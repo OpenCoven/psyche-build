@@ -48,9 +48,12 @@ use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
 use native_workspace::{workspace_load, workspace_save};
 use pane_metrics::PaneSessionMetrics;
 use pty_transport::{
-    coordinate_exit_shutdown, CompletionOutcome, DrainOutcome, EnqueueError, ExitShutdownHooks,
-    ExitShutdownOutcome, FinalOutputPumpSnapshot, OutputPump, RecentOutputSnapshots,
-    TransportSessionKey, EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
+    coordinate_exit_shutdown, AckOutcome as TransportAckOutcome, CompletionOutcome, DrainOutcome,
+    EnqueueError, ExitShutdownHooks, ExitShutdownOutcome, FinalOutputPumpSnapshot, OutputPump,
+    OutputPumpMetrics as TransportOutputPumpMetrics,
+    OutputPumpSnapshot as TransportOutputPumpSnapshot, PaneVisibility as TransportPaneVisibility,
+    PumpMetrics as TransportPumpMetrics, RecentOutputSnapshots, TransportSessionKey,
+    EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
 };
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
@@ -2358,6 +2361,190 @@ pub fn latest_pty_transport_snapshot(thread_id: &str) -> Option<FinalOutputPumpS
         .cloned()
 }
 
+fn validate_pty_thread_id(thread_id: &str) -> Result<(), String> {
+    if is_safe_session_id(thread_id) {
+        Ok(())
+    } else {
+        Err("thread id is unsafe".to_string())
+    }
+}
+
+fn clone_live_pty_pump(thread_id: &str) -> Result<OutputPump, String> {
+    validate_pty_thread_id(thread_id)?;
+    let guard = PTY_LIFECYCLES.lock();
+    guard
+        .live(thread_id)
+        .map(|session| session.pump.clone())
+        .ok_or_else(|| format!("thread '{}' not found", thread_id))
+}
+
+fn duration_to_micros(duration: std::time::Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum AckOutcome {
+    Advanced {
+        sequence: u64,
+        bytes: usize,
+        latency_micros: u64,
+    },
+    Duplicate {
+        sequence: u64,
+    },
+}
+
+impl From<TransportAckOutcome> for AckOutcome {
+    fn from(outcome: TransportAckOutcome) -> Self {
+        match outcome {
+            TransportAckOutcome::Advanced {
+                sequence,
+                bytes,
+                latency,
+                ..
+            } => Self::Advanced {
+                sequence,
+                bytes,
+                latency_micros: duration_to_micros(latency),
+            },
+            TransportAckOutcome::Duplicate { sequence } => Self::Duplicate { sequence },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum PtyTransportVisibility {
+    Visible,
+    Hidden,
+}
+
+impl From<TransportPaneVisibility> for PtyTransportVisibility {
+    fn from(visibility: TransportPaneVisibility) -> Self {
+        match visibility {
+            TransportPaneVisibility::Visible => Self::Visible,
+            TransportPaneVisibility::Hidden => Self::Hidden,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PtyTransportStateMetrics {
+    bytes_accepted: u64,
+    fragments_accepted: u64,
+    bytes_emitted: u64,
+    batches_emitted: u64,
+    bytes_acknowledged: u64,
+    batches_acknowledged: u64,
+    push_would_block_count: u64,
+    pending_bytes_high_water: usize,
+    pending_fragments_high_water: usize,
+    in_flight_batches_high_water: usize,
+    in_flight_bytes_high_water: usize,
+    total_ack_latency_micros: u64,
+    max_ack_latency_micros: u64,
+}
+
+impl From<TransportPumpMetrics> for PtyTransportStateMetrics {
+    fn from(metrics: TransportPumpMetrics) -> Self {
+        Self {
+            bytes_accepted: metrics.bytes_accepted,
+            fragments_accepted: metrics.fragments_accepted,
+            bytes_emitted: metrics.bytes_emitted,
+            batches_emitted: metrics.batches_emitted,
+            bytes_acknowledged: metrics.bytes_acknowledged,
+            batches_acknowledged: metrics.batches_acknowledged,
+            push_would_block_count: metrics.push_would_block_count,
+            pending_bytes_high_water: metrics.pending_bytes_high_water,
+            pending_fragments_high_water: metrics.pending_fragments_high_water,
+            in_flight_batches_high_water: metrics.in_flight_batches_high_water,
+            in_flight_bytes_high_water: metrics.in_flight_bytes_high_water,
+            total_ack_latency_micros: duration_to_micros(metrics.total_ack_latency),
+            max_ack_latency_micros: duration_to_micros(metrics.max_ack_latency),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PtyTransportMetrics {
+    state: PtyTransportStateMetrics,
+    blocked_reader_count: u64,
+    total_blocked_reader_duration_micros: u64,
+    max_blocked_reader_duration_micros: u64,
+    emit_failure_count: u64,
+    emit_retry_count: u64,
+    visibility_transition_count: u64,
+    drain_timeout_count: u64,
+    worker_error_count: u64,
+}
+
+impl From<TransportOutputPumpMetrics> for PtyTransportMetrics {
+    fn from(metrics: TransportOutputPumpMetrics) -> Self {
+        Self {
+            state: metrics.state.into(),
+            blocked_reader_count: metrics.blocked_reader_count,
+            total_blocked_reader_duration_micros: duration_to_micros(
+                metrics.total_blocked_reader_duration,
+            ),
+            max_blocked_reader_duration_micros: duration_to_micros(
+                metrics.max_blocked_reader_duration,
+            ),
+            emit_failure_count: metrics.emit_failure_count,
+            emit_retry_count: metrics.emit_retry_count,
+            visibility_transition_count: metrics.visibility_transition_count,
+            drain_timeout_count: metrics.drain_timeout_count,
+            worker_error_count: metrics.worker_error_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PtyTransportSnapshot {
+    thread_id: String,
+    pending_bytes: usize,
+    pending_fragments: usize,
+    queued_bytes: usize,
+    queue_depth: usize,
+    prepared: bool,
+    in_flight_batches: usize,
+    in_flight_bytes: usize,
+    last_acked_sequence: u64,
+    blocked_producers: usize,
+    visibility: PtyTransportVisibility,
+    effective_cadence_micros: u64,
+    draining: bool,
+    cancelled: bool,
+    worker_running: bool,
+    metrics: PtyTransportMetrics,
+}
+
+impl From<TransportOutputPumpSnapshot> for PtyTransportSnapshot {
+    fn from(snapshot: TransportOutputPumpSnapshot) -> Self {
+        Self {
+            thread_id: snapshot.thread_id,
+            pending_bytes: snapshot.pending_bytes,
+            pending_fragments: snapshot.pending_fragments,
+            queued_bytes: snapshot.queued_bytes,
+            queue_depth: snapshot.queue_depth,
+            prepared: snapshot.prepared,
+            in_flight_batches: snapshot.in_flight_batches,
+            in_flight_bytes: snapshot.in_flight_bytes,
+            last_acked_sequence: snapshot.last_acked_sequence,
+            blocked_producers: snapshot.blocked_producers,
+            visibility: snapshot.visibility.into(),
+            effective_cadence_micros: duration_to_micros(snapshot.effective_cadence),
+            draining: snapshot.draining,
+            cancelled: snapshot.cancelled,
+            worker_running: snapshot.worker_running,
+            metrics: snapshot.metrics.into(),
+        }
+    }
+}
+
 #[tauri::command]
 fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let thread_id = options.thread_id.clone();
@@ -2597,8 +2784,57 @@ fn pty_stop(thread_id: String) -> Result<PtyStopResult, String> {
 }
 
 #[tauri::command]
+fn pty_ack(thread_id: String, sequence: u64) -> Result<AckOutcome, String> {
+    let pump = clone_live_pty_pump(&thread_id)?;
+    pump.acknowledge(sequence)
+        .map(AckOutcome::from)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pty_set_visibility(thread_id: String, visible: bool) -> Result<(), String> {
+    let pump = clone_live_pty_pump(&thread_id)?;
+    pump.set_visibility(if visible {
+        TransportPaneVisibility::Visible
+    } else {
+        TransportPaneVisibility::Hidden
+    });
+    Ok(())
+}
+
+#[tauri::command]
 fn pty_list() -> Vec<String> {
     PTY_LIFECYCLES.lock().live_thread_ids()
+}
+
+#[tauri::command]
+fn pty_transport_metrics(thread_id: Option<String>) -> Vec<PtyTransportSnapshot> {
+    let pumps = match thread_id {
+        Some(thread_id) => {
+            if validate_pty_thread_id(&thread_id).is_err() {
+                return Vec::new();
+            }
+            let guard = PTY_LIFECYCLES.lock();
+            guard
+                .live(&thread_id)
+                .map(|session| vec![session.pump.clone()])
+                .unwrap_or_default()
+        }
+        None => {
+            let guard = PTY_LIFECYCLES.lock();
+            guard
+                .live_sessions()
+                .into_iter()
+                .map(|(_, session)| session.pump.clone())
+                .collect::<Vec<_>>()
+        }
+    };
+    let mut snapshots = pumps
+        .into_iter()
+        .map(|pump| PtyTransportSnapshot::from(pump.snapshot()))
+        .collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+    snapshots
 }
 
 #[tauri::command]
@@ -4166,8 +4402,11 @@ pub fn run() {
             canonical_project_path,
             pty_write,
             pty_resize,
+            pty_ack,
+            pty_set_visibility,
             pty_stop,
             pty_list,
+            pty_transport_metrics,
             browser_navigate,
             browser_set_bounds,
             browser_hide,
@@ -4229,6 +4468,62 @@ mod pty_runtime_tests {
             Box::new(Self {
                 calls: Arc::clone(&self.calls),
             })
+        }
+    }
+
+    #[cfg(not(windows))]
+    struct TestLivePtySession {
+        token: PtySessionToken,
+        pump: OutputPump,
+    }
+
+    #[cfg(not(windows))]
+    impl TestLivePtySession {
+        fn register(thread_id: &str) -> Self {
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 10,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            let writer = pair.master.take_writer().unwrap();
+            let (_, reader_cancellation) = prepare_pty_reader(pair.master.as_ref()).unwrap();
+            let pump = OutputPump::new(thread_id.to_string()).unwrap();
+            let pending = PendingPtyStart::reserve(thread_id).unwrap();
+            let (token, install_outcome) = pending
+                .install(PtySession {
+                    master: Arc::new(Mutex::new(pair.master)),
+                    writer: Arc::new(Mutex::new(writer)),
+                    pump: pump.clone(),
+                    terminator: PtyProcessTerminator::from_parts(
+                        Box::new(RecordingChildKiller {
+                            calls: Arc::new(AtomicUsize::new(0)),
+                        }),
+                        PtyProcessIdentity::direct_child(None),
+                    ),
+                    reader_cancellation,
+                    pid: Some(42),
+                    spawn_time_unix_secs: 99,
+                })
+                .unwrap();
+            assert!(matches!(install_outcome, InstallSessionOutcome::Running));
+            Self { token, pump }
+        }
+    }
+
+    #[cfg(not(windows))]
+    impl Drop for TestLivePtySession {
+        fn drop(&mut self) {
+            let action = {
+                let mut registry = PTY_LIFECYCLES.lock();
+                registry.stop(&self.token.thread_id)
+            };
+            if let Ok(StopSessionOutcome::Terminate { session, .. }) = action {
+                drop(session);
+            }
+            PTY_LIFECYCLES.lock().finish_exit(&self.token);
         }
     }
 
@@ -4377,6 +4672,23 @@ mod pty_runtime_tests {
                 "process group {process_group} remained observable after SIGKILL"
             );
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_no_output_fields(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    assert_no_output_fields(value);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for (key, value) in values {
+                    assert!(!matches!(key.as_str(), "bytes" | "data" | "payload"));
+                    assert_no_output_fields(value);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -4707,6 +5019,149 @@ mod pty_runtime_tests {
         assert!(cleanup.join().unwrap());
         let replacement = registry.lock().reserve("timed-out-pane").unwrap();
         assert_ne!(replacement.generation, old.generation);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pty_ack_reports_missing_invalid_duplicate_future_and_skipped_sequences() {
+        assert_eq!(
+            pty_ack("missing-pane".to_string(), 1).unwrap_err(),
+            "thread 'missing-pane' not found"
+        );
+        assert_eq!(
+            pty_ack("../unsafe".to_string(), 1).unwrap_err(),
+            "thread id is unsafe"
+        );
+
+        let session = TestLivePtySession::register("ack-pane");
+        session.pump.enqueue(vec![b'a']).unwrap();
+        assert_eq!(
+            session.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 1 })
+        );
+        session.pump.enqueue(vec![b'b']).unwrap();
+        std::thread::sleep(pty_transport::VISIBLE_CADENCE + Duration::from_millis(5));
+        assert_eq!(
+            session.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 2 })
+        );
+
+        assert!(matches!(
+            pty_ack("ack-pane".to_string(), 1).unwrap(),
+            AckOutcome::Advanced {
+                sequence: 1,
+                bytes: 1,
+                latency_micros,
+            } if latency_micros >= duration_to_micros(pty_transport::VISIBLE_CADENCE)
+        ));
+        assert_eq!(
+            pty_ack("ack-pane".to_string(), 1).unwrap(),
+            AckOutcome::Duplicate { sequence: 1 }
+        );
+        assert!(matches!(
+            pty_ack("ack-pane".to_string(), 2).unwrap(),
+            AckOutcome::Advanced {
+                sequence: 2,
+                bytes: 1,
+                ..
+            }
+        ));
+
+        let skipped = TestLivePtySession::register("ack-skipped-pane");
+        skipped.pump.enqueue(vec![b'a']).unwrap();
+        assert_eq!(
+            skipped.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 1 })
+        );
+        skipped.pump.enqueue(vec![b'b']).unwrap();
+        std::thread::sleep(pty_transport::VISIBLE_CADENCE + Duration::from_millis(5));
+        assert_eq!(
+            skipped.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 2 })
+        );
+        assert_eq!(
+            pty_ack("ack-skipped-pane".to_string(), 2).unwrap_err(),
+            "PTY batch acknowledgement 2 skipped expected sequence 1"
+        );
+        assert_eq!(
+            pty_ack("ack-skipped-pane".to_string(), 3).unwrap_err(),
+            "PTY batch acknowledgement 3 is newer than emitted sequence 2"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pty_set_visibility_only_updates_metrics_on_actual_transitions() {
+        assert_eq!(
+            pty_set_visibility("missing-visibility".to_string(), false).unwrap_err(),
+            "thread 'missing-visibility' not found"
+        );
+
+        let session = TestLivePtySession::register("visibility-pane");
+        let visible_cadence = duration_to_micros(pty_transport::VISIBLE_CADENCE);
+        let hidden_cadence = duration_to_micros(pty_transport::HIDDEN_CADENCE);
+
+        let initial = pty_transport_metrics(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(initial.visibility, PtyTransportVisibility::Visible);
+        assert_eq!(initial.effective_cadence_micros, visible_cadence);
+        assert_eq!(initial.metrics.visibility_transition_count, 0);
+
+        pty_set_visibility("visibility-pane".to_string(), true).unwrap();
+        let noop_visible = pty_transport_metrics(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(noop_visible.visibility, PtyTransportVisibility::Visible);
+        assert_eq!(noop_visible.effective_cadence_micros, visible_cadence);
+        assert_eq!(noop_visible.metrics.visibility_transition_count, 0);
+
+        pty_set_visibility("visibility-pane".to_string(), false).unwrap();
+        let hidden = pty_transport_metrics(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(hidden.visibility, PtyTransportVisibility::Hidden);
+        assert_eq!(hidden.effective_cadence_micros, hidden_cadence);
+        assert_eq!(hidden.metrics.visibility_transition_count, 1);
+
+        pty_set_visibility("visibility-pane".to_string(), false).unwrap();
+        let noop_hidden = pty_transport_metrics(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(noop_hidden.visibility, PtyTransportVisibility::Hidden);
+        assert_eq!(noop_hidden.effective_cadence_micros, hidden_cadence);
+        assert_eq!(noop_hidden.metrics.visibility_transition_count, 1);
+
+        drop(session);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pty_transport_metrics_filters_live_sessions_and_serializes_metadata_only() {
+        let first = TestLivePtySession::register("metrics-a");
+        let second = TestLivePtySession::register("metrics-b");
+        first.pump.enqueue(b"secret-metadata".to_vec()).unwrap();
+
+        let mut filtered = pty_transport_metrics(Some("metrics-a".to_string()));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].thread_id, "metrics-a");
+        assert_eq!(filtered[0].pending_bytes, b"secret-metadata".len());
+        assert_eq!(filtered[0].metrics.state.bytes_accepted, b"secret-metadata".len() as u64);
+        assert!(pty_transport_metrics(Some("metrics-missing".to_string())).is_empty());
+        assert!(pty_transport_metrics(Some("../unsafe".to_string())).is_empty());
+
+        let all = pty_transport_metrics(None);
+        assert_eq!(
+            all.iter().map(|snapshot| snapshot.thread_id.as_str()).collect::<Vec<_>>(),
+            vec!["metrics-a", "metrics-b"]
+        );
+
+        let serialized = serde_json::to_value(filtered.pop().unwrap()).unwrap();
+        assert_no_output_fields(&serialized);
+        assert!(!serialized.to_string().contains("secret-metadata"));
+
+        drop(second);
+        drop(first);
     }
 
     #[cfg(not(windows))]

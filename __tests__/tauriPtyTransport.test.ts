@@ -156,6 +156,28 @@ describe('Tauri PTY command threading contract', () => {
     expect(source).not.toMatch(/\.emit\s*\(\s*"pty:data"/);
   });
 
+  test('defines PTY flow-control commands with the native transport contracts', () => {
+    const ack = commandSource(source, 'pty_ack');
+    const visibility = commandSource(source, 'pty_set_visibility');
+    const metrics = commandSource(source, 'pty_transport_metrics');
+
+    expect(ack).toMatch(
+      /#\[tauri::command\]\s*fn\s+pty_ack\s*\(\s*thread_id:\s*String,\s*sequence:\s*u64\s*\)\s*->\s*Result<AckOutcome,\s*String>/,
+    );
+    expect(visibility).toMatch(
+      /#\[tauri::command\]\s*fn\s+pty_set_visibility\s*\(\s*thread_id:\s*String,\s*visible:\s*bool\s*\)\s*->\s*Result<\(\),\s*String>/,
+    );
+    expect(metrics).toMatch(
+      /#\[tauri::command\]\s*fn\s+pty_transport_metrics\s*\(\s*thread_id:\s*Option<String>\s*\)\s*->\s*Vec<PtyTransportSnapshot>/,
+    );
+  });
+
+  test('registers PTY flow-control commands with the Tauri invoke handler', () => {
+    expect(source).toMatch(
+      /tauri::generate_handler!\[[\s\S]*pty_write,[\s\S]*pty_resize,[\s\S]*pty_ack,[\s\S]*pty_set_visibility,[\s\S]*pty_stop,[\s\S]*pty_list,[\s\S]*pty_transport_metrics,[\s\S]*\]/,
+    );
+  });
+
   test('keeps timed-out generations reserved until cleanup after publishing exit', () => {
     const start = commandSource(source, 'pty_start');
     const exitEmission = start.indexOf('"pty:exit"');
