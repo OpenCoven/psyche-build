@@ -38,6 +38,20 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushPromises(times = 2) {
+  for (let index = 0; index < times; index += 1) await Promise.resolve();
+}
+
 describe('Tauri Coven launch project scope', () => {
   it('registers the canonical project path command and requires validated PTY roots', () => {
     expect(libRs).toMatch(/fn canonical_project_path\s*\(\s*root\s*:\s*String\s*\)/);
@@ -124,6 +138,9 @@ describe('Tauri Coven launch project scope', () => {
       },
     ];
     const calls: string[] = [];
+    const refreshes = new Map(
+      restoredProjects.map((project) => [project.id, deferred<void>()]),
+    );
     const state = {
       env: {},
       projects: [] as Array<Record<string, any>>,
@@ -154,8 +171,11 @@ describe('Tauri Coven launch project scope', () => {
           return state.projects.find((project) => project.id === state.activeProjectId) || null;
         },
         restoreProjectLayout: (project: { id: string }) => { calls.push(`restoreProjectLayout:${project.id}`); },
-        refreshProjectWorktrees: async (project: { id: string }) => {
+        refreshProjectWorktrees: (project: { id: string }) => {
           calls.push(`refreshProjectWorktrees:${project.id}`);
+          const refresh = refreshes.get(project.id);
+          if (!refresh) throw new Error(`missing refresh for ${project.id}`);
+          return refresh.promise;
         },
         addProject: async (root: string) => {
           addProjectRoot = root;
@@ -189,13 +209,58 @@ describe('Tauri Coven launch project scope', () => {
       },
     );
 
-    await boot({ repo_root: '/boot/root', home: '/home/tester' });
+    let bootSettled = false;
+    const bootPromise = boot({ repo_root: '/boot/root', home: '/home/tester' })
+      .finally(() => { bootSettled = true; });
+    await flushPromises();
 
     expect(ensureProjectCovenCalls).toBe(0);
     expect(addProjectRoot).toBeNull();
     expect(state.env).toEqual({ repo_root: '/boot/root', home: '/home/tester' });
     expect(state.projects).toEqual(restoredProjects);
     expect(state.activeProjectId).toBe('restored-a');
+    expect(calls).toEqual([
+      'installTerminalImageDrop',
+      'restoreSavedProjects:2:restored-a:5',
+      'activeProject',
+      'restoreProjectLayout:restored-a',
+      'refreshProjectWorktrees:restored-a',
+      'refreshProjectWorktrees:restored-b',
+    ]);
+    expect(bootSettled).toBe(false);
+    expect(calls).not.toContain('currentBrowserTab:restored-a');
+    expect(calls).not.toContain('refreshSidebar');
+    expect(calls).not.toContain('refreshTabs');
+    expect(calls).not.toContain('renderBrowserTabs');
+    expect(calls).not.toContain('syncProjectBrowser');
+    expect(calls).not.toContain('loadAgentSkills');
+    expect(calls).not.toContain('saveWorkspaceNow');
+    expect(calls).not.toContain('startCovenPolling');
+
+    refreshes.get('restored-a')!.resolve();
+    await flushPromises();
+
+    expect(calls).toEqual([
+      'installTerminalImageDrop',
+      'restoreSavedProjects:2:restored-a:5',
+      'activeProject',
+      'restoreProjectLayout:restored-a',
+      'refreshProjectWorktrees:restored-a',
+      'refreshProjectWorktrees:restored-b',
+    ]);
+    expect(bootSettled).toBe(false);
+    expect(calls).not.toContain('currentBrowserTab:restored-a');
+    expect(calls).not.toContain('refreshSidebar');
+    expect(calls).not.toContain('refreshTabs');
+    expect(calls).not.toContain('renderBrowserTabs');
+    expect(calls).not.toContain('syncProjectBrowser');
+    expect(calls).not.toContain('loadAgentSkills');
+    expect(calls).not.toContain('saveWorkspaceNow');
+    expect(calls).not.toContain('startCovenPolling');
+
+    refreshes.get('restored-b')!.resolve();
+    await bootPromise;
+
     expect(calls).toEqual([
       'installTerminalImageDrop',
       'restoreSavedProjects:2:restored-a:5',
@@ -215,6 +280,7 @@ describe('Tauri Coven launch project scope', () => {
       'setInterval:15000',
       'refreshVisiblePaneMetrics',
     ]);
+    expect(bootSettled).toBe(true);
     expect(calls.indexOf('startCovenPolling')).toBeGreaterThan(
       calls.indexOf('refreshProjectWorktrees:restored-b'),
     );
