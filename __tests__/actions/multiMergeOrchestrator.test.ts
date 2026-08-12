@@ -19,7 +19,9 @@ const restartedTmuxServerIdentity = {
   sessionId: '$test-restarted',
 };
 const tmuxServiceMock = vi.hoisted(() => ({
-  getServerIdentity: vi.fn(() => mockTmuxServerIdentity),
+  getServerIdentity: vi.fn(
+    (): typeof mockTmuxServerIdentity | undefined => mockTmuxServerIdentity,
+  ),
   killPane: vi.fn(async () => {}),
   probePanePresence: vi.fn(async () => 'present'),
 }));
@@ -197,7 +199,7 @@ describe('executeMultiMerge conflict cleanup', () => {
     }));
   });
 
-  it('does not kill or remove a same-pane replacement after tmux restarts', async () => {
+  it('skips kill, removes the stale record, and continues the queue after tmux restarts', async () => {
     const pane = createWorktreePane({
       id: 'psyche-root',
       slug: 'root-feature',
@@ -268,6 +270,112 @@ describe('executeMultiMerge conflict cleanup', () => {
     const conflictChoice = await confirmation.onConfirm!();
     await conflictChoice.onSelect!('ai_merge');
     await monitoredConflict.onResolved?.();
+
+    expect(removePaneIdentitiesFromConfig).toHaveBeenCalledWith(
+      [{
+        id: conflictPane.id,
+        paneId: conflictPane.paneId,
+        tmuxServerIdentity: conflictPane.tmuxServerIdentity,
+      }],
+      expect.any(Function),
+    );
+    expect(removedPaneIds).toEqual([conflictPane.id]);
+    expect(tmuxServiceMock.killPane).not.toHaveBeenCalled();
+    expect(mergeWorktreeIntoMainMock).toHaveBeenCalledWith(
+      '/repo',
+      'child-feature',
+    );
+    expect(triggerHookMock).toHaveBeenCalledWith(
+      'post_merge',
+      '/repo',
+      pane,
+      expect.objectContaining({
+        PSYCHE_TARGET_BRANCH: 'main',
+        PSYCHE_WORKTREE_PATH: '/repo/.psyche/worktrees/child-feature',
+        PSYCHE_REPO_NAME: 'child-repo',
+      }),
+    );
+    expect(onActionResult).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Multi-Merge Complete',
+    }));
+  });
+
+  it('preserves the record and blocks queue continuation when current tmux generation is unknown', async () => {
+    const pane = createWorktreePane({
+      id: 'psyche-root',
+      slug: 'root-feature',
+      paneId: '%1',
+      projectRoot: '/repo',
+      projectName: 'Repo',
+      worktreePath: '/repo/.psyche/worktrees/root-feature',
+    });
+    const conflictPane = createWorktreePane({
+      id: 'conflict-pane-id',
+      slug: 'merge-child-into-main',
+      paneId: '%9',
+      projectRoot: '/repo',
+      projectName: 'Repo',
+      worktreePath: '/repo/.psyche/worktrees/child-feature',
+      tmuxServerIdentity: mockTmuxServerIdentity,
+    });
+    createConflictResolutionPaneMock.mockResolvedValue(conflictPane);
+    tmuxServiceMock.getServerIdentity.mockReturnValue(undefined);
+
+    const queue: MergeQueueItem[] = [{
+      worktree: {
+        worktreePath: '/repo/.psyche/worktrees/child-feature',
+        parentRepoPath: '/repo',
+        repoName: 'child-repo',
+        branch: 'child-feature',
+        mainBranch: 'main',
+        isRoot: false,
+        relativePath: 'packages/child-repo',
+        depth: 1,
+      },
+      validation: {
+        canMerge: false,
+        mainBranch: 'main',
+        worktreeBranch: 'child-feature',
+        issues: [{
+          type: 'merge_conflict',
+          message: 'conflicts detected',
+          files: ['src/conflict.ts'],
+          canAutoResolve: true,
+        }],
+      },
+      status: 'pending',
+    }];
+    const removedPaneIds: string[] = [];
+    const onActionResult = vi.fn(async () => {});
+    const removePaneIdentitiesFromConfigImpl:
+      NonNullable<ActionContext['removePaneIdentitiesFromConfig']> = async (
+      _identities,
+      beforeRemove,
+    ) => {
+      await beforeRemove?.([pane, conflictPane], [conflictPane]);
+      removedPaneIds.push(conflictPane.id);
+      return [pane];
+    };
+    const removePaneIdentitiesFromConfig = vi.fn(removePaneIdentitiesFromConfigImpl);
+    const context = createMockContext([pane], {
+      projectName: 'Repo',
+      onActionResult,
+      removePaneIdentitiesFromConfig:
+        removePaneIdentitiesFromConfig as ActionContext['removePaneIdentitiesFromConfig'],
+    });
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { executeMultiMerge } = await import(
+      '../../src/actions/merge/multiMergeOrchestrator.js'
+    );
+
+    try {
+      const confirmation = await executeMultiMerge(pane, context, queue);
+      const conflictChoice = await confirmation.onConfirm!();
+      await conflictChoice.onSelect!('ai_merge');
+      await monitoredConflict.onResolved?.();
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
 
     expect(removePaneIdentitiesFromConfig).toHaveBeenCalledWith(
       [{

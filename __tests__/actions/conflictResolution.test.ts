@@ -20,7 +20,9 @@ const stateManagerMock = vi.hoisted(() => ({
   getPanes: vi.fn(() => [] as PsychePane[]),
 }));
 const tmuxServiceMock = vi.hoisted(() => ({
-  getServerIdentity: vi.fn(() => mockTmuxServerIdentity),
+  getServerIdentity: vi.fn(
+    (): typeof mockTmuxServerIdentity | undefined => mockTmuxServerIdentity,
+  ),
   killPane: vi.fn(async () => {}),
   probePanePresence: vi.fn(async () => 'present'),
 }));
@@ -175,7 +177,7 @@ describe('createConflictResolutionPaneForMerge', () => {
     }));
   });
 
-  it('does not kill or remove a same-pane replacement after tmux restarts', async () => {
+  it('skips kill, removes the stale record, and resumes the merge after tmux restarts', async () => {
     const pane = createWorktreePane({
       id: 'psyche-source',
       slug: 'feature',
@@ -227,6 +229,88 @@ describe('createConflictResolutionPaneForMerge', () => {
       '/repo',
     );
     await monitoredConflict.onResolved?.();
+
+    expect(removePaneIdentitiesFromConfig).toHaveBeenCalledWith(
+      [{
+        id: conflictPane.id,
+        paneId: conflictPane.paneId,
+        tmuxServerIdentity: conflictPane.tmuxServerIdentity,
+      }],
+      expect.any(Function),
+    );
+    expect(removedPaneIds).toEqual([conflictPane.id]);
+    expect(tmuxServiceMock.killPane).not.toHaveBeenCalled();
+    expect(executeMergeMock).toHaveBeenCalledWith(
+      pane,
+      expect.objectContaining({
+        panes: [pane],
+      }),
+      'main',
+      '/repo',
+      true,
+    );
+    expect(onActionResult).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Merge Worktree',
+    }));
+  });
+
+  it('preserves the record and blocks merge continuation when current tmux generation is unknown', async () => {
+    const pane = createWorktreePane({
+      id: 'psyche-source',
+      slug: 'feature',
+      branchName: 'feature',
+      paneId: '%1',
+      projectRoot: '/repo',
+      projectName: 'Repo',
+      worktreePath: '/repo/.psyche/worktrees/feature',
+    });
+    const conflictPane = createWorktreePane({
+      id: 'conflict-pane-id',
+      slug: 'merge-feature-into-main',
+      paneId: '%9',
+      projectRoot: '/repo',
+      projectName: 'Repo',
+      worktreePath: '/repo/.psyche/worktrees/feature',
+      tmuxServerIdentity: mockTmuxServerIdentity,
+    });
+    createConflictResolutionPaneMock.mockResolvedValue(conflictPane);
+    stateManagerMock.getPanes.mockReturnValue([pane, conflictPane]);
+    tmuxServiceMock.getServerIdentity.mockReturnValue(undefined);
+
+    const removedPaneIds: string[] = [];
+    const onActionResult = vi.fn(async () => {});
+    const removePaneIdentitiesFromConfigImpl:
+      NonNullable<ActionContext['removePaneIdentitiesFromConfig']> = async (
+      _identities,
+      beforeRemove,
+    ) => {
+      await beforeRemove?.([pane, conflictPane], [conflictPane]);
+      removedPaneIds.push(conflictPane.id);
+      return [pane];
+    };
+    const removePaneIdentitiesFromConfig = vi.fn(removePaneIdentitiesFromConfigImpl);
+    const context = createMockContext([pane], {
+      projectName: 'Repo',
+      onActionResult,
+      removePaneIdentitiesFromConfig:
+        removePaneIdentitiesFromConfig as ActionContext['removePaneIdentitiesFromConfig'],
+    });
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { createConflictResolutionPaneForMerge } = await import(
+      '../../src/actions/merge/conflictResolution.js'
+    );
+
+    try {
+      await createConflictResolutionPaneForMerge(
+        pane,
+        context,
+        'main',
+        '/repo',
+      );
+      await monitoredConflict.onResolved?.();
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
 
     expect(removePaneIdentitiesFromConfig).toHaveBeenCalledWith(
       [{

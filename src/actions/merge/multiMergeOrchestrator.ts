@@ -689,7 +689,6 @@ async function createAndMonitorConflictPane(
                 tmuxService,
                 current.paneId,
                 current.tmuxServerIdentity,
-                { generationMismatch: 'unknown' },
               );
               if (teardown.presence !== 'absent') {
                 throw new Error(
