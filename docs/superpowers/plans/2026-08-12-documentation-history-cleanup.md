@@ -264,8 +264,7 @@ if output="$(pnpm exec vitest --run __tests__/documentationHistory.test.ts 2>&1)
   exit 1
 else
   status=$?
-  if printf '%s\n' "$output" | grep -Eq 'docs/HISTORY\.md' &&
-    printf '%s\n' "$output" | grep -Eq 'ENOENT|no such file or directory'; then
+  if printf '%s\n' "$output" | grep -Eq '(ENOENT|no such file or directory)[^\n]*docs/HISTORY\.md|docs/HISTORY\.md[^\n]*(ENOENT|no such file or directory)'; then
     printf '%s\n' "$output"
     printf '%s\n' "Expected failure confirmed: docs/HISTORY.md is missing (exit $status)." >&2
     exit 0
