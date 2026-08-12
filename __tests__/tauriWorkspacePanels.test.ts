@@ -406,6 +406,35 @@ describe('Tauri workspace panels', () => {
         /thread\.kind === "git" && thread\.toolBody && gitSurfaceEl[\s\S]*thread\.toolBody\.appendChild\(gitSurfaceEl\)/,
       );
     });
+
+    it('drops late Git refreshes after the active worktree changes', () => {
+      const source = functionSource('gitPanelRequestMatches');
+      expect(functionSource('renderGitPanel')).toContain(
+        'var panelGeneration = gitPanelRequestGate.next();',
+      );
+      expect(functionSource('renderGitPanel')).toContain(
+        'if (!gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;',
+      );
+
+      let active = { id: 'project-a', root: '/worktree-a' };
+      let generation = 1;
+      const matches = Function(
+        'activeProject', 'activeWorkspaceRoot', 'gitPanelRequestGate',
+        `"use strict"; return (${source});`,
+      )(
+        () => active,
+        (project: typeof active) => project.root,
+        { isCurrent: (candidate: number) => candidate === generation },
+      ) as (projectId: string, workspaceRoot: string, candidate: number) => boolean;
+
+      expect(matches('project-a', '/worktree-a', 1)).toBe(true);
+      active = { id: 'project-a', root: '/worktree-b' };
+      expect(matches('project-a', '/worktree-a', 1)).toBe(false);
+      active = { id: 'project-b', root: '/worktree-a' };
+      expect(matches('project-a', '/worktree-a', 1)).toBe(false);
+      generation = 2;
+      expect(matches('project-b', '/worktree-a', 1)).toBe(false);
+    });
   });
 
   describe('voice call bar', () => {

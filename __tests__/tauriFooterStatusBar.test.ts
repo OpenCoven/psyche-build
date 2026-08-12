@@ -834,7 +834,7 @@ describe('Tauri footer status bar shell', () => {
     for (const name of [
       'createThread',
       'createBrowserPane',
-      'popOutGitPane',
+      'openOrFocusGitPane',
       'closeToolPane',
       'closeThread',
       'hideThread',

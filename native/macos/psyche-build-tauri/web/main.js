@@ -8167,6 +8167,7 @@
   var diffCache = window.PsycheCodeEditor.createLruCache(6);
   var diffRequestGate = window.PsycheCodeEditor.createRequestGate();
   var diffPanelRequestGate = window.PsycheCodeEditor.createRequestGate();
+  var gitPanelRequestGate = window.PsycheCodeEditor.createRequestGate();
 
   function diffCacheKey(projectId, workspaceRoot, path, staged, context) {
     return projectId + "\0" + workspaceRoot + "\0" + path + "\0" +
@@ -8185,6 +8186,14 @@
 
   function panelIsVisible(panel) {
     return currentLayout() === "split" && currentPanel() === resolvePanelName(panel);
+  }
+
+  function gitPanelRequestMatches(projectId, workspaceRoot, generation) {
+    var project = activeProject();
+    return gitPanelRequestGate.isCurrent(generation) &&
+      !!project &&
+      project.id === projectId &&
+      activeWorkspaceRoot(project) === workspaceRoot;
   }
 
   // The tree highlights whichever file currently owns the main area.
@@ -8611,8 +8620,11 @@
 
   async function renderGitPanel() {
     if (!gitViewEl) return;
+    var panelGeneration = gitPanelRequestGate.next();
     var project = activeProject();
     if (!project) { panelMessage(gitViewEl, "No project open — ⌘O to add one."); return; }
+    var projectId = project.id;
+    var workspaceRoot = activeWorkspaceRoot(project);
     gitViewEl.innerHTML = "";
     if (gitBranchEl) gitBranchEl.textContent = "";
     gitRemoteWebUrl = null;
@@ -8620,13 +8632,14 @@
 
     var status, commits;
     try {
-      var workspaceRoot = activeWorkspaceRoot(project);
       status = await invoke("git_status", { root: workspaceRoot });
       commits = status.is_repo ? await invoke("git_log", { root: workspaceRoot, limit: 30 }) : [];
     } catch (err) {
+      if (!gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
       panelMessage(gitViewEl, String(err), "panel-error");
       return;
     }
+    if (!gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
     if (!status.is_repo) { panelMessage(gitViewEl, "Not a git repository."); return; }
 
     gitRemoteWebUrl = status.web_url || null;
