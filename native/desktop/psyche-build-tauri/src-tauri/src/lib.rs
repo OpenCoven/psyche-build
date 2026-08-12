@@ -1355,18 +1355,54 @@ fn terminate_platform_process(
 
     let mut reported_groups = None;
     let mut first_error = None;
+    // Groups stay owned once verified. Re-observing between escalations exists to
+    // pick up a foreground group that appeared after SIGHUP, not to re-earn the
+    // right to signal groups already proven to belong to this PTY session.
+    //
+    // That distinction matters because the earlier signals are what tear the
+    // session down: by SIGCONT or SIGKILL the leader may be gone, the terminal
+    // disassociated, or the foreground group reaped, so observation legitimately
+    // starts failing. Treating that as fatal aborted the escalation *before
+    // SIGKILL* and reported a hard error for a session that was terminating
+    // exactly as asked. Instead, fall back to the last verified set and finish
+    // escalating; kill() on a group that has already exited reports ESRCH, which
+    // signal_process_group folds into success.
+    //
+    // A failure before anything is verified is still fatal — nothing has been
+    // proven ours at that point, so signalling would be a guess.
+    let mut verified_groups: Option<Vec<libc::pid_t>> = None;
     for signal in [libc::SIGHUP, libc::SIGCONT, libc::SIGKILL] {
-        let Some(observation) = platform
-            .observe_termination(unix_identity)
-            .map_err(|error| unix_validation_error_with_fallback(error, raw_pid_fallback))?
-        else {
-            continue;
+        let process_groups = match platform.observe_termination(unix_identity) {
+            Ok(Some(observation)) => {
+                match verified_unix_process_groups(unix_identity, observation) {
+                    Ok(groups) => {
+                        if reported_groups.is_none() && !groups.is_empty() {
+                            reported_groups =
+                                Some((observation.foreground_process_group, groups.len()));
+                        }
+                        verified_groups = Some(groups.clone());
+                        groups
+                    }
+                    Err(error) => match verified_groups.clone() {
+                        Some(groups) => groups,
+                        None => {
+                            return Err(unix_validation_error_with_fallback(
+                                error,
+                                raw_pid_fallback,
+                            ))
+                        }
+                    },
+                }
+            }
+            // Nothing observable this round. This is the pre-existing
+            // "disappeared" path and keeps its original meaning: skip the round
+            // rather than signalling anything.
+            Ok(None) => continue,
+            Err(error) => match verified_groups.clone() {
+                Some(groups) => groups,
+                None => return Err(unix_validation_error_with_fallback(error, raw_pid_fallback)),
+            },
         };
-        let process_groups = verified_unix_process_groups(unix_identity, observation)
-            .map_err(|error| unix_validation_error_with_fallback(error, raw_pid_fallback))?;
-        if reported_groups.is_none() && !process_groups.is_empty() {
-            reported_groups = Some((observation.foreground_process_group, process_groups.len()));
-        }
         for process_group in process_groups {
             if let Err(error) = platform.signal_process_group(process_group, signal) {
                 if first_error.is_none() {
@@ -4797,6 +4833,108 @@ mod pty_runtime_tests {
 
         assert!(error.contains("Operation not permitted"));
         assert!(platform.signals().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// SIGHUP is what tears the session down, so by SIGCONT the terminal may
+    /// already be disassociated and observation starts failing. That must not
+    /// abort the escalation before SIGKILL: the groups were verified as ours on
+    /// the first round and stay ours.
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_finishes_escalating_when_observation_fails_after_verification() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::Observed(unix_observation(
+                4_200,
+                Some(4_100),
+                Some(4_200),
+                Some(4_100),
+                Some(4_100),
+            )),
+            UnixObservationStep::PermissionDenied,
+            UnixObservationStep::PermissionDenied,
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+        terminator.wait_for_child(|| ());
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::ConfirmedProcessGroups {
+                foreground_process_group: 4_200,
+                original_process_group: 4_100,
+                group_count: 2,
+            }
+        );
+        // Both groups still receive all three signals, SIGKILL included.
+        assert_eq!(
+            platform.signals(),
+            vec![
+                (4_200, libc::SIGHUP),
+                (4_100, libc::SIGHUP),
+                (4_200, libc::SIGCONT),
+                (4_100, libc::SIGCONT),
+                (4_200, libc::SIGKILL),
+                (4_100, libc::SIGKILL),
+            ]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Same guarantee when the observation succeeds but no longer validates —
+    /// a reaped foreground leader reports a session that is not ours.
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_finishes_escalating_when_validation_fails_after_verification() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let foreign = unix_observation(4_200, Some(9_999), Some(4_200), Some(9_999), Some(4_100));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::Observed(unix_observation(
+                4_200,
+                Some(4_100),
+                Some(4_200),
+                Some(4_100),
+                Some(4_100),
+            )),
+            UnixObservationStep::Observed(foreign),
+            UnixObservationStep::Observed(foreign),
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+        terminator.wait_for_child(|| ());
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::ConfirmedProcessGroups {
+                foreground_process_group: 4_200,
+                original_process_group: 4_100,
+                group_count: 2,
+            }
+        );
+        assert_eq!(platform.signals().len(), 6);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
