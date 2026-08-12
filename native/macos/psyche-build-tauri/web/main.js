@@ -2223,15 +2223,23 @@
   var gitPoppedNoteEl = document.getElementById("git-popped-note");
 
   /** The thread holding the git pane, if it is popped out. */
-  function gitPaneThread() {
+  function gitPaneThread(projectId, workspaceRoot) {
     for (var i = 0; i < state.threads.length; i++) {
-      if (state.threads[i].kind === "git" && !state.threads[i].closing) return state.threads[i];
+      var thread = state.threads[i];
+      if (thread.kind === "git" &&
+          thread.projectId === projectId &&
+          thread.worktreePath === workspaceRoot &&
+          !thread.closing) return thread;
     }
     return null;
   }
 
   function syncGitDockChrome() {
-    var popped = Boolean(gitPaneThread());
+    var project = activeProject();
+    var thread = project
+      ? gitPaneThread(project.id, activeWorkspaceRoot(project))
+      : null;
+    var popped = Boolean(thread);
     if (gitPoppedNoteEl) gitPoppedNoteEl.hidden = !popped;
     var popBtn = document.getElementById("git-pop-out");
     if (popBtn) popBtn.hidden = popped;
@@ -2327,14 +2335,14 @@
    * Open Git as a pane. `dropTarget` optionally places it next to an existing
    * pane, which is how a drag from the dock lands where it was dropped.
    */
-  async function popOutGitPane(dropTarget) {
-    var existing = gitPaneThread();
-    if (existing) { await focusThread(existing.id); return existing; }
+  async function openOrFocusGitPane(dropTarget) {
     var project = activeProject();
     if (!project) { setStatus("No project open", "warn"); return null; }
-    var worktreePath = activeWorkspaceRoot(project);
+    var workspaceRoot = activeWorkspaceRoot(project);
+    var existing = gitPaneThread(project.id, workspaceRoot);
+    if (existing) { await focusThread(existing.id); return existing; }
     var id = makeThreadId();
-    var placement = preparePanePlacement(id, project.id, worktreePath);
+    var placement = preparePanePlacement(id, project.id, workspaceRoot);
     if (!placement) {
       setStatus("Not enough space for another pane", "warn");
       return null;
@@ -2342,7 +2350,7 @@
     var thread = {
       id: id,
       projectId: project.id,
-      worktreePath: worktreePath,
+      worktreePath: workspaceRoot,
       name: "Git",
       kind: "git",
       status: "",
@@ -2367,7 +2375,12 @@
     await focusThread(id);
     syncGitDockChrome();
     refreshSidebar();
+    saveWorkspaceSoon();
     return thread;
+  }
+
+  function popOutGitPane(dropTarget) {
+    return openOrFocusGitPane(dropTarget);
   }
 
   /** Close the pane and hand the surface back to the dock. */
@@ -2410,7 +2423,10 @@
   var gitDockBackBtn = document.getElementById("git-dock-back");
   if (gitDockBackBtn) {
     gitDockBackBtn.addEventListener("click", function () {
-      var thread = gitPaneThread();
+      var project = activeProject();
+      var thread = project
+        ? gitPaneThread(project.id, activeWorkspaceRoot(project))
+        : null;
       if (thread) closeToolPane(thread);
     });
   }

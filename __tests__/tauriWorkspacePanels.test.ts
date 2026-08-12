@@ -42,6 +42,19 @@ const tauriPackage = JSON.parse(
   devDependencies: Record<string, string>;
 };
 
+function functionSource(name: string) {
+  const start = mainJs.indexOf(`function ${name}(`);
+  if (start === -1) throw new Error(`missing ${name}`);
+  const bodyStart = mainJs.indexOf('{', start);
+  let depth = 0;
+  for (let i = bodyStart; i < mainJs.length; i += 1) {
+    if (mainJs[i] === '{') depth += 1;
+    if (mainJs[i] === '}') depth -= 1;
+    if (depth === 0) return mainJs.slice(start, i + 1);
+  }
+  throw new Error(`unterminated ${name}`);
+}
+
 describe('Tauri workspace panels', () => {
   it('registers a scoped pane-session metrics command', () => {
     expect(tauriLib).toContain('mod pane_metrics;');
@@ -319,6 +332,30 @@ describe('Tauri workspace panels', () => {
       );
       expect(sidebarModel).toMatch(
         /row\.type === 'agents' && !isToolRow\(row\)/,
+      );
+    });
+  });
+
+  describe('Git pane ownership', () => {
+    it('scopes lookup to project and worktree', () => {
+      const source = functionSource('gitPaneThread');
+      expect(source).toContain('thread.projectId === projectId');
+      expect(source).toContain('thread.worktreePath === workspaceRoot');
+      expect(source).toContain('!thread.closing');
+    });
+
+    it('focuses an existing owner before allocating a pane', () => {
+      const source = functionSource('openOrFocusGitPane');
+      expect(source).toMatch(/gitPaneThread\(project\.id, workspaceRoot\)/);
+      expect(source).toMatch(
+        /if \(existing\) \{ await focusThread\(existing\.id\); return existing; \}/,
+      );
+      expect(source).toContain('preparePanePlacement(id, project.id, workspaceRoot)');
+    });
+
+    it('keeps the current dock pop-out as a compatibility caller', () => {
+      expect(mainJs).toMatch(
+        /function popOutGitPane\(dropTarget\)[\s\S]*return openOrFocusGitPane\(dropTarget\)/,
       );
     });
   });
