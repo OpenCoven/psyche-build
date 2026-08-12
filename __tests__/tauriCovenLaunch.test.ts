@@ -38,6 +38,20 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushPromises(times = 2) {
+  for (let index = 0; index < times; index += 1) await Promise.resolve();
+}
+
 const spawnPtyRuntimeDeps = {
   attentionTracker: { forget: () => undefined },
   syncThreadAttentionChrome: () => undefined,
@@ -99,11 +113,287 @@ describe('Tauri Coven launch project scope', () => {
     expect(discover).toBeGreaterThan(canonicalize);
   });
 
+  it('passively restores a saved workspace without launching Coven', async () => {
+    const saved = {
+      activeProjectId: 'restored-a',
+      projects: [
+        { id: 'saved-a', root: '/saved/a' },
+        { id: 'saved-b', root: '/saved/b' },
+      ],
+    };
+    const restoredProjects = [
+      {
+        id: 'restored-a',
+        root: '/repo/a',
+        selectedWorktreePath: '/repo/a/worktrees/feature-a',
+        worktrees: [
+          { path: '/repo/a', collapsed: false },
+          { path: '/repo/a/worktrees/feature-a', collapsed: true },
+        ],
+        layout: { mode: 'split', side: 'right', splitFrac: 0.62 },
+        browsersByWorktree: {},
+      },
+      {
+        id: 'restored-b',
+        root: '/repo/b',
+        selectedWorktreePath: '/repo/b',
+        worktrees: [{ path: '/repo/b', collapsed: false }],
+        layout: { mode: 'terminal', side: 'right', splitFrac: 0.6 },
+        browsersByWorktree: {},
+      },
+    ];
+    const calls: string[] = [];
+    const refreshes = new Map(
+      restoredProjects.map((project) => [project.id, deferred<void>()]),
+    );
+    const state = {
+      env: {},
+      projects: [] as Array<Record<string, any>>,
+      activeProjectId: null as string | null,
+    };
+    let addProjectRoot: string | null = null;
+    let ensureProjectCovenCalls = 0;
+    const boot = compileFunction<(env: Record<string, string>) => Promise<void>>(
+      functionSource('boot'),
+      {
+        state,
+        installTerminalImageDrop: async () => { calls.push('installTerminalImageDrop'); },
+        statusController: null,
+        readSavedWorkspace: () => saved,
+        settings: { maxProjects: 5 },
+        HARD_MAX_PROJECTS: 10,
+        isRestoringWorkspace: false,
+        restoreSavedProjects: async (
+          projects: Array<Record<string, unknown>>,
+          activeProjectId: string,
+          limit: number,
+        ) => {
+          calls.push(`restoreSavedProjects:${projects.length}:${activeProjectId}:${limit}`);
+          return { projects: restoredProjects, activeProjectId: 'restored-a' };
+        },
+        activeProject: () => {
+          calls.push('activeProject');
+          return state.projects.find((project) => project.id === state.activeProjectId) || null;
+        },
+        restoreProjectLayout: (project: { id: string }) => { calls.push(`restoreProjectLayout:${project.id}`); },
+        refreshProjectWorktrees: (project: { id: string }) => {
+          calls.push(`refreshProjectWorktrees:${project.id}`);
+          const refresh = refreshes.get(project.id);
+          if (!refresh) throw new Error(`missing refresh for ${project.id}`);
+          return refresh.promise;
+        },
+        addProject: async (root: string) => {
+          addProjectRoot = root;
+          calls.push(`addProject:${root}`);
+          return null;
+        },
+        currentBrowserTab: (project: { id: string } | null) => {
+          calls.push(`currentBrowserTab:${project ? project.id : 'null'}`);
+          return null;
+        },
+        navigateBrowser: () => { throw new Error('navigateBrowser should not run'); },
+        refreshSidebar: () => { calls.push('refreshSidebar'); },
+        refreshTabs: () => { calls.push('refreshTabs'); },
+        renderBrowserTabs: () => { calls.push('renderBrowserTabs'); },
+        syncProjectBrowser: () => { calls.push('syncProjectBrowser'); },
+        loadAgentSkills: () => { calls.push('loadAgentSkills'); },
+        saveWorkspaceNow: () => { calls.push('saveWorkspaceNow'); },
+        startCovenPolling: () => { calls.push('startCovenPolling'); },
+        paneMetricsPollTimer: 0,
+        clearInterval: () => { calls.push('clearInterval'); },
+        setInterval: (_callback: () => void, ms: number) => {
+          calls.push(`setInterval:${ms}`);
+          return 1;
+        },
+        refreshVisiblePaneMetrics: () => { calls.push('refreshVisiblePaneMetrics'); },
+        refreshStatusController: null,
+        ensureProjectCoven: async () => {
+          ensureProjectCovenCalls += 1;
+          throw new Error('ensureProjectCoven must not run');
+        },
+      },
+    );
+
+    let bootSettled = false;
+    const bootPromise = boot({ repo_root: '/boot/root', home: '/home/tester' })
+      .finally(() => { bootSettled = true; });
+    await flushPromises();
+
+    expect(ensureProjectCovenCalls).toBe(0);
+    expect(addProjectRoot).toBeNull();
+    expect(state.env).toEqual({ repo_root: '/boot/root', home: '/home/tester' });
+    expect(state.projects).toEqual(restoredProjects);
+    expect(state.activeProjectId).toBe('restored-a');
+    expect(calls).toEqual([
+      'installTerminalImageDrop',
+      'restoreSavedProjects:2:restored-a:5',
+      'activeProject',
+      'restoreProjectLayout:restored-a',
+      'refreshProjectWorktrees:restored-a',
+      'refreshProjectWorktrees:restored-b',
+    ]);
+    expect(bootSettled).toBe(false);
+    expect(calls).not.toContain('currentBrowserTab:restored-a');
+    expect(calls).not.toContain('refreshSidebar');
+    expect(calls).not.toContain('refreshTabs');
+    expect(calls).not.toContain('renderBrowserTabs');
+    expect(calls).not.toContain('syncProjectBrowser');
+    expect(calls).not.toContain('loadAgentSkills');
+    expect(calls).not.toContain('saveWorkspaceNow');
+    expect(calls).not.toContain('startCovenPolling');
+
+    refreshes.get('restored-a')!.resolve();
+    await flushPromises();
+
+    expect(calls).toEqual([
+      'installTerminalImageDrop',
+      'restoreSavedProjects:2:restored-a:5',
+      'activeProject',
+      'restoreProjectLayout:restored-a',
+      'refreshProjectWorktrees:restored-a',
+      'refreshProjectWorktrees:restored-b',
+    ]);
+    expect(bootSettled).toBe(false);
+    expect(calls).not.toContain('currentBrowserTab:restored-a');
+    expect(calls).not.toContain('refreshSidebar');
+    expect(calls).not.toContain('refreshTabs');
+    expect(calls).not.toContain('renderBrowserTabs');
+    expect(calls).not.toContain('syncProjectBrowser');
+    expect(calls).not.toContain('loadAgentSkills');
+    expect(calls).not.toContain('saveWorkspaceNow');
+    expect(calls).not.toContain('startCovenPolling');
+
+    refreshes.get('restored-b')!.resolve();
+    await bootPromise;
+
+    expect(calls).toEqual([
+      'installTerminalImageDrop',
+      'restoreSavedProjects:2:restored-a:5',
+      'activeProject',
+      'restoreProjectLayout:restored-a',
+      'refreshProjectWorktrees:restored-a',
+      'refreshProjectWorktrees:restored-b',
+      'currentBrowserTab:restored-a',
+      'restoreProjectLayout:restored-a',
+      'refreshSidebar',
+      'refreshTabs',
+      'renderBrowserTabs',
+      'syncProjectBrowser',
+      'loadAgentSkills',
+      'saveWorkspaceNow',
+      'startCovenPolling',
+      'setInterval:15000',
+      'refreshVisiblePaneMetrics',
+    ]);
+    expect(bootSettled).toBe(true);
+    expect(calls.indexOf('startCovenPolling')).toBeGreaterThan(
+      calls.indexOf('refreshProjectWorktrees:restored-b'),
+    );
+  });
+
+  it('passively boots the repo root without launching Coven when no workspace is saved', async () => {
+    const project = {
+      id: 'fresh-project',
+      root: '/repo/root',
+      selectedWorktreePath: '/repo/root',
+      worktrees: [{ path: '/repo/root', collapsed: false }],
+      layout: { mode: 'terminal', side: 'right', splitFrac: 0.6 },
+      browsersByWorktree: {},
+    };
+    const calls: string[] = [];
+    const state = {
+      env: {},
+      projects: [] as Array<Record<string, any>>,
+      activeProjectId: null as string | null,
+    };
+    let addProjectRoot: string | null = null;
+    let ensureProjectCovenCalls = 0;
+    const boot = compileFunction<(env: Record<string, string>) => Promise<void>>(
+      functionSource('boot'),
+      {
+        state,
+        installTerminalImageDrop: async () => { calls.push('installTerminalImageDrop'); },
+        statusController: null,
+        readSavedWorkspace: () => null,
+        settings: { maxProjects: 5 },
+        HARD_MAX_PROJECTS: 10,
+        isRestoringWorkspace: false,
+        restoreSavedProjects: async () => {
+          throw new Error('restoreSavedProjects should not run without saved projects');
+        },
+        activeProject: () => {
+          throw new Error('activeProject should not run without saved projects');
+        },
+        restoreProjectLayout: (value: { id: string }) => { calls.push(`restoreProjectLayout:${value.id}`); },
+        refreshProjectWorktrees: async () => {
+          throw new Error('refreshProjectWorktrees should be owned by addProject');
+        },
+        addProject: async (root: string) => {
+          addProjectRoot = root;
+          calls.push(`addProject:${root}`);
+          state.projects = [project];
+          state.activeProjectId = project.id;
+          return project;
+        },
+        currentBrowserTab: (value: { id: string } | null) => {
+          calls.push(`currentBrowserTab:${value ? value.id : 'null'}`);
+          return null;
+        },
+        navigateBrowser: () => { throw new Error('navigateBrowser should not run'); },
+        refreshSidebar: () => { calls.push('refreshSidebar'); },
+        refreshTabs: () => { calls.push('refreshTabs'); },
+        renderBrowserTabs: () => { calls.push('renderBrowserTabs'); },
+        syncProjectBrowser: () => { calls.push('syncProjectBrowser'); },
+        loadAgentSkills: () => { calls.push('loadAgentSkills'); },
+        saveWorkspaceNow: () => { calls.push('saveWorkspaceNow'); },
+        startCovenPolling: () => { calls.push('startCovenPolling'); },
+        paneMetricsPollTimer: 0,
+        clearInterval: () => { calls.push('clearInterval'); },
+        setInterval: (_callback: () => void, ms: number) => {
+          calls.push(`setInterval:${ms}`);
+          return 1;
+        },
+        refreshVisiblePaneMetrics: () => { calls.push('refreshVisiblePaneMetrics'); },
+        refreshStatusController: null,
+        ensureProjectCoven: async () => {
+          ensureProjectCovenCalls += 1;
+          throw new Error('ensureProjectCoven must not run');
+        },
+      },
+    );
+
+    await boot({ repo_root: '/repo/root', home: '/home/tester' });
+
+    expect(ensureProjectCovenCalls).toBe(0);
+    expect(addProjectRoot).toBe('/repo/root');
+    expect(state.env).toEqual({ repo_root: '/repo/root', home: '/home/tester' });
+    expect(state.projects).toEqual([project]);
+    expect(state.activeProjectId).toBe('fresh-project');
+    expect(calls).toEqual([
+      'installTerminalImageDrop',
+      'addProject:/repo/root',
+      'currentBrowserTab:fresh-project',
+      'restoreProjectLayout:fresh-project',
+      'refreshSidebar',
+      'refreshTabs',
+      'renderBrowserTabs',
+      'syncProjectBrowser',
+      'loadAgentSkills',
+      'saveWorkspaceNow',
+      'startCovenPolling',
+      'setInterval:15000',
+      'refreshVisiblePaneMetrics',
+    ]);
+    expect(calls.indexOf('startCovenPolling')).toBeGreaterThan(
+      calls.indexOf('restoreProjectLayout:fresh-project'),
+    );
+  });
+
   it('keeps protected launch kinds limited to Coven-only launches across the JS/Rust contract', () => {
     expect(libRs).toContain('if !matches!(launch_kind, "coven-chat" | "coven-attach")');
 
     const spawnAgentThread = functionSource('spawnAgentThread');
-    expect(spawnAgentThread).toContain('launchKind: entry.kind === "coven-chat" ? entry.kind : null');
+    expect(spawnAgentThread).toContain('launchKind: null');
 
     const covenChatLaunch = functionSource('covenChatLaunch');
     expect(covenChatLaunch).toContain('launchKind: "coven-chat"');
@@ -739,7 +1029,7 @@ describe('native Coven launch routing', () => {
     expect(thread).toMatchObject({ project, kind: 'coven-chat', name: 'Coven' });
   });
 
-  it('coalesces concurrent automatic ensures through one animation-frame launch', async () => {
+  it('coalesces concurrent explicit ensures through one animation-frame launch', async () => {
     const project = { id: 'project', root: '/repo', selectedWorktreePath: '/repo/wt' };
     const state = {
       env: { coven_path: '/bin/coven' },
@@ -794,7 +1084,7 @@ describe('native Coven launch routing', () => {
     expect(covenEnsureFlights.size).toBe(0);
   });
 
-  it('cleans a rejected automatic ensure so the workspace can retry', async () => {
+  it('cleans a rejected explicit ensure so the user can retry', async () => {
     const project = { id: 'project', root: '/repo' };
     const covenEnsureFlights = new Map<string, Promise<unknown>>();
     let attempts = 0;
@@ -925,128 +1215,104 @@ describe('native Coven launch routing', () => {
     expect(creates).toBe(0);
   });
 
-  it('does not overwrite picker or activation errors when Coven creation returns null', async () => {
+  it('does not launch Coven when the project picker adds a project', async () => {
     const project = { id: 'project', root: '/repo', name: 'repo' };
-    const pickerStatuses: string[] = [];
+    let pickerLaunches = 0;
     const openProjectPicker = compileFunction<() => Promise<void>>(
       functionSource('openProjectPicker'),
       {
         dialogOpen: async () => '/repo',
         state: { env: { home: '/home' } },
         addProject: async () => project,
-        ensureProjectCoven: async () => null,
-        setProjectStatus: () => { pickerStatuses.push('ok'); },
+        ensureProjectCoven: async () => { pickerLaunches += 1; return null; },
+        setProjectStatus: () => { throw new Error('setProjectStatus should not be called'); },
         writeToActive: () => undefined,
       },
     );
     await openProjectPicker();
-    expect(pickerStatuses).toEqual([]);
-
-    const activationStatuses: string[] = [];
-    const setActiveProject = compileFunction<(id: string) => Promise<boolean>>(
-      functionSource('setActiveProject'),
-      {
-        state: { activeProjectId: 'other', threads: [], activeThreadId: null },
-        showTerminalView: async () => true,
-        findProject: () => project,
-        restoreProjectLayout: () => undefined,
-        loadAgentSkills: () => undefined,
-        activeWorkspaceRoot: () => '/repo',
-        focusThread: async () => true,
-        renderPaneWorkspace: () => undefined,
-        refreshSidebar: () => undefined,
-        refreshTabs: () => undefined,
-        syncProjectBrowser: () => undefined,
-        ensureProjectCoven: async () => null,
-        setStatus: (text: string) => { activationStatuses.push(text); },
-        saveWorkspaceSoon: () => undefined,
-      },
-    );
-    await setActiveProject(project.id);
-    expect(activationStatuses).toEqual([]);
+    expect(pickerLaunches).toBe(0);
   });
 
-  it('marks picker and activation ready only after Coven creation succeeds', async () => {
+  it('does not launch Coven when activating a project without a visible pane', async () => {
     const project = { id: 'project', root: '/repo', name: 'repo' };
-    const pickerStatuses: string[] = [];
-    const openProjectPicker = compileFunction<() => Promise<void>>(
-      functionSource('openProjectPicker'),
-      {
-        dialogOpen: async () => '/repo',
-        state: { env: { home: '/home' } },
-        addProject: async () => project,
-        ensureProjectCoven: async () => ({ id: 'coven' }),
-        setProjectStatus: (_value: unknown, status: string) => { pickerStatuses.push(status); },
-        writeToActive: () => undefined,
-      },
-    );
-    await openProjectPicker();
-    expect(pickerStatuses).toEqual(['ok']);
-
-    const activationStatuses: string[] = [];
+    const state = { activeProjectId: 'other', threads: [], activeThreadId: 'stale-thread' as string | null };
+    let renderCalls = 0;
+    let sidebarCalls = 0;
+    let tabCalls = 0;
+    let syncCalls = 0;
+    let activationLaunches = 0;
     const setActiveProject = compileFunction<(id: string) => Promise<boolean>>(
       functionSource('setActiveProject'),
       {
-        state: { activeProjectId: 'other', threads: [], activeThreadId: null },
+        state,
         showTerminalView: async () => true,
         findProject: () => project,
         restoreProjectLayout: () => undefined,
         loadAgentSkills: () => undefined,
         activeWorkspaceRoot: () => '/repo',
         focusThread: async () => true,
-        renderPaneWorkspace: () => undefined,
-        refreshSidebar: () => undefined,
-        refreshTabs: () => undefined,
-        syncProjectBrowser: () => undefined,
-        ensureProjectCoven: async () => ({ id: 'coven' }),
-        setStatus: (text: string) => { activationStatuses.push(text); },
+        renderPaneWorkspace: () => { renderCalls += 1; },
+        refreshSidebar: () => { sidebarCalls += 1; },
+        refreshTabs: () => { tabCalls += 1; },
+        syncProjectBrowser: () => { syncCalls += 1; },
+        ensureProjectCoven: async () => { activationLaunches += 1; return null; },
+        setStatus: () => { throw new Error('setStatus should not be called'); },
         saveWorkspaceSoon: () => undefined,
       },
     );
     await setActiveProject(project.id);
-    expect(activationStatuses).toEqual(['no pane — launching Coven…']);
-
-    const ready: string[] = [];
-    const setProjectStatus = compileFunction<(value: typeof project, level: string) => void>(
-      functionSource('setProjectStatus'),
-      {
-        activeProject: () => project,
-        setStatus: (text: string) => { ready.push(text); },
-      },
-    );
-    setProjectStatus(project, 'ok');
-    expect(ready).toEqual(['Coven is ready']);
+    expect(state.activeThreadId).toBeNull();
+    expect(renderCalls).toBe(1);
+    expect(sidebarCalls).toBe(1);
+    expect(tabCalls).toBe(1);
+    expect(syncCalls).toBe(2);
+    expect(activationLaunches).toBe(0);
   });
 
   it('deduplicates only a visible live Coven chat in the exact workspace', async () => {
     const project = { id: 'project', root: '/repo' };
-    const matching = {
-      id: 'matching', projectId: project.id, worktreePath: '/repo/wt',
-      kind: 'coven-chat', status: 'running', hidden: false,
+    const running = {
+      id: 'running', projectId: project.id, worktreePath: '/repo/wt',
+      kind: 'coven-chat', status: 'running', hidden: false, closing: false,
+    };
+    const starting = {
+      id: 'starting', projectId: project.id, worktreePath: '/repo/wt',
+      kind: 'coven-chat', status: 'starting', hidden: false, closing: false,
     };
     const state = { threads: [
-      { ...matching, id: 'hidden', hidden: true },
-      { ...matching, id: 'exited', status: 'exited' },
-      { ...matching, id: 'other', worktreePath: '/repo/other' },
-      matching,
+      { ...running, id: 'hidden', hidden: true },
+      { ...running, id: 'failed', status: 'failed' },
+      { ...running, id: 'exited', status: 'exited' },
+      { ...running, id: 'closing', closing: true },
+      { ...running, id: 'other', worktreePath: '/repo/other' },
+      starting,
     ] };
     let focused = '';
     let spawned = 0;
-    const ensureProjectCoven = compileFunction<(value: typeof project) => Promise<typeof matching>>(
+    const spawnedThread = { ...running, id: 'spawned' };
+    const ensureProjectCoven = compileFunction<(value: typeof project) => Promise<typeof running>>(
       functionSource('ensureProjectCoven'),
       {
         selectedWorktree: () => ({ path: '/repo/wt' }),
         state,
         focusThread: async (id: string) => { focused = id; },
-        spawnCovenThread: async () => { spawned += 1; return matching; },
+        spawnCovenThread: async () => { spawned += 1; return spawnedThread; },
         covenEnsureFlights: new Map(),
       },
     );
-    await expect(ensureProjectCoven(project)).resolves.toBe(matching);
-    expect({ focused, spawned }).toEqual({ focused: 'matching', spawned: 0 });
+    await expect(ensureProjectCoven(project)).resolves.toBe(starting);
+    expect({ focused, spawned }).toEqual({ focused: 'starting', spawned: 0 });
 
-    state.threads = state.threads.filter((thread) => thread.id !== 'matching');
+    state.threads = state.threads.map((thread) => (
+      thread.id === 'starting' ? running : thread
+    ));
     await ensureProjectCoven(project);
+    expect({ focused, spawned }).toEqual({ focused: 'running', spawned: 0 });
+
+    state.threads = state.threads.filter((thread) => (
+      thread.id !== 'starting' && thread.id !== 'running'
+    ));
+    await expect(ensureProjectCoven(project)).resolves.toBe(spawnedThread);
     expect(spawned).toBe(1);
   });
 
@@ -1631,7 +1897,7 @@ describe('native Coven launch routing', () => {
     );
   });
 
-  it('routes native defaults to Coven while retaining explicit shell and Psyche commands', () => {
+  it('keeps Coven available only through explicit guarded launch surfaces', () => {
     expect(mainJs).toContain('Launch a lane — Coven, a shell, or a browser');
     expect(mainJs).not.toContain('No terminal pane yet — opening Psyche…');
     expect(mainJs).not.toMatch(/canvas-empty-sub[\s\S]{0,200}Psyche TUI/);
@@ -1640,17 +1906,22 @@ describe('native Coven launch routing', () => {
     expect(mainJs).toMatch(/cmd:\s*"\/new-thread"[\s\S]*?run:\s*runNewThreadCommand/);
     expect(mainJs).toMatch(/cmd:\s*"\/new-shell"[\s\S]*?run:\s*runNewShellCommand/);
     expect(mainJs).toMatch(/cmd:\s*"\/new-psyche"[\s\S]*?run:\s*runNewPsycheCommand/);
-    expect(functionSource('runNewThreadCommand')).toMatch(/spawnCovenThread/);
+    expect(functionSource('runNewThreadCommand')).toContain(
+      'return ensureProjectCoven(activeProject());',
+    );
     expect(functionSource('runNewShellCommand')).toMatch(/return createTerminalPane\(\);/);
     expect(functionSource('runNewPsycheCommand')).toMatch(/spawnPsycheThread/);
-    expect(functionSource('setActiveProject')).toMatch(/await ensureProjectCoven\(project\)/);
-    expect(functionSource('setActiveProject')).toMatch(
-      /var covenThread = await ensureProjectCoven\(project\);[\s\S]*if \(covenThread\) setStatus\("no pane — launching Coven…"/,
+    expect(functionSource('spawnAgentThread')).toMatch(
+      /if \(entry\.id === "coven-code"\) \{[\s\S]*return ensureProjectCoven\(project\);[\s\S]*\}\s*if \(!\(await showTerminalView\(\)\)\) return null;/,
     );
-    expect(functionSource('openProjectPicker')).toMatch(/await ensureProjectCoven\(project\)/);
-    expect(functionSource('boot')).toMatch(/await ensureProjectCoven\(project\)/);
+    expect(functionSource('setActiveProject')).not.toContain('ensureProjectCoven');
+    expect(functionSource('setActiveProject')).not.toContain('ensureCoven');
+    expect(functionSource('openProjectPicker')).not.toContain('ensureProjectCoven');
+    expect(functionSource('boot')).not.toContain('ensureProjectCoven');
     expect(mainJs).toContain('label: "Open Coven Terminal"');
-    expect(mainJs).toMatch(/ensureProjectCoven\(project\)/);
+    expect(mainJs).toMatch(
+      /label: "Open Coven Terminal"[\s\S]*await ensureProjectCoven\(project\);/,
+    );
     expect(mainJs).toMatch(/\/new-thread[\s\S]*\/new-shell[\s\S]*\/new-psyche/);
   });
 });

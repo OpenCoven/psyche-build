@@ -552,10 +552,6 @@
       refreshSidebar();
       refreshTabs();
       syncProjectBrowser();
-      if (!options || options.ensureCoven !== false) {
-        var covenThread = await ensureProjectCoven(project);
-        if (covenThread) setStatus("no pane — launching Coven…", "");
-      }
     }
     syncProjectBrowser();
     saveWorkspaceSoon();
@@ -4863,7 +4859,7 @@
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
         if (!(await activateProjectWorktree(
-          project, existing.worktreePath, { ensureCoven: false }
+          project, existing.worktreePath
         ))) return null;
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
@@ -4883,7 +4879,7 @@
     var opening = Promise.resolve().then(async function () {
       var worktree = covenWorktreeForSession(project, session);
       if (!worktree || !worktree.path) return null;
-      if (!(await activateProjectWorktree(project, worktree.path, { ensureCoven: false }))) return null;
+      if (!(await activateProjectWorktree(project, worktree.path))) return null;
       await waitForTerminalLayout();
       return createThread({
         project: project,
@@ -6746,7 +6742,7 @@
   }
 
   async function runNewThreadCommand() {
-    return spawnCovenThread();
+    return ensureProjectCoven(activeProject());
   }
 
   async function runNewShellCommand() {
@@ -8779,11 +8775,7 @@
         defaultPath: defaultPath,
       });
       if (!selected || typeof selected !== "string") return; // user cancelled
-      var project = await addProject(selected);
-      if (project) {
-        var covenThread = await ensureProjectCoven(project);
-        if (covenThread) setProjectStatus(project, "ok");
-      }
+      await addProject(selected);
     } catch (err) {
       writeToActive("\r\n\x1b[31m[open-project]\x1b[0m " + err + "\r\n");
     }
@@ -8900,13 +8892,12 @@
       setStatus("Unknown agent: " + agentId, "error");
       return null;
     }
-    var command = entry.command;
     if (entry.id === "coven-code") {
-      command = state.env && state.env.coven_path;
-      if (!command) {
+      if (!state.env || !state.env.coven_path) {
         setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
         return null;
       }
+      return ensureProjectCoven(project);
     }
     if (!(await showTerminalView())) return null;
     return createThread({
@@ -8914,9 +8905,9 @@
       worktreePath: worktree.path,
       name: entry.label,
       kind: entry.kind,
-      command: command,
+      command: entry.command,
       args: entry.args.slice(),
-      launchKind: entry.kind === "coven-chat" ? entry.kind : null,
+      launchKind: null,
       projectRoot: project.root,
       cwd: worktree.path,
     });
@@ -8974,7 +8965,9 @@
     if (!worktree || !worktree.path) return Promise.resolve(null);
     var existing = state.threads.find(function (t) {
       return t.projectId === project.id && t.worktreePath === worktree.path &&
-        t.kind === "coven-chat" && t.status !== "exited" && !t.hidden;
+        t.kind === "coven-chat" &&
+        (t.status === "starting" || t.status === "running") &&
+        !t.closing && !t.hidden;
     });
     if (existing) {
       return Promise.resolve(focusThread(existing.id)).then(function () { return existing; });
@@ -9091,7 +9084,6 @@
     }
     if (!project) project = await addProject(bootRoot);
     if (project) {
-      await ensureProjectCoven(project);
       var activeTab = currentBrowserTab(project);
       if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
       restoreProjectLayout(project);
