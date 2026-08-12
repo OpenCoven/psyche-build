@@ -83,6 +83,29 @@ describe('ControlRuntime', () => {
     expect(handlers.sendInput).not.toHaveBeenCalled();
   });
 
+  it('fails closed for agent surface commands before any effect handler', async () => {
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 4,
+      handlers,
+      journal: createMemoryJournal(),
+    });
+
+    await expect(runtime.submit(command({
+      kind: 'pane.observe',
+      actor: { id: 'psyche-1', kind: 'psyche' },
+      payload: {
+        taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
+        paneId: 'pane-1', generation: 1,
+      },
+    }))).resolves.toMatchObject({
+      status: 'failed',
+      code: 'command_not_implemented',
+    });
+    for (const handler of Object.values(handlers)) {
+      expect(handler).not.toHaveBeenCalled();
+    }
+  });
+
   it('revokes automation before accepting human input', async () => {
     const runtime = await ControlRuntime.create({
       ownerEpoch: 4,

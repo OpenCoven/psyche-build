@@ -365,6 +365,21 @@ export class ControlRuntime {
           return succeededOutcome(await this.handlers.runCovenDesktopAction(command.payload));
         case 'coven.capability.execute':
           return succeededOutcome(await this.handlers.executeCovenCapability(command.payload));
+        case 'lease.request':
+        case 'lease.grant':
+        case 'lease.release':
+        case 'lease.revoke':
+        case 'pane.observe':
+        case 'pane.action':
+        case 'browser.inspect':
+        case 'browser.action':
+        case 'browser.script':
+        case 'approval.resolve':
+        case 'provider.resource.upsert':
+        case 'provider.resource.remove':
+          throw Object.assign(new Error('agent surface command is not implemented'), {
+            code: 'command_not_implemented',
+          });
         case 'pane.delegate':
         case 'pane.takeover':
           throw new Error(`lease command reached side-effect executor: ${command.kind}`);
