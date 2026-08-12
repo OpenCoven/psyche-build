@@ -245,12 +245,8 @@
     var layout = paneLayoutFor(project.id, worktreePath);
     var leaf = layout && PsychePanes.findLeafById(layout.root, layout.focusedLeafId);
     var thread = leaf && findThread(leaf.threadId);
-    var activeThread = thread &&
-      thread.kind !== "coven-chat" && thread.kind !== "coven-attach"
-        ? thread
-        : null;
-    state.activeThreadId = activeThread ? activeThread.id : null;
-    if (activeThread) project.lastActiveThreadId = activeThread.id;
+    state.activeThreadId = thread ? thread.id : null;
+    if (thread) project.lastActiveThreadId = thread.id;
   }
   async function activateProjectWorktree(project, worktreePath, options) {
     var refreshStatus = !options || options.refreshStatus !== false;
@@ -541,8 +537,7 @@
     // Restore the project's last-focused thread, falling back to its first.
     var workspaceRoot = activeWorkspaceRoot(project);
     var threads = state.threads.filter(function (t) {
-      return t.projectId === id && t.worktreePath === workspaceRoot && !t.hidden &&
-        t.kind !== "coven-chat" && t.kind !== "coven-attach";
+      return t.projectId === id && t.worktreePath === workspaceRoot && !t.hidden;
     });
     var nextId = project.lastActiveThreadId &&
       threads.some(function (t) { return t.id === project.lastActiveThreadId; })
@@ -8886,10 +8881,8 @@
       setStatus("Unknown agent: " + agentId, "error");
       return null;
     }
-    var command = entry.command;
     if (entry.id === "coven-code") {
-      command = state.env && state.env.coven_path;
-      if (!command) {
+      if (!state.env || !state.env.coven_path) {
         setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
         return null;
       }

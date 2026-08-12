@@ -820,7 +820,10 @@ describe('Tauri agent picker', () => {
 
   it('keeps Coven startup behind explicit launch surfaces', () => {
     expect(functionSource('setActiveProject')).not.toContain('ensureProjectCoven');
+    expect(functionSource('setActiveProject')).not.toContain('openCovenSession');
     expect(functionSource('openProjectPicker')).not.toContain('ensureProjectCoven');
+    expect(functionSource('openProjectPicker')).not.toContain('openCovenSession');
     expect(functionSource('boot')).not.toContain('ensureProjectCoven');
+    expect(functionSource('boot')).not.toContain('openCovenSession');
   });
 });

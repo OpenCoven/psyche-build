@@ -1162,7 +1162,7 @@ describe('Tauri physical terminal panes', () => {
     expect(refreshes).toBe(1);
   });
 
-  it('does not make a Coven layout leaf active during passive worktree selection', async () => {
+  it('restores an existing Coven layout leaf during passive worktree selection', async () => {
     const project = { id: 'project', selectedWorktreePath: '/old', lastActiveThreadId: 'shell-a' };
     const thread = { id: 'thread-coven', kind: 'coven-attach' };
     const state = { activeProjectId: project.id, activeThreadId: 'stale-thread' as string | null };
@@ -1201,8 +1201,8 @@ describe('Tauri physical terminal panes', () => {
 
     await expect(activateProjectWorktree(project, '/target')).resolves.toBe(true);
     expect(project.selectedWorktreePath).toBe('/target');
-    expect(project.lastActiveThreadId).toBe('shell-a');
-    expect(state.activeThreadId).toBeNull();
+    expect(project.lastActiveThreadId).toBe(thread.id);
+    expect(state.activeThreadId).toBe(thread.id);
     expect(renders).toBe(1);
     expect(refreshes).toBe(1);
   });
@@ -1278,7 +1278,7 @@ describe('Tauri physical terminal panes', () => {
     expect(options).toEqual({ refreshStatus: true });
   });
 
-  it('does not focus visible Coven panes during passive project activation', async () => {
+  it('restores a visible local Coven pane during passive project activation', async () => {
     const project = {
       id: 'project',
       selectedWorktreePath: '/target',
@@ -1333,12 +1333,14 @@ describe('Tauri physical terminal panes', () => {
 
     await expect(setActiveProject(project.id)).resolves.toBe(true);
     expect(state.activeProjectId).toBe(project.id);
-    expect(state.activeThreadId).toBeNull();
-    expect(focusCalls).toEqual([]);
-    expect(renderCalls).toBe(1);
-    expect(sidebarCalls).toBe(1);
-    expect(tabCalls).toBe(1);
-    expect(syncCalls).toBe(2);
+    expect(state.activeThreadId).toBe('thread-chat');
+    expect(focusCalls).toEqual([
+      { id: 'thread-chat', options: { refreshStatus: false } },
+    ]);
+    expect(renderCalls).toBe(0);
+    expect(sidebarCalls).toBe(0);
+    expect(tabCalls).toBe(0);
+    expect(syncCalls).toBe(1);
   });
 
   it('refreshes direct focusThread by default and allows batched suppression', async () => {
