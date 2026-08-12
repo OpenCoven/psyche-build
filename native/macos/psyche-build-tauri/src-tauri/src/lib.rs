@@ -24,8 +24,8 @@ mod coven_sessions;
 mod metrics;
 mod pane_metrics;
 mod workspace_contract;
-use coven_sessions::coven_sessions;
 use coven_sessions::is_safe_session_id;
+use coven_sessions::{coven_session_kill, coven_sessions};
 use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
 use pane_metrics::PaneSessionMetrics;
 
@@ -2294,6 +2294,7 @@ pub fn run() {
             browser_eval,
             app_environment,
             coven_sessions,
+            coven_session_kill,
             agent_skills,
             fs_list_dir,
             fs_read_text,

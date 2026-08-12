@@ -29,6 +29,21 @@ enum CovenEndpoint {
     Http(SocketAddr),
 }
 
+#[derive(Clone, Copy)]
+enum HttpMethod {
+    Get,
+    Post,
+}
+
+impl HttpMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum HttpResponseError {
     Malformed,
@@ -295,32 +310,96 @@ pub(crate) async fn coven_sessions(
     }
 }
 
+#[tauri::command]
+pub(crate) async fn coven_session_kill(session_id: String) -> Result<(), String> {
+    match tauri::async_runtime::spawn_blocking(move || {
+        if !is_safe_session_id(&session_id) {
+            return Err("Invalid Coven session".to_string());
+        }
+        let env = coven_environment([
+            ("COVEN_SOCKET", std::env::var_os("COVEN_SOCKET")),
+            ("COVEN_HOME", std::env::var_os("COVEN_HOME")),
+            ("COVEN_URL", std::env::var_os("COVEN_URL")),
+            ("COVEN_PORT", std::env::var_os("COVEN_PORT")),
+        ])
+        .map_err(|()| adapter_error_message(CovenAdapterError::Failed).to_string())?;
+        let home = home_path(std::env::var_os("HOME"));
+        let endpoint = resolve_endpoint(&env, &home)
+            .map_err(|_| adapter_error_message(CovenAdapterError::Failed).to_string())?;
+
+        try_kill_coven_session(&endpoint, &session_id)
+            .map_err(|error| adapter_error_message(error).to_string())
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(adapter_error_message(CovenAdapterError::Failed).to_string()),
+    }
+}
+
 fn try_load_coven_sessions(
     endpoint: &CovenEndpoint,
     project_roots: &[PathBuf],
     project_scopes: &[CovenProjectScope],
 ) -> Result<Vec<CovenSessionSummary>, CovenAdapterError> {
     let deadline = Instant::now() + EXCHANGE_TIMEOUT;
-    let health_body = request_endpoint(endpoint, "/api/v1/health", deadline)?;
+    let health_body = request_endpoint(endpoint, HttpMethod::Get, "/api/v1/health", deadline)?;
     let health: CovenHealthResponse =
         serde_json::from_slice(&health_body).map_err(|_| CovenAdapterError::Failed)?;
     if health.api_version != STABLE_API_VERSION {
         return Err(CovenAdapterError::Incompatible);
     }
 
-    let sessions_body = request_endpoint(endpoint, "/api/v1/sessions", deadline)?;
+    let sessions_body = request_endpoint(endpoint, HttpMethod::Get, "/api/v1/sessions", deadline)?;
     let sessions_value =
         serde_json::from_slice(&sessions_body).map_err(|_| CovenAdapterError::Failed)?;
     normalize_sessions_with_scopes(sessions_value, project_roots, project_scopes)
         .map_err(|_| CovenAdapterError::Failed)
 }
 
+fn try_kill_coven_session(
+    endpoint: &CovenEndpoint,
+    session_id: &str,
+) -> Result<(), CovenAdapterError> {
+    if !is_safe_session_id(session_id) {
+        return Err(CovenAdapterError::Failed);
+    }
+
+    let deadline = Instant::now() + EXCHANGE_TIMEOUT;
+    let health_body = request_endpoint(endpoint, HttpMethod::Get, "/api/v1/health", deadline)?;
+    let health: CovenHealthResponse =
+        serde_json::from_slice(&health_body).map_err(|_| CovenAdapterError::Failed)?;
+    if health.api_version != STABLE_API_VERSION {
+        return Err(CovenAdapterError::Incompatible);
+    }
+
+    let kill_path = format!("/api/v1/sessions/{session_id}/kill");
+    request_endpoint(endpoint, HttpMethod::Post, &kill_path, deadline)?;
+    Ok(())
+}
+
+fn adapter_error_message(error: CovenAdapterError) -> &'static str {
+    match error {
+        CovenAdapterError::Unavailable => UNAVAILABLE_MESSAGE,
+        CovenAdapterError::Incompatible => INCOMPATIBLE_MESSAGE,
+        CovenAdapterError::Failed => "Coven session could not be stopped",
+    }
+}
+
 fn request_endpoint(
     endpoint: &CovenEndpoint,
+    method: HttpMethod,
     path: &str,
     deadline: Instant,
 ) -> Result<Vec<u8>, CovenAdapterError> {
-    if !matches!(path, "/api/v1/health" | "/api/v1/sessions") {
+    let allowed = match method {
+        HttpMethod::Get => matches!(path, "/api/v1/health" | "/api/v1/sessions"),
+        HttpMethod::Post => path
+            .strip_prefix("/api/v1/sessions/")
+            .and_then(|value| value.strip_suffix("/kill"))
+            .is_some_and(is_safe_session_id),
+    };
+    if !allowed {
         return Err(CovenAdapterError::Failed);
     }
 
@@ -329,7 +408,7 @@ fn request_endpoint(
         CovenEndpoint::Unix(socket) => {
             let mut stream = connect_unix_before(socket, deadline)
                 .map_err(|error| categorize_io_error(&error, true))?;
-            exchange_http(&mut stream, path, deadline)
+            exchange_http(&mut stream, method, path, deadline)
         }
         #[cfg(not(unix))]
         CovenEndpoint::Unix(_) => Err(CovenAdapterError::Failed),
@@ -344,7 +423,7 @@ fn request_endpoint(
             stream
                 .set_nonblocking(true)
                 .map_err(|error| categorize_io_error(&error, false))?;
-            exchange_http(&mut stream, path, deadline)
+            exchange_http(&mut stream, method, path, deadline)
         }
     }
 }
@@ -368,11 +447,13 @@ impl LocalHttpStream for UnixStream {
 
 fn exchange_http<S: LocalHttpStream>(
     stream: &mut S,
+    method: HttpMethod,
     path: &str,
     deadline: Instant,
 ) -> Result<Vec<u8>, CovenAdapterError> {
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: coven\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        "{} {path} HTTP/1.1\r\nHost: coven\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        method.as_str()
     );
     write_all_before(stream, request.as_bytes(), deadline)
         .map_err(|error| categorize_io_error(&error, false))?;
@@ -1243,16 +1324,16 @@ mod tests {
         response
     }
 
-    fn expected_request(path: &str) -> Vec<u8> {
+    fn expected_request(method: &str, path: &str) -> Vec<u8> {
         format!(
-            "GET {path} HTTP/1.1\r\nHost: coven\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+            "{method} {path} HTTP/1.1\r\nHost: coven\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
         )
         .into_bytes()
     }
 
     fn assert_server_requests(server: &FakeServer, paths: &[&str]) {
         for path in paths {
-            assert_eq!(server.recv_request(), expected_request(path));
+            assert_eq!(server.recv_request(), expected_request("GET", path));
         }
     }
 
@@ -2263,8 +2344,11 @@ mod tests {
             Some("Native session")
         );
         assert_eq!(response.message, None);
-        assert_eq!(health_request, expected_request("/api/v1/health"));
-        assert_eq!(sessions_request, expected_request("/api/v1/sessions"));
+        assert_eq!(health_request, expected_request("GET", "/api/v1/health"));
+        assert_eq!(
+            sessions_request,
+            expected_request("GET", "/api/v1/sessions")
+        );
     }
 
     #[test]
@@ -2293,8 +2377,88 @@ mod tests {
         assert_eq!(response.sessions[0].project_root, project.to_string_lossy());
         assert_eq!(response.sessions[0].status.as_deref(), Some("active"));
         assert_eq!(response.message, None);
-        assert_eq!(health_request, expected_request("/api/v1/health"));
-        assert_eq!(sessions_request, expected_request("/api/v1/sessions"));
+        assert_eq!(health_request, expected_request("GET", "/api/v1/health"));
+        assert_eq!(
+            sessions_request,
+            expected_request("GET", "/api/v1/sessions")
+        );
+    }
+
+    #[test]
+    fn kills_a_session_over_loopback_tcp_with_exact_requests() {
+        let (endpoint, server) = spawn_tcp_server(vec![
+            http_json(br#"{"apiVersion":"coven.daemon.v1"}"#),
+            http_json(b"{}"),
+        ]);
+
+        let result = try_kill_coven_session(&endpoint, "release:fix_01.a-b");
+        let health_request = server.recv_request();
+        let kill_request = server.recv_request();
+        server.finish();
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(health_request, expected_request("GET", "/api/v1/health"));
+        assert_eq!(
+            kill_request,
+            expected_request("POST", "/api/v1/sessions/release:fix_01.a-b/kill")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kills_a_session_over_unix_with_exact_requests() {
+        let socket = TempSocket::new("kill-round-trip");
+        let server = spawn_unix_server(
+            &socket.path,
+            vec![
+                http_json(br#"{"apiVersion":"coven.daemon.v1"}"#),
+                http_json(b"{}"),
+            ],
+        );
+        let endpoint = CovenEndpoint::Unix(socket.path.clone());
+
+        let result = try_kill_coven_session(&endpoint, "release:fix_01.a-b");
+        let health_request = server.recv_request();
+        let kill_request = server.recv_request();
+        server.finish();
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(health_request, expected_request("GET", "/api/v1/health"));
+        assert_eq!(
+            kill_request,
+            expected_request("POST", "/api/v1/sessions/release:fix_01.a-b/kill")
+        );
+    }
+
+    #[test]
+    fn rejects_an_unsafe_kill_id_before_connecting() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = CovenEndpoint::Http(listener.local_addr().unwrap());
+
+        assert_eq!(
+            try_kill_coven_session(&endpoint, "../foreign"),
+            Err(CovenAdapterError::Failed)
+        );
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn maps_kill_adapter_errors_to_operator_messages() {
+        assert_eq!(
+            adapter_error_message(CovenAdapterError::Unavailable),
+            UNAVAILABLE_MESSAGE
+        );
+        assert_eq!(
+            adapter_error_message(CovenAdapterError::Incompatible),
+            INCOMPATIBLE_MESSAGE
+        );
+        assert_eq!(
+            adapter_error_message(CovenAdapterError::Failed),
+            "Coven session could not be stopped"
+        );
     }
 
     #[test]
@@ -2408,7 +2572,7 @@ mod tests {
         server.cancel();
 
         assert!(elapsed < Duration::from_secs(5), "timeout took {elapsed:?}");
-        assert_eq!(request, expected_request("/api/v1/health"));
+        assert_eq!(request, expected_request("GET", "/api/v1/health"));
         assert_adapter_state(
             &response,
             "unavailable",
@@ -2425,7 +2589,7 @@ mod tests {
             configure_fake_tcp_stream(&stream).unwrap();
             let mut request = Vec::new();
             stream.read_to_end(&mut request).unwrap();
-            assert_eq!(request, expected_request("/api/v1/health"));
+            assert_eq!(request, expected_request("GET", "/api/v1/health"));
 
             let response = http_json(br#"{"apiVersion":"coven.daemon.v1"}"#);
             for byte in response {
@@ -2447,6 +2611,7 @@ mod tests {
         let started = Instant::now();
         let result = request_endpoint(
             &endpoint,
+            HttpMethod::Get,
             "/api/v1/health",
             Instant::now() + EXCHANGE_TIMEOUT,
         );
@@ -2488,7 +2653,7 @@ mod tests {
             "incompatible",
             Some("Coven daemon API update required"),
         );
-        assert_eq!(health_request, expected_request("/api/v1/health"));
+        assert_eq!(health_request, expected_request("GET", "/api/v1/health"));
     }
 
     #[test]
@@ -2510,7 +2675,7 @@ mod tests {
             "incompatible",
             Some("Coven daemon API update required"),
         );
-        assert_eq!(request, expected_request("/api/v1/health"));
+        assert_eq!(request, expected_request("GET", "/api/v1/health"));
     }
 
     #[test]
@@ -2531,7 +2696,7 @@ mod tests {
             "incompatible",
             Some("Coven daemon API update required"),
         );
-        assert_eq!(request, expected_request("/api/v1/health"));
+        assert_eq!(request, expected_request("GET", "/api/v1/health"));
     }
 
     #[test]
