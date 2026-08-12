@@ -148,6 +148,43 @@ type BrowserNavigationTab = {
   historyIndex: number;
 };
 
+type BrowserTabFixture = {
+  id: string;
+  created: boolean;
+};
+
+type BrowserProjectFixture = {
+  browsersByWorktree: Record<string, {
+    activeTabId: string;
+    tabs: BrowserTabFixture[];
+  }>;
+};
+
+type IdentifiedBrowserProjectFixture = BrowserProjectFixture & {
+  id: string;
+};
+
+type DormantBrowserTabFixture = {
+  id: string;
+  url: string;
+  created: boolean;
+  history: string[];
+  historyIndex: number;
+};
+
+type ActiveDormantBrowserTabFixture = {
+  id: string;
+  created: boolean;
+  url: string;
+};
+
+type BrowserPaneThreadFixture = {
+  id: string;
+  kind: string;
+  projectId: string;
+  worktreePath: string;
+};
+
 function browserNavigationDependencies(
   project: { id: string },
   browser: { activeTabId: string; tabs: BrowserNavigationTab[] },
@@ -159,7 +196,7 @@ function browserNavigationDependencies(
     createBrowserPane: async () => ({ id: 'web-pane' }),
     ensureBrowserModel: () => browser,
     currentBrowserTab: () => tab,
-    createBrowserTab: () => null,
+    createBrowserTab: (): BrowserNavigationTab | null => null,
     visibleBrowserBounds: () => ({ x: 1, y: 2, w: 3, h: 4 }),
     normaliseUrl: (url: string) => url,
     tabTitle: (url: string) => url,
@@ -223,7 +260,7 @@ describe('Tauri native browser lifecycle', () => {
 
   it('destroys a browser view before removing its tab state', async () => {
     const calls: string[] = [];
-    const project = {
+    const project: IdentifiedBrowserProjectFixture = {
       id: 'project-a',
       browsersByWorktree: {
         '/workspace': {
@@ -236,7 +273,7 @@ describe('Tauri native browser lifecycle', () => {
       },
     };
     const closeBrowserTab = compileFunction<
-      (project: typeof project, tabId: string) => Promise<boolean>
+      (project: IdentifiedBrowserProjectFixture, tabId: string) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserTab'), {
       activeProject: () => project,
       ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
@@ -265,7 +302,7 @@ describe('Tauri native browser lifecycle', () => {
 
   it('retains tab state and reports native browser destruction failures', async () => {
     const statuses: Array<[string, string]> = [];
-    const project = {
+    const project: IdentifiedBrowserProjectFixture = {
       id: 'project-a',
       browsersByWorktree: {
         '/workspace': {
@@ -275,7 +312,7 @@ describe('Tauri native browser lifecycle', () => {
       },
     };
     const closeBrowserTab = compileFunction<
-      (project: typeof project, tabId: string) => Promise<boolean>
+      (project: IdentifiedBrowserProjectFixture, tabId: string) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserTab'), {
       activeProject: () => project,
       ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
@@ -300,7 +337,7 @@ describe('Tauri native browser lifecycle', () => {
 
   it('restores saved dormant URLs without changing their browser history', async () => {
     const navigations: Array<[string, Record<string, unknown>]> = [];
-    const tab = {
+    const tab: DormantBrowserTabFixture = {
       id: 'tab-a',
       url: 'https://example.com',
       created: false,
@@ -308,7 +345,7 @@ describe('Tauri native browser lifecycle', () => {
       historyIndex: 1,
     };
     const restoreDormantBrowserTab = compileFunction<
-      (project: unknown, tab: typeof tab) => Promise<boolean>
+      (project: unknown, tab: DormantBrowserTabFixture) => Promise<boolean>
     >(functionSource(mainJs, 'restoreDormantBrowserTab'), {
       navigateBrowser: async (url: string, options: Record<string, unknown>) => {
         navigations.push([url, options]);
@@ -453,6 +490,49 @@ describe('Tauri native browser lifecycle', () => {
     expect(writes).toEqual(['\r\n\x1b[31m[browser_navigate]\x1b[0m Error: native unavailable\r\n']);
   });
 
+  it('does not create or mutate tabs for an explicitly requested missing tab', async () => {
+    const calls: string[] = [];
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old.example',
+      created: false,
+      loading: false,
+      title: 'Old',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    const dependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      async (command) => { calls.push(command); },
+    );
+    dependencies.createBrowserPane = async () => {
+      calls.push('create-pane');
+      return { id: 'web-pane' };
+    };
+    dependencies.createBrowserTab = () => {
+      calls.push('create-tab');
+      return tab;
+    };
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), dependencies);
+
+    await expect(navigateBrowser('https://example.com', { tabId: 'missing' })).resolves.toBe(false);
+    expect(calls).toEqual([]);
+    expect(browser).toEqual({ activeTabId: 'tab-a', tabs: [tab] });
+    expect(tab).toMatchObject({
+      created: false,
+      loading: false,
+      url: 'https://old.example',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    });
+  });
+
   it('does not restore missing, blank, or already-created browser tabs', async () => {
     const restoreDormantBrowserTab = compileFunction<
       (project: unknown, tab: { created?: boolean; url?: string; id?: string } | null) => Promise<boolean>
@@ -468,7 +548,7 @@ describe('Tauri native browser lifecycle', () => {
 
   it('activates valid tabs and lazily restores dormant ones', async () => {
     const calls: string[] = [];
-    const project = {
+    const project: BrowserProjectFixture = {
       browsersByWorktree: {
         '/workspace': {
           activeTabId: 'old',
@@ -477,7 +557,7 @@ describe('Tauri native browser lifecycle', () => {
       },
     };
     const activateBrowserTab = compileFunction<
-      (project: typeof project, tabId: string) => Promise<boolean>
+      (project: BrowserProjectFixture, tabId: string) => Promise<boolean>
     >(functionSource(mainJs, 'activateBrowserTab'), {
       activeProject: () => project,
       ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
@@ -499,10 +579,10 @@ describe('Tauri native browser lifecycle', () => {
   it('restores an existing active dormant tab when reopening a browser pane', async () => {
     const calls: string[] = [];
     const project = { id: 'project-a' };
-    const activeTab = { id: 'tab-a', created: false, url: 'https://example.com' };
+    const activeTab: ActiveDormantBrowserTabFixture = { id: 'tab-a', created: false, url: 'https://example.com' };
     const browser = { tabs: [activeTab], activeTabId: activeTab.id };
     const openBlankBrowserTab = compileFunction<
-      (options?: { requireNew?: boolean }) => Promise<typeof activeTab | null>
+      (options?: { requireNew?: boolean }) => Promise<ActiveDormantBrowserTabFixture | null>
     >(functionSource(mainJs, 'openBlankBrowserTab'), {
       activeProject: () => project,
       activeWorkspaceRoot: () => '/workspace',
@@ -527,14 +607,14 @@ describe('Tauri native browser lifecycle', () => {
 
   it('destroys pane views before staging and preserves tabs as dormant', async () => {
     const calls: string[] = [];
-    const thread = { id: 'web-pane', kind: 'web', projectId: 'project-a', worktreePath: '/workspace' };
+    const thread: BrowserPaneThreadFixture = { id: 'web-pane', kind: 'web', projectId: 'project-a', worktreePath: '/workspace' };
     const project = { id: 'project-a' };
     const tabs = [
       { id: 'tab-a', created: true, loading: true },
       { id: 'tab-b', created: true, loading: false },
     ];
     const closeBrowserPane = compileFunction<
-      (thread: typeof thread) => Promise<boolean>
+      (thread: BrowserPaneThreadFixture) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserPane'), {
       findProject: () => project,
       ensureBrowserModel: () => ({ tabs, activeTabId: 'tab-a' }),
@@ -565,11 +645,11 @@ describe('Tauri native browser lifecycle', () => {
   });
 
   it('skips native pane destruction for zero tabs and retains state on failure', async () => {
-    const thread = { id: 'web-pane', kind: 'web', projectId: 'project-a', worktreePath: '/workspace' };
+    const thread: BrowserPaneThreadFixture = { id: 'web-pane', kind: 'web', projectId: 'project-a', worktreePath: '/workspace' };
     const project = { id: 'project-a' };
     const emptyCalls: string[] = [];
     const emptyCloseBrowserPane = compileFunction<
-      (thread: typeof thread) => Promise<boolean>
+      (thread: BrowserPaneThreadFixture) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserPane'), {
       findProject: () => project,
       ensureBrowserModel: () => ({ tabs: [] }),
@@ -589,7 +669,7 @@ describe('Tauri native browser lifecycle', () => {
     const statuses: Array<[string, string]> = [];
     const failureCalls: string[] = [];
     const failedCloseBrowserPane = compileFunction<
-      (thread: typeof thread) => Promise<boolean>
+      (thread: BrowserPaneThreadFixture) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserPane'), {
       findProject: () => project,
       ensureBrowserModel: () => ({ tabs }),

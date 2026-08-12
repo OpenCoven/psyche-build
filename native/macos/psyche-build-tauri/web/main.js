@@ -7042,8 +7042,9 @@
   }
   async function navigateBrowser(rawUrl, opts) {
     opts = opts || {}; var project = activeProject(); if (!project) return false;
+    var browser = ensureBrowserModel(project); var hasRequestedTab = opts.tabId != null; var tab = hasRequestedTab ? browser.tabs.find(function (t) { return t.id === opts.tabId; }) : currentBrowserTab(project);
+    if (hasRequestedTab && !tab) return false;
     var pane = await createBrowserPane(project); if (!pane) return false;
-    var browser = ensureBrowserModel(project); var tab = opts.tabId ? browser.tabs.find(function (t) { return t.id === opts.tabId; }) : currentBrowserTab(project);
     if (!tab) tab = createBrowserTab(project, rawUrl || "about:blank", true); if (!tab) return false;
     browser.activeTabId = tab.id;
     var b = visibleBrowserBounds(); if (!b) return false;
