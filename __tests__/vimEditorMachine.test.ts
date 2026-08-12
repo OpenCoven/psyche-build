@@ -177,7 +177,7 @@ describe('Vim editor operators, text objects, and visual selections', () => {
 
     const reverseCharacterDocument = new TestDocument('abc\ndef', 2);
     await send(createEditorMachine(reverseCharacterDocument), 'v', 'h');
-    expect(reverseCharacterDocument.ranges).toEqual([{ anchor: 1, head: 3 }]);
+    expect(reverseCharacterDocument.ranges).toEqual([{ anchor: 3, head: 1 }]);
 
     const lineDocument = new TestDocument('abc\ndef');
     await send(createEditorMachine(lineDocument), 'V', 'j');
@@ -185,7 +185,7 @@ describe('Vim editor operators, text objects, and visual selections', () => {
 
     const reverseLineDocument = new TestDocument('one\n\nthree', 4);
     await send(createEditorMachine(reverseLineDocument), 'V', 'k');
-    expect(reverseLineDocument.ranges).toEqual([{ anchor: 0, head: 5 }]);
+    expect(reverseLineDocument.ranges).toEqual([{ anchor: 5, head: 0 }]);
   });
 
   it('uses inclusive grapheme columns for visual-block selections', async () => {
@@ -203,9 +203,21 @@ describe('Vim editor operators, text objects, and visual selections', () => {
     await send(createEditorMachine(document), { key: 'v', ctrlKey: true }, 'k', 'h');
 
     expect(document.ranges).toEqual([
-      { anchor: 0, head: 2 },
-      { anchor: 4, head: 6 },
+      { anchor: 6, head: 4 },
+      { anchor: 2, head: 0 },
     ]);
+  });
+
+  it.each([
+    { name: 'character', text: 'abcd', cursor: 2, input: keys('vhd'), expected: 'ad' },
+    { name: 'line', text: 'one\n\nthree', cursor: 4, input: keys('Vkd'), expected: 'three' },
+    { name: 'block', text: 'abc\ndef', cursor: 5, input: [{ key: 'v', ctrlKey: true }, ...keys('khd')], expected: 'c\nf' },
+  ])('applies reverse visual-$name operators to the active-end span', async ({ text, cursor, input, expected }) => {
+    const document = new TestDocument(text, cursor);
+
+    await send(createEditorMachine(document), ...input);
+
+    expect(document.value).toBe(expected);
   });
 
   it('applies visual-block deletes bottom-up as one undo group', async () => {
@@ -384,6 +396,43 @@ describe('Vim editor editing, repeat, macros, Unicode, and undo grouping', () =>
 
     expect(document.value).toBe('xyxyef');
     expect(machine.snapshot().pending).toBe('');
+  });
+
+  it('applies visual-block change text to every row and repeats the same grouped edit later', async () => {
+    const document = new TestDocument('abcd\nefgh\nijkl\nmnop');
+    const machine = createEditorMachine(document);
+
+    await send(machine, { key: 'v', ctrlKey: true }, 'j', 'l', 'c');
+    expect(document.value).toBe('cd\ngh\nijkl\nmnop');
+    expect(document.ranges).toEqual([{ anchor: 0, head: 0 }, { anchor: 3, head: 3 }]);
+
+    await send(machine, 'X', 'Y');
+    expect(document.value).toBe('XYcd\nXYgh\nijkl\nmnop');
+    expect(document.ranges).toEqual([{ anchor: 2, head: 2 }, { anchor: 7, head: 7 }]);
+    expect(document.edits.filter((edit) => edit.to > edit.from || edit.insert).map((edit) => edit.history)).toEqual([
+      'new', 'join', 'join', 'join', 'join', 'join',
+    ]);
+
+    await send(machine, 'Escape', 'j', 'j', '0', '.');
+    expect(document.value).toBe('XYcd\nXYgh\nXYkl\nXYop');
+    expect(document.edits.filter((edit) => edit.to > edit.from || edit.insert).slice(-2).map((edit) => edit.history)).toEqual([
+      'new', 'join',
+    ]);
+  });
+
+  it('preserves line separators for visual-line change and dot replay', async () => {
+    const document = new TestDocument('one\ntwo\nthree\nfour\nfive\n');
+    const machine = createEditorMachine(document);
+
+    await send(machine, ...keys('VjcX'), 'Escape');
+    expect(document.value).toBe('X\nthree\nfour\nfive\n');
+
+    await send(machine, 'j', '.');
+
+    expect(document.value).toBe('X\nX\nfive\n');
+    expect(document.edits.filter((edit) => edit.to > edit.from || edit.insert).map((edit) => edit.history)).toEqual([
+      'new', 'join', 'new',
+    ]);
   });
 
   it('records and replays a named macro as one deterministic undo group', async () => {
