@@ -190,13 +190,30 @@ type PersistedBrowserTabFixture = BrowserNavigationTab & {
 };
 
 function browserLifecycleHarness() {
-  const tabStates = new WeakMap<object, { closing: boolean; generation: number }>();
+  const tabStates = new WeakMap<object, {
+    closing: boolean;
+    generation: number;
+    invalidationGeneration: number;
+    navigationTail: Promise<void> | null;
+  }>();
   const paneStates = new WeakMap<object, { tearingDown: boolean }>();
   const browserTabLifecycle = (tab: object | null) => {
-    if (!tab) return { closing: false, generation: 0 };
+    if (!tab) {
+      return {
+        closing: false,
+        generation: 0,
+        invalidationGeneration: 0,
+        navigationTail: null,
+      };
+    }
     let lifecycle = tabStates.get(tab);
     if (!lifecycle) {
-      lifecycle = { closing: false, generation: 0 };
+      lifecycle = {
+        closing: false,
+        generation: 0,
+        invalidationGeneration: 0,
+        navigationTail: null,
+      };
       tabStates.set(tab, lifecycle);
     }
     return lifecycle;
@@ -220,9 +237,15 @@ function browserLifecycleHarness() {
         pane.closeStarted === true ||
         browserPaneLifecycle(pane).tearingDown
       ),
+    beginBrowserNavigation: (tab: object) => {
+      const lifecycle = browserTabLifecycle(tab);
+      lifecycle.generation += 1;
+      return lifecycle.generation;
+    },
     invalidateBrowserNavigation: (tab: object) => {
       const lifecycle = browserTabLifecycle(tab);
       lifecycle.generation += 1;
+      lifecycle.invalidationGeneration += 1;
       return lifecycle.generation;
     },
   };
@@ -707,6 +730,9 @@ describe('Tauri native browser lifecycle', () => {
 
     const navigation = navigateBrowser('https://new.example', { tabId: tab.id });
     await Promise.resolve();
+    const queuedNavigation = navigateBrowser('https://queued.example', { tabId: tab.id });
+    await Promise.resolve();
+    expect(calls).toEqual(['browser_navigate']);
     const closing = closeBrowserTab(project, tab.id);
     await Promise.resolve();
     expect(calls).toEqual(['browser_navigate', 'browser_destroy']);
@@ -718,6 +744,7 @@ describe('Tauri native browser lifecycle', () => {
 
     resolveNavigation();
     await expect(navigation).resolves.toBe(false);
+    await expect(queuedNavigation).resolves.toBe(false);
     expect(calls).toEqual(['browser_navigate', 'browser_destroy', 'browser_destroy']);
     expect(tab).toMatchObject({
       url: 'https://old.example',
@@ -970,6 +997,140 @@ describe('Tauri native browser lifecycle', () => {
     expect(tab.history).toEqual(['https://old.example', 'https://example.com']);
   });
 
+  it('serializes rapid same-tab navigation when the first succeeds and the second fails', async () => {
+    let resolveFirst!: () => void;
+    let rejectSecond!: (error: Error) => void;
+    const commands: string[] = [];
+    const nativeCalls: Array<{ command: string; url?: unknown }> = [];
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old.example',
+      created: false,
+      loading: false,
+      title: 'Old title',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      (command, args) => {
+        commands.push(command);
+        if (command !== 'browser_navigate') return Promise.resolve();
+        nativeCalls.push({ command, url: args.url });
+        if (args.url === 'https://first.example') {
+          return new Promise<void>((resolve) => { resolveFirst = resolve; });
+        }
+        return new Promise<void>((_resolve, reject) => { rejectSecond = reject; });
+      },
+    ));
+
+    const first = navigateBrowser('https://first.example', { tabId: tab.id });
+    const second = navigateBrowser('https://second.example', { tabId: tab.id });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nativeCalls).toEqual([{
+      command: 'browser_navigate',
+      url: 'https://first.example',
+    }]);
+
+    resolveFirst();
+    await expect(first).resolves.toBe(true);
+    await Promise.resolve();
+    expect(nativeCalls).toEqual([
+      { command: 'browser_navigate', url: 'https://first.example' },
+      { command: 'browser_navigate', url: 'https://second.example' },
+    ]);
+
+    rejectSecond(new Error('second navigation failed'));
+    await expect(second).resolves.toBe(false);
+    expect(tab).toMatchObject({
+      created: true,
+      url: 'https://first.example',
+      title: 'https://first.example',
+      history: ['https://old.example', 'https://first.example'],
+      historyIndex: 1,
+    });
+    expect(commands).not.toContain('browser_destroy');
+    expect(tab).not.toHaveProperty('generation');
+    expect(tab).not.toHaveProperty('invalidationGeneration');
+    expect(tab).not.toHaveProperty('navigationTail');
+  });
+
+  it('serializes rapid same-tab navigation when the first fails and the second succeeds', async () => {
+    let rejectFirst!: (error: Error) => void;
+    let resolveSecond!: () => void;
+    const commands: string[] = [];
+    const nativeCalls: Array<{ command: string; url?: unknown }> = [];
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old.example',
+      created: false,
+      loading: false,
+      title: 'Old title',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      (command, args) => {
+        commands.push(command);
+        if (command !== 'browser_navigate') return Promise.resolve();
+        nativeCalls.push({ command, url: args.url });
+        if (args.url === 'https://first.example') {
+          return new Promise<void>((_resolve, reject) => { rejectFirst = reject; });
+        }
+        return new Promise<void>((resolve) => { resolveSecond = resolve; });
+      },
+    ));
+
+    const first = navigateBrowser('https://first.example', { tabId: tab.id });
+    const second = navigateBrowser('https://second.example', { tabId: tab.id });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nativeCalls).toEqual([{
+      command: 'browser_navigate',
+      url: 'https://first.example',
+    }]);
+
+    rejectFirst(new Error('first navigation failed'));
+    await expect(first).resolves.toBe(false);
+    await Promise.resolve();
+    expect(nativeCalls).toEqual([
+      { command: 'browser_navigate', url: 'https://first.example' },
+      { command: 'browser_navigate', url: 'https://second.example' },
+    ]);
+
+    resolveSecond();
+    await expect(second).resolves.toBe(true);
+    expect(tab).toMatchObject({
+      created: true,
+      url: 'https://second.example',
+      title: 'https://second.example',
+      history: ['https://old.example', 'https://second.example'],
+      historyIndex: 1,
+    });
+    expect(commands).not.toContain('browser_destroy');
+    expect(tab).not.toHaveProperty('generation');
+    expect(tab).not.toHaveProperty('invalidationGeneration');
+    expect(tab).not.toHaveProperty('navigationTail');
+  });
+
   it('keeps dormant restoration pending until native navigation creates the tab', async () => {
     let resolveNavigation!: () => void;
     const nativeNavigation = new Promise<void>((resolve) => {
@@ -1193,6 +1354,7 @@ describe('Tauri native browser lifecycle', () => {
       failures: Array<{ label: string; error: string }>;
     }) => void;
     const lifecycle = browserLifecycleHarness();
+    let panePresent = true;
     const calls: string[] = [];
     const thread = {
       id: 'web-pane',
@@ -1238,9 +1400,12 @@ describe('Tauri native browser lifecycle', () => {
     );
     Object.assign(navigationDependencies, lifecycle, {
       activeWorkspaceRoot: () => '/workspace',
-      createBrowserPane: async () => thread,
-      findBrowserPane: () => thread,
-      findThread: () => thread,
+      createBrowserPane: async () => {
+        if (!panePresent) throw new Error('queued navigation recreated the removed pane');
+        return thread;
+      },
+      findBrowserPane: () => panePresent ? thread : null,
+      findThread: () => panePresent ? thread : null,
       browserNavigationIsCurrent: (context: {
         tab: BrowserNavigationTab;
         pane: typeof thread;
@@ -1284,6 +1449,7 @@ describe('Tauri native browser lifecycle', () => {
       stageBrowserSurface: () => calls.push('stage'),
       closeThread: () => {
         calls.push('close');
+        panePresent = false;
         thread.closeStarted = true;
         thread.closing = true;
         return true;
@@ -1311,6 +1477,9 @@ describe('Tauri native browser lifecycle', () => {
 
     const navigation = navigateBrowser('https://new.example', { tabId: tab.id });
     await Promise.resolve();
+    const queuedNavigation = navigateBrowser('https://queued.example', { tabId: tab.id });
+    await Promise.resolve();
+    expect(calls).toEqual(['browser_navigate']);
     const closing = closeBrowserPane(thread);
     await Promise.resolve();
 
@@ -1334,6 +1503,7 @@ describe('Tauri native browser lifecycle', () => {
 
     resolveNavigation();
     await expect(navigation).resolves.toBe(false);
+    await expect(queuedNavigation).resolves.toBe(false);
     expect(tab).toMatchObject({
       created: false,
       loading: false,
