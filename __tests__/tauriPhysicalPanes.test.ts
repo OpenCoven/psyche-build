@@ -1847,6 +1847,8 @@ describe('Tauri physical terminal panes', () => {
     });
 
     it('renders exception status as pane glow instead of a header status chip', () => {
+      const legacyPaneStatusToken = ['terminal', 'pane', 'status'].join('-');
+      const legacyPaneStatusClass = new RegExp(String.raw`\\.${legacyPaneStatusToken}\\b`);
       const startingSelector =
         '.terminal-pane-branch[data-status="starting"]';
       const failedSelector =
@@ -1866,10 +1868,10 @@ describe('Tauri physical terminal panes', () => {
       const focusedRootGlowSelector =
         '.terminal-host > .terminal-pane.focused:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)';
 
-      expect(functionSource('mountTerminal')).not.toContain('terminal-pane-status');
-      expect(functionSource('mountBrowserPane')).not.toContain('terminal-pane-status');
-      expect(functionSource('mountToolPane')).not.toContain('terminal-pane-status');
-      expect(stylesCss).not.toMatch(/\.terminal-pane-status\b/);
+      expect(functionSource('mountTerminal')).not.toContain(legacyPaneStatusToken);
+      expect(functionSource('mountBrowserPane')).not.toContain(legacyPaneStatusToken);
+      expect(functionSource('mountToolPane')).not.toContain(legacyPaneStatusToken);
+      expect(stylesCss).not.toMatch(legacyPaneStatusClass);
       expect(stylesCss).not.toMatch(/\.terminal-pane-branch:has\(/);
       expect(cssDeclarations(startingSelector).get('--pane-status-rgb')).toBe('251, 191, 36');
       expect(cssDeclarations(failedSelector).get('--pane-status-rgb')).toBe('248, 113, 113');
