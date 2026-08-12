@@ -1202,7 +1202,8 @@ describe('Tauri workspace panels', () => {
     expect(attributes.get('aria-label')).toBe('Close Git pane');
 
     expect(functionSource('closeToolPane')).toContain('closeThread(thread.id)');
-    expect(functionSource('renderSessionList')).toContain('closeThread(thread.id);');
+    expect(functionSource('renderSessionList')).toContain('requestThreadClose(thread)');
+    expect(functionSource('requestThreadClose')).toContain('closeThread(thread.id)');
     expect(mainJs).toMatch(/cmd: "\/close"[\s\S]{0,180}closeThread\(state\.activeThreadId\)/);
   });
 
