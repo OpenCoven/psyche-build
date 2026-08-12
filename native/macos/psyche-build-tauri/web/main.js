@@ -3485,10 +3485,10 @@
         threadLaneLabel(thread);
     }
     if (thread.pane) {
-      var paneStatus = applyPaneStatus(thread.pane, thread.status);
+      var normalizedStatus = applyPaneStatus(thread.pane, thread.status);
       thread.pane.setAttribute(
         "aria-label",
-        thread.name + (paneStatus ? ", status " + paneStatus : "")
+        thread.name + (normalizedStatus ? ", status " + normalizedStatus : "")
       );
       syncPaneBranchStatusChrome(thread.pane.parentElement);
     }
