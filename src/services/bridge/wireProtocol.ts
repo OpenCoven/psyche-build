@@ -298,7 +298,7 @@ export interface SerializedMobileActionResult {
   progress?: number;
   targetPaneId?: string;
   reviewData?: MobileActionReviewData;
-  data?: string;
+  data?: Record<string, string>;
   relatedFiles?: string[];
   dismissable?: boolean;
 }

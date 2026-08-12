@@ -85,6 +85,21 @@ export interface ActionResult {
   dismissable?: boolean;  // Can user dismiss without action?
 }
 
+/** Callback-free action payload safe to send to a remote client. */
+export type RemoteActionResult = Omit<
+  ActionResult,
+  'onConfirm' | 'onCancel' | 'onSelect' | 'onSubmit' | 'data'
+> & {
+  data?: Record<string, string>;
+  relatedFiles?: string[];
+};
+
+export type RemoteActionResponse =
+  | { kind: 'confirm'; confirmed: boolean }
+  | { kind: 'choice'; optionId: string }
+  | { kind: 'input'; value: string }
+  | { kind: 'cancel' };
+
 export interface PaneLifecycleIdentity {
   id: string;
   paneId: string;
