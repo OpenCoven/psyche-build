@@ -1,6 +1,49 @@
 import Foundation
 
 final class BoundedAsyncSignal: @unchecked Sendable {
+    struct TimeoutScheduler: Sendable {
+        struct Handle: Sendable {
+            private let cancelOperation: @Sendable () -> Void
+
+            init(cancel: @escaping @Sendable () -> Void) {
+                self.cancelOperation = cancel
+            }
+
+            func cancel() {
+                cancelOperation()
+            }
+        }
+
+        private let scheduleOperation: @Sendable (Duration, @escaping @Sendable () -> Void) -> Handle
+
+        init(
+            schedule: @escaping @Sendable (Duration, @escaping @Sendable () -> Void) -> Handle
+        ) {
+            self.scheduleOperation = schedule
+        }
+
+        func schedule(
+            after timeout: Duration,
+            operation: @escaping @Sendable () -> Void
+        ) -> Handle {
+            scheduleOperation(timeout, operation)
+        }
+
+        static let live = TimeoutScheduler { timeout, operation in
+            let task = Task {
+                do {
+                    try await Task.sleep(for: timeout)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    return
+                }
+                operation()
+            }
+            return Handle(cancel: { task.cancel() })
+        }
+    }
+
     enum WaitError: Error, Equatable, LocalizedError {
         case timedOut(String)
 
@@ -18,7 +61,7 @@ final class BoundedAsyncSignal: @unchecked Sendable {
 
     private struct Waiter {
         let continuation: CheckedContinuation<Void, any Error>
-        var timeoutTask: Task<Void, Never>?
+        var timeoutHandle: TimeoutScheduler.Handle?
     }
 
     private enum RegistrationResult {
@@ -35,7 +78,12 @@ final class BoundedAsyncSignal: @unchecked Sendable {
     }
 
     private let lock = NSLock()
+    private let timeoutScheduler: TimeoutScheduler
     private var state = State()
+
+    init(timeoutScheduler: TimeoutScheduler = .live) {
+        self.timeoutScheduler = timeoutScheduler
+    }
 
     deinit {
         let waiters = withLock {
@@ -63,17 +111,10 @@ final class BoundedAsyncSignal: @unchecked Sendable {
                 case .alreadySignaled:
                     continuation.resume()
                 case .registered:
-                    let timeoutTask = Task { [weak self] in
-                        do {
-                            try await Task.sleep(for: timeout)
-                        } catch is CancellationError {
-                            return
-                        } catch {
-                            return
-                        }
+                    let timeoutHandle = timeoutScheduler.schedule(after: timeout) { [weak self] in
                         self?.timeoutWaiter(id: id, event: event)
                     }
-                    attachTimeoutTask(timeoutTask, to: id)
+                    attachTimeoutHandle(timeoutHandle, to: id)
                 }
             }
         } onCancel: {
@@ -127,16 +168,16 @@ final class BoundedAsyncSignal: @unchecked Sendable {
         }
     }
 
-    private func attachTimeoutTask(_ timeoutTask: Task<Void, Never>, to id: UUID) {
+    private func attachTimeoutHandle(_ timeoutHandle: TimeoutScheduler.Handle, to id: UUID) {
         let shouldCancel = withLock {
             guard var waiter = state.waiters[id] else { return true }
-            waiter.timeoutTask = timeoutTask
+            waiter.timeoutHandle = timeoutHandle
             state.waiters[id] = waiter
             return false
         }
 
         if shouldCancel {
-            timeoutTask.cancel()
+            timeoutHandle.cancel()
         }
     }
 
@@ -156,7 +197,7 @@ final class BoundedAsyncSignal: @unchecked Sendable {
         }
 
         guard let waiter else { return }
-        waiter.timeoutTask?.cancel()
+        waiter.timeoutHandle?.cancel()
         waiter.continuation.resume(throwing: CancellationError())
     }
 
@@ -165,7 +206,7 @@ final class BoundedAsyncSignal: @unchecked Sendable {
         with result: Result<Void, any Error>
     ) {
         guard let waiter = withLock({ state.waiters.removeValue(forKey: id) }) else { return }
-        waiter.timeoutTask?.cancel()
+        waiter.timeoutHandle?.cancel()
         waiter.continuation.resume(with: result)
     }
 
@@ -174,7 +215,7 @@ final class BoundedAsyncSignal: @unchecked Sendable {
         with result: Result<Void, any Error>
     ) {
         for waiter in waiters {
-            waiter.timeoutTask?.cancel()
+            waiter.timeoutHandle?.cancel()
             waiter.continuation.resume(with: result)
         }
     }
