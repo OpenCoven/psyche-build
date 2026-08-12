@@ -336,7 +336,13 @@ async function createConflictResolutionPaneWithReservation(
     try {
       await compareAndRemoveProjectPaneConfigPaneIdentities(
         options.sessionProjectRoot,
-        [{ id: newPane.id, paneId: newPane.paneId }],
+        [{
+          id: newPane.id,
+          paneId: newPane.paneId,
+          ...(newPane.tmuxServerIdentity
+            ? { tmuxServerIdentity: newPane.tmuxServerIdentity }
+            : {}),
+        }],
         async () => {
           teardown = await tearDownGenerationBoundPane(
             tmuxService,

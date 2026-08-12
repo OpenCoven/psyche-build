@@ -665,7 +665,13 @@ async function createAndMonitorConflictPane(
             throw new Error('Multi-merge requires exact pane identity removal support');
           }
           const panesWithoutConflictPane = await context.removePaneIdentitiesFromConfig(
-            [{ id: conflictPane.id, paneId: conflictPane.paneId }],
+            [{
+              id: conflictPane.id,
+              paneId: conflictPane.paneId,
+              ...(conflictPane.tmuxServerIdentity
+                ? { tmuxServerIdentity: conflictPane.tmuxServerIdentity }
+                : {}),
+            }],
             async () => {
               const { tearDownPaneWithVerification } = await import('../../utils/paneTeardown.js');
               const teardown = await tearDownPaneWithVerification({
