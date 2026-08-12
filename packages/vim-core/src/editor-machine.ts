@@ -986,6 +986,10 @@ export function createEditorMachine(
           }
           invocationGroup = undefined;
           mode = operation === 'c' ? 'insert' : 'normal';
+          if (operation === 'y') {
+            const origin = Math.min(...ranges.map((range) => range.from));
+            setSelections([{ anchor: origin, head: origin }]);
+          }
           if (operation === 'c') {
             setSelections(insertionPositions.map((position) => ({ anchor: position, head: position })));
             insertFirstEdit = false;

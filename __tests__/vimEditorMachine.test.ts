@@ -232,6 +232,32 @@ describe('Vim editor operators, text objects, and visual selections', () => {
     ]);
   });
 
+  it.each([
+    {
+      name: 'forward',
+      cursor: 0,
+      selection: [{ key: 'v', ctrlKey: true }, ...keys('jly')] as EditorInput[],
+    },
+    {
+      name: 'reverse',
+      cursor: 5,
+      selection: [{ key: 'v', ctrlKey: true }, ...keys('khy')] as EditorInput[],
+    },
+  ])('collapses a $name visual-block yank to its origin before the next normal command', async ({ cursor, selection }) => {
+    const document = new TestDocument('abc\ndef', cursor);
+    const machine = createEditorMachine(document);
+
+    const yank = await send(machine, ...selection);
+
+    expect(yank.mode).toBe('normal');
+    expect(document.ranges).toEqual([{ anchor: 0, head: 0 }]);
+    expect(machine.register('"')?.text).toBe('ab\nde');
+
+    await send(machine, ...keys('dl'));
+    expect(document.value).toBe('bc\ndef');
+    expect(machine.snapshot().pending).toBe('');
+  });
+
   it('deletes inclusive character selections', async () => {
     const document = new TestDocument('abcd');
 
