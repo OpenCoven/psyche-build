@@ -343,7 +343,40 @@ pub(crate) async fn coven_sessions(
 }
 
 #[cfg(unix)]
-__OURS__
+#[tauri::command]
+pub(crate) async fn coven_session_kill(session_id: String) -> Result<(), String> {
+    match tauri::async_runtime::spawn_blocking(move || {
+        if !is_safe_session_id(&session_id) {
+            return Err("Invalid Coven session".to_string());
+        }
+        let env = coven_environment([
+            ("COVEN_SOCKET", std::env::var_os("COVEN_SOCKET")),
+            ("COVEN_HOME", std::env::var_os("COVEN_HOME")),
+            ("COVEN_URL", std::env::var_os("COVEN_URL")),
+            ("COVEN_PORT", std::env::var_os("COVEN_PORT")),
+        ])
+        .map_err(|()| adapter_error_message(CovenAdapterError::Failed).to_string())?;
+        let home = home_path(std::env::var_os("HOME"));
+        let endpoint = resolve_endpoint(&env, &home)
+            .map_err(|_| adapter_error_message(CovenAdapterError::Failed).to_string())?;
+
+        try_kill_coven_session(&endpoint, &session_id)
+            .map_err(|error| adapter_error_message(error).to_string())
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(adapter_error_message(CovenAdapterError::Failed).to_string()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub(crate) async fn coven_session_kill(_session_id: String) -> Result<(), String> {
+    Err("Local Coven session control is unsupported on Windows".to_string())
+}
+
+#[cfg(unix)]
 fn try_load_coven_sessions(
     endpoint: &CovenEndpoint,
     project_roots: &[PathBuf],
@@ -365,7 +398,37 @@ fn try_load_coven_sessions(
 }
 
 #[cfg(unix)]
-__OURS__
+fn try_kill_coven_session(
+    endpoint: &CovenEndpoint,
+    session_id: &str,
+) -> Result<(), CovenAdapterError> {
+    if !is_safe_session_id(session_id) {
+        return Err(CovenAdapterError::Failed);
+    }
+
+    let deadline = Instant::now() + EXCHANGE_TIMEOUT;
+    let health_body = request_endpoint(endpoint, HttpMethod::Get, "/api/v1/health", deadline)?;
+    let health: CovenHealthResponse =
+        serde_json::from_slice(&health_body).map_err(|_| CovenAdapterError::Failed)?;
+    if health.api_version != STABLE_API_VERSION {
+        return Err(CovenAdapterError::Incompatible);
+    }
+
+    let kill_path = format!("/api/v1/sessions/{session_id}/kill");
+    request_endpoint(endpoint, HttpMethod::Post, &kill_path, deadline)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn adapter_error_message(error: CovenAdapterError) -> &'static str {
+    match error {
+        CovenAdapterError::Unavailable => UNAVAILABLE_MESSAGE,
+        CovenAdapterError::Incompatible => INCOMPATIBLE_MESSAGE,
+        CovenAdapterError::Failed => "Coven session could not be stopped",
+    }
+}
+
+#[cfg(unix)]
 fn request_endpoint(
     endpoint: &CovenEndpoint,
     method: HttpMethod,
@@ -1137,7 +1200,19 @@ fn optional_string(
     Some((!value.is_empty()).then(|| value.to_string()))
 }
 
-__OURS__
+fn optional_javascript_safe_u64(
+    fields: &Map<String, Value>,
+    camel_case: &str,
+    snake_case: &str,
+) -> Option<u64> {
+    fields
+        .get(camel_case)
+        .or_else(|| fields.get(snake_case))
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER_U64)
+}
+
+#[cfg(test)]
 #[cfg(all(test, unix))]
 mod tests {
     use std::collections::HashMap;

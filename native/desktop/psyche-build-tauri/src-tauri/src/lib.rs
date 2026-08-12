@@ -12,12 +12,38 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-__MERGED__: keep SystemTime/UNIX_EPOCH and switch parking_lot import to {Condvar, Mutex}.
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
-__MERGED__: keep main modules/commands/constants (metrics, workspace, coven kill/source constants) and incoming PTY-compatible imports; no windows_sys block.
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
+};
+
+mod coven_sessions;
+mod metrics;
+mod native_workspace;
+mod pane_metrics;
+mod platform;
+pub mod pty_transport;
+mod workspace_contract;
+use coven_sessions::is_safe_session_id;
+use coven_sessions::{coven_session_kill, coven_sessions};
+use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
+use native_workspace::{workspace_load, workspace_save};
+use pane_metrics::PaneSessionMetrics;
+use pty_transport::{
+    coordinate_exit_shutdown, CompletionOutcome, DrainOutcome, EnqueueError, ExitShutdownHooks,
+    ExitShutdownOutcome, FinalOutputPumpSnapshot, OutputPump, RecentOutputSnapshots,
+    TransportSessionKey, EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
+};
+
+const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
+const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
+const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
 fn safe_browser_label(label: Option<String>) -> String {
     let raw = label.unwrap_or_else(|| "default".to_string());
@@ -43,7 +69,8 @@ struct PtySession {
     pump: OutputPump,
     terminator: PtyProcessTerminator,
     reader_cancellation: PtyReaderCancellation,
-__OURS__
+    pid: Option<u32>,
+    spawn_time_unix_secs: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,7 +111,7 @@ impl<T> Default for PtyLifecycleRegistry<T> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PtyLifecycleError {
     AlreadyRunning { thread_id: String },
-__OURS__
+    CleanupInProgress { thread_id: String },
     GenerationExhausted,
     StaleStart { thread_id: String, generation: u64 },
     NotFound { thread_id: String },
@@ -97,7 +124,9 @@ impl std::fmt::Display for PtyLifecycleError {
             Self::AlreadyRunning { thread_id } => {
                 write!(formatter, "thread '{thread_id}' already running")
             }
-__OURS__
+            Self::CleanupInProgress { thread_id } => {
+                write!(formatter, "thread '{thread_id}' cleanup in progress")
+            }
             Self::GenerationExhausted => formatter.write_str("PTY session generation exhausted"),
             Self::StaleStart {
                 thread_id,
@@ -138,7 +167,14 @@ enum BeginExitOutcome<T> {
 
 impl<T> PtyLifecycleRegistry<T> {
     fn reserve(&mut self, thread_id: &str) -> Result<PtySessionToken, PtyLifecycleError> {
-__OURS__
+        if let Some(entry) = self.entries.get(thread_id) {
+            return Err(match entry.state {
+                PtyLifecycleState::Exiting => PtyLifecycleError::CleanupInProgress {
+                    thread_id: thread_id.to_string(),
+                },
+                _ => PtyLifecycleError::AlreadyRunning {
+                    thread_id: thread_id.to_string(),
+                },
             });
         }
         let generation = self.next_generation;
@@ -277,7 +313,6 @@ __OURS__
         should_remove
     }
 
-__THEIRS__
     fn live(&self, thread_id: &str) -> Option<&T> {
         self.entries
             .get(thread_id)
@@ -292,7 +327,16 @@ __THEIRS__
         self.live(thread_id).is_some()
     }
 
-__OURS__
+    fn live_sessions(&self) -> Vec<(&String, &T)> {
+        self.entries
+            .iter()
+            .filter_map(|(thread_id, entry)| match &entry.state {
+                PtyLifecycleState::Running(session) => Some((thread_id, session)),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn live_thread_ids(&self) -> Vec<String> {
         self.entries
             .iter()
@@ -308,19 +352,38 @@ static PTY_LIFECYCLES: Lazy<Mutex<PtyLifecycleRegistry<PtySession>>> =
 static RECENT_PTY_SNAPSHOTS: Lazy<Mutex<RecentOutputSnapshots>> =
     Lazy::new(|| Mutex::new(RecentOutputSnapshots::default()));
 
-__THEIRS__
+#[derive(Debug)]
+enum PtyProcessTerminatorSetupError {
+    Message(String),
 }
 
 impl std::fmt::Display for PtyProcessTerminatorSetupError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Message(message) => formatter.write_str(message),
-__THEIRS__
         }
     }
 }
 
-__THEIRS__
+#[cfg(windows)]
+#[derive(Debug)]
+struct WindowsProcessTreeKiller {
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+}
+
+#[cfg(windows)]
+impl WindowsProcessTreeKiller {
+    fn new(killer: Box<dyn ChildKiller + Send + Sync>) -> Self {
+        Self {
+            killer: Mutex::new(killer),
+        }
+    }
+
+    fn terminate(&self) -> std::io::Result<()> {
+        self.killer.lock().kill()
+    }
+}
+
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct UnixPtyIdentity {
@@ -561,7 +624,13 @@ fn verified_unix_process_groups(
     identity: UnixPtyIdentity,
     observation: UnixTerminationObservation,
 ) -> std::io::Result<Vec<libc::pid_t>> {
-__OURS__
+    // The per-group session checks below establish ownership. Some PTYs report
+    // a changed terminal session while their foreground and original groups
+    // still independently prove they belong to this spawned session.
+    if observation.current_pid <= 1
+        || observation.tty_session <= 1
+        || identity.session_id <= 1
+        || identity.original_process_group != identity.session_id
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -709,7 +778,7 @@ struct PtyProcessTerminator {
     #[cfg(unix)]
     unix_platform: Option<Arc<dyn UnixTerminationPlatform>>,
     #[cfg(windows)]
-__THEIRS__
+    process_tree: Arc<WindowsProcessTreeKiller>,
     identity: PtyProcessIdentity,
 }
 
@@ -721,7 +790,8 @@ impl PtyProcessTerminator {
         let child_pid = child.process_id();
         #[cfg(windows)]
         {
-__THEIRS__
+            Ok(Self {
+                process_tree: Arc::new(WindowsProcessTreeKiller::new(child.clone_killer())),
                 identity: PtyProcessIdentity { child_pid },
             })
         }
@@ -879,7 +949,30 @@ fn unix_terminator_setup_error(
     }
 }
 
-__THEIRS__ (plus pid/spawn timestamp carried through session construction).
+struct PtySpawnTerminationGuard {
+    terminator: Option<PtyProcessTerminator>,
+}
+
+impl PtySpawnTerminationGuard {
+    fn new(terminator: PtyProcessTerminator) -> Self {
+        Self {
+            terminator: Some(terminator),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.terminator = None;
+    }
+}
+
+impl Drop for PtySpawnTerminationGuard {
+    fn drop(&mut self) {
+        if let Some(terminator) = self.terminator.take() {
+            if let Err(error) = terminator.terminate() {
+                log::warn!("failed to terminate PTY after start setup error: {error}");
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -935,7 +1028,54 @@ fn terminate_platform_process(
 
     let mut reported_groups = None;
     let mut first_error = None;
-__OURS__
+    // Groups stay owned once verified. Re-observing between escalations exists to
+    // pick up a foreground group that appeared after SIGHUP, not to re-earn the
+    // right to signal groups already proven to belong to this PTY session.
+    //
+    // That distinction matters because the earlier signals are what tear the
+    // session down: by SIGCONT or SIGKILL the leader may be gone, the terminal
+    // disassociated, or the foreground group reaped, so observation legitimately
+    // starts failing. Treating that as fatal aborted the escalation *before
+    // SIGKILL* and reported a hard error for a session that was terminating
+    // exactly as asked. Instead, fall back to the last verified set and finish
+    // escalating; kill() on a group that has already exited reports ESRCH, which
+    // signal_process_group folds into success.
+    //
+    // A failure before anything is verified is still fatal — nothing has been
+    // proven ours at that point, so signalling would be a guess.
+    let mut verified_groups: Option<Vec<libc::pid_t>> = None;
+    for signal in [libc::SIGHUP, libc::SIGCONT, libc::SIGKILL] {
+        let process_groups = match platform.observe_termination(unix_identity) {
+            Ok(Some(observation)) => {
+                match verified_unix_process_groups(unix_identity, observation) {
+                    Ok(groups) => {
+                        if reported_groups.is_none() && !groups.is_empty() {
+                            reported_groups =
+                                Some((observation.foreground_process_group, groups.len()));
+                        }
+                        verified_groups = Some(groups.clone());
+                        groups
+                    }
+                    Err(error) => match verified_groups.clone() {
+                        Some(groups) => groups,
+                        None => {
+                            return Err(unix_validation_error_with_fallback(
+                                error,
+                                raw_pid_fallback,
+                            ))
+                        }
+                    },
+                }
+            }
+            // Nothing observable this round. This is the pre-existing
+            // "disappeared" path and keeps its original meaning: skip the round
+            // rather than signalling anything.
+            Ok(None) => continue,
+            Err(error) => match verified_groups.clone() {
+                Some(groups) => groups,
+                None => return Err(unix_validation_error_with_fallback(error, raw_pid_fallback)),
+            },
+        };
         for process_group in process_groups {
             if let Err(error) = platform.signal_process_group(process_group, signal) {
                 if first_error.is_none() {
@@ -962,14 +1102,18 @@ __OURS__
 
 #[cfg(windows)]
 fn terminate_platform_process(
-__THEIRS__
+    process_tree: &WindowsProcessTreeKiller,
     _identity: PtyProcessIdentity,
 ) -> std::io::Result<PtyTerminationOutcome> {
     process_tree.terminate()?;
     Ok(PtyTerminationOutcome::ProcessTree)
 }
 
-__OURS__
+#[derive(Clone, Default)]
+struct MetricsState {
+    collector: Arc<Mutex<MetricsCollector>>,
+}
+
 #[derive(Debug)]
 struct PendingPtyStart {
     token: PtySessionToken,
@@ -999,7 +1143,6 @@ impl PendingPtyStart {
         self.completed = true;
         Ok((self.token.clone(), outcome))
     }
-__THEIRS__
 }
 
 impl Drop for PendingPtyStart {
@@ -1307,7 +1450,15 @@ fn prepare_pty_start(options: &StartOptions) -> Result<(PendingPtyStart, OpenedP
     Ok((pending_start, resolved_cwd))
 }
 
-__OURS__
+fn has_exact_psyche_source(env: Option<&HashMap<String, String>>) -> bool {
+    matches!(env, Some(values) if values.len() == 1
+        && values.get(COVEN_SESSION_SOURCE).map(String::as_str) == Some(PSYCHE_SESSION_SOURCE))
+}
+
+fn has_no_launch_env(env: Option<&HashMap<String, String>>) -> bool {
+    env.map_or(true, HashMap::is_empty)
+}
+
 fn validate_coven_launch_with(
     options: &StartOptions,
     resolved_coven: Option<&str>,
@@ -1326,7 +1477,34 @@ fn validate_coven_launch_with(
 
     match launch_kind {
         "coven-chat" => {
-__OURS__
+            if !has_exact_psyche_source(options.env.as_ref()) {
+                return Err(
+                    "coven-chat requires exactly COVEN_SESSION_SOURCE=psyche-build".to_string(),
+                );
+            }
+            let session_id = options
+                .coven_session_id
+                .as_deref()
+                .ok_or_else(|| "coven-chat requires a session id".to_string())?;
+            if !is_safe_session_id(session_id) {
+                return Err("coven-chat session id is unsafe".to_string());
+            }
+            match options.args.as_deref() {
+                Some([verb, flag, argument])
+                    if verb == "code" && flag == "--session-id" && argument == session_id =>
+                {
+                    Ok(())
+                }
+                _ => Err(
+                    "coven-chat requires exactly 'code --session-id' and the validated session id"
+                        .to_string(),
+                ),
+            }
+        }
+        "coven-attach" => {
+            if !has_no_launch_env(options.env.as_ref()) {
+                return Err("coven-attach does not accept launch environment entries".to_string());
+            }
             let session_id = options
                 .coven_session_id
                 .as_deref()
@@ -1351,13 +1529,61 @@ fn validate_coven_launch(options: &StartOptions) -> Result<(), String> {
     validate_coven_launch_with(options, resolved_coven.as_deref())
 }
 
-__OURS__
+fn apply_launch_env(
+    cmd: &mut CommandBuilder,
+    env: Option<&HashMap<String, String>>,
+    launch_kind: Option<&str>,
+) {
+    if let Some(extra_env) = env {
+        for (key, value) in extra_env {
+            // Empty-string values are treated as "unset this variable" so the
+            // JS layer can scrub TMUX (which tmux uses to detect nesting).
+            if value.is_empty() {
+                cmd.env_remove(key);
+            } else {
+                cmd.env(key, value);
+            }
+        }
+    }
+    if launch_kind == Some("coven-attach") {
+        cmd.env_remove(COVEN_SESSION_SOURCE);
+    }
+}
+
 #[tauri::command]
 fn canonical_project_path(root: String) -> Result<String, String> {
     canonical_project_root(&root).map(|path| path.to_string_lossy().to_string())
 }
 
-__OURS__
+#[tauri::command]
+async fn pane_session_metrics(
+    project_root: String,
+    cwd: String,
+    session_id: String,
+) -> Result<PaneSessionMetrics, String> {
+    if !is_safe_session_id(&session_id) {
+        return Err("session id is unsafe".to_string());
+    }
+    let resolved_cwd = open_pty_cwd(&project_root, &cwd)?;
+    let coven = which_on_path("coven").ok_or_else(|| "Coven executable not found".to_string())?;
+    let canonical_cwd = resolved_cwd.canonical_path;
+    let path = platform::augmented_path().to_string_lossy().to_string();
+
+    match tauri::async_runtime::spawn_blocking(move || {
+        pane_metrics::load_coven_metrics(
+            &coven,
+            &canonical_cwd,
+            &session_id,
+            std::ffi::OsStr::new(&path),
+        )
+    })
+    .await
+    {
+        Ok(metrics) => metrics,
+        Err(error) => Err(format!("failed to join Coven metrics task: {error}")),
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PtyExitEvent {
     pub thread_id: String,
@@ -1684,7 +1910,24 @@ impl PtyExitShutdown {
             );
         }
     }
-__OURS__
+
+    fn finish_terminated_threads_to_completion(&mut self) {
+        if !self.reader_completion_known {
+            match self.reader_done_rx.recv() {
+                Ok(result) => {
+                    self.reader_result = Some(result);
+                    self.reader_completion_known = true;
+                }
+                Err(_) => {
+                    self.reader_completion_known = true;
+                }
+            }
+        }
+        self.join_reader_after_completion();
+        if self.pump.cancel_and_join().is_err() {
+            log::warn!("PTY output worker panicked for '{}'", self.token.thread_id);
+        }
+    }
 }
 
 impl ExitShutdownHooks for PtyExitShutdown {
@@ -1739,7 +1982,6 @@ impl ExitShutdownHooks for PtyExitShutdown {
     fn remove_session(&mut self) {
         self.begin_matching_exit();
     }
-__THEIRS__
 }
 
 fn terminate_pty_session(session: PtySession) -> Result<PtyTerminationOutcome, String> {
@@ -1777,7 +2019,6 @@ pub fn latest_pty_transport_snapshot(thread_id: &str) -> Option<FinalOutputPumpS
         .cloned()
 }
 
-__THEIRS__
 #[tauri::command]
 fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let thread_id = options.thread_id.clone();
@@ -1812,7 +2053,11 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     if std::env::var("LC_ALL").is_err() {
         cmd.env("LC_ALL", "en_US.UTF-8");
     }
-__OURS__
+    apply_launch_env(
+        &mut cmd,
+        options.env.as_ref(),
+        options.launch_kind.as_deref(),
+    );
     // Always make sure TMUX is unset unless something downstream explicitly
     // wants it. Inheriting it from the Tauri parent process makes nested-tmux
     // checks misfire.
@@ -1824,7 +2069,109 @@ __OURS__
         cmd.env(key, value);
     }
 
-__THEIRS__
+    let spawn_time_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    resolved_cwd.configure_command_cwd(&mut cmd)?;
+    let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let pid = child.process_id();
+    drop(resolved_cwd);
+    let terminator = PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref())
+        .map_err(|error| error.to_string())?;
+    let mut spawn_guard = PtySpawnTerminationGuard::new(terminator.clone());
+    let (mut reader, reader_cancellation) = prepare_pty_reader(pair.master.as_ref())?;
+    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let pump = OutputPump::new(thread_id.clone()).map_err(|e| e.to_string())?;
+    let app_for_output = app.clone();
+    pump.start_worker(move |payload| {
+        app_for_output
+            .emit("pty:data-batch", payload)
+            .map_err(|error| error.to_string())
+    })
+    .map_err(|e| e.to_string())?;
+
+    let (session_token, install_outcome) = pending_start.install(PtySession {
+        master: Arc::new(Mutex::new(pair.master)),
+        writer: Arc::new(Mutex::new(writer)),
+        pump: pump.clone(),
+        terminator: terminator.clone(),
+        reader_cancellation: reader_cancellation.clone(),
+        pid,
+        spawn_time_unix_secs,
+    })?;
+    spawn_guard.disarm();
+
+    let reader_pump = pump.clone();
+    let (reader_done_tx, reader_done_rx) = std::sync::mpsc::sync_channel(1);
+    let data_thread = std::thread::spawn(move || {
+        let reader_result = pump_pty_reader(&mut reader, reader_pump);
+        let _ = reader_done_tx.send(reader_result);
+    });
+
+    let app_for_exit = app.clone();
+    let exit_pump = pump;
+    let exit_token = session_token.clone();
+    let exit_terminator = terminator;
+    std::thread::spawn(move || {
+        let status = exit_terminator.wait_for_child(|| child.wait());
+        let code = status.ok().map(|s| s.exit_code() as i32);
+        let mut shutdown = PtyExitShutdown::new(
+            exit_token.clone(),
+            exit_pump,
+            exit_terminator,
+            reader_cancellation,
+            reader_done_rx,
+            data_thread,
+        );
+        let outcome = coordinate_exit_shutdown(&mut shutdown, EXIT_DRAIN_TIMEOUT);
+        if outcome == ExitShutdownOutcome::TimedOut {
+            let snapshot = shutdown.pump.snapshot();
+            log::warn!(
+                "PTY output shutdown timed out for '{}' with {} pending bytes, \
+                 prepared={}, {} in-flight batches, and {} blocked producers",
+                snapshot.thread_id,
+                snapshot.pending_bytes,
+                snapshot.prepared,
+                snapshot.in_flight_batches,
+                snapshot.blocked_producers,
+            );
+        }
+        RECENT_PTY_SNAPSHOTS.lock().insert(FinalOutputPumpSnapshot {
+            key: TransportSessionKey::new(exit_token.thread_id.clone(), exit_token.generation),
+            outcome,
+            transport: shutdown.pump.snapshot(),
+        });
+        if shutdown.exit_event_allowed {
+            let _ = app_for_exit.emit(
+                "pty:exit",
+                PtyExitEvent {
+                    thread_id: exit_token.thread_id.clone(),
+                    generation: exit_token.generation,
+                    code,
+                },
+            );
+        }
+        // Timeout cleanup has its own bounded budget, so it must happen only after
+        // observers receive the exit. Keep the generation reserved until the old
+        // reader and worker can no longer collide with a replacement session.
+        if outcome == ExitShutdownOutcome::TimedOut {
+            shutdown.finish_terminated_threads(EXIT_TERMINATION_CLEANUP_TIMEOUT);
+            shutdown.finish_terminated_threads_to_completion();
+        }
+        if shutdown.exit_event_allowed {
+            PTY_LIFECYCLES.lock().finish_exit(&exit_token);
+        }
+    });
+
+    if let InstallSessionOutcome::StopImmediately(session) = install_outcome {
+        let termination = terminate_pty_session(session)
+            .map(|outcome| format!("{outcome:?}"))
+            .unwrap_or_else(|error| error);
+        return Err(format!(
+            "thread '{}' generation {} was stopped during start ({termination})",
+            session_token.thread_id, session_token.generation
+        ));
     }
 
     Ok(())
@@ -1846,7 +2193,20 @@ fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
 }
 
 #[tauri::command]
-__OURS__
+fn pty_ack(thread_id: String, sequence: u64) -> Result<(), String> {
+    let pump = {
+        let guard = PTY_LIFECYCLES.lock();
+        let session = guard
+            .live(&thread_id)
+            .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
+        session.pump.clone()
+    };
+    pump.acknowledge(sequence)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
     let master = {
         let guard = PTY_LIFECYCLES.lock();
@@ -1912,7 +2272,35 @@ fn pty_list() -> Vec<String> {
     PTY_LIFECYCLES.lock().live_thread_ids()
 }
 
-__OURS__
+#[tauri::command]
+async fn workspace_metrics(
+    state: State<'_, MetricsState>,
+    scope: Option<MetricsScope>,
+) -> Result<MetricsSnapshot, String> {
+    let tracked_sessions = {
+        let guard = PTY_LIFECYCLES.lock();
+        guard
+            .live_sessions()
+            .into_iter()
+            .filter_map(|(thread_id, session)| {
+                session.pid.map(|pid| {
+                    TrackedPty::new(thread_id.clone(), pid, session.spawn_time_unix_secs)
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let collector = state.collector.clone();
+    let scope = scope.unwrap_or(MetricsScope { thread_id: None });
+
+    tauri::async_runtime::spawn_blocking(move || {
+        collector
+            .lock()
+            .snapshot(std::process::id(), &tracked_sessions, scope)
+    })
+    .await
+    .map_err(|error| format!("metrics collector task failed: {error}"))
+}
+
 // ----------------------------------------------------------------------------
 // Embedded browser pane (Tauri child Webview)
 // ----------------------------------------------------------------------------
@@ -1970,7 +2358,7 @@ fn ensure_browser(
                               if ((event.metaKey || event.ctrlKey) && event.key && event.key.toLowerCase() === "t") {{
                                 event.preventDefault();
                                 event.stopPropagation();
-__OURS__
+                                emit("browser:shortcut-terminal-pane", {{ label: browserLabel, url: location.href }});
                               }}
                             }} catch (_) {{}}
                           }}, true);
@@ -2080,7 +2468,50 @@ fn browser_hide_all_except(app: AppHandle, label: Option<String>) -> Result<(), 
     Ok(())
 }
 
-__OURS__
+fn destroy_browser_webview(app: &AppHandle, label: Option<String>) -> Result<(), String> {
+    let label = safe_browser_label(label);
+    if let Some(webview) = app.get_webview(&label) {
+        webview.close().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn browser_destroy(app: AppHandle, label: Option<String>) -> Result<(), String> {
+    destroy_browser_webview(&app, label)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserDestroyFailure {
+    label: String,
+    error: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserDestroyManyOutcome {
+    destroyed: Vec<String>,
+    failures: Vec<BrowserDestroyFailure>,
+}
+
+#[tauri::command]
+fn browser_destroy_many(app: AppHandle, labels: Vec<String>) -> BrowserDestroyManyOutcome {
+    let mut outcome = BrowserDestroyManyOutcome {
+        destroyed: Vec::new(),
+        failures: Vec::new(),
+    };
+    for label in labels {
+        match destroy_browser_webview(&app, Some(label.clone())) {
+            Ok(()) => outcome.destroyed.push(label),
+            Err(error) => outcome
+                .failures
+                .push(BrowserDestroyFailure { label, error }),
+        }
+    }
+    outcome
+}
+
 #[tauri::command]
 fn browser_reload(app: AppHandle, label: Option<String>) -> Result<(), String> {
     let label = safe_browser_label(label);
@@ -3442,7 +3873,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-__OURS__
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .manage(MetricsState::default())
+        .invoke_handler(tauri::generate_handler![
+            pty_start,
+            pane_session_metrics,
+            canonical_project_path,
+            pty_write,
+            pty_ack,
             pty_resize,
             pty_stop,
             pty_list,
@@ -3450,12 +3888,15 @@ __OURS__
             browser_set_bounds,
             browser_hide,
             browser_hide_all_except,
-__OURS__
+            browser_destroy,
+            browser_destroy_many,
             browser_reload,
             browser_eval,
             app_environment,
             coven_sessions,
-__OURS__
+            coven_session_kill,
+            workspace_load,
+            workspace_save,
             agent_skills,
             fs_list_dir,
             fs_read_text,
@@ -3464,7 +3905,7 @@ __OURS__
             git_worktrees,
             git_diff,
             git_log,
-__OURS__
+            workspace_metrics,
         ])
         .setup(|app| {
             if let Err(error) = platform::configure_window(app) {
@@ -3509,7 +3950,6 @@ mod pty_runtime_tests {
         }
     }
 
-__THEIRS__
     #[cfg(unix)]
     #[derive(Clone, Copy)]
     enum UnixObservationStep {
@@ -3677,7 +4117,6 @@ __THEIRS__
         );
     }
 
-__THEIRS__
     #[cfg(unix)]
     #[test]
     fn unix_reader_cancellation_releases_a_blocked_pty_read() {
@@ -3737,7 +4176,31 @@ __THEIRS__
 
     #[cfg(unix)]
     #[test]
-__OURS__
+    fn unix_termination_uses_independently_verified_groups_when_ambient_ids_change() {
+        let groups = verified_unix_process_groups(
+            UnixPtyIdentity {
+                session_id: 4_100,
+                original_process_group: 4_100,
+            },
+            UnixTerminationObservation {
+                current_pid: 100,
+                current_process_group: 1,
+                current_session: 1,
+                tty_session: 4_200,
+                foreground_process_group: 4_200,
+                foreground_session: Some(4_100),
+                foreground_group: Some(4_200),
+                original_session: Some(4_100),
+                original_group: Some(4_100),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(groups, vec![4_200, 4_100]);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn unix_termination_deduplicates_matching_foreground_and_original_groups() {
         let groups = verified_unix_process_groups(
             UnixPtyIdentity {
@@ -3814,7 +4277,6 @@ __OURS__
     }
 
     #[test]
-__THEIRS__
     fn stop_during_start_is_recorded_and_installed_session_is_stopped() {
         let mut registry = PtyLifecycleRegistry::default();
         let start = registry.reserve("racing-start").unwrap();
@@ -3872,7 +4334,49 @@ __THEIRS__
         assert!(registry.is_live("same-id"));
     }
 
-__OURS__
+    #[test]
+    fn timed_out_exit_blocks_same_id_restart_until_old_emitter_cleanup_finishes() {
+        let registry = Arc::new(Mutex::new(PtyLifecycleRegistry::default()));
+        let old = {
+            let mut registry = registry.lock();
+            let old = registry.reserve("timed-out-pane").unwrap();
+            assert_eq!(
+                registry.install(&old, "old-output-pump").unwrap(),
+                InstallSessionOutcome::Running
+            );
+            assert_eq!(
+                registry.reserve("timed-out-pane").unwrap_err().to_string(),
+                "thread 'timed-out-pane' already running"
+            );
+            assert!(matches!(
+                registry.begin_exit(&old),
+                BeginExitOutcome::Emit {
+                    session: Some("old-output-pump")
+                }
+            ));
+            old
+        };
+        let (old_emit_done_tx, old_emit_done_rx) = mpsc::channel();
+        let cleanup_registry = Arc::clone(&registry);
+        let cleanup_token = old.clone();
+        let cleanup = std::thread::spawn(move || {
+            old_emit_done_rx.recv().unwrap();
+            cleanup_registry.lock().finish_exit(&cleanup_token)
+        });
+        assert_eq!(
+            registry
+                .lock()
+                .reserve("timed-out-pane")
+                .unwrap_err()
+                .to_string(),
+            "thread 'timed-out-pane' cleanup in progress"
+        );
+        old_emit_done_tx.send(()).unwrap();
+        assert!(cleanup.join().unwrap());
+        let replacement = registry.lock().reserve("timed-out-pane").unwrap();
+        assert_ne!(replacement.generation, old.generation);
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn retained_child_killer_is_invoked_by_process_termination() {
@@ -4110,7 +4614,134 @@ __OURS__
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
-__MERGED__: keep the two Unix escalation tests; drop the old PtySpawnTerminationGuard test block.
+    /// SIGHUP is what tears the session down, so by SIGCONT the terminal may
+    /// already be disassociated and observation starts failing. That must not
+    /// abort the escalation before SIGKILL: the groups were verified as ours on
+    /// the first round and stay ours.
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_finishes_escalating_when_observation_fails_after_verification() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::Observed(unix_observation(
+                4_200,
+                Some(4_100),
+                Some(4_200),
+                Some(4_100),
+                Some(4_100),
+            )),
+            UnixObservationStep::PermissionDenied,
+            UnixObservationStep::PermissionDenied,
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+        terminator.wait_for_child(|| ());
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::ConfirmedProcessGroups {
+                foreground_process_group: 4_200,
+                original_process_group: 4_100,
+                group_count: 2,
+            }
+        );
+        // Both groups still receive all three signals, SIGKILL included.
+        assert_eq!(
+            platform.signals(),
+            vec![
+                (4_200, libc::SIGHUP),
+                (4_100, libc::SIGHUP),
+                (4_200, libc::SIGCONT),
+                (4_100, libc::SIGCONT),
+                (4_200, libc::SIGKILL),
+                (4_100, libc::SIGKILL),
+            ]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Same guarantee when the observation succeeds but no longer validates —
+    /// a reaped foreground leader reports a session that is not ours.
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_finishes_escalating_when_validation_fails_after_verification() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let foreign = unix_observation(4_200, Some(9_999), Some(4_200), Some(9_999), Some(4_100));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::Observed(unix_observation(
+                4_200,
+                Some(4_100),
+                Some(4_200),
+                Some(4_100),
+                Some(4_100),
+            )),
+            UnixObservationStep::Observed(foreign),
+            UnixObservationStep::Observed(foreign),
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+        terminator.wait_for_child(|| ());
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::ConfirmedProcessGroups {
+                foreground_process_group: 4_200,
+                original_process_group: 4_100,
+                group_count: 2,
+            }
+        );
+        assert_eq!(platform.signals().len(), 6);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn spawned_start_guard_terminates_on_setup_failure_but_not_after_install() {
+        let failed_calls = Arc::new(AtomicUsize::new(0));
+        let failed_terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&failed_calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(42)),
+        );
+        drop(PtySpawnTerminationGuard::new(failed_terminator));
+        assert_eq!(failed_calls.load(Ordering::SeqCst), 1);
+
+        let installed_calls = Arc::new(AtomicUsize::new(0));
+        let installed_terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&installed_calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(43)),
+        );
+        let mut guard = PtySpawnTerminationGuard::new(installed_terminator);
+        guard.disarm();
+        drop(guard);
+        assert_eq!(installed_calls.load(Ordering::SeqCst), 0);
+    }
+
     #[cfg(unix)]
     #[test]
     fn interactive_foreground_process_group_termination_finishes_child_and_reader() {
@@ -4340,7 +4971,16 @@ mod workspace_panel_tests {
         command: Option<&str>,
         args: Option<&[&str]>,
     ) -> StartOptions {
-__OURS__
+        launch_options_with_env(launch_kind, session_id, command, args, None)
+    }
+
+    fn launch_options_with_env(
+        launch_kind: Option<&str>,
+        session_id: Option<&str>,
+        command: Option<&str>,
+        args: Option<&[&str]>,
+        env: Option<&[(&str, &str)]>,
+    ) -> StartOptions {
         StartOptions {
             thread_id: "launch-validation".to_string(),
             project_root: Some("/project".to_string()),
@@ -4351,7 +4991,43 @@ __OURS__
             args: args.map(|values| values.iter().map(|value| (*value).to_string()).collect()),
             cols: None,
             rows: None,
-__OURS__
+            env: env.map(|values| {
+                values
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                    .collect()
+            }),
+        }
+    }
+
+    fn native_chat_options(
+        session_id: Option<&str>,
+        command: Option<&str>,
+        args: Option<&[&str]>,
+    ) -> StartOptions {
+        launch_options_with_env(
+            Some("coven-chat"),
+            session_id,
+            command,
+            args,
+            Some(&[(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE)]),
+        )
+    }
+
+    #[test]
+    fn accepts_exact_native_coven_chat_and_attach_launches() {
+        let coven = "/canonical/bin/coven";
+        let session_id = "12345678-1234-4abc-8def-1234567890ab";
+        let chat = native_chat_options(
+            Some(session_id),
+            Some(coven),
+            Some(&["code", "--session-id", session_id]),
+        );
+        let attach = launch_options(
+            Some("coven-attach"),
+            Some(session_id),
+            Some(coven),
+            Some(&["attach", session_id]),
         );
 
         assert_eq!(validate_coven_launch_with(&chat, Some(coven)), Ok(()));
@@ -4359,14 +5035,234 @@ __OURS__
     }
 
     #[test]
-__OURS__
+    fn rejects_invalid_native_coven_launch_environments() {
+        let coven = "/canonical/bin/coven";
+        let chat_envs = [
+            None,
+            Some(&[][..]),
+            Some(&[("COVEN_SESSION_SOURCE", "other")][..]),
+            Some(&[("OTHER", "psyche-build")][..]),
+            Some(&[("COVEN_SESSION_SOURCE", "psyche-build"), ("OTHER", "value")][..]),
+        ];
+        for env in chat_envs {
+            let chat = launch_options_with_env(
+                Some("coven-chat"),
+                None,
+                Some(coven),
+                Some(&["chat"]),
+                env,
+            );
+            assert_eq!(
+                validate_coven_launch_with(&chat, Some(coven)),
+                Err("coven-chat requires exactly COVEN_SESSION_SOURCE=psyche-build".to_string())
+            );
+        }
+
+        for env in [
+            Some(&[("COVEN_SESSION_SOURCE", "psyche-build")][..]),
+            Some(&[("OTHER", "value")][..]),
+        ] {
+            let attach = launch_options_with_env(
+                Some("coven-attach"),
+                Some("safe"),
+                Some(coven),
+                Some(&["attach", "safe"]),
+                env,
+            );
+            assert_eq!(
+                validate_coven_launch_with(&attach, Some(coven)),
+                Err("coven-attach does not accept launch environment entries".to_string())
+            );
+        }
+
+        let empty_env_attach = launch_options_with_env(
+            Some("coven-attach"),
+            Some("safe"),
+            Some(coven),
+            Some(&["attach", "safe"]),
+            Some(&[]),
+        );
+        assert_eq!(
+            validate_coven_launch_with(&empty_env_attach, Some(coven)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn applies_effective_launch_environment_without_relabeling_attachments() {
+        let mut attach_without_env = CommandBuilder::new("/bin/coven");
+        attach_without_env.env(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE);
+        apply_launch_env(&mut attach_without_env, None, Some("coven-attach"));
+        assert_eq!(attach_without_env.get_env(COVEN_SESSION_SOURCE), None);
+
+        let empty_env = HashMap::new();
+        let mut attach_with_empty_env = CommandBuilder::new("/bin/coven");
+        attach_with_empty_env.env(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE);
+        apply_launch_env(
+            &mut attach_with_empty_env,
+            Some(&empty_env),
+            Some("coven-attach"),
+        );
+        assert_eq!(attach_with_empty_env.get_env(COVEN_SESSION_SOURCE), None);
+
+        let mut legacy = CommandBuilder::new("/bin/zsh");
+        legacy.env(COVEN_SESSION_SOURCE, "inherited");
+        apply_launch_env(&mut legacy, None, None);
+        assert_eq!(
+            legacy.get_env(COVEN_SESSION_SOURCE),
+            Some(std::ffi::OsStr::new("inherited"))
+        );
+
+        let chat_env = HashMap::from([(
+            COVEN_SESSION_SOURCE.to_string(),
+            PSYCHE_SESSION_SOURCE.to_string(),
+        )]);
+        let mut chat = CommandBuilder::new("/bin/coven");
+        chat.env(COVEN_SESSION_SOURCE, "inherited");
+        apply_launch_env(&mut chat, Some(&chat_env), Some("coven-chat"));
+        assert_eq!(
+            chat.get_env(COVEN_SESSION_SOURCE),
+            Some(std::ffi::OsStr::new(PSYCHE_SESSION_SOURCE))
+        );
+    }
+
+    #[test]
+    fn empty_descriptor_environment_values_still_unset_variables() {
+        let env = HashMap::from([("REMOVE_ME".to_string(), String::new())]);
+        let mut command = CommandBuilder::new("/bin/zsh");
+        command.env("REMOVE_ME", "inherited");
+
+        apply_launch_env(&mut command, Some(&env), None);
+
+        assert_eq!(command.get_env("REMOVE_ME"), None);
+    }
+
+    #[test]
+    fn preserves_legacy_launches_without_a_launch_kind() {
+        let legacy = launch_options_with_env(
+            None,
+            Some("ignored"),
+            Some("/bin/zsh"),
+            Some(&["-l"]),
+            Some(&[("LEGACY_ENV", "unrestricted")]),
+        );
         assert_eq!(validate_coven_launch_with(&legacy, None), Ok(()));
     }
 
     #[test]
     fn rejects_malformed_or_unresolved_native_coven_launches() {
         let coven = "/canonical/bin/coven";
-__OURS__
+        let session_id = "12345678-1234-4abc-8def-1234567890ab";
+        let invalid = [
+            (
+                native_chat_options(Some(session_id), Some(coven), None),
+                "coven-chat requires exactly 'code --session-id' and the validated session id",
+            ),
+            (
+                native_chat_options(
+                    None,
+                    Some(coven),
+                    Some(&["code", "--session-id", session_id]),
+                ),
+                "coven-chat requires a session id",
+            ),
+            (
+                native_chat_options(
+                    Some(session_id),
+                    Some(coven),
+                    Some(&[
+                        "code",
+                        "--session-id",
+                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    ]),
+                ),
+                "coven-chat requires exactly 'code --session-id' and the validated session id",
+            ),
+            (
+                native_chat_options(
+                    Some("../unsafe"),
+                    Some(coven),
+                    Some(&["code", "--session-id", "../unsafe"]),
+                ),
+                "coven-chat session id is unsafe",
+            ),
+            (
+                native_chat_options(
+                    Some(session_id),
+                    Some("/wrong/coven"),
+                    Some(&["code", "--session-id", session_id]),
+                ),
+                "Coven launch command does not match the resolved executable",
+            ),
+            (
+                native_chat_options(Some(session_id), Some(coven), Some(&["code", session_id])),
+                "coven-chat requires exactly 'code --session-id' and the validated session id",
+            ),
+            (
+                native_chat_options(
+                    Some(session_id),
+                    Some(coven),
+                    Some(&["code", "--session-id", session_id, "extra"]),
+                ),
+                "coven-chat requires exactly 'code --session-id' and the validated session id",
+            ),
+            (
+                launch_options(
+                    Some("coven-attach"),
+                    None,
+                    Some(coven),
+                    Some(&["attach", "safe"]),
+                ),
+                "coven-attach requires a session id",
+            ),
+            (
+                launch_options(
+                    Some("coven-attach"),
+                    Some("../unsafe"),
+                    Some(coven),
+                    Some(&["attach", "../unsafe"]),
+                ),
+                "coven-attach session id is unsafe",
+            ),
+            (
+                launch_options(
+                    Some("coven-attach"),
+                    Some("safe"),
+                    Some(coven),
+                    Some(&["attach"]),
+                ),
+                "coven-attach requires exactly 'attach' and the validated session id",
+            ),
+            (
+                launch_options(
+                    Some("coven-attach"),
+                    Some("safe"),
+                    Some(coven),
+                    Some(&["attach", "other"]),
+                ),
+                "coven-attach requires exactly 'attach' and the validated session id",
+            ),
+            (
+                launch_options(Some("unknown"), None, Some(coven), Some(&["chat"])),
+                "unsupported launch kind: unknown",
+            ),
+        ];
+
+        for (options, expected) in invalid {
+            assert_eq!(
+                validate_coven_launch_with(&options, Some(coven)),
+                Err(expected.to_string())
+            );
+        }
+        let chat = native_chat_options(
+            Some(session_id),
+            Some(coven),
+            Some(&["code", "--session-id", session_id]),
+        );
+        assert_eq!(
+            validate_coven_launch_with(&chat, None),
+            Err("Coven executable not found".to_string())
+        );
     }
 
     #[test]
@@ -4633,7 +5529,16 @@ __OURS__
             "secret\n".to_string(),
         )
         .unwrap_err();
-__OURS__
+        #[cfg(unix)]
+        {
+            assert!(relative_error.contains("outside project root"));
+            assert!(absolute_error.contains("outside project root"));
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(relative_error.contains("require POSIX descriptor-relative operations"));
+            assert!(absolute_error.contains("require POSIX descriptor-relative operations"));
+        }
         assert_eq!(std::fs::read(&sibling_file).unwrap(), b"secret\n");
     }
 
@@ -4662,7 +5567,7 @@ __OURS__
         assert_eq!(std::fs::read(&outside).unwrap(), b"secret\n");
     }
 
-__OURS__
+    #[cfg(unix)]
     #[test]
     fn saves_contained_text_atomically_and_preserves_permissions() {
         let tree = TempTree::new("save");
@@ -4705,7 +5610,7 @@ __OURS__
         assert!(save_temp_paths(&target).is_empty());
     }
 
-__OURS__
+    #[cfg(unix)]
     #[test]
     fn rejects_stale_saves_without_mutation_or_temp_files() {
         let tree = TempTree::new("stale-save");
@@ -4856,7 +5761,10 @@ __OURS__
             String::new(),
         )
         .unwrap_err();
-__OURS__
+        #[cfg(unix)]
+        assert!(error.contains("file is not valid UTF-8"));
+        #[cfg(not(unix))]
+        assert!(error.contains("require POSIX descriptor-relative operations"));
         assert_eq!(std::fs::read(&target).unwrap(), original);
         assert!(save_temp_paths(&target).is_empty());
     }

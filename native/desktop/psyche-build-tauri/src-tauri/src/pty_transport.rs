@@ -861,7 +861,6 @@ pub(crate) trait ExitShutdownHooks {
     fn record_drain_timeout(&mut self);
     fn terminate_process(&mut self);
     fn remove_session(&mut self);
-    fn finish_terminated_cleanup(&mut self, timeout: Duration);
 }
 
 pub(crate) fn coordinate_exit_shutdown<H: ExitShutdownHooks>(
@@ -905,7 +904,6 @@ fn timeout_exit_shutdown<H: ExitShutdownHooks>(hooks: &mut H) -> ExitShutdownOut
     hooks.terminate_process();
     hooks.cancel_pump();
     hooks.remove_session();
-    hooks.finish_terminated_cleanup(EXIT_TERMINATION_CLEANUP_TIMEOUT);
     ExitShutdownOutcome::TimedOut
 }
 
@@ -1773,7 +1771,13 @@ mod tests {
             };
             self.clock.advance(elapsed);
         }
-__THEIRS__
+
+        fn finish_terminated_cleanup(&mut self, timeout: Duration) {
+            assert!(!self.session_present);
+            self.events.push("finish_terminated_cleanup");
+            self.terminated_cleanup_budget = Some(timeout);
+            self.clock.advance(timeout);
+        }
     }
 
     impl ExitShutdownHooks for FakeExitHooks {
@@ -1841,7 +1845,6 @@ __THEIRS__
             self.events.push("remove_session");
             self.session_present = false;
         }
-__THEIRS__
     }
 
     struct BlockingProducerTimeoutHooks {
@@ -1896,7 +1899,6 @@ __THEIRS__
             assert!(self.session_present);
             self.session_present = false;
         }
-__THEIRS__
     }
 
     fn state_with_batch_bytes(max_batch_bytes: usize) -> PumpState {
@@ -2918,7 +2920,28 @@ __THEIRS__
                 "terminate_process",
                 "cancel_pump",
                 "remove_session",
-__THEIRS__
+            ]
+        );
+    }
+
+    #[test]
+    fn timeout_cleanup_is_deferred_until_after_the_original_exit_deadline() {
+        let clock = TestClock::new();
+        let mut hooks = FakeExitHooks::successful(Arc::clone(&clock));
+        hooks.reader_outcome = CompletionOutcome::TimedOut;
+
+        assert_eq!(
+            coordinate_exit_shutdown(&mut hooks, EXIT_DRAIN_TIMEOUT),
+            ExitShutdownOutcome::TimedOut
+        );
+        let observer_visible_at = clock.sample().instant.duration_since(clock.origin);
+        hooks.finish_terminated_cleanup(EXIT_TERMINATION_CLEANUP_TIMEOUT);
+
+        assert_eq!(observer_visible_at, EXIT_DRAIN_TIMEOUT);
+        assert_eq!(
+            clock.sample().instant.duration_since(clock.origin),
+            EXIT_DRAIN_TIMEOUT + EXIT_TERMINATION_CLEANUP_TIMEOUT
+        );
         assert_eq!(
             hooks.terminated_cleanup_budget,
             Some(EXIT_TERMINATION_CLEANUP_TIMEOUT)
