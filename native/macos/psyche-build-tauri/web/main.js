@@ -4750,13 +4750,16 @@
   /** The armed row's teardown, so a second row disarms the first. */
   var armedSessionClose = null;
 
-  function disarmSessionClose() {
+  function disarmSessionClose(options) {
     if (!armedSessionClose) return;
     var armed = armedSessionClose;
     armedSessionClose = null;
     clearInterval(armed.timer);
     armed.confirm.remove();
     if (armed.close.isConnected) armed.close.hidden = false;
+    if ((!options || options.restoreFocus !== false) && armed.host.isConnected) {
+      armed.host.focus();
+    }
   }
 
   /**
@@ -4779,7 +4782,7 @@
     paint();
     confirm.addEventListener("click", function (event) {
       event.stopPropagation();
-      disarmSessionClose();
+      disarmSessionClose({ restoreFocus: false });
       onConfirm();
     });
     close.hidden = true;
@@ -4789,7 +4792,13 @@
       if (left <= 0) { disarmSessionClose(); return; }
       paint();
     }, 1000);
-    armedSessionClose = { timer: timer, confirm: confirm, close: close };
+    armedSessionClose = {
+      timer: timer,
+      confirm: confirm,
+      close: close,
+      host: host,
+      treeKey: host.dataset.treeKey || "",
+    };
     confirm.focus();
   }
 
@@ -5390,18 +5399,20 @@
     if (editingContext && editingContext.surface === "sidebar") return;
     var now = Date.now();
     syncLocalSidebarStatusKeys(now);
-    // A re-render would strand an armed confirm on a row that no longer exists,
-    // and an armed confirm is a question the user has not answered — drop it.
-    disarmSessionClose();
+    // A re-render would strand an armed confirm on a row that no longer exists.
+    // Carry its tree identity through the rebuild so focus lands on the
+    // replacement row instead of the soon-to-be-detached host.
+    var armedCloseTreeKey = armedSessionClose ? armedSessionClose.treeKey : "";
+    disarmSessionClose({ restoreFocus: false });
     function targetWithin(event, element) {
       for (var node = event && event.target; node; node = node.parentNode) {
         if (node === element) return true;
       }
       return false;
     }
-    var activeTreeKey = document.activeElement && document.activeElement.dataset
+    var activeTreeKey = (document.activeElement && document.activeElement.dataset
       ? document.activeElement.dataset.treeKey
-      : "";
+      : "") || armedCloseTreeKey;
     var shouldRestoreTreeFocus = Boolean(activeTreeKey);
     if (activeTreeKey) sessionTreeFocusKey = activeTreeKey;
     var focusedKey = sessionTreeFocusKey;

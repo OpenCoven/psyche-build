@@ -134,6 +134,7 @@ class FakeElement {
   }
 
   set textContent(value: string) {
+    this.clearFocusWithinChildren();
     this.ownText = String(value);
     this.html = '';
     this.children = [];
@@ -144,6 +145,7 @@ class FakeElement {
   }
 
   set innerHTML(value: string) {
+    this.clearFocusWithinChildren();
     this.html = String(value);
     this.ownText = '';
     this.children = [];
@@ -223,13 +225,18 @@ class FakeElement {
   removeChild(child: FakeElement) {
     const index = this.children.indexOf(child);
     if (index === -1) throw new Error('child not found');
+    if (child.contains(this.ownerDocument?.activeElement ?? null) && this.ownerDocument) {
+      if (this.ownerDocument.activeElement) this.ownerDocument.activeElement.focused = false;
+      this.ownerDocument.activeElement = null;
+    }
     this.children.splice(index, 1);
     child.parentNode = null;
     return child;
   }
 
-  get isConnected() {
-    return this.parentNode !== null;
+  get isConnected(): boolean {
+    if (this.parentNode) return this.parentNode.isConnected;
+    return this.ownerDocument?.isConnectedRoot(this) ?? false;
   }
 
   get parentElement() {
@@ -241,6 +248,7 @@ class FakeElement {
   }
 
   replaceChildren(...children: FakeElement[]) {
+    this.clearFocusWithinChildren();
     this.children.forEach((child) => { child.parentNode = null; });
     this.children = [];
     this.ownText = '';
@@ -261,8 +269,23 @@ class FakeElement {
   }
 
   focus() {
+    if (this.ownerDocument?.activeElement) this.ownerDocument.activeElement.focused = false;
     this.focused = true;
     if (this.ownerDocument) this.ownerDocument.activeElement = this;
+  }
+
+  contains(candidate: FakeElement | null): boolean {
+    if (!candidate) return false;
+    if (candidate === this) return true;
+    return this.children.some((child) => child.contains(candidate));
+  }
+
+  private clearFocusWithinChildren() {
+    const activeElement = this.ownerDocument?.activeElement ?? null;
+    if (activeElement !== this && this.contains(activeElement) && this.ownerDocument) {
+      activeElement!.focused = false;
+      this.ownerDocument.activeElement = null;
+    }
   }
 
   select() {
@@ -329,7 +352,16 @@ class FakeElement {
 
 class FakeDocument {
   readonly created: FakeElement[] = [];
+  private readonly connectedRoots = new Set<FakeElement>();
   activeElement: FakeElement | null = null;
+
+  connectRoot(element: FakeElement) {
+    this.connectedRoots.add(element);
+  }
+
+  isConnectedRoot(element: FakeElement) {
+    return this.connectedRoots.has(element);
+  }
 
   createElement(tagName: string) {
     const element = new FakeElement(tagName, this);
@@ -407,6 +439,8 @@ function createRenderer(options: {
   const document = new FakeDocument();
   const sessionListEl = new FakeElement('div', document);
   const sessionSearchEl = new FakeElement('input', document);
+  document.connectRoot(sessionListEl);
+  document.connectRoot(sessionSearchEl);
   sessionSearchEl.value = options.filter ?? '';
   const state = {
     env: { home: '/Users/val' },
@@ -471,6 +505,7 @@ function createRenderer(options: {
   const saveSettings = vi.fn();
   const saveWorkspaceSoon = vi.fn();
   const setSessionTypeFilter = vi.fn();
+  const openSessionContextMenu = vi.fn();
   const paneGlyphFor = (kind: string) =>
     kind === 'shell' ? '❯_' : kind === 'web' ? '◍' : '✳';
 
@@ -531,6 +566,7 @@ function createRenderer(options: {
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
     'saveWorkspaceSoon', 'activateProjectWorktree', 'setSessionTypeFilter',
+    'openSessionContextMenu',
     `"use strict"; ${sources.join('\n')}; return {
       render: renderSessionList,
       setFilter: function (value) { sessionFilter = value; },
@@ -590,6 +626,7 @@ function createRenderer(options: {
     saveWorkspaceSoon,
     activateProjectWorktree,
     setSessionTypeFilter,
+    openSessionContextMenu,
   ) as {
     render: () => void;
     setFilter: (value: string) => void;
@@ -597,7 +634,7 @@ function createRenderer(options: {
     armSessionClose: (
       host: FakeElement, close: FakeElement, label: string, onConfirm: () => void,
     ) => void;
-    disarmSessionClose: () => void;
+    disarmSessionClose: (options?: { restoreFocus?: boolean }) => void;
     handleTreeKeydown: (event: FakeEvent) => void;
     toggleSetPick: (threadId: string) => void;
     picked: () => string[] | null;
@@ -622,6 +659,7 @@ function createRenderer(options: {
     saveSettings,
     saveWorkspaceSoon,
     setSessionTypeFilter,
+    openSessionContextMenu,
     setActiveProject,
     activateProjectWorktree,
     focusThread,
@@ -2513,6 +2551,7 @@ describe('Tauri Coven session project rail', () => {
       const wrapper = renderer.sessionListEl.querySelector('.session-row-wrap')!;
       const row = wrapper.querySelector('.session-row')!;
       const close = wrapper.querySelector('.session-close')!;
+      row.focus();
       renderer.armSessionClose(row, close, 'Local', () => {
         renderer.closeThread('local');
       });
@@ -2548,21 +2587,58 @@ describe('Tauri Coven session project rail', () => {
     });
 
     it('cancels itself when the countdown runs out', () => {
-      const { renderer, wrapper, close } = armed();
+      const { renderer, wrapper, row, close } = armed();
 
       vi.advanceTimersByTime(3000);
 
       expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
       expect(close.hidden).toBe(false);
       expect(renderer.closeThread).not.toHaveBeenCalled();
+      expect(renderer.document.activeElement).toBe(row);
+    });
+
+    it('returns focus after a Delete-armed countdown expires', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+      row.focus();
+
+      await row.emit('keydown', { key: 'Delete' });
+      expect(renderer.document.activeElement?.classList.contains('session-close-confirm')).toBe(true);
+
+      vi.advanceTimersByTime(3000);
+
+      expect(renderer.document.activeElement).toBe(row);
+      expect(row.isConnected).toBe(true);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
+
+    it('restores focus to the connected host when Escape disarms confirmation', () => {
+      const { renderer, wrapper, row } = armed();
+
+      renderer.disarmSessionClose();
+
+      expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
+      expect(renderer.document.activeElement).toBe(row);
+      expect(row.isConnected).toBe(true);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
     });
 
     it('drops an armed confirm when the sidebar re-renders under it', () => {
-      const { renderer, wrapper } = armed();
+      const { renderer, wrapper, row } = armed();
 
       renderer.render();
 
+      const replacement = renderer.sessionListEl.querySelector('.session-row')!;
       expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
+      expect(row.isConnected).toBe(false);
+      expect(replacement).not.toBe(row);
+      expect(renderer.document.activeElement).toBe(replacement);
+      expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
+        (item) => item.getAttribute('tabindex') === '0',
+      )).toHaveLength(1);
       expect(renderer.closeThread).not.toHaveBeenCalled();
       // The stale interval must not resurrect anything after the re-render.
       vi.advanceTimersByTime(5000);
@@ -2596,6 +2672,8 @@ describe('Tauri Coven session project rail', () => {
       await confirm.emit('click');
       expect(renderer.closeThread).toHaveBeenCalledTimes(1);
       expect(renderer.closeThread).toHaveBeenCalledWith('local');
+      expect(renderer.document.activeElement).toBeNull();
+      expect(renderer.document.activeElement).not.toBe(row);
     });
 
     it('guards Delete on the focused local session row', async () => {
@@ -2611,6 +2689,31 @@ describe('Tauri Coven session project rail', () => {
       expect(event.defaultPrevented).toBe(true);
       expect(renderer.closeThread).not.toHaveBeenCalled();
       expect(row.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
+    });
+
+    it('routes context-menu Stop and close through the same confirmation', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+
+      await row.emit('contextmenu');
+      const actions = renderer.openSessionContextMenu.mock.calls[0]?.[1] as Array<{
+        label: string;
+        run: () => void;
+      }>;
+      const stopAndClose = actions.find((action) => action?.label === 'Stop and close');
+      expect(stopAndClose).toBeDefined();
+
+      stopAndClose?.run();
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+      const confirm = row.querySelector('.session-close-confirm')!;
+      expect(confirm.textContent).toBe('Close · 3');
+
+      await confirm.emit('click');
+      expect(renderer.closeThread).toHaveBeenCalledTimes(1);
+      expect(renderer.closeThread).toHaveBeenCalledWith('local');
     });
   });
 
