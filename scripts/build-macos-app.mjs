@@ -1583,12 +1583,11 @@ async function executeFileCommand(command, args, options) {
         if (processError && exitSignal && typeof processError.signal !== 'string') {
           processError.signal = exitSignal;
         }
-          resolve({
-            error: processError,
-            stdout: Buffer.concat(stdoutChunks).toString('utf8'),
-            stderr: Buffer.concat(stderrChunks).toString('utf8'),
-          });
-      });
+        resolve({
+          error: processError,
+          stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+          stderr: Buffer.concat(stderrChunks).toString('utf8'),
+        });
     } catch (error) {
       resolve({
         error,
