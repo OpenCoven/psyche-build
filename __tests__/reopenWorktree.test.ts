@@ -170,6 +170,28 @@ describe('reopenWorktree', () => {
     expect(destroyWelcomePaneCoordinatedMock).toHaveBeenCalledWith('/repo');
   });
 
+  it('waits for welcome pane cleanup before completing the reopen flow', async () => {
+    let cleanupFinished = false;
+    destroyWelcomePaneCoordinatedMock.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      cleanupFinished = true;
+      return true;
+    });
+    const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
+
+    await reopenWorktree({
+      slug: 'reopen-me',
+      worktreePath: '/repo/.psyche/worktrees/reopen-me',
+      projectRoot: '/repo',
+      existingPanes: [],
+      sessionProjectRoot: '/repo',
+      sessionConfigPath: '/repo/.psyche/psyche.config.json',
+    });
+
+    expect(destroyWelcomePaneCoordinatedMock).toHaveBeenCalledWith('/repo');
+    expect(cleanupFinished).toBe(true);
+  });
+
   it('keeps a renamed project name when reopening a worktree', async () => {
     fsMock.readFileSync.mockReturnValue(JSON.stringify({
       controlPaneId: '%0',

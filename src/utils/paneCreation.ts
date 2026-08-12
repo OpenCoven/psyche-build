@@ -669,7 +669,7 @@ export async function createPane(
   // which causes isFirstContentPane to be false and skips welcome pane destruction.
   try {
     const { destroyWelcomePaneCoordinated } = await import('./welcomePaneManager.js');
-    destroyWelcomePaneCoordinated(sessionProjectRoot);
+    await destroyWelcomePaneCoordinated(sessionProjectRoot);
   } catch {
     // Ignore - welcome pane cleanup is not critical
   }

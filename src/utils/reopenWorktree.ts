@@ -284,7 +284,7 @@ export async function reopenWorktree(
   // false even when no real content pane exists yet.
   try {
     const { destroyWelcomePaneCoordinated } = await import('./welcomePaneManager.js');
-    destroyWelcomePaneCoordinated(sessionProjectRoot);
+    await destroyWelcomePaneCoordinated(sessionProjectRoot);
   } catch {
     // Ignore - welcome pane cleanup is not critical
   }
