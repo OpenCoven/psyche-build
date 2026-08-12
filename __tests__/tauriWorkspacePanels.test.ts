@@ -304,6 +304,9 @@ describe('Tauri workspace panels', () => {
       expect(indexHtml).toMatch(
         /id="git-surface"[\s\S]*id="git-branch"[\s\S]*id="git-open-remote"[\s\S]*id="git-refresh"/,
       );
+      expect(stylesCss).toMatch(
+        /\.panel-git-body\s*\{[^}]*grid-template-rows:\s*auto\s+auto\s+minmax\(0,\s*1fr\);/,
+      );
     });
 
     it('offers pop-out and drag from the same control', () => {

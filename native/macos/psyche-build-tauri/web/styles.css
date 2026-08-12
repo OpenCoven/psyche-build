@@ -2872,7 +2872,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
    the diff list, so it drops the 38% cap that used to keep them both fed. */
 .panel-git-body {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 .panel-subbar {
   display: flex;
