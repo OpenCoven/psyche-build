@@ -264,14 +264,21 @@ if output="$(pnpm exec vitest --run __tests__/documentationHistory.test.ts 2>&1)
   exit 1
 else
   status=$?
+  if printf '%s\n' "$output" | grep -Eq 'docs/HISTORY\.md' &&
+    printf '%s\n' "$output" | grep -Eq 'ENOENT|no such file or directory'; then
+    printf '%s\n' "$output"
+    printf '%s\n' "Expected failure confirmed: docs/HISTORY.md is missing (exit $status)." >&2
+    exit 0
+  fi
   printf '%s\n' "$output"
-  printf '%s\n' "Expected failure confirmed (exit $status)." >&2
-  exit 0
+  printf '%s\n' "Unexpected Vitest failure: expected a docs/HISTORY.md ENOENT/missing-file error." >&2
+  exit 1
 fi
 ```
 
 Expected: the test output is preserved, and the command exits 0 only when the
-test fails for the missing `docs/HISTORY.md` page.
+failure output proves `docs/HISTORY.md` is missing with an ENOENT/missing-file
+error. Any other Vitest failure prints an unexpected-failure message and exits 1.
 
 - [ ] **Step 3: Give CI the history required by the contract**
 
