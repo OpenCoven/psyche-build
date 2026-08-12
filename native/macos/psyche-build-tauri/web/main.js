@@ -6346,6 +6346,7 @@
       Boolean(explicitThreadId)
     );
     if (destinationId) {
+      if (!explicitThreadId) clearPassiveCovenPaneFocus();
       var layout = activePaneLayout();
       var leaf = layout && layout.root
         ? PsychePanes.findLeafByThreadId(layout.root, destinationId)
@@ -6456,8 +6457,9 @@
           ? project.lastActiveThreadId
           : (threads[0] ? threads[0].id : null);
       state.activeThreadId = nextThreadId;
-      renderPaneWorkspace();
       restoreProjectLayout(project);
+      clearPassiveCovenPaneFocus();
+      renderPaneWorkspace();
       applyLayout("terminal", { persist: false });
       loadAgentSkills();
       syncProjectBrowser();

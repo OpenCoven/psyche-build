@@ -749,6 +749,7 @@ describe('native CodeMirror workspace editor surface', () => {
       },
       renderPaneWorkspace: () => undefined,
       restoreProjectLayout: () => { visibleLayout = project.layout.mode; },
+      clearPassiveCovenPaneFocus: () => undefined,
       applyLayout: (layout: string, options: unknown) => {
         visibleLayout = layout;
         liveLayoutCalls.push({ layout, options });
@@ -809,6 +810,7 @@ describe('native CodeMirror workspace editor surface', () => {
         },
       ],
     };
+    let clearedCovenFocus = 0;
     const revealFileForDecision = compileFunction<
       (target: typeof file) => boolean
     >(extractFunctionSource(mainJs, 'revealFileForDecision'), {
@@ -818,6 +820,7 @@ describe('native CodeMirror workspace editor surface', () => {
       activeWorkspaceRoot: () => project.selectedWorktreePath,
       renderPaneWorkspace: () => undefined,
       restoreProjectLayout: () => undefined,
+      clearPassiveCovenPaneFocus: () => { clearedCovenFocus += 1; },
       applyLayout: () => undefined,
       loadAgentSkills: () => undefined,
       syncProjectBrowser: () => undefined,
@@ -828,6 +831,7 @@ describe('native CodeMirror workspace editor surface', () => {
 
     expect(revealFileForDecision(file)).toBe(true);
     expect(state.activeThreadId).toBe('shell');
+    expect(clearedCovenFocus).toBe(1);
   });
 
   it('gates explicit save while any guarded file decision is pending', async () => {

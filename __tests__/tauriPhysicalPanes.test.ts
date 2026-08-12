@@ -1952,6 +1952,56 @@ describe('Tauri physical terminal panes', () => {
       expect(layout.maximizedLeafId).toBeNull();
     });
 
+    it('clears stale Coven maximize before passively returning to a shell', async () => {
+      const coven = { id: 'coven', kind: 'coven-chat' };
+      const shell = { id: 'shell', kind: 'shell' };
+      const state = { activeFileId: 'file', activeThreadId: coven.id as string | null };
+      const layout: Layout = {
+        root: PsychePanes.insertBelow(
+          PsychePanes.createLeaf('coven-leaf', coven.id),
+          'coven-leaf',
+          PsychePanes.createLeaf('shell-leaf', shell.id),
+          'split',
+        ),
+        focusedLeafId: 'coven-leaf',
+        maximizedLeafId: 'coven-leaf',
+      };
+      const clearPassiveCovenPaneFocus = compileFunction<() => void>(
+        functionSource('clearPassiveCovenPaneFocus'),
+        {
+          state,
+          findThread: (id: string | null) => id === coven.id ? coven : shell,
+          activePaneLayout: () => layout,
+          PsychePanes,
+        },
+      );
+      const returnFromFileFocus = compileFunction<
+        (explicitThreadId?: string, maximizeDestination?: boolean) => Promise<boolean>
+      >(functionSource('returnFromFileFocus'), {
+        state,
+        fileFocus: { returnThreadId: coven.id },
+        findOpenFile: () => ({ id: 'file' }),
+        resolveFileFocusThreadId: () => shell.id,
+        clearPassiveCovenPaneFocus,
+        activePaneLayout: () => layout,
+        PsychePanes,
+        focusThread: async (id: string) => {
+          state.activeThreadId = id;
+          layout.focusedLeafId = 'shell-leaf';
+          return true;
+        },
+        renderPaneMinimap: () => undefined,
+        showTerminalView: async () => true,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+      });
+
+      await expect(returnFromFileFocus()).resolves.toBe(true);
+      expect(state.activeThreadId).toBe(shell.id);
+      expect(layout.focusedLeafId).toBe('shell-leaf');
+      expect(layout.maximizedLeafId).toBeNull();
+    });
+
     it('lists the active file before pane entries in the minimap helper', () => {
       const threads = new Map([
         ['thread-a', { id: 'thread-a', name: 'Agent', status: 'running' }],
