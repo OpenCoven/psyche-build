@@ -31,3 +31,34 @@ if command -v bd >/dev/null 2>&1; then
   if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
 fi
 # --- END BEADS INTEGRATION v1.0.5 ---
+
+# --- BEGIN CONFLICT-MARKER GUARD ---
+# A `git reset` over a conflicted index clears the UU entries but leaves the
+# markers sitting in the working tree, so git stops flagging them and they
+# commit clean. Observed 2026-08-11 with 32 hunks across 10 files. This checks
+# the staged content itself rather than the index state, so it catches them
+# either way. Set ALLOW_CONFLICT_MARKERS=1 to commit markers deliberately.
+if [ -z "$ALLOW_CONFLICT_MARKERS" ]; then
+  _cm_hits=$(
+    git diff --cached --name-only --diff-filter=ACMR -z |
+      while IFS= read -r -d '' _cm_file; do
+        # Only the <<< and >>> sides are tested. A bare ======= line is also a
+        # valid Markdown setext H1 underline, and this repo is mostly docs, so
+        # matching it would block legitimate commits. The ^ anchor avoids
+        # matching prose that quotes a marker mid-line.
+        if git show ":$_cm_file" 2>/dev/null |
+             grep -qE '^(<{7}|>{7})( |$)'; then
+          printf '%s\n' "$_cm_file"
+        fi
+      done
+  )
+  if [ -n "$_cm_hits" ]; then
+    echo >&2 "pre-commit: conflict markers in staged content:"
+    # Quoted + sed rather than `printf '  %s\n' $_cm_hits`, which word-splits
+    # a path containing spaces across several lines.
+    printf >&2 '%s\n' "$_cm_hits" | sed 's/^/  /' >&2
+    echo >&2 "Resolve them, or re-run with ALLOW_CONFLICT_MARKERS=1 to override."
+    exit 1
+  fi
+fi
+# --- END CONFLICT-MARKER GUARD ---
