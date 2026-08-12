@@ -143,6 +143,43 @@ describe('Tauri thread focus activation', () => {
     expect(dependencies.syncBrowserBounds).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['exited', 'failed'])(
+    'can reveal retained output from a visible %s pane',
+    async (status) => {
+      const thread = {
+        id: 'thread-1',
+        projectId: 'project-1',
+        worktreePath: '/repo',
+        kind: 'shell',
+        status,
+        hidden: false,
+        closing: false,
+        closeStarted: false,
+        term: { focus: vi.fn() },
+      };
+      const state = {
+        activeThreadId: null,
+        activeProjectId: 'project-1',
+        threads: [thread],
+      };
+      const frames: Array<() => void> = [];
+      const dependencies = focusDependencies(
+        state,
+        async () => true,
+        (callback) => { frames.push(callback); return frames.length; },
+      );
+      const focusThread = compileFunction<(id: string) => Promise<boolean>>(
+        functionSource(mainJs, 'focusThread'),
+        dependencies,
+      );
+
+      await expect(focusThread(thread.id)).resolves.toBe(true);
+      expect(state.activeThreadId).toBe(thread.id);
+      expect(dependencies.renderPaneWorkspace).toHaveBeenCalledTimes(1);
+      expect(frames).toHaveLength(1);
+    },
+  );
+
   it('retains terminal autofocus by default for live threads', async () => {
     const thread = {
       id: 'thread-1',

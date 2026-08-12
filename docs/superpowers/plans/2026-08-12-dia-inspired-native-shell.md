@@ -837,14 +837,20 @@ describe('Tauri composer session search', () => {
     expect(selection).toContain('findThread(pick.sessionId)');
     expect(selection).toContain('candidate.hidden');
     expect(selection).toContain('isDormantThread(candidate)');
-    expect(selection).toContain('setActiveProject(project.id, { focusTerminal: false })');
+    expect(selection).toContain('activateProjectWorktree(');
+    expect(selection).toContain('thread.worktreePath, { focusTerminal: false }');
+    expect(selection).toContain('activeFocusSet()');
     expect(selection).toContain('applySetScopeForThread(thread)');
+    expect(selection).toContain('activateFocusSet(previousFocusSet.id)');
+    expect(selection).toContain('renderPaneWorkspace()');
     expect(selection).toContain('covenSessionsForProject(project)');
     expect(selection).toContain('candidate.id === pick.sessionId');
     expect(selection).toContain('settings.selectedSessionKey = pick.selectionKey');
     expect(selection).toContain('saveSettings()');
     expect(selection).toContain('focusThread(thread.id, { focusTerminal: false })');
-    expect(selection).toContain('openCovenSession(project, session)');
+    expect(selection).toContain(
+      'openCovenSession(project, session, { focusTerminal: false })',
+    );
     expect(selection).toContain('toast("Session is no longer available")');
   });
 });
@@ -1188,16 +1194,17 @@ This is the final guard that prevents a `?` query from reaching an active PTY if
 - [ ] **Step 7: Revalidate and activate selected sessions**
 
 Harden `focusThread` so the thread is resolved again after file navigation and
-inside the queued autofocus frame. Composer activation passes
-`{ focusTerminal: false }`; all other callers retain the default autofocus:
+inside the queued autofocus frame. Generic focus keeps visible exited or failed
+panes viewable; composer search performs its stricter live-status validation
+before calling focus. Composer activation passes `{ focusTerminal: false }`;
+all other callers retain the default autofocus:
 
 ```js
 async function focusThread(id, options) {
   function resolveFocusableThread() {
     var candidate = findThread(id);
     if (!candidate || candidate.hidden || candidate.closing ||
-        candidate.closeStarted || isDormantThread(candidate) ||
-        candidate.status === "failed") return null;
+        candidate.closeStarted) return null;
     return candidate;
   }
   var thread = resolveFocusableThread();
@@ -1239,19 +1246,16 @@ async function focusThread(id, options) {
 }
 ```
 
-Add before `runSessionSearchPick`:
+Extend `openCovenSession(project, session, options)` so
+`{ focusTerminal: false }` is passed through `activateProjectWorktree`, an
+existing attachment's `focusThread`, and a new attachment's `createThread`
+options. Extend `createThread` narrowly:
 
 ```js
-function waitForSessionSearchActivationFrames() {
-  return new Promise(function (resolve) {
-    requestAnimationFrame(function () {
-      requestAnimationFrame(resolve);
-    });
-  });
-}
+focusThread(id, opts.focusTerminal === false ? { focusTerminal: false } : undefined);
 ```
 
-Then add:
+Ordinary callers omit the option and keep terminal autofocus. Then add:
 
 ```js
 async function runSessionSearchPick(pick) {
@@ -1270,17 +1274,33 @@ async function runSessionSearchPick(pick) {
       toast("Session is no longer available");
       return false;
     }
-    if (project.id !== state.activeProjectId &&
-        !(await setActiveProject(project.id, { focusTerminal: false }))) return false;
+    if ((project.id !== state.activeProjectId ||
+         project.selectedWorktreePath !== thread.worktreePath) &&
+        !(await activateProjectWorktree(
+          project, thread.worktreePath, { focusTerminal: false }
+        ))) return false;
     project = findProject(pick.projectId);
     if (!project) return false;
     thread = resolveLocalThread();
     if (!thread) return false;
+    var previousFocusSet = activeFocusSet();
+    var scopeChanged = applySetScopeForThread(thread);
+    function restorePreviousFocusSet() {
+      if (!scopeChanged) return;
+      if (previousFocusSet) activateFocusSet(previousFocusSet.id);
+      else clearFocusSet();
+      renderPaneWorkspace();
+    }
     var focused = await focusThread(thread.id, { focusTerminal: false });
-    if (!focused) return false;
+    if (!focused) {
+      restorePreviousFocusSet();
+      return false;
+    }
     thread = resolveLocalThread();
-    if (!thread || state.activeThreadId !== thread.id) return false;
-    applySetScopeForThread(thread);
+    if (!thread || state.activeThreadId !== thread.id) {
+      restorePreviousFocusSet();
+      return false;
+    }
     settings.selectedSessionKey = pick.selectionKey;
     saveSettings();
     return true;
@@ -1293,7 +1313,9 @@ async function runSessionSearchPick(pick) {
     toast("Session is no longer available");
     return false;
   }
-  var opened = await openCovenSession(project, session);
+  var opened = await openCovenSession(
+    project, session, { focusTerminal: false }
+  );
   if (!opened) return false;
   settings.selectedSessionKey = pick.selectionKey;
   saveSettings();
@@ -1303,8 +1325,8 @@ async function runSessionSearchPick(pick) {
 
 Make `runPalettePick` async, invalidate older activations when a newer pick
 starts, capture the query, and restore composer UI/focus only while both still
-match. Coven activation waits through two animation frames so deeper
-create/focus callbacks cannot reclaim focus afterward:
+match. Coven activation suppresses terminal autofocus at its source, so no
+post-selection frame drain is needed:
 
 ```js
 async function runPalettePick(pick, mode) {
@@ -1315,9 +1337,6 @@ async function runPalettePick(pick, mode) {
     var selected = false;
     try {
       selected = await runSessionSearchPick(pick);
-      if (selected && pick.sessionSource !== "psyche") {
-        await waitForSessionSearchActivationFrames();
-      }
     } finally {
       var activationCurrent =
         activationGeneration === sessionSearchActivationGeneration &&

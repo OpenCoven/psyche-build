@@ -1926,7 +1926,7 @@
     refreshSidebar();
     refreshTabs();
     mountTerminal(thread);
-    focusThread(id);
+    focusThread(id, opts.focusTerminal === false ? { focusTerminal: false } : undefined);
     // Run fit() now so the PTY starts at the actual visible size, not at
     // xterm.js's default 80x24. Otherwise psyche/Ink draw the first frame at
     // the wrong size and leave artifacts.
@@ -3596,8 +3596,7 @@
     function resolveFocusableThread() {
       var candidate = findThread(id);
       if (!candidate || candidate.hidden || candidate.closing ||
-          candidate.closeStarted || isDormantThread(candidate) ||
-          candidate.status === "failed") return null;
+          candidate.closeStarted) return null;
       return candidate;
     }
     var thread = resolveFocusableThread();
@@ -4976,7 +4975,7 @@
     }) || selectedWorktree(project);
   }
 
-  function openCovenSession(project, session) {
+  function openCovenSession(project, session, options) {
     if (!project || !session || !PsycheSessions.isSafeCovenSessionId(session.id)) {
       setStatus("Invalid Coven session", "error");
       return Promise.resolve(null);
@@ -4992,9 +4991,7 @@
       return Promise.resolve().then(async function () {
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
-        if (!(await activateProjectWorktree(
-          project, existing.worktreePath
-        ))) return null;
+        if (!(await activateProjectWorktree(project, existing.worktreePath, options))) return null;
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
         await waitForTerminalLayout();
@@ -5002,7 +4999,7 @@
         if (!existing) return null;
         if (existing.hidden && !reopenThread(existing.id)) return null;
         existing = findCovenAttachment(project, session, existingId);
-        if (!existing || !(await focusThread(existing.id))) return null;
+        if (!existing || !(await focusThread(existing.id, options))) return null;
         return findCovenAttachment(project, session, existingId);
       });
     }
@@ -5013,7 +5010,7 @@
     var opening = Promise.resolve().then(async function () {
       var worktree = covenWorktreeForSession(project, session);
       if (!worktree || !worktree.path) return null;
-      if (!(await activateProjectWorktree(project, worktree.path))) return null;
+      if (!(await activateProjectWorktree(project, worktree.path, options))) return null;
       await waitForTerminalLayout();
       return createThread({
         project: project,
@@ -5027,6 +5024,7 @@
         launchKind: "coven-attach",
         covenSessionId: session.id,
         metricsProvider: session.harness || "coven",
+        focusTerminal: options && options.focusTerminal,
       });
     }).finally(function () {
       covenAttachInFlight.delete(key);
@@ -7391,13 +7389,6 @@
     commandInput.setAttribute("aria-expanded", "false");
     commandInput.removeAttribute("aria-activedescendant");
   }
-  function waitForSessionSearchActivationFrames() {
-    return new Promise(function (resolve) {
-      requestAnimationFrame(function () {
-        requestAnimationFrame(resolve);
-      });
-    });
-  }
   async function runSessionSearchPick(pick) {
     var project = findProject(pick.projectId);
     if (!project) { toast("Session is no longer available"); return false; }
@@ -7413,17 +7404,33 @@
       if (!thread) {
         toast("Session is no longer available"); return false;
       }
-      if (project.id !== state.activeProjectId &&
-          !(await setActiveProject(project.id, { focusTerminal: false }))) return false;
+      if ((project.id !== state.activeProjectId ||
+           project.selectedWorktreePath !== thread.worktreePath) &&
+          !(await activateProjectWorktree(
+            project, thread.worktreePath, { focusTerminal: false }
+          ))) return false;
       project = findProject(pick.projectId);
       if (!project) return false;
       thread = resolveLocalThread();
       if (!thread) return false;
+      var previousFocusSet = activeFocusSet();
+      var scopeChanged = applySetScopeForThread(thread);
+      function restorePreviousFocusSet() {
+        if (!scopeChanged) return;
+        if (previousFocusSet) activateFocusSet(previousFocusSet.id);
+        else clearFocusSet();
+        renderPaneWorkspace();
+      }
       var focused = await focusThread(thread.id, { focusTerminal: false });
-      if (!focused) return false;
+      if (!focused) {
+        restorePreviousFocusSet();
+        return false;
+      }
       thread = resolveLocalThread();
-      if (!thread || state.activeThreadId !== thread.id) return false;
-      applySetScopeForThread(thread);
+      if (!thread || state.activeThreadId !== thread.id) {
+        restorePreviousFocusSet();
+        return false;
+      }
       settings.selectedSessionKey = pick.selectionKey;
       saveSettings();
       return true;
@@ -7432,7 +7439,7 @@
       return candidate.id === pick.sessionId;
     });
     if (!session) { toast("Session is no longer available"); return false; }
-    var opened = await openCovenSession(project, session);
+    var opened = await openCovenSession(project, session, { focusTerminal: false });
     if (!opened) return false;
     settings.selectedSessionKey = pick.selectionKey;
     saveSettings();
@@ -7446,9 +7453,6 @@
       var selected = false;
       try {
         selected = await runSessionSearchPick(pick);
-        if (selected && pick.sessionSource !== "psyche") {
-          await waitForSessionSearchActivationFrames();
-        }
       } finally {
         var activationCurrent =
           activationGeneration === sessionSearchActivationGeneration &&

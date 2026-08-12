@@ -254,7 +254,9 @@ describe('Tauri composer session search palette', () => {
     expect(activate).toContain('candidate.projectId !== project.id');
     expect(activate).toContain('candidate.hidden');
     expect(activate).toContain('isDormantThread(candidate)');
-    expect(activate).toContain('await setActiveProject(project.id, { focusTerminal: false })');
+    expect(activate).toMatch(
+      /await activateProjectWorktree\(\s*project,\s*thread\.worktreePath,\s*\{ focusTerminal: false \}\s*\)/,
+    );
     expect(activate).toContain('{ focusTerminal: false }');
     expect(activate).toContain('settings.selectedSessionKey = pick.selectionKey');
     expect(activate).toContain('saveSettings()');
@@ -262,7 +264,9 @@ describe('Tauri composer session search palette', () => {
     expect(activate).toContain('await focusThread(thread.id, { focusTerminal: false })');
     expect(activate).toContain('covenSessionsForProject(project).find');
     expect(activate).toContain('candidate.id === pick.sessionId');
-    expect(activate).toContain('await openCovenSession(project, session)');
+    expect(activate).toContain(
+      'await openCovenSession(project, session, { focusTerminal: false })',
+    );
 
     expect(pick).toMatch(/^async function runPalettePick/);
     expect(pick).toContain('pick.kind === "session"');
@@ -270,23 +274,27 @@ describe('Tauri composer session search palette', () => {
     expect(pick).toContain('} finally {');
     expect(pick).toContain('sessionSearchActivationGeneration');
     expect(pick).toContain('commandInput.value === activationQuery');
-    expect(pick).toContain('await waitForSessionSearchActivationFrames()');
     expect(pick).toContain('if (selected)');
     expect(pick).toContain('commandInput.focus()');
+    expect(mainJs).not.toContain('waitForSessionSearchActivationFrames');
 
-    expect(activate.indexOf('await focusThread(thread.id, { focusTerminal: false })')).toBeLessThan(
-      activate.indexOf('applySetScopeForThread(thread)'),
-    );
     expect(activate.indexOf('applySetScopeForThread(thread)')).toBeLessThan(
+      activate.indexOf('await focusThread(thread.id, { focusTerminal: false })'),
+    );
+    expect(activate.indexOf('await focusThread(thread.id, { focusTerminal: false })')).toBeLessThan(
       activate.indexOf('settings.selectedSessionKey = pick.selectionKey'),
     );
-    expect(activate.lastIndexOf('await openCovenSession(project, session)')).toBeLessThan(
+    expect(
+      activate.lastIndexOf(
+        'await openCovenSession(project, session, { focusTerminal: false })',
+      ),
+    ).toBeLessThan(
       activate.lastIndexOf('settings.selectedSessionKey = pick.selectionKey'),
     );
   });
 
-  it('persists a local selection only after focus succeeds', async () => {
-    const project = { id: 'project-1' };
+  it('applies the target focus set before rendering and restores the prior scope on failure', async () => {
+    const project = { id: 'project-1', selectedWorktreePath: '/repo/old' };
     const thread = {
       id: 'thread-1',
       projectId: project.id,
@@ -294,12 +302,14 @@ describe('Tauri composer session search palette', () => {
       closing: false,
       closeStarted: false,
       status: 'running',
+      worktreePath: '/repo/target',
     };
     const state: { activeProjectId: string; activeThreadId: string | null } = {
       activeProjectId: project.id,
       activeThreadId: null,
     };
     const settings = { selectedSessionKey: 'old-selection' };
+    const layout = { activeSetId: 'prior-set' as string | null };
     const focusResults = [false, true];
     const calls: string[] = [];
     const runSessionSearchPick = compileFunction<
@@ -310,12 +320,40 @@ describe('Tauri composer session search palette', () => {
       isDormantThread: () => false,
       state,
       setActiveProject: async () => true,
+      activateProjectWorktree: async (
+        _project: typeof project,
+        worktreePath: string,
+        options?: { focusTerminal?: boolean },
+      ) => {
+        expect(options).toEqual({ focusTerminal: false });
+        calls.push(`navigate:${worktreePath}`);
+        project.selectedWorktreePath = worktreePath;
+        return true;
+      },
       settings,
       saveSettings: () => { calls.push('save'); },
-      applySetScopeForThread: () => { calls.push('scope'); },
+      activeFocusSet: () => (
+        layout.activeSetId ? { id: layout.activeSetId } : null
+      ),
+      applySetScopeForThread: () => {
+        calls.push('scope');
+        layout.activeSetId = 'target-set';
+        return true;
+      },
+      activateFocusSet: (id: string) => {
+        calls.push(`restore:${id}`);
+        layout.activeSetId = id;
+        return true;
+      },
+      clearFocusSet: () => {
+        calls.push('restore:all');
+        layout.activeSetId = null;
+        return true;
+      },
+      renderPaneWorkspace: () => { calls.push('render'); },
       focusThread: async (_id: string, options?: { focusTerminal?: boolean }) => {
         expect(options).toEqual({ focusTerminal: false });
-        calls.push('focus');
+        calls.push(`focus:${layout.activeSetId}`);
         const result = focusResults.shift() ?? false;
         if (result) state.activeThreadId = thread.id;
         return result;
@@ -333,12 +371,83 @@ describe('Tauri composer session search palette', () => {
 
     await expect(runSessionSearchPick(pick)).resolves.toBe(false);
     expect(settings.selectedSessionKey).toBe('old-selection');
-    expect(calls).toEqual(['focus']);
+    expect(layout.activeSetId).toBe('prior-set');
+    expect(calls).toEqual([
+      'navigate:/repo/target',
+      'scope',
+      'focus:target-set',
+      'restore:prior-set',
+      'render',
+    ]);
 
     await expect(runSessionSearchPick(pick)).resolves.toBe(true);
     expect(settings.selectedSessionKey).toBe('psyche:thread-1');
-    expect(calls).toEqual(['focus', 'focus', 'scope', 'save']);
+    expect(layout.activeSetId).toBe('target-set');
+    expect(calls).toEqual([
+      'navigate:/repo/target',
+      'scope',
+      'focus:target-set',
+      'restore:prior-set',
+      'render',
+      'scope',
+      'focus:target-set',
+      'save',
+    ]);
   });
+
+  it.each(['exited', 'failed'])(
+    'revalidates after project navigation and refuses a stale %s pane before focus',
+    async (status) => {
+      const project = { id: 'project-1' };
+      const thread = {
+        id: 'thread-1',
+        projectId: project.id,
+        hidden: false,
+        closing: false,
+        closeStarted: false,
+        status: 'running',
+      };
+      const state = {
+        activeProjectId: 'project-2',
+        activeThreadId: null,
+      };
+      const navigation = deferred<boolean>();
+      const focusThread = vi.fn();
+      const runSessionSearchPick = compileFunction<
+        (pick: Record<string, unknown>) => Promise<boolean>
+      >(functionSource(mainJs, 'runSessionSearchPick'), {
+        findProject: () => project,
+        findThread: () => thread,
+        isDormantThread: (candidate: typeof thread) => candidate.status === 'exited',
+        state,
+        setActiveProject: async () => true,
+        activateProjectWorktree: () => navigation.promise,
+        settings: { selectedSessionKey: 'old-selection' },
+        saveSettings: vi.fn(),
+        activeFocusSet: () => null,
+        applySetScopeForThread: vi.fn(),
+        activateFocusSet: vi.fn(),
+        clearFocusSet: vi.fn(),
+        renderPaneWorkspace: vi.fn(),
+        focusThread,
+        covenSessionsForProject: () => [],
+        openCovenSession: async () => null,
+        toast: vi.fn(),
+      });
+      const activation = runSessionSearchPick({
+        sessionSource: 'psyche',
+        sessionId: thread.id,
+        projectId: project.id,
+        selectionKey: 'psyche:thread-1',
+      });
+
+      thread.status = status;
+      navigation.resolve(true);
+
+      await expect(activation).resolves.toBe(false);
+      expect(focusThread).not.toHaveBeenCalled();
+    },
+  );
 
   it('persists a Coven selection only after open succeeds', async () => {
     const project = { id: 'project-1' };
@@ -407,7 +516,11 @@ describe('Tauri composer session search palette', () => {
       setActiveProject: async () => true,
       settings: { selectedSessionKey: '' },
       saveSettings: () => undefined,
+      activeFocusSet: () => null,
       applySetScopeForThread: () => undefined,
+      activateFocusSet: () => undefined,
+      clearFocusSet: () => undefined,
+      renderPaneWorkspace: () => undefined,
       focusThread: async (_id: string, options?: { focusTerminal?: boolean }) => {
         state.activeThreadId = thread.id;
         if (!options || options.focusTerminal !== false) {
@@ -420,7 +533,6 @@ describe('Tauri composer session search palette', () => {
       toast: () => undefined,
       hidePalette: () => undefined,
       syncComposerChrome: () => undefined,
-      waitForSessionSearchActivationFrames: async () => undefined,
       runCommand: () => undefined,
     }, { activation: 'real' });
 
@@ -437,55 +549,77 @@ describe('Tauri composer session search palette', () => {
     expect(frames).toHaveLength(0);
   });
 
-  it('waits for Coven activation frames to drain before restoring composer focus', async () => {
-    const frameQueue: Array<() => void> = [];
-    const requestAnimationFrame = (callback: () => void) => {
-      frameQueue.push(callback);
-      return frameQueue.length;
-    };
-    const helperSource = mainJs.includes('function waitForSessionSearchActivationFrames(')
-      ? functionSource(mainJs, 'waitForSessionSearchActivationFrames')
-      : 'function waitForSessionSearchActivationFrames() { return Promise.resolve(); }';
-    const waitForSessionSearchActivationFrames = compileFunction<() => Promise<void>>(
-      helperSource,
-      { requestAnimationFrame },
-    );
-    let focusOwner = 'none';
-    let settled = false;
+  it('does not queue Coven terminal autofocus or steal focus after a newer query', async () => {
+    const pending = deferred<{ id: string }>();
+    const frames: Array<() => void> = [];
+    let inputListener: (() => void) | undefined;
+    let focusOwner = 'composer';
+    let composerFocusCalls = 0;
+    const openOptions: Array<{ focusTerminal?: boolean } | undefined> = [];
+    const project = { id: 'project-1' };
+    const session = { id: 'coven-1' };
     const commandInput = {
       value: '? coven',
-      focus() { focusOwner = 'composer'; },
+      focus() {
+        composerFocusCalls += 1;
+        focusOwner = 'composer';
+      },
+      addEventListener(name: string, listener: () => void) {
+        if (name === 'input') inputListener = listener;
+      },
     };
     const controller = compileSessionSearchController({
       commandInput,
-      runSessionSearchPick: async () => {
-        requestAnimationFrame(() => { focusOwner = 'terminal'; });
-        return true;
+      findProject: () => project,
+      findThread: () => null,
+      isDormantThread: () => false,
+      state: { activeProjectId: project.id },
+      setActiveProject: async () => true,
+      settings: { selectedSessionKey: '' },
+      saveSettings: () => undefined,
+      activeFocusSet: () => null,
+      applySetScopeForThread: () => undefined,
+      activateFocusSet: () => undefined,
+      clearFocusSet: () => undefined,
+      renderPaneWorkspace: () => undefined,
+      focusThread: async () => false,
+      covenSessionsForProject: () => [session],
+      openCovenSession: (
+        _project: typeof project,
+        _session: typeof session,
+        options?: { focusTerminal?: boolean },
+      ) => {
+        openOptions.push(options);
+        if (!options || options.focusTerminal !== false) {
+          frames.push(() => { focusOwner = 'terminal'; });
+        }
+        return pending.promise;
       },
+      toast: () => undefined,
       hidePalette: () => undefined,
       syncComposerChrome: () => undefined,
-      waitForSessionSearchActivationFrames,
       runCommand: () => undefined,
-    });
+      PALETTE_SIGILS: '/!%?',
+      openPalette: () => undefined,
+    }, { activation: 'real', inputListener: true });
 
     const activation = controller.runPalettePick({
       kind: 'session',
       sessionSource: 'coven',
-    }).then(() => { settled = true; });
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(mainJs).toContain('function waitForSessionSearchActivationFrames()');
-    expect(helperSource.match(/requestAnimationFrame/g)).toHaveLength(2);
-    expect(helperSource).not.toContain('setTimeout');
-    expect(settled).toBe(false);
-
-    while (frameQueue.length) {
-      frameQueue.shift()!();
-      await Promise.resolve();
-      await Promise.resolve();
-    }
+      sessionId: session.id,
+      projectId: project.id,
+      selectionKey: 'coven:coven-1',
+    });
+    commandInput.value = '? newer query';
+    inputListener!();
+    pending.resolve({ id: 'thread-1' });
     await activation;
+
+    expect(frames).toHaveLength(0);
+    frames.splice(0).forEach((frame) => frame());
+    expect(openOptions).toEqual([{ focusTerminal: false }]);
+    expect(commandInput.value).toBe('? newer query');
+    expect(composerFocusCalls).toBe(0);
     expect(focusOwner).toBe('composer');
   });
 
@@ -506,7 +640,6 @@ describe('Tauri composer session search palette', () => {
       runSessionSearchPick: () => pending.promise,
       hidePalette,
       syncComposerChrome,
-      waitForSessionSearchActivationFrames: async () => undefined,
       runCommand: () => undefined,
       PALETTE_SIGILS: '/!%?',
       openPalette: () => undefined,
@@ -544,7 +677,6 @@ describe('Tauri composer session search palette', () => {
       runSessionSearchPick: () => pending.shift()!,
       hidePalette,
       syncComposerChrome,
-      waitForSessionSearchActivationFrames: async () => undefined,
       runCommand: () => undefined,
     });
     const pick = { kind: 'session', sessionSource: 'psyche' };
