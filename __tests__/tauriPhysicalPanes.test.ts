@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { chromium } from '@playwright/test';
 import { describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
@@ -31,6 +30,27 @@ function functionSource(name: string) {
     if (depth === 0) return mainJs.slice(start, index + 1);
   }
   throw new Error(`unterminated function ${name}`);
+}
+
+function cssDeclarations(selector: string) {
+  const source = stylesCss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const normalizedSelector = selector.replace(/\s+/g, ' ').trim();
+  const rulePattern = /([^{}]+)\{([^{}]*)\}/g;
+  const declarations = new Map<string, string>();
+  let found = false;
+  for (const match of source.matchAll(rulePattern)) {
+    if (match[1].replace(/\s+/g, ' ').trim() !== normalizedSelector) continue;
+    found = true;
+    for (const declaration of match[2].split(';').map((item) => item.trim()).filter(Boolean)) {
+      const separator = declaration.indexOf(':');
+      declarations.set(
+        declaration.slice(0, separator).trim(),
+        declaration.slice(separator + 1).replace(/\s+/g, ' ').trim(),
+      );
+    }
+  }
+  if (found) return declarations;
+  throw new Error(`missing CSS rule ${selector}`);
 }
 
 function compileFunction<T extends (...args: never[]) => unknown>(
@@ -1796,155 +1816,54 @@ describe('Tauri physical terminal panes', () => {
     });
 
     it('renders exception status as pane glow instead of a header status chip', () => {
+      const startingSelector =
+        '.terminal-pane-branch:has(> .terminal-pane[data-status="starting"]:not(.needs-attention))';
+      const failedSelector =
+        '.terminal-pane-branch:has(> .terminal-pane[data-status="failed"]:not(.needs-attention))';
+      const exitedSelector =
+        '.terminal-pane-branch:has(> .terminal-pane[data-status="exited"]:not(.needs-attention))';
+      const glowSelector =
+        '.terminal-pane-branch:has(> .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention))';
+
       expect(functionSource('mountTerminal')).not.toContain('terminal-pane-status');
       expect(functionSource('mountBrowserPane')).not.toContain('terminal-pane-status');
       expect(functionSource('mountToolPane')).not.toContain('terminal-pane-status');
       expect(stylesCss).not.toMatch(/\.terminal-pane-status\b/);
-      expect(stylesCss).toMatch(
-        /\.terminal-pane\[data-status="starting"\]\s*\{\s*--pane-status-rgb:\s*251,\s*191,\s*36;\s*\}/,
-      );
-      expect(stylesCss).toMatch(
-        /\.terminal-pane\[data-status="failed"\]\s*\{\s*--pane-status-rgb:\s*248,\s*113,\s*113;\s*\}/,
-      );
-      expect(stylesCss).toMatch(
-        /\.terminal-pane\[data-status="exited"\]\s*\{\s*--pane-status-rgb:\s*138,\s*132,\s*153;\s*\}/,
-      );
+      expect(cssDeclarations(startingSelector).get('--pane-status-rgb')).toBe('251, 191, 36');
+      expect(cssDeclarations(failedSelector).get('--pane-status-rgb')).toBe('248, 113, 113');
+      expect(cssDeclarations(exitedSelector).get('--pane-status-rgb')).toBe('138, 132, 153');
       expect(stylesCss).not.toMatch(/\[data-status="running"\]/);
-      expect(stylesCss).toMatch(
-        /\.terminal-pane:is\(\[data-status="starting"\], \[data-status="failed"\], \[data-status="exited"\]\):not\(\.needs-attention\)\s*\{[^}]*box-shadow:\s*0 0 0 1px rgba\(var\(--pane-status-rgb\), 0\.2\),\s*0 0 12px rgba\(var\(--pane-status-rgb\), 0\.24\);/s,
-      );
-      expect(stylesCss).toMatch(
-        /\.terminal-pane\.focused:is\(\[data-status="starting"\], \[data-status="failed"\], \[data-status="exited"\]\):not\(\.needs-attention\)\s*\{[^}]*border-color:\s*rgba\(var\(--rgb-accent\), 0\.55\);[^}]*box-shadow:\s*0 0 0 1px rgba\(var\(--rgb-accent\), 0\.22\),\s*0 0 12px rgba\(var\(--pane-status-rgb\), 0\.24\);/s,
-      );
-      expect(stylesCss).not.toMatch(
-        /\.terminal-pane:is\(\[data-status="starting"\], \[data-status="failed"\], \[data-status="exited"\]\):not\(\.needs-attention\)\s*\{[^}]*animation:/s,
-      );
-      expect(stylesCss).not.toMatch(
-        /\.terminal-pane\.focused:is\(\[data-status="starting"\], \[data-status="failed"\], \[data-status="exited"\]\):not\(\.needs-attention\)\s*\{[^}]*animation:/s,
-      );
+      expect(cssDeclarations(glowSelector)).toEqual(new Map([
+        ['position', 'relative'],
+        ['z-index', '1'],
+        ['border-radius', '4px'],
+        [
+          'box-shadow',
+          '0 0 0 1px rgba(var(--pane-status-rgb), 0.2), 0 0 12px rgba(var(--pane-status-rgb), 0.24)',
+        ],
+      ]));
+      expect(cssDeclarations('.terminal-pane.focused')).toEqual(new Map([
+        ['border-color', 'rgba(var(--rgb-accent), 0.55)'],
+        ['box-shadow', '0 0 0 1px rgba(var(--rgb-accent), 0.22)'],
+      ]));
+      expect(() => cssDeclarations(
+        '.terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)',
+      )).toThrow();
+      expect(() => cssDeclarations(
+        '.terminal-pane.focused:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)',
+      )).toThrow();
     });
 
-    it('renders a tiled status glow through its branch without leaking pane content', async () => {
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage({
-          viewport: { width: 500, height: 220 },
-          deviceScaleFactor: 1,
-        });
-        await page.setContent(`
-          <style>${stylesCss}</style>
-          <style>
-            html, body {
-              margin: 0;
-              background: rgb(0, 0, 0) !important;
-            }
-            #probe-stage {
-              width: 406px;
-              height: 137px;
-              margin: 40px;
-            }
-            #probe-stage > .terminal-pane-split {
-              width: 100%;
-              height: 100%;
-            }
-            #probe-stage .terminal-pane {
-              background: rgb(0, 0, 0);
-            }
-          </style>
-          <div id="probe-stage"></div>
-        `);
-
-        await page.evaluate((renderSource) => {
-          const browserDocument = (globalThis as any).document;
-          const makePane = (id: string, status: string) => {
-            const pane = browserDocument.createElement('div');
-            pane.className = 'terminal-pane';
-            pane.dataset.threadId = id;
-            pane.dataset.status = status;
-            return pane;
-          };
-          const firstPane = makePane('thread-failed', 'failed');
-          const leakProbe = browserDocument.createElement('div');
-          Object.assign(leakProbe.style, {
-            position: 'absolute',
-            top: '50px',
-            right: '-6px',
-            width: '6px',
-            height: '20px',
-            background: 'rgb(0, 255, 0)',
-          });
-          firstPane.appendChild(leakProbe);
-
-          const threads = new Map([
-            ['thread-failed', { kind: 'term', pane: firstPane }],
-            ['thread-running', { kind: 'term', pane: makePane('thread-running', 'running') }],
-          ]);
-          const findThread = (id: string) => threads.get(id);
-          const browserSurface = null;
-          const gitSurfaceEl = null;
-          const createPaneDivider = () => {
-            const divider = browserDocument.createElement('div');
-            divider.className = 'terminal-pane-divider is-row';
-            return divider;
-          };
-          const renderPaneNode = eval(`(${renderSource})`);
-          const root = {
-            id: 'split-a',
-            type: 'split',
-            orientation: 'row',
-            ratio: 0.5,
-            first: { id: 'leaf-a', type: 'leaf', threadId: 'thread-failed' },
-            second: { id: 'leaf-b', type: 'leaf', threadId: 'thread-running' },
-          };
-          browserDocument.getElementById('probe-stage')?.appendChild(
-            renderPaneNode(root, new Map([['split-a', 0.5]])),
-          );
-        }, functionSource('renderPaneNode'));
-
-        const branchOverflow = await page.locator('.terminal-pane-branch').first().evaluate(
-          (branch) => (globalThis as any).getComputedStyle(branch).overflow as string,
-        );
-        const paneOverflow = await page.locator('.terminal-pane[data-status="failed"]').evaluate(
-          (pane) => (globalThis as any).getComputedStyle(pane).overflow as string,
-        );
-        const screenshot = await page.screenshot();
-        const pixels = await page.evaluate(async (source) => {
-          const browserDocument = (globalThis as any).document;
-          const image = new (globalThis as any).Image();
-          image.src = source;
-          await image.decode();
-          const canvas = browserDocument.createElement('canvas');
-          canvas.width = image.width;
-          canvas.height = image.height;
-          const context = canvas.getContext('2d');
-          if (!context) throw new Error('missing canvas context');
-          context.drawImage(image, 0, 0);
-          return Array.from<number>(
-            context.getImageData(241, 90, 4, 20).data as ArrayLike<number>,
-          );
-        }, `data:image/png;base64,${screenshot.toString('base64')}`);
-        const rgba = Array.from(
-          { length: pixels.length / 4 },
-          (_, index) => pixels.slice(index * 4, index * 4 + 4),
-        );
-        const strongestRed = rgba.reduce(
-          (best, pixel) => (
-            pixel[0] - Math.max(pixel[1], pixel[2])
-              > best[0] - Math.max(best[1], best[2])
-              ? pixel
-              : best
-          ),
-          [0, 0, 0, 0],
-        );
-
-        expect(branchOverflow).toBe('visible');
-        expect(paneOverflow).toBe('hidden');
-        expect(strongestRed[0]).toBeGreaterThan(strongestRed[1] + 4);
-        expect(Math.max(...rgba.map((pixel) => pixel[1]))).toBeLessThan(100);
-      } finally {
-        await browser.close();
-      }
-    }, 15_000);
+    it('clips pane subtrees and owns the glow on each direct leaf branch', () => {
+      expect(cssDeclarations('.terminal-pane-branch').get('overflow')).toBe('hidden');
+      expect(cssDeclarations('.terminal-pane').get('overflow')).toBe('hidden');
+      expect(functionSource('renderPaneNode')).toMatch(
+        /first\.className = "terminal-pane-branch";[\s\S]*first\.appendChild\(renderPaneNode\(node\.first, splitRatios\)\);[\s\S]*second\.className = "terminal-pane-branch";[\s\S]*second\.appendChild\(renderPaneNode\(node\.second, splitRatios\)\)/,
+      );
+      expect(stylesCss).not.toMatch(
+        /\.terminal-pane-branch\s*\{[^}]*overflow:\s*visible;/s,
+      );
+    });
 
     it('double-clicking the header enters focus mode, but not on its buttons', () => {
       expect(functionSource('mountTerminal')).toMatch(

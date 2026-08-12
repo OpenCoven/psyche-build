@@ -1164,9 +1164,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 }
 .terminal-pane-branch {
   flex-basis: 0;
-  /* The pane clips its own terminal/browser contents; the branch must not clip
-     frame effects that extend into the divider gutter. */
-  overflow: visible;
+  overflow: hidden;
 }
 .terminal-pane {
   display: grid;
@@ -1277,20 +1275,22 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .terminal-pane.needs-attention .terminal-pane-header {
   background: rgba(251, 191, 36, 0.09);
 }
-.terminal-pane[data-status="starting"] { --pane-status-rgb: 251, 191, 36; }
-.terminal-pane[data-status="failed"] { --pane-status-rgb: 248, 113, 113; }
-.terminal-pane[data-status="exited"] { --pane-status-rgb: 138, 132, 153; }
-
-.terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention) {
-  box-shadow:
-    0 0 0 1px rgba(var(--pane-status-rgb), 0.2),
-    0 0 12px rgba(var(--pane-status-rgb), 0.24);
+.terminal-pane-branch:has(> .terminal-pane[data-status="starting"]:not(.needs-attention)) {
+  --pane-status-rgb: 251, 191, 36;
+}
+.terminal-pane-branch:has(> .terminal-pane[data-status="failed"]:not(.needs-attention)) {
+  --pane-status-rgb: 248, 113, 113;
+}
+.terminal-pane-branch:has(> .terminal-pane[data-status="exited"]:not(.needs-attention)) {
+  --pane-status-rgb: 138, 132, 153;
 }
 
-.terminal-pane.focused:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention) {
-  border-color: rgba(var(--rgb-accent), 0.55);
+.terminal-pane-branch:has(> .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)) {
+  position: relative;
+  z-index: 1;
+  border-radius: 4px;
   box-shadow:
-    0 0 0 1px rgba(var(--rgb-accent), 0.22),
+    0 0 0 1px rgba(var(--pane-status-rgb), 0.2),
     0 0 12px rgba(var(--pane-status-rgb), 0.24);
 }
 /* Worded chip, matching how every other pane state is spelled out rather than

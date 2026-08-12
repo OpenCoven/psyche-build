@@ -30,6 +30,27 @@ function functionSource(name: string) {
   throw new Error(`unterminated function ${name}`);
 }
 
+function cssDeclarations(selector: string) {
+  const source = stylesCss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const normalizedSelector = selector.replace(/\s+/g, ' ').trim();
+  const rulePattern = /([^{}]+)\{([^{}]*)\}/g;
+  const declarations = new Map<string, string>();
+  let found = false;
+  for (const match of source.matchAll(rulePattern)) {
+    if (match[1].replace(/\s+/g, ' ').trim() !== normalizedSelector) continue;
+    found = true;
+    for (const declaration of match[2].split(';').map((item) => item.trim()).filter(Boolean)) {
+      const separator = declaration.indexOf(':');
+      declarations.set(
+        declaration.slice(0, separator).trim(),
+        declaration.slice(separator + 1).replace(/\s+/g, ' ').trim(),
+      );
+    }
+  }
+  if (found) return declarations;
+  throw new Error(`missing CSS rule ${selector}`);
+}
+
 function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
@@ -306,9 +327,17 @@ describe('desktop shell wiring', () => {
   });
 
   it('states the waiting reason in words, never in colour alone', () => {
+    const statusGlowSelector =
+      '.terminal-pane-branch:has(> .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention))';
+
     expect(mainJs).toMatch(/PsycheSessions\.attentionLabel\(thread\.attentionReason\)/);
     expect(stylesCss).toContain('.terminal-pane-attention');
-    expect(stylesCss).toMatch(/\.terminal-pane\.needs-attention/);
+    expect(cssDeclarations('.terminal-pane.needs-attention, .terminal-pane.focused.needs-attention'))
+      .toEqual(new Map([
+        ['border-color', 'rgba(251, 191, 36, 0.6)'],
+        ['box-shadow', '0 0 0 1px rgba(251, 191, 36, 0.28)'],
+      ]));
+    expect(cssDeclarations(statusGlowSelector).has('box-shadow')).toBe(true);
     expect(stylesCss).toMatch(/\.minimap-dot\.attention/);
     expect(functionSource('mountTerminal')).toMatch(
       /header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(span\)/,
