@@ -2,6 +2,7 @@
 # copies of these same packages inside .worktrees/ and .psyche/worktrees/,
 # which pnpm would then try to link as workspace members.
 packages:
+  - packages/vim-core
   - frontend
   - docs
   - native/macos/psyche-build-tauri
