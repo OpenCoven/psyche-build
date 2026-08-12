@@ -12,7 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -54,6 +54,7 @@ use pty_transport::{
 };
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
+const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis(100);
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
 const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
@@ -2650,6 +2651,160 @@ struct BrowserAppShortcutPayload {
     url: String,
 }
 
+#[derive(Debug)]
+struct BrowserShortcutAuthorization {
+    initial_secret: String,
+    current_secret: String,
+    last_accepted: Option<Instant>,
+}
+
+#[derive(Default)]
+struct BrowserShortcutAuthorizations {
+    by_label: Mutex<HashMap<String, BrowserShortcutAuthorization>>,
+}
+
+impl BrowserShortcutAuthorizations {
+    fn install(&self, label: &str, initial_secret: String) {
+        self.by_label.lock().insert(
+            label.to_string(),
+            BrowserShortcutAuthorization {
+                current_secret: initial_secret.clone(),
+                initial_secret,
+                last_accepted: None,
+            },
+        );
+    }
+
+    fn reset(&self, label: &str) -> bool {
+        let mut authorizations = self.by_label.lock();
+        let Some(authorization) = authorizations.get_mut(label) else {
+            return false;
+        };
+        authorization.current_secret = authorization.initial_secret.clone();
+        authorization.last_accepted = None;
+        true
+    }
+
+    fn remove(&self, label: &str) -> bool {
+        self.by_label.lock().remove(label).is_some()
+    }
+
+    fn authorize_and_rotate<GenerateSecret, Dispatch>(
+        &self,
+        label: &str,
+        supplied_secret: &str,
+        now: Instant,
+        generate_secret: GenerateSecret,
+        dispatch: Dispatch,
+    ) -> Result<String, String>
+    where
+        GenerateSecret: FnOnce() -> Result<String, String>,
+        Dispatch: FnOnce() -> Result<(), String>,
+    {
+        if !label.starts_with(BROWSER_LABEL_PREFIX) {
+            return Err(
+                "browser app shortcut caller is not an embedded browser webview".to_string(),
+            );
+        }
+
+        let mut authorizations = self.by_label.lock();
+        let authorization = authorizations
+            .get_mut(label)
+            .ok_or_else(|| "browser app shortcut authorization is missing".to_string())?;
+        if !browser_shortcut_secrets_match(&authorization.current_secret, supplied_secret) {
+            return Err("browser app shortcut secret is invalid".to_string());
+        }
+        if authorization.last_accepted.is_some_and(|last_accepted| {
+            now.saturating_duration_since(last_accepted) < MIN_BROWSER_SHORTCUT_INTERVAL
+        }) {
+            return Err("browser app shortcut rate limit exceeded".to_string());
+        }
+
+        let next_secret = generate_secret()?;
+        if next_secret.is_empty()
+            || browser_shortcut_secrets_match(&authorization.current_secret, &next_secret)
+        {
+            return Err("browser app shortcut secret rotation failed".to_string());
+        }
+        dispatch()?;
+        authorization.current_secret = next_secret.clone();
+        authorization.last_accepted = Some(now);
+        Ok(next_secret)
+    }
+}
+
+fn browser_shortcut_secrets_match(expected: &str, supplied: &str) -> bool {
+    expected.len() == supplied.len()
+        && expected
+            .bytes()
+            .zip(supplied.bytes())
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
+}
+
+fn random_browser_shortcut_secret() -> Result<String, String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| format!("failed to generate browser shortcut secret: {error}"))?;
+    let mut secret = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        secret.push(HEX[(byte >> 4) as usize] as char);
+        secret.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(secret)
+}
+
+fn browser_shortcut_initialization_script(initial_secret: &str) -> Result<String, String> {
+    let secret_json = serde_json::to_string(initial_secret).map_err(|error| error.to_string())?;
+    Ok(r#"(function(initialSecret) {
+          try {
+            if (window.top !== window) return;
+            var core = window.__TAURI__ && window.__TAURI__.core;
+            if (!core || typeof core.invoke !== "function") return;
+            var invoke = core.invoke;
+            var promiseThen = Promise.prototype.then;
+            var reflectApply = Reflect.apply;
+            var stringToLowerCase = String.prototype.toLowerCase;
+            var secret = initialSecret;
+            window.addEventListener("keydown", function(event) {
+              try {
+                if (event.isTrusted !== true || event.repeat) return;
+                var key = event.key ? reflectApply(stringToLowerCase, event.key, []) : "";
+                var primary = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
+                var shortcut = "";
+                if ((event.metaKey || event.ctrlKey) && key === "t") {
+                  shortcut = "terminal-pane";
+                } else if (primary && key === "d") {
+                  shortcut = "agent-pane";
+                } else if (primary && key === "f") {
+                  shortcut = "composer";
+                } else {
+                  return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                var pending = reflectApply(invoke, core, [
+                  "browser_app_shortcut",
+                  { shortcut: shortcut, url: location.href, secret: secret }
+                ]);
+                reflectApply(promiseThen, pending, [
+                  function(nextSecret) {
+                    if (typeof nextSecret === "string" && nextSecret) {
+                      secret = nextSecret;
+                    }
+                  },
+                  function() {}
+                ]);
+              } catch (_) {}
+            }, true);
+          } catch (_) {}
+        })(__PSYCHE_BROWSER_SHORTCUT_INITIAL_SECRET__);"#
+        .replace("__PSYCHE_BROWSER_SHORTCUT_INITIAL_SECRET__", &secret_json))
+}
+
 fn resolve_browser_app_shortcut(label: &str, shortcut: &str) -> Result<&'static str, String> {
     if !label.starts_with(BROWSER_LABEL_PREFIX) {
         return Err("browser app shortcut caller is not an embedded browser webview".to_string());
@@ -2666,26 +2821,36 @@ fn resolve_browser_app_shortcut(label: &str, shortcut: &str) -> Result<&'static 
 #[tauri::command]
 fn browser_app_shortcut(
     webview: tauri::Webview,
+    authorizations: State<'_, BrowserShortcutAuthorizations>,
     shortcut: String,
     url: String,
-) -> Result<(), String> {
+    secret: String,
+) -> Result<String, String> {
     let event = resolve_browser_app_shortcut(webview.label(), &shortcut)?;
-    let main = webview
-        .app_handle()
-        .get_webview("main")
-        .ok_or_else(|| "main webview missing".to_string())?;
-    main.set_focus().map_err(|error| error.to_string())?;
-    webview
-        .app_handle()
-        .emit_to(
-            "main",
-            event,
-            BrowserAppShortcutPayload {
-                label: webview.label().to_string(),
-                url,
-            },
-        )
-        .map_err(|error| error.to_string())
+    authorizations.authorize_and_rotate(
+        webview.label(),
+        &secret,
+        Instant::now(),
+        random_browser_shortcut_secret,
+        || {
+            let main = webview
+                .app_handle()
+                .get_webview("main")
+                .ok_or_else(|| "main webview missing".to_string())?;
+            main.set_focus().map_err(|error| error.to_string())?;
+            webview
+                .app_handle()
+                .emit_to(
+                    "main",
+                    event,
+                    BrowserAppShortcutPayload {
+                        label: webview.label().to_string(),
+                        url,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        },
+    )
 }
 
 fn ensure_browser(
@@ -2706,10 +2871,20 @@ fn ensure_browser(
         .ok_or_else(|| "main window missing".to_string())?;
 
     let parsed_url = Url::parse(url).map_err(|e| e.to_string())?;
+    let initial_secret = random_browser_shortcut_secret()?;
+    let shortcut_script = browser_shortcut_initialization_script(&initial_secret)?;
+    app.state::<BrowserShortcutAuthorizations>()
+        .install(label, initial_secret.clone());
     let browser_label = label.to_string();
     let app_for_load = app.clone();
-    let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url)).on_page_load(
-        move |webview, payload| {
+    let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url))
+        .initialization_script(shortcut_script)
+        .on_page_load(move |webview, payload| {
+            if matches!(payload.event(), PageLoadEvent::Started) {
+                app_for_load
+                    .state::<BrowserShortcutAuthorizations>()
+                    .reset(&browser_label);
+            }
             let phase = match payload.event() {
                 PageLoadEvent::Started => "started",
                 PageLoadEvent::Finished => "finished",
@@ -2734,27 +2909,8 @@ fn ensure_browser(
                         }};
                         var title = document.title || location.hostname || location.href;
                         emit("browser:title", {{ label: browserLabel, title: title, url: location.href }});
-                        if (!window.__PSYCHE_BROWSER_SHORTCUTS_INSTALLED__) {{
-                          window.__PSYCHE_BROWSER_SHORTCUTS_INSTALLED__ = true;
-                          window.addEventListener("keydown", function(event) {{
-                            try {{
-                              var key = event.key ? event.key.toLowerCase() : "";
-                              var primary = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
-                              if ((event.metaKey || event.ctrlKey) && key === "t") {{
-                                event.preventDefault();
-                                event.stopPropagation();
-                                window.__TAURI__.core.invoke("browser_app_shortcut", {{ shortcut: "terminal-pane", url: location.href }});
-                              }} else if (primary && key === "d") {{
-                                event.preventDefault();
-                                event.stopPropagation();
-                                window.__TAURI__.core.invoke("browser_app_shortcut", {{ shortcut: "agent-pane", url: location.href }});
-                              }} else if (primary && key === "f") {{
-                                event.preventDefault();
-                                event.stopPropagation();
-                                window.__TAURI__.core.invoke("browser_app_shortcut", {{ shortcut: "composer", url: location.href }});
-                              }}
-                            }} catch (_) {{}}
-                          }}, true);
+                        if (!window.__PSYCHE_BROWSER_FOCUS_INSTALLED__) {{
+                          window.__PSYCHE_BROWSER_FOCUS_INSTALLED__ = true;
                           window.addEventListener("pointerdown", function() {{
                             emit("browser:focus", {{ label: browserLabel, url: location.href }});
                           }}, true);
@@ -2768,15 +2924,16 @@ fn ensure_browser(
                 );
                 let _ = webview.eval(&script);
             }
-        },
-    );
+        });
 
-    main.add_child(
+    if let Err(error) = main.add_child(
         builder,
         LogicalPosition::new(x, y),
         LogicalSize::new(w.max(1.0), h.max(1.0)),
-    )
-    .map_err(|e| e.to_string())?;
+    ) {
+        app.state::<BrowserShortcutAuthorizations>().remove(label);
+        return Err(error.to_string());
+    }
 
     Ok(true)
 }
@@ -2866,6 +3023,7 @@ fn destroy_browser_webview(app: &AppHandle, label: Option<String>) -> Result<(),
     if let Some(webview) = app.get_webview(&label) {
         webview.close().map_err(|error| error.to_string())?;
     }
+    app.state::<BrowserShortcutAuthorizations>().remove(&label);
     Ok(())
 }
 
@@ -4268,6 +4426,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(MetricsState::default())
+        .manage(BrowserShortcutAuthorizations::default())
         .invoke_handler(tauri::generate_handler![
             pty_start,
             pane_session_metrics,
@@ -4314,6 +4473,28 @@ pub fn run() {
 #[cfg(test)]
 mod browser_app_shortcut_tests {
     use super::*;
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    fn authorize(
+        authorizations: &BrowserShortcutAuthorizations,
+        label: &str,
+        secret: &str,
+        now: Instant,
+        next_secret: &str,
+        dispatched: &Cell<usize>,
+    ) -> Result<String, String> {
+        authorizations.authorize_and_rotate(
+            label,
+            secret,
+            now,
+            || Ok(next_secret.to_string()),
+            || {
+                dispatched.set(dispatched.get() + 1);
+                Ok(())
+            },
+        )
+    }
 
     #[test]
     fn browser_app_shortcut_accepts_supported_mappings() {
@@ -4336,6 +4517,176 @@ mod browser_app_shortcut_tests {
     fn browser_app_shortcut_rejects_untrusted_callers_and_unknown_actions() {
         assert!(resolve_browser_app_shortcut("main", "terminal-pane").is_err());
         assert!(resolve_browser_app_shortcut("psyche-browser-project-1", "new-tab").is_err());
+    }
+
+    #[test]
+    fn browser_app_shortcut_rejects_invalid_secrets_without_dispatching() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let dispatched = Cell::new(0);
+
+        assert!(authorize(
+            &authorizations,
+            label,
+            "wrong-secret",
+            Instant::now(),
+            "next-secret",
+            &dispatched,
+        )
+        .is_err());
+        assert_eq!(dispatched.get(), 0);
+    }
+
+    #[test]
+    fn browser_app_shortcut_rotates_only_after_successful_dispatch() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let now = Instant::now();
+
+        let failed = authorizations.authorize_and_rotate(
+            label,
+            "initial-secret",
+            now,
+            || Ok("unused-secret".to_string()),
+            || Err("dispatch failed".to_string()),
+        );
+        assert_eq!(failed.unwrap_err(), "dispatch failed");
+
+        let dispatched = Cell::new(0);
+        assert_eq!(
+            authorize(
+                &authorizations,
+                label,
+                "initial-secret",
+                now,
+                "rotated-secret",
+                &dispatched,
+            )
+            .unwrap(),
+            "rotated-secret"
+        );
+        assert_eq!(dispatched.get(), 1);
+        assert!(authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            now + MIN_BROWSER_SHORTCUT_INTERVAL,
+            "another-secret",
+            &dispatched,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn browser_app_shortcut_rate_limits_without_rotating() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let now = Instant::now();
+        let dispatched = Cell::new(0);
+
+        authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            now,
+            "second-secret",
+            &dispatched,
+        )
+        .unwrap();
+        assert!(authorize(
+            &authorizations,
+            label,
+            "second-secret",
+            now + MIN_BROWSER_SHORTCUT_INTERVAL - Duration::from_millis(1),
+            "too-fast-secret",
+            &dispatched,
+        )
+        .is_err());
+        assert_eq!(dispatched.get(), 1);
+        assert_eq!(
+            authorize(
+                &authorizations,
+                label,
+                "second-secret",
+                now + MIN_BROWSER_SHORTCUT_INTERVAL,
+                "third-secret",
+                &dispatched,
+            )
+            .unwrap(),
+            "third-secret"
+        );
+        assert_eq!(dispatched.get(), 2);
+    }
+
+    #[test]
+    fn browser_app_shortcut_navigation_reset_restores_initial_secret() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let now = Instant::now();
+        let dispatched = Cell::new(0);
+
+        authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            now,
+            "rotated-secret",
+            &dispatched,
+        )
+        .unwrap();
+        assert!(authorizations.reset(label));
+        assert_eq!(
+            authorize(
+                &authorizations,
+                label,
+                "initial-secret",
+                now,
+                "post-navigation-secret",
+                &dispatched,
+            )
+            .unwrap(),
+            "post-navigation-secret"
+        );
+        assert!(authorize(
+            &authorizations,
+            label,
+            "rotated-secret",
+            now + MIN_BROWSER_SHORTCUT_INTERVAL,
+            "unused-secret",
+            &dispatched,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn browser_app_shortcut_cleanup_removes_authorization() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        assert!(authorizations.remove(label));
+
+        let dispatched = Cell::new(0);
+        assert!(authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            Instant::now(),
+            "next-secret",
+            &dispatched,
+        )
+        .is_err());
+        assert_eq!(dispatched.get(), 0);
+    }
+
+    #[test]
+    fn browser_app_shortcut_secret_is_random_hex() {
+        let secret = random_browser_shortcut_secret().unwrap();
+        assert_eq!(secret.len(), 64);
+        assert!(secret.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 }
 

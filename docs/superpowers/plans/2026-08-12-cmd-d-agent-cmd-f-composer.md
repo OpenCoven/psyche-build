@@ -522,10 +522,27 @@ git -c commit.gpgsign=false commit \
 ## Security Correction Addendum
 
 The direct child-webview event emissions in Task 2 are superseded. Forward T,
-D, and F through one dedicated `browser_app_shortcut` Tauri command instead.
-Generate only that command's app permission in `build.rs`, grant it only to
-`psyche-browser-*` webviews through a local plus HTTP/HTTPS capability, validate
-the trusted caller label and shortcut allowlist in Rust, focus `main`, and
-dispatch the existing internal event with `emit_to("main", ...)`. Do not grant
-remote pages general event-emission permission or permission-gate unrelated app
-commands.
+D, and F through one dedicated `browser_app_shortcut` Tauri command. Since a
+nonempty `AppManifest` makes every app command explicit, `build.rs` must list
+every `generate_handler!` command and the main capability must grant every
+generated `allow-<command>` permission while preserving its existing
+core/plugin permissions. The browser capability remains limited to local plus
+HTTP/HTTPS `psyche-browser-*` webviews and exactly
+`allow-browser-app-shortcut`; it receives no other app command and no
+`core:event:allow-emit`.
+
+Do not treat the dedicated command alone as browser authorization. Generate a
+cryptographically random secret per browser webview and pass its initial value
+only into a `WebviewBuilder::initialization_script`. Before page code runs, the
+script captures Tauri invoke and Promise continuation references, installs the
+listener, rejects untrusted/repeated events, preserves T behavior, and applies
+the exact D/F modifier rules. Send the secret with the allowlisted action.
+
+Rust validates caller label, action, current secret, and a 100 ms per-webview
+minimum interval. It focuses `main`, dispatches only with
+`emit_to("main", ...)`, and rotates/returns the secret only after successful
+dispatch. Reset authorization to the initialization secret on page-load start,
+and remove authorization on failed creation or browser destruction. Keep tests
+that synchronize manifest/handler command sets, compare main permissions,
+prove the browser capability contains exactly one permission, and exercise
+secret rotation, reset, cleanup, and rate-limit rejection.

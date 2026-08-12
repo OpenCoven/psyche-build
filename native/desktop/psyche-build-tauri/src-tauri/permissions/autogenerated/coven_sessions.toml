@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-coven-sessions"
+description = "Enables the coven_sessions command without any pre-configured scope."
+commands.allow = ["coven_sessions"]
+
+[[permission]]
+identifier = "deny-coven-sessions"
+description = "Denies the coven_sessions command without any pre-configured scope."
+commands.deny = ["coven_sessions"]

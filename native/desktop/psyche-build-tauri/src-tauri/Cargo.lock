@@ -3161,6 +3161,7 @@ name = "psyche-build-tauri"
 version = "0.0.1"
 dependencies = [
  "env_logger",
+ "getrandom 0.2.17",
  "libc",
  "log",
  "once_cell",

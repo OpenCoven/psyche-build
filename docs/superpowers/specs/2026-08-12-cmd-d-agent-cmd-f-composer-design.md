@@ -153,10 +153,26 @@ The embedded-browser event-emission design above is superseded for T, D, and F
 shortcut forwarding. External child webviews cannot emit Tauri events under the
 v2 ACL and must not receive general event-emission permission.
 
-Each shortcut now invokes the dedicated `browser_app_shortcut` command. The
-command accepts only callers whose trusted webview label starts with
-`psyche-browser-`, allowlists the three shortcut actions, derives the payload
-label from that caller, focuses the main webview, and emits the existing
-internal shortcut event only to `main`. A dedicated capability grants remote
-HTTP/HTTPS browser webviews only `allow-browser-app-shortcut`; existing
-title/focus emission code remains unchanged and receives no added permission.
+Because declaring any `AppManifest` commands enables explicit app-command ACLs,
+`build.rs` lists every command registered by `tauri::generate_handler!`. The
+main capability retains its core and plugin permissions and grants every
+generated `allow-<command>` permission. The browser capability remains scoped
+to local and HTTP/HTTPS `psyche-browser-*` webviews and grants exactly
+`allow-browser-app-shortcut`; it grants no other app command and no
+`core:event:allow-emit`.
+
+The dedicated command is necessary but is not sufficient authorization for
+remote page script. Each browser webview receives a cryptographically random
+initial secret in a `WebviewBuilder::initialization_script`. That script runs
+before remote page code, captures immutable references to Tauri invoke,
+`Promise.prototype.then`, and key normalization, and installs the key listener.
+It rejects untrusted or repeated events before preventing defaults, preserves
+the existing T modifier behavior, and requires exact primary-modifier D/F.
+
+The command validates the trusted caller label, action allowlist, current
+per-webview secret, and a 100 ms minimum interval. It then focuses `main` and
+uses `emit_to("main", ...)`. Only after both operations succeed does it rotate
+and return the next secret; the initialization closure updates its private
+secret only from that successful result. Page-load start resets native state to
+the initialization secret for the new JavaScript context. Browser destruction
+and failed creation remove the native authorization entry.
