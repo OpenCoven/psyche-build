@@ -2253,6 +2253,16 @@
     syncGitDockChrome();
   }
 
+  /** Keep the shared Git surface with the active project and worktree. */
+  function syncGitSurfaceForActiveScope() {
+    var project = activeProject();
+    var thread = project
+      ? gitPaneThread(project.id, activeWorkspaceRoot(project))
+      : null;
+    if (!thread) dockGitSurface();
+    else syncGitDockChrome();
+  }
+
   function mountToolPane(thread) {
     var pane = document.createElement("section");
     pane.className = "terminal-pane is-tool";
@@ -3336,6 +3346,7 @@
   function renderPaneWorkspace() {
     if (!terminalHost) return;
     stageBrowserSurface();
+    syncGitSurfaceForActiveScope();
     terminalHost.replaceChildren();
     var layout = activePaneLayout();
     if (!layout || !layout.root) {

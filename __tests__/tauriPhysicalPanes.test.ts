@@ -478,6 +478,7 @@ describe('Tauri physical terminal panes', () => {
     const renderPaneWorkspace = compileFunction<() => void>(functionSource('renderPaneWorkspace'), {
       terminalHost,
       stageBrowserSurface: () => { calls.push('stage'); },
+      syncGitSurfaceForActiveScope: () => { calls.push('sync-git'); },
       activePaneLayout: () => null,
       renderTerminalEmptyState: () => { calls.push('empty'); },
       renderPaneMinimap: (layout: unknown, file: unknown) => {
@@ -494,7 +495,7 @@ describe('Tauri physical terminal panes', () => {
 
     renderPaneWorkspace();
     expect(terminalHost.children).toEqual([]);
-    expect(calls).toEqual(['stage', 'clear', 'empty', 'minimap']);
+    expect(calls).toEqual(['stage', 'sync-git', 'clear', 'empty', 'minimap']);
   });
 
   it('renders file tabs without depending on terminal thread visibility', () => {

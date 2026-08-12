@@ -346,6 +346,8 @@ describe('Tauri workspace panels', () => {
 
     it('focuses an existing owner before allocating a pane', () => {
       const source = functionSource('openOrFocusGitPane');
+      expect(source).toContain('var project = activeProject();');
+      expect(source).toContain('var workspaceRoot = activeWorkspaceRoot(project);');
       expect(source).toMatch(/gitPaneThread\(project\.id, workspaceRoot\)/);
       expect(source).toMatch(
         /if \(existing\) \{ await focusThread\(existing\.id\); return existing; \}/,
@@ -356,6 +358,52 @@ describe('Tauri workspace panels', () => {
     it('keeps the current dock pop-out as a compatibility caller', () => {
       expect(mainJs).toMatch(
         /function popOutGitPane\(dropTarget\)[\s\S]*return openOrFocusGitPane\(dropTarget\)/,
+      );
+    });
+
+    it('returns the shared surface to the dock when the newly active scope has no owner', () => {
+      const source = functionSource('syncGitSurfaceForActiveScope');
+      expect(source).toMatch(
+        /var project = activeProject\(\);[\s\S]*gitPaneThread\(project\.id, activeWorkspaceRoot\(project\)\)/,
+      );
+      expect(source).toMatch(/if \(!thread\) dockGitSurface\(\);/);
+      expect(source).toMatch(/else syncGitDockChrome\(\);/);
+      expect(functionSource('dockGitSurface')).toContain('syncGitDockChrome();');
+      expect(functionSource('renderPaneWorkspace')).toMatch(
+        /stageBrowserSurface\(\);[\s\S]*syncGitSurfaceForActiveScope\(\);[\s\S]*terminalHost\.replaceChildren\(\);/,
+      );
+
+      function runForActiveScope(owner: unknown) {
+        const calls: string[] = [];
+        const syncActiveScope = Function(
+          'activeProject', 'activeWorkspaceRoot', 'gitPaneThread',
+          'dockGitSurface', 'syncGitDockChrome',
+          `"use strict"; return (${source});`,
+        )(
+          () => ({ id: 'next-project' }),
+          () => '/next-worktree',
+          (projectId: string, workspaceRoot: string) => {
+            calls.push(`lookup:${projectId}:${workspaceRoot}`);
+            return owner;
+          },
+          () => { calls.push('dock'); },
+          () => { calls.push('chrome'); },
+        ) as () => void;
+        syncActiveScope();
+        return calls;
+      }
+
+      expect(runForActiveScope(null)).toEqual([
+        'lookup:next-project:/next-worktree', 'dock',
+      ]);
+      expect(runForActiveScope({ id: 'git-next' })).toEqual([
+        'lookup:next-project:/next-worktree', 'chrome',
+      ]);
+    });
+
+    it('keeps the shared surface mounted in a Git pane owned by the newly active scope', () => {
+      expect(functionSource('renderPaneNode')).toMatch(
+        /thread\.kind === "git" && thread\.toolBody && gitSurfaceEl[\s\S]*thread\.toolBody\.appendChild\(gitSurfaceEl\)/,
       );
     });
   });
