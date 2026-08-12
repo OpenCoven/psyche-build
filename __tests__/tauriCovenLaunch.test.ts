@@ -55,6 +55,17 @@ async function flushPromises(times = 2) {
 const spawnPtyRuntimeDeps = {
   attentionTracker: { forget: () => undefined },
   syncThreadAttentionChrome: () => undefined,
+  ensureThreadPtyController(thread: Record<string, unknown>) {
+    if (thread.terminalController) return thread.terminalController;
+    const controller = {
+      prepareForPtyStart: () => undefined,
+      markPtyStarted: () => Promise.resolve(false),
+      stopPtyDelivery: () => undefined,
+      dispose: () => undefined,
+    };
+    thread.terminalController = controller;
+    return controller;
+  },
 };
 
 describe('Tauri Coven launch project scope', () => {
@@ -1477,25 +1488,31 @@ describe('native Coven launch routing', () => {
   });
 
   it('adopts an already-running Rust PTY response as the live retry', async () => {
-    const writes: Uint8Array[] = [];
+    let markedStarted = 0;
     const thread = {
       id: 'thread-1', projectId: 'project', status: 'failed', spawning: false,
       closing: false, closeStarted: false, startInFlight: false, stopRequested: true,
       ptyStarted: false, launch: {
         command: '/bin/coven', args: ['code', '--session-id', COVEN_SESSION_ID], env: {}, projectRoot: '/repo', cwd: '/repo',
         launchKind: 'coven-chat', covenSessionId: COVEN_SESSION_ID, metricsProvider: 'coven',
-      }, term: { cols: 120, rows: 40, write: (value: Uint8Array) => writes.push(value) },
+      }, term: { cols: 120, rows: 40, write: () => undefined },
+      terminalController: {
+        prepareForPtyStart: () => undefined,
+        markPtyStarted: () => {
+          markedStarted += 1;
+          return Promise.resolve(false);
+        },
+        stopPtyDelivery: () => undefined,
+        dispose: () => undefined,
+      },
     };
     const state = { threads: [thread], activeThreadId: thread.id };
-    const buffered = new Uint8Array([1, 2, 3]);
-    const pendingDataBuffers = new Map([[thread.id, [buffered]]]);
     const projectLevels: string[] = [];
     const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
       functionSource('spawnPty'), {
         ...spawnPtyRuntimeDeps,
         invoke: async () => { throw new Error('PTY already running for thread'); },
         isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
-        pendingDataBuffers,
         syncThreadPaneMetadata: () => undefined,
         refreshSidebar: () => undefined,
         refreshTabs: () => undefined,
@@ -1512,8 +1529,7 @@ describe('native Coven launch routing', () => {
     expect(thread.status).toBe('running');
     expect(thread.ptyStarted).toBe(true);
     expect(thread.stopRequested).toBe(false);
-    expect(writes).toEqual([buffered]);
-    expect(pendingDataBuffers.has(thread.id)).toBe(false);
+    expect(markedStarted).toBe(1);
     expect(projectLevels).toEqual(['ok']);
   });
 
@@ -1537,7 +1553,7 @@ describe('native Coven launch routing', () => {
       launch: {
         command: '/bin/zsh', args: [], env: {}, projectRoot: '/repo', cwd: '/repo',
         launchKind: 'shell', covenSessionId: null,
-      }, term: null,
+      }, term: null, terminalController: null as Record<string, unknown> | null,
     };
     const state = { threads: [thread], activeThreadId: null };
     const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(source, {
@@ -1549,6 +1565,17 @@ describe('native Coven launch routing', () => {
           needsAttention: value.needsAttention,
           attentionReason: value.attentionReason,
         });
+      },
+      ensureThreadPtyController(current: typeof thread) {
+        if (current.terminalController) return current.terminalController;
+        const controller = {
+          prepareForPtyStart: () => undefined,
+          markPtyStarted: () => Promise.resolve(false),
+          stopPtyDelivery: () => undefined,
+          dispose: () => undefined,
+        };
+        current.terminalController = controller;
+        return controller;
       },
       invoke: async () => undefined,
       isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,

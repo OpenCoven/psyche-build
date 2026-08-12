@@ -65,6 +65,17 @@ function compileFunction<T extends (...args: never[]) => unknown>(
 const spawnPtyRuntimeDeps = {
   attentionTracker: { forget: () => undefined },
   syncThreadAttentionChrome: () => undefined,
+  ensureThreadPtyController(thread: Record<string, unknown>) {
+    if (thread.terminalController) return thread.terminalController;
+    const controller = {
+      prepareForPtyStart: () => undefined,
+      markPtyStarted: () => Promise.resolve(false),
+      stopPtyDelivery: () => undefined,
+      dispose: () => undefined,
+    };
+    thread.terminalController = controller;
+    return controller;
+  },
 };
 
 function deferred<T>() {
@@ -489,12 +500,13 @@ describe('Tauri physical terminal panes', () => {
         expect(id).toBe('file-a');
         return activeFile;
       },
+      syncAllPtyVisibility: () => { calls.push('visibility'); },
       state: { activeFileId: 'file-a' },
     });
 
     renderPaneWorkspace();
     expect(terminalHost.children).toEqual([]);
-    expect(calls).toEqual(['stage', 'clear', 'empty', 'minimap']);
+    expect(calls).toEqual(['stage', 'clear', 'empty', 'minimap', 'visibility']);
   });
 
   it('renders file tabs without depending on terminal thread visibility', () => {
@@ -810,10 +822,10 @@ describe('Tauri physical terminal panes', () => {
   it('cancels a queued PTY start when the thread closes before animation frame', () => {
     const project = { id: 'project', root: '/repo' };
     const state = { threads: [] as Array<Record<string, unknown>>, activeThreadId: null as string | null };
-    const pendingDataBuffers = new Map([['thread-a', [new Uint8Array([1])]]]);
     let frame: (() => void) | null = null;
     let starts = 0;
     let stops = 0;
+    let disposed = 0;
     const isLiveThread = (thread: Record<string, unknown>) =>
       state.threads.includes(thread) && thread.closing !== true;
     const createThread = compileFunction<(options: Record<string, unknown>) => Record<string, unknown>>(
@@ -831,6 +843,7 @@ describe('Tauri physical terminal panes', () => {
         mountTerminal: (thread: Record<string, unknown>) => {
           thread.fit = { fit: () => undefined };
           thread.term = { dispose: () => undefined };
+          thread.terminalController = { dispose: () => { disposed += 1; } };
         },
         focusThread: () => undefined,
         requestAnimationFrame: (callback: () => void) => { frame = callback; },
@@ -839,13 +852,11 @@ describe('Tauri physical terminal panes', () => {
       },
     );
     const thread = createThread({ project, command: '/bin/zsh' });
-    pendingDataBuffers.set('thread-a', [new Uint8Array([1])]);
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
       forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
       retainFileFocusAfterThreadRemoval: () => false,
-      pendingDataBuffers,
       stopThreadPty: () => { stops += 1; return Promise.resolve(true); },
       state,
       renderPaneWorkspace: () => undefined,
@@ -860,14 +871,15 @@ describe('Tauri physical terminal panes', () => {
     (frame as unknown as () => void)();
     expect(starts).toBe(0);
     expect(stops).toBe(1);
+    expect(disposed).toBe(1);
     expect(state.threads).toEqual([]);
     expect(thread.closing).toBe(true);
-    expect(pendingDataBuffers.has('thread-a')).toBe(false);
   });
 
   it('stops a remotely started PTY when close wins the in-flight start race', async () => {
     const start = deferred<void>();
     const project = { id: 'project' };
+    let controllerDisposals = 0;
     const thread = {
       id: 'thread-a', projectId: project.id, worktreePath: '/repo',
       launch: {
@@ -877,9 +889,14 @@ describe('Tauri physical terminal panes', () => {
       status: 'starting', spawning: true,
       closing: false, closeStarted: false, startInFlight: false,
       stopRequested: false, ptyStarted: false, term: null, fit: null,
+      terminalController: {
+        prepareForPtyStart: () => undefined,
+        markPtyStarted: () => Promise.resolve(false),
+        stopPtyDelivery: () => undefined,
+        dispose: () => { controllerDisposals += 1; },
+      },
     };
     const state = { threads: [thread], activeThreadId: thread.id };
-    const pendingDataBuffers = new Map([[thread.id, [new Uint8Array([1])]]]);
     let stopCalls = 0;
     const invoke = (command: string) => {
       if (command === 'pty_start') return start.promise;
@@ -897,7 +914,6 @@ describe('Tauri physical terminal panes', () => {
         ...spawnPtyRuntimeDeps,
         invoke,
         isLiveThread,
-        pendingDataBuffers,
         syncThreadPaneMetadata: () => undefined,
         refreshSidebar: () => undefined,
         refreshTabs: () => undefined,
@@ -915,7 +931,6 @@ describe('Tauri physical terminal panes', () => {
       findThread: () => thread,
       detachThreadPane: () => null,
       retainFileFocusAfterThreadRemoval: () => false,
-      pendingDataBuffers,
       stopThreadPty,
       state,
       renderPaneWorkspace: () => undefined,
@@ -929,10 +944,10 @@ describe('Tauri physical terminal panes', () => {
     start.resolve();
     await expect(starting).resolves.toBe(false);
     expect(stopCalls).toBe(1);
+    expect(controllerDisposals).toBe(1);
     expect(thread.status).toBe('starting');
     expect(thread.startInFlight).toBe(false);
     expect(state.threads).toEqual([]);
-    expect(pendingDataBuffers.has(thread.id)).toBe(false);
   });
 
   it('retains file focus when closing the active underlying pane', () => {

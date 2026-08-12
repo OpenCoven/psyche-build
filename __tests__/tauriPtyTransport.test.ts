@@ -1,6 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import {
+  createPtyClient,
+  disposePtyClient,
+  routePtyBatch,
+  type PtyDataBatch,
+} from '../native/desktop/psyche-build-tauri/web/runtime/pty-client';
 
 const source = readFileSync(
   resolve(process.cwd(), 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'),
@@ -293,5 +299,185 @@ describe('native PTY transport module contract', () => {
       expect(definition).not.toMatch(/Vec\s*<\s*u8\s*>|Arc\s*<\s*\[\s*u8\s*\]\s*>|\bInstant\b/);
       expect(definition).not.toMatch(/\b(?:data|payload)\s*:/);
     }
+  });
+});
+
+function batch(
+  threadId: string,
+  sequence: number,
+  bytes: number[] = [sequence],
+  overrides: Partial<PtyDataBatch> = {},
+): PtyDataBatch {
+  return {
+    threadId,
+    sequence,
+    bytes,
+    byteCount: bytes.length,
+    ...overrides,
+  };
+}
+
+const runtimeThreadIds = new Set<string>();
+
+afterEach(() => {
+  runtimeThreadIds.forEach((threadId) => disposePtyClient(threadId));
+  runtimeThreadIds.clear();
+  vi.restoreAllMocks();
+});
+
+describe('typed frontend PTY batch consumer', () => {
+  test('accepts only the exact next sequence for the owning thread', () => {
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const invoke = vi.fn(async () => undefined);
+    runtimeThreadIds.add('thread-a');
+    createPtyClient({
+      threadId: 'thread-a',
+      invoke,
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+      },
+    });
+
+    expect(routePtyBatch(batch('thread-a', 1, [1, 2]))).toBe(true);
+    expect(routePtyBatch(batch('other-thread', 2, [9]))).toBe(false);
+    expect(routePtyBatch(batch('thread-a', 3, [3]))).toBe(false);
+    expect(routePtyBatch(batch('thread-a', 2, [4]))).toBe(true);
+    expect(routePtyBatch(batch('thread-a', 2, [5]))).toBe(false);
+
+    expect(writes).toHaveLength(1);
+    expect(Array.from(writes[0].bytes)).toEqual([1, 2]);
+
+    writes[0].callback();
+
+    expect(writes).toHaveLength(2);
+    expect(Array.from(writes[1].bytes)).toEqual([4]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenNthCalledWith(1, 'pty_ack', {
+      threadId: 'thread-a',
+      thread_id: 'thread-a',
+      sequence: 1,
+    });
+  });
+
+  test('keeps at most one xterm write active and bounds pending delivery to native two-in-flight', () => {
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    runtimeThreadIds.add('thread-b');
+    createPtyClient({
+      threadId: 'thread-b',
+      invoke: vi.fn(async () => undefined),
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+      },
+    });
+
+    expect(routePtyBatch(batch('thread-b', 1, [1]))).toBe(true);
+    expect(routePtyBatch(batch('thread-b', 2, [2]))).toBe(true);
+    expect(routePtyBatch(batch('thread-b', 3, [3]))).toBe(false);
+    expect(writes).toHaveLength(1);
+
+    writes[0].callback();
+
+    expect(writes).toHaveLength(2);
+    expect(Array.from(writes[1].bytes)).toEqual([2]);
+    expect(routePtyBatch(batch('thread-b', 3, [3]))).toBe(true);
+    expect(writes).toHaveLength(2);
+  });
+
+  test('acknowledges only from the xterm write completion callback', async () => {
+    const writes: Array<{ callback: () => void }> = [];
+    const invoke = vi.fn(async () => undefined);
+    runtimeThreadIds.add('thread-c');
+    createPtyClient({
+      threadId: 'thread-c',
+      invoke,
+      write(_bytes, callback) {
+        writes.push({ callback });
+      },
+    });
+
+    expect(routePtyBatch(batch('thread-c', 1, [7]))).toBe(true);
+    expect(invoke).not.toHaveBeenCalled();
+
+    writes[0].callback();
+    await Promise.resolve();
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith('pty_ack', {
+      threadId: 'thread-c',
+      thread_id: 'thread-c',
+      sequence: 1,
+    });
+  });
+
+  test('does not acknowledge when xterm write throws', async () => {
+    const invoke = vi.fn(async () => undefined);
+    runtimeThreadIds.add('thread-d');
+    createPtyClient({
+      threadId: 'thread-d',
+      invoke,
+      write() {
+        throw new Error('write failed');
+      },
+    });
+
+    expect(routePtyBatch(batch('thread-d', 1, [8]))).toBe(false);
+    await Promise.resolve();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  test('syncs visibility only on actual changes and resynchronizes after PTY start', async () => {
+    const invoke = vi.fn(async () => undefined);
+    runtimeThreadIds.add('thread-e');
+    const client = createPtyClient({
+      threadId: 'thread-e',
+      invoke,
+      write() {},
+      visible: true,
+    });
+
+    await client.setVisible(true);
+    await client.setVisible(false);
+    expect(invoke).not.toHaveBeenCalled();
+
+    await client.markPtyStarted();
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenNthCalledWith(1, 'pty_set_visibility', {
+      threadId: 'thread-e',
+      thread_id: 'thread-e',
+      visible: false,
+    });
+
+    await client.setVisible(false);
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    await client.setVisible(true);
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke).toHaveBeenNthCalledWith(2, 'pty_set_visibility', {
+      threadId: 'thread-e',
+      thread_id: 'thread-e',
+      visible: true,
+    });
+  });
+
+  test('disposal removes pane routing and suppresses later acknowledgements from stale callbacks', async () => {
+    const writes: Array<{ callback: () => void }> = [];
+    const invoke = vi.fn(async () => undefined);
+    runtimeThreadIds.add('thread-f');
+    createPtyClient({
+      threadId: 'thread-f',
+      invoke,
+      write(_bytes, callback) {
+        writes.push({ callback });
+      },
+    });
+
+    expect(routePtyBatch(batch('thread-f', 1, [1]))).toBe(true);
+    expect(disposePtyClient('thread-f')).toBe(true);
+    expect(routePtyBatch(batch('thread-f', 2, [2]))).toBe(false);
+
+    writes[0].callback();
+    await Promise.resolve();
+
+    expect(invoke).not.toHaveBeenCalled();
   });
 });

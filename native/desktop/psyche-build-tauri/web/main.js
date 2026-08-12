@@ -38,8 +38,16 @@
     );
     return;
   }
+  if (!window.PsycheRuntime ||
+      typeof window.PsycheRuntime.createPtyClient !== "function" ||
+      typeof window.PsycheRuntime.routePtyBatch !== "function" ||
+      typeof window.PsycheRuntime.disposePtyClient !== "function") {
+    showBootError("PTY runtime bundle missing. Run `pnpm --dir native/desktop/psyche-build-tauri build:web`.");
+    return;
+  }
 
   var statusController = null;
+  var ptyRuntime = window.PsycheRuntime;
   var invokeNative = window.__TAURI__.core.invoke;
   var listen = window.__TAURI__.event.listen;
   var opener = window.__TAURI__.opener || null;
@@ -144,6 +152,7 @@
       if (typeof refreshStatusController === "function") refreshStatusController();
     }
     syncPaneMetricsVisibility();
+    syncAllPtyVisibility();
   }
 
   /**
@@ -1367,23 +1376,60 @@
   // 5. PTY event plumbing
   // ============================================================
 
-  var pendingDataBuffers = new Map(); // threadId → array of Uint8Array (pre-mount)
+  function threadPtyVisible(thread) {
+    return !!thread &&
+      !thread.hidden &&
+      !document.hidden &&
+      terminalHost &&
+      terminalHost.isConnected &&
+      !terminalHost.hidden &&
+      thread.pane &&
+      thread.pane.isConnected;
+  }
 
-  listen("pty:data", function (event) {
-    var payload = event.payload || {};
-    if (!payload.thread_id || !payload.bytes) return;
-    var bytes = new Uint8Array(payload.bytes);
-    var thread = findThread(payload.thread_id);
-    if (!isLiveThread(thread)) return;
-    thread.lastOutputAt = Date.now();
-    if (typeof noteStatusPtyData === "function") noteStatusPtyData(payload.thread_id, bytes);
-    if (thread.term) {
-      thread.term.write(bytes);
-    } else {
-      var arr = pendingDataBuffers.get(payload.thread_id) || [];
-      arr.push(bytes);
-      pendingDataBuffers.set(payload.thread_id, arr);
+  function ensureThreadPtyController(thread, explicitTerm) {
+    if (!thread || thread.kind === "web") return null;
+    if (thread.terminalController) return thread.terminalController;
+    var term = explicitTerm || thread.term;
+    if (!term || typeof term.write !== "function") return null;
+    var controller = ptyRuntime.createPtyClient({
+      threadId: thread.id,
+      invoke: invoke,
+      visible: threadPtyVisible(thread),
+      write: function (bytes, callback) {
+        term.write(bytes, callback);
+      },
+    });
+    thread.terminalController = controller;
+    thread.ptyClient = controller;
+    return controller;
+  }
+
+  function syncThreadPtyVisibility(thread) {
+    if (!thread || !thread.terminalController ||
+        typeof thread.terminalController.setVisible !== "function") {
+      return Promise.resolve(false);
     }
+    return thread.terminalController.setVisible(threadPtyVisible(thread)).catch(function () {
+      return false;
+    });
+  }
+
+  function syncAllPtyVisibility() {
+    state.threads.forEach(function (thread) {
+      syncThreadPtyVisibility(thread);
+    });
+  }
+
+  listen("pty:data-batch", function (event) {
+    var payload = event.payload || {};
+    if (!payload.threadId || !payload.bytes) return;
+    var thread = findThread(payload.threadId);
+    if (!isLiveThread(thread)) return;
+    if (!ptyRuntime.routePtyBatch(payload)) return;
+    var bytes = new Uint8Array(payload.bytes);
+    thread.lastOutputAt = Date.now();
+    if (typeof noteStatusPtyData === "function") noteStatusPtyData(payload.threadId, bytes);
     schedulePaneMetricsRefresh(thread, 1200);
   }).catch(function () {});
 
@@ -1895,6 +1941,8 @@
       exitDuringStart: false,
       stopRequested: false,
       ptyStarted: false,
+      terminalController: null,
+      ptyClient: null,
       metricsGeneration: 0,
       metrics: launch.launchKind === "coven-chat" && launch.covenSessionId
         ? loadingPaneMetrics(launch)
@@ -1990,6 +2038,10 @@
       return Promise.resolve(false);
     }
     var launch = thread.launch;
+    var terminalController = ensureThreadPtyController(thread);
+    if (terminalController && typeof terminalController.prepareForPtyStart === "function") {
+      terminalController.prepareForPtyStart();
+    }
     thread.lastOutputAt = 0;
     thread.isWorking = false;
     thread.sidebarStatusKey = "busy";
@@ -2028,7 +2080,6 @@
     }).then(function () {
       thread.startInFlight = false;
       if (!isLiveThread(thread)) {
-        pendingDataBuffers.delete(thread.id);
         return stopThreadPty(thread).then(function () { return false; });
       }
       if (thread.exitDuringStart) {
@@ -2044,6 +2095,10 @@
       thread.ptyStarted = true;
       thread.status = "running";
       thread.spawning = false;
+      if (thread.terminalController &&
+          typeof thread.terminalController.markPtyStarted === "function") {
+        thread.terminalController.markPtyStarted().catch(function () {});
+      }
       syncThreadPaneMetadata(thread);
       refreshSidebar();
       refreshTabs();
@@ -2051,18 +2106,11 @@
         setProjectStatus(findProject(thread.projectId), "ok");
       }
       if (launch.launchKind === "coven-chat") refreshCovenSessions();
-      // Flush any data that arrived before the xterm was mounted.
-      var pending = pendingDataBuffers.get(thread.id);
-      if (pending && thread.term) {
-        for (var i = 0; i < pending.length; i++) thread.term.write(pending[i]);
-        pendingDataBuffers.delete(thread.id);
-      }
       return true;
     }).catch(function (err) {
       thread.startInFlight = false;
       var msg = String(err);
       if (!isLiveThread(thread)) {
-        pendingDataBuffers.delete(thread.id);
         if (msg.indexOf("already running") !== -1) {
           thread.ptyStarted = true;
           return stopThreadPty(thread).then(function () { return false; });
@@ -2083,7 +2131,6 @@
       if (msg.indexOf("cleanup in progress") !== -1) {
         thread.ptyStarted = false;
         if (thread.terminalController) thread.terminalController.stopPtyDelivery();
-        thread.ptyClient = null;
         thread.status = "exited";
         thread.finishedAt = Date.now();
         thread.exitCode = null;
@@ -2094,15 +2141,14 @@
         thread.ptyStarted = true;
         thread.status = "running";
         thread.stopRequested = false;
+        if (thread.terminalController &&
+            typeof thread.terminalController.markPtyStarted === "function") {
+          thread.terminalController.markPtyStarted().catch(function () {});
+        }
         if (state.activeThreadId === thread.id) {
           setProjectStatus(findProject(thread.projectId), "ok");
         }
         if (launch.launchKind === "coven-chat") refreshCovenSessions();
-        var pending = pendingDataBuffers.get(thread.id);
-        if (pending && thread.term) {
-          for (var i = 0; i < pending.length; i++) thread.term.write(pending[i]);
-          pendingDataBuffers.delete(thread.id);
-        }
       } else {
         thread.ptyStarted = false;
         thread.status = "failed";
@@ -2757,6 +2803,8 @@
 
     thread.term = term;
     thread.fit = fit;
+    ensureThreadPtyController(thread, term);
+    syncThreadPtyVisibility(thread);
   }
 
   function applyPaneStatus(pane, status) {
@@ -3369,6 +3417,7 @@
     if (!layout || !layout.root) {
       renderTerminalEmptyState();
       renderPaneMinimap(layout, findOpenFile(state.activeFileId));
+      syncAllPtyVisibility();
       return;
     }
     var root = effectivePaneRoot(layout);
@@ -3394,6 +3443,7 @@
     });
     renderSetPickBar();
     renderPaneMinimap(layout, findOpenFile(state.activeFileId));
+    syncAllPtyVisibility();
     scheduleVisiblePaneFit();
     requestAnimationFrame(syncBrowserBounds);
   }
@@ -3736,7 +3786,11 @@
       thread.metricsRefreshTimer = 0;
     }
     if (typeof noteStatusActivity === "function") noteStatusActivity();
-    pendingDataBuffers.delete(id);
+    if (thread.terminalController && thread.terminalController.dispose) {
+      try { thread.terminalController.dispose(); } catch (_) {}
+    }
+    thread.terminalController = null;
+    thread.ptyClient = null;
     // A set must never point at a thread that no longer exists, or scoping the
     // canvas to it would silently show fewer panes than it claims.
     forgetThreadInSets(id);
@@ -6301,6 +6355,7 @@
     fileViewEl.hidden = false;
     terminalHost.hidden = true;
     syncPaneMetricsVisibility();
+    syncAllPtyVisibility();
     renderPaneMinimap(activePaneLayout(), file);
     return true;
   }
@@ -6312,6 +6367,7 @@
     fileViewEl.hidden = true;
     terminalHost.hidden = false;
     syncPaneMetricsVisibility();
+    syncAllPtyVisibility();
   }
 
   async function returnFromFileFocus(explicitThreadId, maximizeDestination) {
