@@ -9,8 +9,8 @@
     "preview": "vite build && vite preview"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "4.1.18",
-    "tailwindcss": "4.1.18",
-    "vite": "6.4.2"
+    "@tailwindcss/vite": "4.3.3",
+    "tailwindcss": "4.3.3",
+    "vite": "8.2.1"
   }
 }

@@ -80,10 +80,11 @@ export class PaneWorkerManager {
 
       // Handle worker errors
       worker.on('error', (error) => {
+        const workerError = error instanceof Error ? error : new Error(String(error));
         const msg = `Worker ${pane.id} error`;
-        console.error(msg, error);
-        LogService.getInstance().error(msg, 'PaneWorkerManager', pane.id, error);
-        this.handleWorkerError(pane.id, error);
+        console.error(msg, workerError);
+        LogService.getInstance().error(msg, 'PaneWorkerManager', pane.id, workerError);
+        this.handleWorkerError(pane.id, workerError);
       });
 
       // Handle worker exit

@@ -1503,17 +1503,21 @@ describe('native Coven launch routing', () => {
 
   it('adopts an already-running Rust PTY response as the live retry', async () => {
     const writes: Uint8Array[] = [];
+    const acknowledgements: string[] = [];
     const thread = {
       id: 'thread-1', projectId: 'project', status: 'failed', spawning: false,
       closing: false, closeStarted: false, startInFlight: false, stopRequested: true,
       ptyStarted: false, launch: {
         command: '/bin/coven', args: ['code', '--session-id', COVEN_SESSION_ID], env: {}, projectRoot: '/repo', cwd: '/repo',
         launchKind: 'coven-chat', covenSessionId: COVEN_SESSION_ID, metricsProvider: 'coven',
-      }, term: { cols: 120, rows: 40, write: (value: Uint8Array) => writes.push(value) },
+      }, term: { cols: 120, rows: 40, write: (value: Uint8Array, callback?: () => void) => { writes.push(value); callback?.(); } },
     };
     const state = { threads: [thread], activeThreadId: thread.id };
     const buffered = new Uint8Array([1, 2, 3]);
-    const pendingDataBuffers = new Map([[thread.id, [buffered]]]);
+    const pendingDataBuffers = new Map([[thread.id, [{
+      bytes: buffered,
+      acknowledge: () => acknowledgements.push('acked'),
+    }]]]);
     const projectLevels: string[] = [];
     const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
       functionSource('spawnPty'), {
@@ -1538,6 +1542,7 @@ describe('native Coven launch routing', () => {
     expect(thread.ptyStarted).toBe(true);
     expect(thread.stopRequested).toBe(false);
     expect(writes).toEqual([buffered]);
+    expect(acknowledgements).toEqual(['acked']);
     expect(pendingDataBuffers.has(thread.id)).toBe(false);
     expect(projectLevels).toEqual(['ok']);
   });
