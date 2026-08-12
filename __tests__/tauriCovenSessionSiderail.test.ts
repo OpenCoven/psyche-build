@@ -2626,6 +2626,56 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.closeThread).not.toHaveBeenCalled();
     });
 
+    it('makes a non-roving × target the sole roving item after timeout', async () => {
+      const renderer = createRenderer({
+        threads: [
+          { id: 'first', projectId: 'alpha', name: 'First', status: 'running' },
+          { id: 'second', projectId: 'alpha', name: 'Second', status: 'running' },
+        ],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row').find(
+        (candidate) => candidate.dataset.threadId === 'second',
+      )!;
+      expect(row.getAttribute('tabindex')).toBe('-1');
+
+      await row.querySelector('.session-close')?.emit('click');
+      vi.advanceTimersByTime(3000);
+
+      expect(renderer.document.activeElement === row).toBe(true);
+      expect(row.getAttribute('tabindex')).toBe('0');
+      expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
+        (item) => item.getAttribute('tabindex') === '0',
+      ).map((item) => item.dataset.treeKey)).toEqual([row.dataset.treeKey]);
+    });
+
+    it('makes a non-roving context-menu target the sole roving item after Escape', async () => {
+      const renderer = createRenderer({
+        threads: [
+          { id: 'first', projectId: 'alpha', name: 'First', status: 'running' },
+          { id: 'second', projectId: 'alpha', name: 'Second', status: 'running' },
+        ],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row').find(
+        (candidate) => candidate.dataset.threadId === 'second',
+      )!;
+
+      await row.emit('contextmenu');
+      const actions = renderer.openSessionContextMenu.mock.calls[0]?.[1] as Array<{
+        label: string;
+        run: () => void;
+      }>;
+      actions.find((action) => action?.label === 'Stop and close')?.run();
+      renderer.disarmSessionClose();
+
+      expect(renderer.document.activeElement === row).toBe(true);
+      expect(row.getAttribute('tabindex')).toBe('0');
+      expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
+        (item) => item.getAttribute('tabindex') === '0',
+      ).map((item) => item.dataset.treeKey)).toEqual([row.dataset.treeKey]);
+    });
+
     it('drops an armed confirm when the sidebar re-renders under it', () => {
       const { renderer, wrapper, row } = armed();
 
@@ -2643,6 +2693,22 @@ describe('Tauri Coven session project rail', () => {
       // The stale interval must not resurrect anything after the re-render.
       vi.advanceTimersByTime(5000);
       expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
+
+    it('does not steal search focus when rerender disarms confirmation', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+      await row.querySelector('.session-close')?.emit('click');
+      expect(row.querySelector('.session-close-confirm')).not.toBeNull();
+
+      renderer.sessionSearchEl.focus();
+      renderer.render();
+
+      expect(renderer.document.activeElement === renderer.sessionSearchEl).toBe(true);
+      expect(renderer.sessionListEl.querySelector('.session-close-confirm')).toBeNull();
     });
   });
 

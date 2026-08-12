@@ -4758,7 +4758,11 @@
     armed.confirm.remove();
     if (armed.close.isConnected) armed.close.hidden = false;
     if ((!options || options.restoreFocus !== false) && armed.host.isConnected) {
-      armed.host.focus();
+      if (armed.host.dataset && armed.host.dataset.treeItem) {
+        focusSessionTreeItem(armed.host);
+      } else {
+        armed.host.focus();
+      }
     }
   }
 
@@ -5402,7 +5406,10 @@
     // A re-render would strand an armed confirm on a row that no longer exists.
     // Carry its tree identity through the rebuild so focus lands on the
     // replacement row instead of the soon-to-be-detached host.
-    var armedCloseTreeKey = armedSessionClose ? armedSessionClose.treeKey : "";
+    var armedCloseTreeKey = armedSessionClose &&
+      armedSessionClose.confirm.contains(document.activeElement)
+      ? armedSessionClose.treeKey
+      : "";
     disarmSessionClose({ restoreFocus: false });
     function targetWithin(event, element) {
       for (var node = event && event.target; node; node = node.parentNode) {
