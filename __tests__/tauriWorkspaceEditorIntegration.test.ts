@@ -373,11 +373,11 @@ describe('native CodeMirror workspace editor surface', () => {
       'diffCache.deleteWhere(function (key) { return key.startsWith(projectId + "\\0"); })'
     );
     expect(extractFunctionSource(mainJs, 'refreshDiffs')).toMatch(
-      /invalidateProjectDiffs\(project\.id\)[\s\S]*renderGitSurface\(\)/
+      /invalidateProjectDiffs\(project\.id\)[\s\S]*renderGitSurface\(\{ force: true \}\)/
     );
     expect(extractFunctionSource(mainJs, 'renderGitSurface')).toContain('gitPaneIsVisible(project)');
     expect(extractFunctionSource(mainJs, 'performFileSave')).toMatch(
-      /invalidateProjectDiffs\(project\.id\);[\s\S]*gitPaneIsVisible\(project\)[\s\S]*renderGitSurface\(\);/
+      /invalidateProjectDiffs\(project\.id\);[\s\S]*gitPaneIsVisible\(project\)[\s\S]*renderGitSurface\(\{ force: true \}\);/
     );
   });
 

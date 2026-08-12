@@ -2140,7 +2140,7 @@
       canvasThreadIds().indexOf(thread.id) !== -1;
   }
 
-  function renderGitSurface() {
+  function renderGitSurface(options) {
     var project = activeProject();
     if (!gitPaneIsVisible(project)) {
       suspendGitRequests();
@@ -2149,7 +2149,8 @@
     var projectId = project.id;
     var workspaceRoot = activeWorkspaceRoot(project);
     var scopeKey = projectId + "\0" + workspaceRoot;
-    if (gitRefreshFlight && gitRefreshFlight.scopeKey === scopeKey) {
+    if (gitRefreshFlight && gitRefreshFlight.scopeKey === scopeKey &&
+        !(options && options.force)) {
       return gitRefreshFlight.promise;
     }
 
@@ -6654,7 +6655,7 @@
       var editedWorkspaceRoot = file.workspaceRoot || project.root;
       if (activeProject() && activeProject().id === project.id &&
           activeWorkspaceRoot(project) === editedWorkspaceRoot &&
-          gitPaneIsVisible(project)) renderGitSurface();
+          gitPaneIsVisible(project)) renderGitSurface({ force: true });
       setTimeout(function () {
         if (!file.dirty && file.saveState === "saved") {
           file.saveState = "clean";
@@ -8589,7 +8590,7 @@
   function refreshDiffs() {
     var project = activeProject();
     if (project) invalidateProjectDiffs(project.id);
-    renderGitSurface();
+    renderGitSurface({ force: true });
   }
 
   onRailClick("diffs-refresh", refreshDiffs);
@@ -8607,7 +8608,6 @@
     } catch (err) {
       if (!gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration) ||
           !gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
-      setGitChangesCount(0);
       panelMessage(gitViewEl, String(err), "panel-error");
       return;
     }
@@ -8677,7 +8677,7 @@
     });
   }
 
-  onRailClick("git-refresh", function () { renderGitSurface(); });
+  onRailClick("git-refresh", function () { renderGitSurface({ force: true }); });
   onRailClick("git-open-remote", function () {
     if (gitRemoteWebUrl && openUrl) openUrl(gitRemoteWebUrl).catch(function () {});
   });

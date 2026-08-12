@@ -555,6 +555,122 @@ describe('Tauri workspace panels', () => {
       expect(functionSource('reopenThread')).toContain('renderGitSurface()');
     });
 
+    it('supersedes pending history when Changes requests an authoritative refresh', async () => {
+      const oldLog = deferred<void>();
+      const project = { id: 'project-a', root: '/worktree-a' };
+      let refreshGeneration = 0;
+      let gitGeneration = 0;
+      let diffGeneration = 0;
+      let detailGeneration = 0;
+      let statusCalls = 0;
+      const paints: string[] = [];
+      const refreshGate = {
+        next: () => ++refreshGeneration,
+        isCurrent: (candidate: number) => candidate === refreshGeneration,
+      };
+      const renderGitSurface = Function(
+        'activeProject', 'activeWorkspaceRoot', 'gitPaneIsVisible', 'invoke',
+        'gitRefreshRequestGate', 'gitPanelRequestGate', 'diffPanelRequestGate',
+        'diffRequestGate', 'setGitChangesCount', 'prepareGitSurfaceRefresh',
+        'gitSurfaceRequestMatches', 'renderGitPanel', 'renderDiffsPanel', 'renderGitSurfaceError',
+        `"use strict";
+         var gitRefreshFlight = null;
+         return (${functionSource('renderGitSurface')});`,
+      )(
+        () => project,
+        (value: typeof project) => value.root,
+        () => true,
+        () => {
+          statusCalls += 1;
+          return Promise.resolve({
+            marker: statusCalls === 1 ? 'A' : 'B',
+            is_repo: true,
+            files: statusCalls === 1 ? [{ path: 'old.ts' }] : [{ path: 'new.ts' }],
+          });
+        },
+        refreshGate,
+        { next: () => ++gitGeneration },
+        { next: () => ++diffGeneration },
+        { next: () => ++detailGeneration },
+        () => undefined,
+        () => undefined,
+        (_projectId: string, _root: string, generation: number) =>
+          refreshGate.isCurrent(generation),
+        async (
+          _project: unknown,
+          _root: string,
+          status: { marker: string },
+          _gitGeneration: number,
+          generation: number,
+        ) => {
+          if (status.marker === 'A') await oldLog.promise;
+          if (refreshGate.isCurrent(generation)) paints.push(`commit:${status.marker}`);
+        },
+        (
+          _project: unknown,
+          _root: string,
+          status: { marker: string },
+        ) => { paints.push(`changes:${status.marker}`); },
+        () => undefined,
+      ) as (options?: { force?: boolean }) => Promise<void>;
+      const refreshDiffs = Function(
+        'activeProject', 'invalidateProjectDiffs', 'renderGitSurface',
+        `"use strict"; return (${functionSource('refreshDiffs')});`,
+      )(
+        () => project,
+        () => undefined,
+        renderGitSurface,
+      ) as () => void;
+
+      const stale = renderGitSurface();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(paints).toEqual(['changes:A']);
+
+      refreshDiffs();
+      expect(statusCalls).toBe(2);
+      const current = renderGitSurface();
+      await current;
+      expect(paints).toEqual(['changes:A', 'changes:B', 'commit:B']);
+
+      oldLog.resolve();
+      await stale;
+      expect(paints).toEqual(['changes:A', 'changes:B', 'commit:B']);
+    });
+
+    it('keeps a successful status badge when history loading fails', async () => {
+      let badge = 3;
+      const messages: string[] = [];
+      const renderGitPanel = Function(
+        'gitViewEl', 'gitSurfaceRequestMatches', 'gitPanelRequestMatches',
+        'invoke', 'setGitChangesCount', 'panelMessage',
+        `"use strict"; return (${functionSource('renderGitPanel')});`,
+      )(
+        {},
+        () => true,
+        () => true,
+        async () => { throw new Error('history unavailable'); },
+        (count: number) => { badge = count; },
+        (_element: unknown, message: string) => { messages.push(message); },
+      ) as (
+        project: { id: string },
+        root: string,
+        status: { is_repo: boolean; files: unknown[] },
+        panelGeneration: number,
+        refreshGeneration: number,
+      ) => Promise<void>;
+
+      await renderGitPanel(
+        { id: 'project-a' },
+        '/worktree-a',
+        { is_repo: true, files: [{}, {}, {}] },
+        1,
+        1,
+      );
+      expect(messages).toEqual(['Error: history unavailable']);
+      expect(badge).toBe(3);
+    });
+
     it('scopes lookup to project and worktree', () => {
       const source = functionSource('gitPaneThread');
       expect(source).toContain('thread.projectId === projectId');
