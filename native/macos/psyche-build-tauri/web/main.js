@@ -7488,12 +7488,14 @@
     syncComposerChrome();
   });
   commandInput.addEventListener("keydown", function (e) {
+    var sessionSearchOpen = commandInput.value.charAt(0) === "?";
     if (paletteVisible) {
       if (e.key === "ArrowDown") {
         if (paletteFiltered.length > 0) {
           paletteIndex = (paletteIndex + 1) % paletteFiltered.length;
           renderPalette();
         }
+        if (sessionSearchOpen) e.stopPropagation();
         e.preventDefault();
         return;
       }
@@ -7502,17 +7504,20 @@
           paletteIndex = (paletteIndex - 1 + paletteFiltered.length) % paletteFiltered.length;
           renderPalette();
         }
+        if (sessionSearchOpen) e.stopPropagation();
         e.preventDefault();
         return;
       }
-      if (e.key === "Enter" && commandInput.value.charAt(0) === "?") {
+      if (e.key === "Enter" && sessionSearchOpen) {
+        e.stopPropagation();
         e.preventDefault();
         var sessionPick = paletteFiltered[paletteIndex];
         if (sessionPick) runPalettePick(sessionPick);
         return;
       }
       if (e.key === "Tab") {
-        if (commandInput.value.charAt(0) === "?") {
+        if (sessionSearchOpen) {
+          e.stopPropagation();
           e.preventDefault();
           return;
         }
@@ -7524,7 +7529,10 @@
         return;
       }
       if (e.key === "Escape") {
-        if (commandInput.value.charAt(0) === "?") commandInput.value = "";
+        if (sessionSearchOpen) {
+          commandInput.value = "";
+          e.stopPropagation();
+        }
         hidePalette();
         syncComposerChrome();
         commandInput.focus();

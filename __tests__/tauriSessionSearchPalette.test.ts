@@ -84,6 +84,56 @@ function ruleBlock(source: string, selector: string) {
   return match?.[2] ?? '';
 }
 
+function keydownHarness(value: string) {
+  let handler: ((event: {
+    key: string;
+    preventDefault: () => void;
+    stopPropagation: () => void;
+  }) => void) | undefined;
+  const commandInput = {
+    value,
+    addEventListener(name: string, listener: typeof handler) {
+      if (name === 'keydown') handler = listener;
+    },
+    focus() {},
+  };
+  Function(
+    'commandInput',
+    'renderPalette',
+    'runPalettePick',
+    'hidePalette',
+    'syncComposerChrome',
+    'runCommand',
+    `"use strict";
+      var paletteVisible = true;
+      var paletteFiltered = [{ kind: "session", cmd: "pick" }];
+      var paletteIndex = 0;
+      ${listenerSource(mainJs, 'keydown')}
+    `,
+  )(
+    commandInput,
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+  );
+  if (!handler) throw new Error('keydown listener was not registered');
+
+  return {
+    press(key: string) {
+      let defaultPrevented = false;
+      let propagationStopped = false;
+      handler!({
+        key,
+        preventDefault() { defaultPrevented = true; },
+        stopPropagation() { propagationStopped = true; },
+      });
+      return { defaultPrevented, propagationStopped };
+    },
+  };
+}
+
 describe('Tauri composer session search palette', () => {
   it('exposes the composer palette as an accessible listbox above the composer', () => {
     expect(indexHtml).toMatch(
@@ -188,20 +238,32 @@ describe('Tauri composer session search palette', () => {
     const runCommand = functionSource(mainJs, 'runCommand');
 
     expect(input).toContain('commandInput.value.charAt(0)');
+    expect(keydown).toContain('var sessionSearchOpen = commandInput.value.charAt(0) === "?";');
     expect(keydown).toMatch(/e\.key === "ArrowDown"[\s\S]*paletteFiltered\.length > 0/);
     expect(keydown).toMatch(/e\.key === "ArrowUp"[\s\S]*paletteFiltered\.length > 0/);
     expect(keydown).toMatch(
-      /e\.key === "Enter"[\s\S]*commandInput\.value\.charAt\(0\) === "\?"[\s\S]*e\.preventDefault\(\)[\s\S]*return;/,
+      /e\.key === "Enter"[\s\S]*sessionSearchOpen[\s\S]*e\.stopPropagation\(\)[\s\S]*e\.preventDefault\(\)[\s\S]*return;/,
     );
     expect(keydown).toMatch(
-      /e\.key === "Tab"[\s\S]*commandInput\.value\.charAt\(0\) === "\?"[\s\S]*e\.preventDefault\(\)[\s\S]*return;/,
+      /e\.key === "Tab"[\s\S]*sessionSearchOpen[\s\S]*e\.stopPropagation\(\)[\s\S]*e\.preventDefault\(\)[\s\S]*return;/,
     );
     expect(keydown).toMatch(
-      /e\.key === "Escape"[\s\S]*commandInput\.value = ""[\s\S]*hidePalette\(\)[\s\S]*syncComposerChrome\(\)[\s\S]*commandInput\.focus\(\)/,
+      /e\.key === "Escape"[\s\S]*sessionSearchOpen[\s\S]*commandInput\.value = ""[\s\S]*e\.stopPropagation\(\)[\s\S]*hidePalette\(\)[\s\S]*syncComposerChrome\(\)[\s\S]*commandInput\.focus\(\)/,
     );
     expect(runCommand).toMatch(
       /if\s*\(trimmed\.charAt\(0\) === "\?"\)\s*\{[\s\S]*commandInput\.value = trimmed;[\s\S]*openPalette\(trimmed, true\);[\s\S]*syncComposerChrome\(\);[\s\S]*return;/,
     );
+  });
+
+  it('stops every captured search key without changing non-search palette propagation', () => {
+    for (const key of ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape']) {
+      const searchEvent = keydownHarness('? session').press(key);
+      expect(searchEvent.defaultPrevented, key).toBe(true);
+      expect(searchEvent.propagationStopped, key).toBe(true);
+
+      const commandEvent = keydownHarness('/command').press(key);
+      expect(commandEvent.propagationStopped, key).toBe(false);
+    }
   });
 
   it('announces live result counts and returns focus after session activation', () => {
