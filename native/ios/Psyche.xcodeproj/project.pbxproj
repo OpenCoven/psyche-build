@@ -47,6 +47,7 @@
 		A7E6CEE49BA3FDEC13794413 /* SecureStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79423F6893871C3D7AD45E8C /* SecureStore.swift */; };
 		A848D729CFF3700011AAE0B3 /* CreatePaneSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492A51919A54966E13C891B5 /* CreatePaneSheet.swift */; };
 		AB1FC89CB2954D125308A9E5 /* PsycheTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CEEAF9D0EBB558BCAABF4E7 /* PsycheTransport.swift */; };
+		AB2A99048BCFA55F1CCD1840 /* BoundedAsyncSignal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77D00F2DD54B9AA4702860A8 /* BoundedAsyncSignal.swift */; };
 		ADE2364200253F66FF3F60A5 /* NowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40D4A071246B0EBEC1668CCE /* NowView.swift */; };
 		B28AA7E56F8C0B0EADACA6C6 /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B01F85780ECB7DA2A3933F1 /* AppModelTests.swift */; };
 		B3A62E2DE6A3F7B9E94D8936 /* CockpitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0208B0729C5558A164DD1556 /* CockpitView.swift */; };
@@ -62,6 +63,7 @@
 		C5172D7B0FA837EEAC936A98 /* CreatePaneFormTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C422F47C586CD7CE3F0CCC6 /* CreatePaneFormTests.swift */; };
 		C5705019D0B13652CECE4667 /* ProtocolVersions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E78871160AA42DBF2E794D0 /* ProtocolVersions.swift */; };
 		C7F239519FB92079A04D842E /* ControlRequestClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A673F1BEBAB99E38B91C69D /* ControlRequestClientTests.swift */; };
+		CA61A7A0760D5AE6CB5F1026 /* BoundedAsyncSignalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71FE54AF9D7DB661EA784079 /* BoundedAsyncSignalTests.swift */; };
 		CE215E59267AF66B3E88AF53 /* FixtureTerminalClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49080BA406F9229608D97834 /* FixtureTerminalClient.swift */; };
 		D1B3875E9E7646C48D686F83 /* PsycheAppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A406BA96351072FC1292B9B0 /* PsycheAppUITests.swift */; };
 		DB7C2CDBBCA833A09FE94734 /* TerminalKeyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0793EF81D5450CA68596792 /* TerminalKeyTests.swift */; };
@@ -167,6 +169,8 @@
 		6AB21E6A5478C2F4ED968A0F /* PsycheCoreTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PsycheCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6AC28DF81E9E1BE9886046B9 /* PsycheApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PsycheApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6C43E6A1E83A7A2553415A2E /* WorkspaceFixturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFixturesTests.swift; sourceTree = "<group>"; };
+		71FE54AF9D7DB661EA784079 /* BoundedAsyncSignalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedAsyncSignalTests.swift; sourceTree = "<group>"; };
+		77D00F2DD54B9AA4702860A8 /* BoundedAsyncSignal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedAsyncSignal.swift; sourceTree = "<group>"; };
 		79423F6893871C3D7AD45E8C /* SecureStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureStore.swift; sourceTree = "<group>"; };
 		7C422F47C586CD7CE3F0CCC6 /* CreatePaneFormTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreatePaneFormTests.swift; sourceTree = "<group>"; };
 		7D372D919A26B03B7D6759D5 /* BridgeMessagesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeMessagesTests.swift; sourceTree = "<group>"; };
@@ -393,6 +397,8 @@
 			isa = PBXGroup;
 			children = (
 				B6748125A581F028503863B5 /* BonjourHostDiscoveryTests.swift */,
+				77D00F2DD54B9AA4702860A8 /* BoundedAsyncSignal.swift */,
+				71FE54AF9D7DB661EA784079 /* BoundedAsyncSignalTests.swift */,
 				7D372D919A26B03B7D6759D5 /* BridgeMessagesTests.swift */,
 				A474688E992B73C52AC99E85 /* ConnectionManagerTests.swift */,
 				F82FFAD02EDDF3155266ACD4 /* ControlMessagesTests.swift */,
@@ -630,6 +636,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				946A093CAC513E842D70C35A /* BonjourHostDiscoveryTests.swift in Sources */,
+				AB2A99048BCFA55F1CCD1840 /* BoundedAsyncSignal.swift in Sources */,
+				CA61A7A0760D5AE6CB5F1026 /* BoundedAsyncSignalTests.swift in Sources */,
 				7DEED3179790CC8695C0AB79 /* BridgeMessagesTests.swift in Sources */,
 				875BFDD977CDD12127F8E5EA /* ConnectionManagerTests.swift in Sources */,
 				82F26E4C170DE2FB9134595C /* ControlMessagesTests.swift in Sources */,
