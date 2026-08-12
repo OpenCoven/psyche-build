@@ -6362,6 +6362,7 @@
       Boolean(explicitThreadId)
     );
     if (destinationId) {
+      if (!(await showTerminalView())) return false;
       if (!explicitThreadId) clearPassiveCovenPaneFocus();
       var layout = activePaneLayout();
       var leaf = layout && layout.root

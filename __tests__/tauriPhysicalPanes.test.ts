@@ -2015,6 +2015,32 @@ describe('Tauri physical terminal panes', () => {
       expect(layout.maximizedLeafId).toBeNull();
     });
 
+    it('preserves passive Coven return state when file exit is cancelled', async () => {
+      const state = { activeFileId: 'file', activeThreadId: 'coven' };
+      let sanitizes = 0;
+      let focuses = 0;
+      const returnFromFileFocus = compileFunction<
+        () => Promise<boolean>
+      >(functionSource('returnFromFileFocus'), {
+        state,
+        fileFocus: { returnThreadId: 'coven' },
+        findOpenFile: () => ({ id: 'file' }),
+        resolveFileFocusThreadId: () => 'shell',
+        showTerminalView: async () => false,
+        clearPassiveCovenPaneFocus: () => { sanitizes += 1; },
+        activePaneLayout: () => null,
+        PsychePanes,
+        focusThread: async () => { focuses += 1; return true; },
+        renderPaneMinimap: () => undefined,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+      });
+
+      await expect(returnFromFileFocus()).resolves.toBe(false);
+      expect(state).toEqual({ activeFileId: 'file', activeThreadId: 'coven' });
+      expect({ sanitizes, focuses }).toEqual({ sanitizes: 0, focuses: 0 });
+    });
+
     it('lists the active file before pane entries in the minimap helper', () => {
       const threads = new Map([
         ['thread-a', { id: 'thread-a', name: 'Agent', status: 'running' }],
