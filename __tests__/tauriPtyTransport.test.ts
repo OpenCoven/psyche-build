@@ -482,7 +482,9 @@ describe('typed frontend PTY batch consumer', () => {
 
   test('preserves one active xterm write across PTY generation reset', async () => {
     const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
-    const invoke = vi.fn(async () => undefined);
+    const invoke = vi.fn(
+      async (_command: string, _args: Record<string, unknown>) => undefined,
+    );
     runtimeThreadIds.add('thread-c-generation');
     const client = createPtyClient({
       threadId: 'thread-c-generation',
@@ -494,7 +496,7 @@ describe('typed frontend PTY batch consumer', () => {
 
     expect(routePtyBatch(batch('thread-c-generation', 1, [1]))).toBe(true);
 
-    client.prepareForPtyStart();
+    const startAttempt = client.prepareForPtyStart();
 
     expect(routePtyBatch(batch('thread-c-generation', 1, [2]))).toBe(true);
     expect(routePtyBatch(batch('thread-c-generation', 2, [3]))).toBe(false);
@@ -510,17 +512,189 @@ describe('typed frontend PTY batch consumer', () => {
     expect(routePtyBatch(batch('thread-c-generation', 2, [3]))).toBe(true);
     expect(writes).toHaveLength(2);
 
+    await client.markPtyStarted(startAttempt);
     writes[1].callback();
     await flushAsyncWork();
 
-    expect(invoke).toHaveBeenCalledTimes(1);
-    expect(invoke).toHaveBeenCalledWith('pty_ack', {
-      threadId: 'thread-c-generation',
-      thread_id: 'thread-c-generation',
-      sequence: 1,
-    });
+    expect(invoke.mock.calls.filter(([command]) => command === 'pty_ack')).toEqual([
+      [
+        'pty_ack',
+        {
+          threadId: 'thread-c-generation',
+          thread_id: 'thread-c-generation',
+          sequence: 1,
+        },
+      ],
+    ]);
     expect(writes).toHaveLength(3);
     expect(Array.from(writes[2].bytes)).toEqual([3]);
+  });
+
+  test('retires the old write callback before a successful start can acknowledge the new pump', async () => {
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const invoke = vi.fn(
+      async (_command: string, _args: Record<string, unknown>) => undefined,
+    );
+    runtimeThreadIds.add('thread-c-success-stale-callback');
+    const client = createPtyClient({
+      threadId: 'thread-c-success-stale-callback',
+      invoke,
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+      },
+    });
+
+    expect(routePtyBatch(batch('thread-c-success-stale-callback', 1, [1]))).toBe(true);
+    const startAttempt = client.prepareForPtyStart();
+    await client.markPtyStarted(startAttempt);
+
+    expect(routePtyBatch(batch('thread-c-success-stale-callback', 1, [2]))).toBe(true);
+    expect(writes).toHaveLength(1);
+
+    writes[0].callback();
+    await flushAsyncWork();
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'pty_ack')).toEqual([]);
+    expect(writes).toHaveLength(2);
+    expect(Array.from(writes[1].bytes)).toEqual([2]);
+
+    writes[1].callback();
+    await flushAsyncWork();
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'pty_ack')).toEqual([
+      [
+        'pty_ack',
+        {
+          threadId: 'thread-c-success-stale-callback',
+          thread_id: 'thread-c-success-stale-callback',
+          sequence: 1,
+        },
+      ],
+    ]);
+  });
+
+  test('quarantines an ambiguous batch until an already-running PTY is adopted', async () => {
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const invoke = vi.fn(
+      async (_command: string, _args: Record<string, unknown>) => undefined,
+    );
+    runtimeThreadIds.add('thread-c-adopt-quarantine');
+    const client = createPtyClient({
+      threadId: 'thread-c-adopt-quarantine',
+      invoke,
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+      },
+    });
+
+    const startAttempt = client.prepareForPtyStart();
+    expect(routePtyBatch(batch('thread-c-adopt-quarantine', 1, [11]))).toBe(true);
+    expect(writes).toEqual([]);
+    expect(invoke.mock.calls.filter(([command]) => command === 'pty_ack')).toEqual([]);
+
+    await client.adoptRunningPty(startAttempt);
+
+    expect(writes).toHaveLength(1);
+    expect(Array.from(writes[0].bytes)).toEqual([11]);
+
+    writes[0].callback();
+    await flushAsyncWork();
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'pty_ack')).toEqual([
+      [
+        'pty_ack',
+        {
+          threadId: 'thread-c-adopt-quarantine',
+          thread_id: 'thread-c-adopt-quarantine',
+          sequence: 1,
+        },
+      ],
+    ]);
+    expect(routePtyBatch(batch('thread-c-adopt-quarantine', 2, [12]))).toBe(true);
+    expect(writes).toHaveLength(2);
+  });
+
+  test('feeds at most two ambiguous batches to a successfully started PTY in order', async () => {
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const invoke = vi.fn(
+      async (_command: string, _args: Record<string, unknown>) => undefined,
+    );
+    runtimeThreadIds.add('thread-c-success-quarantine');
+    const client = createPtyClient({
+      threadId: 'thread-c-success-quarantine',
+      invoke,
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+      },
+    });
+
+    const startAttempt = client.prepareForPtyStart();
+    expect(routePtyBatch(batch('thread-c-success-quarantine', 1, [21]))).toBe(true);
+    expect(routePtyBatch(batch('thread-c-success-quarantine', 1, [99]))).toBe(false);
+    expect(routePtyBatch(batch('thread-c-success-quarantine', 3, [99]))).toBe(false);
+    expect(routePtyBatch(batch('thread-c-success-quarantine', 2, [22]))).toBe(true);
+    expect(routePtyBatch(batch('thread-c-success-quarantine', 3, [23]))).toBe(false);
+    expect(writes).toEqual([]);
+    expect(invoke.mock.calls.filter(([command]) => command === 'pty_ack')).toEqual([]);
+
+    await client.markPtyStarted(startAttempt);
+
+    expect(writes).toHaveLength(1);
+    expect(Array.from(writes[0].bytes)).toEqual([21]);
+
+    writes[0].callback();
+    await flushAsyncWork();
+
+    expect(writes).toHaveLength(2);
+    expect(Array.from(writes[1].bytes)).toEqual([22]);
+    writes[1].callback();
+    await flushAsyncWork();
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'pty_ack')).toEqual([
+      [
+        'pty_ack',
+        {
+          threadId: 'thread-c-success-quarantine',
+          thread_id: 'thread-c-success-quarantine',
+          sequence: 1,
+        },
+      ],
+      [
+        'pty_ack',
+        {
+          threadId: 'thread-c-success-quarantine',
+          thread_id: 'thread-c-success-quarantine',
+          sequence: 2,
+        },
+      ],
+    ]);
+    expect(routePtyBatch(batch('thread-c-success-quarantine', 3, [23]))).toBe(true);
+    expect(writes).toHaveLength(3);
+  });
+
+  test('drops an unresolved quarantine when another start reset supersedes it', async () => {
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const invoke = vi.fn(async () => undefined);
+    runtimeThreadIds.add('thread-c-reset-quarantine');
+    const client = createPtyClient({
+      threadId: 'thread-c-reset-quarantine',
+      invoke,
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+      },
+    });
+
+    client.prepareForPtyStart();
+    expect(routePtyBatch(batch('thread-c-reset-quarantine', 1, [31]))).toBe(true);
+    expect(writes).toEqual([]);
+
+    const replacementAttempt = client.prepareForPtyStart();
+    await client.markPtyStarted(replacementAttempt);
+
+    expect(writes).toEqual([]);
+    expect(routePtyBatch(batch('thread-c-reset-quarantine', 1, [32]))).toBe(true);
+    expect(writes).toHaveLength(1);
+    expect(Array.from(writes[0].bytes)).toEqual([32]);
   });
 
   test('cancels stale acknowledgement retries across PTY generation reset', async () => {
