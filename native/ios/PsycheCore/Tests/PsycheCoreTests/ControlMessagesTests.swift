@@ -208,6 +208,80 @@ final class ControlMessagesTests: XCTestCase {
         }
     }
 
+    func testFileInspectionFixturesDecodeEveryBoundedField() throws {
+        let fixtures = try loadMobileControlFixtures()
+
+        guard case let .listFiles(list) = try decodeRequestFixture("listFiles", fixtures: fixtures) else {
+            return XCTFail("Expected files.list")
+        }
+        XCTAssertEqual(list.requestID, "files-list-1")
+        XCTAssertEqual(list.paneID, "%3")
+
+        guard case let .filesList(listResult) = try decodeResponseFixture(
+            "filesListResult",
+            fixtures: fixtures
+        ) else {
+            return XCTFail("Expected files.list.result")
+        }
+        XCTAssertEqual(listResult.snapshot.rootPath, "/repo")
+        XCTAssertEqual(listResult.snapshot.files.first?.path, "src/index.ts")
+        XCTAssertEqual(listResult.snapshot.files.first?.statusLabel, "Modified")
+
+        guard case let .filesRead(readResult) = try decodeResponseFixture(
+            "filesReadResult",
+            fixtures: fixtures
+        ) else {
+            return XCTFail("Expected files.read.result")
+        }
+        XCTAssertEqual(readResult.path, "src/index.ts")
+        XCTAssertEqual(readResult.content, "export {};\n")
+        XCTAssertEqual(readResult.truncated, true)
+
+        guard case let .filesDiff(diffResult) = try decodeResponseFixture(
+            "filesDiffResult",
+            fixtures: fixtures
+        ) else {
+            return XCTFail("Expected files.diff.result")
+        }
+        XCTAssertEqual(diffResult.path, "src/index.ts")
+        XCTAssertEqual(diffResult.diff, "@@ -0,0 +1 @@\n+export {};\n")
+    }
+
+    func testActionResponseFixtureCarriesTheContinuationSession() throws {
+        let fixtures = try loadMobileControlFixtures()
+        guard case let .respondToAction(response) = try decodeRequestFixture(
+            "respondToAction",
+            fixtures: fixtures
+        ) else {
+            return XCTFail("Expected actions.respond")
+        }
+        XCTAssertEqual(response.requestID, "action-response-1")
+        XCTAssertEqual(response.sessionID, "action-session-1")
+        XCTAssertEqual(response.response, .confirm)
+    }
+
+    func testActionResultDecodesStringMetadata() throws {
+        let message = try JSONDecoder().decode(MobileServerMessage.self, from: Data("""
+        {
+          "type": "control",
+          "payload": {
+            "type": "actions.result",
+            "requestId": "action-1",
+            "result": {
+              "type": "success",
+              "message": "Created pane",
+              "data": {"action": "create_pane", "agent": "codex"}
+            }
+          }
+        }
+        """.utf8))
+
+        guard case let .control(.actionResult(response)) = message else {
+            return XCTFail("Expected actions.result")
+        }
+        XCTAssertEqual(response.result.data, ["action": "create_pane", "agent": "codex"])
+    }
+
     private func decodeRequestFixture(
         _ name: String,
         fixtures: [String: Data]

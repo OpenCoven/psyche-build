@@ -605,7 +605,12 @@ describe("BridgeDaemon", () => {
         if (m.type === "pong") {
           client.send(JSON.stringify({
             type: "control",
-            payload: { type: "files.list", requestId: "unsupported-1", paneId: "%3" },
+            payload: {
+              type: "actions.start",
+              requestId: "unsupported-1",
+              paneId: "%3",
+              action: "view",
+            },
           }));
         }
         if (m.type === "control") resolve();
@@ -620,10 +625,79 @@ describe("BridgeDaemon", () => {
         type: "error",
         requestId: "unsupported-1",
         code: "command_not_supported",
-        message: "mobile control command is not supported yet: files.list",
+        message: "this host does not support remote actions yet",
       },
     });
 
+    client.close();
+    await daemon.stop();
+  });
+
+  it("routes scoped action requests through the registered live executor", async () => {
+    const tokenStore = new FakeTokenStore() as any;
+    const knownToken = "control-action-token";
+    tokenStore.records = [{
+      token: knownToken,
+      clientId: "c",
+      clientName: "c",
+      pairedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    }];
+    const daemon = new BridgeDaemon({
+      serverId: "server",
+      serverName: "test",
+      projectName: "psyche",
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      paneProvider: () => [],
+      projectProvider: () => [],
+      workspaceProvider: () => WORKSPACE_SNAPSHOT_FIXTURE.workspace,
+      ...noopRituals,
+      tokenStore,
+    });
+    const calls: unknown[] = [];
+    daemon.setActionExecutor(async (input) => {
+      calls.push(input);
+      return { type: "success", message: "opened" };
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const response = await new Promise<any>((resolve, reject) => {
+      client.on("open", () => {
+        client.send(JSON.stringify({
+          type: "hello",
+          payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: knownToken },
+        }));
+        client.send(JSON.stringify({ type: "ping", payload: { token: "ready" } }));
+      });
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        if (message.type === "pong") {
+          client.send(JSON.stringify({
+            type: "control",
+            payload: {
+              type: "actions.start",
+              requestId: "action-1",
+              paneId: "%3",
+              action: "view",
+            },
+          }));
+        }
+        if (message.type === "control") resolve(message);
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(response).toEqual({
+      type: "control",
+      payload: {
+        type: "actions.result",
+        requestId: "action-1",
+        result: { type: "success", message: "opened" },
+      },
+    });
+    expect(calls).toEqual([{ paneId: "%3", actionId: "view" }]);
     client.close();
     await daemon.stop();
   });

@@ -105,6 +105,7 @@
       "paneId": "%3",
       "path": "src/index.ts",
       "requestId": "files-read-1",
+      "truncated": true,
       "type": "files.read.result"
     },
     "type": "control"
@@ -187,11 +188,11 @@
   },
   "respondToAction": {
     "payload": {
-      "paneId": "%3",
       "requestId": "action-response-1",
       "response": {
         "type": "confirm"
       },
+      "sessionId": "action-session-1",
       "type": "actions.respond"
     },
     "type": "control"
