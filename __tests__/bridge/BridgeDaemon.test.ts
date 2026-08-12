@@ -605,7 +605,12 @@ describe("BridgeDaemon", () => {
         if (m.type === "pong") {
           client.send(JSON.stringify({
             type: "control",
-            payload: { type: "files.list", requestId: "unsupported-1", paneId: "%3" },
+            payload: {
+              type: "actions.start",
+              requestId: "unsupported-1",
+              paneId: "%3",
+              action: "view",
+            },
           }));
         }
         if (m.type === "control") resolve();
@@ -620,7 +625,7 @@ describe("BridgeDaemon", () => {
         type: "error",
         requestId: "unsupported-1",
         code: "command_not_supported",
-        message: "mobile control command is not supported yet: files.list",
+        message: "mobile control command is not supported yet: actions.start",
       },
     });
 

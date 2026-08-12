@@ -1,6 +1,12 @@
 import type { PaneSpawnResult, StreamId } from '../../daemon/protocol.js';
 import { decodeBase64Payload } from '../../utils/base64.js';
+import type { BrowserFileRecord, BrowserSnapshot } from '../../utils/fileBrowser.js';
 import type { ReadonlyWorkspaceSnapshot } from '../../workspace/snapshot.js';
+import {
+  createMobileInspection,
+  MobileInspectionError,
+  type MobileInspection,
+} from './mobileInspection.js';
 import type {
   MobileControlRequest,
   MobileControlResponse,
@@ -52,6 +58,7 @@ export interface MobileControlGatewayOptions {
     ritualId: string,
     params: Record<string, string>,
   ) => Promise<void>;
+  mobileInspection?: MobileInspection;
   /**
    * Invoked only once a mutation actually changed host state, so a replayed
    * idempotent request does not announce a change that did not happen.
@@ -84,7 +91,11 @@ export class MobileControlGateway {
     execution: Promise<PaneSpawnResult>;
   }>();
 
-  constructor(private readonly options: MobileControlGatewayOptions) {}
+  private readonly mobileInspection: MobileInspection;
+
+  constructor(private readonly options: MobileControlGatewayOptions) {
+    this.mobileInspection = options.mobileInspection ?? createMobileInspection();
+  }
 
   async handle(
     request: MobileControlRequest | { type: string; requestId?: unknown },
@@ -227,6 +238,72 @@ export class MobileControlGateway {
         this.options.onWorkspaceChanged?.();
         return { type: 'ack', requestId, ok: true };
       }
+      case 'files.list': {
+        const paneId = requireNonEmpty(field(request, 'paneId'), 'paneId', requestId);
+        const root = await this.requireInspectionRoot(requestId, paneId);
+        const snapshot = await this.runInspection(
+          requestId,
+          () => this.mobileInspection.list(root),
+        );
+        return {
+          type: 'files.list.result',
+          requestId,
+          paneId,
+          snapshot,
+        };
+      }
+      case 'files.read': {
+        const paneId = requireNonEmpty(field(request, 'paneId'), 'paneId', requestId);
+        const relativePath = requireNonEmpty(field(request, 'path'), 'path', requestId);
+        const root = await this.requireInspectionRoot(requestId, paneId);
+        const snapshot = await this.runInspection(
+          requestId,
+          () => this.mobileInspection.list(root),
+        );
+        const file = this.requireInspectionFile(snapshot, relativePath, requestId);
+        if (!file.exists) {
+          throw new MobileControlGatewayError(
+            'file_deleted',
+            'file no longer exists in the selected worktree',
+            requestId,
+          );
+        }
+        const preview = await this.runInspection(
+          requestId,
+          () => this.mobileInspection.readFile({
+            root: snapshot.rootPath,
+            relativePath: file.path,
+          }),
+        );
+        return {
+          type: 'files.read.result',
+          requestId,
+          paneId,
+          path: file.path,
+          content: preview.text,
+        };
+      }
+      case 'files.diff': {
+        const paneId = requireNonEmpty(field(request, 'paneId'), 'paneId', requestId);
+        const relativePath = requireNonEmpty(field(request, 'path'), 'path', requestId);
+        const root = await this.requireInspectionRoot(requestId, paneId);
+        const snapshot = await this.runInspection(
+          requestId,
+          () => this.mobileInspection.list(root),
+        );
+        const file = this.requireInspectionFile(snapshot, relativePath, requestId);
+        const diff = await this.runInspection(
+          requestId,
+          () => this.mobileInspection.diff(snapshot.rootPath, file.path, file.statusCode),
+        );
+        return {
+          type: 'files.diff.result',
+          requestId,
+          paneId,
+          path: file.path,
+          diff,
+        };
+      }
       case 'hello':
         throw new MobileControlGatewayError(
           'invalid_control_request',
@@ -306,6 +383,48 @@ export class MobileControlGateway {
           worktree.panes.some((pane) => pane.id === paneId))),
       'pane is not published by this host',
     );
+  }
+
+  private async requireInspectionRoot(requestId: string, paneId: string): Promise<string> {
+    const { workspace } = await this.options.workspaceSnapshot();
+    for (const project of workspace.projects) {
+      for (const worktree of project.worktrees) {
+        if (!worktree.panes.some((pane) => pane.id === paneId)) continue;
+        if (worktree.missing || worktree.bare || worktree.prunable) break;
+        return worktree.path;
+      }
+    }
+
+    throw new MobileControlGatewayError(
+      'unknown_target',
+      'pane is not published with an available worktree',
+      requestId,
+    );
+  }
+
+  private requireInspectionFile(
+    snapshot: BrowserSnapshot,
+    relativePath: string,
+    requestId: string,
+  ): BrowserFileRecord {
+    const file = snapshot.files.find((candidate) => candidate.path === relativePath);
+    if (file) return file;
+    throw new MobileControlGatewayError(
+      'file_not_found',
+      'file is not published by the selected worktree',
+      requestId,
+    );
+  }
+
+  private async runInspection<T>(requestId: string, operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof MobileInspectionError) {
+        throw new MobileControlGatewayError(error.code, error.message, requestId);
+      }
+      throw error;
+    }
   }
 
   /** A command the host did not wire up is unsupported, never a crash. */
