@@ -1379,35 +1379,39 @@ describe('Tauri physical terminal panes', () => {
     expect(suppressedOptions).toEqual({ refreshStatus: false });
   });
 
-  it('accepts guarded /new-thread creation only after revealing the terminal', async () => {
-    const terminalHost = { hidden: true };
-    let spawned = 0;
-    const runNewThreadCommand = compileFunction<() => Promise<{ kind: string } | null>>(
+  it('routes /new-thread through ensureProjectCoven(activeProject())', async () => {
+    const project = { id: 'project', root: '/repo' };
+    let ensured: typeof project | null = null;
+    const result = { kind: 'coven-chat' };
+    const runNewThreadCommand = compileFunction<() => Promise<typeof result | null>>(
       functionSource('runNewThreadCommand'),
       {
-        spawnCovenThread: async () => {
-          terminalHost.hidden = false;
-          expect(terminalHost.hidden).toBe(false);
-          spawned += 1;
-          return { kind: 'coven-chat' };
+        activeProject: () => project,
+        ensureProjectCoven: async (value: typeof project | null) => {
+          ensured = value;
+          return result;
         },
       },
     );
-    await expect(runNewThreadCommand()).resolves.toEqual({ kind: 'coven-chat' });
-    expect(spawned).toBe(1);
+    await expect(runNewThreadCommand()).resolves.toBe(result);
+    expect(ensured).toBe(project);
     expect(mainJs).toMatch(/cmd: "\/new-thread"[\s\S]*?run: runNewThreadCommand/);
   });
 
-  it('cancels /new-thread without creating a thread or PTY', async () => {
-    let spawned = 0;
+  it('resolves null from /new-thread when there is no active project', async () => {
+    let ensured: null = null;
     const runNewThreadCommand = compileFunction<() => Promise<null>>(
       functionSource('runNewThreadCommand'),
       {
-        spawnCovenThread: async () => null,
+        activeProject: () => null,
+        ensureProjectCoven: async (value: null) => {
+          ensured = value;
+          return null;
+        },
       },
     );
     await expect(runNewThreadCommand()).resolves.toBeNull();
-    expect(spawned).toBe(0);
+    expect(ensured).toBeNull();
   });
 
   it('accepts guarded /new-psyche creation with its distinct spawn path', async () => {

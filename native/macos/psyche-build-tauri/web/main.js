@@ -6734,7 +6734,7 @@
   }
 
   async function runNewThreadCommand() {
-    return spawnCovenThread();
+    return ensureProjectCoven(activeProject());
   }
 
   async function runNewShellCommand() {
@@ -8961,6 +8961,7 @@
         setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
         return null;
       }
+      return ensureProjectCoven(project);
     }
     if (!(await showTerminalView())) return null;
     return createThread({
@@ -8968,9 +8969,9 @@
       worktreePath: worktree.path,
       name: entry.label,
       kind: entry.kind,
-      command: command,
+      command: entry.command,
       args: entry.args.slice(),
-      launchKind: entry.kind === "coven-chat" ? entry.kind : null,
+      launchKind: null,
       projectRoot: project.root,
       cwd: worktree.path,
     });
