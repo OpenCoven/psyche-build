@@ -1,18 +1,21 @@
-import fs from 'fs/promises';
 import path from 'path';
 import type { PsychePane } from '../types.js';
-import { rebindPaneByTitle } from '../utils/paneRebinding.js';
+import {
+  paneTmuxIdentityIsCurrent,
+  rebindPaneByTitle,
+} from '../utils/paneRebinding.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { PaneLifecycleManager } from '../services/PaneLifecycleManager.js';
 import { TMUX_COMMAND_TIMEOUT } from '../constants/timing.js';
 import type { PsycheConfig } from './usePaneLoading.js';
-import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { getPaneTmuxTitle } from '../utils/paneTitle.js';
 import { StateManager } from '../shared/StateManager.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
+import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
+import { sameTmuxServerIdentity } from '../services/TmuxServerIdentity.js';
 
 /**
  * Enforces that tmux pane titles match the encoded config title for each pane.
@@ -84,10 +87,14 @@ export async function enforcePaneTitles(
 export async function savePanesToFile(
   panesFile: string,
   panes: PsychePane[],
-  withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>
+  withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>,
+  previousPanes: readonly PsychePane[],
 ): Promise<PsychePane[]> {
+  const originatingPanes = [...previousPanes];
+  const nextPanes = [...panes];
+
   return withWriteLock(async () => {
-    let activePanes = panes;
+    let activePanes = nextPanes;
 
     // Try to update pane IDs if they've changed (rebinding)
     try {
@@ -110,45 +117,22 @@ export async function savePanesToFile(
       // This prevents losing panes during concurrent operations
       // Note: We need to get allPaneIds to properly use rebindPaneByTitle
       const allPaneIds = Array.from(titleToId.values());
-      activePanes = panes.map(p => rebindPaneByTitle(p, titleToId, allPaneIds));
+      activePanes = nextPanes.map(p => rebindPaneByTitle(p, titleToId, allPaneIds));
     } catch (error) {
       // If tmux command fails, keep panes as-is (prevents data loss during tmux instability)
       LogService.getInstance().debug(
         `Failed to fetch tmux panes for rebinding: ${error instanceof Error ? error.message : String(error)}`,
         'usePaneSync'
       );
-      activePanes = panes;
+      activePanes = nextPanes;
     }
 
-    // Read existing config to preserve other fields
-    let config: PsycheConfig = { panes: [] };
-    try {
-      const content = await fs.readFile(panesFile, 'utf-8');
-      const parsed = JSON.parse(content);
-      if (!Array.isArray(parsed)) {
-        config = parsed;
-      }
-    } catch {}
-
-    // Save in config format (use atomic write to prevent race conditions)
-    const projectRoot = config.projectRoot || path.dirname(path.dirname(panesFile));
-    const projectName = config.projectName || path.basename(projectRoot);
-    const normalizedSidebarProjects = normalizeSidebarProjects(
-      config.sidebarProjects,
+    const sessionProjectRoot = path.dirname(path.dirname(panesFile));
+    return persistPaneConfigDelta(
+      sessionProjectRoot,
+      originatingPanes,
       activePanes,
-      projectRoot,
-      projectName
     );
-    config.sidebarProjects = normalizedSidebarProjects;
-    config.panes = syncPaneColorThemes(
-      activePanes,
-      normalizedSidebarProjects,
-      projectRoot
-    );
-    config.lastUpdated = new Date().toISOString();
-    await atomicWriteJson(panesFile, config);
-
-    return config.panes;
   });
 }
 
@@ -192,7 +176,7 @@ export function rebindAndFilterPanes(
   // Filter out dead shell panes, keep worktree panes
   const activePanes = reboundPanes.filter(pane => {
     // If we have tmux data and this pane is not found
-    if (allPaneIds.length > 0 && !allPaneIds.includes(pane.paneId)) {
+    if (allPaneIds.length > 0 && !paneTmuxIdentityIsCurrent(pane, allPaneIds)) {
       // CRITICAL: Check if pane is being intentionally closed
       // If so, remove it from tracking (don't recreate, don't keep)
       if (lifecycleManager.isClosing(pane.id) || lifecycleManager.isClosing(pane.paneId)) {
@@ -244,12 +228,16 @@ export function rebindAndFilterPanes(
 
   // Track if shell panes were removed (for saving to config)
   const shellPanesRemoved = loadedPanes.some(p =>
-    p.type === 'shell' && allPaneIds.length > 0 && !allPaneIds.includes(p.paneId)
+    p.type === 'shell'
+    && allPaneIds.length > 0
+    && !paneTmuxIdentityIsCurrent(p, allPaneIds)
   );
 
   if (shellPanesRemoved) {
     LogService.getInstance().info(
-      `Removed ${loadedPanes.filter(p => p.type === 'shell' && !allPaneIds.includes(p.paneId)).length} stale shell pane(s) from config`,
+      `Removed ${loadedPanes.filter((p) => (
+        p.type === 'shell' && !paneTmuxIdentityIsCurrent(p, allPaneIds)
+      )).length} stale shell pane(s) from config`,
       'shellDetection'
     );
   }
@@ -263,42 +251,230 @@ export function rebindAndFilterPanes(
 export async function saveUpdatedPaneConfig(
   panesFile: string,
   activePanes: PsychePane[],
-  withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>
+  withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>,
+  previousPanes: readonly PsychePane[],
 ): Promise<void> {
-  await withWriteLock(async () => {
-    // Re-read config in case it changed
-    let currentConfig: PsycheConfig = { panes: [] };
-    try {
-      const content = await fs.readFile(panesFile, 'utf-8');
-      const parsed = JSON.parse(content);
-      if (!Array.isArray(parsed)) {
-        currentConfig = parsed;
-      }
-    } catch {}
+  const originatingPanes = [...previousPanes];
+  const nextPanes = [...activePanes];
 
-    // Update with remapped panes
-    const projectRoot = currentConfig.projectRoot || path.dirname(path.dirname(panesFile));
-    const projectName = currentConfig.projectName || path.basename(projectRoot);
-    const normalizedSidebarProjects = normalizeSidebarProjects(
-      currentConfig.sidebarProjects,
-      activePanes,
-      projectRoot,
-      projectName
+  await withWriteLock(async () => {
+    const sessionProjectRoot = path.dirname(path.dirname(panesFile));
+    const panes = await persistPaneConfigDelta(
+      sessionProjectRoot,
+      originatingPanes,
+      nextPanes,
     );
-    currentConfig.sidebarProjects = normalizedSidebarProjects;
-    currentConfig.panes = syncPaneColorThemes(
-      activePanes,
-      normalizedSidebarProjects,
-      projectRoot
-    );
-    currentConfig.lastUpdated = new Date().toISOString();
     LogService.getInstance().debug(
-      `Writing config with ${currentConfig.panes.length} panes`,
+      `Writing config with ${panes.length} panes`,
       'shellDetection'
     );
-    await atomicWriteJson(panesFile, currentConfig);
     LogService.getInstance().debug('Config file written successfully', 'shellDetection');
   });
+}
+
+/**
+ * Applies a caller's snapshot delta to the fresh config while the project-wide
+ * lease is held. Unrelated panes written by the daemon remain untouched.
+ */
+async function persistPaneConfigDelta(
+  projectRoot: string,
+  previousPanes: readonly PsychePane[],
+  nextPanes: readonly PsychePane[],
+): Promise<PsychePane[]> {
+  const mutation = await mutateProjectPaneConfig(projectRoot, (configRecord) => {
+    const config = configRecord as unknown as PsycheConfig;
+    const mergedPanes = mergePaneSnapshots(
+      Array.isArray(config.panes) ? config.panes : [],
+      previousPanes,
+      nextPanes,
+    );
+    const effectiveProjectRoot = config.projectRoot || projectRoot;
+    const projectName = config.projectName || path.basename(effectiveProjectRoot);
+    const normalizedSidebarProjects = normalizeSidebarProjects(
+      config.sidebarProjects,
+      mergedPanes,
+      effectiveProjectRoot,
+      projectName,
+    );
+    config.sidebarProjects = normalizedSidebarProjects;
+    config.panes = syncPaneColorThemes(
+      mergedPanes,
+      normalizedSidebarProjects,
+      effectiveProjectRoot,
+    );
+    config.lastUpdated = new Date().toISOString();
+    return config.panes;
+  });
+  return mutation.result as PsychePane[];
+}
+
+/**
+ * Reconciles an originating UI snapshot with the fresh registry. A pane that
+ * disappeared after the snapshot is not resurrected by a stale update; a
+ * newly added ID is the explicit re-addition case.
+ */
+export function mergePaneSnapshots(
+  freshPanes: readonly PsychePane[],
+  previousPanes: readonly PsychePane[],
+  nextPanes: readonly PsychePane[],
+): PsychePane[] {
+  const previousById = new Map(previousPanes.map((pane) => [pane.id, pane]));
+  const nextById = new Map(nextPanes.map((pane) => [pane.id, pane]));
+  const explicitlyRemoved = new Set(
+    previousPanes
+      .filter((pane) => !nextById.has(pane.id))
+      .map((pane) => paneLifecycleIdentityKey(pane)),
+  );
+  const freshIds = new Set(freshPanes.map((pane) => pane.id));
+  const merged: PsychePane[] = [];
+
+  for (const freshPane of freshPanes) {
+    const previousPane = previousById.get(freshPane.id);
+    if (
+      previousPane
+      && explicitlyRemoved.has(paneLifecycleIdentityKey(freshPane))
+      && samePaneLifecycleIdentity(previousPane, freshPane)
+    ) {
+      continue;
+    }
+
+    const nextPane = nextById.get(freshPane.id);
+    if (
+      nextPane
+      && previousPane
+      && samePaneLifecycleIdentity(previousPane, freshPane)
+    ) {
+      const delta = getPanePropertyDelta(previousPane, nextPane);
+      merged.push(
+        delta
+          ? applyPanePropertyDelta(freshPane, delta)
+          : freshPane
+      );
+    } else {
+      merged.push(freshPane);
+    }
+  }
+
+  for (const nextPane of nextPanes) {
+    if (!previousById.has(nextPane.id) && !freshIds.has(nextPane.id)) {
+      merged.push(nextPane);
+    }
+  }
+
+  return merged;
+}
+
+function samePaneLifecycleIdentity(
+  left: PsychePane,
+  right: PsychePane,
+): boolean {
+  if (left.id !== right.id || left.paneId !== right.paneId) {
+    return false;
+  }
+  if (!left.tmuxServerIdentity || !right.tmuxServerIdentity) {
+    return left.tmuxServerIdentity === right.tmuxServerIdentity;
+  }
+  return sameTmuxServerIdentity(
+    left.tmuxServerIdentity,
+    right.tmuxServerIdentity,
+  );
+}
+
+function paneLifecycleIdentityKey(pane: PsychePane): string {
+  return `${pane.id}\0${pane.paneId}\0${
+    pane.tmuxServerIdentity
+      ? JSON.stringify(pane.tmuxServerIdentity)
+      : 'legacy'
+  }`;
+}
+
+interface PanePropertyDelta {
+  changed: Map<string, unknown>;
+  deleted: Set<string>;
+}
+
+/**
+ * Returns only the caller's intent between two snapshots of the same pane.
+ *
+ * Deletion semantics are intentional: a property is cleared when it had a
+ * defined value in the originating snapshot and is absent or `undefined` in
+ * the next snapshot. Properties absent (or undefined) in both snapshots have
+ * no local intent and therefore cannot erase a concurrently persisted value.
+ */
+function getPanePropertyDelta(
+  previousPane: PsychePane,
+  nextPane: PsychePane,
+): PanePropertyDelta | undefined {
+  const changed = new Map<string, unknown>();
+  const deleted = new Set<string>();
+  const properties = new Set([
+    ...Object.keys(previousPane),
+    ...Object.keys(nextPane),
+  ]);
+
+  for (const property of properties) {
+    if (property === 'id') {
+      continue;
+    }
+
+    const hadPreviousValue = hasOwnProperty(previousPane, property);
+    const hasNextValue = hasOwnProperty(nextPane, property);
+    const previousValue = (previousPane as unknown as Record<string, unknown>)[property];
+    const nextValue = (nextPane as unknown as Record<string, unknown>)[property];
+
+    if (
+      hadPreviousValue
+      && previousValue !== undefined
+      && (!hasNextValue || nextValue === undefined)
+    ) {
+      deleted.add(property);
+      continue;
+    }
+
+    if (
+      hasNextValue
+      && nextValue !== undefined
+      && (
+        !hadPreviousValue
+        || previousValue === undefined
+        || !panePropertyValuesEqual(previousValue, nextValue)
+      )
+    ) {
+      changed.set(property, nextValue);
+    }
+  }
+
+  if (changed.size === 0 && deleted.size === 0) {
+    return undefined;
+  }
+
+  return { changed, deleted };
+}
+
+function applyPanePropertyDelta(
+  freshPane: PsychePane,
+  delta: PanePropertyDelta,
+): PsychePane {
+  const mergedPane = {
+    ...freshPane,
+  } as Record<string, unknown>;
+
+  for (const property of delta.deleted) {
+    delete mergedPane[property];
+  }
+  for (const [property, value] of delta.changed) {
+    mergedPane[property] = value;
+  }
+
+  return mergedPane as unknown as PsychePane;
+}
+
+function hasOwnProperty(value: object, property: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, property);
+}
+
+function panePropertyValuesEqual(left: unknown, right: unknown): boolean {
+  return Object.is(left, right) || JSON.stringify(left) === JSON.stringify(right);
 }
 
 /**
@@ -322,21 +498,21 @@ export async function destroyWelcomePaneIfNeeded(
   if (!shouldDestroyWelcome) return;
 
   try {
-    // Load config to get welcomePaneId
-    const configContent = await fs.readFile(panesFile, 'utf-8');
-    const config = JSON.parse(configContent);
-    if (config.welcomePaneId) {
+    const sessionProjectRoot = path.dirname(path.dirname(panesFile));
+    await mutateProjectPaneConfig(sessionProjectRoot, async (configRecord) => {
+      const config = configRecord as { welcomePaneId?: string; lastUpdated?: string };
+      if (!config.welcomePaneId) {
+        return;
+      }
       LogService.getInstance().debug(
         `Destroying welcome pane ${config.welcomePaneId} because panes were added`,
         'shellDetection'
       );
       const { destroyWelcomePane } = await import('../utils/welcomePane.js');
       await destroyWelcomePane(config.welcomePaneId);
-      // Clear welcomePaneId from config (will be saved by caller)
       config.welcomePaneId = undefined;
-      // Write the config immediately to clear welcomePaneId
-      await atomicWriteJson(panesFile, config);
-    }
+      config.lastUpdated = new Date().toISOString();
+    });
   } catch (error) {
     LogService.getInstance().debug('Failed to destroy welcome pane', 'shellDetection');
   }

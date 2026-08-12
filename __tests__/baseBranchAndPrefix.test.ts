@@ -13,6 +13,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { getPaneBranchName, isValidBranchName } from '../src/utils/git.js';
 
+vi.mock('../src/services/LiveTmuxWorktreeGuard.js', () => ({
+  inspectLiveTmuxWorktreeConsumers: vi.fn(() => ({ state: 'safe' })),
+  describeLiveTmuxWorktreeGuard: vi.fn(() => 'no live tmux pane is using the worktree'),
+}));
+
 // ─── Test 1 & 2: getPaneBranchName, slug/branchName separation ───
 
 describe('getPaneBranchName', () => {
@@ -179,6 +184,7 @@ describe('merge operations quote branch names', () => {
   it('mergeWorktreeIntoMain quotes branch name', async () => {
     vi.mock('child_process', () => ({
       execSync: vi.fn().mockReturnValue(Buffer.from('')),
+      execFileSync: vi.fn(() => ''),
     }));
 
     const { mergeWorktreeIntoMain } = await import('../src/utils/mergeExecution.js');
@@ -195,6 +201,7 @@ describe('merge operations quote branch names', () => {
   it('mergeMainIntoWorktree quotes branch name', async () => {
     vi.mock('child_process', () => ({
       execSync: vi.fn().mockReturnValue(Buffer.from('')),
+      execFileSync: vi.fn(() => ''),
     }));
 
     const { mergeMainIntoWorktree } = await import('../src/utils/mergeExecution.js');
@@ -211,6 +218,7 @@ describe('merge operations quote branch names', () => {
   it('cleanupAfterMerge quotes branch name in git branch -d', async () => {
     vi.mock('child_process', () => ({
       execSync: vi.fn().mockReturnValue(Buffer.from('')),
+      execFileSync: vi.fn(() => ''),
     }));
 
     const { cleanupAfterMerge } = await import('../src/utils/mergeExecution.js');

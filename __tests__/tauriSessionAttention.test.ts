@@ -18,7 +18,9 @@ const sessionEntry = readFileSync(join(webRoot, 'sessions/session-entry.js'), 'u
 const SETTLE = 2200;
 
 function functionSource(name: string) {
-  const start = mainJs.indexOf(`function ${name}(`);
+  const asyncStart = mainJs.indexOf(`async function ${name}(`);
+  const syncStart = mainJs.indexOf(`function ${name}(`);
+  const start = asyncStart === -1 ? syncStart : asyncStart;
   if (start === -1) throw new Error(`missing function ${name}`);
   const bodyStart = mainJs.indexOf('{', start);
   let depth = 0;
@@ -28,6 +30,58 @@ function functionSource(name: string) {
     if (depth === 0) return mainJs.slice(start, index + 1);
   }
   throw new Error(`unterminated function ${name}`);
+}
+
+function cssDeclarations(selector: string) {
+  const source = stylesCss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const normalizedSelector = selector.replace(/\s+/g, ' ').trim();
+  const rulePattern = /([^{}]+)\{([^{}]*)\}/g;
+  const declarations = new Map<string, string>();
+  let found = false;
+  for (const match of source.matchAll(rulePattern)) {
+    if (match[1].replace(/\s+/g, ' ').trim() !== normalizedSelector) continue;
+    found = true;
+    for (const declaration of match[2].split(';').map((item) => item.trim()).filter(Boolean)) {
+      const separator = declaration.indexOf(':');
+      declarations.set(
+        declaration.slice(0, separator).trim(),
+        declaration.slice(separator + 1).replace(/\s+/g, ' ').trim(),
+      );
+    }
+  }
+  if (found) return declarations;
+  throw new Error(`missing CSS rule ${selector}`);
+}
+
+function paneHeaderBackground(paneClasses: string[]) {
+  const source = stylesCss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rulePattern = /([^{}]+)\{([^{}]*)\}/g;
+  let winner: { specificity: number; order: number; value: string } | null = null;
+  let order = 0;
+  for (const match of source.matchAll(rulePattern)) {
+    const background = match[2].match(/(?:^|;)\s*background:\s*([^;]+)/)?.[1].trim();
+    if (!background) continue;
+    for (const rawSelector of match[1].split(',')) {
+      const selector = rawSelector.replace(/\s+/g, ' ').trim();
+      if (!selector.endsWith('.terminal-pane-header')) continue;
+      const paneSelector = selector.slice(0, -'.terminal-pane-header'.length).trim();
+      if (paneSelector) {
+        const required = [...paneSelector.matchAll(/(?<!:not\()\.([\w-]+)/g)]
+          .map((item) => item[1]);
+        const excluded = [...paneSelector.matchAll(/:not\(\.([\w-]+)\)/g)]
+          .map((item) => item[1]);
+        if (!required.every((name) => paneClasses.includes(name)) ||
+            excluded.some((name) => paneClasses.includes(name))) continue;
+      }
+      const specificity = (selector.match(/\.[\w-]+/g) || []).length;
+      if (!winner || specificity > winner.specificity ||
+          (specificity === winner.specificity && order >= winner.order)) {
+        winner = { specificity, order, value: background };
+      }
+    }
+    order += 1;
+  }
+  return winner?.value;
 }
 
 function compileFunction<T extends (...args: never[]) => unknown>(
@@ -213,18 +267,282 @@ describe('desktop shell wiring', () => {
     expect(mainJs).toContain('PsycheSessions.createAttentionTracker()');
   });
 
+  it('initialises local threads with sidebar activity fields', () => {
+    expect(mainJs).toMatch(
+      /function createThread\(opts\)[\s\S]{0,2600}lastOutputAt:\s*0,[\s\S]{0,120}isWorking:\s*false,[\s\S]{0,120}sidebarStatusKey:\s*"busy"/,
+    );
+  });
+
+  it('timestamps PTY output as soon as a live thread receives bytes', () => {
+    expect(mainJs).toMatch(
+      /listen\("pty:data", function \(event\) \{[\s\S]{0,260}var thread = findThread\(payload\.thread_id\);[\s\S]{0,120}if \(!isLiveThread\(thread\)\) return;[\s\S]{0,120}thread\.lastOutputAt = Date\.now\(\);/,
+    );
+  });
+
   it('samples only panes that can actually be waiting on an answer', () => {
     // A shell prompt sitting at `$` is idle, not waiting — badging it would put
     // a permanent mark on every terminal in the app.
-    expect(mainJs).toMatch(
-      /function threadWantsAttentionTracking\(thread\)[\s\S]{0,320}\(thread\.kind \|\| "shell"\) !== "shell"/
-    );
-    expect(mainJs).toMatch(/threadWantsAttentionTracking[\s\S]{0,400}thread\.status !== "exited"/);
+    const source = functionSource('threadWantsAttentionTracking');
+    expect(source).toMatch(/\(thread\.kind \|\| "shell"\) !== "shell"/);
+    expect(source).toMatch(/thread\.status !== "exited"/);
+    expect(source).toMatch(/thread\.status !== "failed"/);
     expect(mainJs).toContain('setInterval(sampleThreadAttention, ATTENTION_SAMPLE_MS)');
+  });
+
+  it('excludes failed PTYs from attention tracking', () => {
+    const threadWantsAttentionTracking = compileFunction<
+      (thread: Record<string, unknown> | null | undefined) => boolean
+    >(functionSource('threadWantsAttentionTracking'), {});
+
+    expect(threadWantsAttentionTracking({
+      id: 'failed',
+      kind: 'coven',
+      status: 'failed',
+    })).toBe(false);
+    expect(threadWantsAttentionTracking({
+      id: 'running',
+      kind: 'coven',
+      status: 'running',
+    })).toBe(true);
+  });
+
+  it('samples terminal tails once for working state before gating attention', () => {
+    expect(functionSource('sampleThreadAttention')).toMatch(
+      /var tail = terminalTail\(thread\.term, ATTENTION_TAIL_LINES\);[\s\S]{0,120}thread\.isWorking = PsycheSessions\.sidebarTailIsWorking\(tail\);[\s\S]{0,420}if \(!threadWantsAttentionTracking\(thread\)\) \{/,
+    );
+  });
+
+  it('returns the clear-attention render verdict so callers can coalesce correctly', () => {
+    const source = functionSource('clearThreadAttention');
+    expect(source).toMatch(/if \(!thread\) return false;/);
+    expect(source).toMatch(
+      /return applyThreadAttention\(thread, \{ needsAttention: false, reason: null \}\);/,
+    );
+
+    const calls: Array<[Record<string, unknown>, { needsAttention: boolean; reason: string | null }]> = [];
+    const clearThreadAttention = compileFunction<
+      (thread: Record<string, unknown> | null | undefined) => boolean
+    >(source, {
+      attentionTracker: { forget: () => undefined },
+      applyThreadAttention: (
+        thread: Record<string, unknown>,
+        next: { needsAttention: boolean; reason: string | null },
+      ) => {
+        calls.push([thread, next]);
+        return true;
+      },
+    });
+
+    expect(clearThreadAttention(null)).toBe(false);
+    const thread = { id: 'thread-1' };
+    expect(clearThreadAttention(thread)).toBe(true);
+    expect(calls).toEqual([[thread, { needsAttention: false, reason: null }]]);
+  });
+
+  it('synchronizes cached sidebar status keys at the start of every sidebar render', () => {
+    const renderSource = functionSource('renderSessionList');
+    expect(renderSource).toMatch(
+      /if \(!sessionListEl\) return;[\s\S]{0,120}if \(editingContext && editingContext\.surface === "sidebar"\) return;[\s\S]{0,120}var now = Date\.now\(\);[\s\S]{0,80}syncLocalSidebarStatusKeys\(now\);/,
+    );
+    expect(renderSource).toMatch(/disarmSessionClose\([^)]*\);/);
+
+    const source = functionSource('syncLocalSidebarStatusKeys');
+    expect(source).toMatch(
+      /thread\.sidebarStatusKey = PsycheSessions\.deriveLocalSidebarStatus\(thread, now\)\.key;/,
+    );
+
+    const state = {
+      threads: [
+        { id: 'one', sidebarStatusKey: 'busy' },
+        { id: 'two', sidebarStatusKey: 'active' },
+      ],
+    };
+    const calls: Array<[string, number]> = [];
+    const syncLocalSidebarStatusKeys = compileFunction<(now: number) => void>(source, {
+      state,
+      PsycheSessions: {
+        deriveLocalSidebarStatus: (
+          thread: { id: string },
+          now: number,
+        ) => {
+          calls.push([thread.id, now]);
+          return { key: thread.id === 'one' ? 'idle' : 'exited' };
+        },
+      },
+    });
+
+    syncLocalSidebarStatusKeys(4_242);
+    expect(state.threads.map((thread) => thread.sidebarStatusKey)).toEqual(['idle', 'exited']);
+    expect(calls).toEqual([
+      ['one', 4_242],
+      ['two', 4_242],
+    ]);
+  });
+
+  it('coalesces attention renders without dropping later status-only changes', () => {
+    const source = functionSource('sampleThreadAttention');
+    expect(source).toContain('var needsFinalRender = false;');
+    const statusIndex = source.indexOf('var nextStatus = PsycheSessions.deriveLocalSidebarStatus(thread, now);');
+    const attentionIndex = source.indexOf('var attentionChanged = false;');
+    expect(statusIndex).toBeGreaterThan(attentionIndex);
+    expect(source).toMatch(
+      /var attentionChanged = false;[\s\S]{0,520}var nextStatus = PsycheSessions\.deriveLocalSidebarStatus\(thread, now\);[\s\S]{0,200}var statusChanged = false;[\s\S]{0,160}if \(thread\.sidebarStatusKey !== nextStatus\.key\) \{[\s\S]{0,120}thread\.sidebarStatusKey = nextStatus\.key;[\s\S]{0,120}statusChanged = true;/,
+    );
+    expect(source).toMatch(/if \(attentionChanged\) \{[\s\S]{0,80}needsFinalRender = false;/);
+    expect(source).toMatch(
+      /else if \(statusChanged\) \{[\s\S]{0,80}needsFinalRender = true;/,
+    );
+    expect(source).toMatch(
+      /attentionTracker\.retain\(tracked\);[\s\S]{0,160}if \(needsFinalRender\) \{[\s\S]{0,80}renderSessionList\(\);[\s\S]{0,80}syncSessionListScroll\(\);/,
+    );
+
+    const harness = (
+      threads: Array<{
+        id: string;
+        term: object;
+        sidebarStatusKey: string;
+        steadyStatusKey: string;
+        needsAttention?: boolean;
+        attentionReason?: string | null;
+      }>,
+      attentionById: Map<string, boolean>,
+    ) => {
+      const renderCalls: string[] = [];
+      const syncCalls: string[] = [];
+      const retained: string[] = [];
+      let renderReason = 'final';
+      let syncReason = 'final';
+      let renderOffset = 0;
+      let syncOffset = 0;
+      let retainOffset = 0;
+      const state = { threads };
+      const deriveKey = (thread: {
+        needsAttention?: boolean;
+        steadyStatusKey: string;
+      }) => (thread.needsAttention ? 'attention' : thread.steadyStatusKey);
+      const renderSessionList = () => {
+        state.threads.forEach((thread) => {
+          thread.sidebarStatusKey = deriveKey(thread);
+        });
+        renderCalls.push(renderReason);
+      };
+      const syncSessionListScroll = () => {
+        syncCalls.push(syncReason);
+      };
+      const sampleThreadAttention = compileFunction<() => void>(source, {
+        ATTENTION_TAIL_LINES: 14,
+        Date: { now: () => 1000 },
+        terminalTail: () => '',
+        PsycheSessions: {
+          sidebarTailIsWorking: () => false,
+          deriveLocalSidebarStatus: (thread: { needsAttention?: boolean; steadyStatusKey: string }) => ({
+            key: deriveKey(thread),
+          }),
+        },
+        threadWantsAttentionTracking: () => true,
+        clearThreadAttention: (
+          thread: { id: string; needsAttention?: boolean; attentionReason?: string | null },
+        ) => {
+          if (!thread.needsAttention) return false;
+          thread.needsAttention = false;
+          thread.attentionReason = null;
+          renderReason = `clear:${thread.id}`;
+          syncReason = renderReason;
+          renderSessionList();
+          syncSessionListScroll();
+          renderReason = 'final';
+          syncReason = 'final';
+          return true;
+        },
+        applyThreadAttention: (
+          thread: { id: string; needsAttention?: boolean; attentionReason?: string | null },
+          next: { needsAttention: boolean; reason: string | null },
+        ) => {
+          var currentReason = thread.attentionReason || null;
+          if (!!thread.needsAttention === next.needsAttention && currentReason === next.reason) {
+            return false;
+          }
+          thread.needsAttention = next.needsAttention;
+          thread.attentionReason = next.reason;
+          renderReason = `attention:${thread.id}`;
+          syncReason = renderReason;
+          renderSessionList();
+          syncSessionListScroll();
+          renderReason = 'final';
+          syncReason = 'final';
+          return true;
+        },
+        attentionTracker: {
+          observe: (id: string) => ({
+            needsAttention: attentionById.get(id) || false,
+            reason: attentionById.get(id) ? 'turn' : null,
+          }),
+          retain: (ids: string[]) => retained.push(ids.join(',')),
+        },
+        state,
+        renderSessionList,
+        syncSessionListScroll,
+      });
+
+      return {
+        threads,
+        sample() {
+          sampleThreadAttention();
+          const result = {
+            renderCalls: renderCalls.slice(renderOffset),
+            syncCalls: syncCalls.slice(syncOffset),
+            retained: retained.slice(retainOffset),
+          };
+          renderOffset = renderCalls.length;
+          syncOffset = syncCalls.length;
+          retainOffset = retained.length;
+          return result;
+        },
+      };
+    };
+
+    const statusBeforeAttention = harness([
+      { id: 'one', term: {}, sidebarStatusKey: 'busy', steadyStatusKey: 'idle' },
+      { id: 'two', term: {}, sidebarStatusKey: 'busy', steadyStatusKey: 'busy' },
+    ], new Map([['one', false], ['two', true]]));
+
+    expect(statusBeforeAttention.sample()).toEqual({
+      renderCalls: ['attention:two'],
+      syncCalls: ['attention:two'],
+      retained: ['one,two'],
+    });
+    expect(statusBeforeAttention.sample()).toEqual({
+      renderCalls: [],
+      syncCalls: [],
+      retained: ['one,two'],
+    });
+
+    const laterStatus = harness([
+      { id: 'one', term: {}, sidebarStatusKey: 'busy', steadyStatusKey: 'busy' },
+      { id: 'two', term: {}, sidebarStatusKey: 'busy', steadyStatusKey: 'busy' },
+    ], new Map([['one', true], ['two', false]]));
+
+    expect(laterStatus.sample()).toEqual({
+      renderCalls: ['attention:one'],
+      syncCalls: ['attention:one'],
+      retained: ['one,two'],
+    });
+    laterStatus.threads[1].steadyStatusKey = 'idle';
+    expect(laterStatus.sample()).toEqual({
+      renderCalls: ['final'],
+      syncCalls: ['final'],
+      retained: ['one,two'],
+    });
   });
 
   it('reads what the terminal shows rather than the bytes that produced it', () => {
     expect(mainJs).toMatch(/function terminalTail\(term, lines\)[\s\S]{0,400}translateToString\(true\)/);
+  });
+
+  it('keeps shells out of attention tracking even while sampling their work state', () => {
+    expect(functionSource('sampleThreadAttention')).toMatch(
+      /thread\.isWorking = PsycheSessions\.sidebarTailIsWorking\(tail\);[\s\S]{0,420}if \(!threadWantsAttentionTracking\(thread\)\) \{[\s\S]{0,160}if \(thread\.needsAttention\) \{[\s\S]{0,120}clearThreadAttention\(thread\)/,
+    );
   });
 
   it('routes terminal input through the attention-aware sender', () => {
@@ -233,7 +551,7 @@ describe('desktop shell wiring', () => {
     );
     expect(
       mainJs.match(
-        /\{ label: "Interrupt", run: function \(\) \{ sendToThread\(thread, "\\x03"\); \} \}/g
+        /label: "Interrupt", run: function \(\) \{\s*sendToThread\(thread, "\\x03"\);\s*\} \}/g
       )
     ).toHaveLength(2);
   });
@@ -292,28 +610,123 @@ describe('desktop shell wiring', () => {
 
   it('clears attention on the bell and on exit', () => {
     expect(mainJs).toMatch(/term\.onBell\(function \(\)[\s\S]{0,200}attentionTracker\.bell\(thread\.id\)/);
-    expect(mainJs).toMatch(/thread\.status = "exited";[\s\S]{0,300}clearThreadAttention\(thread\)/);
+    expect(mainJs).toMatch(
+      /function handlePtyExit\(payload\)[\s\S]{0,500}thread\.status = "exited";[\s\S]{0,120}thread\.isWorking = false;[\s\S]{0,300}clearThreadAttention\(thread\)/,
+    );
+  });
+
+  it('marks dead or failed PTYs as no longer working', () => {
+    expect(mainJs).toMatch(/thread\.status = "failed";[\s\S]{0,120}thread\.isWorking = false;/);
   });
 
   it('marks the waiting session on the rail, the pane and the minimap', () => {
-    expect(mainJs).toMatch(/thread\.needsAttention \? " needs-attention" : ""/);
-    expect(mainJs).toMatch(/session-attention-badge[\s\S]{0,200}>!</);
+    expect(mainJs).toMatch(/rowModel\.needsAttention \? " needs-attention" : ""/);
+    expect(mainJs).toMatch(/attention\.textContent = "!" \+ (?:branchModel|projectModel)\.attentionCount/);
+    expect(mainJs).toContain('label.textContent = status.label;');
     expect(mainJs).toContain('classList.toggle("needs-attention", !!thread.needsAttention)');
     expect(mainJs).toMatch(/thread\.needsAttention \? " attention" : ""/);
     // The group-head counts already existed but only ever saw Coven rows; local
     // panes reaching them is the point of all of the above.
-    expect(mainJs).toContain('row.needsAttention');
+    expect(mainJs).toContain('rowModel.needsAttention');
+  });
+
+  it('suppresses and restores branch status glow as attention changes', () => {
+    const paneClasses = new Set(['terminal-pane']);
+    const branch = {
+      classList: { contains: (name: string) => name === 'terminal-pane-branch' },
+      dataset: { status: 'failed' } as Record<string, string>,
+      firstElementChild: null as null | {
+        classList: {
+          contains: (name: string) => boolean;
+          toggle: (name: string, enabled: boolean) => void;
+        };
+        dataset: Record<string, string>;
+      },
+    };
+    const pane = {
+      classList: {
+        contains: (name: string) => paneClasses.has(name),
+        toggle: (name: string, enabled: boolean) => {
+          if (enabled) paneClasses.add(name);
+          else paneClasses.delete(name);
+        },
+      },
+      dataset: { status: 'failed' },
+      parentElement: branch,
+    };
+    branch.firstElementChild = pane;
+    const attention = {
+      hidden: true,
+      textContent: '',
+      title: '',
+      setAttribute: () => undefined,
+    };
+    const syncPaneBranchStatusChrome = compileFunction<(value: typeof branch) => void>(
+      functionSource('syncPaneBranchStatusChrome'),
+      {},
+    );
+    const syncThreadAttentionChrome = compileFunction<(
+      value: { id: string; needsAttention: boolean; attentionReason: string | null;
+        pane: typeof pane; paneAttention: typeof attention },
+    ) => void>(functionSource('syncThreadAttentionChrome'), {
+      syncPaneBranchStatusChrome,
+      PsycheSessions: { attentionLabel: () => 'Waiting for input' },
+      terminalArea: { querySelector: () => null },
+    });
+    const thread: {
+      id: string;
+      needsAttention: boolean;
+      attentionReason: string | null;
+      pane: typeof pane;
+      paneAttention: typeof attention;
+    } = {
+      id: 'thread-a',
+      needsAttention: true,
+      attentionReason: 'question',
+      pane,
+      paneAttention: attention,
+    };
+
+    syncThreadAttentionChrome(thread);
+    expect(paneClasses.has('needs-attention')).toBe(true);
+    expect('status' in branch.dataset).toBe(false);
+
+    thread.needsAttention = false;
+    thread.attentionReason = null;
+    syncThreadAttentionChrome(thread);
+    expect(paneClasses.has('needs-attention')).toBe(false);
+    expect(branch.dataset.status).toBe('failed');
   });
 
   it('states the waiting reason in words, never in colour alone', () => {
+    const statusGlowSelector =
+      '.terminal-pane-branch:is([data-status="starting"], [data-status="failed"], [data-status="exited"])';
+    const rootStatusGlowSelector =
+      '.terminal-host > .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)';
+
     expect(mainJs).toMatch(/PsycheSessions\.attentionLabel\(thread\.attentionReason\)/);
     expect(stylesCss).toContain('.terminal-pane-attention');
-    expect(stylesCss).toMatch(/\.terminal-pane\.needs-attention/);
+    expect(cssDeclarations('.terminal-pane.needs-attention, .terminal-pane.focused.needs-attention'))
+      .toEqual(new Map([
+        ['border-color', 'rgba(251, 191, 36, 0.6)'],
+        ['box-shadow', '0 0 0 1px rgba(251, 191, 36, 0.28)'],
+      ]));
+    expect(paneHeaderBackground(['terminal-pane', 'focused']))
+      .toBe('rgba(var(--rgb-accent), 0.07)');
+    expect(paneHeaderBackground(['terminal-pane', 'needs-attention']))
+      .toBe('rgba(251, 191, 36, 0.09)');
+    expect(paneHeaderBackground(['terminal-pane', 'focused', 'needs-attention']))
+      .toBe('rgba(251, 191, 36, 0.09)');
+    expect(cssDeclarations(statusGlowSelector).has('box-shadow')).toBe(true);
+    expect(cssDeclarations(rootStatusGlowSelector).has('box-shadow')).toBe(true);
     expect(stylesCss).toMatch(/\.minimap-dot\.attention/);
-    // The header grew a seventh track for the chip; leaving it at six would
-    // wrap the close button onto a second row the moment a pane waits.
+    expect(functionSource('mountTerminal')).toMatch(
+      /header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(span\)/,
+    );
+    // The terminal header needs one track per mounted child once the attention
+    // chip joins the row, or the controls wrap when a pane is waiting.
     expect(stylesCss).toMatch(
-      /\.terminal-pane-header \{[\s\S]{0,120}grid-template-columns: auto minmax\(0, 1fr\) auto auto auto auto auto;/
+      /\.terminal-pane-header \{[\s\S]{0,120}grid-template-columns: auto minmax\(0, 1fr\) auto auto auto auto;/
     );
   });
 });

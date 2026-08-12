@@ -1,7 +1,9 @@
 import path from 'path';
 import * as os from 'os';
-import type { PsychePane, MergeTargetReference } from '../types.js';
-import { createPane } from '../utils/paneCreation.js';
+import fs from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import type { PsychePane, MergeTargetReference, SavePanes } from '../types.js';
+import { createPane, type CreatePaneOptions } from '../utils/paneCreation.js';
 import { LogService } from '../services/LogService.js';
 import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
 import { type AgentName } from '../utils/agentLaunch.js';
@@ -13,7 +15,7 @@ import { SettingsManager } from '../utils/settingsManager.js';
 
 interface Params {
   panes: PsychePane[];
-  savePanes: (p: PsychePane[]) => Promise<void>;
+  savePanes: SavePanes;
   projectName: string;
   sessionProjectRoot: string;
   panesFile: string;
@@ -25,6 +27,7 @@ interface Params {
 
 interface CreateNewPaneOptions {
   existingPanes?: PsychePane[];
+  existingWorktree?: CreatePaneOptions['existingWorktree'];
   slugSuffix?: string;
   slugBase?: string;
   targetProjectRoot?: string;
@@ -34,6 +37,33 @@ interface CreateNewPaneOptions {
 }
 
 const MAX_PARALLEL_PANE_CREATIONS = 4;
+
+function getEditorExecutable(editor: string): string {
+  if (
+    !editor
+    || editor.trim() !== editor
+    || /\s/.test(editor)
+    || /[`$;&|<>"']/.test(editor)
+  ) {
+    throw new Error(
+      'Editor must be a single executable path; command strings with whitespace are not supported',
+    );
+  }
+  return editor;
+}
+
+function waitForEditor(editorProcess: ReturnType<typeof spawn>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    editorProcess.once('error', reject);
+    editorProcess.once('close', (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`Prompt editor exited with code ${code ?? 'unknown'}`));
+      }
+    });
+  });
+}
 
 function getParallelPaneCreationLimit(totalAgents: number): number {
   if (totalAgents <= 1) {
@@ -62,7 +92,8 @@ function getParallelPaneCreationLimit(totalAgents: number): number {
 
 function enqueueManagedWorktreePruning(
   projectRoots: string[],
-  activePanes: PsychePane[]
+  activePanes: PsychePane[],
+  configPath: string
 ): void {
   const uniqueProjectRoots = Array.from(new Set(projectRoots));
 
@@ -76,6 +107,7 @@ function enqueueManagedWorktreePruning(
       projectRoot,
       activePanes,
       maxManagedWorktrees,
+      configPath,
     });
   }
 }
@@ -92,30 +124,56 @@ export default function usePaneCreation({
   availableAgents,
 }: Params) {
   const openInEditor = async (currentPrompt: string, setPrompt: (v: string) => void) => {
+    let tmpFile: string | undefined;
+    let editorError: Error | undefined;
     try {
-      const fs = await import('fs');
-      const tmpFile = path.join(os.tmpdir(), `psyche-prompt-${Date.now()}.md`);
-      fs.writeFileSync(tmpFile, currentPrompt || '# Enter your Claude prompt here\n\n');
-      const editor = process.env.EDITOR || process.env.VISUAL || 'nano';
+      tmpFile = path.join(os.tmpdir(), `psyche-prompt-${Date.now()}.md`);
+      await fs.writeFile(tmpFile, currentPrompt || '# Enter your Claude prompt here\n\n');
+      const editor = getEditorExecutable(process.env.EDITOR || process.env.VISUAL || 'nano');
       process.stdout.write('\x1b[2J\x1b[H');
-      const { spawn } = await import('child_process');
-      const editorProcess = spawn(editor, [tmpFile], { stdio: 'inherit', shell: true });
-      editorProcess.on('close', () => {
+      const editorProcess = spawn(editor, [tmpFile], { stdio: 'inherit', shell: false });
+      await waitForEditor(editorProcess);
+      const content = (await fs.readFile(tmpFile, 'utf8'))
+        .replace(/^# Enter your Claude prompt here\s*\n*/m, '')
+        .trim();
+      setPrompt(content);
+      process.stdout.write('\x1b[2J\x1b[H');
+    } catch (error) {
+      editorError = error instanceof Error ? error : new Error(String(error));
+      LogService.getInstance().error(
+        'Failed to open prompt editor',
+        'usePaneCreation',
+        undefined,
+        editorError,
+      );
+    } finally {
+      if (tmpFile) {
         try {
-          const content = fs.readFileSync(tmpFile, 'utf8').replace(/^# Enter your Claude prompt here\s*\n*/m, '').trim();
-          setPrompt(content);
-          fs.unlinkSync(tmpFile);
-          process.stdout.write('\x1b[2J\x1b[H');
-        } catch {}
-      });
-    } catch {}
+          await fs.unlink(tmpFile);
+        } catch (error) {
+          const cleanupError = error instanceof Error ? error : new Error(String(error));
+          LogService.getInstance().error(
+            `Failed to remove prompt editor temporary file: ${tmpFile}`,
+            'usePaneCreation',
+            undefined,
+            cleanupError,
+          );
+          editorError ??= cleanupError;
+        }
+      }
+
+      if (editorError) {
+        setStatusMessage(`Failed to open prompt editor: ${editorError.message}`);
+        setTimeout(() => setStatusMessage(''), 3000);
+      }
+    }
   };
 
   const createPaneInternal = async (
     prompt: string,
     agent?: AgentName,
     options: CreateNewPaneOptions = {}
-  ): Promise<PsychePane> => {
+  ): Promise<{ pane: PsychePane; persistedDuringLifecycle: boolean }> => {
     const panesForCreation = options.existingPanes ?? panes;
     const result = await createPane(
       {
@@ -125,12 +183,19 @@ export default function usePaneCreation({
         existingPanes: panesForCreation,
         slugSuffix: options.slugSuffix,
         slugBase: options.slugBase,
+        existingWorktree: options.existingWorktree,
         projectRoot: options.targetProjectRoot,
         skipAgentSelection: options.skipAgentSelection,
         startPointBranch: options.startPointBranch,
         mergeTargetChain: options.mergeTargetChain,
         sessionProjectRoot,
         sessionConfigPath: panesFile,
+        persistCreatedPane: async (pane) => {
+          await savePanes([...panesForCreation, pane], panesForCreation);
+        },
+        persistReusedPane: async (pane) => {
+          await savePanes([...panesForCreation, pane], panesForCreation);
+        },
       },
       availableAgents
     );
@@ -139,7 +204,12 @@ export default function usePaneCreation({
       throw new Error('Agent choice is required');
     }
 
-    return result.pane;
+    return {
+      pane: result.pane,
+      persistedDuringLifecycle: Boolean(
+        result.persistedDuringLifecycle || options.existingWorktree
+      ),
+    };
   };
 
   const createNewPane = async (
@@ -153,12 +223,18 @@ export default function usePaneCreation({
       setIsCreatingPane(true)
       setStatusMessage("Creating pane...")
 
-      const pane = await createPaneInternal(prompt, agent, options);
+      const { pane, persistedDuringLifecycle } = await createPaneInternal(prompt, agent, options);
 
       // Save the pane
       const updatedPanes = [...panesForCreation, pane];
-      await savePanes(updatedPanes);
-      enqueueManagedWorktreePruning([pane.projectRoot || sessionProjectRoot], updatedPanes);
+      if (!persistedDuringLifecycle) {
+        await savePanes(updatedPanes, panesForCreation);
+      }
+      enqueueManagedWorktreePruning(
+        [pane.projectRoot || sessionProjectRoot],
+        updatedPanes,
+        panesFile
+      );
 
       await loadPanes();
       setStatusMessage("Pane created")
@@ -216,6 +292,19 @@ export default function usePaneCreation({
         basePanes: panesForCreation,
         availableAgents,
         slugBase,
+        persistReusedPane: async (_pane, previousPanes, panesToPersist) => {
+          await savePanes(panesToPersist, previousPanes);
+        },
+        persistCreatedPane: async (_pane, previousPanes, panesToPersist) => {
+          await savePanes(panesToPersist, previousPanes);
+        },
+        persistOrchestrationMetadata: async (originatingPane, nextPane) => {
+          // This is a one-pane property delta. Do not write the original
+          // pre-lane array here: StatusDetector may have added agentSession
+          // between createPane's durable save and this orchestration update.
+          await savePanes([nextPane], [originatingPane]);
+          return nextPane;
+        },
       });
       const orchestrator = new Orchestrator({ executeLane: backend.execute });
 
@@ -243,13 +332,15 @@ export default function usePaneCreation({
       }
 
       // Successful lanes are persisted even when siblings failed — a partial
-      // result still leaves usable work behind.
+      // result still leaves usable work behind. Each lane was already made
+      // durable by createPane and then patched with its orchestration delta;
+      // a stale whole-array save here would erase concurrent pane fields.
       if (createdPanes.length > 0) {
         const updatedPanes = [...panesForCreation, ...createdPanes];
-        await savePanes(updatedPanes);
         enqueueManagedWorktreePruning(
           createdPanes.map((pane) => pane.projectRoot || sessionProjectRoot),
-          updatedPanes
+          updatedPanes,
+          panesFile
         );
         await loadPanes();
       }

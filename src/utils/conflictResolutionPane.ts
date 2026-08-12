@@ -7,6 +7,11 @@
 import type { PsychePane } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
 import {
+  assertTmuxGenerationUnchanged,
+  captureTmuxGeneration,
+  tearDownGenerationBoundPane,
+} from './TmuxGenerationGuard.js';
+import {
   enforceControlPaneSize,
   ensurePaneBorderStatusForCurrentSession,
   splitPane,
@@ -33,6 +38,27 @@ import {
 } from './agentLaunch.js';
 import { sendPromptViaTmux } from './agentPromptDispatch.js';
 import { resolveProjectColorTheme } from './paneColors.js';
+import { createPsychePaneId } from './paneIdentity.js';
+import {
+  WorktreeCleanupService,
+  type WorktreeReuseReservation,
+} from '../services/WorktreeCleanupService.js';
+import {
+  compareAndRemoveProjectPaneConfigPaneIdentities,
+  ensureProjectPaneConfigPane,
+  projectPaneConfigPath,
+} from '../services/ProjectPaneConfig.js';
+import {
+  paneRecoveryInstructions,
+  tearDownPaneWithVerification,
+  type TmuxPanePresence,
+} from './paneTeardown.js';
+import {
+  isPaneLifecycleReservationRetainedError,
+  PaneLifecycleReservationRetainedError,
+  retainPaneRecovery,
+  type PaneRecoveryPersistenceResult,
+} from './paneLifecycleRecovery.js';
 
 export interface ConflictResolutionPaneOptions {
   sourceBranch: string;      // Branch being merged (the worktree branch)
@@ -41,6 +67,11 @@ export interface ConflictResolutionPaneOptions {
   agent: AgentName;
   projectName: string;
   existingPanes: PsychePane[];
+  /** The shared pane registry root, not the conflict worktree itself. */
+  sessionProjectRoot: string;
+  /** Must durably add this exact record before merge/agent commands run. */
+  persistConflictPane: (pane: PsychePane) => Promise<void>;
+  refreshPanes?: () => Promise<void>;
 }
 
 /**
@@ -48,6 +79,37 @@ export interface ConflictResolutionPaneOptions {
  */
 export async function createConflictResolutionPane(
   options: ConflictResolutionPaneOptions
+): Promise<PsychePane> {
+  const reservation = await WorktreeCleanupService.getInstance()
+    .beginWorktreeReuseReservation(
+      options.targetRepoPath,
+      options.sessionProjectRoot,
+    );
+  let settled = false;
+  try {
+    const pane = await createConflictResolutionPaneWithReservation(
+      options,
+      reservation,
+    );
+    await reservation.complete();
+    settled = true;
+    return pane;
+  } catch (error) {
+    if (isPaneLifecycleReservationRetainedError(error)) {
+      reservation.retain();
+      settled = true;
+    }
+    throw error;
+  } finally {
+    if (!settled) {
+      await reservation.cancel();
+    }
+  }
+}
+
+async function createConflictResolutionPaneWithReservation(
+  options: ConflictResolutionPaneOptions,
+  reservation: WorktreeReuseReservation,
 ): Promise<PsychePane> {
   const { sourceBranch, targetBranch, targetRepoPath, agent, projectName, existingPanes } = options;
   const tmuxService = TmuxService.getInstance();
@@ -60,9 +122,6 @@ export async function createConflictResolutionPane(
   // Get current pane info
   const originalPaneId = tmuxService.getCurrentPaneIdSync();
 
-  // Get current pane count
-  const paneCount = tmuxService.getAllPaneIdsSync().length;
-
   // Enable pane borders to show titles
   try {
     ensurePaneBorderStatusForCurrentSession();
@@ -70,69 +129,108 @@ export async function createConflictResolutionPane(
     // Ignore if already set or fails
   }
 
-  // Create new pane
+  // Create new pane. From this point onward, every fallible operation is
+  // guarded by exact persistence or verified teardown/recovery.
+  const allocationGeneration = captureTmuxGeneration(
+    tmuxService,
+    'conflict pane allocation',
+  );
   const paneInfo = splitPane();
+  const prompt = `There are conflicts merging ${targetBranch} into ${sourceBranch}. Both are valid changes, so please keep both feature sets and merge them intelligently. Check git status to see the conflicting files, then resolve each conflict to preserve both sets of changes. Once all conflicts are resolved, commit the merge.`;
+  const tmuxServerIdentity = allocationGeneration;
+  const newPane: PsychePane = {
+    id: createPsychePaneId(),
+    slug,
+    prompt,
+    paneId: paneInfo,
+    ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
+    projectRoot: targetRepoPath,
+    projectName,
+    colorTheme: resolveProjectColorTheme(targetRepoPath, []),
+    worktreePath: targetRepoPath,
+    agent,
+  };
 
-  // Wait for pane creation to settle
-  await new Promise((resolve) => setTimeout(resolve, 500));
-
-  // Set pane title
   try {
+    assertTmuxGenerationUnchanged(
+      tmuxService,
+      allocationGeneration,
+      'conflict pane allocation',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (!(await tmuxService.paneExists(paneInfo))) {
+      throw new Error(`newly split conflict pane ${paneInfo} is not present`);
+    }
     await tmuxService.setPaneTitle(paneInfo, slug);
-  } catch {
-    // Ignore if setting title fails
-  }
-
-  // Don't apply global layouts - just enforce sidebar width
-  try {
     const controlPaneId = tmuxService.getCurrentPaneIdSync();
     await enforceControlPaneSize(controlPaneId, SIDEBAR_WIDTH);
-  } catch {}
+    await options.persistConflictPane(newPane);
+  } catch (error) {
+    const teardown = await tearDownGenerationBoundPane(
+      tmuxService,
+      paneInfo,
+      allocationGeneration,
+      { generationMismatch: 'unknown' },
+    );
+    const recovery = teardown.presence === 'absent'
+      ? undefined
+      : await retainPaneRecovery({
+        projectRoot: options.sessionProjectRoot,
+        sessionProjectRoot: options.sessionProjectRoot,
+        pane: newPane,
+        operation: 'conflict-resolution-pane',
+        reason: `post-split setup or persistence failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        reservation,
+        persistConfigRecovery: tmuxServerIdentity
+          ? () => persistConflictPaneRecovery(
+            options.sessionProjectRoot,
+            newPane,
+          )
+          : async () => ({
+            durable: false,
+            message: 'refused to persist an unversioned conflict pane record',
+          }),
+      });
+    if (recovery?.retained) {
+      throw new PaneLifecycleReservationRetainedError(
+        `Failed to persist conflict resolution pane before commands: ${
+          error instanceof Error ? error.message : String(error)
+        }; ${recovery.message}`,
+      );
+    }
+    throw new Error(
+      `Failed to persist conflict resolution pane before commands: ${
+        error instanceof Error ? error.message : String(error)
+      }${recovery ? `; ${recovery.message}` : ''}`,
+    );
+  }
 
-  // CD into the target repository (where we'll resolve conflicts)
   try {
+    // The durable record exists before the pane touches the worktree or starts
+    // a merge. This lets cleanup see it even if the agent command fails.
     await tmuxService.sendShellCommand(paneInfo, `cd "${targetRepoPath}"`);
     await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
     await new Promise((resolve) => setTimeout(resolve, 500));
-  } catch (error) {
-    console.error('[conflictResolutionPane] Failed to cd into target repo:', error);
-  }
-
-  // CRITICAL: Ensure clean state before starting merge
-  // If a previous merge attempt left MERGE_HEAD, abort it first
-  try {
     await tmuxService.sendShellCommand(paneInfo, 'git merge --abort 2>/dev/null || true');
     await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
     await new Promise((resolve) => setTimeout(resolve, 500));
-  } catch (error) {
-    console.error('[conflictResolutionPane] Failed to abort previous merge:', error);
-  }
-
-  // CRITICAL: Start the merge to create conflict markers for the agent to resolve
-  // This is necessary because pre-validation or failed execution may have aborted the merge
-  try {
     await tmuxService.sendShellCommand(paneInfo, `git merge ${targetBranch} --no-edit || true`);
     await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
     await new Promise((resolve) => setTimeout(resolve, TMUX_LAYOUT_APPLY_DELAY));
-  } catch (error) {
-    console.error('[conflictResolutionPane] Failed to initiate merge:', error);
-  }
 
-  // Construct the AI prompt for conflict resolution
-  const prompt = `There are conflicts merging ${targetBranch} into ${sourceBranch}. Both are valid changes, so please keep both feature sets and merge them intelligently. Check git status to see the conflicting files, then resolve each conflict to preserve both sets of changes. Once all conflicts are resolved, commit the merge.`;
-  const shouldSendPromptViaTmux = getPromptTransport(agent) === 'send-keys';
+    const shouldSendPromptViaTmux = getPromptTransport(agent) === 'send-keys';
 
-  let promptFilePath: string | null = null;
-  if (!shouldSendPromptViaTmux) {
-    try {
-      promptFilePath = await writePromptFile(targetRepoPath, slug, prompt);
-    } catch {
-      // Fall back to escaped inline flows if prompt file creation fails
+    let promptFilePath: string | null = null;
+    if (!shouldSendPromptViaTmux) {
+      try {
+        promptFilePath = await writePromptFile(targetRepoPath, slug, prompt);
+      } catch {
+        // Fall back to escaped inline flows if prompt file creation fails
+      }
     }
-  }
 
-  // Launch agent with the conflict resolution prompt
-  {
     if (agent === 'gemini') {
       ensureGeminiFolderTrusted(targetRepoPath);
     }
@@ -195,39 +293,100 @@ export async function createConflictResolutionPane(
         // Ignore errors in background monitoring
       });
     }
+
+    if (promptFilePath) {
+      await deletePromptFile(promptFilePath);
+    }
+
+    await tmuxService.selectPane(paneInfo);
+
+    await tmuxService.selectPane(originalPaneId);
+    try {
+      await tmuxService.setPaneTitle(originalPaneId, "psyche");
+    } catch {
+      // The durable conflict record remains the lifecycle authority.
+    }
+    return newPane;
+  } catch (error) {
+    let teardown: Awaited<ReturnType<typeof tearDownConflictPane>> | undefined;
+    try {
+      await compareAndRemoveProjectPaneConfigPaneIdentities(
+        options.sessionProjectRoot,
+        [{ id: newPane.id, paneId: newPane.paneId }],
+        async () => {
+          teardown = await tearDownGenerationBoundPane(
+            tmuxService,
+            paneInfo,
+            tmuxServerIdentity,
+          );
+          if (!teardown || teardown.presence !== 'absent') {
+            throw new Error(
+              `could not confirm conflict pane ${paneInfo} is closed (${
+                teardown?.presence || 'unknown'
+              }); ${
+                paneRecoveryInstructions(paneInfo, projectPaneConfigPath(options.sessionProjectRoot))
+              }`,
+            );
+          }
+        },
+      );
+    } catch (cleanupError) {
+      await options.refreshPanes?.();
+      throw new Error(
+        `Conflict resolution command failed: ${
+          error instanceof Error ? error.message : String(error)
+        }; exact pane cleanup was retained: ${
+          cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        }`,
+      );
+    }
+    await options.refreshPanes?.();
+    throw error;
   }
+}
 
-  if (promptFilePath) {
-    await deletePromptFile(promptFilePath);
-  }
+async function tearDownConflictPane(
+  tmuxService: TmuxService,
+  paneId: string,
+) {
+  return tearDownPaneWithVerification({
+    probe: () => probeConflictPanePresence(tmuxService, paneId),
+    kill: () => tmuxService.killPane(paneId),
+  });
+}
 
-  // Keep focus on the new pane
-  await tmuxService.selectPane(paneInfo);
-
-  // Create the pane object
-  const newPane: PsychePane = {
-    id: `psyche-${Date.now()}`,
-    slug,
-    prompt,
-    paneId: paneInfo,
-    projectRoot: targetRepoPath,
-    projectName,
-    colorTheme: resolveProjectColorTheme(targetRepoPath, []),
-    agent,
-    // Note: No worktreePath - this pane operates directly in the target repo
-  };
-
-  // Switch back to the original pane
-  await tmuxService.selectPane(originalPaneId);
-
-  // Re-set the title for the psyche pane
+async function probeConflictPanePresence(
+  tmuxService: TmuxService,
+  paneId: string,
+): Promise<TmuxPanePresence> {
   try {
-    await tmuxService.setPaneTitle(originalPaneId, "psyche");
+    return await tmuxService.paneExists(paneId) ? 'present' : 'absent';
   } catch {
-    // Ignore if setting title fails
+    return 'unknown';
   }
+}
 
-  return newPane;
+async function persistConflictPaneRecovery(
+  sessionProjectRoot: string,
+  pane: PsychePane,
+): Promise<PaneRecoveryPersistenceResult> {
+  const configPath = projectPaneConfigPath(sessionProjectRoot);
+  try {
+    await ensureProjectPaneConfigPane(sessionProjectRoot, pane);
+    return {
+      durable: true,
+      message: `retained recovery record ${pane.id} in ${configPath}. ${
+        paneRecoveryInstructions(pane.paneId, configPath)
+      }`,
+    };
+  } catch (error) {
+    return {
+      durable: false,
+      message: `could not persist recovery record ${pane.id}: ${
+        error instanceof Error ? error.message : String(error)
+      }. ${paneRecoveryInstructions(pane.paneId, configPath)}`,
+    };
+  }
 }
 
 /**

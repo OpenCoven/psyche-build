@@ -301,6 +301,51 @@ kbd {
 .sidebar-tab.is-active svg { color: var(--accent); opacity: 1; }
 .sidebar-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+.session-search-wrap {
+  position: relative;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.session-search-wrap .session-search { width: 100%; padding-right: 27px; }
+.session-search-key {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 0 4px;
+  color: var(--text-soft);
+  background: var(--surface-3);
+  font: 10px/16px var(--font-mono);
+  pointer-events: none;
+}
+.session-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px 8px;
+}
+.session-filter {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10.5px;
+}
+.session-filter.is-active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.session-filter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.session-legend-button { margin-left: auto; }
+
 .sidebar-files {
   display: flex;
   flex-direction: column;
@@ -424,6 +469,24 @@ kbd {
   font-size: 10.5px;
 }
 .session-worktree-group .session-row { padding-left: 25px; }
+.session-disclosure {
+  flex: 0 0 16px;
+  width: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+.session-project-count,
+.session-branch-count,
+.session-category-count {
+  flex: none;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--muted);
+}
 .session-subsection-label {
   padding: 5px 8px 2px 22px;
   font-size: 9.5px;
@@ -599,13 +662,10 @@ kbd {
   justify-content: center;
   font-size: 13px;
   line-height: 1;
-  opacity: 0;
+  opacity: 1;
   transition: opacity var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
 }
-.session-row-wrap:hover .session-close,
-.session-row-wrap:focus-within .session-close { opacity: 1; }
 .session-close:focus-visible {
-  opacity: 1;
   outline: 1px solid var(--accent-line);
   outline-offset: 1px;
 }
@@ -717,6 +777,31 @@ kbd {
   font-size: 12.5px;
   color: var(--muted);
   line-height: 1.5;
+}
+.session-result-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.session-result-reset {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.session-result-reset:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.session-list mark {
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--warn) 35%, transparent);
+  color: inherit;
 }
 
 .rail-btn {
@@ -1199,10 +1284,6 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.terminal-pane-status {
-  flex: none;
-  text-transform: lowercase;
-}
 .terminal-pane-close {
   flex: none;
   border: 0;
@@ -1279,6 +1360,44 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .terminal-pane.needs-attention .terminal-pane-header {
   background: rgba(251, 191, 36, 0.09);
 }
+.terminal-pane-branch[data-status="starting"] {
+  --pane-status-rgb: 251, 191, 36;
+}
+.terminal-pane-branch[data-status="failed"] {
+  --pane-status-rgb: 248, 113, 113;
+}
+.terminal-pane-branch[data-status="exited"] {
+  --pane-status-rgb: 138, 132, 153;
+}
+
+.terminal-pane-branch:is([data-status="starting"], [data-status="failed"], [data-status="exited"]) {
+  position: relative;
+  z-index: 1;
+  border-radius: 4px;
+  box-shadow:
+    0 0 0 1px rgba(var(--pane-status-rgb), 0.2),
+    0 0 12px rgba(var(--pane-status-rgb), 0.24);
+}
+.terminal-host > .terminal-pane[data-status="starting"]:not(.needs-attention) {
+  --pane-status-rgb: 251, 191, 36;
+}
+.terminal-host > .terminal-pane[data-status="failed"]:not(.needs-attention) {
+  --pane-status-rgb: 248, 113, 113;
+}
+.terminal-host > .terminal-pane[data-status="exited"]:not(.needs-attention) {
+  --pane-status-rgb: 138, 132, 153;
+}
+.terminal-host > .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention) {
+  box-shadow:
+    0 0 0 1px rgba(var(--pane-status-rgb), 0.2),
+    0 0 12px rgba(var(--pane-status-rgb), 0.24);
+}
+.terminal-host > .terminal-pane.focused:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention) {
+  border-color: rgba(var(--rgb-accent), 0.55);
+  box-shadow:
+    0 0 0 1px rgba(var(--rgb-accent), 0.22),
+    0 0 12px rgba(var(--pane-status-rgb), 0.24);
+}
 /* Worded chip, matching how every other pane state is spelled out rather than
    left to colour alone. */
 .terminal-pane-attention {
@@ -1292,14 +1411,14 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   white-space: nowrap;
 }
 
-/* Seven tracks: glyph · label · attention · status · span · maximise · close.
-   The label is the only flexible one, so the buttons keep their footprint at
-   any width instead of being squeezed out of the row. The attention chip is
-   hidden (display:none) unless the pane is waiting, so its track collapses to
+/* Six tracks: glyph · label · attention · span · maximise · close. The label
+   is the only flexible one, so the buttons keep their footprint at any width
+   instead of being squeezed out of the row. The attention chip is hidden
+   (display:none) unless the pane is waiting, so its track collapses to
    nothing rather than reserving space for a state most panes never reach. */
 .terminal-pane-header {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
   align-items: center;
   gap: 8px;
   padding: 0 6px 0 8px;
@@ -1307,7 +1426,12 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   font-size: 12.5px;
   user-select: none;
 }
-.terminal-pane.focused .terminal-pane-header { background: rgba(var(--rgb-accent), 0.07); }
+.terminal-pane:is(.is-web, .is-tool) .terminal-pane-header {
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+}
+.terminal-pane.focused:not(.needs-attention) .terminal-pane-header {
+  background: rgba(var(--rgb-accent), 0.07);
+}
 
 /* Title and meta share one track and ellipsize independently: the title gives
    up space last (flex 0 1) and the meta first (flex 0 4). */
@@ -1352,43 +1476,6 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--muted);
-}
-
-/* Status is a worded chip, never a bare colour. Running is the exception and
-   only because it is the steady state of nearly every pane: a static green dot
-   carries it, and the word stays in the aria-label. */
-.terminal-pane-status {
-  justify-self: end;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-.terminal-pane-status:empty { display: none; }
-.terminal-pane-status.starting {
-  background: rgba(251, 191, 36, 0.14);
-  color: var(--warn);
-}
-.terminal-pane-status.failed {
-  background: rgba(248, 113, 113, 0.14);
-  color: var(--error);
-}
-.terminal-pane-status.exited {
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--muted);
-}
-.terminal-pane-status.running {
-  display: block;
-  width: 7px;
-  height: 7px;
-  padding: 0;
-  border-radius: 50%;
-  background: var(--ok);
-  box-shadow: 0 0 6px rgba(52, 211, 153, 0.5);
-  align-self: center;
 }
 
 /* Header controls: span cycle, maximise, close. Identical footprint so the
@@ -1468,12 +1555,11 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .terminal-pane-max[aria-pressed="true"] { color: var(--accent); }
 
 /* Pane tiers. Information drops in reverse order of usefulness: the meta line
-   is repeated in the sidebar, the status word is not. */
+   is repeated in the sidebar, so it goes first. */
 @container pane (max-width: 460px) {
   .terminal-pane-meta { display: none; }
 }
 @container pane (max-width: 300px) {
-  .terminal-pane-status:not(.running) { display: none; }
   .terminal-pane-header { gap: 4px; padding: 0 4px 0 6px; }
 }
 .terminal-pane-divider {
@@ -1946,9 +2032,8 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .canvas-empty-action .key { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
 
 /* -------- Command composer --------
-   Window-wide footer: a scope chip that says where text lands, the input
-   itself, and the voice/send affordances. The palette and scope menu open
-   upward from here. */
+   Window-wide footer: the input itself plus the voice/send affordances. Text
+   goes to the focused pane. The palette opens upward from here. */
 
 .composer {
   position: relative;
@@ -1962,43 +2047,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-top: 1px solid var(--border);
   height: var(--composer-h);
 }
-.scope-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 32px;
-  padding: 0 11px;
-  border-radius: 8px;
-  border: 1px solid var(--border-strong);
-  background: var(--surface-2);
-  color: var(--text-soft);
-  font-size: 11.5px;
-  white-space: nowrap;
-  flex: none;
-  transition: border-color var(--transition-fast), color var(--transition-fast);
-}
-.scope-btn:hover { border-color: var(--accent-line); color: var(--text); }
-.scope-kicker {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.scope-label { font-weight: 600; color: var(--text); }
-.scope-caret { color: var(--muted); font-size: 9px; }
-.scope-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  flex: none;
-  background: var(--accent);
-}
-.scope-dot-project { background: var(--ok); }
-.scope-dot-agents { background: var(--warn); }
-.scope-btn[data-scope="project"] .scope-dot { background: var(--ok); }
-.scope-btn[data-scope="agents"] .scope-dot { background: var(--warn); }
-
 .composer-field {
   position: relative;
   flex: 1 1 auto;
@@ -2691,23 +2739,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 /* -------- Menus that open upward from the composer -------- */
 
-.scope-menu {
-  position: absolute;
-  left: 12px;
-  bottom: calc(var(--composer-h) - 4px);
-  z-index: 60;
-  min-width: 262px;
-  padding: 5px;
-  border: 1px solid var(--border-strong);
-  border-radius: 9px;
-  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.97));
-  backdrop-filter: blur(28px) saturate(1.2);
-  -webkit-backdrop-filter: blur(28px) saturate(1.2);
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
-  animation: menu-rise 140ms ease-out;
-}
-.scope-menu[hidden] { display: none; }
-.scope-menu-head,
 .new-pane-menu-head {
   padding: 6px 9px 4px;
   color: var(--muted);
@@ -2716,30 +2747,12 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   letter-spacing: 0.07em;
   text-transform: uppercase;
 }
-.scope-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 7px 9px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text);
-  font-size: 12px;
-  text-align: left;
-}
-.scope-item:hover { background: var(--accent-soft); }
-.scope-item[aria-checked="true"] { background: var(--accent-soft); }
-.scope-item-text { flex: 1; min-width: 0; }
-.scope-item-desc { display: block; font-size: 10.5px; color: var(--muted); }
-.scope-item-key { font-size: 10px; color: var(--muted); }
 @keyframes menu-rise {
   from { opacity: 0; transform: translateY(5px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .scope-menu, .new-pane-menu, .toast, .help-overlay { animation: none; }
+  .new-pane-menu, .toast, .help-overlay { animation: none; }
 }
 
 .palette {
@@ -4213,6 +4226,20 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   align-items: flex-end;
   gap: 2px;
 }
+.session-status {
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.session-status.status-active { color: var(--ok); }
+.session-status.status-busy { color: #60a5fa; }
+.session-status.status-attention { color: var(--warn); }
+.session-status.status-idle { color: var(--muted); }
+.session-status.status-exited { color: var(--error); }
 .session-chip {
   display: inline-block;
   padding: 1px 6px;

@@ -1,9 +1,9 @@
-import type { PsychePane, ProjectSettings } from '../types.js';
+import type { PsychePane, ProjectSettings, SavePanes } from '../types.js';
 import usePaneRunner from './usePaneRunner.js';
 
 interface Params {
   panes: PsychePane[];
-  savePanes: (p: PsychePane[]) => Promise<void>;
+  savePanes: SavePanes;
   projectSettings: ProjectSettings;
   saveSettings: (s: ProjectSettings) => Promise<void>;
   setShowCommandPrompt: (v: 'test' | 'dev' | null) => void;

@@ -28,7 +28,7 @@ describe('toggleAutopilotAction', () => {
         id: 'psyche-1',
         autopilot: true,
       }),
-    ]);
+    ], [mockPane]);
 
     // Verify onPaneUpdate callback
     expect(onPaneUpdateSpy).toHaveBeenCalledWith(
@@ -53,7 +53,7 @@ describe('toggleAutopilotAction', () => {
         id: 'psyche-1',
         autopilot: false,
       }),
-    ]);
+    ], [mockPane]);
 
     expectSuccess(result, 'disabled');
   });
@@ -72,7 +72,7 @@ describe('toggleAutopilotAction', () => {
       expect.objectContaining({ id: 'psyche-1', autopilot: false }),
       expect.objectContaining({ id: 'psyche-2', autopilot: false }), // Toggled
       expect.objectContaining({ id: 'psyche-3', autopilot: false }),
-    ]);
+    ], [pane1, pane2, pane3]);
   });
 
   it('should handle savePanes errors gracefully', async () => {
@@ -108,7 +108,7 @@ describe('toggleAutopilotAction', () => {
     // undefined autopilot should be treated as false, so toggling enables it
     expect(savePanesSpy).toHaveBeenCalledWith([
       expect.objectContaining({ autopilot: true }),
-    ]);
+    ], [mockPane]);
   });
 
   it('should include pane slug in result message', async () => {

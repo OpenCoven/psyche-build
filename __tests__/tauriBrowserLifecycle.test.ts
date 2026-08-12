@@ -2999,7 +2999,8 @@ describe('Tauri native browser lifecycle', () => {
     await expect(requestThreadClose({ id: 'web', kind: 'web' })).resolves.toBe(true);
     await expect(requestThreadClose({ id: 'shell', kind: 'shell' })).resolves.toBe(true);
 
-    expect(functionSource(mainJs, 'armSessionClose')).toContain('requestThreadClose(thread)');
+    expect(functionSource(mainJs, 'armSessionClose')).toContain('var result = onConfirm();');
+    expect(mainJs).toContain('return requestThreadClose(thread);');
     expect(mainJs).toContain('requestThreadClose(findThread(state.activeThreadId))');
     expect(mainJs).toMatch(
       /btn\.addEventListener\("click", async function \(event\) \{ if \(event\.target.*await closeBrowserTab\(project, tab\.id\); else await activateBrowserTab\(project, tab\.id\); \}\)/,

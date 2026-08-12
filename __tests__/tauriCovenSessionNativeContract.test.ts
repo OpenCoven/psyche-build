@@ -95,7 +95,9 @@ describe('Tauri Coven session native contract', () => {
       /discover\s*\(\s*&env\s*,\s*&home\s*,\s*project_roots\s*,\s*project_scopes\s*\)/,
     );
 
-    expect(libSource).toMatch(/use\s+coven_sessions::coven_sessions\s*;/);
+    expect(libSource).toMatch(
+      /use\s+coven_sessions::\{\s*coven_session_kill\s*,\s*coven_sessions\s*\}\s*;/,
+    );
     expect(libSource).toMatch(
       /tauri::generate_handler!\s*\[[\s\S]*?app_environment\s*,\s*coven_sessions\s*,/,
     );
@@ -105,6 +107,32 @@ describe('Tauri Coven session native contract', () => {
     expect(libSource).toMatch(/fn\s+linked_worktree_roots\(/);
     expect(libSource).toMatch(/cmd\.env_remove\("TMUX"\)/);
   });
+
+  test('registers a non-blocking native Coven session kill command', async () => {
+    const [covenSessionsSource, libSource] = await Promise.all([
+      readFile(covenSessionsSourcePath, 'utf8'),
+      readFile(libSourcePath, 'utf8'),
+    ]);
+
+    expect(covenSessionsSource).toMatch(
+      /#\[tauri::command\][\s\S]*?fn\s+coven_session_kill\s*\(\s*session_id\s*:\s*String\s*,?\s*\)\s*->\s*Result<\(\),\s*String>/,
+    );
+    const command = functionBody(covenSessionsSource, 'coven_session_kill');
+    expect(command).toMatch(/tauri::async_runtime::spawn_blocking\s*\(\s*move\s*\|\|\s*\{/);
+    const closure = blockingClosureBody(command);
+    expect(closure).toMatch(/is_safe_session_id\s*\(\s*&session_id\s*\)/);
+    expect(closure).toMatch(
+      /try_kill_coven_session\s*\(\s*&endpoint\s*,\s*&session_id\s*\)/,
+    );
+
+    expect(libSource).toMatch(
+      /use\s+coven_sessions::\{\s*coven_session_kill\s*,\s*coven_sessions\s*\}\s*;/,
+    );
+    expect(libSource).toMatch(
+      /tauri::generate_handler!\s*\[[\s\S]*?coven_sessions\s*,\s*coven_session_kill\s*,/,
+    );
+  });
+
   test('shares one wall-clock deadline across health and session requests', async () => {
     const source = await readFile(covenSessionsSourcePath, 'utf8');
     const loadBody = functionBody(source, 'try_load_coven_sessions');
@@ -112,10 +140,10 @@ describe('Tauri Coven session native contract', () => {
 
     expect(loadBody).toMatch(/let\s+deadline\s*=\s*Instant::now\(\)\s*\+\s*EXCHANGE_TIMEOUT/);
     expect(loadBody).toMatch(
-      /request_endpoint\s*\(\s*endpoint\s*,\s*"\/api\/v1\/health"\s*,\s*deadline\s*\)/,
+      /request_endpoint\s*\(\s*endpoint\s*,\s*HttpMethod::Get\s*,\s*"\/api\/v1\/health"\s*,\s*deadline\s*\)/,
     );
     expect(loadBody).toMatch(
-      /request_endpoint\s*\(\s*endpoint\s*,\s*"\/api\/v1\/sessions"\s*,\s*deadline\s*\)/,
+      /request_endpoint\s*\(\s*endpoint\s*,\s*HttpMethod::Get\s*,\s*"\/api\/v1\/sessions"\s*,\s*deadline\s*\)/,
     );
     expect(requestBody).toMatch(/deadline\s*:\s*Instant/);
     expect(requestBody).not.toMatch(/Instant::now\(\)\s*\+\s*EXCHANGE_TIMEOUT/);

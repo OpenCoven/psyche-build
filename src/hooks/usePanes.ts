@@ -1,8 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
-import fs from 'fs/promises';
 import path from 'path';
 import PQueue from 'p-queue';
-import type { PsycheConfig, PsychePane, SidebarProject } from '../types.js';
+import type { PsycheConfig, PsychePane, SavePanes, SidebarProject } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { PANE_POLLING_INTERVAL } from '../constants/timing.js';
 import {
@@ -26,9 +25,15 @@ import { rebindPaneByTitle } from '../utils/paneRebinding.js';
 import { PaneEventService, type PaneEventMode } from '../services/PaneEventService.js';
 import { enforceControlPaneSize } from '../utils/tmux.js';
 import { SIDEBAR_WIDTH } from '../utils/layoutManager.js';
-import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
+import {
+  compareAndRemoveProjectPaneConfigPaneIdentities,
+  mutateProjectPaneConfig,
+  removeProjectPaneConfigPaneIdentities,
+  removeProjectPaneConfigPanes,
+} from '../services/ProjectPaneConfig.js';
+import type { PaneLifecycleIdentity } from '../actions/types.js';
 
 // Use p-queue for proper concurrency control instead of manual write lock
 // This prevents race conditions and provides better visibility into queue state
@@ -174,7 +179,12 @@ export default function usePanes(
 
           // Save to file if IDs were remapped OR if shell panes were added/removed
           if (idsChanged || shellPanesAdded || shellPanesRemoved) {
-            await saveUpdatedPaneConfig(panesFile, finalPanes, withWriteLock);
+            await saveUpdatedPaneConfig(
+              panesFile,
+              finalPanes,
+              withWriteLock,
+              loadedPanes,
+            );
 
             if (shellPanesRemoved) {
               // If shell panes were removed and we now have 0 panes, recreate welcome pane.
@@ -210,8 +220,13 @@ export default function usePanes(
     }
   };
 
-  const savePanes = async (newPanes: PsychePane[]) => {
-    const updatedPanes = await savePanesToFile(panesFile, newPanes, withWriteLock);
+  const savePanes: SavePanes = async (newPanes, previousPanes) => {
+    const updatedPanes = await savePanesToFile(
+      panesFile,
+      newPanes,
+      withWriteLock,
+      previousPanes,
+    );
     panesRef.current = updatedPanes;
     setPanes(updatedPanes);
 
@@ -228,43 +243,138 @@ export default function usePanes(
     }
   };
 
+  const removePanesFromConfig = async (
+    paneIds: Iterable<string>,
+  ): Promise<PsychePane[]> => {
+    return withWriteLock(async () => {
+      const ids = new Set(
+        Array.from(paneIds).filter((paneId) => typeof paneId === 'string' && paneId.length > 0),
+      );
+      const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
+      await removeProjectPaneConfigPanes(fallbackProjectRoot, ids);
+      const mutation = await mutateProjectPaneConfig(
+        fallbackProjectRoot,
+        (configRecord) => {
+          const config = configRecord as unknown as PsycheConfig;
+          const projectRoot = config.projectRoot || fallbackProjectRoot;
+          const projectName = config.projectName || path.basename(projectRoot);
+          const freshPanes = Array.isArray(config.panes) ? config.panes : [];
+          const normalizedProjects = normalizeSidebarProjects(
+            config.sidebarProjects,
+            freshPanes,
+            projectRoot,
+            projectName
+          );
+
+          // Close is intentionally a targeted config mutation: preserve every
+          // fresh pane record unchanged and remove only the pane that closed.
+          config.sidebarProjects = normalizedProjects;
+          config.lastUpdated = new Date().toISOString();
+          return {
+            panes: freshPanes,
+            sidebarProjects: normalizedProjects,
+          };
+        }
+      );
+      const persistedPanes = mutation.result.panes;
+      panesRef.current = persistedPanes;
+      setPanes(persistedPanes);
+      sidebarProjectsRef.current = mutation.result.sidebarProjects;
+      setSidebarProjects(mutation.result.sidebarProjects);
+      return persistedPanes;
+    });
+  };
+
+  const removePaneFromConfig = async (paneId: string): Promise<PsychePane[]> => {
+    return removePanesFromConfig([paneId]);
+  };
+
+  const removePaneIdentitiesFromConfig = async (
+    identities: Iterable<PaneLifecycleIdentity>,
+    beforeRemove?: (
+      panes?: readonly PsychePane[],
+      exactPanes?: readonly PsychePane[],
+    ) => Promise<void> | void,
+  ): Promise<PsychePane[]> => {
+    return withWriteLock(async () => {
+      const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
+      try {
+        await compareAndRemoveProjectPaneConfigPaneIdentities(
+          fallbackProjectRoot,
+          identities,
+          beforeRemove
+            ? (freshPanes, exactPanes) => beforeRemove(
+              freshPanes as PsychePane[],
+              exactPanes as PsychePane[],
+            )
+            : undefined,
+        );
+        const mutation = await mutateProjectPaneConfig(
+          fallbackProjectRoot,
+          (configRecord) => {
+            const config = configRecord as unknown as PsycheConfig;
+            const projectRoot = config.projectRoot || fallbackProjectRoot;
+            const projectName = config.projectName || path.basename(projectRoot);
+            const freshPanes = Array.isArray(config.panes) ? config.panes : [];
+            const normalizedProjects = normalizeSidebarProjects(
+              config.sidebarProjects,
+              freshPanes,
+              projectRoot,
+              projectName,
+            );
+            config.sidebarProjects = normalizedProjects;
+            config.lastUpdated = new Date().toISOString();
+            return {
+              panes: freshPanes,
+              sidebarProjects: normalizedProjects,
+            };
+          },
+        );
+        const persistedPanes = mutation.result.panes;
+        panesRef.current = persistedPanes;
+        setPanes(persistedPanes);
+        sidebarProjectsRef.current = mutation.result.sidebarProjects;
+        setSidebarProjects(mutation.result.sidebarProjects);
+        return persistedPanes;
+      } catch (error) {
+        // Exact-identity failures are intentionally non-destructive, but the
+        // in-memory UI is now stale by definition. Reload it before surfacing
+        // the failure so a concurrent rebind becomes visible immediately.
+        await loadPanes();
+        throw error;
+      }
+    });
+  };
+
   const saveSidebarProjects = async (newSidebarProjects: SidebarProject[]) => {
     return withWriteLock(async () => {
       const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
-      let config: PsycheConfig = {
-        projectName: path.basename(fallbackProjectRoot),
-        projectRoot: fallbackProjectRoot,
-        panes: panesRef.current,
-        settings: {},
-        lastUpdated: new Date().toISOString(),
-      };
+      const mutation = await mutateProjectPaneConfig(
+        fallbackProjectRoot,
+        (configRecord) => {
+          const config = configRecord as unknown as PsycheConfig;
+          const projectRoot = config.projectRoot || fallbackProjectRoot;
+          const projectName = config.projectName || path.basename(projectRoot);
+          const freshPanes = Array.isArray(config.panes) ? config.panes : [];
+          const normalizedProjects = normalizeSidebarProjects(
+            newSidebarProjects,
+            freshPanes,
+            projectRoot,
+            projectName
+          );
+          const syncedPanes = syncPaneColorThemes(
+            freshPanes,
+            normalizedProjects,
+            projectRoot
+          );
 
-      try {
-        const content = await fs.readFile(panesFile, 'utf-8');
-        const parsed = JSON.parse(content);
-        if (!Array.isArray(parsed)) {
-          config = parsed;
+          config.panes = syncedPanes;
+          config.sidebarProjects = normalizedProjects;
+          config.lastUpdated = new Date().toISOString();
+          return { normalizedProjects, syncedPanes };
         }
-      } catch {}
-
-      const projectRoot = config.projectRoot || fallbackProjectRoot;
-      const projectName = config.projectName || path.basename(projectRoot);
-      const normalizedProjects = normalizeSidebarProjects(
-        newSidebarProjects,
-        config.panes || panesRef.current,
-        projectRoot,
-        projectName
       );
-      const syncedPanes = syncPaneColorThemes(
-        panesRef.current,
-        normalizedProjects,
-        projectRoot
-      );
-
-      config.panes = syncedPanes;
-      config.sidebarProjects = normalizedProjects;
-      config.lastUpdated = new Date().toISOString();
-      await atomicWriteJson(panesFile, config);
+      const { normalizedProjects, syncedPanes } = mutation.result;
 
       if (panesRef.current !== syncedPanes) {
         panesRef.current = syncedPanes;
@@ -368,6 +478,9 @@ export default function usePanes(
     isLoading,
     loadPanes,
     savePanes,
+    removePaneFromConfig,
+    removePanesFromConfig,
+    removePaneIdentitiesFromConfig,
     saveSidebarProjects,
     eventMode,
   } as const;
