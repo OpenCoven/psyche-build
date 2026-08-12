@@ -195,6 +195,19 @@ function browserLifecycleHarness() {
     generation: number;
     invalidationGeneration: number;
     navigationTail: Promise<void> | null;
+    nativeLabel: string | null;
+    pendingGeneration: number;
+    pendingUrl: string | null;
+    liveGeneration: number;
+    liveUrl: string | null;
+    eventUrl: string | null;
+    viewLive: boolean;
+    navigationSnapshot: {
+      url: string;
+      title: string;
+      history: string[];
+      historyIndex: number;
+    } | null;
   }>();
   const paneStates = new WeakMap<object, { tearingDown: boolean }>();
   const browserTabLifecycle = (tab: object | null) => {
@@ -204,6 +217,14 @@ function browserLifecycleHarness() {
         generation: 0,
         invalidationGeneration: 0,
         navigationTail: null,
+        nativeLabel: null,
+        pendingGeneration: 0,
+        pendingUrl: null,
+        liveGeneration: 0,
+        liveUrl: null,
+        eventUrl: null,
+        viewLive: false,
+        navigationSnapshot: null,
       };
     }
     let lifecycle = tabStates.get(tab);
@@ -213,6 +234,14 @@ function browserLifecycleHarness() {
         generation: 0,
         invalidationGeneration: 0,
         navigationTail: null,
+        nativeLabel: null,
+        pendingGeneration: 0,
+        pendingUrl: null,
+        liveGeneration: 0,
+        liveUrl: null,
+        eventUrl: null,
+        viewLive: (tab as { created?: boolean }).created === true,
+        navigationSnapshot: null,
       };
       tabStates.set(tab, lifecycle);
     }
@@ -246,6 +275,10 @@ function browserLifecycleHarness() {
       const lifecycle = browserTabLifecycle(tab);
       lifecycle.generation += 1;
       lifecycle.invalidationGeneration += 1;
+      lifecycle.pendingGeneration = 0;
+      lifecycle.pendingUrl = null;
+      lifecycle.eventUrl = null;
+      lifecycle.navigationSnapshot = null;
       return lifecycle.generation;
     },
   };
@@ -256,8 +289,8 @@ function browserNavigationDependencies(
   browser: { activeTabId: string; tabs: BrowserNavigationTab[] },
   tab: BrowserNavigationTab,
   invoke: (command: string, args: Record<string, unknown>) => Promise<void>,
+  lifecycle = browserLifecycleHarness(),
 ) {
-  const lifecycle = browserLifecycleHarness();
   const pane = {
     id: 'web-pane',
     kind: 'web',
@@ -279,6 +312,7 @@ function browserNavigationDependencies(
     findThread: () => pane,
     visibleBrowserBounds: () => ({ x: 1, y: 2, w: 3, h: 4 }),
     normaliseUrl: (url: string) => url,
+    browserUrlsMatch: (left: string, right: string) => left === right,
     tabTitle: (url: string) => url,
     renderBrowserTabs: () => {},
     updateBrowserControls: () => {},
@@ -321,6 +355,86 @@ function browserNavigationDependencies(
         context.tab.title = context.previousTitle;
       }
       return true;
+    },
+  };
+}
+
+function browserNativeEventHandlers(options: {
+  lifecycle: ReturnType<typeof browserLifecycleHarness>;
+  project: { id: string; browsersByWorktree?: Record<string, unknown> };
+  worktreePath: string;
+  browser: { activeTabId: string; tabs: BrowserNavigationTab[] };
+  tab: BrowserNavigationTab;
+  pane: BrowserPaneThreadFixture | null;
+  state?: { activeProjectId: string };
+  calls?: string[];
+  nativeLabel?: string;
+}) {
+  const {
+    lifecycle,
+    project,
+    worktreePath,
+    browser,
+    tab,
+  } = options;
+  const state = options.state ?? { activeProjectId: project.id };
+  const calls = options.calls ?? [];
+  const nativeLabel = options.nativeLabel ?? 'native-tab-a';
+  let pane = options.pane;
+  const browserUrlsMatch = compileFunction<
+    (left: string, right: string) => boolean
+  >(functionSource(mainJs, 'browserUrlsMatch'), {});
+  const browserNativeEventContext = compileFunction<
+    (nativeLabel: string, url: string) => {
+      project: typeof project;
+      worktreePath: string;
+      browser: typeof browser;
+      tab: typeof tab;
+    } | null
+  >(functionSource(mainJs, 'browserNativeEventContext'), {
+    browserTabForNativeLabel: (label: string) => label === nativeLabel
+      ? { project, worktreePath, browser, tab }
+      : null,
+    browserTabLifecycle: lifecycle.browserTabLifecycle,
+    browserTabIsClosing: lifecycle.browserTabIsClosing,
+    browserPaneIsClosing: lifecycle.browserPaneIsClosing,
+    findProject: (projectId: string) => projectId === project.id ? project : null,
+    findBrowserPane: () => pane,
+    findThread: (threadId: string) => pane?.id === threadId ? pane : null,
+    browserUrlsMatch,
+  });
+  const markBrowserTabLoaded = compileFunction<
+    (nativeLabel: string, url: string, title: string) => boolean
+  >(functionSource(mainJs, 'markBrowserTabLoaded'), {
+    browserNativeEventContext,
+    state,
+    activeWorkspaceRoot: () => worktreePath,
+    renderBrowserTabs: () => calls.push('render'),
+    syncUrlInput: () => calls.push('url'),
+    saveWorkspaceSoon: () => calls.push('save'),
+    tabTitle: (url: string) => `title:${url}`,
+  });
+  const handleBrowserPageLoad = compileFunction<
+    (event: { payload: { label: string; url: string; phase: string } }) => boolean
+  >(functionSource(mainJs, 'handleBrowserPageLoad'), {
+    browserNativeEventContext,
+    markBrowserTabLoaded,
+    state,
+    activeWorkspaceRoot: () => worktreePath,
+    renderBrowserTabs: () => calls.push('render'),
+    updateBrowserControls: () => calls.push('controls'),
+  });
+  const handleBrowserTitle = compileFunction<
+    (event: { payload: { label: string; url: string; title: string } }) => boolean
+  >(functionSource(mainJs, 'handleBrowserTitle'), {
+    markBrowserTabLoaded,
+  });
+  return {
+    calls,
+    handleBrowserPageLoad,
+    handleBrowserTitle,
+    setPane(nextPane: BrowserPaneThreadFixture | null) {
+      pane = nextPane;
     },
   };
 }
@@ -1198,6 +1312,414 @@ describe('Tauri native browser lifecycle', () => {
     ]);
   });
 
+  it('does not reactivate an abandoned project or worktree when queued navigation begins', async () => {
+    let resolveFirst!: () => void;
+    const state = {
+      activeProjectId: 'project-a',
+      threads: [] as BrowserPaneThreadFixture[],
+    };
+    const projectA = {
+      id: 'project-a',
+      selectedWorktreePath: '/workspace-a',
+    };
+    const projectB = {
+      id: 'project-b',
+      selectedWorktreePath: '/workspace-b',
+    };
+    const tabA: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old-a.example',
+      created: true,
+      loading: false,
+      title: 'Old A',
+      history: ['https://old-a.example'],
+      historyIndex: 0,
+    };
+    const browserA = { activeTabId: tabA.id, tabs: [tabA] };
+    const paneA: BrowserPaneThreadFixture = {
+      id: 'web-pane-a',
+      kind: 'web',
+      projectId: projectA.id,
+      worktreePath: projectA.selectedWorktreePath,
+    };
+    const paneB: BrowserPaneThreadFixture = {
+      id: 'web-pane-b',
+      kind: 'web',
+      projectId: projectB.id,
+      worktreePath: projectB.selectedWorktreePath,
+    };
+    state.threads.push(paneA, paneB);
+    const nativeCalls: string[] = [];
+    const paneCalls: string[] = [];
+    const activeProject = () => state.activeProjectId === projectA.id ? projectA : projectB;
+    const activeWorkspaceRoot = (project: typeof projectA | typeof projectB) =>
+      project.selectedWorktreePath;
+    const findBrowserPane = (projectId: string, worktreePath: string) =>
+      state.threads.find((pane) =>
+        pane.projectId === projectId && pane.worktreePath === worktreePath
+      ) ?? null;
+    const dependencies = browserNavigationDependencies(
+      projectA,
+      browserA,
+      tabA,
+      (command, args) => {
+        if (command !== 'browser_navigate') return Promise.resolve();
+        nativeCalls.push(String(args.url));
+        if (args.url === 'https://first.example') {
+          return new Promise<void>((resolve) => { resolveFirst = resolve; });
+        }
+        return Promise.resolve();
+      },
+    );
+    Object.assign(dependencies, {
+      state,
+      activeProject,
+      activeWorkspaceRoot,
+      findProject: (projectId: string) => projectId === projectA.id
+        ? projectA
+        : projectId === projectB.id ? projectB : null,
+      ensureBrowserModel: () => browserA,
+      findBrowserPane,
+      findThread: (threadId: string) =>
+        state.threads.find((pane) => pane.id === threadId) ?? null,
+      createBrowserPane: async (project: typeof projectA) => {
+        paneCalls.push(`create:${project.id}:${project.selectedWorktreePath}`);
+        state.activeProjectId = project.id;
+        const existing = findBrowserPane(project.id, project.selectedWorktreePath);
+        if (existing) return existing;
+        const pane = {
+          id: `web-pane-${state.threads.length}`,
+          kind: 'web',
+          projectId: project.id,
+          worktreePath: project.selectedWorktreePath,
+        };
+        state.threads.push(pane);
+        return pane;
+      },
+      browserNavigationOwnsVisiblePane: () => false,
+      syncBrowserBounds: () => {},
+    });
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), dependencies);
+
+    const first = navigateBrowser('https://first.example', { tabId: tabA.id });
+    const second = navigateBrowser('https://second.example', { tabId: tabA.id });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(nativeCalls).toEqual(['https://first.example']);
+
+    state.activeProjectId = projectB.id;
+    projectA.selectedWorktreePath = '/workspace-a-other';
+    const panesAfterSwitch = state.threads.slice();
+    const paneCallCountAfterSwitch = paneCalls.length;
+
+    resolveFirst();
+    await expect(first).resolves.toBe(true);
+    await expect(second).resolves.toBe(false);
+
+    expect(state.activeProjectId).toBe(projectB.id);
+    expect(activeWorkspaceRoot(activeProject())).toBe('/workspace-b');
+    expect(state.threads).toEqual(panesAfterSwitch);
+    expect(paneCalls).toHaveLength(paneCallCountAfterSwitch);
+    expect(nativeCalls).toEqual(['https://first.example']);
+  });
+
+  it('rejects delayed native events from superseded navigation and accepts current events', () => {
+    const lifecycle = browserLifecycleHarness();
+    const project = {
+      id: 'project-a',
+      browsersByWorktree: {} as Record<string, unknown>,
+    };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://first.example',
+      created: true,
+      loading: true,
+      title: 'First title',
+      history: ['https://first.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    project.browsersByWorktree['/workspace'] = browser;
+    const pane: BrowserPaneThreadFixture = {
+      id: 'web-pane',
+      kind: 'web',
+      projectId: project.id,
+      worktreePath: '/workspace',
+    };
+    Object.assign(lifecycle.browserTabLifecycle(tab), {
+      generation: 2,
+      nativeLabel: 'native-tab-a',
+      pendingGeneration: 2,
+      pendingUrl: 'https://second.example',
+      liveGeneration: 1,
+      liveUrl: 'https://first.example',
+      eventUrl: null,
+      viewLive: true,
+    });
+    const handlers = browserNativeEventHandlers({
+      lifecycle,
+      project,
+      worktreePath: '/workspace',
+      browser,
+      tab,
+      pane,
+    });
+
+    expect(handlers.handleBrowserPageLoad({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://first.example',
+        phase: 'started',
+      },
+    })).toBe(false);
+    expect(handlers.handleBrowserPageLoad({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://first.example',
+        phase: 'finished',
+      },
+    })).toBe(false);
+    expect(handlers.handleBrowserTitle({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://first.example',
+        title: 'Stale first title',
+      },
+    })).toBe(false);
+    expect(handlers.handleBrowserTitle({
+      payload: {
+        label: 'stale-native-label',
+        url: 'https://second.example',
+        title: 'Stale label title',
+      },
+    })).toBe(false);
+    expect(tab).toMatchObject({
+      url: 'https://first.example',
+      title: 'First title',
+      loading: true,
+    });
+    expect(handlers.calls).toEqual([]);
+
+    lifecycle.browserTabLifecycle(tab).pendingGeneration = 1;
+    expect(handlers.handleBrowserPageLoad({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://second.example',
+        phase: 'started',
+      },
+    })).toBe(false);
+    lifecycle.browserTabLifecycle(tab).pendingGeneration = 2;
+
+    expect(handlers.handleBrowserPageLoad({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://second.example',
+        phase: 'started',
+      },
+    })).toBe(true);
+    expect(tab.loading).toBe(true);
+    expect(handlers.handleBrowserPageLoad({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://second.example',
+        phase: 'finished',
+      },
+    })).toBe(true);
+    expect(handlers.handleBrowserTitle({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://second.example',
+        title: 'Current second title',
+      },
+    })).toBe(true);
+    expect(tab).toMatchObject({
+      url: 'https://second.example',
+      title: 'Current second title',
+      loading: false,
+    });
+    expect(handlers.calls).toEqual([
+      'render',
+      'controls',
+      'render',
+      'url',
+      'save',
+      'render',
+      'url',
+      'save',
+    ]);
+  });
+
+  it('ignores native events for dormant tabs and destroyed pane views', () => {
+    const lifecycle = browserLifecycleHarness();
+    const project = {
+      id: 'project-a',
+      browsersByWorktree: {} as Record<string, unknown>,
+    };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://saved.example',
+      created: false,
+      loading: false,
+      title: 'Saved title',
+      history: ['https://saved.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    project.browsersByWorktree['/workspace'] = browser;
+    const pane: BrowserPaneThreadFixture = {
+      id: 'web-pane',
+      kind: 'web',
+      projectId: project.id,
+      worktreePath: '/workspace',
+    };
+    Object.assign(lifecycle.browserTabLifecycle(tab), {
+      generation: 1,
+      nativeLabel: 'native-tab-a',
+      liveGeneration: 1,
+      liveUrl: tab.url,
+      viewLive: false,
+    });
+    const handlers = browserNativeEventHandlers({
+      lifecycle,
+      project,
+      worktreePath: '/workspace',
+      browser,
+      tab,
+      pane,
+    });
+    const finishedEvent = {
+      payload: {
+        label: 'native-tab-a',
+        url: tab.url,
+        phase: 'finished',
+      },
+    };
+
+    expect(handlers.handleBrowserPageLoad(finishedEvent)).toBe(false);
+    expect(handlers.handleBrowserTitle({
+      payload: {
+        label: 'native-tab-a',
+        url: tab.url,
+        title: 'Stale title',
+      },
+    })).toBe(false);
+
+    tab.created = true;
+    Object.assign(lifecycle.browserTabLifecycle(tab), {
+      viewLive: true,
+      liveGeneration: 1,
+    });
+    lifecycle.browserTabLifecycle(tab).closing = true;
+    expect(handlers.handleBrowserPageLoad(finishedEvent)).toBe(false);
+    lifecycle.browserTabLifecycle(tab).closing = false;
+    lifecycle.browserPaneLifecycle(pane).tearingDown = true;
+    expect(handlers.handleBrowserPageLoad(finishedEvent)).toBe(false);
+    lifecycle.browserPaneLifecycle(pane).tearingDown = false;
+    handlers.setPane(null);
+    expect(handlers.handleBrowserPageLoad(finishedEvent)).toBe(false);
+    expect(tab).toMatchObject({
+      url: 'https://saved.example',
+      title: 'Saved title',
+      loading: false,
+    });
+    expect(handlers.calls).toEqual([]);
+  });
+
+  it('accepts current page-load and title events before native navigation settles', async () => {
+    let resolveNavigation!: () => void;
+    const lifecycle = browserLifecycleHarness();
+    const project = {
+      id: 'project-a',
+      browsersByWorktree: {} as Record<string, unknown>,
+    };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old.example',
+      created: false,
+      loading: false,
+      title: 'Old title',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    project.browsersByWorktree['/workspace'] = browser;
+    const dependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      (command) => command === 'browser_navigate'
+        ? new Promise<void>((resolve) => { resolveNavigation = resolve; })
+        : Promise.resolve(),
+      lifecycle,
+    );
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), dependencies);
+    const handlers = browserNativeEventHandlers({
+      lifecycle,
+      project,
+      worktreePath: '/workspace',
+      browser,
+      tab,
+      pane: dependencies.findBrowserPane() as BrowserPaneThreadFixture,
+      nativeLabel: 'project-a:tab-a',
+    });
+
+    const navigation = navigateBrowser('https://current.example', { tabId: tab.id });
+    let settled = false;
+    navigation.then(() => { settled = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(handlers.handleBrowserPageLoad({
+      payload: {
+        label: 'project-a:tab-a',
+        url: 'https://current.example',
+        phase: 'started',
+      },
+    })).toBe(true);
+    expect(handlers.handleBrowserPageLoad({
+      payload: {
+        label: 'project-a:tab-a',
+        url: 'https://current.example',
+        phase: 'finished',
+      },
+    })).toBe(true);
+    expect(handlers.handleBrowserTitle({
+      payload: {
+        label: 'project-a:tab-a',
+        url: 'https://current.example',
+        title: 'Current title',
+      },
+    })).toBe(true);
+    expect(settled).toBe(false);
+    expect(tab).toMatchObject({
+      created: false,
+      loading: false,
+      url: 'https://current.example',
+      title: 'Current title',
+    });
+
+    resolveNavigation();
+    await expect(navigation).resolves.toBe(true);
+    expect(tab).toMatchObject({
+      created: true,
+      loading: false,
+      url: 'https://current.example',
+      title: 'Current title',
+    });
+    expect(tab).not.toHaveProperty('pendingGeneration');
+    expect(tab).not.toHaveProperty('pendingUrl');
+    expect(tab).not.toHaveProperty('nativeLabel');
+    expect(tab).not.toHaveProperty('liveGeneration');
+    expect(tab).not.toHaveProperty('liveUrl');
+    expect(tab).not.toHaveProperty('eventUrl');
+    expect(tab).not.toHaveProperty('viewLive');
+    expect(tab).not.toHaveProperty('navigationSnapshot');
+  });
+
   it('serializes rapid same-tab navigation when the first succeeds and the second fails', async () => {
     let resolveFirst!: () => void;
     let rejectSecond!: (error: Error) => void;
@@ -1957,6 +2479,7 @@ describe('Tauri native browser lifecycle', () => {
       invoke,
       browserLabelForTab: (_: typeof project, value: BrowserNavigationTab) =>
         `${project.id}:${value.id}`,
+      nativeBrowserLabel: (label: string) => label,
       setStatus: (text: string, level: string) => statuses.push([text, level]),
       saveWorkspaceSoon: () => calls.push('save'),
       stageBrowserSurface: () => calls.push('stage'),
@@ -2006,6 +2529,138 @@ describe('Tauri native browser lifecycle', () => {
     ]);
     expect(statuses).toEqual([[
       'browser pane close failed; native close failures: project-a:tab-b: tab-b destroy failed; recreated 1/1 confirmed-destroyed live tabs',
+      'error',
+    ]]);
+  });
+
+  it('recovers a retained live pane after stale cleanup and destroy-many transport rejection', async () => {
+    let resolveNavigation!: () => void;
+    const lifecycle = browserLifecycleHarness();
+    const calls: string[] = [];
+    const statuses: Array<[string, string]> = [];
+    const thread: BrowserPaneThreadFixture = {
+      id: 'web-pane',
+      kind: 'web',
+      projectId: 'project-a',
+      worktreePath: '/workspace',
+    };
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      created: true,
+      loading: false,
+      url: 'https://saved.example/current',
+      title: 'Saved current title',
+      history: ['https://saved.example', 'https://saved.example/current'],
+      historyIndex: 1,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    const nativeViews = new Set(['project-a:tab-a']);
+    const invoke = (
+      command: string,
+      args: { labels?: string[]; label?: string; url?: string },
+    ): Promise<unknown> => {
+      if (command === 'browser_navigate' && args.url === 'https://new.example') {
+        calls.push(`navigate:${args.url}`);
+        return new Promise<void>((resolve) => { resolveNavigation = resolve; });
+      }
+      if (command === 'browser_destroy') {
+        calls.push(`destroy:${args.label}`);
+        nativeViews.delete(String(args.label));
+        return Promise.resolve();
+      }
+      if (command === 'browser_destroy_many') {
+        calls.push(`destroy-many:${args.labels?.join(',')}`);
+        return Promise.reject(new Error('ipc disconnected'));
+      }
+      if (command === 'browser_navigate') {
+        calls.push(`recover:${args.label}:${args.url}`);
+        nativeViews.add(String(args.label));
+        return Promise.resolve();
+      }
+      throw new Error(`unexpected command ${command}`);
+    };
+    const navigationDependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      invoke as (command: string, args: Record<string, unknown>) => Promise<void>,
+      lifecycle,
+    );
+    Object.assign(navigationDependencies, {
+      createBrowserPane: async () => thread,
+      findBrowserPane: () => thread,
+      findThread: () => thread,
+      discardObsoleteBrowserNavigation: async (context: {
+        tab: BrowserNavigationTab;
+        browser: typeof browser;
+        label: string;
+        previousTitle: string;
+      }) => {
+        lifecycle.invalidateBrowserNavigation(context.tab);
+        await invoke('browser_destroy', { label: context.label });
+        if (context.browser.tabs.includes(context.tab)) {
+          context.tab.created = false;
+          context.tab.loading = false;
+          context.tab.title = context.previousTitle;
+        }
+        return true;
+      },
+    });
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), navigationDependencies);
+    const closeBrowserPane = compileFunction<
+      (value: BrowserPaneThreadFixture) => Promise<boolean>
+    >(functionSource(mainJs, 'closeBrowserPane'), {
+      ...lifecycle,
+      findProject: () => project,
+      ensureBrowserModel: () => browser,
+      invoke,
+      browserLabelForTab: (_: typeof project, value: BrowserNavigationTab) =>
+        `${project.id}:${value.id}`,
+      nativeBrowserLabel: (label: string) => label,
+      setStatus: (text: string, level: string) => statuses.push([text, level]),
+      saveWorkspaceSoon: () => calls.push('save'),
+      stageBrowserSurface: () => calls.push('stage'),
+      closeThread: () => { calls.push('close'); return true; },
+      syncProjectBrowser: () => calls.push('sync'),
+      state: { activeThreadId: thread.id },
+      markActiveSurface: () => calls.push('surface'),
+    });
+
+    const navigation = navigateBrowser('https://new.example', { tabId: tab.id });
+    await Promise.resolve();
+    await Promise.resolve();
+    const closing = closeBrowserPane(thread);
+    await Promise.resolve();
+    expect(calls).toEqual(['navigate:https://new.example']);
+
+    resolveNavigation();
+    await expect(navigation).resolves.toBe(false);
+    await expect(closing).resolves.toBe(false);
+
+    expect(browser.activeTabId).toBe(tab.id);
+    expect(tab).toEqual({
+      id: 'tab-a',
+      created: true,
+      loading: false,
+      url: 'https://saved.example/current',
+      title: 'Saved current title',
+      history: ['https://saved.example', 'https://saved.example/current'],
+      historyIndex: 1,
+    });
+    expect(nativeViews).toEqual(new Set(['project-a:tab-a']));
+    expect(calls).toEqual([
+      'navigate:https://new.example',
+      'destroy:project-a:tab-a',
+      'destroy-many:project-a:tab-a',
+      'recover:project-a:tab-a:https://saved.example/current',
+      'sync',
+      'save',
+    ]);
+    expect(statuses).toEqual([[
+      'browser pane close failed before structured teardown outcome: Error: ipc disconnected; recreated 1/1 missing live tabs',
       'error',
     ]]);
   });
@@ -2167,6 +2822,7 @@ describe('Tauri native browser lifecycle', () => {
         throw new Error(`unexpected command ${command}`);
       },
       browserLabelForTab: (_: typeof project, tab: { id: string }) => `${project.id}:${tab.id}`,
+      nativeBrowserLabel: (label: string) => label,
       setStatus: (text: string, level: string) => statuses.push([text, level]),
       saveWorkspaceSoon: () => calls.push('save'),
       stageBrowserSurface: () => calls.push('stage'),
@@ -2278,6 +2934,7 @@ describe('Tauri native browser lifecycle', () => {
         throw new Error(`unexpected command ${command}`);
       },
       browserLabelForTab: (_: typeof project, tab: { id: string }) => `${project.id}:${tab.id}`,
+      nativeBrowserLabel: (label: string) => label,
       setStatus: (text: string, level: string) => statuses.push([text, level]),
       saveWorkspaceSoon: () => calls.push('save'),
       stageBrowserSurface: () => calls.push('stage'),
