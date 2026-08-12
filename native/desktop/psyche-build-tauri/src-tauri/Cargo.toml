@@ -41,6 +41,9 @@ windows-sys = { version = "=0.59.0", features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 window-vibrancy = "0.6"
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 codegen-units = 1
 lto = true

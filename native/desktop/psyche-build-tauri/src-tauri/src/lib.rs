@@ -37,6 +37,7 @@ use windows_sys::Win32::{
 
 mod coven_sessions;
 mod metrics;
+mod native_workspace;
 mod pane_metrics;
 mod platform;
 pub mod pty_transport;
@@ -44,6 +45,7 @@ mod workspace_contract;
 use coven_sessions::is_safe_session_id;
 use coven_sessions::{coven_session_kill, coven_sessions};
 use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
+use native_workspace::{workspace_load, workspace_save};
 use pane_metrics::PaneSessionMetrics;
 use pty_transport::{
     coordinate_exit_shutdown, CompletionOutcome, DrainOutcome, EnqueueError, ExitShutdownHooks,
@@ -4171,6 +4173,8 @@ pub fn run() {
             app_environment,
             coven_sessions,
             coven_session_kill,
+            workspace_load,
+            workspace_save,
             agent_skills,
             fs_list_dir,
             fs_read_text,

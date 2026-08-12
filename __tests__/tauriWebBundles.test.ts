@@ -122,6 +122,7 @@ describe('committed web bundles', () => {
       'web/panes.bundle.js',
       'web/sessions.bundle.js',
       'web/status.bundle.js',
+      'web/workspace.bundle.js',
     ]);
   });
 

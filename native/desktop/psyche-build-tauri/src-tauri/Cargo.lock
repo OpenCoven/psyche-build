@@ -3174,6 +3174,7 @@ dependencies = [
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tempfile",
  "tokio",
  "window-vibrancy",
  "windows-sys 0.59.0",

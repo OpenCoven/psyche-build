@@ -81,6 +81,7 @@ describe('native CodeMirror workspace editor surface', () => {
       './panes.bundle.js',
       './input.bundle.js',
       './status.bundle.js',
+      './workspace.bundle.js',
       './main.js',
     ];
     const scriptPositions = requiredScripts.map((script) => {
