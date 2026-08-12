@@ -35,7 +35,7 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(indexHtml).not.toContain('session-filter-btn');
 
     const filterRowMatch = indexHtml.match(
-      /<div class="session-filter-row" role="toolbar" aria-label="Filter sessions">([\s\S]*?)<\/div>\s*<div class="sr-only" id="session-status-legend">/,
+      /<div class="session-filter-row" role="toolbar" aria-label="Filter sessions">([\s\S]*?)<\/div>/,
     );
     expect(filterRowMatch).not.toBeNull();
     const filterRow = filterRowMatch?.[1] ?? '';
@@ -44,13 +44,10 @@ describe('Tauri project/worktree/pane rail', () => {
       expect(indexHtml).toContain(`data-session-filter="${filter}"`);
     }
     const attentionIndex = filterRow.indexOf('data-session-filter="attention"');
-    const legendIndex = filterRow.indexOf('class="session-legend-button has-tooltip"');
     expect(attentionIndex).toBeGreaterThan(-1);
-    expect(legendIndex).toBeGreaterThan(attentionIndex);
-    expect(indexHtml).toContain('id="session-status-legend"');
-    expect(indexHtml).toMatch(
-      /<div class="session-filter-row" role="toolbar" aria-label="Filter sessions">[\s\S]*class="session-legend-button has-tooltip"[\s\S]*<\/div>\s*<div class="sr-only" id="session-status-legend">/,
-    );
+    expect(indexHtml).not.toContain('session-legend-button');
+    expect(indexHtml).not.toContain('session-status-legend');
+    expect(indexHtml).not.toContain('Session status legend');
     expect(indexHtml).toMatch(
       /id="session-list"[^>]*role="tree"[^>]*aria-label="Sessions by project, branch, and category"/,
     );
