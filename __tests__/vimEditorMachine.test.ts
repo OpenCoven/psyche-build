@@ -239,6 +239,38 @@ describe('Vim editor operators, text objects, and visual selections', () => {
 
     expect(document.value).toBe('cd');
   });
+
+  it.each([
+    { name: 'character grapheme', text: '👩‍💻x', cursor: 0, input: ['v'] as EditorInput[], ranges: [{ anchor: 0, head: 5 }] },
+    { name: 'middle line', text: 'one\ntwo\nthree', cursor: 4, input: ['V'] as EditorInput[], ranges: [{ anchor: 4, head: 8 }] },
+    { name: 'block grapheme cell', text: 'e\u0301x', cursor: 0, input: [{ key: 'v', ctrlKey: true }] as EditorInput[], ranges: [{ anchor: 0, head: 2 }] },
+  ])('materializes the current $name on visual entry', async ({ text, cursor, input, ranges }) => {
+    const document = new TestDocument(text, cursor);
+
+    await send(createEditorMachine(document), ...input);
+
+    expect(document.ranges).toEqual(ranges);
+  });
+
+  it.each([
+    { name: 'character delete', text: '👩‍💻x', cursor: 0, input: keys('vd'), expected: 'x', register: '👩‍💻' },
+    { name: 'character change', text: 'a👩‍💻z', cursor: 1, input: [...keys('vcX'), 'Escape'], expected: 'aXz', register: '👩‍💻' },
+    { name: 'character yank', text: 'e\u0301x', cursor: 0, input: keys('vy'), expected: 'e\u0301x', register: 'e\u0301' },
+    { name: 'line delete', text: 'one\ntwo\nthree', cursor: 4, input: keys('Vd'), expected: 'one\nthree', register: 'two\n' },
+    { name: 'line change', text: 'one\ntwo\nthree', cursor: 4, input: [...keys('VcX'), 'Escape'], expected: 'one\nX\nthree', register: 'two\n' },
+    { name: 'line yank', text: 'one\ntwo', cursor: 0, input: keys('Vy'), expected: 'one\ntwo', register: 'one\n' },
+    { name: 'block delete', text: '👩‍💻x', cursor: 0, input: [{ key: 'v', ctrlKey: true }, 'd'], expected: 'x', register: '👩‍💻' },
+    { name: 'block change', text: 'ae\u0301z', cursor: 1, input: [{ key: 'v', ctrlKey: true }, 'c', 'X', 'Escape'], expected: 'aXz', register: 'e\u0301' },
+    { name: 'block yank', text: 'e\u0301x', cursor: 0, input: [{ key: 'v', ctrlKey: true }, 'y'], expected: 'e\u0301x', register: 'e\u0301' },
+  ])('applies zero-motion visual $name to the materialized selection', async ({ text, cursor, input, expected, register }) => {
+    const document = new TestDocument(text, cursor);
+    const machine = createEditorMachine(document);
+
+    await send(machine, ...input);
+
+    expect(document.value).toBe(expected);
+    expect(machine.register('"')?.text).toBe(register);
+  });
 });
 
 describe('Vim editor registers and marks', () => {
@@ -433,6 +465,24 @@ describe('Vim editor editing, repeat, macros, Unicode, and undo grouping', () =>
     expect(document.edits.filter((edit) => edit.to > edit.from || edit.insert).map((edit) => edit.history)).toEqual([
       'new', 'join', 'new',
     ]);
+  });
+
+  it('learns line change on a terminated line and replays cleanly on the final line', async () => {
+    const document = new TestDocument('one\ntwo\nlast');
+    const machine = createEditorMachine(document);
+
+    await send(machine, ...keys('VcX'), 'Escape', 'G', '.');
+
+    expect(document.value).toBe('X\ntwo\nX');
+  });
+
+  it('learns line change on the final line and preserves a middle target separator', async () => {
+    const document = new TestDocument('one\ntwo\nlast', 8);
+    const machine = createEditorMachine(document);
+
+    await send(machine, ...keys('VcX'), 'Escape', ...keys('ggj.'));
+
+    expect(document.value).toBe('one\nX\nX');
   });
 
   it('records and replays a named macro as one deterministic undo group', async () => {

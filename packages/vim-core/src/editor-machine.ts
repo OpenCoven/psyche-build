@@ -100,7 +100,7 @@ interface VisualChange {
   readonly mode: 'visual-character' | 'visual-line' | 'visual-block';
   readonly width: number;
   readonly height: number;
-  preserveLineBreak: boolean;
+  linewiseChange: boolean;
   insert: string;
 }
 
@@ -475,7 +475,10 @@ export function createEditorMachine(
     mode = next;
     resetPending();
     inputBuffer = '';
-    if (next.startsWith('visual-')) visualAnchor = visualHead = document.selections()[0]?.head ?? 0;
+    if (next.startsWith('visual-')) {
+      visualAnchor = visualHead = document.selections()[0]?.head ?? 0;
+      select(visualHead);
+    }
     if (next === 'insert' || next === 'replace') insertFirstEdit = true;
     return snapshot([{ type: 'mode', mode }]);
   }
@@ -597,7 +600,7 @@ export function createEditorMachine(
           Math.max(selection.anchor, selection.head),
         )))),
         height: selections.length,
-        preserveLineBreak: false,
+        linewiseChange: false,
         insert: '',
       };
     }
@@ -606,7 +609,7 @@ export function createEditorMachine(
         mode: visualMode,
         width: 0,
         height: lineNumber(text, Math.max(from, to - 1)) - lineNumber(text, from) + 1,
-        preserveLineBreak: false,
+        linewiseChange: false,
         insert: '',
       };
     }
@@ -614,7 +617,7 @@ export function createEditorMachine(
       mode: visualMode,
       width: graphemeCount(text.slice(from, to)),
       height: 1,
-      preserveLineBreak: false,
+      linewiseChange: false,
       insert: '',
     };
   }
@@ -652,7 +655,9 @@ export function createEditorMachine(
     const removed = [...ordered].reverse().map((range) => text.slice(range.from, range.to)).join('\n');
     writeRegisters('delete', removed, change.mode === 'visual-line');
     invocationGroup = { used: false };
-    const insert = change.mode === 'visual-line' && change.preserveLineBreak
+    const targetHasLineBreak = change.mode === 'visual-line'
+      && ordered.some((range) => text[range.to - 1] === '\n');
+    const insert = change.linewiseChange && targetHasLineBreak
       ? `${change.insert}\n`
       : change.insert;
     for (const range of ordered) apply(range.from, range.to, insert, range.from + change.insert.length, 'new');
@@ -994,7 +999,7 @@ export function createEditorMachine(
         const to = Math.max(...selections.flatMap((selection) => [selection.anchor, selection.head]));
         const linewise = mode === 'visual-line';
         const changeTo = key === 'c' && linewise && document.text()[to - 1] === '\n' ? to - 1 : to;
-        descriptor.preserveLineBreak = key === 'c' && linewise && changeTo !== to;
+        descriptor.linewiseChange = key === 'c' && linewise;
         const result = operate(
           key as 'd' | 'c' | 'y',
           { from, to: changeTo },
