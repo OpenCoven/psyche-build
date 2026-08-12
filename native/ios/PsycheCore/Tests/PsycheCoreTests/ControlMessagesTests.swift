@@ -247,6 +247,19 @@ final class ControlMessagesTests: XCTestCase {
         XCTAssertEqual(diffResult.diff, "@@ -0,0 +1 @@\n+export {};\n")
     }
 
+    func testActionResponseFixtureCarriesTheContinuationSession() throws {
+        let fixtures = try loadMobileControlFixtures()
+        guard case let .respondToAction(response) = try decodeRequestFixture(
+            "respondToAction",
+            fixtures: fixtures
+        ) else {
+            return XCTFail("Expected actions.respond")
+        }
+        XCTAssertEqual(response.requestID, "action-response-1")
+        XCTAssertEqual(response.sessionID, "action-session-1")
+        XCTAssertEqual(response.response, .confirm)
+    }
+
     private func decodeRequestFixture(
         _ name: String,
         fixtures: [String: Data]

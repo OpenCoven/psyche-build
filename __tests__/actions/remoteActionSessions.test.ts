@@ -156,6 +156,55 @@ describe('RemoteActionSessions', () => {
       kind: 'choice', optionId: 'wrong',
     })).rejects.toMatchObject({ code: 'invalid_action_response' });
   });
+
+  it('revalidates inherited scope before every callback and supports global teardown', async () => {
+    const sessions = new RemoteActionSessions({ ttlMs: 300_000 });
+    const callback = vi.fn(async () => ({ type: 'success', message: 'done' } as ActionResult));
+    const first = sessions.start('device-1', {
+      type: 'confirm', message: 'Mutate?', onConfirm: callback,
+    }, '%3');
+    await expect(sessions.respond(
+      'device-1',
+      first.sessionId!,
+      { kind: 'confirm', confirmed: true },
+      async (scope) => {
+        expect(scope).toBe('%3');
+        throw Object.assign(new Error('pane is stale'), { code: 'pane_scope_violation' });
+      },
+    )).rejects.toMatchObject({ code: 'pane_scope_violation' });
+    expect(callback).not.toHaveBeenCalled();
+
+    const second = sessions.start('device-1', inputResult(), '%3');
+    sessions.clearAll();
+    await expect(sessions.respond('device-1', second.sessionId!, {
+      kind: 'input', value: 'stale',
+    })).rejects.toMatchObject({ code: 'action_session_not_found' });
+  });
+
+  it('consumes before async scope validation so concurrent responses execute once', async () => {
+    const sessions = new RemoteActionSessions({ ttlMs: 300_000 });
+    const callback = vi.fn(async () => ({ type: 'success', message: 'done' } as ActionResult));
+    const first = sessions.start('device-1', {
+      type: 'confirm', message: 'Mutate?', onConfirm: callback,
+    }, '%3');
+    let releaseValidation!: () => void;
+    const validationBarrier = new Promise<void>((resolve) => {
+      releaseValidation = resolve;
+    });
+    const validate = async () => validationBarrier;
+
+    const firstResponse = sessions.respond(
+      'device-1', first.sessionId!, { kind: 'confirm', confirmed: true }, validate,
+    );
+    const concurrentResponse = sessions.respond(
+      'device-1', first.sessionId!, { kind: 'confirm', confirmed: true }, validate,
+    );
+    releaseValidation();
+
+    const outcomes = await Promise.allSettled([firstResponse, concurrentResponse]);
+    expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(['fulfilled', 'rejected']);
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
 });
 
 function inputResult(): ActionResult {

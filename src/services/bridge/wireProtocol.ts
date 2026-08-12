@@ -271,7 +271,7 @@ export type MobileActionsStartRequest = {
 export type MobileActionsRespondRequest = {
   type: 'actions.respond';
   requestId: string;
-  paneId: string;
+  sessionId: string;
   response: MobileActionInteractionResponse;
 };
 

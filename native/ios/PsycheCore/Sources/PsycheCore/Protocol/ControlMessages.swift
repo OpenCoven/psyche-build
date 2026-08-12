@@ -1010,20 +1010,20 @@ public struct MobileActionStartRequest: Codable, Sendable, Equatable {
 public struct MobileActionRespondRequest: Codable, Sendable, Equatable {
     public let type: String
     public let requestID: String
-    public let paneID: String
+    public let sessionID: String
     public let response: MobileActionResponse
 
-    public init(requestID: String, paneID: String, response: MobileActionResponse) {
+    public init(requestID: String, sessionID: String, response: MobileActionResponse) {
         self.type = "actions.respond"
         self.requestID = requestID
-        self.paneID = paneID
+        self.sessionID = sessionID
         self.response = response
     }
 
     enum CodingKeys: String, CodingKey {
         case type, response
         case requestID = "requestId"
-        case paneID = "paneId"
+        case sessionID = "sessionId"
     }
 }
 

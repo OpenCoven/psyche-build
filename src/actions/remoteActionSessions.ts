@@ -9,6 +9,7 @@ interface PendingAction {
   ownerId: string;
   expiresAt: number;
   result: ActionResult;
+  scope?: string;
 }
 
 export interface RemoteActionSessionsOptions {
@@ -41,7 +42,7 @@ export class RemoteActionSessions {
     }
   }
 
-  start(ownerId: string, result: ActionResult): {
+  start(ownerId: string, result: ActionResult, scope?: string): {
     sessionId?: string;
     result: RemoteActionResult;
   } {
@@ -57,6 +58,7 @@ export class RemoteActionSessions {
       ownerId,
       expiresAt: Date.now() + this.options.ttlMs,
       result,
+      scope,
     });
     return { sessionId, result: serialized };
   }
@@ -65,6 +67,7 @@ export class RemoteActionSessions {
     ownerId: string,
     sessionId: string,
     response: RemoteActionResponse,
+    beforeContinue?: (scope: string | undefined) => Promise<void> | void,
   ): Promise<{ sessionId?: string; result: RemoteActionResult }> {
     const pending = this.pending.get(sessionId);
     if (!pending || pending.ownerId !== ownerId) {
@@ -75,20 +78,26 @@ export class RemoteActionSessions {
       throw actionSessionError('action_session_not_found', 'action session not found');
     }
 
-    // Consume before invoking application code so retries cannot execute a
-    // callback twice, including when that callback throws.
+    // Consume before every await, including scope validation, so concurrent
+    // replies cannot both retain a reference and execute the same callback.
+    // Failed validation remains consumed (fail closed).
     this.pending.delete(sessionId);
+    await beforeContinue?.(pending.scope);
     const next = inheritRemoteContext(
       await continueAction(pending.result, response),
       pending.result,
     );
-    return this.start(ownerId, next);
+    return this.start(ownerId, next, pending.scope);
   }
 
   clearOwner(ownerId: string): void {
     for (const [sessionId, pending] of this.pending) {
       if (pending.ownerId === ownerId) this.pending.delete(sessionId);
     }
+  }
+
+  clearAll(): void {
+    this.pending.clear();
   }
 
   private pruneExpired(): void {

@@ -1,4 +1,6 @@
 import type { PaneSpawnResult, StreamId } from '../../daemon/protocol.js';
+import { PaneAction, type ActionResult, type RemoteActionResponse } from '../../actions/types.js';
+import { RemoteActionSessions } from '../../actions/remoteActionSessions.js';
 import { decodeBase64Payload } from '../../utils/base64.js';
 import type { BrowserFileRecord, BrowserSnapshot } from '../../utils/fileBrowser.js';
 import type { ReadonlyWorkspaceSnapshot } from '../../workspace/snapshot.js';
@@ -58,6 +60,10 @@ export interface MobileControlGatewayOptions {
     ritualId: string,
     params: Record<string, string>,
   ) => Promise<void>;
+  executeAction?: (input: {
+    paneId: string;
+    actionId: PaneAction;
+  }) => Promise<ActionResult>;
   mobileInspection?: MobileInspection;
   /**
    * Invoked only once a mutation actually changed host state, so a replayed
@@ -92,6 +98,10 @@ export class MobileControlGateway {
   }>();
 
   private readonly mobileInspection: MobileInspection;
+  private readonly remoteActions = new RemoteActionSessions({
+    ttlMs: 5 * 60_000,
+    maxPending: 64,
+  });
 
   constructor(private readonly options: MobileControlGatewayOptions) {
     this.mobileInspection = options.mobileInspection ?? createMobileInspection();
@@ -305,6 +315,44 @@ export class MobileControlGateway {
           diff,
         };
       }
+      case 'actions.start': {
+        const actionId = requirePaneAction(field(request, 'action'), requestId);
+        const paneId = requireNonEmpty(field(request, 'paneId'), 'paneId', requestId);
+        await this.requireActionPane(requestId, paneId);
+        const executeAction = this.requireActionExecutor(requestId);
+        const action = await this.runRemoteAction(
+          requestId,
+          async () => this.remoteActions.start(
+            context.ownerId,
+            await executeAction({ paneId, actionId }),
+            paneId,
+          ),
+        );
+        return { type: 'actions.result', requestId, ...action };
+      }
+      case 'actions.respond': {
+        const sessionId = requireNonEmpty(field(request, 'sessionId'), 'sessionId', requestId);
+        const response = requireActionResponse(field(request, 'response'), requestId);
+        const action = await this.runRemoteAction(
+          requestId,
+          () => this.remoteActions.respond(
+            context.ownerId,
+            sessionId,
+            response,
+            async (scope) => {
+              if (!scope) {
+                throw new MobileControlGatewayError(
+                  'pane_scope_violation',
+                  'action session has no published pane scope',
+                  requestId,
+                );
+              }
+              await this.requireActionPane(requestId, scope);
+            },
+          ),
+        );
+        return { type: 'actions.result', requestId, ...action };
+      }
       case 'hello':
         throw new MobileControlGatewayError(
           'invalid_control_request',
@@ -318,6 +366,14 @@ export class MobileControlGateway {
           requestId,
         );
     }
+  }
+
+  clearOwner(ownerId: string): void {
+    this.remoteActions.clearOwner(ownerId);
+  }
+
+  clearActions(): void {
+    this.remoteActions.clearAll();
   }
 
   /**
@@ -386,6 +442,21 @@ export class MobileControlGateway {
     );
   }
 
+  private async requireActionPane(requestId: string, paneId: string): Promise<void> {
+    const { workspace } = await this.options.workspaceSnapshot();
+    const published = workspace.projects.some((project) =>
+      project.projectPanes.some((pane) => pane.id === paneId)
+      || project.worktrees.some((worktree) =>
+        worktree.panes.some((pane) => pane.id === paneId)));
+    if (!published) {
+      throw new MobileControlGatewayError(
+        'pane_scope_violation',
+        'pane is not published by this host',
+        requestId,
+      );
+    }
+  }
+
   private async requireInspectionRoot(requestId: string, paneId: string): Promise<string> {
     const { workspace } = await this.options.workspaceSnapshot();
     for (const project of workspace.projects) {
@@ -439,6 +510,29 @@ export class MobileControlGateway {
     }
     return dependency;
   }
+
+  private requireActionExecutor(requestId: string): NonNullable<MobileControlGatewayOptions['executeAction']> {
+    if (!this.options.executeAction) {
+      throw new MobileControlGatewayError(
+        'command_not_supported',
+        'this host does not support remote actions yet',
+        requestId,
+      );
+    }
+    return this.options.executeAction;
+  }
+
+  private async runRemoteAction<T>(requestId: string, operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      const code = actionErrorCode(error);
+      if (code) {
+        throw new MobileControlGatewayError(code, (error as Error).message, requestId);
+      }
+      throw error;
+    }
+  }
 }
 
 /// Every field here arrives off the wire, so it is read as unknown and
@@ -456,6 +550,58 @@ function requireNonEmpty(value: unknown, field: string, requestId: string): stri
     );
   }
   return value;
+}
+
+function requirePaneAction(value: unknown, requestId: string): PaneAction {
+  if (typeof value !== 'string' || !Object.values(PaneAction).includes(value as PaneAction)) {
+    throw new MobileControlGatewayError('invalid_action', 'action is not supported', requestId);
+  }
+  return value as PaneAction;
+}
+
+function requireActionResponse(value: unknown, requestId: string): RemoteActionResponse {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new MobileControlGatewayError(
+      'invalid_control_request',
+      'response must be an action response object',
+      requestId,
+    );
+  }
+  const record = value as Record<string, unknown>;
+  switch (record.type) {
+    case 'confirm': return { kind: 'confirm', confirmed: true };
+    case 'cancel': return { kind: 'cancel' };
+    case 'choice': return {
+      kind: 'choice',
+      optionId: requireNonEmpty(record.optionId, 'response.optionId', requestId),
+    };
+    case 'input':
+      if (typeof record.value !== 'string') {
+        throw new MobileControlGatewayError(
+          'invalid_control_request',
+          'response.value must be a string',
+          requestId,
+        );
+      }
+      return { kind: 'input', value: record.value };
+    default:
+      throw new MobileControlGatewayError(
+        'invalid_control_request',
+        'response type is not supported',
+        requestId,
+      );
+  }
+}
+
+function actionErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' && [
+    'action_session_limit',
+    'action_session_not_found',
+    'invalid_action_state',
+    'invalid_action_response',
+  ].includes(code) ? code : undefined;
 }
 
 function optionalSequence(value: unknown, requestId: string): number | undefined {

@@ -188,11 +188,11 @@
   },
   "respondToAction": {
     "payload": {
-      "paneId": "%3",
       "requestId": "action-response-1",
       "response": {
         "type": "confirm"
       },
+      "sessionId": "action-session-1",
       "type": "actions.respond"
     },
     "type": "control"
