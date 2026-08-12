@@ -765,7 +765,7 @@ describe('Tauri agent picker', () => {
     expect(functionSource('openAgentPicker')).toContain('agentPickerIndex = 0;');
   });
 
-  it('keeps shell, agent, and browser launch hints distinct across menus, empty state, and help', () => {
+  it('keeps shell, agent, browser, and Git launch hints distinct across menus, empty state, and help', () => {
     expect(indexHtml).toMatch(
       /id="new-pane-term"[\s\S]*?Shell — login shell[\s\S]*?<span class="new-pane-key">⌘T<\/span>/,
     );
@@ -774,6 +774,9 @@ describe('Tauri agent picker', () => {
     );
     expect(indexHtml).toMatch(
       /id="new-pane-web"[\s\S]*?Browser — web[\s\S]*?<span class="new-pane-key">Web \+<\/span>/,
+    );
+    expect(indexHtml).toMatch(
+      /id="new-pane-git"[\s\S]*Git — changes and commits[\s\S]*<span class="new-pane-key">⌘G<\/span>/,
     );
     expect(indexHtml).not.toMatch(
       /id="new-pane-web"[\s\S]*?<span class="new-pane-key">⌘⌥B<\/span>/,
@@ -790,6 +793,7 @@ describe('Tauri agent picker', () => {
     expect(mainJs).toMatch(/\["New terminal pane", "⌘T"\]/);
     expect(mainJs).toMatch(/\["Choose an agent", "⌘P"\]/);
     expect(mainJs).toMatch(/\["New browser tab", "Web pane \+"\]/);
+    expect(mainJs).toMatch(/\["Open or focus Git", "⌘G"\]/);
     expect(mainJs).toMatch(/\["Toggle the tools dock", "⌘⌥B"\]/);
     expect(mainJs).not.toMatch(/\["New agent pane \(coven chat\)", "⌘T"\]/);
     expect(mainJs).not.toMatch(/\["New browser tab", "focus Web, then ⌘T"\]/);
@@ -810,6 +814,15 @@ describe('Tauri agent picker', () => {
     );
     expect(mainJs).not.toMatch(
       /onMenuClick\("new-pane-agent", async function \(\) \{[\s\S]*?runNewThreadCommand\(\)/,
+    );
+    expect(mainJs).toMatch(
+      /onMenuClick\("new-pane-git", async function \(\)[\s\S]*openOrFocusGitPane\(\)/,
+    );
+    expect(mainJs).toMatch(
+      /cmd: "\/git",[\s\S]*desc: "Open or focus the Git pane"[\s\S]*openOrFocusGitPane\(\)/,
+    );
+    expect(mainJs).toMatch(
+      /String\(e\.key\)\.toLowerCase\(\) === "g"[\s\S]*await openOrFocusGitPane\(\)/,
     );
 
     const emptyState = functionSource('renderTerminalEmptyState');

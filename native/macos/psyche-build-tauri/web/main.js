@@ -6979,6 +6979,11 @@
       run: function () { openBlankBrowserTab(); },
     },
     {
+      cmd: "/git",
+      desc: "Open or focus the Git pane",
+      run: function () { return openOrFocusGitPane(); },
+    },
+    {
       cmd: "/terminal",
       desc: "Switch to terminal-only layout",
       run: function () { applyLayout("terminal"); },
@@ -7822,6 +7827,11 @@
       if (openAgentPicker()) e.preventDefault();
       return;
     }
+    if (String(e.key).toLowerCase() === "g" && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      await openOrFocusGitPane();
+      return;
+    }
     // ⌘O opens a new project (folder picker → addProject → Coven).
     if (e.key === "o") { openProjectPicker(); e.preventDefault(); return; }
     // ⌘W closes the active file tab; with none open it closes the project.
@@ -7962,6 +7972,10 @@
     await openBlankBrowserTab();
     toast("Web pane opened");
   });
+  onMenuClick("new-pane-git", async function () {
+    closeNewPaneMenu();
+    await openOrFocusGitPane();
+  });
   onMenuClick("new-pane-set", function () { beginSetPicking(); });
   onMenuClick("new-pane-project", function () { openProjectPicker(); });
 
@@ -8067,6 +8081,7 @@
     ["New terminal pane", "⌘T"],
     ["Choose an agent", "⌘P"],
     ["New browser tab", "Web pane +"],
+    ["Open or focus Git", "⌘G"],
     ["Close the focused file / project", "⌘W"],
     ["Rename a session", "double-click"],
     ["Cycle file tabs", "⌘[ · ⌘]"],

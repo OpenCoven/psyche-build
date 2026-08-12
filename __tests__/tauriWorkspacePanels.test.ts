@@ -299,6 +299,13 @@ describe('Tauri workspace panels', () => {
       expect(indexHtml.match(/id="git-surface"/g)).toHaveLength(1);
     });
 
+    it('keeps Git actions inside the shared surface', () => {
+      expect(indexHtml).toContain('class="git-pane-toolbar"');
+      expect(indexHtml).toMatch(
+        /id="git-surface"[\s\S]*id="git-branch"[\s\S]*id="git-open-remote"[\s\S]*id="git-refresh"/,
+      );
+    });
+
     it('offers pop-out and drag from the same control', () => {
       expect(indexHtml).toMatch(/id="git-pop-out"[\s\S]*draggable="true"/);
       expect(mainJs).toMatch(/gitPopOutBtn\.addEventListener\("click"[\s\S]*popOutGitPane\(\)/);
