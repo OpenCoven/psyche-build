@@ -79,6 +79,12 @@ function fakeClient(sessions: CovenSessionSummary[]): CovenClient {
 function fakeDeps(): BridgeSpawnDeps & { commands: string[]; killed: string[] } {
   let next = 0;
   let panePresent = true;
+  const tmuxServerIdentity = {
+    pid: 4242,
+    processStartIdentity: 'mock-tmux-server-start',
+    socketPath: '/mock/tmux.sock',
+    sessionId: '$1',
+  };
   const commands: string[] = [];
   const killed: string[] = [];
   return {
@@ -86,6 +92,7 @@ function fakeDeps(): BridgeSpawnDeps & { commands: string[]; killed: string[] } 
     killed,
     tmuxSessionExists: () => true,
     createTmuxPane: () => `%${++next}`,
+    getTmuxServerIdentity: () => tmuxServerIdentity,
     sendTmuxCommand: (_paneId, command) => { commands.push(command); },
     probeTmuxPane: () => panePresent ? 'present' : 'absent',
     killTmuxPane: (paneId) => {

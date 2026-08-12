@@ -11,12 +11,18 @@ import {
 
 let root: string;
 let nextMockPaneId = 9;
+const mockTmuxServerIdentity = {
+  pid: 4242,
+  processStartIdentity: 'mock-tmux-server-start',
+  socketPath: '/mock/tmux.sock',
+  sessionId: '$1',
+};
 
 beforeEach(() => {
   nextMockPaneId = 9;
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'psyche-spawn-transport-')));
   execSync('git init', { cwd: root, stdio: 'ignore' });
-  execSync('git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', {
+  execSync('git -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', {
     cwd: root,
     stdio: 'ignore',
   });
@@ -32,6 +38,7 @@ function harness() {
   const deps: BridgeSpawnDeps = {
     tmuxSessionExists: () => true,
     createTmuxPane: () => `%${nextMockPaneId++}`,
+    getTmuxServerIdentity: () => mockTmuxServerIdentity,
     sendTmuxCommand: (_paneId: string, command: string) => {
       commands.push(command);
     },

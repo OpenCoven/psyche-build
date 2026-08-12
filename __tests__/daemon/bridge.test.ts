@@ -27,6 +27,12 @@ import {
 } from '../../src/orchestration/capabilityRouter.js';
 
 let tempRoots: string[] = [];
+const mockTmuxServerIdentity = {
+  pid: 4242,
+  processStartIdentity: 'mock-tmux-server-start',
+  socketPath: '/mock/tmux.sock',
+  sessionId: '$1',
+};
 
 async function tempDir(prefix: string): Promise<string> {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), prefix)));
@@ -367,6 +373,7 @@ describe('daemon bridge Coven helpers', () => {
           expect(title).toBe('coven:Fix tests');
           return '%42';
         },
+        getTmuxServerIdentity: () => mockTmuxServerIdentity,
         sendTmuxCommand: (paneId, command) => {
           commands.push(`${paneId}:${command}`);
         },
@@ -494,6 +501,7 @@ describe('daemon bridge Coven helpers', () => {
       {
         tmuxSessionExists: () => true,
         createTmuxPane: () => '%42',
+        getTmuxServerIdentity: () => mockTmuxServerIdentity,
         sendTmuxCommand: () => { throw new Error('coven attach failed'); },
         probeTmuxPane: () => present ? 'present' : 'absent',
         killTmuxPane: () => {
@@ -532,6 +540,7 @@ describe('daemon bridge Coven helpers', () => {
       {
         tmuxSessionExists: () => true,
         createTmuxPane: () => '%42',
+        getTmuxServerIdentity: () => mockTmuxServerIdentity,
         sendTmuxCommand: () => { throw new Error('coven attach failed'); },
         probeTmuxPane: () => 'unknown',
         killTmuxPane: () => { killCalled = true; },
@@ -1107,6 +1116,7 @@ describe('daemon bridge pane helpers', () => {
     }, {
       tmuxSessionExists: () => true,
       createTmuxPane: () => '%43',
+      getTmuxServerIdentity: () => mockTmuxServerIdentity,
       sendTmuxCommand: () => undefined,
     });
 
