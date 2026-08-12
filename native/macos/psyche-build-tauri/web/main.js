@@ -4802,18 +4802,23 @@
    */
   function armSessionClose(host, close, label, onConfirm) {
     disarmSessionClose();
-    var left = SESSION_CLOSE_SECONDS;
+    var expiresAt = Date.now() + SESSION_CLOSE_SECONDS * 1000;
     var confirm = document.createElement("button");
     confirm.type = "button";
     confirm.className = "session-close-confirm";
     confirm.title = "Click to confirm — auto-cancels when the timer runs out";
     function paint() {
+      var left = Math.ceil(Math.max(0, expiresAt - Date.now()) / 1000);
       confirm.textContent = "Close · " + left;
       confirm.setAttribute("aria-label", "Confirm closing " + label);
     }
     paint();
     confirm.addEventListener("click", function (event) {
       event.stopPropagation();
+      if (Date.now() >= expiresAt) {
+        disarmSessionClose();
+        return;
+      }
       var confirmOwnedFocus = document.activeElement === confirm;
       var treeKey = host.dataset.treeKey || "";
       disarmSessionClose({ restoreFocus: false });
@@ -4835,8 +4840,7 @@
     close.hidden = true;
     host.appendChild(confirm);
     var timer = setInterval(function () {
-      left -= 1;
-      if (left <= 0) { disarmSessionClose(); return; }
+      if (Date.now() >= expiresAt) { disarmSessionClose(); return; }
       paint();
     }, 1000);
     armedSessionClose = {
@@ -4845,6 +4849,7 @@
       close: close,
       host: host,
       treeKey: host.dataset.treeKey || "",
+      expiresAt: expiresAt,
     };
     confirm.focus();
   }

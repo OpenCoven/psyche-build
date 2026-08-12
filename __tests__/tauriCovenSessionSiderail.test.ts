@@ -2570,7 +2570,10 @@ describe('Tauri Coven session project rail', () => {
       return { renderer, wrapper, row, close };
     }
 
-    beforeEach(() => { vi.useFakeTimers(); });
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(10_000);
+    });
     afterEach(() => { vi.useRealTimers(); });
 
     it('replaces the × with a counting confirm instead of closing', () => {
@@ -2596,6 +2599,18 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.closeThread).toHaveBeenCalledWith('local');
       expect(event.propagationStopped).toBe(true);
       expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
+    });
+
+    it('rejects an overdue confirmation click without waiting for timer callbacks', async () => {
+      const { renderer, wrapper, row } = armed();
+      const confirm = wrapper.querySelector('.session-close-confirm')!;
+
+      vi.setSystemTime(13_001);
+      await confirm.emit('click');
+
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+      expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
+      expect(renderer.document.activeElement === row).toBe(true);
     });
 
     it('cancels itself when the countdown runs out', () => {
