@@ -91,20 +91,26 @@ public actor PairedHostStore {
         try write(records)
     }
 
-    /// The generation-bound explicit re-pair path. A connection that was
-    /// replaced while its secure-store operation was in flight cannot rewrite
-    /// a pinned fingerprint after it has been retired.
+    /// The generation- and attempt-bound explicit re-pair path. Either a
+    /// replaced connection or a cancelled pairing attempt is forbidden from
+    /// rewriting a pinned fingerprint after it has been retired.
     func replace(
         _ host: PairedHost,
-        for generation: ConnectionGeneration
+        for generation: ConnectionGeneration,
+        authorizedBy authorization: PairingPersistenceAuthorization
     ) throws -> Bool {
         let normalized = try normalize(host)
         var records = try records()
         records[normalized.serverID] = normalized
-        return try generation.withValidity {
-            try write(records)
-            return true
-        } ?? false
+        guard let committed = try generation.withValidity({
+            try authorization.withAuthorization {
+                try write(records)
+                return true
+            } ?? false
+        }) else {
+            return false
+        }
+        return committed
     }
 
     /// Tokens are reissued without the host identity changing, so this skips

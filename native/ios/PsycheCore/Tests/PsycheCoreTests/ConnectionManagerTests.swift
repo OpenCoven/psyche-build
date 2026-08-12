@@ -488,7 +488,7 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(host.token, "fresh-token")
     }
 
-    func testPairTaskCancellationFailsWaiterAndDoesNotPersistLateAcceptance() async throws {
+    func testCancelledPairPoisonsGenerationUntilFreshReconnectAndLateAcceptanceCannotPersist() async throws {
         let fake = FakeTransport()
         let composition = makeComposition(transport: fake)
         let manager = composition.manager
@@ -500,7 +500,6 @@ final class ConnectionManagerTests: XCTestCase {
         let pairing = pairingResult(code: "123456", on: manager)
         try await waitForPairRequest(on: fake)
         pairing.cancel()
-        await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "late-token"))))
 
         do {
             _ = try await pairing.value.get()
@@ -508,8 +507,107 @@ final class ConnectionManagerTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? PairingError, .cancelled)
         }
+        do {
+            _ = try await manager.pair(code: "654321")
+            XCTFail("Expected the poisoned connection to require a reconnect")
+        } catch {
+            XCTAssertEqual(error as? PairingError, .reconnectRequired)
+        }
+        let pairRequestsBeforeReconnect = await fake.sentMessages.filter {
+            if case .legacy(.pair) = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(pairRequestsBeforeReconnect.count, 1)
+
+        await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "late-token"))))
+        try await waitForDisconnectCount(1, on: fake)
         let persistedHosts = try await composition.pairedHostStore.hosts()
         XCTAssertEqual(persistedHosts, [])
+
+        let reconnect = Task { await manager.connect(to: testEndpoint()) }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await reconnect.value
+        let freshPairing = pairingResult(code: "654321", on: manager)
+        try await waitForPairRequest(on: fake, occurrence: 2)
+        await fake.emit(
+            .legacy(.pairAccepted(PairAcceptedPayload(token: "stale-token"))),
+            onConnection: 0
+        )
+        for _ in 0..<100 { await Task.yield() }
+        let hostsBeforeFreshAcceptance = try await composition.pairedHostStore.hosts()
+        XCTAssertEqual(hostsBeforeFreshAcceptance, [])
+        await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "fresh-token"))))
+        let freshResult = await freshPairing.value
+        XCTAssertEqual(try freshResult.get().token, "fresh-token")
+    }
+
+    func testCancellationBeforeStoreCommitRevokesPersistenceAuthorization() async throws {
+        let fake = FakeTransport()
+        let secureStore = BlockingReadSecureStore()
+        let pairedHostStore = PairedHostStore(secureStore: secureStore)
+        let requestClient = ControlRequestClient(transport: fake)
+        let workspaceStore = WorkspaceStore(controlRequests: requestClient)
+        let manager = ConnectionManager(
+            transport: fake,
+            workspaceStore: workspaceStore,
+            requestClient: requestClient,
+            pairedHostStore: pairedHostStore,
+            clientID: "test-client",
+            clientName: "Psyche Tests"
+        )
+        let connectTask = Task { await manager.connect(to: testEndpoint()) }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await connectTask.value
+
+        let pairing = pairingResult(code: "123456", on: manager)
+        try await waitForPairRequest(on: fake)
+        secureStore.blockNextRead()
+        await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "late-token"))))
+        await secureStore.waitUntilReadBegins()
+        pairing.cancel()
+        let cancellation = await pairing.value
+        secureStore.releaseRead()
+
+        do {
+            _ = try cancellation.get()
+            XCTFail("Expected cancellation to complete the pairing exactly once")
+        } catch {
+            XCTAssertEqual(error as? PairingError, .cancelled)
+        }
+        for _ in 0..<100 { await Task.yield() }
+        let persistedHosts = try await pairedHostStore.hosts()
+        XCTAssertEqual(persistedHosts, [])
+    }
+
+    func testPairSendFailurePoisonsGenerationAndCleansUpBeforeRetry() async throws {
+        let fake = FakeTransport()
+        let transport = PairSendFailingTransport(base: fake)
+        let manager = makeComposition(transport: transport).manager
+        let connectTask = Task { await manager.connect(to: testEndpoint()) }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await connectTask.value
+
+        do {
+            _ = try await manager.pair(code: "123456")
+            XCTFail("Expected the pair send failure to surface")
+        } catch {
+            XCTAssertEqual(error as? FakeTransportError, .connectionFailed)
+        }
+        do {
+            _ = try await manager.pair(code: "654321")
+            XCTFail("Expected failed pairing to require reconnect")
+        } catch {
+            XCTAssertEqual(error as? PairingError, .reconnectRequired)
+        }
+        let pairRequests = await fake.sentMessages.filter {
+            if case .legacy(.pair) = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(pairRequests, [])
+        try await waitForDisconnectCount(1, on: fake)
     }
 
     func testPairRejectsConcurrentRequest() async throws {
@@ -2168,6 +2266,39 @@ private actor HelloCompletionGateTransport: PsycheTransport {
             shouldGateHello = false
             await gate.wait()
         }
+    }
+
+    func incomingMessages() async -> AsyncStream<MobileServerMessage> {
+        await base.incomingMessages()
+    }
+
+    func incomingBinaryFrames() async -> AsyncStream<TerminalBinaryFrame> {
+        await base.incomingBinaryFrames()
+    }
+}
+
+private actor PairSendFailingTransport: PsycheTransport {
+    private let base: FakeTransport
+    private var shouldFailPair = true
+
+    init(base: FakeTransport) {
+        self.base = base
+    }
+
+    func connect(to endpoint: HostEndpoint) async throws {
+        try await base.connect(to: endpoint)
+    }
+
+    func disconnect() async {
+        await base.disconnect()
+    }
+
+    func send(_ message: MobileClientMessage) async throws {
+        if shouldFailPair, case .legacy(.pair) = message {
+            shouldFailPair = false
+            throw FakeTransportError.connectionFailed
+        }
+        try await base.send(message)
     }
 
     func incomingMessages() async -> AsyncStream<MobileServerMessage> {

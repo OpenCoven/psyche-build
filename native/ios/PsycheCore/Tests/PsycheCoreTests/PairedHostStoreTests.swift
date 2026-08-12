@@ -96,11 +96,16 @@ final class PairedHostStoreTests: XCTestCase {
         let store = PairedHostStore(secureStore: secureStore)
         try await store.save(makeHost())
         let generation = ConnectionGeneration(id: 1)
+        let authorization = PairingPersistenceAuthorization()
         let replacementHost = makeHost(fingerprint: otherFingerprint, token: "token-2")
 
         secureStore.blockNextRead()
         let replacement = Task {
-            try await store.replace(replacementHost, for: generation)
+            try await store.replace(
+                replacementHost,
+                for: generation,
+                authorizedBy: authorization
+            )
         }
         await secureStore.waitUntilReadBegins()
         generation.invalidate()
