@@ -6,6 +6,7 @@ import {
   buildSidebarProjectModel,
   deriveCovenSidebarStatus,
   deriveLocalSidebarStatus,
+  flattenSidebarSearchResults,
   localSidebarSelectionKey,
   matchTextRanges,
   normalizeSidebarFilter,
@@ -256,6 +257,92 @@ describe('Tauri sidebar model', () => {
       'shell 8 · pnpm dev',
       'shell 8 · vitest --watch',
     ]);
+  });
+
+  it('flattens filtered project models in stable sidebar order with display context', () => {
+    const result = buildSidebarProjectModel({
+      project: baseProject,
+      localSessions: [
+        localSession('shell-api', {
+          name: 'API',
+          title: 'API',
+          launch: { command: 'pnpm', args: ['dev'] },
+          needsAttention: true,
+          lastOutputAt: 9_000,
+        }),
+        localSession('shell-tests', {
+          name: 'Tests',
+          title: 'Tests',
+          launch: { command: 'pnpm', args: ['vitest'] },
+          lastOutputAt: 8_500,
+        }),
+      ],
+      covenSessions: [covenSession('coven-1', { title: 'Review agent' })],
+      query: '',
+      filter: 'all',
+      selectedKey: '',
+      now: 10_000,
+    });
+
+    expect(flattenSidebarSearchResults([result])).toEqual([
+      expect.objectContaining({
+        key: 'coven:coven-1',
+        source: 'coven',
+        projectId: 'psyche',
+        projectTitle: 'PSYCHE-BUILD',
+        branchTitle: 'feat/web-pane-attention',
+        title: 'Review agent',
+        meta: 'Coven · running',
+        status: expect.objectContaining({ label: 'BUSY' }),
+      }),
+      expect.objectContaining({
+        key: 'psyche:shell-api',
+        source: 'psyche',
+        projectId: 'psyche',
+        projectTitle: 'PSYCHE-BUILD',
+        branchTitle: 'feat/web-pane-attention',
+        title: 'API',
+        meta: 'pnpm dev',
+        status: expect.objectContaining({ label: 'REPLY' }),
+      }),
+      expect.objectContaining({
+        key: 'psyche:shell-tests',
+        source: 'psyche',
+        projectId: 'psyche',
+        projectTitle: 'PSYCHE-BUILD',
+        branchTitle: 'feat/web-pane-attention',
+        title: 'Tests',
+        meta: 'pnpm vitest',
+        status: expect.objectContaining({ label: 'ACTIVE' }),
+      }),
+    ]);
+  });
+
+  it('reuses normalized sidebar query matching when flattening search results', () => {
+    const result = buildSidebarProjectModel({
+      project: baseProject,
+      localSessions: [
+        localSession('shell-api', {
+          name: 'API server',
+          title: 'API server',
+          launch: { command: 'pnpm', args: ['dev'] },
+          lastOutputAt: 9_000,
+        }),
+        localSession('shell-tests', {
+          name: 'Tests',
+          title: 'Tests',
+          launch: { command: 'pnpm', args: ['vitest'] },
+          lastOutputAt: 8_500,
+        }),
+      ],
+      covenSessions: [],
+      query: ' API ',
+      filter: 'all',
+      selectedKey: '',
+      now: 10_000,
+    });
+
+    expect(flattenSidebarSearchResults([result]).map((row) => row.title)).toEqual(['API server']);
   });
 
   it('uses stable ordinals for duplicate titles without commands regardless of input order', () => {
