@@ -4,7 +4,7 @@ import { describe, expect, test } from 'vitest';
 
 const libSourcePath = resolve(
   process.cwd(),
-  'native/macos/psyche-build-tauri/src-tauri/src/lib.rs',
+  'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs',
 );
 
 function bracedBody(source: string, start: number): string {

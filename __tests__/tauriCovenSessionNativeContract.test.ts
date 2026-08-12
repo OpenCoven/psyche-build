@@ -4,15 +4,15 @@ import { describe, expect, test } from 'vitest';
 
 const covenSessionsSourcePath = resolve(
   process.cwd(),
-  'native/macos/psyche-build-tauri/src-tauri/src/coven_sessions.rs',
+  'native/desktop/psyche-build-tauri/src-tauri/src/coven_sessions.rs',
 );
 const libSourcePath = resolve(
   process.cwd(),
-  'native/macos/psyche-build-tauri/src-tauri/src/lib.rs',
+  'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs',
 );
 const mainSourcePath = resolve(
   process.cwd(),
-  'native/macos/psyche-build-tauri/web/main.js',
+  'native/desktop/psyche-build-tauri/web/main.js',
 );
 
 function bracedBody(source: string, start: number): string {

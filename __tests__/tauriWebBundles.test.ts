@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 /**
@@ -10,8 +12,9 @@ import { afterAll, describe, expect, it } from 'vitest';
  * package.json rather than restated here, so changing the build cannot leave
  * the check validating yesterday's command -- and compares the bytes.
  */
-const packageRoot = join(process.cwd(), 'native/macos/psyche-build-tauri');
+const packageRoot = join(process.cwd(), 'native/desktop/psyche-build-tauri');
 const webRoot = join(packageRoot, 'web');
+const require = createRequire(import.meta.url);
 
 /**
  * Where the esbuild binary lands depends on how the workspace was installed:
@@ -26,6 +29,40 @@ function resolveEsbuild(): string | null {
     join(process.cwd(), 'node_modules/.bin/esbuild'),
   ];
   return candidates.find((candidate) => existsSync(candidate)) ?? null;
+}
+
+type EsbuildLauncher = {
+  command: string;
+  args: string[];
+  packageBinPath: string | null;
+  shimPath: string | null;
+};
+
+function resolveEsbuildLauncher(): EsbuildLauncher | null {
+  const shimPath = resolveEsbuild();
+
+  for (const base of [packageRoot, process.cwd()]) {
+    try {
+      const packageJsonPath = require.resolve('esbuild/package.json', { paths: [base] });
+      const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as {
+        bin?: string | Record<string, string>;
+      };
+      const bin = typeof packageJson.bin === 'string' ? packageJson.bin : packageJson.bin?.esbuild;
+      if (!bin) throw new Error(`esbuild package.json at ${packageJsonPath} has no bin entry`);
+      const packageBinPath = join(dirname(packageJsonPath), bin);
+      return {
+        command: process.execPath,
+        args: [packageBinPath],
+        packageBinPath,
+        shimPath,
+      };
+    } catch (error) {
+      const candidate = error as NodeJS.ErrnoException;
+      if (candidate.code !== 'MODULE_NOT_FOUND') throw error;
+    }
+  }
+
+  return null;
 }
 
 const buildScript = (
@@ -54,6 +91,22 @@ mkdirSync(scratch, { recursive: true });
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 describe('committed web bundles', () => {
+  it('launches esbuild without depending on the POSIX-only .bin shim contract', () => {
+    const launcher = resolveEsbuildLauncher();
+    expect(launcher, 'esbuild launcher').not.toBeNull();
+    expect(launcher?.command).toBe(process.execPath);
+    expect(launcher?.args).toHaveLength(1);
+    expect(launcher?.packageBinPath).toBe(launcher?.args[0]);
+    expect(launcher?.packageBinPath).toMatch(/node_modules[/\\].*esbuild[/\\]bin[/\\]esbuild$/);
+
+    const shimPath = launcher?.shimPath;
+    if (!shimPath) return;
+
+    expect(readFileSync(shimPath, 'utf8')).toContain('#!/bin/sh');
+    expect(readFileSync(launcher!.packageBinPath!, 'utf8')).toContain('#!/usr/bin/env node');
+    expect(launcher?.packageBinPath).not.toBe(shimPath);
+  });
+
   it('parses the native workspace shell before packaging it', () => {
     expect(() => execFileSync(process.execPath, ['--check', join(webRoot, 'main.js')]))
       .not.toThrow();
@@ -88,8 +141,8 @@ describe('committed web bundles', () => {
       const committed = join(packageRoot, step.outfile);
       expect(existsSync(committed), `${step.outfile} is missing — run pnpm build:web`).toBe(true);
 
-      const esbuild = resolveEsbuild();
-      if (!esbuild) {
+      const launcher = resolveEsbuildLauncher();
+      if (!launcher) {
         throw new Error(
           'esbuild is not installed for psyche-build-tauri. Run `pnpm install` at the ' +
             'repo root — it is a workspace member, so a root install provides it.',
@@ -100,7 +153,10 @@ describe('committed web bundles', () => {
       const argv = step.argv.map((arg) =>
         arg.startsWith('--outfile=') ? `--outfile=${rebuilt}` : arg,
       );
-      execFileSync(esbuild, argv, { cwd: packageRoot, stdio: 'pipe' });
+      execFileSync(launcher.command, [...launcher.args, ...argv], {
+        cwd: packageRoot,
+        stdio: 'pipe',
+      });
 
       // Byte comparison, not a hash, so a failure can point at the divergence.
       // Equal-length drift is the common case -- an edited source usually

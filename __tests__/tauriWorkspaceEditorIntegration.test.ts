@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
-const tauriRoot = join(repoRoot, 'native/macos/psyche-build-tauri');
+const tauriRoot = join(repoRoot, 'native/desktop/psyche-build-tauri');
 const webRoot = join(tauriRoot, 'web');
 const indexHtml = readFileSync(join(webRoot, 'index.html'), 'utf8');
 const editorEntry = readFileSync(join(webRoot, 'editor/editor-entry.js'), 'utf8');

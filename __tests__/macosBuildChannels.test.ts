@@ -56,16 +56,16 @@ const scriptPath = join(repositoryRoot, 'scripts/build-macos-app.mjs');
 const devBuildHelperPath = join(repositoryRoot, 'scripts/build-dev-app.mjs');
 const publishHelperPath = join(repositoryRoot, 'scripts/publish-build-channel.mjs');
 const provenanceHelperPath = join(repositoryRoot, 'scripts/write-build-provenance.mjs');
-const tauriRelativeCwd = 'native/macos/psyche-build-tauri';
+const tauriRelativeCwd = 'native/desktop/psyche-build-tauri';
 const tauriDirectory = join(repositoryRoot, tauriRelativeCwd);
-const manifestPath = 'native/macos/psyche-build-tauri/src-tauri/Cargo.toml';
-const devConfigPath = resolve(repositoryRoot, 'native/macos/psyche-build-tauri/dev.tauri.generated.json');
+const manifestPath = 'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml';
+const devConfigPath = resolve(repositoryRoot, 'native/desktop/psyche-build-tauri/dev.tauri.generated.json');
 const scratchRoot = join(repositoryRoot, '.agent-test-artifacts', 'macos-build-channels');
 const devSourcePathspecs = [
   ':(top,glob)**',
   ':(top,glob,exclude)**/target/**',
   ':(top,glob,exclude)**/node_modules/**',
-  ':(top,glob,exclude)native/macos/psyche-build-tauri/web/*.bundle.js',
+  ':(top,glob,exclude)native/desktop/psyche-build-tauri/web/*.bundle.js',
 ];
 
 const packageJson = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')) as {
@@ -97,7 +97,7 @@ const macosTauriConfig = JSON.parse(
   readFileSync(
     join(
       repositoryRoot,
-      'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json',
+      'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json',
     ),
     'utf8',
   ),
@@ -1180,7 +1180,7 @@ describe('macOS build channels', () => {
       const configPath = join(tempRoot, 'tauri.dev.json');
       const targetDir = join(
         sourceRoot,
-        'native/macos/psyche-build-tauri/src-tauri/target',
+        'native/desktop/psyche-build-tauri/src-tauri/target',
       );
       const lockPath = join(targetDir, '.psyche-build-dev.lock');
       const inputPath = join(tempRoot, '.dev-build.input-fixed.json');
@@ -1191,7 +1191,7 @@ describe('macOS build channels', () => {
       );
       const candidatePath = join(
         sourceRoot,
-        'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
+        'native/desktop/psyche-build-tauri/src-tauri/target/release/bundle/macos',
         'Psyche Build Dev.app',
       );
       const identity: BundleIdentity = {
@@ -1270,7 +1270,7 @@ describe('macOS build channels', () => {
       const configPath = join(tempRoot, 'tauri.dev.json');
       const bundleDir = join(
         sourceRoot,
-        'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
+        'native/desktop/psyche-build-tauri/src-tauri/target/release/bundle/macos',
       );
       const candidatePath = join(bundleDir, 'Psyche Build Dev.app');
       const snapshotPath = join(
@@ -1423,7 +1423,7 @@ describe('macOS build channels', () => {
       const tempRoot = createScratchDirectory('dev-helper-timeout-temp');
       const lockPath = join(
         sourceRoot,
-        'native/macos/psyche-build-tauri/src-tauri/target/.psyche-build-dev.lock',
+        'native/desktop/psyche-build-tauri/src-tauri/target/.psyche-build-dev.lock',
       );
       const timeoutError = Object.assign(new Error('lockf failed'), {
         exitCode: 75,
@@ -3149,7 +3149,7 @@ fi
       const sourceRoot = join(tempRoot, 'source');
       const bundleDir = join(
         sourceRoot,
-        'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
+        'native/desktop/psyche-build-tauri/src-tauri/target/release/bundle/macos',
       );
       const candidate = join(bundleDir, 'Psyche Build.app');
       const installedPath = join(virtualHome, 'Applications', 'Psyche Build.app');
@@ -3350,7 +3350,7 @@ fi
       const configPath = join(tempRoot, 'tauri.dev.json');
       const bundleDir = join(
         virtualRepository,
-        'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
+        'native/desktop/psyche-build-tauri/src-tauri/target/release/bundle/macos',
       );
       const candidate = join(bundleDir, 'Psyche Build Dev.app');
       const snapshot = join(tempRoot, 'dev-snapshot', 'Psyche Build Dev.app');
@@ -3566,9 +3566,9 @@ fi
 
     it('allows build:web to change tracked generated bundles without rejecting publication', async () => {
       const generatedBundle =
-        'native/macos/psyche-build-tauri/web/editor.bundle.js';
+        'native/desktop/psyche-build-tauri/web/editor.bundle.js';
       const sourceRoot = createCommittedSource('dev-source-generated-output');
-      mkdirSync(join(sourceRoot, 'native/macos/psyche-build-tauri/web'), {
+      mkdirSync(join(sourceRoot, 'native/desktop/psyche-build-tauri/web'), {
         recursive: true,
       });
       writeFileSync(join(sourceRoot, generatedBundle), 'generated version one\n', 'utf8');
@@ -3648,7 +3648,7 @@ fi
       const configPath = join(tempRoot, 'tauri.dev.json');
       const candidate = join(
         virtualRepository,
-        'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
+        'native/desktop/psyche-build-tauri/src-tauri/target/release/bundle/macos',
         'Psyche Build Dev.app',
       );
       const removePath = vi.fn(async () => {});
@@ -3885,7 +3885,7 @@ fi
         const sourceRoot = join(tempRoot, 'source');
         const expectedCandidate = join(
           sourceRoot,
-          'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
+          'native/desktop/psyche-build-tauri/src-tauri/target/release/bundle/macos',
           'Psyche Build.app',
         );
         const stdout: string[] = [];
