@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -69,6 +69,45 @@ function functionSource(source: string, name: string) {
   throw new Error(`unterminated function ${name}`);
 }
 
+function compileFunction<T extends (...args: never[]) => unknown>(
+  source: string,
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(...names, `"use strict"; return (${source});`)(...values) as T;
+}
+
+function compileSessionSearchController(
+  dependencies: Record<string, unknown>,
+  options: { activation?: 'real' | 'dependency'; inputListener?: boolean } = {},
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  const activationSource = options.activation === 'real'
+    ? functionSource(mainJs, 'runSessionSearchPick')
+    : '';
+  const inputSource = options.inputListener ? listenerSource(mainJs, 'input') : '';
+  return Function(
+    ...names,
+    `"use strict";
+      var sessionSearchActivationGeneration = 0;
+      ${activationSource}
+      ${functionSource(mainJs, 'runPalettePick')}
+      ${inputSource}
+      return { runPalettePick: runPalettePick };
+    `,
+  )(...values) as {
+    runPalettePick: (pick: Record<string, unknown>, mode?: string) => Promise<void>;
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
 function listenerSource(source: string, eventName: string) {
   const start = source.indexOf(`commandInput.addEventListener("${eventName}"`);
   if (start === -1) throw new Error(`missing command input ${eventName} listener`);
@@ -137,7 +176,7 @@ function keydownHarness(value: string) {
 describe('Tauri composer session search palette', () => {
   it('exposes the composer palette as an accessible listbox above the composer', () => {
     expect(indexHtml).toMatch(
-      /id="command-input"[\s\S]*?aria-controls="palette"[\s\S]*?aria-autocomplete="list"[\s\S]*?aria-expanded="false"/,
+      /id="command-input"[\s\S]*?role="combobox"[\s\S]*?aria-controls="palette"[\s\S]*?aria-autocomplete="list"[\s\S]*?aria-expanded="false"/,
     );
     expect(indexHtml).toMatch(
       /<div class="palette" id="palette" role="listbox" aria-label="Composer suggestions" hidden><\/div>/,
@@ -212,14 +251,15 @@ describe('Tauri composer session search palette', () => {
     expect(activate.match(/Session is no longer available/g)).toHaveLength(3);
     expect(activate).toContain('var project = findProject(pick.projectId)');
     expect(activate).toContain('pick.sessionSource === "psyche"');
-    expect(activate).toContain('thread.projectId !== project.id');
-    expect(activate).toContain('thread.hidden');
-    expect(activate).toContain('isDormantThread(thread)');
-    expect(activate).toContain('await setActiveProject(project.id)');
+    expect(activate).toContain('candidate.projectId !== project.id');
+    expect(activate).toContain('candidate.hidden');
+    expect(activate).toContain('isDormantThread(candidate)');
+    expect(activate).toContain('await setActiveProject(project.id, { focusTerminal: false })');
+    expect(activate).toContain('{ focusTerminal: false }');
     expect(activate).toContain('settings.selectedSessionKey = pick.selectionKey');
     expect(activate).toContain('saveSettings()');
     expect(activate).toContain('applySetScopeForThread(thread)');
-    expect(activate).toContain('await focusThread(thread.id)');
+    expect(activate).toContain('await focusThread(thread.id, { focusTerminal: false })');
     expect(activate).toContain('covenSessionsForProject(project).find');
     expect(activate).toContain('candidate.id === pick.sessionId');
     expect(activate).toContain('await openCovenSession(project, session)');
@@ -228,8 +268,302 @@ describe('Tauri composer session search palette', () => {
     expect(pick).toContain('pick.kind === "session"');
     expect(pick).toContain('await runSessionSearchPick(pick)');
     expect(pick).toContain('} finally {');
+    expect(pick).toContain('sessionSearchActivationGeneration');
+    expect(pick).toContain('commandInput.value === activationQuery');
+    expect(pick).toContain('await waitForSessionSearchActivationFrames()');
     expect(pick).toContain('if (selected)');
     expect(pick).toContain('commandInput.focus()');
+
+    expect(activate.indexOf('await focusThread(thread.id, { focusTerminal: false })')).toBeLessThan(
+      activate.indexOf('applySetScopeForThread(thread)'),
+    );
+    expect(activate.indexOf('applySetScopeForThread(thread)')).toBeLessThan(
+      activate.indexOf('settings.selectedSessionKey = pick.selectionKey'),
+    );
+    expect(activate.lastIndexOf('await openCovenSession(project, session)')).toBeLessThan(
+      activate.lastIndexOf('settings.selectedSessionKey = pick.selectionKey'),
+    );
+  });
+
+  it('persists a local selection only after focus succeeds', async () => {
+    const project = { id: 'project-1' };
+    const thread = {
+      id: 'thread-1',
+      projectId: project.id,
+      hidden: false,
+      closing: false,
+      closeStarted: false,
+      status: 'running',
+    };
+    const state: { activeProjectId: string; activeThreadId: string | null } = {
+      activeProjectId: project.id,
+      activeThreadId: null,
+    };
+    const settings = { selectedSessionKey: 'old-selection' };
+    const focusResults = [false, true];
+    const calls: string[] = [];
+    const runSessionSearchPick = compileFunction<
+      (pick: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'runSessionSearchPick'), {
+      findProject: () => project,
+      findThread: () => thread,
+      isDormantThread: () => false,
+      state,
+      setActiveProject: async () => true,
+      settings,
+      saveSettings: () => { calls.push('save'); },
+      applySetScopeForThread: () => { calls.push('scope'); },
+      focusThread: async (_id: string, options?: { focusTerminal?: boolean }) => {
+        expect(options).toEqual({ focusTerminal: false });
+        calls.push('focus');
+        const result = focusResults.shift() ?? false;
+        if (result) state.activeThreadId = thread.id;
+        return result;
+      },
+      covenSessionsForProject: () => [],
+      openCovenSession: async () => null,
+      toast: () => undefined,
+    });
+    const pick = {
+      sessionSource: 'psyche',
+      sessionId: thread.id,
+      projectId: project.id,
+      selectionKey: 'psyche:thread-1',
+    };
+
+    await expect(runSessionSearchPick(pick)).resolves.toBe(false);
+    expect(settings.selectedSessionKey).toBe('old-selection');
+    expect(calls).toEqual(['focus']);
+
+    await expect(runSessionSearchPick(pick)).resolves.toBe(true);
+    expect(settings.selectedSessionKey).toBe('psyche:thread-1');
+    expect(calls).toEqual(['focus', 'focus', 'scope', 'save']);
+  });
+
+  it('persists a Coven selection only after open succeeds', async () => {
+    const project = { id: 'project-1' };
+    const session = { id: 'coven-1' };
+    const settings = { selectedSessionKey: 'old-selection' };
+    const openResults = [null, { id: 'thread-1' }];
+    const saveSettings = vi.fn();
+    const runSessionSearchPick = compileFunction<
+      (pick: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'runSessionSearchPick'), {
+      findProject: () => project,
+      findThread: () => null,
+      isDormantThread: () => false,
+      state: { activeProjectId: project.id },
+      setActiveProject: async () => true,
+      settings,
+      saveSettings,
+      applySetScopeForThread: () => undefined,
+      focusThread: async () => false,
+      covenSessionsForProject: () => [session],
+      openCovenSession: async () => openResults.shift() ?? null,
+      toast: () => undefined,
+    });
+    const pick = {
+      sessionSource: 'coven',
+      sessionId: session.id,
+      projectId: project.id,
+      selectionKey: 'coven:coven-1',
+    };
+
+    await expect(runSessionSearchPick(pick)).resolves.toBe(false);
+    expect(settings.selectedSessionKey).toBe('old-selection');
+    expect(saveSettings).not.toHaveBeenCalled();
+
+    await expect(runSessionSearchPick(pick)).resolves.toBe(true);
+    expect(settings.selectedSessionKey).toBe('coven:coven-1');
+    expect(saveSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('selects a local search result without terminal autofocus and leaves focus in the composer', async () => {
+    const project = { id: 'project-1' };
+    const thread = {
+      id: 'thread-1',
+      projectId: project.id,
+      hidden: false,
+      closing: false,
+      closeStarted: false,
+      status: 'running',
+    };
+    const state: { activeProjectId: string; activeThreadId: string | null } = {
+      activeProjectId: project.id,
+      activeThreadId: null,
+    };
+    const frames: Array<() => void> = [];
+    let focusOwner = 'none';
+    const commandInput = {
+      value: '? local',
+      focus() { focusOwner = 'composer'; },
+    };
+    const controller = compileSessionSearchController({
+      commandInput,
+      findProject: () => project,
+      findThread: () => thread,
+      isDormantThread: () => false,
+      state,
+      setActiveProject: async () => true,
+      settings: { selectedSessionKey: '' },
+      saveSettings: () => undefined,
+      applySetScopeForThread: () => undefined,
+      focusThread: async (_id: string, options?: { focusTerminal?: boolean }) => {
+        state.activeThreadId = thread.id;
+        if (!options || options.focusTerminal !== false) {
+          frames.push(() => { focusOwner = 'terminal'; });
+        }
+        return true;
+      },
+      covenSessionsForProject: () => [],
+      openCovenSession: async () => null,
+      toast: () => undefined,
+      hidePalette: () => undefined,
+      syncComposerChrome: () => undefined,
+      waitForSessionSearchActivationFrames: async () => undefined,
+      runCommand: () => undefined,
+    }, { activation: 'real' });
+
+    await controller.runPalettePick({
+      kind: 'session',
+      sessionSource: 'psyche',
+      sessionId: thread.id,
+      projectId: project.id,
+      selectionKey: 'psyche:thread-1',
+    });
+    frames.splice(0).forEach((frame) => frame());
+
+    expect(focusOwner).toBe('composer');
+    expect(frames).toHaveLength(0);
+  });
+
+  it('waits for Coven activation frames to drain before restoring composer focus', async () => {
+    const frameQueue: Array<() => void> = [];
+    const requestAnimationFrame = (callback: () => void) => {
+      frameQueue.push(callback);
+      return frameQueue.length;
+    };
+    const helperSource = mainJs.includes('function waitForSessionSearchActivationFrames(')
+      ? functionSource(mainJs, 'waitForSessionSearchActivationFrames')
+      : 'function waitForSessionSearchActivationFrames() { return Promise.resolve(); }';
+    const waitForSessionSearchActivationFrames = compileFunction<() => Promise<void>>(
+      helperSource,
+      { requestAnimationFrame },
+    );
+    let focusOwner = 'none';
+    let settled = false;
+    const commandInput = {
+      value: '? coven',
+      focus() { focusOwner = 'composer'; },
+    };
+    const controller = compileSessionSearchController({
+      commandInput,
+      runSessionSearchPick: async () => {
+        requestAnimationFrame(() => { focusOwner = 'terminal'; });
+        return true;
+      },
+      hidePalette: () => undefined,
+      syncComposerChrome: () => undefined,
+      waitForSessionSearchActivationFrames,
+      runCommand: () => undefined,
+    });
+
+    const activation = controller.runPalettePick({
+      kind: 'session',
+      sessionSource: 'coven',
+    }).then(() => { settled = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mainJs).toContain('function waitForSessionSearchActivationFrames()');
+    expect(helperSource.match(/requestAnimationFrame/g)).toHaveLength(2);
+    expect(helperSource).not.toContain('setTimeout');
+    expect(settled).toBe(false);
+
+    while (frameQueue.length) {
+      frameQueue.shift()!();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    await activation;
+    expect(focusOwner).toBe('composer');
+  });
+
+  it('does not let an older pick alter newer composer input', async () => {
+    const pending = deferred<boolean>();
+    let inputListener: (() => void) | undefined;
+    const hidePalette = vi.fn();
+    const syncComposerChrome = vi.fn();
+    const commandInput = {
+      value: '? old',
+      focus: vi.fn(),
+      addEventListener(name: string, listener: () => void) {
+        if (name === 'input') inputListener = listener;
+      },
+    };
+    const controller = compileSessionSearchController({
+      commandInput,
+      runSessionSearchPick: () => pending.promise,
+      hidePalette,
+      syncComposerChrome,
+      waitForSessionSearchActivationFrames: async () => undefined,
+      runCommand: () => undefined,
+      PALETTE_SIGILS: '/!%?',
+      openPalette: () => undefined,
+    }, { inputListener: true });
+
+    const activation = controller.runPalettePick({
+      kind: 'session',
+      sessionSource: 'psyche',
+    });
+    commandInput.value = '? newer input';
+    inputListener!();
+    expect(syncComposerChrome).toHaveBeenCalledTimes(1);
+
+    pending.resolve(true);
+    await activation;
+
+    expect(commandInput.value).toBe('? newer input');
+    expect(hidePalette).not.toHaveBeenCalled();
+    expect(syncComposerChrome).toHaveBeenCalledTimes(1);
+    expect(commandInput.focus).not.toHaveBeenCalled();
+  });
+
+  it('invalidates an older same-query pick when a newer pick starts', async () => {
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    const pending = [first.promise, second.promise];
+    const hidePalette = vi.fn();
+    const syncComposerChrome = vi.fn();
+    const commandInput = {
+      value: '? same query',
+      focus: vi.fn(),
+    };
+    const controller = compileSessionSearchController({
+      commandInput,
+      runSessionSearchPick: () => pending.shift()!,
+      hidePalette,
+      syncComposerChrome,
+      waitForSessionSearchActivationFrames: async () => undefined,
+      runCommand: () => undefined,
+    });
+    const pick = { kind: 'session', sessionSource: 'psyche' };
+
+    const olderActivation = controller.runPalettePick(pick);
+    const newerActivation = controller.runPalettePick(pick);
+    second.resolve(false);
+    await newerActivation;
+    expect(commandInput.value).toBe('? same query');
+    expect(syncComposerChrome).toHaveBeenCalledTimes(1);
+    expect(commandInput.focus).toHaveBeenCalledTimes(1);
+
+    first.resolve(true);
+    await olderActivation;
+
+    expect(commandInput.value).toBe('? same query');
+    expect(hidePalette).not.toHaveBeenCalled();
+    expect(syncComposerChrome).toHaveBeenCalledTimes(1);
+    expect(commandInput.focus).toHaveBeenCalledTimes(1);
   });
 
   it('guards empty palette navigation and prevents session queries reaching a PTY', () => {

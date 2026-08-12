@@ -3593,9 +3593,18 @@
   }
 
   async function focusThread(id, options) {
-    var thread = findThread(id);
+    function resolveFocusableThread() {
+      var candidate = findThread(id);
+      if (!candidate || candidate.hidden || candidate.closing ||
+          candidate.closeStarted || isDormantThread(candidate) ||
+          candidate.status === "failed") return null;
+      return candidate;
+    }
+    var thread = resolveFocusableThread();
     if (!thread) return false;
     if (!(await showTerminalView())) return false;
+    thread = resolveFocusableThread();
+    if (!thread) return false;
     markActiveSurface(thread.kind === "web" ? "browser" : "terminal");
     state.activeThreadId = id;
     // Make the thread's project the active one so the sidebar/tabs
@@ -3614,8 +3623,12 @@
     renderPaneWorkspace();
     refreshSidebar();
     requestAnimationFrame(function () {
+      var focusedThread = resolveFocusableThread();
+      if (!focusedThread || state.activeThreadId !== id) return;
       scheduleVisiblePaneFit();
-      if (thread.term) thread.term.focus();
+      if ((!options || options.focusTerminal !== false) && focusedThread.term) {
+        focusedThread.term.focus();
+      }
       syncBrowserBounds();
     });
 
@@ -7222,6 +7235,7 @@
   var paletteIndex = 0;
   var paletteVisible = false;
   var paletteFiltered = [];
+  var sessionSearchActivationGeneration = 0;
 
   function builtinPaletteEntries() {
     return commands.map(function (c) {
@@ -7377,43 +7391,76 @@
     commandInput.setAttribute("aria-expanded", "false");
     commandInput.removeAttribute("aria-activedescendant");
   }
+  function waitForSessionSearchActivationFrames() {
+    return new Promise(function (resolve) {
+      requestAnimationFrame(function () {
+        requestAnimationFrame(resolve);
+      });
+    });
+  }
   async function runSessionSearchPick(pick) {
     var project = findProject(pick.projectId);
     if (!project) { toast("Session is no longer available"); return false; }
     if (pick.sessionSource === "psyche") {
-      var thread = findThread(pick.sessionId);
-      if (!thread || thread.projectId !== project.id || thread.hidden ||
-          isDormantThread(thread)) {
+      function resolveLocalThread() {
+        var candidate = findThread(pick.sessionId);
+        if (!candidate || candidate.projectId !== project.id || candidate.hidden ||
+            candidate.closing || candidate.closeStarted ||
+            isDormantThread(candidate) || candidate.status === "failed") return null;
+        return candidate;
+      }
+      var thread = resolveLocalThread();
+      if (!thread) {
         toast("Session is no longer available"); return false;
       }
       if (project.id !== state.activeProjectId &&
-          !(await setActiveProject(project.id))) return false;
+          !(await setActiveProject(project.id, { focusTerminal: false }))) return false;
+      project = findProject(pick.projectId);
+      if (!project) return false;
+      thread = resolveLocalThread();
+      if (!thread) return false;
+      var focused = await focusThread(thread.id, { focusTerminal: false });
+      if (!focused) return false;
+      thread = resolveLocalThread();
+      if (!thread || state.activeThreadId !== thread.id) return false;
+      applySetScopeForThread(thread);
       settings.selectedSessionKey = pick.selectionKey;
       saveSettings();
-      applySetScopeForThread(thread);
-      return !!(await focusThread(thread.id));
+      return true;
     }
     var session = covenSessionsForProject(project).find(function (candidate) {
       return candidate.id === pick.sessionId;
     });
     if (!session) { toast("Session is no longer available"); return false; }
+    var opened = await openCovenSession(project, session);
+    if (!opened) return false;
     settings.selectedSessionKey = pick.selectionKey;
     saveSettings();
-    return !!(await openCovenSession(project, session));
+    return true;
   }
   async function runPalettePick(pick, mode) {
     if (!pick) return;
     if (pick.kind === "session") {
+      var activationGeneration = ++sessionSearchActivationGeneration;
+      var activationQuery = commandInput.value;
       var selected = false;
       try {
         selected = await runSessionSearchPick(pick);
-      } finally {
-        if (selected) {
-          commandInput.value = "";
-          hidePalette();
+        if (selected && pick.sessionSource !== "psyche") {
+          await waitForSessionSearchActivationFrames();
         }
-        syncComposerChrome();
-        commandInput.focus();
+      } finally {
+        var activationCurrent =
+          activationGeneration === sessionSearchActivationGeneration &&
+          commandInput.value === activationQuery;
+        if (activationCurrent) {
+          if (selected) {
+            commandInput.value = "";
+            hidePalette();
+          }
+          syncComposerChrome();
+          commandInput.focus();
+        }
       }
       return;
     }
@@ -7483,6 +7530,7 @@
   }
 
   commandInput.addEventListener("input", function () {
+    sessionSearchActivationGeneration += 1;
     if (PALETTE_SIGILS.indexOf(commandInput.value.charAt(0)) !== -1) openPalette();
     else hidePalette();
     syncComposerChrome();

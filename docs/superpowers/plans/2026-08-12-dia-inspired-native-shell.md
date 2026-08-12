@@ -716,6 +716,7 @@ git commit -m "feat(macos): expose ordered session search results"
 - Modify: `native/macos/psyche-build-tauri/web/styles.css:3600-3900`
 - Modify: `native/macos/psyche-build-tauri/web/main.js:4100-4140, 5530-6030, 7180-7460`
 - Create: `__tests__/tauriSessionSearchPalette.test.ts`
+- Create: `__tests__/tauriThreadFocus.test.ts`
 - Modify: `__tests__/tauriWorkspaceRail.test.ts:205-230`
 - Modify: `__tests__/tauriComposerScope.test.ts:1-end`
 
@@ -795,7 +796,9 @@ describe('Tauri composer session search', () => {
     expect(indexHtml).toMatch(
       /id="palette"[^>]*role="listbox"[^>]*aria-label="Composer suggestions"/,
     );
-    expect(indexHtml).toMatch(/id="command-input"[^>]*aria-controls="palette"/);
+    expect(indexHtml).toMatch(
+      /id="command-input"[^>]*role="combobox"[^>]*aria-controls="palette"/,
+    );
     expect(stylesCss).toMatch(/\.palette\s*\{[^}]*bottom:\s*calc\(100%\s*\+/s);
     expect(stylesCss).toMatch(/\.palette-item\.palette-session\s*\{/);
     expect(stylesCss).toMatch(/\.palette-empty\s*\{/);
@@ -832,15 +835,15 @@ describe('Tauri composer session search', () => {
   it('revalidates local and Coven matches immediately before activation', () => {
     const selection = functionSource(mainJs, 'runSessionSearchPick');
     expect(selection).toContain('findThread(pick.sessionId)');
-    expect(selection).toContain('thread.hidden');
-    expect(selection).toContain('isDormantThread(thread)');
-    expect(selection).toContain('setActiveProject(project.id)');
+    expect(selection).toContain('candidate.hidden');
+    expect(selection).toContain('isDormantThread(candidate)');
+    expect(selection).toContain('setActiveProject(project.id, { focusTerminal: false })');
     expect(selection).toContain('applySetScopeForThread(thread)');
     expect(selection).toContain('covenSessionsForProject(project)');
-    expect(selection).toContain('session.id === pick.sessionId');
+    expect(selection).toContain('candidate.id === pick.sessionId');
     expect(selection).toContain('settings.selectedSessionKey = pick.selectionKey');
     expect(selection).toContain('saveSettings()');
-    expect(selection).toContain('focusThread(thread.id)');
+    expect(selection).toContain('focusThread(thread.id, { focusTerminal: false })');
     expect(selection).toContain('openCovenSession(project, session)');
     expect(selection).toContain('toast("Session is no longer available")');
   });
@@ -971,6 +974,7 @@ Update the existing composer controls in `index.html`:
 Add these attributes to `#command-input`:
 
 ```html
+role="combobox"
 aria-controls="palette"
 aria-autocomplete="list"
 aria-expanded="false"
@@ -1019,7 +1023,10 @@ var PALETTE_SIGILS = "/!%?";
 Change the composer input listener to inspect the actual first character rather than trimmed input:
 
 ```js
+var sessionSearchActivationGeneration = 0;
+
 commandInput.addEventListener("input", function () {
+  sessionSearchActivationGeneration += 1;
   if (PALETTE_SIGILS.indexOf(commandInput.value.charAt(0)) !== -1) openPalette();
   else hidePalette();
   syncComposerChrome();
@@ -1180,31 +1187,103 @@ This is the final guard that prevents a `?` query from reaching an active PTY if
 
 - [ ] **Step 7: Revalidate and activate selected sessions**
 
-Add before `runPalettePick`:
+Harden `focusThread` so the thread is resolved again after file navigation and
+inside the queued autofocus frame. Composer activation passes
+`{ focusTerminal: false }`; all other callers retain the default autofocus:
+
+```js
+async function focusThread(id, options) {
+  function resolveFocusableThread() {
+    var candidate = findThread(id);
+    if (!candidate || candidate.hidden || candidate.closing ||
+        candidate.closeStarted || isDormantThread(candidate) ||
+        candidate.status === "failed") return null;
+    return candidate;
+  }
+  var thread = resolveFocusableThread();
+  if (!thread) return false;
+  if (!(await showTerminalView())) return false;
+  thread = resolveFocusableThread();
+  if (!thread) return false;
+  markActiveSurface(thread.kind === "web" ? "browser" : "terminal");
+  state.activeThreadId = id;
+  if (thread.projectId && state.activeProjectId !== thread.projectId) {
+    state.activeProjectId = thread.projectId;
+  }
+  var project = findProject(thread.projectId);
+  if (project) {
+    project.lastActiveThreadId = id;
+    project.selectedWorktreePath = thread.worktreePath;
+  }
+  var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
+  var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
+  if (layout && leaf) layout.focusedLeafId = leaf.id;
+  renderPaneWorkspace();
+  refreshSidebar();
+  requestAnimationFrame(function () {
+    var focusedThread = resolveFocusableThread();
+    if (!focusedThread || state.activeThreadId !== id) return;
+    scheduleVisiblePaneFit();
+    if ((!options || options.focusTerminal !== false) && focusedThread.term) {
+      focusedThread.term.focus();
+    }
+    syncBrowserBounds();
+  });
+
+  setProjectStatus(project, statusLevel(thread.status));
+  if ((!options || options.refreshStatus !== false) &&
+      typeof refreshStatusController === "function") {
+    refreshStatusController();
+  }
+  return true;
+}
+```
+
+Add before `runSessionSearchPick`:
+
+```js
+function waitForSessionSearchActivationFrames() {
+  return new Promise(function (resolve) {
+    requestAnimationFrame(function () {
+      requestAnimationFrame(resolve);
+    });
+  });
+}
+```
+
+Then add:
 
 ```js
 async function runSessionSearchPick(pick) {
   var project = findProject(pick.projectId);
-  if (!project) {
-    toast("Session is no longer available");
-    return false;
-  }
-
+  if (!project) { toast("Session is no longer available"); return false; }
   if (pick.sessionSource === "psyche") {
-    var thread = findThread(pick.sessionId);
-    if (!thread
-      || thread.projectId !== project.id
-      || thread.hidden
-      || isDormantThread(thread)) {
+    function resolveLocalThread() {
+      var candidate = findThread(pick.sessionId);
+      if (!candidate || candidate.projectId !== project.id || candidate.hidden ||
+          candidate.closing || candidate.closeStarted ||
+          isDormantThread(candidate) || candidate.status === "failed") return null;
+      return candidate;
+    }
+    var thread = resolveLocalThread();
+    if (!thread) {
       toast("Session is no longer available");
       return false;
     }
     if (project.id !== state.activeProjectId &&
-        !(await setActiveProject(project.id))) return false;
+        !(await setActiveProject(project.id, { focusTerminal: false }))) return false;
+    project = findProject(pick.projectId);
+    if (!project) return false;
+    thread = resolveLocalThread();
+    if (!thread) return false;
+    var focused = await focusThread(thread.id, { focusTerminal: false });
+    if (!focused) return false;
+    thread = resolveLocalThread();
+    if (!thread || state.activeThreadId !== thread.id) return false;
+    applySetScopeForThread(thread);
     settings.selectedSessionKey = pick.selectionKey;
     saveSettings();
-    applySetScopeForThread(thread);
-    return !!(await focusThread(thread.id));
+    return true;
   }
 
   var session = covenSessionsForProject(project).find(function (candidate) {
@@ -1214,23 +1293,44 @@ async function runSessionSearchPick(pick) {
     toast("Session is no longer available");
     return false;
   }
+  var opened = await openCovenSession(project, session);
+  if (!opened) return false;
   settings.selectedSessionKey = pick.selectionKey;
   saveSettings();
-  return !!(await openCovenSession(project, session));
+  return true;
 }
 ```
 
-Make `runPalettePick` async and branch before command execution:
+Make `runPalettePick` async, invalidate older activations when a newer pick
+starts, capture the query, and restore composer UI/focus only while both still
+match. Coven activation waits through two animation frames so deeper
+create/focus callbacks cannot reclaim focus afterward:
 
 ```js
 async function runPalettePick(pick, mode) {
   if (!pick) return;
   if (pick.kind === "session") {
-    var selected = await runSessionSearchPick(pick);
-    if (selected) commandInput.value = "";
-    if (selected) hidePalette();
-    syncComposerChrome();
-    commandInput.focus();
+    var activationGeneration = ++sessionSearchActivationGeneration;
+    var activationQuery = commandInput.value;
+    var selected = false;
+    try {
+      selected = await runSessionSearchPick(pick);
+      if (selected && pick.sessionSource !== "psyche") {
+        await waitForSessionSearchActivationFrames();
+      }
+    } finally {
+      var activationCurrent =
+        activationGeneration === sessionSearchActivationGeneration &&
+        commandInput.value === activationQuery;
+      if (activationCurrent) {
+        if (selected) {
+          commandInput.value = "";
+          hidePalette();
+        }
+        syncComposerChrome();
+        commandInput.focus();
+      }
+    }
     return;
   }
 
@@ -1251,7 +1351,10 @@ async function runPalettePick(pick, mode) {
 }
 ```
 
-Existing click and Enter callers may invoke the async function without awaiting it; the function owns its own error/status UI through `focusThread`, `openCovenSession`, and `toast`.
+Existing click and Enter callers may invoke the async function without awaiting
+it. Older activations may still complete their requested session focus, but
+their generation/query guard prevents them from clearing, hiding, or focusing
+over a newer composer interaction.
 
 - [ ] **Step 8: Make keyboard and composer chrome behavior explicit**
 
@@ -1343,6 +1446,7 @@ git add \
   native/macos/psyche-build-tauri/web/styles.css \
   native/macos/psyche-build-tauri/web/main.js \
   __tests__/tauriSessionSearchPalette.test.ts \
+  __tests__/tauriThreadFocus.test.ts \
   __tests__/tauriComposerScope.test.ts \
   __tests__/tauriWorkspaceRail.test.ts
 git commit -m "feat(macos): move session search into composer"
