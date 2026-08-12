@@ -52,6 +52,11 @@ async function flushPromises(times = 2) {
   for (let index = 0; index < times; index += 1) await Promise.resolve();
 }
 
+const spawnPtyRuntimeDeps = {
+  attentionTracker: { forget: () => undefined },
+  syncThreadAttentionChrome: () => undefined,
+};
+
 describe('Tauri Coven launch project scope', () => {
   it('registers the canonical project path command and requires validated PTY roots', () => {
     expect(libRs).toMatch(/fn canonical_project_path\s*\(\s*root\s*:\s*String\s*\)/);
@@ -883,6 +888,7 @@ describe('native Coven launch routing', () => {
     const spawnPty = compileFunction<(value: Record<string, any>) => Promise<boolean>>(
       functionSource('spawnPty'),
       {
+        ...spawnPtyRuntimeDeps,
         isLiveThread: () => true,
         invoke: async (_name: string, payload: Record<string, any>) => { invoked.push(payload); },
         pendingDataBuffers: new Map(),
@@ -1023,7 +1029,7 @@ describe('native Coven launch routing', () => {
     expect(thread).toMatchObject({ project, kind: 'coven-chat', name: 'Coven' });
   });
 
-  it('coalesces concurrent automatic ensures through one animation-frame launch', async () => {
+  it('coalesces concurrent explicit ensures through one animation-frame launch', async () => {
     const project = { id: 'project', root: '/repo', selectedWorktreePath: '/repo/wt' };
     const state = {
       env: { coven_path: '/bin/coven' },
@@ -1078,7 +1084,7 @@ describe('native Coven launch routing', () => {
     expect(covenEnsureFlights.size).toBe(0);
   });
 
-  it('cleans a rejected automatic ensure so the workspace can retry', async () => {
+  it('cleans a rejected explicit ensure so the user can retry', async () => {
     const project = { id: 'project', root: '/repo' };
     const covenEnsureFlights = new Map<string, Promise<unknown>>();
     let attempts = 0;
@@ -1332,6 +1338,7 @@ describe('native Coven launch routing', () => {
       return undefined;
     };
     const dependencies = {
+      ...spawnPtyRuntimeDeps,
       invoke,
       isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
       pendingDataBuffers,
@@ -1397,6 +1404,7 @@ describe('native Coven launch routing', () => {
     const state = { threads: [thread], activeThreadId: thread.id };
     const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
       functionSource('spawnPty'), {
+        ...spawnPtyRuntimeDeps,
         invoke: () => { starts += 1; return new Promise<void>((resolve) => { resolveStart = resolve; }); },
         isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
         pendingDataBuffers: new Map(),
@@ -1479,6 +1487,7 @@ describe('native Coven launch routing', () => {
     const projectLevels: string[] = [];
     const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
       functionSource('spawnPty'), {
+        ...spawnPtyRuntimeDeps,
         invoke: async () => { throw new Error('PTY already running for thread'); },
         isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
         pendingDataBuffers,
@@ -1503,6 +1512,103 @@ describe('native Coven launch routing', () => {
     expect(projectLevels).toEqual(['ok']);
   });
 
+  it('resets stale runtime state only when a PTY retry actually starts', async () => {
+    const source = functionSource('spawnPty');
+    expect(source).toMatch(
+      /thread\.lastOutputAt = 0;[\s\S]{0,80}thread\.isWorking = false;[\s\S]{0,80}thread\.sidebarStatusKey = "busy";/,
+    );
+    expect(source).toMatch(
+      /attentionTracker\.forget\(thread\.id\);[\s\S]{0,80}thread\.needsAttention = false;[\s\S]{0,80}thread\.attentionReason = null;[\s\S]{0,80}syncThreadAttentionChrome\(thread\);/,
+    );
+
+    const refreshSnapshots: Array<Record<string, unknown>> = [];
+    const chromeSnapshots: Array<Record<string, unknown>> = [];
+    const forgotten: string[] = [];
+    const thread = {
+      id: 'thread-1', projectId: 'project', status: 'failed', spawning: false,
+      closing: false, closeStarted: false, startInFlight: false, stopRequested: true,
+      ptyStarted: false, lastOutputAt: 12_345, isWorking: true, sidebarStatusKey: 'attention',
+      needsAttention: true, attentionReason: 'question',
+      launch: {
+        command: '/bin/zsh', args: [], env: {}, projectRoot: '/repo', cwd: '/repo',
+        launchKind: 'shell', covenSessionId: null,
+      }, term: null,
+    };
+    const state = { threads: [thread], activeThreadId: null };
+    const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(source, {
+      attentionTracker: {
+        forget: (id: string) => { forgotten.push(id); },
+      },
+      syncThreadAttentionChrome: (value: typeof thread) => {
+        chromeSnapshots.push({
+          needsAttention: value.needsAttention,
+          attentionReason: value.attentionReason,
+        });
+      },
+      invoke: async () => undefined,
+      isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
+      pendingDataBuffers: new Map(),
+      syncThreadPaneMetadata: () => undefined,
+      refreshSidebar: () => {
+        refreshSnapshots.push({
+          lastOutputAt: thread.lastOutputAt,
+          isWorking: thread.isWorking,
+          sidebarStatusKey: thread.sidebarStatusKey,
+          needsAttention: thread.needsAttention,
+          attentionReason: thread.attentionReason,
+          status: thread.status,
+          spawning: thread.spawning,
+        });
+      },
+      refreshTabs: () => undefined,
+      state,
+      setProjectStatus: () => undefined,
+      findProject: () => ({ id: 'project' }),
+      setStatus: () => undefined,
+      stopThreadPty: () => Promise.resolve(false),
+      refreshCovenSessions: () => Promise.resolve(),
+    });
+
+    await expect(spawnPty(thread)).resolves.toBe(true);
+    expect(forgotten).toEqual(['thread-1']);
+    expect(chromeSnapshots[0]).toEqual({
+      needsAttention: false,
+      attentionReason: null,
+    });
+    expect(refreshSnapshots[0]).toEqual({
+      lastOutputAt: 0,
+      isWorking: false,
+      sidebarStatusKey: 'busy',
+      needsAttention: false,
+      attentionReason: null,
+      status: 'starting',
+      spawning: true,
+    });
+
+    const guarded = {
+      ...thread,
+      id: 'thread-2',
+      startInFlight: true,
+      stopRequested: true,
+      lastOutputAt: 77,
+      isWorking: true,
+      sidebarStatusKey: 'active',
+      needsAttention: true,
+      attentionReason: 'turn',
+    };
+    state.threads.push(guarded);
+    await expect(spawnPty(guarded)).resolves.toBe(false);
+    expect(guarded).toMatchObject({
+      lastOutputAt: 77,
+      isWorking: true,
+      sidebarStatusKey: 'active',
+      needsAttention: true,
+      attentionReason: 'turn',
+      stopRequested: true,
+    });
+    expect(forgotten).toEqual(['thread-1']);
+  });
+
   it('resets stop coordination for retry and stops the retried PTY once on close', async () => {
     const calls: string[] = [];
     const thread = {
@@ -1521,6 +1627,7 @@ describe('native Coven launch routing', () => {
     );
     const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
       functionSource('spawnPty'), {
+        ...spawnPtyRuntimeDeps,
         invoke,
         isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
         pendingDataBuffers: new Map(),
@@ -1640,6 +1747,7 @@ describe('native Coven launch routing', () => {
     );
     const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
       functionSource('spawnPty'), {
+        ...spawnPtyRuntimeDeps,
         invoke, isLiveThread, stopThreadPty,
         pendingDataBuffers: new Map(),
         syncThreadPaneMetadata: () => undefined,
@@ -1707,6 +1815,7 @@ describe('native Coven launch routing', () => {
       const isLiveThread = (value: typeof thread) => state.threads.includes(value) && !value.closing;
       const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
         functionSource('spawnPty'), {
+          ...spawnPtyRuntimeDeps,
           invoke: () => {
             starts += 1;
             return new Promise<void>((resolve, reject) => {

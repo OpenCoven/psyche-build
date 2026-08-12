@@ -4,7 +4,7 @@
 
 **Goal:** Prevent app boot and project navigation from creating Coven sessions while preserving one coalesced creation path for explicit Coven actions.
 
-**Architecture:** Remove `ensureProjectCoven` from passive workspace lifecycle callers and delete the now-obsolete `ensureCoven` suppression option. Route the agent picker and `/new-thread` through `ensureProjectCoven` so explicit requests reuse a visible pane and share the existing per-project/worktree in-flight launch guard.
+**Architecture:** Remove `ensureProjectCoven` from passive workspace lifecycle callers and delete the now-obsolete `ensureCoven` suppression option, while retaining normal restoration and focus of existing local panes. Route the agent picker and `/new-thread` through `ensureProjectCoven` so explicit requests reuse a visible pane and share the existing per-project/worktree in-flight launch guard.
 
 **Tech Stack:** Tauri web runtime JavaScript, Vitest, TypeScript, pnpm
 
@@ -22,16 +22,11 @@
 
 **Files:**
 
-- Modify: `native/macos/psyche-build-tauri/web/main.js:251-269`
-- Modify: `native/macos/psyche-build-tauri/web/main.js:524-565`
-- Modify: `native/macos/psyche-build-tauri/web/main.js:4760-4813`
-- Modify: `native/macos/psyche-build-tauri/web/main.js:8250-8280`
-- Modify: `native/macos/psyche-build-tauri/web/main.js:8560-8590`
-- Test: `__tests__/tauriCovenLaunch.test.ts:922-1002`
-- Test: `__tests__/tauriAgentPicker.test.ts:817-821`
-- Test: `__tests__/tauriPhysicalPanes.test.ts:1163-1224`
-- Test: `__tests__/tauriPhysicalPanes.test.ts:1277-1378`
-- Test: `__tests__/tauriCovenSessionLifecycle.test.ts:800-900`
+- Modify: `native/macos/psyche-build-tauri/web/main.js` — `activateProjectWorktree`, `setActiveProject`, `openCovenSession`, `openProjectPicker`, and `boot`
+- Test: `__tests__/tauriCovenLaunch.test.ts` — lifecycle routing and project activation
+- Test: `__tests__/tauriAgentPicker.test.ts` — lifecycle source contract
+- Test: `__tests__/tauriPhysicalPanes.test.ts` — worktree activation and `/new-thread`
+- Test: `__tests__/tauriCovenSessionLifecycle.test.ts` — daemon attachment activation
 
 - [ ] **Step 1: Replace automatic-start source assertions with explicit-only assertions**
 
@@ -287,12 +282,10 @@ git commit -m "fix(macos): stop automatic Coven session spawning" \
 
 **Files:**
 
-- Modify: `native/macos/psyche-build-tauri/web/main.js:6170-6172`
-- Modify: `native/macos/psyche-build-tauri/web/main.js:8369-8414`
-- Test: `__tests__/tauriCovenLaunch.test.ts:700-816`
-- Test: `__tests__/tauriCovenLaunch.test.ts:1525-1546`
-- Test: `__tests__/tauriAgentPicker.test.ts:120-175`
-- Test: `__tests__/tauriPhysicalPanes.test.ts:1379-1410`
+- Modify: `native/macos/psyche-build-tauri/web/main.js` — `runNewThreadCommand` and `spawnAgentThread`
+- Test: `__tests__/tauriCovenLaunch.test.ts` — launch coalescing and source routing
+- Test: `__tests__/tauriAgentPicker.test.ts` — Coven picker delegation
+- Test: `__tests__/tauriPhysicalPanes.test.ts` — `/new-thread` delegation
 
 - [ ] **Step 1: Change the `/new-thread` test to require the guarded explicit path**
 
