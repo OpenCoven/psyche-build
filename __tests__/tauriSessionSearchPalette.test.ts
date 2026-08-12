@@ -85,7 +85,11 @@ function compileSessionSearchController(
   const names = Object.keys(dependencies);
   const values = Object.values(dependencies);
   const activationSource = options.activation === 'real'
-    ? functionSource(mainJs, 'runSessionSearchPick')
+    ? `
+      ${functionSource(mainJs, 'snapshotSetScopePresentation')}
+      ${functionSource(mainJs, 'restoreSetScopePresentation')}
+      ${functionSource(mainJs, 'runSessionSearchPick')}
+    `
     : '';
   const inputSource = options.inputListener ? listenerSource(mainJs, 'input') : '';
   return Function(
@@ -100,6 +104,21 @@ function compileSessionSearchController(
   )(...values) as {
     runPalettePick: (pick: Record<string, unknown>, mode?: string) => Promise<void>;
   };
+}
+
+function compileSessionSearchPick<T extends (...args: never[]) => unknown>(
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(
+    ...names,
+    `"use strict";
+      ${functionSource(mainJs, 'snapshotSetScopePresentation')}
+      ${functionSource(mainJs, 'restoreSetScopePresentation')}
+      return (${functionSource(mainJs, 'runSessionSearchPick')});
+    `,
+  )(...values) as T;
 }
 
 function deferred<T>() {
@@ -260,7 +279,11 @@ describe('Tauri composer session search palette', () => {
     expect(activate).toContain('{ focusTerminal: false }');
     expect(activate).toContain('settings.selectedSessionKey = pick.selectionKey');
     expect(activate).toContain('saveSettings()');
+    expect(activate).toContain('snapshotSetScopePresentation(thread)');
     expect(activate).toContain('applySetScopeForThread(thread)');
+    expect(activate).toContain(
+      'restoreSetScopePresentation(previousPresentation, appliedPresentation)',
+    );
     expect(activate).toContain('await focusThread(thread.id, { focusTerminal: false })');
     expect(activate).toContain('covenSessionsForProject(project).find');
     expect(activate).toContain('candidate.id === pick.sessionId');
@@ -309,12 +332,19 @@ describe('Tauri composer session search palette', () => {
       activeThreadId: null,
     };
     const settings = { selectedSessionKey: 'old-selection' };
-    const layout = { activeSetId: 'prior-set' as string | null };
+    const priorSpanRoot = { id: 'prior-span-root' };
+    const layout = {
+      root: { id: 'layout-root' },
+      activeSetId: 'prior-set' as string | null,
+      maximizedLeafId: 'prior-maximized' as string | null,
+      spanRoot: priorSpanRoot as Record<string, unknown> | null,
+      spanSignature: 'prior-span-signature' as string | null,
+    };
     const focusResults = [false, true];
     const calls: string[] = [];
-    const runSessionSearchPick = compileFunction<
+    const runSessionSearchPick = compileSessionSearchPick<
       (pick: Record<string, unknown>) => Promise<boolean>
-    >(functionSource(mainJs, 'runSessionSearchPick'), {
+    >({
       findProject: () => project,
       findThread: () => thread,
       isDormantThread: () => false,
@@ -332,12 +362,17 @@ describe('Tauri composer session search palette', () => {
       },
       settings,
       saveSettings: () => { calls.push('save'); },
+      paneLayoutForThread: () => layout,
+      paneLayoutFor: () => layout,
       activeFocusSet: () => (
         layout.activeSetId ? { id: layout.activeSetId } : null
       ),
       applySetScopeForThread: () => {
         calls.push('scope');
         layout.activeSetId = 'target-set';
+        layout.maximizedLeafId = null;
+        layout.spanRoot = null;
+        layout.spanSignature = null;
         return true;
       },
       activateFocusSet: (id: string) => {
@@ -351,6 +386,7 @@ describe('Tauri composer session search palette', () => {
         return true;
       },
       renderPaneWorkspace: () => { calls.push('render'); },
+      refreshSidebar: () => { calls.push('refresh-sidebar'); },
       focusThread: async (_id: string, options?: { focusTerminal?: boolean }) => {
         expect(options).toEqual({ focusTerminal: false });
         calls.push(`focus:${layout.activeSetId}`);
@@ -371,13 +407,19 @@ describe('Tauri composer session search palette', () => {
 
     await expect(runSessionSearchPick(pick)).resolves.toBe(false);
     expect(settings.selectedSessionKey).toBe('old-selection');
-    expect(layout.activeSetId).toBe('prior-set');
+    expect(layout).toEqual({
+      root: { id: 'layout-root' },
+      activeSetId: 'prior-set',
+      maximizedLeafId: 'prior-maximized',
+      spanRoot: priorSpanRoot,
+      spanSignature: 'prior-span-signature',
+    });
     expect(calls).toEqual([
       'navigate:/repo/target',
       'scope',
       'focus:target-set',
-      'restore:prior-set',
       'render',
+      'refresh-sidebar',
     ]);
 
     await expect(runSessionSearchPick(pick)).resolves.toBe(true);
@@ -387,12 +429,94 @@ describe('Tauri composer session search palette', () => {
       'navigate:/repo/target',
       'scope',
       'focus:target-set',
-      'restore:prior-set',
       'render',
+      'refresh-sidebar',
       'scope',
       'focus:target-set',
       'save',
     ]);
+  });
+
+  it('does not roll back focus-set presentation over newer user changes', async () => {
+    const project = { id: 'project-1', selectedWorktreePath: '/repo/target' };
+    const thread = {
+      id: 'thread-1',
+      projectId: project.id,
+      hidden: false,
+      closing: false,
+      closeStarted: false,
+      status: 'running',
+      worktreePath: '/repo/target',
+    };
+    const originalSpanRoot = { id: 'original-span' };
+    const newerSpanRoot = { id: 'newer-span' };
+    const layout = {
+      root: { id: 'layout-root' },
+      activeSetId: 'prior-set' as string | null,
+      maximizedLeafId: 'prior-maximized' as string | null,
+      spanRoot: originalSpanRoot as Record<string, unknown> | null,
+      spanSignature: 'prior-signature' as string | null,
+    };
+    const renderPaneWorkspace = vi.fn();
+    const refreshSidebar = vi.fn();
+    const runSessionSearchPick = compileSessionSearchPick<
+      (pick: Record<string, unknown>) => Promise<boolean>
+    >({
+      findProject: () => project,
+      findThread: () => thread,
+      isDormantThread: () => false,
+      state: { activeProjectId: project.id, activeThreadId: null },
+      activateProjectWorktree: async () => true,
+      settings: { selectedSessionKey: 'old-selection' },
+      saveSettings: vi.fn(),
+      paneLayoutForThread: () => layout,
+      paneLayoutFor: () => layout,
+      activeFocusSet: () => ({ id: 'prior-set' }),
+      applySetScopeForThread: () => {
+        layout.activeSetId = 'target-set';
+        layout.maximizedLeafId = null;
+        layout.spanRoot = null;
+        layout.spanSignature = null;
+        return true;
+      },
+      activateFocusSet: (id: string) => {
+        layout.activeSetId = id;
+        layout.maximizedLeafId = null;
+        layout.spanRoot = null;
+        layout.spanSignature = null;
+        return true;
+      },
+      clearFocusSet: () => true,
+      renderPaneWorkspace,
+      refreshSidebar,
+      focusThread: async () => {
+        layout.activeSetId = 'newer-set';
+        layout.maximizedLeafId = 'newer-maximized';
+        layout.spanRoot = newerSpanRoot;
+        layout.spanSignature = 'newer-signature';
+        return false;
+      },
+      covenSessionsForProject: () => [],
+      openCovenSession: async () => null,
+      toast: vi.fn(),
+    });
+
+    await expect(runSessionSearchPick({
+      sessionSource: 'psyche',
+      sessionId: thread.id,
+      projectId: project.id,
+      selectionKey: 'psyche:thread-1',
+    })).resolves.toBe(false);
+
+    expect(layout).toEqual({
+      root: { id: 'layout-root' },
+      activeSetId: 'newer-set',
+      maximizedLeafId: 'newer-maximized',
+      spanRoot: newerSpanRoot,
+      spanSignature: 'newer-signature',
+    });
+    expect(renderPaneWorkspace).not.toHaveBeenCalled();
+    expect(refreshSidebar).not.toHaveBeenCalled();
   });
 
   it.each(['exited', 'failed'])(
@@ -413,9 +537,9 @@ describe('Tauri composer session search palette', () => {
       };
       const navigation = deferred<boolean>();
       const focusThread = vi.fn();
-      const runSessionSearchPick = compileFunction<
+      const runSessionSearchPick = compileSessionSearchPick<
         (pick: Record<string, unknown>) => Promise<boolean>
-      >(functionSource(mainJs, 'runSessionSearchPick'), {
+      >({
         findProject: () => project,
         findThread: () => thread,
         isDormantThread: (candidate: typeof thread) => candidate.status === 'exited',
@@ -455,9 +579,9 @@ describe('Tauri composer session search palette', () => {
     const settings = { selectedSessionKey: 'old-selection' };
     const openResults = [null, { id: 'thread-1' }];
     const saveSettings = vi.fn();
-    const runSessionSearchPick = compileFunction<
+    const runSessionSearchPick = compileSessionSearchPick<
       (pick: Record<string, unknown>) => Promise<boolean>
-    >(functionSource(mainJs, 'runSessionSearchPick'), {
+    >({
       findProject: () => project,
       findThread: () => null,
       isDormantThread: () => false,
@@ -516,11 +640,14 @@ describe('Tauri composer session search palette', () => {
       setActiveProject: async () => true,
       settings: { selectedSessionKey: '' },
       saveSettings: () => undefined,
+      paneLayoutForThread: () => null,
+      paneLayoutFor: () => null,
       activeFocusSet: () => null,
       applySetScopeForThread: () => undefined,
       activateFocusSet: () => undefined,
       clearFocusSet: () => undefined,
       renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
       focusThread: async (_id: string, options?: { focusTerminal?: boolean }) => {
         state.activeThreadId = thread.id;
         if (!options || options.focusTerminal !== false) {

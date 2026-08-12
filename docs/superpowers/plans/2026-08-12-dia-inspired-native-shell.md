@@ -839,10 +839,11 @@ describe('Tauri composer session search', () => {
     expect(selection).toContain('isDormantThread(candidate)');
     expect(selection).toContain('activateProjectWorktree(');
     expect(selection).toContain('thread.worktreePath, { focusTerminal: false }');
-    expect(selection).toContain('activeFocusSet()');
+    expect(selection).toContain('snapshotSetScopePresentation(thread)');
     expect(selection).toContain('applySetScopeForThread(thread)');
-    expect(selection).toContain('activateFocusSet(previousFocusSet.id)');
-    expect(selection).toContain('renderPaneWorkspace()');
+    expect(selection).toContain(
+      'restoreSetScopePresentation(previousPresentation, appliedPresentation)',
+    );
     expect(selection).toContain('covenSessionsForProject(project)');
     expect(selection).toContain('candidate.id === pick.sessionId');
     expect(selection).toContain('settings.selectedSessionKey = pick.selectionKey');
@@ -1246,10 +1247,15 @@ async function focusThread(id, options) {
 }
 ```
 
-Extend `openCovenSession(project, session, options)` so
-`{ focusTerminal: false }` is passed through `activateProjectWorktree`, an
-existing attachment's `focusThread`, and a new attachment's `createThread`
-options. Extend `createThread` narrowly:
+Extend `openCovenSession(project, session, options)` so an existing attachment
+still passes the caller options through project activation and `focusThread`.
+For a new attachment, keep one option-neutral coalesced creation promise: use
+`{ focusTerminal: false }` for its project activation and `createThread`, then
+have every caller apply its own options with
+`focusCovenAttachmentForCaller(opening, options)`. Immediately after the
+terminal-layout frame, re-resolve the project, owned worktree, and Coven
+session from current state before `createThread`; stale targets use the existing
+neutral unavailable warning and return `null`. Extend `createThread` narrowly:
 
 ```js
 focusThread(id, opts.focusTerminal === false ? { focusTerminal: false } : undefined);
@@ -1258,6 +1264,39 @@ focusThread(id, opts.focusTerminal === false ? { focusTerminal: false } : undefi
 Ordinary callers omit the option and keep terminal autofocus. Then add:
 
 ```js
+function snapshotSetScopePresentation(thread) {
+  var layout = paneLayoutForThread(thread);
+  if (!layout) return null;
+  return {
+    projectId: thread.projectId,
+    worktreePath: thread.worktreePath,
+    layout: layout,
+    root: layout.root,
+    activeSetId: layout.activeSetId,
+    maximizedLeafId: layout.maximizedLeafId,
+    spanRoot: layout.spanRoot,
+    spanSignature: layout.spanSignature,
+  };
+}
+
+function restoreSetScopePresentation(snapshot, applied) {
+  if (!snapshot || !applied || snapshot.layout !== applied.layout) return false;
+  var layout = paneLayoutFor(snapshot.projectId, snapshot.worktreePath);
+  if (layout !== snapshot.layout ||
+      layout.root !== applied.root ||
+      layout.activeSetId !== applied.activeSetId ||
+      layout.maximizedLeafId !== applied.maximizedLeafId ||
+      layout.spanRoot !== applied.spanRoot ||
+      layout.spanSignature !== applied.spanSignature) return false;
+  layout.activeSetId = snapshot.activeSetId;
+  layout.maximizedLeafId = snapshot.maximizedLeafId;
+  layout.spanRoot = snapshot.spanRoot;
+  layout.spanSignature = snapshot.spanSignature;
+  renderPaneWorkspace();
+  refreshSidebar();
+  return true;
+}
+
 async function runSessionSearchPick(pick) {
   var project = findProject(pick.projectId);
   if (!project) { toast("Session is no longer available"); return false; }
@@ -1283,22 +1322,23 @@ async function runSessionSearchPick(pick) {
     if (!project) return false;
     thread = resolveLocalThread();
     if (!thread) return false;
-    var previousFocusSet = activeFocusSet();
+    var previousPresentation = snapshotSetScopePresentation(thread);
     var scopeChanged = applySetScopeForThread(thread);
-    function restorePreviousFocusSet() {
+    var appliedPresentation = scopeChanged
+      ? snapshotSetScopePresentation(thread)
+      : null;
+    function restorePreviousPresentation() {
       if (!scopeChanged) return;
-      if (previousFocusSet) activateFocusSet(previousFocusSet.id);
-      else clearFocusSet();
-      renderPaneWorkspace();
+      restoreSetScopePresentation(previousPresentation, appliedPresentation);
     }
     var focused = await focusThread(thread.id, { focusTerminal: false });
     if (!focused) {
-      restorePreviousFocusSet();
+      restorePreviousPresentation();
       return false;
     }
     thread = resolveLocalThread();
     if (!thread || state.activeThreadId !== thread.id) {
-      restorePreviousFocusSet();
+      restorePreviousPresentation();
       return false;
     }
     settings.selectedSessionKey = pick.selectionKey;

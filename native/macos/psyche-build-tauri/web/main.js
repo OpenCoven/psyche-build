@@ -3225,6 +3225,39 @@
     return activateFocusSet(sets[0].id);
   }
 
+  function snapshotSetScopePresentation(thread) {
+    var layout = paneLayoutForThread(thread);
+    if (!layout) return null;
+    return {
+      projectId: thread.projectId,
+      worktreePath: thread.worktreePath,
+      layout: layout,
+      root: layout.root,
+      activeSetId: layout.activeSetId,
+      maximizedLeafId: layout.maximizedLeafId,
+      spanRoot: layout.spanRoot,
+      spanSignature: layout.spanSignature,
+    };
+  }
+
+  function restoreSetScopePresentation(snapshot, applied) {
+    if (!snapshot || !applied || snapshot.layout !== applied.layout) return false;
+    var layout = paneLayoutFor(snapshot.projectId, snapshot.worktreePath);
+    if (layout !== snapshot.layout ||
+        layout.root !== applied.root ||
+        layout.activeSetId !== applied.activeSetId ||
+        layout.maximizedLeafId !== applied.maximizedLeafId ||
+        layout.spanRoot !== applied.spanRoot ||
+        layout.spanSignature !== applied.spanSignature) return false;
+    layout.activeSetId = snapshot.activeSetId;
+    layout.maximizedLeafId = snapshot.maximizedLeafId;
+    layout.spanRoot = snapshot.spanRoot;
+    layout.spanSignature = snapshot.spanSignature;
+    renderPaneWorkspace();
+    refreshSidebar();
+    return true;
+  }
+
   function removeFromFocusSet(setId, threadId) {
     var set = findFocusSet(setId);
     if (!set) return false;
@@ -4975,6 +5008,31 @@
     }) || selectedWorktree(project);
   }
 
+  function resolveCurrentCovenAttachTarget(expected) {
+    var project = findProject(expected.projectId);
+    if (!project || project.root !== expected.projectRoot) return null;
+    var session = covenSessionsForProject(project).find(function (candidate) {
+      return candidate.id === expected.sessionId;
+    });
+    if (!session ||
+        (session.projectRoot || null) !== expected.sessionProjectRoot ||
+        (session.cwd || null) !== expected.sessionCwd) return null;
+    var worktree = covenWorktreeForSession(project, session);
+    if (!worktree || worktree.path !== expected.worktreePath) return null;
+    var ownsWorktree = worktree.path === project.root ||
+      (project.worktrees || []).some(function (candidate) {
+        return candidate.path === worktree.path;
+      });
+    return ownsWorktree ? { project: project, session: session, worktree: worktree } : null;
+  }
+
+  function focusCovenAttachmentForCaller(opening, options) {
+    return opening.then(async function (thread) {
+      if (!thread || !(await focusThread(thread.id, options))) return null;
+      return thread;
+    });
+  }
+
   function openCovenSession(project, session, options) {
     if (!project || !session || !PsycheSessions.isSafeCovenSessionId(session.id)) {
       setStatus("Invalid Coven session", "error");
@@ -5005,32 +5063,61 @@
     }
 
     var key = covenAttachKey(project, session);
-    if (covenAttachInFlight.has(key)) return covenAttachInFlight.get(key);
-
-    var opening = Promise.resolve().then(async function () {
+    var opening = covenAttachInFlight.get(key);
+    if (!opening) {
       var worktree = covenWorktreeForSession(project, session);
-      if (!worktree || !worktree.path) return null;
-      if (!(await activateProjectWorktree(project, worktree.path, options))) return null;
-      await waitForTerminalLayout();
-      return createThread({
-        project: project,
-        name: session.title || "Coven " + session.id.slice(0, 8),
-        kind: "coven-attach",
-        command: state.env.coven_path,
-        args: ["attach", session.id],
+      if (!worktree || !worktree.path) return Promise.resolve(null);
+      var expected = {
+        projectId: project.id,
         projectRoot: project.root,
-        cwd: session.cwd || worktree.path,
+        sessionId: session.id,
+        sessionProjectRoot: session.projectRoot || null,
+        sessionCwd: session.cwd || null,
         worktreePath: worktree.path,
-        launchKind: "coven-attach",
-        covenSessionId: session.id,
-        metricsProvider: session.harness || "coven",
-        focusTerminal: options && options.focusTerminal,
+      };
+      opening = Promise.resolve().then(async function () {
+        var current = resolveCurrentCovenAttachTarget(expected);
+        if (!current) {
+          setStatus(
+            "Coven session is no longer available; refresh the rail before retrying",
+            "warn"
+          );
+          return null;
+        }
+        if (!(await activateProjectWorktree(
+          current.project,
+          current.worktree.path,
+          { focusTerminal: false }
+        ))) return null;
+        await waitForTerminalLayout();
+        current = resolveCurrentCovenAttachTarget(expected);
+        if (!current) {
+          setStatus(
+            "Coven session is no longer available; refresh the rail before retrying",
+            "warn"
+          );
+          return null;
+        }
+        return createThread({
+          project: current.project,
+          name: current.session.title || "Coven " + current.session.id.slice(0, 8),
+          kind: "coven-attach",
+          command: state.env.coven_path,
+          args: ["attach", current.session.id],
+          projectRoot: current.project.root,
+          cwd: current.session.cwd || current.worktree.path,
+          worktreePath: current.worktree.path,
+          launchKind: "coven-attach",
+          covenSessionId: current.session.id,
+          metricsProvider: current.session.harness || "coven",
+          focusTerminal: false,
+        });
+      }).finally(function () {
+        covenAttachInFlight.delete(key);
       });
-    }).finally(function () {
-      covenAttachInFlight.delete(key);
-    });
-    covenAttachInFlight.set(key, opening);
-    return opening;
+      covenAttachInFlight.set(key, opening);
+    }
+    return focusCovenAttachmentForCaller(opening, options);
   }
 
   function attachTooltip(element, text) {
@@ -7413,22 +7500,23 @@
       if (!project) return false;
       thread = resolveLocalThread();
       if (!thread) return false;
-      var previousFocusSet = activeFocusSet();
+      var previousPresentation = snapshotSetScopePresentation(thread);
       var scopeChanged = applySetScopeForThread(thread);
-      function restorePreviousFocusSet() {
+      var appliedPresentation = scopeChanged
+        ? snapshotSetScopePresentation(thread)
+        : null;
+      function restorePreviousPresentation() {
         if (!scopeChanged) return;
-        if (previousFocusSet) activateFocusSet(previousFocusSet.id);
-        else clearFocusSet();
-        renderPaneWorkspace();
+        restoreSetScopePresentation(previousPresentation, appliedPresentation);
       }
       var focused = await focusThread(thread.id, { focusTerminal: false });
       if (!focused) {
-        restorePreviousFocusSet();
+        restorePreviousPresentation();
         return false;
       }
       thread = resolveLocalThread();
       if (!thread || state.activeThreadId !== thread.id) {
-        restorePreviousFocusSet();
+        restorePreviousPresentation();
         return false;
       }
       settings.selectedSessionKey = pick.selectionKey;

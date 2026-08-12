@@ -796,6 +796,14 @@ describe('native Coven launch routing', () => {
       covenAttachKey: () => 'project:safe-session',
       covenAttachInFlight: new Map(),
       covenWorktreeForSession: () => ({ path: '/repo/wt' }),
+      resolveCurrentCovenAttachTarget: () => ({
+        project,
+        session,
+        worktree: { path: '/repo/wt' },
+      }),
+      focusCovenAttachmentForCaller: async (
+        opening: Promise<Record<string, unknown> | null>,
+      ) => opening,
       activateProjectWorktree: async () => true,
       waitForTerminalLayout: async () => undefined,
       createThread: (options: Record<string, unknown>) => {
