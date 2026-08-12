@@ -542,14 +542,15 @@ describe('Tauri physical terminal panes', () => {
 
   it('keeps mounted pane metadata current for status and rename changes', () => {
     const attributes = new Map<string, string>();
-    const statusAttributes = new Map<string, string>();
+    const paneAttributes = new Map<string, string>();
     const thread = {
       id: 'thread-a', projectId: 'project', name: 'Psyche', status: 'starting',
-      paneTitle: { textContent: '' },
-      paneStatus: {
-        textContent: '', className: '', title: '',
-        setAttribute: (name: string, value: string) => statusAttributes.set(name, value),
+      pane: {
+        dataset: {} as Record<string, string>,
+        setAttribute: (name: string, value: string) => paneAttributes.set(name, value),
+        removeAttribute: (name: string) => { paneAttributes.delete(name); },
       },
+      paneTitle: { textContent: '' },
       paneClose: { setAttribute: (name: string, value: string) => attributes.set(name, value) },
     };
     const applyPaneStatus = compileFunction<(element: unknown, status: string) => void>(
@@ -569,18 +570,20 @@ describe('Tauri physical terminal panes', () => {
         syncPaneMaxControl: () => undefined,
       },
     );
-    // Running is shown as a dot, so the label moves to the class and aria-label
-    // and the visible text goes away.
     thread.status = 'running';
     syncThreadPaneMetadata(thread);
-    expect(thread.paneStatus.textContent).toBe('');
-    expect(thread.paneStatus.className).toBe('terminal-pane-status running');
-    expect(statusAttributes.get('aria-label')).toBe('running');
-    // Every other state keeps its word.
+    expect(thread.pane.dataset.status).toBe('running');
+    expect(paneAttributes.get('aria-description')).toBe('Status: running');
+
     thread.status = 'exited';
     syncThreadPaneMetadata(thread);
-    expect(thread.paneStatus.textContent).toBe('exited');
-    expect(thread.paneStatus.className).toBe('terminal-pane-status exited');
+    expect(thread.pane.dataset.status).toBe('exited');
+    expect(paneAttributes.get('aria-description')).toBe('Status: exited');
+
+    thread.status = 'paused';
+    syncThreadPaneMetadata(thread);
+    expect('status' in thread.pane.dataset).toBe(false);
+    expect(paneAttributes.has('aria-description')).toBe(false);
 
     const renameThread = compileFunction<(id: string, name: string) => boolean>(
       functionSource('renameThread'),
@@ -1775,7 +1778,7 @@ describe('Tauri physical terminal panes', () => {
         /\.terminal-pane-header\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto auto auto;/s,
       );
       expect(functionSource('mountTerminal')).toMatch(
-        /header\.appendChild\(glyph\);[\s\S]*header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(status\);[\s\S]*header\.appendChild\(span\);[\s\S]*header\.appendChild\(maximize\);[\s\S]*header\.appendChild\(close\)/,
+        /header\.appendChild\(glyph\);[\s\S]*header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(span\);[\s\S]*header\.appendChild\(maximize\);[\s\S]*header\.appendChild\(close\)/,
       );
     });
 

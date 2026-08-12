@@ -2156,8 +2156,6 @@
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var status = document.createElement("span");
-    status.className = "terminal-pane-status";
     var span = document.createElement("button");
     span.type = "button";
     span.className = "terminal-pane-span";
@@ -2193,7 +2191,6 @@
     });
     header.appendChild(glyph);
     header.appendChild(label);
-    header.appendChild(status);
     header.appendChild(span);
     header.appendChild(maximize);
     header.appendChild(close);
@@ -2210,7 +2207,6 @@
     thread.toolBody = body;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneStatus = status;
     thread.paneSpan = span;
     thread.paneMax = maximize;
     thread.paneClose = close;
@@ -2365,9 +2361,6 @@
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var status = document.createElement("span");
-    status.className = "terminal-pane-status";
-    applyPaneStatus(status, thread.status);
     var span = document.createElement("button");
     span.type = "button";
     span.className = "terminal-pane-span";
@@ -2411,7 +2404,6 @@
     });
     header.appendChild(glyph);
     header.appendChild(label);
-    header.appendChild(status);
     header.appendChild(span);
     header.appendChild(maximize);
     header.appendChild(close);
@@ -2431,7 +2423,6 @@
     thread.browserBody = body;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneStatus = status;
     thread.paneSpan = span;
     thread.paneMax = maximize;
     thread.paneClose = close;
@@ -2464,9 +2455,6 @@
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var status = document.createElement("span");
-    status.className = "terminal-pane-status";
-    applyPaneStatus(status, thread.status);
     var span = document.createElement("button");
     span.type = "button";
     span.className = "terminal-pane-span";
@@ -2507,7 +2495,6 @@
     header.appendChild(glyph);
     header.appendChild(label);
     header.appendChild(attention);
-    header.appendChild(status);
     header.appendChild(span);
     header.appendChild(maximize);
     header.appendChild(close);
@@ -2551,7 +2538,6 @@
     thread.host = container;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneStatus = status;
     thread.paneSpan = span;
     thread.paneMax = maximize;
     thread.paneClose = close;
@@ -2622,17 +2608,18 @@
     thread.fit = fit;
   }
 
-  // Status never travels as colour alone: starting, exited and failed are
-  // worded chips. Running is the one exception, and only because it is the
-  // steady state of nearly every pane — it gets a static green dot, and the
-  // word stays in the title and aria-label so nothing is lost without colour.
-  function applyPaneStatus(element, status) {
-    if (!element) return;
+  function applyPaneStatus(pane, status) {
+    if (!pane) return;
     var label = status || "";
-    element.className = "terminal-pane-status " + label;
-    element.textContent = label === "running" ? "" : label;
-    element.title = label;
-    element.setAttribute("aria-label", label);
+    var supported = label === "running" || label === "starting" ||
+      label === "failed" || label === "exited";
+    if (!supported) {
+      if (pane.dataset) delete pane.dataset.status;
+      pane.removeAttribute("aria-description");
+      return;
+    }
+    pane.dataset.status = label;
+    pane.setAttribute("aria-description", "Status: " + label);
   }
 
   function handlePanePointerDown(thread, body, close, event) {
@@ -3478,8 +3465,8 @@
       thread.paneMeta.textContent = (thread.kind || "shell") + " · " +
         threadLaneLabel(thread);
     }
-    if (thread.paneStatus) {
-      applyPaneStatus(thread.paneStatus, thread.status);
+    if (thread.pane) {
+      applyPaneStatus(thread.pane, thread.status);
     }
     if (typeof syncPaneFooter === "function") syncPaneFooter(thread);
     var layout = paneLayoutForThread(thread);
