@@ -6986,11 +6986,16 @@
     if (trimmed[0] === "%") { runPaneSigil(trimmed.slice(1)); return; }
     if (trimmed[0] !== "/") {
       // Not a slash command — it goes to the focused pane.
-      if (!findThread(state.activeThreadId)) {
+      var focused = findThread(state.activeThreadId);
+      if (!focused) {
         toast("No focused pane to send to");
         return;
       }
-      sendToActive(trimmed + "\n");
+      if (focused.kind === "web" || focused.status === "exited" || focused.status === "failed") {
+        toast("Focused pane cannot receive text");
+        return;
+      }
+      sendToThread(focused, trimmed + "\n");
       return;
     }
     commandHistory.push(trimmed);
@@ -8838,7 +8843,6 @@
     if (!agentPickerOpen()) agentPickerPreviousFocus = document.activeElement;
     setHelpOpen(false);
     closeNewPaneMenu();
-    closeScopeMenu();
     closeSessionContextMenu();
     agentPickerIndex = 0;
     renderAgentPicker();
