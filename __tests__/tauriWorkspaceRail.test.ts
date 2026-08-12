@@ -240,11 +240,27 @@ describe('Tauri project/worktree/pane rail', () => {
 
   it('keeps the open toggle on the sidebar boundary and clears the traffic-light gutter when collapsed', () => {
     expect(ruleBlock(styles, '.titlebar-sidebar-toggle')).toMatch(/left:\s*0;/);
+    expect(ruleBlock(styles, '.titlebar-sidebar-toggle')).toMatch(
+      /transform:\s*translate\(-50%,\s*-50%\);/,
+    );
     expect(
       ruleBlock(styles, '.app[data-sidebar="collapsed"] .titlebar-sidebar-toggle'),
     ).toMatch(
       /left:\s*calc\(var\(--titlebar-pad-l\)\s*-\s*var\(--mini-rail-w\)\);/,
     );
+    expect(
+      ruleBlock(styles, '.app[data-sidebar="collapsed"] .titlebar-sidebar-toggle'),
+    ).toMatch(/transform:\s*translateY\(-50%\);/);
+  });
+
+  it('makes visible brand descendants non-interactive so direct clicks resolve to the drag-region shell', () => {
+    const titlebar = titlebarHtml(indexHtml);
+
+    expect(titlebar).toContain('<span class="titlebar-brand" data-tauri-drag-region>');
+    expect(titlebar).toContain('<span class="titlebar-brand-icon" aria-hidden="true">');
+    expect(titlebar).toContain('<span class="titlebar-brand-name">Psyche</span>');
+    expect(ruleBlock(styles, '.titlebar-brand-icon')).toMatch(/pointer-events:\s*none;/);
+    expect(ruleBlock(styles, '.titlebar-brand-name')).toMatch(/pointer-events:\s*none;/);
   });
 
   it('syncs both sidebar toggle controls with the collapsed state', () => {

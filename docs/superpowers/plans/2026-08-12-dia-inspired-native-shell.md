@@ -303,6 +303,7 @@ Replace the monolithic title-bar layout with:
   overflow: hidden;
   border-radius: 5px;
   background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  pointer-events: none;
 }
 
 .titlebar-brand-fallback {
@@ -323,6 +324,7 @@ Replace the monolithic title-bar layout with:
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  pointer-events: none;
 }
 
 .titlebar-sidebar-toggle {
@@ -340,6 +342,11 @@ Replace the monolithic title-bar layout with:
   color: var(--text-muted);
   transform: translate(-50%, -50%);
   -webkit-app-region: no-drag;
+}
+
+.app[data-sidebar="collapsed"] .titlebar-sidebar-toggle {
+  left: calc(var(--titlebar-pad-l) - var(--mini-rail-w));
+  transform: translateY(-50%);
 }
 
 .titlebar-sidebar-toggle:hover,

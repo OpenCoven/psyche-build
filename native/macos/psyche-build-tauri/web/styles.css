@@ -849,6 +849,7 @@ kbd {
   overflow: hidden;
   border-radius: 5px;
   background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  pointer-events: none;
 }
 .titlebar-brand-fallback { color: var(--text); font-size: 10px; font-weight: 800; }
 .titlebar-brand-mark {
@@ -858,7 +859,12 @@ kbd {
   height: 18px;
   object-fit: cover;
 }
-.titlebar-brand-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.titlebar-brand-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
 .titlebar-sidebar-toggle {
   position: absolute;
   z-index: 4;
@@ -877,6 +883,7 @@ kbd {
 }
 .app[data-sidebar="collapsed"] .titlebar-sidebar-toggle {
   left: calc(var(--titlebar-pad-l) - var(--mini-rail-w));
+  transform: translateY(-50%);
 }
 .titlebar-sidebar-toggle:hover,
 .titlebar-sidebar-toggle:focus-visible {
