@@ -4765,7 +4765,7 @@
    * itself when the timer runs out — the guard costs nothing if you meant it
    * and everything if you didn't.
    */
-  function armSessionClose(host, close, thread) {
+  function armSessionClose(host, close, label, onConfirm) {
     disarmSessionClose();
     var left = SESSION_CLOSE_SECONDS;
     var confirm = document.createElement("button");
@@ -4774,13 +4774,13 @@
     confirm.title = "Click to confirm — auto-cancels when the timer runs out";
     function paint() {
       confirm.textContent = "Close · " + left;
-      confirm.setAttribute("aria-label", "Confirm closing " + thread.name);
+      confirm.setAttribute("aria-label", "Confirm closing " + label);
     }
     paint();
     confirm.addEventListener("click", function (event) {
       event.stopPropagation();
       disarmSessionClose();
-      closeThread(thread.id);
+      onConfirm();
     });
     close.hidden = true;
     host.appendChild(confirm);
@@ -5633,7 +5633,6 @@
               }
 
               var thread = rowModel.value;
-              var onCanvas = onCanvasIds.indexOf(thread.id) !== -1;
               var picking = Boolean(setPicking);
               var picked = picking && isPicked(thread.id);
               row.dataset.threadId = thread.id;
@@ -5658,7 +5657,7 @@
                 if (event.target !== row || document.activeElement !== row) return;
                 if (event.key !== "Delete") return;
                 event.preventDefault();
-                dismissLocalRow();
+                armLocalClose();
               });
               function beginSessionRename(event) {
                 event.stopPropagation();
@@ -5720,7 +5719,7 @@
                     : null,
                   { label: "Hide", run: function () { hideThread(thread.id); } },
                   { label: "Stop and close", danger: true, run: function () {
-                      armSessionClose(row, close, thread);
+                      armLocalClose();
                     } },
                 ]);
               });
@@ -5728,24 +5727,18 @@
               var close = document.createElement("button");
               close.type = "button";
               close.className = "session-close";
-              var scopingSet = activeFocusSet();
-              var inScopingSet = Boolean(scopingSet) &&
-                scopingSet.threadIds.indexOf(thread.id) !== -1;
-              close.title = inScopingSet
-                ? "Remove from " + scopingSet.name + " — the pane stays open"
-                : onCanvas
-                  ? "Hide the pane — the session keeps running"
-                  : "Hide session";
+              close.title = "Stop and close " + thread.name;
               close.setAttribute("aria-label", close.title);
               close.setAttribute("tabindex", "-1");
               close.textContent = "×";
-              function dismissLocalRow() {
-                if (inScopingSet) removeFromFocusSet(scopingSet.id, thread.id);
-                else hideThread(thread.id);
+              function armLocalClose() {
+                armSessionClose(row, close, thread.name, function () {
+                  closeThread(thread.id);
+                });
               }
               close.addEventListener("click", function (event) {
                 event.stopPropagation();
-                dismissLocalRow();
+                armLocalClose();
               });
               row.appendChild(close);
               categoryGroup.appendChild(wrapper);

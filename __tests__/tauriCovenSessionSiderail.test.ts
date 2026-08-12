@@ -595,7 +595,7 @@ function createRenderer(options: {
     setFilter: (value: string) => void;
     setDiscovery: (value: typeof discovery) => void;
     armSessionClose: (
-      wrapper: FakeElement, close: FakeElement, thread: { id: string; name: string },
+      host: FakeElement, close: FakeElement, label: string, onConfirm: () => void,
     ) => void;
     disarmSessionClose: () => void;
     handleTreeKeydown: (event: FakeEvent) => void;
@@ -2095,14 +2095,17 @@ describe('Tauri Coven session project rail', () => {
     localRow.focus();
     const deleteEvent = await localRow.emit('keydown', { key: 'Delete' });
     expect(deleteEvent.defaultPrevented).toBe(true);
-    expect(renderer.hideThread).toHaveBeenCalledTimes(1);
-    expect(renderer.hideThread).toHaveBeenCalledWith('local');
+    expect(renderer.hideThread).not.toHaveBeenCalled();
+    expect(renderer.closeThread).not.toHaveBeenCalled();
+    expect(localRow.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
     expect(renderer.setActiveProject).not.toHaveBeenCalled();
     expect(renderer.focusThread).not.toHaveBeenCalled();
 
     renderer.hideThread.mockClear();
     const closeEvent = await close?.emit('click');
-    expect(renderer.hideThread).toHaveBeenCalledWith('local');
+    expect(renderer.hideThread).not.toHaveBeenCalled();
+    expect(renderer.closeThread).not.toHaveBeenCalled();
+    expect(localRow.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
     expect(closeEvent?.propagationStopped).toBe(true);
 
     const title = localRow.querySelector('.session-title');
@@ -2247,7 +2250,7 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.activateProjectWorktree).toHaveBeenCalled();
   });
 
-  it('marks rows that hold a pane-tree leaf and detaches them without killing the process', async () => {
+  it('marks rows that hold a pane-tree leaf while keeping close guarded', async () => {
     const renderer = createRenderer({
       activeThreadId: 'local',
       canvasThreadIds: ['local'],
@@ -2259,13 +2262,12 @@ describe('Tauri Coven session project rail', () => {
     const row = wrapper?.querySelector('.session-row');
     const close = wrapper?.querySelector('.session-close');
     expect(row?.querySelector('.session-oncanvas')).not.toBeNull();
-    expect(close?.title).toBe('Hide the pane — the session keeps running');
+    expect(close?.title).toBe('Stop and close Local');
 
-    // hideThread detaches the leaf and leaves the PTY running, so the row stays
-    // reopenable rather than being a destructive close.
     await close?.emit('click');
-    expect(renderer.hideThread).toHaveBeenCalledWith('local');
+    expect(renderer.hideThread).not.toHaveBeenCalled();
     expect(renderer.closeThread).not.toHaveBeenCalled();
+    expect(row?.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
   });
 
   it('omits the canvas marker for rows with no pane on the canvas', () => {
@@ -2276,7 +2278,7 @@ describe('Tauri Coven session project rail', () => {
 
     const wrapper = renderer.sessionListEl.querySelector('.session-row-wrap');
     expect(wrapper?.querySelector('.session-row')?.querySelector('.session-oncanvas')).toBeNull();
-    expect(wrapper?.querySelector('.session-close')?.title).toBe('Hide session');
+    expect(wrapper?.querySelector('.session-close')?.title).toBe('Stop and close Local');
   });
 
   it('moves lane git state to the branch and keeps the row icon type-specific', () => {
@@ -2423,7 +2425,8 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.sessionListEl.getAttribute('aria-multiselectable')).toBeNull();
     });
 
-    it('turns × into "remove from set" while a set scopes the canvas', async () => {
+    it('keeps × destructive while a set scopes the canvas', async () => {
+      vi.useFakeTimers();
       const renderer = createRenderer({
         threads,
         focusSets: [memberSet],
@@ -2433,17 +2436,19 @@ describe('Tauri Coven session project rail', () => {
 
       const wrappers = renderer.sessionListEl.querySelectorAll('.session-row-wrap');
       const close = wrappers[0].querySelector('.session-close');
-      expect(close?.title).toBe('Remove from Review — the pane stays open');
+      expect(close?.title).toBe('Stop and close Local');
 
       await close?.emit('click');
 
-      expect(renderer.removeFromFocusSet).toHaveBeenCalledWith('set-1', 'local');
-      // The pane is not going anywhere — only its membership changed.
+      expect(renderer.removeFromFocusSet).not.toHaveBeenCalled();
       expect(renderer.hideThread).not.toHaveBeenCalled();
       expect(renderer.closeThread).not.toHaveBeenCalled();
+      expect(wrappers[0].querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
+      vi.useRealTimers();
     });
 
-    it('leaves × as hide for a pane the scoping set does not contain', async () => {
+    it('keeps × destructive for a pane the scoping set does not contain', async () => {
+      vi.useFakeTimers();
       const renderer = createRenderer({
         threads,
         focusSets: [memberSet],
@@ -2454,11 +2459,15 @@ describe('Tauri Coven session project rail', () => {
       const wrappers = renderer.sessionListEl.querySelectorAll('.session-row-wrap');
       await wrappers[1].querySelector('.session-close')?.emit('click');
 
-      expect(renderer.hideThread).toHaveBeenCalledWith('other');
+      expect(renderer.hideThread).not.toHaveBeenCalled();
       expect(renderer.removeFromFocusSet).not.toHaveBeenCalled();
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+      expect(wrappers[1].querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
+      vi.useRealTimers();
     });
 
-    it('lets Delete on the focused row run the same remove-from-set action as ×', async () => {
+    it('arms destructive confirmation when Delete is pressed on the focused row', async () => {
+      vi.useFakeTimers();
       const renderer = createRenderer({
         threads,
         focusSets: [memberSet],
@@ -2473,17 +2482,13 @@ describe('Tauri Coven session project rail', () => {
 
       const deleteEvent = await row?.emit('keydown', { key: 'Delete' });
       expect(deleteEvent?.defaultPrevented).toBe(true);
-      expect(renderer.removeFromFocusSet).toHaveBeenCalledTimes(1);
-      expect(renderer.removeFromFocusSet).toHaveBeenCalledWith('set-1', 'local');
+      expect(renderer.removeFromFocusSet).not.toHaveBeenCalled();
       expect(renderer.hideThread).not.toHaveBeenCalled();
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+      expect(wrappers[0].querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
       expect(renderer.focusThread).not.toHaveBeenCalled();
-
-      renderer.removeFromFocusSet.mockClear();
-      const closeEvent = await close?.emit('click');
-      expect(closeEvent?.propagationStopped).toBe(true);
-      expect(renderer.removeFromFocusSet).toHaveBeenCalledTimes(1);
-      expect(renderer.removeFromFocusSet).toHaveBeenCalledWith('set-1', 'local');
-      expect(renderer.focusThread).not.toHaveBeenCalled();
+      expect(close?.getAttribute('tabindex')).toBe('-1');
+      vi.useRealTimers();
     });
 
     it('returns to all panes when the project header is clicked', async () => {
@@ -2508,7 +2513,9 @@ describe('Tauri Coven session project rail', () => {
       const wrapper = renderer.sessionListEl.querySelector('.session-row-wrap')!;
       const row = wrapper.querySelector('.session-row')!;
       const close = wrapper.querySelector('.session-close')!;
-      renderer.armSessionClose(row, close, { id: 'local', name: 'Local' });
+      renderer.armSessionClose(row, close, 'Local', () => {
+        renderer.closeThread('local');
+      });
       return { renderer, wrapper, row, close };
     }
 
@@ -2520,6 +2527,7 @@ describe('Tauri Coven session project rail', () => {
 
       const confirm = wrapper.querySelector('.session-close-confirm');
       expect(confirm?.textContent).toBe('Close · 3');
+      expect(confirm?.getAttribute('aria-label')).toBe('Confirm closing Local');
       expect(confirm?.parentNode).toBe(row);
       expect(close.hidden).toBe(true);
       expect(renderer.closeThread).not.toHaveBeenCalled();
@@ -2559,6 +2567,50 @@ describe('Tauri Coven session project rail', () => {
       // The stale interval must not resurrect anything after the re-render.
       vi.advanceTimersByTime(5000);
       expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('local row close control', () => {
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('shows a guarded Stop and close control that closes only after confirmation', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+      const close = row.querySelector('.session-close')!;
+
+      expect(close).not.toBeNull();
+      expect(close.title).toBe('Stop and close Local');
+      expect(close.getAttribute('aria-label')).toBe('Stop and close Local');
+      expect(close.getAttribute('tabindex')).toBe('-1');
+
+      const closeEvent = await close.emit('click');
+      expect(closeEvent.propagationStopped).toBe(true);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+      const confirm = row.querySelector('.session-close-confirm')!;
+      expect(confirm.textContent).toBe('Close · 3');
+
+      await confirm.emit('click');
+      expect(renderer.closeThread).toHaveBeenCalledTimes(1);
+      expect(renderer.closeThread).toHaveBeenCalledWith('local');
+    });
+
+    it('guards Delete on the focused local session row', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+      row.focus();
+
+      const event = await row.emit('keydown', { key: 'Delete' });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+      expect(row.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
     });
   });
 
@@ -2629,8 +2681,10 @@ describe('Tauri Coven session project rail', () => {
     expect(styles).toMatch(/\.session-row-wrap\s*\{[^}]*position:\s*relative;/s);
     expect(styles).toMatch(/\.session-row\.inline-edit-hidden\s*\{[^}]*visibility:\s*hidden;/s);
     expect(styles).toMatch(/\.session-row-wrap\s*>\s*\.inline-edit\s*\{[^}]*position:\s*absolute;/s);
-    expect(styles).toMatch(/\.session-row-wrap:focus-within\s+\.session-close/);
-    expect(styles).toMatch(/\.session-close:focus-visible\s*\{[^}]*opacity:\s*1;[^}]*outline:/s);
+    expect(styles).toMatch(/\.session-close\s*\{[^}]*opacity:\s*1;/s);
+    expect(styles).not.toMatch(/\.session-row-wrap:focus-within\s+\.session-close/);
+    expect(styles).toMatch(/\.session-close:focus-visible\s*\{[^}]*outline:/s);
+    expect(styles).not.toMatch(/\.session-close:focus-visible\s*\{[^}]*opacity:/s);
     expect(styles).toMatch(/\.session-row-wrap:hover\s+\.session-row:not\(\.active\)/);
     expect(styles).not.toMatch(/\.session-row-wrap:hover\s+\.session-row\s*\{/);
     expect(styles).toMatch(
