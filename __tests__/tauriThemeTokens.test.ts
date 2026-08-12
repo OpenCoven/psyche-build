@@ -31,11 +31,16 @@ function customProperties(block: string) {
   return [...block.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]).sort();
 }
 
-/** "13, 12, 20" -> true (tinted), "8, 8, 10" -> false (grey). */
-function isTinted(triplet: string) {
+/** Channel spread: 0 is pure grey, larger is more saturated. */
+function chroma(triplet: string) {
   const channels = triplet.split(',').map((n) => Number(n.trim()));
-  return Math.max(...channels) - Math.min(...channels) >= 3;
+  return Math.max(...channels) - Math.min(...channels);
 }
+
+/** Comfortably above the subtle ramp this theme first shipped with (spread 8)
+ *  and well under what it carries now (34), so the assertion fails if the
+ *  default drifts back toward grey without pinning an exact palette. */
+const MIN_DEFAULT_CHROMA = 12;
 
 describe('theme tokens', () => {
   const { names, defaultTheme } = declaredThemes();
@@ -60,10 +65,10 @@ describe('theme tokens', () => {
     for (const shape of shapes) expect(shape).toEqual(shapes[0]);
   });
 
-  it('keeps the default theme tinted rather than grey', () => {
+  it('keeps the default theme saturated rather than grey', () => {
     const block = themeBlock(defaultTheme) ?? '';
     const term = block.match(/--rgb-term:\s*([0-9,\s]+);/);
     expect(term).not.toBeNull();
-    expect(isTinted(term![1])).toBe(true);
+    expect(chroma(term![1])).toBeGreaterThanOrEqual(MIN_DEFAULT_CHROMA);
   });
 });
