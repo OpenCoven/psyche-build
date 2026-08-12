@@ -38,6 +38,8 @@ export interface LocalPaneBackendOptions {
    * of one task (fix-auth-codex, fix-auth-claude) rather than unrelated names.
    */
   slugBase?: string;
+  focusedTmuxPaneId?: string | null;
+  selectedPaneId?: string;
   /** Injectable for tests. */
   createPaneFn?: (
     options: CreatePaneOptions,
@@ -113,6 +115,8 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
         projectRoot: lane.projectRoot,
         existingPanes: panesBeforeCurrent,
         sessionProjectRoot: options.sessionProjectRoot,
+        focusedTmuxPaneId: options.focusedTmuxPaneId,
+        selectedPaneId: options.selectedPaneId,
         ...(options.sessionConfigPath ? { sessionConfigPath: options.sessionConfigPath } : {}),
         ...(lane.existingWorktree && options.persistReusedPane
           ? {

@@ -662,13 +662,10 @@ kbd {
   justify-content: center;
   font-size: 13px;
   line-height: 1;
-  opacity: 0;
+  opacity: 1;
   transition: opacity var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
 }
-.session-row-wrap:hover .session-close,
-.session-row-wrap:focus-within .session-close { opacity: 1; }
 .session-close:focus-visible {
-  opacity: 1;
   outline: 1px solid var(--accent-line);
   outline-offset: 1px;
 }

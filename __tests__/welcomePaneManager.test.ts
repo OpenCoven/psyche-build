@@ -32,6 +32,7 @@ import {
   createWelcomePaneCoordinated,
   syncWelcomePaneVisibility,
 } from '../src/utils/welcomePaneManager.js';
+import { SIDEBAR_WIDTH } from '../src/utils/tmux.js';
 
 describe('welcomePaneManager', () => {
   let tempProjectRoot = '';
@@ -71,7 +72,7 @@ describe('welcomePaneManager', () => {
     const created = await createWelcomePaneCoordinated(tempProjectRoot, '%1');
 
     expect(created).toBe(true);
-    expect(mockCreateWelcomePane).toHaveBeenCalledWith('%1', tempProjectRoot, undefined);
+    expect(mockCreateWelcomePane).toHaveBeenCalledWith('%1', tempProjectRoot, undefined, SIDEBAR_WIDTH);
 
     const updatedConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     expect(updatedConfig.welcomePaneId).toBe('%77');
@@ -89,7 +90,7 @@ describe('welcomePaneManager', () => {
     );
 
     expect(synced).toBe(true);
-    expect(mockCreateWelcomePane).toHaveBeenCalledWith('%1', tempProjectRoot, 'purple');
+    expect(mockCreateWelcomePane).toHaveBeenCalledWith('%1', tempProjectRoot, 'purple', SIDEBAR_WIDTH);
 
     const updatedConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     expect(updatedConfig.welcomePaneId).toBe('%88');

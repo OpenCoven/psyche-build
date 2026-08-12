@@ -2,6 +2,7 @@ import type { PsycheConfig, PsycheThemeName } from '../types.js';
 import { createWelcomePane, welcomePaneExists, destroyWelcomePane } from './welcomePane.js';
 import { LogService } from '../services/LogService.js';
 import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
+import { SIDEBAR_WIDTH } from './layoutManager.js';
 
 // Global lock to prevent concurrent welcome pane operations
 let creationLock = false;
@@ -78,7 +79,8 @@ export async function destroyWelcomePaneCoordinated(projectRoot: string): Promis
 export async function createWelcomePaneCoordinated(
   projectRoot: string,
   controlPaneId: string,
-  themeName?: PsycheThemeName
+  themeName?: PsycheThemeName,
+  sidebarWidth?: number,
 ): Promise<boolean> {
   const logService = LogService.getInstance();
 
@@ -97,7 +99,16 @@ export async function createWelcomePaneCoordinated(
         return;
       }
 
-      const welcomePaneId = await createWelcomePane(controlPaneId, projectRoot, themeName);
+      const effectiveSidebarWidth = sidebarWidth
+        ?? (typeof config.controlPaneSize === 'number'
+          ? config.controlPaneSize
+          : SIDEBAR_WIDTH);
+      const welcomePaneId = await createWelcomePane(
+        controlPaneId,
+        projectRoot,
+        themeName,
+        effectiveSidebarWidth,
+      );
       if (!welcomePaneId) {
         return;
       }
@@ -142,7 +153,15 @@ export async function syncWelcomePaneVisibility(
           return;
         }
 
-        const createdPaneId = await createWelcomePane(controlPaneId, projectRoot, themeName);
+        const sidebarWidth = typeof config.controlPaneSize === 'number'
+          ? config.controlPaneSize
+          : SIDEBAR_WIDTH;
+        const createdPaneId = await createWelcomePane(
+          controlPaneId,
+          projectRoot,
+          themeName,
+          sidebarWidth,
+        );
         if (!createdPaneId) {
           return;
         }

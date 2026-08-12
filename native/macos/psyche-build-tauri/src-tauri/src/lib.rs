@@ -25,8 +25,8 @@ mod metrics;
 mod native_workspace;
 mod pane_metrics;
 mod workspace_contract;
-use coven_sessions::coven_sessions;
 use coven_sessions::is_safe_session_id;
+use coven_sessions::{coven_session_kill, coven_sessions};
 use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
 use native_workspace::{workspace_load, workspace_save};
 use pane_metrics::PaneSessionMetrics;
@@ -2296,6 +2296,7 @@ pub fn run() {
             browser_eval,
             app_environment,
             coven_sessions,
+            coven_session_kill,
             workspace_load,
             workspace_save,
             agent_skills,

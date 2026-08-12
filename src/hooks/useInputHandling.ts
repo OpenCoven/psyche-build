@@ -1102,12 +1102,19 @@ export function useInputHandling(params: UseInputHandlingParams) {
       return false
     }
 
-    if (onToggleSidePanel && mouseEvent.column <= SIDE_PANEL_COLLAPSED_WIDTH) {
-      onToggleSidePanel()
+    if (sidePanelCollapsed) {
+      if (onToggleSidePanel && mouseEvent.column <= SIDE_PANEL_COLLAPSED_WIDTH) {
+        onToggleSidePanel()
+      }
       return true
     }
 
-    if (sidePanelCollapsed) {
+    if (
+      onToggleSidePanel
+      && mouseEvent.row === 1
+      && mouseEvent.column === sidePanelWidth
+    ) {
+      onToggleSidePanel()
       return true
     }
 
@@ -1119,7 +1126,9 @@ export function useInputHandling(params: UseInputHandlingParams) {
     )
     const target = resolveSidebarMouseTarget(
       layout,
-      mouseEvent.row,
+      // The expanded panel renders a dedicated chevron row before project
+      // headers; sidebarMouse models the project content itself.
+      mouseEvent.row - 1,
       mouseEvent.column,
       { isLoading }
     )

@@ -134,6 +134,7 @@ class FakeElement {
   }
 
   set textContent(value: string) {
+    this.clearFocusWithinChildren();
     this.ownText = String(value);
     this.html = '';
     this.children = [];
@@ -144,6 +145,7 @@ class FakeElement {
   }
 
   set innerHTML(value: string) {
+    this.clearFocusWithinChildren();
     this.html = String(value);
     this.ownText = '';
     this.children = [];
@@ -223,13 +225,18 @@ class FakeElement {
   removeChild(child: FakeElement) {
     const index = this.children.indexOf(child);
     if (index === -1) throw new Error('child not found');
+    if (child.contains(this.ownerDocument?.activeElement ?? null) && this.ownerDocument) {
+      if (this.ownerDocument.activeElement) this.ownerDocument.activeElement.focused = false;
+      this.ownerDocument.activeElement = null;
+    }
     this.children.splice(index, 1);
     child.parentNode = null;
     return child;
   }
 
-  get isConnected() {
-    return this.parentNode !== null;
+  get isConnected(): boolean {
+    if (this.parentNode) return this.parentNode.isConnected;
+    return this.ownerDocument?.isConnectedRoot(this) ?? false;
   }
 
   get parentElement() {
@@ -241,6 +248,7 @@ class FakeElement {
   }
 
   replaceChildren(...children: FakeElement[]) {
+    this.clearFocusWithinChildren();
     this.children.forEach((child) => { child.parentNode = null; });
     this.children = [];
     this.ownText = '';
@@ -261,8 +269,23 @@ class FakeElement {
   }
 
   focus() {
+    if (this.ownerDocument?.activeElement) this.ownerDocument.activeElement.focused = false;
     this.focused = true;
     if (this.ownerDocument) this.ownerDocument.activeElement = this;
+  }
+
+  contains(candidate: FakeElement | null): boolean {
+    if (!candidate) return false;
+    if (candidate === this) return true;
+    return this.children.some((child) => child.contains(candidate));
+  }
+
+  private clearFocusWithinChildren() {
+    const activeElement = this.ownerDocument?.activeElement ?? null;
+    if (activeElement !== this && this.contains(activeElement) && this.ownerDocument) {
+      activeElement!.focused = false;
+      this.ownerDocument.activeElement = null;
+    }
   }
 
   select() {
@@ -329,7 +352,16 @@ class FakeElement {
 
 class FakeDocument {
   readonly created: FakeElement[] = [];
+  private readonly connectedRoots = new Set<FakeElement>();
   activeElement: FakeElement | null = null;
+
+  connectRoot(element: FakeElement) {
+    this.connectedRoots.add(element);
+  }
+
+  isConnectedRoot(element: FakeElement) {
+    return this.connectedRoots.has(element);
+  }
 
   createElement(tagName: string) {
     const element = new FakeElement(tagName, this);
@@ -396,6 +428,8 @@ function createRenderer(options: {
   activeProjectId?: string | null;
   activeThreadId?: string | null;
   openCovenSession?: (project: Project, session: RemoteSession) => unknown;
+  invoke?: (command: string, args: Record<string, unknown>) => Promise<unknown>;
+  refreshCovenSessions?: (options?: { force?: boolean }) => Promise<unknown>;
   realEdit?: boolean;
   canvasThreadIds?: string[];
   focusSets?: Array<{ id: string; index: number; name: string; key: string; threadIds: string[] }>;
@@ -407,6 +441,8 @@ function createRenderer(options: {
   const document = new FakeDocument();
   const sessionListEl = new FakeElement('div', document);
   const sessionSearchEl = new FakeElement('input', document);
+  document.connectRoot(sessionListEl);
+  document.connectRoot(sessionSearchEl);
   sessionSearchEl.value = options.filter ?? '';
   const state = {
     env: { home: '/Users/val' },
@@ -452,6 +488,8 @@ function createRenderer(options: {
   ) as (element: FakeElement, surface: string, editOptions: unknown) => void;
   const editLabelInlineImpl = options.realEdit ? realEditLabelInline : editLabelInline;
   const openCovenSession = vi.fn(options.openCovenSession ?? (() => Promise.resolve()));
+  const invoke = vi.fn(options.invoke ?? (() => Promise.resolve()));
+  const refreshCovenSessions = vi.fn(options.refreshCovenSessions ?? (() => Promise.resolve()));
   const setStatus = vi.fn();
   const onCanvasIds = options.canvasThreadIds ?? [];
   const canvasThreadIds = vi.fn(() => onCanvasIds);
@@ -471,12 +509,15 @@ function createRenderer(options: {
   const saveSettings = vi.fn();
   const saveWorkspaceSoon = vi.fn();
   const setSessionTypeFilter = vi.fn();
+  const openSessionContextMenu = vi.fn();
   const paneGlyphFor = (kind: string) =>
     kind === 'shell' ? '❯_' : kind === 'web' ? '◍' : '✳';
 
   const sources = [
     'var SESSION_CLOSE_SECONDS = 3;',
     'var armedSessionClose = null;',
+    'var covenSessionCloseFlights = new Set();',
+    'var covenSessionMutationGeneration = 0;',
     'var focusSets = seedFocusSets;',
     'var setPicking = seedSetPicking;',
     'var sessionTreeFocusKey = "";',
@@ -498,6 +539,7 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'sessionLaneLabel'),
     extractFunctionSource(mainJs, 'disarmSessionClose'),
     extractFunctionSource(mainJs, 'armSessionClose'),
+    extractFunctionSource(mainJs, 'closeCovenSession'),
     extractFunctionSource(mainJs, 'threadCovenSessionId'),
     // createCovenSessionRow is gone on this branch and isReusableCovenAttachment
     // is not on renderSessionList's path any more — the sidebar tree below
@@ -531,12 +573,14 @@ function createRenderer(options: {
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
     'saveWorkspaceSoon', 'activateProjectWorktree', 'setSessionTypeFilter',
+    'openSessionContextMenu', 'invoke', 'refreshCovenSessions',
     `"use strict"; ${sources.join('\n')}; return {
       render: renderSessionList,
       setFilter: function (value) { sessionFilter = value; },
       setDiscovery: function (value) { covenDiscovery = value; },
       armSessionClose: armSessionClose,
       disarmSessionClose: disarmSessionClose,
+      closeCovenSession: closeCovenSession,
       handleTreeKeydown: handleSessionTreeKeydown,
       toggleSetPick: toggleSetPick,
       picked: function () { return setPicking ? setPicking.picked.slice() : null; }
@@ -590,14 +634,18 @@ function createRenderer(options: {
     saveWorkspaceSoon,
     activateProjectWorktree,
     setSessionTypeFilter,
+    openSessionContextMenu,
+    invoke,
+    refreshCovenSessions,
   ) as {
     render: () => void;
     setFilter: (value: string) => void;
     setDiscovery: (value: typeof discovery) => void;
     armSessionClose: (
-      wrapper: FakeElement, close: FakeElement, thread: { id: string; name: string },
+      host: FakeElement, close: FakeElement, label: string, onConfirm: () => void,
     ) => void;
-    disarmSessionClose: () => void;
+    disarmSessionClose: (options?: { restoreFocus?: boolean }) => void;
+    closeCovenSession: (session: RemoteSession) => Promise<boolean>;
     handleTreeKeydown: (event: FakeEvent) => void;
     toggleSetPick: (threadId: string) => void;
     picked: () => string[] | null;
@@ -622,6 +670,7 @@ function createRenderer(options: {
     saveSettings,
     saveWorkspaceSoon,
     setSessionTypeFilter,
+    openSessionContextMenu,
     setActiveProject,
     activateProjectWorktree,
     focusThread,
@@ -630,6 +679,8 @@ function createRenderer(options: {
     renameThread,
     editLabelInline,
     openCovenSession,
+    invoke,
+    refreshCovenSessions,
     setStatus,
     canvasThreadIds,
   };
@@ -2095,14 +2146,17 @@ describe('Tauri Coven session project rail', () => {
     localRow.focus();
     const deleteEvent = await localRow.emit('keydown', { key: 'Delete' });
     expect(deleteEvent.defaultPrevented).toBe(true);
-    expect(renderer.hideThread).toHaveBeenCalledTimes(1);
-    expect(renderer.hideThread).toHaveBeenCalledWith('local');
+    expect(renderer.hideThread).not.toHaveBeenCalled();
+    expect(renderer.closeThread).not.toHaveBeenCalled();
+    expect(localRow.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
     expect(renderer.setActiveProject).not.toHaveBeenCalled();
     expect(renderer.focusThread).not.toHaveBeenCalled();
 
     renderer.hideThread.mockClear();
     const closeEvent = await close?.emit('click');
-    expect(renderer.hideThread).toHaveBeenCalledWith('local');
+    expect(renderer.hideThread).not.toHaveBeenCalled();
+    expect(renderer.closeThread).not.toHaveBeenCalled();
+    expect(localRow.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
     expect(closeEvent?.propagationStopped).toBe(true);
 
     const title = localRow.querySelector('.session-title');
@@ -2247,7 +2301,7 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.activateProjectWorktree).toHaveBeenCalled();
   });
 
-  it('marks rows that hold a pane-tree leaf and detaches them without killing the process', async () => {
+  it('marks rows that hold a pane-tree leaf while keeping close guarded', async () => {
     const renderer = createRenderer({
       activeThreadId: 'local',
       canvasThreadIds: ['local'],
@@ -2259,13 +2313,12 @@ describe('Tauri Coven session project rail', () => {
     const row = wrapper?.querySelector('.session-row');
     const close = wrapper?.querySelector('.session-close');
     expect(row?.querySelector('.session-oncanvas')).not.toBeNull();
-    expect(close?.title).toBe('Hide the pane — the session keeps running');
+    expect(close?.title).toBe('Stop and close Local');
 
-    // hideThread detaches the leaf and leaves the PTY running, so the row stays
-    // reopenable rather than being a destructive close.
     await close?.emit('click');
-    expect(renderer.hideThread).toHaveBeenCalledWith('local');
+    expect(renderer.hideThread).not.toHaveBeenCalled();
     expect(renderer.closeThread).not.toHaveBeenCalled();
+    expect(row?.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
   });
 
   it('omits the canvas marker for rows with no pane on the canvas', () => {
@@ -2276,7 +2329,7 @@ describe('Tauri Coven session project rail', () => {
 
     const wrapper = renderer.sessionListEl.querySelector('.session-row-wrap');
     expect(wrapper?.querySelector('.session-row')?.querySelector('.session-oncanvas')).toBeNull();
-    expect(wrapper?.querySelector('.session-close')?.title).toBe('Hide session');
+    expect(wrapper?.querySelector('.session-close')?.title).toBe('Stop and close Local');
   });
 
   it('moves lane git state to the branch and keeps the row icon type-specific', () => {
@@ -2423,7 +2476,8 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.sessionListEl.getAttribute('aria-multiselectable')).toBeNull();
     });
 
-    it('turns × into "remove from set" while a set scopes the canvas', async () => {
+    it('keeps × destructive while a set scopes the canvas', async () => {
+      vi.useFakeTimers();
       const renderer = createRenderer({
         threads,
         focusSets: [memberSet],
@@ -2433,17 +2487,19 @@ describe('Tauri Coven session project rail', () => {
 
       const wrappers = renderer.sessionListEl.querySelectorAll('.session-row-wrap');
       const close = wrappers[0].querySelector('.session-close');
-      expect(close?.title).toBe('Remove from Review — the pane stays open');
+      expect(close?.title).toBe('Stop and close Local');
 
       await close?.emit('click');
 
-      expect(renderer.removeFromFocusSet).toHaveBeenCalledWith('set-1', 'local');
-      // The pane is not going anywhere — only its membership changed.
+      expect(renderer.removeFromFocusSet).not.toHaveBeenCalled();
       expect(renderer.hideThread).not.toHaveBeenCalled();
       expect(renderer.closeThread).not.toHaveBeenCalled();
+      expect(wrappers[0].querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
+      vi.useRealTimers();
     });
 
-    it('leaves × as hide for a pane the scoping set does not contain', async () => {
+    it('keeps × destructive for a pane the scoping set does not contain', async () => {
+      vi.useFakeTimers();
       const renderer = createRenderer({
         threads,
         focusSets: [memberSet],
@@ -2454,11 +2510,15 @@ describe('Tauri Coven session project rail', () => {
       const wrappers = renderer.sessionListEl.querySelectorAll('.session-row-wrap');
       await wrappers[1].querySelector('.session-close')?.emit('click');
 
-      expect(renderer.hideThread).toHaveBeenCalledWith('other');
+      expect(renderer.hideThread).not.toHaveBeenCalled();
       expect(renderer.removeFromFocusSet).not.toHaveBeenCalled();
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+      expect(wrappers[1].querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
+      vi.useRealTimers();
     });
 
-    it('lets Delete on the focused row run the same remove-from-set action as ×', async () => {
+    it('arms destructive confirmation when Delete is pressed on the focused row', async () => {
+      vi.useFakeTimers();
       const renderer = createRenderer({
         threads,
         focusSets: [memberSet],
@@ -2473,17 +2533,13 @@ describe('Tauri Coven session project rail', () => {
 
       const deleteEvent = await row?.emit('keydown', { key: 'Delete' });
       expect(deleteEvent?.defaultPrevented).toBe(true);
-      expect(renderer.removeFromFocusSet).toHaveBeenCalledTimes(1);
-      expect(renderer.removeFromFocusSet).toHaveBeenCalledWith('set-1', 'local');
+      expect(renderer.removeFromFocusSet).not.toHaveBeenCalled();
       expect(renderer.hideThread).not.toHaveBeenCalled();
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+      expect(wrappers[0].querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
       expect(renderer.focusThread).not.toHaveBeenCalled();
-
-      renderer.removeFromFocusSet.mockClear();
-      const closeEvent = await close?.emit('click');
-      expect(closeEvent?.propagationStopped).toBe(true);
-      expect(renderer.removeFromFocusSet).toHaveBeenCalledTimes(1);
-      expect(renderer.removeFromFocusSet).toHaveBeenCalledWith('set-1', 'local');
-      expect(renderer.focusThread).not.toHaveBeenCalled();
+      expect(close?.getAttribute('tabindex')).toBe('-1');
+      vi.useRealTimers();
     });
 
     it('returns to all panes when the project header is clicked', async () => {
@@ -2508,11 +2564,17 @@ describe('Tauri Coven session project rail', () => {
       const wrapper = renderer.sessionListEl.querySelector('.session-row-wrap')!;
       const row = wrapper.querySelector('.session-row')!;
       const close = wrapper.querySelector('.session-close')!;
-      renderer.armSessionClose(row, close, { id: 'local', name: 'Local' });
+      row.focus();
+      renderer.armSessionClose(row, close, 'Local', () => {
+        renderer.closeThread('local');
+      });
       return { renderer, wrapper, row, close };
     }
 
-    beforeEach(() => { vi.useFakeTimers(); });
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(10_000);
+    });
     afterEach(() => { vi.useRealTimers(); });
 
     it('replaces the × with a counting confirm instead of closing', () => {
@@ -2520,6 +2582,7 @@ describe('Tauri Coven session project rail', () => {
 
       const confirm = wrapper.querySelector('.session-close-confirm');
       expect(confirm?.textContent).toBe('Close · 3');
+      expect(confirm?.getAttribute('aria-label')).toBe('Confirm closing Local');
       expect(confirm?.parentNode).toBe(row);
       expect(close.hidden).toBe(true);
       expect(renderer.closeThread).not.toHaveBeenCalled();
@@ -2539,26 +2602,451 @@ describe('Tauri Coven session project rail', () => {
       expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
     });
 
+    it('rejects an overdue confirmation click without waiting for timer callbacks', async () => {
+      const { renderer, wrapper, row } = armed();
+      const confirm = wrapper.querySelector('.session-close-confirm')!;
+
+      vi.setSystemTime(13_001);
+      await confirm.emit('click');
+
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+      expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
+      expect(renderer.document.activeElement === row).toBe(true);
+    });
+
     it('cancels itself when the countdown runs out', () => {
-      const { renderer, wrapper, close } = armed();
+      const { renderer, wrapper, row, close } = armed();
 
       vi.advanceTimersByTime(3000);
 
       expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
       expect(close.hidden).toBe(false);
       expect(renderer.closeThread).not.toHaveBeenCalled();
+      expect(renderer.document.activeElement).toBe(row);
+    });
+
+    it('returns focus after a Delete-armed countdown expires', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+      row.focus();
+
+      await row.emit('keydown', { key: 'Delete' });
+      expect(renderer.document.activeElement?.classList.contains('session-close-confirm')).toBe(true);
+
+      vi.advanceTimersByTime(3000);
+
+      expect(renderer.document.activeElement).toBe(row);
+      expect(row.isConnected).toBe(true);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
+
+    it('restores focus to the connected host when Escape disarms confirmation', () => {
+      const { renderer, wrapper, row } = armed();
+
+      renderer.disarmSessionClose();
+
+      expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
+      expect(renderer.document.activeElement).toBe(row);
+      expect(row.isConnected).toBe(true);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
+
+    it('makes a non-roving × target the sole roving item after timeout', async () => {
+      const renderer = createRenderer({
+        threads: [
+          { id: 'first', projectId: 'alpha', name: 'First', status: 'running' },
+          { id: 'second', projectId: 'alpha', name: 'Second', status: 'running' },
+        ],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row').find(
+        (candidate) => candidate.dataset.threadId === 'second',
+      )!;
+      expect(row.getAttribute('tabindex')).toBe('-1');
+
+      await row.querySelector('.session-close')?.emit('click');
+      vi.advanceTimersByTime(3000);
+
+      expect(renderer.document.activeElement === row).toBe(true);
+      expect(row.getAttribute('tabindex')).toBe('0');
+      expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
+        (item) => item.getAttribute('tabindex') === '0',
+      ).map((item) => item.dataset.treeKey)).toEqual([row.dataset.treeKey]);
+    });
+
+    it('makes a non-roving context-menu target the sole roving item after Escape', async () => {
+      const renderer = createRenderer({
+        threads: [
+          { id: 'first', projectId: 'alpha', name: 'First', status: 'running' },
+          { id: 'second', projectId: 'alpha', name: 'Second', status: 'running' },
+        ],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row').find(
+        (candidate) => candidate.dataset.threadId === 'second',
+      )!;
+
+      await row.emit('contextmenu');
+      const actions = renderer.openSessionContextMenu.mock.calls[0]?.[1] as Array<{
+        label: string;
+        run: () => void;
+      }>;
+      actions.find((action) => action?.label === 'Stop and close')?.run();
+      renderer.disarmSessionClose();
+
+      expect(renderer.document.activeElement === row).toBe(true);
+      expect(row.getAttribute('tabindex')).toBe('0');
+      expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
+        (item) => item.getAttribute('tabindex') === '0',
+      ).map((item) => item.dataset.treeKey)).toEqual([row.dataset.treeKey]);
     });
 
     it('drops an armed confirm when the sidebar re-renders under it', () => {
-      const { renderer, wrapper } = armed();
+      const { renderer, wrapper, row } = armed();
 
       renderer.render();
 
+      const replacement = renderer.sessionListEl.querySelector('.session-row')!;
       expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
+      expect(row.isConnected).toBe(false);
+      expect(replacement).not.toBe(row);
+      expect(renderer.document.activeElement).toBe(replacement);
+      expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
+        (item) => item.getAttribute('tabindex') === '0',
+      )).toHaveLength(1);
       expect(renderer.closeThread).not.toHaveBeenCalled();
       // The stale interval must not resurrect anything after the re-render.
       vi.advanceTimersByTime(5000);
       expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
+
+    it('does not steal search focus when rerender disarms confirmation', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+      await row.querySelector('.session-close')?.emit('click');
+      expect(row.querySelector('.session-close-confirm')).not.toBeNull();
+
+      renderer.sessionSearchEl.focus();
+      renderer.render();
+
+      expect(renderer.document.activeElement === renderer.sessionSearchEl).toBe(true);
+      expect(renderer.sessionListEl.querySelector('.session-close-confirm')).toBeNull();
+    });
+
+    it('does not steal search focus when an abandoned confirmation times out', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+      await row.querySelector('.session-close')?.emit('click');
+      renderer.sessionSearchEl.focus();
+
+      vi.advanceTimersByTime(3000);
+
+      expect(row.querySelector('.session-close-confirm')).toBeNull();
+      expect(renderer.document.activeElement === renderer.sessionSearchEl).toBe(true);
+      expect(renderer.document.activeElement === row).toBe(false);
+      expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
+        (item) => item.getAttribute('tabindex') === '0',
+      )).toHaveLength(1);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
+
+    it('does not steal search focus when Escape disarms an abandoned confirmation', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+      await row.querySelector('.session-close')?.emit('click');
+      renderer.sessionSearchEl.focus();
+
+      renderer.disarmSessionClose();
+
+      expect(row.querySelector('.session-close-confirm')).toBeNull();
+      expect(renderer.document.activeElement === renderer.sessionSearchEl).toBe(true);
+      expect(renderer.document.activeElement === row).toBe(false);
+      expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
+        (item) => item.getAttribute('tabindex') === '0',
+      )).toHaveLength(1);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Coven row close control', () => {
+    const session: RemoteSession = {
+      id: 'coven-1', projectRoot: '/alpha', cwd: '/alpha', title: 'Agent Coven', status: 'running',
+      labels: ['source:psyche-build'],
+    };
+
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('stops and refreshes an eligible Coven session only after confirmation succeeds', async () => {
+      const renderer = createRenderer({ sessions: [session] });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+      const close = row.querySelector('.session-close')!;
+
+      expect(close).not.toBeNull();
+      expect(close.title).toBe('Stop and close Agent Coven');
+      expect(close.getAttribute('aria-label')).toBe('Stop and close Agent Coven');
+      expect(close.getAttribute('tabindex')).toBe('-1');
+
+      const closeEvent = await close.emit('click');
+      expect(closeEvent.propagationStopped).toBe(true);
+      expect(renderer.openCovenSession).not.toHaveBeenCalled();
+      expect(renderer.invoke).not.toHaveBeenCalled();
+      expect(row.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
+
+      const confirmEvent = await row.querySelector('.session-close-confirm')!.emit('click');
+      expect(confirmEvent.propagationStopped).toBe(true);
+      await vi.waitFor(() => {
+        expect(renderer.invoke).toHaveBeenCalledTimes(1);
+        expect(renderer.refreshCovenSessions).toHaveBeenCalledTimes(1);
+      });
+      expect(renderer.refreshCovenSessions).toHaveBeenCalledWith({
+        force: true,
+        requiredGeneration: 1,
+      });
+      expect(renderer.invoke).toHaveBeenCalledWith('coven_session_kill', {
+        sessionId: 'coven-1',
+        session_id: 'coven-1',
+      });
+      expect(renderer.openCovenSession).not.toHaveBeenCalled();
+      expect(renderer.document.activeElement).not.toBe(row);
+    });
+
+    it('retains the Coven row and reports an error when native stop fails', async () => {
+      const renderer = createRenderer({
+        sessions: [session],
+        invoke: () => Promise.reject(new Error('daemon refused')),
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+
+      await row.querySelector('.session-close')!.emit('click');
+      await row.querySelector('.session-close-confirm')!.emit('click');
+      await vi.waitFor(() => {
+        expect(renderer.setStatus).toHaveBeenCalledWith(
+          'Stop and close failed: Error: daemon refused',
+          'error',
+        );
+      });
+
+      expect(renderer.refreshCovenSessions).not.toHaveBeenCalled();
+      expect(renderer.sessionListEl.querySelectorAll('.session-row')
+        .some((candidate) => candidate.dataset.sessionId === session.id)).toBe(true);
+      expect(renderer.document.activeElement).toBe(row);
+      expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
+        (item) => item.getAttribute('tabindex') === '0',
+      )).toHaveLength(1);
+    });
+
+    it('does not steal focus moved to search while a failed Coven close is pending', async () => {
+      let rejectInvoke!: (error: Error) => void;
+      const pending = new Promise<never>((_resolve, reject) => { rejectInvoke = reject; });
+      const renderer = createRenderer({ sessions: [session], invoke: () => pending });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+
+      await row.querySelector('.session-close')!.emit('click');
+      await row.querySelector('.session-close-confirm')!.emit('click');
+      renderer.sessionSearchEl.focus();
+      rejectInvoke(new Error('daemon refused'));
+      await vi.waitFor(() => expect(renderer.setStatus).toHaveBeenCalled());
+
+      expect(renderer.document.activeElement).toBe(renderer.sessionSearchEl);
+      expect(renderer.document.activeElement).not.toBe(row);
+      expect(renderer.refreshCovenSessions).not.toHaveBeenCalled();
+    });
+
+    it('deduplicates native stop calls while one session close is in flight', async () => {
+      let resolveInvoke!: () => void;
+      const pending = new Promise<void>((resolve) => { resolveInvoke = resolve; });
+      const renderer = createRenderer({ sessions: [session], invoke: () => pending });
+
+      const first = renderer.closeCovenSession(session);
+      const second = renderer.closeCovenSession(session);
+      expect(renderer.invoke).toHaveBeenCalledTimes(1);
+      expect(await second).toBe(false);
+      expect(renderer.refreshCovenSessions).not.toHaveBeenCalled();
+
+      resolveInvoke();
+      expect(await first).toBe(true);
+      expect(renderer.refreshCovenSessions).toHaveBeenCalledTimes(1);
+    });
+
+    it('allows retrying a Coven close after a rejected native request settles', async () => {
+      const invoke = vi.fn()
+        .mockRejectedValueOnce(new Error('daemon refused'))
+        .mockResolvedValueOnce(null);
+      const renderer = createRenderer({ sessions: [session], invoke });
+
+      await expect(renderer.closeCovenSession(session)).resolves.toBe(false);
+      await expect(renderer.closeCovenSession(session)).resolves.toBe(true);
+
+      expect(renderer.invoke).toHaveBeenCalledTimes(2);
+      expect(renderer.refreshCovenSessions).toHaveBeenCalledTimes(1);
+      expect(renderer.refreshCovenSessions).toHaveBeenCalledWith({
+        force: true,
+        requiredGeneration: 1,
+      });
+    });
+
+    it('guards Delete on a focused Coven row without activating it', async () => {
+      const renderer = createRenderer({ sessions: [session] });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+      row.focus();
+
+      const event = await row.emit('keydown', { key: 'Delete' });
+      expect(event.defaultPrevented).toBe(true);
+      expect(renderer.invoke).not.toHaveBeenCalled();
+      expect(renderer.openCovenSession).not.toHaveBeenCalled();
+      expect(row.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
+
+      await row.querySelector('.session-close-confirm')!.emit('click');
+      await vi.waitFor(() => expect(renderer.invoke).toHaveBeenCalledTimes(1));
+      expect(renderer.openCovenSession).not.toHaveBeenCalled();
+    });
+
+    it('offers Attach and guarded Stop and close context actions without row activation', async () => {
+      const renderer = createRenderer({ sessions: [session] });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+
+      await row.emit('contextmenu');
+      const actions = renderer.openSessionContextMenu.mock.calls[0]?.[1] as Array<{
+        label: string;
+        danger?: boolean;
+        run: () => void;
+      }>;
+      expect(actions[0]?.label).toBe('Attach');
+      const stop = actions.find((action) => action?.label === 'Stop and close');
+      expect(stop).toMatchObject({ label: 'Stop and close', danger: true });
+
+      stop?.run();
+      expect(renderer.invoke).not.toHaveBeenCalled();
+      expect(renderer.openCovenSession).not.toHaveBeenCalled();
+      expect(row.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
+      await row.querySelector('.session-close-confirm')!.emit('click');
+      await vi.waitFor(() => expect(renderer.invoke).toHaveBeenCalledTimes(1));
+      expect(renderer.openCovenSession).not.toHaveBeenCalled();
+    });
+
+    it('labels the first context action Focus attachment for attached Coven rows', async () => {
+      const renderer = createRenderer({
+        sessions: [session],
+        threads: [{
+          id: 'attached', projectId: 'alpha', name: 'Agent Coven', status: 'running',
+          launch: { covenSessionId: session.id },
+        }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+
+      await row.emit('contextmenu');
+      expect(renderer.openSessionContextMenu.mock.calls[0]?.[1]?.[0]?.label)
+        .toBe('Focus attachment');
+    });
+
+    it('restores roving focus to a Coven row after its confirmation times out', async () => {
+      const renderer = createRenderer({ sessions: [session] });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+      await row.querySelector('.session-close')!.emit('click');
+
+      vi.advanceTimersByTime(3000);
+
+      expect(renderer.document.activeElement).toBe(row);
+      expect(row.getAttribute('tabindex')).toBe('0');
+      expect(renderer.invoke).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('local row close control', () => {
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('shows a guarded Stop and close control that closes only after confirmation', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+      const close = row.querySelector('.session-close')!;
+
+      expect(close).not.toBeNull();
+      expect(close.title).toBe('Stop and close Local');
+      expect(close.getAttribute('aria-label')).toBe('Stop and close Local');
+      expect(close.getAttribute('tabindex')).toBe('-1');
+
+      const closeEvent = await close.emit('click');
+      expect(closeEvent.propagationStopped).toBe(true);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+      const confirm = row.querySelector('.session-close-confirm')!;
+      expect(confirm.textContent).toBe('Close · 3');
+
+      await confirm.emit('click');
+      expect(renderer.closeThread).toHaveBeenCalledTimes(1);
+      expect(renderer.closeThread).toHaveBeenCalledWith('local');
+      expect(renderer.document.activeElement).toBeNull();
+      expect(renderer.document.activeElement).not.toBe(row);
+    });
+
+    it('guards Delete on the focused local session row', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+      row.focus();
+
+      const event = await row.emit('keydown', { key: 'Delete' });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+      expect(row.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
+    });
+
+    it('routes context-menu Stop and close through the same confirmation', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+
+      await row.emit('contextmenu');
+      const actions = renderer.openSessionContextMenu.mock.calls[0]?.[1] as Array<{
+        label: string;
+        run: () => void;
+      }>;
+      const stopAndClose = actions.find((action) => action?.label === 'Stop and close');
+      expect(stopAndClose).toBeDefined();
+
+      stopAndClose?.run();
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+      const confirm = row.querySelector('.session-close-confirm')!;
+      expect(confirm.textContent).toBe('Close · 3');
+
+      await confirm.emit('click');
+      expect(renderer.closeThread).toHaveBeenCalledTimes(1);
+      expect(renderer.closeThread).toHaveBeenCalledWith('local');
     });
   });
 
@@ -2629,8 +3117,10 @@ describe('Tauri Coven session project rail', () => {
     expect(styles).toMatch(/\.session-row-wrap\s*\{[^}]*position:\s*relative;/s);
     expect(styles).toMatch(/\.session-row\.inline-edit-hidden\s*\{[^}]*visibility:\s*hidden;/s);
     expect(styles).toMatch(/\.session-row-wrap\s*>\s*\.inline-edit\s*\{[^}]*position:\s*absolute;/s);
-    expect(styles).toMatch(/\.session-row-wrap:focus-within\s+\.session-close/);
-    expect(styles).toMatch(/\.session-close:focus-visible\s*\{[^}]*opacity:\s*1;[^}]*outline:/s);
+    expect(styles).toMatch(/\.session-close\s*\{[^}]*opacity:\s*1;/s);
+    expect(styles).not.toMatch(/\.session-row-wrap:focus-within\s+\.session-close/);
+    expect(styles).toMatch(/\.session-close:focus-visible\s*\{[^}]*outline:/s);
+    expect(styles).not.toMatch(/\.session-close:focus-visible\s*\{[^}]*opacity:/s);
     expect(styles).toMatch(/\.session-row-wrap:hover\s+\.session-row:not\(\.active\)/);
     expect(styles).not.toMatch(/\.session-row-wrap:hover\s+\.session-row\s*\{/);
     expect(styles).toMatch(

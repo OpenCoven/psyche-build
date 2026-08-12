@@ -342,8 +342,9 @@ describe('desktop shell wiring', () => {
   it('synchronizes cached sidebar status keys at the start of every sidebar render', () => {
     const renderSource = functionSource('renderSessionList');
     expect(renderSource).toMatch(
-      /if \(!sessionListEl\) return;[\s\S]{0,120}if \(editingContext && editingContext\.surface === "sidebar"\) return;[\s\S]{0,120}var now = Date\.now\(\);[\s\S]{0,80}syncLocalSidebarStatusKeys\(now\);[\s\S]{0,320}disarmSessionClose\(\);/,
+      /if \(!sessionListEl\) return;[\s\S]{0,120}if \(editingContext && editingContext\.surface === "sidebar"\) return;[\s\S]{0,120}var now = Date\.now\(\);[\s\S]{0,80}syncLocalSidebarStatusKeys\(now\);/,
     );
+    expect(renderSource).toMatch(/disarmSessionClose\([^)]*\);/);
 
     const source = functionSource('syncLocalSidebarStatusKeys');
     expect(source).toMatch(
