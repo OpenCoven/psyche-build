@@ -480,7 +480,7 @@ describe('typed frontend PTY batch consumer', () => {
     });
   });
 
-  test('preserves one active xterm write across PTY generation reset', async () => {
+  test('retains two new-generation batches behind an old physical write', async () => {
     const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
     const invoke = vi.fn(
       async (_command: string, _args: Record<string, unknown>) => undefined,
@@ -499,20 +499,18 @@ describe('typed frontend PTY batch consumer', () => {
     const startAttempt = client.prepareForPtyStart();
 
     expect(routePtyBatch(batch('thread-c-generation', 1, [2]))).toBe(true);
-    expect(routePtyBatch(batch('thread-c-generation', 2, [3]))).toBe(false);
+    expect(routePtyBatch(batch('thread-c-generation', 2, [3]))).toBe(true);
+    expect(routePtyBatch(batch('thread-c-generation', 3, [4]))).toBe(false);
     expect(writes).toHaveLength(1);
 
+    await client.markPtyStarted(startAttempt);
     writes[0].callback();
     await flushAsyncWork();
 
-    expect(invoke).not.toHaveBeenCalled();
+    expect(invoke.mock.calls.filter(([command]) => command === 'pty_ack')).toEqual([]);
     expect(writes).toHaveLength(2);
     expect(Array.from(writes[1].bytes)).toEqual([2]);
 
-    expect(routePtyBatch(batch('thread-c-generation', 2, [3]))).toBe(true);
-    expect(writes).toHaveLength(2);
-
-    await client.markPtyStarted(startAttempt);
     writes[1].callback();
     await flushAsyncWork();
 
@@ -528,6 +526,28 @@ describe('typed frontend PTY batch consumer', () => {
     ]);
     expect(writes).toHaveLength(3);
     expect(Array.from(writes[2].bytes)).toEqual([3]);
+
+    writes[2].callback();
+    await flushAsyncWork();
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'pty_ack')).toEqual([
+      [
+        'pty_ack',
+        {
+          threadId: 'thread-c-generation',
+          thread_id: 'thread-c-generation',
+          sequence: 1,
+        },
+      ],
+      [
+        'pty_ack',
+        {
+          threadId: 'thread-c-generation',
+          thread_id: 'thread-c-generation',
+          sequence: 2,
+        },
+      ],
+    ]);
   });
 
   test('retires the old write callback before a successful start can acknowledge the new pump', async () => {
@@ -612,6 +632,52 @@ describe('typed frontend PTY batch consumer', () => {
     ]);
     expect(routePtyBatch(batch('thread-c-adopt-quarantine', 2, [12]))).toBe(true);
     expect(writes).toHaveLength(2);
+  });
+
+  test('ignores adoption from a start attempt superseded by a newer attempt', async () => {
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const invoke = vi.fn(
+      async (_command: string, _args: Record<string, unknown>) => undefined,
+    );
+    runtimeThreadIds.add('thread-c-stale-adoption');
+    const client = createPtyClient({
+      threadId: 'thread-c-stale-adoption',
+      invoke,
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+      },
+    });
+
+    const staleAttempt = client.prepareForPtyStart();
+    const currentAttempt = client.prepareForPtyStart();
+    expect(routePtyBatch(batch('thread-c-stale-adoption', 1, [41]))).toBe(true);
+
+    await expect(client.adoptRunningPty(staleAttempt)).resolves.toBe(false);
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+    expect(routePtyBatch(batch('thread-c-stale-adoption', 1, [99]))).toBe(false);
+    expect(routePtyBatch(batch('thread-c-stale-adoption', 2, [42]))).toBe(true);
+
+    await expect(client.markPtyStarted(currentAttempt)).resolves.toBe(true);
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'pty_set_visibility')).toEqual([
+      [
+        'pty_set_visibility',
+        {
+          threadId: 'thread-c-stale-adoption',
+          thread_id: 'thread-c-stale-adoption',
+          visible: true,
+        },
+      ],
+    ]);
+    expect(writes).toHaveLength(1);
+    expect(Array.from(writes[0].bytes)).toEqual([41]);
+
+    writes[0].callback();
+    await flushAsyncWork();
+    expect(writes).toHaveLength(2);
+    expect(Array.from(writes[1].bytes)).toEqual([42]);
   });
 
   test('feeds at most two ambiguous batches to a successfully started PTY in order', async () => {
@@ -736,6 +802,92 @@ describe('typed frontend PTY batch consumer', () => {
       thread_id: 'thread-c-generation-ack',
       sequence: 1,
     });
+  });
+
+  test('reserves a sequence before xterm write can synchronously reenter routing', async () => {
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const invoke = vi.fn(
+      async (_command: string, _args: Record<string, unknown>) => undefined,
+    );
+    let nestedResult: boolean | undefined;
+    runtimeThreadIds.add('thread-c-reentrant-write');
+    createPtyClient({
+      threadId: 'thread-c-reentrant-write',
+      invoke,
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+        nestedResult = routePtyBatch(batch('thread-c-reentrant-write', 1, [99]));
+      },
+    });
+
+    expect(routePtyBatch(batch('thread-c-reentrant-write', 1, [51]))).toBe(true);
+    expect(nestedResult).toBe(false);
+    expect(writes).toHaveLength(1);
+    expect(Array.from(writes[0].bytes)).toEqual([51]);
+
+    writes[0].callback();
+    await flushAsyncWork();
+
+    expect(writes).toHaveLength(1);
+    expect(invoke.mock.calls.filter(([command]) => command === 'pty_ack')).toEqual([
+      [
+        'pty_ack',
+        {
+          threadId: 'thread-c-reentrant-write',
+          thread_id: 'thread-c-reentrant-write',
+          sequence: 1,
+        },
+      ],
+    ]);
+  });
+
+  test('rolls back an unsuperseded sequence reservation when xterm write throws', async () => {
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const invoke = vi.fn(
+      async (_command: string, _args: Record<string, unknown>) => undefined,
+    );
+    let writeAttempts = 0;
+    let nestedResult: boolean | undefined;
+    runtimeThreadIds.add('thread-d-reservation-rollback');
+    const client = createPtyClient({
+      threadId: 'thread-d-reservation-rollback',
+      invoke,
+      write(bytes, callback) {
+        writeAttempts += 1;
+        if (writeAttempts === 1) {
+          nestedResult = routePtyBatch(
+            batch('thread-d-reservation-rollback', 1, [99]),
+          );
+          throw new Error('write failed');
+        }
+        writes.push({ bytes, callback });
+      },
+    });
+
+    expect(routePtyBatch(batch('thread-d-reservation-rollback', 1, [61]))).toBe(false);
+    expect(nestedResult).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
+
+    const recoveryAttempt = client.prepareForPtyStart();
+    client.restoreAfterFailedPtyStart(recoveryAttempt);
+
+    expect(routePtyBatch(batch('thread-d-reservation-rollback', 1, [62]))).toBe(true);
+    expect(writes).toHaveLength(1);
+    expect(Array.from(writes[0].bytes)).toEqual([62]);
+
+    writes[0].callback();
+    await flushAsyncWork();
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'pty_ack')).toEqual([
+      [
+        'pty_ack',
+        {
+          threadId: 'thread-d-reservation-rollback',
+          thread_id: 'thread-d-reservation-rollback',
+          sequence: 1,
+        },
+      ],
+    ]);
   });
 
   test('does not acknowledge when xterm write throws', async () => {
