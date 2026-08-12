@@ -472,28 +472,7 @@ export async function replaceProjectPaneConfigPaneIdentity(
   return transactProjectPaneConfig(projectRoot, async ({ config, persist }) => {
     const panes = Array.isArray(config.panes) ? [...config.panes] : [];
     assertUniquePaneIds(panes, projectPaneConfigPath(projectRoot));
-    const exactIndex = panes.findIndex((candidate) => {
-      const identity = paneRecordIdentity(candidate);
-      if (
-        !identity
-        || identity.id !== expected.id
-        || identity.paneId !== expected.paneId
-      ) {
-        return false;
-      }
-
-      if (!expected.tmuxServerIdentity) {
-        return true;
-      }
-
-      return Boolean(
-        identity.tmuxServerIdentity
-        && sameTmuxServerIdentity(
-          identity.tmuxServerIdentity,
-          expected.tmuxServerIdentity,
-        )
-      );
-    });
+    const exactIndex = panes.findIndex((candidate) => hasPaneRecordIdentity(candidate, expected));
 
     if (exactIndex === -1) {
       const current = panes.find((candidate) => paneRecordId(candidate) === expected.id);

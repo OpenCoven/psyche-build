@@ -166,7 +166,11 @@ describe('killBridgePane', () => {
     })]);
     await replaceProjectPaneConfigPaneIdentity(
       projectRoot,
-      { id: 'psyche-1', paneId: '%3' },
+      {
+        id: 'psyche-1',
+        paneId: '%3',
+        tmuxServerIdentity: oldServerGeneration,
+      },
       {
         id: 'psyche-1',
         paneId: '%9',
