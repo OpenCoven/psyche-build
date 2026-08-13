@@ -24,6 +24,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
+use unicode_normalization::UnicodeNormalization;
 
 pub const MAX_PROVIDER_LINE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_PROVIDER_RESULT_BYTES: usize = 4 * 1024 * 1024;
@@ -56,15 +57,20 @@ struct ManagedProvider {
     provider_id: String,
     writer: mpsc::Sender<OutboundFrame>,
     pending: Arc<Mutex<HashSet<String>>>,
-    responses: Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>,
+    responses: Arc<Mutex<HashMap<String, PendingResponse>>>,
     task: Mutex<Option<JoinHandle<()>>>,
+}
+
+struct PendingResponse {
+    expected_type: &'static str,
+    sender: oneshot::Sender<Result<Value, String>>,
 }
 
 impl ManagedProvider {
     fn clear_pending(&self, reason: &str) {
         self.pending.lock().clear();
         for (_, response) in self.responses.lock().drain() {
-            let _ = response.send(Err(reason.to_string()));
+            let _ = response.sender.send(Err(reason.to_string()));
         }
     }
 }
@@ -201,7 +207,8 @@ fn validate_effect_request(effect: &ProviderEffectRequest) -> Result<(), String>
     if effect.version != 1 || effect.frame_type != "provider.effect.request" {
         return Err("invalid provider effect envelope".to_string());
     }
-    if effect.request_id.trim().is_empty()
+    if effect.request_id != effect.action_id
+        || effect.request_id.trim().is_empty()
         || effect.action_id.trim().is_empty()
         || effect.tab_id.trim().is_empty()
         || effect.request_id.len() > 256
@@ -280,15 +287,61 @@ struct StoredCredentials {
     operator_token: String,
 }
 
-fn canonical_root(project_root: &str) -> Result<PathBuf, String> {
-    Path::new(project_root)
-        .canonicalize()
-        .map_err(|error| format!("invalid project root: {error}"))
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+enum IdentityPlatform {
+    MacOs,
+    Windows,
+    Other,
 }
 
-fn endpoint_for_root(root: &Path) -> Result<PathBuf, String> {
-    let encoded = format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()));
-    let identifier: String = encoded.chars().take(20).collect();
+fn normalize_canonical_identity_for(platform: IdentityPlatform, canonical: &str) -> String {
+    match platform {
+        IdentityPlatform::MacOs => canonical.nfc().collect(),
+        IdentityPlatform::Windows => {
+            if let Some(rest) = canonical.strip_prefix(r"\\?\UNC\") {
+                format!(r"\\{rest}")
+            } else {
+                canonical
+                    .strip_prefix(r"\\?\")
+                    .unwrap_or(canonical)
+                    .to_string()
+            }
+        }
+        IdentityPlatform::Other => canonical.to_string(),
+    }
+}
+
+fn normalize_canonical_identity(canonical: &Path) -> String {
+    #[cfg(target_os = "macos")]
+    let platform = IdentityPlatform::MacOs;
+    #[cfg(windows)]
+    let platform = IdentityPlatform::Windows;
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let platform = IdentityPlatform::Other;
+    normalize_canonical_identity_for(platform, &canonical.to_string_lossy())
+}
+
+fn project_identity_hash(identity: &str) -> String {
+    let encoded = format!("{:x}", Sha256::digest(identity.as_bytes()));
+    encoded.chars().take(20).collect()
+}
+
+struct CanonicalProjectRoot {
+    path: PathBuf,
+    identity: String,
+}
+
+fn canonical_root(project_root: &str) -> Result<CanonicalProjectRoot, String> {
+    let path = Path::new(project_root)
+        .canonicalize()
+        .map_err(|error| format!("invalid project root: {error}"))?;
+    let identity = normalize_canonical_identity(&path);
+    Ok(CanonicalProjectRoot { path, identity })
+}
+
+fn endpoint_for_root(identity: &str) -> Result<PathBuf, String> {
+    let identifier = project_identity_hash(identity);
     #[cfg(windows)]
     {
         return Ok(PathBuf::from(format!(
@@ -385,7 +438,7 @@ fn ensure_trusted_control_caller(label: &str) -> Result<(), String> {
 
 async fn send_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
-    root: &Path,
+    project_identity: &str,
     token: String,
     provider_id: String,
 ) -> Result<(), String> {
@@ -396,11 +449,11 @@ async fn send_handshake<S: AsyncRead + AsyncWrite + Unpin>(
             request_id: "hello".to_string(),
             token,
             client_name: "psyche-build-desktop".to_string(),
-            project_root: root.to_string_lossy().to_string(),
+            project_root: project_identity.to_string(),
         },
     )
     .await?;
-    expect_handshake_response(stream, "welcome").await?;
+    expect_handshake_response(stream, "welcome", "welcome").await?;
     write_frame(
         stream,
         &OutboundFrame::Register {
@@ -410,19 +463,19 @@ async fn send_handshake<S: AsyncRead + AsyncWrite + Unpin>(
         },
     )
     .await?;
-    expect_handshake_response(stream, "ack").await
+    expect_handshake_response(stream, "ack", "provider-register").await
 }
 
 async fn connect_provider(
-    root: &Path,
+    root: &CanonicalProjectRoot,
     token: &str,
     provider_id: &str,
 ) -> Result<impl AsyncRead + AsyncWrite + Unpin, String> {
-    let endpoint = endpoint_for_root(root)?;
+    let endpoint = endpoint_for_root(&root.identity)?;
     let mut stream = connect_control(&endpoint).await?;
     send_handshake(
         &mut stream,
-        root,
+        &root.identity,
         token.to_string(),
         provider_id.to_string(),
     )
@@ -460,6 +513,7 @@ async fn read_bounded_line<R: AsyncRead + Unpin>(
 async fn expect_handshake_response<R: AsyncRead + Unpin>(
     reader: &mut R,
     expected_type: &str,
+    expected_request_id: &str,
 ) -> Result<(), String> {
     let line = timeout(REQUEST_TIMEOUT, read_bounded_line(reader))
         .await
@@ -467,6 +521,11 @@ async fn expect_handshake_response<R: AsyncRead + Unpin>(
         .ok_or_else(|| "control provider disconnected during handshake".to_string())?;
     let value: Value = serde_json::from_slice(&line)
         .map_err(|_| "control provider handshake response is invalid".to_string())?;
+    if value.get("version").and_then(Value::as_u64) != Some(1)
+        || value.get("requestId").and_then(Value::as_str) != Some(expected_request_id)
+    {
+        return Err("control provider handshake correlation is invalid".to_string());
+    }
     if value.get("type").and_then(Value::as_str) == Some(expected_type) {
         return Ok(());
     }
@@ -489,7 +548,7 @@ async fn provider_loop<R, W>(
     mut writer: W,
     mut frames: mpsc::Receiver<OutboundFrame>,
     pending: Arc<Mutex<HashSet<String>>>,
-    responses: Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>,
+    responses: Arc<Mutex<HashMap<String, PendingResponse>>>,
     connections: Arc<Mutex<HashMap<String, Arc<ManagedProvider>>>>,
 ) where
     R: AsyncRead + Unpin,
@@ -521,16 +580,7 @@ async fn provider_loop<R, W>(
                     if emitted.is_err() { break; }
                     continue;
                 }
-                if let Some(request_id) = value.get("requestId").and_then(Value::as_str) {
-                    if let Some(response) = responses.lock().remove(request_id) {
-                        let result = if value.get("type").and_then(Value::as_str) == Some("error") {
-                            Err(value.get("message").and_then(Value::as_str).unwrap_or("control request failed").to_string())
-                        } else {
-                            Ok(value)
-                        };
-                        let _ = response.send(result);
-                    }
-                }
+                if !resolve_provider_response(&responses, value) { break; }
             }
             frame = frames.recv() => {
                 let Some(frame) = frame else { break };
@@ -541,7 +591,9 @@ async fn provider_loop<R, W>(
 
     pending.lock().clear();
     for (_, response) in responses.lock().drain() {
-        let _ = response.send(Err("control provider disconnected".to_string()));
+        let _ = response
+            .sender
+            .send(Err("control provider disconnected".to_string()));
     }
     let should_remove = connections
         .lock()
@@ -552,6 +604,49 @@ async fn provider_loop<R, W>(
     }
 }
 
+fn resolve_provider_response(
+    responses: &Mutex<HashMap<String, PendingResponse>>,
+    value: Value,
+) -> bool {
+    if value.get("version").and_then(Value::as_u64) != Some(1) {
+        return false;
+    }
+    let Some(frame_type) = value.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(request_id) = value.get("requestId").and_then(Value::as_str) else {
+        return false;
+    };
+    if frame_type.is_empty()
+        || frame_type.len() > 64
+        || request_id.is_empty()
+        || request_id.len() > 256
+    {
+        return false;
+    }
+    let Some(response) = responses.lock().remove(request_id) else {
+        return frame_type == "ack" || frame_type == "error";
+    };
+    if frame_type == "error" {
+        let message = value
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("control request failed")
+            .to_string();
+        let _ = response.sender.send(Err(message));
+        return true;
+    }
+    if frame_type == response.expected_type {
+        let _ = response.sender.send(Ok(value));
+        return true;
+    }
+    let expected = response.expected_type;
+    let _ = response.sender.send(Err(format!(
+        "unexpected control response type '{frame_type}'; expected '{expected}'"
+    )));
+    false
+}
+
 fn next_request_id(state: &ControlProviderState) -> String {
     let sequence = state.next_generation.fetch_add(1, Ordering::Relaxed);
     format!("desktop-{sequence}")
@@ -559,12 +654,12 @@ fn next_request_id(state: &ControlProviderState) -> String {
 
 fn connection_for(
     state: &ControlProviderState,
-    root: &Path,
+    root: &CanonicalProjectRoot,
 ) -> Result<Arc<ManagedProvider>, String> {
     state
         .connections
         .lock()
-        .get(&root.to_string_lossy().to_string())
+        .get(&root.identity)
         .cloned()
         .ok_or_else(|| "control provider is not connected".to_string())
 }
@@ -572,7 +667,7 @@ fn connection_for(
 async fn send_request(connection: &ManagedProvider, frame: OutboundFrame) -> Result<Value, String> {
     let request_id = frame.request_id().to_string();
     let (sender, receiver) = oneshot::channel();
-    reserve_response(&connection.responses, request_id.clone(), sender)?;
+    reserve_response(&connection.responses, request_id.clone(), "ack", sender)?;
     let sent = timeout(WRITE_TIMEOUT, connection.writer.send(frame)).await;
     if !matches!(sent, Ok(Ok(()))) {
         connection.responses.lock().remove(&request_id);
@@ -592,8 +687,9 @@ async fn send_request(connection: &ManagedProvider, frame: OutboundFrame) -> Res
 }
 
 fn reserve_response(
-    responses: &Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>,
+    responses: &Mutex<HashMap<String, PendingResponse>>,
     request_id: String,
+    expected_type: &'static str,
     sender: oneshot::Sender<Result<Value, String>>,
 ) -> Result<(), String> {
     let mut responses = responses.lock();
@@ -603,13 +699,22 @@ fn reserve_response(
     if responses.contains_key(&request_id) {
         return Err("duplicate control provider request id".to_string());
     }
-    responses.insert(request_id, sender);
+    responses.insert(
+        request_id,
+        PendingResponse {
+            expected_type,
+            sender,
+        },
+    );
     Ok(())
 }
 
-async fn standalone_control_request(root: &Path, frame: OutboundFrame) -> Result<Value, String> {
-    let token = operator_token(root)?;
-    let endpoint = endpoint_for_root(root)?;
+async fn standalone_control_request(
+    root: &CanonicalProjectRoot,
+    frame: OutboundFrame,
+) -> Result<Value, String> {
+    let token = operator_token(&root.path)?;
+    let endpoint = endpoint_for_root(&root.identity)?;
     let mut stream = connect_control(&endpoint).await?;
     write_frame(
         &mut stream,
@@ -618,11 +723,17 @@ async fn standalone_control_request(root: &Path, frame: OutboundFrame) -> Result
             request_id: "hello".to_string(),
             token,
             client_name: "psyche-build-operator".to_string(),
-            project_root: root.to_string_lossy().to_string(),
+            project_root: root.identity.clone(),
         },
     )
     .await?;
-    expect_handshake_response(&mut stream, "welcome").await?;
+    expect_handshake_response(&mut stream, "welcome", "welcome").await?;
+    let expected_request_id = frame.request_id().to_string();
+    let expected_type = match &frame {
+        OutboundFrame::CommandSubmit { .. } => "command.result",
+        OutboundFrame::StateGet { .. } => "state.result",
+        _ => return Err("unsupported standalone control request".to_string()),
+    };
     write_frame(&mut stream, &frame).await?;
     let line = timeout(REQUEST_TIMEOUT, read_bounded_line(&mut stream))
         .await
@@ -630,12 +741,22 @@ async fn standalone_control_request(root: &Path, frame: OutboundFrame) -> Result
         .ok_or_else(|| "control owner disconnected".to_string())?;
     let value: Value =
         serde_json::from_slice(&line).map_err(|_| "control response is invalid".to_string())?;
+    if value.get("version").and_then(Value::as_u64) != Some(1)
+        || value.get("requestId").and_then(Value::as_str) != Some(&expected_request_id)
+    {
+        return Err("control response correlation is invalid".to_string());
+    }
     if value.get("type").and_then(Value::as_str) == Some("error") {
         return Err(value
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("control request failed")
             .to_string());
+    }
+    if value.get("type").and_then(Value::as_str) != Some(expected_type) {
+        return Err(format!(
+            "unexpected control response type; expected '{expected_type}'"
+        ));
     }
     Ok(value)
 }
@@ -649,7 +770,7 @@ pub async fn control_provider_start(
 ) -> Result<ProviderStatus, String> {
     ensure_trusted_control_caller(webview.label())?;
     let root = canonical_root(&project_root)?;
-    let root_key = root.to_string_lossy().to_string();
+    let root_key = root.identity.clone();
     let previous = { state.connections.lock().remove(&root_key) };
     if let Some(previous) = previous {
         previous.clear_pending("control provider reconnecting");
@@ -660,9 +781,8 @@ pub async fn control_provider_start(
         }
     }
 
-    let token = operator_token(&root)?;
-    let digest = format!("{:x}", Sha256::digest(root_key.as_bytes()));
-    let provider_id = format!("desktop-{}", digest.chars().take(20).collect::<String>());
+    let token = operator_token(&root.path)?;
+    let provider_id = format!("desktop-{}", project_identity_hash(&root_key));
     let mut attempts = 0_u8;
     let stream = loop {
         match connect_provider(&root, &token, &provider_id).await {
@@ -705,7 +825,7 @@ pub async fn control_provider_start(
     ));
     *connection.task.lock() = Some(task);
     Ok(ProviderStatus {
-        project_root: root.to_string_lossy().to_string(),
+        project_root: root.identity,
         provider_id,
         connected: true,
         pending_effects: 0,
@@ -720,12 +840,7 @@ pub async fn control_provider_stop(
 ) -> Result<(), String> {
     ensure_trusted_control_caller(webview.label())?;
     let root = canonical_root(&project_root)?;
-    let connection = {
-        state
-            .connections
-            .lock()
-            .remove(&root.to_string_lossy().to_string())
-    };
+    let connection = { state.connections.lock().remove(&root.identity) };
     if let Some(connection) = connection {
         connection.clear_pending("control provider stopped");
         let provider_task = { connection.task.lock().take() };
@@ -747,9 +862,7 @@ pub async fn control_provider_upsert(
     ensure_trusted_control_caller(webview.label())?;
     let root = canonical_root(&project_root)?;
     let connection = connection_for(&state, &root)?;
-    if resource.provider_id != connection.provider_id
-        || resource.project_root != root.to_string_lossy()
-    {
+    if resource.provider_id != connection.provider_id || resource.project_root != root.identity {
         return Err("browser resource is outside provider scope".to_string());
     }
     let request_id = next_request_id(&state);
@@ -860,7 +973,7 @@ pub async fn control_operator_submit(
         "id": request_id,
         "idempotencyKey": format!("desktop:{request_id}"),
         "kind": kind,
-        "projectRoot": root.to_string_lossy(),
+        "projectRoot": root.identity,
         "createdAt": now,
         "payload": payload,
     });
@@ -922,12 +1035,8 @@ pub async fn control_state(
 ) -> Result<Value, String> {
     ensure_trusted_control_caller(webview.label())?;
     let root = canonical_root(&project_root)?;
-    if !state
-        .connections
-        .lock()
-        .contains_key(&root.to_string_lossy().to_string())
-    {
-        return Ok(json!({ "connected": false, "projectRoot": root.to_string_lossy() }));
+    if !state.connections.lock().contains_key(&root.identity) {
+        return Ok(json!({ "connected": false, "projectRoot": root.identity }));
     }
     let request_id = next_request_id(&state);
     standalone_control_request(
@@ -969,9 +1078,31 @@ mod control_provider_tests {
 
     #[test]
     fn endpoint_hash_matches_the_typescript_contract() {
-        let root = Path::new("/tmp/example-project");
-        let encoded = format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()));
-        assert_eq!(encoded.chars().take(20).collect::<String>().len(), 20);
+        let vectors = [
+            (
+                IdentityPlatform::MacOs,
+                "/tmp/Cafe\u{301}",
+                "/tmp/Café",
+                "c5d313be878d0ecbc02e",
+            ),
+            (
+                IdentityPlatform::Windows,
+                r"\\?\C:\Users\Val\Repo",
+                r"C:\Users\Val\Repo",
+                "c256e15c0de5a4be0851",
+            ),
+            (
+                IdentityPlatform::Windows,
+                r"\\?\UNC\Server\Share\Repo",
+                r"\\Server\Share\Repo",
+                "a9c53493f2ac537428dd",
+            ),
+        ];
+        for (platform, raw, expected_identity, expected_hash) in vectors {
+            let identity = normalize_canonical_identity_for(platform, raw);
+            assert_eq!(identity, expected_identity);
+            assert_eq!(project_identity_hash(&identity), expected_hash);
+        }
     }
 
     #[test]
@@ -996,12 +1127,12 @@ mod control_provider_tests {
         let responses = Mutex::new(HashMap::new());
         for index in 0..MAX_PENDING_REQUESTS {
             let (sender, _receiver) = oneshot::channel();
-            reserve_response(&responses, format!("request-{index}"), sender)
+            reserve_response(&responses, format!("request-{index}"), "ack", sender)
                 .expect("reservation within bound must succeed");
         }
         let (overflow, _receiver) = oneshot::channel();
         assert!(
-            reserve_response(&responses, "overflow".to_string(), overflow)
+            reserve_response(&responses, "overflow".to_string(), "ack", overflow)
                 .unwrap_err()
                 .contains("limit")
         );
@@ -1009,7 +1140,7 @@ mod control_provider_tests {
         responses.lock().remove("request-0");
         let (duplicate, _receiver) = oneshot::channel();
         assert!(
-            reserve_response(&responses, "request-1".to_string(), duplicate)
+            reserve_response(&responses, "request-1".to_string(), "ack", duplicate)
                 .unwrap_err()
                 .contains("duplicate")
         );
@@ -1020,17 +1151,82 @@ mod control_provider_tests {
         let mut effect = ProviderEffectRequest {
             version: 1,
             frame_type: "provider.effect.request".to_string(),
-            request_id: "request-1".to_string(),
+            request_id: "action-1".to_string(),
             action_id: "action-1".to_string(),
             tab_id: "tab-1".to_string(),
             generation: 1,
             operation: json!({ "kind": "inspect" }),
         };
         assert!(validate_effect_request(&effect).is_ok());
+        effect.request_id = "other-request".to_string();
+        assert!(validate_effect_request(&effect).is_err());
+        effect.request_id = effect.action_id.clone();
         effect.version = 2;
         assert!(validate_effect_request(&effect).is_err());
         effect.version = 1;
         effect.action_id.clear();
         assert!(validate_effect_request(&effect).is_err());
+    }
+
+    #[test]
+    fn provider_responses_require_exact_version_type_and_request_id() {
+        let responses = Mutex::new(HashMap::new());
+
+        let (mismatch_sender, mut mismatch_receiver) = oneshot::channel();
+        reserve_response(
+            &responses,
+            "expected-id".to_string(),
+            "ack",
+            mismatch_sender,
+        )
+        .unwrap();
+        assert!(resolve_provider_response(
+            &responses,
+            json!({ "version": 1, "type": "ack", "requestId": "other-id" }),
+        ));
+        assert!(matches!(
+            mismatch_receiver.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        responses.lock().remove("expected-id");
+
+        let (wrong_sender, wrong_receiver) = oneshot::channel();
+        reserve_response(&responses, "wrong".to_string(), "ack", wrong_sender).unwrap();
+        assert!(!resolve_provider_response(
+            &responses,
+            json!({ "version": 1, "type": "welcome", "requestId": "wrong" }),
+        ));
+        assert!(wrong_receiver
+            .blocking_recv()
+            .unwrap()
+            .unwrap_err()
+            .contains("unexpected"));
+
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        reserve_response(&responses, "ack-1".to_string(), "ack", ack_sender).unwrap();
+        assert!(resolve_provider_response(
+            &responses,
+            json!({ "version": 1, "type": "ack", "requestId": "ack-1" }),
+        ));
+        assert_eq!(
+            ack_receiver.blocking_recv().unwrap().unwrap()["type"],
+            "ack"
+        );
+
+        let (error_sender, error_receiver) = oneshot::channel();
+        reserve_response(&responses, "error-1".to_string(), "ack", error_sender).unwrap();
+        assert!(resolve_provider_response(
+            &responses,
+            json!({ "version": 1, "type": "error", "requestId": "error-1", "message": "denied" }),
+        ));
+        assert_eq!(
+            error_receiver.blocking_recv().unwrap().unwrap_err(),
+            "denied"
+        );
+
+        assert!(!resolve_provider_response(
+            &responses,
+            json!({ "version": 2, "type": "ack", "requestId": "unknown" }),
+        ));
     }
 }

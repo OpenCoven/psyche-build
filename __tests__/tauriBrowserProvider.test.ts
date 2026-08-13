@@ -24,6 +24,9 @@ describe('Tauri browser control provider contract', () => {
     expect(provider).toMatch(/Sha256::digest/);
     expect(provider).toMatch(/\.take\(20\)/);
     expect(provider).toContain('.psyche/runtime/sockets');
+    expect(provider).toContain('normalize_canonical_identity');
+    expect(provider).toContain('project_identity_hash');
+    expect(cargo).toContain('unicode-normalization');
   });
 
   it('reads only the operator token from a 0600 credential file', () => {
@@ -51,6 +54,7 @@ describe('Tauri browser control provider contract', () => {
     expect(provider).toMatch(/effect\.version != 1/);
     expect(provider).toMatch(/effect\.frame_type != "provider\.effect\.request"/);
     expect(provider).toMatch(/pending_effects\.contains/);
+    expect(provider).toMatch(/effect\.request_id != effect\.action_id/);
   });
 
   it('exposes typed commands and a closed operator command enum', () => {
@@ -74,6 +78,8 @@ describe('Tauri browser control provider contract', () => {
     expect(provider.match(/clear_pending\(/g)?.length).toBeGreaterThanOrEqual(3);
     expect(provider).toContain('MAX_PENDING_REQUESTS');
     expect(provider).toMatch(/responses\.len\(\) >= MAX_PENDING_REQUESTS/);
+    expect(provider).toMatch(/struct PendingResponse[\s\S]*expected_type/);
+    expect(provider).toMatch(/frame_type == response\.expected_type/);
   });
 
   it('registers the provider manager and cryptographic dependencies', () => {
