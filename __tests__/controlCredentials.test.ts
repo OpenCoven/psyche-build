@@ -1,8 +1,25 @@
-import { mkdtemp, readFile, rm, stat, symlink } from 'node:fs/promises';
+import {
+  access,
+  link,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createControlCredentialStore } from '../src/control/credentials.js';
+import {
+  createControlCredentialStore,
+  createControlCredentialStoreForCanonicalRoot,
+  type CredentialCreationOps,
+} from '../src/control/credentials.js';
 import { createControlServerForTest } from '../src/control/server.js';
 import type { ControlServerRuntime } from '../src/control/server.js';
 import type { ControlCommandInput } from '../src/control/types.js';
@@ -122,6 +139,77 @@ describe('control credential store', () => {
       filePath: path.join(linkedParent, 'runtime', 'control-credentials.json'),
     });
     await expect(store.agentToken()).rejects.toMatchObject({ code: 'credential_path_unsafe' });
+  });
+
+  it.each(['write', 'sync', 'close', 'publish'] as const)(
+    'removes temporary credential material after an injected %s failure',
+    async (failureStep) => {
+      const root = await realpath(await tempProject());
+      const filePath = path.join(root, 'control-credentials.json');
+      const failure = new Error(`injected ${failureStep} failure`);
+      let closeCalls = 0;
+      const creationOps: CredentialCreationOps = {
+        async openTemporary(temporary) {
+          const handle = await open(temporary, 'wx', 0o600);
+          return {
+            async writeFile(data, encoding) {
+              if (failureStep === 'write') throw failure;
+              return handle.writeFile(data, encoding);
+            },
+            async sync() {
+              if (failureStep === 'sync') throw failure;
+              return handle.sync();
+            },
+            async close() {
+              closeCalls += 1;
+              if (failureStep === 'close' && closeCalls === 1) {
+                throw failure;
+              }
+              await handle.close().catch(() => undefined);
+            },
+          };
+        },
+        async publish(temporary, target) {
+          if (failureStep === 'publish') throw failure;
+          await link(temporary, target);
+        },
+        removeTemporary: unlink,
+      };
+      const store = await createControlCredentialStoreForCanonicalRoot({
+        canonicalProjectRoot: root,
+        filePath,
+        creationOps,
+      });
+
+      await expect(store.agentToken()).rejects.toBe(failure);
+      await expect(access(filePath)).rejects.toMatchObject({ code: 'ENOENT' });
+      const leftovers = (await readdir(root)).filter((name) => name.endsWith('.tmp'));
+      expect(leftovers).toEqual([]);
+      expect(closeCalls).toBe(failureStep === 'close' ? 2 : 1);
+    },
+  );
+
+  it('rereads an atomic publication winner and removes only the losing temporary file', async () => {
+    const root = await realpath(await tempProject());
+    const filePath = path.join(root, 'control-credentials.json');
+    const winner = { operatorToken: 'winner-operator', agentToken: 'winner-agent' };
+    const creationOps: CredentialCreationOps = {
+      openTemporary: (temporary) => open(temporary, 'wx', 0o600),
+      async publish(_temporary, target) {
+        await writeFile(target, `${JSON.stringify(winner)}\n`, { mode: 0o600 });
+        throw Object.assign(new Error('winner exists'), { code: 'EEXIST' });
+      },
+      removeTemporary: unlink,
+    };
+    const store = await createControlCredentialStoreForCanonicalRoot({
+      canonicalProjectRoot: root,
+      filePath,
+      creationOps,
+    });
+
+    await expect(store.agentToken()).resolves.toBe(winner.agentToken);
+    expect(JSON.parse(await readFile(filePath, 'utf8'))).toEqual(winner);
+    expect((await readdir(root)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 });
 

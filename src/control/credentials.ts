@@ -28,6 +28,24 @@ interface StoredCredentials {
   agentToken: string;
 }
 
+export interface CredentialTemporaryHandle {
+  writeFile(data: string, encoding: BufferEncoding): Promise<unknown>;
+  sync(): Promise<unknown>;
+  close(): Promise<unknown>;
+}
+
+export interface CredentialCreationOps {
+  openTemporary(filePath: string): Promise<CredentialTemporaryHandle>;
+  publish(temporary: string, target: string): Promise<void>;
+  removeTemporary(filePath: string): Promise<void>;
+}
+
+const DEFAULT_CREATION_OPS: CredentialCreationOps = {
+  openTemporary: (filePath) => open(filePath, 'wx', 0o600),
+  publish: link,
+  removeTemporary: unlink,
+};
+
 /** Per-path coordination complements the cross-process atomic link below. */
 const credentialLoads = new Map<string, Promise<StoredCredentials>>();
 
@@ -69,6 +87,7 @@ export async function createControlCredentialStore(options: {
 export async function createControlCredentialStoreForCanonicalRoot(options: {
   canonicalProjectRoot: string;
   filePath?: string;
+  creationOps?: CredentialCreationOps;
 }): Promise<ControlCredentialStore> {
   const root = options.canonicalProjectRoot;
   const filePath = path.resolve(
@@ -80,7 +99,7 @@ export async function createControlCredentialStoreForCanonicalRoot(options: {
     if (cache) return cache;
     let pending = credentialLoads.get(filePath);
     if (!pending) {
-      pending = loadOrCreateCredentials(root, filePath);
+      pending = loadOrCreateCredentials(root, filePath, options.creationOps ?? DEFAULT_CREATION_OPS);
       credentialLoads.set(filePath, pending);
       void pending.finally(() => {
         if (credentialLoads.get(filePath) === pending) credentialLoads.delete(filePath);
@@ -114,6 +133,7 @@ export async function createControlCredentialStoreForCanonicalRoot(options: {
 async function loadOrCreateCredentials(
   canonicalRoot: string,
   filePath: string,
+  creationOps: CredentialCreationOps,
 ): Promise<StoredCredentials> {
   await ensureSafeCredentialParent(canonicalRoot, filePath);
   const existing = await readStoredCredentials(filePath);
@@ -124,26 +144,42 @@ async function loadOrCreateCredentials(
     agentToken: randomBytes(32).toString('hex'),
   };
   const temporary = `${filePath}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
-  const handle = await open(temporary, 'wx', 0o600);
+  let handle: CredentialTemporaryHandle | undefined;
+  let primaryError: unknown;
   try {
+    handle = await creationOps.openTemporary(temporary);
     await handle.writeFile(`${JSON.stringify(created)}\n`, 'utf8');
     await handle.sync();
-  } finally {
     await handle.close();
-  }
+    handle = undefined;
 
-  try {
     // A hard link publishes the fully written inode without overwriting a
     // winner from another process. Unlike rename, this is no-clobber atomic.
-    await link(temporary, filePath);
+    await creationOps.publish(temporary, filePath);
     return created;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    const winner = await readStoredCredentials(filePath);
-    if (!winner) throw unsafeCredentialPath('credential winner disappeared during creation');
-    return winner;
+    primaryError = error;
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      const winner = await readStoredCredentials(filePath);
+      if (!winner) throw unsafeCredentialPath('credential winner disappeared during creation');
+      return winner;
+    }
+    throw error;
   } finally {
-    await unlink(temporary).catch(() => undefined);
+    if (handle) {
+      try {
+        await handle.close();
+      } catch (closeError) {
+        if (primaryError === undefined) primaryError = closeError;
+      }
+    }
+    try {
+      await creationOps.removeTemporary(temporary);
+    } catch (cleanupError) {
+      if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT' && primaryError === undefined) {
+        throw cleanupError;
+      }
+    }
   }
 }
 
