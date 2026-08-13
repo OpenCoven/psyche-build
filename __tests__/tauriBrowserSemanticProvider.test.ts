@@ -7,6 +7,20 @@ const html = readFileSync(new URL('web/index.html', root), 'utf8');
 const packageJson = readFileSync(new URL('package.json', root), 'utf8');
 const lib = readFileSync(new URL('src-tauri/src/lib.rs', root), 'utf8');
 
+function functionSource(source: string, name: string): string {
+  const start = source.indexOf(`function ${name}(`);
+  const asyncStart = source.indexOf(`async function ${name}(`);
+  const index = asyncStart >= 0 ? asyncStart : start;
+  if (index < 0) throw new Error(`missing ${name}`);
+  const body = source.indexOf('{', index);
+  let depth = 0;
+  for (let cursor = body; cursor < source.length; cursor += 1) {
+    if (source[cursor] === '{') depth += 1;
+    if (source[cursor] === '}' && --depth === 0) return source.slice(index, cursor + 1);
+  }
+  throw new Error(`unterminated ${name}`);
+}
+
 describe('Tauri semantic browser provider lifecycle', () => {
   it('builds and loads the committed PsycheControl bundle', () => {
     expect(packageJson).toContain('--global-name=PsycheControl');
@@ -38,6 +52,29 @@ describe('Tauri semantic browser provider lifecycle', () => {
     expect(lib).toContain('MAX_BROWSER_SNAPSHOT_BYTES');
     expect(lib).toContain('backend_unavailable');
     expect(lib).toContain('get_webview(&label)');
+    expect(lib).toContain('with_webview');
+    expect(lib).toContain('takeSnapshotWithConfiguration_completionHandler');
+    expect(lib).toContain('NSBitmapImageFileType::PNG');
+    expect(lib).toContain('BASE64_STANDARD.encode');
     expect(lib).not.toContain('capture_desktop');
+  });
+
+  it('completes exact-tab generation mismatches immediately', async () => {
+    const completions: unknown[] = [];
+    const pair = { project: { root: '/project' }, tab: {} };
+    const handler = Function(
+      'browserControlPairByTabId', 'browserTabLifecycle', 'completeBrowserProviderEffect',
+      'installBrowserAutomationForPair', 'awaitBrowserAutomationResult', 'invoke',
+      'browserLabelForTab', 'browserAutomationDispatchScript',
+      `return (${functionSource(main, 'handleBrowserProviderEffect')});`,
+    )(
+      () => pair,
+      () => ({ liveGeneration: 2, nativeLabel: 'native' }),
+      async (_project: unknown, result: unknown) => { completions.push(result); },
+      async () => true, async () => ({}), async () => ({}), () => 'label', () => '',
+    );
+
+    await expect(handler({ payload: { actionId: 'a1', tabId: 'tab', projectRoot: '/project', generation: 1 } })).resolves.toBe(false);
+    expect(completions).toEqual([{ actionId: 'a1', status: 'failed', code: 'resource_replaced', message: 'browser tab generation was replaced' }]);
   });
 });

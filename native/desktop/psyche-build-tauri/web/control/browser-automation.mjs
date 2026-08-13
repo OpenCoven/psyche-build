@@ -24,7 +24,7 @@ export function installBrowserAutomation(globalObject, options = {}) {
 
   function requireCurrent(request) {
     if (!current || request.snapshotId !== current.snapshot.snapshotId ||
-        now() - current.createdAt > SNAPSHOT_TTL_MS ||
+        now() - current.createdAt >= SNAPSHOT_TTL_MS ||
         current.document !== globalObject.document ||
         current.documentElement !== globalObject.document?.documentElement) {
       invalidate();
@@ -54,7 +54,7 @@ export function installBrowserAutomation(globalObject, options = {}) {
     throw automationError('unsupported_operation', 'unsupported_operation: automation operation is not allowed');
   }
 
-  const api = Object.freeze({ dispatch, invalidate });
+  const api = Object.freeze({ schema: 'psyche.browser.automation/v1', dispatch, invalidate });
   Object.defineProperty(globalObject, '__PSYCHE_AUTOMATION__', {
     configurable: false,
     enumerable: false,
@@ -71,6 +71,10 @@ export function dispatchBrowserAutomation(globalObject, request) {
 
 export function browserAutomationSource() {
   return `(function(globalObject){
+    var existing=globalObject.__PSYCHE_AUTOMATION__;
+    if (existing && existing.schema==='psyche.browser.automation/v1' &&
+        typeof existing.dispatch==='function' && typeof existing.invalidate==='function') return;
+    if (existing) delete globalObject.__PSYCHE_AUTOMATION__;
     const SNAPSHOT_SCHEMA=${JSON.stringify(SNAPSHOT_SCHEMA)};
     const MAX_NODES=${MAX_NODES}; const MAX_DEPTH=${MAX_DEPTH}; const MAX_NAME_BYTES=${MAX_NAME_BYTES};
     const SNAPSHOT_TTL_MS=${SNAPSHOT_TTL_MS}; const INSTALLED=new WeakMap();
@@ -141,7 +145,7 @@ function semanticNode(element, document, viewportWidth, viewportHeight) {
   if (!role) return null;
   const rect = safeRect(element);
   const clipped = clipRect(rect, viewportWidth, viewportHeight);
-  if (!clipped && !INTERACTIVE_TAGS.has(tag) && !element.getAttribute?.('role')) return null;
+  if (!clipped && !INTERACTIVE_TAGS.has(tag)) return null;
   const name = accessibleName(element, document);
   const result = { role, name, bounds: clipped || { x: 0, y: 0, width: 0, height: 0, clipped: true } };
   if (element.disabled === true || element.hasAttribute?.('disabled') || element.getAttribute?.('aria-disabled') === 'true') result.disabled = true;

@@ -115,7 +115,7 @@ describe('bounded semantic browser automation', () => {
     expect(() => api.dispatch({ type: 'resolve', snapshotId: first.snapshotId, ref: 'e1' })).toThrowError(/snapshot_stale/);
 
     const current = api.dispatch({ type: 'snapshot' });
-    now += 30_001;
+    now += 30_000;
     expect(() => api.dispatch({ type: 'resolve', snapshotId: current.snapshotId, ref: 'e1' })).toThrowError(/snapshot_stale/);
 
     const latest = api.dispatch({ type: 'snapshot' });
@@ -125,6 +125,32 @@ describe('bounded semantic browser automation', () => {
     const beforeReplacement = api.dispatch({ type: 'snapshot' });
     globalObject.document = { ...globalObject.document, documentElement: node('body') };
     expect(() => api.dispatch({ type: 'resolve', snapshotId: beforeReplacement.snapshotId, ref: 'e1' })).toThrowError(/snapshot_stale/);
+  });
+
+  it('can inject the same source twice in one document without replacing live state', () => {
+    const { globalObject } = fixture();
+    const source = browserAutomationSource();
+    Function('globalThis', source)(globalObject);
+    const installed = globalObject as typeof globalObject & { __PSYCHE_AUTOMATION__: { dispatch(request: Record<string, unknown> & { type: string }): any } };
+    const firstApi = installed.__PSYCHE_AUTOMATION__;
+    const snapshot = firstApi.dispatch({ type: 'snapshot' });
+
+    expect(() => Function('globalThis', source)(globalObject)).not.toThrow();
+    expect(installed.__PSYCHE_AUTOMATION__).toBe(firstApi);
+    expect(firstApi.dispatch({ type: 'resolve', snapshotId: snapshot.snapshotId, ref: 'e1' })).toMatchObject({ role: 'button' });
+  });
+
+  it('omits noninteractive offscreen and zero-size explicit roles', () => {
+    const { globalObject } = fixture();
+    const heading = node('h2', { textContent: 'Offscreen heading', attrs: { role: 'heading' }, rect: [900, 900, 100, 20] });
+    const zero = node('div', { textContent: 'Zero status', attrs: { role: 'status' }, rect: [0, 0, 0, 0] });
+    const zeroButton = node('button', { textContent: 'Keyboard target', rect: [0, 0, 0, 0] });
+    globalObject.document.body = node('body', { children: [heading, zero, zeroButton] });
+    globalObject.document.documentElement = globalObject.document.body;
+
+    const snapshot = dispatchBrowserAutomation(globalObject, { type: 'snapshot' });
+    expect(snapshot.nodes).toEqual([expect.objectContaining({ role: 'button', name: 'Keyboard target' })]);
+    expect(snapshot.nodes[0].bounds).toMatchObject({ width: 0, height: 0, clipped: true });
   });
 
   it('bounds node count, depth, and accessible names', () => {

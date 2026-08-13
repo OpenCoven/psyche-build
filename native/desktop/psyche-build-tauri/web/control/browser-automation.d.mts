@@ -8,6 +8,7 @@ export interface BrowserAutomationSnapshot {
 }
 
 export interface BrowserAutomationApi {
+  schema: 'psyche.browser.automation/v1';
   dispatch(request: Record<string, unknown> & { type: string }): any;
   invalidate(): void;
 }

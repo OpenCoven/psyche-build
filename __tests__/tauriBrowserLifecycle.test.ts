@@ -133,8 +133,16 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
 ) {
-  const names = Object.keys(dependencies);
-  const values = Object.values(dependencies);
+  const completeDependencies = {
+    invalidateBrowserAutomation: async () => true,
+    removeBrowserControlResource: async () => true,
+    publishBrowserControlResource: async () => true,
+    installBrowserAutomationForPair: async () => true,
+    browserTabForNativeLabel: () => null,
+    ...dependencies,
+  };
+  const names = Object.keys(completeDependencies);
+  const values = Object.values(completeDependencies);
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
@@ -563,6 +571,34 @@ describe('Tauri native browser lifecycle', () => {
     });
   });
 
+  it('aborts tab destruction when semantic invalidation fails', async () => {
+    const nativeCalls: string[] = [];
+    const statuses: string[] = [];
+    const project = {
+      id: 'project-a', root: '/project',
+      browsersByWorktree: { '/workspace': { activeTabId: 'tab-a', tabs: [{ id: 'tab-a', created: true }] } },
+    };
+    const lifecycle = browserLifecycleHarness();
+    lifecycle.browserTabLifecycle(project.browsersByWorktree['/workspace'].tabs[0]).nativeLabel = 'native';
+    const closeBrowserTab = compileFunction<(value: typeof project, tabId: string) => Promise<boolean>>(
+      functionSource(mainJs, 'closeBrowserTab'), {
+        ...lifecycle,
+        activeProject: () => project,
+        ensureBrowserModel: () => project.browsersByWorktree['/workspace'],
+        invalidateBrowserAutomation: async () => false,
+        invoke: async (command: string) => { nativeCalls.push(command); },
+        browserLabelForTab: () => 'project-a:tab-a',
+        setStatus: (message: string) => statuses.push(message),
+        renderBrowserTabs: () => {}, syncProjectBrowser: () => {}, saveWorkspaceSoon: () => {},
+      },
+    );
+
+    await expect(closeBrowserTab(project, 'tab-a')).resolves.toBe(false);
+    expect(nativeCalls).toEqual([]);
+    expect(statuses).toEqual(['browser automation invalidation failed']);
+    expect(project.browsersByWorktree['/workspace'].tabs).toHaveLength(1);
+  });
+
   it('retains tab state and reports native browser destruction failures', async () => {
     const statuses: Array<[string, string]> = [];
     const project: IdentifiedBrowserProjectFixture = {
@@ -853,6 +889,7 @@ describe('Tauri native browser lifecycle', () => {
     expect(calls).toEqual(['browser_navigate']);
     const closing = closeBrowserTab(project, tab.id);
     await Promise.resolve();
+    await Promise.resolve();
     expect(calls).toEqual(['browser_navigate', 'browser_destroy']);
 
     resolveClose();
@@ -1113,6 +1150,32 @@ describe('Tauri native browser lifecycle', () => {
     await expect(navigation).resolves.toBe(true);
     expect(tab).toMatchObject({ created: true, url: 'https://example.com' });
     expect(tab.history).toEqual(['https://old.example', 'https://example.com']);
+  });
+
+  it('aborts native navigation when semantic invalidation fails', async () => {
+    const calls: string[] = [];
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a', url: 'https://old.example', created: true, loading: false,
+      title: 'Old', history: ['https://old.example'], historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    const lifecycle = browserLifecycleHarness();
+    lifecycle.browserTabLifecycle(tab).nativeLabel = 'native';
+    lifecycle.browserTabLifecycle(tab).liveGeneration = 1;
+    const dependencies = browserNavigationDependencies(project, browser, tab, async (command) => {
+      calls.push(command);
+    }, lifecycle);
+    const navigateBrowser = compileFunction<(url: string, options: Record<string, unknown>) => Promise<boolean>>(
+      functionSource(mainJs, 'navigateBrowser'), {
+        ...dependencies,
+        invalidateBrowserAutomation: async () => false,
+      },
+    );
+
+    await expect(navigateBrowser('https://new.example', { tabId: tab.id })).resolves.toBe(false);
+    expect(calls).toEqual([]);
+    expect(tab.url).toBe('https://old.example');
   });
 
   it('updates project A metadata without resurfacing A after switching to project B', async () => {

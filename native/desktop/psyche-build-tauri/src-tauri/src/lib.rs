@@ -14,6 +14,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "macos")]
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+#[cfg(target_os = "macos")]
+use objc2::runtime::AnyObject;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{
+    NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSImage,
+};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSDictionary, NSError};
+#[cfg(target_os = "macos")]
+use objc2_web_kit::WKWebView;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -2545,21 +2557,86 @@ struct BrowserSnapshot {
     height: u32,
 }
 
-/// Captures only an exact child browser webview. Tauri 2 does not currently
-/// expose a stable cross-platform child-WKWebView snapshot API, so this stays
-/// fail-closed until the macOS backend can return a bounded PNG without falling
-/// back to desktop or coordinate capture.
+/// Captures only an exact child browser webview. macOS uses that child's native
+/// WKWebView snapshot API; other platforms fail closed without desktop or
+/// coordinate capture.
 #[tauri::command]
-fn browser_snapshot(app: AppHandle, label: Option<String>) -> Result<BrowserSnapshot, String> {
+async fn browser_snapshot(
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<BrowserSnapshot, String> {
     let label = safe_browser_label(label);
-    let _webview = app
+    let webview = app
         .get_webview(&label)
         .ok_or_else(|| "browser webview missing".to_string())?;
-    let _maximum = MAX_BROWSER_SNAPSHOT_BYTES;
-    #[cfg(target_os = "macos")]
-    return Err("backend_unavailable: exact child WKWebView snapshot is unavailable".to_string());
     #[cfg(not(target_os = "macos"))]
-    Err("backend_unavailable: browser snapshot is unsupported on this platform".to_string())
+    {
+        let _ = webview;
+        return Err(
+            "backend_unavailable: browser snapshot is unsupported on this platform".to_string(),
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        webview
+            .with_webview(move |platform_webview| unsafe {
+                let wk_webview = &*(platform_webview.inner().cast::<WKWebView>());
+                let sender = std::sync::Mutex::new(Some(sender));
+                let completion =
+                    block2::RcBlock::new(move |image: *mut NSImage, _error: *mut NSError| {
+                        let result = (|| {
+                            let image = image
+                                .as_ref()
+                                .ok_or_else(|| "browser snapshot failed".to_string())?;
+                            let tiff = image
+                                .TIFFRepresentation()
+                                .ok_or_else(|| "browser snapshot encoding failed".to_string())?;
+                            let bitmap =
+                                NSBitmapImageRep::imageRepWithData(&tiff).ok_or_else(|| {
+                                    "browser snapshot bitmap is unavailable".to_string()
+                                })?;
+                            let properties =
+                                NSDictionary::<NSBitmapImageRepPropertyKey, AnyObject>::new();
+                            let png = bitmap
+                                .representationUsingType_properties(
+                                    NSBitmapImageFileType::PNG,
+                                    &properties,
+                                )
+                                .ok_or_else(|| {
+                                    "browser snapshot PNG encoding failed".to_string()
+                                })?;
+                            let bytes = png.as_bytes_unchecked();
+                            if bytes.len() > MAX_BROWSER_SNAPSHOT_BYTES {
+                                return Err("browser snapshot exceeds maximum size".to_string());
+                            }
+                            let width = u32::try_from(bitmap.pixelsWide())
+                                .map_err(|_| "browser snapshot width is invalid".to_string())?;
+                            let height = u32::try_from(bitmap.pixelsHigh())
+                                .map_err(|_| "browser snapshot height is invalid".to_string())?;
+                            if width == 0 || height == 0 {
+                                return Err("browser snapshot dimensions are invalid".to_string());
+                            }
+                            Ok(BrowserSnapshot {
+                                png_base64: BASE64_STANDARD.encode(bytes),
+                                width,
+                                height,
+                            })
+                        })();
+                        if let Some(sender) =
+                            sender.lock().ok().and_then(|mut sender| sender.take())
+                        {
+                            let _ = sender.send(result);
+                        }
+                    });
+                wk_webview.takeSnapshotWithConfiguration_completionHandler(None, &completion);
+            })
+            .map_err(|error| error.to_string())?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), receiver)
+            .await
+            .map_err(|_| "browser snapshot timed out".to_string())?
+            .map_err(|_| "browser snapshot callback was dropped".to_string())?
+    }
 }
 
 // ----------------------------------------------------------------------------
