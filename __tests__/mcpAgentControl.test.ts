@@ -2,14 +2,16 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   TOOLS,
+  closeMcpControlClients,
   createMcpControlClientForRoot,
   handleMcpRequest,
   setMcpDeps,
 } from '../src/mcp/server.js';
 
 const restores: Array<() => void> = [];
-afterEach(() => {
+afterEach(async () => {
   while (restores.length) restores.pop()!();
+  await closeMcpControlClients();
   vi.restoreAllMocks();
 });
 
@@ -29,7 +31,7 @@ function payload(response: any): any {
 
 function fakeClient(overrides: Record<string, unknown> = {}): any {
   return {
-    submit: vi.fn(), getState: vi.fn(), actionStatus: vi.fn(), close: vi.fn(),
+    submit: vi.fn(), getState: vi.fn(), actionStatus: vi.fn(), close: vi.fn(async () => undefined),
     ...overrides,
   };
 }
@@ -145,7 +147,7 @@ describe('agent surface MCP tools', () => {
       .mockResolvedValueOnce(client);
     let now = 0;
 
-    await expect(createMcpControlClientForRoot('/symlink/repo', {
+    const borrowed = await createMcpControlClientForRoot('/symlink/repo', {
       canonicalize,
       credentialStoreForCanonicalRoot,
       connect,
@@ -153,7 +155,7 @@ describe('agent surface MCP tools', () => {
       now: () => now,
       sleep: async (delay) => { now += delay; },
       entryPath: '/entry.js',
-    })).resolves.toBe(client);
+    });
 
     expect(canonicalize).toHaveBeenCalledOnce();
     expect(credentialStoreForCanonicalRoot).toHaveBeenCalledWith({
@@ -162,6 +164,7 @@ describe('agent surface MCP tools', () => {
     expect(agentToken).toHaveBeenCalledOnce();
     expect(connect).toHaveBeenCalledTimes(3);
     expect(connect.mock.calls.every(([options]) => options.projectRoot === '/canonical/repo')).toBe(true);
+    await borrowed.close();
   });
 
   it('maps an unavailable action transaction to unknown', async () => {
@@ -172,6 +175,92 @@ describe('agent surface MCP tools', () => {
     expect(payload(await call('psyche_control_action_status', {
       action_id: 'missing-action', project_root: '/repo',
     }))).toEqual({ status: 'unknown', action_id: 'missing-action' });
+  });
+
+  it('releases the control client after every tool operation', async () => {
+    const close = vi.fn(async () => undefined);
+    inject({ controlClientForRoot: vi.fn(async () => fakeClient({
+      close,
+      getState: vi.fn(async () => ({
+        ownerEpoch: 1, sequence: 0, commands: {}, leases: {}, resources: [],
+        capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
+      })),
+    })) });
+
+    await call('psyche_control_list', { project_root: '/repo' });
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('single-flights 32 concurrent cold starts and closes the shared client once', async () => {
+    const canonicalize = vi.fn(async () => '/canonical/repo');
+    const underlying = fakeClient({ projectRoot: '/canonical/repo' });
+    const connect = vi.fn()
+      .mockRejectedValueOnce(connectionError('ENOENT'))
+      .mockResolvedValueOnce(underlying);
+    const spawn = vi.fn(() => ({ unref: vi.fn() } as never));
+    const credentials = { agentToken: vi.fn(async () => 'token') } as any;
+    let now = 0;
+    const options = {
+      canonicalize,
+      credentialStoreForCanonicalRoot: vi.fn(async () => credentials),
+      connect,
+      spawn,
+      now: () => now,
+      sleep: async (delay: number) => { now += delay; },
+      entryPath: '/entry.js',
+    };
+
+    const borrowed = await Promise.all(Array.from(
+      { length: 32 },
+      () => createMcpControlClientForRoot('/repo-link', options),
+    ));
+
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(options.credentialStoreForCanonicalRoot).toHaveBeenCalledOnce();
+    await Promise.all(borrowed.map((client) => client.close()));
+    expect(underlying.close).toHaveBeenCalledOnce();
+  });
+
+  it('server cleanup closes an outstanding shared control client', async () => {
+    const underlying = fakeClient({ projectRoot: '/canonical/repo' });
+    const borrowed = await createMcpControlClientForRoot('/repo', {
+      canonicalize: async () => '/canonical/repo',
+      credentialStoreForCanonicalRoot: async () => ({ agentToken: async () => 'token' } as any),
+      connect: async () => underlying,
+      entryPath: '/entry.js',
+    });
+
+    await closeMcpControlClients();
+    expect(underlying.close).toHaveBeenCalledOnce();
+    await borrowed.close();
+    expect(underlying.close).toHaveBeenCalledOnce();
+  });
+
+  it('coalesces an authentication failure once and allows a fresh later attempt', async () => {
+    const authFailure = new Error('authentication_failed: invalid credentials');
+    const connect = vi.fn()
+      .mockRejectedValueOnce(authFailure)
+      .mockResolvedValueOnce(fakeClient({ projectRoot: '/canonical/repo' }));
+    const options = {
+      canonicalize: async () => '/canonical/repo',
+      credentialStoreForCanonicalRoot: async () => ({ agentToken: async () => 'token' } as any),
+      connect,
+      spawn: vi.fn(),
+      entryPath: '/entry.js',
+    };
+
+    const first = await Promise.allSettled(Array.from(
+      { length: 8 },
+      () => createMcpControlClientForRoot('/repo', options),
+    ));
+    expect(first.every((result) => result.status === 'rejected')).toBe(true);
+    expect(connect).toHaveBeenCalledOnce();
+    expect(options.spawn).not.toHaveBeenCalled();
+
+    const recovered = await createMcpControlClientForRoot('/repo', options);
+    expect(connect).toHaveBeenCalledTimes(2);
+    await recovered.close();
   });
 
   it('contains no direct mutation dependencies', () => {

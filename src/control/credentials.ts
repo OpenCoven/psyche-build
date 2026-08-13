@@ -1,10 +1,10 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { chmod, link, lstat, mkdir, open, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 
 export type ControlPrincipalKind = 'operator' | 'agent' | 'compatibility';
-
 export type ControlCapability = 'read' | 'mutate' | 'delegate';
 
 export interface ControlPrincipal {
@@ -14,11 +14,8 @@ export interface ControlPrincipal {
 }
 
 export interface ControlCredentialStore {
-  /** Resolve a bearer token to a principal, or null when it matches nothing. */
   authenticate(token: string): Promise<ControlPrincipal | null>;
-  /** The operator (TUI / authenticated human device) token. */
   operatorToken(): Promise<string>;
-  /** The agent (MCP) token. */
   agentToken(): Promise<string>;
 }
 
@@ -31,26 +28,18 @@ interface StoredCredentials {
   agentToken: string;
 }
 
-/**
- * A server-minted principal for translated legacy v0 automation.
- *
- * Legacy clients never authenticate against the credential store; the owner
- * stamps this principal so their commands still carry an explicit,
- * non-delegating identity through the single authority.
- */
+/** Per-path coordination complements the cross-process atomic link below. */
+const credentialLoads = new Map<string, Promise<StoredCredentials>>();
+
 export function compatibilityPrincipal(id: string): ControlPrincipal {
   return { id, kind: 'compatibility', capabilities: COMPATIBILITY_CAPABILITIES };
 }
 
-/** The read-only capability set advertised for each authenticated kind. */
 export function capabilitiesForKind(kind: ControlPrincipalKind): readonly ControlCapability[] {
   switch (kind) {
-    case 'operator':
-      return OPERATOR_CAPABILITIES;
-    case 'agent':
-      return AGENT_CAPABILITIES;
-    case 'compatibility':
-      return COMPATIBILITY_CAPABILITIES;
+    case 'operator': return OPERATOR_CAPABILITIES;
+    case 'agent': return AGENT_CAPABILITIES;
+    case 'compatibility': return COMPATIBILITY_CAPABILITIES;
   }
 }
 
@@ -61,67 +50,44 @@ function constantTimeEquals(left: string, right: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-/**
- * A file-backed credential store scoped to one project.
- *
- * Tokens are generated on first use and persisted with mode `0600` under the
- * project runtime directory. The store only ever authenticates the operator
- * and agent principals; compatibility principals are minted by the server.
- */
+/** File-backed project credentials with defensive project canonicalization. */
 export async function createControlCredentialStore(options: {
   projectRoot: string;
   filePath?: string;
 }): Promise<ControlCredentialStore> {
   const root = await canonicalizeProjectRoot(options.projectRoot);
+  const filePath = options.filePath === undefined
+    ? undefined
+    : path.join(root, path.relative(path.resolve(options.projectRoot), path.resolve(options.filePath)));
   return createControlCredentialStoreForCanonicalRoot({
     canonicalProjectRoot: root,
-    ...(options.filePath === undefined ? {} : { filePath: options.filePath }),
+    ...(filePath === undefined ? {} : { filePath }),
   });
 }
 
-/**
- * Build a credential store for a root already canonicalized by the caller.
- *
- * Owner-bootstrap code uses this seam so token loading, endpoint derivation,
- * and connection retries share one identity resolution. General callers
- * should use createControlCredentialStore, which retains the realpath guard.
- */
+/** Trusted seam for an owner bootstrap that already canonicalized the root. */
 export async function createControlCredentialStoreForCanonicalRoot(options: {
   canonicalProjectRoot: string;
   filePath?: string;
 }): Promise<ControlCredentialStore> {
   const root = options.canonicalProjectRoot;
-  const filePath = options.filePath
-    ?? path.join(root, '.psyche', 'runtime', 'control-credentials.json');
-
+  const filePath = path.resolve(
+    options.filePath ?? path.join(root, '.psyche', 'runtime', 'control-credentials.json'),
+  );
   let cache: StoredCredentials | null = null;
 
   const load = async (): Promise<StoredCredentials> => {
     if (cache) return cache;
-    try {
-      const parsed = JSON.parse(await readFile(filePath, 'utf8')) as Partial<StoredCredentials>;
-      if (typeof parsed.operatorToken === 'string' && typeof parsed.agentToken === 'string') {
-        // Best-effort re-assert 0600 in case an older version or external edit
-        // left the token file with looser permissions.
-        try {
-          await chmod(filePath, 0o600);
-        } catch {
-          // Non-fatal: on platforms without POSIX modes this is a no-op.
-        }
-        cache = { operatorToken: parsed.operatorToken, agentToken: parsed.agentToken };
-        return cache;
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    let pending = credentialLoads.get(filePath);
+    if (!pending) {
+      pending = loadOrCreateCredentials(root, filePath);
+      credentialLoads.set(filePath, pending);
+      void pending.finally(() => {
+        if (credentialLoads.get(filePath) === pending) credentialLoads.delete(filePath);
+      }).catch(() => undefined);
     }
-    const created: StoredCredentials = {
-      operatorToken: randomBytes(32).toString('hex'),
-      agentToken: randomBytes(32).toString('hex'),
-    };
-    await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-    await writeFile(filePath, `${JSON.stringify(created)}\n`, { mode: 0o600 });
-    cache = created;
-    return created;
+    cache = await pending;
+    return cache;
   };
 
   return {
@@ -143,4 +109,99 @@ export async function createControlCredentialStoreForCanonicalRoot(options: {
       return (await load()).agentToken;
     },
   };
+}
+
+async function loadOrCreateCredentials(
+  canonicalRoot: string,
+  filePath: string,
+): Promise<StoredCredentials> {
+  await ensureSafeCredentialParent(canonicalRoot, filePath);
+  const existing = await readStoredCredentials(filePath);
+  if (existing) return existing;
+
+  const created: StoredCredentials = {
+    operatorToken: randomBytes(32).toString('hex'),
+    agentToken: randomBytes(32).toString('hex'),
+  };
+  const temporary = `${filePath}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
+  const handle = await open(temporary, 'wx', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(created)}\n`, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+
+  try {
+    // A hard link publishes the fully written inode without overwriting a
+    // winner from another process. Unlike rename, this is no-clobber atomic.
+    await link(temporary, filePath);
+    return created;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    const winner = await readStoredCredentials(filePath);
+    if (!winner) throw unsafeCredentialPath('credential winner disappeared during creation');
+    return winner;
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
+}
+
+async function readStoredCredentials(filePath: string): Promise<StoredCredentials | undefined> {
+  let stats;
+  try {
+    stats = await lstat(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    throw unsafeCredentialPath('credential path must be a regular file');
+  }
+  let parsed: Partial<StoredCredentials>;
+  const handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const openedStats = await handle.stat();
+    if (!openedStats.isFile()) throw unsafeCredentialPath('credential path must be a regular file');
+    await handle.chmod(0o600);
+    parsed = JSON.parse(await handle.readFile('utf8')) as Partial<StoredCredentials>;
+  } catch {
+    throw unsafeCredentialPath('credential file is invalid');
+  } finally {
+    await handle.close();
+  }
+  if (
+    typeof parsed.operatorToken !== 'string' || !parsed.operatorToken
+    || typeof parsed.agentToken !== 'string' || !parsed.agentToken
+  ) {
+    throw unsafeCredentialPath('credential file is invalid');
+  }
+  return { operatorToken: parsed.operatorToken, agentToken: parsed.agentToken };
+}
+
+async function ensureSafeCredentialParent(canonicalRoot: string, filePath: string): Promise<void> {
+  const relative = path.relative(canonicalRoot, filePath);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw unsafeCredentialPath('credential path escapes the canonical project');
+  }
+  const parent = path.dirname(filePath);
+  const parentRelative = path.relative(canonicalRoot, parent);
+  let current = canonicalRoot;
+  for (const component of parentRelative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, component);
+    try {
+      await mkdir(current, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    const stats = await lstat(current);
+    if (stats.isSymbolicLink() || !stats.isDirectory()) {
+      throw unsafeCredentialPath('credential parent contains an unsafe path component');
+    }
+  }
+  if (parent !== canonicalRoot) await chmod(parent, 0o700);
+}
+
+function unsafeCredentialPath(message: string): Error & { code: 'credential_path_unsafe' } {
+  return Object.assign(new Error(message), { code: 'credential_path_unsafe' as const });
 }

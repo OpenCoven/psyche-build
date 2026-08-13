@@ -205,10 +205,14 @@ export class ControlClient {
     const recent = snapshot.receipts.find((receipt) => receipt.actionId === actionId);
     if (recent) return recent;
     const pageLimit = 256;
-    let afterSequence = 0;
+    const historyLimit = 1_000;
+    const maxPages = Math.ceil(historyLimit / pageLimit);
+    let afterSequence = Math.max(0, snapshot.sequence - historyLimit);
     let found: ActionReceipt | undefined;
-    for (;;) {
-      const page = await this.readEvents(afterSequence, pageLimit);
+    for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
+      const remaining = historyLimit - pageNumber * pageLimit;
+      const limit = Math.min(pageLimit, remaining);
+      const page = await this.readEvents(afterSequence, limit);
       for (const event of page.events) {
         if (!event || typeof event !== 'object') continue;
         const payload = (event as { payload?: unknown }).payload;
@@ -216,9 +220,10 @@ export class ControlClient {
         const receipt = (payload as { receipt?: unknown }).receipt;
         if (isActionReceipt(receipt) && receipt.actionId === actionId) found = receipt;
       }
-      if (page.events.length < pageLimit || page.nextSequence <= afterSequence) return found;
+      if (page.events.length < limit || page.nextSequence <= afterSequence) return found;
       afterSequence = page.nextSequence;
     }
+    return found;
   }
 
   async close(): Promise<void> {

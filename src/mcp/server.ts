@@ -15,6 +15,7 @@ import {
   type EnsureHostOptions,
 } from '../control/hostProcess.js';
 import { canonicalizeProjectRoot } from '../control/projectIdentity.js';
+import { controlEndpointForProject } from '../control/endpoint.js';
 import type {
   ActionReceipt,
   CommandOutcome,
@@ -70,6 +71,7 @@ export interface McpControlClient {
   submit(command: ControlCommandInput): Promise<CommandOutcome>;
   getState(): Promise<ControlSnapshot>;
   actionStatus(actionId: string): Promise<ActionReceipt | undefined>;
+  close(): Promise<void>;
 }
 
 export interface McpDeps {
@@ -106,24 +108,108 @@ export interface McpControlClientBootstrapOptions {
   entryPath?: string;
 }
 
+interface SharedControlClient {
+  key: string;
+  canonicalRoot: string;
+  refs: number;
+  promise: Promise<ControlClient>;
+  closePromise?: Promise<void>;
+}
+
+const sharedControlClients = new Map<string, SharedControlClient>();
+const controlStartupFlights = new Map<string, Promise<ControlClient>>();
+
 export async function createMcpControlClientForRoot(
   projectRoot: string,
   options: McpControlClientBootstrapOptions = {},
-): Promise<ControlClient> {
+): Promise<McpControlClient> {
   const canonicalRoot = await (options.canonicalize ?? canonicalizeProjectRoot)(projectRoot);
+  const key = `${canonicalRoot}\0${controlEndpointForProject(canonicalRoot)}`;
+  let shared = sharedControlClients.get(key);
+  if (!shared) {
+    let startup = controlStartupFlights.get(key);
+    if (!startup) {
+      startup = startMcpControlClient(canonicalRoot, options);
+      controlStartupFlights.set(key, startup);
+      void startup.finally(() => {
+        if (controlStartupFlights.get(key) === startup) controlStartupFlights.delete(key);
+      }).catch(() => undefined);
+    }
+    shared = { key, canonicalRoot, refs: 0, promise: startup };
+    sharedControlClients.set(key, shared);
+    void startup.catch(() => {
+      if (sharedControlClients.get(key) === shared) sharedControlClients.delete(key);
+    });
+  }
+  shared.refs += 1;
+  try {
+    await shared.promise;
+  } catch (error) {
+    shared.refs -= 1;
+    throw error;
+  }
+  return borrowedControlClient(shared);
+}
+
+async function startMcpControlClient(
+  canonicalRoot: string,
+  options: McpControlClientBootstrapOptions,
+): Promise<ControlClient> {
   const credentials = await (
     options.credentialStoreForCanonicalRoot ?? createControlCredentialStoreForCanonicalRoot
   )({ canonicalProjectRoot: canonicalRoot });
   const token = await credentials.agentToken();
   return ensureCanonicalHostControlPlane(canonicalRoot, {
-    token,
-    clientName: 'psyche-mcp',
-    entryPath: options.entryPath ?? entryPath,
+    token, clientName: 'psyche-mcp', entryPath: options.entryPath ?? entryPath,
     ...(options.connect === undefined ? {} : { connect: options.connect }),
     ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
   });
+}
+
+function borrowedControlClient(shared: SharedControlClient): McpControlClient {
+  let released = false;
+  const use = async <T>(operation: (client: ControlClient) => Promise<T>): Promise<T> => {
+    try {
+      return await operation(await shared.promise);
+    } catch (error) {
+      await invalidateSharedControlClient(shared);
+      throw error;
+    }
+  };
+  return {
+    projectRoot: shared.canonicalRoot,
+    submit: (command) => use((client) => client.submit(command)),
+    getState: () => use((client) => client.getState()),
+    actionStatus: (actionId) => use((client) => client.actionStatus(actionId)),
+    async close() {
+      if (released) return;
+      released = true;
+      shared.refs -= 1;
+      if (shared.refs <= 0) await closeSharedControlClient(shared);
+    },
+  };
+}
+
+async function invalidateSharedControlClient(shared: SharedControlClient): Promise<void> {
+  if (sharedControlClients.get(shared.key) === shared) sharedControlClients.delete(shared.key);
+  await closeSharedControlClient(shared);
+}
+
+async function closeSharedControlClient(shared: SharedControlClient): Promise<void> {
+  if (sharedControlClients.get(shared.key) === shared) sharedControlClients.delete(shared.key);
+  shared.closePromise ??= shared.promise.then(
+    (client) => client.close(),
+    () => undefined,
+  );
+  await shared.closePromise;
+}
+
+export async function closeMcpControlClients(): Promise<void> {
+  const active = [...sharedControlClients.values()];
+  sharedControlClients.clear();
+  await Promise.all(active.map((shared) => closeSharedControlClient(shared)));
 }
 
 export const defaultMcpDeps: McpDeps = {
@@ -211,14 +297,27 @@ function command(
   } as ControlCommandInput;
 }
 
+async function withControlClient<T>(
+  projectRoot: string,
+  operation: (client: McpControlClient) => Promise<T>,
+): Promise<T> {
+  const client = await deps.controlClientForRoot(projectRoot);
+  try {
+    return await operation(client);
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
 async function submit(
   args: Record<string, unknown>,
   kind: ControlCommandInput['kind'],
   payload: unknown,
 ): Promise<CommandOutcome> {
   const requestedRoot = resolveProjectRoot(args);
-  const client = await deps.controlClientForRoot(requestedRoot);
-  return client.submit(command(kind, client.projectRoot ?? requestedRoot, payload));
+  return withControlClient(requestedRoot, (client) => (
+    client.submit(command(kind, client.projectRoot ?? requestedRoot, payload))
+  ));
 }
 
 function actionResult(outcome: CommandOutcome): ActionReceipt | CommandOutcome {
@@ -249,19 +348,20 @@ export const TOOLS: ToolDef[] = [
     inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
     handler: async (args) => {
       const requestedRoot = resolveProjectRoot(args);
-      const client = await deps.controlClientForRoot(requestedRoot);
-      const projectRoot = client.projectRoot ?? requestedRoot;
-      const snapshot = await client.getState();
-      return {
-        project_root: projectRoot,
-        owner_epoch: snapshot.ownerEpoch,
-        sequence: snapshot.sequence,
-        resources: snapshot.resources,
-        leases: snapshot.capabilityLeases,
-        lease_requests: snapshot.leaseRequests,
-        approvals: snapshot.approvals,
-        receipts: snapshot.receipts,
-      };
+      return withControlClient(requestedRoot, async (client) => {
+        const projectRoot = client.projectRoot ?? requestedRoot;
+        const snapshot = await client.getState();
+        return {
+          project_root: projectRoot,
+          owner_epoch: snapshot.ownerEpoch,
+          sequence: snapshot.sequence,
+          resources: snapshot.resources,
+          leases: snapshot.capabilityLeases,
+          lease_requests: snapshot.leaseRequests,
+          approvals: snapshot.approvals,
+          receipts: snapshot.receipts,
+        };
+      });
     },
   },
   {
@@ -288,35 +388,32 @@ export const TOOLS: ToolDef[] = [
         invalid('psyche_control_lease supports only request, status, and release');
       }
       const projectRoot = resolveProjectRoot(args);
-      const client = await deps.controlClientForRoot(projectRoot);
-      const canonicalRoot = client.projectRoot ?? projectRoot;
-      if (operation === 'status') {
-        const snapshot = await client.getState();
-        const leaseId = typeof args.lease_id === 'string' ? args.lease_id : undefined;
-        const requestId = typeof args.request_id === 'string' ? args.request_id : undefined;
-        return {
-          leases: snapshot.capabilityLeases.filter((lease) => (
-            lease.taskId === taskId && (!leaseId || lease.id === leaseId)
-          )),
-          requests: snapshot.leaseRequests.filter((request) => (
-            request.taskId === taskId && (!requestId || request.id === requestId)
-          )),
-        };
-      }
-      if (operation === 'release') {
-        return client.submit(command('lease.release', canonicalRoot, {
+      return withControlClient(projectRoot, async (client) => {
+        const canonicalRoot = client.projectRoot ?? projectRoot;
+        if (operation === 'status') {
+          const snapshot = await client.getState();
+          const leaseId = typeof args.lease_id === 'string' ? args.lease_id : undefined;
+          const requestId = typeof args.request_id === 'string' ? args.request_id : undefined;
+          return {
+            leases: snapshot.capabilityLeases.filter((lease) => (
+              lease.taskId === taskId && (!leaseId || lease.id === leaseId)
+            )),
+            requests: snapshot.leaseRequests.filter((request) => (
+              request.taskId === taskId && (!requestId || request.id === requestId)
+            )),
+          };
+        }
+        if (operation === 'release') return client.submit(command('lease.release', canonicalRoot, {
           taskId,
           leaseId: requiredString(args, 'lease_id'),
           leaseRevision: requiredPositiveInteger(args, 'lease_revision'),
         }));
-      }
-      if (!Array.isArray(args.grants) || args.grants.length === 0) invalid('lease request requires `grants`');
-      const grants = args.grants as CapabilityLeaseGrantItem[];
-      return client.submit(command('lease.request', canonicalRoot, {
-        taskId,
-        ttlMs: requiredPositiveInteger(args, 'ttl_ms'),
-        grants,
-      }));
+        if (!Array.isArray(args.grants) || args.grants.length === 0) invalid('lease request requires `grants`');
+        const grants = args.grants as CapabilityLeaseGrantItem[];
+        return client.submit(command('lease.request', canonicalRoot, {
+          taskId, ttlMs: requiredPositiveInteger(args, 'ttl_ms'), grants,
+        }));
+      });
     },
   },
   {
@@ -451,8 +548,9 @@ export const TOOLS: ToolDef[] = [
     },
     handler: async (args) => {
       const actionId = requiredString(args, 'action_id');
-      const receipt = await (await deps.controlClientForRoot(resolveProjectRoot(args))).actionStatus(actionId);
-      return receipt ?? { status: 'unknown', action_id: actionId };
+      return withControlClient(resolveProjectRoot(args), async (client) => (
+        (await client.actionStatus(actionId)) ?? { status: 'unknown', action_id: actionId }
+      ));
     },
   },
   {
@@ -461,11 +559,12 @@ export const TOOLS: ToolDef[] = [
     inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
     handler: async (args) => {
       const requestedRoot = resolveProjectRoot(args);
-      const client = await deps.controlClientForRoot(requestedRoot);
-      const projectRoot = client.projectRoot ?? requestedRoot;
-      const snapshot = await client.getState();
-      const panes = snapshot.resources.filter((resource) => resource.kind === 'pane');
-      return { project_root: projectRoot, count: panes.length, panes };
+      return withControlClient(requestedRoot, async (client) => {
+        const projectRoot = client.projectRoot ?? requestedRoot;
+        const snapshot = await client.getState();
+        const panes = snapshot.resources.filter((resource) => resource.kind === 'pane');
+        return { project_root: projectRoot, count: panes.length, panes };
+      });
     },
   },
   {
@@ -482,17 +581,16 @@ export const TOOLS: ToolDef[] = [
       const prompt = requiredString(args, 'prompt');
       if (!Array.isArray(args.lanes) || args.lanes.length === 0) invalid('requires at least one lane');
       const requestedRoot = resolveProjectRoot(args);
-      const client = await deps.controlClientForRoot(requestedRoot);
-      const projectRoot = client.projectRoot ?? requestedRoot;
-      const request: OrchestrationTaskRequest = {
-        taskId: typeof args.task_id === 'string' && args.task_id.trim() ? args.task_id.trim() : `mcp-task-${deps.randomId()}`,
-        projectRoot,
-        prompt,
-        lanes: args.lanes as OrchestrationTaskRequest['lanes'],
-        ...(typeof args.branch === 'string' ? { startPointBranch: args.branch } : {}),
-        ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}),
-      };
-      return client.submit(command('orchestration.execute', projectRoot, { request }));
+      return withControlClient(requestedRoot, (client) => {
+        const projectRoot = client.projectRoot ?? requestedRoot;
+        const request: OrchestrationTaskRequest = {
+          taskId: typeof args.task_id === 'string' && args.task_id.trim() ? args.task_id.trim() : `mcp-task-${deps.randomId()}`,
+          projectRoot, prompt, lanes: args.lanes as OrchestrationTaskRequest['lanes'],
+          ...(typeof args.branch === 'string' ? { startPointBranch: args.branch } : {}),
+          ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}),
+        };
+        return client.submit(command('orchestration.execute', projectRoot, { request }));
+      });
     },
   },
   {
@@ -509,18 +607,19 @@ export const TOOLS: ToolDef[] = [
       const auth = leaseAuthorization(args);
       if (!auth) return leaseMissing();
       const requestedRoot = resolveProjectRoot(args);
-      const client = await deps.controlClientForRoot(requestedRoot);
-      const projectRoot = client.projectRoot ?? requestedRoot;
-      return actionResult(await client.submit(command('pane.action', projectRoot, {
-        ...auth,
-        projectId: projectRoot,
-        action: {
-          kind: 'create', cwd: projectRoot,
-          agent: requiredString(args, 'agent'), prompt: requiredString(args, 'prompt'),
-          ...(typeof args.branch === 'string' ? { branch: args.branch } : {}),
-          ...(typeof args.title === 'string' ? { title: args.title } : {}),
-        } as never,
-      })));
+      return withControlClient(requestedRoot, async (client) => {
+        const projectRoot = client.projectRoot ?? requestedRoot;
+        return actionResult(await client.submit(command('pane.action', projectRoot, {
+          ...auth,
+          projectId: projectRoot,
+          action: {
+            kind: 'create', cwd: projectRoot,
+            agent: requiredString(args, 'agent'), prompt: requiredString(args, 'prompt'),
+            ...(typeof args.branch === 'string' ? { branch: args.branch } : {}),
+            ...(typeof args.title === 'string' ? { title: args.title } : {}),
+          } as never,
+        })));
+      });
     },
   },
   {
@@ -661,7 +760,11 @@ export async function runMcpServer(): Promise<void> {
     }
     void dispatch(request);
   });
-  await new Promise<void>((resolve) => { lines.on('close', resolve); });
+  try {
+    await new Promise<void>((resolve) => { lines.on('close', resolve); });
+  } finally {
+    await closeMcpControlClients();
+  }
 }
 
 async function readWorktrees(projectRoot: string): Promise<readonly WorktreeSummary[]> {

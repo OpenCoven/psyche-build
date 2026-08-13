@@ -29,6 +29,7 @@ function client(overrides: Record<string, unknown> = {}): any {
       resources: [], capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
     })),
     actionStatus: vi.fn(),
+    close: vi.fn(async () => undefined),
     ...overrides,
   };
 }

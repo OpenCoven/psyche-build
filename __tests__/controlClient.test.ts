@@ -189,6 +189,62 @@ describe('ControlClient over the socket transport', () => {
       .toEqual(['lease.request', 'approval.resolve']);
   });
 
+  it('bounds missing action history lookup to the recent journal window', async () => {
+    const readEvents = vi.fn((after: number, limit?: number) => ({
+      events: Array.from({ length: limit ?? 0 }, (_, index) => ({
+        sequence: after + index + 1, kind: 'command.succeeded', payload: {},
+      })),
+      nextSequence: after + (limit ?? 0),
+      gap: false,
+    }));
+    const harness = await startHarness({
+      snapshot: () => ({
+        ownerEpoch: 7, sequence: 50_000, commands: {}, leases: {}, resources: [],
+        capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
+      }),
+      readEvents,
+    });
+    const client = await ControlClient.connect({
+      projectRoot: harness.projectRoot, endpoint: harness.endpoint,
+      token: harness.operatorToken, clientName: 'bounded-history',
+    });
+    cleanups.push(() => client.close());
+
+    await expect(client.actionStatus('too-old-or-missing')).resolves.toBeUndefined();
+    expect(readEvents.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(readEvents.mock.calls[0][0]).toBeGreaterThanOrEqual(49_000);
+  });
+
+  it('recovers a recent receipt from the bounded tail of a large journal', async () => {
+    const receipt = {
+      schema: 'psyche.control.receipt/v1' as const,
+      actionId: 'recent-large-journal', state: 'succeeded' as const,
+      resource: { kind: 'pane' as const, id: 'pane-1', generation: 1 },
+      createdAt: '2026-08-12T12:00:00.000Z', completedAt: '2026-08-12T12:00:01.000Z',
+    };
+    const readEvents = vi.fn((after: number) => ({
+      events: [{ sequence: after + 1, kind: 'command.succeeded', payload: { receipt } }],
+      nextSequence: after + 1,
+      gap: false,
+    }));
+    const harness = await startHarness({
+      snapshot: () => ({
+        ownerEpoch: 7, sequence: 50_000, commands: {}, leases: {}, resources: [],
+        capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
+      }),
+      readEvents,
+    });
+    const client = await ControlClient.connect({
+      projectRoot: harness.projectRoot, endpoint: harness.endpoint,
+      token: harness.operatorToken, clientName: 'recent-history',
+    });
+    cleanups.push(() => client.close());
+
+    await expect(client.actionStatus(receipt.actionId)).resolves.toEqual(receipt);
+    expect(readEvents).toHaveBeenCalledOnce();
+    expect(readEvents.mock.calls[0][0]).toBe(49_000);
+  });
+
   it.each([
     ['failed', 'effect_failed'],
     ['unknown', 'effect_unknown'],

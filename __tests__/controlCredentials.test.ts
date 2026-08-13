@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -81,6 +81,47 @@ describe('control credential store', () => {
 
     const second = await createControlCredentialStore({ projectRoot: root, filePath });
     expect(await second.operatorToken()).toBe(operatorToken);
+  });
+
+  it('atomically converges concurrent stores on the on-disk credentials', async () => {
+    const root = await tempProject();
+    const filePath = path.join(root, '.psyche', 'runtime', 'control-credentials.json');
+    const stores = await Promise.all(Array.from(
+      { length: 64 },
+      () => createControlCredentialStore({ projectRoot: root, filePath }),
+    ));
+    const tokens = await Promise.all(stores.map(async (store) => ({
+      operator: await store.operatorToken(),
+      agent: await store.agentToken(),
+    })));
+    const onDisk = JSON.parse(await readFile(filePath, 'utf8'));
+
+    expect(new Set(tokens.map((token) => token.operator))).toEqual(new Set([onDisk.operatorToken]));
+    expect(new Set(tokens.map((token) => token.agent))).toEqual(new Set([onDisk.agentToken]));
+    expect((await stat(filePath)).mode & 0o777).toBe(0o600);
+  });
+
+  it('rejects a symlink credential target', async () => {
+    const root = await tempProject();
+    const victim = path.join(root, 'victim.json');
+    const filePath = path.join(root, 'control-credentials.json');
+    await symlink(victim, filePath);
+
+    const store = await createControlCredentialStore({ projectRoot: root, filePath });
+    await expect(store.agentToken()).rejects.toMatchObject({ code: 'credential_path_unsafe' });
+  });
+
+  it('rejects a symlink in the credential parent path', async () => {
+    const root = await tempProject();
+    const outside = await tempProject();
+    const linkedParent = path.join(root, '.psyche');
+    await symlink(outside, linkedParent);
+
+    const store = await createControlCredentialStore({
+      projectRoot: root,
+      filePath: path.join(linkedParent, 'runtime', 'control-credentials.json'),
+    });
+    await expect(store.agentToken()).rejects.toMatchObject({ code: 'credential_path_unsafe' });
   });
 });
 
