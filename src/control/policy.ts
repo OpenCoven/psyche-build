@@ -1,9 +1,18 @@
 import type { SurfaceCapability } from './capabilityLeases.js';
-import type { BrowserSemanticAction, PaneAction } from './types.js';
+import type {
+  BrowserSemanticAction,
+  BrowserSemanticMetadata,
+  PaneAction,
+} from './types.js';
 
 export interface PolicyClassification {
   readonly decision: 'allow' | 'approval';
   readonly capability: SurfaceCapability;
+}
+
+export interface BrowserPolicyAction {
+  readonly kind: BrowserSemanticAction['kind'];
+  readonly semantic?: BrowserSemanticMetadata;
 }
 
 declare const browserRiskContextBrand: unique symbol;
@@ -108,14 +117,58 @@ export function createBrowserPolicyAuthority(): BrowserPolicyAuthority {
   return authority;
 }
 
+export function classifyBrowserAction(action: BrowserPolicyAction): PolicyClassification;
 export function classifyBrowserAction(
   action: BrowserSemanticAction,
   risk: BrowserResolvedRiskContext | undefined,
   authority: BrowserPolicyAuthority,
+): PolicyClassification;
+export function classifyBrowserAction(
+  action: BrowserPolicyAction,
+  risk?: BrowserResolvedRiskContext,
+  authority?: BrowserPolicyAuthority,
 ): PolicyClassification {
-  const classify = authorityClassifiers.get(authority);
-  if (!classify) return capabilityDenied(authority);
-  return classify(action, risk);
+  if (authority !== undefined || risk !== undefined) {
+    const classify = authority && authorityClassifiers.get(authority);
+    if (!classify) return capabilityDenied(authority);
+    return classify(action as BrowserSemanticAction, risk);
+  }
+  return classifyBrowserActionDirect(action);
+}
+
+function classifyBrowserActionDirect(action: BrowserPolicyAction): PolicyClassification {
+  if (!isAction(action)) return capabilityDenied(action);
+  switch (action.kind) {
+    case 'click':
+      return action.semantic?.submit === true
+        ? POLICY.browserInteractApproval
+        : POLICY.browserInteract;
+    case 'type':
+      return action.semantic?.secret === true
+        ? POLICY.browserInteractApproval
+        : POLICY.browserInteract;
+    case 'select':
+    case 'scroll':
+    case 'focus':
+      return POLICY.browserInteract;
+    case 'submit':
+    case 'upload':
+    case 'download':
+    case 'permission_response':
+      return POLICY.browserInteractApproval;
+    case 'navigate':
+      return POLICY.browserNavigate;
+    case 'reload':
+    case 'back':
+    case 'forward':
+      return POLICY.browserHistory;
+    case 'screenshot':
+      return POLICY.browserScreenshot;
+    case 'close':
+      return POLICY.browserClose;
+    default:
+      return assertNever(action.kind);
+  }
 }
 
 function classifyBrowserActionWithTrust(

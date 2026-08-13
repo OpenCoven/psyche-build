@@ -220,6 +220,9 @@ export class ApprovalStore {
     status: 'approved' | 'denied',
   ): Approval {
     const now = this.clock();
+    if (!isNonemptyString(actorId) || actorId.trim().length === 0) {
+      throw codedError('approval_identity_mismatch', 'operator identity is required');
+    }
     const approval = this.requireCurrent(id, now);
     assertDigest(approval, payloadDigest);
     assertStoredDigest(approval);

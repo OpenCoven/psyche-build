@@ -233,6 +233,16 @@ describe('ApprovalStore', () => {
     );
   });
 
+  it.each(['approve', 'deny'] as const)('requires an operator identity to %s', (transition) => {
+    const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
+    const pending = store.request(baseRequest());
+
+    expect(() => store[transition](pending.id, '', pending.payloadDigest)).toThrowError(
+      expect.objectContaining({ code: 'approval_identity_mismatch' }),
+    );
+    expect(store.snapshot()[0].status).toBe('pending');
+  });
+
   it('expires at the exact five-minute boundary', () => {
     let now = Date.parse('2026-08-12T12:00:00.000Z');
     const store = new ApprovalStore(() => new Date(now));
