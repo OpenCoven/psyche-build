@@ -133,6 +133,15 @@ export class ApprovalStore {
   request(input: ApprovalRequest): Approval {
     const now = this.clock();
     this.expireAt(now);
+    return this.requestAt(input, now);
+  }
+
+  /** Request after the caller has explicitly consumed expiry transitions. */
+  requestCurrent(input: ApprovalRequest): Approval {
+    return this.requestAt(input, this.clock());
+  }
+
+  private requestAt(input: ApprovalRequest, now: Date): Approval {
     const identity = copyIdentity(input);
     const payloadDigest = digestIdentity(identity);
     const existingId = this.approvalIdsByAction.get(identity.actionId);
@@ -228,6 +237,11 @@ export class ApprovalStore {
   snapshot(): readonly Approval[] {
     const now = this.clock();
     this.expireAt(now);
+    return this.peek();
+  }
+
+  /** Read current records without causing expiry transitions. */
+  peek(): readonly Approval[] {
     return Object.freeze([...this.approvals.values()]);
   }
 

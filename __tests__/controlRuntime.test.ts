@@ -787,6 +787,51 @@ describe('ControlRuntime', () => {
     }));
   });
 
+  it('terminalizes expired approval A when approval-requiring B arrives without polling', async () => {
+    let now = new Date('2026-08-12T12:00:00.000Z');
+    let approvalId = 0;
+    const clock = () => now;
+    const journal = createMemoryJournal();
+    const surfaces = new SurfaceRegistry();
+    const tab = surfaces.upsertBrowserTab({ id: 'rolling-expiry-tab', projectRoot: '/repo',
+      worktreeRoot: '/repo', providerId: 'provider', webviewLabel: 'rolling',
+      url: 'https://example.test', title: 'Rolling', loading: false,
+      viewport: { width: 800, height: 600 } });
+    const capabilityLeases = new CapabilityLeaseStore(clock, 7);
+    const approvals = new ApprovalStore(clock, () => `rolling-approval-${++approvalId}`);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, surfaces,
+      capabilityLeases, approvals });
+    const grant = await runtime.submit(command({ id: 'rolling-grant', idempotencyKey: 'rolling-grant',
+      kind: 'lease.grant', ownerEpoch: 7, payload: { requestId: 'rolling-request', actorId: 'rolling-agent',
+        taskId: 'rolling-task', ttlMs: 10 * 60_000, grants: [{ target: { kind: 'browser_tab', id: tab.id,
+          generation: tab.generation }, capabilities: ['browser.script'] }] } }));
+    const lease = (grant as { value: { lease: { id: string; revision: number } } }).value.lease;
+    const scriptAction = (id: string, source: string) => command({ id, idempotencyKey: id,
+      kind: 'browser.script', ownerEpoch: 7, actor: { id: 'rolling-agent', kind: 'psyche' }, payload: {
+        taskId: 'rolling-task', leaseId: lease.id, leaseRevision: lease.revision, tabId: tab.id,
+        generation: tab.generation, source,
+      } });
+    await expect(runtime.submit(scriptAction('rolling-a', 'return secretA')))
+      .resolves.toMatchObject({ status: 'succeeded', value: { state: 'approval_required' } });
+    now = new Date('2026-08-12T12:05:01.000Z');
+    await expect(runtime.submit(scriptAction('rolling-b', 'return secretB')))
+      .resolves.toMatchObject({ status: 'succeeded', value: { state: 'approval_required' } });
+    expect(runtime.snapshot().receipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ actionId: 'rolling-a', state: 'failed', code: 'approval_expired' }),
+      expect.objectContaining({ actionId: 'rolling-b', state: 'approval_required' }),
+    ]));
+    await vi.waitFor(() => expect(journal.read()).toContainEqual(expect.objectContaining({
+      kind: 'command.failed', payload: expect.objectContaining({
+        commandId: 'rolling-a', idempotencyKey: 'rolling-a',
+        receipt: expect.objectContaining({ actionId: 'rolling-a', code: 'approval_expired' }),
+      }),
+    })));
+    expect(JSON.stringify(runtime.snapshot())).not.toContain('secretA');
+    expect(JSON.stringify(journal.read())).not.toContain('secretA');
+    expect(JSON.stringify(journal.read())).not.toContain('secretB');
+    expect(handlers.runBrowserScript).not.toHaveBeenCalled();
+  });
+
   it('fails approval resumption after the resource generation changes', async () => {
     const harness = await createBrowserActionHarness();
     const approval = await requestReviewApproval(harness);

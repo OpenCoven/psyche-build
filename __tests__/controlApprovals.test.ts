@@ -230,6 +230,15 @@ describe('ApprovalStore', () => {
     );
   });
 
+  it('peeks without causing an implicit expiry transition', () => {
+    let now = Date.parse('2026-08-12T12:00:00.000Z');
+    const store = new ApprovalStore(() => new Date(now));
+    const pending = store.request(baseRequest());
+    now += AGENT_CONTROL_LIMITS.approvalTtlMs;
+    expect(store.peek()).toEqual([pending]);
+    expect(store.expire()).toEqual([expect.objectContaining({ id: pending.id, status: 'expired' })]);
+  });
+
   it('revokes approvals for a lease and all approvals fail closed', () => {
     const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
     const first = store.request(baseRequest());

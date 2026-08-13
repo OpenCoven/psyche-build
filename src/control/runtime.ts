@@ -204,7 +204,7 @@ export class ControlRuntime {
    * map is scoped to the current owner epoch's activity.
   */
   snapshot(): ControlSnapshot {
-    this.expireApprovalsForSnapshot();
+    const approvals = this.refreshApprovalState();
     const events = this.journal.read(0);
     const sequence = events.length > 0 ? events[events.length - 1].sequence : 0;
     const commands: Record<string, CommandRecord> = {};
@@ -213,8 +213,6 @@ export class ControlRuntime {
         commands[id] = { command: record.command, outcome: record.outcome, sequence: record.sequence };
       }
     }
-    const approvals = this.approvals.snapshot();
-    this.prunePendingApprovals(approvals);
     return {
       ownerEpoch: this.ownerEpoch,
       sequence,
@@ -379,7 +377,7 @@ export class ControlRuntime {
             throw codedRuntimeError('capability_denied', 'only the owning task may release a capability lease');
           }
           this.capabilityLeases.release(lease.id);
-          await this.terminalizeRevokedApprovals(this.approvals.revokeForLease(lease.id));
+          await this.revokeApprovalsForLease(lease.id);
           const request = this.leaseRequests.get(lease.requestId);
           if (request) request.status = 'released';
           return this.appendTerminal(command, succeededOutcome());
@@ -387,7 +385,7 @@ export class ControlRuntime {
         case 'lease.revoke': {
           const lease = this.capabilityLeases.revoke(command.payload.leaseId);
           if (lease) {
-            await this.terminalizeRevokedApprovals(this.approvals.revokeForLease(lease.id));
+            await this.revokeApprovalsForLease(lease.id);
             const request = this.leaseRequests.get(lease.requestId);
             if (request) request.status = 'revoked';
           }
@@ -412,9 +410,9 @@ export class ControlRuntime {
           const context = await this.prepareSurfaceAction(command);
           if (context.classification.decision === 'approval') {
             if (!context.effect) throw codedRuntimeError('approval_payload_invalid', 'approval effect is missing');
-            this.prunePendingApprovals(this.approvals.snapshot());
+            this.refreshApprovalState();
             const immutableContext = freezeContext(context);
-            const approval = this.approvals.request({
+            const approval = this.approvals.requestCurrent({
               actionId: command.id,
               ownerEpoch: command.ownerEpoch,
               leaseId: command.payload.leaseId,
@@ -565,7 +563,7 @@ export class ControlRuntime {
       }
       return this.appendTerminal(command, outcomeForReceipt(receipt), receipt);
     } catch (error) {
-      await this.terminalizeRevokedApprovals(this.approvals.revokeForLease(approval.leaseId));
+      await this.revokeApprovalsForLease(approval.leaseId);
       this.pendingApprovals.delete(approval.id);
       throw error;
     }
@@ -828,7 +826,7 @@ export class ControlRuntime {
 
   private async revokeTarget(target: LeaseTarget): Promise<void> {
     for (const lease of this.capabilityLeases.revokeTarget(target)) {
-      await this.terminalizeRevokedApprovals(this.approvals.revokeForLease(lease.id));
+      await this.revokeApprovalsForLease(lease.id);
       const request = this.leaseRequests.get(lease.requestId);
       if (request) request.status = 'revoked';
     }
@@ -843,7 +841,12 @@ export class ControlRuntime {
     }
   }
 
-  private expireApprovalsForSnapshot(): void {
+  private async revokeApprovalsForLease(leaseId: string): Promise<void> {
+    this.refreshApprovalState();
+    await this.terminalizeRevokedApprovals(this.approvals.revokeForLease(leaseId));
+  }
+
+  private refreshApprovalState(): readonly Approval[] {
     for (const approval of this.approvals.expire()) {
       const context = this.pendingApprovals.get(approval.id);
       if (!context || this.passiveTerminalizations.has(approval.id)) continue;
@@ -858,6 +861,9 @@ export class ControlRuntime {
         .catch(() => undefined)
         .finally(() => this.passiveTerminalizations.delete(approval.id));
     }
+    const approvals = this.approvals.peek();
+    this.prunePendingApprovals(approvals);
+    return approvals;
   }
 
   private makeReceipt(
