@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -52,6 +52,28 @@ function stubRuntime(submit: ControlServerRuntime['submit']): ControlServerRunti
 }
 
 describe('control credential store', () => {
+  it('converges 64 concurrent first-use stores on one atomically persisted token pair', async () => {
+    const root = await tempProject();
+    const filePath = path.join(root, 'control-credentials.json');
+    const stores = await Promise.all(Array.from({ length: 64 }, () => (
+      createControlCredentialStore({ projectRoot: root, filePath })
+    )));
+    const agents = await Promise.all(stores.map((store) => store.agentToken()));
+    const operators = await Promise.all(stores.map((store) => store.operatorToken()));
+    expect(new Set(agents)).toHaveLength(1);
+    expect(new Set(operators)).toHaveLength(1);
+    expect((await stat(filePath)).mode & 0o777).toBe(0o600);
+  });
+
+  it('fails closed on an invalid partial credential file without overwriting it', async () => {
+    const root = await tempProject();
+    const filePath = path.join(root, 'control-credentials.json');
+    await writeFile(filePath, '{"operatorToken":"partial"}\n', { mode: 0o600 });
+    const store = await createControlCredentialStore({ projectRoot: root, filePath });
+    await expect(store.agentToken()).rejects.toThrow('invalid control credential file');
+    await expect(import('node:fs/promises').then(({ readFile }) => readFile(filePath, 'utf8')))
+      .resolves.toBe('{"operatorToken":"partial"}\n');
+  });
   it('mints operator and agent tokens that authenticate to their principals', async () => {
     const root = await tempProject();
     const filePath = path.join(root, 'control-credentials.json');

@@ -135,9 +135,10 @@ When focus is inside a work pane, tmux receives your keys instead of Psyche Buil
 
 ## MCP server
 
-`psyche mcp` exposes the pane surface over MCP (stdio JSON-RPC), so an agent —
-Coven Code, Claude Code, or any MCP-capable client — can fan work into parallel
-Psyche Build panes without leaving its session.
+`psyche mcp` is an authenticated client of the project control owner over stdio
+JSON-RPC. On the first tool call it connects to the project-derived control
+socket; if no owner is listening, it starts one detached `psyche daemon`
+process for that canonical project and waits for authenticated health.
 
 ```json
 {
@@ -149,21 +150,46 @@ Psyche Build panes without leaving its session.
 
 | Tool | Does |
 |---|---|
-| `psyche_list_panes` | List panes for the project, with pane id, branch, agent, and title |
-| `psyche_create_pane` | New worktree + branch + tmux pane, with the chosen harness launched on a prompt |
-| `psyche_execute_task` | Run one prompt across several parallel lanes, each with its own worktree and harness |
-| `psyche_kill_pane` | Terminate a pane and deregister it |
-| `psyche_get_pane_output` | Read a pane's buffer and scrollback without attaching |
-| `psyche_list_rituals` | List built-in and project rituals |
-| `psyche_list_worktrees` | List git worktrees for the project |
+| `psyche_control_list` | List managed pane and browser resources, generations, capabilities, and lease state |
+| `psyche_control_lease` | Request, inspect, or release an agent lease; it cannot grant, revoke, or approve |
+| `psyche_pane_observe` | Read bounded, incremental terminal output without persisting the transcript in MCP |
+| `psyche_pane_action` | Submit a typed pane create/input/focus/resize/close action against an exact generation |
+| `psyche_browser_inspect` | Request a versioned semantic browser snapshot, optionally with an ephemeral screenshot |
+| `psyche_browser_action` | Submit a typed browser action using exact tab, generation, snapshot, and element references |
+| `psyche_browser_script` | Submit an approval-gated, bounded browser script invocation |
+| `psyche_control_action_status` | Read the canonical live outcome or receipt for an action ID |
 
-`psyche_create_pane` requires a running Psyche Build tmux session for the
-project — start `psyche` there first.
+The read-only compatibility tools remain available: `psyche_list_panes`,
+`psyche_get_pane_output`, `psyche_list_rituals`, and
+`psyche_list_worktrees`. They retain their original read behavior and do not
+provide mutation authority.
 
-`psyche_kill_pane` **does not delete the pane's worktree or branch.** It returns
-both so you can inspect or merge the work; removing them stays an explicit
-action in the TUI, because a worktree can hold the only copy of uncommitted
-changes.
+`psyche_execute_task` also remains advertised for client compatibility, but it
+returns `capability_denied` without effect until orchestration has its own
+lease-mediated canonical capability. It no longer launches lanes directly.
+
+The lease flow is `psyche_control_list` → `psyche_control_lease` with
+`operation: "request"` → operator grant → action/observation →
+`psyche_control_lease` with `operation: "release"`. Mutation calls require the
+returned `task_id`, `lease_id`, and `lease_revision`; MCP never accepts caller
+supplied actor, owner epoch, or authentication fields.
+
+`psyche_create_pane` and `psyche_kill_pane` remain listed compatibility aliases,
+but they now translate to canonical `psyche_pane_action` commands and require
+the same lease metadata. Calls without it return `lease_missing` and have no
+effect. Creation uses the canonical project scope; closing an existing pane
+also requires its stable pane ID and generation.
+
+A prompt-less leased `psyche_create_pane` call translates to canonical pane
+creation. A legacy create call with a nonempty `prompt` returns
+`command_not_implemented` and creates no pane; prompts are never silently
+dropped.
+
+Agent control is limited to resources published by the owner. It is not a raw
+tmux, shell, DOM, selector, or filesystem escape surface. The desktop browser
+provider lands in a later slice. Browser calls may first return
+`resource_missing` or `lease_missing` until a tab resource and lease exist; if
+they reach the backend before Task 6, it returns `command_not_implemented`.
 
 ## Coven and OpenCoven
 

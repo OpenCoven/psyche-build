@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
+import { mkdir, readFile, chmod, link, open, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 
@@ -77,8 +77,9 @@ export async function createControlCredentialStore(options: {
     ?? path.join(root, '.psyche', 'runtime', 'control-credentials.json');
 
   let cache: StoredCredentials | null = null;
+  let loading: Promise<StoredCredentials> | null = null;
 
-  const load = async (): Promise<StoredCredentials> => {
+  const loadOnce = async (): Promise<StoredCredentials> => {
     if (cache) return cache;
     try {
       const parsed = JSON.parse(await readFile(filePath, 'utf8')) as Partial<StoredCredentials>;
@@ -100,10 +101,37 @@ export async function createControlCredentialStore(options: {
       operatorToken: randomBytes(32).toString('hex'),
       agentToken: randomBytes(32).toString('hex'),
     };
-    await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-    await writeFile(filePath, `${JSON.stringify(created)}\n`, { mode: 0o600 });
-    cache = created;
-    return created;
+    const parent = path.dirname(filePath);
+    await mkdir(parent, { recursive: true, mode: 0o700 });
+    const temporary = `${filePath}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
+    const handle = await open(temporary, 'wx', 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(created)}\n`, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    try {
+      await link(temporary, filePath);
+      cache = created;
+      return created;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const parsed = JSON.parse(await readFile(filePath, 'utf8')) as Partial<StoredCredentials>;
+      if (typeof parsed.operatorToken !== 'string' || typeof parsed.agentToken !== 'string') {
+        throw new Error('invalid control credential file');
+      }
+      cache = { operatorToken: parsed.operatorToken, agentToken: parsed.agentToken };
+      return cache;
+    } finally {
+      await unlink(temporary).catch(() => undefined);
+    }
+  };
+
+  const load = async (): Promise<StoredCredentials> => {
+    if (cache) return cache;
+    loading ??= loadOnce().finally(() => { loading = null; });
+    return loading;
   };
 
   return {

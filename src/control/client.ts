@@ -24,6 +24,7 @@ export interface ControlClientOptions {
   token: string;
   clientName: string;
   endpoint?: string;
+  signal?: AbortSignal;
 }
 
 interface PendingRequest {
@@ -63,13 +64,28 @@ export class ControlClient {
     const welcome = await new Promise<Extract<ControlResponse, { type: 'welcome' }>>(
       (resolve, reject) => {
         let buffer = '';
-        const onError = (error: Error): void => {
+        let settled = false;
+        const fail = (error: Error): void => {
+          if (settled) return;
+          settled = true;
           cleanup();
+          socket.destroy();
           reject(error);
         };
-        const onClose = (): void => {
+        const succeed = (message: Extract<ControlResponse, { type: 'welcome' }>): void => {
+          if (settled) return;
+          settled = true;
           cleanup();
-          reject(new Error('control connection closed before welcome'));
+          resolve(message);
+        };
+        const onAbort = (): void => fail(Object.assign(new Error('control connection aborted'), {
+          name: 'AbortError', code: 'ABORT_ERR',
+        }));
+        const onError = (error: Error): void => {
+          fail(error);
+        };
+        const onClose = (): void => {
+          fail(new Error('control connection closed before welcome'));
         };
         const onData = (chunk: string): void => {
           buffer += chunk;
@@ -80,36 +96,37 @@ export class ControlClient {
           try {
             message = JSON.parse(line) as ControlResponse;
           } catch {
-            cleanup();
-            reject(new Error('invalid welcome frame'));
+            fail(new Error('invalid welcome frame'));
             return;
           }
           if (message.type === 'error') {
-            cleanup();
-            reject(new Error(`${message.code}: ${message.message}`));
+            fail(new Error(`${message.code}: ${message.message}`));
             return;
           }
           if (message.type !== 'welcome') {
-            cleanup();
-            reject(new Error(`expected welcome, received ${message.type}`));
+            fail(new Error(`expected welcome, received ${message.type}`));
             return;
           }
           if (message.projectRoot !== canonicalRoot) {
-            cleanup();
-            reject(new Error('welcome project root does not match the requested project'));
+            fail(new Error('welcome project root does not match the requested project'));
             return;
           }
-          cleanup();
-          resolve(message);
+          succeed(message);
         };
         const cleanup = (): void => {
           socket.off('data', onData);
           socket.off('error', onError);
           socket.off('close', onClose);
+          options.signal?.removeEventListener('abort', onAbort);
         };
+        if (options.signal?.aborted) {
+          onAbort();
+          return;
+        }
         socket.on('data', onData);
         socket.once('error', onError);
         socket.once('close', onClose);
+        options.signal?.addEventListener('abort', onAbort, { once: true });
         socket.write(`${encodeControlMessage({
           version: 1,
           type: 'hello',

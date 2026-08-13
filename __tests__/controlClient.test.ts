@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { connect } from 'node:net';
+import { createServer } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ControlServer, type ControlServerRuntime } from '../src/control/server.js';
 import { createControlCredentialStore } from '../src/control/credentials.js';
@@ -90,6 +91,38 @@ function inputCommand(id: string): Parameters<ControlClient['submit']>[0] {
 }
 
 describe('ControlClient over the socket transport', () => {
+  it('aborts a stalled welcome handshake and closes the Unix socket', async () => {
+    const projectRoot = await mkdtemp(path.join(tmpdir(), 'psyche-stalled-proj-'));
+    tempRoots.push(projectRoot);
+    const endpoint = socketPath();
+    let peerClosed!: () => void;
+    const closed = new Promise<void>((resolve) => { peerClosed = resolve; });
+    let peerAccepted!: () => void;
+    const accepted = new Promise<void>((resolve) => { peerAccepted = resolve; });
+    let peer: import('node:net').Socket | undefined;
+    const server = createServer((socket) => {
+      peer = socket;
+      peerAccepted();
+      socket.on('error', () => undefined);
+      socket.once('close', peerClosed);
+    });
+    await new Promise<void>((resolve) => server.listen(endpoint, resolve));
+    cleanups.push(async () => {
+      peer?.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+    const controller = new AbortController();
+    const connecting = ControlClient.connect({
+      projectRoot, endpoint, token: 'token', clientName: 'stalled', signal: controller.signal,
+    });
+    await accepted;
+    controller.abort();
+    await expect(connecting).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(Promise.race([
+      closed.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 500)),
+    ])).resolves.toBe(true);
+  });
   it('serializes pipelined hello and following frames in wire order', async () => {
     const harness = await startHarness();
     const socket = connect(harness.endpoint);
