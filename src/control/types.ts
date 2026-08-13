@@ -17,6 +17,24 @@ export type PaneNamedKey =
   | 'Up' | 'Down' | 'Left' | 'Right'
   | 'C-c' | 'C-d';
 
+export const PANE_NAMED_KEYS: readonly PaneNamedKey[] = Object.freeze([
+  'Enter', 'Tab', 'Escape', 'Backspace', 'Up', 'Down', 'Left', 'Right', 'C-c', 'C-d',
+]);
+const PANE_NAMED_KEY_SET: ReadonlySet<string> = new Set(PANE_NAMED_KEYS);
+
+export function isPaneNamedKey(value: unknown): value is PaneNamedKey {
+  return typeof value === 'string' && PANE_NAMED_KEY_SET.has(value);
+}
+
+export function validatePaneNamedKeys(keys: readonly unknown[]): readonly PaneNamedKey[] {
+  if (!Array.isArray(keys) || keys.some((key) => !isPaneNamedKey(key))) {
+    throw Object.assign(new Error('pane keys must use the named-key allowlist'), {
+      code: 'invalid_pane_key',
+    });
+  }
+  return Object.freeze([...keys]) as readonly PaneNamedKey[];
+}
+
 export type ExistingPaneAction =
   | { kind: 'send_text'; text: string }
   | { kind: 'send_keys'; keys: readonly PaneNamedKey[] }
@@ -30,6 +48,15 @@ export type PaneCreateAction = {
 };
 
 export type PaneAction = ExistingPaneAction | PaneCreateAction;
+
+export interface PaneObservationResult {
+  readonly paneId: string;
+  readonly fromSequence: number;
+  readonly nextSequence: number;
+  readonly text: string;
+  readonly bytes: number;
+  readonly truncated: boolean;
+}
 
 export interface BrowserSemanticMetadata {
   role?: string;

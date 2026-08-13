@@ -154,6 +154,20 @@ describe('control protocol v1', () => {
     }
   });
 
+  it('rejects pane observation cursors that cannot be incremented safely', () => {
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'command.submit', requestId: 'req-observe-overflow',
+      command: {
+        id: 'cmd-observe-overflow', idempotencyKey: 'idem-observe-overflow', kind: 'pane.observe',
+        projectRoot: '/repo', createdAt: '2026-08-12T12:00:00.000Z',
+        payload: {
+          taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
+          paneId: 'pane-1', generation: 1, afterSequence: Number.MAX_SAFE_INTEGER,
+        },
+      },
+    }))).toThrow('invalid command.submit payload');
+  });
+
   it.each([
     [{ kind: 'future', id: 'x', generation: 1 }, 'unknown target kind'],
     [{ kind: 'project', id: '/repo', generation: 1 }, 'project generation'],

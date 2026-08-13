@@ -67,6 +67,68 @@ function agentSurfaceHarness() {
   return { surfaces, capabilityLeases, approvals, lease, risk, resolveBrowserSnapshot };
 }
 
+function paneObservationHarness() {
+  const surfaces = new SurfaceRegistry();
+  surfaces.upsertPane({
+    id: 'pane-1', tmuxPaneId: '%3', projectRoot: '/repo', worktreeRoot: '/repo',
+    writable: true, outputSequence: 6,
+  });
+  const capabilityLeases = new CapabilityLeaseStore(now, 7);
+  const approvals = new ApprovalStore(now, () => 'approval-pane');
+  const lease = capabilityLeases.grant({
+    requestId: 'request-pane-observe', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1',
+    ttlMs: 60_000,
+    grants: [{
+      target: { kind: 'pane', id: 'pane-1', generation: 1 },
+      capabilities: ['pane.observe'],
+    }],
+  });
+  return { surfaces, capabilityLeases, approvals, lease };
+}
+
+function paneObserveCommand(leaseId: string) {
+  return command({
+    id: 'cmd-observe', idempotencyKey: 'idem-observe', kind: 'pane.observe',
+    projectRoot: '/repo', actor: { id: 'agent-1', kind: 'psyche' }, ownerEpoch: 7,
+    createdAt: '2026-08-12T12:00:00.000Z',
+    payload: {
+      taskId: 'task-1', leaseId, leaseRevision: 1,
+      paneId: 'pane-1', generation: 1, afterSequence: 4,
+    },
+  }) as unknown as Extract<ControlCommand, { kind: 'pane.observe' }>;
+}
+
+function paneActionHarness(capability: 'pane.focus' | 'pane.resize') {
+  const surfaces = new SurfaceRegistry();
+  surfaces.upsertPane({
+    id: 'pane-1', tmuxPaneId: '%3', projectRoot: '/repo', worktreeRoot: '/repo',
+    writable: true, outputSequence: 0,
+  });
+  const capabilityLeases = new CapabilityLeaseStore(now, 7);
+  const approvals = new ApprovalStore(now, () => 'approval-pane-action');
+  const lease = capabilityLeases.grant({
+    requestId: `request-${capability}`, actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1',
+    ttlMs: 60_000,
+    grants: [{ target: { kind: 'pane', id: 'pane-1', generation: 1 }, capabilities: [capability] }],
+  });
+  return { surfaces, capabilityLeases, approvals, lease };
+}
+
+function paneActionCommand(
+  leaseId: string,
+  action: { kind: 'focus' } | { kind: 'resize'; cols: number; rows: number },
+) {
+  return command({
+    id: `cmd-${action.kind}`, idempotencyKey: `idem-${action.kind}`, kind: 'pane.action',
+    projectRoot: '/repo', actor: { id: 'agent-1', kind: 'psyche' }, ownerEpoch: 7,
+    createdAt: '2026-08-12T12:00:00.000Z',
+    payload: {
+      taskId: 'task-1', leaseId, leaseRevision: 1,
+      paneId: 'pane-1', generation: 1, action,
+    },
+  }) as unknown as Extract<ControlCommand, { kind: 'pane.action' }>;
+}
+
 function browserAction(leaseId: string, overrides: Record<string, unknown> = {}) {
   return command({
     id: 'cmd-click', idempotencyKey: 'idem-click', kind: 'browser.action',
@@ -165,6 +227,114 @@ describe('ControlRuntime', () => {
       expect.objectContaining({ status: 'succeeded' }),
     ]);
     expect(handlers.actOnBrowser).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns pane observation text live while excluding it from journal, snapshot, and status', async () => {
+    const deps = paneObservationHarness();
+    const marker = 'LIVE_ONLY_MARKER';
+    handlers.observePane = vi.fn(async () => ({
+      paneId: 'pane-1', fromSequence: 5, nextSequence: 7,
+      text: `hello ${marker}`, bytes: 22, truncated: false,
+    }));
+    const journal = createMemoryJournal();
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+
+    const outcome = await runtime.submit(paneObserveCommand(deps.lease.id));
+    expect(outcome).toEqual({
+      status: 'succeeded',
+      value: {
+        paneId: 'pane-1', fromSequence: 5, nextSequence: 7,
+        text: `hello ${marker}`, bytes: 22, truncated: false,
+      },
+    });
+    expect(JSON.stringify(journal.read())).not.toContain(marker);
+    expect(JSON.stringify(journal.read())).not.toContain('"text"');
+    expect(JSON.stringify(runtime.snapshot())).not.toContain(marker);
+    expect(JSON.stringify(runtime.actionStatus('cmd-observe'))).not.toContain(marker);
+  });
+
+  it('shares an in-flight live observation but replay after restart exposes receipt only', async () => {
+    const deps = paneObservationHarness();
+    let release!: (value: unknown) => void;
+    handlers.observePane = vi.fn(() => new Promise((resolve) => { release = resolve; }));
+    const journal = createMemoryJournal();
+    const firstRuntime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+    const input = paneObserveCommand(deps.lease.id);
+    const first = firstRuntime.submit(input);
+    await vi.waitFor(() => expect(handlers.observePane).toHaveBeenCalledTimes(1));
+    const pendingRetry = firstRuntime.submit(input);
+    release({
+      paneId: 'pane-1', fromSequence: 5, nextSequence: 7,
+      text: 'EPHEMERAL_REPLAY_MARKER', bytes: 23, truncated: false,
+    });
+    const live = await first;
+    await expect(pendingRetry).resolves.toEqual(live);
+
+    handlers.observePane = vi.fn();
+    const restarted = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+    const replayed = await restarted.submit(input);
+    expect(JSON.stringify(replayed)).not.toContain('EPHEMERAL_REPLAY_MARKER');
+    expect(replayed).toMatchObject({
+      status: 'succeeded', value: { actionId: 'cmd-observe', state: 'succeeded' },
+    });
+    expect(handlers.observePane).not.toHaveBeenCalled();
+  });
+
+  it('does not pass through arbitrary values from other surface handlers', async () => {
+    const deps = agentSurfaceHarness();
+    handlers.actOnBrowser = vi.fn(async () => ({ text: 'OTHER_HANDLER_SECRET' }));
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps,
+    });
+    const outcome = await runtime.submit(browserAction(deps.lease.id));
+    expect(JSON.stringify(outcome)).not.toContain('OTHER_HANDLER_SECRET');
+    expect(outcome).toMatchObject({
+      status: 'succeeded', value: { actionId: 'cmd-click', state: 'succeeded' },
+    });
+  });
+
+  it.each([
+    {
+      kind: 'focus' as const,
+      capability: 'pane.focus' as const,
+      handlerValue: {
+        paneId: 'pane-1', generation: 1, focused: true, cols: 120, rows: 40,
+        secret: 'FOCUS_SECRET',
+      },
+      expected: { paneId: 'pane-1', generation: 1, focused: true },
+    },
+    {
+      kind: 'resize' as const,
+      capability: 'pane.resize' as const,
+      handlerValue: {
+        paneId: 'pane-1', generation: 1, focused: true, cols: 120, rows: 40,
+        secret: 'RESIZE_SECRET',
+      },
+      expected: { paneId: 'pane-1', generation: 1, cols: 120, rows: 40 },
+    },
+  ])('persists only allowlisted $kind postconditions in live/status/journal/replay receipts', async (testCase) => {
+    const deps = paneActionHarness(testCase.capability);
+    handlers.actOnPane = vi.fn(async () => testCase.handlerValue);
+    const journal = createMemoryJournal();
+    const input = paneActionCommand(
+      deps.lease.id,
+      testCase.kind === 'focus' ? { kind: 'focus' } : { kind: 'resize', cols: 120, rows: 40 },
+    );
+    const first = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+    const outcome = await first.submit(input);
+    expect(outcome).toMatchObject({
+      status: 'succeeded', value: { state: 'succeeded', value: testCase.expected },
+    });
+    expect(first.actionStatus(input.id)).toMatchObject({ value: testCase.expected });
+    expect(JSON.stringify(journal.read())).not.toContain(`${testCase.kind.toUpperCase()}_SECRET`);
+    expect(JSON.stringify(journal.read())).toContain(JSON.stringify(testCase.expected));
+
+    handlers.actOnPane = vi.fn();
+    const restarted = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+    await expect(restarted.submit(input)).resolves.toMatchObject({
+      status: 'succeeded', value: { state: 'succeeded', value: testCase.expected },
+    });
+    expect(handlers.actOnPane).not.toHaveBeenCalled();
   });
 
   it('rejects a stale owner epoch before side effects', async () => {
@@ -756,6 +926,32 @@ describe('ControlRuntime', () => {
       id: 'cmd-human-takeover', idempotencyKey: 'idem-human-takeover',
       kind: 'pane.takeover', ownerEpoch: 7, payload: { paneId: '%3' },
     }));
+    expect(capabilityLeases.snapshot()).toEqual([]);
+    expect(approvals.snapshot()).toEqual([expect.objectContaining({ status: 'revoked' })]);
+  });
+
+  it('revokes exact pane leases and approvals when provider reconciliation removes it', async () => {
+    const surfaces = new SurfaceRegistry();
+    surfaces.upsertPane({
+      id: 'pane-1', tmuxPaneId: '%3', projectRoot: '/repo', worktreeRoot: '/repo',
+      writable: true, outputSequence: 0,
+    });
+    const capabilityLeases = new CapabilityLeaseStore(now, 7);
+    const approvals = new ApprovalStore(now, () => 'approval-reconcile');
+    const lease = capabilityLeases.grant({
+      requestId: 'request-reconcile', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1',
+      ttlMs: 60_000,
+      grants: [{ target: { kind: 'pane', id: 'pane-1', generation: 1 }, capabilities: ['pane.close'] }],
+    });
+    approvals.request({
+      actionId: 'close-reconcile', ownerEpoch: 7, leaseId: lease.id, leaseRevision: 1,
+      resource: { kind: 'pane', id: 'pane-1', generation: 1 }, capability: 'pane.close',
+      effect: { kind: 'close', target: 'pane' }, actionPayload: { action: { kind: 'close' } },
+    });
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces, capabilityLeases, approvals,
+    });
+    runtime.revokeSurfaceAuthority({ kind: 'pane', id: 'pane-1', generation: 1 });
     expect(capabilityLeases.snapshot()).toEqual([]);
     expect(approvals.snapshot()).toEqual([expect.objectContaining({ status: 'revoked' })]);
   });

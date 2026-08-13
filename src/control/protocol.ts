@@ -4,6 +4,7 @@ import type {
   ControlCommandInput,
   ControlSnapshot,
 } from './types.js';
+import { isPaneNamedKey } from './types.js';
 
 export const CONTROL_PROTOCOL_VERSION = 1;
 
@@ -195,6 +196,10 @@ function isAuthorityInteger(value: unknown): value is number {
     && value >= 0;
 }
 
+function isResumableCursor(value: unknown): value is number {
+  return isAuthorityInteger(value) && value < Number.MAX_SAFE_INTEGER;
+}
+
 const LEASE_AUTHORIZED_KINDS = new Set([
   'lease.release', 'pane.observe', 'pane.action', 'browser.inspect', 'browser.action', 'browser.script',
 ]);
@@ -219,7 +224,7 @@ function validAgentControlPayload(kind: string, payload: Record<string, unknown>
   }
   if (RESOURCE_GENERATION_KINDS.has(kind) && !isAuthorityInteger(payload.generation)) return false;
   if (kind === 'pane.observe' && !isNonemptyString(payload.paneId)) return false;
-  if (kind === 'pane.observe' && 'afterSequence' in payload && !isAuthorityInteger(payload.afterSequence)) return false;
+  if (kind === 'pane.observe' && 'afterSequence' in payload && !isResumableCursor(payload.afterSequence)) return false;
   if (kind === 'pane.action') {
     if (!isPlainObject(payload.action) || !validPaneAction(payload.action)) return false;
     if (payload.action.kind === 'create') {
@@ -316,7 +321,7 @@ function validPaneAction(action: Record<string, unknown>): boolean {
   switch (action.kind) {
     case 'send_text': return exactKeys(action, ['kind', 'text']) && typeof action.text === 'string';
     case 'send_keys': return exactKeys(action, ['kind', 'keys']) && Array.isArray(action.keys)
-      && action.keys.every((key) => typeof key === 'string' && PANE_NAMED_KEYS.has(key));
+      && action.keys.every(isPaneNamedKey);
     case 'interrupt': return exactKeys(action, ['kind'], ['key']) && (!('key' in action) || action.key === 'C-c' || action.key === 'Escape');
     case 'focus':
     case 'close': return exactKeys(action, ['kind']);
@@ -365,10 +370,6 @@ function validSemantic(value: unknown): boolean {
 
 const BROWSER_ELEMENT_ACTIONS = new Set([
   'click', 'type', 'select', 'submit', 'upload', 'download', 'scroll', 'focus',
-]);
-
-const PANE_NAMED_KEYS = new Set([
-  'Enter', 'Tab', 'Escape', 'Backspace', 'Up', 'Down', 'Left', 'Right', 'C-c', 'C-d',
 ]);
 
 function validGrants(value: unknown): boolean {

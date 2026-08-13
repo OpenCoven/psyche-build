@@ -85,6 +85,47 @@ describe('SurfaceRegistry', () => {
     expect(replacement.generation).toBe(first.generation + 1);
   });
 
+  it('removes only the exact current pane generation and preserves monotonic recreation', () => {
+    const registry = new SurfaceRegistry();
+    const first = registry.upsertPane({
+      id: 'pane-1', tmuxPaneId: '%3', projectRoot: '/repo', worktreeRoot: '/repo/wt',
+      writable: true, outputSequence: 0,
+    });
+    const removed = registry.removePane(first.id, first.generation);
+    expect(removed).toBe(first);
+    expect(Object.isFrozen(removed)).toBe(true);
+    expect(registry.get(first.id)).toBeUndefined();
+    const recreated = registry.upsertPane({
+      id: 'pane-1', tmuxPaneId: '%9', projectRoot: '/repo', worktreeRoot: '/repo/wt',
+      writable: true, outputSequence: 0,
+    });
+    expect(recreated.generation).toBe(first.generation + 1);
+  });
+
+  it('refuses stale, missing, and browser identities through pane removal', () => {
+    const registry = new SurfaceRegistry();
+    const first = registry.upsertPane({
+      id: 'pane-1', tmuxPaneId: '%3', projectRoot: '/repo', worktreeRoot: '/repo/wt',
+      writable: true, outputSequence: 0,
+    });
+    const rebound = registry.upsertPane({ ...first, tmuxPaneId: '%9' });
+    expect(() => registry.removePane(first.id, first.generation)).toThrowError(
+      expect.objectContaining({ code: 'resource_replaced' }),
+    );
+    expect(registry.get(first.id)).toBe(rebound);
+    expect(() => registry.removePane('missing', 1)).toThrowError(
+      expect.objectContaining({ code: 'resource_missing' }),
+    );
+    const tab = registry.upsertBrowserTab({
+      id: 'tab-1', providerId: 'desktop', webviewLabel: 'browser', projectRoot: '/repo',
+      worktreeRoot: '/repo', url: 'https://example.com', title: 'Example', loading: false,
+      viewport: { width: 800, height: 600 },
+    });
+    expect(() => registry.removePane(tab.id, tab.generation)).toThrowError(
+      expect.objectContaining({ code: 'resource_replaced' }),
+    );
+  });
+
   it('does not retain caller aliases or expose mutable registry records', () => {
     const registry = new SurfaceRegistry();
     const viewport = { width: 800, height: 600 };

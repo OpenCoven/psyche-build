@@ -1,7 +1,10 @@
 import type { TmuxControl } from '../services/tmuxControl.js';
+import { assertTmuxPaneId } from '../utils/tmuxTarget.js';
 import { decodeBase64Payload } from '../utils/base64.js';
 import { buildDesktopUseQuickInput, isDesktopUseQuickAction, type DesktopUseQuickAction } from '../utils/covenDesktopUse.js';
 import type { ControlHandlers } from '../control/runtime.js';
+import { validatePaneNamedKeys } from '../control/types.js';
+import type { PaneResourceController } from '../control/resources/panes.js';
 import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
 import {
   spawnBridgePane,
@@ -20,6 +23,8 @@ import {
 
 export interface DaemonControlHandlerDeps {
   tmux: TmuxControl;
+  /** Shared stable pane projection used by both handlers and the host runtime. */
+  panes?: PaneResourceController;
   projectRoot: string;
   sessionName: string;
   /** Effect boundary for pane creation; defaults to the real bridge spawn. */
@@ -67,6 +72,12 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
   const spawn = deps.spawnPane ?? spawnBridgePane;
   const covenClientFactory = deps.createCovenClient ?? createCovenClient;
   const covenSpawnDeps = deps.covenSpawnDeps ?? defaultSpawnDeps;
+  const panes = () => {
+    if (!deps.panes) {
+      throw Object.assign(new Error('pane resource controller is unavailable'), { code: 'command_not_implemented' });
+    }
+    return deps.panes;
+  };
 
   return {
     async spawnPane(payload): Promise<BridgeSpawnResult> {
@@ -80,7 +91,9 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
         startPointBranch: payload.startPointBranch,
         existingWorktree: payload.existingWorktree,
       };
-      return spawn(deps.projectRoot, deps.sessionName, request);
+      const result = await spawn(deps.projectRoot, deps.sessionName, request);
+      await deps.panes?.refresh();
+      return result;
     },
 
     async sendInput(payload): Promise<void> {
@@ -117,8 +130,74 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       });
     },
     launchRitual: notSupported('ritual.launch'),
-    observePane: notImplemented('pane.observe'),
-    actOnPane: notImplemented('pane.action'),
+    async observePane(payload) {
+      return panes().observe(payload.paneId, payload.generation, payload.afterSequence);
+    },
+    async actOnPane(payload) {
+      if (payload.action.kind === 'create') {
+        const result = await spawn(deps.projectRoot, deps.sessionName, {
+          requestId: payload.taskId,
+          cwd: payload.action.cwd,
+          title: payload.action.title,
+          agent: payload.action.agent,
+          branch: payload.action.branch,
+        });
+        const resources = await panes().refresh();
+        const resource = resources.find((candidate) => candidate.tmuxPaneId === result.id);
+        if (!resource) {
+          throw Object.assign(new Error('created pane was not present in the canonical registry'), {
+            code: 'resource_missing',
+          });
+        }
+        return resource;
+      }
+
+      const controller = panes();
+      if (typeof payload.paneId !== 'string' || typeof payload.generation !== 'number') {
+        throw Object.assign(new Error('existing pane action requires a resource generation'), {
+          code: 'resource_missing',
+        });
+      }
+      const resource = controller.resolve(payload.paneId, payload.generation);
+      const tmuxPaneId = assertTmuxPaneId(resource.tmuxPaneId);
+      switch (payload.action.kind) {
+        case 'send_text':
+          await deps.tmux.sendKeysHexAcknowledged(tmuxPaneId, Buffer.from(payload.action.text, 'utf8'));
+          return undefined;
+        case 'send_keys': {
+          const keys = validatePaneNamedKeys(payload.action.keys);
+          await deps.tmux.sendNamedKeysAcknowledged(tmuxPaneId, keys);
+          return undefined;
+        }
+        case 'interrupt': {
+          const key = payload.action.key ?? 'C-c';
+          await deps.tmux.sendNamedKeysAcknowledged(tmuxPaneId, [key]);
+          return undefined;
+        }
+        case 'focus': {
+          await deps.tmux.selectPaneAcknowledged(tmuxPaneId);
+          const observed = await deps.tmux.queryPane(tmuxPaneId);
+          return Object.freeze({
+            paneId: resource.id, generation: resource.generation,
+            focused: observed.focused, cols: observed.cols, rows: observed.rows,
+          });
+        }
+        case 'resize': {
+          await deps.tmux.resizePaneAcknowledged(tmuxPaneId, payload.action.cols, payload.action.rows);
+          const observed = await deps.tmux.queryPane(tmuxPaneId);
+          return Object.freeze({
+            paneId: resource.id, generation: resource.generation,
+            focused: observed.focused, cols: observed.cols, rows: observed.rows,
+          });
+        }
+        case 'close':
+          await deps.tmux.killPaneAcknowledged(tmuxPaneId);
+          controller.remove(resource.id, resource.generation);
+          return undefined;
+        default:
+          return assertNever(payload.action);
+      }
+    },
     inspectBrowser: notImplemented('browser.inspect'),
     actOnBrowser: notImplemented('browser.action'),
     runBrowserScript: notImplemented('browser.script'),
@@ -181,4 +260,10 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       return { sessionId: payload.sessionId, execution };
     },
   };
+}
+
+function assertNever(value: never): never {
+  throw Object.assign(new Error(`unsupported pane action: ${String((value as { kind?: unknown }).kind)}`), {
+    code: 'command_not_implemented',
+  });
 }

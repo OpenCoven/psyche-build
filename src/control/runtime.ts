@@ -12,6 +12,7 @@ import {
   type PolicyClassification,
 } from './policy.js';
 import { SurfaceRegistry, type SurfaceResource } from './surfaces.js';
+import { AGENT_CONTROL_LIMITS } from './limits.js';
 import type {
   ActionReceipt,
   BrowserSemanticAction,
@@ -21,6 +22,7 @@ import type {
   ControlSnapshot,
   PromptEnvelope,
   LeaseRequestState,
+  PaneObservationResult,
 } from './types.js';
 
 export type Payload<K extends ControlCommand['kind']> = Extract<ControlCommand, { kind: K }>['payload'];
@@ -118,6 +120,15 @@ interface PendingApproval {
   readonly classification: PolicyClassification;
   readonly effect: RedactedApprovalEffect;
 }
+
+interface AgentSurfaceHandlerResult {
+  readonly receipt: ActionReceipt;
+  readonly livePaneObservation?: PaneObservationResult;
+}
+
+type PaneActionPostcondition =
+  | Readonly<{ paneId: string; generation: number; focused: boolean }>
+  | Readonly<{ paneId: string; generation: number; cols: number; rows: number }>;
 
 const TERMINAL_EVENT_KINDS = new Set([
   'command.succeeded',
@@ -282,6 +293,11 @@ export class ControlRuntime {
       if (receipt) return receipt;
     }
     return undefined;
+  }
+
+  /** Provider lifecycle seam: revoke leases and approvals for one exact generation. */
+  revokeSurfaceAuthority(target: LeaseTarget): void {
+    this.revokeTargetAuthority(target);
   }
 
   /**
@@ -611,7 +627,7 @@ export class ControlRuntime {
       kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script';
     }>,
     target: LeaseTarget,
-    run: () => Promise<ActionReceipt>,
+    run: () => Promise<AgentSurfaceHandlerResult>,
   ): Promise<CommandOutcome> {
     const key = resourceKey(target);
     const queue = this.queueForResource(key);
@@ -622,8 +638,11 @@ export class ControlRuntime {
         await Promise.all([...queue.blockers]);
         this.setActionStatus(command, target, 'running');
         let outcome: CommandOutcome;
+        let livePaneObservation: PaneObservationResult | undefined;
         try {
-          outcome = succeededOutcome(await run());
+          const result = await run();
+          outcome = succeededOutcome(result.receipt);
+          livePaneObservation = result.livePaneObservation;
         } catch (error) {
           outcome = safeSurfaceFailure(error);
           this.recordReceipt(
@@ -631,7 +650,12 @@ export class ControlRuntime {
             outcome.status === 'succeeded' ? undefined : outcome.code,
           );
         }
-        resolve(await this.appendTerminal(command, outcome));
+        const durableOutcome = await this.appendTerminal(command, outcome);
+        resolve(
+          livePaneObservation && durableOutcome.status === 'succeeded'
+            ? succeededOutcome(livePaneObservation)
+            : durableOutcome,
+        );
       }).catch(async (error: unknown) => {
         resolve(await this.appendTerminal(command, safeSurfaceFailure(error)));
       }).finally(() => {
@@ -646,15 +670,21 @@ export class ControlRuntime {
       kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script';
     }>,
     target: LeaseTarget,
-  ): Promise<ActionReceipt> {
+  ): Promise<AgentSurfaceHandlerResult> {
     try {
+      let livePaneObservation: PaneObservationResult | undefined;
+      let panePostcondition: PaneActionPostcondition | undefined;
       switch (command.kind) {
-        case 'pane.observe':
-          await requireHandler(this.handlers.observePane, command.kind)(command.payload);
+        case 'pane.observe': {
+          const result = await requireHandler(this.handlers.observePane, command.kind)(command.payload);
+          livePaneObservation = normalizePaneObservation(command.payload.paneId, result);
           break;
-        case 'pane.action':
-          await requireHandler(this.handlers.actOnPane, command.kind)(command.payload);
+        }
+        case 'pane.action': {
+          const result = await requireHandler(this.handlers.actOnPane, command.kind)(command.payload);
+          panePostcondition = normalizePaneActionPostcondition(command, result);
           break;
+        }
         case 'browser.inspect':
           await requireHandler(this.handlers.inspectBrowser, command.kind)(command.payload);
           break;
@@ -665,7 +695,10 @@ export class ControlRuntime {
           await requireHandler(this.handlers.runBrowserScript, command.kind)(command.payload);
           break;
       }
-      return this.recordReceipt(command, target, 'succeeded');
+      return {
+        receipt: this.recordReceipt(command, target, 'succeeded', undefined, panePostcondition),
+        ...(livePaneObservation ? { livePaneObservation } : {}),
+      };
     } catch (error) {
       if (isAmbiguous(error)) throw codedError('effect_unknown', 'surface effect outcome is unknown', true);
       throw error;
@@ -935,7 +968,7 @@ export class ControlRuntime {
           revalidated.classification.decision !== 'approval'
           || revalidated.classification.capability !== pending.classification.capability
         ) throw codedError('approval_identity_mismatch', 'trusted action risk changed before approved effect');
-        const receipt = await this.invokeAgentSurfaceHandler(pending.command, current.target);
+        const { receipt } = await this.invokeAgentSurfaceHandler(pending.command, current.target);
         const outcome = outcomeForReceipt(receipt);
         resolve(await this.appendTerminal(pending.command, outcome));
       }).catch(async (error: unknown) => {
@@ -1045,6 +1078,7 @@ export class ControlRuntime {
     resource: LeaseTarget,
     state: ActionReceipt['state'],
     code?: string,
+    value?: PaneActionPostcondition,
   ): ActionReceipt {
     const receipt: ActionReceipt = Object.freeze({
       schema: 'psyche.control.receipt/v1',
@@ -1054,6 +1088,7 @@ export class ControlRuntime {
       createdAt: command.createdAt,
       ...(state === 'approval_required' ? {} : { completedAt: new Date().toISOString() }),
       ...(code ? { code } : {}),
+      ...(value ? { value } : {}),
     });
     const previous = this.receipts.findIndex(({ actionId }) => actionId === command.id);
     if (previous >= 0) this.receipts.splice(previous, 1);
@@ -1476,6 +1511,9 @@ function receiptPayload(event: RuntimeEvent): ActionReceipt | undefined {
     || !resource
     || !isExactLeaseTarget(resource)
   ) return undefined;
+  const postcondition = resource.kind === 'pane'
+    ? normalizeStoredPanePostcondition(resource.id, resource.generation, receipt.value)
+    : undefined;
   return Object.freeze({
     schema: 'psyche.control.receipt/v1',
     actionId: receipt.actionId,
@@ -1484,6 +1522,7 @@ function receiptPayload(event: RuntimeEvent): ActionReceipt | undefined {
     createdAt: receipt.createdAt,
     ...(typeof receipt.completedAt === 'string' ? { completedAt: receipt.completedAt } : {}),
     ...(typeof receipt.code === 'string' ? { code: receipt.code } : {}),
+    ...(postcondition ? { value: postcondition } : {}),
   });
 }
 
@@ -1871,6 +1910,95 @@ function isAmbiguous(error: unknown): boolean {
     (error as { ambiguous?: unknown }).ambiguous === true
     || (error as { code?: unknown }).code === 'effect_unknown'
   ));
+}
+
+function normalizePaneObservation(paneId: string, value: unknown): PaneObservationResult {
+  if (!value || typeof value !== 'object') {
+    throw codedError('invalid_observation_result', 'pane observation result is malformed');
+  }
+  const candidate = value as Partial<PaneObservationResult>;
+  const validSequence = (sequence: unknown) => (
+    typeof sequence === 'number' && Number.isSafeInteger(sequence) && sequence >= 0
+  );
+  if (
+    candidate.paneId !== paneId
+    || !validSequence(candidate.fromSequence)
+    || !validSequence(candidate.nextSequence)
+    || candidate.nextSequence! < candidate.fromSequence!
+    || typeof candidate.text !== 'string'
+    || typeof candidate.bytes !== 'number'
+    || !Number.isSafeInteger(candidate.bytes)
+    || candidate.bytes < 0
+    || candidate.bytes > AGENT_CONTROL_LIMITS.paneOutputBytes
+    || Buffer.byteLength(candidate.text, 'utf8') > candidate.bytes
+    || typeof candidate.truncated !== 'boolean'
+  ) {
+    throw codedError('invalid_observation_result', 'pane observation result is malformed');
+  }
+  return Object.freeze({
+    paneId: candidate.paneId,
+    fromSequence: candidate.fromSequence!,
+    nextSequence: candidate.nextSequence!,
+    text: candidate.text,
+    bytes: candidate.bytes,
+    truncated: candidate.truncated,
+  });
+}
+
+function normalizePaneActionPostcondition(
+  command: Extract<ControlCommand, { kind: 'pane.action' }>,
+  value: unknown,
+): PaneActionPostcondition | undefined {
+  if (command.payload.action.kind !== 'focus' && command.payload.action.kind !== 'resize') return undefined;
+  if (!value || typeof value !== 'object' || typeof command.payload.paneId !== 'string'
+    || typeof command.payload.generation !== 'number') {
+    throw codedError('invalid_pane_postcondition', 'pane action postcondition is malformed');
+  }
+  const candidate = value as Record<string, unknown>;
+  if (candidate.paneId !== command.payload.paneId || candidate.generation !== command.payload.generation) {
+    throw codedError('invalid_pane_postcondition', 'pane action postcondition is malformed');
+  }
+  if (command.payload.action.kind === 'focus' && typeof candidate.focused === 'boolean') {
+    return Object.freeze({
+      paneId: command.payload.paneId,
+      generation: command.payload.generation,
+      focused: candidate.focused,
+    });
+  }
+  if (
+    command.payload.action.kind === 'resize'
+    && validPaneDimension(candidate.cols)
+    && validPaneDimension(candidate.rows)
+  ) {
+    return Object.freeze({
+      paneId: command.payload.paneId,
+      generation: command.payload.generation,
+      cols: candidate.cols,
+      rows: candidate.rows,
+    });
+  }
+  throw codedError('invalid_pane_postcondition', 'pane action postcondition is malformed');
+}
+
+function normalizeStoredPanePostcondition(
+  paneId: string,
+  generation: number,
+  value: unknown,
+): PaneActionPostcondition | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.paneId !== paneId || candidate.generation !== generation) return undefined;
+  if (typeof candidate.focused === 'boolean') {
+    return Object.freeze({ paneId, generation, focused: candidate.focused });
+  }
+  if (validPaneDimension(candidate.cols) && validPaneDimension(candidate.rows)) {
+    return Object.freeze({ paneId, generation, cols: candidate.cols, rows: candidate.rows });
+  }
+  return undefined;
+}
+
+function validPaneDimension(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= 65_535;
 }
 
 function codedError(code: string, message: string, ambiguous = false): Error & { code: string; ambiguous?: boolean } {

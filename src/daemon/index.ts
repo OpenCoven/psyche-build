@@ -37,6 +37,11 @@ import { ControlServer } from '../control/server.js';
 import { createControlCredentialStore } from '../control/credentials.js';
 import { controlEndpointForProject } from '../control/endpoint.js';
 import { createDaemonControlHandlers } from './controlHandlers.js';
+import { SurfaceRegistry } from '../control/surfaces.js';
+import { PaneObservationStore } from '../control/resources/paneObservation.js';
+import { PaneResourceController } from '../control/resources/panes.js';
+import type { HostControlPlane } from '../control/host.js';
+import { TmuxControlSupervisor } from './tmuxControlSupervisor.js';
 import type { ControlActorKind, ControlCommand, CommandOutcome } from '../control/types.js';
 import {
   AgenticCapabilityRouter,
@@ -101,9 +106,6 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
 
   const sessionName = tmuxSessionNameForRoot(projectRoot);
   const tmux = new TmuxControl(sessionName);
-  if (tmuxSessionExists(sessionName)) {
-    tmux.start();
-  }
   tmux.on('stderr', (msg) => {
     // eslint-disable-next-line no-console
     console.error(`[tmux-control] ${msg.trim()}`);
@@ -113,13 +115,50 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   // project owner fence before accepting any connection; a failed acquire must
   // fail startup loudly rather than fall back to unfenced mutation.
   const canonicalProjectRoot = await canonicalizeProjectRoot(projectRoot);
+  const surfaces = new SurfaceRegistry();
+  const paneObservations = new PaneObservationStore();
+  let host!: HostControlPlane;
+  const paneResources = new PaneResourceController({
+    surfaces,
+    observations: paneObservations,
+    projectRoot: canonicalProjectRoot,
+    onRemove: (resource) => {
+      host?.runtime.revokeSurfaceAuthority({
+        kind: 'pane', id: resource.id, generation: resource.generation,
+      });
+    },
+  });
+  const tmuxSupervisor = new TmuxControlSupervisor({
+    control: tmux,
+    sessionExists: () => tmuxSessionExists(sessionName),
+    onConnect: async () => {
+      const unsubscribe = paneResources.subscribe(tmux);
+      try {
+        await paneResources.refresh();
+        return unsubscribe;
+      } catch (error) {
+        unsubscribe();
+        throw error;
+      }
+    },
+  });
+  tmuxSupervisor.start();
   const controlHandlers = createDaemonControlHandlers({
     tmux,
+    panes: paneResources,
     projectRoot: canonicalProjectRoot,
     sessionName,
     capabilityRouter,
   });
-  const host = await createHostControlPlane(canonicalProjectRoot, { handlers: controlHandlers });
+  try {
+    host = await createHostControlPlane(canonicalProjectRoot, {
+      handlers: controlHandlers,
+      surfaces,
+    });
+  } catch (error) {
+    tmuxSupervisor.stop();
+    throw error;
+  }
 
   // Mount the canonical control socket alongside the v0 WebSocket. Both share
   // the one host runtime, so every mutation — from either transport — passes
@@ -140,6 +179,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       credentials: controlCredentials,
     });
   } catch (error) {
+    tmuxSupervisor.stop();
     await host.close().catch(() => undefined);
     throw error;
   }
@@ -168,7 +208,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   // eslint-disable-next-line no-console
   console.log(`project root:  ${projectRoot}`);
   // eslint-disable-next-line no-console
-  console.log(`tmux session:  ${sessionName}${tmux['started'] ? '' : ' (not running — start psyche first)'}`);
+  console.log(`tmux session:  ${sessionName}${tmuxSupervisor.connected ? '' : ' (supervising)'}`);
   // eslint-disable-next-line no-console
   console.log(`token file:    ${tokenFilePath()}`);
   // eslint-disable-next-line no-console
@@ -187,6 +227,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       tmux,
       controlRuntime: host.runtime,
       ownerEpoch: host.epoch,
+      paneResources,
     });
     conn.bind();
   });
@@ -194,7 +235,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   const shutdown = (signal: string) => {
     // eslint-disable-next-line no-console
     console.log(`\npsyche daemon shutting down (${signal})`);
-    tmux.stop();
+    tmuxSupervisor.stop();
     wss.close();
     // Close the control socket before releasing the owner fence. host.close()
     // frees the fence, so if it ran concurrently a successor daemon could win
@@ -228,6 +269,8 @@ export interface ConnectionDeps {
   controlRuntime: { submit(command: ControlCommand): Promise<CommandOutcome> };
   /** Current owner epoch, stamped onto every translated command. */
   ownerEpoch: number;
+  /** Shared pane projection; refreshes canonical resources on list/create seams. */
+  paneResources?: PaneResourceController;
   workspaceProvider?: () => Promise<WorkspaceSnapshot>;
 }
 
@@ -529,6 +572,7 @@ export class Connection {
         return;
       }
       case 'panes.list': {
+        await this.deps.paneResources?.refresh();
         const panes = await listPanes(this.deps.projectRoot);
         this.send({ type: 'panes.list.result', requestId: msg.requestId, panes });
         return;

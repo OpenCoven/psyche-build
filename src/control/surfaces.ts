@@ -83,6 +83,15 @@ export class SurfaceRegistry {
     return Object.freeze([...this.resources.values()]);
   }
 
+  removePane(id: string, expectedGeneration: number): PaneSurface {
+    const resource = this.require(id, expectedGeneration);
+    if (resource.kind !== 'pane') {
+      throw Object.assign(new Error(`surface resource ${id} is not a pane`), { code: 'resource_replaced' });
+    }
+    this.resources.delete(id);
+    return resource;
+  }
+
   removeByProvider(providerId: string): readonly BrowserTabSurface[] {
     const removed: BrowserTabSurface[] = [];
     for (const [id, resource] of this.resources) {
