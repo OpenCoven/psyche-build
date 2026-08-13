@@ -500,7 +500,9 @@ describe('ControlRuntime', () => {
 
   it('records an ambiguous browser effect as unknown and never retries it', async () => {
     handlers.actOnBrowser = vi.fn(async () => {
-      throw Object.assign(new Error('provider disconnected'), { ambiguous: true });
+      throw Object.assign(new Error('provider acknowledgement timed out'), {
+        code: 'action_timeout', ambiguous: true,
+      });
     });
     const surfaces = new SurfaceRegistry();
     surfaces.upsertBrowserTab({

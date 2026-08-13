@@ -7,6 +7,7 @@ import {
   installDaemonPaneLifecycleHooks,
   parseDaemonArgs,
   refreshPaneSurfaces,
+  PaneSurfaceRefreshQueue,
   uninstallDaemonPaneLifecycleHooks,
   updatePaneMeta,
 } from '../../src/daemon/index.js';
@@ -136,6 +137,42 @@ describe('daemon pane config helpers', () => {
     await refreshPaneSurfaces(root, surfaces, observations, async (paneId) => paneId === '%4');
     expect(surfaces.get('psyche-2')).toMatchObject({
       tmuxPaneId: '%4', generation: first.generation + 1,
+    });
+  });
+
+  it('serializes delayed refreshes so an older result cannot overwrite a newer rebind', async () => {
+    const root = await writeConfig({
+      panes: [{ id: 'psyche-2', paneId: '%3', worktreeDir: '/repo/worktree' }],
+    });
+    const surfaces = new SurfaceRegistry();
+    const observations = new PaneObservationStore();
+    const original = surfaces.upsertPane({
+      id: 'psyche-2', tmuxPaneId: '%2', projectRoot: root, worktreeRoot: '/repo/worktree',
+      writable: true, outputSequence: 7,
+    });
+    let releaseFirst!: () => void;
+    let probeCalls = 0;
+    const queue = new PaneSurfaceRefreshQueue(() => refreshPaneSurfaces(
+      root,
+      surfaces,
+      observations,
+      async (paneId) => {
+        probeCalls += 1;
+        if (probeCalls === 1) await new Promise<void>((resolve) => { releaseFirst = resolve; });
+        return paneId === '%4';
+      },
+    ));
+
+    const first = queue.run();
+    await vi.waitFor(() => expect(probeCalls).toBe(1));
+    await writeFile(path.join(root, '.psyche', 'psyche.config.json'), JSON.stringify({
+      panes: [{ id: 'psyche-2', paneId: '%4', worktreeDir: '/repo/worktree' }],
+    }));
+    const second = queue.run();
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(surfaces.get('psyche-2')).toMatchObject({
+      tmuxPaneId: '%4', generation: original.generation + 1, outputSequence: 0,
     });
   });
 

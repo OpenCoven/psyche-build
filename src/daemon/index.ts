@@ -88,6 +88,7 @@ export const AUTH_DEADLINE_MS = 10_000;
 export const MAX_STREAMS_PER_CONNECTION = 64;
 export const MAX_BATCH_LANES = 16;
 export const MAX_IDEMPOTENT_SPAWNS = 128;
+export const MAX_CONNECTION_BUFFERED_BYTES = 1024 * 1024;
 
 export async function refreshPaneSurfaces(
   projectRoot: string,
@@ -116,6 +117,18 @@ export async function refreshPaneSurfaces(
     observations.clear(resource.id);
   }
   return surfaces.list().filter((resource): resource is PaneSurface => resource.kind === 'pane');
+}
+
+export class PaneSurfaceRefreshQueue {
+  private tail: Promise<unknown> = Promise.resolve();
+
+  constructor(private readonly refresh: () => Promise<readonly PaneSurface[]>) {}
+
+  run(): Promise<readonly PaneSurface[]> {
+    const result = this.tail.then(this.refresh, this.refresh);
+    this.tail = result.then(() => undefined, () => undefined);
+    return result;
+  }
 }
 
 function invalidatePaneSurfaces(
@@ -203,9 +216,14 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   const paneObservations = new PaneObservationStore();
   const surfaces = new SurfaceRegistry();
   await refreshPaneSurfaces(canonicalProjectRoot, surfaces, paneObservations);
+  const paneRefresh = new PaneSurfaceRefreshQueue(() => refreshPaneSurfaces(
+    canonicalProjectRoot,
+    surfaces,
+    paneObservations,
+  ));
   const handlePaneLifecycleSignal = (): void => {
     invalidatePaneSurfaces(surfaces, paneObservations);
-    void refreshPaneSurfaces(canonicalProjectRoot, surfaces, paneObservations).catch((error) => {
+    void paneRefresh.run().catch((error) => {
       // eslint-disable-next-line no-console
       console.error(`[daemon] failed to refresh pane surfaces: ${String(error)}`);
     });
@@ -231,11 +249,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     capabilityRouter,
     paneObservations,
     surfaces,
-    refreshPaneSurfaces: () => refreshPaneSurfaces(
-      canonicalProjectRoot,
-      surfaces,
-      paneObservations,
-    ),
+    refreshPaneSurfaces: () => paneRefresh.run(),
   });
   const host = await createHostControlPlane(canonicalProjectRoot, {
     handlers: controlHandlers,
@@ -408,6 +422,7 @@ export class Connection {
   private authTimer: NodeJS.Timeout | null = null;
   /** Subscription to the daemon-level fan-out; never a direct tmux listener. */
   private unsubscribeOutput: (() => void) | null = null;
+  private outputBackpressured = false;
 
   /** Stable identity for every command this connection translates. */
   private readonly actorId = randomUUID();
@@ -494,8 +509,18 @@ export class Connection {
   }
 
   private sendBinary(streamId: StreamId, payload: Buffer): void {
+    if (this.outputBackpressured) return;
+    const frame = encodeBinaryFrame(streamId, payload);
+    if (this.ws.bufferedAmount + frame.length > MAX_CONNECTION_BUFFERED_BYTES) {
+      this.outputBackpressured = true;
+      this.activeStreams.clear();
+      this.streamLease.clear();
+      this.releaseOutputHandler();
+      this.ws.close(4409, 'pane output backpressure');
+      return;
+    }
     try {
-      this.ws.send(encodeBinaryFrame(streamId, payload));
+      this.ws.send(frame);
     } catch {
       // ignore
     }

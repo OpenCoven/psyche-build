@@ -7,6 +7,7 @@ import {
   AUTH_DEADLINE_MS,
   Connection,
   MAX_STREAMS_PER_CONNECTION,
+  MAX_CONNECTION_BUFFERED_BYTES,
   tokensMatch,
   type ConnectionDeps,
 } from '../../src/daemon/index.js';
@@ -49,6 +50,7 @@ class FakeSocket extends EventEmitter {
   readonly sent: any[] = [];
   readonly binary: Buffer[] = [];
   readonly closes: Array<{ code: number; reason: string }> = [];
+  bufferedAmount = 0;
 
   send(data: string | Buffer): void {
     if (typeof data === 'string') this.sent.push(JSON.parse(data));
@@ -602,5 +604,24 @@ describe('daemon connection resilience', () => {
     const frame = ws.binary[0];
     expect(frame.subarray(1, 1 + frame.readUInt8(0)).toString('utf8')).toBe(forStreamOfPaneFour);
     expect(frame.subarray(1 + frame.readUInt8(0)).toString('utf8')).toBe('hello from four');
+  });
+
+  it('closes a slow client while a healthy client continues on the sole output listener', async () => {
+    const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
+    const tmux = new RecordingTmux('psyche-test');
+    const paneOutput = new PaneOutputFanout(tmux);
+    const slow = await buildConnection(root, { tmux, paneOutput });
+    const healthy = await buildConnection(root, { tmux, paneOutput });
+    await request(slow.ws, { type: 'panes.attach', requestId: 'slow', id: '%3' });
+    await request(healthy.ws, { type: 'panes.attach', requestId: 'healthy', id: '%3' });
+    const healthyBefore = healthy.ws.binary.length;
+    slow.ws.bufferedAmount = MAX_CONNECTION_BUFFERED_BYTES;
+
+    tmux.emit('output', '%3', Buffer.from('one'));
+    expect(slow.ws.closes).toEqual([{ code: 4409, reason: 'pane output backpressure' }]);
+    expect(healthy.ws.binary).toHaveLength(healthyBefore + 1);
+    tmux.emit('output', '%3', Buffer.from('two'));
+    expect(healthy.ws.binary).toHaveLength(healthyBefore + 2);
+    expect(tmux.listenerCount('output')).toBe(1);
   });
 });

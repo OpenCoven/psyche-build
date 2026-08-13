@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { TmuxControl, tmuxDimensionArg, unescapeTmuxOutput } from '../../src/services/tmuxControl.js';
@@ -151,13 +151,18 @@ function createFakeControlProcess() {
 
   const commands: string[] = [];
   let nextNumber = 0;
+  let deferWrites = false;
+  const writeCallbacks: Array<(error?: Error | null) => void> = [];
 
   (proc as unknown as { stdout: unknown }).stdout = stdout;
   (proc as unknown as { stderr: unknown }).stderr = stderr;
   (proc as unknown as { stdin: unknown }).stdin = {
     write(chunk: string, cb?: (error?: Error | null) => void) {
       commands.push(chunk.replace(/\n$/, ''));
-      if (cb) cb();
+      if (cb) {
+        if (deferWrites) writeCallbacks.push(cb);
+        else cb();
+      }
       return true;
     },
     end() {},
@@ -169,6 +174,8 @@ function createFakeControlProcess() {
   return {
     process: proc as ChildProcessWithoutNullStreams,
     commands: () => commands.slice(),
+    deferWrites() { deferWrites = true; },
+    completeWrite(error?: Error) { writeCallbacks.shift()?.(error); },
     /** Emit the unsolicited acknowledgement block tmux sends for the attach. */
     attach() {
       const number = String(nextNumber++);
@@ -196,15 +203,83 @@ function createFakeControlProcess() {
  * Start a TmuxControl backed by a fake control process, then emit the initial
  * attach acknowledgement block exactly as `tmux -C attach-session` does.
  */
-function startControl() {
+function startControl(options: { actionTimeoutMs?: number } = {}) {
   const fake = createFakeControlProcess();
-  const tmux = new TmuxControl('psyche-test', { spawnControl: () => fake.process });
+  const tmux = new TmuxControl('psyche-test', { spawnControl: () => fake.process, ...options });
   tmux.start();
   fake.attach();
   return { fake, tmux };
 }
 
 describe('TmuxControl acknowledged submission', () => {
+  it('quarantines the ACK stream after a delayed write callback fails', async () => {
+    const { fake, tmux } = startControl();
+    fake.deferWrites();
+
+    const first = tmux.executeCommand("send-keys -t '%3' Enter");
+    const second = tmux.executeCommand("send-keys -t '%3' Tab");
+    void first.catch(() => {});
+    void second.catch(() => {});
+    await tick();
+    expect(fake.commands()).toEqual(["send-keys -t '%3' Enter"]);
+    fake.completeWrite(new Error('late write failure'));
+    fake.acknowledgeNext();
+
+    await expect(first).rejects.toMatchObject({ ambiguous: true });
+    await expect(second).rejects.toMatchObject({ ambiguous: true });
+    expect(fake.commands()).toEqual(["send-keys -t '%3' Enter"]);
+  });
+
+  it('ignores a quarantined stream ACK after an explicit fresh restart', async () => {
+    const stale = createFakeControlProcess();
+    const fresh = createFakeControlProcess();
+    const processes = [stale.process, fresh.process];
+    const tmux = new TmuxControl('psyche-test', { spawnControl: () => processes.shift()! });
+    tmux.start();
+    stale.attach();
+    stale.deferWrites();
+    const failed = tmux.executeCommand("send-keys -t '%3' Enter");
+    void failed.catch(() => {});
+    await tick();
+    stale.completeWrite(new Error('late write failure'));
+    await expect(failed).rejects.toMatchObject({ ambiguous: true });
+
+    tmux.start();
+    fresh.attach();
+    const restarted = tmux.executeCommand("send-keys -t '%3' Tab");
+    await tick();
+    stale.acknowledgeNext();
+    await tick();
+    expect(fresh.commands()).toEqual(["send-keys -t '%3' Tab"]);
+    fresh.acknowledgeNext();
+    await expect(restarted).resolves.toBeUndefined();
+  });
+
+  it('times out an unacknowledged effect and quarantines pending commands', async () => {
+    vi.useFakeTimers();
+    try {
+      const { fake, tmux } = startControl({ actionTimeoutMs: 25 });
+      const first = tmux.executeCommand("send-keys -t '%3' Enter");
+      const second = tmux.executeCommand("send-keys -t '%3' Tab");
+      void first.catch(() => {});
+      void second.catch(() => {});
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expect(first).rejects.toMatchObject({ code: 'action_timeout', ambiguous: true });
+      await expect(second).rejects.toMatchObject({ ambiguous: true });
+      expect(fake.commands()).toEqual(["send-keys -t '%3' Enter"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps command output by line count including empty line separators', async () => {
+    const { fake, tmux } = startControl();
+    const pending = tmux.executeCommandWithOutput("display-message -p ''");
+    await tick();
+    fake.acknowledgeNext(Array.from({ length: 4097 }, () => ''));
+    await expect(pending).rejects.toMatchObject({ code: 'output_truncated' });
+  });
   it('captures bounded command output from its acknowledgement block', async () => {
     const { fake, tmux } = startControl();
 
