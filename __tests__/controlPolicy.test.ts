@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  classifyBrowserAction as classifyBrowserActionDirect,
   classifyBrowserScript,
   classifyPaneAction,
   createBrowserPolicyAuthority,
@@ -16,6 +17,20 @@ describe('agent control policy', () => {
   const trustedType = (secret: boolean): BrowserResolvedRiskContext => (
     authority.resolveFromCanonicalSnapshot({ actionKind: 'type', secret })
   );
+
+  it('supports direct classification from semantic metadata', () => {
+    expect(classifyBrowserActionDirect({
+      kind: 'click',
+      semantic: { role: 'button', submit: false },
+    })).toEqual({ decision: 'allow', capability: 'browser.interact' });
+    expect(classifyBrowserActionDirect({
+      kind: 'type',
+      semantic: { secret: true },
+    })).toMatchObject({ decision: 'approval', capability: 'browser.interact' });
+    for (const kind of ['submit', 'upload', 'download', 'permission_response', 'close'] as const) {
+      expect(classifyBrowserActionDirect({ kind })).toMatchObject({ decision: 'approval' });
+    }
+  });
 
   it.each<[PaneAction, 'allow' | 'approval', string]>([
     [{ kind: 'send_text', text: 'status' }, 'allow', 'pane.input'],
