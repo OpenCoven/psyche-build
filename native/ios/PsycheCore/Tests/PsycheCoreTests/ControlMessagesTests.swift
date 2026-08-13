@@ -311,8 +311,9 @@ final class ControlMessagesTests: XCTestCase {
                 aiFailed: false
             ),
             data: [
-                "session": "action-session-1",
-                "topic": "pr_review"
+                "host": "studio.local",
+                "projectTitle": "psyche-build",
+                "consequence": "Creates a public pull request"
             ],
             relatedFiles: ["Sources/App.swift", "Sources/SceneDelegate.swift"],
             dismissable: false
