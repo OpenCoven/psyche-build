@@ -7,10 +7,25 @@ const MAX_NAME_NODES = 2_000;
 const MAX_NAME_WORK = 10_000;
 const MAX_NAME_TOTAL_BYTES = 1024 * 1024;
 const SNAPSHOT_TTL_MS = 30_000;
-const INSTALLED = new WeakMap();
+const TrustedMap = Map;
+const TrustedWeakMap = WeakMap;
+const TrustedSet = Set;
+const textEncoder = new TextEncoder();
+const encodeText = textEncoder.encode.bind(textEncoder);
+const objectAssign = Object.assign.bind(Object);
+const objectDefineProperty = Object.defineProperty.bind(Object);
+const objectFreeze = Object.freeze.bind(Object);
+const reflectApply = Reflect.apply.bind(Reflect);
+const trustedElementGetAttribute = globalThis.Element?.prototype?.getAttribute;
+const trustedElementHasAttribute = globalThis.Element?.prototype?.hasAttribute;
+const trustedElementGetBoundingClientRect = globalThis.Element?.prototype?.getBoundingClientRect;
+const trustedDocumentGetElementById = globalThis.Document?.prototype?.getElementById;
+const trustedDocumentQuerySelectorAll = globalThis.Document?.prototype?.querySelectorAll;
+const trustedGetComputedStyle = globalThis.getComputedStyle?.bind(globalThis);
+const INSTALLED = new TrustedWeakMap();
 
-const INTERACTIVE_TAGS = new Set(['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY', 'IFRAME']);
-const ALLOWED_ROLES = new Set(['button', 'link', 'textbox', 'checkbox', 'radio', 'combobox', 'option', 'frame', 'img', 'heading', 'status', 'dialog', 'menu', 'menuitem', 'tab', 'tabpanel', 'switch']);
+const INTERACTIVE_TAGS = new TrustedSet(['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY', 'IFRAME']);
+const ALLOWED_ROLES = new TrustedSet(['button', 'link', 'textbox', 'checkbox', 'radio', 'combobox', 'option', 'frame', 'img', 'heading', 'status', 'dialog', 'menu', 'menuitem', 'tab', 'tabpanel', 'switch']);
 
 export function installBrowserAutomation(globalObject, options = {}) {
   if (!globalObject || (typeof globalObject !== 'object' && typeof globalObject !== 'function')) {
@@ -60,9 +75,9 @@ export function installBrowserAutomation(globalObject, options = {}) {
   }
 
   const api = { schema: 'psyche.browser.automation/v1', dispatch, invalidate };
-  if (options.installNonce) Object.defineProperty(api, '__psycheInstallNonce', { value: options.installNonce });
-  Object.freeze(api);
-  Object.defineProperty(globalObject, '__PSYCHE_AUTOMATION__', {
+  if (options.installNonce) objectDefineProperty(api, '__psycheInstallNonce', { value: options.installNonce });
+  objectFreeze(api);
+  objectDefineProperty(globalObject, '__PSYCHE_AUTOMATION__', {
     configurable: false,
     enumerable: false,
     writable: false,
@@ -87,16 +102,33 @@ export function browserAutomationSource() {
     const MAX_NODES=${MAX_NODES}; const MAX_VISITED_NODES=${MAX_VISITED_NODES}; const MAX_DEPTH=${MAX_DEPTH}; const MAX_NAME_BYTES=${MAX_NAME_BYTES};
     const MAX_NAME_NODES=${MAX_NAME_NODES};
     const MAX_NAME_WORK=${MAX_NAME_WORK}; const MAX_NAME_TOTAL_BYTES=${MAX_NAME_TOTAL_BYTES};
-    const SNAPSHOT_TTL_MS=${SNAPSHOT_TTL_MS}; const INSTALLED=new WeakMap();
-    const INTERACTIVE_TAGS=new Set(${JSON.stringify([...INTERACTIVE_TAGS])});
-    const ALLOWED_ROLES=new Set(${JSON.stringify([...ALLOWED_ROLES])});
+    const TrustedMap=Map; const TrustedWeakMap=WeakMap; const TrustedSet=Set;
+    const textEncoder=new TextEncoder(); const encodeText=textEncoder.encode.bind(textEncoder);
+    const objectAssign=Object.assign.bind(Object); const objectDefineProperty=Object.defineProperty.bind(Object); const objectFreeze=Object.freeze.bind(Object);
+    const reflectApply=Reflect.apply.bind(Reflect);
+    const trustedElementGetAttribute=globalObject.Element?.prototype?.getAttribute;
+    const trustedElementHasAttribute=globalObject.Element?.prototype?.hasAttribute;
+    const trustedElementGetBoundingClientRect=globalObject.Element?.prototype?.getBoundingClientRect;
+    const trustedDocumentGetElementById=globalObject.Document?.prototype?.getElementById;
+    const trustedDocumentQuerySelectorAll=globalObject.Document?.prototype?.querySelectorAll;
+    const trustedGetComputedStyle=globalObject.getComputedStyle?.bind(globalObject);
+    const SNAPSHOT_TTL_MS=${SNAPSHOT_TTL_MS}; const INSTALLED=new TrustedWeakMap();
+    const INTERACTIVE_TAGS=new TrustedSet(${JSON.stringify([...INTERACTIVE_TAGS])});
+    const ALLOWED_ROLES=new TrustedSet(${JSON.stringify([...ALLOWED_ROLES])});
     ${automationError.toString()}
+    ${readAttribute.toString()}
+    ${hasAttribute.toString()}
+    ${readRect.toString()}
+    ${findElementById.toString()}
+    ${selectElements.toString()}
+    ${computedStyle.toString()}
     ${boundedText.toString()}
     ${finiteBound.toString()}
     ${clipRect.toString()}
     ${safeRect.toString()}
     ${isHidden.toString()}
     ${visibleText.toString()}
+    ${cachedVisibleText.toString()}
     ${accessibleName.toString()}
     ${roleFor.toString()}
     ${semanticNode.toString()}
@@ -112,22 +144,24 @@ function captureSnapshot(globalObject, sequence, createdAt) {
   const viewportWidth = finiteBound(globalObject.innerWidth, 0, 100_000);
   const viewportHeight = finiteBound(globalObject.innerHeight, 0, 100_000);
   const nodes = [];
-  const refs = new Map();
+  const refs = new TrustedMap();
   const root = document.body || document.documentElement;
-  const labelsByFor = new Map();
-  const referencedText = new Map();
+  const labelsByFor = new TrustedMap();
+  const referencedText = new TrustedMap();
+  const labelTextByFor = new TrustedMap();
+  const visibleTextCache = new TrustedWeakMap();
   const nameBudget = { nodes: MAX_NAME_WORK, bytes: MAX_NAME_TOTAL_BYTES, truncated: false };
   let labelIndexExhausted = false;
-  if (typeof document.querySelectorAll === 'function') {
+  if (trustedDocumentQuerySelectorAll || typeof document.querySelectorAll === 'function') {
     let indexedLabels = 0;
-    const labelList = document.querySelectorAll('label');
+    const labelList = selectElements(document, 'label');
     const labelIterator = labelList[Symbol.iterator]();
     while (indexedLabels < MAX_VISITED_NODES) {
       const nextLabel = labelIterator.next();
       if (nextLabel.done) break;
       const label = nextLabel.value;
       indexedLabels += 1;
-      const target = label.getAttribute?.('for');
+      const target = readAttribute(label, 'for');
       if (target && !labelsByFor.has(target)) labelsByFor.set(target, []);
       if (target) labelsByFor.get(target).push(label);
     }
@@ -147,7 +181,7 @@ function captureSnapshot(globalObject, sequence, createdAt) {
       frame.entered = true;
       const hidden = isHidden(frame.element, globalObject);
       if (!hidden) {
-        const semantic = semanticNode(frame.element, document, viewportWidth, viewportHeight, globalObject, labelsByFor, referencedText, nameBudget);
+        const semantic = semanticNode(frame.element, document, viewportWidth, viewportHeight, globalObject, labelsByFor, referencedText, labelTextByFor, visibleTextCache, nameBudget);
         if (semantic && nodes.length < MAX_NODES) {
           const ref = `e${nodes.length + 1}`;
           nodes.push({ ref, ...semantic });
@@ -184,20 +218,20 @@ function captureSnapshot(globalObject, sequence, createdAt) {
   };
 }
 
-function semanticNode(element, document, viewportWidth, viewportHeight, globalObject, labelsByFor, referencedText, nameBudget) {
+function semanticNode(element, document, viewportWidth, viewportHeight, globalObject, labelsByFor, referencedText, labelTextByFor, visibleTextCache, nameBudget) {
   const tag = String(element.tagName || '').toUpperCase();
   const role = roleFor(element, tag);
   if (!role) return null;
   const rect = safeRect(element);
   const clipped = clipRect(rect, viewportWidth, viewportHeight);
   if (!clipped && !INTERACTIVE_TAGS.has(tag)) return null;
-  const name = accessibleName(element, document, globalObject, labelsByFor, referencedText, nameBudget);
+  const name = accessibleName(element, document, globalObject, labelsByFor, referencedText, labelTextByFor, visibleTextCache, nameBudget);
   const result = { role, name, bounds: clipped || { x: 0, y: 0, width: 0, height: 0, clipped: true } };
-  if (element.disabled === true || element.hasAttribute?.('disabled') || element.getAttribute?.('aria-disabled') === 'true') result.disabled = true;
-  if (role === 'checkbox' || role === 'radio') result.checked = element.checked === true || element.getAttribute?.('aria-checked') === 'true';
-  if (role === 'option') result.selected = element.selected === true || element.getAttribute?.('aria-selected') === 'true';
+  if (element.disabled === true || hasAttribute(element, 'disabled') || readAttribute(element, 'aria-disabled') === 'true') result.disabled = true;
+  if (role === 'checkbox' || role === 'radio') result.checked = element.checked === true || readAttribute(element, 'aria-checked') === 'true';
+  if (role === 'option') result.selected = element.selected === true || readAttribute(element, 'aria-selected') === 'true';
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
-    const secret = tag === 'INPUT' && String(element.type || element.getAttribute?.('type') || '').toLowerCase() === 'password';
+    const secret = tag === 'INPUT' && String(element.type || readAttribute(element, 'type') || '').toLowerCase() === 'password';
     if (secret) {
       result.secret = true;
       result.valuePresent = String(element.value || '').length > 0;
@@ -210,20 +244,20 @@ function semanticNode(element, document, viewportWidth, viewportHeight, globalOb
 }
 
 function roleFor(element, tag) {
-  const explicit = boundedText(element.getAttribute?.('role') || '', 64).toLowerCase();
+  const explicit = boundedText(readAttribute(element, 'role') || '', 64).toLowerCase();
   if (explicit) {
     for (const token of explicit.split(/\s+/)) if (ALLOWED_ROLES.has(token)) return token;
     return null;
   }
   if (tag === 'BUTTON') return 'button';
-  if (tag === 'A' && element.getAttribute?.('href')) return 'link';
+  if (tag === 'A' && readAttribute(element, 'href')) return 'link';
   if (tag === 'TEXTAREA') return 'textbox';
   if (tag === 'SELECT') return 'combobox';
   if (tag === 'OPTION') return 'option';
   if (tag === 'IFRAME' || tag === 'FRAME') return 'frame';
-  if (tag === 'IMG' && element.getAttribute?.('alt')) return 'img';
+  if (tag === 'IMG' && readAttribute(element, 'alt')) return 'img';
   if (tag === 'INPUT') {
-    const type = String(element.type || element.getAttribute?.('type') || 'text').toLowerCase();
+    const type = String(element.type || readAttribute(element, 'type') || 'text').toLowerCase();
     if (type === 'hidden') return null;
     if (type === 'checkbox') return 'checkbox';
     if (type === 'radio') return 'radio';
@@ -233,19 +267,19 @@ function roleFor(element, tag) {
   return null;
 }
 
-function accessibleName(element, document, globalObject, labelsByFor, referencedText, nameBudget) {
-  const direct = element.getAttribute?.('aria-label');
+function accessibleName(element, document, globalObject, labelsByFor, referencedText, labelTextByFor, visibleTextCache, nameBudget) {
+  const direct = readAttribute(element, 'aria-label');
   if (direct) return boundedText(direct, MAX_NAME_BYTES);
-  const labelledBy = String(element.getAttribute?.('aria-labelledby') || '').trim();
+  const labelledBy = String(readAttribute(element, 'aria-labelledby') || '').trim();
   if (labelledBy) {
     const parts = [];
     let references = 0;
     for (const match of labelledBy.slice(0, 65536).matchAll(/\S+/g)) {
       if (references++ >= MAX_NAME_NODES) break;
-      if (!referencedText.has(match[0])) referencedText.set(match[0], visibleText(document.getElementById?.(match[0]), globalObject, nameBudget));
+      if (!referencedText.has(match[0])) referencedText.set(match[0], cachedVisibleText(findElementById(document, match[0]), globalObject, nameBudget, visibleTextCache));
       const text = referencedText.get(match[0]);
       if (text) parts.push(text);
-      if (new TextEncoder().encode(parts.join(' ')).length >= MAX_NAME_BYTES) break;
+      if (encodeText(boundedText(parts.join(' '), MAX_NAME_BYTES)).length >= MAX_NAME_BYTES) break;
     }
     const label = boundedText(parts.join(' '), MAX_NAME_BYTES);
     if (label) return boundedText(label, MAX_NAME_BYTES);
@@ -255,29 +289,52 @@ function accessibleName(element, document, globalObject, labelsByFor, referenced
     let references = 0;
     for (const item of element.labels) {
       if (references++ >= MAX_NAME_NODES) break;
-      const text = visibleText(item, globalObject, nameBudget);
+      const text = cachedVisibleText(item, globalObject, nameBudget, visibleTextCache);
       if (text) parts.push(text);
-      if (new TextEncoder().encode(parts.join(' ')).length >= MAX_NAME_BYTES) break;
+      if (encodeText(boundedText(parts.join(' '), MAX_NAME_BYTES)).length >= MAX_NAME_BYTES) break;
     }
     const label = boundedText(parts.join(' '), MAX_NAME_BYTES);
     if (label) return boundedText(label, MAX_NAME_BYTES);
   }
-  const id = element.getAttribute?.('id');
+  const id = readAttribute(element, 'id');
   if (id) {
-    const label = boundedText((labelsByFor.get(id) || []).map((item) => visibleText(item, globalObject, nameBudget)).join(' '), MAX_NAME_BYTES);
+    if (!labelTextByFor.has(id)) {
+      const parts = [];
+      let references = 0;
+      for (const item of labelsByFor.get(id) || []) {
+        if (references++ >= MAX_NAME_NODES) break;
+        const text = cachedVisibleText(item, globalObject, nameBudget, visibleTextCache);
+        if (text) parts.push(text);
+        if (encodeText(boundedText(parts.join(' '), MAX_NAME_BYTES)).length >= MAX_NAME_BYTES) break;
+      }
+      labelTextByFor.set(id, boundedText(parts.join(' '), MAX_NAME_BYTES));
+    }
+    const label = labelTextByFor.get(id);
     if (label) return boundedText(label, MAX_NAME_BYTES);
   }
-  const alt = element.getAttribute?.('alt');
+  const alt = readAttribute(element, 'alt');
   if (alt) return boundedText(alt, MAX_NAME_BYTES);
-  const title = element.getAttribute?.('title');
+  const title = readAttribute(element, 'title');
   if (title) return boundedText(title, MAX_NAME_BYTES);
-  return boundedText(visibleText(element, globalObject, nameBudget), MAX_NAME_BYTES);
+  return boundedText(cachedVisibleText(element, globalObject, nameBudget, visibleTextCache), MAX_NAME_BYTES);
+}
+
+function cachedVisibleText(element, globalObject, budget, cache) {
+  if (!element || (typeof element !== 'object' && typeof element !== 'function')) return '';
+  if (cache.has(element)) return cache.get(element);
+  const text = visibleText(element, globalObject, budget);
+  cache.set(element, text);
+  return text;
 }
 
 function visibleText(element, globalObject, budget) {
-  if (!element || isHidden(element, globalObject)) return '';
+  if (!element) return '';
+  if (budget.nodes <= 0 || budget.bytes <= 0) {
+    budget.truncated = true;
+    return '';
+  }
+  if (isHidden(element, globalObject)) return '';
   const parts = [];
-  const encoder = new TextEncoder();
   let remaining = MAX_NAME_BYTES;
   let visited = 0;
 
@@ -290,7 +347,7 @@ function visibleText(element, globalObject, budget) {
     const bounded = boundedText(text, remaining);
     if (!bounded) return;
     parts.push(bounded);
-    const used = encoder.encode(bounded).length;
+    const used = encodeText(bounded).length;
     remaining -= used;
     budget.bytes -= used;
   }
@@ -333,8 +390,8 @@ function visibleText(element, globalObject, budget) {
 function isHidden(element, globalObject) {
   let current = element;
   for (let depth = 0; current && depth <= MAX_DEPTH; depth += 1, current = current.parentElement) {
-    if (current.hidden === true || current.hasAttribute?.('hidden') || current.getAttribute?.('aria-hidden') === 'true') return true;
-    const style = typeof globalObject.getComputedStyle === 'function' ? globalObject.getComputedStyle(current) : null;
+    if (current.hidden === true || hasAttribute(current, 'hidden') || readAttribute(current, 'aria-hidden') === 'true') return true;
+    const style = computedStyle(current, globalObject);
     if (style?.display === 'none' || style?.visibility === 'hidden') return true;
   }
   return false;
@@ -342,7 +399,7 @@ function isHidden(element, globalObject) {
 
 function safeRect(element) {
   try {
-    const rect = element.getBoundingClientRect?.();
+    const rect = readRect(element);
     if (!rect) return null;
     const x = Number(rect.x ?? rect.left);
     const y = Number(rect.y ?? rect.top);
@@ -373,7 +430,6 @@ function finiteBound(value, minimum, maximum) {
 
 function boundedText(value, maxBytes) {
   const source = String(value || '');
-  const encoder = new TextEncoder();
   let output = '';
   let bytes = 0;
   let pendingSpace = false;
@@ -383,7 +439,7 @@ function boundedText(value, maxBytes) {
       continue;
     }
     const prefix = pendingSpace && output ? ' ' : '';
-    const characterBytes = encoder.encode(prefix + character).length;
+    const characterBytes = encodeText(prefix + character).length;
     if (bytes + characterBytes > maxBytes) break;
     output += prefix + character;
     bytes += characterBytes;
@@ -392,6 +448,48 @@ function boundedText(value, maxBytes) {
   return output;
 }
 
+function readAttribute(element, name) {
+  try {
+    if (trustedElementGetAttribute) return reflectApply(trustedElementGetAttribute, element, [name]);
+  } catch {}
+  return element?.getAttribute?.(name) ?? null;
+}
+
+function hasAttribute(element, name) {
+  try {
+    if (trustedElementHasAttribute) return reflectApply(trustedElementHasAttribute, element, [name]);
+  } catch {}
+  return element?.hasAttribute?.(name) === true;
+}
+
+function readRect(element) {
+  try {
+    if (trustedElementGetBoundingClientRect) return reflectApply(trustedElementGetBoundingClientRect, element, []);
+  } catch {}
+  return element?.getBoundingClientRect?.() ?? null;
+}
+
+function findElementById(document, id) {
+  try {
+    if (trustedDocumentGetElementById) return reflectApply(trustedDocumentGetElementById, document, [id]);
+  } catch {}
+  return document?.getElementById?.(id) ?? null;
+}
+
+function selectElements(document, selector) {
+  try {
+    if (trustedDocumentQuerySelectorAll) return reflectApply(trustedDocumentQuerySelectorAll, document, [selector]);
+  } catch {}
+  return document.querySelectorAll(selector);
+}
+
+function computedStyle(element, globalObject) {
+  try {
+    if (trustedGetComputedStyle) return trustedGetComputedStyle(element);
+  } catch {}
+  return typeof globalObject.getComputedStyle === 'function' ? globalObject.getComputedStyle(element) : null;
+}
+
 function automationError(code, message) {
-  return Object.assign(new Error(message), { code });
+  return objectAssign(new Error(message), { code });
 }

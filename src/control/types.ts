@@ -82,6 +82,7 @@ export interface SemanticSnapshot {
   truncated: boolean;
   opaqueFrames: number;
   expiresAt: string;
+  screenshot?: Readonly<{ pngBase64: string; width: number; height: number }>;
 }
 
 export interface ActionReceipt {

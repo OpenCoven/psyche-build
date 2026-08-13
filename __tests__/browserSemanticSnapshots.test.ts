@@ -47,4 +47,14 @@ describe('BrowserSemanticSnapshotRegistry', () => {
     expect(() => registry.store(snapshot({ nodes: [{ ref: 'e1', role: 'button', name: 'x', injected: true }] }), 'tab-1', 1))
       .toThrow(/malformed/);
   });
+
+  it('preserves a deeply owned bounded screenshot for includeScreenshot results', () => {
+    const registry = new BrowserSemanticSnapshotRegistry(() => new Date('2026-08-12T12:00:01.000Z'));
+    const input = snapshot({ screenshot: { pngBase64: 'iVBORw==', width: 2, height: 3 } }) as any;
+    const stored = registry.store(input, 'tab-1', 1) as any;
+    input.screenshot.pngBase64 = 'evil';
+    expect(stored.screenshot).toEqual({ pngBase64: 'iVBORw==', width: 2, height: 3 });
+    expect(Object.isFrozen(stored.screenshot)).toBe(true);
+    expect(() => registry.store(snapshot({ screenshot: { pngBase64: 'x'.repeat(4 * 1024 * 1024 + 1), width: 2, height: 3 } }), 'tab-1', 1)).toThrow(/malformed/);
+  });
 });

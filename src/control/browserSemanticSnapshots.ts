@@ -66,6 +66,20 @@ function requireSnapshot(value: unknown, tabId: string, generation: number, now:
   if (!finiteRange(viewport.width, 0, 100_000) || !finiteRange(viewport.height, 0, 100_000)) throw invalid();
   const refs = new Set<string>();
   const nodes = snapshot.nodes.map((node) => copyNode(node, refs));
+  let screenshot: Readonly<{ pngBase64: string; width: number; height: number }> | undefined;
+  if (snapshot.screenshot !== undefined) {
+    if (!plain(snapshot.screenshot)) throw invalid();
+    exactKeys(snapshot.screenshot, ['pngBase64', 'width', 'height']);
+    const encoded = snapshot.screenshot.pngBase64;
+    const width = snapshot.screenshot.width;
+    const height = snapshot.screenshot.height;
+    if (!boundedString(encoded, 4 * 1024 * 1024) || encoded.length === 0 || encoded.length % 4 !== 0
+      || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded as string)
+      || !Number.isInteger(width) || !Number.isInteger(height)
+      || !finiteRange(width, 1, 8192) || !finiteRange(height, 1, 8192)
+      || (width as number) * (height as number) > 16 * 1024 * 1024) throw invalid();
+    screenshot = Object.freeze({ pngBase64: encoded as string, width: width as number, height: height as number });
+  }
   return Object.freeze({
     schema: 'psyche.browser.snapshot/v1',
     id: snapshot.id,
@@ -80,6 +94,7 @@ function requireSnapshot(value: unknown, tabId: string, generation: number, now:
     truncated: snapshot.truncated,
     opaqueFrames: snapshot.opaqueFrames,
     expiresAt: snapshot.expiresAt,
+    ...(screenshot ? { screenshot } : {}),
   }) as SemanticSnapshot;
 }
 

@@ -160,21 +160,38 @@ describe('bounded semantic browser automation', () => {
   it('keeps the trusted initialization install non-configurable before later hostile intrinsic patches', () => {
     const { globalObject } = fixture();
     const source = browserAutomationSource();
-    const NativeObject = Object;
+    const nativeAssign = Object.assign;
+    const nativeDefineProperty = Object.defineProperty;
+    const nativeFreeze = Object.freeze;
+    const nativeEncode = TextEncoder.prototype.encode;
+    const NativeMap = Map;
     const NativeWeakMap = WeakMap;
     const NativeSet = Set;
     const NativeTextEncoder = TextEncoder;
     Function('globalThis', source)(globalObject);
     expect(Object.getOwnPropertyDescriptor(globalObject, '__PSYCHE_AUTOMATION__')?.configurable).toBe(false);
-    (globalObject as any).Object = class { static defineProperty() { throw new Error('page Object'); } };
-    (globalObject as any).WeakMap = class { constructor() { throw new Error('page WeakMap'); } };
-    (globalObject as any).Set = class { constructor() { throw new Error('page Set'); } };
-    (globalObject as any).TextEncoder = class { constructor() { throw new Error('page TextEncoder'); } };
-    expect((globalObject as any).__PSYCHE_AUTOMATION__.dispatch({ type: 'snapshot' })).toMatchObject({ schema: 'psyche.browser.snapshot/v1' });
-    expect(Object).toBe(NativeObject);
-    expect(WeakMap).toBe(NativeWeakMap);
-    expect(Set).toBe(NativeSet);
-    expect(TextEncoder).toBe(NativeTextEncoder);
+    let result: any;
+    try {
+      Object.assign = (() => { throw new Error('page Object.assign'); }) as typeof Object.assign;
+      Object.defineProperty = (() => { throw new Error('page Object.defineProperty'); }) as typeof Object.defineProperty;
+      Object.freeze = (() => { throw new Error('page Object.freeze'); }) as typeof Object.freeze;
+      TextEncoder.prototype.encode = (() => { throw new Error('page TextEncoder.encode'); }) as typeof TextEncoder.prototype.encode;
+      (globalThis as any).Map = class { constructor() { throw new Error('page Map'); } };
+      (globalThis as any).WeakMap = class { constructor() { throw new Error('page WeakMap'); } };
+      (globalThis as any).Set = class { constructor() { throw new Error('page Set'); } };
+      (globalThis as any).TextEncoder = class { constructor() { throw new Error('page TextEncoder'); } };
+      result = (globalObject as any).__PSYCHE_AUTOMATION__.dispatch({ type: 'snapshot' });
+    } finally {
+      Object.assign = nativeAssign;
+      Object.defineProperty = nativeDefineProperty;
+      Object.freeze = nativeFreeze;
+      NativeTextEncoder.prototype.encode = nativeEncode;
+      (globalThis as any).Map = NativeMap;
+      (globalThis as any).WeakMap = NativeWeakMap;
+      (globalThis as any).Set = NativeSet;
+      (globalThis as any).TextEncoder = NativeTextEncoder;
+    }
+    expect(result).toMatchObject({ schema: 'psyche.browser.snapshot/v1' });
   });
 
   it('bounds total DOM visits even when 100k siblings are nonsemantic', () => {
@@ -214,6 +231,24 @@ describe('bounded semantic browser automation', () => {
     const snapshot = dispatchBrowserAutomation(globalObject, { type: 'snapshot' });
     expect(labelReads).toBe(2_000);
     expect(snapshot.nodes[0]).toMatchObject({ name: 'label-0' });
+  });
+
+  it('computes a shared for-label once for duplicate target ids', () => {
+    const { globalObject } = fixture();
+    let textReads = 0;
+    const label = node('label', { attrs: { for: 'duplicate' } });
+    Object.defineProperty(label, 'textContent', {
+      get() { textReads += 1; return 'Shared label'; },
+    });
+    const inputs = Array.from({ length: 100 }, () => node('input', { attrs: { id: 'duplicate' } }));
+    globalObject.document.body = node('body', { children: inputs });
+    globalObject.document.documentElement = globalObject.document.body;
+    (globalObject.document as any).querySelectorAll = () => [label];
+
+    const snapshot = dispatchBrowserAutomation(globalObject, { type: 'snapshot' });
+    expect(snapshot.nodes).toHaveLength(100);
+    expect(snapshot.nodes.every((entry: { name: string }) => entry.name === 'Shared label')).toBe(true);
+    expect(textReads).toBe(1);
   });
 
   it('uses the first supported explicit role token and marks exhausted label indexing truncated', () => {

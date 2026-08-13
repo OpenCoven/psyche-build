@@ -1649,7 +1649,64 @@ pub struct BrowserPageLoadEvent {
 
 struct BrowserNavigationWaiter {
     token: String,
+    requested_url: Url,
+    current_url: Option<Url>,
+    started: bool,
     completion: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BrowserNavigationMatch {
+    Ignored,
+    Started,
+    Finished,
+}
+
+fn browser_urls_equivalent(left: &Url, right: &Url) -> bool {
+    left == right
+}
+
+fn update_browser_navigation_waiter(
+    waiter: &mut BrowserNavigationWaiter,
+    event: PageLoadEvent,
+    event_url: &Url,
+) -> BrowserNavigationMatch {
+    match event {
+        PageLoadEvent::Started
+            if waiter.started || browser_urls_equivalent(&waiter.requested_url, event_url) =>
+        {
+            waiter.started = true;
+            waiter.current_url = Some(event_url.clone());
+            BrowserNavigationMatch::Started
+        }
+        PageLoadEvent::Finished
+            if waiter.started
+                && waiter
+                    .current_url
+                    .as_ref()
+                    .is_some_and(|url| browser_urls_equivalent(url, event_url)) =>
+        {
+            BrowserNavigationMatch::Finished
+        }
+        _ => BrowserNavigationMatch::Ignored,
+    }
+}
+
+struct BrowserNavigationWaiterGuard {
+    label: String,
+    token: String,
+}
+
+impl Drop for BrowserNavigationWaiterGuard {
+    fn drop(&mut self) {
+        let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+        if waiters
+            .get(&self.label)
+            .is_some_and(|waiter| waiter.token == self.token)
+        {
+            waiters.remove(&self.label);
+        }
+    }
 }
 
 static BROWSER_NAVIGATION_WAITERS: Lazy<Mutex<HashMap<String, BrowserNavigationWaiter>>> =
@@ -2391,10 +2448,28 @@ fn ensure_browser(
                 PageLoadEvent::Started => "started",
                 PageLoadEvent::Finished => "finished",
             };
-            let navigation_token = BROWSER_NAVIGATION_WAITERS
-                .lock()
-                .get(&browser_label)
-                .map(|waiter| waiter.token.clone());
+            let (navigation_token, completion) = {
+                let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+                let mut completion = None;
+                let navigation_token = waiters.get_mut(&browser_label).and_then(|waiter| {
+                    match update_browser_navigation_waiter(
+                        waiter,
+                        payload.event(),
+                        payload.url(),
+                    ) {
+                        BrowserNavigationMatch::Ignored => None,
+                        BrowserNavigationMatch::Started => Some(waiter.token.clone()),
+                        BrowserNavigationMatch::Finished => {
+                            completion = waiter.completion.take();
+                            Some(waiter.token.clone())
+                        }
+                    }
+                });
+                if completion.is_some() {
+                    waiters.remove(&browser_label);
+                }
+                (navigation_token, completion)
+            };
             let _ = app_for_load.emit(
                 "browser:page-load",
                 BrowserPageLoadEvent {
@@ -2439,10 +2514,6 @@ fn ensure_browser(
                     label_json
                 );
                 let _ = webview.eval(&script);
-                let completion = BROWSER_NAVIGATION_WAITERS
-                    .lock()
-                    .remove(&browser_label)
-                    .and_then(|mut waiter| waiter.completion.take());
                 if let Some(completion) = completion {
                     let _ = completion.send(Ok(()));
                 }
@@ -2489,6 +2560,7 @@ async fn browser_navigate(
         return Err("browser automation initialization source is invalid".to_string());
     }
     let label = safe_browser_label(label);
+    let requested_url = Url::parse(&url).map_err(|error| error.to_string())?;
     let (completion, receiver) = tokio::sync::oneshot::channel();
     {
         let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
@@ -2499,17 +2571,18 @@ async fn browser_navigate(
             label.clone(),
             BrowserNavigationWaiter {
                 token: navigation_token.clone(),
+                requested_url,
+                current_url: None,
+                started: false,
                 completion: Some(completion),
             },
         );
     }
-    let created = match ensure_browser(&app, &label, x, y, w, h, &url, &automation_source) {
-        Ok(created) => created,
-        Err(error) => {
-            BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
-            return Err(error);
-        }
+    let _waiter_guard = BrowserNavigationWaiterGuard {
+        label: label.clone(),
+        token: navigation_token.clone(),
     };
+    let created = ensure_browser(&app, &label, x, y, w, h, &url, &automation_source)?;
     if !created {
         let webview = app
             .get_webview(&label)
@@ -2521,22 +2594,14 @@ async fn browser_navigate(
             .set_size(LogicalSize::new(w.max(1.0), h.max(1.0)))
             .map_err(|e| e.to_string())?;
         let parsed_url = Url::parse(&url).map_err(|e| e.to_string())?;
-        if let Err(error) = webview.navigate(parsed_url) {
-            BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
-            return Err(error.to_string());
-        }
+        webview
+            .navigate(parsed_url)
+            .map_err(|error| error.to_string())?;
     }
     match tokio::time::timeout(std::time::Duration::from_secs(30), receiver).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err("browser navigation was cancelled".to_string()),
         Err(_) => {
-            let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
-            if waiters
-                .get(&label)
-                .is_some_and(|waiter| waiter.token == navigation_token)
-            {
-                waiters.remove(&label);
-            }
             if let Some(webview) = app.get_webview(&label) {
                 let _ = webview.close();
             }
@@ -4169,6 +4234,125 @@ mod pty_runtime_tests {
         assert!(validate_browser_snapshot_dimensions(800, 600).is_ok());
         assert!(validate_browser_snapshot_dimensions(0, 600).is_err());
         assert!(validate_browser_snapshot_dimensions(8192, 8192).is_err());
+    }
+
+    fn browser_navigation_waiter(url: &str) -> BrowserNavigationWaiter {
+        let (completion, _receiver) = tokio::sync::oneshot::channel();
+        BrowserNavigationWaiter {
+            token: "requested-token".to_string(),
+            requested_url: Url::parse(url).unwrap(),
+            current_url: None,
+            started: false,
+            completion: Some(completion),
+        }
+    }
+
+    #[test]
+    fn browser_navigation_waiter_ignores_unrelated_events_until_requested_start() {
+        let mut waiter = browser_navigation_waiter("https://example.test/requested");
+        let unrelated = Url::parse("https://example.test/old").unwrap();
+        let requested = Url::parse("https://example.test/requested").unwrap();
+
+        assert_eq!(
+            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &unrelated),
+            BrowserNavigationMatch::Ignored
+        );
+        assert_eq!(
+            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Started, &unrelated),
+            BrowserNavigationMatch::Ignored
+        );
+        assert_eq!(
+            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &requested),
+            BrowserNavigationMatch::Ignored
+        );
+        assert_eq!(
+            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Started, &requested),
+            BrowserNavigationMatch::Started
+        );
+        assert_eq!(
+            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &requested),
+            BrowserNavigationMatch::Finished
+        );
+    }
+
+    #[test]
+    fn browser_navigation_waiter_tracks_redirects_and_only_finishes_the_terminal_url() {
+        let mut waiter = browser_navigation_waiter("https://example.test/requested");
+        let requested = Url::parse("https://example.test/requested").unwrap();
+        let redirect = Url::parse("https://example.test/redirected").unwrap();
+
+        assert_eq!(
+            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Started, &requested),
+            BrowserNavigationMatch::Started
+        );
+        assert_eq!(
+            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Started, &redirect),
+            BrowserNavigationMatch::Started
+        );
+        assert_eq!(
+            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &requested),
+            BrowserNavigationMatch::Ignored
+        );
+        assert_eq!(
+            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &redirect),
+            BrowserNavigationMatch::Finished
+        );
+    }
+
+    #[test]
+    fn browser_navigation_waiter_rejects_late_same_url_finish_before_new_start() {
+        let requested = Url::parse("https://example.test/same").unwrap();
+        let mut waiter = browser_navigation_waiter(requested.as_str());
+
+        assert_eq!(
+            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &requested),
+            BrowserNavigationMatch::Ignored
+        );
+        assert_eq!(
+            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Started, &requested),
+            BrowserNavigationMatch::Started
+        );
+        assert_eq!(
+            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &requested),
+            BrowserNavigationMatch::Finished
+        );
+    }
+
+    #[test]
+    fn browser_navigation_waiter_guard_cleans_every_early_exit_without_removing_a_successor() {
+        for stage in ["ensure", "lookup", "bounds", "navigate", "timeout"] {
+            let label = format!("browser-waiter-guard-{stage}");
+            let token = format!("token-{stage}");
+            BROWSER_NAVIGATION_WAITERS.lock().insert(
+                label.clone(),
+                browser_navigation_waiter("https://example.test"),
+            );
+            BROWSER_NAVIGATION_WAITERS
+                .lock()
+                .get_mut(&label)
+                .unwrap()
+                .token = token.clone();
+            {
+                let _guard = BrowserNavigationWaiterGuard {
+                    label: label.clone(),
+                    token: token.clone(),
+                };
+            }
+            assert!(!BROWSER_NAVIGATION_WAITERS.lock().contains_key(&label));
+
+            BROWSER_NAVIGATION_WAITERS.lock().insert(
+                label.clone(),
+                browser_navigation_waiter("https://example.test"),
+            );
+            {
+                let _old_guard = BrowserNavigationWaiterGuard {
+                    label: label.clone(),
+                    token,
+                };
+            }
+            assert!(BROWSER_NAVIGATION_WAITERS.lock().contains_key(&label));
+            BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
+        }
     }
 
     #[cfg(not(windows))]
