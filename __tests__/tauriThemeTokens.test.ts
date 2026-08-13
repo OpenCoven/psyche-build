@@ -31,6 +31,12 @@ function customProperties(block: string) {
   return [...block.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]).sort();
 }
 
+function customProperty(block: string, name: string) {
+  const activeCss = block.replace(/\/\*[\s\S]*?\*\//g, '');
+  const found = activeCss.match(new RegExp(`${name}:\\s*([^;]+);`));
+  return found ? found[1].replace(/\s+/g, ' ').trim() : null;
+}
+
 /** Channel spread: 0 is pure grey, larger is more saturated. */
 function chroma(triplet: string) {
   const channels = triplet.split(',').map((n) => Number(n.trim()));
@@ -65,10 +71,77 @@ describe('theme tokens', () => {
     for (const shape of shapes) expect(shape).toEqual(shapes[0]);
   });
 
+  it('pins the historical Coven Purple palette', () => {
+    const block = themeBlock('coven-purple') ?? '';
+
+    expect({
+      rgbAccent: customProperty(block, '--rgb-accent'),
+      accent: customProperty(block, '--accent'),
+      accentStrong: customProperty(block, '--accent-strong'),
+      deep: customProperty(block, '--rgb-deep'),
+      surface1: customProperty(block, '--rgb-s1'),
+      surface2: customProperty(block, '--rgb-s2'),
+      surface3: customProperty(block, '--rgb-s3'),
+      terminal: customProperty(block, '--rgb-term'),
+      text: customProperty(block, '--text'),
+      textSoft: customProperty(block, '--text-soft'),
+      muted: customProperty(block, '--muted'),
+    }).toEqual({
+      rgbAccent: '184, 157, 255',
+      accent: '#b89dff',
+      accentStrong: '#9d80f0',
+      deep: '15, 6, 39',
+      surface1: '22, 9, 58',
+      surface2: '30, 12, 79',
+      surface3: '40, 16, 103',
+      terminal: '16, 6, 40',
+      text: '#f5f2fb',
+      textSoft: '#c8c2d8',
+      muted: '#8a8499',
+    });
+  });
+
+  it('pins the approved Codex Blackish palette', () => {
+    const block = themeBlock('codex-blackish') ?? '';
+
+    expect({
+      rgbAccent: customProperty(block, '--rgb-accent'),
+      accent: customProperty(block, '--accent'),
+      accentStrong: customProperty(block, '--accent-strong'),
+      deep: customProperty(block, '--rgb-deep'),
+      surface1: customProperty(block, '--rgb-s1'),
+      surface2: customProperty(block, '--rgb-s2'),
+      surface3: customProperty(block, '--rgb-s3'),
+      terminal: customProperty(block, '--rgb-term'),
+      text: customProperty(block, '--text'),
+      textSoft: customProperty(block, '--text-soft'),
+      muted: customProperty(block, '--muted'),
+    }).toEqual({
+      rgbAccent: '196, 202, 214',
+      accent: '#c4cad6',
+      accentStrong: '#9da6b8',
+      deep: '15, 15, 17',
+      surface1: '22, 23, 26',
+      surface2: '30, 30, 31',
+      surface3: '43, 44, 48',
+      terminal: '15, 15, 17',
+      text: '#f0f1f4',
+      textSoft: '#c2c6ce',
+      muted: '#858b96',
+    });
+  });
+
   it('keeps the default theme saturated rather than grey', () => {
     const block = themeBlock(defaultTheme) ?? '';
     const term = block.match(/--rgb-term:\s*([0-9,\s]+);/);
     expect(term).not.toBeNull();
     expect(chroma(term![1])).toBeGreaterThanOrEqual(MIN_DEFAULT_CHROMA);
+  });
+
+  it('ignores commented declarations when matching custom properties', () => {
+    expect(customProperty('/* --accent: #111111; */', '--accent')).toBeNull();
+    expect(
+      customProperty('/* --accent: #111111; */ --accent: #222222;', '--accent'),
+    ).toBe('#222222');
   });
 });

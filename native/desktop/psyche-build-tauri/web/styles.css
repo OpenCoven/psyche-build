@@ -3777,17 +3777,17 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 
 :root[data-theme="codex-blackish"] {
-  --rgb-accent: 210, 210, 214;
-  --accent: #d2d2d6;
-  --accent-strong: #a8a8ad;
-  --rgb-deep: 10, 10, 11;
-  --rgb-s1:   17, 17, 19;
-  --rgb-s2:   26, 26, 29;
-  --rgb-s3:   38, 38, 42;
-  --rgb-term: 8, 8, 9;
-  --text: #f2f2f3;
-  --text-soft: #c4c4c8;
-  --muted: #83838a;
+  --rgb-accent: 196, 202, 214;
+  --accent: #c4cad6;
+  --accent-strong: #9da6b8;
+  --rgb-deep: 15, 15, 17;
+  --rgb-s1:   22, 23, 26;
+  --rgb-s2:   30, 30, 31;
+  --rgb-s3:   43, 44, 48;
+  --rgb-term: 15, 15, 17;
+  --text: #f0f1f4;
+  --text-soft: #c2c6ce;
+  --muted: #858b96;
 }
 
 :root[data-theme="gemini-blue"] {
