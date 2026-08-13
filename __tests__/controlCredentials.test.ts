@@ -211,6 +211,31 @@ describe('control credential store', () => {
     expect(JSON.parse(await readFile(filePath, 'utf8'))).toEqual(winner);
     expect((await readdir(root)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
+
+  it('surfaces losing temporary cleanup failure after validating a publication winner', async () => {
+    const root = await realpath(await tempProject());
+    const filePath = path.join(root, 'control-credentials.json');
+    const winner = { operatorToken: 'winner-operator', agentToken: 'winner-agent' };
+    const cleanupFailure = new Error('injected cleanup failure');
+    const creationOps: CredentialCreationOps = {
+      openTemporary: (temporary) => open(temporary, 'wx', 0o600),
+      async publish(_temporary, target) {
+        await writeFile(target, `${JSON.stringify(winner)}\n`, { mode: 0o600 });
+        throw Object.assign(new Error('winner exists'), { code: 'EEXIST' });
+      },
+      async removeTemporary() {
+        throw cleanupFailure;
+      },
+    };
+    const store = await createControlCredentialStoreForCanonicalRoot({
+      canonicalProjectRoot: root,
+      filePath,
+      creationOps,
+    });
+
+    await expect(store.agentToken()).rejects.toBe(cleanupFailure);
+    expect(JSON.parse(await readFile(filePath, 'utf8'))).toEqual(winner);
+  });
 });
 
 describe('control server authorization', () => {

@@ -162,6 +162,7 @@ async function loadOrCreateCredentials(
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
       const winner = await readStoredCredentials(filePath);
       if (!winner) throw unsafeCredentialPath('credential winner disappeared during creation');
+      primaryError = undefined;
       return winner;
     }
     throw error;
