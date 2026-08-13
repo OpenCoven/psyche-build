@@ -3,16 +3,21 @@ import type {
   LeaseTarget,
   SurfaceCapability,
 } from './capabilityLeases.js';
-import type { SurfaceResource } from './surfaces.js';
+import type { BrowserTabSurface } from './surfaces.js';
 
 export interface LeaseGrant {
   readonly target: LeaseTarget;
   readonly capabilities: readonly SurfaceCapability[];
 }
 
+export type PaneNamedKey =
+  | 'Enter' | 'Tab' | 'Escape' | 'Backspace'
+  | 'Up' | 'Down' | 'Left' | 'Right'
+  | 'C-c' | 'C-d';
+
 export type ExistingPaneAction =
   | { kind: 'send_text'; text: string }
-  | { kind: 'send_keys'; keys: readonly string[] }
+  | { kind: 'send_keys'; keys: readonly PaneNamedKey[] }
   | { kind: 'interrupt'; key?: 'C-c' | 'Escape' }
   | { kind: 'focus' }
   | { kind: 'resize'; cols: number; rows: number }
@@ -191,7 +196,7 @@ export type ControlCommand =
       payloadDigest: string;
       decision: 'approve' | 'deny';
     }>
-  | CommandBase<'provider.resource.upsert', { resource: SurfaceResource }>
+  | CommandBase<'provider.resource.upsert', { resource: BrowserTabSurface }>
   | CommandBase<'provider.resource.remove', { id: string; generation: number }>
   | CommandBase<'pane.spawn', {
       cwd: string;

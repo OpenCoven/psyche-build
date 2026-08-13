@@ -47,9 +47,31 @@ void (null as PublicControlContracts | null);
 
 type PaneActionCommand = Extract<ControlCommand, { kind: 'pane.action' }>;
 type BrowserActionCommand = Extract<ControlCommand, { kind: 'browser.action' }>;
+type ProviderResourceUpsertCommand = Extract<ControlCommand, { kind: 'provider.resource.upsert' }>;
 function assertAgentActionTypes(): void {
   const acceptsPaneAction = (_command: PaneActionCommand): void => {};
   const acceptsBrowserAction = (_command: BrowserActionCommand): void => {};
+  const acceptsProviderResourceUpsert = (_command: ProviderResourceUpsertCommand): void => {};
+
+  acceptsPaneAction({
+    ...commandBase,
+    kind: 'pane.action',
+    payload: {
+      taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
+      paneId: 'pane-1', generation: 1,
+      action: { kind: 'send_keys', keys: ['Enter', 'C-d'] },
+    },
+  });
+  acceptsPaneAction({
+    ...commandBase,
+    kind: 'pane.action',
+    payload: {
+      taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
+      paneId: 'pane-1', generation: 1,
+      // @ts-expect-error Pane key input is restricted to the named-key allowlist.
+      action: { kind: 'send_keys', keys: ['Space'] },
+    },
+  });
 
   acceptsPaneAction({
     ...commandBase,
@@ -86,6 +108,33 @@ function assertAgentActionTypes(): void {
       taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
       tabId: 'tab-1', generation: 2,
       action: { kind: 'click', elementRef: 'e17' },
+    },
+  });
+
+  acceptsProviderResourceUpsert({
+    ...commandBase,
+    kind: 'provider.resource.upsert',
+    payload: {
+      resource: {
+        id: 'tab-1', kind: 'browser_tab', generation: 2,
+        projectRoot: '/repo', worktreeRoot: '/repo',
+        providerId: 'desktop-1', webviewLabel: 'browser-a',
+        url: 'https://example.com', title: 'Example', loading: false,
+        viewport: { width: 800, height: 600 },
+      },
+    },
+  });
+  acceptsProviderResourceUpsert({
+    ...commandBase,
+    kind: 'provider.resource.upsert',
+    payload: {
+      resource: {
+        id: 'pane-1',
+        // @ts-expect-error Provider resource commands accept browser tabs only.
+        kind: 'pane', generation: 1,
+        projectRoot: '/repo', worktreeRoot: '/repo',
+        tmuxPaneId: '%3', writable: true, outputSequence: 0,
+      },
     },
   });
   acceptsBrowserAction({
