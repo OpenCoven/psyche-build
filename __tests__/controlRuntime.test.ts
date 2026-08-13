@@ -977,6 +977,26 @@ describe('ControlRuntime', () => {
     expect(serialized).not.toContain('#fragment');
   });
 
+  it.each([
+    'camera token=runtimeSecret',
+    'camera\nruntimeSecret',
+    'camera\u0000runtimeSecret',
+    'x'.repeat(65),
+  ])('does not leak unsafe permission label through snapshot or journal', async (permissionLabel) => {
+    const harness = await createBrowserActionHarness();
+    await harness.runtime.submit(command({ id: `unsafe-${permissionLabel.length}`,
+      idempotencyKey: `unsafe-${permissionLabel.length}-${permissionLabel.charCodeAt(0)}`,
+      kind: 'browser.action', ownerEpoch: 7, actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation,
+        action: { kind: 'permission_response', permission: permissionLabel,
+          origin: 'https://example.test', decision: 'allow' },
+      } }));
+    expect(harness.runtime.snapshot().approvals[0]?.effect.target).toBe('[redacted]');
+    expect(JSON.stringify(harness.runtime.snapshot())).not.toContain(permissionLabel);
+    expect(JSON.stringify(harness.journal.read())).not.toContain(permissionLabel);
+  });
+
   it('revokes old authority when provider upsert replaces a browser binding', async () => {
     const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
     const resource = { id: 'replace-tab', kind: 'browser_tab' as const, generation: 1,

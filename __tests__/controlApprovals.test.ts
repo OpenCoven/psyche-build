@@ -132,6 +132,17 @@ describe('ApprovalStore', () => {
   });
 
   it.each([
+    'allow camera token=supersecret for https://example.test',
+    'allow camera\ntoken for https://example.test',
+    'allow camera\u0000token for https://example.test',
+    `allow ${'a'.repeat(65)} for https://example.test`,
+    'allow camera;download for https://example.test',
+  ])('redacts unsafe permission label %j', (target) => {
+    expect(createRedactedApprovalEffect({ kind: 'permission_response', target }).target)
+      .toBe('[redacted]');
+  });
+
+  it.each([
     ['action id', { actionId: 'action-2' }],
     ['owner epoch', { ownerEpoch: 8 }],
     ['lease id', { leaseId: 'lease-2' }],

@@ -431,10 +431,12 @@ function normalizeEffectTarget(kind: ApprovalEffectKind, source: string): string
   if (kind === 'permission_response') {
     const permission = /^(allow|deny)\s+([^\r\n]+?)\s+for\s+(https?:\/\/\S+)$/i.exec(target);
     if (!permission) return '[redacted]';
+    const label = permission[2].toLowerCase();
+    if (!isSafeBrowserPermissionLabel(label)) return '[redacted]';
     const origin = sanitizeHttpTarget(permission[3]);
     if (origin === '[redacted]') return origin;
     return truncateUtf8(
-      `${permission[1].toLowerCase()} ${permission[2]} for ${origin}`,
+      `${permission[1].toLowerCase()} ${label} for ${origin}`,
       AGENT_CONTROL_LIMITS.accessibleNameBytes,
     );
   }
@@ -458,6 +460,13 @@ function normalizeEffectTarget(kind: ApprovalEffectKind, source: string): string
     return '[redacted]';
   }
   return truncateUtf8(target, AGENT_CONTROL_LIMITS.accessibleNameBytes);
+}
+
+function isSafeBrowserPermissionLabel(value: string): boolean {
+  return value.length >= 1
+    && value.length <= 64
+    && /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/.test(value)
+    && !containsSensitiveTarget(value);
 }
 
 function sanitizeHttpTarget(target: string): string {
