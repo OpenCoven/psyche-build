@@ -162,6 +162,7 @@ describe('ControlClient over the socket transport', () => {
     ['unknown', 'effect_unknown'],
     ['failed', 'action_validation_failed'],
     ['failed', 'action_invalidated'],
+    ['failed', 'approval_expired'],
   ] as const)('recovers %s action status from the journal after receipt eviction', async (state, code) => {
     const receipt = {
       schema: 'psyche.control.receipt/v1' as const,

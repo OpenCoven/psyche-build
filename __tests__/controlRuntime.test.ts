@@ -739,6 +739,54 @@ describe('ControlRuntime', () => {
     }));
   });
 
+  it('terminalizes passive approval expiry during snapshot polling', async () => {
+    let now = new Date('2026-08-12T12:00:00.000Z');
+    const clock = () => now;
+    const journal = createMemoryJournal();
+    const surfaces = new SurfaceRegistry();
+    const tab = surfaces.upsertBrowserTab({ id: 'expiry-tab', projectRoot: '/repo', worktreeRoot: '/repo',
+      providerId: 'provider', webviewLabel: 'expiry', url: 'https://example.test', title: 'Expiry',
+      loading: false, viewport: { width: 800, height: 600 } });
+    const capabilityLeases = new CapabilityLeaseStore(clock, 7);
+    const approvals = new ApprovalStore(clock, () => 'passive-expiry');
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, surfaces,
+      capabilityLeases, approvals });
+    const grant = await runtime.submit(command({ id: 'expiry-grant', idempotencyKey: 'expiry-grant',
+      kind: 'lease.grant', ownerEpoch: 7, payload: { requestId: 'expiry-request', actorId: 'agent-expiry',
+        taskId: 'task-expiry', ttlMs: 10 * 60_000, grants: [{ target: { kind: 'browser_tab', id: tab.id,
+          generation: tab.generation }, capabilities: ['browser.script'] }] } }));
+    const lease = (grant as { value: { lease: { id: string; revision: number } } }).value.lease;
+    await runtime.submit(command({ id: 'expiring-action', idempotencyKey: 'expiring-action',
+      kind: 'browser.script', ownerEpoch: 7, actor: { id: 'agent-expiry', kind: 'psyche' }, payload: {
+        taskId: 'task-expiry', leaseId: lease.id, leaseRevision: lease.revision, tabId: tab.id,
+        generation: tab.generation, source: 'return window.localStorage.secretToken',
+      } }));
+    expect(runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'expiring-action', state: 'approval_required',
+    }));
+    now = new Date('2026-08-12T12:05:01.000Z');
+    const snapshot = runtime.snapshot();
+    expect(snapshot.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'expiring-action', state: 'failed', code: 'approval_expired',
+    }));
+    await vi.waitFor(() => expect(journal.read()).toContainEqual(expect.objectContaining({
+      kind: 'command.failed', payload: expect.objectContaining({
+        commandId: 'expiring-action', idempotencyKey: 'expiring-action',
+        receipt: expect.objectContaining({ actionId: 'expiring-action', code: 'approval_expired' }),
+      }),
+    })));
+    expect(JSON.stringify(snapshot)).not.toContain('secretToken');
+    expect(JSON.stringify(journal.read())).not.toContain('secretToken');
+    expect(handlers.runBrowserScript).not.toHaveBeenCalled();
+    await expect(runtime.submit(command({ id: 'late-resolve', idempotencyKey: 'late-resolve',
+      kind: 'approval.resolve', ownerEpoch: 7, payload: { approvalId: 'passive-expiry',
+        payloadDigest: 'a'.repeat(64), decision: 'approve' } })))
+      .resolves.toMatchObject({ status: 'failed' });
+    expect(runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'expiring-action', state: 'failed', code: 'approval_expired',
+    }));
+  });
+
   it('fails approval resumption after the resource generation changes', async () => {
     const harness = await createBrowserActionHarness();
     const approval = await requestReviewApproval(harness);

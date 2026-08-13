@@ -147,6 +147,7 @@ export class ControlRuntime {
   private readonly leaseRequests = new Map<string, LeaseRequestRecord>();
   private readonly pendingApprovals = new Map<string, SurfaceActionContext>();
   private readonly receipts = new Map<string, ActionReceipt>();
+  private readonly passiveTerminalizations = new Map<string, Promise<unknown>>();
 
   private constructor(
     private readonly ownerEpoch: number,
@@ -201,8 +202,9 @@ export class ControlRuntime {
    * became owner. After a restart the journal is replayed for outcome
    * deduplication, but the full command envelopes are not rehydrated, so the
    * map is scoped to the current owner epoch's activity.
-   */
+  */
   snapshot(): ControlSnapshot {
+    this.expireApprovalsForSnapshot();
     const events = this.journal.read(0);
     const sequence = events.length > 0 ? events[events.length - 1].sequence : 0;
     const commands: Record<string, CommandRecord> = {};
@@ -525,7 +527,11 @@ export class ControlRuntime {
         ? this.approvals.approve(command.payload.approvalId, command.actor.id, command.payload.payloadDigest)
         : this.approvals.deny(command.payload.approvalId, command.actor.id, command.payload.payloadDigest);
     } catch (error) {
-      if (context && isApprovalInvalidationError(error)) {
+      if (
+        context
+        && isApprovalInvalidationError(error)
+        && !this.passiveTerminalizations.has(command.payload.approvalId)
+      ) {
         await this.terminalizeValidationFailure(context.command, context.target, 'action_invalidated');
         this.pendingApprovals.delete(command.payload.approvalId);
       }
@@ -837,6 +843,23 @@ export class ControlRuntime {
     }
   }
 
+  private expireApprovalsForSnapshot(): void {
+    for (const approval of this.approvals.expire()) {
+      const context = this.pendingApprovals.get(approval.id);
+      if (!context || this.passiveTerminalizations.has(approval.id)) continue;
+      const terminalization = this.terminalizeValidationFailure(
+        context.command,
+        context.target,
+        'approval_expired',
+      );
+      this.passiveTerminalizations.set(approval.id, terminalization);
+      void terminalization
+        .then(() => this.pendingApprovals.delete(approval.id))
+        .catch(() => undefined)
+        .finally(() => this.passiveTerminalizations.delete(approval.id));
+    }
+  }
+
   private makeReceipt(
     command: SurfaceActionContext['command'],
     target: LeaseTarget,
@@ -882,7 +905,9 @@ export class ControlRuntime {
         .map((approval) => approval.id),
     );
     for (const id of this.pendingApprovals.keys()) {
-      if (!active.has(id)) this.pendingApprovals.delete(id);
+      if (!active.has(id) && !this.passiveTerminalizations.has(id)) {
+        this.pendingApprovals.delete(id);
+      }
     }
   }
 
