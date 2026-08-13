@@ -17,15 +17,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(target_os = "macos")]
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 #[cfg(target_os = "macos")]
-use objc2::runtime::AnyObject;
+use objc2::{
+    runtime::{AnyObject, Imp, Sel},
+    sel,
+};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSImage,
 };
 #[cfg(target_os = "macos")]
-use objc2_foundation::{NSDictionary, NSError};
+use objc2_foundation::{NSDictionary, NSError, NSString, NSURLRequest, NSURL};
 #[cfg(target_os = "macos")]
-use objc2_web_kit::WKWebView;
+use objc2_web_kit::{WKNavigation, WKWebView};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -1647,49 +1650,16 @@ pub struct BrowserPageLoadEvent {
     pub navigation_token: Option<String>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BrowserNavigationResult {
+    terminal_url: String,
+}
+
 struct BrowserNavigationWaiter {
     token: String,
-    requested_url: Url,
-    current_url: Option<Url>,
-    started: bool,
-    completion: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum BrowserNavigationMatch {
-    Ignored,
-    Started,
-    Finished,
-}
-
-fn browser_urls_equivalent(left: &Url, right: &Url) -> bool {
-    left == right
-}
-
-fn update_browser_navigation_waiter(
-    waiter: &mut BrowserNavigationWaiter,
-    event: PageLoadEvent,
-    event_url: &Url,
-) -> BrowserNavigationMatch {
-    match event {
-        PageLoadEvent::Started
-            if waiter.started || browser_urls_equivalent(&waiter.requested_url, event_url) =>
-        {
-            waiter.started = true;
-            waiter.current_url = Some(event_url.clone());
-            BrowserNavigationMatch::Started
-        }
-        PageLoadEvent::Finished
-            if waiter.started
-                && waiter
-                    .current_url
-                    .as_ref()
-                    .is_some_and(|url| browser_urls_equivalent(url, event_url)) =>
-        {
-            BrowserNavigationMatch::Finished
-        }
-        _ => BrowserNavigationMatch::Ignored,
-    }
+    navigation_identity: Option<usize>,
+    completion: Option<tokio::sync::oneshot::Sender<Result<BrowserNavigationResult, String>>>,
 }
 
 struct BrowserNavigationWaiterGuard {
@@ -1711,6 +1681,78 @@ impl Drop for BrowserNavigationWaiterGuard {
 
 static BROWSER_NAVIGATION_WAITERS: Lazy<Mutex<HashMap<String, BrowserNavigationWaiter>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn complete_browser_navigation(navigation_identity: usize, terminal_url: &str) -> bool {
+    let completion = {
+        let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+        let label = waiters.iter().find_map(|(label, waiter)| {
+            (waiter.navigation_identity == Some(navigation_identity)).then(|| label.clone())
+        });
+        label.and_then(|label| {
+            waiters
+                .remove(&label)
+                .and_then(|mut waiter| waiter.completion.take())
+        })
+    };
+    if let Some(completion) = completion {
+        let result = if terminal_url.is_empty() {
+            Err("browser navigation terminal URL is unavailable".to_string())
+        } else {
+            Ok(BrowserNavigationResult {
+                terminal_url: terminal_url.to_string(),
+            })
+        };
+        let _ = completion.send(result);
+        return true;
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+static ORIGINAL_BROWSER_DID_FINISH_NAVIGATION: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(target_os = "macos")]
+static BROWSER_NAVIGATION_HOOK_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn browser_did_finish_navigation(
+    delegate: &AnyObject,
+    selector: Sel,
+    webview: &WKWebView,
+    navigation: &WKNavigation,
+) {
+    let original = ORIGINAL_BROWSER_DID_FINISH_NAVIGATION.load(Ordering::Acquire);
+    if original != 0 {
+        let original: unsafe extern "C-unwind" fn(&AnyObject, Sel, &WKWebView, &WKNavigation) =
+            unsafe { std::mem::transmute(original) };
+        unsafe { original(delegate, selector, webview, navigation) };
+    }
+    let navigation_identity = navigation as *const WKNavigation as usize;
+    let terminal_url = unsafe { webview.URL() }
+        .and_then(|url| url.absoluteString())
+        .map(|url| url.to_string())
+        .unwrap_or_default();
+    complete_browser_navigation(navigation_identity, &terminal_url);
+}
+
+#[cfg(target_os = "macos")]
+fn install_browser_navigation_identity_hook(delegate: &AnyObject) -> Result<(), String> {
+    let _install_guard = BROWSER_NAVIGATION_HOOK_LOCK.lock();
+    if ORIGINAL_BROWSER_DID_FINISH_NAVIGATION.load(Ordering::Acquire) != 0 {
+        return Ok(());
+    }
+    let class = delegate.class();
+    let method = class
+        .instance_method(sel!(webView:didFinishNavigation:))
+        .ok_or_else(|| "browser navigation delegate finish hook is unavailable".to_string())?;
+    let replacement: unsafe extern "C-unwind" fn(&AnyObject, Sel, &WKWebView, &WKNavigation) =
+        browser_did_finish_navigation;
+    let replacement: Imp = unsafe { std::mem::transmute(replacement) };
+    let original = method.implementation() as usize;
+    ORIGINAL_BROWSER_DID_FINISH_NAVIGATION.store(original, Ordering::Release);
+    unsafe { method.set_implementation(replacement) };
+    Ok(())
+}
 
 fn pump_pty_reader<R: Read>(mut reader: R, pump: OutputPump) -> Result<(), String> {
     let mut buffer = [0u8; 4096];
@@ -2437,10 +2479,13 @@ fn ensure_browser(
         .get_window("main")
         .ok_or_else(|| "main window missing".to_string())?;
 
-    let parsed_url = Url::parse(url).map_err(|e| e.to_string())?;
+    Url::parse(url).map_err(|e| e.to_string())?;
     let browser_label = label.to_string();
     let app_for_load = app.clone();
-    let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url))
+    let builder = WebviewBuilder::new(
+        label,
+        WebviewUrl::External(Url::parse("about:blank").expect("about:blank URL is valid")),
+    )
         .initialization_script(automation_source)
         .on_page_load(
         move |webview, payload| {
@@ -2448,28 +2493,10 @@ fn ensure_browser(
                 PageLoadEvent::Started => "started",
                 PageLoadEvent::Finished => "finished",
             };
-            let (navigation_token, completion) = {
-                let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
-                let mut completion = None;
-                let navigation_token = waiters.get_mut(&browser_label).and_then(|waiter| {
-                    match update_browser_navigation_waiter(
-                        waiter,
-                        payload.event(),
-                        payload.url(),
-                    ) {
-                        BrowserNavigationMatch::Ignored => None,
-                        BrowserNavigationMatch::Started => Some(waiter.token.clone()),
-                        BrowserNavigationMatch::Finished => {
-                            completion = waiter.completion.take();
-                            Some(waiter.token.clone())
-                        }
-                    }
-                });
-                if completion.is_some() {
-                    waiters.remove(&browser_label);
-                }
-                (navigation_token, completion)
-            };
+            // Wry's page-load callback omits WKNavigation identity. Controlled
+            // navigation therefore never attaches its token here; completion
+            // is resolved only by the exact native WKNavigation hook below.
+            let navigation_token = None;
             let _ = app_for_load.emit(
                 "browser:page-load",
                 BrowserPageLoadEvent {
@@ -2514,9 +2541,6 @@ fn ensure_browser(
                     label_json
                 );
                 let _ = webview.eval(&script);
-                if let Some(completion) = completion {
-                    let _ = completion.send(Ok(()));
-                }
             }
         },
     );
@@ -2541,6 +2565,56 @@ fn hide_webview(webview: &tauri::Webview) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+async fn start_browser_navigation(
+    webview: &tauri::Webview,
+    label: &str,
+    url: &str,
+) -> Result<(), String> {
+    let label = label.to_string();
+    let url = url.to_string();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    webview
+        .with_webview(move |platform_webview| unsafe {
+            let result = (|| {
+                let wk_webview = &*(platform_webview.inner().cast::<WKWebView>());
+                let delegate = wk_webview
+                    .navigationDelegate()
+                    .ok_or_else(|| "browser navigation delegate is unavailable".to_string())?;
+                let delegate_object = &*((&*delegate) as *const _ as *const AnyObject);
+                install_browser_navigation_identity_hook(delegate_object)?;
+                let url_string = NSString::from_str(&url);
+                let native_url = NSURL::URLWithString(&url_string)
+                    .ok_or_else(|| "browser navigation URL is invalid".to_string())?;
+                let request = NSURLRequest::requestWithURL(&native_url);
+                let navigation = wk_webview
+                    .loadRequest(&request)
+                    .ok_or_else(|| "browser navigation did not start".to_string())?;
+                let navigation_identity = (&*navigation) as *const WKNavigation as usize;
+                let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+                let waiter = waiters
+                    .get_mut(&label)
+                    .ok_or_else(|| "browser navigation waiter is missing".to_string())?;
+                waiter.navigation_identity = Some(navigation_identity);
+                Ok(())
+            })();
+            let _ = sender.send(result);
+        })
+        .map_err(|error| error.to_string())?;
+    receiver
+        .await
+        .map_err(|_| "browser navigation setup was cancelled".to_string())?
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn start_browser_navigation(
+    _webview: &tauri::Webview,
+    _label: &str,
+    _url: &str,
+) -> Result<(), String> {
+    Err("backend_unavailable: exact browser navigation identity is unsupported".to_string())
+}
+
 #[tauri::command]
 async fn browser_navigate(
     app: AppHandle,
@@ -2552,7 +2626,7 @@ async fn browser_navigate(
     h: f64,
     navigation_token: String,
     automation_source: String,
-) -> Result<(), String> {
+) -> Result<BrowserNavigationResult, String> {
     if navigation_token.is_empty() || navigation_token.len() > 128 {
         return Err("browser navigation token is invalid".to_string());
     }
@@ -2560,7 +2634,7 @@ async fn browser_navigate(
         return Err("browser automation initialization source is invalid".to_string());
     }
     let label = safe_browser_label(label);
-    let requested_url = Url::parse(&url).map_err(|error| error.to_string())?;
+    Url::parse(&url).map_err(|error| error.to_string())?;
     let (completion, receiver) = tokio::sync::oneshot::channel();
     {
         let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
@@ -2571,9 +2645,7 @@ async fn browser_navigate(
             label.clone(),
             BrowserNavigationWaiter {
                 token: navigation_token.clone(),
-                requested_url,
-                current_url: None,
-                started: false,
+                navigation_identity: None,
                 completion: Some(completion),
             },
         );
@@ -2583,21 +2655,18 @@ async fn browser_navigate(
         token: navigation_token.clone(),
     };
     let created = ensure_browser(&app, &label, x, y, w, h, &url, &automation_source)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser webview missing".to_string())?;
     if !created {
-        let webview = app
-            .get_webview(&label)
-            .ok_or_else(|| "browser webview missing".to_string())?;
         webview
             .set_position(LogicalPosition::new(x, y))
             .map_err(|e| e.to_string())?;
         webview
             .set_size(LogicalSize::new(w.max(1.0), h.max(1.0)))
             .map_err(|e| e.to_string())?;
-        let parsed_url = Url::parse(&url).map_err(|e| e.to_string())?;
-        webview
-            .navigate(parsed_url)
-            .map_err(|error| error.to_string())?;
     }
+    start_browser_navigation(&webview, &label, &url).await?;
     match tokio::time::timeout(std::time::Duration::from_secs(30), receiver).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err("browser navigation was cancelled".to_string()),
@@ -4236,86 +4305,48 @@ mod pty_runtime_tests {
         assert!(validate_browser_snapshot_dimensions(8192, 8192).is_err());
     }
 
-    fn browser_navigation_waiter(url: &str) -> BrowserNavigationWaiter {
+    fn browser_navigation_waiter(_url: &str) -> BrowserNavigationWaiter {
         let (completion, _receiver) = tokio::sync::oneshot::channel();
         BrowserNavigationWaiter {
             token: "requested-token".to_string(),
-            requested_url: Url::parse(url).unwrap(),
-            current_url: None,
-            started: false,
+            navigation_identity: None,
             completion: Some(completion),
         }
     }
 
     #[test]
-    fn browser_navigation_waiter_ignores_unrelated_events_until_requested_start() {
-        let mut waiter = browser_navigation_waiter("https://example.test/requested");
-        let unrelated = Url::parse("https://example.test/old").unwrap();
-        let requested = Url::parse("https://example.test/requested").unwrap();
+    fn browser_navigation_waiters_correlate_only_exact_native_identity() {
+        let requested_label = "browser-native-identity-requested".to_string();
+        let unrelated_label = "browser-native-identity-unrelated".to_string();
+        let (requested_sender, mut requested_receiver) = tokio::sync::oneshot::channel();
+        let (unrelated_sender, mut unrelated_receiver) = tokio::sync::oneshot::channel();
+        BROWSER_NAVIGATION_WAITERS.lock().insert(
+            requested_label.clone(),
+            BrowserNavigationWaiter {
+                token: "requested".to_string(),
+                navigation_identity: Some(41),
+                completion: Some(requested_sender),
+            },
+        );
+        BROWSER_NAVIGATION_WAITERS.lock().insert(
+            unrelated_label.clone(),
+            BrowserNavigationWaiter {
+                token: "unrelated".to_string(),
+                navigation_identity: Some(42),
+                completion: Some(unrelated_sender),
+            },
+        );
 
+        assert!(!complete_browser_navigation(99, "https://user.example"));
+        assert!(requested_receiver.try_recv().is_err());
+        assert!(unrelated_receiver.try_recv().is_err());
+        assert!(complete_browser_navigation(41, "https://terminal.example"));
         assert_eq!(
-            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &unrelated),
-            BrowserNavigationMatch::Ignored
+            requested_receiver.try_recv().unwrap().unwrap().terminal_url,
+            "https://terminal.example"
         );
-        assert_eq!(
-            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Started, &unrelated),
-            BrowserNavigationMatch::Ignored
-        );
-        assert_eq!(
-            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &requested),
-            BrowserNavigationMatch::Ignored
-        );
-        assert_eq!(
-            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Started, &requested),
-            BrowserNavigationMatch::Started
-        );
-        assert_eq!(
-            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &requested),
-            BrowserNavigationMatch::Finished
-        );
-    }
-
-    #[test]
-    fn browser_navigation_waiter_tracks_redirects_and_only_finishes_the_terminal_url() {
-        let mut waiter = browser_navigation_waiter("https://example.test/requested");
-        let requested = Url::parse("https://example.test/requested").unwrap();
-        let redirect = Url::parse("https://example.test/redirected").unwrap();
-
-        assert_eq!(
-            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Started, &requested),
-            BrowserNavigationMatch::Started
-        );
-        assert_eq!(
-            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Started, &redirect),
-            BrowserNavigationMatch::Started
-        );
-        assert_eq!(
-            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &requested),
-            BrowserNavigationMatch::Ignored
-        );
-        assert_eq!(
-            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &redirect),
-            BrowserNavigationMatch::Finished
-        );
-    }
-
-    #[test]
-    fn browser_navigation_waiter_rejects_late_same_url_finish_before_new_start() {
-        let requested = Url::parse("https://example.test/same").unwrap();
-        let mut waiter = browser_navigation_waiter(requested.as_str());
-
-        assert_eq!(
-            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &requested),
-            BrowserNavigationMatch::Ignored
-        );
-        assert_eq!(
-            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Started, &requested),
-            BrowserNavigationMatch::Started
-        );
-        assert_eq!(
-            update_browser_navigation_waiter(&mut waiter, PageLoadEvent::Finished, &requested),
-            BrowserNavigationMatch::Finished
-        );
+        assert!(unrelated_receiver.try_recv().is_err());
+        BROWSER_NAVIGATION_WAITERS.lock().remove(&unrelated_label);
     }
 
     #[test]

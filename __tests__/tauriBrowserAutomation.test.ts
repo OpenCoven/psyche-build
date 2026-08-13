@@ -251,6 +251,73 @@ describe('bounded semantic browser automation', () => {
     expect(textReads).toBe(1);
   });
 
+  it('charges labelledby parsing and labels iteration to one snapshot work budget', () => {
+    const { globalObject } = fixture();
+    let labelIterations = 0;
+    let idLookups = 0;
+    const referenced = node('span', { textContent: 'Shared' });
+    const controls = Array.from({ length: 2_000 }, (_, controlIndex) => {
+      const control = node('input', {
+        attrs: { 'aria-labelledby': Array.from({ length: 2_000 }, (_, index) => `ref-${controlIndex}-${index}`).join(' ') },
+      });
+      Object.defineProperty(control, 'labels', {
+        get() {
+          return {
+            *[Symbol.iterator]() {
+              for (let index = 0; index < 2_000; index += 1) {
+                labelIterations += 1;
+                yield referenced;
+              }
+            },
+            length: 2_000,
+          };
+        },
+      });
+      return control;
+    });
+    globalObject.document.body = node('body', { children: controls });
+    globalObject.document.documentElement = globalObject.document.body;
+    globalObject.document.getElementById = () => { idLookups += 1; return null; };
+
+    const snapshot = dispatchBrowserAutomation(globalObject, { type: 'snapshot' });
+    expect(snapshot.truncated).toBe(true);
+    expect(idLookups + labelIterations).toBeLessThanOrEqual(10_000);
+  });
+
+  it('uses initialization-time WebIDL getters and fails closed for unknown input types', () => {
+    const { globalObject } = fixture();
+    class FakeElement {}
+    class FakeInput extends FakeElement {}
+    const trustedTypes = new WeakMap<object, string>();
+    const trustedValues = new WeakMap<object, string>();
+    Object.defineProperties(FakeInput.prototype, {
+      type: { configurable: true, get() { return trustedTypes.get(this) ?? ''; } },
+      value: { configurable: true, get() { return trustedValues.get(this) ?? ''; } },
+      checked: { configurable: true, get() { return false; } },
+      disabled: { configurable: true, get() { return false; } },
+      labels: { configurable: true, get() { return []; } },
+    });
+    (globalObject as any).Element = FakeElement;
+    (globalObject as any).HTMLInputElement = FakeInput;
+    const source = browserAutomationSource();
+    Function('globalThis', source)(globalObject);
+
+    const password = node('input', { attrs: {} }) as FakeNode & FakeInput;
+    Object.setPrototypeOf(password, FakeInput.prototype);
+    trustedTypes.set(password, 'password');
+    trustedValues.set(password, 'trusted-secret');
+    globalObject.document.body = node('body', { children: [password] });
+    globalObject.document.documentElement = globalObject.document.body;
+    Object.defineProperties(FakeInput.prototype, {
+      type: { configurable: true, get() { return 'text'; } },
+      value: { configurable: true, get() { return 'leaked-page-value'; } },
+    });
+
+    const snapshot = (globalObject as any).__PSYCHE_AUTOMATION__.dispatch({ type: 'snapshot' });
+    expect(snapshot.nodes[0]).toMatchObject({ role: 'textbox', secret: true, valuePresent: true });
+    expect(snapshot.nodes[0]).not.toHaveProperty('value');
+  });
+
   it('uses the first supported explicit role token and marks exhausted label indexing truncated', () => {
     const { globalObject } = fixture();
     const button = node('div', { textContent: 'Save', attrs: { role: 'presentation button dialog' } });

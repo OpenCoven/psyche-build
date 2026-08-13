@@ -15,6 +15,7 @@ const encodeText = textEncoder.encode.bind(textEncoder);
 const objectAssign = Object.assign.bind(Object);
 const objectDefineProperty = Object.defineProperty.bind(Object);
 const objectFreeze = Object.freeze.bind(Object);
+const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor.bind(Object);
 const reflectApply = Reflect.apply.bind(Reflect);
 const trustedElementGetAttribute = globalThis.Element?.prototype?.getAttribute;
 const trustedElementHasAttribute = globalThis.Element?.prototype?.hasAttribute;
@@ -22,6 +23,18 @@ const trustedElementGetBoundingClientRect = globalThis.Element?.prototype?.getBo
 const trustedDocumentGetElementById = globalThis.Document?.prototype?.getElementById;
 const trustedDocumentQuerySelectorAll = globalThis.Document?.prototype?.querySelectorAll;
 const trustedGetComputedStyle = globalThis.getComputedStyle?.bind(globalThis);
+const trustedInputTypeGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLInputElement?.prototype || {}, 'type')?.get;
+const trustedInputValueGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLInputElement?.prototype || {}, 'value')?.get;
+const trustedInputCheckedGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLInputElement?.prototype || {}, 'checked')?.get;
+const trustedInputDisabledGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLInputElement?.prototype || {}, 'disabled')?.get;
+const trustedInputLabelsGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLInputElement?.prototype || {}, 'labels')?.get;
+const trustedTextareaValueGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLTextAreaElement?.prototype || {}, 'value')?.get;
+const trustedTextareaDisabledGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLTextAreaElement?.prototype || {}, 'disabled')?.get;
+const trustedTextareaLabelsGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLTextAreaElement?.prototype || {}, 'labels')?.get;
+const trustedSelectValueGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLSelectElement?.prototype || {}, 'value')?.get;
+const trustedSelectDisabledGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLSelectElement?.prototype || {}, 'disabled')?.get;
+const trustedSelectLabelsGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLSelectElement?.prototype || {}, 'labels')?.get;
+const trustedOptionSelectedGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLOptionElement?.prototype || {}, 'selected')?.get;
 const INSTALLED = new TrustedWeakMap();
 
 const INTERACTIVE_TAGS = new TrustedSet(['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY', 'IFRAME']);
@@ -104,7 +117,7 @@ export function browserAutomationSource() {
     const MAX_NAME_WORK=${MAX_NAME_WORK}; const MAX_NAME_TOTAL_BYTES=${MAX_NAME_TOTAL_BYTES};
     const TrustedMap=Map; const TrustedWeakMap=WeakMap; const TrustedSet=Set;
     const textEncoder=new TextEncoder(); const encodeText=textEncoder.encode.bind(textEncoder);
-    const objectAssign=Object.assign.bind(Object); const objectDefineProperty=Object.defineProperty.bind(Object); const objectFreeze=Object.freeze.bind(Object);
+    const objectAssign=Object.assign.bind(Object); const objectDefineProperty=Object.defineProperty.bind(Object); const objectFreeze=Object.freeze.bind(Object); const objectGetOwnPropertyDescriptor=Object.getOwnPropertyDescriptor.bind(Object);
     const reflectApply=Reflect.apply.bind(Reflect);
     const trustedElementGetAttribute=globalObject.Element?.prototype?.getAttribute;
     const trustedElementHasAttribute=globalObject.Element?.prototype?.hasAttribute;
@@ -112,6 +125,18 @@ export function browserAutomationSource() {
     const trustedDocumentGetElementById=globalObject.Document?.prototype?.getElementById;
     const trustedDocumentQuerySelectorAll=globalObject.Document?.prototype?.querySelectorAll;
     const trustedGetComputedStyle=globalObject.getComputedStyle?.bind(globalObject);
+    const trustedInputTypeGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLInputElement?.prototype||{},'type')?.get;
+    const trustedInputValueGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLInputElement?.prototype||{},'value')?.get;
+    const trustedInputCheckedGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLInputElement?.prototype||{},'checked')?.get;
+    const trustedInputDisabledGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLInputElement?.prototype||{},'disabled')?.get;
+    const trustedInputLabelsGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLInputElement?.prototype||{},'labels')?.get;
+    const trustedTextareaValueGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLTextAreaElement?.prototype||{},'value')?.get;
+    const trustedTextareaDisabledGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLTextAreaElement?.prototype||{},'disabled')?.get;
+    const trustedTextareaLabelsGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLTextAreaElement?.prototype||{},'labels')?.get;
+    const trustedSelectValueGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLSelectElement?.prototype||{},'value')?.get;
+    const trustedSelectDisabledGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLSelectElement?.prototype||{},'disabled')?.get;
+    const trustedSelectLabelsGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLSelectElement?.prototype||{},'labels')?.get;
+    const trustedOptionSelectedGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLOptionElement?.prototype||{},'selected')?.get;
     const SNAPSHOT_TTL_MS=${SNAPSHOT_TTL_MS}; const INSTALLED=new TrustedWeakMap();
     const INTERACTIVE_TAGS=new TrustedSet(${JSON.stringify([...INTERACTIVE_TAGS])});
     const ALLOWED_ROLES=new TrustedSet(${JSON.stringify([...ALLOWED_ROLES])});
@@ -122,6 +147,9 @@ export function browserAutomationSource() {
     ${findElementById.toString()}
     ${selectElements.toString()}
     ${computedStyle.toString()}
+    ${readWebIdl.toString()}
+    ${readInputType.toString()}
+    ${consumeNameWork.toString()}
     ${boundedText.toString()}
     ${finiteBound.toString()}
     ${clipRect.toString()}
@@ -227,16 +255,25 @@ function semanticNode(element, document, viewportWidth, viewportHeight, globalOb
   if (!clipped && !INTERACTIVE_TAGS.has(tag)) return null;
   const name = accessibleName(element, document, globalObject, labelsByFor, referencedText, labelTextByFor, visibleTextCache, nameBudget);
   const result = { role, name, bounds: clipped || { x: 0, y: 0, width: 0, height: 0, clipped: true } };
-  if (element.disabled === true || hasAttribute(element, 'disabled') || readAttribute(element, 'aria-disabled') === 'true') result.disabled = true;
-  if (role === 'checkbox' || role === 'radio') result.checked = element.checked === true || readAttribute(element, 'aria-checked') === 'true';
-  if (role === 'option') result.selected = element.selected === true || readAttribute(element, 'aria-selected') === 'true';
+  const disabledGetter = tag === 'INPUT' ? trustedInputDisabledGetter
+    : tag === 'TEXTAREA' ? trustedTextareaDisabledGetter
+      : tag === 'SELECT' ? trustedSelectDisabledGetter : null;
+  if (readWebIdl(disabledGetter, element, 'disabled') === true || hasAttribute(element, 'disabled') || readAttribute(element, 'aria-disabled') === 'true') result.disabled = true;
+  if (role === 'checkbox' || role === 'radio') result.checked = readWebIdl(trustedInputCheckedGetter, element, 'checked') === true || readAttribute(element, 'aria-checked') === 'true';
+  if (role === 'option') result.selected = readWebIdl(trustedOptionSelectedGetter, element, 'selected') === true || readAttribute(element, 'aria-selected') === 'true';
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
-    const secret = tag === 'INPUT' && String(element.type || readAttribute(element, 'type') || '').toLowerCase() === 'password';
+    const inputType = tag === 'INPUT' ? readInputType(element) : '';
+    const secret = tag === 'INPUT' && (!inputType || inputType === 'password');
+    const value = tag === 'INPUT'
+      ? readWebIdl(trustedInputValueGetter, element, 'value')
+      : tag === 'TEXTAREA'
+        ? readWebIdl(trustedTextareaValueGetter, element, 'value')
+        : readWebIdl(trustedSelectValueGetter, element, 'value');
     if (secret) {
       result.secret = true;
-      result.valuePresent = String(element.value || '').length > 0;
-    } else if (typeof element.value === 'string') {
-      result.value = boundedText(element.value, MAX_NAME_BYTES);
+      result.valuePresent = typeof value === 'string' && value.length > 0;
+    } else if (typeof value === 'string') {
+      result.value = boundedText(value, MAX_NAME_BYTES);
     }
   }
   if (tag === 'IFRAME' || tag === 'FRAME') result.opaque = true;
@@ -257,7 +294,8 @@ function roleFor(element, tag) {
   if (tag === 'IFRAME' || tag === 'FRAME') return 'frame';
   if (tag === 'IMG' && readAttribute(element, 'alt')) return 'img';
   if (tag === 'INPUT') {
-    const type = String(element.type || readAttribute(element, 'type') || 'text').toLowerCase();
+    const type = readInputType(element);
+    if (!type) return 'textbox';
     if (type === 'hidden') return null;
     if (type === 'checkbox') return 'checkbox';
     if (type === 'radio') return 'radio';
@@ -272,9 +310,14 @@ function accessibleName(element, document, globalObject, labelsByFor, referenced
   if (direct) return boundedText(direct, MAX_NAME_BYTES);
   const labelledBy = String(readAttribute(element, 'aria-labelledby') || '').trim();
   if (labelledBy) {
+    if (nameBudget.nodes <= 0) {
+      nameBudget.truncated = true;
+      return '';
+    }
     const parts = [];
     let references = 0;
     for (const match of labelledBy.slice(0, 65536).matchAll(/\S+/g)) {
+      if (!consumeNameWork(nameBudget)) break;
       if (references++ >= MAX_NAME_NODES) break;
       if (!referencedText.has(match[0])) referencedText.set(match[0], cachedVisibleText(findElementById(document, match[0]), globalObject, nameBudget, visibleTextCache));
       const text = referencedText.get(match[0]);
@@ -284,10 +327,16 @@ function accessibleName(element, document, globalObject, labelsByFor, referenced
     const label = boundedText(parts.join(' '), MAX_NAME_BYTES);
     if (label) return boundedText(label, MAX_NAME_BYTES);
   }
-  if (element.labels?.length) {
+  const tag = String(element.tagName || '').toUpperCase();
+  const labelsGetter = tag === 'INPUT' ? trustedInputLabelsGetter
+    : tag === 'TEXTAREA' ? trustedTextareaLabelsGetter
+      : tag === 'SELECT' ? trustedSelectLabelsGetter : null;
+  const labels = nameBudget.nodes > 0 ? readWebIdl(labelsGetter, element, 'labels') : null;
+  if (labels?.length) {
     const parts = [];
     let references = 0;
-    for (const item of element.labels) {
+    for (const item of labels) {
+      if (!consumeNameWork(nameBudget)) break;
       if (references++ >= MAX_NAME_NODES) break;
       const text = cachedVisibleText(item, globalObject, nameBudget, visibleTextCache);
       if (text) parts.push(text);
@@ -385,6 +434,15 @@ function visibleText(element, globalObject, budget) {
 
   visit(element, 0, true);
   return parts.join(' ');
+}
+
+function consumeNameWork(budget) {
+  if (budget.nodes <= 0) {
+    budget.truncated = true;
+    return false;
+  }
+  budget.nodes -= 1;
+  return true;
 }
 
 function isHidden(element, globalObject) {
@@ -488,6 +546,22 @@ function computedStyle(element, globalObject) {
     if (trustedGetComputedStyle) return trustedGetComputedStyle(element);
   } catch {}
   return typeof globalObject.getComputedStyle === 'function' ? globalObject.getComputedStyle(element) : null;
+}
+
+function readWebIdl(getter, element, fallbackProperty) {
+  try {
+    if (getter) return reflectApply(getter, element, []);
+  } catch {
+    return undefined;
+  }
+  return element?.[fallbackProperty];
+}
+
+function readInputType(element) {
+  const attribute = readAttribute(element, 'type');
+  if (attribute !== null) return boundedText(attribute, 64).toLowerCase();
+  const nativeType = readWebIdl(trustedInputTypeGetter, element, 'type');
+  return typeof nativeType === 'string' ? boundedText(nativeType, 64).toLowerCase() : '';
 }
 
 function automationError(code, message) {

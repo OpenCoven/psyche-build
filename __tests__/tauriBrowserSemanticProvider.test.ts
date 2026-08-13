@@ -68,6 +68,10 @@ describe('Tauri semantic browser provider lifecycle', () => {
     expect(lib).not.toContain('BROWSER_NAVIGATION_TOKENS');
     expect(lib).toContain('webview.close()');
     expect(lib).toContain('browser navigation timed out');
+    expect(lib).toContain('loadRequest');
+    expect(lib).toContain('navigation_identity');
+    expect(lib).toContain('terminal_url');
+    expect(lib).not.toContain('browser_urls_equivalent');
   });
 
   it('publishes exact typed tab resources and correlates inspect results', () => {

@@ -9114,29 +9114,65 @@
       };
       tab.loading = true; tab.title = tabTitle(normalised); renderBrowserTabs(); updateBrowserControls();
       try {
-        await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h, navigationToken: navigationToken, automationSource: lifecycle.automationSource });
+        var nativeNavigation = await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h, navigationToken: navigationToken, automationSource: lifecycle.automationSource });
         if (!browserNavigationIsCurrent(context)) {
           await discardObsoleteBrowserNavigation(context);
           return false;
         }
+        var terminalUrl = nativeNavigation && nativeNavigation.terminalUrl
+          ? String(nativeNavigation.terminalUrl)
+          : normalised;
         tab.created = true;
-        tab.url = normalised;
+        tab.url = terminalUrl;
         tab.loading = false;
+        lifecycle.liveGeneration = generation;
+        lifecycle.liveUrl = terminalUrl;
+        lifecycle.liveNavigationToken = navigationToken;
+        lifecycle.pendingGeneration = 0;
+        lifecycle.pendingUrl = null;
+        lifecycle.pendingNavigationToken = null;
+        lifecycle.eventUrl = terminalUrl;
+        lifecycle.navigationSnapshot = null;
         lifecycle.viewLive = true;
+        if (!browserUrlsMatch(terminalUrl, normalised)) tab.title = tabTitle(terminalUrl);
         if (opts.fromHistory && typeof opts.historyIndex === "number") {
           tab.historyIndex = opts.historyIndex;
         } else if (!opts.fromHistory && !opts.preserveHistory) {
           tab.history = opts.replace ? [] : tab.history.slice(0, tab.historyIndex + 1);
-          tab.history.push(normalised);
+          tab.history.push(terminalUrl);
           tab.historyIndex = tab.history.length - 1;
         }
         if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
         else syncBrowserBounds();
+        var automationInstalled = await Promise.resolve(
+          installBrowserAutomationForPair(navigationPair)
+        ).catch(function () { return false; });
+        if (!automationInstalled) {
+          await Promise.resolve(publishBrowserControlResource(navigationPair)).catch(function () { return false; });
+        }
         saveWorkspaceSoon();
         return true;
       } catch (err) {
         if (!browserNavigationIsCurrent(context)) {
           await discardObsoleteBrowserNavigation(context);
+          return false;
+        }
+        var navigationTimedOut = String(err).indexOf("browser navigation timed out") !== -1;
+        if (navigationTimedOut) {
+          await removeBrowserControlResource(navigationPair);
+          invalidateBrowserNavigation(tab);
+          lifecycle.nativeLabel = null;
+          lifecycle.liveGeneration = 0;
+          lifecycle.liveUrl = null;
+          lifecycle.liveNavigationToken = null;
+          lifecycle.eventUrl = null;
+          lifecycle.viewLive = false;
+          lifecycle.navigationSnapshot = null;
+          tab.created = false;
+          tab.loading = false;
+          if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
+          else syncBrowserBounds();
+          writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
           return false;
         }
         lifecycle.nativeLabel = previousView.nativeLabel;
