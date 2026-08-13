@@ -4,6 +4,8 @@ const MAX_VISITED_NODES = 2_000;
 const MAX_DEPTH = 32;
 const MAX_NAME_BYTES = 512;
 const MAX_NAME_NODES = 2_000;
+const MAX_NAME_WORK = 10_000;
+const MAX_NAME_TOTAL_BYTES = 1024 * 1024;
 const SNAPSHOT_TTL_MS = 30_000;
 const INSTALLED = new WeakMap();
 
@@ -61,7 +63,7 @@ export function installBrowserAutomation(globalObject, options = {}) {
   if (options.installNonce) Object.defineProperty(api, '__psycheInstallNonce', { value: options.installNonce });
   Object.freeze(api);
   Object.defineProperty(globalObject, '__PSYCHE_AUTOMATION__', {
-    configurable: true,
+    configurable: false,
     enumerable: false,
     writable: false,
     value: api,
@@ -84,6 +86,7 @@ export function browserAutomationSource() {
     const SNAPSHOT_SCHEMA=${JSON.stringify(SNAPSHOT_SCHEMA)};
     const MAX_NODES=${MAX_NODES}; const MAX_VISITED_NODES=${MAX_VISITED_NODES}; const MAX_DEPTH=${MAX_DEPTH}; const MAX_NAME_BYTES=${MAX_NAME_BYTES};
     const MAX_NAME_NODES=${MAX_NAME_NODES};
+    const MAX_NAME_WORK=${MAX_NAME_WORK}; const MAX_NAME_TOTAL_BYTES=${MAX_NAME_TOTAL_BYTES};
     const SNAPSHOT_TTL_MS=${SNAPSHOT_TTL_MS}; const INSTALLED=new WeakMap();
     const INTERACTIVE_TAGS=new Set(${JSON.stringify([...INTERACTIVE_TAGS])});
     const ALLOWED_ROLES=new Set(${JSON.stringify([...ALLOWED_ROLES])});
@@ -112,9 +115,13 @@ function captureSnapshot(globalObject, sequence, createdAt) {
   const refs = new Map();
   const root = document.body || document.documentElement;
   const labelsByFor = new Map();
+  const referencedText = new Map();
+  const nameBudget = { nodes: MAX_NAME_WORK, bytes: MAX_NAME_TOTAL_BYTES, truncated: false };
+  let labelIndexExhausted = false;
   if (typeof document.querySelectorAll === 'function') {
     let indexedLabels = 0;
-    const labelIterator = document.querySelectorAll('label')[Symbol.iterator]();
+    const labelList = document.querySelectorAll('label');
+    const labelIterator = labelList[Symbol.iterator]();
     while (indexedLabels < MAX_VISITED_NODES) {
       const nextLabel = labelIterator.next();
       if (nextLabel.done) break;
@@ -124,6 +131,9 @@ function captureSnapshot(globalObject, sequence, createdAt) {
       if (target && !labelsByFor.has(target)) labelsByFor.set(target, []);
       if (target) labelsByFor.get(target).push(label);
     }
+    labelIndexExhausted = typeof labelList.length === 'number'
+      ? labelList.length > indexedLabels
+      : indexedLabels === MAX_VISITED_NODES;
   }
 
   let visited = 0;
@@ -137,7 +147,7 @@ function captureSnapshot(globalObject, sequence, createdAt) {
       frame.entered = true;
       const hidden = isHidden(frame.element, globalObject);
       if (!hidden) {
-        const semantic = semanticNode(frame.element, document, viewportWidth, viewportHeight, globalObject, labelsByFor);
+        const semantic = semanticNode(frame.element, document, viewportWidth, viewportHeight, globalObject, labelsByFor, referencedText, nameBudget);
         if (semantic && nodes.length < MAX_NODES) {
           const ref = `e${nodes.length + 1}`;
           nodes.push({ ref, ...semantic });
@@ -169,19 +179,19 @@ function captureSnapshot(globalObject, sequence, createdAt) {
       url: boundedText(globalObject.location?.href || '', 2_048),
       viewport: { width: viewportWidth, height: viewportHeight },
       nodes,
-      truncated,
+      truncated: truncated || labelIndexExhausted || nameBudget.truncated,
     },
   };
 }
 
-function semanticNode(element, document, viewportWidth, viewportHeight, globalObject, labelsByFor) {
+function semanticNode(element, document, viewportWidth, viewportHeight, globalObject, labelsByFor, referencedText, nameBudget) {
   const tag = String(element.tagName || '').toUpperCase();
   const role = roleFor(element, tag);
   if (!role) return null;
   const rect = safeRect(element);
   const clipped = clipRect(rect, viewportWidth, viewportHeight);
   if (!clipped && !INTERACTIVE_TAGS.has(tag)) return null;
-  const name = accessibleName(element, document, globalObject, labelsByFor);
+  const name = accessibleName(element, document, globalObject, labelsByFor, referencedText, nameBudget);
   const result = { role, name, bounds: clipped || { x: 0, y: 0, width: 0, height: 0, clipped: true } };
   if (element.disabled === true || element.hasAttribute?.('disabled') || element.getAttribute?.('aria-disabled') === 'true') result.disabled = true;
   if (role === 'checkbox' || role === 'radio') result.checked = element.checked === true || element.getAttribute?.('aria-checked') === 'true';
@@ -201,7 +211,10 @@ function semanticNode(element, document, viewportWidth, viewportHeight, globalOb
 
 function roleFor(element, tag) {
   const explicit = boundedText(element.getAttribute?.('role') || '', 64).toLowerCase();
-  if (explicit) return ALLOWED_ROLES.has(explicit) ? explicit : null;
+  if (explicit) {
+    for (const token of explicit.split(/\s+/)) if (ALLOWED_ROLES.has(token)) return token;
+    return null;
+  }
   if (tag === 'BUTTON') return 'button';
   if (tag === 'A' && element.getAttribute?.('href')) return 'link';
   if (tag === 'TEXTAREA') return 'textbox';
@@ -220,7 +233,7 @@ function roleFor(element, tag) {
   return null;
 }
 
-function accessibleName(element, document, globalObject, labelsByFor) {
+function accessibleName(element, document, globalObject, labelsByFor, referencedText, nameBudget) {
   const direct = element.getAttribute?.('aria-label');
   if (direct) return boundedText(direct, MAX_NAME_BYTES);
   const labelledBy = String(element.getAttribute?.('aria-labelledby') || '').trim();
@@ -229,7 +242,8 @@ function accessibleName(element, document, globalObject, labelsByFor) {
     let references = 0;
     for (const match of labelledBy.slice(0, 65536).matchAll(/\S+/g)) {
       if (references++ >= MAX_NAME_NODES) break;
-      const text = visibleText(document.getElementById?.(match[0]), globalObject);
+      if (!referencedText.has(match[0])) referencedText.set(match[0], visibleText(document.getElementById?.(match[0]), globalObject, nameBudget));
+      const text = referencedText.get(match[0]);
       if (text) parts.push(text);
       if (new TextEncoder().encode(parts.join(' ')).length >= MAX_NAME_BYTES) break;
     }
@@ -241,7 +255,7 @@ function accessibleName(element, document, globalObject, labelsByFor) {
     let references = 0;
     for (const item of element.labels) {
       if (references++ >= MAX_NAME_NODES) break;
-      const text = visibleText(item, globalObject);
+      const text = visibleText(item, globalObject, nameBudget);
       if (text) parts.push(text);
       if (new TextEncoder().encode(parts.join(' ')).length >= MAX_NAME_BYTES) break;
     }
@@ -250,17 +264,17 @@ function accessibleName(element, document, globalObject, labelsByFor) {
   }
   const id = element.getAttribute?.('id');
   if (id) {
-    const label = boundedText((labelsByFor.get(id) || []).map((item) => visibleText(item, globalObject)).join(' '), MAX_NAME_BYTES);
+    const label = boundedText((labelsByFor.get(id) || []).map((item) => visibleText(item, globalObject, nameBudget)).join(' '), MAX_NAME_BYTES);
     if (label) return boundedText(label, MAX_NAME_BYTES);
   }
   const alt = element.getAttribute?.('alt');
   if (alt) return boundedText(alt, MAX_NAME_BYTES);
   const title = element.getAttribute?.('title');
   if (title) return boundedText(title, MAX_NAME_BYTES);
-  return boundedText(visibleText(element, globalObject), MAX_NAME_BYTES);
+  return boundedText(visibleText(element, globalObject, nameBudget), MAX_NAME_BYTES);
 }
 
-function visibleText(element, globalObject) {
+function visibleText(element, globalObject, budget) {
   if (!element || isHidden(element, globalObject)) return '';
   const parts = [];
   const encoder = new TextEncoder();
@@ -268,19 +282,23 @@ function visibleText(element, globalObject) {
   let visited = 0;
 
   function append(value) {
-    if (remaining <= 0) return;
-    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (remaining <= 0 || budget.bytes <= 0) { budget.truncated = true; return; }
+    const text = boundedText(value, Math.min(remaining, budget.bytes));
     if (!text) return;
     if (parts.length) remaining -= 1;
     if (remaining <= 0) return;
     const bounded = boundedText(text, remaining);
     if (!bounded) return;
     parts.push(bounded);
-    remaining -= encoder.encode(bounded).length;
+    const used = encoder.encode(bounded).length;
+    remaining -= used;
+    budget.bytes -= used;
   }
 
   function visit(node, depth, root) {
     if (!node || remaining <= 0 || visited >= MAX_NAME_NODES || depth > MAX_DEPTH) return;
+    if (budget.nodes <= 0) { budget.truncated = true; return; }
+    budget.nodes -= 1;
     visited += 1;
     if (node.nodeType === 3) {
       append(node.nodeValue);
@@ -354,16 +372,22 @@ function finiteBound(value, minimum, maximum) {
 }
 
 function boundedText(value, maxBytes) {
-  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  const source = String(value || '');
   const encoder = new TextEncoder();
-  if (encoder.encode(text).length <= maxBytes) return text;
   let output = '';
   let bytes = 0;
-  for (const character of text) {
-    const characterBytes = encoder.encode(character).length;
+  let pendingSpace = false;
+  for (const character of source) {
+    if (/\s/.test(character)) {
+      if (output) pendingSpace = true;
+      continue;
+    }
+    const prefix = pendingSpace && output ? ' ' : '';
+    const characterBytes = encoder.encode(prefix + character).length;
     if (bytes + characterBytes > maxBytes) break;
-    output += character;
+    output += prefix + character;
     bytes += characterBytes;
+    pendingSpace = false;
   }
   return output;
 }

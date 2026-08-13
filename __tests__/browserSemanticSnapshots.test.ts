@@ -30,4 +30,21 @@ describe('BrowserSemanticSnapshotRegistry', () => {
     expect(() => registry.store(snapshot({ expiresAt: '2026-08-12T12:00:00.000Z' }), 'tab-1', 1)).toThrow(/malformed/);
     expect(() => registry.store(snapshot({ injected: true }), 'tab-1', 1)).toThrow(/malformed/);
   });
+
+  it('keeps only the newest same-generation snapshot and owns deep immutable node data', () => {
+    const registry = new BrowserSemanticSnapshotRegistry(() => new Date('2026-08-12T12:00:01.000Z'));
+    const mutable = snapshot() as any;
+    registry.store(mutable, 'tab-1', 1);
+    registry.store(snapshot({ id: 'snap-2' }), 'tab-1', 1);
+    expect(() => registry.resolve({ tabId: 'tab-1', generation: 1, snapshotId: 'snap-1', elementRef: 'e1' })).toThrow(/stale/);
+
+    const owned = snapshot({ id: 'snap-owned' }) as any;
+    registry.store(owned, 'tab-1', 1);
+    owned.nodes[0].role = 'textbox';
+    owned.nodes[0].value.secret = false;
+    expect(registry.resolve({ tabId: 'tab-1', generation: 1, snapshotId: 'snap-owned', elementRef: 'e1' }))
+      .toMatchObject({ role: 'button', secret: true });
+    expect(() => registry.store(snapshot({ nodes: [{ ref: 'e1', role: 'button', name: 'x', injected: true }] }), 'tab-1', 1))
+      .toThrow(/malformed/);
+  });
 });

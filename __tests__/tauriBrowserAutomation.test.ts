@@ -157,6 +157,26 @@ describe('bounded semantic browser automation', () => {
     });
   });
 
+  it('keeps the trusted initialization install non-configurable before later hostile intrinsic patches', () => {
+    const { globalObject } = fixture();
+    const source = browserAutomationSource();
+    const NativeObject = Object;
+    const NativeWeakMap = WeakMap;
+    const NativeSet = Set;
+    const NativeTextEncoder = TextEncoder;
+    Function('globalThis', source)(globalObject);
+    expect(Object.getOwnPropertyDescriptor(globalObject, '__PSYCHE_AUTOMATION__')?.configurable).toBe(false);
+    (globalObject as any).Object = class { static defineProperty() { throw new Error('page Object'); } };
+    (globalObject as any).WeakMap = class { constructor() { throw new Error('page WeakMap'); } };
+    (globalObject as any).Set = class { constructor() { throw new Error('page Set'); } };
+    (globalObject as any).TextEncoder = class { constructor() { throw new Error('page TextEncoder'); } };
+    expect((globalObject as any).__PSYCHE_AUTOMATION__.dispatch({ type: 'snapshot' })).toMatchObject({ schema: 'psyche.browser.snapshot/v1' });
+    expect(Object).toBe(NativeObject);
+    expect(WeakMap).toBe(NativeWeakMap);
+    expect(Set).toBe(NativeSet);
+    expect(TextEncoder).toBe(NativeTextEncoder);
+  });
+
   it('bounds total DOM visits even when 100k siblings are nonsemantic', () => {
     const { globalObject } = fixture();
     let rectReads = 0;
@@ -194,6 +214,20 @@ describe('bounded semantic browser automation', () => {
     const snapshot = dispatchBrowserAutomation(globalObject, { type: 'snapshot' });
     expect(labelReads).toBe(2_000);
     expect(snapshot.nodes[0]).toMatchObject({ name: 'label-0' });
+  });
+
+  it('uses the first supported explicit role token and marks exhausted label indexing truncated', () => {
+    const { globalObject } = fixture();
+    const button = node('div', { textContent: 'Save', attrs: { role: 'presentation button dialog' } });
+    globalObject.document.body = node('body', { children: [button] });
+    globalObject.document.documentElement = globalObject.document.body;
+    (globalObject.document as any).querySelectorAll = () => ({
+      length: 2_001,
+      *[Symbol.iterator]() { for (let i = 0; i < 2_001; i += 1) yield node('label'); },
+    });
+    const snapshot = dispatchBrowserAutomation(globalObject, { type: 'snapshot' });
+    expect(snapshot.nodes[0]).toMatchObject({ role: 'button' });
+    expect(snapshot.truncated).toBe(true);
   });
 
   it('omits noninteractive offscreen and zero-size explicit roles', () => {

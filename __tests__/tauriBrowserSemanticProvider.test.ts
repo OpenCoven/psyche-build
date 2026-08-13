@@ -61,6 +61,15 @@ describe('Tauri semantic browser provider lifecycle', () => {
     expect(main).toContain('invalidateBrowserAutomation');
   });
 
+  it('installs the trusted automation source at document initialization and awaits Finished natively', () => {
+    expect(lib).toContain('.initialization_script(automation_source)');
+    expect(lib).toMatch(/async fn browser_navigate[\s\S]*oneshot::channel[\s\S]*Duration::from_secs\(30\)[\s\S]*receiver/);
+    expect(lib).toContain('BROWSER_NAVIGATION_WAITERS');
+    expect(lib).not.toContain('BROWSER_NAVIGATION_TOKENS');
+    expect(lib).toContain('webview.close()');
+    expect(lib).toContain('browser navigation timed out');
+  });
+
   it('publishes exact typed tab resources and correlates inspect results', () => {
     expect(main).toContain('control_provider_start');
     expect(main).toContain('control_provider_upsert');

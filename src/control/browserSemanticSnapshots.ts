@@ -11,8 +11,7 @@ export class BrowserSemanticSnapshotRegistry {
 
   store(value: unknown, tabId: string, generation: number): SemanticSnapshot {
     const snapshot = requireSnapshot(value, tabId, generation, this.now());
-    this.invalidateTab(tabId, generation);
-    this.snapshots.delete(snapshot.id);
+    this.invalidateTab(tabId);
     this.snapshots.set(snapshot.id, snapshot);
     while (this.snapshots.size > MAX_SNAPSHOTS) {
       const oldest = this.snapshots.keys().next().value as string | undefined;
@@ -48,14 +47,99 @@ export class BrowserSemanticSnapshotRegistry {
 }
 
 function requireSnapshot(value: unknown, tabId: string, generation: number, now: Date): SemanticSnapshot {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid();
-  const snapshot = value as Partial<SemanticSnapshot>;
+  if (!plain(value)) throw invalid();
+  const snapshot = value as Record<string, unknown>;
   const allowed = ['schema', 'id', 'tabId', 'generation', 'url', 'title', 'loading', 'viewport', 'capturedAt', 'nodes', 'truncated', 'opaqueFrames', 'expiresAt', 'screenshot'];
-  if (Object.keys(snapshot).some((key) => !allowed.includes(key)) || snapshot.schema !== 'psyche.browser.snapshot/v1'
-    || snapshot.tabId !== tabId || snapshot.generation !== generation || typeof snapshot.id !== 'string'
-    || !Array.isArray(snapshot.nodes) || snapshot.nodes.length > MAX_NODES
-    || !Number.isFinite(Date.parse(snapshot.expiresAt ?? '')) || Date.parse(snapshot.expiresAt ?? '') <= now.getTime()) throw invalid();
-  return Object.freeze({ ...snapshot, nodes: Object.freeze([...snapshot.nodes]) }) as SemanticSnapshot;
+  exactKeys(snapshot, allowed);
+  if (snapshot.schema !== 'psyche.browser.snapshot/v1' || snapshot.tabId !== tabId
+    || snapshot.generation !== generation || !boundedString(snapshot.id, 256)
+    || !boundedString(snapshot.url, 2_048) || !boundedString(snapshot.title, 512)
+    || typeof snapshot.loading !== 'boolean' || !plain(snapshot.viewport)
+    || !boundedString(snapshot.capturedAt, 64) || !Array.isArray(snapshot.nodes)
+    || snapshot.nodes.length > MAX_NODES || typeof snapshot.truncated !== 'boolean'
+    || !Number.isInteger(snapshot.opaqueFrames) || (snapshot.opaqueFrames as number) < 0
+    || !boundedString(snapshot.expiresAt, 64)
+    || !Number.isFinite(Date.parse(snapshot.expiresAt as string))
+    || Date.parse(snapshot.expiresAt as string) <= now.getTime()) throw invalid();
+  exactKeys(snapshot.viewport, ['width', 'height']);
+  const viewport = snapshot.viewport as Record<string, unknown>;
+  if (!finiteRange(viewport.width, 0, 100_000) || !finiteRange(viewport.height, 0, 100_000)) throw invalid();
+  const refs = new Set<string>();
+  const nodes = snapshot.nodes.map((node) => copyNode(node, refs));
+  return Object.freeze({
+    schema: 'psyche.browser.snapshot/v1',
+    id: snapshot.id,
+    tabId,
+    generation,
+    url: snapshot.url,
+    title: snapshot.title,
+    loading: snapshot.loading,
+    viewport: Object.freeze({ width: viewport.width, height: viewport.height }),
+    capturedAt: snapshot.capturedAt,
+    nodes: Object.freeze(nodes),
+    truncated: snapshot.truncated,
+    opaqueFrames: snapshot.opaqueFrames,
+    expiresAt: snapshot.expiresAt,
+  }) as SemanticSnapshot;
+}
+
+function copyNode(value: unknown, refs: Set<string>): SemanticSnapshot['nodes'][number] {
+  if (!plain(value)) throw invalid();
+  exactKeys(value, ['ref', 'role', 'name', 'state', 'value', 'bounds', 'actions', 'children']);
+  if (!boundedString(value.ref, 64) || refs.has(value.ref as string)
+    || !boundedString(value.role, 64) || !boundedString(value.name, 512)) throw invalid();
+  refs.add(value.ref as string);
+  const node: Record<string, unknown> = { ref: value.ref, role: value.role, name: value.name };
+  if (value.state !== undefined) {
+    if (!plain(value.state)) throw invalid();
+    const state: Record<string, boolean | string | number> = {};
+    for (const [key, item] of Object.entries(value.state)) {
+      if (!boundedString(key, 64) || !['boolean', 'string', 'number'].includes(typeof item)
+        || (typeof item === 'string' && !boundedString(item, 512)) || (typeof item === 'number' && !Number.isFinite(item))) throw invalid();
+      state[key] = item as boolean | string | number;
+    }
+    node.state = Object.freeze(state);
+  }
+  if (value.value !== undefined) {
+    if (!plain(value.value)) throw invalid();
+    exactKeys(value.value, ['kind', 'value', 'secret']);
+    if (!boundedString(value.value.kind, 64)
+      || (value.value.value !== undefined && !boundedString(value.value.value, 512))
+      || (value.value.secret !== undefined && typeof value.value.secret !== 'boolean')) throw invalid();
+    node.value = Object.freeze({ ...value.value });
+  }
+  if (value.bounds !== undefined) {
+    if (!plain(value.bounds)) throw invalid();
+    const bounds = value.bounds;
+    exactKeys(bounds, ['x', 'y', 'width', 'height']);
+    if (!['x', 'y', 'width', 'height'].every((key) => Number.isFinite(bounds[key]))) throw invalid();
+    node.bounds = Object.freeze({ ...bounds });
+  }
+  for (const key of ['actions', 'children'] as const) {
+    if (value[key] !== undefined) {
+      if (!Array.isArray(value[key]) || value[key].length > MAX_NODES
+        || value[key].some((item) => !boundedString(item, 64))) throw invalid();
+      node[key] = Object.freeze([...value[key]]);
+    }
+  }
+  return Object.freeze(node) as unknown as SemanticSnapshot['nodes'][number];
+}
+
+function plain(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+}
+
+function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): void {
+  if (Object.keys(value).some((key) => !allowed.includes(key))) throw invalid();
+}
+
+function boundedString(value: unknown, maxBytes: number): value is string {
+  return typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= maxBytes;
+}
+
+function finiteRange(value: unknown, minimum: number, maximum: number): boolean {
+  return Number.isFinite(value) && (value as number) >= minimum && (value as number) <= maximum;
 }
 
 function invalid(): Error & { code: string } {

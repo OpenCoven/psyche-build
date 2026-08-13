@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 #[cfg(unix)]
 use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
@@ -1647,13 +1647,12 @@ pub struct BrowserPageLoadEvent {
     pub navigation_token: Option<String>,
 }
 
-#[derive(Default)]
-struct BrowserNavigationTokens {
-    pending: Option<String>,
-    active: VecDeque<String>,
+struct BrowserNavigationWaiter {
+    token: String,
+    completion: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 }
 
-static BROWSER_NAVIGATION_TOKENS: Lazy<Mutex<HashMap<String, BrowserNavigationTokens>>> =
+static BROWSER_NAVIGATION_WAITERS: Lazy<Mutex<HashMap<String, BrowserNavigationWaiter>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn pump_pty_reader<R: Read>(mut reader: R, pump: OutputPump) -> Result<(), String> {
@@ -2371,7 +2370,7 @@ fn ensure_browser(
     w: f64,
     h: f64,
     url: &str,
-    navigation_token: &str,
+    automation_source: &str,
 ) -> Result<bool, String> {
     if app.webviews().keys().any(|existing| existing == label) {
         return Ok(false);
@@ -2383,32 +2382,19 @@ fn ensure_browser(
 
     let parsed_url = Url::parse(url).map_err(|e| e.to_string())?;
     let browser_label = label.to_string();
-    BROWSER_NAVIGATION_TOKENS.lock().insert(
-        browser_label.clone(),
-        BrowserNavigationTokens {
-            pending: Some(navigation_token.to_string()),
-            active: VecDeque::new(),
-        },
-    );
     let app_for_load = app.clone();
-    let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url)).on_page_load(
+    let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url))
+        .initialization_script(automation_source)
+        .on_page_load(
         move |webview, payload| {
             let phase = match payload.event() {
                 PageLoadEvent::Started => "started",
                 PageLoadEvent::Finished => "finished",
             };
-            let navigation_token = {
-                let mut tokens = BROWSER_NAVIGATION_TOKENS.lock();
-                let state = tokens.entry(browser_label.clone()).or_default();
-                if matches!(payload.event(), PageLoadEvent::Started) {
-                    if let Some(pending) = state.pending.take() {
-                        state.active.push_back(pending);
-                    }
-                    state.active.back().cloned()
-                } else {
-                    state.active.pop_front()
-                }
-            };
+            let navigation_token = BROWSER_NAVIGATION_WAITERS
+                .lock()
+                .get(&browser_label)
+                .map(|waiter| waiter.token.clone());
             let _ = app_for_load.emit(
                 "browser:page-load",
                 BrowserPageLoadEvent {
@@ -2453,6 +2439,13 @@ fn ensure_browser(
                     label_json
                 );
                 let _ = webview.eval(&script);
+                let completion = BROWSER_NAVIGATION_WAITERS
+                    .lock()
+                    .remove(&browser_label)
+                    .and_then(|mut waiter| waiter.completion.take());
+                if let Some(completion) = completion {
+                    let _ = completion.send(Ok(()));
+                }
             }
         },
     );
@@ -2478,7 +2471,7 @@ fn hide_webview(webview: &tauri::Webview) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn browser_navigate(
+async fn browser_navigate(
     app: AppHandle,
     label: Option<String>,
     url: String,
@@ -2487,12 +2480,36 @@ fn browser_navigate(
     w: f64,
     h: f64,
     navigation_token: String,
+    automation_source: String,
 ) -> Result<(), String> {
     if navigation_token.is_empty() || navigation_token.len() > 128 {
         return Err("browser navigation token is invalid".to_string());
     }
+    if automation_source.is_empty() || automation_source.len() > 1024 * 1024 {
+        return Err("browser automation initialization source is invalid".to_string());
+    }
     let label = safe_browser_label(label);
-    let created = ensure_browser(&app, &label, x, y, w, h, &url, &navigation_token)?;
+    let (completion, receiver) = tokio::sync::oneshot::channel();
+    {
+        let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+        if waiters.contains_key(&label) {
+            return Err("browser navigation is already in progress".to_string());
+        }
+        waiters.insert(
+            label.clone(),
+            BrowserNavigationWaiter {
+                token: navigation_token.clone(),
+                completion: Some(completion),
+            },
+        );
+    }
+    let created = match ensure_browser(&app, &label, x, y, w, h, &url, &automation_source) {
+        Ok(created) => created,
+        Err(error) => {
+            BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
+            return Err(error);
+        }
+    };
     if !created {
         let webview = app
             .get_webview(&label)
@@ -2504,14 +2521,28 @@ fn browser_navigate(
             .set_size(LogicalSize::new(w.max(1.0), h.max(1.0)))
             .map_err(|e| e.to_string())?;
         let parsed_url = Url::parse(&url).map_err(|e| e.to_string())?;
-        BROWSER_NAVIGATION_TOKENS
-            .lock()
-            .entry(label.clone())
-            .or_default()
-            .pending = Some(navigation_token);
-        webview.navigate(parsed_url).map_err(|e| e.to_string())?;
+        if let Err(error) = webview.navigate(parsed_url) {
+            BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
+            return Err(error.to_string());
+        }
     }
-    Ok(())
+    match tokio::time::timeout(std::time::Duration::from_secs(30), receiver).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("browser navigation was cancelled".to_string()),
+        Err(_) => {
+            let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+            if waiters
+                .get(&label)
+                .is_some_and(|waiter| waiter.token == navigation_token)
+            {
+                waiters.remove(&label);
+            }
+            if let Some(webview) = app.get_webview(&label) {
+                let _ = webview.close();
+            }
+            Err("browser navigation timed out".to_string())
+        }
+    }
 }
 
 #[tauri::command]
@@ -2558,7 +2589,7 @@ fn browser_hide_all_except(app: AppHandle, label: Option<String>) -> Result<(), 
 
 fn destroy_browser_webview(app: &AppHandle, label: Option<String>) -> Result<(), String> {
     let label = safe_browser_label(label);
-    BROWSER_NAVIGATION_TOKENS.lock().remove(&label);
+    BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
     if let Some(webview) = app.get_webview(&label) {
         webview.close().map_err(|error| error.to_string())?;
     }
@@ -2676,6 +2707,11 @@ async fn browser_snapshot(
                                 NSBitmapImageRep::imageRepWithData(&tiff).ok_or_else(|| {
                                     "browser snapshot bitmap is unavailable".to_string()
                                 })?;
+                            let width = u32::try_from(bitmap.pixelsWide())
+                                .map_err(|_| "browser snapshot width is invalid".to_string())?;
+                            let height = u32::try_from(bitmap.pixelsHigh())
+                                .map_err(|_| "browser snapshot height is invalid".to_string())?;
+                            validate_browser_snapshot_dimensions(width, height)?;
                             let properties =
                                 NSDictionary::<NSBitmapImageRepPropertyKey, AnyObject>::new();
                             let png = bitmap
@@ -2689,13 +2725,6 @@ async fn browser_snapshot(
                             let bytes = png.as_bytes_unchecked();
                             if bytes.len() > MAX_BROWSER_SNAPSHOT_BYTES {
                                 return Err("browser snapshot exceeds maximum size".to_string());
-                            }
-                            let width = u32::try_from(bitmap.pixelsWide())
-                                .map_err(|_| "browser snapshot width is invalid".to_string())?;
-                            let height = u32::try_from(bitmap.pixelsHigh())
-                                .map_err(|_| "browser snapshot height is invalid".to_string())?;
-                            if width == 0 || height == 0 {
-                                return Err("browser snapshot dimensions are invalid".to_string());
                             }
                             Ok(BrowserSnapshot {
                                 png_base64: BASE64_STANDARD.encode(bytes),

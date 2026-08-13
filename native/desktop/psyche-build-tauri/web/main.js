@@ -4071,6 +4071,7 @@
         if (!savedTab) continue;
         try {
           var recoveryNavigationToken = "recovery:" + Date.now() + ":" + index;
+          if (!tabLifecycle.automationSource) tabLifecycle.automationSource = PsycheControl.browserAutomationSource();
           await invoke("browser_navigate", {
             label: savedTab.label,
             url: savedTab.url,
@@ -4079,6 +4080,7 @@
             w: 1,
             h: 1,
             navigationToken: recoveryNavigationToken,
+            automationSource: tabLifecycle.automationSource,
           });
           currentTab.created = true;
           currentTab.loading = false;
@@ -8298,10 +8300,10 @@
     return projectId + "__" + tabId;
   }
   function browserTabLifecycle(tab) {
-    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
+    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
     var lifecycle = browserTabLifecycleStates.get(tab);
     if (!lifecycle) {
-      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
+      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
       browserTabLifecycleStates.set(tab, lifecycle);
     }
     return lifecycle;
@@ -8503,7 +8505,7 @@
       if ((lifecycle.liveGeneration || lifecycle.pendingGeneration) !== expectedGeneration) return false;
       return invoke("browser_eval", {
         label: browserLabelForTab(pair.project, pair.tab),
-        script: PsycheControl.browserAutomationSource(),
+        script: lifecycle.automationSource || PsycheControl.browserAutomationSource(),
       }).then(function () { return publishBrowserControlResource(pair); });
     };
     var flight = lifecycle.automationTail ? lifecycle.automationTail.then(run, run) : run();
@@ -8680,7 +8682,7 @@
         try {
           await invoke("browser_eval", {
             label: browserLabelForTab(pair.project, pair.tab),
-            script: PsycheControl.browserAutomationSource() + "\n" + browserAutomationDispatchScript(effect),
+            script: (browserTabLifecycle(pair.tab).automationSource || PsycheControl.browserAutomationSource()) + "\n" + browserAutomationDispatchScript(effect),
           });
         } catch (evalError) {
           resultFlight.cancel(evalError);
@@ -9085,6 +9087,7 @@
       if (lifecycle.invalidationGeneration !== invalidationGeneration || !requestIsCurrent()) return false;
       var generation = beginBrowserNavigation(tab);
       var navigationToken = generation + ":" + (globalThis.crypto && globalThis.crypto.randomUUID ? globalThis.crypto.randomUUID() : Date.now() + ":" + Math.random());
+      if (!lifecycle.automationSource) lifecycle.automationSource = PsycheControl.browserAutomationSource();
       var label = browserLabelForTab(project, tab);
       var nativeLabel = nativeBrowserLabel(label);
       lifecycle.nativeLabel = nativeLabel;
@@ -9111,7 +9114,7 @@
       };
       tab.loading = true; tab.title = tabTitle(normalised); renderBrowserTabs(); updateBrowserControls();
       try {
-        await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h, navigationToken: navigationToken });
+        await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h, navigationToken: navigationToken, automationSource: lifecycle.automationSource });
         if (!browserNavigationIsCurrent(context)) {
           await discardObsoleteBrowserNavigation(context);
           return false;
