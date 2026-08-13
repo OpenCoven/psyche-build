@@ -23,7 +23,10 @@ function functionSource(source: string, name: string): string {
 
 describe('Tauri semantic browser provider lifecycle', () => {
   it('strictly projects untrusted page snapshots into provider-owned canonical snapshots', () => {
-    const canonicalize = Function(`return (${functionSource(main, 'canonicalizeBrowserSemanticSnapshot')});`)();
+    const canonicalize = Function(
+      'browserAutomationSnapshotRefs',
+      `return (${functionSource(main, 'canonicalizeBrowserSemanticSnapshot')});`,
+    )(new Map());
     const pair = {
       tab: { id: 'tab-1', title: 'Trusted title', loading: false },
       project: {}, browser: {}, worktreePath: '/worktree',
@@ -109,12 +112,14 @@ describe('Tauri semantic browser provider lifecycle', () => {
       'browserControlPairByTabId', 'browserTabLifecycle', 'completeBrowserProviderEffect',
       'installBrowserAutomationForPair', 'awaitBrowserAutomationResult', 'invoke',
       'browserLabelForTab', 'browserAutomationDispatchScript', 'canonicalizeBrowserSemanticSnapshot',
+      'browserProviderOperationPreflight', 'runBrowserLifecycleOperation',
       `return (${functionSource(main, 'handleBrowserProviderEffect')});`,
     )(
       () => pair,
       () => ({ liveGeneration: 2, nativeLabel: 'native' }),
       async (_project: unknown, result: unknown) => { completions.push(result); },
       async () => true, async () => ({}), async () => ({}), () => 'label', () => '', () => ({}),
+      () => 'page', vi.fn(),
     );
 
     await expect(handler({ payload: { actionId: 'a1', tabId: 'tab', projectRoot: '/project', generation: 1 } })).resolves.toBe(false);
@@ -134,12 +139,14 @@ describe('Tauri semantic browser provider lifecycle', () => {
       'browserControlPairByTabId', 'browserTabLifecycle', 'completeBrowserProviderEffect',
       'installBrowserAutomationForPair', 'awaitBrowserAutomationResult', 'invoke',
       'browserLabelForTab', 'browserAutomationDispatchScript', 'canonicalizeBrowserSemanticSnapshot',
+      'browserProviderOperationPreflight', 'runBrowserLifecycleOperation',
       `return (${functionSource(main, 'handleBrowserProviderEffect')});`,
     )(
       () => pair,
       () => lifecycle,
       async (_project: unknown, result: unknown) => { completions.push(result); },
       install, awaitResult, dispatch, () => 'label', () => 'dispatch-script', (value: unknown) => value,
+      () => 'page', vi.fn(),
     );
 
     const effectFlight = handler({
@@ -184,5 +191,89 @@ describe('Tauri semantic browser provider lifecycle', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it.each([
+    ['upload', { elementRef: 'e1', path: '/project/secret.txt' }],
+    ['download', { elementRef: 'e1', destination: '/project/download.txt' }],
+  ])('validates exact snapshot and ref before failing unsupported native %s without dispatch', async (kind, actionFields) => {
+    const snapshotRefs = new Map([['canonical-1', {
+      rawSnapshotId: 'raw-1', tabId: 'tab', generation: 1,
+      expiresAt: Date.now() + 30_000, refs: new Set(['e1']),
+    }]]);
+    const invoke = vi.fn();
+    const install = vi.fn();
+    const completions: any[] = [];
+    const pair = { project: { root: '/project' }, browser: {}, worktreePath: '/project', tab: {} };
+    const lifecycle = { liveGeneration: 1, pendingGeneration: 0, nativeLabel: 'native', navigationTail: null };
+    const resolveNativeTarget = Function(
+      'browserAutomationSnapshotRefs',
+      `return (${functionSource(main, 'resolveBrowserNativeElementTarget')});`,
+    )(snapshotRefs);
+    const preflight = Function(
+      'resolveBrowserNativeElementTarget',
+      `return (${functionSource(main, 'browserProviderOperationPreflight')});`,
+    )(resolveNativeTarget);
+    const handler = Function(
+      'browserControlPairByTabId', 'state', 'browserControlProviders', 'browserTabLifecycle',
+      'completeBrowserProviderEffect', 'browserProviderOperationPreflight', 'runBrowserLifecycleOperation',
+      'installBrowserAutomationForPair', 'awaitBrowserAutomationResult', 'invoke', 'browserLabelForTab',
+      'PsycheControl', 'browserAutomationDispatchScript', 'canonicalizeBrowserSemanticSnapshot',
+      `return (${functionSource(main, 'handleBrowserProviderEffect')});`,
+    )(
+      () => pair, { projects: [] }, new Map(), () => lifecycle,
+      async (_project: unknown, value: unknown) => { completions.push(value); }, preflight, vi.fn(),
+      install, vi.fn(), invoke, vi.fn(), { browserAutomationSource: vi.fn() }, vi.fn(), vi.fn(),
+    );
+
+    for (const [snapshotId, elementRef, code] of [
+      ['stale', 'e1', 'snapshot_stale'],
+      ['canonical-1', 'missing', 'element_missing'],
+      ['canonical-1', 'e1', 'backend_unavailable'],
+    ]) {
+      await handler({ payload: {
+        actionId: `${kind}-${code}`, tabId: 'tab', projectRoot: '/project', generation: 1,
+        operation: { kind: 'action', snapshotId, action: { kind, ...actionFields, elementRef } },
+      } });
+    }
+
+    expect(completions.map((entry) => entry.code)).toEqual([
+      'snapshot_stale', 'element_missing', 'backend_unavailable',
+    ]);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
+    expect(JSON.stringify(invoke.mock.calls)).not.toContain('/project/');
+  });
+
+  it('fails permission responses before page or native dispatch', async () => {
+    const invoke = vi.fn();
+    const install = vi.fn();
+    const completions: any[] = [];
+    const pair = { project: { root: '/project' }, browser: {}, worktreePath: '/project', tab: {} };
+    const lifecycle = { liveGeneration: 1, pendingGeneration: 0, nativeLabel: 'native', navigationTail: null };
+    const preflight = Function(
+      'resolveBrowserNativeElementTarget',
+      `return (${functionSource(main, 'browserProviderOperationPreflight')});`,
+    )(vi.fn());
+    const handler = Function(
+      'browserControlPairByTabId', 'state', 'browserControlProviders', 'browserTabLifecycle',
+      'completeBrowserProviderEffect', 'browserProviderOperationPreflight', 'runBrowserLifecycleOperation',
+      'installBrowserAutomationForPair', 'awaitBrowserAutomationResult', 'invoke', 'browserLabelForTab',
+      'PsycheControl', 'browserAutomationDispatchScript', 'canonicalizeBrowserSemanticSnapshot',
+      `return (${functionSource(main, 'handleBrowserProviderEffect')});`,
+    )(
+      () => pair, { projects: [] }, new Map(), () => lifecycle,
+      async (_project: unknown, value: unknown) => { completions.push(value); }, preflight, vi.fn(),
+      install, vi.fn(), invoke, vi.fn(), { browserAutomationSource: vi.fn() }, vi.fn(), vi.fn(),
+    );
+    await handler({ payload: {
+      actionId: 'permission', tabId: 'tab', projectRoot: '/project', generation: 1,
+      operation: { kind: 'action', action: {
+        kind: 'permission_response', permission: 'camera', origin: 'https://example.test', decision: 'deny',
+      } },
+    } });
+    expect(completions).toEqual([expect.objectContaining({ code: 'backend_unavailable' })]);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
   });
 });

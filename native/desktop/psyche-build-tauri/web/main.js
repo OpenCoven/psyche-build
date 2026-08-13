@@ -8621,6 +8621,7 @@
       tabId: pair.tab.id,
       generation: effect.generation,
       expiresAt: capturedAt.getTime() + 30000,
+      refs: new Set(refs),
     });
     while (browserAutomationSnapshotRefs.size > 128) {
       var oldestSnapshotId = browserAutomationSnapshotRefs.keys().next().value;
@@ -8643,7 +8644,22 @@
       expiresAt: new Date(capturedAt.getTime() + 30000).toISOString(),
     };
   }
-  function browserProviderOperationPreflight(operation) {
+  function resolveBrowserNativeElementTarget(effect) {
+    var operation = effect && effect.operation;
+    var action = operation && operation.action;
+    var canonicalId = operation && operation.snapshotId;
+    var mapped = typeof canonicalId === "string" ? browserAutomationSnapshotRefs.get(canonicalId) : null;
+    if (!mapped || mapped.tabId !== effect.tabId || mapped.generation !== effect.generation || mapped.expiresAt <= Date.now()) {
+      if (mapped) browserAutomationSnapshotRefs.delete(canonicalId);
+      throw Object.assign(new Error("semantic snapshot is missing or stale"), { code: "snapshot_stale" });
+    }
+    if (!action || typeof action.elementRef !== "string" || !mapped.refs || !mapped.refs.has(action.elementRef)) {
+      throw Object.assign(new Error("semantic element reference is missing"), { code: "element_missing" });
+    }
+    return { rawSnapshotId: mapped.rawSnapshotId, elementRef: action.elementRef };
+  }
+  function browserProviderOperationPreflight(effect) {
+    var operation = effect && effect.operation;
     if (!operation || (operation.kind !== "inspect" && operation.kind !== "action")) {
       throw Object.assign(new Error("browser operation is not supported"), { code: "unsupported_operation" });
     }
@@ -8652,7 +8668,15 @@
     if (!action || typeof action !== "object" || Array.isArray(action) || typeof action.kind !== "string") {
       throw Object.assign(new Error("browser action is malformed"), { code: "automation_failed" });
     }
-    if (action.kind === "upload" || action.kind === "download" || action.kind === "permission_response") {
+    if (action.kind === "upload" || action.kind === "download") {
+      resolveBrowserNativeElementTarget(effect);
+      throw Object.assign(new Error("backend_unavailable: native interception is unavailable"), { code: "backend_unavailable" });
+    }
+    if (action.kind === "permission_response") {
+      if (typeof action.permission !== "string" || !action.permission || typeof action.origin !== "string" ||
+          !action.origin || (action.decision !== "allow" && action.decision !== "deny")) {
+        throw Object.assign(new Error("permission response contract is malformed"), { code: "automation_failed" });
+      }
       throw Object.assign(new Error("backend_unavailable: native interception is unavailable"), { code: "backend_unavailable" });
     }
     if (["navigate", "reload", "back", "forward", "close", "screenshot"].indexOf(action.kind) !== -1) return "lifecycle";
@@ -8747,7 +8771,7 @@
     };
     var operationClass;
     try {
-      operationClass = browserProviderOperationPreflight(effect.operation);
+      operationClass = browserProviderOperationPreflight(effect);
     } catch (preflightError) {
       await completeBrowserProviderEffect(pair.project, {
         actionId: effect.actionId, status: "failed", code: preflightError.code || "automation_failed",
