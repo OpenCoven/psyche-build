@@ -1040,73 +1040,138 @@ describe('Tauri workspace panels', () => {
       expect(calls).toEqual(['status:Not enough space for another pane']);
     });
 
-    it('announces every Git placement failure through the visible accessibility status', async () => {
-      expect(indexHtml).toMatch(
-        /id="toast"[^>]*role="status"[^>]*aria-live="polite"[^>]*hidden/,
-      );
+    it('keeps a full-canvas Cmd+G reopen failure visible and accessible without mutation', async () => {
+      expect(indexHtml).toMatch(/id="toast"[^>]*role="status"[^>]*aria-live="polite"/);
+      expect(indexHtml).not.toMatch(/id="toast"[^>]*hidden/);
+      const inactiveToastCss = stylesCss.match(/\.toast\s*\{([^}]*)\}/s)?.[1] ?? '';
+      const visibleToastCss = stylesCss.match(/\.toast\.is-visible\s*\{([^}]*)\}/s)?.[1] ?? '';
+      expect(inactiveToastCss).not.toMatch(/display:\s*none/);
+      expect(inactiveToastCss).toMatch(/position:\s*absolute/);
+      expect(inactiveToastCss).toMatch(/width:\s*1px/);
+      expect(inactiveToastCss).toMatch(/height:\s*1px/);
+      expect(inactiveToastCss).toMatch(/clip:\s*rect\(0 0 0 0\)/);
+      expect(inactiveToastCss).toMatch(/clip-path:\s*inset\(50%\)/);
+      expect(visibleToastCss).toMatch(/display:\s*flex/);
+      expect(visibleToastCss).toMatch(/right:\s*16px/);
+      expect(visibleToastCss).toMatch(/padding:\s*8px 13px/);
       const warning = 'Not enough space for another pane';
-      async function exercise(existing: { id: string; hidden: boolean } | null) {
-        const liveStatus = {
-          hidden: true,
-          textContent: '',
-          role: 'status',
-          ariaLive: 'polite',
-        };
-        const state = { threads: [] as unknown[] };
-        const calls: string[] = [];
-        const showPanePlacementWarning = Function(
-          'setStatus', 'toast',
-          `"use strict"; return (${functionSource('showPanePlacementWarning')});`,
-        )(
-          (message: string) => { calls.push(`hidden-status:${message}`); },
-          (message: string) => {
-            liveStatus.textContent = message;
-            liveStatus.hidden = false;
-          },
-        ) as (message: string) => void;
-        const openOrFocusGitPane = Function(
-          'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
-          'showTerminalView', 'reopenThread', 'revealGitPane', 'focusThread',
-          'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
-          'state', 'noteStatusActivity', 'mountToolPane', 'renderGitSurface',
-          'refreshSidebar', 'saveWorkspaceSoon', 'showPanePlacementWarning',
-          `"use strict"; return (${functionSource('openOrFocusGitPane')});`,
-        )(
-          () => ({ id: 'project-a' }),
-          () => undefined,
-          () => '/worktree-a',
-          () => existing,
-          async () => true,
-          () => false,
-          () => { calls.push('reveal'); },
-          async () => { calls.push('focus'); },
-          () => 'git-new',
-          () => null,
-          () => { calls.push('commit'); },
-          state,
-          () => { calls.push('activity'); },
-          () => { calls.push('mount'); },
-          () => { calls.push('render'); },
-          () => { calls.push('sidebar'); },
-          () => { calls.push('save'); },
-          showPanePlacementWarning,
-        ) as () => Promise<null>;
+      const classes = new Set<string>();
+      const liveStatus = {
+        hidden: false,
+        textContent: '',
+        role: 'status',
+        ariaLive: 'polite',
+        classList: {
+          add: (name: string) => classes.add(name),
+          remove: (name: string) => classes.delete(name),
+          contains: (name: string) => classes.has(name),
+        },
+      };
+      let now = 0;
+      let nextTimerId = 1;
+      const timers = new Map<number, { callback: () => void; dueAt: number }>();
+      const setTimer = (callback: () => void, delay: number) => {
+        const id = nextTimerId++;
+        timers.set(id, { callback, dueAt: now + delay });
+        return id;
+      };
+      const advanceClock = (milliseconds: number) => {
+        now += milliseconds;
+        for (const [id, timer] of [...timers]) {
+          if (timer.dueAt <= now) {
+            timers.delete(id);
+            timer.callback();
+          }
+        }
+      };
+      const toast = Function(
+        'toastEl', 'setTimeout', 'clearTimeout',
+        `"use strict"; var toastTimer = 0; return (${functionSource('toast')});`,
+      )(liveStatus, setTimer, (id: number) => timers.delete(id)) as (message: string, duration?: number) => void;
+      const showPanePlacementWarning = Function(
+        'setStatus', 'toast',
+        `"use strict"; return (${functionSource('showPanePlacementWarning')});`,
+      )(() => undefined, toast) as (message: string) => void;
+      const state = {
+        activeProjectId: 'project-a',
+        activeThreadId: 'shell-a',
+        threads: [{
+          id: 'git-hidden', projectId: 'project-a', worktreePath: '/worktree-a',
+          kind: 'git', hidden: true,
+        }],
+      };
+      const project = { id: 'project-a' };
+      const reopenThread = Function(
+        'findThread', 'findProject', 'state', 'activeWorkspaceRoot', 'preparePanePlacement',
+        'setStatus', 'noteStatusActivity', 'commitPanePlacement', 'createPaneFooter',
+        'revealGitPane', 'renderPaneWorkspace', 'renderGitSurface', 'refreshSidebar',
+        `"use strict"; return (${functionSource('reopenThread')});`,
+      )(
+        (id: string) => state.threads.find((thread) => thread.id === id),
+        () => project,
+        state,
+        () => '/worktree-a',
+        () => null,
+        () => undefined,
+        () => undefined,
+        () => { throw new Error('must not commit placement'); },
+        () => { throw new Error('must not create footer'); },
+        () => { throw new Error('must not reveal Git'); },
+        () => { throw new Error('must not render workspace'); },
+        () => { throw new Error('must not render Git'); },
+        () => { throw new Error('must not refresh sidebar'); },
+      ) as (id: string) => boolean;
+      const openOrFocusGitPane = Function(
+        'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+        'showTerminalView', 'reopenThread', 'revealGitPane', 'focusThread',
+        'makeThreadId', 'preparePanePlacement', 'commitPanePlacement', 'state',
+        'noteStatusActivity', 'mountToolPane', 'renderGitSurface', 'refreshSidebar',
+        'saveWorkspaceSoon', 'showPanePlacementWarning',
+        `"use strict"; return (${functionSource('openOrFocusGitPane')});`,
+      )(
+        () => project,
+        () => undefined,
+        () => '/worktree-a',
+        () => state.threads[0],
+        async () => true,
+        reopenThread,
+        () => { throw new Error('must not reveal Git'); },
+        async () => { throw new Error('must not focus Git'); },
+        () => 'git-new',
+        () => null,
+        () => { throw new Error('must not commit placement'); },
+        state,
+        () => undefined,
+        () => { throw new Error('must not mount Git'); },
+        () => { throw new Error('must not render Git'); },
+        () => { throw new Error('must not refresh sidebar'); },
+        () => { throw new Error('must not save workspace'); },
+        showPanePlacementWarning,
+      ) as () => Promise<null>;
+      const routeGitPaneShortcut = Function(
+        'isTextEntryTarget', 'gitPaneShortcutBlocked', 'openOrFocusGitPane',
+        `"use strict"; return (${functionSource('routeGitPaneShortcut')});`,
+      )(() => false, () => false, openOrFocusGitPane) as (event: Record<string, unknown>) => boolean;
+      let prevented = false;
+      const before = JSON.stringify(state);
 
-        await expect(openOrFocusGitPane()).resolves.toBeNull();
-        expect(liveStatus).toEqual({
-          hidden: false,
-          textContent: warning,
-          role: 'status',
-          ariaLive: 'polite',
-        });
-        expect(state.threads).toEqual([]);
-        expect(calls).not.toContain('commit');
-        expect(calls).not.toContain('mount');
-        return calls;
-      }
+      expect(routeGitPaneShortcut({
+        key: 'g', code: 'KeyG', metaKey: true, ctrlKey: false, altKey: false,
+        shiftKey: false, target: { tagName: 'BODY' }, preventDefault: () => { prevented = true; },
+      })).toBe(true);
+      await Promise.resolve();
+      await Promise.resolve();
 
-      await exercise(null);
-      await exercise({ id: 'git-hidden', hidden: true });
+      expect(prevented).toBe(true);
+      expect(liveStatus.textContent).toBe(warning);
+      expect(liveStatus.classList.contains('is-visible')).toBe(true);
+      expect(JSON.stringify(state)).toBe(before);
+      advanceClock(3_000);
+      expect(liveStatus.textContent).toBe(warning);
+      expect(liveStatus.classList.contains('is-visible')).toBe(true);
+      advanceClock(3_001);
+      expect(liveStatus.textContent).toBe('');
+      expect(liveStatus.classList.contains('is-visible')).toBe(false);
     });
   });
 
