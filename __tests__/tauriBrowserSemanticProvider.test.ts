@@ -74,6 +74,10 @@ describe('Tauri semantic browser provider lifecycle', () => {
     expect(lib).not.toContain('browser_urls_equivalent');
   });
 
+  it('closes only a newly created blank view when native navigation setup fails', () => {
+    expect(lib).toMatch(/if let Err\(error\) = start_browser_navigation\(&webview,[\s\S]*?cleanup_created_browser_after_setup_failure\(created,[\s\S]*?webview\.close\(\)/);
+  });
+
   it('publishes exact typed tab resources and correlates inspect results', () => {
     expect(main).toContain('control_provider_start');
     expect(main).toContain('control_provider_upsert');

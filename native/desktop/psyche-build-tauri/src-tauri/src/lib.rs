@@ -2565,6 +2565,15 @@ fn hide_webview(webview: &tauri::Webview) -> Result<(), String> {
     Ok(())
 }
 
+fn cleanup_created_browser_after_setup_failure(
+    created: bool,
+    close: impl FnOnce() -> Result<(), String>,
+) {
+    if created {
+        let _ = close();
+    }
+}
+
 #[cfg(target_os = "macos")]
 async fn start_browser_navigation(
     webview: &tauri::Webview,
@@ -2666,7 +2675,14 @@ async fn browser_navigate(
             .set_size(LogicalSize::new(w.max(1.0), h.max(1.0)))
             .map_err(|e| e.to_string())?;
     }
-    start_browser_navigation(&webview, &label, &url).await?;
+    if let Err(error) = start_browser_navigation(&webview, &label, &url).await {
+        cleanup_created_browser_after_setup_failure(created, || {
+            webview
+                .close()
+                .map_err(|close_error| close_error.to_string())
+        });
+        return Err(error);
+    }
     match tokio::time::timeout(std::time::Duration::from_secs(30), receiver).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err("browser navigation was cancelled".to_string()),
@@ -4384,6 +4400,22 @@ mod pty_runtime_tests {
             assert!(BROWSER_NAVIGATION_WAITERS.lock().contains_key(&label));
             BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
         }
+    }
+
+    #[test]
+    fn browser_navigation_setup_failure_closes_only_a_newly_created_view() {
+        let closes = AtomicUsize::new(0);
+        cleanup_created_browser_after_setup_failure(true, || {
+            closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+
+        cleanup_created_browser_after_setup_failure(false, || {
+            closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
     }
 
     #[cfg(not(windows))]
