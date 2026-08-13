@@ -11,6 +11,7 @@ import type {
   ProviderEffectResult,
 } from '../control/browserProviderBroker.js';
 import { randomUUID } from 'node:crypto';
+import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
 import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
 import {
   spawnBridgePane,
@@ -206,7 +207,7 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       ? async (payload) => providerValue(await deps.browserProvider!.dispatch({
           actionId: randomUUID(), tabId: payload.tabId, generation: payload.generation,
           operation: { kind: 'inspect', includeScreenshot: payload.includeScreenshot },
-          timeoutMs: 30_000,
+          timeoutMs: AGENT_CONTROL_LIMITS.actionTimeoutMs,
         }))
       : notSupported('browser.inspect'),
     actOnBrowser: deps.browserProvider
@@ -216,14 +217,14 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
             kind: 'action', action: payload.action,
             ...('snapshotId' in payload && payload.snapshotId ? { snapshotId: payload.snapshotId } : {}),
           },
-          timeoutMs: 30_000,
+          timeoutMs: AGENT_CONTROL_LIMITS.actionTimeoutMs,
         }))
       : notSupported('browser.action'),
     runBrowserScript: deps.browserProvider
       ? async (payload) => providerValue(await deps.browserProvider!.dispatch({
           actionId: randomUUID(), tabId: payload.tabId, generation: payload.generation,
           operation: { kind: 'script', source: payload.source, args: payload.args },
-          timeoutMs: 30_000,
+          timeoutMs: AGENT_CONTROL_LIMITS.scriptTimeoutMs,
         }))
       : notSupported('browser.script'),
 

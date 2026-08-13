@@ -331,12 +331,15 @@ describe('createDaemonControlHandlers browser provider', () => {
     expect(dispatch).toHaveBeenNthCalledWith(1, expect.objectContaining({
       tabId: 'tab-1', generation: 2,
       operation: { kind: 'inspect', includeScreenshot: true },
+      timeoutMs: 15_000,
     }));
     expect(dispatch).toHaveBeenNthCalledWith(2, expect.objectContaining({
       operation: { kind: 'action', action: { kind: 'reload' } },
+      timeoutMs: 15_000,
     }));
     expect(dispatch).toHaveBeenNthCalledWith(3, expect.objectContaining({
       operation: { kind: 'script', source: 'return 1' },
+      timeoutMs: 5_000,
     }));
   });
 });
