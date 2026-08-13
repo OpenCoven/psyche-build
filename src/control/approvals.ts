@@ -66,6 +66,7 @@ export interface ApprovalRequest {
   readonly resource: LeaseTarget;
   readonly capability: SurfaceCapability;
   readonly effect: RedactedApprovalEffect;
+  readonly executablePayloadDigest: string;
 }
 
 interface ApprovalIdentity {
@@ -76,6 +77,7 @@ interface ApprovalIdentity {
   readonly resource: LeaseTarget;
   readonly capability: SurfaceCapability;
   readonly effect: RedactedApprovalEffect;
+  readonly executablePayloadDigest: string;
 }
 
 export interface ApprovalConsumeAssertion {
@@ -88,6 +90,7 @@ export interface ApprovalConsumeAssertion {
   readonly resource: LeaseTarget;
   readonly capability: SurfaceCapability;
   readonly effect: RedactedApprovalEffect;
+  readonly executablePayloadDigest: string;
 }
 
 interface NormalizedApprovalConsumeAssertion extends ApprovalIdentity {
@@ -113,6 +116,7 @@ export interface Approval {
   readonly resource: LeaseTarget;
   readonly capability: SurfaceCapability;
   readonly effect: RedactedApprovalEffect;
+  readonly executablePayloadDigest: string;
   readonly payloadDigest: string;
   readonly createdAt: string;
   readonly expiresAt: string;
@@ -319,6 +323,7 @@ export class ApprovalStore {
 function copyIdentity(input: ApprovalRequest): ApprovalIdentity {
   assertExactKeys(input, [
     'actionId', 'ownerEpoch', 'leaseId', 'leaseRevision', 'resource', 'capability', 'effect',
+    'executablePayloadDigest',
   ], 'approval request');
   assertIdentityFields(input);
   return {
@@ -329,6 +334,7 @@ function copyIdentity(input: ApprovalRequest): ApprovalIdentity {
     resource: copyTarget(input.resource),
     capability: input.capability,
     effect: copyEffect(input.effect),
+    executablePayloadDigest: copyExecutableDigest(input.executablePayloadDigest),
   };
 }
 
@@ -336,6 +342,7 @@ function copyAssertion(input: ApprovalConsumeAssertion): NormalizedApprovalConsu
   assertExactKeys(input, [
     'approvalId', 'payloadDigest', 'actionId', 'ownerEpoch', 'leaseId', 'leaseRevision',
     'resource', 'capability', 'effect',
+    'executablePayloadDigest',
   ], 'approval assertion');
   if (!isNonemptyString(input?.approvalId)) {
     throw codedError('approval_identity_mismatch', 'approval id is missing');
@@ -354,6 +361,7 @@ function copyAssertion(input: ApprovalConsumeAssertion): NormalizedApprovalConsu
     resource: copyTarget(input.resource),
     capability: input.capability,
     effect: copyEffect(input.effect),
+    executablePayloadDigest: copyExecutableDigest(input.executablePayloadDigest),
   };
 }
 
@@ -405,6 +413,13 @@ function copyEffect(effect: RedactedApprovalEffect): RedactedApprovalEffect {
     throw codedError('approval_payload_invalid', 'approval effect lacks redaction provenance');
   }
   return effect;
+}
+
+function copyExecutableDigest(value: string): string {
+  if (!isSha256(value)) {
+    throw codedError('approval_digest_mismatch', 'executable payload digest is invalid');
+  }
+  return value;
 }
 
 function normalizeEffectTarget(kind: ApprovalEffectKind, source: string): string {
@@ -487,6 +502,7 @@ function digestIdentity(identity: ApprovalIdentity): string {
     resource,
     capability: identity.capability,
     effect: identity.effect,
+    executablePayloadDigest: identity.executablePayloadDigest,
   };
   return createHash('sha256').update(stableKeyJson(payload), 'utf8').digest('hex');
 }
@@ -561,6 +577,7 @@ function assertionMatches(approval: Approval, assertion: NormalizedApprovalConsu
     && approval.leaseId === assertion.leaseId
     && approval.leaseRevision === assertion.leaseRevision
     && approval.capability === assertion.capability
+    && approval.executablePayloadDigest === assertion.executablePayloadDigest
     && targetsEqual(approval.resource, assertion.resource);
 }
 

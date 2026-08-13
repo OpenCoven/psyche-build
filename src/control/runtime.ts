@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import path from 'node:path';
 import { LaneLeaseStore } from './leases.js';
 import { PromptDispatcher } from './promptDispatch.js';
 import { ApprovalStore, createRedactedApprovalEffect, type Approval, type RedactedApprovalEffect } from './approvals.js';
@@ -88,6 +90,7 @@ interface SurfaceActionContext {
   target: LeaseTarget;
   classification: PolicyClassification;
   effect?: RedactedApprovalEffect;
+  executablePayloadDigest: string;
 }
 
 interface PaneQueueState {
@@ -243,6 +246,7 @@ export class ControlRuntime {
   }
 
   blockResourceQueue(target: LeaseTarget): () => void {
+    const key = resourceKey(target);
     const queue = this.queueForResource(target);
     let released = false;
     let release!: () => void;
@@ -251,8 +255,10 @@ export class ControlRuntime {
       if (released) return;
       released = true;
       const current = queue.blocker;
+      const tail = queue.tail;
       release();
       if (queue.blocker === current) delete queue.blocker;
+      void tail.then(() => this.pruneResourceQueue(key, queue, tail));
     };
   }
 
@@ -392,7 +398,14 @@ export class ControlRuntime {
           return this.appendTerminal(command, succeededOutcome());
         }
         case 'provider.resource.upsert': {
+          this.assertProviderResourceScope(command.payload.resource, command.projectRoot);
+          const previous = this.surfaces.get(command.payload.resource.id);
           const resource = this.surfaces.upsertBrowserTab(command.payload.resource);
+          if (previous?.kind === 'browser_tab' && previous.generation !== resource.generation) {
+            await this.revokeTarget({
+              kind: 'browser_tab', id: previous.id, generation: previous.generation,
+            });
+          }
           return this.appendTerminal(command, succeededOutcome({ resource }));
         }
         case 'provider.resource.remove': {
@@ -420,8 +433,11 @@ export class ControlRuntime {
               resource: context.target,
               capability: context.classification.capability,
               effect: context.effect,
+              executablePayloadDigest: context.executablePayloadDigest,
             });
-            this.pendingApprovals.set(approval.id, immutableContext);
+            if (!this.pendingApprovals.has(approval.id)) {
+              this.pendingApprovals.set(approval.id, immutableContext);
+            }
             await this.journal.append('approval.requested', {
               commandId: command.id,
               approvalId: approval.id,
@@ -445,6 +461,9 @@ export class ControlRuntime {
         }
       }
     } catch (error) {
+      if (errorCodeIs(error, 'approval_action_conflict')) {
+        return this.appendTerminal(command, failedOutcome(error));
+      }
       if (isSurfaceActionCommand(command)) {
         return this.terminalizeValidationFailure(command, targetForSurfaceAction(command));
       }
@@ -459,6 +478,7 @@ export class ControlRuntime {
     let target: LeaseTarget;
     let classification: PolicyClassification;
     let effect: RedactedApprovalEffect | undefined;
+    let canonicalSemantic: CanonicalElementSemantics | undefined;
     switch (command.kind) {
       case 'pane.observe':
         target = { kind: 'pane', id: command.payload.paneId, generation: command.payload.generation };
@@ -503,6 +523,7 @@ export class ControlRuntime {
         }
         classification = classifyBrowserAction({ kind: action.kind, ...(semantic ? { semantic } : {}) });
         effect = approvalEffectForBrowserAction(action, semantic);
+        canonicalSemantic = semantic;
         break;
       }
       case 'browser.script':
@@ -512,7 +533,13 @@ export class ControlRuntime {
         break;
     }
     this.assertSurfaceAndLease(command, target, classification.capability);
-    return { command, target, classification, ...(effect ? { effect } : {}) };
+    return {
+      command,
+      target,
+      classification,
+      executablePayloadDigest: digestExecutablePayload(command, canonicalSemantic),
+      ...(effect ? { effect } : {}),
+    };
   }
 
   private async resolveApproval(
@@ -540,6 +567,7 @@ export class ControlRuntime {
       const receipt = this.makeReceipt(context.command, context.target, 'denied', { code: 'approval_denied' });
       this.rememberReceipt(receipt);
       this.pendingApprovals.delete(approval.id);
+      await this.appendTerminal(context.command, outcomeForReceipt(receipt), receipt);
       return this.appendTerminal(command, succeededOutcome(receipt));
     }
     if (!context.effect) throw codedRuntimeError('approval_payload_invalid', 'approval effect is unavailable');
@@ -555,12 +583,11 @@ export class ControlRuntime {
         resource: context.target,
         capability: context.classification.capability,
         effect: context.effect,
+        executablePayloadDigest: context.executablePayloadDigest,
       });
       this.pendingApprovals.delete(approval.id);
       const receipt = await this.enqueueSurfaceEffect(context);
-      if (receipt.state === 'failed' && receipt.code === 'action_invalidated') {
-        await this.appendTerminal(context.command, outcomeForReceipt(receipt), receipt);
-      }
+      await this.appendTerminal(context.command, outcomeForReceipt(receipt), receipt);
       return this.appendTerminal(command, outcomeForReceipt(receipt), receipt);
     } catch (error) {
       await this.revokeApprovalsForLease(approval.leaseId);
@@ -571,9 +598,11 @@ export class ControlRuntime {
 
   private async enqueueSurfaceEffect(context: SurfaceActionContext): Promise<ActionReceipt> {
     const queue = this.queueForResource(context.target);
+    const key = resourceKey(context.target);
     const prior = queue.tail;
     let release!: () => void;
     queue.tail = new Promise<void>((resolve) => { release = resolve; });
+    const tail = queue.tail;
     await prior;
     try {
       await (queue.blocker ?? Promise.resolve());
@@ -614,6 +643,7 @@ export class ControlRuntime {
       return receipt;
     } finally {
       release();
+      void tail.then(() => this.pruneResourceQueue(key, queue, tail));
     }
   }
 
@@ -642,9 +672,11 @@ export class ControlRuntime {
         reject,
       };
       queue.items.add(item);
-      queue.tail = queue.tail
+      const tail = queue.tail
         .then(() => this.runQueuedItem(item, run))
         .catch((error: unknown) => item.reject(error));
+      queue.tail = tail;
+      void tail.then(() => this.pruneResourceQueue(queueKey, queue, tail));
     });
 
     return promise;
@@ -787,6 +819,9 @@ export class ControlRuntime {
         if (resource.kind !== grant.target.kind) {
           throw codedRuntimeError('resource_missing', 'surface target kind does not match the registered resource');
         }
+        if (resource.projectRoot !== projectRoot) {
+          throw codedRuntimeError('resource_scope_mismatch', 'surface belongs to another project');
+        }
       }
     }
   }
@@ -810,6 +845,9 @@ export class ControlRuntime {
       if (resource.kind !== target.kind) {
         throw codedRuntimeError('resource_missing', 'surface target kind does not match the registered resource');
       }
+      if (resource.projectRoot !== command.projectRoot) {
+        throw codedRuntimeError('resource_scope_mismatch', 'surface belongs to another project');
+      }
     } else if (target.id !== command.projectRoot) {
       throw codedRuntimeError('resource_missing', 'project target does not match the command project');
     }
@@ -829,6 +867,19 @@ export class ControlRuntime {
       await this.revokeApprovalsForLease(lease.id);
       const request = this.leaseRequests.get(lease.requestId);
       if (request) request.status = 'revoked';
+    }
+  }
+
+  private assertProviderResourceScope(
+    resource: Extract<ControlCommand, { kind: 'provider.resource.upsert' }>['payload']['resource'],
+    projectRoot: string,
+  ): void {
+    if (path.resolve(resource.projectRoot) !== path.resolve(projectRoot)) {
+      throw codedRuntimeError('resource_scope_mismatch', 'provider resource project does not match owner');
+    }
+    const relative = path.relative(path.resolve(projectRoot), path.resolve(resource.worktreeRoot));
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw codedRuntimeError('resource_scope_mismatch', 'provider worktree is outside the project scope');
     }
   }
 
@@ -1004,6 +1055,17 @@ export class ControlRuntime {
     return queue;
   }
 
+  private pruneResourceQueue(key: string, queue: PaneQueueState, tail: Promise<void>): void {
+    if (
+      this.resourceQueues.get(key) === queue
+      && queue.tail === tail
+      && queue.items.size === 0
+      && queue.blocker === undefined
+    ) {
+      this.resourceQueues.delete(key);
+    }
+  }
+
   private waitForQueueBlocker(key: string): Promise<void> {
     return this.resourceQueues.get(key)?.blocker ?? Promise.resolve();
   }
@@ -1129,6 +1191,10 @@ function isApprovalInvalidationError(error: unknown): boolean {
     || code === 'approval_identity_mismatch';
 }
 
+function errorCodeIs(error: unknown, code: string): boolean {
+  return Boolean(error && typeof error === 'object' && (error as { code?: unknown }).code === code);
+}
+
 function resourceKey(target: LeaseTarget): string {
   return target.kind === 'project'
     ? `${target.kind}:${target.id}`
@@ -1163,6 +1229,43 @@ function approvalEffectForBrowserAction(
     default:
       return undefined;
   }
+}
+
+function digestExecutablePayload(
+  command: SurfaceActionContext['command'],
+  canonicalSemantic?: CanonicalElementSemantics,
+): string {
+  let payload: unknown = command.payload;
+  if (command.kind === 'browser.action') {
+    const { semantic: _clientSemantic, ...action } = command.payload.action as (
+      typeof command.payload.action & { semantic?: unknown }
+    );
+    payload = {
+      ...command.payload,
+      action: {
+        ...action,
+        ...(canonicalSemantic ? { semantic: canonicalSemantic } : {}),
+      },
+    };
+  }
+  return createHash('sha256').update(stableRuntimeJson(payload), 'utf8').digest('hex');
+}
+
+function stableRuntimeJson(value: unknown): string {
+  return JSON.stringify(sortRuntimeKeys(value));
+}
+
+function sortRuntimeKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortRuntimeKeys);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [
+        key,
+        sortRuntimeKeys((value as Record<string, unknown>)[key]),
+      ]),
+    );
+  }
+  return value;
 }
 
 function freezeContext(context: SurfaceActionContext): SurfaceActionContext {
@@ -1201,6 +1304,7 @@ function contextsMatch(left: SurfaceActionContext, right: SurfaceActionContext):
   return resourceKey(left.target) === resourceKey(right.target)
     && left.classification.decision === right.classification.decision
     && left.classification.capability === right.classification.capability
+    && left.executablePayloadDigest === right.executablePayloadDigest
     && JSON.stringify(left.effect) === JSON.stringify(right.effect);
 }
 

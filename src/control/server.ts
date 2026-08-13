@@ -108,6 +108,10 @@ export function authorizeCommand(
   principal: ControlPrincipal,
   kind: ControlCommand['kind'],
 ): CommandOutcome | null {
+  const agentAllowedKinds: ReadonlySet<ControlCommand['kind']> = new Set([
+    'lease.request', 'lease.release', 'pane.observe', 'pane.action',
+    'browser.inspect', 'browser.action', 'browser.script',
+  ]);
   const agentControlKinds: ReadonlySet<ControlCommand['kind']> = new Set([
     'lease.request', 'lease.grant', 'lease.release', 'lease.revoke', 'pane.observe',
     'pane.action', 'browser.inspect', 'browser.action', 'browser.script',
@@ -143,6 +147,12 @@ export function authorizeCommand(
       status: 'rejected',
       code: 'takeover_not_authorized',
       message: 'only an operator principal may take over a lane',
+    };
+  }
+  if (principal.kind === 'agent' && !agentAllowedKinds.has(kind)) {
+    return {
+      status: 'rejected', code: 'agent_not_authorized',
+      message: 'agent principals may only use leased surface controls',
     };
   }
   return null;

@@ -4,6 +4,7 @@ import { ApprovalStore } from '../src/control/approvals.js';
 import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
 import { createCanonicalElementSemantics } from '../src/control/policy.js';
 import { SurfaceRegistry } from '../src/control/surfaces.js';
+import type { ControlCommand } from '../src/control/types.js';
 
 const handlers: ControlHandlers = {
   executeOrchestration: vi.fn(),
@@ -85,7 +86,7 @@ async function createBrowserActionHarness(options: {
     id: 'grant-review', idempotencyKey: 'grant-review', kind: 'lease.grant', ownerEpoch: 7,
     payload: { requestId: 'request-review', actorId: 'agent-review', taskId: 'task-review', ttlMs: 60_000,
       grants: [{ target: { kind: 'browser_tab', id: tab.id, generation: tab.generation },
-        capabilities: ['browser.interact', 'browser.history'] }] },
+        capabilities: ['browser.interact', 'browser.history', 'browser.script'] }] },
   }));
   const lease = (grant as { value: { lease: { id: string; revision: number } } }).value.lease;
   return { runtime, journal, surfaces, capabilityLeases, approvals, tab, lease };
@@ -445,8 +446,9 @@ describe('ControlRuntime', () => {
     const capabilityLeases = new CapabilityLeaseStore(() => new Date('2026-08-12T12:00:00.000Z'), 7);
     const approvals = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'), () => 'approval-1');
     const resolver = vi.fn(() => createCanonicalElementSemantics({ role: 'button', submit: true }));
+    const journal = createMemoryJournal();
     const runtime = await ControlRuntime.create({
-      ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces, capabilityLeases, approvals,
+      ownerEpoch: 7, handlers, journal, surfaces, capabilityLeases, approvals,
       resolveBrowserElementSemantics: resolver,
     });
     const grant = await runtime.submit(command({
@@ -477,6 +479,14 @@ describe('ControlRuntime', () => {
       id: 'resolve-good', idempotencyKey: 'resolve-good', kind: 'approval.resolve', ownerEpoch: 7,
       payload: { approvalId: approval.approvalId, payloadDigest: approval.payloadDigest, decision: 'approve' },
     }))).resolves.toMatchObject({ status: 'succeeded', value: { state: 'succeeded' } });
+    await expect(runtime.submit(original)).resolves.toMatchObject({
+      status: 'succeeded', value: { state: 'succeeded' },
+    });
+    const recovered = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal,
+      surfaces, capabilityLeases, approvals });
+    await expect(recovered.submit(original)).resolves.toMatchObject({
+      status: 'succeeded', value: { state: 'succeeded' },
+    });
     expect(resolver).toHaveBeenCalledTimes(2);
     expect(handlers.actOnBrowser).toHaveBeenCalledTimes(1);
     expect(handlers.actOnBrowser).toHaveBeenCalledWith(expect.objectContaining({
@@ -512,6 +522,52 @@ describe('ControlRuntime', () => {
     await expect(restarted.submit({ ...action, id: 'reload-after-restart' }))
       .resolves.toMatchObject({ status: 'unknown', code: 'effect_unknown' });
     expect(handlers.actOnBrowser).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['failed', false],
+    ['unknown', true],
+  ] as const)('finalizes approved original action after %s backend result', async (state, ambiguous) => {
+    const harness = await createBrowserActionHarness({
+      actOnBrowser: vi.fn(async () => {
+        throw Object.assign(new Error('sensitive backend detail'), { ambiguous });
+      }),
+    });
+    const action = command({ id: `final-${state}`, idempotencyKey: `final-${state}`,
+      kind: 'browser.action', ownerEpoch: 7, actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation,
+        action: { kind: 'permission_response', permission: 'camera', origin: 'https://example.test', decision: 'allow' },
+      } }) as unknown as Extract<ControlCommand, { kind: 'browser.action' }>;
+    const requested = await harness.runtime.submit(action);
+    const approval = (requested as { value: { approvalId: string; payloadDigest: string } }).value;
+    await harness.runtime.submit(command({ id: `resolve-${state}`, idempotencyKey: `resolve-${state}`,
+      kind: 'approval.resolve', ownerEpoch: 7, payload: { approvalId: approval.approvalId,
+        payloadDigest: approval.payloadDigest, decision: 'approve' } }));
+    await expect(harness.runtime.submit(action)).resolves.toMatchObject({
+      status: state, code: ambiguous ? 'effect_unknown' : 'effect_failed',
+    });
+    expect(harness.journal.read().filter((event) => event.payload.commandId === action.id).at(-1))
+      .toMatchObject({ kind: ambiguous ? 'command.unknown' : 'command.failed' });
+    expect(JSON.stringify(harness.journal.read())).not.toContain('sensitive backend detail');
+  });
+
+  it('finalizes denied original action identity', async () => {
+    const harness = await createBrowserActionHarness();
+    const action = command({ id: 'denied-original', idempotencyKey: 'denied-original',
+      kind: 'browser.script', ownerEpoch: 7, actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation, source: 'return deniedSecret',
+      } }) as unknown as Extract<ControlCommand, { kind: 'browser.script' }>;
+    const requested = await harness.runtime.submit(action);
+    const approval = (requested as { value: { approvalId: string; payloadDigest: string } }).value;
+    await harness.runtime.submit(command({ id: 'deny-original', idempotencyKey: 'deny-original',
+      kind: 'approval.resolve', ownerEpoch: 7, payload: { approvalId: approval.approvalId,
+        payloadDigest: approval.payloadDigest, decision: 'deny' } }));
+    await expect(harness.runtime.submit(action)).resolves.toMatchObject({
+      status: 'failed', code: 'approval_denied',
+    });
+    expect(JSON.stringify(harness.journal.read())).not.toContain('deniedSecret');
   });
 
   it('rejects grants for missing generations and non-canonical project targets', async () => {
@@ -639,6 +695,9 @@ describe('ControlRuntime', () => {
     await expect(legacy).resolves.toMatchObject({ status: 'succeeded' });
     await expect(surface).resolves.toMatchObject({ status: 'succeeded' });
     expect(handlers.actOnPane).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(
+      (runtime as unknown as { resourceQueues: Map<string, unknown> }).resourceQueues.size,
+    ).toBe(0));
   });
 
   it('journals a bounded redacted receipt for failed surface effects', async () => {
@@ -703,7 +762,7 @@ describe('ControlRuntime', () => {
       kind: 'lease.grant', ownerEpoch: 7, payload: { requestId: 'request-review',
         actorId: 'agent-review', taskId: 'task-review', ttlMs: 60_000,
         grants: [{ target: { kind: 'browser_tab', id: harness.tab.id, generation: harness.tab.generation },
-          capabilities: ['browser.interact', 'browser.history'] }] } }));
+          capabilities: ['browser.interact', 'browser.history', 'browser.script'] }] } }));
     await expect(harness.runtime.submit(command({ id: 'resolve-revision', idempotencyKey: 'resolve-revision',
       kind: 'approval.resolve', ownerEpoch: 7, payload: { approvalId: approval.approvalId,
         payloadDigest: approval.payloadDigest, decision: 'approve' } })))
@@ -830,6 +889,105 @@ describe('ControlRuntime', () => {
     expect(JSON.stringify(journal.read())).not.toContain('secretA');
     expect(JSON.stringify(journal.read())).not.toContain('secretB');
     expect(handlers.runBrowserScript).not.toHaveBeenCalled();
+  });
+
+  it('rejects approval substitution while retaining only payload hashes', async () => {
+    const harness = await createBrowserActionHarness();
+    const first = command({ id: 'substitution-action', idempotencyKey: 'substitution-first',
+      kind: 'browser.script', ownerEpoch: 7, actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation, source: 'return secretAlpha',
+      } }) as unknown as Extract<ControlCommand, { kind: 'browser.script' }>;
+    await expect(harness.runtime.submit(first))
+      .resolves.toMatchObject({ status: 'succeeded', value: { state: 'approval_required' } });
+    await expect(harness.runtime.submit({ ...first, idempotencyKey: 'substitution-second',
+      payload: { ...first.payload, source: 'return secretBeta' } }))
+      .resolves.toMatchObject({ status: 'failed', code: 'approval_action_conflict' });
+    expect(harness.runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'substitution-action', state: 'approval_required',
+    }));
+    expect(harness.runtime.snapshot().approvals).toHaveLength(1);
+    const serialized = JSON.stringify(harness.runtime.snapshot());
+    expect(serialized).not.toContain('secretAlpha');
+    expect(serialized).not.toContain('secretBeta');
+    expect(serialized).toContain('executablePayloadDigest');
+  });
+
+  it.each([
+    ['secret text',
+      { kind: 'type', elementRef: 'secret-field', text: 'alpha' },
+      { kind: 'type', elementRef: 'secret-field', text: 'beta' }],
+    ['same-basename upload',
+      { kind: 'upload', elementRef: 'upload', path: '/first/same.txt' },
+      { kind: 'upload', elementRef: 'upload', path: '/second/same.txt' }],
+    ['permission decision',
+      { kind: 'permission_response', permission: 'camera', origin: 'https://example.test', decision: 'allow' },
+      { kind: 'permission_response', permission: 'camera', origin: 'https://example.test', decision: 'deny' }],
+  ] as const)('binds approval to complete canonical %s payload', async (_label, firstAction, secondAction) => {
+    const harness = await createBrowserActionHarness({
+      resolver: () => createCanonicalElementSemantics({ role: 'textbox', submit: false, secret: true }),
+    });
+    const action = command({ id: 'canonical-substitution', idempotencyKey: 'canonical-first',
+      kind: 'browser.action', ownerEpoch: 7, actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation,
+        ...('elementRef' in firstAction ? { snapshotId: 'snapshot-review' } : {}), action: firstAction,
+      } }) as unknown as Extract<ControlCommand, { kind: 'browser.action' }>;
+    await expect(harness.runtime.submit(action))
+      .resolves.toMatchObject({ status: 'succeeded', value: { state: 'approval_required' } });
+    const substituted = { ...action, idempotencyKey: 'canonical-second', payload: {
+      ...action.payload,
+      ...('elementRef' in secondAction ? { snapshotId: 'snapshot-review' } : {}),
+      action: secondAction,
+    } } as unknown as Extract<ControlCommand, { kind: 'browser.action' }>;
+    await expect(harness.runtime.submit(substituted))
+      .resolves.toMatchObject({ status: 'failed', code: 'approval_action_conflict' });
+    expect(harness.runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'canonical-substitution', state: 'approval_required',
+    }));
+    expect(handlers.actOnBrowser).not.toHaveBeenCalled();
+  });
+
+  it('revokes old authority when provider upsert replaces a browser binding', async () => {
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
+    const resource = { id: 'replace-tab', kind: 'browser_tab' as const, generation: 1,
+      projectRoot: '/repo', worktreeRoot: '/repo', providerId: 'provider', webviewLabel: 'first',
+      url: 'https://example.test', title: 'Replace', loading: false,
+      viewport: { width: 800, height: 600 } };
+    await runtime.submit(command({ id: 'upsert-first', idempotencyKey: 'upsert-first',
+      kind: 'provider.resource.upsert', ownerEpoch: 7, payload: { resource } }));
+    const grant = await runtime.submit(command({ id: 'replace-grant', idempotencyKey: 'replace-grant',
+      kind: 'lease.grant', ownerEpoch: 7, payload: { requestId: 'replace-request', actorId: 'replace-agent',
+        taskId: 'replace-task', ttlMs: 60_000, grants: [{ target: { kind: 'browser_tab', id: resource.id,
+          generation: 1 }, capabilities: ['browser.script'] }] } }));
+    const lease = (grant as { value: { lease: { id: string; revision: number } } }).value.lease;
+    await runtime.submit(command({ id: 'replace-action', idempotencyKey: 'replace-action',
+      kind: 'browser.script', ownerEpoch: 7, actor: { id: 'replace-agent', kind: 'psyche' }, payload: {
+        taskId: 'replace-task', leaseId: lease.id, leaseRevision: lease.revision, tabId: resource.id,
+        generation: 1, source: 'return replacementSecret',
+      } }));
+    await runtime.submit(command({ id: 'upsert-replacement', idempotencyKey: 'upsert-replacement',
+      kind: 'provider.resource.upsert', ownerEpoch: 7,
+      payload: { resource: { ...resource, webviewLabel: 'second' } } }));
+    expect(runtime.snapshot().capabilityLeases).toHaveLength(0);
+    expect(runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'replace-action', state: 'failed', code: 'action_invalidated',
+    }));
+    expect(JSON.stringify(runtime.snapshot())).not.toContain('replacementSecret');
+  });
+
+  it.each([
+    [{ projectRoot: '/other', worktreeRoot: '/other' }, 'cross-project'],
+    [{ projectRoot: '/repo', worktreeRoot: '/outside' }, 'cross-worktree'],
+  ])('rejects provider registration outside owner scope: %s', async (scope, label) => {
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
+    await expect(runtime.submit(command({ id: label, idempotencyKey: label,
+      kind: 'provider.resource.upsert', ownerEpoch: 7, payload: { resource: {
+        id: label, kind: 'browser_tab', generation: 1, ...scope, providerId: 'provider',
+        webviewLabel: label, url: 'https://example.test', title: label, loading: false,
+        viewport: { width: 800, height: 600 },
+      } } }))).resolves.toMatchObject({ status: 'failed', code: 'resource_scope_mismatch' });
+    expect(runtime.snapshot().resources).toHaveLength(0);
   });
 
   it('fails approval resumption after the resource generation changes', async () => {

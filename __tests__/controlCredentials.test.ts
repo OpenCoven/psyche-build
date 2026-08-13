@@ -141,4 +141,18 @@ describe('control server authorization', () => {
     await expect(server.submitAs(agent, request)).resolves.toMatchObject({ status: 'succeeded' });
     expect(submit).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['pane.spawn', 'pane.kill', 'pane.resize', 'coven.desktop.action'] as const)(
+    'blocks agent principals from legacy %s bypass',
+    async (kind) => {
+      const submit = vi.fn(async () => ({ status: 'succeeded' as const }));
+      const server = createControlServerForTest({ runtime: stubRuntime(submit) });
+      const legacy = { ...takeoverInput(), kind, payload: {} } as ControlCommandInput;
+      await expect(server.submitAs(
+        { id: 'agent-1', kind: 'agent', capabilities: ['read', 'mutate', 'delegate'] },
+        legacy,
+      )).resolves.toMatchObject({ status: 'rejected', code: 'agent_not_authorized' });
+      expect(submit).not.toHaveBeenCalled();
+    },
+  );
 });

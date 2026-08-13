@@ -17,6 +17,7 @@ const baseRequest = (): ApprovalRequest => ({
   resource: { kind: 'browser_tab', id: 'tab-1', generation: 3 },
   capability: 'browser.interact',
   effect: createRedactedApprovalEffect({ kind: 'submit', target: 'Create issue' }),
+  executablePayloadDigest: 'b'.repeat(64),
 });
 
 const assertionFor = (
@@ -32,6 +33,7 @@ const assertionFor = (
   resource: approval.resource,
   capability: approval.capability,
   effect: approval.effect,
+  executablePayloadDigest: approval.executablePayloadDigest,
   ...overrides,
 });
 
@@ -66,7 +68,8 @@ type RequiredConsumeField =
   | 'leaseRevision'
   | 'resource'
   | 'capability'
-  | 'effect';
+  | 'effect'
+  | 'executablePayloadDigest';
 type OmissionIsRejected<K extends RequiredConsumeField> =
   Omit<ApprovalConsumeAssertion, K> extends ApprovalConsumeAssertion ? never : true;
 const requiredConsumeFields: { readonly [K in RequiredConsumeField]: OmissionIsRejected<K> } = {
@@ -79,6 +82,7 @@ const requiredConsumeFields: { readonly [K in RequiredConsumeField]: OmissionIsR
   resource: true,
   capability: true,
   effect: true,
+  executablePayloadDigest: true,
 };
 void requiredConsumeFields;
 
@@ -89,7 +93,7 @@ describe('ApprovalStore', () => {
 
     expect(pending.payloadDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(pending.payloadDigest).toBe(
-      '094c6ccd0b81b4457f4d053873f20b789c56b6d0e76c3d3b6ce53e94065fa510',
+      '2e738149fbe162c5ac8b14a39ccce67c402c6238634a29476a2923b4320c7fa3',
     );
     expect(store.request(baseRequest()).payloadDigest).toBe(pending.payloadDigest);
     expect(store.approve(pending.id, 'operator', pending.payloadDigest).status).toBe('approved');
@@ -98,6 +102,17 @@ describe('ApprovalStore', () => {
       expect.objectContaining({ code: 'approval_denied' }),
     );
   });
+
+  it.each(['script source', 'secret text', 'same-basename path', 'permission decision'])(
+    'rejects same-action substitution for changed %s hash',
+    () => {
+      const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
+      store.request(baseRequest());
+      expect(() => store.request({ ...baseRequest(), executablePayloadDigest: 'c'.repeat(64) }))
+        .toThrowError(expect.objectContaining({ code: 'approval_action_conflict' }));
+      expect(store.peek()).toHaveLength(1);
+    },
+  );
 
   it.each([
     ['action id', { actionId: 'action-2' }],

@@ -180,15 +180,21 @@ export class ControlClient {
     const snapshot = await this.getState();
     const recent = snapshot.receipts.find((receipt) => receipt.actionId === actionId);
     if (recent) return recent;
-    const page = await this.readEvents(0);
-    for (const event of [...page.events].reverse()) {
-      if (!event || typeof event !== 'object') continue;
-      const payload = (event as { payload?: unknown }).payload;
-      if (!payload || typeof payload !== 'object') continue;
-      const receipt = (payload as { receipt?: unknown }).receipt;
-      if (isActionReceipt(receipt) && receipt.actionId === actionId) return receipt;
+    const pageLimit = 256;
+    let afterSequence = 0;
+    let found: ActionReceipt | undefined;
+    for (;;) {
+      const page = await this.readEvents(afterSequence, pageLimit);
+      for (const event of page.events) {
+        if (!event || typeof event !== 'object') continue;
+        const payload = (event as { payload?: unknown }).payload;
+        if (!payload || typeof payload !== 'object') continue;
+        const receipt = (payload as { receipt?: unknown }).receipt;
+        if (isActionReceipt(receipt) && receipt.actionId === actionId) found = receipt;
+      }
+      if (page.events.length < pageLimit || page.nextSequence <= afterSequence) return found;
+      afterSequence = page.nextSequence;
     }
-    return undefined;
   }
 
   async close(): Promise<void> {
