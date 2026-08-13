@@ -7950,7 +7950,17 @@
     var lifecycle = browserTabLifecycle(tab);
     lifecycle.documentId = null;
     lifecycle.documentSequence += 1;
-    return Promise.resolve();
+    if (!lifecycle.nativeLabel || !lifecycle.controlGeneration) return Promise.resolve(false);
+    return invoke("browser_action", { request: { tabId: tab.id, generation: lifecycle.controlGeneration,
+      snapshotId: "", expectedRisk: {}, action: { kind: "invalidate" } } }).then(function () { return true; });
+  }
+  function queueBrowserAutomationInvalidation(pair) {
+    var lifecycle = browserTabLifecycle(pair.tab);
+    lifecycle.invalidationGeneration += 1;
+    var run = function () { return invalidateBrowserAutomation(pair.tab); };
+    var invalidation = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
+    lifecycle.navigationTail = invalidation.then(function () {}, function () {});
+    return invalidation;
   }
   function installBrowserAutomationCompatibility(pair) {
     var lifecycle = browserTabLifecycle(pair.tab);
@@ -7989,9 +7999,110 @@
     lifecycle.navigationTail = inspection.then(function () {}, function () {});
     return inspection;
   }
+  function providerBrowserError(code, message) {
+    var error = new Error(message); error.code = code; return error;
+  }
+  async function queueBrowserProviderNavigation(pair, operation) {
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var run = async function () {
+      if (lifecycle.closing || lifecycle.controlGeneration <= 0 ||
+          lifecycle.controlLabel !== lifecycle.nativeLabel) throw providerBrowserError("snapshot_stale", "browser tab is stale");
+      var url = operation.kind === "navigate" ? normaliseUrl(operation.url) : null;
+      var historyIndex = pair.tab.historyIndex;
+      if (operation.kind === "back") historyIndex -= 1;
+      if (operation.kind === "forward") historyIndex += 1;
+      if (operation.kind === "back" || operation.kind === "forward") url = pair.tab.history[historyIndex];
+      if (!url) throw providerBrowserError("invalid_action", "browser navigation target is unavailable");
+      var bounds = lifecycle.nativeBounds || { x: -10000, y: -10000, w: 1, h: 1 };
+      await invalidateBrowserAutomation(pair.tab);
+      await invoke("browser_navigate", { tabId: pair.tab.id, generation: lifecycle.controlGeneration,
+        label: browserLabelForTab(pair.project, pair.tab), url: url,
+        x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h });
+      pair.tab.created = true; pair.tab.loading = true; pair.tab.url = url; pair.tab.title = tabTitle(url);
+      lifecycle.liveUrl = url; lifecycle.eventUrl = null; lifecycle.documentId = null;
+      if (operation.kind === "back" || operation.kind === "forward") pair.tab.historyIndex = historyIndex;
+      else { pair.tab.history = pair.tab.history.slice(0, pair.tab.historyIndex + 1); pair.tab.history.push(url);
+        pair.tab.historyIndex = pair.tab.history.length - 1; }
+      saveWorkspaceSoon();
+      await publishBrowserResource(pair);
+      return { url: url, title: pair.tab.title };
+    };
+    var navigation = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
+    lifecycle.navigationTail = navigation.then(function () {}, function () {});
+    return navigation;
+  }
+  async function queueBrowserProviderAction(pair, request) {
+    var action = request.operation.action || {};
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var invalidationGeneration = lifecycle.invalidationGeneration;
+    if (["upload", "download", "permission_response"].includes(action.kind)) {
+      throw providerBrowserError("backend_unavailable", action.kind + " native interception is unavailable");
+    }
+    var pane = findBrowserPane(pair.project.id, pair.worktreePath);
+    if (!pane || browserPaneIsClosing(pane)) throw providerBrowserError("provider_unavailable", "browser pane is unavailable");
+    if (action.kind === "reload") return queueBrowserReload(pair.project, pair.tab, pane).then(function (ok) {
+      if (!ok) throw providerBrowserError("backend_unavailable", "browser reload failed");
+      return { url: pair.tab.url || "", title: pair.tab.title || "" };
+    });
+    if (action.kind === "close") {
+      var closeRun = async function () {
+        if (!(await closeBrowserTab(pair.project, pair.tab.id, pair.worktreePath))) {
+          throw providerBrowserError("backend_unavailable", "browser close failed");
+        }
+        return { closed: true };
+      };
+      var closePending = lifecycle.navigationTail ? lifecycle.navigationTail.then(closeRun, closeRun) : closeRun();
+      lifecycle.navigationTail = closePending.then(function () {}, function () {});
+      return closePending;
+    }
+    if (["navigate", "back", "forward"].includes(action.kind)) return queueBrowserProviderNavigation(pair, action);
+    if (action.kind === "screenshot") return invoke("browser_snapshot", {
+      tabId: pair.tab.id, generation: request.generation,
+    });
+    var run = async function () {
+      if (!request.operation.snapshotId || lifecycle.closing ||
+          lifecycle.invalidationGeneration !== invalidationGeneration ||
+          lifecycle.controlGeneration !== request.generation || lifecycle.controlLabel !== lifecycle.nativeLabel) {
+        throw providerBrowserError("snapshot_stale", "browser action binding is stale");
+      }
+      var nativeAction = {};
+      Object.keys(action).forEach(function (key) { if (key !== "semantic") nativeAction[key] = action[key]; });
+      return invoke("browser_action", { request: { tabId: pair.tab.id, generation: request.generation,
+        snapshotId: request.operation.snapshotId, expectedRisk: request.operation.expectedRisk || {}, action: nativeAction } });
+    };
+    var pending = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
+    lifecycle.navigationTail = pending.then(function () {}, function () {});
+    return pending;
+  }
+  async function queueBrowserProviderResolve(pair, request) {
+    var operation = request.operation;
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var run = function () {
+      if (!operation.snapshotId || !operation.elementRef || lifecycle.closing ||
+          lifecycle.controlGeneration !== request.generation || lifecycle.controlLabel !== lifecycle.nativeLabel) {
+        throw providerBrowserError("snapshot_stale", "browser element binding is stale");
+      }
+      return invoke("browser_action", { request: { tabId: pair.tab.id, generation: request.generation,
+        snapshotId: operation.snapshotId, action: { kind: "resolve", elementRef: operation.elementRef,
+          actionKind: operation.actionKind } } });
+    };
+    var pending = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
+    lifecycle.navigationTail = pending.then(function () {}, function () {});
+    return pending;
+  }
+  var BROWSER_PROVIDER_FAILURE_CODES = new Set([
+    "approval_identity_mismatch", "snapshot_stale", "element_missing", "element_disabled",
+    "element_hidden", "invalid_action", "backend_unavailable", "invalid_snapshot",
+    "unsupported_operation", "result_too_large", "effect_unknown", "action_failed",
+  ]);
+  function browserProviderFailureCode(error) {
+    var candidate = error && typeof error.code === "string" ? error.code :
+      String(error && error.message || error || "");
+    return BROWSER_PROVIDER_FAILURE_CODES.has(candidate) ? candidate : "action_failed";
+  }
   function handleBrowserProviderEffect(event) {
     var payload = event.payload || {}; var operation = payload.operation || {};
-    if (operation.kind !== "inspect") return false;
+    if (operation.kind !== "inspect" && operation.kind !== "action" && operation.kind !== "resolve") return false;
     var pair = state.projects.reduce(function (found, project) {
       if (found || project.root !== payload.projectRoot) return found; var roots = Object.keys(project.browsersByWorktree || {});
       for (var i = 0; i < roots.length; i++) { var browser = project.browsersByWorktree[roots[i]];
@@ -8012,20 +8123,22 @@
         result: { actionId: payload.actionId, status: "failed", code: "snapshot_stale", message: "browser tab generation is stale" } }).catch(function () {});
       return false;
     }
-    queueBrowserInspection(pair, { requestId: payload.requestId, generation: payload.generation,
-      label: lifecycle.nativeLabel, includeScreenshot: operation.includeScreenshot === true }).then(function (value) {
+    var effect = operation.kind === "inspect"
+      ? queueBrowserInspection(pair, { requestId: payload.requestId, generation: payload.generation,
+        label: lifecycle.nativeLabel, includeScreenshot: operation.includeScreenshot === true })
+      : operation.kind === "resolve" ? queueBrowserProviderResolve(pair, payload) : queueBrowserProviderAction(pair, payload);
+    effect.then(function (value) {
       var completedSnapshot = value && value.snapshot ? value.snapshot : value;
       var completionLifecycle = browserTabLifecycle(pair.tab);
-      if (!completedSnapshot || completionLifecycle.closing || completionLifecycle.nativeLabel !== lifecycle.nativeLabel ||
+      if (operation.kind === "inspect" && (!completedSnapshot || completionLifecycle.closing || completionLifecycle.nativeLabel !== lifecycle.nativeLabel ||
           completionLifecycle.controlLabel !== lifecycle.nativeLabel || completionLifecycle.controlGeneration !== payload.generation ||
-          completionLifecycle.documentId !== completedSnapshot.documentId) throw new Error("snapshot_stale");
+          completionLifecycle.documentId !== completedSnapshot.documentId)) throw new Error("snapshot_stale");
       return invoke("control_provider_complete", { projectRoot: pair.project.root, requestId: payload.requestId,
         result: { actionId: payload.actionId, status: "succeeded", value: value } });
     }).catch(function (error) {
       invoke("control_provider_complete", { projectRoot: pair.project.root, requestId: payload.requestId,
         result: { actionId: payload.actionId, status: "failed",
-          code: String(error).indexOf("backend_unavailable") !== -1 ? "backend_unavailable" :
-            (String(error).indexOf("invalid_snapshot") !== -1 ? "invalid_snapshot" : "snapshot_stale"),
+          code: browserProviderFailureCode(error),
           message: String(error) } }).catch(function () {});
     }); return true;
   }
@@ -8034,7 +8147,7 @@
     var pair = browserNativeEventContext(payload.label, payload.url);
     if (!pair) return false;
     if (payload.phase === "started") {
-      if (typeof invalidateBrowserAutomation === "function") invalidateBrowserAutomation(pair.tab);
+      if (typeof queueBrowserAutomationInvalidation === "function") queueBrowserAutomationInvalidation(pair);
       pair.tab.loading = true;
     } else if (payload.phase === "finished") {
       var loaded = markBrowserTabLoaded(payload.label, payload.url, "");
@@ -8117,9 +8230,9 @@
     if (activate || !browser.activeTabId) { browser.activeTabId = tab.id; markActiveSurface("browser"); }
     renderBrowserTabs(); saveWorkspaceSoon(); return tab;
   }
-  async function closeBrowserTab(project, tabId) {
+  async function closeBrowserTab(project, tabId, exactWorktreePath) {
     project = project || activeProject();
-    var browser = ensureBrowserModel(project); if (!browser) return false;
+    var browser = ensureBrowserModel(project, exactWorktreePath); if (!browser) return false;
     var idx = browser.tabs.findIndex(function (t) { return t.id === tabId; }); if (idx < 0) return false;
     var tab = browser.tabs[idx];
     var lifecycle = browserTabLifecycle(tab);

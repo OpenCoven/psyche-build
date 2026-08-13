@@ -59,6 +59,11 @@ describe('canonical MCP agent control', () => {
     }
   });
 
+  it('states that generic click application effects cannot be perfectly predicted', () => {
+    const tool = TOOLS.find((candidate) => candidate.name === 'psyche_browser_action');
+    expect(tool?.description).toContain('application-defined effects behind a generic click cannot be perfectly predicted');
+  });
+
   it('rejects malformed target/action shapes before creating a control client', async () => {
     const controlClientForRoot = vi.fn();
     restores.push(setMcpDeps({ controlClientForRoot }));

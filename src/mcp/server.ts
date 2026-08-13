@@ -653,7 +653,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'psyche_browser_action',
-    description: 'Submit one typed browser action using exact tab, generation, and snapshot references.',
+    description: 'Submit one typed browser action using exact tab, generation, and snapshot references; application-defined effects behind a generic click cannot be perfectly predicted.',
     inputSchema: {
       oneOf: [
         exactObject({

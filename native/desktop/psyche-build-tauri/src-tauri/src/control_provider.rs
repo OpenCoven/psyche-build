@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -15,12 +15,13 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, Duration};
+use tokio::time::{timeout, Duration, Instant};
 use unicode_normalization::UnicodeNormalization;
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const MAX_CONTROL_FRAME_BYTES: usize = 6 * 1024 * 1024;
 const MAX_PENDING_EFFECTS: usize = 256;
+const EFFECT_TOMBSTONE_TTL: Duration = Duration::from_secs(60);
 const MAX_PENDING_RESPONSES: usize = 128;
 const MAX_RAW_SCREENSHOT_BYTES: usize = 4 * 1024 * 1024;
 const BASE64_SCREENSHOT_BYTES: usize = ((MAX_RAW_SCREENSHOT_BYTES + 2) / 3) * 4;
@@ -44,12 +45,20 @@ struct ProviderConnection {
     writer: mpsc::UnboundedSender<Vec<u8>>,
     publication: Arc<AtomicU64>,
     task: JoinHandle<()>,
-    pending_effects: Arc<Mutex<HashSet<String>>>,
+    pending_effects: Arc<Mutex<HashMap<String, PendingEffectCorrelation>>>,
     pending_responses: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
     resources: Arc<Mutex<HashMap<String, BrowserTabResource>>>,
     connected: Arc<AtomicBool>,
     socket_path: PathBuf,
     operator_token: String,
+}
+
+#[derive(Clone, Debug)]
+struct PendingEffectCorrelation {
+    action_id: String,
+    tab_id: String,
+    generation: u64,
+    canceled_at: Option<Instant>,
 }
 
 impl ProviderConnection {
@@ -165,6 +174,16 @@ pub enum ProviderEffectResult {
         #[serde(deserialize_with = "deserialize_true")]
         ambiguous: bool,
     },
+}
+
+impl ProviderEffectResult {
+    fn action_id(&self) -> &str {
+        match self {
+            Self::Succeeded { action_id, .. }
+            | Self::Failed { action_id, .. }
+            | Self::Unknown { action_id, .. } => action_id,
+        }
+    }
 }
 
 fn deserialize_true<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
@@ -386,6 +405,92 @@ fn cancel_pending_response(
     request_id: &str,
 ) {
     pending.remove(request_id);
+}
+
+fn prune_pending_effect_tombstones(
+    pending: &mut HashMap<String, PendingEffectCorrelation>,
+    now: Instant,
+) {
+    pending.retain(|_, effect| {
+        effect.canceled_at.is_none_or(|canceled_at| {
+            now.saturating_duration_since(canceled_at) <= EFFECT_TOMBSTONE_TTL
+        })
+    });
+}
+
+fn reserve_pending_effect(
+    pending: &mut HashMap<String, PendingEffectCorrelation>,
+    frame: &Value,
+    now: Instant,
+) -> Result<(), String> {
+    prune_pending_effect_tombstones(pending, now);
+    let request_id = frame
+        .get("requestId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "invalid provider effect request".to_string())?;
+    let action_id = frame
+        .get("actionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "invalid provider effect request".to_string())?;
+    let tab_id = frame
+        .get("tabId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "invalid provider effect request".to_string())?;
+    let generation = frame
+        .get("generation")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "invalid provider effect request".to_string())?;
+    if pending.len() >= MAX_PENDING_EFFECTS {
+        return Err("provider_busy".to_string());
+    }
+    if pending.contains_key(request_id) {
+        return Err("duplicate provider effect request".to_string());
+    }
+    pending.insert(
+        request_id.to_string(),
+        PendingEffectCorrelation {
+            action_id: action_id.to_string(),
+            tab_id: tab_id.to_string(),
+            generation,
+            canceled_at: None,
+        },
+    );
+    Ok(())
+}
+
+fn cancel_pending_effect(
+    pending: &mut HashMap<String, PendingEffectCorrelation>,
+    request_id: &str,
+    action_id: &str,
+    now: Instant,
+) -> bool {
+    prune_pending_effect_tombstones(pending, now);
+    let Some(effect) = pending.get_mut(request_id) else {
+        return false;
+    };
+    if effect.action_id != action_id {
+        return false;
+    }
+    effect.canceled_at.get_or_insert(now);
+    true
+}
+
+fn complete_pending_effect(
+    pending: &mut HashMap<String, PendingEffectCorrelation>,
+    request_id: &str,
+    action_id: &str,
+    now: Instant,
+) -> Result<PendingEffectCorrelation, String> {
+    prune_pending_effect_tombstones(pending, now);
+    let Some(effect) = pending.get(request_id) else {
+        return Err("unknown or stale provider effect request".to_string());
+    };
+    if effect.action_id != action_id {
+        return Err("provider effect action correlation failed".to_string());
+    }
+    pending
+        .remove(request_id)
+        .ok_or_else(|| "unknown or stale provider effect request".to_string())
 }
 
 fn remove_if_nonce<V, F>(entries: &mut HashMap<String, V>, key: &str, nonce: u64, get_nonce: F)
@@ -641,7 +746,7 @@ async fn connect_provider(
     let mut reader = BufReader::new(reader);
     let (writer, mut outbound) = mpsc::unbounded_channel::<Vec<u8>>();
     let publication = Arc::new(AtomicU64::new(PUBLICATION_PENDING));
-    let pending_effects = Arc::new(Mutex::new(HashSet::new()));
+    let pending_effects = Arc::new(Mutex::new(HashMap::new()));
     let pending_responses = Arc::new(Mutex::new(HashMap::<String, oneshot::Sender<Value>>::new()));
     let resources = Arc::new(Mutex::new(HashMap::new()));
     let connected = Arc::new(AtomicBool::new(true));
@@ -719,15 +824,11 @@ async fn connect_provider(
                     .get("requestId")
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                if let Some(request_id) = &request_id {
-                    let mut pending = effects.lock();
-                    if pending.len() >= MAX_PENDING_EFFECTS {
-                        if let Some(result) = provider_busy_result(&frame) {
-                            let _ = queue_json(&effect_writer, &result, MAX_PROVIDER_RESULT_BYTES);
-                        }
-                        continue;
+                if reserve_pending_effect(&mut effects.lock(), &frame, Instant::now()).is_err() {
+                    if let Some(result) = provider_busy_result(&frame) {
+                        let _ = queue_json(&effect_writer, &result, MAX_PROVIDER_RESULT_BYTES);
                     }
-                    pending.insert(request_id.clone());
+                    continue;
                 }
                 if let Some(main) = app.get_webview_window("main") {
                     let mut desktop_frame = frame.clone();
@@ -761,8 +862,16 @@ async fn connect_provider(
                 continue;
             }
             if frame.get("type").and_then(Value::as_str) == Some("provider.effect.cancel") {
-                if let Some(request_id) = frame.get("requestId").and_then(Value::as_str) {
-                    effects.lock().remove(request_id);
+                if let (Some(request_id), Some(action_id)) = (
+                    frame.get("requestId").and_then(Value::as_str),
+                    frame.get("actionId").and_then(Value::as_str),
+                ) {
+                    cancel_pending_effect(
+                        &mut effects.lock(),
+                        request_id,
+                        action_id,
+                        Instant::now(),
+                    );
                 }
                 continue;
             }
@@ -1035,9 +1144,17 @@ pub fn control_provider_complete(
         "requestId": request_id, "result": result,
     });
     let encoded = encode_bounded(&frame, MAX_PROVIDER_RESULT_BYTES)?;
-    if !connection.pending_effects.lock().remove(&request_id) {
-        return Err("unknown or stale provider effect request".to_string());
-    }
+    let correlation = complete_pending_effect(
+        &mut connection.pending_effects.lock(),
+        &request_id,
+        result.action_id(),
+        Instant::now(),
+    )?;
+    log::debug!(
+        "completed browser provider effect for tab '{}' generation {}",
+        correlation.tab_id,
+        correlation.generation
+    );
     connection
         .writer
         .send(encoded)
@@ -1292,6 +1409,70 @@ mod tests {
             "provider_busy"
         );
         cancel_pending_response(&mut pending, "one");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn canceled_effect_retains_one_bounded_late_completion_correlation() {
+        let started = tokio::time::Instant::now();
+        let mut pending = HashMap::new();
+        let request = json!({
+            "requestId": "request-1", "actionId": "action-1", "tabId": "tab-1", "generation": 7
+        });
+        reserve_pending_effect(&mut pending, &request, started).unwrap();
+        assert!(cancel_pending_effect(
+            &mut pending,
+            "request-1",
+            "action-1",
+            started + Duration::from_secs(1)
+        ));
+        let late = complete_pending_effect(
+            &mut pending,
+            "request-1",
+            "action-1",
+            started + Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(late.tab_id, "tab-1");
+        assert_eq!(late.generation, 7);
+        assert!(complete_pending_effect(
+            &mut pending,
+            "request-1",
+            "action-1",
+            started + Duration::from_secs(3),
+        )
+        .is_err());
+        assert!(complete_pending_effect(
+            &mut pending,
+            "unknown",
+            "action-1",
+            started + Duration::from_secs(3),
+        )
+        .is_err());
+        reserve_pending_effect(
+            &mut pending,
+            &json!({ "requestId": "request-2", "actionId": "action-2", "tabId": "tab-1", "generation": 7 }),
+            started + Duration::from_secs(3),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn canceled_effect_tombstones_expire_and_disconnect_cleanup_is_bounded() {
+        let started = tokio::time::Instant::now();
+        let mut pending = HashMap::new();
+        let request = json!({
+            "requestId": "request-1", "actionId": "action-1", "tabId": "tab-1", "generation": 7
+        });
+        reserve_pending_effect(&mut pending, &request, started).unwrap();
+        cancel_pending_effect(&mut pending, "request-1", "action-1", started);
+        prune_pending_effect_tombstones(
+            &mut pending,
+            started + EFFECT_TOMBSTONE_TTL + Duration::from_millis(1),
+        );
+        assert!(pending.is_empty());
+        reserve_pending_effect(&mut pending, &request, started).unwrap();
+        pending.clear();
         assert!(pending.is_empty());
     }
 

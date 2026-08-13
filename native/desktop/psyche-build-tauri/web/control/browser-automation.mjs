@@ -153,7 +153,7 @@ function createSnapshot(runtime, request) {
   const refs = new Map(); const nodes = [];
   const frameDocuments = [];
   let truncated = false; let visited = 0; let encodedNodeBytes = 0;
-  const visit = (element, depth, offsetX = 0, offsetY = 0, clip = null) => {
+  const visit = (element, depth, offsetX = 0, offsetY = 0, clip = null, frames = []) => {
     if (!element || depth > MAX_DEPTH || visited >= MAX_VISITED) { if (element) truncated = true; return; }
     visited += 1;
     const role = roleFor(element);
@@ -171,26 +171,27 @@ function createSnapshot(runtime, request) {
         if (encodedNodeBytes + nodeBytes >= MAX_SNAPSHOT_BYTES - SNAPSHOT_METADATA_RESERVE_BYTES) {
           truncated = true; return;
         }
-        encodedNodeBytes += nodeBytes; refs.set(ref, element); nodes.push(node);
+        encodedNodeBytes += nodeBytes; refs.set(ref, { element, frames, offsetX, offsetY, clip }); nodes.push(node);
         if (childDocument) {
           frameDocuments.push({ frame: element, document: childDocument });
           const childLeft = offsetX + rect.left; const childTop = offsetY + rect.top;
           const childClip = intersectClip(childLeft, childTop, childLeft + rect.width, childTop + rect.height,
             clip, runtime.globalObject);
-          visit(childDocument.documentElement, depth + 1, childLeft, childTop, childClip);
+          visit(childDocument.documentElement, depth + 1, childLeft, childTop, childClip,
+            [...frames, { frame: element, document: childDocument }]);
         }
       } else {
         const nodeBytes = new TextEncoder().encode(JSON.stringify(node)).byteLength + (nodes.length ? 1 : 0);
         if (encodedNodeBytes + nodeBytes >= MAX_SNAPSHOT_BYTES - SNAPSHOT_METADATA_RESERVE_BYTES) {
           truncated = true; return;
         }
-        encodedNodeBytes += nodeBytes; refs.set(ref, element); nodes.push(node);
+        encodedNodeBytes += nodeBytes; refs.set(ref, { element, frames, offsetX, offsetY, clip }); nodes.push(node);
       }
     }
     if (visited >= MAX_VISITED || nodes.length >= MAX_NODES) { truncated = true; return; }
     const children = element.children || [];
     for (let index = 0; index < children.length && visited < MAX_VISITED && nodes.length < MAX_NODES; index += 1) {
-      visit(children[index], depth + 1, offsetX, offsetY, clip);
+      visit(children[index], depth + 1, offsetX, offsetY, clip, frames);
     }
   };
   visit(document.documentElement, 0);
@@ -213,26 +214,200 @@ function createSnapshot(runtime, request) {
   return value;
 }
 
+function currentElement(runtime, request) {
+  const current = runtime.current;
+  const framesCurrent = current && current.frameDocuments.every((entry) => {
+    try { return entry.frame.contentDocument === entry.document; } catch { return false; }
+  });
+  const stored = current?.refs.get(request.ref);
+  const element = stored?.element;
+  const ownerDocument = element?.ownerDocument;
+  if (!current || current.value.snapshotId !== request.snapshotId ||
+      current.document !== runtime.globalObject.document || !framesCurrent ||
+      runtime.now() - current.createdAt >= SNAPSHOT_TTL_MS || !element ||
+      !ownerDocument || !ownerDocument.contains?.(element)) {
+    runtime.current = null;
+    throw codedError('snapshot_stale', 'browser snapshot is stale');
+  }
+  if (boundedText(runtime.globalObject.document.location?.href || '', MAX_URL_BYTES) !== current.value.url) {
+    runtime.current = null; throw codedError('snapshot_stale', 'browser URL changed');
+  }
+  let offsetX = 0; let offsetY = 0; let clip = null;
+  for (const entry of stored.frames) {
+    if (!entry.frame.ownerDocument?.contains?.(entry.frame) || entry.frame.contentDocument !== entry.document ||
+        hiddenByTree(entry.frame, runtime.globalObject) ||
+        !visible(entry.frame, runtime.globalObject, offsetX, offsetY, clip)) {
+      runtime.current = null; throw codedError('snapshot_stale', 'containing browser frame is stale');
+    }
+    const rect = entry.frame.getBoundingClientRect();
+    const left = offsetX + rect.left; const top = offsetY + rect.top;
+    clip = intersectClip(left, top, left + rect.width, top + rect.height, clip, runtime.globalObject);
+    offsetX = left; offsetY = top;
+  }
+  if (hiddenByTree(element, runtime.globalObject) ||
+      !visible(element, runtime.globalObject, offsetX, offsetY, clip)) {
+    runtime.current = null;
+    throw codedError('snapshot_stale', 'browser element is no longer visible');
+  }
+  if (element.disabled || element.getAttribute?.('aria-disabled') === 'true') {
+    throw codedError('element_disabled', 'browser element is disabled');
+  }
+  return element;
+}
+
+function eventFor(element, name, input = false, data = null, inputType = '') {
+  const view = element.ownerDocument?.defaultView;
+  const Constructor = input ? (view?.InputEvent || view?.Event) : view?.Event;
+  const options = { bubbles: true, cancelable: name === 'beforeinput', ...(input ? { data, inputType } : {}) };
+  const event = Constructor ? new Constructor(name, options) : { type: name, ...options };
+  if (input && event.data === undefined) {
+    try { Object.defineProperties(event, { data: { value: data }, inputType: { value: inputType } }); } catch {}
+  }
+  return event;
+}
+
+function dispatchEvent(element, name, input = false, data = null, inputType = '') {
+  return element.dispatchEvent?.(eventFor(element, name, input, data, inputType)) !== false;
+}
+
+function submitMetadata(element, runtime, requireForm = false) {
+  const tag = String(element.tagName || '').toLowerCase();
+  const type = String(element.type || element.getAttribute?.('type') || '').toLowerCase();
+  const form = tag === 'form' ? element : element.form;
+  const submit = tag === 'form' || ((tag === 'button' && (!type || type === 'submit')) ||
+    (tag === 'input' && (type === 'submit' || type === 'image'))) && !!form;
+  let formId;
+  if ((submit || requireForm) && form && runtime) {
+    formId = runtime.formIds.get(form);
+    if (!formId) { formId = `f${++runtime.formSequence}`; runtime.formIds.set(form, formId); }
+  }
+  return { submit, ...(formId ? { formId } : {}) };
+}
+
+function actionPostcondition(runtime, request) {
+  if (request.kind === 'upload' || request.kind === 'download' || request.kind === 'permission_response') {
+    throw codedError('backend_unavailable', `${request.kind} requires unavailable native interception`);
+  }
+  const element = currentElement(runtime, request);
+  const secret = String(element.type || '').toLowerCase() === 'password';
+  if (request.kind === 'click' || request.kind === 'type' || request.kind === 'submit') {
+    const metadata = request.kind === 'click' || request.kind === 'submit'
+      ? submitMetadata(element, runtime, request.kind === 'submit') : null;
+    const actualRisk = { documentId: runtime.current?.value.documentId,
+      submit: request.kind === 'type' ? null : metadata.submit,
+      formId: request.kind === 'type' ? null : (metadata.formId || null),
+      secret: request.kind === 'type' ? secret : null };
+    const expected = request.expectedRisk;
+    const keys = expected && typeof expected === 'object' ? Object.keys(expected).sort() : [];
+    if (keys.join(',') !== 'documentId,formId,secret,submit' ||
+        keys.some((key) => expected[key] !== actualRisk[key])) {
+      throw codedError('approval_identity_mismatch', 'browser action risk identity changed');
+    }
+  }
+  switch (request.kind) {
+    case 'focus':
+      element.focus?.();
+      {
+        const result = { focused: element.ownerDocument?.activeElement === element };
+        runtime.current = null; return result;
+      }
+    case 'type': {
+      const tag = String(element.tagName || '').toLowerCase();
+      const type = String(element.type || '').toLowerCase();
+      if (!(tag === 'textarea' || (tag === 'input' &&
+          !['button', 'submit', 'reset', 'image', 'file', 'checkbox', 'radio', 'range'].includes(type)))) {
+        throw codedError('invalid_action', 'type requires a text-like control');
+      }
+      element.focus?.();
+      const previous = String(element.value || '');
+      const text = String(request.text || '');
+      const inputType = request.append === true ? 'insertText' : text ? 'insertReplacementText' : 'deleteContentBackward';
+      const data = inputType === 'deleteContentBackward' ? null : text;
+      if (!dispatchEvent(element, 'beforeinput', true, data, inputType)) {
+        runtime.current = null; return { canceled: true, secret,
+          ...(secret ? { valuePresent: previous.length > 0 } : {}) };
+      }
+      element.value = request.append === true ? previous + text : text;
+      dispatchEvent(element, 'input', true, data, inputType);
+      dispatchEvent(element, 'change');
+      const result = secret ? { secret: true, valuePresent: element.value.length > 0 } :
+        { secret: false, value: boundedText(element.value, MAX_NAME_BYTES) };
+      runtime.current = null; return result;
+    }
+    case 'select': {
+      if (String(element.tagName || '').toLowerCase() !== 'select') throw codedError('invalid_action', 'select requires a select control');
+      const wanted = new Set(Array.isArray(request.values) ? request.values.map(String) : []);
+      if (!element.multiple && wanted.size > 1) throw codedError('invalid_action', 'single select accepts one value');
+      const available = new Map(Array.from(element.options || []).map((option) => [String(option.value), option]));
+      for (const value of wanted) {
+        const option = available.get(value);
+        if (!option || option.disabled) throw codedError('invalid_action', 'requested option is unavailable');
+      }
+      const selected = [];
+      for (const option of Array.from(element.options || [])) {
+        option.selected = wanted.has(String(option.value));
+        if (option.selected) selected.push(boundedText(option.value, MAX_NAME_BYTES));
+      }
+      if (!element.multiple) element.value = selected[0] || '';
+      dispatchEvent(element, 'input'); dispatchEvent(element, 'change');
+      if (!element.ownerDocument?.contains?.(element)) {
+        runtime.current = null; throw codedError('effect_unknown', 'select postcondition is unavailable after page mutation');
+      }
+      const finalSelected = [];
+      for (const option of Array.from(element.options || [])) {
+        if (option.selected) finalSelected.push(boundedText(option.value, MAX_NAME_BYTES));
+        if (finalSelected.length >= 100) break;
+      }
+      const result = secret ? { secret: true, valuePresent: finalSelected.length > 0 } : { values: finalSelected };
+      runtime.current = null; return result;
+    }
+    case 'scroll': {
+      element.scrollBy?.({ left: Number(request.deltaX || 0), top: Number(request.deltaY || 0), behavior: 'auto' });
+      const result = { scrollLeft: Number(element.scrollLeft || 0), scrollTop: Number(element.scrollTop || 0) };
+      runtime.current = null; return result;
+    }
+    case 'click': {
+      const metadata = submitMetadata(element, runtime);
+      element.focus?.(); element.click?.();
+      runtime.current = null;
+      return { clicked: true, submit: metadata.submit,
+        url: boundedText(runtime.globalObject.document.location?.href || '', MAX_URL_BYTES),
+        title: boundedText(runtime.globalObject.document.title || '', MAX_NAME_BYTES) };
+    }
+    case 'submit': {
+      const metadata = submitMetadata(element, runtime);
+      const form = String(element.tagName || '').toLowerCase() === 'form' ? element : element.form;
+      if (!form || typeof form.requestSubmit !== 'function') throw codedError('invalid_action', 'element has no submittable form');
+      form.requestSubmit(element === form ? undefined : element);
+      runtime.current = null;
+      return { submitted: true, submit: metadata.submit || !!form,
+        url: boundedText(runtime.globalObject.document.location?.href || '', MAX_URL_BYTES),
+        title: boundedText(runtime.globalObject.document.title || '', MAX_NAME_BYTES) };
+    }
+    default:
+      throw codedError('unsupported_operation', 'browser automation operation is unsupported');
+  }
+}
+
 export function installBrowserAutomation(globalObject, options = {}) {
   const existing = globalObject.__PSYCHE_AUTOMATION__;
   if (existing && existing.document === globalObject.document && existing.__psycheRuntime === true) return existing;
   const runtime = { __psycheRuntime: true, document: globalObject.document, globalObject,
     sessionId: options.sessionId || randomSession(globalObject, options), now: options.now || (() => Date.now()),
-    sequence: 0, current: null, dispatch(request) {
+    sequence: 0, current: null, formIds: new WeakMap(), formSequence: 0, dispatch(request) {
       if (!request || request.kind === 'snapshot' || request.kind === 'inspect') return createSnapshot(runtime, request || {});
       if (request.kind === 'navigation' || request.kind === 'invalidate') { runtime.current = null; return { invalidated: true }; }
       if (request.kind === 'resolve') {
-        const current = runtime.current;
-        var framesCurrent = current && current.frameDocuments.every((entry) => {
-          try { return entry.frame.contentDocument === entry.document; } catch { return false; }
-        });
-        if (!current || current.value.snapshotId !== request.snapshotId || current.document !== globalObject.document || !framesCurrent ||
-            runtime.now() - current.createdAt >= SNAPSHOT_TTL_MS || !current.refs.has(request.ref)) {
-          runtime.current = null; throw codedError('snapshot_stale', 'browser snapshot is stale');
-        }
-        return { snapshotId: current.value.snapshotId, ref: request.ref };
+        const element = currentElement(runtime, request);
+        const metadata = request.actionKind === 'click' || request.actionKind === 'submit'
+          ? submitMetadata(element, runtime, request.actionKind === 'submit') : null;
+        const risk = { submit: request.actionKind === 'type' ? null : metadata ? metadata.submit : null,
+          formId: metadata?.formId || null,
+          secret: request.actionKind === 'type' ? String(element.type || '').toLowerCase() === 'password' : null };
+        return { snapshotId: runtime.current.value.snapshotId, ref: request.ref,
+          actionKind: request.actionKind, documentId: runtime.current.value.documentId, ...risk };
       }
-      throw codedError('unsupported_operation', 'browser automation operation is unsupported');
+      return actionPostcondition(runtime, request);
     } };
   globalObject.__PSYCHE_AUTOMATION__ = runtime;
   return runtime;
@@ -246,7 +421,7 @@ export function browserAutomationSource() {
   const definitions = { MAX_VISITED, MAX_NODES, MAX_DEPTH, MAX_NAME_BYTES, MAX_URL_BYTES, MAX_SNAPSHOT_BYTES,
     SNAPSHOT_METADATA_RESERVE_BYTES, SNAPSHOT_TTL_MS, APPROVED_ROLES,
     codedError, boundedText, roleFor, nodeText, accessibleName, hiddenByTree, visible, intersectClip, stateFor, randomSession,
-    createSnapshot, installBrowserAutomation };
+    createSnapshot, currentElement, eventFor, dispatchEvent, submitMetadata, actionPostcondition, installBrowserAutomation };
   return `(function(){${Object.entries(definitions).map(([name, definition]) =>
     `const ${name}=${typeof definition === 'function' ? definition.toString() : JSON.stringify(definition)};`).join('')}installBrowserAutomation(window);})()`;
 }

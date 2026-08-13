@@ -28,6 +28,7 @@ interface PendingEffect {
   timer: ReturnType<typeof setTimeout>; timedOut: boolean;
   resolve(result: ProviderEffectResult): void; reject(error: unknown): void;
 }
+const EFFECT_TOMBSTONE_TIMEOUT_MS = 60_000;
 function codedError(code: string, message: string, ambiguous = false): Error {
   return Object.assign(new Error(message), { code, ...(ambiguous ? { ambiguous: true } : {}) });
 }
@@ -36,6 +37,7 @@ function codedError(code: string, message: string, ambiguous = false): Error {
 export class BrowserProviderBroker {
   private provider: ActiveProvider | undefined;
   private readonly pendingByTab = new Map<string, PendingEffect>();
+  private readonly tabTails = new Map<string, Promise<void>>();
   private readonly pendingByRequest = new Map<string, PendingEffect>();
   private readonly canonicalizePath: NonNullable<BrowserProviderBrokerOptions['canonicalizePath']>;
 
@@ -57,6 +59,15 @@ export class BrowserProviderBroker {
   }
 
   dispatch(input: BrowserProviderDispatch): Promise<ProviderEffectResult> {
+    const previous = this.tabTails.get(input.tabId);
+    const result = previous ? previous.then(() => this.dispatchOne(input)) : this.dispatchOne(input);
+    const tail = result.then(() => undefined, () => undefined);
+    this.tabTails.set(input.tabId, tail);
+    tail.finally(() => { if (this.tabTails.get(input.tabId) === tail) this.tabTails.delete(input.tabId); });
+    return result;
+  }
+
+  private dispatchOne(input: BrowserProviderDispatch): Promise<ProviderEffectResult> {
     const provider = this.provider;
     const resource = this.options.surfaces.get(input.tabId);
     if (!provider || !resource || resource.kind !== 'browser_tab'
@@ -64,7 +75,7 @@ export class BrowserProviderBroker {
       return Promise.reject(codedError('provider_unavailable', 'browser provider is unavailable'));
     }
     if (this.pendingByTab.has(input.tabId)) {
-      return Promise.reject(codedError('effect_in_flight', 'a browser effect is already in flight for this tab'));
+      return Promise.reject(codedError('effect_in_flight', 'an ambiguous browser effect still fences this tab'));
     }
     const requestId = randomUUID();
     return new Promise<ProviderEffectResult>((resolve, reject) => {
@@ -77,6 +88,9 @@ export class BrowserProviderBroker {
         provider.send({ version: 1, type: 'provider.effect.cancel', requestId,
           actionId: input.actionId, reason: 'timeout' });
         reject(codedError('effect_unknown', 'browser provider effect outcome is unknown', true));
+        pending.timer = setTimeout(() => {
+          if (this.pendingByRequest.get(requestId) === pending) this.disconnect(provider);
+        }, EFFECT_TOMBSTONE_TIMEOUT_MS);
       }, AGENT_CONTROL_LIMITS.actionTimeoutMs);
       this.pendingByTab.set(input.tabId, pending);
       this.pendingByRequest.set(requestId, pending);

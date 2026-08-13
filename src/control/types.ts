@@ -86,6 +86,32 @@ export type BrowserSurfaceAction =
 
 export type BrowserSemanticAction = BrowserElementAction | BrowserSurfaceAction;
 
+export type BrowserActionPostcondition =
+  | { kind: 'focus'; focused: boolean }
+  | { kind: 'type'; secret: false; value: string }
+  | { kind: 'type'; secret: true; valuePresent: boolean }
+  | { kind: 'type'; secret: false; canceled: true }
+  | { kind: 'type'; secret: true; canceled: true; valuePresent: boolean }
+  | { kind: 'select'; values: readonly string[] }
+  | { kind: 'scroll'; scrollLeft: number; scrollTop: number }
+  | { kind: 'click'; clicked: true; submit: boolean; url: string; title: string }
+  | { kind: 'submit'; submitted: true; submit: boolean; url: string; title: string }
+  | { kind: 'navigate'; url: string; title: string }
+  | { kind: 'reload'; url: string; title: string }
+  | { kind: 'back'; url: string; title: string }
+  | { kind: 'forward'; url: string; title: string }
+  | { kind: 'screenshot'; pngBase64: string; width: number; height: number; navigationEpoch: number; navigationUrl: string }
+  | { kind: 'close'; closed: true };
+
+export type BrowserActionDurableSummary = {
+  kind: BrowserSemanticAction['kind'];
+  result: 'result_unavailable';
+};
+
+export type PaneActionPostcondition =
+  | { paneId: string; generation: number; focused: boolean }
+  | { paneId: string; generation: number; cols: number; rows: number };
+
 export interface SemanticSnapshot {
   schema: 'psyche.browser.snapshot/v1';
   id: string;
@@ -122,7 +148,7 @@ export interface ActionReceipt {
   completedAt?: string;
   code?: string;
   message?: string;
-  value?: unknown;
+  value?: BrowserActionPostcondition | BrowserActionDurableSummary | PaneActionPostcondition;
 }
 
 interface AgentSurfaceAuthorization {

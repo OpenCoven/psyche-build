@@ -72,7 +72,10 @@ export type ControlRequest =
 
 export type BrowserProviderOperation =
   | { kind: 'inspect'; includeScreenshot?: boolean }
-  | { kind: 'action'; action: BrowserSemanticAction; snapshotId?: string }
+  | { kind: 'resolve'; snapshotId: string; elementRef: string; actionKind: 'click' | 'type' | 'select' | 'submit' | 'upload' | 'download' | 'scroll' | 'focus' }
+  | { kind: 'action'; action: BrowserSemanticAction; snapshotId?: string; expectedRisk?: {
+      documentId: string; submit: boolean | null; formId: string | null; secret: boolean | null;
+    } }
   | { kind: 'script'; source: string; args?: unknown };
 
 export type ProviderEffectResult =

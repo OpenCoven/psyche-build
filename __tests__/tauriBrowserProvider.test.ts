@@ -56,7 +56,12 @@ describe('desktop control browser provider transport', () => {
     expect(provider).toContain('"projectRoot".to_string()');
     expect(provider).toMatch(/get_webview_window\("main"\)/);
     expect(provider).toContain('connected: Arc<AtomicBool>');
-    expect(provider).toContain('pending_effects.lock().remove');
+    expect(provider).toContain('pending_effects: Arc<Mutex<HashMap<String, PendingEffectCorrelation>>>');
+    expect(provider).toContain('EFFECT_TOMBSTONE_TTL');
+    expect(provider).toContain('reserve_pending_effect(');
+    expect(provider).toContain('cancel_pending_effect(');
+    expect(provider).toContain('complete_pending_effect(');
+    expect(provider).not.toContain('pending_effects.lock().remove');
     expect(provider).toContain('provider.effect.cancel');
     expect(provider).toContain('webview_emit_failed');
     expect(provider).toContain('MAX_PENDING_EFFECTS');

@@ -67,16 +67,21 @@ describe('BrowserProviderBroker', () => {
     expect(() => connection.complete(requestId, {
       actionId: 'wrong-action', status: 'succeeded', value: {},
     })).toThrowError(/action correlation/);
-    await expect(broker.dispatch({
+    const second = broker.dispatch({
       actionId: 'action-2', tabId: 'tab-1', generation: 1,
       operation: { kind: 'action', action: { kind: 'reload' } },
-    })).rejects.toMatchObject({ code: 'effect_in_flight' });
+    });
+    expect(sent).toHaveLength(1);
     connection.complete(requestId, {
       actionId: 'action-1', status: 'succeeded', value: { snapshot: true },
     });
     await expect(pending).resolves.toEqual({
       actionId: 'action-1', status: 'succeeded', value: { snapshot: true },
     });
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    const secondRequestId = (sent[1] as { requestId: string }).requestId;
+    connection.complete(secondRequestId, { actionId: 'action-2', status: 'succeeded' });
+    await expect(second).resolves.toMatchObject({ actionId: 'action-2', status: 'succeeded' });
   });
 
   it('times out ambiguously, fences the tab, and only late completion clears it', async () => {
@@ -96,10 +101,40 @@ describe('BrowserProviderBroker', () => {
         operation: { kind: 'inspect' } })).rejects.toMatchObject({ code: 'effect_in_flight' });
       const requestId = (sent[0] as { requestId: string }).requestId;
       connection.complete(requestId, { actionId: 'action-timeout', status: 'succeeded' });
+      expect(() => connection.complete(requestId, {
+        actionId: 'action-timeout', status: 'succeeded',
+      })).toThrowError(expect.objectContaining({ code: 'request_correlation_mismatch' }));
       const next = broker.dispatch({ actionId: 'after-late', tabId: 'tab-1', generation: 1,
         operation: { kind: 'inspect' } });
+      const nextRequestId = (sent[2] as { requestId: string }).requestId;
+      connection.complete(nextRequestId, { actionId: 'after-late', status: 'succeeded' });
+      await expect(next).resolves.toMatchObject({ actionId: 'after-late', status: 'succeeded' });
+      expect(() => connection.complete('unknown', {
+        actionId: 'after-late', status: 'succeeded',
+      })).toThrowError(expect.objectContaining({ code: 'request_correlation_mismatch' }));
       connection.disconnect();
-      await expect(next).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('disconnects and clears a timed-out fence when the bounded late-completion window expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const { broker, connection, surfaces } = harness();
+      await connection.upsert(resource());
+      const pending = broker.dispatch({ actionId: 'abandoned', tabId: 'tab-1', generation: 1,
+        operation: { kind: 'inspect' } });
+      const assertion = expect(pending).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await assertion;
+      await vi.advanceTimersByTimeAsync(60_001);
+      expect(surfaces.get('tab-1')).toBeUndefined();
+      await expect(broker.dispatch({ actionId: 'after-abandon', tabId: 'tab-1', generation: 1,
+        operation: { kind: 'inspect' } })).rejects.toMatchObject({ code: 'provider_unavailable' });
+      expect(() => connection.complete('unknown', {
+        actionId: 'abandoned', status: 'succeeded',
+      })).toThrowError(expect.objectContaining({ code: 'provider_unavailable' }));
     } finally {
       vi.useRealTimers();
     }

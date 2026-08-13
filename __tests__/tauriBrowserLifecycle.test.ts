@@ -3234,10 +3234,90 @@ describe('agent browser inspection lifecycle', () => {
 
   it('invalidates reload and page-started navigation and revalidates screenshot correlation', () => {
     expect(mainJs).toContain('queueBrowserReload');
-    expect(functionSource(mainJs, 'handleBrowserPageLoad')).toContain('invalidateBrowserAutomation');
+    expect(functionSource(mainJs, 'handleBrowserPageLoad')).toContain('queueBrowserAutomationInvalidation');
+    expect(functionSource(mainJs, 'queueBrowserAutomationInvalidation')).toContain('invalidateBrowserAutomation');
     expect(mainJs).toContain('validatePendingBrowserInspection');
     expect(mainJs).toContain('documentId');
     expect(mainJs).toContain('snapshotId');
+  });
+
+  it('fences a queued old-snapshot action as soon as a page load starts', async () => {
+    const tab = { id: 'tab-a', loading: false };
+    const pair = {
+      project: { id: 'project-a', root: '/project' },
+      worktreePath: '/project',
+      tab,
+    };
+    type PageStartPair = typeof pair;
+    let releasePrior!: () => void;
+    const prior = new Promise<void>((resolve) => { releasePrior = resolve; });
+    const lifecycle = {
+      closing: false,
+      controlGeneration: 7,
+      controlLabel: 'native-tab-a',
+      nativeLabel: 'native-tab-a',
+      documentId: 'document-a',
+      documentSequence: 1,
+      invalidationGeneration: 0,
+      navigationTail: prior,
+    };
+    const invocations: Array<{ command: string; args: Record<string, any> }> = [];
+    const invoke = async (command: string, args: Record<string, any>) => {
+      invocations.push({ command, args });
+      return {};
+    };
+    const providerBrowserError = (code: string, message: string) => Object.assign(new Error(message), { code });
+    const invalidateBrowserAutomation = compileFunction<
+      (tab: object) => Promise<boolean>
+    >(functionSource(mainJs, 'invalidateBrowserAutomation'), {
+      browserTabLifecycle: () => lifecycle,
+      invoke,
+    });
+    let queueBrowserAutomationInvalidation: ((pair: PageStartPair) => Promise<boolean>) | undefined;
+    try {
+      queueBrowserAutomationInvalidation = compileFunction(
+        functionSource(mainJs, 'queueBrowserAutomationInvalidation'),
+        { browserTabLifecycle: () => lifecycle, invalidateBrowserAutomation },
+      );
+    } catch (_) {
+      queueBrowserAutomationInvalidation = undefined;
+    }
+    const queueBrowserProviderAction = compileFunction<
+      (pair: PageStartPair, request: Record<string, any>) => Promise<unknown>
+    >(functionSource(mainJs, 'queueBrowserProviderAction'), {
+      browserTabLifecycle: () => lifecycle,
+      findBrowserPane: () => ({}),
+      browserPaneIsClosing: () => false,
+      providerBrowserError,
+      invoke,
+    });
+    const handleBrowserPageLoad = compileFunction<
+      (event: { payload: { label: string; url: string; phase: string } }) => boolean
+    >(functionSource(mainJs, 'handleBrowserPageLoad'), {
+      browserNativeEventContext: () => pair,
+      invalidateBrowserAutomation,
+      queueBrowserAutomationInvalidation,
+      state: { activeProjectId: 'other-project' },
+      activeWorkspaceRoot: () => '/project',
+      publishBrowserResource: undefined,
+    });
+
+    const action = queueBrowserProviderAction(pair, {
+      generation: 7,
+      operation: { snapshotId: 'snapshot-a', action: { kind: 'click', elementRef: 'e1' } },
+    });
+    expect(handleBrowserPageLoad({
+      payload: { label: 'native-tab-a', url: 'https://next.example', phase: 'started' },
+    })).toBe(true);
+    releasePrior();
+
+    await expect(action).rejects.toMatchObject({ code: 'snapshot_stale' });
+    await lifecycle.navigationTail;
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0]).toMatchObject({
+      command: 'browser_action',
+      args: { request: { tabId: 'tab-a', generation: 7, action: { kind: 'invalidate' } } },
+    });
   });
 
   it('stores viewport per exact tab rather than reading the active preview during publication', () => {
@@ -3256,12 +3336,56 @@ describe('agent browser inspection lifecycle', () => {
   it('queues inspect after navigation and requires the exact tab generation', () => {
     expect(mainJs).toContain('control:provider-effect-request');
     const dispatch = functionSource(mainJs, 'handleBrowserProviderEffect');
-    expect(dispatch).toContain('operation.kind !== "inspect"');
+    expect(dispatch).toContain('operation.kind !== "inspect" && operation.kind !== "action" && operation.kind !== "resolve"');
     expect(dispatch).toContain('pair.tab.id !== payload.tabId');
     expect(dispatch).toContain('lifecycle.generation !== payload.generation');
     expect(functionSource(mainJs, 'queueBrowserInspection')).toContain('lifecycle.navigationTail');
     expect(dispatch).toContain('control_provider_complete');
     expect(dispatch).not.toContain('currentBrowserTab');
+  });
+
+  it('routes exact provider actions through the per-tab lifecycle queue without active-tab fallback', () => {
+    const dispatch = functionSource(mainJs, 'handleBrowserProviderEffect');
+    const queue = functionSource(mainJs, 'queueBrowserProviderAction');
+    expect(dispatch).toContain('queueBrowserProviderAction(pair');
+    expect(queue).toContain('lifecycle.navigationTail');
+    expect(queue).toContain('invoke("browser_action"');
+    expect(queue).toContain('queueBrowserReload(pair.project, pair.tab, pane)');
+    expect(queue).toContain('closeBrowserTab(pair.project, pair.tab.id, pair.worktreePath)');
+    expect(queue).toContain('lifecycle.navigationTail.then(closeRun, closeRun)');
+    expect(queue).not.toContain('currentBrowserTab');
+    expect(dispatch).not.toContain('currentBrowserTab');
+  });
+
+  it('returns stable backend_unavailable before native-only upload, download, or permission effects', () => {
+    const queue = functionSource(mainJs, 'queueBrowserProviderAction');
+    expect(queue).toContain('["upload", "download", "permission_response"]');
+    expect(queue).toContain('backend_unavailable');
+    expect(queue.indexOf('backend_unavailable')).toBeLessThan(queue.indexOf('invoke("browser_action"'));
+  });
+
+  it('preserves only stable browser action failure codes across the native provider boundary', () => {
+    const classify = compileFunction<(error: unknown) => string>(
+      functionSource(mainJs, 'browserProviderFailureCode'),
+      { BROWSER_PROVIDER_FAILURE_CODES: new Set([
+        'approval_identity_mismatch', 'snapshot_stale', 'element_missing', 'element_disabled',
+        'element_hidden', 'invalid_action', 'backend_unavailable', 'invalid_snapshot',
+        'unsupported_operation', 'result_too_large', 'action_failed', 'effect_unknown',
+      ]) },
+    );
+    expect(classify(Object.assign(new Error('disabled'), { code: 'element_disabled' }))).toBe('element_disabled');
+    expect(classify(new Error('snapshot_stale'))).toBe('snapshot_stale');
+    expect(classify(Object.assign(new Error('untrusted'), { code: 'made_up' }))).toBe('action_failed');
+    expect(classify(Object.assign(new Error('ambiguous'), { code: 'effect_unknown' }))).toBe('effect_unknown');
+    expect(classify(new Error('mentions snapshot_stale but is not the code'))).toBe('action_failed');
+    expect(functionSource(mainJs, 'handleBrowserProviderEffect')).toContain('browserProviderFailureCode(error)');
+    expect(mainJs).toContain('"effect_unknown"');
+  });
+
+  it('exports the future drawer-facing generic click limitation copy', () => {
+    const controlEntry = readFileSync(join(process.cwd(), 'native/desktop/psyche-build-tauri/web/control/control-entry.js'), 'utf8');
+    expect(controlEntry).toContain('GENERIC_CLICK_LIMITATION');
+    expect(controlEntry).toContain('Application-defined effects behind a generic click cannot be perfectly predicted.');
   });
 
   it('invalidates the page snapshot before native navigation and destroy', () => {

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createDaemonControlHandlers } from '../../src/daemon/controlHandlers.js';
+import { createBrowserSnapshotResolver, createDaemonControlHandlers } from '../../src/daemon/controlHandlers.js';
 import { AgenticCapabilityRouter } from '../../src/orchestration/capabilityRouter.js';
 import { TmuxControl } from '../../src/services/tmuxControl.js';
 import { SurfaceRegistry } from '../../src/control/surfaces.js';
@@ -57,6 +57,49 @@ function paneHandlerHarness() {
 }
 
 describe('createDaemonControlHandlers agent pane surfaces', () => {
+  it('resolves browser risk through the exact provider binding without caller semantic metadata', async () => {
+    const dispatch = vi.fn(async () => ({ status: 'succeeded', value: {
+      snapshotId: 'snapshot-1', ref: 'e7', actionKind: 'click', documentId: 'document-1',
+      submit: true, formId: 'form-1', secret: null,
+    } }));
+    const resolve = createBrowserSnapshotResolver({ dispatch } as never);
+    await expect(resolve({
+      taskId: 'task', leaseId: 'lease', leaseRevision: 1, tabId: 'tab-1', generation: 4,
+      snapshotId: 'snapshot-1', action: { kind: 'click', elementRef: 'e7', semantic: { submit: false } },
+    })).resolves.toMatchObject({
+      tabId: 'tab-1', generation: 4, snapshotId: 'snapshot-1', elementRef: 'e7',
+      actionKind: 'click', documentId: 'document-1', submit: true, formId: 'form-1', secret: null,
+    });
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      tabId: 'tab-1', generation: 4,
+      operation: { kind: 'resolve', snapshotId: 'snapshot-1', elementRef: 'e7', actionKind: 'click' },
+    }));
+  });
+
+  it('preserves every canonical browser risk field including nulls through action dispatch', async () => {
+    const dispatch = vi.fn(async () => ({ status: 'succeeded', value: {
+      clicked: true, submit: false, url: 'https://example.test', title: 'Example',
+    } }));
+    const handlers = createDaemonControlHandlers({
+      tmux: new TmuxControl('psyche-test'), projectRoot: '/tmp/psyche-test-root',
+      sessionName: 'psyche-test', capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+      browserProviders: { dispatch } as never,
+      createCovenClient: () => ({ listSessions: async () => [] }),
+    });
+    await handlers.actOnBrowser({
+      taskId: 'task', leaseId: 'lease', leaseRevision: 1, tabId: 'tab-1', generation: 4,
+      snapshotId: 'snapshot-1', action: { kind: 'click', elementRef: 'e7' },
+    }, 'action-1', {
+      tabId: 'tab-1', generation: 4, snapshotId: 'snapshot-1', elementRef: 'e7',
+      actionKind: 'click', documentId: 'document-1', submit: false, formId: null, secret: null,
+    });
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      operation: expect.objectContaining({ expectedRisk: {
+        documentId: 'document-1', submit: false, formId: null, secret: null,
+      } }),
+    }));
+  });
+
   it('keeps browser provider backends fail closed when no provider is composed', async () => {
     const spawnPane = vi.fn();
     const handlers = createDaemonControlHandlers({

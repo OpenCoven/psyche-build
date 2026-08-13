@@ -2,7 +2,7 @@ import type { TmuxControl } from '../services/tmuxControl.js';
 import { assertTmuxPaneId } from '../utils/tmuxTarget.js';
 import { decodeBase64Payload } from '../utils/base64.js';
 import { buildDesktopUseQuickInput, isDesktopUseQuickAction, type DesktopUseQuickAction } from '../utils/covenDesktopUse.js';
-import type { ControlHandlers } from '../control/runtime.js';
+import type { CanonicalBrowserSnapshotResolver, ControlHandlers } from '../control/runtime.js';
 import { validatePaneNamedKeys } from '../control/types.js';
 import type { PaneResourceController } from '../control/resources/panes.js';
 import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
@@ -49,6 +49,43 @@ function notSupported(kind: string): () => Promise<never> {
     new Error(`control command not supported by the daemon adapter: ${kind}`),
     { code: 'command_not_supported' },
   ));
+}
+
+export function createBrowserSnapshotResolver(
+  broker: BrowserProviderBroker,
+): CanonicalBrowserSnapshotResolver {
+  return async (payload) => {
+    if (typeof payload.snapshotId !== 'string' || !('elementRef' in payload.action)) return undefined;
+    const result = await broker.dispatch({
+      actionId: `resolve:${payload.tabId}:${payload.generation}:${payload.snapshotId}:${payload.action.elementRef}`,
+      tabId: payload.tabId,
+      generation: payload.generation,
+      operation: {
+        kind: 'resolve', snapshotId: payload.snapshotId, elementRef: payload.action.elementRef,
+        actionKind: payload.action.kind,
+      },
+    });
+    if (result.status !== 'succeeded') {
+      throw Object.assign(new Error(result.message), {
+        code: result.code,
+        ...(result.status === 'unknown' ? { ambiguous: true } : {}),
+      });
+    }
+    if (!result.value || typeof result.value !== 'object') return undefined;
+    const value = result.value as Record<string, unknown>;
+    if (typeof value.documentId !== 'string' || value.documentId.length === 0 ||
+      !('submit' in value) || !(typeof value.submit === 'boolean' || value.submit === null) ||
+      !('formId' in value) || !(typeof value.formId === 'string' || value.formId === null) ||
+      !('secret' in value) || !(typeof value.secret === 'boolean' || value.secret === null)) return undefined;
+    return {
+      tabId: payload.tabId, generation: payload.generation,
+      snapshotId: typeof value.snapshotId === 'string' ? value.snapshotId : '',
+      elementRef: typeof value.ref === 'string' ? value.ref : '',
+      actionKind: typeof value.actionKind === 'string' ? value.actionKind as never : payload.action.kind,
+      documentId: value.documentId,
+      submit: value.submit, formId: value.formId, secret: value.secret,
+    };
+  };
 }
 
 /**
@@ -216,13 +253,17 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
           ? {} : { includeScreenshot: payload.includeScreenshot }) },
       }));
     },
-    async actOnBrowser(payload, actionId) {
+    async actOnBrowser(payload, actionId, binding) {
       return effectValue(await browserProviders().dispatch({
         actionId,
         tabId: payload.tabId,
         generation: payload.generation,
         operation: { kind: 'action', action: payload.action,
-          ...('snapshotId' in payload && payload.snapshotId ? { snapshotId: payload.snapshotId } : {}) },
+          ...('snapshotId' in payload && payload.snapshotId ? { snapshotId: payload.snapshotId } : {}),
+          ...(binding ? { expectedRisk: {
+            documentId: binding.documentId, submit: binding.submit,
+            formId: binding.formId, secret: binding.secret,
+          } } : {}) },
       }));
     },
     async runBrowserScript(payload, actionId) {

@@ -2887,6 +2887,40 @@ mod browser_snapshot_tests {
             Err("invalid_snapshot".into())
         );
     }
+
+    #[test]
+    fn typed_invalidate_payload_does_not_require_a_snapshot_or_element_ref() {
+        let payload = browser_action_payload(&BrowserActionRequest {
+            tab_id: "tab-1".into(),
+            generation: 7,
+            snapshot_id: String::new(),
+            expected_risk: serde_json::json!({}),
+            action: BrowserDomAction::Invalidate,
+        })
+        .unwrap();
+        assert_eq!(payload, serde_json::json!({ "kind": "invalidate" }));
+    }
+
+    #[test]
+    fn browser_action_error_codes_are_allowlisted_at_the_native_boundary() {
+        assert_eq!(
+            stable_browser_action_error_code(Some("element_disabled")),
+            "element_disabled"
+        );
+        assert_eq!(
+            stable_browser_action_error_code(Some("snapshot_stale")),
+            "snapshot_stale"
+        );
+        assert_eq!(
+            stable_browser_action_error_code(Some("attacker_defined")),
+            "action_failed"
+        );
+        assert_eq!(
+            stable_browser_action_error_code(Some("effect_unknown")),
+            "effect_unknown"
+        );
+        assert_eq!(stable_browser_action_error_code(None), "action_failed");
+    }
 }
 
 #[derive(Serialize)]
@@ -3037,6 +3071,97 @@ struct BrowserInspectResponse {
     snapshot_json: String,
     navigation_epoch: u64,
     navigation_url: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum BrowserDomAction {
+    Invalidate,
+    Resolve {
+        element_ref: String,
+        action_kind: String,
+    },
+    Click {
+        element_ref: String,
+    },
+    Type {
+        element_ref: String,
+        text: String,
+        #[serde(default)]
+        append: bool,
+    },
+    Select {
+        element_ref: String,
+        values: Vec<String>,
+    },
+    Scroll {
+        element_ref: String,
+        #[serde(default)]
+        delta_x: f64,
+        #[serde(default)]
+        delta_y: f64,
+    },
+    Focus {
+        element_ref: String,
+    },
+    Submit {
+        element_ref: String,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserActionRequest {
+    tab_id: String,
+    generation: u64,
+    snapshot_id: String,
+    #[serde(default)]
+    expected_risk: serde_json::Value,
+    action: BrowserDomAction,
+}
+
+fn browser_action_payload(request: &BrowserActionRequest) -> Result<serde_json::Value, String> {
+    let mut action = serde_json::to_value(&request.action).map_err(|error| error.to_string())?;
+    if matches!(request.action, BrowserDomAction::Invalidate) {
+        return Ok(action);
+    }
+    let object = action
+        .as_object_mut()
+        .ok_or_else(|| "invalid_action".to_string())?;
+    let reference = object
+        .remove("elementRef")
+        .ok_or_else(|| "invalid_action".to_string())?;
+    object.insert("ref".to_string(), reference);
+    object.insert(
+        "snapshotId".to_string(),
+        serde_json::Value::String(request.snapshot_id.clone()),
+    );
+    if let Some(expected) = request.expected_risk.as_object() {
+        object.insert("expectedRisk".to_string(), expected.clone().into());
+    }
+    Ok(action)
+}
+
+fn stable_browser_action_error_code(code: Option<&str>) -> &'static str {
+    match code {
+        Some("approval_identity_mismatch") => "approval_identity_mismatch",
+        Some("snapshot_stale") => "snapshot_stale",
+        Some("element_missing") => "element_missing",
+        Some("element_disabled") => "element_disabled",
+        Some("element_hidden") => "element_hidden",
+        Some("invalid_action") => "invalid_action",
+        Some("backend_unavailable") => "backend_unavailable",
+        Some("invalid_snapshot") => "invalid_snapshot",
+        Some("unsupported_operation") => "unsupported_operation",
+        Some("result_too_large") => "result_too_large",
+        Some("effect_unknown") => "effect_unknown",
+        Some("action_failed") => "action_failed",
+        _ => "action_failed",
+    }
 }
 
 fn validate_browser_snapshot_json(
@@ -3350,6 +3475,115 @@ async fn browser_inspect(
     })
 }
 
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn browser_action(
+    app: AppHandle,
+    caller: tauri::Webview,
+    bindings: State<'_, BrowserBindingState>,
+    request: BrowserActionRequest,
+) -> Result<serde_json::Value, String> {
+    use block2::RcBlock;
+    use objc2::{runtime::AnyObject, ClassType, MainThreadMarker};
+    use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
+    use objc2_web_kit::{WKContentWorld, WKWebView};
+
+    require_main_webview(&caller)?;
+    let initial = browser_binding(&bindings, &request.tab_id, request.generation)?;
+    let label = initial.label.clone();
+    let payload = serde_json::to_string(&browser_action_payload(&request)?)
+        .map_err(|error| error.to_string())?;
+    let script = format!(
+        "{};JSON.stringify((()=>{{try{{return {{ok:true,value:window.__PSYCHE_AUTOMATION__.dispatch({})}}}}catch(error){{return {{ok:false,code:String(error&&error.code||'invalid_action'),message:String(error&&error.message||'browser action failed')}}}}}})())",
+        BROWSER_AUTOMATION_RUNTIME, payload
+    );
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser webview missing".to_string())?;
+    let before_url = webview
+        .url()
+        .map_err(|error| error.to_string())?
+        .to_string();
+    let binding = reconcile_browser_binding_live_url(
+        &bindings,
+        &request.tab_id,
+        request.generation,
+        &before_url,
+    )?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    webview
+        .with_webview(move |platform_webview| {
+            let sender = Mutex::new(Some(sender));
+            let completion = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+                let result = if !error.is_null() {
+                    Err("browser action failed".to_string())
+                } else if value.is_null() {
+                    Err("invalid_action_result".to_string())
+                } else {
+                    let object = unsafe { &*(value as *const NSObject) };
+                    if !object.isKindOfClass(NSString::class()) {
+                        Err("invalid_action_result".to_string())
+                    } else {
+                        let text =
+                            unsafe { &*(value as *const AnyObject as *const NSString) }.to_string();
+                        if text.len() > MAX_BROWSER_INSPECTION_BYTES {
+                            Err("result_too_large".to_string())
+                        } else {
+                            Ok(text)
+                        }
+                    }
+                };
+                if let Some(sender) = sender.lock().take() {
+                    let _ = sender.send(result);
+                }
+            });
+            let mtm = MainThreadMarker::new().expect("WKWebView callback runs on the main thread");
+            let world_name = NSString::from_str("com.opencoven.psyche.browser-inspection");
+            let world = unsafe { WKContentWorld::worldWithName(&world_name, mtm) };
+            let source = NSString::from_str(&script);
+            let webview = unsafe { &*(platform_webview.inner() as *mut WKWebView) };
+            unsafe {
+                webview.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                    &source,
+                    None,
+                    &world,
+                    Some(&completion),
+                )
+            };
+        })
+        .map_err(|error| error.to_string())?;
+    let result_json = tokio::time::timeout(BROWSER_INSPECTION_TIMEOUT, receiver)
+        .await
+        .map_err(|_| "browser action timed out".to_string())?
+        .map_err(|_| "browser action callback closed".to_string())??;
+    let envelope: serde_json::Value =
+        serde_json::from_str(&result_json).map_err(|_| "invalid_action_result".to_string())?;
+    if envelope.get("ok") != Some(&serde_json::Value::Bool(true)) {
+        return Err(stable_browser_action_error_code(
+            envelope.get("code").and_then(|value| value.as_str()),
+        )
+        .to_string());
+    }
+    let value = envelope
+        .get("value")
+        .cloned()
+        .ok_or_else(|| "invalid_action_result".to_string())?;
+    let after_url = webview
+        .url()
+        .map_err(|error| error.to_string())?
+        .to_string();
+    let current = reconcile_browser_binding_live_url(
+        &bindings,
+        &request.tab_id,
+        request.generation,
+        &after_url,
+    )?;
+    if current.navigation_epoch != binding.navigation_epoch && before_url == after_url {
+        return Err("snapshot_stale".to_string());
+    }
+    Ok(value)
+}
+
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn browser_inspect(
@@ -3358,6 +3592,18 @@ async fn browser_inspect(
     _bindings: State<'_, BrowserBindingState>,
     _request: BrowserInspectRequest,
 ) -> Result<BrowserInspectResponse, String> {
+    require_main_webview(&caller)?;
+    Err("backend_unavailable".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn browser_action(
+    _app: AppHandle,
+    caller: tauri::Webview,
+    _bindings: State<'_, BrowserBindingState>,
+    _request: BrowserActionRequest,
+) -> Result<serde_json::Value, String> {
     require_main_webview(&caller)?;
     Err("backend_unavailable".to_string())
 }
@@ -4728,6 +4974,7 @@ pub fn run() {
             browser_reload,
             browser_install_automation,
             browser_inspect,
+            browser_action,
             browser_snapshot,
             app_environment,
             coven_sessions,

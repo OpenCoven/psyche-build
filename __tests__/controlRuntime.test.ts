@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ControlRuntime, type ControlHandlers } from '../src/control/runtime.js';
+import { ControlRuntime, type CanonicalBrowserSnapshotResolver, type ControlHandlers } from '../src/control/runtime.js';
 import { ApprovalStore } from '../src/control/approvals.js';
 import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
 import { SurfaceRegistry } from '../src/control/surfaces.js';
@@ -51,17 +51,16 @@ function agentSurfaceHarness() {
     ttlMs: 60_000,
     grants: [{
       target: { kind: 'browser_tab', id: 'tab-1', generation: 1 },
-      capabilities: ['browser.interact'],
+      capabilities: ['browser.interact', 'browser.screenshot', 'browser.navigate', 'browser.history', 'browser.close'],
     }],
   });
-  const risk = { submit: false };
-  const resolveBrowserSnapshot = vi.fn(async (payload: {
-    tabId: string; generation: number; snapshotId?: string; action: { kind: string; elementRef?: string };
-  }) => {
+  const risk = { submit: false, formId: null as string | null };
+  const resolveBrowserSnapshot = vi.fn<CanonicalBrowserSnapshotResolver>(async (payload) => {
     if (!payload.snapshotId || !payload.action.elementRef) return undefined;
     return {
       tabId: payload.tabId, generation: payload.generation, snapshotId: payload.snapshotId,
-      elementRef: payload.action.elementRef, actionKind: payload.action.kind as 'click', submit: risk.submit,
+      elementRef: payload.action.elementRef, actionKind: payload.action.kind as never, documentId: 'document-1',
+      submit: risk.submit, formId: risk.submit ? (risk.formId ?? 'form-1') : null, secret: null,
     };
   });
   return { surfaces, capabilityLeases, approvals, lease, risk, resolveBrowserSnapshot };
@@ -181,7 +180,21 @@ describe('ControlRuntime', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     handlers.sendPrompt = vi.fn();
-    handlers.actOnBrowser = vi.fn();
+    handlers.actOnBrowser = vi.fn(async (payload) => {
+      switch (payload.action.kind) {
+        case 'focus': return { focused: true };
+        case 'type': return { secret: false, value: payload.action.text };
+        case 'select': return { values: payload.action.values };
+        case 'scroll': return { scrollLeft: 1, scrollTop: 2 };
+        case 'submit': return { submitted: true, submit: true, url: 'https://example.test', title: 'Example' };
+        case 'navigate': case 'reload': case 'back': case 'forward':
+          return { url: 'https://example.test', title: 'Example' };
+        case 'screenshot': return { pngBase64: 'iVBORw==', width: 1, height: 1,
+          navigationEpoch: 1, navigationUrl: 'https://example.test' };
+        case 'close': return { closed: true };
+        default: return { clicked: true, submit: false, url: 'https://example.test', title: 'Example' };
+      }
+    });
     handlers.inspectBrowser = vi.fn();
     handlers.actOnPane = vi.fn();
     handlers.observePane = vi.fn();
@@ -204,7 +217,9 @@ describe('ControlRuntime', () => {
   it('joins an in-flight exact retry after requested persistence and conflicts on changed identity', async () => {
     const deps = agentSurfaceHarness();
     let release!: () => void;
-    handlers.actOnBrowser = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+    handlers.actOnBrowser = vi.fn(() => new Promise((resolve) => { release = () => resolve({
+      clicked: true, submit: false, url: 'https://example.test', title: 'Example',
+    }); }));
     const journal = createMemoryJournal();
     const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
     const original = browserAction(deps.lease.id);
@@ -298,9 +313,7 @@ describe('ControlRuntime', () => {
     });
     const outcome = await runtime.submit(browserAction(deps.lease.id));
     expect(JSON.stringify(outcome)).not.toContain('OTHER_HANDLER_SECRET');
-    expect(outcome).toMatchObject({
-      status: 'succeeded', value: { actionId: 'cmd-click', state: 'succeeded' },
-    });
+    expect(outcome).toMatchObject({ status: 'unknown', code: 'effect_unknown' });
   });
 
   it.each([
@@ -524,6 +537,258 @@ describe('ControlRuntime', () => {
     expect(deps.resolveBrowserSnapshot).toHaveBeenCalledTimes(2);
   });
 
+  it('normalizes and persists an exact bounded browser action postcondition', async () => {
+    const deps = agentSurfaceHarness();
+    handlers.actOnBrowser = vi.fn(async () => ({ clicked: true, submit: false,
+      url: 'https://example.test/after', title: 'After' }));
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    await expect(runtime.submit(browserAction(deps.lease.id))).resolves.toMatchObject({
+      status: 'succeeded', value: { value: { kind: 'click', clicked: true, submit: false,
+        url: 'https://example.test/after', title: 'After' } },
+    });
+    expect(runtime.actionStatus('cmd-click')).toMatchObject({
+      value: { kind: 'click', clicked: true, submit: false },
+    });
+  });
+
+  it('rejects oversized browser postconditions instead of preserving provider values', async () => {
+    const deps = agentSurfaceHarness();
+    handlers.actOnBrowser = vi.fn(async () => ({ clicked: true, submit: false,
+      url: `https://example.test/${'x'.repeat(3000)}`, title: 'After' }));
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    await expect(runtime.submit(browserAction(deps.lease.id))).resolves.toMatchObject({
+      status: 'unknown', code: 'effect_unknown',
+    });
+  });
+
+  it.each([
+    ['nonsecret success without value', { secret: false }],
+    ['secret success without valuePresent', { secret: true }],
+    ['nonsecret success with contradictory valuePresent', { secret: false, value: 'new', valuePresent: true }],
+    ['secret success leaking value', { secret: true, valuePresent: true, value: 'secret' }],
+    ['nonsecret canceled with mutated value', { secret: false, canceled: true, value: 'new' }],
+    ['secret canceled without valuePresent', { secret: true, canceled: true }],
+    ['non-canceled success with canceled false', { secret: false, value: 'new', canceled: false }],
+  ])('marks contradictory type evidence unknown: %s', async (_label, evidence) => {
+    const deps = agentSurfaceHarness();
+    deps.resolveBrowserSnapshot.mockImplementation(async (payload) => ({
+      tabId: payload.tabId, generation: payload.generation, snapshotId: payload.snapshotId!,
+      elementRef: 'elementRef' in payload.action ? payload.action.elementRef : '', actionKind: 'type',
+      documentId: 'document-1', submit: null, formId: null, secret: false,
+    }));
+    handlers.actOnBrowser = vi.fn(async () => evidence);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    await expect(runtime.submit(browserAction(deps.lease.id, {
+      payload: { ...browserAction(deps.lease.id).payload,
+        action: { kind: 'type', elementRef: 'e17', text: 'new' } },
+    }))).resolves.toMatchObject({ status: 'unknown', code: 'effect_unknown' });
+    expect(runtime.actionStatus('cmd-click')).toMatchObject({ state: 'unknown', code: 'effect_unknown' });
+  });
+
+  it.each(['click', 'close'] as const)('rejects provider-supplied %s postcondition kind even when the rest is valid', async (kind) => {
+    const deps = agentSurfaceHarness();
+    handlers.actOnBrowser = vi.fn(async () => ({ kind, clicked: true, submit: false,
+      url: 'https://example.test', title: 'Example' }));
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    await expect(runtime.submit(browserAction(deps.lease.id))).resolves.toMatchObject({
+      status: 'unknown', code: 'effect_unknown',
+    });
+  });
+
+  it.each([
+    ['focus', { kind: 'focus', elementRef: 'e17' }, { focused: true }],
+    ['type', { kind: 'type', elementRef: 'e17', text: 'new' }, { secret: false, value: 'new' }],
+    ['select', { kind: 'select', elementRef: 'e17', values: ['one'] }, { values: ['one'] }],
+    ['scroll', { kind: 'scroll', elementRef: 'e17', deltaY: 1 }, { scrollLeft: 0, scrollTop: 1 }],
+    ['click', { kind: 'click', elementRef: 'e17' }, { clicked: true, submit: false,
+      url: 'https://example.test', title: 'Example' }],
+    ['submit', { kind: 'submit', elementRef: 'e17' }, { submitted: true, submit: true,
+      url: 'https://example.test', title: 'Example' }],
+    ['navigate', { kind: 'navigate', url: 'https://example.test/next' }, {
+      url: 'https://example.test/next', title: 'Next' }],
+    ['reload', { kind: 'reload' }, { url: 'https://example.test', title: 'Example' }],
+    ['back', { kind: 'back' }, { url: 'https://example.test/back', title: 'Back' }],
+    ['forward', { kind: 'forward' }, { url: 'https://example.test/forward', title: 'Forward' }],
+    ['screenshot', { kind: 'screenshot' }, { pngBase64: 'iVBORw==', width: 1, height: 1,
+      navigationEpoch: 1, navigationUrl: 'https://example.test' }],
+    ['close', { kind: 'close' }, { closed: true }],
+  ] as const)('rejects a provider kind field for commanded %s evidence', async (actionKind, action, evidence) => {
+    const deps = agentSurfaceHarness();
+    deps.resolveBrowserSnapshot.mockImplementation(async (payload) => {
+      if (!payload.snapshotId || !('elementRef' in payload.action)) return undefined;
+      const kind = payload.action.kind;
+      return {
+        tabId: payload.tabId, generation: payload.generation, snapshotId: payload.snapshotId,
+        elementRef: payload.action.elementRef, actionKind: kind as never, documentId: 'document-1',
+        submit: kind === 'click' || kind === 'submit' ? kind === 'submit' : null,
+        formId: kind === 'submit' ? 'form-1' : null,
+        secret: kind === 'type' ? false : null,
+      };
+    });
+    handlers.actOnBrowser = vi.fn(async () => ({ ...evidence,
+      kind: actionKind === 'close' ? 'click' : 'close' }));
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    const base = browserAction(deps.lease.id);
+    const payload = { ...base.payload, action } as Record<string, unknown>;
+    if (!('elementRef' in action)) delete payload.snapshotId;
+    await runtime.submit(browserAction(deps.lease.id, {
+      id: `cmd-kind-${actionKind}`, idempotencyKey: `idem-kind-${actionKind}`, payload,
+    }));
+    const approval = deps.approvals.snapshot()[0];
+    if (approval) {
+      await runtime.submit(command({
+        id: `approve-kind-${actionKind}`, idempotencyKey: `approve-kind-${actionKind}`,
+        kind: 'approval.resolve', actor: { id: 'operator-1', kind: 'human' }, ownerEpoch: 7,
+        payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
+      }));
+    }
+    expect(runtime.actionStatus(`cmd-kind-${actionKind}`)).toMatchObject({
+      state: 'unknown', code: 'effect_unknown',
+    });
+  });
+
+  it.each([
+    ['focus', { kind: 'focus', elementRef: 'e17' }, { focused: true }, false],
+    ['type text', { kind: 'type', elementRef: 'e17', text: 'typed-secret' },
+      { secret: false, value: 'typed-secret' }, false],
+    ['type secret', { kind: 'type', elementRef: 'e17', text: 'typed-secret' },
+      { secret: true, valuePresent: true }, true],
+    ['type canceled', { kind: 'type', elementRef: 'e17', text: 'typed-secret' },
+      { secret: false, canceled: true }, false],
+    ['type secret canceled', { kind: 'type', elementRef: 'e17', text: 'typed-secret' },
+      { secret: true, canceled: true, valuePresent: true }, true],
+    ['select', { kind: 'select', elementRef: 'e17', values: ['selected-secret'] },
+      { values: ['selected-secret'] }, false],
+    ['scroll', { kind: 'scroll', elementRef: 'e17', deltaY: 7 },
+      { scrollLeft: 3, scrollTop: 7 }, false],
+    ['click', { kind: 'click', elementRef: 'e17' }, { clicked: true, submit: false,
+      url: 'https://private.example/click', title: 'Private click title' }, false],
+    ['submit', { kind: 'submit', elementRef: 'e17' }, { submitted: true, submit: true,
+      url: 'https://private.example/submit', title: 'Private submit title' }, false],
+    ['navigate', { kind: 'navigate', url: 'https://private.example/navigate' }, {
+      url: 'https://private.example/navigate', title: 'Private navigate title' }, false],
+    ['reload', { kind: 'reload' }, { url: 'https://private.example/reload', title: 'Private reload title' }, false],
+    ['back', { kind: 'back' }, { url: 'https://private.example/back', title: 'Private back title' }, false],
+    ['forward', { kind: 'forward' }, { url: 'https://private.example/forward', title: 'Private forward title' }, false],
+    ['screenshot', { kind: 'screenshot' }, { pngBase64: 'c2NyZWVuc2hvdC1zZWNyZXQ=', width: 2, height: 2,
+      navigationEpoch: 9, navigationUrl: 'https://private.example/screenshot' }, false],
+    ['close', { kind: 'close' }, { closed: true }, false],
+  ] as const)('keeps %s evidence live but redacts it from journal and replay', async (label, action, evidence, secret) => {
+    const deps = agentSurfaceHarness();
+    deps.resolveBrowserSnapshot.mockImplementation(async (payload) => {
+      if (!payload.snapshotId || !('elementRef' in payload.action)) return undefined;
+      const kind = payload.action.kind;
+      return {
+        tabId: payload.tabId, generation: payload.generation, snapshotId: payload.snapshotId,
+        elementRef: payload.action.elementRef, actionKind: kind as never, documentId: 'document-1',
+        submit: kind === 'click' || kind === 'submit' ? kind === 'submit' : null,
+        formId: kind === 'submit' ? 'form-1' : null,
+        secret: kind === 'type' ? secret : null,
+      };
+    });
+    handlers.actOnBrowser = vi.fn(async () => evidence);
+    const journal = createMemoryJournal();
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+    const base = browserAction(deps.lease.id);
+    const payload = { ...base.payload, action } as Record<string, unknown>;
+    if (!('elementRef' in action)) delete payload.snapshotId;
+    const original = browserAction(deps.lease.id, {
+      id: `private-${label}`, idempotencyKey: `private-${label}`, payload,
+    });
+    await runtime.submit(original);
+    const approval = deps.approvals.snapshot()[0];
+    if (approval) await runtime.submit(command({
+      id: `approve-private-${label}`, idempotencyKey: `approve-private-${label}`,
+      kind: 'approval.resolve', actor: { id: 'operator-1', kind: 'human' }, ownerEpoch: 7,
+      payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
+    }));
+    expect(runtime.actionStatus(original.id)).toMatchObject({ state: 'succeeded', value: { kind: action.kind, ...evidence } });
+    const terminal = [...journal.read()].reverse().find((event) => event.payload.commandId === original.id)!;
+    expect(terminal.payload).toMatchObject({ receipt: { value: {
+      kind: action.kind, result: 'result_unavailable',
+    } } });
+    expect(JSON.stringify(terminal.payload)).not.toContain('private.example');
+    expect(JSON.stringify(terminal.payload)).not.toContain('typed-secret');
+    expect(JSON.stringify(terminal.payload)).not.toContain('selected-secret');
+    expect(JSON.stringify(terminal.payload)).not.toContain('c2NyZWVuc2hvdC1zZWNyZXQ=');
+
+    const effectCount = vi.mocked(handlers.actOnBrowser).mock.calls.length;
+    await expect(runtime.submit(original)).resolves.toMatchObject({ status: 'succeeded', value: {
+      actionId: original.id, value: { kind: action.kind, result: 'result_unavailable' },
+    } });
+    const restarted = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+    await expect(restarted.submit(original)).resolves.toMatchObject({ status: 'succeeded', value: {
+      actionId: original.id, value: { kind: action.kind, result: 'result_unavailable' },
+    } });
+    expect(handlers.actOnBrowser).toHaveBeenCalledTimes(effectCount);
+  });
+
+  it('downgrades legacy durable browser evidence to result_unavailable during rehydration', async () => {
+    const journal = createMemoryJournal();
+    await journal.append('command.succeeded', {
+      commandId: 'legacy-browser', idempotencyKey: 'legacy-browser', status: 'succeeded',
+      receipt: {
+        schema: 'psyche.control.receipt/v1', actionId: 'legacy-browser', state: 'succeeded',
+        resource: { kind: 'browser_tab', id: 'tab-1', generation: 1 },
+        createdAt: '2026-08-12T12:00:00.000Z', completedAt: '2026-08-12T12:00:01.000Z',
+        value: { kind: 'click', clicked: true, submit: false,
+          url: 'https://legacy-private.example', title: 'Legacy private title' },
+      },
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    expect(runtime.actionStatus('legacy-browser')).toEqual(expect.objectContaining({
+      value: { kind: 'click', result: 'result_unavailable' },
+    }));
+    expect(JSON.stringify(runtime.actionStatus('legacy-browser'))).not.toContain('legacy-private');
+  });
+
+  it('normalizes actual submit and screenshot provider postconditions into exact receipts', async () => {
+    const deps = agentSurfaceHarness();
+    deps.resolveBrowserSnapshot.mockImplementation(async (payload) => ({
+      tabId: payload.tabId, generation: payload.generation, snapshotId: payload.snapshotId!,
+      elementRef: 'elementRef' in payload.action ? payload.action.elementRef : '',
+      actionKind: 'submit', documentId: 'document-1',
+      submit: true, formId: 'form-1', secret: null,
+    }));
+    handlers.actOnBrowser = vi.fn(async (payload) => payload.action.kind === 'submit'
+      ? { submitted: true, submit: true, url: 'https://example.test/after', title: 'After' }
+      : { pngBase64: 'iVBORw==', width: 1, height: 1, navigationEpoch: 4,
+          navigationUrl: 'https://example.test/after' });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    await runtime.submit(browserAction(deps.lease.id, {
+      payload: { ...browserAction(deps.lease.id).payload, action: { kind: 'submit', elementRef: 'e17' } },
+    }));
+    const approval = deps.approvals.snapshot()[0]!;
+    await expect(runtime.submit(command({
+      id: 'approve-submit', idempotencyKey: 'approve-submit', kind: 'approval.resolve',
+      actor: { id: 'operator-1', kind: 'human' }, ownerEpoch: 7,
+      payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
+    }))).resolves.toMatchObject({ status: 'succeeded', value: { value: {
+      kind: 'submit', submitted: true, submit: true, url: 'https://example.test/after', title: 'After',
+    } } });
+    const screenshotPayload = { ...browserAction(deps.lease.id).payload,
+      action: { kind: 'screenshot' as const } };
+    delete (screenshotPayload as { snapshotId?: string }).snapshotId;
+    await expect(runtime.submit(browserAction(deps.lease.id, {
+      id: 'screenshot-action', idempotencyKey: 'screenshot-action',
+      payload: screenshotPayload,
+    }))).resolves.toMatchObject({ status: 'succeeded', value: { value: {
+      kind: 'screenshot', pngBase64: 'iVBORw==', width: 1, height: 1, navigationEpoch: 4,
+    } } });
+  });
+
+  it('marks missing screenshot evidence unknown after provider dispatch', async () => {
+    const deps = agentSurfaceHarness();
+    handlers.actOnBrowser = vi.fn(async () => undefined);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    const screenshotPayload = { ...browserAction(deps.lease.id).payload,
+      action: { kind: 'screenshot' as const } };
+    delete (screenshotPayload as { snapshotId?: string }).snapshotId;
+    await expect(runtime.submit(browserAction(deps.lease.id, {
+      payload: screenshotPayload,
+    }))).resolves.toMatchObject({ status: 'unknown', code: 'effect_unknown' });
+  });
+
   it('uses canonical snapshot risk, requests approval without invoking or holding the queue, then resumes immutable intent', async () => {
     const deps = agentSurfaceHarness();
     deps.risk.submit = true;
@@ -558,6 +823,7 @@ describe('ControlRuntime', () => {
     expect(handlers.actOnBrowser).toHaveBeenLastCalledWith(
       expect.objectContaining({ action: expect.objectContaining({ elementRef: 'e17' }) }),
       'cmd-click',
+      expect.objectContaining({ submit: true, snapshotId: 'snapshot-1', elementRef: 'e17' }),
     );
     await expect(runtime.submit(browserAction(deps.lease.id))).resolves.toMatchObject({
       status: 'succeeded', value: { state: 'succeeded', actionId: 'cmd-click' },
@@ -848,12 +1114,30 @@ describe('ControlRuntime', () => {
     expect(handlers.actOnBrowser).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { action: { kind: 'click', elementRef: 'e17' }, binding: { submit: false, secret: null } },
+    { action: { kind: 'type', elementRef: 'e17', text: 'value' }, binding: { submit: null, formId: null, secret: false } },
+    { action: { kind: 'submit', elementRef: 'e17' }, binding: { submit: true, formId: null, secret: null } },
+  ] as const)('rejects incomplete exact $action.kind risk identity fields', async ({ action, binding }) => {
+    const deps = agentSurfaceHarness();
+    deps.resolveBrowserSnapshot.mockResolvedValueOnce({
+      tabId: 'tab-1', generation: 1, snapshotId: 'snapshot-1', elementRef: 'e17',
+      actionKind: action.kind, ...binding,
+    } as never);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    await expect(runtime.submit(browserAction(deps.lease.id, {
+      payload: { ...browserAction(deps.lease.id).payload, action },
+    }))).resolves.toMatchObject({ status: 'failed', code: 'snapshot_stale' });
+    expect(handlers.actOnBrowser).not.toHaveBeenCalled();
+  });
+
   it.each(['tabId', 'generation', 'snapshotId', 'elementRef', 'actionKind'] as const)(
     'rejects a canonical binding with mismatched %s',
     async (field) => {
       const deps = agentSurfaceHarness();
       deps.resolveBrowserSnapshot.mockResolvedValueOnce({
-        tabId: 'tab-1', generation: 1, snapshotId: 'snapshot-1', elementRef: 'e17', actionKind: 'click', submit: false,
+        tabId: 'tab-1', generation: 1, snapshotId: 'snapshot-1', elementRef: 'e17', actionKind: 'click',
+        documentId: 'document-1', submit: false, formId: null, secret: null,
         [field]: field === 'generation' ? 2 : field === 'actionKind' ? 'type' : 'mismatch',
       });
       const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
@@ -868,7 +1152,9 @@ describe('ControlRuntime', () => {
     const deps = agentSurfaceHarness();
     deps.risk.submit = true;
     let releaseEffect!: () => void;
-    handlers.actOnBrowser = vi.fn(() => new Promise<void>((resolve) => { releaseEffect = resolve; }));
+    handlers.actOnBrowser = vi.fn(() => new Promise((resolve) => { releaseEffect = () => resolve({
+      clicked: true, submit: true, url: 'https://example.test', title: 'Example',
+    }); }));
     const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
     await runtime.submit(browserAction(deps.lease.id));
     const approval = deps.approvals.snapshot()[0]!;
@@ -905,6 +1191,53 @@ describe('ControlRuntime', () => {
       actor: { id: 'operator-1', kind: 'human' }, ownerEpoch: 7,
       payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
     }))).resolves.toMatchObject({ status: 'failed', code: 'approval_identity_mismatch' });
+    expect(handlers.actOnBrowser).not.toHaveBeenCalled();
+  });
+
+  it('binds approval to the original canonical form identity across consume and queue resume', async () => {
+    const deps = agentSurfaceHarness();
+    let formId = 'form-1';
+    deps.resolveBrowserSnapshot.mockImplementation(async (payload) => ({
+      tabId: payload.tabId, generation: payload.generation, snapshotId: payload.snapshotId!,
+      elementRef: 'elementRef' in payload.action ? payload.action.elementRef : '',
+      actionKind: 'click', documentId: 'document-1',
+      submit: true, formId, secret: null,
+    }));
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    await runtime.submit(browserAction(deps.lease.id));
+    const approval = deps.approvals.snapshot()[0]!;
+    formId = 'form-2';
+    await expect(runtime.submit(command({
+      id: 'cmd-form-change', idempotencyKey: 'idem-form-change', kind: 'approval.resolve',
+      actor: { id: 'operator-1', kind: 'human' }, ownerEpoch: 7,
+      payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
+    }))).resolves.toMatchObject({ status: 'failed', code: 'approval_identity_mismatch' });
+    expect(handlers.actOnBrowser).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: 'generic click becomes submit', initial: { submit: false, formId: null, secret: null },
+      changed: { submit: true, formId: 'form-2', secret: null }, action: { kind: 'click', elementRef: 'e17' } },
+    { name: 'text input becomes password', initial: { submit: null, formId: null, secret: false },
+      changed: { submit: null, formId: null, secret: true }, action: { kind: 'type', elementRef: 'e17', text: 'secret' } },
+  ])('fails queued low-risk action before effect when $name', async ({ initial, changed, action }) => {
+    const deps = agentSurfaceHarness();
+    let risk: { submit: boolean | null; formId: string | null; secret: boolean | null } = initial;
+    deps.resolveBrowserSnapshot.mockImplementation(async (payload) => ({
+      tabId: payload.tabId, generation: payload.generation, snapshotId: payload.snapshotId!,
+      elementRef: 'elementRef' in payload.action ? payload.action.elementRef : '',
+      actionKind: payload.action.kind as never,
+      documentId: 'document-1', ...risk,
+    }));
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    const release = runtime.blockResourceQueue('browser_tab:tab-1:1');
+    const pending = runtime.submit(browserAction(deps.lease.id, {
+      payload: { ...browserAction(deps.lease.id).payload, action },
+    }));
+    await vi.waitFor(() => expect(runtime.actionStatus('cmd-click')).toMatchObject({ state: 'queued' }));
+    risk = changed;
+    release();
+    await expect(pending).resolves.toMatchObject({ status: 'failed', code: 'approval_identity_mismatch' });
     expect(handlers.actOnBrowser).not.toHaveBeenCalled();
   });
 
@@ -1401,6 +1734,7 @@ describe('ControlRuntime', () => {
     });
     await runtime.submit(action);
     expect(handlers.actOnBrowser).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(runtime.events())).not.toContain('sensitive backend detail');
   });
 
   it('settles unknown without hanging when terminal persistence fails after effect', async () => {

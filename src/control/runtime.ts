@@ -16,6 +16,7 @@ import { SurfaceRegistry, type SurfaceResource } from './surfaces.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
 import type {
   ActionReceipt,
+  BrowserActionPostcondition,
   BrowserSemanticAction,
   CommandOutcome,
   CommandRecord,
@@ -24,6 +25,8 @@ import type {
   PromptEnvelope,
   LeaseRequestState,
   PaneObservationResult,
+  PaneActionPostcondition,
+  BrowserActionDurableSummary,
 } from './types.js';
 
 export type Payload<K extends ControlCommand['kind']> = Extract<ControlCommand, { kind: K }>['payload'];
@@ -50,7 +53,7 @@ export interface ControlHandlers {
   observePane(payload: Payload<'pane.observe'>): Promise<unknown>;
   actOnPane(payload: Payload<'pane.action'>): Promise<unknown>;
   inspectBrowser(payload: Payload<'browser.inspect'>, actionId: string): Promise<unknown>;
-  actOnBrowser(payload: Payload<'browser.action'>, actionId: string): Promise<unknown>;
+  actOnBrowser(payload: Payload<'browser.action'>, actionId: string, binding?: CanonicalBrowserElementBinding): Promise<unknown>;
   runBrowserScript(payload: Payload<'browser.script'>, actionId: string): Promise<unknown>;
 }
 
@@ -64,8 +67,10 @@ export interface CanonicalBrowserElementBinding {
   readonly snapshotId: string;
   readonly elementRef: string;
   readonly actionKind: Extract<Payload<'browser.action'>['action'], { elementRef: string }>['kind'];
-  readonly submit?: boolean;
-  readonly secret?: boolean;
+  readonly documentId: string;
+  readonly submit: boolean | null;
+  readonly formId: string | null;
+  readonly secret: boolean | null;
 }
 
 export interface RuntimeEvent {
@@ -119,6 +124,7 @@ interface PendingApproval {
     kind: 'pane.action' | 'browser.action' | 'browser.script';
   }>;
   readonly classification: PolicyClassification;
+  readonly browserBinding?: CanonicalBrowserElementBinding;
   readonly effect: RedactedApprovalEffect;
 }
 
@@ -126,10 +132,6 @@ interface AgentSurfaceHandlerResult {
   readonly receipt: ActionReceipt;
   readonly livePaneObservation?: PaneObservationResult;
 }
-
-type PaneActionPostcondition =
-  | Readonly<{ paneId: string; generation: number; focused: boolean }>
-  | Readonly<{ paneId: string; generation: number; cols: number; rows: number }>;
 
 const TERMINAL_EVENT_KINDS = new Set([
   'command.succeeded',
@@ -344,7 +346,7 @@ export class ControlRuntime {
         ...approval,
         resource: redactTarget(approval.resource),
       })),
-      receipts: this.receipts.map((receipt) => ({
+      receipts: this.receipts.map(({ value: _value, ...receipt }) => ({
         ...receipt,
         resource: redactTarget(receipt.resource),
       })),
@@ -512,13 +514,15 @@ export class ControlRuntime {
           effect,
           actionPayload: command.payload,
         });
-        this.pendingApprovals.set(approval.id, { approval, command, classification: prepared.classification, effect });
+        this.pendingApprovals.set(approval.id, { approval, command, classification: prepared.classification,
+          ...(prepared.browserBinding ? { browserBinding: freezeBrowserBinding(prepared.browserBinding) } : {}), effect });
         const receipt = this.recordReceipt(command, prepared.target, 'approval_required', 'approval_required');
         return this.appendTerminal(command, succeededOutcome(receipt));
       }
       return this.enqueueAgentSurfaceEffect(command, prepared.target, async () => {
-        await this.prepareAgentSurfaceEffect(command);
-        return this.invokeAgentSurfaceHandler(command, prepared.target);
+        const current = await this.prepareAgentSurfaceEffect(command);
+        assertPreparedIdentity(prepared, current);
+        return this.invokeAgentSurfaceHandler(command, prepared.target, prepared.browserBinding);
       });
     } catch (error) {
       const outcome = safeSurfaceFailure(error);
@@ -530,10 +534,11 @@ export class ControlRuntime {
     command: Extract<ControlCommand, {
       kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script';
     }>,
-  ): Promise<{ target: LeaseTarget; classification: PolicyClassification }> {
+  ): Promise<{ target: LeaseTarget; classification: PolicyClassification; browserBinding?: CanonicalBrowserElementBinding }> {
     this.assertCurrentOwner(command.ownerEpoch);
     let target: LeaseTarget;
     let classification: PolicyClassification;
+    let browserBinding: CanonicalBrowserElementBinding | undefined;
     switch (command.kind) {
       case 'pane.observe':
         this.requireResource(command.payload.paneId, command.payload.generation, 'pane');
@@ -571,12 +576,12 @@ export class ControlRuntime {
         this.assertCapabilityLease(command, target, browserCapabilityForAction(command.payload.action.kind));
         let risk;
         if ('snapshotId' in command.payload) {
-          const binding = await this.resolveBrowserSnapshot(command.payload);
-          assertBrowserBinding(command.payload, binding);
-          if (binding?.actionKind === 'click') {
-            risk = this.browserPolicy.resolveFromCanonicalSnapshot({ actionKind: 'click', submit: binding.submit === true });
-          } else if (binding?.actionKind === 'type') {
-            risk = this.browserPolicy.resolveFromCanonicalSnapshot({ actionKind: 'type', secret: binding.secret === true });
+          browserBinding = await this.resolveBrowserSnapshot(command.payload);
+          assertBrowserBinding(command.payload, browserBinding);
+          if (browserBinding?.actionKind === 'click') {
+            risk = this.browserPolicy.resolveFromCanonicalSnapshot({ actionKind: 'click', submit: browserBinding.submit === true });
+          } else if (browserBinding?.actionKind === 'type') {
+            risk = this.browserPolicy.resolveFromCanonicalSnapshot({ actionKind: 'type', secret: browserBinding.secret === true });
           }
         }
         if (command.payload.action.kind === 'upload') {
@@ -602,7 +607,7 @@ export class ControlRuntime {
         break;
     }
     this.assertCapabilityLease(command, target, classification.capability);
-    return { target, classification };
+    return { target, classification, ...(browserBinding ? { browserBinding } : {}) };
   }
 
   private assertCapabilityLease(
@@ -671,10 +676,11 @@ export class ControlRuntime {
       kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script';
     }>,
     target: LeaseTarget,
+    browserBinding?: CanonicalBrowserElementBinding,
   ): Promise<AgentSurfaceHandlerResult> {
     try {
       let livePaneObservation: PaneObservationResult | undefined;
-      let panePostcondition: PaneActionPostcondition | undefined;
+      let postcondition: PaneActionPostcondition | BrowserActionPostcondition | undefined;
       switch (command.kind) {
         case 'pane.observe': {
           const result = await requireHandler(this.handlers.observePane, command.kind)(command.payload);
@@ -683,21 +689,30 @@ export class ControlRuntime {
         }
         case 'pane.action': {
           const result = await requireHandler(this.handlers.actOnPane, command.kind)(command.payload);
-          panePostcondition = normalizePaneActionPostcondition(command, result);
+          postcondition = normalizePaneActionPostcondition(command, result);
           break;
         }
         case 'browser.inspect':
           await requireHandler(this.handlers.inspectBrowser, command.kind)(command.payload, command.id);
           break;
         case 'browser.action':
-          await requireHandler(this.handlers.actOnBrowser, command.kind)(command.payload, command.id);
+          {
+            const value = await requireHandler(this.handlers.actOnBrowser, command.kind)(
+              command.payload, command.id, browserBinding,
+            );
+            try {
+              postcondition = normalizeBrowserActionPostcondition(command.payload.action.kind, value);
+            } catch {
+              throw codedError('effect_unknown', 'browser effect returned invalid evidence', true);
+            }
+          }
           break;
         case 'browser.script':
           await requireHandler(this.handlers.runBrowserScript, command.kind)(command.payload, command.id);
           break;
       }
       return {
-        receipt: this.recordReceipt(command, target, 'succeeded', undefined, panePostcondition),
+        receipt: this.recordReceipt(command, target, 'succeeded', undefined, postcondition),
         ...(livePaneObservation ? { livePaneObservation } : {}),
       };
     } catch (error) {
@@ -928,8 +943,8 @@ export class ControlRuntime {
     try {
       current = await this.prepareAgentSurfaceEffect(pending.command);
       if (
-        current.classification.decision !== 'approval'
-        || current.classification.capability !== pending.classification.capability
+        !sameClassification(current.classification, pending.classification)
+        || !sameBrowserBinding(current.browserBinding, pending.browserBinding)
       ) throw codedError('approval_identity_mismatch', 'trusted action risk changed before approval consumption');
       this.approvals.consume({
         approvalId: resolved.id,
@@ -966,10 +981,12 @@ export class ControlRuntime {
         this.setActionStatus(pending.command, current.target, 'running');
         const revalidated = await this.prepareAgentSurfaceEffect(pending.command);
         if (
-          revalidated.classification.decision !== 'approval'
-          || revalidated.classification.capability !== pending.classification.capability
+          !sameClassification(revalidated.classification, pending.classification)
+          || !sameBrowserBinding(revalidated.browserBinding, pending.browserBinding)
         ) throw codedError('approval_identity_mismatch', 'trusted action risk changed before approved effect');
-        const { receipt } = await this.invokeAgentSurfaceHandler(pending.command, current.target);
+        const { receipt } = await this.invokeAgentSurfaceHandler(
+          pending.command, current.target, pending.browserBinding,
+        );
         const outcome = outcomeForReceipt(receipt);
         resolve(await this.appendTerminal(pending.command, outcome));
       }).catch(async (error: unknown) => {
@@ -1079,7 +1096,7 @@ export class ControlRuntime {
     resource: LeaseTarget,
     state: ActionReceipt['state'],
     code?: string,
-    value?: PaneActionPostcondition,
+    value?: PaneActionPostcondition | BrowserActionPostcondition,
   ): ActionReceipt {
     const receipt: ActionReceipt = Object.freeze({
       schema: 'psyche.control.receipt/v1',
@@ -1225,13 +1242,14 @@ export class ControlRuntime {
   private async appendTerminal(command: ControlCommand, outcome: CommandOutcome): Promise<CommandOutcome> {
     const receipt = this.terminalReceiptOverrides.get(command.id)
       ?? [...this.receipts].reverse().find(({ actionId }) => actionId === command.id);
+    const durableReceipt = receipt ? durableReceiptForJournal(receipt) : undefined;
     let event: RuntimeEvent;
     try {
       event = await this.journal.append(terminalKindForOutcome(outcome), {
         commandId: command.id,
         idempotencyKey: command.idempotencyKey,
-        ...payloadForOutcome(outcome),
-        ...(receipt ? { receipt } : {}),
+        ...payloadForOutcome(outcome, durableReceipt),
+        ...(durableReceipt ? { receipt: durableReceipt } : {}),
       });
     } catch {
       const unknown: CommandOutcome = {
@@ -1243,14 +1261,16 @@ export class ControlRuntime {
       this.setCanonicalActionOutcome(command, unknown);
       return unknown;
     }
-    this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
-    this.outcomesByCommandId.set(command.id, outcome);
+    const canonicalOutcome = durableReceipt && outcome.status === 'succeeded' && isActionReceipt(outcome.value)
+      ? outcomeForReceipt(durableReceipt) : outcome;
+    this.outcomesByIdempotencyKey.set(command.idempotencyKey, canonicalOutcome);
+    this.outcomesByCommandId.set(command.id, canonicalOutcome);
     const record = this.commandRecords.get(command.id);
     if (record) {
-      record.outcome = outcome;
+      record.outcome = canonicalOutcome;
       record.sequence = event.sequence;
     } else {
-      this.retainCommandRecord(command.id, { command, outcome, sequence: event.sequence });
+      this.retainCommandRecord(command.id, { command, outcome: canonicalOutcome, sequence: event.sequence });
     }
     this.terminalReceiptOverrides.delete(command.id);
     this.compactTerminalIndexes();
@@ -1451,10 +1471,10 @@ function terminalKindForOutcome(outcome: CommandOutcome): string {
   }
 }
 
-function payloadForOutcome(outcome: CommandOutcome): Record<string, unknown> {
+function payloadForOutcome(outcome: CommandOutcome, durableReceipt?: ActionReceipt): Record<string, unknown> {
   if (outcome.status === 'succeeded') {
-    return 'value' in outcome && isActionReceipt(outcome.value)
-      ? { status: outcome.status, receipt: outcome.value }
+    return durableReceipt && 'value' in outcome && isActionReceipt(outcome.value)
+      ? { status: outcome.status, receipt: durableReceipt }
       : { status: outcome.status };
   }
   const message = outcome.status === 'unknown'
@@ -1514,7 +1534,7 @@ function receiptPayload(event: RuntimeEvent): ActionReceipt | undefined {
   ) return undefined;
   const postcondition = resource.kind === 'pane'
     ? normalizeStoredPanePostcondition(resource.id, resource.generation, receipt.value)
-    : undefined;
+    : normalizeStoredBrowserActionSummary(receipt.value);
   return Object.freeze({
     schema: 'psyche.control.receipt/v1',
     actionId: receipt.actionId,
@@ -1525,6 +1545,32 @@ function receiptPayload(event: RuntimeEvent): ActionReceipt | undefined {
     ...(typeof receipt.code === 'string' ? { code: receipt.code } : {}),
     ...(postcondition ? { value: postcondition } : {}),
   });
+}
+
+const BROWSER_ACTION_RESULT_KINDS: ReadonlySet<BrowserSemanticAction['kind']> = new Set([
+  'focus', 'type', 'select', 'scroll', 'click', 'submit', 'upload', 'download',
+  'navigate', 'reload', 'back', 'forward', 'screenshot', 'close', 'permission_response',
+]);
+
+function normalizeStoredBrowserActionSummary(value: unknown): BrowserActionDurableSummary | undefined {
+  if (isExactPlainDataObject(value, ['kind', 'result'])) {
+    const summary = value as Record<string, unknown>;
+    if (typeof summary.kind === 'string'
+        && BROWSER_ACTION_RESULT_KINDS.has(summary.kind as BrowserSemanticAction['kind'])
+        && summary.result === 'result_unavailable') {
+      return Object.freeze({ kind: summary.kind as BrowserSemanticAction['kind'], result: 'result_unavailable' });
+    }
+    return undefined;
+  }
+  const legacy = normalizeBrowserActionPostcondition(undefined, value, false);
+  return legacy ? Object.freeze({ kind: legacy.kind, result: 'result_unavailable' }) : undefined;
+}
+
+function durableReceiptForJournal(receipt: ActionReceipt): ActionReceipt {
+  if (receipt.resource.kind !== 'browser_tab' || !receipt.value || !('kind' in receipt.value)) return receipt;
+  return Object.freeze({ ...receipt, value: Object.freeze({
+    kind: receipt.value.kind, result: 'result_unavailable' as const,
+  }) });
 }
 
 const RECEIPT_STATES: ReadonlySet<ActionReceipt['state']> = new Set([
@@ -1656,9 +1702,50 @@ function assertBrowserBinding(
     || binding.snapshotId !== payload.snapshotId
     || binding.elementRef !== payload.action.elementRef
     || binding.actionKind !== payload.action.kind
-    || (payload.action.kind === 'click' && typeof binding.submit !== 'boolean')
-    || (payload.action.kind === 'type' && typeof binding.secret !== 'boolean')
+    || ((payload.action.kind === 'click' || payload.action.kind === 'type' || payload.action.kind === 'submit')
+      && (!Object.hasOwn(binding, 'documentId') || typeof binding.documentId !== 'string' || !binding.documentId
+        || !Object.hasOwn(binding, 'submit') || !Object.hasOwn(binding, 'formId') || !Object.hasOwn(binding, 'secret')))
+    || (payload.action.kind === 'click' && (typeof binding.submit !== 'boolean'
+      || (binding.formId !== null && typeof binding.formId !== 'string') || binding.secret !== null))
+    || (payload.action.kind === 'type' && (binding.submit !== null || binding.formId !== null
+      || typeof binding.secret !== 'boolean'))
+    || (payload.action.kind === 'submit' && (typeof binding.submit !== 'boolean'
+      || typeof binding.formId !== 'string' || !binding.formId || binding.secret !== null))
   ) throw codedError('snapshot_stale', 'canonical element binding is stale or mismatched');
+}
+
+function freezeBrowserBinding(binding: CanonicalBrowserElementBinding): CanonicalBrowserElementBinding {
+  return Object.freeze({ ...binding });
+}
+
+function sameBrowserBinding(
+  left: CanonicalBrowserElementBinding | undefined,
+  right: CanonicalBrowserElementBinding | undefined,
+): boolean {
+  if (!left || !right) return left === right;
+  return left.tabId === right.tabId
+    && left.generation === right.generation
+    && left.snapshotId === right.snapshotId
+    && left.elementRef === right.elementRef
+    && left.actionKind === right.actionKind
+    && left.documentId === right.documentId
+    && left.submit === right.submit
+    && left.formId === right.formId
+    && left.secret === right.secret;
+}
+
+function sameClassification(left: PolicyClassification, right: PolicyClassification): boolean {
+  return left.decision === right.decision && left.capability === right.capability;
+}
+
+function assertPreparedIdentity(
+  expected: { classification: PolicyClassification; browserBinding?: CanonicalBrowserElementBinding },
+  actual: { classification: PolicyClassification; browserBinding?: CanonicalBrowserElementBinding },
+): void {
+  if (!sameClassification(expected.classification, actual.classification)
+      || !sameBrowserBinding(expected.browserBinding, actual.browserBinding)) {
+    throw codedError('approval_identity_mismatch', 'trusted action identity changed while queued');
+  }
 }
 
 function requireHandler<T extends (...args: never[]) => Promise<unknown>>(
@@ -1939,6 +2026,70 @@ function normalizePaneObservation(paneId: string, value: unknown): PaneObservati
     bytes: candidate.bytes,
     truncated: candidate.truncated,
   });
+}
+
+export function normalizeBrowserActionPostcondition(
+  actionKind: BrowserSemanticAction['kind'] | undefined,
+  value: unknown,
+  throwOnInvalid = true,
+): BrowserActionPostcondition | undefined {
+  const fail = () => {
+    if (throwOnInvalid) throw codedError('invalid_browser_postcondition', 'browser action postcondition is malformed');
+    return undefined;
+  };
+  if (value === undefined) return fail();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return fail();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Object.getPrototypeOf(value) !== Object.prototype
+      || Reflect.ownKeys(value).some((key) => typeof key === 'symbol')
+      || Object.values(descriptors).some((descriptor) => !descriptor.enumerable || !('value' in descriptor))) return fail();
+  const input = value as Record<string, unknown>;
+  if (actionKind !== undefined && Object.hasOwn(input, 'kind')) return fail();
+  const kind = actionKind ?? (typeof input.kind === 'string' ? input.kind as BrowserSemanticAction['kind'] : undefined);
+  const text = (key: string, max: number) => typeof input[key] === 'string' && Buffer.byteLength(input[key] as string) <= max
+    ? input[key] as string : undefined;
+  let result: BrowserActionPostcondition | undefined;
+  if (kind === 'focus' && typeof input.focused === 'boolean') result = { kind, focused: input.focused };
+  else if (kind === 'type' && input.secret === false && input.canceled === true) {
+    result = { kind, secret: false, canceled: true };
+  } else if (kind === 'type' && input.secret === true && input.canceled === true
+      && typeof input.valuePresent === 'boolean') {
+    result = { kind, secret: true, canceled: true, valuePresent: input.valuePresent };
+  } else if (kind === 'type' && input.secret === false && text('value', 512) !== undefined) {
+    result = { kind, secret: false, value: text('value', 512)! };
+  } else if (kind === 'type' && input.secret === true && typeof input.valuePresent === 'boolean') {
+    result = { kind, secret: true, valuePresent: input.valuePresent };
+  }
+  else if (kind === 'select' && Array.isArray(input.values) && input.values.length <= 100 &&
+      input.values.every((entry) => typeof entry === 'string' && Buffer.byteLength(entry) <= 512)) {
+    result = { kind, values: [...input.values] as string[] };
+  } else if (kind === 'scroll' && Number.isFinite(input.scrollLeft) && Number.isFinite(input.scrollTop)) {
+    result = { kind, scrollLeft: input.scrollLeft as number, scrollTop: input.scrollTop as number };
+  } else if (kind === 'click' && input.clicked === true && typeof input.submit === 'boolean' &&
+      text('url', 2048) !== undefined && text('title', 512) !== undefined) {
+    result = { kind, clicked: true, submit: input.submit, url: text('url', 2048)!, title: text('title', 512)! };
+  } else if (kind === 'submit' && input.submitted === true && typeof input.submit === 'boolean' &&
+      text('url', 2048) !== undefined && text('title', 512) !== undefined) {
+    result = { kind, submitted: true, submit: input.submit, url: text('url', 2048)!, title: text('title', 512)! };
+  } else if (['navigate', 'reload', 'back', 'forward'].includes(kind ?? '') &&
+      text('url', 2048) !== undefined && text('title', 512) !== undefined) {
+    result = { kind: kind as 'navigate' | 'reload' | 'back' | 'forward',
+      url: text('url', 2048)!, title: text('title', 512)! };
+  } else if (kind === 'screenshot' && typeof input.pngBase64 === 'string' && input.pngBase64.length > 0 &&
+      input.pngBase64.length <= Math.ceil(AGENT_CONTROL_LIMITS.screenshotBytes / 3) * 4 &&
+      Buffer.byteLength(input.pngBase64, 'base64') <= AGENT_CONTROL_LIMITS.screenshotBytes &&
+      /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(input.pngBase64) &&
+      Number.isSafeInteger(input.width) && (input.width as number) > 0 && (input.width as number) <= 16384 &&
+      Number.isSafeInteger(input.height) && (input.height as number) > 0 && (input.height as number) <= 16384 &&
+      Number.isSafeInteger(input.navigationEpoch) && (input.navigationEpoch as number) >= 0 &&
+      text('navigationUrl', 2048) !== undefined) {
+    result = { kind, pngBase64: input.pngBase64, width: input.width as number, height: input.height as number,
+      navigationEpoch: input.navigationEpoch as number, navigationUrl: text('navigationUrl', 2048)! };
+  } else if (kind === 'close' && input.closed === true) result = { kind, closed: true };
+  if (!result) return fail();
+  const expectedInputKeys = Object.keys(result).filter((key) => actionKind === undefined || key !== 'kind');
+  if (!isExactPlainDataObject(input, expectedInputKeys)) return fail();
+  return Object.freeze(result);
 }
 
 function normalizePaneActionPostcondition(
