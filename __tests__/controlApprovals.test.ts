@@ -1,16 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   ApprovalStore,
-  digestActionPayload,
   type ApprovalConsumeAssertion,
   type ApprovalRequest,
 } from '../src/control/approvals.js';
 import { AGENT_CONTROL_LIMITS } from '../src/control/limits.js';
-
-const baseActionPayload = () => ({
-  snapshotId: 'snapshot-1',
-  action: { kind: 'submit', elementRef: 'button-1' },
-});
 
 const baseRequest = (): ApprovalRequest => ({
   actionId: 'action-1',
@@ -20,7 +14,6 @@ const baseRequest = (): ApprovalRequest => ({
   resource: { kind: 'browser_tab', id: 'tab-1', generation: 3 },
   capability: 'browser.interact',
   effect: { kind: 'submit', target: 'Create issue' },
-  actionPayload: baseActionPayload(),
 });
 
 const assertionFor = (
@@ -36,7 +29,6 @@ const assertionFor = (
   resource: approval.resource,
   capability: approval.capability,
   effect: approval.effect,
-  actionPayload: baseActionPayload(),
   ...overrides,
 });
 
@@ -56,7 +48,6 @@ function assertConsumeRequiresCompleteIntent(
     leaseRevision: approval.leaseRevision,
     resource: approval.resource,
     capability: approval.capability,
-    actionPayload: baseActionPayload(),
   });
   // @ts-expect-error The current owner epoch is mandatory.
   store.consume({ ...assertionFor(approval), ownerEpoch: undefined });
@@ -72,8 +63,7 @@ type RequiredConsumeField =
   | 'leaseRevision'
   | 'resource'
   | 'capability'
-  | 'effect'
-  | 'actionPayload';
+  | 'effect';
 type OmissionIsRejected<K extends RequiredConsumeField> =
   Omit<ApprovalConsumeAssertion, K> extends ApprovalConsumeAssertion ? never : true;
 const requiredConsumeFields: { readonly [K in RequiredConsumeField]: OmissionIsRejected<K> } = {
@@ -86,36 +76,8 @@ const requiredConsumeFields: { readonly [K in RequiredConsumeField]: OmissionIsR
   resource: true,
   capability: true,
   effect: true,
-  actionPayload: true,
 };
 void requiredConsumeFields;
-const consumeHasNoCallerDigest: 'actionPayloadDigest' extends keyof ApprovalConsumeAssertion
-  ? never
-  : true = true;
-void consumeHasNoCallerDigest;
-
-function assertConsumeRejectsCallerDigest(
-  store: ApprovalStore,
-  approval: ReturnType<ApprovalStore['request']>,
-): void {
-  store.consume({
-    ...assertionFor(approval),
-    // @ts-expect-error Caller-supplied action digests are not authorization inputs.
-    actionPayloadDigest: approval.actionPayloadDigest,
-  });
-}
-void assertConsumeRejectsCallerDigest;
-
-function collectSensitiveStrings(value: unknown): string[] {
-  if (typeof value === 'string') {
-    return /[A-Z][A-Z_]+|\/private\//.test(value) ? [value] : [];
-  }
-  if (Array.isArray(value)) return value.flatMap(collectSensitiveStrings);
-  if (value && typeof value === 'object') {
-    return Object.values(value).flatMap(collectSensitiveStrings);
-  }
-  return [];
-}
 
 describe('ApprovalStore', () => {
   it('creates a deterministic digest and consumes an operator approval once', () => {
@@ -123,6 +85,9 @@ describe('ApprovalStore', () => {
     const pending = store.request(baseRequest());
 
     expect(pending.payloadDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(pending.payloadDigest).toBe(
+      '094c6ccd0b81b4457f4d053873f20b789c56b6d0e76c3d3b6ce53e94065fa510',
+    );
     expect(store.request(baseRequest()).payloadDigest).toBe(pending.payloadDigest);
     expect(store.approve(pending.id, 'operator', pending.payloadDigest).status).toBe('approved');
     expect(() => store.consume(assertionFor(pending))).not.toThrow();
@@ -140,7 +105,6 @@ describe('ApprovalStore', () => {
     ['resource generation', { resource: { kind: 'browser_tab', id: 'tab-1', generation: 4 } }],
     ['capability', { capability: 'browser.close' }],
     ['redacted effect', { effect: { kind: 'submit', target: 'Merge pull request' } }],
-    ['action payload', { actionPayload: { changed: true } }],
   ] as const)('changes the digest when %s changes', (_label, override) => {
     const clock = () => new Date('2026-08-12T12:00:00.000Z');
     const original = new ApprovalStore(clock).request(baseRequest());
@@ -174,7 +138,6 @@ describe('ApprovalStore', () => {
     'resource',
     'capability',
     'effect',
-    'actionPayload',
   ])('fails closed when the runtime assertion omits %s', (field) => {
     const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
     const pending = store.request(baseRequest());
@@ -306,7 +269,7 @@ describe('ApprovalStore', () => {
     store.request(baseRequest());
     expect(() => store.request({
       ...baseRequest(),
-      actionPayload: { changed: true },
+      effect: { kind: 'submit', target: 'Changed intent' },
     })).toThrowError(expect.objectContaining({ code: 'approval_action_conflict' }));
   });
 
@@ -354,156 +317,33 @@ describe('ApprovalStore', () => {
     );
   });
 
-  it('canonically hashes JSON payloads without key-order dependence', () => {
-    expect(digestActionPayload({ b: [true, null, 'x'], a: 1 }))
-      .toBe(digestActionPayload({ a: 1, b: [true, null, 'x'] }));
-  });
-
-  it('hashes normal, deeply frozen, and sealed dense arrays identically', () => {
-    const normal = [1, { a: [2] }];
-    const frozen = Object.freeze([
-      1,
-      Object.freeze({ a: Object.freeze([2]) }),
-    ]);
-    const sealedNested = Object.seal([2]);
-    const sealedObject = Object.seal({ a: sealedNested });
-    const sealed = Object.seal([1, sealedObject]);
-
-    expect(digestActionPayload(frozen)).toBe(digestActionPayload(normal));
-    expect(digestActionPayload(sealed)).toBe(digestActionPayload(normal));
-  });
-
-  it('losslessly distinguishes lone surrogates from replacement characters', () => {
-    expect(digestActionPayload({ text: '\uD800' }))
-      .not.toBe(digestActionPayload({ text: '\uFFFD' }));
-    const first = new ApprovalStore().request({ ...baseRequest(), effect: { kind: 'submit', target: '\uD800' } });
-    const second = new ApprovalStore().request({ ...baseRequest(), effect: { kind: 'submit', target: '\uFFFD' } });
-    expect(first.effect.targetDigest).not.toBe(second.effect.targetDigest);
-  });
-
   it.each([
-    undefined,
-    Number.NaN,
-    Infinity,
-    1n,
-    Symbol('unsupported'),
-    () => 'unsupported',
-    { value: undefined },
-    new Date('2026-08-12T12:00:00.000Z'),
-  ])('rejects unsupported non-JSON action payload value %#', (payload) => {
-    expect(() => digestActionPayload(payload)).toThrowError(
-      expect.objectContaining({ code: 'approval_payload_invalid' }),
-    );
-  });
+    'typedValue',
+    'script',
+    'terminalOutput',
+    'pageText',
+    'cookie',
+    'header',
+    'filePath',
+    'arbitraryExtra',
+  ])('rejects unsafe or unknown approval field %s', (field) => {
+    const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
 
-  it.each([
-    'accessor index',
-    'symbol property',
-    'non-enumerable extra',
-  ] as const)(
-    'rejects canonical arrays with %s',
-    (variant) => {
-      const payload = ['safe'];
-      if (variant === 'accessor index') {
-        Object.defineProperty(payload, '0', { get: () => 'unsafe', enumerable: true });
-      } else if (variant === 'symbol property') {
-        Object.defineProperty(payload, Symbol('unsafe'), { value: true });
-      } else {
-        Object.defineProperty(payload, 'hidden', { value: 'unsafe', enumerable: false });
-      }
-      expect(() => digestActionPayload(payload)).toThrowError(
+    for (const request of [
+      { ...baseRequest(), [field]: 'SENSITIVE_VALUE' },
+      {
+        ...baseRequest(),
+        effect: { ...baseRequest().effect, [field]: 'SENSITIVE_VALUE' },
+      },
+    ]) {
+      expect(() => store.request(request as ApprovalRequest)).toThrowError(
         expect.objectContaining({ code: 'approval_payload_invalid' }),
       );
-    },
-  );
-
-  it.each([
-    ['typed secret text', { snapshotId: 'snap', action: { kind: 'type', elementRef: 'field', text: 'SECRET_TEXT_A' } }, { snapshotId: 'snap', action: { kind: 'type', elementRef: 'field', text: 'SECRET_TEXT_B' } }],
-    ['script source', { source: 'SCRIPT_SOURCE_A', args: null }, { source: 'SCRIPT_SOURCE_B', args: null }],
-    ['upload path', { snapshotId: 'snap', action: { kind: 'upload', elementRef: 'upload', path: '/private/UPLOAD_PATH_A' } }, { snapshotId: 'snap', action: { kind: 'upload', elementRef: 'upload', path: '/private/UPLOAD_PATH_B' } }],
-    ['download path', { snapshotId: 'snap', action: { kind: 'download', elementRef: 'download', destination: '/private/DOWNLOAD_PATH_A' } }, { snapshotId: 'snap', action: { kind: 'download', elementRef: 'download', destination: '/private/DOWNLOAD_PATH_B' } }],
-    ['permission decision', { action: { kind: 'permission_response', permission: 'camera', origin: 'https://ORIGIN_A.test', decision: 'deny' } }, { action: { kind: 'permission_response', permission: 'camera', origin: 'https://ORIGIN_A.test', decision: 'allow' } }],
-    ['permission origin', { action: { kind: 'permission_response', permission: 'camera', origin: 'https://ORIGIN_A.test', decision: 'deny' } }, { action: { kind: 'permission_response', permission: 'camera', origin: 'https://ORIGIN_B.test', decision: 'deny' } }],
-    ['snapshot id', { snapshotId: 'SNAPSHOT_A', action: { kind: 'click', elementRef: 'button' } }, { snapshotId: 'SNAPSHOT_B', action: { kind: 'click', elementRef: 'button' } }],
-    ['element ref', { snapshotId: 'snap', action: { kind: 'click', elementRef: 'ELEMENT_A' } }, { snapshotId: 'snap', action: { kind: 'click', elementRef: 'ELEMENT_B' } }],
-  ] as const)('binds and discards raw %s', (_label, originalPayload, changedPayload) => {
-    const originalActionDigest = digestActionPayload(originalPayload);
-    const changedActionDigest = digestActionPayload(changedPayload);
-    const originalStore = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
-    const pending = originalStore.request({ ...baseRequest(), actionPayload: originalPayload });
-    originalStore.approve(pending.id, 'operator', pending.payloadDigest);
-    const changed = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z')).request({
-      ...baseRequest(),
-      actionPayload: changedPayload,
-    });
-
-    expect(changedActionDigest).not.toBe(originalActionDigest);
-    expect(changed.payloadDigest).not.toBe(pending.payloadDigest);
-    expect(() => originalStore.consume(assertionFor(pending, {
-      actionPayload: changedPayload,
-    }))).toThrowError(expect.objectContaining({ code: 'approval_digest_mismatch' }));
-    const serialized = JSON.stringify({ pending, snapshot: originalStore.snapshot() });
-    for (const marker of collectSensitiveStrings(originalPayload)) expect(serialized).not.toContain(marker);
-  });
-
-  it('recomputes the current payload and ignores a forged stored digest field', () => {
-    const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
-    const pending = store.request({ ...baseRequest(), actionPayload: { text: 'PAYLOAD_A' } });
-    store.approve(pending.id, 'operator', pending.payloadDigest);
-    const forged = {
-      ...assertionFor(pending, { actionPayload: { text: 'PAYLOAD_B' } }),
-      actionPayloadDigest: pending.actionPayloadDigest,
-    } as ApprovalConsumeAssertion;
-
-    expect(() => store.consume(forged)).toThrowError(
-      expect.objectContaining({ code: 'approval_digest_mismatch' }),
-    );
-    expect(JSON.stringify(store.snapshot())).not.toContain('PAYLOAD_A');
-    expect(JSON.stringify(store.snapshot())).not.toContain('PAYLOAD_B');
-  });
-
-  it('hashes then discards adversarial display targets and all extra keys', () => {
-    const unsafeTargets = [
-      '/Users/valentina/private/SENSITIVE_UPLOAD_PATH.txt',
-      'password=SENSITIVE_PASSWORD page text SENSITIVE_PAGE_TEXT',
-      'Authorization: Bearer SENSITIVE_HEADER_VALUE',
-      'Cookie: session=SENSITIVE_COOKIE_VALUE',
-      'document.cookie; SENSITIVE_SCRIPT_SOURCE',
-    ];
-    const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
-    const approvals = unsafeTargets.map((target, index) => store.request({
-      ...baseRequest(),
-      actionId: `unsafe-${index}`,
-      effect: {
-        kind: 'submit',
-        target,
-        rawPayload: `SENSITIVE_RAW_PAYLOAD_${index}`,
-      },
-      typedValue: `SENSITIVE_TYPED_VALUE_${index}`,
-      terminalOutput: `SENSITIVE_TERMINAL_OUTPUT_${index}`,
-      headers: { Authorization: `SENSITIVE_EXTRA_HEADER_${index}` },
-    } as ApprovalRequest));
-    const serialized = JSON.stringify({ approvals, snapshot: store.snapshot() });
-
-    for (const marker of [
-      ...unsafeTargets,
-      'SENSITIVE_RAW_PAYLOAD',
-      'SENSITIVE_TYPED_VALUE',
-      'SENSITIVE_TERMINAL_OUTPUT',
-      'SENSITIVE_EXTRA_HEADER',
-    ]) {
-      expect(serialized).not.toContain(marker);
     }
-    for (const approval of approvals) {
-      expect(approval.effect).toEqual({
-        kind: 'submit',
-        targetDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
-      });
-      expect(approval.effect).not.toHaveProperty('target');
-    }
+    expect(store.snapshot()).toEqual([]);
   });
 
-  it('binds consumption to the normalized digest of the exact display target', () => {
+  it('binds consumption to the exact validated redacted effect', () => {
     const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
     const pending = store.request(baseRequest());
     const changed = store.request({
@@ -533,9 +373,6 @@ describe('ApprovalStore', () => {
     (request.resource as { id: string }).id = 'caller-mutated';
     (request.effect as { target: string }).target = 'caller-mutated';
     expect(pending.resource.id).toBe('tab-1');
-    expect(pending.effect).toEqual({
-      kind: 'submit',
-      targetDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
-    });
+    expect(pending.effect).toEqual({ kind: 'submit', target: 'Create issue' });
   });
 });
