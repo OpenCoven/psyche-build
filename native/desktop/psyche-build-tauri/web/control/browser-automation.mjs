@@ -35,9 +35,12 @@ const trustedTextareaValueGetter = objectGetOwnPropertyDescriptor(globalThis.HTM
 const trustedTextareaDisabledGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLTextAreaElement?.prototype || {}, 'disabled')?.get;
 const trustedTextareaLabelsGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLTextAreaElement?.prototype || {}, 'labels')?.get;
 const trustedSelectValueGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLSelectElement?.prototype || {}, 'value')?.get;
+const trustedSelectOptionsGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLSelectElement?.prototype || {}, 'options')?.get;
+const trustedSelectMultipleGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLSelectElement?.prototype || {}, 'multiple')?.get;
 const trustedSelectDisabledGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLSelectElement?.prototype || {}, 'disabled')?.get;
 const trustedSelectLabelsGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLSelectElement?.prototype || {}, 'labels')?.get;
 const trustedOptionSelectedGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLOptionElement?.prototype || {}, 'selected')?.get;
+const trustedOptionValueGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLOptionElement?.prototype || {}, 'value')?.get;
 const trustedNodeIsConnectedGetter = objectGetOwnPropertyDescriptor(globalThis.Node?.prototype || {}, 'isConnected')?.get;
 const trustedElementTagNameGetter = objectGetOwnPropertyDescriptor(globalThis.Element?.prototype || {}, 'tagName')?.get;
 const trustedElementChildrenGetter = objectGetOwnPropertyDescriptor(globalThis.Element?.prototype || {}, 'children')?.get;
@@ -54,6 +57,11 @@ const trustedInputValueSetter = objectGetOwnPropertyDescriptor(globalThis.HTMLIn
 const trustedTextareaValueSetter = objectGetOwnPropertyDescriptor(globalThis.HTMLTextAreaElement?.prototype || {}, 'value')?.set;
 const trustedSelectValueSetter = objectGetOwnPropertyDescriptor(globalThis.HTMLSelectElement?.prototype || {}, 'value')?.set;
 const trustedOptionSelectedSetter = objectGetOwnPropertyDescriptor(globalThis.HTMLOptionElement?.prototype || {}, 'selected')?.set;
+const trustedOptionValueSetter = objectGetOwnPropertyDescriptor(globalThis.HTMLOptionElement?.prototype || {}, 'value')?.set;
+const trustedScrollLeftGetter = objectGetOwnPropertyDescriptor(globalThis.Element?.prototype || {}, 'scrollLeft')?.get;
+const trustedScrollLeftSetter = objectGetOwnPropertyDescriptor(globalThis.Element?.prototype || {}, 'scrollLeft')?.set;
+const trustedScrollTopGetter = objectGetOwnPropertyDescriptor(globalThis.Element?.prototype || {}, 'scrollTop')?.get;
+const trustedScrollTopSetter = objectGetOwnPropertyDescriptor(globalThis.Element?.prototype || {}, 'scrollTop')?.set;
 const TrustedEvent = globalThis.Event;
 const TrustedInputEvent = globalThis.InputEvent;
 const INSTALLED = new TrustedWeakMap();
@@ -69,6 +77,8 @@ export function installBrowserAutomation(globalObject, options = {}) {
   if (existing) return existing;
 
   const now = typeof options.now === 'function' ? options.now : () => globalObject.Date?.now?.() ?? Date.now();
+  const eventApi = globalObject.__TAURI__?.event;
+  const trustedEmit = typeof eventApi?.emit === 'function' ? eventApi.emit.bind(eventApi) : null;
   let sequence = 0;
   let current = null;
 
@@ -111,7 +121,7 @@ export function installBrowserAutomation(globalObject, options = {}) {
       assertActionRequest(request.action);
       const target = requireCurrent({ snapshotId: request.snapshotId, ref: request.action.elementRef });
       assertActionTarget(target.element, target.semantic, current, globalObject);
-      const result = performAction(target.element, target.semantic, request.action, globalObject);
+      const result = performAction(target.element, target.semantic, request.action, current, globalObject);
       if (result.invalidate === true) invalidate();
       const { invalidate: _invalidate, ...boundedResult } = result;
       return boundedResult;
@@ -125,7 +135,23 @@ export function installBrowserAutomation(globalObject, options = {}) {
     throw automationError('unsupported_operation', 'unsupported_operation: automation operation is not allowed');
   }
 
-  const api = { schema: 'psyche.browser.automation/v1', dispatch, invalidate };
+  async function dispatchAndEmit(request, receipt) {
+    if (!trustedEmit || !receipt || typeof receipt.actionId !== 'string' || typeof receipt.tabId !== 'string' ||
+        !Number.isSafeInteger(receipt.generation)) {
+      throw automationError('backend_unavailable', 'backend_unavailable: trusted automation receipt bridge is unavailable');
+    }
+    const correlation = { actionId: receipt.actionId, tabId: receipt.tabId, generation: receipt.generation };
+    try {
+      const value = await dispatch(request);
+      await trustedEmit('browser:automation-result', { ...correlation, value });
+    } catch (error) {
+      const allowed = new TrustedSet(['action_cancelled', 'automation_failed', 'backend_unavailable', 'bad_request', 'effect_unknown', 'ref_missing', 'result_too_large', 'serialization_failed', 'snapshot_stale', 'target_changed', 'target_unavailable', 'unsupported_operation']);
+      const code = allowed.has(error?.code) ? error.code : 'automation_failed';
+      await trustedEmit('browser:automation-result', { ...correlation, error: { code } });
+    }
+  }
+
+  const api = { schema: 'psyche.browser.automation/v1', dispatch, dispatchAndEmit, invalidate };
   if (options.installNonce) objectDefineProperty(api, '__psycheInstallNonce', { value: options.installNonce });
   objectFreeze(api);
   objectDefineProperty(globalObject, '__PSYCHE_AUTOMATION__', {
@@ -172,9 +198,12 @@ export function browserAutomationSource() {
     const trustedTextareaDisabledGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLTextAreaElement?.prototype||{},'disabled')?.get;
     const trustedTextareaLabelsGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLTextAreaElement?.prototype||{},'labels')?.get;
     const trustedSelectValueGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLSelectElement?.prototype||{},'value')?.get;
+    const trustedSelectOptionsGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLSelectElement?.prototype||{},'options')?.get;
+    const trustedSelectMultipleGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLSelectElement?.prototype||{},'multiple')?.get;
     const trustedSelectDisabledGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLSelectElement?.prototype||{},'disabled')?.get;
     const trustedSelectLabelsGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLSelectElement?.prototype||{},'labels')?.get;
     const trustedOptionSelectedGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLOptionElement?.prototype||{},'selected')?.get;
+    const trustedOptionValueGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLOptionElement?.prototype||{},'value')?.get;
     const trustedNodeIsConnectedGetter=objectGetOwnPropertyDescriptor(globalObject.Node?.prototype||{},'isConnected')?.get;
     const trustedElementTagNameGetter=objectGetOwnPropertyDescriptor(globalObject.Element?.prototype||{},'tagName')?.get;
     const trustedElementChildrenGetter=objectGetOwnPropertyDescriptor(globalObject.Element?.prototype||{},'children')?.get;
@@ -191,6 +220,11 @@ export function browserAutomationSource() {
     const trustedTextareaValueSetter=objectGetOwnPropertyDescriptor(globalObject.HTMLTextAreaElement?.prototype||{},'value')?.set;
     const trustedSelectValueSetter=objectGetOwnPropertyDescriptor(globalObject.HTMLSelectElement?.prototype||{},'value')?.set;
     const trustedOptionSelectedSetter=objectGetOwnPropertyDescriptor(globalObject.HTMLOptionElement?.prototype||{},'selected')?.set;
+    const trustedOptionValueSetter=objectGetOwnPropertyDescriptor(globalObject.HTMLOptionElement?.prototype||{},'value')?.set;
+    const trustedScrollLeftGetter=objectGetOwnPropertyDescriptor(globalObject.Element?.prototype||{},'scrollLeft')?.get;
+    const trustedScrollLeftSetter=objectGetOwnPropertyDescriptor(globalObject.Element?.prototype||{},'scrollLeft')?.set;
+    const trustedScrollTopGetter=objectGetOwnPropertyDescriptor(globalObject.Element?.prototype||{},'scrollTop')?.get;
+    const trustedScrollTopSetter=objectGetOwnPropertyDescriptor(globalObject.Element?.prototype||{},'scrollTop')?.set;
     const TrustedEvent=globalObject.Event; const TrustedInputEvent=globalObject.InputEvent;
     const SNAPSHOT_TTL_MS=${SNAPSHOT_TTL_MS}; const INSTALLED=new TrustedWeakMap();
     const SCRIPT_SOURCE_BYTES=${SCRIPT_SOURCE_BYTES}; const SCRIPT_RESULT_BYTES=${SCRIPT_RESULT_BYTES}; const SCRIPT_TIMEOUT_MS=${SCRIPT_TIMEOUT_MS};
@@ -262,7 +296,11 @@ async function runScript(request, globalObject, now) {
   const startedAt = now();
   let timeoutId;
   const timeout = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => reject(automationError('action_timeout', 'action_timeout: browser script exceeded five seconds')), SCRIPT_TIMEOUT_MS);
+    timeoutId = setTimeout(() => {
+      const error = automationError('effect_unknown', 'effect_unknown: browser script exceeded five seconds and may still be running');
+      error.ambiguous = true;
+      reject(error);
+    }, SCRIPT_TIMEOUT_MS);
   });
   let value;
   try {
@@ -366,10 +404,10 @@ function containsStoredElement(root, target) {
 function dispatchInputEvent(element, globalObject, type, init) {
   const EventCtor = TrustedInputEvent || TrustedEvent;
   if (typeof EventCtor !== 'function') throw automationError('backend_unavailable', 'backend_unavailable: browser events are unavailable');
-  invokeTrusted(trustedDispatchEvent, element, [new EventCtor(type, { bubbles: true, cancelable: type === 'beforeinput', ...init })], 'dispatchEvent');
+  return invokeTrusted(trustedDispatchEvent, element, [new EventCtor(type, { bubbles: true, cancelable: type === 'beforeinput', ...init })], 'dispatchEvent');
 }
 
-function performAction(element, semantic, action, globalObject) {
+function performAction(element, semantic, action, current, globalObject) {
   switch (action.kind) {
     case 'click': {
       invokeTrusted(trustedHTMLElementClick, element, [], 'click');
@@ -385,36 +423,45 @@ function performAction(element, semantic, action, globalObject) {
       const previous = typeof previousValue === 'string' ? previousValue : '';
       const next = action.append === true ? previous + action.text : action.text;
       invokeTrusted(trustedHTMLElementFocus, element, [], 'focus');
-      dispatchInputEvent(element, globalObject, 'beforeinput', { data: action.text, inputType: action.append === true ? 'insertText' : 'insertReplacementText' });
+      assertActionTarget(element, semantic, current, globalObject);
+      const accepted = dispatchInputEvent(element, globalObject, 'beforeinput', { data: action.text, inputType: action.append === true ? 'insertText' : 'insertReplacementText' });
+      if (accepted === false) throw automationError('action_cancelled', 'action_cancelled: beforeinput was cancelled');
+      assertActionTarget(element, semantic, current, globalObject);
       const setter = tag === 'INPUT' ? trustedInputValueSetter : trustedTextareaValueSetter;
       if (setter) reflectApply(setter, element, [next]); else element.value = next;
       dispatchInputEvent(element, globalObject, 'input', { data: action.text, inputType: 'insertText' });
       dispatchInputEvent(element, globalObject, 'change');
-      return secret ? { valuePresent: next.length > 0, secret: true } : { value: boundedText(next, MAX_NAME_BYTES), secret: false };
+      return secret ? { valuePresent: next.length > 0, secret: true } : { typed: true };
     }
     case 'select': {
       if (readTagName(element) !== 'SELECT') throw automationError('target_unavailable', 'target_unavailable: target is not a select');
       const wanted = new TrustedSet(action.values);
       const selectedValues = [];
-      for (const option of element.options || readChildren(element)) {
-        const value = String(option.value ?? readAttribute(option, 'value') ?? option.textContent ?? '');
+      const options = readWebIdl(trustedSelectOptionsGetter, element, 'options') || readChildren(element);
+      for (const option of options) {
+        const optionValue = readWebIdl(trustedOptionValueGetter, option, 'value');
+        const value = String(optionValue ?? readAttribute(option, 'value') ?? '');
         const selected = wanted.has(value);
         if (trustedOptionSelectedSetter && trustedElementTagNameGetter) reflectApply(trustedOptionSelectedSetter, option, [selected]); else option.selected = selected;
         if (selected && selectedValues.length < 128) selectedValues.push(boundedText(value, MAX_NAME_BYTES));
       }
-      if (!element.multiple && selectedValues.length) {
+      if (readWebIdl(trustedSelectMultipleGetter, element, 'multiple') !== true && selectedValues.length) {
         if (trustedSelectValueSetter && trustedElementTagNameGetter) reflectApply(trustedSelectValueSetter, element, [selectedValues[0]]); else element.value = selectedValues[0];
       }
       dispatchInputEvent(element, globalObject, 'input');
+      assertActionTarget(element, semantic, current, globalObject);
       dispatchInputEvent(element, globalObject, 'change');
-      return semantic?.secret === true ? { selectedValues: ['[redacted]'] } : { selectedValues };
+      assertActionTarget(element, semantic, current, globalObject);
+      return { selected: true };
     }
     case 'scroll': {
       const dx = finiteBound(action.deltaX || 0, -100_000, 100_000);
       const dy = finiteBound(action.deltaY || 0, -100_000, 100_000);
-      element.scrollLeft = finiteBound(Number(element.scrollLeft || 0) + dx, -100_000, 100_000);
-      element.scrollTop = finiteBound(Number(element.scrollTop || 0) + dy, -100_000, 100_000);
-      return { scrollLeft: element.scrollLeft, scrollTop: element.scrollTop };
+      const left = finiteBound(Number(readWebIdl(trustedScrollLeftGetter, element, 'scrollLeft') || 0) + dx, -100_000, 100_000);
+      const top = finiteBound(Number(readWebIdl(trustedScrollTopGetter, element, 'scrollTop') || 0) + dy, -100_000, 100_000);
+      if (trustedScrollLeftSetter && trustedElementTagNameGetter) reflectApply(trustedScrollLeftSetter, element, [left]); else element.scrollLeft = left;
+      if (trustedScrollTopSetter && trustedElementTagNameGetter) reflectApply(trustedScrollTopSetter, element, [top]); else element.scrollTop = top;
+      return { scrolled: true };
     }
     case 'focus':
       invokeTrusted(trustedHTMLElementFocus, element, [], 'focus');
@@ -425,7 +472,7 @@ function performAction(element, semantic, action, globalObject) {
         throw automationError('backend_unavailable', 'backend_unavailable: native form submission is unavailable');
       }
       invokeTrusted(trustedRequestSubmit, metadata.form, [element], 'requestSubmit');
-      return { submitted: true, method: metadata.method, destination: metadata.destination, invalidate: true };
+      return { submitted: true, invalidate: true };
     }
     case 'upload':
     case 'download':

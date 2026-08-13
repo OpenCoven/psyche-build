@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
+import { installBrowserAutomation } from '../native/desktop/psyche-build-tauri/web/control/browser-automation.mjs';
 
 const root = new URL('../native/desktop/psyche-build-tauri/', import.meta.url);
 const main = readFileSync(new URL('web/main.js', root), 'utf8');
@@ -193,6 +194,47 @@ describe('Tauri semantic browser provider lifecycle', () => {
     }
   });
 
+  it('quarantines a tab after ambiguous script execution and never reports deterministic failure', async () => {
+    const completions: unknown[] = [];
+    const pair = { project: { root: '/project' }, browser: {}, worktreePath: '/project', tab: {} };
+    const lifecycle: { liveGeneration: number; controlGeneration: number; pendingGeneration: number; nativeLabel: string | null; navigationTail: null } = {
+      liveGeneration: 1, controlGeneration: 1, pendingGeneration: 0, nativeLabel: 'native', navigationTail: null,
+    };
+    const quarantine = vi.fn(async () => {
+      lifecycle.liveGeneration = 0;
+      lifecycle.controlGeneration = 0;
+      lifecycle.nativeLabel = null;
+      return true;
+    });
+    const dispatch = vi.fn(async () => ({}));
+    const handler = Function(
+      'browserControlPairByTabId', 'browserTabLifecycle', 'completeBrowserProviderEffect',
+      'browserProviderOperationPreflight', 'runBrowserLifecycleOperation', 'installBrowserAutomationForPair',
+      'awaitBrowserAutomationResult', 'invoke', 'browserLabelForTab', 'PsycheControl',
+      'browserAutomationDispatchScript', 'canonicalizeBrowserSemanticSnapshot', 'canonicalizeBrowserScriptResult',
+      'canonicalizeBrowserActionResult', 'quarantineBrowserAutomation',
+      `return (${functionSource(main, 'handleBrowserProviderEffect')});`,
+    )(
+      () => pair, () => lifecycle,
+      async (_project: unknown, result: unknown) => { completions.push(result); },
+      () => 'page', vi.fn(), async () => true,
+      vi.fn(async () => { throw Object.assign(new Error('script may still be running'), { code: 'effect_unknown', ambiguous: true }); }),
+      dispatch, () => 'label', { browserAutomationSource: () => '' }, () => 'dispatch-script',
+      vi.fn(), vi.fn(), vi.fn(), quarantine,
+    );
+    await handler({ payload: {
+      actionId: 'script-timeout', tabId: 'tab', projectRoot: '/project', generation: 1,
+      operation: { kind: 'script', source: 'await lateMutation()' },
+    } });
+    expect(quarantine).toHaveBeenCalledOnce();
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(completions).toEqual([expect.objectContaining({
+      actionId: 'script-timeout', status: 'unknown', code: 'effect_unknown',
+    })]);
+    expect(completions).not.toContainEqual(expect.objectContaining({ status: 'failed' }));
+    expect(lifecycle).toMatchObject({ liveGeneration: 0, controlGeneration: 0, nativeLabel: null });
+  });
+
   it.each([
     ['upload', { elementRef: 'e1', path: '/project/secret.txt' }],
     ['download', { elementRef: 'e1', destination: '/project/download.txt' }],
@@ -295,34 +337,58 @@ describe('Tauri semantic browser provider lifecycle', () => {
       { valuePresent: true, secret: 'page-secret' },
       Object.assign(Object.create({ leaked: 'page-secret' }), { valuePresent: true, secret: true }),
     ]) expect(() => project(effect, forged)).toThrowError(expect.objectContaining({ code: 'automation_failed' }));
+
+    snapshots.set('scroll-snap', {
+      tabId: 'tab', generation: 1, expiresAt: Date.now() + 1_000,
+      semantics: new Map([['e2', { secret: false }]]),
+    });
+    const scrollEffect = { tabId: 'tab', generation: 1, operation: {
+      kind: 'action', snapshotId: 'scroll-snap', action: { kind: 'scroll', elementRef: 'e2', deltaX: 1, deltaY: 2 },
+    } };
+    expect(project(scrollEffect, { scrolled: true })).toEqual({ scrolled: true });
+    expect(() => project(scrollEffect, { scrolled: true, scrollLeft: 8675309 }))
+      .toThrowError(expect.objectContaining({ code: 'automation_failed' }));
   });
 
-  it('captures the native emitter before page action dispatch', () => {
+  it('uses only the initialization-captured automation receipt bridge', () => {
     const source = functionSource(main, 'browserAutomationDispatchScript');
-    expect(source).toContain('.emit.bind(');
-    expect(source.indexOf('.emit.bind(')).toBeLessThan(source.indexOf('__PSYCHE_AUTOMATION__.dispatch'));
+    expect(source).toContain('__PSYCHE_AUTOMATION__.dispatchAndEmit');
+    expect(source).not.toContain('__TAURI__');
+    expect(source).not.toContain('.emit');
   });
 
-  it('does not let an action replace the captured result emitter', async () => {
+  it('does not let a prepatched page emitter encode numeric data in an action receipt', async () => {
     const originalEmit = vi.fn();
     const forgedEmit = vi.fn();
+    const eventApi = { emit: originalEmit };
+    const button: any = {
+      tagName: 'BUTTON', children: [], textContent: 'Safe', parentElement: null, isConnected: true,
+      attributes: {}, getAttribute: () => null, hasAttribute: () => false,
+      getBoundingClientRect: () => ({ x: 0, y: 0, width: 10, height: 10, top: 0, left: 0, right: 10, bottom: 10 }),
+      click: vi.fn(() => { eventApi.emit = forgedEmit as typeof originalEmit; }), focus: vi.fn(), dispatchEvent: vi.fn(() => true),
+    };
+    const body: any = { ...button, tagName: 'BODY', textContent: '', children: [button], click: vi.fn() };
+    button.parentElement = body;
+    const window: any = {
+      __TAURI__: { event: eventApi }, document: { body, documentElement: body },
+      innerWidth: 100, innerHeight: 100, location: { href: 'https://example.test/' },
+      Date, URL, Event: class { constructor(public type: string) {} },
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
+    };
+    const api = installBrowserAutomation(window);
+    const snapshot = api.dispatch({ type: 'snapshot' });
     const build = Function(
       'resolveBrowserAutomationSnapshotId',
       `return (${functionSource(main, 'browserAutomationDispatchScript')});`,
-    )(() => 'raw-snapshot');
-    const eventApi = { emit: originalEmit };
-    const window = {
-      __TAURI__: { event: eventApi },
-      __PSYCHE_AUTOMATION__: { dispatch: () => {
-        eventApi.emit = forgedEmit;
-        return { clicked: true };
-      } },
-    };
+    )(() => snapshot.snapshotId);
+    eventApi.emit = vi.fn((_event: string, payload: unknown) => forgedEmit(8675309, payload));
     await Function('window', `return ${build({
       actionId: 'action', tabId: 'tab', generation: 1,
       operation: { kind: 'action', snapshotId: 'snap', action: { kind: 'click', elementRef: 'e1' } },
     })}`)(window);
     expect(originalEmit).toHaveBeenCalledWith('browser:automation-result', expect.objectContaining({ value: { clicked: true } }));
     expect(forgedEmit).not.toHaveBeenCalled();
+    expect(JSON.stringify(originalEmit.mock.calls)).not.toContain('8675309');
+    expect(snapshot.nodes[0]).toMatchObject({ role: 'button' });
   });
 });

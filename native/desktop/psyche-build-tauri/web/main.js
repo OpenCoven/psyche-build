@@ -8631,6 +8631,23 @@
       script: "window.__PSYCHE_AUTOMATION__ && window.__PSYCHE_AUTOMATION__.invalidate();",
     }).then(function () { return true; }, function () { return false; });
   }
+  async function quarantineBrowserAutomation(pair) {
+    if (!pair) return false;
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var generation = lifecycle.controlGeneration || lifecycle.liveGeneration;
+    await invalidateBrowserAutomation(pair);
+    await removeBrowserControlResource(pair);
+    browserAutomationSnapshotRefs.forEach(function (entry, id) {
+      if (entry && entry.tabId === pair.tab.id && (!generation || entry.generation === generation)) {
+        browserAutomationSnapshotRefs.delete(id);
+      }
+    });
+    invalidateBrowserNavigation(pair.tab);
+    lifecycle.controlGeneration = 0;
+    lifecycle.liveGeneration = 0;
+    lifecycle.automationSource = null;
+    return true;
+  }
   function installBrowserAutomationForPair(pair) {
     if (!pair || !window.PsycheControl) return Promise.resolve(false);
     var lifecycle = browserTabLifecycle(pair.tab);
@@ -8654,13 +8671,9 @@
       : operation.kind === "script"
         ? { type: "script", source: operation.source, args: operation.args }
         : { type: "snapshot" };
-    var actionId = JSON.stringify(effect.actionId);
     var requestJson = JSON.stringify(request);
-    var tabId = JSON.stringify(effect.tabId);
-    var generation = JSON.stringify(effect.generation);
-    return "(async function(){var eventApi=window.__TAURI__&&window.__TAURI__.event;var emit=eventApi&&typeof eventApi.emit==='function'?eventApi.emit.bind(eventApi):function(){};" +
-      "try{var value=await window.__PSYCHE_AUTOMATION__.dispatch(" + requestJson + ");await emit('browser:automation-result',{actionId:" + actionId + ",tabId:" + tabId + ",generation:" + generation + ",value:value});}" +
-      "catch(error){await emit('browser:automation-result',{actionId:" + actionId + ",tabId:" + tabId + ",generation:" + generation + ",error:{code:error&&error.code||'automation_failed',message:String(error&&error.message||error)}});}})();";
+    var receiptJson = JSON.stringify({ actionId: effect.actionId, tabId: effect.tabId, generation: effect.generation });
+    return "window.__PSYCHE_AUTOMATION__.dispatchAndEmit(" + requestJson + "," + receiptJson + ");";
   }
   function resolveBrowserAutomationSnapshotId(effect) {
     var canonicalId = effect && effect.operation && effect.operation.snapshotId;
@@ -8841,15 +8854,15 @@
       (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
     if (!plain) fail("browser action result is malformed");
     var action = effect.operation.action;
-    var allowed = {
-      click: ["clicked"], type: ["value", "valuePresent", "secret"], select: ["selectedValues"],
-      scroll: ["scrollLeft", "scrollTop"], focus: ["focused"], submit: ["submitted", "method", "destination"],
-    }[action.kind];
-    if (!allowed || Object.keys(value).some(function (key) { return allowed.indexOf(key) === -1; })) fail("browser action result has unknown fields");
     var mapped = browserAutomationSnapshotRefs.get(effect.operation.snapshotId);
     var semantic = mapped && mapped.tabId === effect.tabId && mapped.generation === effect.generation && mapped.semantics
       ? mapped.semantics.get(action.elementRef) : null;
     if (!semantic) fail("browser action result snapshot is stale");
+    var allowed = {
+      click: ["clicked"], type: semantic && semantic.secret ? ["valuePresent", "secret"] : ["typed"], select: ["selected"],
+      scroll: ["scrolled"], focus: ["focused"], submit: ["submitted"],
+    }[action.kind];
+    if (!allowed || Object.keys(value).some(function (key) { return allowed.indexOf(key) === -1; })) fail("browser action result has unknown fields");
     if (action.kind === "click") {
       if (value.clicked !== true) fail("click result is malformed");
       return { clicked: true };
@@ -8859,16 +8872,16 @@
         if (typeof value.valuePresent !== "boolean" || value.secret !== true) fail("secret input result is malformed");
         return { valuePresent: value.valuePresent, secret: true };
       }
-      if (typeof value.value !== "string" || new TextEncoder().encode(value.value).length > 512) fail("type result is malformed");
+      if (value.typed !== true) fail("type result is malformed");
       return { typed: true };
     }
     if (action.kind === "select") {
-      if (!Array.isArray(value.selectedValues) || value.selectedValues.some(function (item) { return typeof item !== "string"; })) fail("select result is malformed");
+      if (value.selected !== true) fail("select result is malformed");
       return { selectedValues: action.values.slice(0, 128).map(function (item) { return String(item).slice(0, 512); }) };
     }
     if (action.kind === "scroll") {
-      if (!Number.isFinite(value.scrollLeft) || !Number.isFinite(value.scrollTop)) fail("scroll result is malformed");
-      return { scrollLeft: Math.max(-100000, Math.min(100000, value.scrollLeft)), scrollTop: Math.max(-100000, Math.min(100000, value.scrollTop)) };
+      if (value.scrolled !== true) fail("scroll result is malformed");
+      return { scrolled: true };
     }
     if (action.kind === "focus") {
       if (value.focused !== true) fail("focus result is malformed");
@@ -9052,6 +9065,9 @@
         await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "succeeded", value: value });
       } catch (error) {
         var ambiguous = !!(error && (error.ambiguous || error.code === "effect_unknown"));
+        if (ambiguous && effect.operation.kind === "script") {
+          await quarantineBrowserAutomation(pair);
+        }
         var code = ambiguous ? "effect_unknown" : error && error.code || (String(error).indexOf("backend_unavailable") !== -1 ? "backend_unavailable" : "automation_failed");
         await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: ambiguous ? "unknown" : "failed", code: code, message: String(error && error.message || error) });
       }

@@ -118,9 +118,31 @@ describe('bounded semantic browser automation', () => {
     vi.useFakeTimers();
     try {
       const pending = api.dispatch({ type: 'script', source: 'await new Promise(() => {});' });
-      const rejected = expect(pending).rejects.toMatchObject({ code: 'action_timeout' });
+      const rejected = expect(pending).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true });
       await vi.advanceTimersByTimeAsync(5_000);
       await rejected;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports a timed-out script as effect-unknown even when it mutates later', async () => {
+    const { globalObject } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    const mutate = vi.fn();
+    vi.useFakeTimers();
+    try {
+      const pending = api.dispatch({
+        type: 'script',
+        source: 'await new Promise((resolve) => setTimeout(resolve, 6000)); args.mutate(); return null;',
+        args: { mutate },
+      });
+      const rejected = expect(pending).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await rejected;
+      expect(mutate).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(mutate).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
     }
@@ -478,7 +500,7 @@ describe('bounded semantic browser automation', () => {
     const ref = snapshot.nodes.find((entry: { name: string }) => entry.name === 'Notes').ref;
 
     expect(api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'type', elementRef: ref, text: 'new' } }))
-      .toEqual({ value: 'new', secret: false });
+      .toEqual({ typed: true });
     expect(textarea.value).toBe('new');
     expect(order).toEqual(['focus', 'beforeinput', 'input', 'change']);
 
@@ -498,6 +520,31 @@ describe('bounded semantic browser automation', () => {
     expect(JSON.stringify(result)).not.toContain('new-secret');
   });
 
+  it('revalidates typing after focus and cancelable beforeinput before writing a value', () => {
+    for (const phase of ['focus', 'beforeinput', 'cancelled'] as const) {
+      const { globalObject } = fixture();
+      const text = globalObject.document.body.children[6];
+      const original = text.value;
+      const events: string[] = [];
+      text.focus = vi.fn(() => {
+        if (phase === 'focus') text.type = 'password';
+      });
+      text.dispatchEvent = vi.fn((event: { type: string }) => {
+        events.push(event.type);
+        if (phase === 'beforeinput' && event.type === 'beforeinput') text.type = 'password';
+        return phase !== 'cancelled' || event.type !== 'beforeinput';
+      });
+      const api = installBrowserAutomation(globalObject);
+      const snapshot = api.dispatch({ type: 'snapshot' });
+      expect(() => api.dispatch({
+        type: 'action', snapshotId: snapshot.snapshotId,
+        action: { kind: 'type', elementRef: 'e8', text: 'must-not-write' },
+      })).toThrowError(expect.objectContaining({ code: phase === 'cancelled' ? 'action_cancelled' : 'target_changed' }));
+      expect(text.value).toBe(original);
+      expect(events).toEqual(phase === 'focus' ? [] : ['beforeinput']);
+    }
+  });
+
   it('selects values and dispatches input before change', () => {
     const { globalObject, select } = fixture();
     const order: string[] = [];
@@ -508,7 +555,7 @@ describe('bounded semantic browser automation', () => {
     const snapshot = api.dispatch({ type: 'snapshot' });
     const ref = snapshot.nodes.find((entry: { role: string }) => entry.role === 'combobox').ref;
     expect(api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'select', elementRef: ref, values: ['blue'] } }))
-      .toEqual({ selectedValues: ['blue'] });
+      .toEqual({ selected: true });
     expect(order).toEqual(['input', 'change']);
   });
 
@@ -600,7 +647,7 @@ describe('bounded semantic browser automation', () => {
     expect(form.requestSubmit).not.toHaveBeenCalled();
     snapshot = api.dispatch({ type: 'snapshot' });
     expect(api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'submit', elementRef: 'e1' } }))
-      .toEqual({ submitted: true, method: 'POST', destination: 'https://example.test/changed' });
+      .toEqual({ submitted: true });
     expect(form.requestSubmit).toHaveBeenCalledWith(button);
     expect(() => api.dispatch({ type: 'resolve', snapshotId: snapshot.snapshotId, ref: 'e1' }))
       .toThrowError(expect.objectContaining({ code: 'snapshot_stale' }));
@@ -614,7 +661,7 @@ describe('bounded semantic browser automation', () => {
     const snapshot = api.dispatch({ type: 'snapshot' });
     const ref = snapshot.nodes.find((entry: { name: string }) => entry.name === 'Notes').ref;
     expect(api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'scroll', elementRef: ref, deltaX: 5, deltaY: 9 } }))
-      .toEqual({ scrollLeft: 5, scrollTop: 9 });
+      .toEqual({ scrolled: true });
     expect(api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'focus', elementRef: ref } }))
       .toEqual({ focused: true });
   });
