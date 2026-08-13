@@ -526,7 +526,7 @@ describe('Tauri native browser lifecycle', () => {
 
     const browserDestroy = rustFunctionSource(nativeLib, 'browser_destroy');
     expect(browserDestroy).toMatch(
-      /^#\[tauri::command\]\nfn browser_destroy\(app: AppHandle, label: Option<String>\) -> Result<\(\), String> \{\n\s*destroy_browser_webview\(&app, label\)\n\}$/s,
+      /^#\[tauri::command\]\nfn browser_destroy\(\n\s*webview: tauri::Webview,\n\s*app: AppHandle,\n\s*label: Option<String>,\n\) -> Result<\(\), String> \{\n\s*ensure_trusted_browser_caller\(webview\.label\(\)\)\?;\n\s*destroy_browser_webview\(&app, label\)\n\}$/s,
     );
 
     const browserDestroyMany = rustFunctionSource(nativeLib, 'browser_destroy_many');
@@ -536,8 +536,9 @@ describe('Tauri native browser lifecycle', () => {
     expect(nativeLib).toContain('struct BrowserDestroyManyOutcome');
     expect(nativeLib).toContain('destroyed: Vec<String>');
     expect(nativeLib).toContain('failures: Vec<BrowserDestroyFailure>');
-    expect(browserDestroyMany).toContain('#[tauri::command]\nfn browser_destroy_many(');
-    expect(browserDestroyMany).toContain(') -> BrowserDestroyManyOutcome {');
+    expect(browserDestroyMany).toMatch(
+      /^#\[tauri::command\]\nfn browser_destroy_many\(\n\s*webview: tauri::Webview,\n\s*app: AppHandle,\n\s*labels: Vec<String>,\n\) -> Result<BrowserDestroyManyOutcome, String> \{\n\s*ensure_trusted_browser_caller\(webview\.label\(\)\)\?;/s,
+    );
     expect(browserDestroyMany).toContain('for label in labels {');
     expect(browserDestroyMany).toContain(
       'match destroy_browser_webview(&app, Some(label.clone())) {',
@@ -546,7 +547,10 @@ describe('Tauri native browser lifecycle', () => {
     expect(browserDestroyMany).toContain(
       '.push(BrowserDestroyFailure { label, error })',
     );
-    expect(browserDestroyMany).not.toContain('?;');
+    expect(browserDestroyMany).not.toContain(
+      'destroy_browser_webview(&app, Some(label.clone()))?;',
+    );
+    expect(browserDestroyMany).toContain('Ok(outcome)');
 
     const handlers = tauriHandlerNames(nativeLib);
     const first = handlers.indexOf('browser_hide_all_except');
