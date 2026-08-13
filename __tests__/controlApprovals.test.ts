@@ -392,6 +392,16 @@ describe('ApprovalStore', () => {
     expect(JSON.stringify(store.snapshot())).not.toContain(target);
   });
 
+  it.each([
+    ['script', 'alert(1)', '[redacted]'],
+    ['secret_input', 'hunter2', '[redacted]'],
+    ['upload', 'private/customer/report.txt', 'report.txt'],
+    ['download', 'private\\customer\\report.zip', 'report.zip'],
+  ] as const)('strictly redacts %s target %s', (kind, target, expected) => {
+    const effect = createRedactedApprovalEffect({ kind, target });
+    expect(effect).toEqual({ kind, target: expected });
+  });
+
   it('caps normalized targets by UTF-8 bytes', () => {
     const effect = createRedactedApprovalEffect({ kind: 'submit', target: 'é'.repeat(400) });
     expect(Buffer.byteLength(effect.target, 'utf8')).toBeLessThanOrEqual(

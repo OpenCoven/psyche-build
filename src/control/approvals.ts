@@ -397,6 +397,7 @@ function normalizeEffectTarget(kind: ApprovalEffectKind, source: string): string
   const hadMultipleLines = source.split(/\r?\n/).filter((line) => line.trim().length > 0).length > 1;
   let target = source.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (!target) return '[redacted]';
+  if (kind === 'script' || kind === 'secret_input') return '[redacted]';
 
   if (/^https?:\/\//i.test(target)) {
     try {
@@ -416,15 +417,15 @@ function normalizeEffectTarget(kind: ApprovalEffectKind, source: string): string
 
   if (kind === 'upload' || kind === 'download') {
     const portablePath = target.replace(/\\/g, '/');
-    if (portablePath.startsWith('/') || /^[A-Za-z]:\//.test(portablePath)) {
-      target = portablePath.split('/').filter(Boolean).at(-1) ?? '[redacted]';
+    if (portablePath.includes('/')) {
+      const basename = portablePath.split('/').at(-1);
+      target = !basename || basename === '.' || basename === '..' ? '[redacted]' : basename;
     }
   }
 
   if (
     hadMultipleLines
     || containsSensitiveTarget(target)
-    || (kind === 'script' && /(?:[;{}]|=>|\bfunction\s*\()/i.test(target))
   ) {
     return '[redacted]';
   }
