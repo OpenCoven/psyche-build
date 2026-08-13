@@ -411,10 +411,8 @@ export class ControlRuntime {
         case 'provider.resource.remove': {
           const current = this.surfaces.require(command.payload.id, command.payload.generation);
           if (current.kind !== 'browser_tab') throw codedRuntimeError('resource_missing', 'browser resource is missing');
-          const removed = this.surfaces.removeByProvider(current.providerId);
-          for (const item of removed) {
-            await this.revokeTarget({ kind: 'browser_tab', id: item.id, generation: item.generation });
-          }
+          this.surfaces.remove(current.id);
+          await this.revokeTarget({ kind: 'browser_tab', id: current.id, generation: current.generation });
           return this.appendTerminal(command, succeededOutcome());
         }
         case 'approval.resolve':

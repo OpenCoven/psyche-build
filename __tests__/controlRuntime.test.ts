@@ -648,6 +648,24 @@ describe('ControlRuntime', () => {
     expect(restarted.snapshot().capabilityLeases).toHaveLength(0);
   });
 
+  it('removes only the exact provider resource named by a remove frame', async () => {
+    const surfaces = new SurfaceRegistry();
+    const first = surfaces.upsertBrowserTab({ id: 'tab-1', projectRoot: '/repo', worktreeRoot: '/repo',
+      providerId: 'desktop-1', webviewLabel: 'one', url: 'https://one.test', title: 'One', loading: false,
+      viewport: { width: 800, height: 600 } });
+    const second = surfaces.upsertBrowserTab({ id: 'tab-2', projectRoot: '/repo', worktreeRoot: '/repo',
+      providerId: 'desktop-1', webviewLabel: 'two', url: 'https://two.test', title: 'Two', loading: false,
+      viewport: { width: 800, height: 600 } });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces });
+
+    await runtime.submit(command({ id: 'remove-one', idempotencyKey: 'remove-one',
+      kind: 'provider.resource.remove', ownerEpoch: 7,
+      payload: { id: first.id, generation: first.generation } }));
+
+    expect(runtime.surfaces.get(first.id)).toBeUndefined();
+    expect(runtime.surfaces.get(second.id)).toEqual(second);
+  });
+
   it('uses blockPaneQueue as an alias for the current pane resource queue', async () => {
     const surfaces = new SurfaceRegistry();
     const pane = surfaces.upsertPane({ id: 'pane-shared', projectRoot: '/repo', worktreeRoot: '/repo',

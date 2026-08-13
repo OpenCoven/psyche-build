@@ -6,6 +6,11 @@ import type { ControlHandlers } from '../control/runtime.js';
 import { PaneObservationStore } from '../control/resources/paneObservation.js';
 import { SurfaceRegistry, type PaneSurface } from '../control/surfaces.js';
 import type { PaneNamedKey } from '../control/types.js';
+import type {
+  BrowserProviderBroker,
+  ProviderEffectResult,
+} from '../control/browserProviderBroker.js';
+import { randomUUID } from 'node:crypto';
 import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
 import {
   spawnBridgePane,
@@ -41,6 +46,7 @@ export interface DaemonControlHandlerDeps {
   paneObservations?: PaneObservationStore;
   surfaces?: SurfaceRegistry;
   refreshPaneSurfaces?: () => Promise<readonly PaneSurface[]>;
+  browserProvider?: Pick<BrowserProviderBroker, 'dispatch'>;
 }
 
 function notSupported(kind: string): () => Promise<never> {
@@ -196,9 +202,30 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
           return { paneId: payload.paneId, closed: true };
       }
     },
-    inspectBrowser: notSupported('browser.inspect'),
-    actOnBrowser: notSupported('browser.action'),
-    runBrowserScript: notSupported('browser.script'),
+    inspectBrowser: deps.browserProvider
+      ? async (payload) => providerValue(await deps.browserProvider!.dispatch({
+          actionId: randomUUID(), tabId: payload.tabId, generation: payload.generation,
+          operation: { kind: 'inspect', includeScreenshot: payload.includeScreenshot },
+          timeoutMs: 30_000,
+        }))
+      : notSupported('browser.inspect'),
+    actOnBrowser: deps.browserProvider
+      ? async (payload) => providerValue(await deps.browserProvider!.dispatch({
+          actionId: randomUUID(), tabId: payload.tabId, generation: payload.generation,
+          operation: {
+            kind: 'action', action: payload.action,
+            ...('snapshotId' in payload && payload.snapshotId ? { snapshotId: payload.snapshotId } : {}),
+          },
+          timeoutMs: 30_000,
+        }))
+      : notSupported('browser.action'),
+    runBrowserScript: deps.browserProvider
+      ? async (payload) => providerValue(await deps.browserProvider!.dispatch({
+          actionId: randomUUID(), tabId: payload.tabId, generation: payload.generation,
+          operation: { kind: 'script', source: payload.source, args: payload.args },
+          timeoutMs: 30_000,
+        }))
+      : notSupported('browser.script'),
 
     async launchCovenSession(payload) {
       return launchProjectCovenSession(
@@ -286,4 +313,14 @@ function parsePaneDimensions(line: string | undefined): { cols: number; rows: nu
 
 function codedHandlerError(code: string, message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
+}
+
+function providerValue(result: ProviderEffectResult): unknown {
+  if (result.status === 'succeeded') return result.value;
+  if (result.status === 'unknown') {
+    throw Object.assign(new Error(result.message ?? 'browser effect result is unknown'), {
+      code: 'effect_unknown', ambiguous: true,
+    });
+  }
+  throw codedHandlerError(result.code, result.message);
 }

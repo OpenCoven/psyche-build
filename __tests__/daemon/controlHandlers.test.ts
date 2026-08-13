@@ -305,3 +305,38 @@ describe('createDaemonControlHandlers leased pane controls', () => {
     expect(executeCommandWithOutput).not.toHaveBeenCalled();
   });
 });
+
+describe('createDaemonControlHandlers browser provider', () => {
+  it('dispatches typed inspect, action, and script operations through the broker', async () => {
+    const dispatch = vi.fn(async () => ({
+      actionId: 'provider-action', status: 'succeeded' as const, value: { ok: true },
+    }));
+    const handlers = createDaemonControlHandlers({
+      tmux: new TmuxControl('psyche-test'),
+      projectRoot: '/repo', sessionName: 'psyche-test',
+      capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+      browserProvider: { dispatch },
+    });
+    const authorization = {
+      taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
+      tabId: 'tab-1', generation: 2,
+    };
+
+    await expect(handlers.inspectBrowser({ ...authorization, includeScreenshot: true }))
+      .resolves.toEqual({ ok: true });
+    await expect(handlers.actOnBrowser({ ...authorization, action: { kind: 'reload' } }))
+      .resolves.toEqual({ ok: true });
+    await expect(handlers.runBrowserScript({ ...authorization, source: 'return 1' }))
+      .resolves.toEqual({ ok: true });
+    expect(dispatch).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      tabId: 'tab-1', generation: 2,
+      operation: { kind: 'inspect', includeScreenshot: true },
+    }));
+    expect(dispatch).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      operation: { kind: 'action', action: { kind: 'reload' } },
+    }));
+    expect(dispatch).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      operation: { kind: 'script', source: 'return 1' },
+    }));
+  });
+});

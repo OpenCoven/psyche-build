@@ -55,6 +55,7 @@ import { readDaemonWorkspaceSnapshot } from './workspace.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
 import type { BridgeSpawnRequest, BridgeSpawnResult } from './bridge.js';
 import { PaneOutputFanout } from './paneOutputFanout.js';
+import { BrowserProviderBroker } from '../control/browserProviderBroker.js';
 
 export interface DaemonOptions {
   port: number;
@@ -242,6 +243,52 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   tmux.on('tmuxExit', () => {
     invalidatePaneSurfaces(surfaces, paneObservations);
   });
+  let providerRuntime: { submit(command: ControlCommand): Promise<CommandOutcome> } | undefined;
+  let providerOwnerEpoch = 0;
+  const submitProviderMutation = async (
+    kind: 'provider.resource.upsert' | 'provider.resource.remove',
+    payload: Extract<ControlCommand, { kind: typeof kind }>['payload'],
+  ): Promise<unknown> => {
+    if (!providerRuntime) throw Object.assign(new Error('control runtime is unavailable'), {
+      code: 'provider_unavailable',
+    });
+    const id = randomUUID();
+    const outcome = await providerRuntime.submit({
+      id,
+      idempotencyKey: `provider:${id}`,
+      kind,
+      projectRoot: canonicalProjectRoot,
+      actor: { id: 'desktop-provider', kind: 'human' },
+      ownerEpoch: providerOwnerEpoch,
+      createdAt: new Date().toISOString(),
+      payload,
+    } as ControlCommand);
+    if (outcome.status !== 'succeeded') {
+      throw Object.assign(new Error(outcome.message ?? 'provider resource mutation failed'), {
+        code: outcome.code ?? 'provider_error',
+      });
+    }
+    return outcome.value;
+  };
+  const browserProvider = new BrowserProviderBroker({
+    upsertResource: async (_providerId, resource) => {
+      const value = await submitProviderMutation('provider.resource.upsert', { resource });
+      return (value as { resource?: typeof resource } | undefined)?.resource;
+    },
+    removeResource: async (_providerId, id, generation) => {
+      await submitProviderMutation('provider.resource.remove', { id, generation });
+    },
+    removeProviderResources: async (providerId) => {
+      const resources = surfaces.list().filter(
+        (item) => item.kind === 'browser_tab' && item.providerId === providerId,
+      );
+      for (const resource of resources) {
+        await submitProviderMutation('provider.resource.remove', {
+          id: resource.id, generation: resource.generation,
+        });
+      }
+    },
+  });
   const controlHandlers = createDaemonControlHandlers({
     tmux,
     projectRoot: canonicalProjectRoot,
@@ -250,11 +297,14 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     paneObservations,
     surfaces,
     refreshPaneSurfaces: () => paneRefresh.run(),
+    browserProvider,
   });
   const host = await createHostControlPlane(canonicalProjectRoot, {
     handlers: controlHandlers,
     surfaces,
   });
+  providerRuntime = host.runtime;
+  providerOwnerEpoch = host.epoch;
   let paneHooksInstalled = false;
   process.on('SIGUSR2', handlePaneLifecycleSignal);
   try {
@@ -296,6 +346,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       ownerEpoch: host.epoch,
       runtime: host.runtime,
       credentials: controlCredentials,
+      broker: browserProvider,
     });
   } catch (error) {
     process.off('SIGUSR2', handlePaneLifecycleSignal);

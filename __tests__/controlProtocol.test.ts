@@ -153,4 +153,25 @@ describe('control protocol v1', () => {
       requestId: 'req-1',
     }))).toThrow('unsupported control request type');
   });
+
+  it('decodes bounded typed provider frames', () => {
+    expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.register', requestId: 'register-1', providerId: 'desktop-1',
+    }))).toMatchObject({ type: 'provider.register', providerId: 'desktop-1' });
+    expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.result', requestId: 'effect-1',
+      result: { actionId: 'action-1', status: 'succeeded', value: { ok: true } },
+    }))).toMatchObject({ type: 'provider.effect.result', result: { actionId: 'action-1' } });
+  });
+
+  it('rejects malformed provider resources and effect results', () => {
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.resource.upsert', requestId: 'upsert-1',
+      resource: { id: 'tab-1', kind: 'browser_tab', generation: 1 },
+    }))).toThrow('invalid provider resource');
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.result', requestId: 'effect-1',
+      result: { actionId: 'action-1', status: 'invented' },
+    }))).toThrow('invalid provider effect result');
+  });
 });

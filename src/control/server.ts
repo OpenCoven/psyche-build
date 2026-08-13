@@ -12,6 +12,11 @@ import {
   type ControlResponse,
 } from './protocol.js';
 import type {
+  BrowserProviderBroker,
+  BrowserProviderRegistration,
+  ProviderPush,
+} from './browserProviderBroker.js';
+import type {
   ControlActor,
   ControlActorKind,
   ControlCommand,
@@ -37,6 +42,7 @@ export interface ControlServerOptions {
   ownerEpoch: number;
   runtime: ControlServerRuntime;
   credentials: ControlCredentialStore;
+  broker?: BrowserProviderBroker;
 }
 
 /** Cap a single newline-delimited frame so a peer cannot exhaust host memory. */
@@ -248,6 +254,7 @@ export class ControlServer {
     private readonly authority: ControlAuthority,
     private readonly credentials: ControlCredentialStore,
     private readonly canonicalRoot: string,
+    private readonly broker?: BrowserProviderBroker,
   ) {}
 
   static async start(options: ControlServerOptions): Promise<ControlServer> {
@@ -265,6 +272,7 @@ export class ControlServer {
       authority,
       options.credentials,
       canonicalRoot,
+      options.broker,
     );
 
     server.on('connection', (socket) => {
@@ -302,9 +310,11 @@ export class ControlServer {
   private handleConnection(socket: Socket): void {
     let principal: ControlPrincipal | null = null;
     let clientId: string | undefined;
+    let provider: BrowserProviderRegistration | null = null;
     let buffer = '';
+    let tail = Promise.resolve();
 
-    const write = (message: ControlResponse): void => {
+    const write = (message: ControlResponse | ProviderPush): void => {
       if (!socket.destroyed) socket.write(`${encodeControlMessage(message)}\n`);
     };
 
@@ -314,6 +324,7 @@ export class ControlServer {
     };
 
     socket.setEncoding('utf8');
+    socket.on('close', () => { void provider?.disconnect().catch(() => undefined); });
     socket.on('data', (chunk: string) => {
       buffer += chunk;
       if (buffer.length > MAX_FRAME_BYTES && buffer.indexOf('\n') < 0) {
@@ -327,14 +338,16 @@ export class ControlServer {
         buffer = buffer.slice(newline + 1);
         newline = buffer.indexOf('\n');
         if (line.trim().length === 0) continue;
-        this.handleLine(line, write, fail, {
+        tail = tail.then(() => this.handleLine(line, write, fail, {
           getPrincipal: () => principal,
           setPrincipal: (value, id) => {
             principal = value;
             clientId = id;
           },
           getClientId: () => clientId,
-        }).catch((error) => {
+          getProvider: () => provider,
+          setProvider: (value) => { provider = value; },
+        })).catch((error) => {
           fail('internal', error instanceof Error ? error.message : 'internal error');
         });
       }
@@ -343,12 +356,14 @@ export class ControlServer {
 
   private async handleLine(
     line: string,
-    write: (message: ControlResponse) => void,
+    write: (message: ControlResponse | ProviderPush) => void,
     fail: (code: string, message: string, requestId?: string) => void,
     session: {
       getPrincipal: () => ControlPrincipal | null;
       setPrincipal: (principal: ControlPrincipal, clientId?: string) => void;
       getClientId: () => string | undefined;
+      getProvider: () => BrowserProviderRegistration | null;
+      setProvider: (provider: BrowserProviderRegistration) => void;
     },
   ): Promise<void> {
     let request: ReturnType<typeof decodeControlRequest>;
@@ -383,6 +398,34 @@ export class ControlServer {
       }
       session.setPrincipal(authenticated, request.clientName);
       write(this.authority.welcomeFor(authenticated));
+      return;
+    }
+
+    await this.broker?.ready();
+    const provider = session.getProvider();
+    const isProviderFrame = request.type === 'provider.register'
+      || request.type === 'provider.resource.upsert'
+      || request.type === 'provider.resource.remove'
+      || request.type === 'provider.effect.result';
+    if (provider && !isProviderFrame) {
+      write({
+        version: 1, type: 'error', requestId: request.requestId,
+        code: 'provider_mode_only', message: 'provider connections accept provider frames only',
+      });
+      return;
+    }
+    if (provider && request.type === 'provider.register') {
+      write({
+        version: 1, type: 'error', requestId: request.requestId,
+        code: 'already_registered', message: 'provider connection is already registered',
+      });
+      return;
+    }
+    if (!provider && isProviderFrame && request.type !== 'provider.register') {
+      write({
+        version: 1, type: 'error', requestId: request.requestId,
+        code: 'provider_not_registered', message: 'provider registration is required',
+      });
       return;
     }
 
@@ -445,8 +488,72 @@ export class ControlServer {
         });
         return;
       }
+      case 'provider.register': {
+        if (principal.kind !== 'operator') {
+          write({
+            version: 1, type: 'error', requestId: request.requestId,
+            code: 'operator_required', message: 'only an operator may register a provider',
+          });
+          return;
+        }
+        if (!this.broker) {
+          write({
+            version: 1, type: 'error', requestId: request.requestId,
+            code: 'provider_unavailable', message: 'browser provider transport is unavailable',
+          });
+          return;
+        }
+        try {
+          session.setProvider(this.broker.register(request.providerId, write));
+          write({ version: 1, type: 'ack', requestId: request.requestId });
+        } catch (error) {
+          writeProviderError(write, request.requestId, error);
+        }
+        return;
+      }
+      case 'provider.resource.upsert':
+        try {
+          await provider!.upsert(request.resource);
+          write({ version: 1, type: 'ack', requestId: request.requestId });
+        } catch (error) {
+          writeProviderError(write, request.requestId, error);
+        }
+        return;
+      case 'provider.resource.remove':
+        try {
+          await provider!.remove(request.id, request.generation);
+          write({ version: 1, type: 'ack', requestId: request.requestId });
+        } catch (error) {
+          writeProviderError(write, request.requestId, error);
+        }
+        return;
+      case 'provider.effect.result':
+        try {
+          provider!.complete(request.result);
+          write({ version: 1, type: 'ack', requestId: request.requestId });
+        } catch (error) {
+          writeProviderError(write, request.requestId, error);
+        }
+        return;
     }
   }
+}
+
+function writeProviderError(
+  write: (message: ControlResponse | ProviderPush) => void,
+  requestId: string,
+  error: unknown,
+): void {
+  const code = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+    ? (error as { code: string }).code
+    : 'provider_error';
+  write({
+    version: 1,
+    type: 'error',
+    requestId,
+    code,
+    message: error instanceof Error ? error.message : 'browser provider error',
+  });
 }
 
 export { compatibilityPrincipal } from './credentials.js';
