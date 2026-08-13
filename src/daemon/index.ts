@@ -56,6 +56,7 @@ import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
 import type { BridgeSpawnRequest, BridgeSpawnResult } from './bridge.js';
 import { PaneOutputFanout } from './paneOutputFanout.js';
 import { BrowserProviderBroker } from '../control/browserProviderBroker.js';
+import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
 
 export interface DaemonOptions {
   port: number;
@@ -270,12 +271,15 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     }
     return outcome.value;
   };
+  const browserSemanticSnapshots = new BrowserSemanticSnapshotRegistry();
   const browserProvider = new BrowserProviderBroker({
     upsertResource: async (_providerId, resource) => {
+      browserSemanticSnapshots.invalidateTab(resource.id, resource.generation);
       const value = await submitProviderMutation('provider.resource.upsert', { resource });
       return (value as { resource?: typeof resource } | undefined)?.resource;
     },
     removeResource: async (_providerId, id, generation) => {
+      browserSemanticSnapshots.invalidateTab(id);
       await submitProviderMutation('provider.resource.remove', { id, generation });
     },
     removeProviderResources: async (providerId) => {
@@ -283,6 +287,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
         (item) => item.kind === 'browser_tab' && item.providerId === providerId,
       );
       for (const resource of resources) {
+        browserSemanticSnapshots.invalidateTab(resource.id);
         await submitProviderMutation('provider.resource.remove', {
           id: resource.id, generation: resource.generation,
         });
@@ -298,10 +303,12 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     surfaces,
     refreshPaneSurfaces: () => paneRefresh.run(),
     browserProvider,
+    browserSemanticSnapshots,
   });
   const host = await createHostControlPlane(canonicalProjectRoot, {
     handlers: controlHandlers,
     surfaces,
+    browserSemanticSnapshots,
   });
   providerRuntime = host.runtime;
   providerOwnerEpoch = host.epoch;

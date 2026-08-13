@@ -1,5 +1,6 @@
 const SNAPSHOT_SCHEMA = 'psyche.browser.snapshot/v1';
 const MAX_NODES = 2_000;
+const MAX_VISITED_NODES = 2_000;
 const MAX_DEPTH = 32;
 const MAX_NAME_BYTES = 512;
 const MAX_NAME_NODES = 2_000;
@@ -7,6 +8,7 @@ const SNAPSHOT_TTL_MS = 30_000;
 const INSTALLED = new WeakMap();
 
 const INTERACTIVE_TAGS = new Set(['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY', 'IFRAME']);
+const ALLOWED_ROLES = new Set(['button', 'link', 'textbox', 'checkbox', 'radio', 'combobox', 'option', 'frame', 'img', 'heading', 'status', 'dialog', 'menu', 'menuitem', 'tab', 'tabpanel', 'switch']);
 
 export function installBrowserAutomation(globalObject, options = {}) {
   if (!globalObject || (typeof globalObject !== 'object' && typeof globalObject !== 'function')) {
@@ -55,9 +57,11 @@ export function installBrowserAutomation(globalObject, options = {}) {
     throw automationError('unsupported_operation', 'unsupported_operation: automation operation is not allowed');
   }
 
-  const api = Object.freeze({ schema: 'psyche.browser.automation/v1', dispatch, invalidate });
+  const api = { schema: 'psyche.browser.automation/v1', dispatch, invalidate };
+  if (options.installNonce) Object.defineProperty(api, '__psycheInstallNonce', { value: options.installNonce });
+  Object.freeze(api);
   Object.defineProperty(globalObject, '__PSYCHE_AUTOMATION__', {
-    configurable: false,
+    configurable: true,
     enumerable: false,
     writable: false,
     value: api,
@@ -71,16 +75,18 @@ export function dispatchBrowserAutomation(globalObject, request) {
 }
 
 export function browserAutomationSource() {
+  const installNonce = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
   return `(function(globalObject){
     var existing=globalObject.__PSYCHE_AUTOMATION__;
-    if (existing && existing.schema==='psyche.browser.automation/v1' &&
-        typeof existing.dispatch==='function' && typeof existing.invalidate==='function') return;
+    var installNonce=${JSON.stringify(installNonce)};
+    if (existing && existing.__psycheInstallNonce===installNonce) return;
     if (existing) delete globalObject.__PSYCHE_AUTOMATION__;
     const SNAPSHOT_SCHEMA=${JSON.stringify(SNAPSHOT_SCHEMA)};
-    const MAX_NODES=${MAX_NODES}; const MAX_DEPTH=${MAX_DEPTH}; const MAX_NAME_BYTES=${MAX_NAME_BYTES};
+    const MAX_NODES=${MAX_NODES}; const MAX_VISITED_NODES=${MAX_VISITED_NODES}; const MAX_DEPTH=${MAX_DEPTH}; const MAX_NAME_BYTES=${MAX_NAME_BYTES};
     const MAX_NAME_NODES=${MAX_NAME_NODES};
     const SNAPSHOT_TTL_MS=${SNAPSHOT_TTL_MS}; const INSTALLED=new WeakMap();
     const INTERACTIVE_TAGS=new Set(${JSON.stringify([...INTERACTIVE_TAGS])});
+    const ALLOWED_ROLES=new Set(${JSON.stringify([...ALLOWED_ROLES])});
     ${automationError.toString()}
     ${boundedText.toString()}
     ${finiteBound.toString()}
@@ -93,7 +99,7 @@ export function browserAutomationSource() {
     ${semanticNode.toString()}
     ${captureSnapshot.toString()}
     ${installBrowserAutomation.toString()}
-    installBrowserAutomation(globalObject);
+    installBrowserAutomation(globalObject,{installNonce:installNonce});
   })(globalThis);`;
 }
 
@@ -105,25 +111,52 @@ function captureSnapshot(globalObject, sequence, createdAt) {
   const nodes = [];
   const refs = new Map();
   const root = document.body || document.documentElement;
-
-  function visit(element, depth) {
-    if (!element || nodes.length >= MAX_NODES || depth > MAX_DEPTH) return;
-    const hidden = isHidden(element, globalObject);
-    if (!hidden) {
-      const semantic = semanticNode(element, document, viewportWidth, viewportHeight, globalObject);
-      if (semantic) {
-        const ref = `e${nodes.length + 1}`;
-        nodes.push({ ref, ...semantic });
-        refs.set(ref, element);
-      }
-    }
-    if (hidden || depth === MAX_DEPTH) return;
-    for (const child of Array.from(element.children || [])) {
-      if (nodes.length >= MAX_NODES) break;
-      visit(child, depth + 1);
+  const labelsByFor = new Map();
+  if (typeof document.querySelectorAll === 'function') {
+    let indexedLabels = 0;
+    const labelIterator = document.querySelectorAll('label')[Symbol.iterator]();
+    while (indexedLabels < MAX_VISITED_NODES) {
+      const nextLabel = labelIterator.next();
+      if (nextLabel.done) break;
+      const label = nextLabel.value;
+      indexedLabels += 1;
+      const target = label.getAttribute?.('for');
+      if (target && !labelsByFor.has(target)) labelsByFor.set(target, []);
+      if (target) labelsByFor.get(target).push(label);
     }
   }
-  visit(root, 0);
+
+  let visited = 0;
+  let truncated = false;
+  const stack = root ? [{ element: root, depth: 0, entered: false, iterator: null }] : [];
+  while (stack.length) {
+    const frame = stack[stack.length - 1];
+    if (!frame.entered) {
+      if (visited >= MAX_VISITED_NODES) { truncated = true; break; }
+      visited += 1;
+      frame.entered = true;
+      const hidden = isHidden(frame.element, globalObject);
+      if (!hidden) {
+        const semantic = semanticNode(frame.element, document, viewportWidth, viewportHeight, globalObject, labelsByFor);
+        if (semantic && nodes.length < MAX_NODES) {
+          const ref = `e${nodes.length + 1}`;
+          nodes.push({ ref, ...semantic });
+          refs.set(ref, frame.element);
+        }
+      }
+      const children = frame.element.children || [];
+      if (hidden) { stack.pop(); continue; }
+      if (frame.depth === MAX_DEPTH) {
+        if (children.length) truncated = true;
+        stack.pop();
+        continue;
+      }
+      frame.iterator = children[Symbol.iterator]();
+    }
+    const next = frame.iterator.next();
+    if (next.done) { stack.pop(); continue; }
+    stack.push({ element: next.value, depth: frame.depth + 1, entered: false, iterator: null });
+  }
 
   return {
     createdAt,
@@ -136,19 +169,19 @@ function captureSnapshot(globalObject, sequence, createdAt) {
       url: boundedText(globalObject.location?.href || '', 2_048),
       viewport: { width: viewportWidth, height: viewportHeight },
       nodes,
-      truncated: nodes.length >= MAX_NODES,
+      truncated,
     },
   };
 }
 
-function semanticNode(element, document, viewportWidth, viewportHeight, globalObject) {
+function semanticNode(element, document, viewportWidth, viewportHeight, globalObject, labelsByFor) {
   const tag = String(element.tagName || '').toUpperCase();
   const role = roleFor(element, tag);
   if (!role) return null;
   const rect = safeRect(element);
   const clipped = clipRect(rect, viewportWidth, viewportHeight);
   if (!clipped && !INTERACTIVE_TAGS.has(tag)) return null;
-  const name = accessibleName(element, document, globalObject);
+  const name = accessibleName(element, document, globalObject, labelsByFor);
   const result = { role, name, bounds: clipped || { x: 0, y: 0, width: 0, height: 0, clipped: true } };
   if (element.disabled === true || element.hasAttribute?.('disabled') || element.getAttribute?.('aria-disabled') === 'true') result.disabled = true;
   if (role === 'checkbox' || role === 'radio') result.checked = element.checked === true || element.getAttribute?.('aria-checked') === 'true';
@@ -167,8 +200,8 @@ function semanticNode(element, document, viewportWidth, viewportHeight, globalOb
 }
 
 function roleFor(element, tag) {
-  const explicit = boundedText(element.getAttribute?.('role') || '', 64);
-  if (explicit) return explicit;
+  const explicit = boundedText(element.getAttribute?.('role') || '', 64).toLowerCase();
+  if (explicit) return ALLOWED_ROLES.has(explicit) ? explicit : null;
   if (tag === 'BUTTON') return 'button';
   if (tag === 'A' && element.getAttribute?.('href')) return 'link';
   if (tag === 'TEXTAREA') return 'textbox';
@@ -187,22 +220,37 @@ function roleFor(element, tag) {
   return null;
 }
 
-function accessibleName(element, document, globalObject) {
+function accessibleName(element, document, globalObject, labelsByFor) {
   const direct = element.getAttribute?.('aria-label');
   if (direct) return boundedText(direct, MAX_NAME_BYTES);
   const labelledBy = String(element.getAttribute?.('aria-labelledby') || '').trim();
   if (labelledBy) {
-    const label = labelledBy.split(/\s+/).map((id) => visibleText(document.getElementById?.(id), globalObject)).join(' ').trim();
+    const parts = [];
+    let references = 0;
+    for (const match of labelledBy.slice(0, 65536).matchAll(/\S+/g)) {
+      if (references++ >= MAX_NAME_NODES) break;
+      const text = visibleText(document.getElementById?.(match[0]), globalObject);
+      if (text) parts.push(text);
+      if (new TextEncoder().encode(parts.join(' ')).length >= MAX_NAME_BYTES) break;
+    }
+    const label = boundedText(parts.join(' '), MAX_NAME_BYTES);
     if (label) return boundedText(label, MAX_NAME_BYTES);
   }
   if (element.labels?.length) {
-    const label = Array.from(element.labels).map((item) => visibleText(item, globalObject)).join(' ').trim();
+    const parts = [];
+    let references = 0;
+    for (const item of element.labels) {
+      if (references++ >= MAX_NAME_NODES) break;
+      const text = visibleText(item, globalObject);
+      if (text) parts.push(text);
+      if (new TextEncoder().encode(parts.join(' ')).length >= MAX_NAME_BYTES) break;
+    }
+    const label = boundedText(parts.join(' '), MAX_NAME_BYTES);
     if (label) return boundedText(label, MAX_NAME_BYTES);
   }
   const id = element.getAttribute?.('id');
-  if (id && typeof document.querySelectorAll === 'function') {
-    const labels = Array.from(document.querySelectorAll('label')).filter((label) => label.getAttribute?.('for') === id);
-    const label = labels.map((item) => visibleText(item, globalObject)).join(' ').trim();
+  if (id) {
+    const label = boundedText((labelsByFor.get(id) || []).map((item) => visibleText(item, globalObject)).join(' '), MAX_NAME_BYTES);
     if (label) return boundedText(label, MAX_NAME_BYTES);
   }
   const alt = element.getAttribute?.('alt');
@@ -241,7 +289,7 @@ function visibleText(element, globalObject) {
     if (node.nodeType !== 1) return;
     if (!root && (isHidden(node, globalObject) ||
         !clipRect(safeRect(node), finiteBound(globalObject.innerWidth, 0, 100_000), finiteBound(globalObject.innerHeight, 0, 100_000)))) return;
-    const childNodes = Array.from(node.childNodes || []);
+    const childNodes = node.childNodes || [];
     if (childNodes.length) {
       for (const child of childNodes) {
         visit(child, depth + 1, false);
@@ -249,7 +297,7 @@ function visibleText(element, globalObject) {
       }
       return;
     }
-    const children = Array.from(node.children || []);
+    const children = node.children || [];
     if (children.length) {
       for (const child of children) {
         visit(child, depth + 1, false);
@@ -265,9 +313,13 @@ function visibleText(element, globalObject) {
 }
 
 function isHidden(element, globalObject) {
-  if (element.hidden === true || element.hasAttribute?.('hidden') || element.getAttribute?.('aria-hidden') === 'true') return true;
-  const style = typeof globalObject.getComputedStyle === 'function' ? globalObject.getComputedStyle(element) : null;
-  return style?.display === 'none' || style?.visibility === 'hidden';
+  let current = element;
+  for (let depth = 0; current && depth <= MAX_DEPTH; depth += 1, current = current.parentElement) {
+    if (current.hidden === true || current.hasAttribute?.('hidden') || current.getAttribute?.('aria-hidden') === 'true') return true;
+    const style = typeof globalObject.getComputedStyle === 'function' ? globalObject.getComputedStyle(current) : null;
+    if (style?.display === 'none' || style?.visibility === 'hidden') return true;
+  }
+  return false;
 }
 
 function safeRect(element) {
@@ -306,9 +358,12 @@ function boundedText(value, maxBytes) {
   const encoder = new TextEncoder();
   if (encoder.encode(text).length <= maxBytes) return text;
   let output = '';
+  let bytes = 0;
   for (const character of text) {
-    if (encoder.encode(output + character).length > maxBytes) break;
+    const characterBytes = encoder.encode(character).length;
+    if (bytes + characterBytes > maxBytes) break;
     output += character;
+    bytes += characterBytes;
   }
   return output;
 }

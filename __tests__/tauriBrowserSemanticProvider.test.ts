@@ -22,6 +22,32 @@ function functionSource(source: string, name: string): string {
 }
 
 describe('Tauri semantic browser provider lifecycle', () => {
+  it('strictly projects untrusted page snapshots into provider-owned canonical snapshots', () => {
+    const canonicalize = Function(`return (${functionSource(main, 'canonicalizeBrowserSemanticSnapshot')});`)();
+    const pair = {
+      tab: { id: 'tab-1', title: 'Trusted title', loading: false },
+      project: {}, browser: {}, worktreePath: '/worktree',
+    };
+    const page = {
+      schema: 'psyche.browser.snapshot/v1', snapshotId: 'page-id', url: 'https://evil.invalid',
+      viewport: { width: 800, height: 600 }, truncated: false,
+      nodes: [{ ref: 'e1', role: 'button', name: 'Save', bounds: { x: 1, y: 2, width: 3, height: 4, clipped: false } }],
+    };
+    const snapshot = canonicalize(page, pair, { actionId: 'trusted-id', generation: 7 }, 1_000);
+    expect(snapshot).toMatchObject({
+      schema: 'psyche.browser.snapshot/v1', id: 'trusted-id', tabId: 'tab-1', generation: 7,
+      title: 'Trusted title', loading: false, capturedAt: new Date(1_000).toISOString(),
+      expiresAt: new Date(31_000).toISOString(), opaqueFrames: 0,
+    });
+    expect(snapshot).not.toHaveProperty('snapshotId');
+    expect(snapshot.nodes[0]).toEqual({
+      ref: 'e1', role: 'button', name: 'Save', bounds: { x: 1, y: 2, width: 3, height: 4 },
+    });
+    expect(() => canonicalize({ ...page, injected: 'secret' }, pair, { actionId: 'a', generation: 7 }, 1_000)).toThrow(/unknown field/);
+    expect(() => canonicalize({ ...page, nodes: [{ ...page.nodes[0], injected: 'secret' }] }, pair, { actionId: 'a', generation: 7 }, 1_000)).toThrow(/unknown field/);
+    expect(() => canonicalize({ ...page, nodes: Array.from({ length: 2_001 }, () => page.nodes[0]) }, pair, { actionId: 'a', generation: 7 }, 1_000)).toThrow(/maximum/);
+  });
+
   it('builds and loads the committed PsycheControl bundle', () => {
     expect(packageJson).toContain('--global-name=PsycheControl');
     expect(packageJson).toContain('--outfile=web/control.bundle.js');
@@ -65,13 +91,13 @@ describe('Tauri semantic browser provider lifecycle', () => {
     const handler = Function(
       'browserControlPairByTabId', 'browserTabLifecycle', 'completeBrowserProviderEffect',
       'installBrowserAutomationForPair', 'awaitBrowserAutomationResult', 'invoke',
-      'browserLabelForTab', 'browserAutomationDispatchScript',
+      'browserLabelForTab', 'browserAutomationDispatchScript', 'canonicalizeBrowserSemanticSnapshot',
       `return (${functionSource(main, 'handleBrowserProviderEffect')});`,
     )(
       () => pair,
       () => ({ liveGeneration: 2, nativeLabel: 'native' }),
       async (_project: unknown, result: unknown) => { completions.push(result); },
-      async () => true, async () => ({}), async () => ({}), () => 'label', () => '',
+      async () => true, async () => ({}), async () => ({}), () => 'label', () => '', () => ({}),
     );
 
     await expect(handler({ payload: { actionId: 'a1', tabId: 'tab', projectRoot: '/project', generation: 1 } })).resolves.toBe(false);
@@ -90,13 +116,13 @@ describe('Tauri semantic browser provider lifecycle', () => {
     const handler = Function(
       'browserControlPairByTabId', 'browserTabLifecycle', 'completeBrowserProviderEffect',
       'installBrowserAutomationForPair', 'awaitBrowserAutomationResult', 'invoke',
-      'browserLabelForTab', 'browserAutomationDispatchScript',
+      'browserLabelForTab', 'browserAutomationDispatchScript', 'canonicalizeBrowserSemanticSnapshot',
       `return (${functionSource(main, 'handleBrowserProviderEffect')});`,
     )(
       () => pair,
       () => lifecycle,
       async (_project: unknown, result: unknown) => { completions.push(result); },
-      install, awaitResult, dispatch, () => 'label', () => 'dispatch-script',
+      install, awaitResult, dispatch, () => 'label', () => 'dispatch-script', (value: unknown) => value,
     );
 
     const effectFlight = handler({
@@ -118,5 +144,28 @@ describe('Tauri semantic browser provider lifecycle', () => {
       actionId: 'a2', status: 'failed', code: 'resource_replaced',
       message: 'browser tab generation was replaced',
     }]);
+  });
+
+  it('cancels eval waiters and reports timeouts as ambiguous unknown outcomes', async () => {
+    vi.useFakeTimers();
+    try {
+      const waiters = new Map();
+      const awaitResult = Function(
+        'browserAutomationWaiters',
+        `return (${functionSource(main, 'awaitBrowserAutomationResult')});`,
+      )(waiters);
+      const timedOut = awaitResult({ actionId: 'timeout', tabId: 'tab', generation: 1 });
+      const rejection = expect(timedOut).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await rejection;
+      expect(waiters.size).toBe(0);
+
+      const cancelled = awaitResult({ actionId: 'cancel', tabId: 'tab', generation: 1 });
+      cancelled.cancel(new Error('eval rejected'));
+      await expect(cancelled).rejects.toThrow('eval rejected');
+      expect(waiters.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

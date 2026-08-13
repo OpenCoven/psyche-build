@@ -12,6 +12,7 @@ import type {
 } from '../control/browserProviderBroker.js';
 import { randomUUID } from 'node:crypto';
 import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
+import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
 import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
 import {
   spawnBridgePane,
@@ -48,6 +49,7 @@ export interface DaemonControlHandlerDeps {
   surfaces?: SurfaceRegistry;
   refreshPaneSurfaces?: () => Promise<readonly PaneSurface[]>;
   browserProvider?: Pick<BrowserProviderBroker, 'dispatch'>;
+  browserSemanticSnapshots?: BrowserSemanticSnapshotRegistry;
 }
 
 function notSupported(kind: string): () => Promise<never> {
@@ -204,11 +206,16 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       }
     },
     inspectBrowser: deps.browserProvider
-      ? async (payload) => providerValue(await deps.browserProvider!.dispatch({
+      ? async (payload) => {
+        const value = providerValue(await deps.browserProvider!.dispatch({
           actionId: randomUUID(), tabId: payload.tabId, generation: payload.generation,
           operation: { kind: 'inspect', includeScreenshot: payload.includeScreenshot },
           timeoutMs: AGENT_CONTROL_LIMITS.actionTimeoutMs,
-        }))
+        }));
+        return deps.browserSemanticSnapshots
+          ? deps.browserSemanticSnapshots.store(value, payload.tabId, payload.generation)
+          : value;
+      }
       : notSupported('browser.inspect'),
     actOnBrowser: deps.browserProvider
       ? async (payload) => providerValue(await deps.browserProvider!.dispatch({

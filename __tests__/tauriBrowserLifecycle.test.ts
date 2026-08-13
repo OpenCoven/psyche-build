@@ -206,8 +206,10 @@ function browserLifecycleHarness() {
     nativeLabel: string | null;
     pendingGeneration: number;
     pendingUrl: string | null;
+    pendingNavigationToken: string | null;
     liveGeneration: number;
     liveUrl: string | null;
+    liveNavigationToken: string | null;
     eventUrl: string | null;
     viewLive: boolean;
     navigationSnapshot: {
@@ -228,8 +230,10 @@ function browserLifecycleHarness() {
         nativeLabel: null,
         pendingGeneration: 0,
         pendingUrl: null,
+        pendingNavigationToken: null,
         liveGeneration: 0,
         liveUrl: null,
+        liveNavigationToken: null,
         eventUrl: null,
         viewLive: false,
         navigationSnapshot: null,
@@ -245,8 +249,10 @@ function browserLifecycleHarness() {
         nativeLabel: null,
         pendingGeneration: 0,
         pendingUrl: null,
+        pendingNavigationToken: null,
         liveGeneration: 0,
         liveUrl: null,
+        liveNavigationToken: null,
         eventUrl: null,
         viewLive: (tab as { created?: boolean }).created === true,
         navigationSnapshot: null,
@@ -415,6 +421,7 @@ function browserNativeEventHandlers(options: {
     (nativeLabel: string, url: string, title: string) => boolean
   >(functionSource(mainJs, 'markBrowserTabLoaded'), {
     browserNativeEventContext,
+    browserTabLifecycle: lifecycle.browserTabLifecycle,
     state,
     activeWorkspaceRoot: () => worktreePath,
     renderBrowserTabs: () => calls.push('render'),
@@ -423,7 +430,7 @@ function browserNativeEventHandlers(options: {
     tabTitle: (url: string) => `title:${url}`,
   });
   const handleBrowserPageLoad = compileFunction<
-    (event: { payload: { label: string; url: string; phase: string } }) => boolean
+    (event: { payload: { label: string; url: string; phase: string; navigationToken?: string | null } }) => boolean
   >(functionSource(mainJs, 'handleBrowserPageLoad'), {
     browserNativeEventContext,
     markBrowserTabLoaded,
@@ -461,9 +468,8 @@ function tauriHandlerNames(source: string) {
 describe('Tauri native browser lifecycle', () => {
   it('documents the browser lifecycle source contract', () => {
     const destroyBrowserWebview = rustFunctionSource(nativeLib, 'destroy_browser_webview');
-    expect(destroyBrowserWebview).toMatch(
-      /^fn destroy_browser_webview\(app: &AppHandle, label: Option<String>\) -> Result<\(\), String> \{\n\s*let label = safe_browser_label\(label\);\n\s*if let Some\(webview\) = app\.get_webview\(&label\) \{\n\s*webview\.close\(\)\.map_err\(\|error\| error\.to_string\(\)\)\?;\n\s*\}\n\s*Ok\(\(\)\)\n\}$/s,
-    );
+    expect(destroyBrowserWebview).toContain('BROWSER_NAVIGATION_TOKENS.lock().remove(&label);');
+    expect(destroyBrowserWebview).toContain('webview.close().map_err(|error| error.to_string())?;');
 
     const browserDestroy = rustFunctionSource(nativeLib, 'browser_destroy');
     expect(browserDestroy).toMatch(
@@ -1328,14 +1334,14 @@ describe('Tauri native browser lifecycle', () => {
     await Promise.resolve();
     expect(nativeCalls).toEqual([[
       'browser_navigate',
-      {
+      expect.objectContaining({
         label: 'project-a:tab-a',
         url: 'https://new-a.example',
         x: 10,
         y: 20,
         w: 300,
         h: 200,
-      },
+      }),
     ]]);
 
     state.activeProjectId = projectB.id;
@@ -1535,6 +1541,7 @@ describe('Tauri native browser lifecycle', () => {
         label: 'native-tab-a',
         url: 'https://first.example',
         phase: 'started',
+        navigationToken: lifecycle.browserTabLifecycle(tab).pendingNavigationToken,
       },
     })).toBe(false);
     expect(handlers.handleBrowserPageLoad({
@@ -1542,6 +1549,7 @@ describe('Tauri native browser lifecycle', () => {
         label: 'native-tab-a',
         url: 'https://first.example',
         phase: 'finished',
+        navigationToken: lifecycle.browserTabLifecycle(tab).pendingNavigationToken,
       },
     })).toBe(false);
     expect(handlers.handleBrowserTitle({
@@ -1741,6 +1749,7 @@ describe('Tauri native browser lifecycle', () => {
         label: 'project-a:tab-a',
         url: 'https://current.example',
         phase: 'started',
+        navigationToken: lifecycle.browserTabLifecycle(tab).pendingNavigationToken,
       },
     })).toBe(true);
     expect(handlers.handleBrowserPageLoad({
@@ -1748,6 +1757,7 @@ describe('Tauri native browser lifecycle', () => {
         label: 'project-a:tab-a',
         url: 'https://current.example',
         phase: 'finished',
+        navigationToken: lifecycle.browserTabLifecycle(tab).pendingNavigationToken,
       },
     })).toBe(true);
     expect(handlers.handleBrowserTitle({
@@ -1759,7 +1769,7 @@ describe('Tauri native browser lifecycle', () => {
     })).toBe(true);
     expect(settled).toBe(false);
     expect(tab).toMatchObject({
-      created: false,
+      created: true,
       loading: false,
       url: 'https://current.example',
       title: 'Current title',
@@ -1856,7 +1866,7 @@ describe('Tauri native browser lifecycle', () => {
       history: ['https://old.example', 'https://first.example'],
       historyIndex: 1,
     });
-    expect(fallbackTimers).toHaveLength(1);
+    expect(fallbackTimers).toHaveLength(0);
     fallbackTimers.forEach((callback) => callback());
     await Promise.resolve();
     expect(tab.loading).toBe(false);

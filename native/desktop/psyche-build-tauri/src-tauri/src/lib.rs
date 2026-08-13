@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 #[cfg(unix)]
 use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
@@ -60,7 +60,12 @@ use pty_transport::{
 };
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
-const MAX_BROWSER_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PROVIDER_RESULT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_BROWSER_SNAPSHOT_JSON_OVERHEAD: usize = 64 * 1024;
+const MAX_BROWSER_SNAPSHOT_BYTES: usize =
+    (MAX_PROVIDER_RESULT_BYTES - MAX_BROWSER_SNAPSHOT_JSON_OVERHEAD) / 4 * 3;
+const MAX_BROWSER_SNAPSHOT_DIMENSION: u32 = 8192;
+const MAX_BROWSER_SNAPSHOT_PIXELS: u64 = 16 * 1024 * 1024;
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
 const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
@@ -76,6 +81,30 @@ fn safe_browser_label(label: Option<String>) -> String {
         BROWSER_LABEL_PREFIX,
         if safe.is_empty() { "default" } else { &safe }
     )
+}
+
+fn ensure_trusted_browser_caller(label: &str) -> Result<(), String> {
+    if label == "main" {
+        return Ok(());
+    }
+    Err(format!(
+        "browser automation authority is only available to trusted webview 'main'; rejected caller '{label}'"
+    ))
+}
+
+fn validate_browser_snapshot_dimensions(width: u32, height: u32) -> Result<(), String> {
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| "browser snapshot dimensions overflow".to_string())?;
+    if width == 0
+        || height == 0
+        || width > MAX_BROWSER_SNAPSHOT_DIMENSION
+        || height > MAX_BROWSER_SNAPSHOT_DIMENSION
+        || pixels > MAX_BROWSER_SNAPSHOT_PIXELS
+    {
+        return Err("browser snapshot dimensions exceed maximum".to_string());
+    }
+    Ok(())
 }
 
 // ----------------------------------------------------------------------------
@@ -1615,7 +1644,17 @@ pub struct BrowserPageLoadEvent {
     pub label: String,
     pub url: String,
     pub phase: String,
+    pub navigation_token: Option<String>,
 }
+
+#[derive(Default)]
+struct BrowserNavigationTokens {
+    pending: Option<String>,
+    active: VecDeque<String>,
+}
+
+static BROWSER_NAVIGATION_TOKENS: Lazy<Mutex<HashMap<String, BrowserNavigationTokens>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn pump_pty_reader<R: Read>(mut reader: R, pump: OutputPump) -> Result<(), String> {
     let mut buffer = [0u8; 4096];
@@ -2332,6 +2371,7 @@ fn ensure_browser(
     w: f64,
     h: f64,
     url: &str,
+    navigation_token: &str,
 ) -> Result<bool, String> {
     if app.webviews().keys().any(|existing| existing == label) {
         return Ok(false);
@@ -2343,6 +2383,13 @@ fn ensure_browser(
 
     let parsed_url = Url::parse(url).map_err(|e| e.to_string())?;
     let browser_label = label.to_string();
+    BROWSER_NAVIGATION_TOKENS.lock().insert(
+        browser_label.clone(),
+        BrowserNavigationTokens {
+            pending: Some(navigation_token.to_string()),
+            active: VecDeque::new(),
+        },
+    );
     let app_for_load = app.clone();
     let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url)).on_page_load(
         move |webview, payload| {
@@ -2350,12 +2397,25 @@ fn ensure_browser(
                 PageLoadEvent::Started => "started",
                 PageLoadEvent::Finished => "finished",
             };
+            let navigation_token = {
+                let mut tokens = BROWSER_NAVIGATION_TOKENS.lock();
+                let state = tokens.entry(browser_label.clone()).or_default();
+                if matches!(payload.event(), PageLoadEvent::Started) {
+                    if let Some(pending) = state.pending.take() {
+                        state.active.push_back(pending);
+                    }
+                    state.active.back().cloned()
+                } else {
+                    state.active.pop_front()
+                }
+            };
             let _ = app_for_load.emit(
                 "browser:page-load",
                 BrowserPageLoadEvent {
                     label: browser_label.clone(),
                     url: payload.url().to_string(),
                     phase: phase.to_string(),
+                    navigation_token,
                 },
             );
             if matches!(payload.event(), PageLoadEvent::Finished) {
@@ -2426,9 +2486,13 @@ fn browser_navigate(
     y: f64,
     w: f64,
     h: f64,
+    navigation_token: String,
 ) -> Result<(), String> {
+    if navigation_token.is_empty() || navigation_token.len() > 128 {
+        return Err("browser navigation token is invalid".to_string());
+    }
     let label = safe_browser_label(label);
-    let created = ensure_browser(&app, &label, x, y, w, h, &url)?;
+    let created = ensure_browser(&app, &label, x, y, w, h, &url, &navigation_token)?;
     if !created {
         let webview = app
             .get_webview(&label)
@@ -2440,6 +2504,11 @@ fn browser_navigate(
             .set_size(LogicalSize::new(w.max(1.0), h.max(1.0)))
             .map_err(|e| e.to_string())?;
         let parsed_url = Url::parse(&url).map_err(|e| e.to_string())?;
+        BROWSER_NAVIGATION_TOKENS
+            .lock()
+            .entry(label.clone())
+            .or_default()
+            .pending = Some(navigation_token);
         webview.navigate(parsed_url).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -2489,6 +2558,7 @@ fn browser_hide_all_except(app: AppHandle, label: Option<String>) -> Result<(), 
 
 fn destroy_browser_webview(app: &AppHandle, label: Option<String>) -> Result<(), String> {
     let label = safe_browser_label(label);
+    BROWSER_NAVIGATION_TOKENS.lock().remove(&label);
     if let Some(webview) = app.get_webview(&label) {
         webview.close().map_err(|error| error.to_string())?;
     }
@@ -2541,7 +2611,13 @@ fn browser_reload(app: AppHandle, label: Option<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn browser_eval(app: AppHandle, label: Option<String>, script: String) -> Result<(), String> {
+fn browser_eval(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+    script: String,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
         webview.eval(&script).map_err(|e| e.to_string())?;
@@ -2562,13 +2638,17 @@ struct BrowserSnapshot {
 /// coordinate capture.
 #[tauri::command]
 async fn browser_snapshot(
+    webview: tauri::Webview,
     app: AppHandle,
     label: Option<String>,
 ) -> Result<BrowserSnapshot, String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| "browser webview missing".to_string())?;
+    let size = webview.size().map_err(|error| error.to_string())?;
+    validate_browser_snapshot_dimensions(size.width, size.height)?;
     #[cfg(not(target_os = "macos"))]
     {
         let _ = webview;
@@ -4048,6 +4128,19 @@ mod pty_runtime_tests {
     use super::*;
     #[cfg(not(windows))]
     use portable_pty::ChildKiller;
+
+    #[test]
+    fn browser_privileged_commands_reject_external_callers() {
+        assert_eq!(ensure_trusted_browser_caller("main"), Ok(()));
+        assert!(ensure_trusted_browser_caller("psyche-browser-untrusted").is_err());
+    }
+
+    #[test]
+    fn browser_snapshot_dimensions_are_bounded_before_capture() {
+        assert!(validate_browser_snapshot_dimensions(800, 600).is_ok());
+        assert!(validate_browser_snapshot_dimensions(0, 600).is_err());
+        assert!(validate_browser_snapshot_dimensions(8192, 8192).is_err());
+    }
 
     #[cfg(not(windows))]
     #[derive(Debug)]

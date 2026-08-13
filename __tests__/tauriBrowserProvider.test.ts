@@ -105,6 +105,23 @@ describe('Tauri browser control provider contract', () => {
     expect(capability.windows).toEqual(['main']);
   });
 
+  it('gates privileged browser inspection commands to the trusted main webview first', () => {
+    for (const command of ['browser_eval', 'browser_snapshot']) {
+      expect(lib).toMatch(new RegExp(
+        `fn ${command}\\([\\s\\S]{0,300}webview: tauri::Webview[\\s\\S]{0,220}\\{\\n\\s*ensure_trusted_browser_caller\\(webview.label\\(\\)\\)\\?;`,
+      ));
+    }
+    expect(lib).toContain('ensure_trusted_browser_caller("psyche-browser-untrusted")');
+  });
+
+  it('pre-bounds screenshot pixels and reserves base64 JSON wire overhead', () => {
+    expect(lib).toContain('MAX_BROWSER_SNAPSHOT_PIXELS');
+    expect(lib).toContain('MAX_BROWSER_SNAPSHOT_DIMENSION');
+    expect(lib).toMatch(/MAX_BROWSER_SNAPSHOT_BYTES[^=]*=\s*\(MAX_PROVIDER_RESULT_BYTES\s*-\s*MAX_BROWSER_SNAPSHOT_JSON_OVERHEAD\)\s*\/\s*4\s*\*\s*3/);
+    expect(lib).toMatch(/validate_browser_snapshot_dimensions[\s\S]*checked_mul/);
+    expect(lib).toMatch(/browser_snapshot[\s\S]*validate_browser_snapshot_dimensions[\s\S]*takeSnapshotWithConfiguration/);
+  });
+
   it('implements Unix and Windows control endpoint transports', () => {
     expect(provider).toContain('#[cfg(unix)]');
     expect(provider).toContain('UnixStream');

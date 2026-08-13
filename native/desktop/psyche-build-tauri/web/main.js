@@ -4070,6 +4070,7 @@
         if (skippedLabels.has(label)) continue;
         if (!savedTab) continue;
         try {
+          var recoveryNavigationToken = "recovery:" + Date.now() + ":" + index;
           await invoke("browser_navigate", {
             label: savedTab.label,
             url: savedTab.url,
@@ -4077,6 +4078,7 @@
             y: -10000,
             w: 1,
             h: 1,
+            navigationToken: recoveryNavigationToken,
           });
           currentTab.created = true;
           currentTab.loading = false;
@@ -4084,6 +4086,7 @@
           tabLifecycle.nativeLabel = nativeBrowserLabel(savedTab.label);
           tabLifecycle.liveGeneration = tabLifecycle.generation;
           tabLifecycle.liveUrl = savedTab.url;
+          tabLifecycle.liveNavigationToken = recoveryNavigationToken;
           tabLifecycle.viewLive = true;
           recreated += 1;
         } catch (recoveryError) {
@@ -8295,10 +8298,10 @@
     return projectId + "__" + tabId;
   }
   function browserTabLifecycle(tab) {
-    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
+    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
     var lifecycle = browserTabLifecycleStates.get(tab);
     if (!lifecycle) {
-      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
+      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
       browserTabLifecycleStates.set(tab, lifecycle);
     }
     return lifecycle;
@@ -8333,6 +8336,7 @@
     lifecycle.invalidationGeneration += 1;
     lifecycle.pendingGeneration = 0;
     lifecycle.pendingUrl = null;
+    lifecycle.pendingNavigationToken = null;
     lifecycle.eventUrl = null;
     lifecycle.navigationSnapshot = null;
     return lifecycle.generation;
@@ -8460,7 +8464,7 @@
   function publishBrowserControlResource(pair) {
     if (!pair || browserTabIsClosing(pair.tab)) return Promise.resolve(false);
     var lifecycle = browserTabLifecycle(pair.tab);
-    if (!lifecycle.nativeLabel || !(lifecycle.liveGeneration || lifecycle.pendingGeneration)) return Promise.resolve(false);
+    if (!lifecycle.nativeLabel || !lifecycle.liveGeneration || lifecycle.pendingGeneration) return Promise.resolve(false);
     return ensureBrowserControlProvider(pair.project).then(function (status) {
       return invoke("control_provider_upsert", {
         projectRoot: pair.project.root,
@@ -8517,21 +8521,101 @@
       "catch(error){emit('browser:automation-result',{actionId:" + actionId + ",tabId:" + tabId + ",generation:" + generation + ",error:{code:error&&error.code||'automation_failed',message:String(error&&error.message||error)}});}})();";
   }
   function awaitBrowserAutomationResult(effect) {
-    return new Promise(function (resolve, reject) {
-      var timeout = setTimeout(function () {
+    var cancel;
+    var promise = new Promise(function (resolve, reject) {
+      var settled = false;
+      var settle = function (callback, value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
         browserAutomationWaiters.delete(effect.actionId);
-        reject(Object.assign(new Error("browser automation timed out"), { code: "effect_unknown" }));
+        callback(value);
+      };
+      var timeout = setTimeout(function () {
+        settle(reject, Object.assign(new Error("browser automation timed out"), { code: "effect_unknown", ambiguous: true }));
       }, 15000);
       browserAutomationWaiters.set(effect.actionId, {
         tabId: effect.tabId,
         generation: effect.generation,
-        resolve: function (value) { clearTimeout(timeout); resolve(value); },
-        reject: function (error) { clearTimeout(timeout); reject(error); },
+        resolve: function (value) { settle(resolve, value); },
+        reject: function (error) { settle(reject, error); },
       });
+      cancel = function (error) { settle(reject, error); };
     });
+    promise.cancel = function (error) { cancel(error); };
+    return promise;
   }
   function completeBrowserProviderEffect(project, result) {
     return invoke("control_provider_complete", { projectRoot: project.root, result: result });
+  }
+  function canonicalizeBrowserSemanticSnapshot(value, pair, effect, capturedAtMs) {
+    var fail = function (message) { throw Object.assign(new Error(message), { code: "automation_failed" }); };
+    var plain = function (item) { return !!item && typeof item === "object" && !Array.isArray(item); };
+    var exactKeys = function (item, allowed, label) {
+      var keys = Object.keys(item);
+      for (var i = 0; i < keys.length; i++) if (allowed.indexOf(keys[i]) === -1) fail(label + " has unknown field " + keys[i]);
+    };
+    if (!plain(value)) fail("snapshot is malformed");
+    var encoded = JSON.stringify(value);
+    if (new TextEncoder().encode(encoded).length > 1024 * 1024) fail("snapshot exceeds maximum size");
+    exactKeys(value, ["schema", "snapshotId", "url", "viewport", "nodes", "truncated"], "snapshot");
+    if (value.schema !== "psyche.browser.snapshot/v1" || typeof value.snapshotId !== "string" ||
+        typeof value.url !== "string" || !plain(value.viewport) || !Array.isArray(value.nodes) ||
+        typeof value.truncated !== "boolean") fail("snapshot is malformed");
+    exactKeys(value.viewport, ["width", "height"], "viewport");
+    var width = value.viewport.width;
+    var height = value.viewport.height;
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 0 || height < 0 || width > 100000 || height > 100000) fail("viewport is malformed");
+    if (value.nodes.length > 2000) fail("snapshot exceeds maximum node count");
+    var roles = ["button", "link", "textbox", "checkbox", "radio", "combobox", "option", "frame", "img", "heading", "status", "dialog", "menu", "menuitem", "tab", "tabpanel", "switch"];
+    var refs = new Set();
+    var opaqueFrames = 0;
+    var nodes = value.nodes.map(function (node) {
+      if (!plain(node)) fail("snapshot node is malformed");
+      exactKeys(node, ["ref", "role", "name", "bounds", "disabled", "checked", "selected", "value", "secret", "valuePresent", "opaque"], "snapshot node");
+      if (typeof node.ref !== "string" || !/^e[1-9][0-9]{0,5}$/.test(node.ref) || refs.has(node.ref) ||
+          typeof node.role !== "string" || roles.indexOf(node.role) === -1 || typeof node.name !== "string" || node.name.length > 512 ||
+          !plain(node.bounds)) fail("snapshot node is malformed");
+      refs.add(node.ref);
+      exactKeys(node.bounds, ["x", "y", "width", "height", "clipped"], "snapshot bounds");
+      var bounds = {};
+      ["x", "y", "width", "height"].forEach(function (key) {
+        if (!Number.isFinite(node.bounds[key])) fail("snapshot bounds are malformed");
+        bounds[key] = node.bounds[key];
+      });
+      var projected = { ref: node.ref, role: node.role, name: node.name, bounds: bounds };
+      var state = {};
+      ["disabled", "checked", "selected"].forEach(function (key) {
+        if (node[key] !== undefined) {
+          if (typeof node[key] !== "boolean") fail("snapshot state is malformed");
+          state[key] = node[key];
+        }
+      });
+      if (Object.keys(state).length) projected.state = state;
+      if (node.secret === true) projected.value = { kind: "text", secret: true };
+      else if (node.value !== undefined) {
+        if (typeof node.value !== "string" || node.value.length > 512) fail("snapshot value is malformed");
+        projected.value = { kind: "text", value: node.value };
+      }
+      if (node.opaque === true || node.role === "frame") opaqueFrames += 1;
+      return projected;
+    });
+    var capturedAt = new Date(capturedAtMs);
+    return {
+      schema: "psyche.browser.snapshot/v1",
+      id: effect.actionId,
+      tabId: pair.tab.id,
+      generation: effect.generation,
+      url: String(pair.tab.url || "about:blank").slice(0, 2048),
+      title: String(pair.tab.title || "").slice(0, 512),
+      loading: !!pair.tab.loading,
+      viewport: { width: width, height: height },
+      capturedAt: capturedAt.toISOString(),
+      nodes: nodes,
+      truncated: value.truncated,
+      opaqueFrames: opaqueFrames,
+      expiresAt: new Date(capturedAt.getTime() + 30000).toISOString(),
+    };
   }
   async function handleBrowserProviderEffect(event) {
     var effect = event && event.payload || {};
@@ -8547,7 +8631,7 @@
       return false;
     }
     var lifecycle = browserTabLifecycle(pair.tab);
-    if (effect.generation !== lifecycle.liveGeneration) {
+    if (effect.generation !== lifecycle.liveGeneration || lifecycle.pendingGeneration) {
       await completeBrowserProviderEffect(pair.project, {
         actionId: effect.actionId,
         status: "failed",
@@ -8585,7 +8669,7 @@
       if (!current || current.project !== pair.project || current.browser !== pair.browser ||
           current.tab !== pair.tab || current.worktreePath !== pair.worktreePath) return false;
       var currentLifecycle = browserTabLifecycle(current.tab);
-      return effect.generation === currentLifecycle.liveGeneration && !!currentLifecycle.nativeLabel;
+      return effect.generation === currentLifecycle.liveGeneration && !currentLifecycle.pendingGeneration && !!currentLifecycle.nativeLabel;
     };
     var runInspect = async function () {
       if (!exactPairIsCurrent()) return completeReplaced();
@@ -8593,11 +8677,17 @@
         var installed = await installBrowserAutomationForPair(pair);
         if (!installed || !exactPairIsCurrent()) return completeReplaced();
         var resultFlight = awaitBrowserAutomationResult(effect);
-        await invoke("browser_eval", {
-          label: browserLabelForTab(pair.project, pair.tab),
-          script: browserAutomationDispatchScript(effect),
-        });
-        var value = await resultFlight;
+        try {
+          await invoke("browser_eval", {
+            label: browserLabelForTab(pair.project, pair.tab),
+            script: PsycheControl.browserAutomationSource() + "\n" + browserAutomationDispatchScript(effect),
+          });
+        } catch (evalError) {
+          resultFlight.cancel(evalError);
+          await resultFlight.catch(function () {});
+          throw evalError;
+        }
+        var value = canonicalizeBrowserSemanticSnapshot(await resultFlight, pair, effect, Date.now());
         if (!exactPairIsCurrent()) return completeReplaced();
         if (effect.operation.includeScreenshot) {
           value.screenshot = await invoke("browser_snapshot", { label: browserLabelForTab(pair.project, pair.tab) });
@@ -8605,8 +8695,9 @@
         }
         await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "succeeded", value: value });
       } catch (error) {
-        var code = error && error.code || (String(error).indexOf("backend_unavailable") !== -1 ? "backend_unavailable" : "automation_failed");
-        await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "failed", code: code, message: String(error && error.message || error) });
+        var ambiguous = !!(error && (error.ambiguous || error.code === "effect_unknown"));
+        var code = ambiguous ? "effect_unknown" : error && error.code || (String(error).indexOf("backend_unavailable") !== -1 ? "backend_unavailable" : "automation_failed");
+        await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: ambiguous ? "unknown" : "failed", code: code, message: String(error && error.message || error) });
       }
       return true;
     };
@@ -8648,7 +8739,7 @@
     try { return new URL(String(left)).href === new URL(String(right)).href; }
     catch (_) { return String(left) === String(right); }
   }
-  function browserNativeEventContext(nativeLabel, url) {
+  function browserNativeEventContext(nativeLabel, url, navigationToken) {
     var pair = browserTabForNativeLabel(nativeLabel);
     if (!pair || findProject(pair.project.id) !== pair.project) return null;
     if (!pair.project.browsersByWorktree ||
@@ -8661,6 +8752,8 @@
         findThread(pane.id) !== pane || browserPaneIsClosing(pane)) return null;
     var lifecycle = browserTabLifecycle(pair.tab);
     var hasPendingNavigation = lifecycle.pendingGeneration > 0;
+    if (hasPendingNavigation && lifecycle.pendingNavigationToken && navigationToken !== lifecycle.pendingNavigationToken) return null;
+    if (!hasPendingNavigation && navigationToken && navigationToken !== lifecycle.liveNavigationToken) return null;
     var expectedUrl = hasPendingNavigation ? lifecycle.pendingUrl : lifecycle.liveUrl;
     if (!lifecycle.viewLive || lifecycle.nativeLabel !== nativeLabel ||
         (hasPendingNavigation && lifecycle.pendingGeneration !== lifecycle.generation) ||
@@ -8671,9 +8764,20 @@
     if (url) lifecycle.eventUrl = url;
     return pair;
   }
-  function markBrowserTabLoaded(nativeLabel, url, title) {
-    var pair = browserNativeEventContext(nativeLabel, url);
+  function markBrowserTabLoaded(nativeLabel, url, title, navigationToken) {
+    var pair = browserNativeEventContext(nativeLabel, url, navigationToken);
     if (!pair) return false;
+    var lifecycle = browserTabLifecycle(pair.tab);
+    if (lifecycle.pendingGeneration) {
+      lifecycle.liveGeneration = lifecycle.pendingGeneration;
+      lifecycle.liveUrl = url || lifecycle.pendingUrl;
+      lifecycle.liveNavigationToken = lifecycle.pendingNavigationToken;
+      lifecycle.pendingGeneration = 0;
+      lifecycle.pendingUrl = null;
+      lifecycle.pendingNavigationToken = null;
+      lifecycle.navigationSnapshot = null;
+      pair.tab.created = true;
+    }
     pair.tab.loading = false;
     if (url) pair.tab.url = url;
     if (title && String(title).trim()) pair.tab.title = String(title).trim();
@@ -8687,7 +8791,7 @@
   }
   function handleBrowserPageLoad(event) {
     var payload = event.payload || {};
-    var pair = browserNativeEventContext(payload.label, payload.url);
+    var pair = browserNativeEventContext(payload.label, payload.url, payload.navigationToken);
     if (!pair) return false;
     if (payload.phase === "started") {
       pair.tab.loading = true;
@@ -8695,9 +8799,12 @@
         publishBrowserControlResource(pair).catch(function () {});
       }
     } else if (payload.phase === "finished") {
-      var loaded = markBrowserTabLoaded(payload.label, payload.url, "");
+      var loaded = markBrowserTabLoaded(payload.label, payload.url, "", payload.navigationToken);
       if (loaded && typeof installBrowserAutomationForPair === "function") {
         installBrowserAutomationForPair(pair).catch(function () {});
+      }
+      if (loaded && typeof publishBrowserControlResource === "function") {
+        publishBrowserControlResource(pair).catch(function () {});
       }
       return loaded;
     } else {
@@ -8711,7 +8818,7 @@
   }
   function handleBrowserTitle(event) {
     var payload = event.payload || {};
-    var marked = markBrowserTabLoaded(payload.label, payload.url, payload.title);
+    var marked = markBrowserTabLoaded(payload.label, payload.url, payload.title, payload.navigationToken);
     var pair = marked && typeof browserTabForNativeLabel === "function"
       ? browserTabForNativeLabel(payload.label)
       : null;
@@ -8977,11 +9084,13 @@
       }
       if (lifecycle.invalidationGeneration !== invalidationGeneration || !requestIsCurrent()) return false;
       var generation = beginBrowserNavigation(tab);
+      var navigationToken = generation + ":" + (globalThis.crypto && globalThis.crypto.randomUUID ? globalThis.crypto.randomUUID() : Date.now() + ":" + Math.random());
       var label = browserLabelForTab(project, tab);
       var nativeLabel = nativeBrowserLabel(label);
       lifecycle.nativeLabel = nativeLabel;
       lifecycle.pendingGeneration = generation;
       lifecycle.pendingUrl = normalised;
+      lifecycle.pendingNavigationToken = navigationToken;
       lifecycle.eventUrl = null;
       lifecycle.viewLive = true;
       lifecycle.navigationSnapshot = {
@@ -9002,20 +9111,15 @@
       };
       tab.loading = true; tab.title = tabTitle(normalised); renderBrowserTabs(); updateBrowserControls();
       try {
-        await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h });
+        await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h, navigationToken: navigationToken });
         if (!browserNavigationIsCurrent(context)) {
           await discardObsoleteBrowserNavigation(context);
           return false;
         }
-        var committedUrl = lifecycle.eventUrl || normalised;
-        tab.created = true; tab.url = committedUrl;
-        lifecycle.pendingGeneration = 0;
-        lifecycle.pendingUrl = null;
-        lifecycle.liveGeneration = generation;
-        lifecycle.liveUrl = committedUrl;
+        tab.created = true;
+        tab.url = normalised;
+        tab.loading = false;
         lifecycle.viewLive = true;
-        lifecycle.navigationSnapshot = null;
-        await publishBrowserControlResource(navigationPair);
         if (opts.fromHistory && typeof opts.historyIndex === "number") {
           tab.historyIndex = opts.historyIndex;
         } else if (!opts.fromHistory && !opts.preserveHistory) {
@@ -9026,12 +9130,6 @@
         if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
         else syncBrowserBounds();
         saveWorkspaceSoon();
-        setTimeout(function () {
-          if (browserNavigationIsCurrent(context) && tab.loading &&
-              browserUrlsMatch(tab.url, normalised)) {
-            markBrowserTabLoaded(nativeBrowserLabel(label), normalised, "");
-          }
-        }, 4500);
         return true;
       } catch (err) {
         if (!browserNavigationIsCurrent(context)) {
@@ -9041,6 +9139,7 @@
         lifecycle.nativeLabel = previousView.nativeLabel;
         lifecycle.pendingGeneration = 0;
         lifecycle.pendingUrl = null;
+        lifecycle.pendingNavigationToken = null;
         lifecycle.liveGeneration = previousView.liveGeneration;
         lifecycle.liveUrl = previousView.liveUrl;
         lifecycle.eventUrl = previousView.eventUrl;
@@ -9069,7 +9168,9 @@
   urlInput.addEventListener("keydown", function (e) { if (e.key === "Enter") navigateBrowser(urlInput.value); });
   document.getElementById("reload").addEventListener("click", function () {
     var project = activeProject(); var tab = currentBrowserTab(project); var pane = project && findBrowserPane(project.id, activeWorkspaceRoot(project));
-    if (tab && tab.created && !browserTabIsClosing(tab) && !browserPaneIsClosing(pane)) { tab.loading = true; renderBrowserTabs(); updateBrowserControls(); invoke("browser_reload", { label: browserLabelForTab(project, tab) }).catch(function () {}).finally(function () { setTimeout(function () { if (!browserTabIsClosing(tab) && !browserPaneIsClosing(pane)) tab.loading = false; renderBrowserTabs(); updateBrowserControls(); }, 350); }); }
+    if (tab && tab.created && !browserTabIsClosing(tab) && !browserPaneIsClosing(pane)) {
+      navigateBrowser(tab.url, { tabId: tab.id, replace: true, preserveHistory: true }).catch(function () {});
+    }
   });
   document.getElementById("back").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex > 0) { var index = tab.historyIndex - 1; navigateBrowser(tab.history[index], { fromHistory: true, historyIndex: index }); } });
   document.getElementById("forward").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex < tab.history.length - 1) { var index = tab.historyIndex + 1; navigateBrowser(tab.history[index], { fromHistory: true, historyIndex: index }); } });

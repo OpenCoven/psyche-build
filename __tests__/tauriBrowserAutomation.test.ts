@@ -144,6 +144,58 @@ describe('bounded semantic browser automation', () => {
     expect(firstApi.dispatch({ type: 'resolve', snapshotId: snapshot.snapshotId, ref: 'e1' })).toMatchObject({ role: 'button' });
   });
 
+  it('overwrites a configurable page-owned automation impostor instead of trusting it', () => {
+    const { globalObject } = fixture();
+    const impostor = { schema: 'psyche.browser.automation/v1', dispatch: vi.fn(() => ({ secret: true })), invalidate: vi.fn() };
+    Object.defineProperty(globalObject, '__PSYCHE_AUTOMATION__', { configurable: true, value: impostor });
+
+    Function('globalThis', browserAutomationSource())(globalObject);
+
+    expect((globalObject as any).__PSYCHE_AUTOMATION__).not.toBe(impostor);
+    expect((globalObject as any).__PSYCHE_AUTOMATION__.dispatch({ type: 'snapshot' })).toMatchObject({
+      schema: 'psyche.browser.snapshot/v1',
+    });
+  });
+
+  it('bounds total DOM visits even when 100k siblings are nonsemantic', () => {
+    const { globalObject } = fixture();
+    let rectReads = 0;
+    const siblings = Array.from({ length: 100_000 }, () => {
+      const child = node('div');
+      child.getBoundingClientRect = () => {
+        rectReads += 1;
+        return { x: 0, y: 0, width: 1, height: 1, top: 0, left: 0, right: 1, bottom: 1 };
+      };
+      return child;
+    });
+    globalObject.document.body = node('body', { children: siblings });
+    globalObject.document.documentElement = globalObject.document.body;
+
+    const snapshot = dispatchBrowserAutomation(globalObject, { type: 'snapshot' });
+    expect(rectReads).toBeLessThanOrEqual(2_000);
+    expect(snapshot.truncated).toBe(true);
+  });
+
+  it('indexes a label flood once and stops at the global visit budget', () => {
+    const { globalObject } = fixture();
+    const input = node('input', { attrs: { id: 'target' } });
+    globalObject.document.body = node('body', { children: [input] });
+    globalObject.document.documentElement = globalObject.document.body;
+    let labelReads = 0;
+    (globalObject.document as any).querySelectorAll = (() => ({
+      *[Symbol.iterator]() {
+        for (let index = 0; index < 100_000; index += 1) {
+          labelReads += 1;
+          yield node('label', { textContent: `label-${index}`, attrs: { for: index === 0 ? 'target' : `other-${index}` } });
+        }
+      },
+    })) as any;
+
+    const snapshot = dispatchBrowserAutomation(globalObject, { type: 'snapshot' });
+    expect(labelReads).toBe(2_000);
+    expect(snapshot.nodes[0]).toMatchObject({ name: 'label-0' });
+  });
+
   it('omits noninteractive offscreen and zero-size explicit roles', () => {
     const { globalObject } = fixture();
     const heading = node('h2', { textContent: 'Offscreen heading', attrs: { role: 'heading' }, rect: [900, 900, 100, 20] });
@@ -164,7 +216,8 @@ describe('bounded semantic browser automation', () => {
     globalObject.document.body = node('body', { children: [root, ...Array.from({ length: 2_100 }, (_, i) => node('button', { textContent: `b${i}` }))] });
 
     const snapshot = dispatchBrowserAutomation(globalObject, { type: 'snapshot' });
-    expect(snapshot.nodes).toHaveLength(2_000);
+    expect(snapshot.nodes.length).toBeLessThanOrEqual(2_000);
+    expect(snapshot.truncated).toBe(true);
     expect(snapshot.nodes.every((entry: { name?: string }) => new TextEncoder().encode(entry.name ?? '').length <= 512)).toBe(true);
   });
 
