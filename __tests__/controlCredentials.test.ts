@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createControlCredentialStore } from '../src/control/credentials.js';
-import { createControlServerForTest } from '../src/control/server.js';
+import { authorizeCommand, createControlServerForTest } from '../src/control/server.js';
 import type { ControlServerRuntime } from '../src/control/server.js';
 import type { ControlCommandInput } from '../src/control/types.js';
 import type { ControlPrincipal } from '../src/control/credentials.js';
@@ -82,6 +82,18 @@ describe('control credential store', () => {
 });
 
 describe('control server authorization', () => {
+  it.each([
+    'orchestration.execute', 'pane.spawn', 'pane.prompt', 'pane.interrupt', 'pane.delegate', 'pane.takeover',
+    'pane.input', 'pane.terminal.open', 'pane.resize', 'pane.focus', 'pane.kill', 'pane.respawn',
+    'pane.conflict.open', 'pane.option.update', 'pane.meta.update', 'ritual.launch',
+    'coven.session.launch', 'coven.session.open', 'coven.desktop.action', 'coven.capability.execute',
+    'lease.grant', 'lease.revoke', 'approval.resolve', 'provider.resource.upsert', 'provider.resource.remove',
+  ] as const)('denies agent legacy/operator command %s', (kind) => {
+    expect(authorizeCommand(
+      { id: 'agent-1', kind: 'agent', capabilities: ['read', 'mutate'] },
+      kind,
+    )).toMatchObject({ status: 'rejected', code: 'agent_mutation_denied' });
+  });
   it('rejects agent self-delegation and stamps operator identity', async () => {
     const submit = vi.fn(async (command) => ({ status: 'succeeded' as const, value: command.actor }));
     const server = createControlServerForTest({ runtime: stubRuntime(submit) });
@@ -89,7 +101,7 @@ describe('control server authorization', () => {
     await expect(server.submitAs(
       { id: 'agent-1', kind: 'agent', capabilities: ['read', 'mutate', 'delegate'] },
       delegationInput(),
-    )).resolves.toMatchObject({ status: 'rejected', code: 'delegation_not_authorized' });
+    )).resolves.toMatchObject({ status: 'rejected', code: 'agent_mutation_denied' });
 
     await expect(server.submitAs(
       { id: 'operator-1', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] },
@@ -109,9 +121,15 @@ describe('control server authorization', () => {
     const server = createControlServerForTest({ runtime: stubRuntime(submit) });
 
     await expect(server.submitAs(principal, delegationInput()))
-      .resolves.toMatchObject({ status: 'rejected', code: 'delegation_not_authorized' });
+      .resolves.toMatchObject({
+        status: 'rejected',
+        code: principal.kind === 'agent' ? 'agent_mutation_denied' : 'delegation_not_authorized',
+      });
     await expect(server.submitAs(principal, takeoverInput()))
-      .resolves.toMatchObject({ status: 'rejected', code: 'takeover_not_authorized' });
+      .resolves.toMatchObject({
+        status: 'rejected',
+        code: principal.kind === 'agent' ? 'agent_mutation_denied' : 'takeover_not_authorized',
+      });
     expect(submit).not.toHaveBeenCalled();
   });
 

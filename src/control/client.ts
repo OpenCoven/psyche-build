@@ -3,10 +3,15 @@ import { canonicalizeProjectRoot } from './projectIdentity.js';
 import { controlEndpointForProject } from './endpoint.js';
 import { encodeControlMessage, type ControlRequest, type ControlResponse } from './protocol.js';
 import type {
+  ActionReceipt,
+  ControlCommand,
   ControlCommandInput,
   CommandOutcome,
   ControlSnapshot,
 } from './types.js';
+
+type InputFor<K extends ControlCommand['kind']> = Extract<ControlCommandInput, { kind: K }>;
+type HelperInput<K extends ControlCommand['kind']> = Omit<InputFor<K>, 'kind' | 'projectRoot'>;
 
 export interface ControlClientPrincipal {
   id: string;
@@ -160,6 +165,27 @@ export class ControlClient {
         return { events: response.events, nextSequence: response.nextSequence, gap: response.gap };
       }
       throw responseError(response, 'events.read');
+    });
+  }
+
+  requestLease(input: HelperInput<'lease.request'>): Promise<CommandOutcome> {
+    return this.submit({ ...input, kind: 'lease.request', projectRoot: this.projectRoot });
+  }
+
+  releaseLease(input: HelperInput<'lease.release'>): Promise<CommandOutcome> {
+    return this.submit({ ...input, kind: 'lease.release', projectRoot: this.projectRoot });
+  }
+
+  resolveApproval(input: HelperInput<'approval.resolve'>): Promise<CommandOutcome> {
+    return this.submit({ ...input, kind: 'approval.resolve', projectRoot: this.projectRoot });
+  }
+
+  async actionStatus(actionId: string): Promise<ActionReceipt | undefined> {
+    return this.request({
+      version: 1, type: 'action.status', requestId: this.allocateRequestId(), actionId,
+    }).then((response) => {
+      if (response.type === 'action.status.result') return response.receipt;
+      throw responseError(response, 'action.status');
     });
   }
 

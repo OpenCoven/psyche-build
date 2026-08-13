@@ -43,6 +43,13 @@ function notSupported(kind: string): () => Promise<never> {
   ));
 }
 
+function notImplemented(kind: string): () => Promise<never> {
+  return () => Promise.reject(Object.assign(
+    new Error(`agent surface backend is not implemented: ${kind}`),
+    { code: 'command_not_implemented' },
+  ));
+}
+
 /**
  * The concrete {@link ControlHandlers} that turn canonical control commands
  * into daemon effects.
@@ -110,6 +117,11 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       });
     },
     launchRitual: notSupported('ritual.launch'),
+    observePane: notImplemented('pane.observe'),
+    actOnPane: notImplemented('pane.action'),
+    inspectBrowser: notImplemented('browser.inspect'),
+    actOnBrowser: notImplemented('browser.action'),
+    runBrowserScript: notImplemented('browser.script'),
 
     async launchCovenSession(payload) {
       return launchProjectCovenSession(

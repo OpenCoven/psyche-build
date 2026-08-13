@@ -1,9 +1,11 @@
 import type { OrchestrationTaskRequest } from '../orchestration/types.js';
 import type {
+  CapabilityLease,
   LeaseTarget,
   SurfaceCapability,
 } from './capabilityLeases.js';
-import type { BrowserTabSurface } from './surfaces.js';
+import type { Approval } from './approvals.js';
+import type { BrowserTabSurface, SurfaceResource } from './surfaces.js';
 
 export interface LeaseGrant {
   readonly target: LeaseTarget;
@@ -295,9 +297,26 @@ export type CommandOutcome =
   | { status: 'unknown'; code: string; message: string };
 
 export interface CommandRecord {
-  command: ControlCommand;
+  id: string;
+  kind: ControlCommand['kind'];
   outcome: CommandOutcome;
   sequence: number;
+}
+
+export interface LeaseRequestState {
+  id: string;
+  actorId: string;
+  taskId: string;
+  ttlMs: number;
+  grants: readonly LeaseGrant[];
+  createdAt: string;
+  status: 'pending' | 'granted';
+}
+
+export interface ResourceState {
+  id: string;
+  kind: SurfaceResource['kind'];
+  generation: number;
 }
 
 export interface ControlSnapshot {
@@ -312,4 +331,9 @@ export interface ControlSnapshot {
     revision: number;
     expiresAt: string;
   }>;
+  resources?: readonly ResourceState[];
+  capabilityLeases?: readonly CapabilityLease[];
+  leaseRequests?: readonly LeaseRequestState[];
+  approvals?: readonly Approval[];
+  receipts?: readonly ActionReceipt[];
 }

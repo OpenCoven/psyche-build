@@ -17,6 +17,7 @@ import type {
   ControlCommand,
   ControlCommandInput,
   CommandOutcome,
+  ActionReceipt,
   ControlSnapshot,
 } from './types.js';
 
@@ -29,6 +30,7 @@ export interface ControlServerRuntime {
     nextSequence: number;
     gap: boolean;
   };
+  actionStatus?(actionId: string): ActionReceipt | undefined;
 }
 
 export interface ControlServerOptions {
@@ -64,6 +66,33 @@ const KNOWN_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
   'coven.session.open',
   'coven.desktop.action',
   'coven.capability.execute',
+  'lease.request',
+  'lease.grant',
+  'lease.release',
+  'lease.revoke',
+  'pane.observe',
+  'pane.action',
+  'browser.inspect',
+  'browser.action',
+  'browser.script',
+  'approval.resolve',
+  'provider.resource.upsert',
+  'provider.resource.remove',
+]);
+
+const AGENT_CONTROL_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
+  'lease.request', 'lease.grant', 'lease.release', 'lease.revoke',
+  'pane.observe', 'pane.action', 'browser.inspect', 'browser.action', 'browser.script',
+  'approval.resolve', 'provider.resource.upsert', 'provider.resource.remove',
+]);
+
+const OPERATOR_ONLY_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
+  'lease.grant', 'lease.revoke', 'approval.resolve',
+  'provider.resource.upsert', 'provider.resource.remove',
+]);
+const AGENT_ALLOWED_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
+  'lease.request', 'lease.release', 'pane.observe', 'pane.action',
+  'browser.inspect', 'browser.action', 'browser.script',
 ]);
 
 function actorKindForPrincipal(kind: ControlPrincipal['kind']): ControlActorKind {
@@ -96,6 +125,24 @@ export function authorizeCommand(
   principal: ControlPrincipal,
   kind: ControlCommand['kind'],
 ): CommandOutcome | null {
+  if (principal.kind === 'agent' && !AGENT_ALLOWED_COMMAND_KINDS.has(kind)) {
+    return {
+      status: 'rejected', code: 'agent_mutation_denied',
+      message: 'agent principals must use lease-mediated control commands',
+    };
+  }
+  if (AGENT_CONTROL_COMMAND_KINDS.has(kind) && principal.kind === 'compatibility') {
+    return {
+      status: 'rejected', code: 'agent_control_not_authorized',
+      message: 'compatibility principals cannot use agent control commands',
+    };
+  }
+  if (OPERATOR_ONLY_COMMAND_KINDS.has(kind) && principal.kind !== 'operator') {
+    return {
+      status: 'rejected', code: 'operator_required',
+      message: 'only an operator principal may submit this command',
+    };
+  }
   if (kind === 'pane.delegate') {
     if (principal.kind !== 'operator' || !principal.capabilities.includes('delegate')) {
       return {
@@ -156,6 +203,10 @@ export class ControlAuthority {
     gap: boolean;
   } {
     return this.runtime.readEvents(afterSequence, limit);
+  }
+
+  actionStatus(actionId: string): ActionReceipt | undefined {
+    return this.runtime.actionStatus?.(actionId);
   }
 
   welcomeFor(principal: ControlPrincipal): Extract<ControlResponse, { type: 'welcome' }> {
@@ -260,6 +311,7 @@ export class ControlServer {
     let principal: ControlPrincipal | null = null;
     let clientId: string | undefined;
     let buffer = '';
+    let processingTail: Promise<void> = Promise.resolve();
 
     const write = (message: ControlResponse): void => {
       if (!socket.destroyed) socket.write(`${encodeControlMessage(message)}\n`);
@@ -284,16 +336,24 @@ export class ControlServer {
         buffer = buffer.slice(newline + 1);
         newline = buffer.indexOf('\n');
         if (line.trim().length === 0) continue;
-        this.handleLine(line, write, fail, {
-          getPrincipal: () => principal,
-          setPrincipal: (value, id) => {
-            principal = value;
-            clientId = id;
-          },
-          getClientId: () => clientId,
-        }).catch((error) => {
-          fail('internal', error instanceof Error ? error.message : 'internal error');
-        });
+        processingTail = processingTail
+          .catch(() => undefined)
+          .then(() => this.handleLine(line, write, fail, {
+            getPrincipal: () => principal,
+            setPrincipal: (value, id) => {
+              principal = value;
+              clientId = id;
+            },
+            getClientId: () => clientId,
+          }))
+          .catch((error) => {
+            write({
+              version: 1,
+              type: 'error',
+              code: 'internal',
+              message: error instanceof Error ? error.message : 'internal error',
+            });
+          });
       }
     });
   }
@@ -402,6 +462,25 @@ export class ControlServer {
         });
         return;
       }
+      case 'action.status':
+        if (principal.kind === 'compatibility') {
+          write({
+            version: 1, type: 'error', requestId: request.requestId,
+            code: 'agent_control_not_authorized',
+            message: 'compatibility principals cannot use agent control status',
+          });
+          return;
+        }
+        write({
+          version: 1,
+          type: 'action.status.result',
+          requestId: request.requestId,
+          actionId: request.actionId,
+          ...(this.authority.actionStatus(request.actionId)
+            ? { receipt: this.authority.actionStatus(request.actionId) }
+            : {}),
+        });
+        return;
     }
   }
 }

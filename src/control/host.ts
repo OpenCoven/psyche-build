@@ -1,7 +1,11 @@
 import { ControlJournal } from './journal.js';
 import { acquireOwnerLock } from './ownerLock.js';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
-import { ControlRuntime, type ControlHandlers } from './runtime.js';
+import { ControlRuntime, type ControlHandlers, type RuntimeJournal } from './runtime.js';
+import type { CanonicalBrowserSnapshotResolver } from './runtime.js';
+import { SurfaceRegistry } from './surfaces.js';
+import { CapabilityLeaseStore } from './capabilityLeases.js';
+import { ApprovalStore } from './approvals.js';
 import { bootstrapSession } from './resources/sessionBootstrap.js';
 
 export interface HostControlPlane {
@@ -13,8 +17,13 @@ export interface HostControlPlane {
 export interface HostControlPlaneOptions {
   handlers: ControlHandlers;
   ownerLock?: typeof acquireOwnerLock;
-  journalOpen?: typeof ControlJournal.open;
+  journalOpen?: (projectRoot: string, ownerEpoch: number) => Promise<RuntimeJournal>;
   bootstrap?: (projectRoot: string) => Promise<void>;
+  surfaces?: SurfaceRegistry;
+  capabilityLeases?: CapabilityLeaseStore;
+  approvals?: ApprovalStore;
+  resolveBrowserSnapshot?: CanonicalBrowserSnapshotResolver;
+  canonicalizePath?: (candidate: string, mode?: 'existing' | 'prospective') => string | Promise<string>;
 }
 
 export async function createHostControlPlane(
@@ -33,6 +42,11 @@ export async function createHostControlPlane(
       ownerEpoch: lock.epoch,
       handlers: options.handlers,
       journal,
+      surfaces: options.surfaces ?? new SurfaceRegistry(),
+      capabilityLeases: options.capabilityLeases ?? new CapabilityLeaseStore(undefined, lock.epoch),
+      approvals: options.approvals ?? new ApprovalStore(),
+      resolveBrowserSnapshot: options.resolveBrowserSnapshot,
+      canonicalizePath: options.canonicalizePath,
     });
 
     return {

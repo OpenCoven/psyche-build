@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { connect } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ControlServer, type ControlServerRuntime } from '../src/control/server.js';
 import { createControlCredentialStore } from '../src/control/credentials.js';
@@ -12,6 +13,7 @@ interface Harness {
   endpoint: string;
   projectRoot: string;
   operatorToken: string;
+  agentToken: string;
   submit: ReturnType<typeof vi.fn>;
 }
 
@@ -25,6 +27,8 @@ function socketPath(): string {
 async function startHarness(overrides: {
   submit?: ControlServerRuntime['submit'];
   ownerEpoch?: number;
+  snapshot?: ControlServerRuntime['snapshot'];
+  actionStatus?: NonNullable<ControlServerRuntime['actionStatus']>;
 } = {}): Promise<Harness> {
   const projectRoot = await mkdtemp(path.join(tmpdir(), 'psyche-ctl-proj-'));
   tempRoots.push(projectRoot);
@@ -33,12 +37,14 @@ async function startHarness(overrides: {
     ?? (async (command) => ({ status: 'succeeded' as const, value: { actorKind: command.actor.kind } })));
   const runtime: ControlServerRuntime = {
     submit: submit as unknown as ControlServerRuntime['submit'],
-    snapshot: () => ({ ownerEpoch: overrides.ownerEpoch ?? 7, sequence: 2, commands: {}, leases: {} }),
+    snapshot: overrides.snapshot
+      ?? (() => ({ ownerEpoch: overrides.ownerEpoch ?? 7, sequence: 2, commands: {}, leases: {} })),
     readEvents: (after) => ({
       events: [{ sequence: after + 1, kind: 'command.requested', payload: {} }],
       nextSequence: after + 1,
       gap: false,
     }),
+    actionStatus: overrides.actionStatus,
   };
 
   const credentials = await createControlCredentialStore({
@@ -60,6 +66,7 @@ async function startHarness(overrides: {
     endpoint,
     projectRoot,
     operatorToken: await credentials.operatorToken(),
+    agentToken: await credentials.agentToken(),
     submit: submit as unknown as ReturnType<typeof vi.fn>,
   };
 }
@@ -83,6 +90,27 @@ function inputCommand(id: string): Parameters<ControlClient['submit']>[0] {
 }
 
 describe('ControlClient over the socket transport', () => {
+  it('serializes pipelined hello and following frames in wire order', async () => {
+    const harness = await startHarness();
+    const socket = connect(harness.endpoint);
+    socket.setEncoding('utf8');
+    const responses = new Promise<string[]>((resolve, reject) => {
+      let buffer = '';
+      socket.on('data', (chunk: string) => {
+        buffer += chunk;
+        const lines = buffer.trim().split('\n');
+        if (lines.length >= 2) resolve(lines);
+      });
+      socket.on('error', reject);
+    });
+    socket.write(`${JSON.stringify({
+      version: 1, type: 'hello', requestId: 'hello', token: harness.operatorToken,
+      clientName: 'pipeline', projectRoot: harness.projectRoot,
+    })}\n${JSON.stringify({ version: 1, type: 'state.get', requestId: 'state-pipeline' })}\n`);
+    const lines = (await responses).map((line) => JSON.parse(line));
+    expect(lines.map(({ type }) => type)).toEqual(['welcome', 'state.result']);
+    socket.destroy();
+  });
   it('learns the owner epoch and principal from welcome', async () => {
     const harness = await startHarness();
     const client = await ControlClient.connect({
@@ -130,6 +158,83 @@ describe('ControlClient over the socket transport', () => {
     await expect(client.getState()).resolves.toMatchObject({ ownerEpoch: 7, sequence: 2 });
     await expect(client.readEvents(0)).resolves.toMatchObject({ nextSequence: 1, gap: false });
   });
+
+  it('builds typed lease and approval helper commands while the server stamps actor and epoch', async () => {
+    const harness = await startHarness();
+    const client = await ControlClient.connect({
+      projectRoot: harness.projectRoot, endpoint: harness.endpoint,
+      token: harness.operatorToken, clientName: 'test-operator',
+    });
+    cleanups.push(() => client.close());
+
+    await client.requestLease({
+      id: 'cmd-request', idempotencyKey: 'idem-request',
+      createdAt: '2026-08-12T12:00:00.000Z',
+      payload: { taskId: 'task-1', ttlMs: 1000, grants: [] },
+    });
+    await client.releaseLease({
+      id: 'cmd-release', idempotencyKey: 'idem-release',
+      createdAt: '2026-08-12T12:00:00.000Z',
+      payload: { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1 },
+    });
+    await client.resolveApproval({
+      id: 'cmd-resolve', idempotencyKey: 'idem-resolve',
+      createdAt: '2026-08-12T12:00:00.000Z',
+      payload: { approvalId: 'approval-1', payloadDigest: '0'.repeat(64), decision: 'approve' },
+    });
+
+    expect(harness.submit.mock.calls.map(([submitted]) => ({
+      kind: submitted.kind, actor: submitted.actor.kind, ownerEpoch: submitted.ownerEpoch,
+    }))).toEqual([
+      { kind: 'lease.request', actor: 'human', ownerEpoch: 7 },
+      { kind: 'lease.release', actor: 'human', ownerEpoch: 7 },
+      { kind: 'approval.resolve', actor: 'human', ownerEpoch: 7 },
+    ]);
+  });
+
+  it('gets canonical action status without scanning snapshot receipts', async () => {
+    const harness = await startHarness({
+      actionStatus: (actionId) => actionId === 'action-1'
+        ? {
+            schema: 'psyche.control.receipt/v1', actionId, state: 'approval_required',
+            resource: { kind: 'browser_tab', id: 'tab-1', generation: 2 },
+            createdAt: '2026-08-12T12:00:00.000Z', code: 'approval_required',
+          }
+        : undefined,
+    });
+    const client = await ControlClient.connect({
+      projectRoot: harness.projectRoot, endpoint: harness.endpoint,
+      token: harness.operatorToken, clientName: 'test-operator',
+    });
+    cleanups.push(() => client.close());
+    await expect(client.actionStatus('action-1')).resolves.toMatchObject({
+      actionId: 'action-1', state: 'approval_required',
+    });
+    expect(harness.submit).not.toHaveBeenCalled();
+  });
+
+  it.each(['lease.grant', 'lease.revoke', 'approval.resolve'] as const)(
+    'rejects agent %s before runtime dispatch',
+    async (kind) => {
+      const harness = await startHarness();
+      const client = await ControlClient.connect({
+        projectRoot: harness.projectRoot, endpoint: harness.endpoint,
+        token: harness.agentToken, clientName: 'test-agent',
+      });
+      cleanups.push(() => client.close());
+      const payload = kind === 'lease.grant'
+        ? { requestId: 'r', actorId: 'agent', taskId: 'task', ttlMs: 1, grants: [] }
+        : kind === 'lease.revoke'
+          ? { leaseId: 'lease-1' }
+          : { approvalId: 'approval-1', payloadDigest: '0'.repeat(64), decision: 'approve' as const };
+      const outcome = await client.submit({
+        id: `cmd-${kind}`, idempotencyKey: `idem-${kind}`, kind,
+        projectRoot: harness.projectRoot, createdAt: '2026-08-12T12:00:00.000Z', payload,
+      } as Parameters<ControlClient['submit']>[0]);
+      expect(outcome).toMatchObject({ status: 'rejected', code: 'agent_mutation_denied' });
+      expect(harness.submit).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects a connection whose declared project root does not match the owner', async () => {
     const harness = await startHarness();

@@ -311,6 +311,33 @@ describe('ApprovalStore', () => {
     );
   });
 
+  it('bounds terminal approvals while retaining active approvals and their action mappings', () => {
+    let id = 0;
+    const store = new ApprovalStore(
+      () => new Date('2026-08-12T12:00:00.000Z'),
+      () => `approval-${id += 1}`,
+      3,
+    );
+    const activePending = store.request({ ...baseRequest(), actionId: 'active-pending' });
+    const activeApproved = store.request({ ...baseRequest(), actionId: 'active-approved' });
+    store.approve(activeApproved.id, 'operator', activeApproved.payloadDigest);
+    for (let index = 0; index < 8; index += 1) {
+      const approval = store.request({ ...baseRequest(), actionId: `terminal-${index}` });
+      store.deny(approval.id, 'operator', approval.payloadDigest);
+    }
+    expect(store.snapshot().map(({ actionId }) => actionId)).toEqual([
+      'active-pending', 'active-approved', 'terminal-5', 'terminal-6', 'terminal-7',
+    ]);
+    expect(store.request({ ...baseRequest(), actionId: 'terminal-0' }).actionId).toBe('terminal-0');
+    expect(() => store.request({
+      ...baseRequest(), actionId: 'terminal-7', actionPayload: { changed: true },
+    })).toThrowError(expect.objectContaining({ code: 'approval_action_conflict' }));
+    const snapshot = store.snapshot();
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot[0])).toBe(true);
+    expect(Object.isFrozen(snapshot[0]!.resource)).toBe(true);
+  });
+
   it('uses one clock reading for an approval transition', () => {
     const base = Date.parse('2026-08-12T12:00:00.000Z');
     const readings = [

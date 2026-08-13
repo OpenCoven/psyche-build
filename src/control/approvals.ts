@@ -116,7 +116,12 @@ export class ApprovalStore {
   constructor(
     private readonly clock: () => Date = () => new Date(),
     private readonly generateId: () => string = randomUUID,
-  ) {}
+    private readonly terminalRetention = 1000,
+  ) {
+    if (!Number.isSafeInteger(terminalRetention) || terminalRetention < 0) {
+      throw new TypeError('terminal approval retention must be a nonnegative safe integer');
+    }
+  }
 
   request(input: ApprovalRequest): Approval {
     const now = this.clock();
@@ -177,6 +182,7 @@ export class ApprovalStore {
       consumedAt: now.toISOString(),
     });
     this.approvals.set(approval.id, consumed);
+    this.compactTerminalApprovals();
     return consumed;
   }
 
@@ -194,6 +200,7 @@ export class ApprovalStore {
         expired.push(replacement);
       }
     }
+    this.compactTerminalApprovals();
     return Object.freeze(expired);
   }
 
@@ -233,6 +240,7 @@ export class ApprovalStore {
       resolvedAt: now.toISOString(),
     });
     this.approvals.set(id, resolved);
+    this.compactTerminalApprovals();
     return resolved;
   }
 
@@ -260,7 +268,20 @@ export class ApprovalStore {
         revoked.push(replacement);
       }
     }
+    this.compactTerminalApprovals();
     return Object.freeze(revoked);
+  }
+
+  private compactTerminalApprovals(): void {
+    const terminal = [...this.approvals.values()].filter(({ status }) => (
+      status === 'consumed' || status === 'denied' || status === 'expired' || status === 'revoked'
+    ));
+    for (const approval of terminal.slice(0, Math.max(0, terminal.length - this.terminalRetention))) {
+      this.approvals.delete(approval.id);
+      if (this.approvalIdsByAction.get(approval.actionId) === approval.id) {
+        this.approvalIdsByAction.delete(approval.actionId);
+      }
+    }
   }
 }
 

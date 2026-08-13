@@ -18,6 +18,44 @@ function handlersWithCovenClient(
   });
 }
 
+describe('createDaemonControlHandlers agent surface placeholders', () => {
+  it('fails closed for every Task 4/6 backend without invoking existing effects', async () => {
+    const spawnPane = vi.fn();
+    const handlers = createDaemonControlHandlers({
+      tmux: new TmuxControl('psyche-test'),
+      projectRoot: '/tmp/psyche-test-root',
+      sessionName: 'psyche-test',
+      capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+      createCovenClient: () => ({ listSessions: async () => [] }),
+      spawnPane,
+    });
+    const calls = [
+      () => handlers.observePane({
+        taskId: 'task', leaseId: 'lease', leaseRevision: 1, paneId: 'pane', generation: 1,
+      }),
+      () => handlers.actOnPane({
+        taskId: 'task', leaseId: 'lease', leaseRevision: 1,
+        paneId: 'pane', generation: 1, action: { kind: 'focus' },
+      }),
+      () => handlers.inspectBrowser({
+        taskId: 'task', leaseId: 'lease', leaseRevision: 1, tabId: 'tab', generation: 1,
+      }),
+      () => handlers.actOnBrowser({
+        taskId: 'task', leaseId: 'lease', leaseRevision: 1,
+        tabId: 'tab', generation: 1, action: { kind: 'reload' },
+      }),
+      () => handlers.runBrowserScript({
+        taskId: 'task', leaseId: 'lease', leaseRevision: 1,
+        tabId: 'tab', generation: 1, source: '1',
+      }),
+    ];
+    for (const call of calls) {
+      await expect(call()).rejects.toMatchObject({ code: 'command_not_implemented' });
+    }
+    expect(spawnPane).not.toHaveBeenCalled();
+  });
+});
+
 describe('createDaemonControlHandlers runCovenDesktopAction', () => {
   it('sends a known desktop quick action to the coven client', async () => {
     const sendInput = vi.fn(async (_sessionId: string, _input: string) => {});

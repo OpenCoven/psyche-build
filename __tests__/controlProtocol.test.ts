@@ -105,6 +105,77 @@ describe('control protocol v1', () => {
     }
   });
 
+  it('rejects agent surface commands with missing generations or unsafe authority revisions', () => {
+    const base = {
+      id: 'cmd-click', idempotencyKey: 'idem-click', kind: 'browser.action',
+      projectRoot: '/repo', createdAt: '2026-08-12T12:00:00.000Z',
+      payload: {
+        taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
+        tabId: 'tab-1', generation: 2, snapshotId: 'snapshot-1',
+        action: { kind: 'click', elementRef: 'e17' },
+      },
+    };
+    for (const payload of [
+      { ...base.payload, generation: undefined },
+      { ...base.payload, generation: -1 },
+      { ...base.payload, generation: Number.MAX_SAFE_INTEGER + 1 },
+      { ...base.payload, leaseRevision: Number.NaN },
+    ]) {
+      expect(() => decodeControlRequest(JSON.stringify({
+        version: 1, type: 'command.submit', requestId: 'req-agent',
+        command: { ...base, payload },
+      }))).toThrow('invalid command.submit payload');
+    }
+  });
+
+  it('accepts every version-one agent control command kind without changing the protocol version', () => {
+    const payloads = {
+      'lease.request': { taskId: 'task-1', ttlMs: 1000, grants: [] },
+      'lease.grant': { requestId: 'request-1', actorId: 'agent-1', taskId: 'task-1', ttlMs: 1000, grants: [] },
+      'lease.release': { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1 },
+      'lease.revoke': { leaseId: 'lease-1' },
+      'pane.observe': { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1, paneId: 'pane-1', generation: 1 },
+      'pane.action': { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1, paneId: 'pane-1', generation: 1, action: { kind: 'focus' } },
+      'browser.inspect': { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1, tabId: 'tab-1', generation: 1 },
+      'browser.action': { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1, tabId: 'tab-1', generation: 1, action: { kind: 'reload' } },
+      'browser.script': { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1, tabId: 'tab-1', generation: 1, source: '1' },
+      'approval.resolve': { approvalId: 'approval-1', payloadDigest: '0'.repeat(64), decision: 'deny' },
+      'provider.resource.remove': { id: 'tab-1', generation: 1 },
+    } as const;
+    for (const [kind, payload] of Object.entries(payloads)) {
+      expect(decodeControlRequest(JSON.stringify({
+        version: CONTROL_PROTOCOL_VERSION,
+        type: 'command.submit', requestId: `req-${kind}`,
+        command: {
+          id: `cmd-${kind}`, idempotencyKey: `idem-${kind}`, kind,
+          projectRoot: '/repo', createdAt: '2026-08-12T12:00:00.000Z', payload,
+        },
+      }))).toMatchObject({ version: 1, command: { kind } });
+    }
+  });
+
+  it.each([
+    [{ kind: 'future', id: 'x', generation: 1 }, 'unknown target kind'],
+    [{ kind: 'project', id: '/repo', generation: 1 }, 'project generation'],
+    [{ kind: 'pane', id: 'pane-1' }, 'missing pane generation'],
+    [{ kind: 'browser_tab', id: 'tab-1', generation: -1 }, 'negative generation'],
+    [{ kind: 'browser_tab', id: 'tab-1', generation: Number.MAX_SAFE_INTEGER + 1 }, 'unsafe generation'],
+    [{ kind: 'pane', id: 'pane-1', generation: 1, path: '/secret' }, 'extra pane path'],
+    [{ kind: 'project', id: '/repo', extra: true }, 'extra project key'],
+  ])('rejects malformed lease targets: %s (%s)', (target, _label) => {
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'command.submit', requestId: 'req-target',
+      command: {
+        id: 'cmd-target', idempotencyKey: 'idem-target', kind: 'lease.request',
+        projectRoot: '/repo', createdAt: '2026-08-12T12:00:00.000Z',
+        payload: {
+          taskId: 'task-1', ttlMs: 1000,
+          grants: [{ target, capabilities: ['browser.inspect'] }],
+        },
+      },
+    }))).toThrow('invalid command.submit payload');
+  });
+
   it('rejects events.read requests with a non-number afterSequence', () => {
     expect(() => decodeControlRequest(JSON.stringify({
       version: CONTROL_PROTOCOL_VERSION,
@@ -113,6 +184,18 @@ describe('control protocol v1', () => {
       afterSequence: '0',
     }))).toThrow('invalid events.read request');
   });
+
+  it.each([-1, 0.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects an unsupported events.read afterSequence: %s',
+    (afterSequence) => {
+      expect(() => decodeControlRequest(JSON.stringify({
+        version: CONTROL_PROTOCOL_VERSION,
+        type: 'events.read',
+        requestId: 'req-range',
+        afterSequence,
+      }))).toThrow('invalid events.read request');
+    },
+  );
 
   it('decodes a valid events.read request', () => {
     expect(decodeControlRequest(JSON.stringify({
