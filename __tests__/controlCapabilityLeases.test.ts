@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
+import { readFileSync } from 'node:fs';
+import { CapabilityLeaseStore, SURFACE_CAPABILITIES } from '../src/control/capabilityLeases.js';
 import type {
   CapabilityLease,
   CapabilityLeaseErrorCode,
@@ -460,5 +461,15 @@ describe('CapabilityLeaseStore', () => {
     expect(store.revokeTarget({ kind: 'pane', id: 'pane-1', generation: 2 })).toEqual([matching]);
     expect(store.revokeAll()).toEqual([other]);
     expect(store.snapshot()).toEqual([]);
+  });
+
+  it('matches every canonical surface capability in the shared provider contract', () => {
+    const fixture = JSON.parse(readFileSync(new URL(
+      '../protocol-fixtures/control-v1/provider-contract.json', import.meta.url), 'utf8')) as {
+      surfaceCapabilities: string[];
+    };
+    expect(SURFACE_CAPABILITIES).toEqual(fixture.surfaceCapabilities);
+    expect(new Set(SURFACE_CAPABILITIES).size).toBe(SURFACE_CAPABILITIES.length);
+    expect(SURFACE_CAPABILITIES).not.toContain('browser.action');
   });
 });

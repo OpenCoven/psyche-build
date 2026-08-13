@@ -6,6 +6,8 @@ import type { ControlHandlers } from '../control/runtime.js';
 import { validatePaneNamedKeys } from '../control/types.js';
 import type { PaneResourceController } from '../control/resources/panes.js';
 import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
+import type { BrowserProviderBroker } from '../control/browserProviderBroker.js';
+import type { ProviderEffectResult } from '../control/protocol.js';
 import {
   spawnBridgePane,
   createCovenClient,
@@ -35,6 +37,7 @@ export interface DaemonControlHandlerDeps {
   ) => Promise<BridgeSpawnResult>;
   /** Router used to execute Coven session capabilities. */
   capabilityRouter: AgenticCapabilityRouter;
+  browserProviders?: BrowserProviderBroker;
   /** Coven client factory; defaults to the real bridge client. */
   createCovenClient?: () => CovenClient;
   /** Spawn deps used when opening a Coven session pane; defaults to the real bridge deps. */
@@ -45,13 +48,6 @@ function notSupported(kind: string): () => Promise<never> {
   return () => Promise.reject(Object.assign(
     new Error(`control command not supported by the daemon adapter: ${kind}`),
     { code: 'command_not_supported' },
-  ));
-}
-
-function notImplemented(kind: string): () => Promise<never> {
-  return () => Promise.reject(Object.assign(
-    new Error(`agent surface backend is not implemented: ${kind}`),
-    { code: 'command_not_implemented' },
   ));
 }
 
@@ -77,6 +73,19 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       throw Object.assign(new Error('pane resource controller is unavailable'), { code: 'command_not_implemented' });
     }
     return deps.panes;
+  };
+  const browserProviders = () => {
+    if (!deps.browserProviders) {
+      throw Object.assign(new Error('browser provider is unavailable'), { code: 'provider_unavailable' });
+    }
+    return deps.browserProviders;
+  };
+  const effectValue = (result: ProviderEffectResult): unknown => {
+    if (result.status === 'succeeded') return result.value;
+    throw Object.assign(new Error(result.message), {
+      code: result.code,
+      ...(result.status === 'unknown' ? { ambiguous: true } : {}),
+    });
   };
 
   return {
@@ -198,9 +207,33 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
           return assertNever(payload.action);
       }
     },
-    inspectBrowser: notImplemented('browser.inspect'),
-    actOnBrowser: notImplemented('browser.action'),
-    runBrowserScript: notImplemented('browser.script'),
+    async inspectBrowser(payload, actionId) {
+      return effectValue(await browserProviders().dispatch({
+        actionId,
+        tabId: payload.tabId,
+        generation: payload.generation,
+        operation: { kind: 'inspect', ...(payload.includeScreenshot === undefined
+          ? {} : { includeScreenshot: payload.includeScreenshot }) },
+      }));
+    },
+    async actOnBrowser(payload, actionId) {
+      return effectValue(await browserProviders().dispatch({
+        actionId,
+        tabId: payload.tabId,
+        generation: payload.generation,
+        operation: { kind: 'action', action: payload.action,
+          ...('snapshotId' in payload && payload.snapshotId ? { snapshotId: payload.snapshotId } : {}) },
+      }));
+    },
+    async runBrowserScript(payload, actionId) {
+      return effectValue(await browserProviders().dispatch({
+        actionId,
+        tabId: payload.tabId,
+        generation: payload.generation,
+        operation: { kind: 'script', source: payload.source,
+          ...(payload.args === undefined ? {} : { args: payload.args }) },
+      }));
+    },
 
     async launchCovenSession(payload) {
       return launchProjectCovenSession(

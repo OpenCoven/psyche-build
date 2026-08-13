@@ -52,6 +52,7 @@ import {
 import { readDaemonWorkspaceSnapshot } from './workspace.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
 import type { BridgeSpawnRequest, BridgeSpawnResult } from './bridge.js';
+import { BrowserProviderBroker } from '../control/browserProviderBroker.js';
 
 export interface DaemonOptions {
   port: number;
@@ -118,6 +119,11 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   const surfaces = new SurfaceRegistry();
   const paneObservations = new PaneObservationStore();
   let host!: HostControlPlane;
+  const browserProviders = new BrowserProviderBroker({
+    projectRoot: canonicalProjectRoot,
+    surfaces,
+    revokeSurfaceAuthority: (target) => host?.runtime.revokeSurfaceAuthority(target),
+  });
   const paneResources = new PaneResourceController({
     surfaces,
     observations: paneObservations,
@@ -149,11 +155,13 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     projectRoot: canonicalProjectRoot,
     sessionName,
     capabilityRouter,
+    browserProviders,
   });
   try {
     host = await createHostControlPlane(canonicalProjectRoot, {
       handlers: controlHandlers,
       surfaces,
+      browserProviders,
     });
   } catch (error) {
     tmuxSupervisor.stop();
@@ -177,6 +185,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       ownerEpoch: host.epoch,
       runtime: host.runtime,
       credentials: controlCredentials,
+      browserProviders: host.browserProviders,
     });
   } catch (error) {
     tmuxSupervisor.stop();

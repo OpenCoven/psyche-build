@@ -20,6 +20,8 @@ import type {
   ActionReceipt,
   ControlSnapshot,
 } from './types.js';
+import type { BrowserProviderBroker, BrowserProviderConnection } from './browserProviderBroker.js';
+import { CONTROL_WIRE_LIMITS } from './limits.js';
 
 /** The minimal runtime surface the control server drives. */
 export interface ControlServerRuntime {
@@ -39,10 +41,12 @@ export interface ControlServerOptions {
   ownerEpoch: number;
   runtime: ControlServerRuntime;
   credentials: ControlCredentialStore;
+  browserProviders?: BrowserProviderBroker;
 }
 
 /** Cap a single newline-delimited frame so a peer cannot exhaust host memory. */
-const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+const MAX_FRAME_BYTES = CONTROL_WIRE_LIMITS.maxFrameBytes;
+const MAX_PROVIDER_RESULT_BYTES = CONTROL_WIRE_LIMITS.maxProviderResultBytes;
 
 /** Every command kind the runtime knows how to execute. */
 const KNOWN_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
@@ -256,6 +260,7 @@ export class ControlServer {
     private readonly authority: ControlAuthority,
     private readonly credentials: ControlCredentialStore,
     private readonly canonicalRoot: string,
+    private readonly browserProviders?: BrowserProviderBroker,
   ) {}
 
   static async start(options: ControlServerOptions): Promise<ControlServer> {
@@ -273,6 +278,7 @@ export class ControlServer {
       authority,
       options.credentials,
       canonicalRoot,
+      options.browserProviders,
     );
 
     server.on('connection', (socket) => {
@@ -310,17 +316,27 @@ export class ControlServer {
   private handleConnection(socket: Socket): void {
     let principal: ControlPrincipal | null = null;
     let clientId: string | undefined;
+    let provider: BrowserProviderConnection | undefined;
     let buffer = '';
     let processingTail: Promise<void> = Promise.resolve();
 
-    const write = (message: ControlResponse): void => {
-      if (!socket.destroyed) socket.write(`${encodeControlMessage(message)}\n`);
+    const write = (message: ControlResponse): boolean => {
+      if (socket.destroyed || !socket.writable) return false;
+      socket.write(`${encodeControlMessage(message)}\n`);
+      return !socket.destroyed && socket.writable;
     };
 
     const fail = (code: string, message: string, requestId?: string): void => {
-      write({ version: 1, type: 'error', requestId, code, message });
-      socket.destroy();
+      if (socket.destroyed || !socket.writable) return;
+      socket.end(`${encodeControlMessage({ version: 1, type: 'error', requestId, code, message })}\n`);
     };
+
+    const disconnectProvider = (): void => {
+      provider?.disconnect();
+      provider = undefined;
+    };
+    socket.once('close', disconnectProvider);
+    socket.once('error', disconnectProvider);
 
     socket.setEncoding('utf8');
     socket.on('data', (chunk: string) => {
@@ -335,6 +351,26 @@ export class ControlServer {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
         newline = buffer.indexOf('\n');
+        if (Buffer.byteLength(line, 'utf8') > MAX_FRAME_BYTES) {
+          let requestId: string | undefined;
+          const match = line.slice(0, 1024).match(/"requestId"\s*:\s*"([^"\\]{1,256})"/);
+          if (match) requestId = match[1];
+          fail('frame_too_large', 'control frame exceeds maximum size', requestId);
+          buffer = '';
+          return;
+        }
+        const frameBytes = Buffer.byteLength(line, 'utf8');
+        if (frameBytes > MAX_PROVIDER_RESULT_BYTES) {
+          try {
+            const envelope = JSON.parse(line) as { type?: unknown; requestId?: unknown };
+            if (envelope.type === 'provider.effect.result') {
+              fail('result_too_large', 'provider effect result exceeds maximum size',
+                typeof envelope.requestId === 'string' ? envelope.requestId : undefined);
+              buffer = '';
+              return;
+            }
+          } catch { /* bounded malformed JSON is handled by the normal decoder */ }
+        }
         if (line.trim().length === 0) continue;
         processingTail = processingTail
           .catch(() => undefined)
@@ -345,12 +381,15 @@ export class ControlServer {
               clientId = id;
             },
             getClientId: () => clientId,
+            getProvider: () => provider,
+            setProvider: (value) => { provider = value; },
           }))
           .catch((error) => {
+            const coded = error as { code?: unknown };
             write({
               version: 1,
               type: 'error',
-              code: 'internal',
+              code: typeof coded.code === 'string' ? coded.code : 'internal',
               message: error instanceof Error ? error.message : 'internal error',
             });
           });
@@ -360,19 +399,26 @@ export class ControlServer {
 
   private async handleLine(
     line: string,
-    write: (message: ControlResponse) => void,
+    write: (message: ControlResponse) => boolean,
     fail: (code: string, message: string, requestId?: string) => void,
     session: {
       getPrincipal: () => ControlPrincipal | null;
       setPrincipal: (principal: ControlPrincipal, clientId?: string) => void;
       getClientId: () => string | undefined;
+      getProvider: () => BrowserProviderConnection | undefined;
+      setProvider: (provider: BrowserProviderConnection) => void;
     },
   ): Promise<void> {
     let request: ReturnType<typeof decodeControlRequest>;
     try {
       request = decodeControlRequest(line);
     } catch (error) {
-      fail('bad_request', error instanceof Error ? error.message : 'invalid request');
+      let requestId: string | undefined;
+      try {
+        const parsed = JSON.parse(line) as { requestId?: unknown };
+        if (typeof parsed.requestId === 'string') requestId = parsed.requestId;
+      } catch { /* invalid JSON has no trustworthy correlation */ }
+      fail('bad_request', error instanceof Error ? error.message : 'invalid request', requestId);
       return;
     }
 
@@ -400,6 +446,20 @@ export class ControlServer {
       }
       session.setPrincipal(authenticated, request.clientName);
       write(this.authority.welcomeFor(authenticated));
+      return;
+    }
+
+    if (session.getProvider() && request.type !== 'provider.resource.upsert'
+      && request.type !== 'provider.resource.remove' && request.type !== 'provider.effect.result') {
+      write({ version: 1, type: 'error', requestId: request.requestId,
+        code: 'provider_mode', message: 'provider sockets only accept provider frames' });
+      return;
+    }
+    if (!session.getProvider() && request.type !== 'provider.register'
+      && (request.type === 'provider.resource.upsert' || request.type === 'provider.resource.remove'
+        || request.type === 'provider.effect.result')) {
+      write({ version: 1, type: 'error', requestId: request.requestId,
+        code: 'provider_registration_required', message: 'provider.register is required first' });
       return;
     }
 
@@ -481,8 +541,59 @@ export class ControlServer {
             : {}),
         });
         return;
+      case 'provider.register': {
+        if (principal.kind !== 'operator') {
+          write({ version: 1, type: 'error', requestId: request.requestId,
+            code: 'operator_required', message: 'only an operator principal may register a provider' });
+          return;
+        }
+        if (!this.browserProviders) {
+          write({ version: 1, type: 'error', requestId: request.requestId,
+            code: 'provider_unavailable', message: 'browser provider transport is unavailable' });
+          return;
+        }
+        session.setProvider(this.browserProviders.register(request.providerId, write));
+        write({ version: 1, type: 'ack', requestId: request.requestId });
+        return;
+      }
+      case 'provider.resource.upsert': {
+        try {
+          const resource = await session.getProvider()!.upsert(request.resource);
+          write({ version: 1, type: 'provider.resource.result', requestId: request.requestId, resource });
+        } catch (error) {
+          writeProviderError(write, request.requestId, error);
+        }
+        return;
+      }
+      case 'provider.resource.remove':
+        try {
+          session.getProvider()!.remove(request.id, request.generation);
+          write({ version: 1, type: 'ack', requestId: request.requestId });
+        } catch (error) {
+          writeProviderError(write, request.requestId, error);
+        }
+        return;
+      case 'provider.effect.result':
+        try {
+          session.getProvider()!.complete(request.requestId, request.result);
+          write({ version: 1, type: 'ack', requestId: request.requestId });
+        } catch (error) {
+          writeProviderError(write, request.requestId, error);
+        }
+        return;
     }
   }
+}
+
+function writeProviderError(
+  write: (message: ControlResponse) => boolean,
+  requestId: string,
+  error: unknown,
+): void {
+  const coded = error as { code?: unknown };
+  write({ version: 1, type: 'error', requestId,
+    code: typeof coded.code === 'string' ? coded.code : 'internal',
+    message: error instanceof Error ? error.message : 'provider frame failed' });
 }
 
 export { compatibilityPrincipal } from './credentials.js';

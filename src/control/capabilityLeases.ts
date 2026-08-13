@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
 
-export type SurfaceCapability =
-  | 'pane.observe' | 'pane.input' | 'pane.interrupt' | 'pane.focus'
-  | 'pane.resize' | 'pane.create' | 'pane.close'
-  | 'browser.inspect' | 'browser.screenshot' | 'browser.navigate'
-  | 'browser.interact' | 'browser.history' | 'browser.close' | 'browser.script';
+export const SURFACE_CAPABILITIES = Object.freeze([
+  'pane.observe', 'pane.input', 'pane.interrupt', 'pane.focus',
+  'pane.resize', 'pane.create', 'pane.close',
+  'browser.inspect', 'browser.screenshot', 'browser.navigate',
+  'browser.interact', 'browser.history', 'browser.close', 'browser.script',
+] as const);
+
+export type SurfaceCapability = typeof SURFACE_CAPABILITIES[number];
 
 export type LeaseTarget =
   | { readonly kind: 'project'; readonly id: string }

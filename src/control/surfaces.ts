@@ -36,6 +36,11 @@ export class SurfaceRegistry {
 
   upsertPane(input: SurfaceInput<PaneSurface>): PaneSurface {
     const previous = this.resources.get(input.id);
+    if (previous && previous.kind !== 'pane') {
+      throw Object.assign(new Error(`surface resource ${input.id} belongs to another kind`), {
+        code: 'resource_collision',
+      });
+    }
     const generation = previous
       ? previous.generation + (previous.kind !== 'pane' || previous.tmuxPaneId !== input.tmuxPaneId ? 1 : 0)
       : (this.generations.get(input.id) ?? 0) + 1;
@@ -47,6 +52,11 @@ export class SurfaceRegistry {
 
   upsertBrowserTab(input: SurfaceInput<BrowserTabSurface>): BrowserTabSurface {
     const previous = this.resources.get(input.id);
+    if (previous && previous.kind !== 'browser_tab') {
+      throw Object.assign(new Error(`surface resource ${input.id} belongs to another kind`), {
+        code: 'resource_collision',
+      });
+    }
     const bindingChanged = previous?.kind !== 'browser_tab'
       || previous.providerId !== input.providerId
       || previous.webviewLabel !== input.webviewLabel;
@@ -87,6 +97,15 @@ export class SurfaceRegistry {
     const resource = this.require(id, expectedGeneration);
     if (resource.kind !== 'pane') {
       throw Object.assign(new Error(`surface resource ${id} is not a pane`), { code: 'resource_replaced' });
+    }
+    this.resources.delete(id);
+    return resource;
+  }
+
+  removeBrowserTab(id: string, expectedGeneration: number): BrowserTabSurface {
+    const resource = this.require(id, expectedGeneration);
+    if (resource.kind !== 'browser_tab') {
+      throw Object.assign(new Error(`surface resource ${id} is not a browser tab`), { code: 'resource_replaced' });
     }
     this.resources.delete(id);
     return resource;

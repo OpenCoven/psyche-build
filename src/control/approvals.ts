@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { LeaseTarget, SurfaceCapability } from './capabilityLeases.js';
+import { SURFACE_CAPABILITIES, type LeaseTarget, type SurfaceCapability } from './capabilityLeases.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
 
 export type ApprovalErrorCode =
@@ -321,12 +321,7 @@ function copyAssertion(input: ApprovalConsumeAssertion): NormalizedApprovalConsu
   };
 }
 
-const CAPABILITIES: ReadonlySet<SurfaceCapability> = new Set([
-  'pane.observe', 'pane.input', 'pane.interrupt', 'pane.focus', 'pane.resize',
-  'pane.create', 'pane.close', 'browser.inspect', 'browser.screenshot',
-  'browser.navigate', 'browser.interact', 'browser.history', 'browser.close',
-  'browser.script',
-]);
+const CAPABILITIES: ReadonlySet<SurfaceCapability> = new Set(SURFACE_CAPABILITIES);
 
 function assertIdentityFields(input: ApprovalIdentity | ApprovalRequest | ApprovalConsumeAssertion): void {
   if (!isNonemptyString(input?.actionId) || !isNonemptyString(input?.leaseId)) {

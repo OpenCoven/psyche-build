@@ -232,4 +232,17 @@ describe('control protocol v1', () => {
       requestId: 'req-1',
     }))).toThrow('unsupported control request type');
   });
+
+  it('decodes exact version-one provider transport frames', () => {
+    expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.register', requestId: 'register-1', providerId: 'desktop-1',
+    }))).toMatchObject({ type: 'provider.register', providerId: 'desktop-1' });
+    expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.result', requestId: 'effect-1',
+      result: { actionId: 'action-1', status: 'succeeded', value: {} },
+    }))).toMatchObject({ type: 'provider.effect.result', requestId: 'effect-1' });
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.register', requestId: 'register-1', providerId: 'desktop-1', extra: true,
+    }))).toThrow('invalid provider.register request');
+  });
 });

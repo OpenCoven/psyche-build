@@ -7,10 +7,12 @@ import { SurfaceRegistry } from './surfaces.js';
 import { CapabilityLeaseStore } from './capabilityLeases.js';
 import { ApprovalStore } from './approvals.js';
 import { bootstrapSession } from './resources/sessionBootstrap.js';
+import type { BrowserProviderBroker } from './browserProviderBroker.js';
 
 export interface HostControlPlane {
   epoch: number;
   runtime: ControlRuntime;
+  browserProviders?: BrowserProviderBroker;
   close(): Promise<void>;
 }
 
@@ -23,6 +25,7 @@ export interface HostControlPlaneOptions {
   capabilityLeases?: CapabilityLeaseStore;
   approvals?: ApprovalStore;
   resolveBrowserSnapshot?: CanonicalBrowserSnapshotResolver;
+  browserProviders?: BrowserProviderBroker;
   canonicalizePath?: (candidate: string, mode?: 'existing' | 'prospective') => string | Promise<string>;
 }
 
@@ -52,6 +55,7 @@ export async function createHostControlPlane(
     return {
       epoch: lock.epoch,
       runtime,
+      browserProviders: options.browserProviders,
       close: async () => {
         await lock.release();
       },

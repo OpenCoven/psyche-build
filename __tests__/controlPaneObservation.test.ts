@@ -170,6 +170,22 @@ describe('PaneObservationStore', () => {
 });
 
 describe('PaneResourceController', () => {
+  it('preserves a browser identity and authority when pane publication collides', () => {
+    const surfaces = new SurfaceRegistry();
+    const browser = surfaces.upsertBrowserTab({ id: 'shared-1', providerId: 'desktop-1',
+      webviewLabel: 'browser-a', projectRoot: '/repo', worktreeRoot: '/repo',
+      url: 'https://example.com', title: 'Example', loading: false,
+      viewport: { width: 800, height: 600 } });
+    const onRemove = vi.fn();
+    const controller = new PaneResourceController({ surfaces,
+      observations: new PaneObservationStore(), projectRoot: '/repo', onRemove });
+    expect(() => controller.upsert({ id: browser.id, tmuxPaneId: '%3', worktreeRoot: '/repo',
+      writable: true })).toThrowError(expect.objectContaining({ code: 'resource_collision' }));
+    expect(surfaces.get(browser.id)).toBe(browser);
+    expect(onRemove).not.toHaveBeenCalled();
+    expect(controller.removeByTmuxPaneId('%3')).toBeUndefined();
+  });
+
   it('rejects duplicate native bindings without replacing the valid stable resource', () => {
     const controller = new PaneResourceController({
       surfaces: new SurfaceRegistry(), observations: new PaneObservationStore(), projectRoot: '/repo',

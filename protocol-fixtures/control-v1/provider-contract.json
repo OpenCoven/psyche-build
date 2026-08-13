@@ -1,0 +1,23 @@
+{
+  "surfaceCapabilities": [
+    "pane.observe",
+    "pane.input",
+    "pane.interrupt",
+    "pane.focus",
+    "pane.resize",
+    "pane.create",
+    "pane.close",
+    "browser.inspect",
+    "browser.screenshot",
+    "browser.navigate",
+    "browser.interact",
+    "browser.history",
+    "browser.close",
+    "browser.script"
+  ],
+  "maxRawScreenshotBytes": 4194304,
+  "base64ScreenshotBytes": 5592408,
+  "providerResultEnvelopeBytes": 131072,
+  "maxProviderResultWireBytes": 5723480,
+  "maxControlFrameBytes": 6291456
+}

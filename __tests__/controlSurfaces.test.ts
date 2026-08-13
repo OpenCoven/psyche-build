@@ -52,6 +52,32 @@ describe('SurfaceRegistry', () => {
     expect(second.generation).toBe(first.generation + 1);
   });
 
+  it('rejects browser upserts over pane identities without changing the pane', () => {
+    const registry = new SurfaceRegistry();
+    const pane = registry.upsertPane({
+      id: 'shared-1', tmuxPaneId: '%3', projectRoot: '/repo', worktreeRoot: '/repo',
+      writable: true, outputSequence: 0,
+    });
+    expect(() => registry.upsertBrowserTab({
+      id: 'shared-1', providerId: 'desktop-1', webviewLabel: 'browser-a',
+      projectRoot: '/repo', worktreeRoot: '/repo', url: 'https://example.com',
+      title: 'Example', loading: false, viewport: { width: 800, height: 600 },
+    })).toThrowError(expect.objectContaining({ code: 'resource_collision' }));
+    expect(registry.get('shared-1')).toBe(pane);
+  });
+
+  it('rejects pane upserts over browser identities without changing the browser', () => {
+    const registry = new SurfaceRegistry();
+    const browser = registry.upsertBrowserTab({ id: 'shared-1', providerId: 'desktop-1',
+      webviewLabel: 'browser-a', projectRoot: '/repo', worktreeRoot: '/repo',
+      url: 'https://example.com', title: 'Example', loading: false,
+      viewport: { width: 800, height: 600 } });
+    expect(() => registry.upsertPane({ id: 'shared-1', tmuxPaneId: '%3', projectRoot: '/repo',
+      worktreeRoot: '/repo', writable: true, outputSequence: 0 }))
+      .toThrowError(expect.objectContaining({ code: 'resource_collision' }));
+    expect(registry.get('shared-1')).toBe(browser);
+  });
+
   it('reports missing resources and removes browser records by provider', () => {
     const registry = new SurfaceRegistry();
     const tab = registry.upsertBrowserTab({

@@ -229,6 +229,16 @@ describe('ControlRuntime', () => {
     expect(handlers.actOnBrowser).toHaveBeenCalledTimes(1);
   });
 
+  it('passes immutable command IDs to browser handlers for distinct actions under one task', async () => {
+    const deps = agentSurfaceHarness();
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers,
+      journal: createMemoryJournal(), ...deps });
+    await runtime.submit(browserAction(deps.lease.id, { id: 'action-a', idempotencyKey: 'idem-a' }));
+    await runtime.submit(browserAction(deps.lease.id, { id: 'action-b', idempotencyKey: 'idem-b' }));
+    expect(vi.mocked(handlers.actOnBrowser).mock.calls.map((call) => call[1]))
+      .toEqual(['action-a', 'action-b']);
+  });
+
   it('returns pane observation text live while excluding it from journal, snapshot, and status', async () => {
     const deps = paneObservationHarness();
     const marker = 'LIVE_ONLY_MARKER';
@@ -547,6 +557,7 @@ describe('ControlRuntime', () => {
     expect(handlers.actOnBrowser).toHaveBeenCalledTimes(2);
     expect(handlers.actOnBrowser).toHaveBeenLastCalledWith(
       expect.objectContaining({ action: expect.objectContaining({ elementRef: 'e17' }) }),
+      'cmd-click',
     );
     await expect(runtime.submit(browserAction(deps.lease.id))).resolves.toMatchObject({
       status: 'succeeded', value: { state: 'succeeded', actionId: 'cmd-click' },
@@ -975,6 +986,29 @@ describe('ControlRuntime', () => {
     }));
     expect(deps.capabilityLeases.snapshot()).toEqual([]);
     expect(deps.approvals.snapshot()).toEqual([expect.objectContaining({ status: 'revoked' })]);
+  });
+
+  it('rejects operator command upserts over pane identities without mutating authority', async () => {
+    const surfaces = new SurfaceRegistry();
+    const pane = surfaces.upsertPane({ id: 'shared-1', tmuxPaneId: '%3', projectRoot: '/repo',
+      worktreeRoot: '/repo', writable: true, outputSequence: 0 });
+    const capabilityLeases = new CapabilityLeaseStore(now, 7);
+    const lease = capabilityLeases.grant({ requestId: 'pane-lease', actorId: 'agent-1',
+      taskId: 'task-1', grantedBy: 'operator-1', ttlMs: 60_000,
+      grants: [{ target: { kind: 'pane', id: pane.id, generation: pane.generation },
+        capabilities: ['pane.observe'] }] });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers,
+      journal: createMemoryJournal(), surfaces, capabilityLeases });
+    const outcome = await runtime.submit(command({ id: 'collision-upsert',
+      idempotencyKey: 'collision-upsert', kind: 'provider.resource.upsert',
+      actor: { id: 'operator-1', kind: 'human' }, ownerEpoch: 7,
+      payload: { resource: { id: pane.id, kind: 'browser_tab', generation: pane.generation,
+        providerId: 'desktop-1', webviewLabel: 'browser-a', projectRoot: '/repo',
+        worktreeRoot: '/repo', url: 'https://example.test', title: 'Example', loading: false,
+        viewport: { width: 800, height: 600 } } } }));
+    expect(outcome).toMatchObject({ status: 'failed', code: 'resource_collision' });
+    expect(surfaces.get(pane.id)).toBe(pane);
+    expect(capabilityLeases.snapshot()).toEqual([lease]);
   });
 
   it('records agent lease requests, grants only exact operator authority, and lets the owner release it', async () => {

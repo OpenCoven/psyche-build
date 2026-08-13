@@ -3,7 +3,8 @@ import { PromptDispatcher } from './promptDispatch.js';
 import path from 'node:path';
 import { lstat, realpath } from 'node:fs/promises';
 import { ApprovalStore, digestActionPayload, type Approval, type RedactedApprovalEffect } from './approvals.js';
-import { CapabilityLeaseStore, type LeaseTarget, type SurfaceCapability } from './capabilityLeases.js';
+import { CapabilityLeaseStore, SURFACE_CAPABILITIES as CANONICAL_SURFACE_CAPABILITIES,
+  type LeaseTarget, type SurfaceCapability } from './capabilityLeases.js';
 import {
   classifyBrowserScript,
   classifyPaneAction,
@@ -48,9 +49,9 @@ export interface ControlHandlers {
   executeCovenCapability(payload: Payload<'coven.capability.execute'>): Promise<unknown>;
   observePane(payload: Payload<'pane.observe'>): Promise<unknown>;
   actOnPane(payload: Payload<'pane.action'>): Promise<unknown>;
-  inspectBrowser(payload: Payload<'browser.inspect'>): Promise<unknown>;
-  actOnBrowser(payload: Payload<'browser.action'>): Promise<unknown>;
-  runBrowserScript(payload: Payload<'browser.script'>): Promise<unknown>;
+  inspectBrowser(payload: Payload<'browser.inspect'>, actionId: string): Promise<unknown>;
+  actOnBrowser(payload: Payload<'browser.action'>, actionId: string): Promise<unknown>;
+  runBrowserScript(payload: Payload<'browser.script'>, actionId: string): Promise<unknown>;
 }
 
 export interface CanonicalBrowserSnapshotResolver {
@@ -686,13 +687,13 @@ export class ControlRuntime {
           break;
         }
         case 'browser.inspect':
-          await requireHandler(this.handlers.inspectBrowser, command.kind)(command.payload);
+          await requireHandler(this.handlers.inspectBrowser, command.kind)(command.payload, command.id);
           break;
         case 'browser.action':
-          await requireHandler(this.handlers.actOnBrowser, command.kind)(command.payload);
+          await requireHandler(this.handlers.actOnBrowser, command.kind)(command.payload, command.id);
           break;
         case 'browser.script':
-          await requireHandler(this.handlers.runBrowserScript, command.kind)(command.payload);
+          await requireHandler(this.handlers.runBrowserScript, command.kind)(command.payload, command.id);
           break;
       }
       return {
@@ -1660,7 +1661,7 @@ function assertBrowserBinding(
   ) throw codedError('snapshot_stale', 'canonical element binding is stale or mismatched');
 }
 
-function requireHandler<T extends (payload: never) => Promise<unknown>>(
+function requireHandler<T extends (...args: never[]) => Promise<unknown>>(
   handler: T | undefined,
   kind: string,
 ): T {
@@ -1819,12 +1820,7 @@ function isExactPlainDataObject(value: unknown, expectedKeys: readonly string[])
   return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
 }
 
-const SURFACE_CAPABILITIES: ReadonlySet<SurfaceCapability> = new Set([
-  'pane.observe', 'pane.input', 'pane.interrupt', 'pane.focus', 'pane.resize',
-  'pane.create', 'pane.close', 'browser.inspect', 'browser.screenshot',
-  'browser.navigate', 'browser.interact', 'browser.history', 'browser.close',
-  'browser.script',
-]);
+const SURFACE_CAPABILITIES: ReadonlySet<SurfaceCapability> = new Set(CANONICAL_SURFACE_CAPABILITIES);
 
 function sameGrants(
   left: readonly { target: LeaseTarget; capabilities: readonly SurfaceCapability[] }[],

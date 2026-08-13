@@ -23,6 +23,7 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
 };
 
+mod control_provider;
 mod coven_sessions;
 mod metrics;
 mod native_workspace;
@@ -30,6 +31,11 @@ mod pane_metrics;
 mod platform;
 pub mod pty_transport;
 mod workspace_contract;
+use control_provider::{
+    control_operator_submit, control_provider_complete, control_provider_remove,
+    control_provider_start, control_provider_stop, control_provider_upsert, control_state,
+    ControlProviderState,
+};
 use coven_sessions::is_safe_session_id;
 use coven_sessions::{coven_session_kill, coven_sessions};
 use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
@@ -3875,6 +3881,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(MetricsState::default())
+        .manage(ControlProviderState::default())
         .invoke_handler(tauri::generate_handler![
             pty_start,
             pane_session_metrics,
@@ -3906,6 +3913,13 @@ pub fn run() {
             git_diff,
             git_log,
             workspace_metrics,
+            control_provider_start,
+            control_provider_stop,
+            control_provider_upsert,
+            control_provider_remove,
+            control_provider_complete,
+            control_operator_submit,
+            control_state,
         ])
         .setup(|app| {
             if let Err(error) = platform::configure_window(app) {

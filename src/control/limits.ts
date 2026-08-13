@@ -13,3 +13,12 @@ export const AGENT_CONTROL_LIMITS = Object.freeze({
   actionTimeoutMs: 15_000,
   scriptTimeoutMs: 5_000,
 });
+
+const MAX_RAW_SCREENSHOT_BYTES = AGENT_CONTROL_LIMITS.screenshotBytes;
+const BASE64_SCREENSHOT_BYTES = Math.ceil(MAX_RAW_SCREENSHOT_BYTES / 3) * 4;
+const PROVIDER_RESULT_ENVELOPE_BYTES = 128 * 1024;
+
+export const CONTROL_WIRE_LIMITS = Object.freeze({
+  maxFrameBytes: 6 * 1024 * 1024,
+  maxProviderResultBytes: BASE64_SCREENSHOT_BYTES + PROVIDER_RESULT_ENVELOPE_BYTES,
+});

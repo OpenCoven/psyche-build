@@ -57,7 +57,7 @@ function paneHandlerHarness() {
 }
 
 describe('createDaemonControlHandlers agent pane surfaces', () => {
-  it('keeps browser Task 6 backends fail closed', async () => {
+  it('keeps browser provider backends fail closed when no provider is composed', async () => {
     const spawnPane = vi.fn();
     const handlers = createDaemonControlHandlers({
       tmux: new TmuxControl('psyche-test'),
@@ -69,18 +69,18 @@ describe('createDaemonControlHandlers agent pane surfaces', () => {
     });
     const calls = [() => handlers.inspectBrowser({
         taskId: 'task', leaseId: 'lease', leaseRevision: 1, tabId: 'tab', generation: 1,
-      }),
+      }, 'inspect-action'),
       () => handlers.actOnBrowser({
         taskId: 'task', leaseId: 'lease', leaseRevision: 1,
         tabId: 'tab', generation: 1, action: { kind: 'reload' },
-      }),
+      }, 'browser-action'),
       () => handlers.runBrowserScript({
         taskId: 'task', leaseId: 'lease', leaseRevision: 1,
         tabId: 'tab', generation: 1, source: '1',
-      }),
+      }, 'script-action'),
     ];
     for (const call of calls) {
-      await expect(call()).rejects.toMatchObject({ code: 'command_not_implemented' });
+      await expect(call()).rejects.toMatchObject({ code: 'provider_unavailable' });
     }
     expect(spawnPane).not.toHaveBeenCalled();
   });

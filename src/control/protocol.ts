@@ -3,8 +3,11 @@ import type {
   CommandOutcome,
   ControlCommandInput,
   ControlSnapshot,
+  BrowserSemanticAction,
 } from './types.js';
 import { isPaneNamedKey } from './types.js';
+import type { BrowserTabSurface } from './surfaces.js';
+import { SURFACE_CAPABILITIES as CANONICAL_SURFACE_CAPABILITIES } from './capabilityLeases.js';
 
 export const CONTROL_PROTOCOL_VERSION = 1;
 
@@ -40,6 +43,59 @@ export type ControlRequest =
       type: 'action.status';
       requestId: string;
       actionId: string;
+    }
+  | {
+      version: 1;
+      type: 'provider.register';
+      requestId: string;
+      providerId: string;
+    }
+  | {
+      version: 1;
+      type: 'provider.resource.upsert';
+      requestId: string;
+      resource: BrowserTabSurface;
+    }
+  | {
+      version: 1;
+      type: 'provider.resource.remove';
+      requestId: string;
+      id: string;
+      generation: number;
+    }
+  | {
+      version: 1;
+      type: 'provider.effect.result';
+      requestId: string;
+      result: ProviderEffectResult;
+    };
+
+export type BrowserProviderOperation =
+  | { kind: 'inspect'; includeScreenshot?: boolean }
+  | { kind: 'action'; action: BrowserSemanticAction; snapshotId?: string }
+  | { kind: 'script'; source: string; args?: unknown };
+
+export type ProviderEffectResult =
+  | { actionId: string; status: 'succeeded'; value?: unknown }
+  | { actionId: string; status: 'failed'; code: string; message: string }
+  | { actionId: string; status: 'unknown'; code: string; message: string; ambiguous: true };
+
+export type ProviderPush =
+  | {
+      version: 1;
+      type: 'provider.effect.request';
+      requestId: string;
+      actionId: string;
+      tabId: string;
+      generation: number;
+      operation: BrowserProviderOperation;
+    }
+  | {
+      version: 1;
+      type: 'provider.effect.cancel';
+      requestId: string;
+      actionId: string;
+      reason: 'timeout';
     };
 
 export type ControlResponse =
@@ -56,6 +112,7 @@ export type ControlResponse =
       };
     }
   | { version: 1; type: 'ack'; requestId: string }
+  | { version: 1; type: 'provider.resource.result'; requestId: string; resource: BrowserTabSurface }
   | {
       version: 1;
       type: 'command.result';
@@ -90,7 +147,8 @@ export type ControlResponse =
       requestId?: string;
       code: string;
       message: string;
-    };
+    }
+  | ProviderPush;
 
 function stableStringify(value: unknown): string {
   return JSON.stringify(value, (_key, current: unknown) => {
@@ -175,11 +233,57 @@ export function decodeControlRequest(raw: string): ControlRequest {
         || !isNonemptyString(value.actionId)
       ) throw new Error('invalid action.status request');
       break;
+    case 'provider.register':
+      if (!exactKeys(value, ['providerId', 'requestId', 'type', 'version']) || !isNonemptyString(value.providerId)) {
+        throw new Error('invalid provider.register request');
+      }
+      break;
+    case 'provider.resource.upsert':
+      if (!exactKeys(value, ['requestId', 'resource', 'type', 'version']) || !validBrowserResource(value.resource)) {
+        throw new Error('invalid provider.resource.upsert request');
+      }
+      break;
+    case 'provider.resource.remove':
+      if (!exactKeys(value, ['generation', 'id', 'requestId', 'type', 'version'])
+        || !isNonemptyString(value.id) || !isAuthorityInteger(value.generation)) {
+        throw new Error('invalid provider.resource.remove request');
+      }
+      break;
+    case 'provider.effect.result':
+      if (!exactKeys(value, ['requestId', 'result', 'type', 'version']) || !validProviderEffectResult(value.result)) {
+        throw new Error('invalid provider.effect.result request');
+      }
+      break;
     default:
       throw new Error('unsupported control request type');
   }
 
   return value as ControlRequest;
+}
+
+function validBrowserResource(value: unknown): value is BrowserTabSurface {
+  if (!isPlainObject(value)) return false;
+  return exactKeys(value, [
+    'generation', 'id', 'kind', 'loading', 'projectRoot', 'providerId',
+    'title', 'url', 'viewport', 'webviewLabel', 'worktreeRoot',
+  ]) && value.kind === 'browser_tab'
+    && isNonemptyString(value.id) && isNonemptyString(value.providerId)
+    && isNonemptyString(value.projectRoot) && isNonemptyString(value.worktreeRoot)
+    && isNonemptyString(value.webviewLabel) && typeof value.url === 'string'
+    && typeof value.title === 'string' && typeof value.loading === 'boolean'
+    && isAuthorityInteger(value.generation) && isPlainObject(value.viewport)
+    && exactKeys(value.viewport, ['height', 'width'])
+    && isAuthorityInteger(value.viewport.width) && isAuthorityInteger(value.viewport.height);
+}
+
+function validProviderEffectResult(value: unknown): value is ProviderEffectResult {
+  if (!isPlainObject(value) || !isNonemptyString(value.actionId) || !isNonemptyString(value.status)) return false;
+  if (value.status === 'succeeded') return exactKeys(value, ['actionId', 'status'], ['value']);
+  if (value.status === 'failed') return exactKeys(value, ['actionId', 'code', 'message', 'status'])
+    && isNonemptyString(value.code) && typeof value.message === 'string';
+  return value.status === 'unknown'
+    && exactKeys(value, ['actionId', 'ambiguous', 'code', 'message', 'status'])
+    && value.ambiguous === true && isNonemptyString(value.code) && typeof value.message === 'string';
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -398,9 +502,4 @@ function exactTargetKeys(target: Record<string, unknown>): boolean {
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
-const SURFACE_CAPABILITIES: ReadonlySet<string> = new Set([
-  'pane.observe', 'pane.input', 'pane.interrupt', 'pane.focus', 'pane.resize',
-  'pane.create', 'pane.close', 'browser.inspect', 'browser.screenshot',
-  'browser.navigate', 'browser.interact', 'browser.history', 'browser.close',
-  'browser.script',
-]);
+const SURFACE_CAPABILITIES: ReadonlySet<string> = new Set(CANONICAL_SURFACE_CAPABILITIES);
