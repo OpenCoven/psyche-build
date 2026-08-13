@@ -247,6 +247,7 @@ function createPaneFocusHarness(
     activePaneLayout: () => null,
     renderTerminalEmptyState: () => undefined,
     renderPaneMinimap: () => undefined,
+    filesPaneHasCanvasFocus: () => false,
     findOpenFile: () => null,
     state,
     restoreRenderedTerminalFocus,
@@ -628,6 +629,8 @@ describe('Tauri physical terminal panes', () => {
       'togglePaneMaximize',
       'exitPaneMaximize',
       'refreshSidebar',
+      'removeFilesPaneNow',
+      'activateFileTabNow',
     ];
     for (const name of preserveOnly) {
       expect(renderPaneWorkspaceCalls(name), name).toEqual([
@@ -641,6 +644,7 @@ describe('Tauri physical terminal panes', () => {
     expect(renderPaneWorkspaceCalls('closeToolPane')).toEqual([]);
     expect(renderPaneWorkspaceCalls('closeThread')).toEqual([
       'renderPaneWorkspace({ preserveTerminalFocus: false });',
+      'renderPaneWorkspace();',
       'renderPaneWorkspace({ preserveTerminalFocus: false });',
       'renderPaneWorkspace({ preserveTerminalFocus: false });',
       'renderPaneWorkspace();',
@@ -651,7 +655,7 @@ describe('Tauri physical terminal panes', () => {
     ]);
 
     const expectedCallCount =
-      transitionOnly.length + preserveOnly.length + 1 + 4 + 2 + 1;
+      transitionOnly.length + preserveOnly.length + 1 + 5 + 2 + 1;
     expect((mainJs.match(/renderPaneWorkspace\(/g) || []).length - 1).toBe(
       expectedCallCount,
     );
