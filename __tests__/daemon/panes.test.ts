@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { listPaneSurfaceBindings, listPanes } from '../../src/daemon/panes.js';
 import {
   installDaemonPaneLifecycleHooks,
+  parseDaemonArgs,
   refreshPaneSurfaces,
   uninstallDaemonPaneLifecycleHooks,
   updatePaneMeta,
@@ -29,6 +30,14 @@ afterEach(async () => {
 });
 
 describe('daemon pane config helpers', () => {
+  it('rejects invalid ports before daemon resources can be acquired', () => {
+    for (const port of ['-1', '65536', '1.5', 'NaN']) {
+      expect(() => parseDaemonArgs(['--port', port])).toThrow(/--port requires/);
+    }
+    expect(parseDaemonArgs(['--port', '0'])).toMatchObject({ port: 0 });
+    expect(parseDaemonArgs(['--port', '65535'])).toMatchObject({ port: 65_535 });
+  });
+
   it('installs additive real tmux hooks for split and exit refresh signals', () => {
     const run = vi.fn();
 

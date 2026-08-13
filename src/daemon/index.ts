@@ -170,7 +170,7 @@ const DAEMON_PANE_HOOK_INDEX = 987654321;
 
 export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void> {
   const projectRoot = opts.projectRoot ?? findGitRoot() ?? process.cwd();
-  const port = opts.port ?? DEFAULT_PORT;
+  const port = daemonPort(opts.port ?? DEFAULT_PORT);
   const serverVersion = opts.serverVersion ?? 'unknown';
   const capabilityRouter = new AgenticCapabilityRouter({
     strategies: [
@@ -1231,8 +1231,7 @@ export function parseDaemonArgs(argv: string[]): Partial<DaemonOptions> {
     const a = argv[i];
     if (a === '--port' && argv[i + 1]) {
       const n = Number(argv[++i]);
-      if (!Number.isFinite(n)) throw new Error('--port requires a number');
-      opts.port = n;
+      opts.port = daemonPort(n);
     } else if (a === '--print-token') {
       opts.printToken = true;
     } else if (a === '--project-root' && argv[i + 1]) {
@@ -1240,4 +1239,11 @@ export function parseDaemonArgs(argv: string[]): Partial<DaemonOptions> {
     }
   }
   return opts;
+}
+
+function daemonPort(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 65_535) {
+    throw new Error('--port requires an integer from 0 through 65535');
+  }
+  return value;
 }
