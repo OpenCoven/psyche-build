@@ -282,6 +282,56 @@ final class ControlMessagesTests: XCTestCase {
         XCTAssertEqual(response.result.data, ["action": "create_pane", "agent": "codex"])
     }
 
+    func testConstructedActionResultPreservesEveryPresentationField() throws {
+        let result = MobileActionResult(
+            type: "pr_review",
+            message: "Review the proposed changes",
+            title: "PR Review",
+            confirmLabel: "Submit review",
+            cancelLabel: "Cancel",
+            options: [
+                MobileActionOption(
+                    id: "approve",
+                    label: "Approve",
+                    description: "Approve the changes as-is",
+                    danger: true,
+                    isDefault: false
+                )
+            ],
+            placeholder: "Leave a review comment",
+            defaultValue: "Looks good",
+            inputMaxVisibleLines: 4,
+            progress: 0.75,
+            targetPaneID: "%11",
+            reviewData: MobileActionReviewData(
+                repoPath: "/repo",
+                sourceBranch: "feature/mobile-actions",
+                targetBranch: "main",
+                files: ["Sources/App.swift", "Tests/AppTests.swift"],
+                aiFailed: false
+            ),
+            data: [
+                "session": "action-session-1",
+                "topic": "pr_review"
+            ],
+            relatedFiles: ["Sources/App.swift", "Sources/SceneDelegate.swift"],
+            dismissable: false
+        )
+        let response = MobileActionsResultResponse(
+            requestID: "action-response-1",
+            sessionID: "session-1",
+            result: result
+        )
+        let message = MobileServerMessage.control(.actionResult(response))
+        let decoded = try JSONDecoder().decode(MobileServerMessage.self, from: JSONEncoder().encode(message))
+
+        guard case let .control(.actionResult(decodedResponse)) = decoded else {
+            return XCTFail("Expected actions.result response")
+        }
+        XCTAssertEqual(decodedResponse.sessionID, "session-1")
+        XCTAssertEqual(decodedResponse.result, result)
+    }
+
     private func decodeRequestFixture(
         _ name: String,
         fixtures: [String: Data]
