@@ -21,6 +21,13 @@ vi.mock('node:child_process', () => ({
   execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
 }));
 
+const mockInspectLiveTmuxWorktreeConsumers = vi.fn((_worktreePath: string) => ({ state: 'safe' }));
+vi.mock('../../src/services/LiveTmuxWorktreeGuard.js', () => ({
+  inspectLiveTmuxWorktreeConsumers: (worktreePath: string) =>
+    mockInspectLiveTmuxWorktreeConsumers(worktreePath),
+  describeLiveTmuxWorktreeGuard: vi.fn(() => 'no live tmux consumers'),
+}));
+
 // Mock StateManager
 const mockGetState = vi.fn(() => ({ projectRoot: '/test' }));
 const mockPauseConfigWatcher = vi.fn();
@@ -188,7 +195,10 @@ describe('Git Operations Integration Tests', () => {
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    // These hoisted module mocks are shared by every test in this file.
+    // Vitest 4's restoreAllMocks() restores their original empty
+    // implementations, so later tests can silently bypass the per-test setup.
+    vi.clearAllMocks();
   });
 
   describe('Worktree Creation', () => {
@@ -484,6 +494,18 @@ index abc123..def456 100644
     });
 
     it('should generate commit message from AI', async () => {
+      const diff = `diff --git a/src/auth.ts b/src/auth.ts
+index abc123..def456 100644
+--- a/src/auth.ts
++++ b/src/auth.ts
+@@ -10,6 +10,8 @@
++  // Add JWT validation
++  validateToken(token);`;
+      mockExecFileSync.mockImplementation(
+        (_file: string, args: readonly string[] = []) =>
+          args.includes('--stat') ? 'src/auth.ts | 2 ++' : diff,
+      );
+
       // Mock OpenRouter API
       const originalOpenRouterApiKey = process.env.OPENROUTER_API_KEY;
       process.env.OPENROUTER_API_KEY = 'test-key';
@@ -502,6 +524,8 @@ index abc123..def456 100644
 
         const message = await generateCommitMessage('/test');
 
+        expect(mockExecFileSync).toHaveBeenCalled();
+        expect(global.fetch).toHaveBeenCalled();
         expect(message).toContain('feat:');
         expect(message).toContain('authentication');
       } finally {
