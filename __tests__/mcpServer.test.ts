@@ -137,18 +137,25 @@ describe('MCP canonical delegation and read-only helpers', () => {
     });
   });
 
-  it('translates task execution to the owner instead of a local backend', async () => {
-    const fake = client({ submit: vi.fn(async () => ({
-      status: 'rejected', code: 'agent_not_authorized', message: 'not authorized',
-    })) });
+  it('requires and forwards project lease authority for task execution', async () => {
+    const fake = client({ submit: vi.fn(async () => ({ status: 'succeeded' })) });
     inject({ controlClientForRoot: vi.fn(async () => fake), randomId: () => 'id-1' });
 
     expect(payload(await call('psyche_execute_task', {
       project_root: '/repo', prompt: 'test', lanes: [{ id: 'one', mode: 'terminal' }],
-    }))).toMatchObject({ status: 'rejected', code: 'agent_not_authorized' });
+    }))).toMatchObject({ status: 'rejected', code: 'lease_missing' });
+    expect(fake.submit).not.toHaveBeenCalled();
+
+    await call('psyche_execute_task', {
+      project_root: '/repo', prompt: 'test', lanes: [{ id: 'one', mode: 'terminal' }],
+      task_id: 'task-1', lease_id: 'lease-1', lease_revision: 2,
+    });
     expect(fake.submit).toHaveBeenCalledOnce();
     expect(fake.submit.mock.calls[0][0]).toMatchObject({
-      kind: 'orchestration.execute', payload: { request: { projectRoot: '/repo', prompt: 'test' } },
+      kind: 'orchestration.execute', payload: {
+        taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 2,
+        request: { taskId: 'task-1', projectRoot: '/repo', prompt: 'test' },
+      },
     });
   });
 });

@@ -276,4 +276,53 @@ describe('Tauri semantic browser provider lifecycle', () => {
     expect(invoke).not.toHaveBeenCalled();
     expect(install).not.toHaveBeenCalled();
   });
+
+  it('strictly projects page action results without forwarding forged payloads', () => {
+    const snapshots = new Map([['snap', {
+      tabId: 'tab', generation: 1, expiresAt: Date.now() + 1_000,
+      semantics: new Map([['e1', { secret: true }]]),
+    }]]);
+    const project = Function(
+      'browserAutomationSnapshotRefs',
+      `return (${functionSource(main, 'canonicalizeBrowserActionResult')});`,
+    )(snapshots);
+    const effect = { tabId: 'tab', generation: 1, operation: {
+      kind: 'action', snapshotId: 'snap', action: { kind: 'type', elementRef: 'e1', text: 'agent-secret' },
+    } };
+    expect(project(effect, { valuePresent: true, secret: true })).toEqual({ valuePresent: true, secret: true });
+    for (const forged of [
+      { valuePresent: true, secret: true, leaked: 'page-secret' },
+      { valuePresent: true, secret: 'page-secret' },
+      Object.assign(Object.create({ leaked: 'page-secret' }), { valuePresent: true, secret: true }),
+    ]) expect(() => project(effect, forged)).toThrowError(expect.objectContaining({ code: 'automation_failed' }));
+  });
+
+  it('captures the native emitter before page action dispatch', () => {
+    const source = functionSource(main, 'browserAutomationDispatchScript');
+    expect(source).toContain('.emit.bind(');
+    expect(source.indexOf('.emit.bind(')).toBeLessThan(source.indexOf('__PSYCHE_AUTOMATION__.dispatch'));
+  });
+
+  it('does not let an action replace the captured result emitter', async () => {
+    const originalEmit = vi.fn();
+    const forgedEmit = vi.fn();
+    const build = Function(
+      'resolveBrowserAutomationSnapshotId',
+      `return (${functionSource(main, 'browserAutomationDispatchScript')});`,
+    )(() => 'raw-snapshot');
+    const eventApi = { emit: originalEmit };
+    const window = {
+      __TAURI__: { event: eventApi },
+      __PSYCHE_AUTOMATION__: { dispatch: () => {
+        eventApi.emit = forgedEmit;
+        return { clicked: true };
+      } },
+    };
+    await Function('window', `return ${build({
+      actionId: 'action', tabId: 'tab', generation: 1,
+      operation: { kind: 'action', snapshotId: 'snap', action: { kind: 'click', elementRef: 'e1' } },
+    })}`)(window);
+    expect(originalEmit).toHaveBeenCalledWith('browser:automation-result', expect.objectContaining({ value: { clicked: true } }));
+    expect(forgedEmit).not.toHaveBeenCalled();
+  });
 });

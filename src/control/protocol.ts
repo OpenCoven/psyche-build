@@ -72,7 +72,7 @@ export type ControlResponse =
         capabilities: readonly string[];
       };
     }
-  | { version: 1; type: 'ack'; requestId: string }
+  | { version: 1; type: 'ack'; requestId: string; resource?: BrowserTabSurface }
   | {
       version: 1;
       type: 'command.result';
@@ -240,7 +240,7 @@ function validateSurfaceAuthorization(kind: unknown, payload: Record<string, unk
   const actionKinds = new Set([
     'pane.observe', 'pane.action', 'browser.inspect', 'browser.action', 'browser.script',
   ]);
-  if (kind === 'lease.release') {
+  if (kind === 'lease.release' || kind === 'orchestration.execute') {
     if (!hasTaskLeaseAuthorization(payload)) throw new Error('invalid surface authorization');
     return;
   }

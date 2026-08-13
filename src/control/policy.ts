@@ -10,6 +10,8 @@ declare const canonicalElementSemanticsBrand: unique symbol;
 export interface CanonicalElementSemantics {
   readonly role?: string;
   readonly submit?: boolean;
+  readonly submitMethod?: string;
+  readonly submitDestination?: string;
   readonly secret?: boolean;
   readonly [canonicalElementSemanticsBrand]: true;
 }
@@ -17,6 +19,8 @@ export interface CanonicalElementSemantics {
 export interface CanonicalElementSemanticsInput {
   readonly role?: string;
   readonly submit?: boolean;
+  readonly submitMethod?: string;
+  readonly submitDestination?: string;
   readonly secret?: boolean;
 }
 
@@ -48,12 +52,14 @@ export function createCanonicalElementSemantics(
 ): CanonicalElementSemantics {
   assertPlainDataObject(input);
   const keys = Object.keys(input);
-  if (keys.some((key) => !['role', 'submit', 'secret'].includes(key))) {
+  if (keys.some((key) => !['role', 'submit', 'submitMethod', 'submitDestination', 'secret'].includes(key))) {
     return capabilityDenied(input);
   }
   if (
     (input.role !== undefined && typeof input.role !== 'string')
     || (input.submit !== undefined && typeof input.submit !== 'boolean')
+    || (input.submitMethod !== undefined && (typeof input.submitMethod !== 'string' || input.submitMethod.length > 16))
+    || (input.submitDestination !== undefined && (typeof input.submitDestination !== 'string' || input.submitDestination.length > 2_048))
     || (input.secret !== undefined && typeof input.secret !== 'boolean')
   ) {
     return capabilityDenied(input);
@@ -61,6 +67,8 @@ export function createCanonicalElementSemantics(
   const semantic = Object.freeze({
     ...(input.role === undefined ? {} : { role: input.role }),
     ...(input.submit === undefined ? {} : { submit: input.submit }),
+    ...(input.submitMethod === undefined ? {} : { submitMethod: input.submitMethod }),
+    ...(input.submitDestination === undefined ? {} : { submitDestination: input.submitDestination }),
     ...(input.secret === undefined ? {} : { secret: input.secret }),
   }) as CanonicalElementSemantics;
   canonicalSemantics.add(semantic);

@@ -12,6 +12,7 @@ import {
   type PolicyClassification,
 } from './policy.js';
 import { SurfaceRegistry } from './surfaces.js';
+import { AGENT_CONTROL_LIMITS } from './limits.js';
 import type {
   ActionReceipt,
   CommandOutcome,
@@ -21,6 +22,21 @@ import type {
   LeaseGrant,
   PromptEnvelope,
 } from './types.js';
+
+const STABLE_SURFACE_EFFECT_CODES = new Set([
+  'action_timeout',
+  'automation_failed',
+  'backend_unavailable',
+  'element_missing',
+  'provider_busy',
+  'provider_unavailable',
+  'resource_missing',
+  'resource_replaced',
+  'result_too_large',
+  'script_source_too_large',
+  'serialization_failed',
+  'snapshot_stale',
+]);
 
 export type Payload<K extends ControlCommand['kind']> = Extract<ControlCommand, { kind: K }>['payload'];
 
@@ -470,7 +486,11 @@ export class ControlRuntime {
         return this.appendTerminal(command, failedOutcome(error));
       }
       if (isSurfaceActionCommand(command)) {
-        return this.terminalizeValidationFailure(command, targetForSurfaceAction(command));
+        const code = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+          ? (error as { code: string }).code
+          : 'action_validation_failed';
+        return this.terminalizeValidationFailure(command, targetForSurfaceAction(command),
+          code === 'script_source_too_large' ? code : 'action_validation_failed');
       }
       return this.appendTerminal(command, failedOutcome(error));
     }
@@ -532,6 +552,9 @@ export class ControlRuntime {
         break;
       }
       case 'browser.script':
+        if (Buffer.byteLength(command.payload.source, 'utf8') > AGENT_CONTROL_LIMITS.scriptSourceBytes) {
+          throw codedRuntimeError('script_source_too_large', 'browser script source exceeds maximum size');
+        }
         target = { kind: 'browser_tab', id: command.payload.tabId, generation: command.payload.generation };
         classification = classifyBrowserScript();
         effect = createRedactedApprovalEffect({ kind: 'script', target: command.payload.source });
@@ -638,12 +661,14 @@ export class ControlRuntime {
       } catch (error) {
         const ambiguous = Boolean(error && typeof error === 'object' && (error as { ambiguous?: unknown }).ambiguous);
         const receipt = this.makeReceipt(context.command, context.target, ambiguous ? 'unknown' : 'failed', {
-          code: ambiguous ? 'effect_unknown' : 'effect_failed',
+          code: ambiguous ? 'effect_unknown' : stableSurfaceEffectCode(error),
         });
         this.rememberReceipt(receipt);
         return receipt;
       }
-      const receipt = this.makeReceipt(context.command, context.target, 'succeeded', { value });
+      const receipt = context.command.kind === 'browser.script'
+        ? this.makeScriptReceipt(context.command, context.target, value)
+        : this.makeReceipt(context.command, context.target, 'succeeded', { value });
       this.rememberReceipt(receipt);
       return receipt;
     } finally {
@@ -747,6 +772,15 @@ export class ControlRuntime {
         case 'pane.meta.update':
           return succeededOutcome(await this.handlers.updatePaneMeta(command.payload));
         case 'orchestration.execute':
+          this.capabilityLeases.assert({
+            leaseId: command.payload.leaseId,
+            revision: command.payload.leaseRevision,
+            ownerEpoch: command.ownerEpoch,
+            actorId: command.actor.id,
+            taskId: command.payload.taskId,
+            target: { kind: 'project', id: command.projectRoot },
+            capability: 'pane.create',
+          });
           return succeededOutcome(await this.handlers.executeOrchestration(command.payload));
         case 'ritual.launch':
           return succeededOutcome(await this.handlers.launchRitual(command.payload));
@@ -926,7 +960,8 @@ export class ControlRuntime {
     command: SurfaceActionContext['command'],
     target: LeaseTarget,
     state: ActionReceipt['state'],
-    details: { code?: string; message?: string; value?: unknown } = {},
+    details: { code?: string; message?: string; value?: unknown; sourceDigest?: string;
+      sourceBytes?: number; resultBytes?: number; durationMs?: number } = {},
   ): ActionReceipt {
     return Object.freeze({
       schema: 'psyche.control.receipt/v1' as const,
@@ -936,6 +971,28 @@ export class ControlRuntime {
       createdAt: command.createdAt,
       ...(state === 'approval_required' ? {} : { completedAt: new Date().toISOString() }),
       ...details,
+    });
+  }
+
+  private makeScriptReceipt(
+    command: Extract<ControlCommand, { kind: 'browser.script' }>,
+    target: LeaseTarget,
+    result: unknown,
+  ): ActionReceipt {
+    if (!result || typeof result !== 'object') {
+      throw codedRuntimeError('serialization_failed', 'browser script returned an invalid result envelope');
+    }
+    const envelope = result as { value?: unknown; resultBytes?: unknown; durationMs?: unknown };
+    if (!Number.isSafeInteger(envelope.resultBytes) || (envelope.resultBytes as number) < 0
+      || !Number.isFinite(envelope.durationMs) || (envelope.durationMs as number) < 0) {
+      throw codedRuntimeError('serialization_failed', 'browser script returned invalid result metadata');
+    }
+    return this.makeReceipt(command, target, 'succeeded', {
+      value: envelope.value,
+      sourceDigest: createHash('sha256').update(command.payload.source, 'utf8').digest('hex'),
+      sourceBytes: Buffer.byteLength(command.payload.source, 'utf8'),
+      resultBytes: envelope.resultBytes as number,
+      durationMs: envelope.durationMs as number,
     });
   }
 
@@ -1101,6 +1158,13 @@ export class ControlRuntime {
       ? { kind: 'pane', id: paneId, generation: surface.generation }
       : { kind: 'pane', id: paneId, generation: 0 };
   }
+}
+
+function stableSurfaceEffectCode(error: unknown): string {
+  const code = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+    ? (error as { code: string }).code
+    : '';
+  return STABLE_SURFACE_EFFECT_CODES.has(code) ? code : 'effect_failed';
 }
 
 function paneIdForCommand(command: ControlCommand): string | undefined {

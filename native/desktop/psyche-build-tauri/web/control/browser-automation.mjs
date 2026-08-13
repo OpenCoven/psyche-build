@@ -7,6 +7,9 @@ const MAX_NAME_NODES = 2_000;
 const MAX_NAME_WORK = 10_000;
 const MAX_NAME_TOTAL_BYTES = 1024 * 1024;
 const SNAPSHOT_TTL_MS = 30_000;
+const SCRIPT_SOURCE_BYTES = 64 * 1024;
+const SCRIPT_RESULT_BYTES = 256 * 1024;
+const SCRIPT_TIMEOUT_MS = 5_000;
 const TrustedMap = Map;
 const TrustedWeakMap = WeakMap;
 const TrustedSet = Set;
@@ -35,6 +38,24 @@ const trustedSelectValueGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLS
 const trustedSelectDisabledGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLSelectElement?.prototype || {}, 'disabled')?.get;
 const trustedSelectLabelsGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLSelectElement?.prototype || {}, 'labels')?.get;
 const trustedOptionSelectedGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLOptionElement?.prototype || {}, 'selected')?.get;
+const trustedNodeIsConnectedGetter = objectGetOwnPropertyDescriptor(globalThis.Node?.prototype || {}, 'isConnected')?.get;
+const trustedElementTagNameGetter = objectGetOwnPropertyDescriptor(globalThis.Element?.prototype || {}, 'tagName')?.get;
+const trustedElementChildrenGetter = objectGetOwnPropertyDescriptor(globalThis.Element?.prototype || {}, 'children')?.get;
+const trustedParentElementGetter = objectGetOwnPropertyDescriptor(globalThis.Node?.prototype || {}, 'parentElement')?.get;
+const trustedButtonDisabledGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLButtonElement?.prototype || {}, 'disabled')?.get;
+const trustedButtonTypeGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLButtonElement?.prototype || {}, 'type')?.get;
+const trustedButtonFormGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLButtonElement?.prototype || {}, 'form')?.get;
+const trustedInputFormGetter = objectGetOwnPropertyDescriptor(globalThis.HTMLInputElement?.prototype || {}, 'form')?.get;
+const trustedHTMLElementClick = globalThis.HTMLElement?.prototype?.click;
+const trustedHTMLElementFocus = globalThis.HTMLElement?.prototype?.focus;
+const trustedDispatchEvent = globalThis.EventTarget?.prototype?.dispatchEvent;
+const trustedRequestSubmit = globalThis.HTMLFormElement?.prototype?.requestSubmit;
+const trustedInputValueSetter = objectGetOwnPropertyDescriptor(globalThis.HTMLInputElement?.prototype || {}, 'value')?.set;
+const trustedTextareaValueSetter = objectGetOwnPropertyDescriptor(globalThis.HTMLTextAreaElement?.prototype || {}, 'value')?.set;
+const trustedSelectValueSetter = objectGetOwnPropertyDescriptor(globalThis.HTMLSelectElement?.prototype || {}, 'value')?.set;
+const trustedOptionSelectedSetter = objectGetOwnPropertyDescriptor(globalThis.HTMLOptionElement?.prototype || {}, 'selected')?.set;
+const TrustedEvent = globalThis.Event;
+const TrustedInputEvent = globalThis.InputEvent;
 const INSTALLED = new TrustedWeakMap();
 
 const INTERACTIVE_TAGS = new TrustedSet(['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY', 'IFRAME']);
@@ -95,6 +116,7 @@ export function installBrowserAutomation(globalObject, options = {}) {
       const { invalidate: _invalidate, ...boundedResult } = result;
       return boundedResult;
     }
+    if (request.type === 'script') return runScript(request, globalObject, now);
     if (request.type !== 'resolve') {
       throw automationError('unsupported_operation', 'unsupported_operation: automation operation is not allowed');
     }
@@ -153,7 +175,25 @@ export function browserAutomationSource() {
     const trustedSelectDisabledGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLSelectElement?.prototype||{},'disabled')?.get;
     const trustedSelectLabelsGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLSelectElement?.prototype||{},'labels')?.get;
     const trustedOptionSelectedGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLOptionElement?.prototype||{},'selected')?.get;
+    const trustedNodeIsConnectedGetter=objectGetOwnPropertyDescriptor(globalObject.Node?.prototype||{},'isConnected')?.get;
+    const trustedElementTagNameGetter=objectGetOwnPropertyDescriptor(globalObject.Element?.prototype||{},'tagName')?.get;
+    const trustedElementChildrenGetter=objectGetOwnPropertyDescriptor(globalObject.Element?.prototype||{},'children')?.get;
+    const trustedParentElementGetter=objectGetOwnPropertyDescriptor(globalObject.Node?.prototype||{},'parentElement')?.get;
+    const trustedButtonDisabledGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLButtonElement?.prototype||{},'disabled')?.get;
+    const trustedButtonTypeGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLButtonElement?.prototype||{},'type')?.get;
+    const trustedButtonFormGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLButtonElement?.prototype||{},'form')?.get;
+    const trustedInputFormGetter=objectGetOwnPropertyDescriptor(globalObject.HTMLInputElement?.prototype||{},'form')?.get;
+    const trustedHTMLElementClick=globalObject.HTMLElement?.prototype?.click;
+    const trustedHTMLElementFocus=globalObject.HTMLElement?.prototype?.focus;
+    const trustedDispatchEvent=globalObject.EventTarget?.prototype?.dispatchEvent;
+    const trustedRequestSubmit=globalObject.HTMLFormElement?.prototype?.requestSubmit;
+    const trustedInputValueSetter=objectGetOwnPropertyDescriptor(globalObject.HTMLInputElement?.prototype||{},'value')?.set;
+    const trustedTextareaValueSetter=objectGetOwnPropertyDescriptor(globalObject.HTMLTextAreaElement?.prototype||{},'value')?.set;
+    const trustedSelectValueSetter=objectGetOwnPropertyDescriptor(globalObject.HTMLSelectElement?.prototype||{},'value')?.set;
+    const trustedOptionSelectedSetter=objectGetOwnPropertyDescriptor(globalObject.HTMLOptionElement?.prototype||{},'selected')?.set;
+    const TrustedEvent=globalObject.Event; const TrustedInputEvent=globalObject.InputEvent;
     const SNAPSHOT_TTL_MS=${SNAPSHOT_TTL_MS}; const INSTALLED=new TrustedWeakMap();
+    const SCRIPT_SOURCE_BYTES=${SCRIPT_SOURCE_BYTES}; const SCRIPT_RESULT_BYTES=${SCRIPT_RESULT_BYTES}; const SCRIPT_TIMEOUT_MS=${SCRIPT_TIMEOUT_MS};
     const INTERACTIVE_TAGS=new TrustedSet(${JSON.stringify([...INTERACTIVE_TAGS])});
     const ALLOWED_ROLES=new TrustedSet(${JSON.stringify([...ALLOWED_ROLES])});
     ${automationError.toString()}
@@ -178,14 +218,70 @@ export function browserAutomationSource() {
     ${semanticNode.toString()}
     ${assertActionRequest.toString()}
     ${assertActionTarget.toString()}
+    ${actionTargetSemantics.toString()}
+    ${readTagName.toString()}
+    ${readChildren.toString()}
+    ${readConnected.toString()}
+    ${readForm.toString()}
+    ${invokeTrusted.toString()}
     ${containsStoredElement.toString()}
     ${dispatchInputEvent.toString()}
     ${performAction.toString()}
     ${submitMetadata.toString()}
+    ${assertJsonValue.toString()}
+    ${runScript.toString()}
     ${captureSnapshot.toString()}
     ${installBrowserAutomation.toString()}
     installBrowserAutomation(globalObject,{installNonce:installNonce});
   })(globalThis);`;
+}
+
+function assertJsonValue(value, seen, depth = 0) {
+  if (depth > 64) throw automationError('serialization_failed', 'serialization_failed: result nesting exceeds maximum');
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw automationError('serialization_failed', 'serialization_failed: result contains a non-finite number');
+    return;
+  }
+  if (typeof value !== 'object') throw automationError('serialization_failed', 'serialization_failed: result is not JSON data');
+  if (seen.has(value)) throw automationError('serialization_failed', 'serialization_failed: result contains a cycle');
+  seen.add(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
+    throw automationError('serialization_failed', 'serialization_failed: result contains a native object');
+  }
+  const entries = Array.isArray(value) ? value : Object.values(value);
+  for (const item of entries) assertJsonValue(item, seen, depth + 1);
+  seen.delete(value);
+}
+
+async function runScript(request, globalObject, now) {
+  if (typeof request.source !== 'string' || encodeText(request.source).length > SCRIPT_SOURCE_BYTES) {
+    throw automationError('script_source_too_large', 'script_source_too_large: browser script source exceeds maximum');
+  }
+  const startedAt = now();
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(automationError('action_timeout', 'action_timeout: browser script exceeded five seconds')), SCRIPT_TIMEOUT_MS);
+  });
+  let value;
+  try {
+    const execute = Function('args', `"use strict"; return (async()=>{${request.source}\n})();`);
+    value = await Promise.race([Promise.resolve().then(() => execute(request.args)), timeout]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+  assertJsonValue(value, new WeakSet());
+  let encoded;
+  try { encoded = JSON.stringify(value); }
+  catch { throw automationError('serialization_failed', 'serialization_failed: result cannot be encoded'); }
+  if (encoded === undefined) throw automationError('serialization_failed', 'serialization_failed: result is not JSON data');
+  const resultBytes = encodeText(encoded).length;
+  if (resultBytes > SCRIPT_RESULT_BYTES) throw automationError('result_too_large', 'result_too_large: browser script result exceeds maximum');
+  let parsed;
+  try { parsed = JSON.parse(encoded); }
+  catch { throw automationError('serialization_failed', 'serialization_failed: result cannot be decoded'); }
+  return { value: parsed, resultBytes, durationMs: Math.max(0, now() - startedAt) };
 }
 
 function assertActionRequest(action) {
@@ -217,11 +313,41 @@ function assertActionRequest(action) {
 }
 
 function assertActionTarget(element, semantic, current, globalObject) {
-  if (!element || element.isConnected === false || !containsStoredElement(current.documentElement, element)
-      || isHidden(element, globalObject) || semantic?.disabled === true
-      || element.disabled === true || hasAttribute(element, 'disabled') || readAttribute(element, 'aria-disabled') === 'true') {
-    throw automationError('target_unavailable', 'target_unavailable: semantic target cannot be acted on');
+  const next = actionTargetSemantics(element, globalObject);
+  if (!element || !readConnected(element) || !containsStoredElement(current.documentElement, element)
+      || isHidden(element, globalObject) || next.role !== semantic?.role
+      || next.disabled !== (semantic?.disabled === true) || next.submit !== (semantic?.submit === true)
+      || next.submitMethod !== semantic?.submitMethod || next.submitDestination !== semantic?.submitDestination
+      || next.secret !== (semantic?.secret === true)) {
+    throw automationError('target_changed', 'target_changed: semantic target changed before dispatch');
   }
+}
+
+function actionTargetSemantics(element, globalObject) {
+  const tag = readTagName(element);
+  const inputType = tag === 'INPUT' ? readInputType(element) : '';
+  const buttonType = tag === 'BUTTON' ? String(readWebIdl(trustedButtonTypeGetter, element, 'type') || '').toLowerCase() : inputType;
+  const form = readForm(element, tag);
+  const disabledGetter = tag === 'BUTTON' ? trustedButtonDisabledGetter : tag === 'INPUT' ? trustedInputDisabledGetter
+    : tag === 'TEXTAREA' ? trustedTextareaDisabledGetter : tag === 'SELECT' ? trustedSelectDisabledGetter : null;
+  const submit = (tag === 'BUTTON' || tag === 'INPUT') && (buttonType === 'submit' || (tag === 'BUTTON' && !buttonType && !!form));
+  const metadata = submit ? submitMetadata(element, globalObject) : null;
+  return {
+    role: roleFor(element, tag),
+    disabled: readWebIdl(disabledGetter, element, 'disabled') === true || hasAttribute(element, 'disabled') || readAttribute(element, 'aria-disabled') === 'true',
+    submit,
+    ...(metadata ? { submitMethod: metadata.method, submitDestination: metadata.destination } : {}),
+    secret: tag === 'INPUT' && (!inputType || inputType === 'password'),
+  };
+}
+function readTagName(element) { return String(readWebIdl(trustedElementTagNameGetter, element, 'tagName') || '').toUpperCase(); }
+function readChildren(element) { return readWebIdl(trustedElementChildrenGetter, element, 'children') || []; }
+function readConnected(element) { return readWebIdl(trustedNodeIsConnectedGetter, element, 'isConnected') !== false; }
+function readForm(element, tag) { return readWebIdl(tag === 'BUTTON' ? trustedButtonFormGetter : tag === 'INPUT' ? trustedInputFormGetter : null, element, 'form') || null; }
+function invokeTrusted(method, receiver, args, fallback) {
+  if (typeof method === 'function' && trustedElementTagNameGetter) return reflectApply(method, receiver, args);
+  if (typeof receiver?.[fallback] === 'function') return receiver[fallback](...args);
+  throw automationError('backend_unavailable', `backend_unavailable: ${fallback} is unavailable`);
 }
 
 function containsStoredElement(root, target) {
@@ -231,49 +357,54 @@ function containsStoredElement(root, target) {
     const item = stack.pop();
     visited += 1;
     if (item === target) return true;
-    const children = item?.children || [];
+    const children = readChildren(item);
     for (let index = children.length - 1; index >= 0; index -= 1) stack.push(children[index]);
   }
   return false;
 }
 
 function dispatchInputEvent(element, globalObject, type, init) {
-  const EventCtor = globalObject.InputEvent || globalObject.Event;
+  const EventCtor = TrustedInputEvent || TrustedEvent;
   if (typeof EventCtor !== 'function') throw automationError('backend_unavailable', 'backend_unavailable: browser events are unavailable');
-  element.dispatchEvent(new EventCtor(type, { bubbles: true, cancelable: type === 'beforeinput', ...init }));
+  invokeTrusted(trustedDispatchEvent, element, [new EventCtor(type, { bubbles: true, cancelable: type === 'beforeinput', ...init })], 'dispatchEvent');
 }
 
 function performAction(element, semantic, action, globalObject) {
   switch (action.kind) {
     case 'click': {
-      if (typeof element.click !== 'function') throw automationError('backend_unavailable', 'backend_unavailable: click is unavailable');
-      element.click();
+      invokeTrusted(trustedHTMLElementClick, element, [], 'click');
       return { clicked: true, invalidate: true };
     }
     case 'type': {
-      if (!['INPUT', 'TEXTAREA'].includes(String(element.tagName || '').toUpperCase())) {
+      const tag = readTagName(element);
+      if (!['INPUT', 'TEXTAREA'].includes(tag)) {
         throw automationError('target_unavailable', 'target_unavailable: target is not editable');
       }
       const secret = semantic?.secret === true;
-      const previous = typeof element.value === 'string' ? element.value : '';
+      const previousValue = readWebIdl(tag === 'INPUT' ? trustedInputValueGetter : trustedTextareaValueGetter, element, 'value');
+      const previous = typeof previousValue === 'string' ? previousValue : '';
       const next = action.append === true ? previous + action.text : action.text;
-      element.focus?.();
+      invokeTrusted(trustedHTMLElementFocus, element, [], 'focus');
       dispatchInputEvent(element, globalObject, 'beforeinput', { data: action.text, inputType: action.append === true ? 'insertText' : 'insertReplacementText' });
-      element.value = next;
+      const setter = tag === 'INPUT' ? trustedInputValueSetter : trustedTextareaValueSetter;
+      if (setter) reflectApply(setter, element, [next]); else element.value = next;
       dispatchInputEvent(element, globalObject, 'input', { data: action.text, inputType: 'insertText' });
       dispatchInputEvent(element, globalObject, 'change');
       return secret ? { valuePresent: next.length > 0, secret: true } : { value: boundedText(next, MAX_NAME_BYTES), secret: false };
     }
     case 'select': {
-      if (String(element.tagName || '').toUpperCase() !== 'SELECT') throw automationError('target_unavailable', 'target_unavailable: target is not a select');
+      if (readTagName(element) !== 'SELECT') throw automationError('target_unavailable', 'target_unavailable: target is not a select');
       const wanted = new TrustedSet(action.values);
       const selectedValues = [];
-      for (const option of element.options || element.children || []) {
+      for (const option of element.options || readChildren(element)) {
         const value = String(option.value ?? readAttribute(option, 'value') ?? option.textContent ?? '');
-        option.selected = wanted.has(value);
-        if (option.selected && selectedValues.length < 128) selectedValues.push(boundedText(value, MAX_NAME_BYTES));
+        const selected = wanted.has(value);
+        if (trustedOptionSelectedSetter && trustedElementTagNameGetter) reflectApply(trustedOptionSelectedSetter, option, [selected]); else option.selected = selected;
+        if (selected && selectedValues.length < 128) selectedValues.push(boundedText(value, MAX_NAME_BYTES));
       }
-      if (!element.multiple && selectedValues.length) element.value = selectedValues[0];
+      if (!element.multiple && selectedValues.length) {
+        if (trustedSelectValueSetter && trustedElementTagNameGetter) reflectApply(trustedSelectValueSetter, element, [selectedValues[0]]); else element.value = selectedValues[0];
+      }
       dispatchInputEvent(element, globalObject, 'input');
       dispatchInputEvent(element, globalObject, 'change');
       return semantic?.secret === true ? { selectedValues: ['[redacted]'] } : { selectedValues };
@@ -286,15 +417,14 @@ function performAction(element, semantic, action, globalObject) {
       return { scrollLeft: element.scrollLeft, scrollTop: element.scrollTop };
     }
     case 'focus':
-      if (typeof element.focus !== 'function') throw automationError('backend_unavailable', 'backend_unavailable: focus is unavailable');
-      element.focus();
+      invokeTrusted(trustedHTMLElementFocus, element, [], 'focus');
       return { focused: true };
     case 'submit': {
       const metadata = submitMetadata(element, globalObject);
-      if (!metadata.form || typeof metadata.form.requestSubmit !== 'function') {
+      if (!metadata.form || (typeof trustedRequestSubmit !== 'function' && typeof metadata.form.requestSubmit !== 'function')) {
         throw automationError('backend_unavailable', 'backend_unavailable: native form submission is unavailable');
       }
-      metadata.form.requestSubmit(element);
+      invokeTrusted(trustedRequestSubmit, metadata.form, [element], 'requestSubmit');
       return { submitted: true, method: metadata.method, destination: metadata.destination, invalidate: true };
     }
     case 'upload':
@@ -307,7 +437,8 @@ function performAction(element, semantic, action, globalObject) {
 }
 
 function submitMetadata(element, globalObject) {
-  const form = element.form || (String(element.tagName || '').toUpperCase() === 'FORM' ? element : null);
+  const tag = readTagName(element);
+  const form = readForm(element, tag) || (tag === 'FORM' ? element : null);
   if (!form) throw automationError('target_unavailable', 'target_unavailable: submit target has no form');
   const method = String(readAttribute(element, 'formmethod') || readAttribute(form, 'method') || 'get').toUpperCase().slice(0, 16);
   const rawAction = readAttribute(element, 'formaction') || readAttribute(form, 'action') || globalObject.location?.href || '';
@@ -367,7 +498,7 @@ function captureSnapshot(globalObject, sequence, createdAt) {
           refs.set(ref, frame.element);
         }
       }
-      const children = frame.element.children || [];
+      const children = readChildren(frame.element);
       if (hidden) { stack.pop(); continue; }
       if (frame.depth === MAX_DEPTH) {
         if (children.length) truncated = true;
@@ -398,7 +529,7 @@ function captureSnapshot(globalObject, sequence, createdAt) {
 }
 
 function semanticNode(element, document, viewportWidth, viewportHeight, globalObject, labelsByFor, referencedText, labelTextByFor, visibleTextCache, nameBudget) {
-  const tag = String(element.tagName || '').toUpperCase();
+  const tag = readTagName(element);
   const role = roleFor(element, tag);
   if (!role) return null;
   const rect = safeRect(element);
@@ -406,13 +537,19 @@ function semanticNode(element, document, viewportWidth, viewportHeight, globalOb
   if (!clipped && !INTERACTIVE_TAGS.has(tag)) return null;
   const name = accessibleName(element, document, globalObject, labelsByFor, referencedText, labelTextByFor, visibleTextCache, nameBudget);
   const result = { role, name, bounds: clipped || { x: 0, y: 0, width: 0, height: 0, clipped: true } };
-  const disabledGetter = tag === 'INPUT' ? trustedInputDisabledGetter
+  const disabledGetter = tag === 'BUTTON' ? trustedButtonDisabledGetter
+    : tag === 'INPUT' ? trustedInputDisabledGetter
     : tag === 'TEXTAREA' ? trustedTextareaDisabledGetter
       : tag === 'SELECT' ? trustedSelectDisabledGetter : null;
   if (readWebIdl(disabledGetter, element, 'disabled') === true || hasAttribute(element, 'disabled') || readAttribute(element, 'aria-disabled') === 'true') result.disabled = true;
   if (role === 'button') {
     const buttonType = tag === 'INPUT' ? readInputType(element) : boundedText(readAttribute(element, 'type') || '', 64).toLowerCase();
-    result.submit = buttonType === 'submit' || (tag === 'BUTTON' && !buttonType && !!element.form);
+    result.submit = buttonType === 'submit' || (tag === 'BUTTON' && !buttonType && !!readForm(element, tag));
+    if (result.submit) {
+      const metadata = submitMetadata(element, globalObject);
+      result.submitMethod = metadata.method;
+      result.submitDestination = metadata.destination;
+    }
   }
   if (role === 'checkbox' || role === 'radio') result.checked = readWebIdl(trustedInputCheckedGetter, element, 'checked') === true || readAttribute(element, 'aria-checked') === 'true';
   if (role === 'option') result.selected = readWebIdl(trustedOptionSelectedGetter, element, 'selected') === true || readAttribute(element, 'aria-selected') === 'true';
@@ -482,7 +619,7 @@ function accessibleName(element, document, globalObject, labelsByFor, referenced
     const label = boundedText(parts.join(' '), MAX_NAME_BYTES);
     if (label) return boundedText(label, MAX_NAME_BYTES);
   }
-  const tag = String(element.tagName || '').toUpperCase();
+  const tag = readTagName(element);
   const labelsGetter = tag === 'INPUT' ? trustedInputLabelsGetter
     : tag === 'TEXTAREA' ? trustedTextareaLabelsGetter
       : tag === 'SELECT' ? trustedSelectLabelsGetter : null;
@@ -602,7 +739,7 @@ function consumeNameWork(budget) {
 
 function isHidden(element, globalObject) {
   let current = element;
-  for (let depth = 0; current && depth <= MAX_DEPTH; depth += 1, current = current.parentElement) {
+  for (let depth = 0; current && depth <= MAX_DEPTH; depth += 1, current = readWebIdl(trustedParentElementGetter, current, 'parentElement')) {
     if (current.hidden === true || hasAttribute(current, 'hidden') || readAttribute(current, 'aria-hidden') === 'true') return true;
     const style = computedStyle(current, globalObject);
     if (style?.display === 'none' || style?.visibility === 'hidden') return true;

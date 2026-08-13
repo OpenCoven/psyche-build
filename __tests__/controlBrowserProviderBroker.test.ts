@@ -73,7 +73,7 @@ describe('BrowserProviderBroker', () => {
       upsertResource: async (_providerId, resource) => ({ ...resource, generation: 3 }),
     });
     const provider = broker.register('desktop-1', (frame) => sent.push(frame));
-    await provider.upsert(tab({ generation: 2 }));
+    await expect(provider.upsert(tab({ generation: 2 }))).resolves.toMatchObject({ generation: 3 });
     const pending = broker.dispatch({
       actionId: 'canonical-generation', tabId: 'tab-1', generation: 3,
       operation: operation(), timeoutMs: 15_000,
@@ -81,6 +81,38 @@ describe('BrowserProviderBroker', () => {
     expect(sent[0]).toMatchObject({ generation: 3 });
     provider.complete({ actionId: 'canonical-generation', status: 'succeeded' });
     await pending;
+  });
+
+  it('returns the canonical resource in the provider upsert acknowledgement', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-control-provider-'));
+    const endpoint = path.join(root, 'control.sock');
+    const credentials = {
+      authenticate: (token: string) => token === 'operator-token'
+        ? { id: 'operator', kind: 'operator', capabilities: ['*'] }
+        : null,
+    } as unknown as ControlCredentialStore;
+    const broker = new BrowserProviderBroker({
+      upsertResource: async (_providerId, resource) => ({ ...resource, generation: 9 }),
+    });
+    const server = await ControlServer.start({
+      endpoint, projectRoot: root, ownerEpoch: 1, broker, credentials,
+      runtime: {
+        submit: async () => ({ status: 'succeeded' }),
+        snapshot: () => ({ ownerEpoch: 1, sequence: 0, commands: {}, leases: {} }),
+        readEvents: () => ({ events: [], nextSequence: 0, gap: false }),
+      } as never,
+    });
+    cleanups.push(async () => { await server.close(); await rm(root, { recursive: true, force: true }); });
+    const peer = await connectLines(endpoint);
+    peer.send({
+      version: 1, type: 'hello', requestId: 'hello', token: 'operator-token',
+      clientName: 'desktop', projectRoot: root,
+    });
+    await peer.next();
+    peer.send({ version: 1, type: 'provider.register', requestId: 'register', providerId: 'desktop-1' });
+    await peer.next();
+    peer.send({ version: 1, type: 'provider.resource.upsert', requestId: 'upsert', resource: tab({ projectRoot: root, worktreeRoot: root }) });
+    expect(await peer.next()).toMatchObject({ type: 'ack', requestId: 'upsert', resource: { generation: 9 } });
   });
 
   it('allows only one in-flight effect per tab', async () => {

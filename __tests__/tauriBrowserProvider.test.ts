@@ -83,6 +83,15 @@ describe('Tauri browser control provider contract', () => {
     expect(provider).toMatch(/frame_type == response\.expected_type/);
   });
 
+  it('returns the canonical resource generation to the desktop after upsert', () => {
+    expect(provider).toMatch(/control_provider_upsert[\s\S]*Result<BrowserTabResource, String>/);
+    expect(provider).toMatch(/send_request[\s\S]*\.get\("resource"\)/);
+    expect(lib).toContain('control_provider_upsert');
+    expect(readFileSync(new URL(
+      '../native/desktop/psyche-build-tauri/web/main.js', import.meta.url,
+    ), 'utf8')).toMatch(/control_provider_upsert[\s\S]{0,500}controlGeneration\s*=\s*canonical\.generation/);
+  });
+
   it('registers the provider manager and cryptographic dependencies', () => {
     expect(lib).toContain('mod control_provider;');
     expect(lib).toContain('.manage(ControlProviderState::default())');
@@ -105,8 +114,11 @@ describe('Tauri browser control provider contract', () => {
     expect(capability.windows).toEqual(['main']);
   });
 
-  it('gates privileged browser inspection commands to the trusted main webview first', () => {
-    for (const command of ['browser_eval', 'browser_snapshot']) {
+  it('gates every browser command that can target a child view to the trusted main webview first', () => {
+    for (const command of [
+      'browser_navigate', 'browser_set_bounds', 'browser_hide', 'browser_hide_all_except',
+      'browser_destroy', 'browser_destroy_many', 'browser_reload', 'browser_eval', 'browser_snapshot',
+    ]) {
       expect(lib).toMatch(new RegExp(
         `fn ${command}\\([\\s\\S]{0,300}webview: tauri::Webview[\\s\\S]{0,220}\\{\\n\\s*ensure_trusted_browser_caller\\(webview.label\\(\\)\\)\\?;`,
       ));

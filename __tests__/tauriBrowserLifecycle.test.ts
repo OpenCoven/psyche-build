@@ -40,6 +40,23 @@ describe('agent browser action lifecycle', () => {
     expect(source).toContain('snapshot_missing');
     expect(source).not.toContain('activeTab');
   });
+
+  it.each(['navigate', 'reload', 'back', 'forward', 'close'])('marks %s failures after dispatch ambiguous', async (kind) => {
+    const project = { id: 'project' };
+    const tab = { id: 'tab', url: 'https://b.test', title: 'B', history: ['https://a.test', 'https://b.test', 'https://c.test'], historyIndex: 1 };
+    const ambiguous = Function(`return (${functionSource(mainJs, 'ambiguousBrowserLifecycle')});`)();
+    const run = Function(
+      'state', 'activeProject', 'activeWorkspaceRoot', 'navigateBrowser', 'browserTabLifecycle',
+      'closeBrowserTab', 'invoke', 'ambiguousBrowserLifecycle',
+      `return (${functionSource(mainJs, 'runBrowserLifecycleOperation')});`,
+    )(
+      { activeProjectId: 'project' }, () => project, () => '/repo',
+      async () => { throw new Error('transport dropped'); }, () => ({ navigationTail: null }),
+      async () => { throw new Error('transport dropped'); }, async () => ({}), ambiguous,
+    );
+    await expect(run({ project, worktreePath: '/repo', tab }, { operation: { action: { kind, url: 'https://new.test' } } }))
+      .rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true });
+  });
 });
 
 function escapeRegExp(value: string) {

@@ -6,7 +6,9 @@ function snapshot(overrides: Record<string, unknown> = {}) {
     schema: 'psyche.browser.snapshot/v1', id: 'snap-1', tabId: 'tab-1', generation: 1,
     url: 'https://example.test', title: 'Example', loading: false,
     viewport: { width: 800, height: 600 }, capturedAt: '2026-08-12T12:00:00.000Z',
-    nodes: [{ ref: 'e1', role: 'button', name: 'Submit', state: { submit: true }, value: { kind: 'text', secret: true } }],
+    nodes: [{ ref: 'e1', role: 'button', name: 'Submit', state: {
+      submit: true, submitMethod: 'POST', submitDestination: 'https://example.test/save',
+    }, value: { kind: 'text', secret: true } }],
     truncated: false, opaqueFrames: 0, expiresAt: '2026-08-12T12:00:30.000Z',
     ...overrides,
   };
@@ -17,7 +19,8 @@ describe('BrowserSemanticSnapshotRegistry', () => {
     const registry = new BrowserSemanticSnapshotRegistry(() => new Date('2026-08-12T12:00:01.000Z'));
     registry.store(snapshot(), 'tab-1', 1);
     expect(registry.resolve({ tabId: 'tab-1', generation: 1, snapshotId: 'snap-1', elementRef: 'e1' }))
-      .toMatchObject({ role: 'button', submit: true, secret: true });
+      .toMatchObject({ role: 'button', submit: true, secret: true,
+        submitMethod: 'POST', submitDestination: 'https://example.test/save' });
     expect(() => registry.resolve({ tabId: 'tab-1', generation: 2, snapshotId: 'snap-1', elementRef: 'e1' }))
       .toThrow(/missing or stale/);
   });

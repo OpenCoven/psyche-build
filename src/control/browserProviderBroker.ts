@@ -23,7 +23,7 @@ export interface ProviderPush {
 
 export interface BrowserProviderRegistration {
   readonly providerId: string;
-  upsert(resource: BrowserTabSurface): Promise<void>;
+  upsert(resource: BrowserTabSurface): Promise<BrowserTabSurface>;
   remove(id: string, generation: number): Promise<void>;
   complete(result: ProviderEffectResult): void;
   disconnect(): Promise<void>;
@@ -124,7 +124,7 @@ export class BrowserProviderBroker {
       providerId,
       upsert: async (resource) => {
         this.requireLiveRegistration(state, disconnected);
-        await this.withResourceLock('all-resources', () => this.upsert(state, resource));
+        return this.withResourceLock('all-resources', () => this.upsert(state, resource));
       },
       remove: async (id, generation) => {
         this.requireLiveRegistration(state, disconnected);
@@ -205,7 +205,7 @@ export class BrowserProviderBroker {
     });
   }
 
-  private async upsert(state: ProviderState, resource: BrowserTabSurface): Promise<void> {
+  private async upsert(state: ProviderState, resource: BrowserTabSurface): Promise<BrowserTabSurface> {
     if (resource.kind !== 'browser_tab' || resource.providerId !== state.id) {
       throw brokerError('provider_scope_mismatch', 'browser resource belongs to another provider');
     }
@@ -232,6 +232,7 @@ export class BrowserProviderBroker {
     }
     this.resources.set(canonical.id, canonical);
     this.requireLiveRegistration(state, false);
+    return canonical;
   }
 
   private async remove(state: ProviderState, id: string, generation: number): Promise<void> {

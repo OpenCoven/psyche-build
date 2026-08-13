@@ -117,7 +117,7 @@ export function authorizeCommand(
   kind: ControlCommand['kind'],
 ): CommandOutcome | null {
   const agentAllowedKinds: ReadonlySet<ControlCommand['kind']> = new Set([
-    'lease.request', 'lease.release', 'pane.observe', 'pane.action',
+    'orchestration.execute', 'lease.request', 'lease.release', 'pane.observe', 'pane.action',
     'browser.inspect', 'browser.action', 'browser.script',
   ]);
   const agentControlKinds: ReadonlySet<ControlCommand['kind']> = new Set([
@@ -533,8 +533,8 @@ export class ControlServer {
       }
       case 'provider.resource.upsert':
         try {
-          await provider!.upsert(request.resource);
-          write({ version: 1, type: 'ack', requestId: request.requestId });
+          const resource = await provider!.upsert(request.resource);
+          write({ version: 1, type: 'ack', requestId: request.requestId, resource });
         } catch (error) {
           writeProviderError(write, request.requestId, error);
         }

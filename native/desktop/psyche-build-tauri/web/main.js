@@ -8581,7 +8581,7 @@
     return {
       id: pair.tab.id,
       kind: "browser_tab",
-      generation: lifecycle.liveGeneration || lifecycle.pendingGeneration || lifecycle.generation,
+      generation: lifecycle.controlGeneration || lifecycle.liveGeneration || lifecycle.pendingGeneration || lifecycle.generation,
       providerId: status.providerId,
       webviewLabel: lifecycle.nativeLabel,
       projectRoot: status.projectRoot,
@@ -8596,17 +8596,23 @@
     if (!pair || browserTabIsClosing(pair.tab)) return Promise.resolve(false);
     var lifecycle = browserTabLifecycle(pair.tab);
     if (!lifecycle.nativeLabel || !lifecycle.liveGeneration || lifecycle.pendingGeneration) return Promise.resolve(false);
+    var nativeGeneration = lifecycle.liveGeneration;
     return ensureBrowserControlProvider(pair.project).then(function (status) {
       return invoke("control_provider_upsert", {
         projectRoot: pair.project.root,
         resource: browserControlResource(pair, status),
-      }).then(function () { return true; });
+      }).then(function (canonical) {
+        if (!canonical || typeof canonical.generation !== "number") return false;
+        if (lifecycle.liveGeneration !== nativeGeneration || lifecycle.pendingGeneration) return false;
+        lifecycle.controlGeneration = canonical.generation;
+        return true;
+      });
     }).catch(function () { return false; });
   }
   function removeBrowserControlResource(pair) {
     if (!pair) return Promise.resolve(false);
     var lifecycle = browserTabLifecycle(pair.tab);
-    var generation = lifecycle.liveGeneration || lifecycle.pendingGeneration;
+    var generation = lifecycle.controlGeneration || lifecycle.liveGeneration || lifecycle.pendingGeneration;
     if (!generation) return Promise.resolve(false);
     return ensureBrowserControlProvider(pair.project).then(function () {
       return invoke("control_provider_remove", {
@@ -8645,14 +8651,16 @@
     var operation = effect.operation || {};
     var request = operation.kind === "action"
       ? { type: "action", snapshotId: resolveBrowserAutomationSnapshotId(effect), action: operation.action }
-      : { type: "snapshot" };
+      : operation.kind === "script"
+        ? { type: "script", source: operation.source, args: operation.args }
+        : { type: "snapshot" };
     var actionId = JSON.stringify(effect.actionId);
     var requestJson = JSON.stringify(request);
     var tabId = JSON.stringify(effect.tabId);
     var generation = JSON.stringify(effect.generation);
-    return "(function(){var emit=function(name,payload){if(window.__TAURI__&&window.__TAURI__.event)window.__TAURI__.event.emit(name,payload);};" +
-      "try{var value=window.__PSYCHE_AUTOMATION__.dispatch(" + requestJson + ");emit('browser:automation-result',{actionId:" + actionId + ",tabId:" + tabId + ",generation:" + generation + ",value:value});}" +
-      "catch(error){emit('browser:automation-result',{actionId:" + actionId + ",tabId:" + tabId + ",generation:" + generation + ",error:{code:error&&error.code||'automation_failed',message:String(error&&error.message||error)}});}})();";
+    return "(async function(){var eventApi=window.__TAURI__&&window.__TAURI__.event;var emit=eventApi&&typeof eventApi.emit==='function'?eventApi.emit.bind(eventApi):function(){};" +
+      "try{var value=await window.__PSYCHE_AUTOMATION__.dispatch(" + requestJson + ");await emit('browser:automation-result',{actionId:" + actionId + ",tabId:" + tabId + ",generation:" + generation + ",value:value});}" +
+      "catch(error){await emit('browser:automation-result',{actionId:" + actionId + ",tabId:" + tabId + ",generation:" + generation + ",error:{code:error&&error.code||'automation_failed',message:String(error&&error.message||error)}});}})();";
   }
   function resolveBrowserAutomationSnapshotId(effect) {
     var canonicalId = effect && effect.operation && effect.operation.snapshotId;
@@ -8713,9 +8721,10 @@
     var roles = ["button", "link", "textbox", "checkbox", "radio", "combobox", "option", "frame", "img", "heading", "status", "dialog", "menu", "menuitem", "tab", "tabpanel", "switch"];
     var refs = new Set();
     var opaqueFrames = 0;
+    var semantics = new Map();
     var nodes = value.nodes.map(function (node) {
       if (!plain(node)) fail("snapshot node is malformed");
-      exactKeys(node, ["ref", "role", "name", "bounds", "disabled", "checked", "selected", "submit", "value", "secret", "valuePresent", "opaque"], "snapshot node");
+      exactKeys(node, ["ref", "role", "name", "bounds", "disabled", "checked", "selected", "submit", "submitMethod", "submitDestination", "value", "secret", "valuePresent", "opaque"], "snapshot node");
       if (typeof node.ref !== "string" || !/^e[1-9][0-9]{0,5}$/.test(node.ref) || refs.has(node.ref) ||
           typeof node.role !== "string" || roles.indexOf(node.role) === -1 || typeof node.name !== "string" || node.name.length > 512 ||
           !plain(node.bounds)) fail("snapshot node is malformed");
@@ -8734,6 +8743,13 @@
           state[key] = node[key];
         }
       });
+      [["submitMethod", 16], ["submitDestination", 2048]].forEach(function (entry) {
+        var key = entry[0];
+        if (node[key] !== undefined) {
+          if (typeof node[key] !== "string" || node[key].length > entry[1]) fail("snapshot submit metadata is malformed");
+          state[key] = node[key];
+        }
+      });
       if (Object.keys(state).length) projected.state = state;
       if (node.secret === true) projected.value = { kind: "text", secret: true };
       else if (node.value !== undefined) {
@@ -8741,6 +8757,11 @@
         projected.value = { kind: "text", value: node.value };
       }
       if (node.opaque === true || node.role === "frame") opaqueFrames += 1;
+      semantics.set(node.ref, {
+        role: node.role, disabled: node.disabled === true, submit: node.submit === true,
+        submitMethod: node.submitMethod, submitDestination: node.submitDestination,
+        secret: node.secret === true,
+      });
       return projected;
     });
     var capturedAt = new Date(capturedAtMs);
@@ -8750,6 +8771,7 @@
       generation: effect.generation,
       expiresAt: capturedAt.getTime() + 30000,
       refs: new Set(refs),
+      semantics: semantics,
     });
     while (browserAutomationSnapshotRefs.size > 128) {
       var oldestSnapshotId = browserAutomationSnapshotRefs.keys().next().value;
@@ -8788,10 +8810,10 @@
   }
   function browserProviderOperationPreflight(effect) {
     var operation = effect && effect.operation;
-    if (!operation || (operation.kind !== "inspect" && operation.kind !== "action")) {
+    if (!operation || (operation.kind !== "inspect" && operation.kind !== "action" && operation.kind !== "script")) {
       throw Object.assign(new Error("browser operation is not supported"), { code: "unsupported_operation" });
     }
-    if (operation.kind === "inspect") return "page";
+    if (operation.kind === "inspect" || operation.kind === "script") return "page";
     var action = operation.action;
     if (!action || typeof action !== "object" || Array.isArray(action) || typeof action.kind !== "string") {
       throw Object.assign(new Error("browser action is malformed"), { code: "automation_failed" });
@@ -8813,6 +8835,71 @@
     }
     return "page";
   }
+  function canonicalizeBrowserActionResult(effect, value) {
+    var fail = function (message) { throw Object.assign(new Error(message), { code: "automation_failed" }); };
+    var plain = value && typeof value === "object" && !Array.isArray(value) &&
+      (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+    if (!plain) fail("browser action result is malformed");
+    var action = effect.operation.action;
+    var allowed = {
+      click: ["clicked"], type: ["value", "valuePresent", "secret"], select: ["selectedValues"],
+      scroll: ["scrollLeft", "scrollTop"], focus: ["focused"], submit: ["submitted", "method", "destination"],
+    }[action.kind];
+    if (!allowed || Object.keys(value).some(function (key) { return allowed.indexOf(key) === -1; })) fail("browser action result has unknown fields");
+    var mapped = browserAutomationSnapshotRefs.get(effect.operation.snapshotId);
+    var semantic = mapped && mapped.tabId === effect.tabId && mapped.generation === effect.generation && mapped.semantics
+      ? mapped.semantics.get(action.elementRef) : null;
+    if (!semantic) fail("browser action result snapshot is stale");
+    if (action.kind === "click") {
+      if (value.clicked !== true) fail("click result is malformed");
+      return { clicked: true };
+    }
+    if (action.kind === "type") {
+      if (semantic.secret) {
+        if (typeof value.valuePresent !== "boolean" || value.secret !== true) fail("secret input result is malformed");
+        return { valuePresent: value.valuePresent, secret: true };
+      }
+      if (typeof value.value !== "string" || new TextEncoder().encode(value.value).length > 512) fail("type result is malformed");
+      return { typed: true };
+    }
+    if (action.kind === "select") {
+      if (!Array.isArray(value.selectedValues) || value.selectedValues.some(function (item) { return typeof item !== "string"; })) fail("select result is malformed");
+      return { selectedValues: action.values.slice(0, 128).map(function (item) { return String(item).slice(0, 512); }) };
+    }
+    if (action.kind === "scroll") {
+      if (!Number.isFinite(value.scrollLeft) || !Number.isFinite(value.scrollTop)) fail("scroll result is malformed");
+      return { scrollLeft: Math.max(-100000, Math.min(100000, value.scrollLeft)), scrollTop: Math.max(-100000, Math.min(100000, value.scrollTop)) };
+    }
+    if (action.kind === "focus") {
+      if (value.focused !== true) fail("focus result is malformed");
+      return { focused: true };
+    }
+    if (action.kind === "submit") {
+      if (value.submitted !== true) fail("submit result is malformed");
+      return { submitted: true };
+    }
+    fail("browser action result is unsupported");
+  }
+  function canonicalizeBrowserScriptResult(value) {
+    var plain = value && typeof value === "object" && !Array.isArray(value) &&
+      (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+    if (!plain || Object.keys(value).some(function (key) {
+      return ["value", "resultBytes", "durationMs"].indexOf(key) === -1;
+    }) || !Number.isSafeInteger(value.resultBytes) || value.resultBytes < 0 || value.resultBytes > 256 * 1024 ||
+      !Number.isFinite(value.durationMs) || value.durationMs < 0 || value.durationMs > 60000) {
+      throw Object.assign(new Error("browser script result is malformed"), { code: "serialization_failed" });
+    }
+    var encoded;
+    try { encoded = JSON.stringify(value.value); }
+    catch (_) { throw Object.assign(new Error("browser script result cannot be encoded"), { code: "serialization_failed" }); }
+    if (encoded === undefined || new TextEncoder().encode(encoded).length !== value.resultBytes) {
+      throw Object.assign(new Error("browser script result byte count is invalid"), { code: "serialization_failed" });
+    }
+    return { value: JSON.parse(encoded), resultBytes: value.resultBytes, durationMs: value.durationMs };
+  }
+  function ambiguousBrowserLifecycle(message) {
+    return Object.assign(new Error(message), { code: "effect_unknown", ambiguous: true });
+  }
   async function runBrowserLifecycleOperation(pair, effect) {
     var action = effect.operation.action;
     if (state.activeProjectId !== pair.project.id || activeProject() !== pair.project ||
@@ -8820,28 +8907,36 @@
       throw Object.assign(new Error("backend_unavailable: exact browser tab is not active"), { code: "backend_unavailable" });
     }
     if (action.kind === "navigate") {
-      var navigated = await navigateBrowser(action.url, { tabId: pair.tab.id });
-      if (!navigated) throw Object.assign(new Error("browser navigation failed"), { code: "automation_failed" });
+      var navigated;
+      try { navigated = await navigateBrowser(action.url, { tabId: pair.tab.id }); }
+      catch (_) { throw ambiguousBrowserLifecycle("browser navigation outcome is unknown"); }
+      if (!navigated) throw ambiguousBrowserLifecycle("browser navigation outcome is unknown");
       return { url: pair.tab.url, title: pair.tab.title };
     }
     if (action.kind === "reload") {
-      var reloaded = await navigateBrowser(pair.tab.url, { tabId: pair.tab.id, replace: true, preserveHistory: true });
-      if (!reloaded) throw Object.assign(new Error("browser reload failed"), { code: "automation_failed" });
+      var reloaded;
+      try { reloaded = await navigateBrowser(pair.tab.url, { tabId: pair.tab.id, replace: true, preserveHistory: true }); }
+      catch (_) { throw ambiguousBrowserLifecycle("browser reload outcome is unknown"); }
+      if (!reloaded) throw ambiguousBrowserLifecycle("browser reload outcome is unknown");
       return { url: pair.tab.url, title: pair.tab.title };
     }
     if (action.kind === "back" || action.kind === "forward") {
       var delta = action.kind === "back" ? -1 : 1;
       var index = pair.tab.historyIndex + delta;
       if (index < 0 || index >= pair.tab.history.length) throw Object.assign(new Error("browser history target is unavailable"), { code: "resource_missing" });
-      var moved = await navigateBrowser(pair.tab.history[index], { tabId: pair.tab.id, fromHistory: true, historyIndex: index });
-      if (!moved) throw Object.assign(new Error("browser history navigation failed"), { code: "automation_failed" });
+      var moved;
+      try { moved = await navigateBrowser(pair.tab.history[index], { tabId: pair.tab.id, fromHistory: true, historyIndex: index }); }
+      catch (_) { throw ambiguousBrowserLifecycle("browser history navigation outcome is unknown"); }
+      if (!moved) throw ambiguousBrowserLifecycle("browser history navigation outcome is unknown");
       return { url: pair.tab.url, title: pair.tab.title, historyIndex: pair.tab.historyIndex };
     }
     if (action.kind === "close") {
       var lifecycle = browserTabLifecycle(pair.tab);
       if (lifecycle.navigationTail) await lifecycle.navigationTail;
-      var closed = await closeBrowserTab(pair.project, pair.tab.id);
-      if (!closed) throw Object.assign(new Error("browser close failed"), { code: "automation_failed" });
+      var closed;
+      try { closed = await closeBrowserTab(pair.project, pair.tab.id); }
+      catch (_) { throw ambiguousBrowserLifecycle("browser close outcome is unknown"); }
+      if (!closed) throw ambiguousBrowserLifecycle("browser close outcome is unknown");
       return { closed: true };
     }
     if (action.kind === "screenshot") {
@@ -8863,7 +8958,7 @@
       return false;
     }
     var lifecycle = browserTabLifecycle(pair.tab);
-    if (effect.generation !== lifecycle.liveGeneration || lifecycle.pendingGeneration) {
+    if (effect.generation !== (lifecycle.controlGeneration || lifecycle.liveGeneration) || lifecycle.pendingGeneration) {
       await completeBrowserProviderEffect(pair.project, {
         actionId: effect.actionId,
         status: "failed",
@@ -8895,7 +8990,7 @@
       if (!current || current.project !== pair.project || current.browser !== pair.browser ||
           current.tab !== pair.tab || current.worktreePath !== pair.worktreePath) return false;
       var currentLifecycle = browserTabLifecycle(current.tab);
-      return effect.generation === currentLifecycle.liveGeneration && !currentLifecycle.pendingGeneration && !!currentLifecycle.nativeLabel;
+      return effect.generation === (currentLifecycle.controlGeneration || currentLifecycle.liveGeneration) && !currentLifecycle.pendingGeneration && !!currentLifecycle.nativeLabel;
     };
     var operationClass;
     try {
@@ -8940,8 +9035,16 @@
         var automationValue = await resultFlight;
         var value = effect.operation.kind === "inspect"
           ? canonicalizeBrowserSemanticSnapshot(automationValue, pair, effect, Date.now())
-          : automationValue;
-        if (!exactPairIsCurrent()) return completeReplaced();
+          : effect.operation.kind === "script"
+            ? canonicalizeBrowserScriptResult(automationValue)
+            : canonicalizeBrowserActionResult(effect, automationValue);
+        if (!exactPairIsCurrent()) {
+          if (effect.operation.kind === "script") {
+            await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "unknown", code: "effect_unknown", message: "browser tab changed during script evaluation" });
+            return false;
+          }
+          return completeReplaced();
+        }
         if (effect.operation.kind === "inspect" && effect.operation.includeScreenshot) {
           value.screenshot = await invoke("browser_snapshot", { label: browserLabelForTab(pair.project, pair.tab) });
           if (!exactPairIsCurrent()) return completeReplaced();
@@ -9324,6 +9427,7 @@
       var previousView = {
         nativeLabel: lifecycle.nativeLabel,
         liveGeneration: lifecycle.liveGeneration,
+        controlGeneration: lifecycle.controlGeneration,
         liveUrl: lifecycle.liveUrl,
         eventUrl: lifecycle.eventUrl,
         viewLive: lifecycle.viewLive,
@@ -9338,6 +9442,7 @@
       }
       if (lifecycle.invalidationGeneration !== invalidationGeneration || !requestIsCurrent()) return false;
       var generation = beginBrowserNavigation(tab);
+      lifecycle.controlGeneration = 0;
       var navigationToken = generation + ":" + (globalThis.crypto && globalThis.crypto.randomUUID ? globalThis.crypto.randomUUID() : Date.now() + ":" + Math.random());
       if (!lifecycle.automationSource) lifecycle.automationSource = PsycheControl.browserAutomationSource();
       var label = browserLabelForTab(project, tab);
@@ -9432,6 +9537,7 @@
         lifecycle.pendingUrl = null;
         lifecycle.pendingNavigationToken = null;
         lifecycle.liveGeneration = previousView.liveGeneration;
+        lifecycle.controlGeneration = previousView.controlGeneration;
         lifecycle.liveUrl = previousView.liveUrl;
         lifecycle.eventUrl = previousView.eventUrl;
         lifecycle.viewLive = previousView.viewLive;

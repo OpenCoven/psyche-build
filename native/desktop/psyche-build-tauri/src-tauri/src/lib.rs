@@ -2626,6 +2626,7 @@ async fn start_browser_navigation(
 
 #[tauri::command]
 async fn browser_navigate(
+    webview: tauri::Webview,
     app: AppHandle,
     label: Option<String>,
     url: String,
@@ -2636,6 +2637,7 @@ async fn browser_navigate(
     navigation_token: String,
     automation_source: String,
 ) -> Result<BrowserNavigationResult, String> {
+    ensure_trusted_browser_caller(webview.label())?;
     if navigation_token.is_empty() || navigation_token.len() > 128 {
         return Err("browser navigation token is invalid".to_string());
     }
@@ -2697,6 +2699,7 @@ async fn browser_navigate(
 
 #[tauri::command]
 fn browser_set_bounds(
+    webview: tauri::Webview,
     app: AppHandle,
     label: Option<String>,
     x: f64,
@@ -2704,6 +2707,7 @@ fn browser_set_bounds(
     w: f64,
     h: f64,
 ) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
         webview
@@ -2717,7 +2721,12 @@ fn browser_set_bounds(
 }
 
 #[tauri::command]
-fn browser_hide(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_hide(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
         hide_webview(&webview)?;
@@ -2726,7 +2735,12 @@ fn browser_hide(app: AppHandle, label: Option<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn browser_hide_all_except(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_hide_all_except(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let keep = label.map(|raw| safe_browser_label(Some(raw)));
     for (existing_label, webview) in app.webviews() {
         if existing_label.starts_with(BROWSER_LABEL_PREFIX) && Some(existing_label.clone()) != keep
@@ -2747,7 +2761,12 @@ fn destroy_browser_webview(app: &AppHandle, label: Option<String>) -> Result<(),
 }
 
 #[tauri::command]
-fn browser_destroy(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_destroy(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     destroy_browser_webview(&app, label)
 }
 
@@ -2766,7 +2785,12 @@ struct BrowserDestroyManyOutcome {
 }
 
 #[tauri::command]
-fn browser_destroy_many(app: AppHandle, labels: Vec<String>) -> BrowserDestroyManyOutcome {
+fn browser_destroy_many(
+    webview: tauri::Webview,
+    app: AppHandle,
+    labels: Vec<String>,
+) -> Result<BrowserDestroyManyOutcome, String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let mut outcome = BrowserDestroyManyOutcome {
         destroyed: Vec::new(),
         failures: Vec::new(),
@@ -2779,11 +2803,16 @@ fn browser_destroy_many(app: AppHandle, labels: Vec<String>) -> BrowserDestroyMa
                 .push(BrowserDestroyFailure { label, error }),
         }
     }
-    outcome
+    Ok(outcome)
 }
 
 #[tauri::command]
-fn browser_reload(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_reload(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
         webview.reload().map_err(|e| e.to_string())?;

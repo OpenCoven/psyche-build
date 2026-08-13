@@ -534,12 +534,12 @@ describe('ControlRuntime', () => {
   });
 
   it.each([
-    ['failed', false],
-    ['unknown', true],
-  ] as const)('finalizes approved original action after %s backend result', async (state, ambiguous) => {
+    ['failed', false, 'backend_unavailable'],
+    ['unknown', true, 'effect_unknown'],
+  ] as const)('finalizes approved original action after %s backend result', async (state, ambiguous, expectedCode) => {
     const harness = await createBrowserActionHarness({
       actOnBrowser: vi.fn(async () => {
-        throw Object.assign(new Error('sensitive backend detail'), { ambiguous });
+        throw Object.assign(new Error('sensitive backend detail'), { code: 'backend_unavailable', ambiguous });
       }),
     });
     const action = command({ id: `final-${state}`, idempotencyKey: `final-${state}`,
@@ -554,7 +554,7 @@ describe('ControlRuntime', () => {
       kind: 'approval.resolve', ownerEpoch: 7, payload: { approvalId: approval.approvalId,
         payloadDigest: approval.payloadDigest, decision: 'approve' } }));
     await expect(harness.runtime.submit(action)).resolves.toMatchObject({
-      status: state, code: ambiguous ? 'effect_unknown' : 'effect_failed',
+      status: state, code: expectedCode,
     });
     expect(harness.journal.read().filter((event) => event.payload.commandId === action.id).at(-1))
       .toMatchObject({ kind: ambiguous ? 'command.unknown' : 'command.failed' });
@@ -579,6 +579,58 @@ describe('ControlRuntime', () => {
     expect(JSON.stringify(harness.journal.read())).not.toContain('deniedSecret');
   });
 
+  it('rejects oversized browser scripts before approval or effect dispatch', async () => {
+    const harness = await createBrowserActionHarness();
+    const action = command({ id: 'oversized-script', idempotencyKey: 'oversized-script',
+      kind: 'browser.script', ownerEpoch: 7, actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation, source: 'x'.repeat(64 * 1024 + 1),
+      } }) as unknown as Extract<ControlCommand, { kind: 'browser.script' }>;
+
+    await expect(harness.runtime.submit(action)).resolves.toMatchObject({
+      status: 'failed', code: 'script_source_too_large',
+    });
+    expect(harness.runtime.snapshot().approvals).toHaveLength(0);
+    expect(handlers.runBrowserScript).not.toHaveBeenCalled();
+    expect(JSON.stringify(harness.runtime.snapshot())).not.toContain('x'.repeat(1_024));
+  });
+
+  it('binds each browser script approval to its source digest and stores only bounded metadata', async () => {
+    handlers.runBrowserScript = vi.fn(async () => ({
+      value: { secretResult: 'returned-only-to-caller' }, resultBytes: 41, durationMs: 7,
+    }));
+    const harness = await createBrowserActionHarness();
+    const makeAction = (id: string, source: string) => command({ id, idempotencyKey: id,
+      kind: 'browser.script', ownerEpoch: 7, actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation, source,
+      } }) as unknown as Extract<ControlCommand, { kind: 'browser.script' }>;
+    const first = makeAction('script-one', 'return firstSecret;');
+    const second = makeAction('script-two', 'return secondSecret;');
+    const requested = await harness.runtime.submit(first);
+    const firstApproval = (requested as { value: { approvalId: string; payloadDigest: string } }).value;
+    const secondApproval = ((await harness.runtime.submit(second)) as {
+      value: { approvalId: string; payloadDigest: string };
+    }).value;
+    expect(secondApproval.approvalId).not.toBe(firstApproval.approvalId);
+    expect(secondApproval.payloadDigest).not.toBe(firstApproval.payloadDigest);
+    expect(JSON.stringify(harness.runtime.snapshot())).not.toContain('firstSecret');
+    expect(JSON.stringify(harness.journal.read())).not.toContain('firstSecret');
+
+    await harness.runtime.submit(command({ id: 'approve-script', idempotencyKey: 'approve-script',
+      kind: 'approval.resolve', ownerEpoch: 7, payload: { approvalId: firstApproval.approvalId,
+        payloadDigest: firstApproval.payloadDigest, decision: 'approve' } }));
+    const completed = await harness.runtime.submit(first);
+    expect(completed).toMatchObject({ status: 'succeeded', value: {
+      value: { secretResult: 'returned-only-to-caller' }, sourceBytes: 19, resultBytes: 41, durationMs: 7,
+    } });
+    const stored = harness.runtime.snapshot().receipts.find((receipt) => receipt.actionId === first.id);
+    expect(stored).toMatchObject({ sourceBytes: 19, resultBytes: 41, durationMs: 7 });
+    expect(stored).not.toHaveProperty('value');
+    expect(JSON.stringify(harness.journal.read())).not.toContain('returned-only-to-caller');
+    expect(handlers.runBrowserScript).toHaveBeenCalledOnce();
+  });
+
   it('rejects grants for missing generations and non-canonical project targets', async () => {
     const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
     await expect(runtime.submit(command({
@@ -591,6 +643,29 @@ describe('ControlRuntime', () => {
       payload: { requestId: 'r2', actorId: 'a', taskId: 't', ttlMs: 1,
         grants: [{ target: { kind: 'project', id: '/other' }, capabilities: ['pane.create'] }] },
     }))).resolves.toMatchObject({ status: 'failed', code: 'capability_denied' });
+  });
+
+  it('requires a project pane-create lease before orchestration execution', async () => {
+    handlers.executeOrchestration = vi.fn(async () => ({ ok: true }));
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
+    const request = { taskId: 'task-orchestration', projectRoot: '/repo', prompt: 'test',
+      lanes: [{ id: 'one', mode: 'terminal' as const }] };
+    await expect(runtime.submit(command({ id: 'unleased-orchestration', idempotencyKey: 'unleased-orchestration',
+      kind: 'orchestration.execute', ownerEpoch: 7, actor: { id: 'agent-1', kind: 'psyche' },
+      payload: { request, taskId: request.taskId, leaseId: 'missing', leaseRevision: 1 } })))
+      .resolves.toMatchObject({ status: 'failed', code: 'lease_missing' });
+    expect(handlers.executeOrchestration).not.toHaveBeenCalled();
+
+    const granted = await runtime.submit(command({ id: 'grant-orchestration', idempotencyKey: 'grant-orchestration',
+      kind: 'lease.grant', ownerEpoch: 7, payload: { requestId: 'request-orchestration', actorId: 'agent-1',
+        taskId: request.taskId, ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: '/repo' }, capabilities: ['pane.create'] }] } }));
+    const lease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
+    await expect(runtime.submit(command({ id: 'leased-orchestration', idempotencyKey: 'leased-orchestration',
+      kind: 'orchestration.execute', ownerEpoch: 7, actor: { id: 'agent-1', kind: 'psyche' },
+      payload: { request, taskId: request.taskId, leaseId: lease.id, leaseRevision: lease.revision } })))
+      .resolves.toMatchObject({ status: 'succeeded' });
+    expect(handlers.executeOrchestration).toHaveBeenCalledOnce();
   });
 
   it('revalidates lease expiry before an approved effect', async () => {

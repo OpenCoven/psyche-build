@@ -861,7 +861,7 @@ pub async fn control_provider_upsert(
     state: State<'_, ControlProviderState>,
     project_root: String,
     resource: BrowserTabResource,
-) -> Result<(), String> {
+) -> Result<BrowserTabResource, String> {
     ensure_trusted_control_caller(webview.label())?;
     let root = canonical_root(&project_root)?;
     let connection = connection_for(&state, &root)?;
@@ -869,7 +869,7 @@ pub async fn control_provider_upsert(
         return Err("browser resource is outside provider scope".to_string());
     }
     let request_id = next_request_id(&state);
-    send_request(
+    let response = send_request(
         &connection,
         OutboundFrame::ResourceUpsert {
             version: 1,
@@ -878,7 +878,13 @@ pub async fn control_provider_upsert(
         },
     )
     .await?;
-    Ok(())
+    serde_json::from_value(
+        response
+            .get("resource")
+            .cloned()
+            .ok_or_else(|| "provider upsert response omitted canonical resource".to_string())?,
+    )
+    .map_err(|_| "provider upsert response contained an invalid canonical resource".to_string())
 }
 
 #[tauri::command]

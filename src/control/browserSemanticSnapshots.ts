@@ -33,6 +33,8 @@ export class BrowserSemanticSnapshotRegistry {
     return createCanonicalElementSemantics({
       role: node.role,
       submit: node.state?.submit === true,
+      submitMethod: typeof node.state?.submitMethod === 'string' ? node.state.submitMethod : undefined,
+      submitDestination: typeof node.state?.submitDestination === 'string' ? node.state.submitDestination : undefined,
       secret: node.value?.secret === true,
     });
   }

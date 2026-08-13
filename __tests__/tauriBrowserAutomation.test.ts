@@ -91,6 +91,41 @@ function fixture(now = 1_000) {
 }
 
 describe('bounded semantic browser automation', () => {
+  it('runs approved script requests with plain bounded JSON results', async () => {
+    const { globalObject } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    await expect(api.dispatch({ type: 'script', source: 'return { answer: args.value + 1 };', args: { value: 41 } }))
+      .resolves.toMatchObject({ value: { answer: 42 }, resultBytes: 13 });
+  });
+
+  it.each([
+    ['function', 'return function nope() {};'],
+    ['cycle', 'const value = {}; value.self = value; return value;'],
+    ['native', 'return new Date();'],
+  ])('rejects non-JSON %s script results', async (_kind, source) => {
+    const { globalObject } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    await expect(api.dispatch({ type: 'script', source })).rejects.toMatchObject({ code: 'serialization_failed' });
+  });
+
+  it('bounds script source, result size, and execution time', async () => {
+    const { globalObject } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    await expect(api.dispatch({ type: 'script', source: 'x'.repeat(64 * 1024 + 1) }))
+      .rejects.toMatchObject({ code: 'script_source_too_large' });
+    await expect(api.dispatch({ type: 'script', source: 'return "x".repeat(256 * 1024 + 1);' }))
+      .rejects.toMatchObject({ code: 'result_too_large' });
+    vi.useFakeTimers();
+    try {
+      const pending = api.dispatch({ type: 'script', source: 'await new Promise(() => {});' });
+      const rejected = expect(pending).rejects.toMatchObject({ code: 'action_timeout' });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await rejected;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('installs one bounded semantic snapshot with preorder refs and redacted secrets', () => {
     const { globalObject } = fixture();
     const api = installBrowserAutomation(globalObject);
@@ -487,9 +522,65 @@ describe('bounded semantic browser automation', () => {
       if (mode === 'detached') button.isConnected = false;
       if (mode === 'replaced') globalObject.document.body.children[0] = node('button', { textContent: 'replacement' });
       expect(() => api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'click', elementRef: 'e1' } }))
-        .toThrowError(expect.objectContaining({ code: 'target_unavailable' }));
+        .toThrowError(expect.objectContaining({ code: 'target_changed' }));
       expect(button.click).not.toHaveBeenCalled();
     }
+  });
+
+  it('fails changed submit and secret semantics immediately before effect', () => {
+    const { globalObject, button } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    let snapshot = api.dispatch({ type: 'snapshot' });
+    button.form = node('form');
+    expect(() => api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'click', elementRef: 'e1' } }))
+      .toThrowError(expect.objectContaining({ code: 'target_changed' }));
+    expect(button.click).not.toHaveBeenCalled();
+
+    const text = globalObject.document.body.children[6];
+    text.form = null;
+    snapshot = api.dispatch({ type: 'snapshot' });
+    text.type = 'password';
+    expect(() => api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'type', elementRef: 'e8', text: 'secret' } }))
+      .toThrowError(expect.objectContaining({ code: 'target_changed' }));
+    expect(text.dispatchEvent).not.toHaveBeenCalled();
+  });
+
+  it('uses initialization-captured DOM methods despite hostile instance and prototype patches', () => {
+    const { globalObject, button } = fixture();
+    const tags = new WeakMap<object, string>();
+    const children = new WeakMap<object, FakeNode[]>();
+    const parents = new WeakMap<object, object | null>();
+    const forms = new WeakMap<object, object | null>();
+    const nativeClick = vi.fn();
+    class TrustedElement {}
+    Object.defineProperties(TrustedElement.prototype, {
+      tagName: { configurable: true, get() { return tags.get(this) ?? ''; } },
+      children: { configurable: true, get() { return children.get(this) ?? []; } },
+      parentElement: { configurable: true, get() { return parents.get(this) ?? null; } },
+      isConnected: { configurable: true, get() { return true; } },
+      disabled: { configurable: true, get() { return false; } },
+      type: { configurable: true, get() { return ''; } },
+      form: { configurable: true, get() { return forms.get(this) ?? null; } },
+      click: { configurable: true, value: nativeClick },
+    });
+    const body = globalObject.document.body;
+    Object.setPrototypeOf(body, TrustedElement.prototype);
+    Object.setPrototypeOf(button, TrustedElement.prototype);
+    tags.set(body, 'BODY'); tags.set(button, 'BUTTON');
+    children.set(body, [button]); children.set(button, []);
+    parents.set(body, null); parents.set(button, body);
+    Object.assign(globalObject, {
+      Node: TrustedElement, Element: TrustedElement, HTMLElement: TrustedElement,
+      HTMLButtonElement: TrustedElement,
+    });
+    Function('globalThis', browserAutomationSource())(globalObject);
+    const api = (globalObject as any).__PSYCHE_AUTOMATION__;
+    const snapshot = api.dispatch({ type: 'snapshot' });
+    button.click = vi.fn(() => { throw new Error('hostile instance click'); });
+    Object.defineProperty(TrustedElement.prototype, 'click', { configurable: true, value: vi.fn(() => { throw new Error('hostile prototype click'); }) });
+    expect(api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'click', elementRef: 'e1' } }))
+      .toEqual({ clicked: true });
+    expect(nativeClick).toHaveBeenCalledOnce();
   });
 
   it('captures submit metadata before dispatch and invalidates the snapshot', () => {
@@ -499,9 +590,17 @@ describe('bounded semantic browser automation', () => {
     button.type = 'submit';
     button.form = form;
     const api = installBrowserAutomation(globalObject);
-    const snapshot = api.dispatch({ type: 'snapshot' });
+    let snapshot = api.dispatch({ type: 'snapshot' });
+    expect(snapshot.nodes[0]).toMatchObject({
+      submit: true, submitMethod: 'POST', submitDestination: 'https://example.test/save',
+    });
+    form.attributes.action = '/changed';
+    expect(() => api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'submit', elementRef: 'e1' } }))
+      .toThrowError(expect.objectContaining({ code: 'target_changed' }));
+    expect(form.requestSubmit).not.toHaveBeenCalled();
+    snapshot = api.dispatch({ type: 'snapshot' });
     expect(api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'submit', elementRef: 'e1' } }))
-      .toEqual({ submitted: true, method: 'POST', destination: 'https://example.test/save' });
+      .toEqual({ submitted: true, method: 'POST', destination: 'https://example.test/changed' });
     expect(form.requestSubmit).toHaveBeenCalledWith(button);
     expect(() => api.dispatch({ type: 'resolve', snapshotId: snapshot.snapshotId, ref: 'e1' }))
       .toThrowError(expect.objectContaining({ code: 'snapshot_stale' }));

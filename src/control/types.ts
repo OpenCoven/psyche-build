@@ -97,6 +97,10 @@ export interface ActionReceipt {
   code?: string;
   message?: string;
   value?: unknown;
+  sourceDigest?: string;
+  sourceBytes?: number;
+  resultBytes?: number;
+  durationMs?: number;
 }
 
 interface AgentSurfaceAuthorization {
@@ -165,7 +169,7 @@ export interface PromptEnvelope {
 }
 
 export type ControlCommand =
-  | CommandBase<'orchestration.execute', { request: OrchestrationTaskRequest }>
+  | CommandBase<'orchestration.execute', AgentSurfaceAuthorization & { request: OrchestrationTaskRequest }>
   | CommandBase<'lease.request', {
       taskId: string;
       ttlMs: number;

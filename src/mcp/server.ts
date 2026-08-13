@@ -569,27 +569,30 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'psyche_execute_task',
-    description: 'Compatibility alias that submits orchestration to the project control owner.',
+    description: 'Compatibility alias that submits leased orchestration to the project control owner.',
     inputSchema: {
-      type: 'object', required: ['prompt', 'lanes'],
+      type: 'object', required: ['prompt', 'lanes', ...authorizationRequired],
       properties: {
-        prompt: { type: 'string' }, lanes: { type: 'array', minItems: 1 }, task_id: { type: 'string' },
+        prompt: { type: 'string' }, lanes: { type: 'array', minItems: 1 },
+        ...authorizationProperties,
         concurrency: { type: 'integer', minimum: 1 }, branch: { type: 'string' }, project_root: projectRootProperty,
       },
     },
     handler: async (args) => {
+      const auth = leaseAuthorization(args);
+      if (!auth) return leaseMissing();
       const prompt = requiredString(args, 'prompt');
       if (!Array.isArray(args.lanes) || args.lanes.length === 0) invalid('requires at least one lane');
       const requestedRoot = resolveProjectRoot(args);
       return withControlClient(requestedRoot, (client) => {
         const projectRoot = client.projectRoot ?? requestedRoot;
         const request: OrchestrationTaskRequest = {
-          taskId: typeof args.task_id === 'string' && args.task_id.trim() ? args.task_id.trim() : `mcp-task-${deps.randomId()}`,
+          taskId: auth.taskId,
           projectRoot, prompt, lanes: args.lanes as OrchestrationTaskRequest['lanes'],
           ...(typeof args.branch === 'string' ? { startPointBranch: args.branch } : {}),
           ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}),
         };
-        return client.submit(command('orchestration.execute', projectRoot, { request }));
+        return client.submit(command('orchestration.execute', projectRoot, { ...auth, request }));
       });
     },
   },
