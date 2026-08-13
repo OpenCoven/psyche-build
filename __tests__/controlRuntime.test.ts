@@ -154,11 +154,51 @@ describe('ControlRuntime', () => {
       },
     }))).resolves.toMatchObject({
       status: 'failed',
-      code: 'resource_missing',
+      code: 'action_validation_failed',
     });
     for (const handler of Object.values(handlers)) {
       expect(handler).not.toHaveBeenCalled();
     }
+  });
+
+  it('stores and journals a redacted terminal receipt for initial validation failure', async () => {
+    const journal = createMemoryJournal();
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    await expect(runtime.submit(command({
+      id: 'missing-resource-action', idempotencyKey: 'missing-resource-action', kind: 'browser.action',
+      ownerEpoch: 7, actor: { id: 'agent-1', kind: 'psyche' }, payload: {
+        taskId: 'task-1', leaseId: 'missing-secret-lease', leaseRevision: 1,
+        tabId: 'missing-tab', generation: 9, action: { kind: 'reload' },
+      },
+    }))).resolves.toMatchObject({ status: 'failed', code: 'action_validation_failed' });
+    expect(runtime.snapshot().receipts).toMatchObject([{
+      actionId: 'missing-resource-action', state: 'failed', code: 'action_validation_failed',
+    }]);
+    const terminal = journal.read().at(-1);
+    expect(terminal).toMatchObject({
+      kind: 'command.failed',
+      payload: {
+        commandId: 'missing-resource-action', idempotencyKey: 'missing-resource-action',
+        receipt: { actionId: 'missing-resource-action', state: 'failed', code: 'action_validation_failed' },
+      },
+    });
+    expect(JSON.stringify(terminal)).not.toContain('missing-secret-lease');
+  });
+
+  it('stores a terminal receipt when an existing resource has no matching lease', async () => {
+    const surfaces = new SurfaceRegistry();
+    const tab = surfaces.upsertBrowserTab({ id: 'unleased-tab', projectRoot: '/repo', worktreeRoot: '/repo',
+      providerId: 'provider', webviewLabel: 'unleased', url: 'https://example.test', title: 'Unleased',
+      loading: false, viewport: { width: 800, height: 600 } });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces });
+    await expect(runtime.submit(command({ id: 'missing-lease-action', idempotencyKey: 'missing-lease-action',
+      kind: 'browser.action', ownerEpoch: 7, actor: { id: 'agent-1', kind: 'psyche' }, payload: {
+        taskId: 'task-1', leaseId: 'missing-lease', leaseRevision: 1, tabId: tab.id,
+        generation: tab.generation, action: { kind: 'reload' },
+      } }))).resolves.toMatchObject({ status: 'failed', code: 'action_validation_failed' });
+    expect(runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'missing-lease-action', state: 'failed', code: 'action_validation_failed',
+    }));
   });
 
   it('revokes automation before accepting human input', async () => {
@@ -668,7 +708,35 @@ describe('ControlRuntime', () => {
       kind: 'approval.resolve', ownerEpoch: 7, payload: { approvalId: approval.approvalId,
         payloadDigest: approval.payloadDigest, decision: 'approve' } })))
       .resolves.toMatchObject({ status: 'failed', code: 'lease_revision_mismatch' });
+    expect(harness.runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'approval-action', state: 'failed', code: 'action_invalidated',
+    }));
+    expect(harness.runtime.snapshot().receipts).not.toContainEqual(expect.objectContaining({
+      actionId: 'approval-action', state: 'approval_required',
+    }));
+    expect(harness.journal.read()).toContainEqual(expect.objectContaining({
+      kind: 'command.failed', payload: expect.objectContaining({
+        commandId: 'approval-action', idempotencyKey: 'approval-action',
+        receipt: expect.objectContaining({ actionId: 'approval-action', code: 'action_invalidated' }),
+      }),
+    }));
     expect(handlers.actOnBrowser).not.toHaveBeenCalled();
+  });
+
+  it('replaces approval_required immediately when its lease is revoked', async () => {
+    const harness = await createBrowserActionHarness();
+    await requestReviewApproval(harness);
+    await harness.runtime.submit(command({ id: 'revoke-review', idempotencyKey: 'revoke-review',
+      kind: 'lease.revoke', ownerEpoch: 7, payload: { leaseId: harness.lease.id } }));
+    expect(harness.runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'approval-action', state: 'failed', code: 'action_invalidated',
+    }));
+    expect(harness.journal.read()).toContainEqual(expect.objectContaining({
+      kind: 'command.failed', payload: expect.objectContaining({
+        commandId: 'approval-action', idempotencyKey: 'approval-action',
+        receipt: expect.objectContaining({ code: 'action_invalidated' }),
+      }),
+    }));
   });
 
   it('fails approval resumption after the resource generation changes', async () => {
@@ -679,6 +747,14 @@ describe('ControlRuntime', () => {
       kind: 'approval.resolve', ownerEpoch: 7, payload: { approvalId: approval.approvalId,
         payloadDigest: approval.payloadDigest, decision: 'approve' } })))
       .resolves.toMatchObject({ status: 'failed', code: 'resource_replaced' });
+    expect(harness.runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'approval-action', state: 'failed', code: 'action_invalidated',
+    }));
+    expect(harness.journal.read()).toContainEqual(expect.objectContaining({
+      kind: 'command.failed', payload: expect.objectContaining({
+        commandId: 'approval-action', receipt: expect.objectContaining({ code: 'action_invalidated' }),
+      }),
+    }));
     expect(handlers.actOnBrowser).not.toHaveBeenCalled();
   });
 
@@ -702,7 +778,7 @@ describe('ControlRuntime', () => {
     await expect(harness.runtime.submit(command({ id: `resolve-${code}`, idempotencyKey: `resolve-${code}`,
       kind: 'approval.resolve', ownerEpoch: 7, payload: { approvalId: approval.approvalId,
         payloadDigest: approval.payloadDigest, decision: 'approve' } })))
-      .resolves.toMatchObject({ status: 'failed', code: 'effect_failed' });
+      .resolves.toMatchObject({ status: 'failed', code: 'action_invalidated' });
     expect(handlers.actOnBrowser).not.toHaveBeenCalled();
   });
 

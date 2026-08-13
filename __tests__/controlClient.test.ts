@@ -160,10 +160,12 @@ describe('ControlClient over the socket transport', () => {
   it.each([
     ['failed', 'effect_failed'],
     ['unknown', 'effect_unknown'],
+    ['failed', 'action_validation_failed'],
+    ['failed', 'action_invalidated'],
   ] as const)('recovers %s action status from the journal after receipt eviction', async (state, code) => {
     const receipt = {
       schema: 'psyche.control.receipt/v1' as const,
-      actionId: `evicted-${state}`, state,
+      actionId: `evicted-${code}`, state,
       resource: { kind: 'browser_tab' as const, id: 'tab-1', generation: 1 },
       createdAt: '2026-08-12T12:00:00.000Z', completedAt: '2026-08-12T12:00:01.000Z',
       code,
@@ -177,7 +179,7 @@ describe('ControlClient over the socket transport', () => {
     const client = await ControlClient.connect({ projectRoot: harness.projectRoot, endpoint: harness.endpoint,
       token: harness.operatorToken, clientName: 'test-operator' });
     cleanups.push(() => client.close());
-    await expect(client.actionStatus(`evicted-${state}`)).resolves.toEqual(receipt);
+    await expect(client.actionStatus(`evicted-${code}`)).resolves.toEqual(receipt);
   });
 
   it('rejects a connection whose declared project root does not match the owner', async () => {
