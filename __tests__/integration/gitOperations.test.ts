@@ -25,7 +25,7 @@ const mockInspectLiveTmuxWorktreeConsumers = vi.fn((_worktreePath: string) => ({
 vi.mock('../../src/services/LiveTmuxWorktreeGuard.js', () => ({
   inspectLiveTmuxWorktreeConsumers: (worktreePath: string) =>
     mockInspectLiveTmuxWorktreeConsumers(worktreePath),
-  describeLiveTmuxWorktreeGuard: vi.fn(() => 'no live tmux consumers'),
+  describeLiveTmuxWorktreeGuard: vi.fn(() => 'no live tmux pane is using the worktree'),
 }));
 
 // Mock StateManager
@@ -198,6 +198,8 @@ describe('Git Operations Integration Tests', () => {
     // These hoisted module mocks are shared by every test in this file.
     // Vitest 4's restoreAllMocks() restores their original empty
     // implementations, so later tests can silently bypass the per-test setup.
+    // Restore stubbed globals separately so fetch cannot leak between tests.
+    vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
@@ -509,7 +511,7 @@ index abc123..def456 100644
       // Mock OpenRouter API
       const originalOpenRouterApiKey = process.env.OPENROUTER_API_KEY;
       process.env.OPENROUTER_API_KEY = 'test-key';
-      global.fetch = vi.fn(() =>
+      vi.stubGlobal('fetch', vi.fn(() =>
         Promise.resolve({
           ok: true,
           json: () =>
@@ -517,7 +519,7 @@ index abc123..def456 100644
               choices: [{ message: { content: 'feat: add JWT authentication' } }],
             }),
         } as Response)
-      );
+      ));
 
       try {
         const { generateCommitMessage } = await import('../../src/utils/aiMerge.js');
@@ -539,7 +541,7 @@ index abc123..def456 100644
 
     it('should fallback to manual commit when AI fails', async () => {
       // Mock API failure
-      global.fetch = vi.fn(() => Promise.reject(new Error('API timeout')));
+      vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('API timeout'))));
 
       const { generateCommitMessage } = await import('../../src/utils/aiMerge.js');
 
