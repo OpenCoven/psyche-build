@@ -75,7 +75,11 @@ async function createBrowserActionHarness(options: {
     viewport: { width: 800, height: 600 },
   });
   const capabilityLeases = new CapabilityLeaseStore(() => new Date('2026-08-12T12:00:00.000Z'), 7);
-  const approvals = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'), () => 'approval-review');
+  let approvalId = 0;
+  const approvals = new ApprovalStore(
+    () => new Date('2026-08-12T12:00:00.000Z'),
+    () => `approval-review-${++approvalId}`,
+  );
   if (options.actOnBrowser) handlers.actOnBrowser = options.actOnBrowser;
   const runtime = await ControlRuntime.create({
     ownerEpoch: 7, handlers, journal, surfaces, capabilityLeases, approvals,
@@ -946,6 +950,31 @@ describe('ControlRuntime', () => {
       actionId: 'canonical-substitution', state: 'approval_required',
     }));
     expect(handlers.actOnBrowser).not.toHaveBeenCalled();
+  });
+
+  it('exposes distinct sanitized permission decisions in approval snapshot and journal', async () => {
+    const harness = await createBrowserActionHarness();
+    const permission = (id: string, decision: 'allow' | 'deny') => command({ id, idempotencyKey: id,
+      kind: 'browser.action', ownerEpoch: 7, actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation,
+        action: { kind: 'permission_response', permission: 'camera',
+          origin: 'https://user:pass@example.test/path?token=secret#fragment', decision },
+      } });
+    await harness.runtime.submit(permission('allow-permission', 'allow'));
+    await harness.runtime.submit(permission('deny-permission', 'deny'));
+    const approvals = harness.runtime.snapshot().approvals;
+    expect(approvals.map((approval) => approval.effect.target)).toEqual([
+      'allow camera for https://example.test/path',
+      'deny camera for https://example.test/path',
+    ]);
+    expect(approvals[0].payloadDigest).not.toBe(approvals[1].payloadDigest);
+    const serialized = JSON.stringify(harness.journal.read());
+    expect(serialized).toContain('allow camera for https://example.test/path');
+    expect(serialized).toContain('deny camera for https://example.test/path');
+    expect(serialized).not.toContain('user:pass');
+    expect(serialized).not.toContain('token=secret');
+    expect(serialized).not.toContain('#fragment');
   });
 
   it('revokes old authority when provider upsert replaces a browser binding', async () => {

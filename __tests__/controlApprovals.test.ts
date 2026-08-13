@@ -114,6 +114,23 @@ describe('ApprovalStore', () => {
     },
   );
 
+  it('keeps permission decisions visibly distinct while sanitizing origins', () => {
+    const allow = createRedactedApprovalEffect({
+      kind: 'permission_response',
+      target: 'allow camera for https://user:pass@example.test/path?token=secret#fragment',
+    });
+    const deny = createRedactedApprovalEffect({
+      kind: 'permission_response',
+      target: 'deny camera for https://user:pass@example.test/path?token=secret#fragment',
+    });
+    expect(allow.target).toBe('allow camera for https://example.test/path');
+    expect(deny.target).toBe('deny camera for https://example.test/path');
+    const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
+    const allowed = store.request({ ...baseRequest(), actionId: 'allow', effect: allow });
+    const denied = store.request({ ...baseRequest(), actionId: 'deny', effect: deny });
+    expect(allowed.payloadDigest).not.toBe(denied.payloadDigest);
+  });
+
   it.each([
     ['action id', { actionId: 'action-2' }],
     ['owner epoch', { ownerEpoch: 8 }],

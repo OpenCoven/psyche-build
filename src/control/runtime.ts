@@ -1222,7 +1222,8 @@ function approvalEffectForBrowserAction(
       return createRedactedApprovalEffect({ kind: 'download', target: action.destination });
     case 'permission_response':
       return createRedactedApprovalEffect({
-        kind: 'permission_response', target: `${action.origin} ${action.permission}`,
+        kind: 'permission_response',
+        target: `${action.decision} ${action.permission} for ${action.origin}`,
       });
     case 'close':
       return createRedactedApprovalEffect({ kind: 'close', target: 'browser tab' });
