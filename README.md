@@ -135,9 +135,10 @@ When focus is inside a work pane, tmux receives your keys instead of Psyche Buil
 
 ## MCP server
 
-`psyche mcp` exposes the pane surface over MCP (stdio JSON-RPC), so an agent —
-Coven Code, Claude Code, or any MCP-capable client — can fan work into parallel
-Psyche Build panes without leaving its session.
+`psyche mcp` exposes the project owner's leased pane and browser surface over
+MCP (stdio JSON-RPC). It connects to the project control socket and starts the
+detached owner when the socket is absent; mutations still pass through the
+same authenticated authority, policy, approval, and receipt path as the UI.
 
 ```json
 {
@@ -149,16 +150,26 @@ Psyche Build panes without leaving its session.
 
 | Tool | Does |
 |---|---|
-| `psyche_list_panes` | List panes for the project, with pane id, branch, agent, and title |
-| `psyche_create_pane` | New worktree + branch + tmux pane, with the chosen harness launched on a prompt |
-| `psyche_execute_task` | Run one prompt across several parallel lanes, each with its own worktree and harness |
-| `psyche_kill_pane` | Terminate a pane and deregister it |
-| `psyche_get_pane_output` | Read a pane's buffer and scrollback without attaching |
+| `psyche_control_list` | List bounded controllable pane/browser resources, generations, leases, requests, and approvals |
+| `psyche_control_lease` | Request, inspect, or release scoped authority; it cannot grant or approve authority |
+| `psyche_pane_observe` | Read bounded pane output and status through an exact leased generation |
+| `psyche_pane_action` | Perform one typed leased pane action and return its canonical receipt |
+| `psyche_browser_inspect` | Capture a bounded semantic snapshot of an exact leased tab generation |
+| `psyche_browser_action` | Perform one typed leased browser action and return its canonical receipt |
+| `psyche_browser_script` | Submit an approval-gated browser script through an exact leased tab generation |
+| `psyche_control_action_status` | Read the latest canonical receipt without retrying the action |
+| `psyche_list_panes` | Compatibility alias that lists pane resources through the owner |
+| `psyche_create_pane` | Compatibility alias for leased pane creation through the owner |
+| `psyche_execute_task` | Compatibility alias that submits orchestration through the owner |
+| `psyche_kill_pane` | Compatibility alias for approved pane close through the owner |
+| `psyche_get_pane_output` | Compatibility alias for bounded leased pane observation |
 | `psyche_list_rituals` | List built-in and project rituals |
 | `psyche_list_worktrees` | List git worktrees for the project |
 
-`psyche_create_pane` requires a running Psyche Build tmux session for the
-project — start `psyche` there first.
+The compatibility mutation aliases require `task_id`, `lease_id`, and
+`lease_revision`; pane-specific aliases also require the current generation.
+Missing authority returns a structured `lease_missing` result without an
+effect.
 
 `psyche_kill_pane` **does not delete the pane's worktree or branch.** It returns
 both so you can inspect or merge the work; removing them stays an explicit

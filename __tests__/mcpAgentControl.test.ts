@@ -1,0 +1,136 @@
+import { readFileSync } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { TOOLS, handleMcpRequest, setMcpDeps } from '../src/mcp/server.js';
+
+const restores: Array<() => void> = [];
+afterEach(() => {
+  while (restores.length) restores.pop()!();
+  vi.restoreAllMocks();
+});
+
+function inject(next: Parameters<typeof setMcpDeps>[0]): void {
+  restores.push(setMcpDeps(next));
+}
+
+async function call(name: string, args: Record<string, unknown> = {}): Promise<any> {
+  return handleMcpRequest({
+    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args },
+  });
+}
+
+function payload(response: any): any {
+  return JSON.parse(response.result.content[0].text);
+}
+
+function fakeClient(overrides: Record<string, unknown> = {}): any {
+  return {
+    submit: vi.fn(), getState: vi.fn(), actionStatus: vi.fn(), close: vi.fn(),
+    ...overrides,
+  };
+}
+
+const lease = {
+  task_id: 'task-1', lease_id: 'lease-1', lease_revision: 2,
+};
+
+describe('agent surface MCP tools', () => {
+  it('pins the eight typed control tools and required authorization fields', () => {
+    const names = [
+      'psyche_control_list', 'psyche_control_lease', 'psyche_pane_observe',
+      'psyche_pane_action', 'psyche_browser_inspect', 'psyche_browser_action',
+      'psyche_browser_script', 'psyche_control_action_status',
+    ];
+    expect(names.every((name) => TOOLS.some((tool) => tool.name === name))).toBe(true);
+
+    for (const name of ['psyche_pane_observe', 'psyche_pane_action', 'psyche_browser_inspect',
+      'psyche_browser_action', 'psyche_browser_script']) {
+      const required = (TOOLS.find((tool) => tool.name === name)!.inputSchema.required ?? []) as string[];
+      expect(required).toEqual(expect.arrayContaining(['task_id', 'lease_id', 'lease_revision']));
+    }
+  });
+
+  it('routes a pane action through the canonical client without forging actor or epoch', async () => {
+    const receipt = {
+      schema: 'psyche.control.receipt/v1', actionId: 'action-1', state: 'queued',
+      resource: { kind: 'pane', id: 'pane-1', generation: 3 }, createdAt: '2026-08-12T00:00:00.000Z',
+    };
+    const client = fakeClient({
+      submit: vi.fn(async () => ({ status: 'succeeded', value: receipt })),
+    });
+    const controlClientForRoot = vi.fn(async () => client);
+    inject({ controlClientForRoot });
+
+    const body = payload(await call('psyche_pane_action', {
+      ...lease, project_root: '/repo', pane_id: 'pane-1', generation: 3,
+      action: { kind: 'send_text', text: 'hello' },
+    }));
+
+    expect(body).toEqual(receipt);
+    expect(controlClientForRoot).toHaveBeenCalledWith('/repo');
+    const command = client.submit.mock.calls[0][0];
+    expect(command).toMatchObject({
+      kind: 'pane.action', projectRoot: '/repo',
+      payload: {
+        taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 2,
+        paneId: 'pane-1', generation: 3,
+        action: { kind: 'send_text', text: 'hello' },
+      },
+    });
+    expect(command.actor).toBeUndefined();
+    expect(command.ownerEpoch).toBeUndefined();
+  });
+
+  it('supports request, status, and release but refuses grant and approval operations', async () => {
+    const client = fakeClient({ getState: vi.fn(async () => ({
+      capabilityLeases: [], leaseRequests: [], resources: [], approvals: [], receipts: [],
+    })) });
+    inject({ controlClientForRoot: vi.fn(async () => client) });
+
+    for (const operation of ['grant', 'approve']) {
+      const response = await call('psyche_control_lease', { operation, task_id: 'task-1' });
+      expect(response.error.code).toBe(-32602);
+    }
+    expect(client.submit).not.toHaveBeenCalled();
+
+    expect(payload(await call('psyche_control_lease', {
+      operation: 'status', task_id: 'task-1', project_root: '/repo',
+    }))).toMatchObject({ leases: [], requests: [] });
+  });
+
+  it('returns a structured lease_missing result for unleased create and kill aliases', async () => {
+    const client = fakeClient();
+    inject({ controlClientForRoot: vi.fn(async () => client) });
+
+    for (const [name, args] of [
+      ['psyche_create_pane', { prompt: 'fix it', agent: 'codex' }],
+      ['psyche_kill_pane', { pane_id: 'pane-1', generation: 1 }],
+    ] as const) {
+      expect(payload(await call(name, args))).toMatchObject({
+        status: 'rejected', code: 'lease_missing',
+      });
+    }
+    expect(client.submit).not.toHaveBeenCalled();
+  });
+
+  it('uses the connected client canonical root for alias pane creation scope', async () => {
+    const client = fakeClient({
+      projectRoot: '/canonical/repo',
+      submit: vi.fn(async () => ({ status: 'succeeded' })),
+    });
+    inject({ controlClientForRoot: vi.fn(async () => client) });
+
+    await call('psyche_create_pane', {
+      ...lease, project_root: '/symlink/repo', prompt: 'fix it', agent: 'codex',
+    });
+
+    expect(client.submit.mock.calls[0][0]).toMatchObject({
+      projectRoot: '/canonical/repo',
+      payload: { projectId: '/canonical/repo', action: { cwd: '/canonical/repo' } },
+    });
+  });
+
+  it('contains no direct mutation dependencies', () => {
+    const source = readFileSync(new URL('../src/mcp/server.ts', import.meta.url), 'utf8');
+    expect(source).not.toMatch(/spawnBridgePane|killBridgePane|TmuxControl|execFileSync/);
+  });
+});
