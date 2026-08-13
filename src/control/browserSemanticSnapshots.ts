@@ -32,7 +32,7 @@ export class BrowserSemanticSnapshotRegistry {
     if (!node) throw Object.assign(new Error('semantic element reference is missing'), { code: 'ref_missing' });
     return createCanonicalElementSemantics({
       role: node.role,
-      submit: node.role === 'button' || node.role === 'form',
+      submit: node.state?.submit === true,
       secret: node.value?.secret === true,
     });
   }

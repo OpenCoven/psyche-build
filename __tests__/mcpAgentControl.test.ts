@@ -56,6 +56,12 @@ describe('agent surface MCP tools', () => {
     }
   });
 
+  it('documents the generic click risk boundary', () => {
+    const description = TOOLS.find((tool) => tool.name === 'psyche_browser_action')?.description;
+    expect(description).toMatch(/generic click/i);
+    expect(description).toMatch(/cannot be perfectly predicted/i);
+  });
+
   it('routes a pane action through the canonical client without forging actor or epoch', async () => {
     const receipt = {
       schema: 'psyche.control.receipt/v1', actionId: 'action-1', state: 'queued',

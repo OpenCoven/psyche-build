@@ -6,7 +6,7 @@ function snapshot(overrides: Record<string, unknown> = {}) {
     schema: 'psyche.browser.snapshot/v1', id: 'snap-1', tabId: 'tab-1', generation: 1,
     url: 'https://example.test', title: 'Example', loading: false,
     viewport: { width: 800, height: 600 }, capturedAt: '2026-08-12T12:00:00.000Z',
-    nodes: [{ ref: 'e1', role: 'button', name: 'Submit', value: { kind: 'text', secret: true } }],
+    nodes: [{ ref: 'e1', role: 'button', name: 'Submit', state: { submit: true }, value: { kind: 'text', secret: true } }],
     truncated: false, opaqueFrames: 0, expiresAt: '2026-08-12T12:00:30.000Z',
     ...overrides,
   };
@@ -20,6 +20,13 @@ describe('BrowserSemanticSnapshotRegistry', () => {
       .toMatchObject({ role: 'button', submit: true, secret: true });
     expect(() => registry.resolve({ tabId: 'tab-1', generation: 2, snapshotId: 'snap-1', elementRef: 'e1' }))
       .toThrow(/missing or stale/);
+  });
+
+  it('does not infer submit risk from a generic button role', () => {
+    const registry = new BrowserSemanticSnapshotRegistry(() => new Date('2026-08-12T12:00:01.000Z'));
+    registry.store(snapshot({ nodes: [{ ref: 'e1', role: 'button', name: 'Refresh', state: { submit: false } }] }), 'tab-1', 1);
+    expect(registry.resolve({ tabId: 'tab-1', generation: 1, snapshotId: 'snap-1', elementRef: 'e1' }))
+      .toMatchObject({ role: 'button', submit: false });
   });
 
   it('invalidates replacement generations and rejects expired or extra fields', () => {

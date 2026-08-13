@@ -7,6 +7,41 @@ const webRoot = join(repoRoot, 'native/desktop/psyche-build-tauri');
 const mainJs = readFileSync(join(webRoot, 'web/main.js'), 'utf8');
 const nativeLib = readFileSync(join(webRoot, 'src-tauri/src/lib.rs'), 'utf8');
 
+describe('agent browser action lifecycle', () => {
+  it('serializes exact lifecycle actions and never falls back to the active tab', () => {
+    const source = functionSource(mainJs, 'runBrowserLifecycleOperation');
+    expect(source).toContain('pair.tab.id');
+    expect(source).toContain('navigateBrowser');
+    expect(source).toContain('closeBrowserTab(pair.project, pair.tab.id)');
+    expect(source).not.toContain('currentBrowserTab');
+    expect(source).not.toContain('browser_destroy');
+  });
+
+  it('preflights native-only mutations before page dispatch', () => {
+    const source = functionSource(mainJs, 'browserProviderOperationPreflight');
+    expect(source).toContain('upload');
+    expect(source).toContain('download');
+    expect(source).toContain('permission_response');
+    expect(source).toContain('backend_unavailable');
+  });
+
+  it('sends only semantic action data and snapshot identity to page automation', () => {
+    const source = functionSource(mainJs, 'browserAutomationDispatchScript');
+    expect(source).toContain('snapshotId');
+    expect(source).toContain('operation.action');
+    expect(source).not.toContain('selector');
+    expect(source).not.toContain('coordinates');
+  });
+
+  it('correlates canonical snapshot ids to the exact raw page snapshot', () => {
+    const source = functionSource(mainJs, 'resolveBrowserAutomationSnapshotId');
+    expect(source).toContain('effect.tabId');
+    expect(source).toContain('effect.generation');
+    expect(source).toContain('snapshot_missing');
+    expect(source).not.toContain('activeTab');
+  });
+});
+
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

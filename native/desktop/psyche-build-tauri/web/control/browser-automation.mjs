@@ -79,6 +79,22 @@ export function installBrowserAutomation(globalObject, options = {}) {
       current = captured;
       return captured.snapshot;
     }
+    if (request.type === 'action') {
+      if (!request.action || typeof request.action !== 'object' || Array.isArray(request.action)) {
+        throw automationError('bad_request', 'bad_request: browser action is invalid');
+      }
+      if (request.action.kind === 'permission_response') {
+        assertActionRequest(request.action);
+        throw automationError('backend_unavailable', 'backend_unavailable: native interception is required');
+      }
+      assertActionRequest(request.action);
+      const target = requireCurrent({ snapshotId: request.snapshotId, ref: request.action.elementRef });
+      assertActionTarget(target.element, target.semantic, current, globalObject);
+      const result = performAction(target.element, target.semantic, request.action, globalObject);
+      if (result.invalidate === true) invalidate();
+      const { invalidate: _invalidate, ...boundedResult } = result;
+      return boundedResult;
+    }
     if (request.type !== 'resolve') {
       throw automationError('unsupported_operation', 'unsupported_operation: automation operation is not allowed');
     }
@@ -160,10 +176,145 @@ export function browserAutomationSource() {
     ${accessibleName.toString()}
     ${roleFor.toString()}
     ${semanticNode.toString()}
+    ${assertActionRequest.toString()}
+    ${assertActionTarget.toString()}
+    ${containsStoredElement.toString()}
+    ${dispatchInputEvent.toString()}
+    ${performAction.toString()}
+    ${submitMetadata.toString()}
     ${captureSnapshot.toString()}
     ${installBrowserAutomation.toString()}
     installBrowserAutomation(globalObject,{installNonce:installNonce});
   })(globalThis);`;
+}
+
+function assertActionRequest(action) {
+  const allowedByKind = {
+    click: ['kind', 'elementRef'],
+    type: ['kind', 'elementRef', 'text', 'append'],
+    select: ['kind', 'elementRef', 'values'],
+    scroll: ['kind', 'elementRef', 'deltaX', 'deltaY'],
+    focus: ['kind', 'elementRef'],
+    submit: ['kind', 'elementRef'],
+    upload: ['kind', 'elementRef', 'path'],
+    download: ['kind', 'elementRef', 'destination'],
+    permission_response: ['kind', 'permission', 'origin', 'decision'],
+  };
+  const allowed = allowedByKind[action.kind];
+  if (!allowed || Object.keys(action).some((key) => !allowed.includes(key))) {
+    throw automationError('bad_request', 'bad_request: browser action shape is invalid');
+  }
+  if (action.kind !== 'permission_response' && (typeof action.elementRef !== 'string' || !action.elementRef)) {
+    throw automationError('bad_request', 'bad_request: element reference is required');
+  }
+  if (action.kind === 'type' && typeof action.text !== 'string') throw automationError('bad_request', 'bad_request: text is required');
+  if (action.kind === 'select' && (!Array.isArray(action.values) || action.values.some((value) => typeof value !== 'string'))) {
+    throw automationError('bad_request', 'bad_request: select values are invalid');
+  }
+  if (action.kind === 'scroll' && [action.deltaX, action.deltaY].some((value) => value !== undefined && !Number.isFinite(value))) {
+    throw automationError('bad_request', 'bad_request: scroll deltas are invalid');
+  }
+}
+
+function assertActionTarget(element, semantic, current, globalObject) {
+  if (!element || element.isConnected === false || !containsStoredElement(current.documentElement, element)
+      || isHidden(element, globalObject) || semantic?.disabled === true
+      || element.disabled === true || hasAttribute(element, 'disabled') || readAttribute(element, 'aria-disabled') === 'true') {
+    throw automationError('target_unavailable', 'target_unavailable: semantic target cannot be acted on');
+  }
+}
+
+function containsStoredElement(root, target) {
+  const stack = [root];
+  let visited = 0;
+  while (stack.length && visited < MAX_VISITED_NODES) {
+    const item = stack.pop();
+    visited += 1;
+    if (item === target) return true;
+    const children = item?.children || [];
+    for (let index = children.length - 1; index >= 0; index -= 1) stack.push(children[index]);
+  }
+  return false;
+}
+
+function dispatchInputEvent(element, globalObject, type, init) {
+  const EventCtor = globalObject.InputEvent || globalObject.Event;
+  if (typeof EventCtor !== 'function') throw automationError('backend_unavailable', 'backend_unavailable: browser events are unavailable');
+  element.dispatchEvent(new EventCtor(type, { bubbles: true, cancelable: type === 'beforeinput', ...init }));
+}
+
+function performAction(element, semantic, action, globalObject) {
+  switch (action.kind) {
+    case 'click': {
+      if (typeof element.click !== 'function') throw automationError('backend_unavailable', 'backend_unavailable: click is unavailable');
+      element.click();
+      return { clicked: true, invalidate: true };
+    }
+    case 'type': {
+      if (!['INPUT', 'TEXTAREA'].includes(String(element.tagName || '').toUpperCase())) {
+        throw automationError('target_unavailable', 'target_unavailable: target is not editable');
+      }
+      const secret = semantic?.secret === true;
+      const previous = typeof element.value === 'string' ? element.value : '';
+      const next = action.append === true ? previous + action.text : action.text;
+      element.focus?.();
+      dispatchInputEvent(element, globalObject, 'beforeinput', { data: action.text, inputType: action.append === true ? 'insertText' : 'insertReplacementText' });
+      element.value = next;
+      dispatchInputEvent(element, globalObject, 'input', { data: action.text, inputType: 'insertText' });
+      dispatchInputEvent(element, globalObject, 'change');
+      return secret ? { valuePresent: next.length > 0, secret: true } : { value: boundedText(next, MAX_NAME_BYTES), secret: false };
+    }
+    case 'select': {
+      if (String(element.tagName || '').toUpperCase() !== 'SELECT') throw automationError('target_unavailable', 'target_unavailable: target is not a select');
+      const wanted = new TrustedSet(action.values);
+      const selectedValues = [];
+      for (const option of element.options || element.children || []) {
+        const value = String(option.value ?? readAttribute(option, 'value') ?? option.textContent ?? '');
+        option.selected = wanted.has(value);
+        if (option.selected && selectedValues.length < 128) selectedValues.push(boundedText(value, MAX_NAME_BYTES));
+      }
+      if (!element.multiple && selectedValues.length) element.value = selectedValues[0];
+      dispatchInputEvent(element, globalObject, 'input');
+      dispatchInputEvent(element, globalObject, 'change');
+      return semantic?.secret === true ? { selectedValues: ['[redacted]'] } : { selectedValues };
+    }
+    case 'scroll': {
+      const dx = finiteBound(action.deltaX || 0, -100_000, 100_000);
+      const dy = finiteBound(action.deltaY || 0, -100_000, 100_000);
+      element.scrollLeft = finiteBound(Number(element.scrollLeft || 0) + dx, -100_000, 100_000);
+      element.scrollTop = finiteBound(Number(element.scrollTop || 0) + dy, -100_000, 100_000);
+      return { scrollLeft: element.scrollLeft, scrollTop: element.scrollTop };
+    }
+    case 'focus':
+      if (typeof element.focus !== 'function') throw automationError('backend_unavailable', 'backend_unavailable: focus is unavailable');
+      element.focus();
+      return { focused: true };
+    case 'submit': {
+      const metadata = submitMetadata(element, globalObject);
+      if (!metadata.form || typeof metadata.form.requestSubmit !== 'function') {
+        throw automationError('backend_unavailable', 'backend_unavailable: native form submission is unavailable');
+      }
+      metadata.form.requestSubmit(element);
+      return { submitted: true, method: metadata.method, destination: metadata.destination, invalidate: true };
+    }
+    case 'upload':
+    case 'download':
+    case 'permission_response':
+      throw automationError('backend_unavailable', 'backend_unavailable: native interception is required');
+    default:
+      throw automationError('unsupported_operation', 'unsupported_operation: browser action is not supported');
+  }
+}
+
+function submitMetadata(element, globalObject) {
+  const form = element.form || (String(element.tagName || '').toUpperCase() === 'FORM' ? element : null);
+  if (!form) throw automationError('target_unavailable', 'target_unavailable: submit target has no form');
+  const method = String(readAttribute(element, 'formmethod') || readAttribute(form, 'method') || 'get').toUpperCase().slice(0, 16);
+  const rawAction = readAttribute(element, 'formaction') || readAttribute(form, 'action') || globalObject.location?.href || '';
+  let destination;
+  try { destination = String(new globalObject.URL(rawAction, globalObject.location?.href).href).slice(0, 2048); }
+  catch { throw automationError('target_unavailable', 'target_unavailable: form destination is invalid'); }
+  return { form, method, destination };
 }
 
 function captureSnapshot(globalObject, sequence, createdAt) {
@@ -259,6 +410,10 @@ function semanticNode(element, document, viewportWidth, viewportHeight, globalOb
     : tag === 'TEXTAREA' ? trustedTextareaDisabledGetter
       : tag === 'SELECT' ? trustedSelectDisabledGetter : null;
   if (readWebIdl(disabledGetter, element, 'disabled') === true || hasAttribute(element, 'disabled') || readAttribute(element, 'aria-disabled') === 'true') result.disabled = true;
+  if (role === 'button') {
+    const buttonType = tag === 'INPUT' ? readInputType(element) : boundedText(readAttribute(element, 'type') || '', 64).toLowerCase();
+    result.submit = buttonType === 'submit' || (tag === 'BUTTON' && !buttonType && !!element.form);
+  }
   if (role === 'checkbox' || role === 'radio') result.checked = readWebIdl(trustedInputCheckedGetter, element, 'checked') === true || readAttribute(element, 'aria-checked') === 'true';
   if (role === 'option') result.selected = readWebIdl(trustedOptionSelectedGetter, element, 'selected') === true || readAttribute(element, 'aria-selected') === 'true';
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {

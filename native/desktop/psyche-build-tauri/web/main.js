@@ -135,6 +135,7 @@
   var browserPaneLifecycleStates = new WeakMap();
   var browserControlProviders = new Map();
   var browserAutomationWaiters = new Map();
+  var browserAutomationSnapshotRefs = new Map();
   // Matches --pane-min-w / --pane-min-h: the tree's arithmetic and the pane's
   // own CSS floor have to agree, or a layout the tree calls valid renders
   // overflowing. 200x137 includes the fixed 27px footer rail.
@@ -8513,7 +8514,10 @@
     return Promise.resolve(flight);
   }
   function browserAutomationDispatchScript(effect) {
-    var request = { type: "snapshot" };
+    var operation = effect.operation || {};
+    var request = operation.kind === "action"
+      ? { type: "action", snapshotId: resolveBrowserAutomationSnapshotId(effect), action: operation.action }
+      : { type: "snapshot" };
     var actionId = JSON.stringify(effect.actionId);
     var requestJson = JSON.stringify(request);
     var tabId = JSON.stringify(effect.tabId);
@@ -8521,6 +8525,15 @@
     return "(function(){var emit=function(name,payload){if(window.__TAURI__&&window.__TAURI__.event)window.__TAURI__.event.emit(name,payload);};" +
       "try{var value=window.__PSYCHE_AUTOMATION__.dispatch(" + requestJson + ");emit('browser:automation-result',{actionId:" + actionId + ",tabId:" + tabId + ",generation:" + generation + ",value:value});}" +
       "catch(error){emit('browser:automation-result',{actionId:" + actionId + ",tabId:" + tabId + ",generation:" + generation + ",error:{code:error&&error.code||'automation_failed',message:String(error&&error.message||error)}});}})();";
+  }
+  function resolveBrowserAutomationSnapshotId(effect) {
+    var canonicalId = effect && effect.operation && effect.operation.snapshotId;
+    var mapped = typeof canonicalId === "string" ? browserAutomationSnapshotRefs.get(canonicalId) : null;
+    if (!mapped || mapped.tabId !== effect.tabId || mapped.generation !== effect.generation || mapped.expiresAt <= Date.now()) {
+      if (mapped) browserAutomationSnapshotRefs.delete(canonicalId);
+      throw Object.assign(new Error("semantic snapshot is missing or stale"), { code: "snapshot_missing" });
+    }
+    return mapped.rawSnapshotId;
   }
   function awaitBrowserAutomationResult(effect) {
     var cancel;
@@ -8574,7 +8587,7 @@
     var opaqueFrames = 0;
     var nodes = value.nodes.map(function (node) {
       if (!plain(node)) fail("snapshot node is malformed");
-      exactKeys(node, ["ref", "role", "name", "bounds", "disabled", "checked", "selected", "value", "secret", "valuePresent", "opaque"], "snapshot node");
+      exactKeys(node, ["ref", "role", "name", "bounds", "disabled", "checked", "selected", "submit", "value", "secret", "valuePresent", "opaque"], "snapshot node");
       if (typeof node.ref !== "string" || !/^e[1-9][0-9]{0,5}$/.test(node.ref) || refs.has(node.ref) ||
           typeof node.role !== "string" || roles.indexOf(node.role) === -1 || typeof node.name !== "string" || node.name.length > 512 ||
           !plain(node.bounds)) fail("snapshot node is malformed");
@@ -8587,7 +8600,7 @@
       });
       var projected = { ref: node.ref, role: node.role, name: node.name, bounds: bounds };
       var state = {};
-      ["disabled", "checked", "selected"].forEach(function (key) {
+      ["disabled", "checked", "selected", "submit"].forEach(function (key) {
         if (node[key] !== undefined) {
           if (typeof node[key] !== "boolean") fail("snapshot state is malformed");
           state[key] = node[key];
@@ -8603,6 +8616,17 @@
       return projected;
     });
     var capturedAt = new Date(capturedAtMs);
+    browserAutomationSnapshotRefs.set(effect.actionId, {
+      rawSnapshotId: value.snapshotId,
+      tabId: pair.tab.id,
+      generation: effect.generation,
+      expiresAt: capturedAt.getTime() + 30000,
+    });
+    while (browserAutomationSnapshotRefs.size > 128) {
+      var oldestSnapshotId = browserAutomationSnapshotRefs.keys().next().value;
+      if (!oldestSnapshotId) break;
+      browserAutomationSnapshotRefs.delete(oldestSnapshotId);
+    }
     return {
       schema: "psyche.browser.snapshot/v1",
       id: effect.actionId,
@@ -8618,6 +8642,60 @@
       opaqueFrames: opaqueFrames,
       expiresAt: new Date(capturedAt.getTime() + 30000).toISOString(),
     };
+  }
+  function browserProviderOperationPreflight(operation) {
+    if (!operation || (operation.kind !== "inspect" && operation.kind !== "action")) {
+      throw Object.assign(new Error("browser operation is not supported"), { code: "unsupported_operation" });
+    }
+    if (operation.kind === "inspect") return "page";
+    var action = operation.action;
+    if (!action || typeof action !== "object" || Array.isArray(action) || typeof action.kind !== "string") {
+      throw Object.assign(new Error("browser action is malformed"), { code: "automation_failed" });
+    }
+    if (action.kind === "upload" || action.kind === "download" || action.kind === "permission_response") {
+      throw Object.assign(new Error("backend_unavailable: native interception is unavailable"), { code: "backend_unavailable" });
+    }
+    if (["navigate", "reload", "back", "forward", "close", "screenshot"].indexOf(action.kind) !== -1) return "lifecycle";
+    if (!operation.snapshotId || typeof operation.snapshotId !== "string") {
+      throw Object.assign(new Error("semantic snapshot identity is required"), { code: "snapshot_missing" });
+    }
+    return "page";
+  }
+  async function runBrowserLifecycleOperation(pair, effect) {
+    var action = effect.operation.action;
+    if (state.activeProjectId !== pair.project.id || activeProject() !== pair.project ||
+        activeWorkspaceRoot(pair.project) !== pair.worktreePath) {
+      throw Object.assign(new Error("backend_unavailable: exact browser tab is not active"), { code: "backend_unavailable" });
+    }
+    if (action.kind === "navigate") {
+      var navigated = await navigateBrowser(action.url, { tabId: pair.tab.id });
+      if (!navigated) throw Object.assign(new Error("browser navigation failed"), { code: "automation_failed" });
+      return { url: pair.tab.url, title: pair.tab.title };
+    }
+    if (action.kind === "reload") {
+      var reloaded = await navigateBrowser(pair.tab.url, { tabId: pair.tab.id, replace: true, preserveHistory: true });
+      if (!reloaded) throw Object.assign(new Error("browser reload failed"), { code: "automation_failed" });
+      return { url: pair.tab.url, title: pair.tab.title };
+    }
+    if (action.kind === "back" || action.kind === "forward") {
+      var delta = action.kind === "back" ? -1 : 1;
+      var index = pair.tab.historyIndex + delta;
+      if (index < 0 || index >= pair.tab.history.length) throw Object.assign(new Error("browser history target is unavailable"), { code: "resource_missing" });
+      var moved = await navigateBrowser(pair.tab.history[index], { tabId: pair.tab.id, fromHistory: true, historyIndex: index });
+      if (!moved) throw Object.assign(new Error("browser history navigation failed"), { code: "automation_failed" });
+      return { url: pair.tab.url, title: pair.tab.title, historyIndex: pair.tab.historyIndex };
+    }
+    if (action.kind === "close") {
+      var lifecycle = browserTabLifecycle(pair.tab);
+      if (lifecycle.navigationTail) await lifecycle.navigationTail;
+      var closed = await closeBrowserTab(pair.project, pair.tab.id);
+      if (!closed) throw Object.assign(new Error("browser close failed"), { code: "automation_failed" });
+      return { closed: true };
+    }
+    if (action.kind === "screenshot") {
+      return invoke("browser_snapshot", { label: browserLabelForTab(pair.project, pair.tab) });
+    }
+    throw Object.assign(new Error("browser lifecycle action is not supported"), { code: "unsupported_operation" });
   }
   async function handleBrowserProviderEffect(event) {
     var effect = event && event.payload || {};
@@ -8651,12 +8729,6 @@
       });
       return false;
     }
-    if (!effect.operation || effect.operation.kind !== "inspect") {
-      await completeBrowserProviderEffect(pair.project, {
-        actionId: effect.actionId, status: "failed", code: "unsupported_operation", message: "browser operation is not supported",
-      });
-      return true;
-    }
     var completeReplaced = async function () {
       await completeBrowserProviderEffect(pair.project, {
         actionId: effect.actionId,
@@ -8673,6 +8745,30 @@
       var currentLifecycle = browserTabLifecycle(current.tab);
       return effect.generation === currentLifecycle.liveGeneration && !currentLifecycle.pendingGeneration && !!currentLifecycle.nativeLabel;
     };
+    var operationClass;
+    try {
+      operationClass = browserProviderOperationPreflight(effect.operation);
+    } catch (preflightError) {
+      await completeBrowserProviderEffect(pair.project, {
+        actionId: effect.actionId, status: "failed", code: preflightError.code || "automation_failed",
+        message: String(preflightError.message || preflightError),
+      });
+      return true;
+    }
+    if (operationClass === "lifecycle") {
+      try {
+        var lifecycleValue = await runBrowserLifecycleOperation(pair, effect);
+        await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "succeeded", value: lifecycleValue });
+      } catch (lifecycleError) {
+        var lifecycleAmbiguous = !!(lifecycleError && (lifecycleError.ambiguous || lifecycleError.code === "effect_unknown"));
+        await completeBrowserProviderEffect(pair.project, {
+          actionId: effect.actionId, status: lifecycleAmbiguous ? "unknown" : "failed",
+          code: lifecycleAmbiguous ? "effect_unknown" : lifecycleError.code || "automation_failed",
+          message: String(lifecycleError.message || lifecycleError),
+        });
+      }
+      return true;
+    }
     var runInspect = async function () {
       if (!exactPairIsCurrent()) return completeReplaced();
       try {
@@ -8689,9 +8785,12 @@
           await resultFlight.catch(function () {});
           throw evalError;
         }
-        var value = canonicalizeBrowserSemanticSnapshot(await resultFlight, pair, effect, Date.now());
+        var automationValue = await resultFlight;
+        var value = effect.operation.kind === "inspect"
+          ? canonicalizeBrowserSemanticSnapshot(automationValue, pair, effect, Date.now())
+          : automationValue;
         if (!exactPairIsCurrent()) return completeReplaced();
-        if (effect.operation.includeScreenshot) {
+        if (effect.operation.kind === "inspect" && effect.operation.includeScreenshot) {
           value.screenshot = await invoke("browser_snapshot", { label: browserLabelForTab(pair.project, pair.tab) });
           if (!exactPairIsCurrent()) return completeReplaced();
         }

@@ -625,7 +625,7 @@ export class ControlRuntime {
           case 'pane.observe': value = await this.handlers.observePane(context.command.payload); break;
           case 'pane.action': value = await this.handlers.actOnPane(context.command.payload); break;
           case 'browser.inspect': value = await this.handlers.inspectBrowser(context.command.payload); break;
-          case 'browser.action': value = await this.handlers.actOnBrowser(context.command.payload); break;
+          case 'browser.action': value = await this.handlers.actOnBrowser(executableBrowserPayload(context.command.payload)); break;
           case 'browser.script': value = await this.handlers.runBrowserScript(context.command.payload); break;
         }
       } catch (error) {
@@ -1228,6 +1228,15 @@ function approvalEffectForBrowserAction(
     default:
       return undefined;
   }
+}
+
+function executableBrowserPayload(
+  payload: Extract<ControlCommand, { kind: 'browser.action' }>['payload'],
+): Extract<ControlCommand, { kind: 'browser.action' }>['payload'] {
+  const { semantic: _untrustedSemantic, ...action } = payload.action as (
+    typeof payload.action & { semantic?: unknown }
+  );
+  return { ...payload, action } as Extract<ControlCommand, { kind: 'browser.action' }>['payload'];
 }
 
 function digestExecutablePayload(

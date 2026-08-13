@@ -381,6 +381,9 @@ describe('ControlRuntime', () => {
     }));
     expect(outcome).toMatchObject({ status: 'succeeded', value: { state: 'succeeded' } });
     expect(handlers.actOnBrowser).toHaveBeenCalledTimes(1);
+    expect(handlers.actOnBrowser).toHaveBeenCalledWith(expect.objectContaining({
+      action: { kind: 'click', elementRef: 'e17' },
+    }));
     expect(JSON.stringify(runtime.snapshot())).not.toContain('sensitive page text');
     expect(JSON.stringify(journal.read())).not.toContain('sensitive page text');
   });

@@ -492,7 +492,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'psyche_browser_action',
-    description: 'Perform one typed browser action through an exact leased tab generation.',
+    description: 'Perform one typed browser action through an exact leased tab generation. Application-defined effects behind a generic click cannot be perfectly predicted.',
     inputSchema: {
       type: 'object',
       required: [...authorizationRequired, 'tab_id', 'generation', 'action'],

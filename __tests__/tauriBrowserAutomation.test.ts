@@ -26,6 +26,12 @@ type FakeNode = {
   click: ReturnType<typeof vi.fn>;
   focus: ReturnType<typeof vi.fn>;
   dispatchEvent: ReturnType<typeof vi.fn>;
+  isConnected: boolean;
+  scrollLeft?: number;
+  scrollTop?: number;
+  options?: FakeNode[];
+  form?: FakeNode | null;
+  requestSubmit?: ReturnType<typeof vi.fn>;
 };
 
 function node(tagName: string, options: Partial<FakeNode> & { attrs?: Record<string, string>; rect?: [number, number, number, number] } = {}): FakeNode {
@@ -44,6 +50,7 @@ function node(tagName: string, options: Partial<FakeNode> & { attrs?: Record<str
     click: vi.fn(),
     focus: vi.fn(),
     dispatchEvent: vi.fn(() => true),
+    isConnected: true,
     ...options,
   };
   for (const child of result.children) child.parentElement = result;
@@ -73,13 +80,14 @@ function fixture(now = 1_000) {
     innerHeight: 600,
     location: { href: 'https://example.test/account' },
     Event: class { constructor(public type: string, public init?: unknown) {} },
+    URL,
     Date: { now: () => now },
     getComputedStyle: (element: FakeNode) => ({
       display: element.attributes['data-display'] ?? 'block',
       visibility: element.attributes['data-visibility'] ?? 'visible',
     }),
   };
-  return { globalObject, button, password, checkbox, hidden, disabled, frame };
+  return { globalObject, button, password, checkbox, hidden, disabled, frame, select, textarea, link };
 }
 
 describe('bounded semantic browser automation', () => {
@@ -401,7 +409,7 @@ describe('bounded semantic browser automation', () => {
     expect(reads).toBeLessThan(children.length);
   });
 
-  it('resolves an exact current ref without exposing mutation or arbitrary evaluation', () => {
+  it('resolves an exact current ref without exposing arbitrary evaluation', () => {
     const { globalObject } = fixture();
     const api = installBrowserAutomation(globalObject);
     const snapshot = api.dispatch({ type: 'snapshot' });
@@ -410,12 +418,130 @@ describe('bounded semantic browser automation', () => {
     expect(() => api.dispatch({ type: 'eval', source: 'globalThis.secret' })).toThrowError(/unsupported_operation/);
   });
 
+  it('dispatches click against only the stored current element object', () => {
+    const { globalObject, button } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    const snapshot = api.dispatch({ type: 'snapshot' });
+
+    expect(api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'click', elementRef: 'e1' } }))
+      .toMatchObject({ clicked: true });
+    expect(button.click).toHaveBeenCalledOnce();
+    const current = api.dispatch({ type: 'snapshot' });
+    expect(() => api.dispatch({ type: 'action', snapshotId: current.snapshotId, action: { kind: 'click', selector: 'button' } }))
+      .toThrowError(expect.objectContaining({ code: 'bad_request' }));
+    expect(() => api.dispatch({ type: 'action', snapshotId: 'stale', action: { kind: 'click', elementRef: 'e1' } }))
+      .toThrowError(expect.objectContaining({ code: 'snapshot_stale' }));
+  });
+
+  it('types with browser event order, replacing by default and appending explicitly', () => {
+    const { globalObject, textarea } = fixture();
+    const order: string[] = [];
+    textarea.focus = vi.fn(() => order.push('focus'));
+    textarea.dispatchEvent = vi.fn((event: { type: string }) => { order.push(event.type); return true; });
+    const api = installBrowserAutomation(globalObject);
+    let snapshot = api.dispatch({ type: 'snapshot' });
+    const ref = snapshot.nodes.find((entry: { name: string }) => entry.name === 'Notes').ref;
+
+    expect(api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'type', elementRef: ref, text: 'new' } }))
+      .toEqual({ value: 'new', secret: false });
+    expect(textarea.value).toBe('new');
+    expect(order).toEqual(['focus', 'beforeinput', 'input', 'change']);
+
+    snapshot = api.dispatch({ type: 'snapshot' });
+    api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'type', elementRef: ref, text: ' text', append: true } });
+    expect(textarea.value).toBe('new text');
+  });
+
+  it('never returns a typed secret', () => {
+    const { globalObject, password } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    const snapshot = api.dispatch({ type: 'snapshot' });
+    const ref = snapshot.nodes.find((entry: { secret?: boolean }) => entry.secret).ref;
+    const result = api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'type', elementRef: ref, text: 'new-secret' } });
+    expect(password.value).toBe('new-secret');
+    expect(result).toEqual({ valuePresent: true, secret: true });
+    expect(JSON.stringify(result)).not.toContain('new-secret');
+  });
+
+  it('selects values and dispatches input before change', () => {
+    const { globalObject, select } = fixture();
+    const order: string[] = [];
+    select.options = select.children;
+    select.children[0].value = 'blue';
+    select.dispatchEvent = vi.fn((event: { type: string }) => { order.push(event.type); return true; });
+    const api = installBrowserAutomation(globalObject);
+    const snapshot = api.dispatch({ type: 'snapshot' });
+    const ref = snapshot.nodes.find((entry: { role: string }) => entry.role === 'combobox').ref;
+    expect(api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'select', elementRef: ref, values: ['blue'] } }))
+      .toEqual({ selectedValues: ['blue'] });
+    expect(order).toEqual(['input', 'change']);
+  });
+
+  it('fails hidden, disabled, detached, and replaced targets before effect', () => {
+    for (const mode of ['hidden', 'disabled', 'detached', 'replaced'] as const) {
+      const { globalObject, button } = fixture();
+      const api = installBrowserAutomation(globalObject);
+      const snapshot = api.dispatch({ type: 'snapshot' });
+      if (mode === 'hidden') button.hidden = true;
+      if (mode === 'disabled') button.disabled = true;
+      if (mode === 'detached') button.isConnected = false;
+      if (mode === 'replaced') globalObject.document.body.children[0] = node('button', { textContent: 'replacement' });
+      expect(() => api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'click', elementRef: 'e1' } }))
+        .toThrowError(expect.objectContaining({ code: 'target_unavailable' }));
+      expect(button.click).not.toHaveBeenCalled();
+    }
+  });
+
+  it('captures submit metadata before dispatch and invalidates the snapshot', () => {
+    const { globalObject, button } = fixture();
+    const form = node('form', { attrs: { action: '/save', method: 'post' } });
+    form.requestSubmit = vi.fn();
+    button.type = 'submit';
+    button.form = form;
+    const api = installBrowserAutomation(globalObject);
+    const snapshot = api.dispatch({ type: 'snapshot' });
+    expect(api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'submit', elementRef: 'e1' } }))
+      .toEqual({ submitted: true, method: 'POST', destination: 'https://example.test/save' });
+    expect(form.requestSubmit).toHaveBeenCalledWith(button);
+    expect(() => api.dispatch({ type: 'resolve', snapshotId: snapshot.snapshotId, ref: 'e1' }))
+      .toThrowError(expect.objectContaining({ code: 'snapshot_stale' }));
+  });
+
+  it('scrolls and focuses stored targets with bounded postconditions', () => {
+    const { globalObject, textarea } = fixture();
+    textarea.scrollLeft = 0;
+    textarea.scrollTop = 0;
+    const api = installBrowserAutomation(globalObject);
+    const snapshot = api.dispatch({ type: 'snapshot' });
+    const ref = snapshot.nodes.find((entry: { name: string }) => entry.name === 'Notes').ref;
+    expect(api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'scroll', elementRef: ref, deltaX: 5, deltaY: 9 } }))
+      .toEqual({ scrollLeft: 5, scrollTop: 9 });
+    expect(api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'focus', elementRef: ref } }))
+      .toEqual({ focused: true });
+  });
+
+  it.each(['upload', 'download', 'permission_response'])('fails native-only %s before page effect', (kind) => {
+    const { globalObject, button } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    const snapshot = api.dispatch({ type: 'snapshot' });
+    const action = kind === 'upload' ? { kind, elementRef: 'e1', path: '/secret' }
+      : kind === 'download' ? { kind, elementRef: 'e1', destination: '/secret' }
+        : { kind, permission: 'camera', origin: 'https://example.test', decision: 'deny' };
+    expect(() => api.dispatch({ type: 'action', snapshotId: snapshot.snapshotId, action }))
+      .toThrowError(expect.objectContaining({ code: 'backend_unavailable' }));
+    expect(button.click).not.toHaveBeenCalled();
+  });
+
   it('emits a self-contained injection source that installs the full API', () => {
-    const { globalObject } = fixture();
+    const { globalObject, button } = fixture();
     Function('globalThis', browserAutomationSource())(globalObject);
-    const installed = globalObject as typeof globalObject & { __PSYCHE_AUTOMATION__: { dispatch(request: { type: string }): any } };
+    const installed = globalObject as typeof globalObject & { __PSYCHE_AUTOMATION__: { dispatch(request: Record<string, unknown>): any } };
     const snapshot = installed.__PSYCHE_AUTOMATION__.dispatch({ type: 'snapshot' });
     expect(snapshot).toMatchObject({ schema: 'psyche.browser.snapshot/v1' });
     expect(snapshot.nodes[0]).toMatchObject({ role: 'button', name: 'Save changes' });
+    expect(installed.__PSYCHE_AUTOMATION__.dispatch({
+      type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'click', elementRef: 'e1' },
+    })).toEqual({ clicked: true });
+    expect(button.click).toHaveBeenCalledOnce();
   });
 });
