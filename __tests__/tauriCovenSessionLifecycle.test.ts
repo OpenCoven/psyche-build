@@ -105,6 +105,7 @@ function compileOpenWithProjectActivation<T extends (...args: never[]) => unknow
   return Function(
     ...names,
     `"use strict";
+     const guardActiveFileBoundary = async () => true;
      ${functionSource(mainJs, 'waitForTerminalLayout')}
      ${functionSource(mainJs, 'threadCovenSessionId')}
      ${functionSource(mainJs, 'isReusableCovenAttachment')}

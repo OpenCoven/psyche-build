@@ -43,17 +43,14 @@ describe('Tauri desktop tab shortcuts', () => {
     );
   });
 
-  it('swaps the dirty dot for the close control in one non-reflowing slot', () => {
-    // Both controls live in the same fixed-width slot, so revealing one cannot
-    // shift the strip.
-    expect(mainJs).toMatch(/<span class="tab-end">/);
-    expect(stylesCss).toMatch(/\.tab-end \{[^}]*flex: 0 0 16px/);
+  it('overlays the dirty dot and close control without reflowing the file tab', () => {
+    expect(mainJs).toContain('item.className = "file-tab-item"');
+    expect(stylesCss).toMatch(/\.file-tab-item \{[^}]*position: relative;[^}]*flex: 0 0 auto;/);
+    expect(stylesCss).toMatch(/\.file-tab-item > \.tab \{[^}]*padding-right: 34px;/);
     expect(stylesCss).toMatch(/\.tab \.dot \{[^}]*position: absolute/);
-    expect(stylesCss).toMatch(/\.tab \.close \{[^}]*position: absolute/);
-    expect(stylesCss).toContain('.tab:hover .close { opacity: 1; }');
-    expect(stylesCss).toContain('.tab:hover .dot { opacity: 0; }');
-    // The active tab keeps its dot: that is the file whose unsaved state matters.
-    expect(stylesCss).not.toMatch(/\.tab\.active \.dot \{[^}]*opacity: 0/);
+    expect(stylesCss).toMatch(/\.file-tab-item > \.close \{[^}]*position: absolute/);
+    expect(stylesCss).toContain('.file-tab-item:hover > .close { opacity: 1; }');
+    expect(stylesCss).toContain('.file-tab-item:hover .dot { opacity: 0; }');
   });
 
   it('closes a file tab on middle click', () => {

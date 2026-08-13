@@ -973,6 +973,7 @@ kbd {
   position: relative;
   border-radius: 0;
 }
+#file-surface-staging[hidden],
 #git-surface-staging[hidden] { display: none; }
 /* The file-tab strip only earns its row once a file is open. Explicit
    grid-row assignments live with the file view, further down. */
@@ -1014,14 +1015,23 @@ kbd {
   white-space: nowrap;
   transition: background var(--transition-fast), color var(--transition-fast);
 }
+.file-tab-item {
+  display: flex;
+  align-items: stretch;
+  position: relative;
+  flex: 0 0 auto;
+}
+.file-tab-item > .tab {
+  padding-right: 34px;
+}
 .tab:hover { background: var(--surface-2); color: var(--text); }
 .tab.active {
   color: #f8f5ff;
   background: rgba(255, 255, 255, 0.10);
 }
 .tab.active { border-right-color: transparent; }
-.tab:has(+ .tab.active) { border-right-color: transparent; }
-.tab:last-child { border-right: 0; }
+.file-tab-item:has(+ .file-tab-item > .tab.active) > .tab { border-right-color: transparent; }
+.file-tab-item:last-child > .tab { border-right: 0; }
 .tab.active::after {
   content: '';
   position: absolute;
@@ -1033,17 +1043,10 @@ kbd {
 /* Dot and close occupy the same slot: the dirty state is what you need at
    rest, the close is what you need under the cursor, and swapping them in
    place keeps the strip from reflowing on hover. */
-.tab-end {
-  position: relative;
-  flex: 0 0 16px;
-  width: 16px;
-  height: 16px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
 .tab .dot {
   position: absolute;
+  right: 17px;
+  top: calc((var(--tab-h) - 6px) / 2);
   width: 6px;
   height: 6px;
   border-radius: 999px;
@@ -1051,9 +1054,12 @@ kbd {
   transition: opacity var(--transition-fast), background var(--transition-fast);
 }
 .tab.active .dot { background: var(--accent); }
-.tab .close {
+.file-tab-item > .close {
   position: absolute;
-  inset: 0;
+  right: 10px;
+  top: calc((var(--tab-h) - 16px) / 2);
+  width: 16px;
+  height: 16px;
   border-radius: 4px;
   display: inline-flex;
   align-items: center;
@@ -1068,9 +1074,9 @@ kbd {
 }
 /* Hover reveals the close and retires the dot. The active tab keeps its dot,
    because that is exactly the file whose unsaved state matters most. */
-.tab:hover .close { opacity: 1; }
-.tab:hover .dot { opacity: 0; }
-.tab .close:hover { background: var(--surface-3); color: var(--text); }
+.file-tab-item:hover > .close { opacity: 1; }
+.file-tab-item:hover .dot { opacity: 0; }
+.file-tab-item > .close:hover { background: var(--surface-3); color: var(--text); }
 .tab-add {
   display: inline-flex;
   align-items: center;
@@ -2813,24 +2819,46 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .file-row .file-name { overflow: hidden; text-overflow: ellipsis; }
 .file-row.is-dir .file-name { color: var(--text); }
 
-/* -------- File view (main area) --------
-   Opened files become tabs in the main tab strip and render here, sharing the
-   terminal's grid row. An author `display` beats the hidden attribute's UA
-   rule, so [hidden] has to be restored explicitly. */
+/* -------- File view (Files pane) --------
+   The one editor host is staged outside the canvas until a Files surface
+   adopts it. An author `display` beats the hidden attribute's UA rule, so
+   [hidden] has to be restored explicitly. */
 
 /* Row 2 and column 2 are the transient ones: the focus-set pick bar and the
    focus-mode minimap. Both tracks are `auto`, so an absent element costs
    nothing rather than reserving a gap. */
-.tab-strip     { grid-row: 1; grid-column: 1 / -1; }
 .set-pick-bar  { grid-row: 2; grid-column: 1 / -1; }
 .terminal-host { grid-row: 3; grid-column: 1; }
-.file-view     { grid-row: 3; grid-column: 1 / -1; }
 .pane-minimap  { grid-row: 3; grid-column: 2; }
-.terminal-area.is-file-focused .file-view {
-  grid-column: 1;
+
+.terminal-pane.is-files {
+  grid-template-rows: var(--pane-head-h) minmax(0, 1fr);
 }
-.terminal-area.is-file-focused .pane-minimap {
-  grid-column: 2;
+.terminal-pane.is-files .terminal-pane-header {
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+}
+.terminal-pane.is-files .terminal-pane-glyph { color: var(--accent); }
+.files-pane-body {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+.files-pane-body > .file-view {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.terminal-pane.is-files.focused {
+  border-color: rgba(var(--rgb-accent), 0.66);
+  box-shadow:
+    0 0 0 1px rgba(var(--rgb-accent), 0.24),
+    0 0 16px rgba(var(--rgb-accent), 0.18);
+}
+.terminal-pane.is-files.focused > .terminal-pane-header {
+  background: rgba(var(--rgb-accent), 0.10);
+  border-bottom-color: rgba(var(--rgb-accent), 0.24);
 }
 
 .file-view[hidden] { display: none; }
@@ -2942,8 +2970,8 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   color: var(--text-soft);
 }
 .file-editor-host .cm-editor.cm-focused {
-  outline: 1px solid var(--accent-line);
-  outline-offset: -1px;
+  outline: none;
+  box-shadow: none;
 }
 .file-editor-host .cm-scroller {
   height: 100%;

@@ -199,8 +199,14 @@
         <main class="detail" id="detail">
           <section class="terminal-area">
             <div class="terminal-host" id="terminal-host"></div>
+          </section>
+
+        </main>
+      </div>
+
+      <div id="file-surface-staging" hidden>
             <div class="file-view" id="file-view" hidden>
-              <div class="tab-strip" id="tab-strip"></div>
+              <div class="tab-strip" id="tab-strip" role="tablist" aria-label="Open files"></div>
               <div class="file-editor-toolbar" role="toolbar" aria-label="File editor actions">
                 <span class="file-language" id="file-language">Plain Text</span>
                 <span class="file-view-title" id="file-view-title">No file selected</span>
@@ -235,9 +241,6 @@
                 <span id="file-cursor" aria-label="Cursor position">Ln 1, Col 1</span>
               </div>
             </div>
-          </section>
-
-        </main>
       </div>
 
       <div id="git-surface-staging" hidden>

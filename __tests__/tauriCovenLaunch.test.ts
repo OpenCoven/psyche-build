@@ -1269,6 +1269,7 @@ describe('native Coven launch routing', () => {
       functionSource('setActiveProject'),
       {
         state,
+        guardActiveFileBoundary: async () => true,
         showTerminalView: async () => true,
         findProject: () => project,
         clearPassiveCovenPaneFocus: () => undefined,

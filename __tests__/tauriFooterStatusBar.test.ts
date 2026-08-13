@@ -849,8 +849,10 @@ describe('Tauri footer status bar shell', () => {
       /state\.env = env \|\| \{\};[\s\S]*statusController[\s\S]*statusController\.start\(\);/s
     );
     expect(mainJs).toMatch(
-      /window\.addEventListener\("beforeunload", function \(\) \{[\s\S]*saveWorkspaceNow\(\);[\s\S]*if \(statusController\) statusController\.stop\(\);[\s\S]*\}\);/s
+      /function handleWindowBeforeUnload\(event\) \{[\s\S]*saveWorkspaceNow\(\);[\s\S]*window\.addEventListener\("beforeunload", handleWindowBeforeUnload\);/s
     );
+    expect(mainJs.match(/function handleWindowBeforeUnload\(event\)[\s\S]*?\n  \}/)?.[0])
+      .not.toContain('statusController.stop()');
     expect(functionSource(mainJs, 'covenSessionsForProject')).toContain('covenSessionAssignments()');
     expect(functionSource(mainJs, 'covenSessionsForProject')).toContain('owned.get(project.id) || []');
     expect(functionSource(mainJs, 'covenSessionsForProject')).not.toContain('allSessionsByProject');

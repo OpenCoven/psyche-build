@@ -430,6 +430,8 @@ describe('Tauri agent picker', () => {
       {
         routeAgentPickerModalKeydown: () => false,
         routeGitPaneShortcut: () => false,
+        filesPaneHasCanvasFocus: () => false,
+        routeFilesShortcut: () => false,
         handleExplicitFileSave: (event: { preventDefault: () => void }) => {
           event.preventDefault();
           return Promise.resolve();
@@ -470,10 +472,50 @@ describe('Tauri agent picker', () => {
     await dispatch('t');
     await dispatch('w');
     expect(observed).toEqual([
-      { key: 's', prevented: true },
+      { key: 's', prevented: false },
       { key: 't', prevented: true },
       { key: 'w', prevented: true },
     ]);
+  });
+
+  it('prevents and dispatches non-Files shortcuts synchronously while Files owns focus', async () => {
+    let prevented = false;
+    let terminalCreates = 0;
+    const routeFilesShortcut = compileFunction<(event: Record<string, unknown>) => boolean>(
+      functionSource('routeFilesShortcut'),
+      {
+        filesPaneHasCanvasFocus: () => true,
+      },
+    );
+    const routeGlobalShortcut = compileFunction<(event: Record<string, unknown>) => Promise<unknown>>(
+      functionSource('routeGlobalShortcut'),
+      {
+        routeAgentPickerModalKeydown: () => false,
+        routeGitPaneShortcut: () => false,
+        filesPaneHasCanvasFocus: () => true,
+        routeFilesShortcut,
+        createTerminalPane: () => { terminalCreates += 1; return Promise.resolve(); },
+        openAgentPicker: () => false,
+        openProjectPicker: () => undefined,
+        state: { activeProjectId: 'project', projects: [] },
+        removeProject: () => Promise.resolve(),
+        commandInput: { focus: () => undefined },
+        openPalette: () => undefined,
+        toggleSidebar: () => undefined,
+        canvasThreadIds: () => [],
+        focusThread: () => Promise.resolve(),
+        switchTab: () => Promise.resolve(),
+        setActiveProject: () => Promise.resolve(),
+      },
+    );
+    const inFlight = routeGlobalShortcut({
+      key: 't', metaKey: true, ctrlKey: false, altKey: false, shiftKey: false,
+      preventDefault: () => { prevented = true; },
+    });
+
+    expect(prevented).toBe(true);
+    expect(terminalCreates).toBe(1);
+    await inFlight;
   });
 
   it('stops propagation for picker-owned keys, especially Escape', () => {

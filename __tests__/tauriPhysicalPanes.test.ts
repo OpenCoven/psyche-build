@@ -1778,7 +1778,7 @@ describe('Tauri physical terminal panes', () => {
     expect(stylesCss).toMatch(/\.terminal-pane-body/);
   });
 
-  it('refreshes the minimap in the empty-layout branch while a file stays active', () => {
+  it('does not render file minimap chrome when a terminal owns canvas focus', () => {
     const calls: string[] = [];
     const activeFile = { id: 'file-a' };
     const terminalHost = {
@@ -1803,9 +1803,10 @@ describe('Tauri physical terminal panes', () => {
       renderTerminalEmptyState: () => { calls.push('empty'); },
       renderPaneMinimap: (layout: unknown, file: unknown) => {
         expect(layout).toBeNull();
-        expect(file).toBe(activeFile);
+        expect(file).toBeNull();
         calls.push('minimap');
       },
+      filesPaneHasCanvasFocus: () => false,
       findOpenFile: (id: string | null) => {
         expect(id).toBe('file-a');
         return activeFile;
@@ -2297,6 +2298,7 @@ describe('Tauri physical terminal panes', () => {
       fileFocus,
       findProject: (id: string) => (id === project.id ? project : null),
       findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+      filesPaneHasCanvasFocus: () => true,
     });
     let renders = 0;
     let focused = 0;
@@ -2361,6 +2363,7 @@ describe('Tauri physical terminal panes', () => {
       fileFocus,
       findProject: (id: string) => (id === project.id ? project : null),
       findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+      filesPaneHasCanvasFocus: () => true,
     });
     let renders = 0;
     let focused = 0;
@@ -2385,6 +2388,97 @@ describe('Tauri physical terminal panes', () => {
     expect(project.selectedWorktreePath).toBe(threadB.worktreePath);
     expect(threadA.hidden).toBe(true);
     expect(renders).toBe(1);
+  });
+
+  it('focuses the next live terminal when closing a terminal with a file still selected', () => {
+    const project = { id: 'project', lastActiveThreadId: 'thread-a', selectedWorktreePath: '/repo' };
+    const threadA = {
+      id: 'thread-a', kind: 'shell', projectId: project.id, worktreePath: '/repo',
+      closeStarted: false, closing: false, startInFlight: false,
+      metricsGeneration: 0, metricsRefreshTimer: 0, term: { dispose: () => undefined },
+    };
+    const threadB = {
+      id: 'thread-b', kind: 'shell', projectId: project.id, worktreePath: '/repo',
+      closeStarted: false, closing: false, startInFlight: false,
+      metricsGeneration: 0, metricsRefreshTimer: 0, term: { dispose: () => undefined },
+    };
+    const state = {
+      threads: [threadA, threadB], activeThreadId: threadA.id as string | null,
+      activeFileId: 'file-a',
+    };
+    const retainFileFocusAfterThreadRemoval = compileFunction<
+      (removedThreadId: string, nextThreadId: string | null, projectId: string) => boolean
+    >(functionSource('retainFileFocusAfterThreadRemoval'), {
+      state,
+      filesPaneHasCanvasFocus: () => false,
+      fileFocus: { returnThreadId: threadA.id },
+      filesPanes: new Map(),
+      findProject: () => project,
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+    });
+    const focused: string[] = [];
+    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+      detachThreadPane: () => 'files-pane',
+      retainFileFocusAfterThreadRemoval,
+      canvasThreadIds: () => [threadB.id],
+      canvasSurfaceById: () => ({ id: 'files-pane', kind: 'files' }),
+      pendingDataBuffers: new Map(),
+      stopThreadPty: () => Promise.resolve(true),
+      state,
+      renderPaneWorkspace: () => undefined,
+      setProjectStatus: () => undefined,
+      findProject: () => project,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      focusThread: (id: string) => { focused.push(id); return true; },
+    });
+
+    expect(closeThread(threadA.id)).toBe(true);
+    expect(focused).toEqual([threadB.id]);
+    expect(state.activeThreadId).toBeNull();
+  });
+
+  it('focuses the next live terminal when hiding a terminal with a file still selected', () => {
+    const threadA = {
+      id: 'thread-a', kind: 'shell', projectId: 'project', worktreePath: '/repo',
+      hidden: false, metricsGeneration: 0, metricsRefreshTimer: 0,
+    };
+    const threadB = {
+      id: 'thread-b', kind: 'shell', projectId: 'project', worktreePath: '/repo',
+      hidden: false, metricsGeneration: 0, metricsRefreshTimer: 0,
+    };
+    const state = {
+      threads: [threadA, threadB], activeThreadId: threadA.id as string | null,
+      activeFileId: 'file-a',
+    };
+    const retainFileFocusAfterThreadRemoval = compileFunction<
+      (removedThreadId: string, nextThreadId: string | null, projectId: string) => boolean
+    >(functionSource('retainFileFocusAfterThreadRemoval'), {
+      state,
+      filesPaneHasCanvasFocus: () => false,
+      fileFocus: { returnThreadId: threadA.id },
+      filesPanes: new Map(),
+      findProject: () => null,
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+    });
+    const focused: string[] = [];
+    const hideThread = compileFunction<(id: string) => boolean>(functionSource('hideThread'), {
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+      detachThreadPane: () => 'files-pane',
+      retainFileFocusAfterThreadRemoval,
+      canvasThreadIds: () => [threadB.id],
+      state,
+      focusThread: (id: string) => { focused.push(id); return true; },
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+    });
+
+    expect(hideThread(threadA.id)).toBe(true);
+    expect(focused).toEqual([threadB.id]);
+    expect(state.activeThreadId).toBeNull();
   });
 
   it('clears file-focus project metadata when there is no replacement pane', () => {
@@ -2416,6 +2510,7 @@ describe('Tauri physical terminal panes', () => {
       fileFocus,
       findProject: (id: string) => (id === project.id ? project : null),
       findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+      filesPaneHasCanvasFocus: () => true,
     });
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
       forgetThreadInSets: () => undefined,
@@ -2550,6 +2645,7 @@ describe('Tauri physical terminal panes', () => {
     const activateProjectWorktree = compileFunction<(
       value: typeof project, path: string,
     ) => Promise<boolean>>(functionSource('activateProjectWorktree'), {
+      guardActiveFileBoundary: async () => true,
       showTerminalView: async () => true,
       state,
       setActiveProject: async () => true,
@@ -2597,6 +2693,7 @@ describe('Tauri physical terminal panes', () => {
     const activateProjectWorktree = compileFunction<(
       value: typeof project, path: string,
     ) => Promise<boolean>>(functionSource('activateProjectWorktree'), {
+      guardActiveFileBoundary: async () => true,
       showTerminalView: async () => true,
       state,
       setActiveProject: async () => true,
@@ -2647,6 +2744,7 @@ describe('Tauri physical terminal panes', () => {
       callOptions?: Record<string, unknown>,
     ) => Promise<boolean>>(functionSource('setActiveProject'), {
       state,
+      guardActiveFileBoundary: async () => true,
       showTerminalView: async () => true,
       findProject: () => project,
       restoreProjectLayout: () => undefined,
@@ -2736,6 +2834,7 @@ describe('Tauri physical terminal panes', () => {
       callOptions?: Record<string, unknown>,
     ) => Promise<boolean>>(functionSource('setActiveProject'), {
       state,
+      guardActiveFileBoundary: async () => true,
       showTerminalView: async () => true,
       findProject: () => project,
       restoreProjectLayout: () => undefined,
@@ -2925,6 +3024,7 @@ describe('Tauri physical terminal panes', () => {
       callOptions?: Record<string, unknown>,
     ) => Promise<boolean>>(functionSource('setActiveProject'), {
       state,
+      guardActiveFileBoundary: async () => true,
       showTerminalView: async () => true,
       findProject: () => project,
       restoreProjectLayout: () => undefined,
@@ -3142,7 +3242,7 @@ describe('Tauri physical terminal panes', () => {
       };
     }
 
-    it('resolves the recorded return pane, then focused pane, then first pane', () => {
+    it('resolves the recorded return pane, then an available pane when Files is absent', () => {
       const layout: Layout = { root: tree(), focusedLeafId: 'leaf-b' };
       const threads = new Map([
         ['thread-a', {
@@ -3168,6 +3268,7 @@ describe('Tauri physical terminal panes', () => {
         activeWorkspaceRoot: () => '/repo',
         activePaneLayout: () => layout,
         scopedPaneRoot: (value: Layout) => value.root,
+        activeFilesPane: () => null,
         findThread: (id: string) => threads.get(id) || null,
         PsychePanes,
         fileFocusThreadIsAvailable,
