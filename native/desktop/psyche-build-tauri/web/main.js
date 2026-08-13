@@ -168,6 +168,134 @@
   function activeProject() {
     return findProject(state.activeProjectId) || state.projects[0] || null;
   }
+  var agentControlModel = null;
+  var agentControlOwnerEpoch = null;
+  var agentControlPollTimer = null;
+
+  function agentControlCommand(project, command) {
+    return invoke("control_operator_submit", { projectRoot: project.root, command: command }).then(function (response) {
+      var outcome = response && response.outcome;
+      if (!outcome || outcome.status !== "succeeded") {
+        var error = new Error(outcome && outcome.message || "operator command failed");
+        error.code = outcome && outcome.code;
+        throw error;
+      }
+      return outcome;
+    });
+  }
+
+  function updateAgentControlBadges() {
+    document.querySelectorAll(".agent-control-badge").forEach(function (badge) { badge.remove(); });
+    if (!agentControlModel || !window.PsycheControl) return;
+    document.querySelectorAll(".terminal-pane[data-thread-id]").forEach(function (pane) {
+      var threadId = pane.dataset.threadId;
+      var badge = agentControlModel.badges.find(function (item) {
+        return item.kind === "pane" && item.id === threadId;
+      });
+      var header = pane.querySelector(".terminal-pane-header");
+      if (!badge || !header) return;
+      var node = document.createElement("span");
+      node.className = "agent-control-badge";
+      node.textContent = "leased";
+      node.setAttribute("aria-label", "Leased to " + badge.agentId + " for " + badge.taskId + " until " + badge.expiresAt);
+      node.dataset.leaseId = badge.leaseId;
+      node.dataset.leaseRevision = String(badge.revision);
+      header.appendChild(node);
+    });
+    document.querySelectorAll(".browser-tab[data-tab-id]").forEach(function (tabNode) {
+      var badge = agentControlModel.badges.find(function (item) {
+        return item.kind === "browser_tab" && item.id === tabNode.dataset.tabId;
+      });
+      if (!badge) return;
+      var node = document.createElement("span");
+      node.className = "agent-control-badge";
+      node.textContent = "leased";
+      node.setAttribute("aria-label", "Leased to " + badge.agentId + " for " + badge.taskId + " until " + badge.expiresAt);
+      node.dataset.leaseId = badge.leaseId;
+      node.dataset.leaseRevision = String(badge.revision);
+      tabNode.appendChild(node);
+    });
+  }
+
+  function renderAgentControl() {
+    var content = document.getElementById("agent-control-content");
+    var count = document.getElementById("agent-control-count");
+    if (count) {
+      count.textContent = String(agentControlModel ? agentControlModel.pendingCount : 0);
+      count.hidden = !agentControlModel || agentControlModel.pendingCount === 0;
+    }
+    updateAgentControlBadges();
+    if (!content || !agentControlModel || !window.PsycheControl) return;
+    var project = activeProject();
+    window.PsycheControl.renderAgentControlDrawer(content, agentControlModel, {
+      onGrant: function (request) {
+        return agentControlCommand(project, {
+          type: "lease_grant", requestId: request.requestId, actorId: request.agentId,
+          taskId: request.taskId, ttlMs: request.ttlMs,
+          grants: request.resources.map(function (resource) {
+            return { target: { kind: resource.kind, id: resource.id, generation: resource.generation }, capabilities: resource.capabilities };
+          }),
+        }).then(refreshAgentControlState);
+      },
+      onDeny: function (approval) {
+        return agentControlCommand(project, {
+          type: "approval_resolve", approvalId: approval.approvalId,
+          payloadDigest: approval.payloadDigest, decision: "deny",
+        }).then(refreshAgentControlState);
+      },
+      onApprove: function (approval) {
+        return agentControlCommand(project, {
+          type: "approval_resolve", approvalId: approval.approvalId,
+          payloadDigest: approval.payloadDigest, decision: "approve",
+        }).then(refreshAgentControlState);
+      },
+      onRevoke: function (lease) {
+        return agentControlCommand(project, { type: "lease_revoke", leaseId: lease.leaseId })
+          .then(refreshAgentControlState);
+      },
+    });
+  }
+
+  function refreshAgentControlState() {
+    var project = activeProject();
+    if (!project || !window.PsycheControl) return Promise.resolve(null);
+    return invoke("control_state", { projectRoot: project.root }).then(function (response) {
+      var snapshot = response && response.snapshot ? response.snapshot : response;
+      agentControlModel = window.PsycheControl.createAgentControlModel(snapshot || {}, {
+        operator: true,
+        previousOwnerEpoch: agentControlOwnerEpoch,
+      });
+      agentControlOwnerEpoch = agentControlModel.ownerEpoch;
+      renderAgentControl();
+      return agentControlModel;
+    }).catch(function () {
+      agentControlModel = null;
+      renderAgentControl();
+      return null;
+    });
+  }
+
+  function installAgentControlUi() {
+    var toggle = document.getElementById("agent-control-toggle");
+    var overlay = document.getElementById("agent-control-overlay");
+    var close = document.getElementById("agent-control-close");
+    if (!toggle || !overlay || !close) return;
+    var hide = function () {
+      overlay.hidden = true;
+      toggle.setAttribute("aria-expanded", "false");
+      toggle.focus();
+    };
+    toggle.addEventListener("click", function () {
+      overlay.hidden = false;
+      toggle.setAttribute("aria-expanded", "true");
+      void refreshAgentControlState().then(function () { close.focus(); });
+    });
+    close.addEventListener("click", hide);
+    overlay.addEventListener("click", function (event) { if (event.target === overlay) hide(); });
+    overlay.addEventListener("keydown", function (event) { if (event.key === "Escape") hide(); });
+    void refreshAgentControlState();
+    agentControlPollTimer = setInterval(refreshAgentControlState, 2000);
+  }
   function mergeWorktreePresentationState(project, discovered) {
     var existing = Array.isArray(project.worktrees) ? project.worktrees : [];
     return (Array.isArray(discovered) ? discovered : []).map(function (worktree) {
@@ -9115,6 +9243,7 @@
     browser.tabs.forEach(function (tab) {
       var btn = document.createElement("button");
       btn.className = "browser-tab" + (tab.id === browser.activeTabId ? " active" : "") + (tab.loading ? " loading" : "");
+      btn.dataset.tabId = tab.id;
       btn.title = tab.url || "New tab";
       btn.innerHTML = '<span class="browser-tab-favicon" aria-hidden="true"></span><span class="browser-tab-title">' + escapeHtml(tab.title || "New tab") + '</span><span class="browser-tab-close">×</span>';
       btn.addEventListener("click", async function (event) { if (event.target && event.target.classList.contains("browser-tab-close")) await closeBrowserTab(project, tab.id); else await activateBrowserTab(project, tab.id); });
@@ -10606,6 +10735,7 @@
     syncProjectBrowser();
     saveWorkspaceSoon();
     startCovenPolling();
+    installAgentControlUi();
     if (typeof refreshStatusController === "function") refreshStatusController();
     return project;
   }

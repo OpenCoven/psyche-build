@@ -25,6 +25,14 @@
           <span class="daemon-dot" id="daemon-dot"></span>
           <span class="daemon-label" id="daemon-label">psyche · local</span>
         </span>
+        <button
+          id="agent-control-toggle"
+          class="chrome-btn agent-control-toggle"
+          type="button"
+          aria-haspopup="dialog"
+          aria-expanded="false"
+          aria-controls="agent-control-drawer"
+        >Agent control <span id="agent-control-count" hidden>0</span></button>
         <span class="titlebar-sep" aria-hidden="true"></span>
         <span class="status-pill" id="shell-status" hidden>starting…</span>
         <button
@@ -464,6 +472,26 @@
       </div>
 
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+      <div class="agent-control-overlay" id="agent-control-overlay" hidden>
+        <section
+          id="agent-control-drawer"
+          class="agent-control-drawer"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="agent-control-title"
+        >
+          <header class="agent-control-head">
+            <div>
+              <h2 id="agent-control-title">Agent control</h2>
+              <p>Review requested authority, approve one action, or revoke a lease immediately.</p>
+            </div>
+            <button id="agent-control-close" type="button" aria-label="Close Agent control">×</button>
+          </header>
+          <p class="agent-control-limitation">Application-defined effects behind a generic click cannot be perfectly predicted.</p>
+          <div id="agent-control-content"></div>
+        </section>
+      </div>
 
       <div class="help-overlay" id="help-overlay" hidden>
         <div class="help-card" role="dialog" aria-modal="true" aria-labelledby="help-title">

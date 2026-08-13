@@ -323,6 +323,8 @@ export interface ControlSnapshot {
     taskId: string;
     status: 'pending' | 'granted' | 'released' | 'revoked';
     createdAt: string;
+    ttlMs: number;
+    grants: readonly LeaseGrant[];
   }[];
   approvals: readonly Approval[];
   receipts: readonly ActionReceipt[];

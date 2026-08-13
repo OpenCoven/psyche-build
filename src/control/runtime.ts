@@ -18,6 +18,7 @@ import type {
   CommandRecord,
   ControlCommand,
   ControlSnapshot,
+  LeaseGrant,
   PromptEnvelope,
 } from './types.js';
 
@@ -83,6 +84,8 @@ interface LeaseRequestRecord {
   taskId: string;
   status: 'pending' | 'granted' | 'released' | 'revoked';
   createdAt: string;
+  ttlMs: number;
+  grants: readonly LeaseGrant[];
 }
 
 interface SurfaceActionContext {
@@ -360,6 +363,10 @@ export class ControlRuntime {
           const request: LeaseRequestRecord = {
             id: command.id, actorId: command.actor.id, taskId: command.payload.taskId,
             status: 'pending', createdAt: command.createdAt,
+            ttlMs: command.payload.ttlMs,
+            grants: command.payload.grants.map((grant) => ({
+              target: { ...grant.target }, capabilities: [...grant.capabilities],
+            })),
           };
           this.leaseRequests.set(request.id, request);
           while (this.leaseRequests.size > MAX_COMMAND_RECORDS) {
