@@ -20,19 +20,15 @@ function recordingControl() {
 }
 
 describe('TmuxControl pane commands', () => {
-  it('builds quoted commands for a real pane id', () => {
+  it('builds quoted fire-and-forget commands for a real pane id', () => {
     const { tmux, commands } = recordingControl();
 
     tmux.selectPane('%3');
-    tmux.killPane('%7');
     tmux.resizePane('%7', 100, 30);
-    tmux.sendKeysHex('%7', Buffer.from([0x61, 0x0d]));
 
     expect(commands).toEqual([
       "select-pane -t '%3'",
-      "kill-pane -t '%7'",
       "resize-pane -t '%7' -x 100 -y 30",
-      "send-keys -t '%7' -H 61 0d",
     ]);
   });
 
@@ -179,9 +175,10 @@ function createFakeControlProcess() {
       emit(`%begin 0 ${number} 0`);
       emit(`%end 0 ${number} 0`);
     },
-    acknowledgeNext() {
+    acknowledgeNext(lines: readonly string[] = []) {
       const number = String(nextNumber++);
       emit(`%begin 0 ${number} 0`);
+      for (const line of lines) emit(line);
       emit(`%end 0 ${number} 0`);
     },
     errorNext() {
@@ -208,6 +205,51 @@ function startControl() {
 }
 
 describe('TmuxControl acknowledged submission', () => {
+  it('captures bounded command output from its acknowledgement block', async () => {
+    const { fake, tmux } = startControl();
+
+    const pending = tmux.executeCommandWithOutput("display-message -p -t '%3' '#{pane_width} #{pane_height}'");
+    await tick();
+    fake.acknowledgeNext(['120 40']);
+
+    await expect(pending).resolves.toEqual(['120 40']);
+  });
+
+  it('sendKeysHex acknowledges exact UTF-8 bytes sent as hex', async () => {
+    const { fake, tmux } = startControl();
+
+    const pending = tmux.sendKeysHex('%3', Buffer.from('hi 🧪', 'utf8'));
+    await tick();
+    expect(fake.commands()).toEqual([
+      "send-keys -t '%3' -H 68 69 20 f0 9f a7 aa",
+    ]);
+    fake.acknowledgeNext();
+
+    await expect(pending).resolves.toBeUndefined();
+  });
+
+  it('marks sendKeysHex ambiguous when the connection drops after dispatch', async () => {
+    const { fake, tmux } = startControl();
+
+    const pending = tmux.sendKeysHex('%3', Buffer.from('x', 'utf8'));
+    await tick();
+    expect(fake.commands()).toEqual(["send-keys -t '%3' -H 78"]);
+    fake.disconnect();
+
+    await expect(pending).rejects.toMatchObject({ ambiguous: true });
+  });
+
+  it('acknowledges killPane through the public pane seam', async () => {
+    const { fake, tmux } = startControl();
+
+    const pending = tmux.killPane('%3');
+    await tick();
+    expect(fake.commands()).toEqual(["kill-pane -t '%3'"]);
+    fake.acknowledgeNext();
+
+    await expect(pending).resolves.toBeUndefined();
+  });
+
   it('waits for tmux acknowledgement of text and Enter', async () => {
     const { fake, tmux } = startControl();
 

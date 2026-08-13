@@ -10,6 +10,49 @@ import type { PaneSummary } from './protocol.js';
  * the daemon is scoped to one project root (passed in from the CLI).
  */
 export async function listPanes(projectRoot: string): Promise<PaneSummary[]> {
+  const panes = await readPaneRecords(projectRoot);
+  return panes.map((p): PaneSummary => {
+    const tmuxId = String(p.paneId ?? p.id ?? '');
+    const fallbackTitle =
+      typeof p.title === 'string' ? p.title :
+      typeof p.slug === 'string' ? p.slug :
+      typeof p.id === 'string' ? p.id : undefined;
+    return {
+      id: tmuxId,
+      cwd: String(p.worktreePath ?? p.worktreeDir ?? p.cwd ?? projectRoot),
+      branch: typeof p.branchName === 'string' ? p.branchName : typeof p.branch === 'string' ? p.branch : undefined,
+      agent: typeof p.agent === 'string' ? p.agent : undefined,
+      title: fallbackTitle,
+      lastActivity: typeof p.lastUpdated === 'string' ? p.lastUpdated : undefined,
+    };
+  }).filter((p) => p.id);
+}
+
+export interface PaneSurfaceBinding {
+  id: string;
+  tmuxPaneId: string;
+  worktreeRoot: string;
+  title?: string;
+  agent?: string;
+}
+
+export async function listPaneSurfaceBindings(projectRoot: string): Promise<PaneSurfaceBinding[]> {
+  const panes = await readPaneRecords(projectRoot);
+  return panes.flatMap((pane) => {
+    const id = String(pane.id ?? pane.paneId ?? '');
+    const tmuxPaneId = String(pane.paneId ?? '');
+    if (!id || !tmuxPaneId) return [];
+    return [{
+      id,
+      tmuxPaneId,
+      worktreeRoot: String(pane.worktreePath ?? pane.worktreeDir ?? pane.cwd ?? projectRoot),
+      ...(typeof pane.title === 'string' ? { title: pane.title } : {}),
+      ...(typeof pane.agent === 'string' ? { agent: pane.agent } : {}),
+    }];
+  });
+}
+
+async function readPaneRecords(projectRoot: string): Promise<Array<Record<string, unknown>>> {
   const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
 
   let raw: string;
@@ -30,25 +73,7 @@ export async function listPanes(projectRoot: string): Promise<PaneSummary[]> {
   if (!config.panes || !Array.isArray(config.panes)) {
     return [];
   }
-
-  // `id` must be the tmux pane identifier (`%3`) because every downstream
-  // op (send-keys, capture-pane, resize-pane) keys on it. The psyche-internal
-  // id (`psyche-2`) falls back as `title` so the rail has something readable.
-  return config.panes.map((p): PaneSummary => {
-    const tmuxId = String(p.paneId ?? p.id ?? '');
-    const fallbackTitle =
-      typeof p.title === 'string' ? p.title :
-      typeof p.slug === 'string' ? p.slug :
-      typeof p.id === 'string' ? p.id : undefined;
-    return {
-      id: tmuxId,
-      cwd: String(p.worktreePath ?? p.worktreeDir ?? p.cwd ?? projectRoot),
-      branch: typeof p.branchName === 'string' ? p.branchName : typeof p.branch === 'string' ? p.branch : undefined,
-      agent: typeof p.agent === 'string' ? p.agent : undefined,
-      title: fallbackTitle,
-      lastActivity: typeof p.lastUpdated === 'string' ? p.lastUpdated : undefined,
-    };
-  }).filter((p) => p.id);
+  return config.panes;
 }
 
 /**

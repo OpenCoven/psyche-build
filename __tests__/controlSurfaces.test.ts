@@ -85,6 +85,20 @@ describe('SurfaceRegistry', () => {
     expect(replacement.generation).toBe(first.generation + 1);
   });
 
+  it('removes an exited pane and increments generation if its id returns', () => {
+    const registry = new SurfaceRegistry();
+    const input = {
+      id: 'pane-1', tmuxPaneId: '%3', projectRoot: '/repo', worktreeRoot: '/repo',
+      writable: true, outputSequence: 0,
+    };
+    const first = registry.upsertPane(input);
+
+    expect(registry.remove('pane-1')).toBe(first);
+    expect(registry.list()).toEqual([]);
+    expect(registry.upsertPane({ ...input, tmuxPaneId: '%4' }).generation)
+      .toBe(first.generation + 1);
+  });
+
   it('does not retain caller aliases or expose mutable registry records', () => {
     const registry = new SurfaceRegistry();
     const viewport = { width: 800, height: 600 };

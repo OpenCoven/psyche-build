@@ -12,10 +12,11 @@ import {
  * Thin wrapper around `tmux -C attach-session` (tmux control mode).
  *
  * One subprocess per tmux session. Parses `%output`, `%exit`, and
- * `%window-close` events. Fire-and-forget ops (`command`, `sendKeysHex`,
- * `resizePane`, ...) write a command and move on. `executeCommand`/`sendPrompt`
- * instead correlate the `%begin/%end/%error` acknowledgement block so prompt
- * submission is integrity-checked and safe against replay on an ambiguous drop.
+ * `%window-close` events. Legacy UI ops (`command`, `resizePane`, ...) remain
+ * fire-and-forget. Effectful agent-facing seams (`sendKeysHex`, `killPane`,
+ * `executeCommand`, and `sendPrompt`) correlate the `%begin/%end/%error`
+ * acknowledgement block so dispatch is integrity-checked and safe against
+ * replay on an ambiguous drop.
  *
  * Originally lifted from meow/psyche-daemon-ws commit cda47c5 per
  * docs/superpowers/plans/2026-04-25-psyche-bridge-daemon.md, then copied a
@@ -34,8 +35,11 @@ export interface TmuxControlOptions {
 }
 
 interface AckWaiter {
-  resolve: () => void;
+  resolve: (lines: readonly string[]) => void;
   reject: (error: Error & { ambiguous?: boolean }) => void;
+  readonly lines: string[];
+  outputBytes: number;
+  outputTooLarge: boolean;
 }
 
 export class TmuxControl extends EventEmitter {
@@ -56,6 +60,7 @@ export class TmuxControl extends EventEmitter {
    */
   private commandTail: Promise<void> = Promise.resolve();
   private readonly ackQueue: Array<AckWaiter | null> = [];
+  private activeAck: AckWaiter | null | undefined;
 
   /**
    * Attaching in control mode emits one unsolicited `%begin/%end` block for the
@@ -137,14 +142,24 @@ export class TmuxControl extends EventEmitter {
    * have applied them.
    */
   executeCommand(line: string): Promise<void> {
+    return this.executeCommandWithOutput(line).then(() => undefined);
+  }
+
+  executeCommandWithOutput(line: string): Promise<readonly string[]> {
     assertSingleTmuxCommandLine(line);
     const run = () =>
-      new Promise<void>((resolve, reject) => {
+      new Promise<readonly string[]>((resolve, reject) => {
         if (!this.proc) {
           reject(new Error('tmux control mode not started'));
           return;
         }
-        const waiter: AckWaiter = { resolve, reject };
+        const waiter: AckWaiter = {
+          resolve,
+          reject,
+          lines: [],
+          outputBytes: 0,
+          outputTooLarge: false,
+        };
         this.ackQueue.push(waiter);
         this.proc.stdin.write(`${line}\n`, (error) => {
           if (!error) return;
@@ -154,7 +169,7 @@ export class TmuxControl extends EventEmitter {
         });
       });
     const result = this.commandTail.then(run, run);
-    this.commandTail = result.catch(() => {});
+    this.commandTail = result.then(() => undefined, () => undefined);
     return result;
   }
 
@@ -179,11 +194,10 @@ export class TmuxControl extends EventEmitter {
     }
   }
 
-  sendKeysHex(paneId: string, data: Buffer): void {
+  sendKeysHex(paneId: string, data: Buffer): void | Promise<void> {
     const target = assertTmuxPaneId(paneId);
-    if (data.length === 0) return;
-    const hex = Array.from(data, (b) => b.toString(16).padStart(2, '0')).join(' ');
-    this.command(`send-keys -t ${quote(target)} -H ${hex}`);
+    if (data.length === 0) return Promise.resolve();
+    return this.executeCommand(`send-keys -t ${quote(target)} -H ${hexBytes(data)}`);
   }
 
   resizePane(paneId: string, cols: unknown, rows: unknown): void {
@@ -197,8 +211,9 @@ export class TmuxControl extends EventEmitter {
     this.command(`select-pane -t ${quote(assertTmuxPaneId(paneId))}`);
   }
 
-  killPane(paneId: string): void {
-    this.command(`kill-pane -t ${quote(assertTmuxPaneId(paneId))}`);
+  killPane(paneId: string): void | Promise<void> {
+    const target = assertTmuxPaneId(paneId);
+    return this.executeCommand(`kill-pane -t ${quote(target)}`);
   }
 
   private onStdout(chunk: string): void {
@@ -212,7 +227,17 @@ export class TmuxControl extends EventEmitter {
   }
 
   private onLine(line: string): void {
-    if (!line.startsWith('%')) return;
+    if (!line.startsWith('%')) {
+      if (this.activeAck) {
+        this.activeAck.outputBytes += Buffer.byteLength(line, 'utf8');
+        if (this.activeAck.outputBytes <= TMUX_COMMAND_OUTPUT_BYTES) {
+          this.activeAck.lines.push(line);
+        } else {
+          this.activeAck.outputTooLarge = true;
+        }
+      }
+      return;
+    }
 
     // %output %<paneId> <octal-escaped-bytes>
     if (line.startsWith('%output ')) {
@@ -240,6 +265,7 @@ export class TmuxControl extends EventEmitter {
     // Every command produces exactly one block, delivered in send order, so the
     // front of ackQueue is the block being closed. %begin only opens the block.
     if (line.startsWith('%begin')) {
+      this.activeAck = this.attachAckConsumed ? this.ackQueue[0] : undefined;
       return;
     }
     if (line.startsWith('%end') || line.startsWith('%error')) {
@@ -247,18 +273,30 @@ export class TmuxControl extends EventEmitter {
       // a client command, so consume it without touching the queue.
       if (!this.attachAckConsumed) {
         this.attachAckConsumed = true;
+        this.activeAck = undefined;
         return;
       }
       const waiter = this.ackQueue.shift();
+      this.activeAck = undefined;
       if (!waiter) return; // fire-and-forget block (null) or an unexpected extra
       if (line.startsWith('%error')) {
         waiter.reject(new Error(`tmux command failed: ${line}`));
+      } else if (waiter.outputTooLarge) {
+        waiter.reject(Object.assign(new Error('tmux command output exceeds limit'), {
+          code: 'output_truncated',
+        }));
       } else {
-        waiter.resolve();
+        waiter.resolve(waiter.lines);
       }
       return;
     }
   }
+}
+
+const TMUX_COMMAND_OUTPUT_BYTES = 64 * 1024;
+
+function hexBytes(data: Buffer): string {
+  return Array.from(data, (byte) => byte.toString(16).padStart(2, '0')).join(' ');
 }
 
 /**

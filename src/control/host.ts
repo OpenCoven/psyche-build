@@ -15,6 +15,7 @@ export interface HostControlPlane {
 
 export interface HostControlPlaneOptions {
   handlers: ControlHandlers;
+  surfaces?: SurfaceRegistry;
   ownerLock?: typeof acquireOwnerLock;
   journalOpen?: typeof ControlJournal.open;
   bootstrap?: (projectRoot: string) => Promise<void>;
@@ -36,7 +37,7 @@ export async function createHostControlPlane(
       ownerEpoch: lock.epoch,
       handlers: options.handlers,
       journal,
-      surfaces: new SurfaceRegistry(),
+      surfaces: options.surfaces ?? new SurfaceRegistry(),
       capabilityLeases: new CapabilityLeaseStore(undefined, lock.epoch),
       approvals: new ApprovalStore(),
     });

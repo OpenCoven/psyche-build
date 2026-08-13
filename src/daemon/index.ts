@@ -1,9 +1,9 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { readOrCreateToken, tokenFilePath } from './token.js';
-import { listPanes, capturePaneSync } from './panes.js';
+import { listPaneSurfaceBindings, listPanes, capturePaneSync } from './panes.js';
 import {
   PROTOCOL_VERSION,
   type ClientRequest,
@@ -37,6 +37,8 @@ import { ControlServer } from '../control/server.js';
 import { createControlCredentialStore } from '../control/credentials.js';
 import { controlEndpointForProject } from '../control/endpoint.js';
 import { createDaemonControlHandlers } from './controlHandlers.js';
+import { PaneObservationStore } from '../control/resources/paneObservation.js';
+import { SurfaceRegistry, type PaneSurface } from '../control/surfaces.js';
 import type { ControlActorKind, ControlCommand, CommandOutcome } from '../control/types.js';
 import {
   AgenticCapabilityRouter,
@@ -81,6 +83,58 @@ export const MAX_STREAMS_PER_CONNECTION = 64;
 export const MAX_BATCH_LANES = 16;
 export const MAX_IDEMPOTENT_SPAWNS = 128;
 
+async function refreshPaneSurfaces(
+  projectRoot: string,
+  surfaces: SurfaceRegistry,
+  observations: PaneObservationStore,
+): Promise<readonly PaneSurface[]> {
+  const panes = await listPaneSurfaceBindings(projectRoot);
+  const seen = new Set(panes.map((pane) => pane.id));
+  for (const pane of panes) {
+    const previous = surfaces.get(pane.id);
+    surfaces.upsertPane({
+      id: pane.id,
+      tmuxPaneId: pane.tmuxPaneId,
+      projectRoot,
+      worktreeRoot: pane.worktreeRoot,
+      title: pane.title,
+      agent: pane.agent,
+      writable: true,
+      outputSequence: previous?.kind === 'pane' ? previous.outputSequence : 0,
+    });
+  }
+  for (const resource of surfaces.list()) {
+    if (resource.kind !== 'pane' || seen.has(resource.id)) continue;
+    surfaces.remove(resource.id);
+    observations.clear(resource.id);
+  }
+  return surfaces.list().filter((resource): resource is PaneSurface => resource.kind === 'pane');
+}
+
+function invalidatePaneSurfaces(
+  surfaces: SurfaceRegistry,
+  observations: PaneObservationStore,
+): void {
+  for (const resource of surfaces.list()) {
+    if (resource.kind !== 'pane') continue;
+    surfaces.remove(resource.id);
+    observations.clear(resource.id);
+  }
+}
+
+export function installDaemonPaneLifecycleHooks(
+  sessionName: string,
+  pid = process.pid,
+  run: typeof execFileSync = execFileSync,
+): void {
+  const notify = `run-shell "kill -USR2 ${pid} 2>/dev/null || true # psyche-daemon-control"`;
+  for (const hook of ['pane-exited', 'after-split-window'] as const) {
+    run('tmux', [
+      'set-hook', '-t', sessionName, `${hook}[987654321]`, notify,
+    ], { stdio: 'ignore' });
+  }
+}
+
 export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void> {
   const projectRoot = opts.projectRoot ?? findGitRoot() ?? process.cwd();
   const port = opts.port ?? DEFAULT_PORT;
@@ -113,13 +167,56 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   // project owner fence before accepting any connection; a failed acquire must
   // fail startup loudly rather than fall back to unfenced mutation.
   const canonicalProjectRoot = await canonicalizeProjectRoot(projectRoot);
+  const paneObservations = new PaneObservationStore();
+  const surfaces = new SurfaceRegistry();
+  await refreshPaneSurfaces(canonicalProjectRoot, surfaces, paneObservations);
+  const handlePaneLifecycleSignal = (): void => {
+    invalidatePaneSurfaces(surfaces, paneObservations);
+    void refreshPaneSurfaces(canonicalProjectRoot, surfaces, paneObservations).catch((error) => {
+      // eslint-disable-next-line no-console
+      console.error(`[daemon] failed to refresh pane surfaces: ${String(error)}`);
+    });
+  };
+  process.on('SIGUSR2', handlePaneLifecycleSignal);
+  try {
+    if (tmuxSessionExists(sessionName)) {
+      installDaemonPaneLifecycleHooks(sessionName);
+    }
+  } catch (error) {
+    process.off('SIGUSR2', handlePaneLifecycleSignal);
+    throw error;
+  }
+  tmux.on('output', (tmuxPaneId: string, data: Buffer) => {
+    const pane = surfaces.list().find(
+      (resource) => resource.kind === 'pane' && resource.tmuxPaneId === tmuxPaneId,
+    );
+    if (!pane || pane.kind !== 'pane') return;
+    const outputSequence = paneObservations.append(pane.id, data);
+    surfaces.upsertPane({ ...pane, outputSequence });
+  });
+  tmux.on('windowClose', () => {
+    handlePaneLifecycleSignal();
+  });
+  tmux.on('tmuxExit', () => {
+    invalidatePaneSurfaces(surfaces, paneObservations);
+  });
   const controlHandlers = createDaemonControlHandlers({
     tmux,
     projectRoot: canonicalProjectRoot,
     sessionName,
     capabilityRouter,
+    paneObservations,
+    surfaces,
+    refreshPaneSurfaces: () => refreshPaneSurfaces(
+      canonicalProjectRoot,
+      surfaces,
+      paneObservations,
+    ),
   });
-  const host = await createHostControlPlane(canonicalProjectRoot, { handlers: controlHandlers });
+  const host = await createHostControlPlane(canonicalProjectRoot, {
+    handlers: controlHandlers,
+    surfaces,
+  });
 
   // Mount the canonical control socket alongside the v0 WebSocket. Both share
   // the one host runtime, so every mutation — from either transport — passes
@@ -140,6 +237,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       credentials: controlCredentials,
     });
   } catch (error) {
+    process.off('SIGUSR2', handlePaneLifecycleSignal);
     await host.close().catch(() => undefined);
     throw error;
   }
@@ -194,6 +292,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   const shutdown = (signal: string) => {
     // eslint-disable-next-line no-console
     console.log(`\npsyche daemon shutting down (${signal})`);
+    process.off('SIGUSR2', handlePaneLifecycleSignal);
     tmux.stop();
     wss.close();
     // Close the control socket before releasing the owner fence. host.close()

@@ -1,9 +1,9 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { listPanes } from '../../src/daemon/panes.js';
-import { updatePaneMeta } from '../../src/daemon/index.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { listPaneSurfaceBindings, listPanes } from '../../src/daemon/panes.js';
+import { installDaemonPaneLifecycleHooks, updatePaneMeta } from '../../src/daemon/index.js';
 
 let tempRoots: string[] = [];
 
@@ -22,6 +22,19 @@ afterEach(async () => {
 });
 
 describe('daemon pane config helpers', () => {
+  it('installs additive real tmux hooks for split and exit refresh signals', () => {
+    const run = vi.fn();
+
+    installDaemonPaneLifecycleHooks('psyche-test', 1234, run as never);
+
+    expect(run.mock.calls).toEqual([
+      ['tmux', ['set-hook', '-t', 'psyche-test', 'pane-exited[987654321]',
+        'run-shell "kill -USR2 1234 2>/dev/null || true # psyche-daemon-control"'], { stdio: 'ignore' }],
+      ['tmux', ['set-hook', '-t', 'psyche-test', 'after-split-window[987654321]',
+        'run-shell "kill -USR2 1234 2>/dev/null || true # psyche-daemon-control"'], { stdio: 'ignore' }],
+    ]);
+  });
+
   it('lists tmux pane identifiers while preserving psyche ids as fallback titles', async () => {
     const root = await writeConfig({
       panes: [
@@ -45,6 +58,20 @@ describe('daemon pane config helpers', () => {
         lastActivity: undefined,
       },
     ]);
+  });
+
+  it('projects stable Psyche ids separately from replaceable tmux bindings', async () => {
+    const root = await writeConfig({
+      panes: [{
+        id: 'psyche-2', paneId: '%3', worktreeDir: '/repo/worktree',
+        title: 'Agent', agent: 'codex',
+      }],
+    });
+
+    await expect(listPaneSurfaceBindings(root)).resolves.toEqual([{
+      id: 'psyche-2', tmuxPaneId: '%3', worktreeRoot: '/repo/worktree',
+      title: 'Agent', agent: 'codex',
+    }]);
   });
 
   it('updates pane metadata by tmux pane id from panes.list results', async () => {

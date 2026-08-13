@@ -83,6 +83,12 @@ export class SurfaceRegistry {
     return Object.freeze([...this.resources.values()]);
   }
 
+  remove(id: string): SurfaceResource | undefined {
+    const resource = this.resources.get(id);
+    if (resource) this.resources.delete(id);
+    return resource;
+  }
+
   removeByProvider(providerId: string): readonly BrowserTabSurface[] {
     const removed: BrowserTabSurface[] = [];
     for (const [id, resource] of this.resources) {
