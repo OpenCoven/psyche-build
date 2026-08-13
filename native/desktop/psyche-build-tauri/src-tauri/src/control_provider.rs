@@ -1,5 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::io::Read as StdRead;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -10,6 +17,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::ClientOptions;
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -19,11 +29,26 @@ pub const MAX_PROVIDER_LINE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_PROVIDER_RESULT_BYTES: usize = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PENDING_REQUESTS: usize = 128;
+const MAX_CREDENTIAL_BYTES: u64 = 64 * 1024;
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
 #[derive(Default)]
 pub struct ControlProviderState {
     connections: Arc<Mutex<HashMap<String, Arc<ManagedProvider>>>>,
     next_generation: AtomicU64,
+}
+
+impl Drop for ControlProviderState {
+    fn drop(&mut self) {
+        for (_, connection) in self.connections.lock().drain() {
+            connection.clear_pending("control provider manager dropped");
+            if let Some(task) = connection.task.lock().take() {
+                task.abort();
+            }
+        }
+    }
 }
 
 struct ManagedProvider {
@@ -172,6 +197,23 @@ pub struct ProviderEffectRequest {
     operation: Value,
 }
 
+fn validate_effect_request(effect: &ProviderEffectRequest) -> Result<(), String> {
+    if effect.version != 1 || effect.frame_type != "provider.effect.request" {
+        return Err("invalid provider effect envelope".to_string());
+    }
+    if effect.request_id.trim().is_empty()
+        || effect.action_id.trim().is_empty()
+        || effect.tab_id.trim().is_empty()
+        || effect.request_id.len() > 256
+        || effect.action_id.len() > 256
+        || effect.tab_id.len() > 256
+        || effect.generation == 0
+    {
+        return Err("invalid provider effect identity".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum OutboundFrame {
@@ -247,25 +289,50 @@ fn canonical_root(project_root: &str) -> Result<PathBuf, String> {
 fn endpoint_for_root(root: &Path) -> Result<PathBuf, String> {
     let encoded = format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()));
     let identifier: String = encoded.chars().take(20).collect();
-    let home = std::env::var_os("HOME").ok_or_else(|| "HOME is unavailable".to_string())?;
-    Ok(PathBuf::from(home)
-        .join(".psyche/runtime/sockets")
-        .join(format!("{identifier}.sock")))
+    #[cfg(windows)]
+    {
+        return Ok(PathBuf::from(format!(
+            r"\\.\pipe\psyche-control-{identifier}"
+        )));
+    }
+    #[cfg(unix)]
+    {
+        let home = std::env::var_os("HOME").ok_or_else(|| "HOME is unavailable".to_string())?;
+        Ok(PathBuf::from(home)
+            .join(".psyche/runtime/sockets")
+            .join(format!("{identifier}.sock")))
+    }
 }
 
 fn operator_token(root: &Path) -> Result<String, String> {
     let path = root.join(".psyche/runtime/control-credentials.json");
-    let metadata = std::fs::symlink_metadata(&path)
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    #[cfg(windows)]
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = options
+        .open(&path)
+        .map_err(|error| format!("control credentials unavailable: {error}"))?;
+    let metadata = file
+        .metadata()
         .map_err(|error| format!("control credentials unavailable: {error}"))?;
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
         return Err("control credentials must be a regular file".to_string());
     }
+    #[cfg(unix)]
     if metadata.permissions().mode() & 0o777 != 0o600 {
         return Err("control credentials must have mode 0600".to_string());
     }
-    let bytes = std::fs::read(&path)
+    if metadata.len() > MAX_CREDENTIAL_BYTES {
+        return Err("control credentials exceed maximum size".to_string());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_CREDENTIAL_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|error| format!("control credentials unavailable: {error}"))?;
-    if bytes.len() > 64 * 1024 {
+    if bytes.len() as u64 > MAX_CREDENTIAL_BYTES {
         return Err("control credentials exceed maximum size".to_string());
     }
     let stored: StoredCredentials = serde_json::from_slice(&bytes)
@@ -285,10 +352,35 @@ async fn write_frame<W: AsyncWrite + Unpin>(
         return Err("provider frame exceeds maximum size".to_string());
     }
     bytes.push(b'\n');
-    writer
-        .write_all(&bytes)
+    timeout(WRITE_TIMEOUT, writer.write_all(&bytes))
         .await
+        .map_err(|_| "control provider write timed out".to_string())?
         .map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+async fn connect_control(endpoint: &Path) -> Result<UnixStream, String> {
+    UnixStream::connect(endpoint)
+        .await
+        .map_err(|error| format!("control owner unavailable: {error}"))
+}
+
+#[cfg(windows)]
+async fn connect_control(
+    endpoint: &Path,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, String> {
+    ClientOptions::new()
+        .open(endpoint)
+        .map_err(|error| format!("control owner unavailable: {error}"))
+}
+
+fn ensure_trusted_control_caller(label: &str) -> Result<(), String> {
+    if label == "main" {
+        return Ok(());
+    }
+    Err(format!(
+        "control provider authority is only available to trusted webview 'main'; rejected caller '{label}'"
+    ))
 }
 
 async fn send_handshake<S: AsyncRead + AsyncWrite + Unpin>(
@@ -319,6 +411,23 @@ async fn send_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     )
     .await?;
     expect_handshake_response(stream, "ack").await
+}
+
+async fn connect_provider(
+    root: &Path,
+    token: &str,
+    provider_id: &str,
+) -> Result<impl AsyncRead + AsyncWrite + Unpin, String> {
+    let endpoint = endpoint_for_root(root)?;
+    let mut stream = connect_control(&endpoint).await?;
+    send_handshake(
+        &mut stream,
+        root,
+        token.to_string(),
+        provider_id.to_string(),
+    )
+    .await?;
+    Ok(stream)
 }
 
 async fn read_bounded_line<R: AsyncRead + Unpin>(
@@ -361,11 +470,15 @@ async fn expect_handshake_response<R: AsyncRead + Unpin>(
     if value.get("type").and_then(Value::as_str) == Some(expected_type) {
         return Ok(());
     }
-    Err(value
+    let message = value
         .get("message")
         .and_then(Value::as_str)
-        .unwrap_or("control provider handshake failed")
-        .to_string())
+        .unwrap_or("control provider handshake failed");
+    let code = value.get("code").and_then(Value::as_str);
+    Err(match code {
+        Some(code) => format!("{code}: {message}"),
+        None => message.to_string(),
+    })
 }
 
 async fn provider_loop<R, W>(
@@ -389,10 +502,18 @@ async fn provider_loop<R, W>(
                 let Ok(value) = serde_json::from_slice::<Value>(&line) else { break };
                 if value.get("type").and_then(Value::as_str) == Some("provider.effect.request") {
                     let Ok(effect) = serde_json::from_value::<ProviderEffectRequest>(value) else { break };
-                    if effect.action_id.len() > 256 || pending.lock().len() >= 128 {
+                    if validate_effect_request(&effect).is_err() {
                         break;
                     }
-                    pending.lock().insert(effect.action_id.clone());
+                    {
+                        let mut pending_effects = pending.lock();
+                        if pending_effects.len() >= MAX_PENDING_REQUESTS
+                            || pending_effects.contains(&effect.action_id)
+                        {
+                            break;
+                        }
+                        pending_effects.insert(effect.action_id.clone());
+                    }
                     let emitted = app
                         .get_webview_window("main")
                         .ok_or(())
@@ -450,17 +571,15 @@ fn connection_for(
 
 async fn send_request(connection: &ManagedProvider, frame: OutboundFrame) -> Result<Value, String> {
     let request_id = frame.request_id().to_string();
-    if connection.responses.lock().len() >= MAX_PENDING_REQUESTS {
-        return Err("control provider request limit reached".to_string());
-    }
     let (sender, receiver) = oneshot::channel();
-    connection
-        .responses
-        .lock()
-        .insert(request_id.clone(), sender);
-    if connection.writer.send(frame).await.is_err() {
+    reserve_response(&connection.responses, request_id.clone(), sender)?;
+    let sent = timeout(WRITE_TIMEOUT, connection.writer.send(frame)).await;
+    if !matches!(sent, Ok(Ok(()))) {
         connection.responses.lock().remove(&request_id);
-        return Err("control provider is disconnected".to_string());
+        return Err(match sent {
+            Err(_) => "control provider queue timed out".to_string(),
+            _ => "control provider is disconnected".to_string(),
+        });
     }
     match timeout(REQUEST_TIMEOUT, receiver).await {
         Ok(Ok(result)) => result,
@@ -472,12 +591,26 @@ async fn send_request(connection: &ManagedProvider, frame: OutboundFrame) -> Res
     }
 }
 
+fn reserve_response(
+    responses: &Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>,
+    request_id: String,
+    sender: oneshot::Sender<Result<Value, String>>,
+) -> Result<(), String> {
+    let mut responses = responses.lock();
+    if responses.len() >= MAX_PENDING_REQUESTS {
+        return Err("control provider request limit reached".to_string());
+    }
+    if responses.contains_key(&request_id) {
+        return Err("duplicate control provider request id".to_string());
+    }
+    responses.insert(request_id, sender);
+    Ok(())
+}
+
 async fn standalone_control_request(root: &Path, frame: OutboundFrame) -> Result<Value, String> {
     let token = operator_token(root)?;
     let endpoint = endpoint_for_root(root)?;
-    let mut stream = UnixStream::connect(endpoint)
-        .await
-        .map_err(|error| format!("control owner unavailable: {error}"))?;
+    let mut stream = connect_control(&endpoint).await?;
     write_frame(
         &mut stream,
         &OutboundFrame::Hello {
@@ -509,30 +642,41 @@ async fn standalone_control_request(root: &Path, frame: OutboundFrame) -> Result
 
 #[tauri::command]
 pub async fn control_provider_start(
+    webview: tauri::Webview,
     app: AppHandle,
     state: State<'_, ControlProviderState>,
     project_root: String,
 ) -> Result<ProviderStatus, String> {
+    ensure_trusted_control_caller(webview.label())?;
     let root = canonical_root(&project_root)?;
     let root_key = root.to_string_lossy().to_string();
-    if let Some(previous) = state.connections.lock().remove(&root_key) {
+    let previous = { state.connections.lock().remove(&root_key) };
+    if let Some(previous) = previous {
         previous.clear_pending("control provider reconnecting");
-        if let Some(task) = previous.task.lock().take() {
+        let old_task = { previous.task.lock().take() };
+        if let Some(task) = old_task {
             task.abort();
+            let _ = task.await;
         }
     }
 
     let token = operator_token(&root)?;
-    let endpoint = endpoint_for_root(&root)?;
-    let mut stream = UnixStream::connect(endpoint)
-        .await
-        .map_err(|error| format!("control owner unavailable: {error}"))?;
     let digest = format!("{:x}", Sha256::digest(root_key.as_bytes()));
     let provider_id = format!("desktop-{}", digest.chars().take(20).collect::<String>());
-    send_handshake(&mut stream, &root, token, provider_id.clone()).await?;
+    let mut attempts = 0_u8;
+    let stream = loop {
+        match connect_provider(&root, &token, &provider_id).await {
+            Ok(stream) => break stream,
+            Err(error) if attempts < 2 && error.starts_with("provider_already_registered:") => {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    };
 
     let generation = state.next_generation.fetch_add(1, Ordering::Relaxed);
-    let (reader, writer) = stream.into_split();
+    let (reader, writer) = tokio::io::split(stream);
     let (sender, receiver) = mpsc::channel(128);
     let pending = Arc::new(Mutex::new(HashSet::new()));
     let responses = Arc::new(Mutex::new(HashMap::new()));
@@ -570,18 +714,24 @@ pub async fn control_provider_start(
 
 #[tauri::command]
 pub async fn control_provider_stop(
+    webview: tauri::Webview,
     state: State<'_, ControlProviderState>,
     project_root: String,
 ) -> Result<(), String> {
+    ensure_trusted_control_caller(webview.label())?;
     let root = canonical_root(&project_root)?;
-    if let Some(connection) = state
-        .connections
-        .lock()
-        .remove(&root.to_string_lossy().to_string())
-    {
+    let connection = {
+        state
+            .connections
+            .lock()
+            .remove(&root.to_string_lossy().to_string())
+    };
+    if let Some(connection) = connection {
         connection.clear_pending("control provider stopped");
-        if let Some(task) = connection.task.lock().take() {
+        let provider_task = { connection.task.lock().take() };
+        if let Some(task) = provider_task {
             task.abort();
+            let _ = task.await;
         }
     }
     Ok(())
@@ -589,10 +739,12 @@ pub async fn control_provider_stop(
 
 #[tauri::command]
 pub async fn control_provider_upsert(
+    webview: tauri::Webview,
     state: State<'_, ControlProviderState>,
     project_root: String,
     resource: BrowserTabResource,
 ) -> Result<(), String> {
+    ensure_trusted_control_caller(webview.label())?;
     let root = canonical_root(&project_root)?;
     let connection = connection_for(&state, &root)?;
     if resource.provider_id != connection.provider_id
@@ -615,11 +767,13 @@ pub async fn control_provider_upsert(
 
 #[tauri::command]
 pub async fn control_provider_remove(
+    webview: tauri::Webview,
     state: State<'_, ControlProviderState>,
     project_root: String,
     tab_id: String,
     generation: u64,
 ) -> Result<(), String> {
+    ensure_trusted_control_caller(webview.label())?;
     let root = canonical_root(&project_root)?;
     let connection = connection_for(&state, &root)?;
     let request_id = next_request_id(&state);
@@ -638,17 +792,20 @@ pub async fn control_provider_remove(
 
 #[tauri::command]
 pub async fn control_provider_complete(
+    webview: tauri::Webview,
     state: State<'_, ControlProviderState>,
     project_root: String,
     result: ProviderEffectResult,
 ) -> Result<(), String> {
+    ensure_trusted_control_caller(webview.label())?;
     let encoded = serde_json::to_vec(&result).map_err(|error| error.to_string())?;
     if encoded.len() > MAX_PROVIDER_RESULT_BYTES {
         return Err("provider result exceeds maximum size".to_string());
     }
     let root = canonical_root(&project_root)?;
     let connection = connection_for(&state, &root)?;
-    if !connection.pending.lock().remove(result.action_id()) {
+    let action_id = result.action_id().to_string();
+    if !connection.pending.lock().contains(&action_id) {
         return Err("provider effect is not pending".to_string());
     }
     let request_id = next_request_id(&state);
@@ -661,15 +818,18 @@ pub async fn control_provider_complete(
         },
     )
     .await?;
+    connection.pending.lock().remove(&action_id);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn control_operator_submit(
+    webview: tauri::Webview,
     state: State<'_, ControlProviderState>,
     project_root: String,
     command: OperatorCommand,
 ) -> Result<Value, String> {
+    ensure_trusted_control_caller(webview.label())?;
     let root = canonical_root(&project_root)?;
     let request_id = next_request_id(&state);
     let (kind, payload) = match command {
@@ -756,9 +916,11 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
 
 #[tauri::command]
 pub async fn control_state(
+    webview: tauri::Webview,
     state: State<'_, ControlProviderState>,
     project_root: String,
 ) -> Result<Value, String> {
+    ensure_trusted_control_caller(webview.label())?;
     let root = canonical_root(&project_root)?;
     if !state
         .connections
@@ -778,6 +940,29 @@ pub async fn control_state(
     .await
 }
 
+#[tauri::command]
+pub async fn control_provider_shutdown(
+    webview: tauri::Webview,
+    state: State<'_, ControlProviderState>,
+) -> Result<(), String> {
+    ensure_trusted_control_caller(webview.label())?;
+    let connections: Vec<_> = {
+        let mut managed = state.connections.lock();
+        managed.drain().map(|(_, connection)| connection).collect()
+    };
+    for connection in &connections {
+        connection.clear_pending("control provider manager shutting down");
+    }
+    for connection in connections {
+        let provider_task = { connection.task.lock().take() };
+        if let Some(task) = provider_task {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod control_provider_tests {
     use super::*;
@@ -795,5 +980,57 @@ mod control_provider_tests {
             format_system_time(std::time::UNIX_EPOCH),
             "1970-01-01T00:00:00Z"
         );
+    }
+
+    #[test]
+    fn trusted_control_caller_rejects_external_browser_webviews() {
+        assert_eq!(ensure_trusted_control_caller("main"), Ok(()));
+        let error = ensure_trusted_control_caller("psyche-browser-untrusted")
+            .expect_err("external browser webview must not control provider authority");
+        assert!(error.contains("trusted webview 'main'"));
+        assert!(error.contains("psyche-browser-untrusted"));
+    }
+
+    #[test]
+    fn response_reservations_are_atomic_bounded_and_unique() {
+        let responses = Mutex::new(HashMap::new());
+        for index in 0..MAX_PENDING_REQUESTS {
+            let (sender, _receiver) = oneshot::channel();
+            reserve_response(&responses, format!("request-{index}"), sender)
+                .expect("reservation within bound must succeed");
+        }
+        let (overflow, _receiver) = oneshot::channel();
+        assert!(
+            reserve_response(&responses, "overflow".to_string(), overflow)
+                .unwrap_err()
+                .contains("limit")
+        );
+
+        responses.lock().remove("request-0");
+        let (duplicate, _receiver) = oneshot::channel();
+        assert!(
+            reserve_response(&responses, "request-1".to_string(), duplicate)
+                .unwrap_err()
+                .contains("duplicate")
+        );
+    }
+
+    #[test]
+    fn provider_effect_validation_rejects_wrong_identity_and_envelope() {
+        let mut effect = ProviderEffectRequest {
+            version: 1,
+            frame_type: "provider.effect.request".to_string(),
+            request_id: "request-1".to_string(),
+            action_id: "action-1".to_string(),
+            tab_id: "tab-1".to_string(),
+            generation: 1,
+            operation: json!({ "kind": "inspect" }),
+        };
+        assert!(validate_effect_request(&effect).is_ok());
+        effect.version = 2;
+        assert!(validate_effect_request(&effect).is_err());
+        effect.version = 1;
+        effect.action_id.clear();
+        assert!(validate_effect_request(&effect).is_err());
     }
 }

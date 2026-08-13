@@ -179,6 +179,82 @@ describe('BrowserProviderBroker', () => {
     first.complete({ actionId: 'action-1', status: 'succeeded' });
     await pending;
   });
+
+  it('bounds resources globally and per provider and releases capacity', async () => {
+    const broker = new BrowserProviderBroker({ maxResources: 2, maxResourcesPerProvider: 1 });
+    const first = broker.register('desktop-1', () => undefined);
+    const second = broker.register('desktop-2', () => undefined);
+    await first.upsert(tab());
+    await expect(first.upsert(tab({ id: 'tab-2', webviewLabel: 'two' })))
+      .rejects.toMatchObject({ code: 'provider_resource_limit' });
+    await second.upsert(tab({ id: 'tab-2', providerId: 'desktop-2', webviewLabel: 'two' }));
+    await first.remove('tab-1', 2);
+    await first.upsert(tab({ id: 'tab-3', webviewLabel: 'three' }));
+    await first.disconnect();
+    const replacement = broker.register('desktop-1', () => undefined);
+    await replacement.upsert(tab({ id: 'tab-4', webviewLabel: 'four' }));
+  });
+
+  it('serializes competing tab upserts and rechecks ownership after authority returns', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const broker = new BrowserProviderBroker({
+      upsertResource: async (providerId, resource) => {
+        if (providerId === 'desktop-1') await gate;
+        return resource;
+      },
+    });
+    const first = broker.register('desktop-1', () => undefined);
+    const second = broker.register('desktop-2', () => undefined);
+    const firstUpsert = first.upsert(tab());
+    const competing = second.upsert(tab({ providerId: 'desktop-2' }));
+    release();
+    await firstUpsert;
+    await expect(competing).rejects.toMatchObject({ code: 'provider_scope_mismatch' });
+  });
+
+  it('revokes an authority upsert that finishes while its provider disconnects', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const removals: string[] = [];
+    const broker = new BrowserProviderBroker({
+      upsertResource: async (_providerId, resource) => {
+        await gate;
+        return resource;
+      },
+      removeResource: async (_providerId, id) => { removals.push(id); },
+    });
+    const provider = broker.register('desktop-1', () => undefined);
+    const upsert = provider.upsert(tab());
+    const disconnected = provider.disconnect();
+    release();
+
+    await expect(upsert).rejects.toMatchObject({ code: 'provider_unavailable' });
+    await disconnected;
+    expect(removals).toEqual(['tab-1']);
+    expect(() => broker.register('desktop-1', () => undefined)).not.toThrow();
+  });
+
+  it('retains failed disconnect ownership, retries all removals, and reconciles on ready', async () => {
+    const attempts: string[] = [];
+    let failFirst = true;
+    const broker = new BrowserProviderBroker({
+      removeResource: async (_providerId, id) => {
+        attempts.push(id);
+        if (id === 'tab-1' && failFirst) throw new Error('temporary revoke failure');
+      },
+    });
+    const provider = broker.register('desktop-1', () => undefined);
+    await provider.upsert(tab());
+    await provider.upsert(tab({ id: 'tab-2', webviewLabel: 'two' }));
+    await expect(provider.disconnect()).rejects.toThrow('temporary revoke failure');
+    expect(attempts).toEqual(['tab-1', 'tab-2']);
+    expect(() => broker.register('desktop-1', () => undefined)).toThrow(/already connected/);
+    failFirst = false;
+    await broker.ready();
+    expect(attempts).toEqual(['tab-1', 'tab-2', 'tab-1']);
+    expect(() => broker.register('desktop-1', () => undefined)).not.toThrow();
+  });
 });
 
 async function connectLines(endpoint: string): Promise<{
@@ -264,6 +340,32 @@ describe('ControlServer provider mode', () => {
       version: 1, type: 'provider.resource.remove', requestId: 'r2', id: 'tab-1', generation: 1,
     });
     expect(await agent.next()).toMatchObject({ type: 'error', code: 'provider_not_registered' });
+  });
+
+  it('destroys peers that send an oversized newline-terminated frame', async () => {
+    const { endpoint } = await startProviderServer();
+    const peer = await connectLines(endpoint);
+    const closed = new Promise<void>((resolve) => peer.socket.once('close', () => resolve()));
+    peer.socket.write(`${'x'.repeat(4 * 1024 * 1024 + 1)}\n`);
+    await closed;
+    expect(peer.socket.destroyed).toBe(true);
+  });
+
+  it('destroys peers that queue too many tiny frames', async () => {
+    const { endpoint, root } = await startProviderServer();
+    const peer = await connectLines(endpoint);
+    peer.send({
+      version: 1, type: 'hello', requestId: 'hello', token: 'operator-token',
+      clientName: 'flood', projectRoot: root,
+    });
+    expect((await peer.next()).type).toBe('welcome');
+    const closed = new Promise<void>((resolve) => peer.socket.once('close', () => resolve()));
+    const frames = Array.from({ length: 200 }, (_, index) => JSON.stringify({
+      version: 1, type: 'state.get', requestId: `state-${index}`,
+    })).join('\n');
+    peer.socket.write(`${frames}\n`);
+    await closed;
+    expect(peer.socket.destroyed).toBe(true);
   });
 
   it('locks a registered operator socket into provider-only mode', async () => {

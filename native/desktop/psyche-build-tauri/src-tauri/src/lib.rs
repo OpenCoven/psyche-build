@@ -33,8 +33,8 @@ pub mod pty_transport;
 mod workspace_contract;
 use control_provider::{
     control_operator_submit, control_provider_complete, control_provider_remove,
-    control_provider_start, control_provider_stop, control_provider_upsert, control_state,
-    ControlProviderState,
+    control_provider_shutdown, control_provider_start, control_provider_stop,
+    control_provider_upsert, control_state, ControlProviderState,
 };
 use coven_sessions::is_safe_session_id;
 use coven_sessions::{coven_session_kill, coven_sessions};
@@ -3918,6 +3918,7 @@ pub fn run() {
             control_provider_upsert,
             control_provider_remove,
             control_provider_complete,
+            control_provider_shutdown,
             control_operator_submit,
             control_state,
         ])

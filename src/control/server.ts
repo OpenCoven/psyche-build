@@ -47,6 +47,8 @@ export interface ControlServerOptions {
 
 /** Cap a single newline-delimited frame so a peer cannot exhaust host memory. */
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+const MAX_QUEUED_FRAMES = 128;
+const MAX_QUEUED_BYTES = 8 * 1024 * 1024;
 
 /** Every command kind the runtime knows how to execute. */
 const KNOWN_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
@@ -313,6 +315,8 @@ export class ControlServer {
     let provider: BrowserProviderRegistration | null = null;
     let buffer = '';
     let tail = Promise.resolve();
+    let queuedFrames = 0;
+    let queuedBytes = 0;
 
     const write = (message: ControlResponse | ProviderPush): void => {
       if (!socket.destroyed) socket.write(`${encodeControlMessage(message)}\n`);
@@ -327,7 +331,7 @@ export class ControlServer {
     socket.on('close', () => { void provider?.disconnect().catch(() => undefined); });
     socket.on('data', (chunk: string) => {
       buffer += chunk;
-      if (buffer.length > MAX_FRAME_BYTES && buffer.indexOf('\n') < 0) {
+      if (Buffer.byteLength(buffer, 'utf8') > MAX_FRAME_BYTES && buffer.indexOf('\n') < 0) {
         fail('frame_too_large', 'control frame exceeds maximum size');
         buffer = '';
         return;
@@ -338,6 +342,19 @@ export class ControlServer {
         buffer = buffer.slice(newline + 1);
         newline = buffer.indexOf('\n');
         if (line.trim().length === 0) continue;
+        const frameBytes = Buffer.byteLength(line, 'utf8');
+        if (frameBytes > MAX_FRAME_BYTES) {
+          fail('frame_too_large', 'control frame exceeds maximum size');
+          buffer = '';
+          return;
+        }
+        queuedFrames += 1;
+        queuedBytes += frameBytes;
+        if (queuedFrames > MAX_QUEUED_FRAMES || queuedBytes > MAX_QUEUED_BYTES) {
+          fail('backpressure', 'too many queued control frames');
+          buffer = '';
+          return;
+        }
         tail = tail.then(() => this.handleLine(line, write, fail, {
           getPrincipal: () => principal,
           setPrincipal: (value, id) => {
@@ -349,6 +366,9 @@ export class ControlServer {
           setProvider: (value) => { provider = value; },
         })).catch((error) => {
           fail('internal', error instanceof Error ? error.message : 'internal error');
+        }).finally(() => {
+          queuedFrames -= 1;
+          queuedBytes -= frameBytes;
         });
       }
     });

@@ -39,12 +39,15 @@ export interface BrowserProviderBrokerOptions {
   maxProviders?: number;
   maxPending?: number;
   maxTimeoutMs?: number;
+  maxResources?: number;
+  maxResourcesPerProvider?: number;
 }
 
 interface ProviderState {
   readonly id: string;
   readonly send: (frame: ProviderPush) => void;
   connected: boolean;
+  cleanup?: Promise<void>;
 }
 
 interface PendingEffect {
@@ -60,6 +63,8 @@ interface PendingEffect {
 const DEFAULT_MAX_PROVIDERS = 8;
 const DEFAULT_MAX_PENDING = 128;
 const DEFAULT_MAX_TIMEOUT_MS = 60_000;
+const DEFAULT_MAX_RESOURCES = 256;
+const DEFAULT_MAX_RESOURCES_PER_PROVIDER = 64;
 
 /**
  * Correlates browser effects with one authenticated desktop provider.
@@ -72,16 +77,19 @@ export class BrowserProviderBroker {
   private readonly resources = new Map<string, BrowserTabSurface>();
   private readonly pending = new Map<string, PendingEffect>();
   private readonly pendingByTab = new Map<string, string>();
-  private readonly disconnects = new Set<Promise<void>>();
-  private disconnectFailure: unknown;
+  private readonly resourceTails = new Map<string, Promise<void>>();
   private readonly maxProviders: number;
   private readonly maxPending: number;
   private readonly maxTimeoutMs: number;
+  private readonly maxResources: number;
+  private readonly maxResourcesPerProvider: number;
 
   constructor(private readonly options: BrowserProviderBrokerOptions = {}) {
     this.maxProviders = options.maxProviders ?? DEFAULT_MAX_PROVIDERS;
     this.maxPending = options.maxPending ?? DEFAULT_MAX_PENDING;
     this.maxTimeoutMs = options.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS;
+    this.maxResources = options.maxResources ?? DEFAULT_MAX_RESOURCES;
+    this.maxResourcesPerProvider = options.maxResourcesPerProvider ?? DEFAULT_MAX_RESOURCES_PER_PROVIDER;
   }
 
   get pendingCount(): number {
@@ -90,9 +98,12 @@ export class BrowserProviderBroker {
 
   /** Wait until disconnect-triggered runtime revocations have completed. */
   async ready(): Promise<void> {
-    if (this.disconnectFailure) throw this.disconnectFailure;
-    if (this.disconnects.size > 0) await Promise.all([...this.disconnects]);
-    if (this.disconnectFailure) throw this.disconnectFailure;
+    const disconnected = [...this.providers.values()].filter((provider) => !provider.connected);
+    const results = await Promise.allSettled(disconnected.map((provider) => (
+      this.withResourceLock('all-resources', () => this.cleanupProvider(provider))
+    )));
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failure) throw failure.reason;
   }
 
   register(
@@ -113,11 +124,11 @@ export class BrowserProviderBroker {
       providerId,
       upsert: async (resource) => {
         this.requireLiveRegistration(state, disconnected);
-        await this.upsert(state, resource);
+        await this.withResourceLock('all-resources', () => this.upsert(state, resource));
       },
       remove: async (id, generation) => {
         this.requireLiveRegistration(state, disconnected);
-        await this.remove(state, id, generation);
+        await this.withResourceLock('all-resources', () => this.remove(state, id, generation));
       },
       complete: (result) => {
         this.requireLiveRegistration(state, disconnected);
@@ -126,16 +137,7 @@ export class BrowserProviderBroker {
       disconnect: async () => {
         if (disconnected) return;
         disconnected = true;
-        const cleanup = this.disconnect(state);
-        this.disconnects.add(cleanup);
-        try {
-          await cleanup;
-        } catch (error) {
-          this.disconnectFailure = error;
-          throw error;
-        } finally {
-          this.disconnects.delete(cleanup);
-        }
+        await this.disconnect(state);
       },
     };
   }
@@ -212,11 +214,24 @@ export class BrowserProviderBroker {
     if (current && current.providerId !== state.id) {
       throw brokerError('provider_scope_mismatch', 'browser resource belongs to another provider');
     }
+    if (!current && this.resources.size >= this.maxResources) {
+      throw brokerError('provider_resource_limit', 'browser resource limit reached');
+    }
+    const providerResources = [...this.resources.values()]
+      .filter((item) => item.providerId === state.id).length;
+    if (!current && providerResources >= this.maxResourcesPerProvider) {
+      throw brokerError('provider_resource_limit', 'provider browser resource limit reached');
+    }
     const canonical = await this.options.upsertResource?.(state.id, resource) ?? resource;
     if (canonical.id !== resource.id || canonical.providerId !== state.id) {
       throw brokerError('provider_scope_mismatch', 'runtime returned a mismatched browser resource');
     }
+    const after = this.resources.get(resource.id);
+    if (after && after.providerId !== state.id) {
+      throw brokerError('provider_scope_mismatch', 'browser resource ownership changed during upsert');
+    }
     this.resources.set(canonical.id, canonical);
+    this.requireLiveRegistration(state, false);
   }
 
   private async remove(state: ProviderState, id: string, generation: number): Promise<void> {
@@ -245,15 +260,58 @@ export class BrowserProviderBroker {
 
   private async disconnect(state: ProviderState): Promise<void> {
     state.connected = false;
-    this.providers.delete(state.id);
     for (const pending of [...this.pending.values()]) {
       if (pending.providerId !== state.id) continue;
       this.settle(pending.actionId);
       pending.reject(ambiguousEffect('browser provider disconnected after effect dispatch'));
     }
+    await this.withResourceLock('all-resources', () => this.cleanupProvider(state));
+  }
+
+  private cleanupProvider(state: ProviderState): Promise<void> {
+    if (state.cleanup) return state.cleanup;
+    state.cleanup = this.cleanupProviderFresh(state).finally(() => { state.cleanup = undefined; });
+    return state.cleanup;
+  }
+
+  private async cleanupProviderFresh(state: ProviderState): Promise<void> {
+    const failures: unknown[] = [];
     const owned = [...this.resources.values()].filter((resource) => resource.providerId === state.id);
-    for (const resource of owned) this.resources.delete(resource.id);
-    await this.options.removeProviderResources?.(state.id);
+    if (this.options.removeResource) {
+      for (const resource of owned) {
+        try {
+          await this.options.removeResource(state.id, resource.id, resource.generation);
+          if (this.resources.get(resource.id) === resource) this.resources.delete(resource.id);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+    } else {
+      try {
+        await this.options.removeProviderResources?.(state.id);
+        for (const resource of owned) {
+          if (this.resources.get(resource.id) === resource) this.resources.delete(resource.id);
+        }
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) throw failures[0];
+    this.providers.delete(state.id);
+  }
+
+  private async withResourceLock<T>(id: string, run: () => Promise<T>): Promise<T> {
+    const previous = this.resourceTails.get(id) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.resourceTails.set(id, current);
+    await previous.catch(() => undefined);
+    try {
+      return await run();
+    } finally {
+      release();
+      if (this.resourceTails.get(id) === current) this.resourceTails.delete(id);
+    }
   }
 
   private settle(actionId: string): void {
