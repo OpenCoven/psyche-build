@@ -125,9 +125,13 @@ export function decodeControlRequest(raw: string): ControlRequest {
         || typeof command.kind !== 'string'
         || typeof command.projectRoot !== 'string'
         || typeof command.createdAt !== 'string'
+        || !Number.isFinite(Date.parse(command.createdAt))
+        || ('expiresAt' in command
+          && (typeof command.expiresAt !== 'string' || !Number.isFinite(Date.parse(command.expiresAt))))
       ) {
         throw new Error('invalid command.submit payload');
       }
+      validateSurfaceAuthorization(command.kind, command.payload);
       break;
     }
     case 'state.get':
@@ -151,4 +155,35 @@ export function decodeControlRequest(raw: string): ControlRequest {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validateSurfaceAuthorization(kind: unknown, payload: Record<string, unknown>): void {
+  const actionKinds = new Set([
+    'pane.observe', 'pane.action', 'browser.inspect', 'browser.action', 'browser.script',
+  ]);
+  if (kind === 'lease.release') {
+    if (!hasTaskLeaseAuthorization(payload)) throw new Error('invalid surface authorization');
+    return;
+  }
+  if (!actionKinds.has(String(kind))) return;
+  if (!hasTaskLeaseAuthorization(payload)) throw new Error('invalid surface authorization');
+  if (kind === 'pane.action' && isPlainObject(payload.action) && payload.action.kind === 'create') {
+    if (typeof payload.projectId !== 'string') throw new Error('invalid surface authorization');
+    return;
+  }
+  if (!Number.isSafeInteger(payload.generation) || (payload.generation as number) < 1) {
+    throw new Error('invalid surface authorization');
+  }
+  if (kind === 'pane.observe' || kind === 'pane.action') {
+    if (typeof payload.paneId !== 'string') throw new Error('invalid surface authorization');
+  } else if (typeof payload.tabId !== 'string') {
+    throw new Error('invalid surface authorization');
+  }
+}
+
+function hasTaskLeaseAuthorization(payload: Record<string, unknown>): boolean {
+  return typeof payload.taskId === 'string' && payload.taskId.length > 0
+    && typeof payload.leaseId === 'string' && payload.leaseId.length > 0
+    && Number.isSafeInteger(payload.leaseRevision)
+    && (payload.leaseRevision as number) >= 1;
 }

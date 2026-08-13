@@ -33,7 +33,10 @@ async function startHarness(overrides: {
     ?? (async (command) => ({ status: 'succeeded' as const, value: { actorKind: command.actor.kind } })));
   const runtime: ControlServerRuntime = {
     submit: submit as unknown as ControlServerRuntime['submit'],
-    snapshot: () => ({ ownerEpoch: overrides.ownerEpoch ?? 7, sequence: 2, commands: {}, leases: {} }),
+    snapshot: () => ({
+      ownerEpoch: overrides.ownerEpoch ?? 7, sequence: 2, commands: {}, leases: {},
+      resources: [], capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
+    }),
     readEvents: (after) => ({
       events: [{ sequence: after + 1, kind: 'command.requested', payload: {} }],
       nextSequence: after + 1,
@@ -129,6 +132,27 @@ describe('ControlClient over the socket transport', () => {
 
     await expect(client.getState()).resolves.toMatchObject({ ownerEpoch: 7, sequence: 2 });
     await expect(client.readEvents(0)).resolves.toMatchObject({ nextSequence: 1, gap: false });
+  });
+
+  it('constructs lease, approval, and action-status helper envelopes', async () => {
+    const harness = await startHarness();
+    const client = await ControlClient.connect({
+      projectRoot: harness.projectRoot, endpoint: harness.endpoint,
+      token: harness.operatorToken, clientName: 'test-operator',
+    });
+    cleanups.push(() => client.close());
+    await client.requestLease({
+      id: 'request-1', idempotencyKey: 'request-1', kind: 'lease.request', projectRoot: '/ignored',
+      createdAt: '2026-08-12T12:00:00.000Z', payload: { taskId: 'task-1', ttlMs: 60_000, grants: [] },
+    });
+    await client.resolveApproval({
+      id: 'resolve-1', idempotencyKey: 'resolve-1', kind: 'approval.resolve', projectRoot: '/ignored',
+      createdAt: '2026-08-12T12:00:00.000Z',
+      payload: { approvalId: 'approval-1', payloadDigest: 'a'.repeat(64), decision: 'approve' },
+    });
+    await expect(client.actionStatus('missing')).resolves.toBeUndefined();
+    expect(harness.submit.mock.calls.map(([submitted]) => submitted.kind))
+      .toEqual(['lease.request', 'approval.resolve']);
   });
 
   it('rejects a connection whose declared project root does not match the owner', async () => {

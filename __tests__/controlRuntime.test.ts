@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ControlRuntime, type ControlHandlers } from '../src/control/runtime.js';
+import { ApprovalStore } from '../src/control/approvals.js';
+import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
+import { createCanonicalElementSemantics } from '../src/control/policy.js';
+import { SurfaceRegistry } from '../src/control/surfaces.js';
 
 const handlers: ControlHandlers = {
   executeOrchestration: vi.fn(),
@@ -20,6 +24,11 @@ const handlers: ControlHandlers = {
   openCovenSession: vi.fn(),
   runCovenDesktopAction: vi.fn(),
   executeCovenCapability: vi.fn(),
+  observePane: vi.fn(),
+  actOnPane: vi.fn(),
+  inspectBrowser: vi.fn(),
+  actOnBrowser: vi.fn(),
+  runBrowserScript: vi.fn(),
 };
 
 function command(overrides: Record<string, unknown> = {}) {
@@ -57,6 +66,11 @@ describe('ControlRuntime', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     handlers.sendPrompt = vi.fn();
+    handlers.observePane = vi.fn();
+    handlers.actOnPane = vi.fn();
+    handlers.inspectBrowser = vi.fn();
+    handlers.actOnBrowser = vi.fn();
+    handlers.runBrowserScript = vi.fn();
   });
 
   it('returns the prior outcome for a duplicate idempotency key', async () => {
@@ -83,7 +97,7 @@ describe('ControlRuntime', () => {
     expect(handlers.sendInput).not.toHaveBeenCalled();
   });
 
-  it('fails closed for agent surface commands before any effect handler', async () => {
+  it('fails closed when an agent targets an unknown surface', async () => {
     const runtime = await ControlRuntime.create({
       ownerEpoch: 4,
       handlers,
@@ -99,7 +113,7 @@ describe('ControlRuntime', () => {
       },
     }))).resolves.toMatchObject({
       status: 'failed',
-      code: 'command_not_implemented',
+      code: 'resource_missing',
     });
     for (const handler of Object.values(handlers)) {
       expect(handler).not.toHaveBeenCalled();
@@ -236,5 +250,254 @@ describe('ControlRuntime', () => {
     });
     await expect(takeover).resolves.toMatchObject({ status: 'succeeded' });
     expect(handlers.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('grants exact surface authority and executes an allowed browser action once', async () => {
+    handlers.actOnBrowser = vi.fn(async () => ({ pageText: 'sensitive page text' }));
+    const journal = createMemoryJournal();
+    const surfaces = new SurfaceRegistry();
+    surfaces.upsertBrowserTab({
+      id: 'tab-1', projectRoot: '/repo', worktreeRoot: '/repo', providerId: 'provider-1',
+      webviewLabel: 'old', url: 'https://example.test', title: 'Example', loading: false,
+      viewport: { width: 800, height: 600 },
+    });
+    surfaces.upsertBrowserTab({
+      id: 'tab-1', projectRoot: '/repo', worktreeRoot: '/repo', providerId: 'provider-1',
+      webviewLabel: 'current', url: 'https://example.test', title: 'Example', loading: false,
+      viewport: { width: 800, height: 600 },
+    });
+    const capabilityLeases = new CapabilityLeaseStore(() => new Date('2026-08-12T12:00:00.000Z'), 7);
+    const approvals = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'), () => 'approval-1');
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7, handlers, journal, surfaces, capabilityLeases, approvals,
+      resolveBrowserElementSemantics: ({ snapshotId, elementRef }) => {
+        expect(snapshotId).toBe('snapshot-1');
+        expect(elementRef).toBe('e17');
+        return createCanonicalElementSemantics({ role: 'button', submit: false, secret: false });
+      },
+    });
+    const grant = await runtime.submit(command({
+      id: 'grant-1', idempotencyKey: 'grant-1', ownerEpoch: 7, kind: 'lease.grant',
+      payload: {
+        requestId: 'request-1', actorId: 'agent-1', taskId: 'task-1', ttlMs: 60_000,
+        grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 2 }, capabilities: ['browser.interact'] }],
+      },
+    }));
+    const lease = (grant as { value: { lease: { id: string; revision: number } } }).value.lease;
+    const outcome = await runtime.submit(command({
+      id: 'cmd-click', idempotencyKey: 'idem-click', kind: 'browser.action', ownerEpoch: 7,
+      actor: { id: 'agent-1', kind: 'psyche' }, createdAt: '2026-08-12T12:00:00.000Z',
+      payload: {
+        taskId: 'task-1', leaseId: lease.id, leaseRevision: lease.revision,
+        tabId: 'tab-1', generation: 2, snapshotId: 'snapshot-1',
+        action: { kind: 'click', elementRef: 'e17', semantic: { role: 'button', name: 'Refresh', submit: true } },
+      },
+    }));
+    expect(outcome).toMatchObject({ status: 'succeeded', value: { state: 'succeeded' } });
+    expect(handlers.actOnBrowser).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(runtime.snapshot())).not.toContain('sensitive page text');
+    expect(JSON.stringify(journal.read())).not.toContain('sensitive page text');
+  });
+
+  it('returns approval_required without holding the resource queue or invoking the handler', async () => {
+    const surfaces = new SurfaceRegistry();
+    surfaces.upsertBrowserTab({
+      id: 'tab-1', projectRoot: '/repo', worktreeRoot: '/repo', providerId: 'provider-1',
+      webviewLabel: 'current', url: 'https://example.test', title: 'Example', loading: false,
+      viewport: { width: 800, height: 600 },
+    });
+    const capabilityLeases = new CapabilityLeaseStore(() => new Date('2026-08-12T12:00:00.000Z'), 7);
+    const approvals = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'), () => 'approval-1');
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces, capabilityLeases, approvals,
+      resolveBrowserElementSemantics: () => createCanonicalElementSemantics({ role: 'button', submit: true }),
+    });
+    const grant = await runtime.submit(command({
+      id: 'grant-1', idempotencyKey: 'grant-1', ownerEpoch: 7, kind: 'lease.grant',
+      payload: {
+        requestId: 'request-1', actorId: 'agent-1', taskId: 'task-1', ttlMs: 60_000,
+        grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.interact', 'browser.history'] }],
+      },
+    }));
+    const lease = (grant as { value: { lease: { id: string; revision: number } } }).value.lease;
+    const outcome = await runtime.submit(command({
+      id: 'cmd-submit', idempotencyKey: 'idem-submit', kind: 'browser.action', ownerEpoch: 7,
+      actor: { id: 'agent-1', kind: 'psyche' },
+      payload: {
+        taskId: 'task-1', leaseId: lease.id, leaseRevision: lease.revision,
+        tabId: 'tab-1', generation: 1, snapshotId: 'snapshot-1',
+        action: { kind: 'submit', elementRef: 'e17' },
+      },
+    }));
+    expect(outcome).toMatchObject({
+      status: 'succeeded', value: { state: 'approval_required', approvalId: 'approval-1' },
+    });
+    expect(handlers.actOnBrowser).not.toHaveBeenCalled();
+    await expect(runtime.submit(command({
+      id: 'cmd-reload', idempotencyKey: 'idem-reload', kind: 'browser.action', ownerEpoch: 7,
+      actor: { id: 'agent-1', kind: 'psyche' }, payload: {
+        taskId: 'task-1', leaseId: lease.id, leaseRevision: lease.revision,
+        tabId: 'tab-1', generation: 1, action: { kind: 'reload' },
+      },
+    }))).resolves.toMatchObject({ status: 'succeeded' });
+    expect(handlers.actOnBrowser).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects agent authority administration', async () => {
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
+    for (const kind of ['lease.grant', 'lease.revoke', 'approval.resolve'] as const) {
+      const outcome = await runtime.submit(command({
+        id: `cmd-${kind}`, idempotencyKey: `idem-${kind}`, kind, ownerEpoch: 7,
+        actor: { id: 'agent-1', kind: 'psyche' }, payload: {},
+      }));
+      expect(outcome).toMatchObject({ status: 'rejected', code: 'operator_required' });
+    }
+  });
+
+  it('resolves an approval by revalidating the immutable original action', async () => {
+    const surfaces = new SurfaceRegistry();
+    surfaces.upsertBrowserTab({
+      id: 'tab-1', projectRoot: '/repo', worktreeRoot: '/repo', providerId: 'provider-1',
+      webviewLabel: 'current', url: 'https://example.test', title: 'Example', loading: false,
+      viewport: { width: 800, height: 600 },
+    });
+    const capabilityLeases = new CapabilityLeaseStore(() => new Date('2026-08-12T12:00:00.000Z'), 7);
+    const approvals = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'), () => 'approval-1');
+    const resolver = vi.fn(() => createCanonicalElementSemantics({ role: 'button', submit: true }));
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces, capabilityLeases, approvals,
+      resolveBrowserElementSemantics: resolver,
+    });
+    const grant = await runtime.submit(command({
+      id: 'grant-1', idempotencyKey: 'grant-1', ownerEpoch: 7, kind: 'lease.grant',
+      payload: {
+        requestId: 'request-1', actorId: 'agent-1', taskId: 'task-1', ttlMs: 60_000,
+        grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.interact'] }],
+      },
+    }));
+    const lease = (grant as { value: { lease: { id: string; revision: number } } }).value.lease;
+    const original = command({
+      id: 'cmd-submit', idempotencyKey: 'idem-submit', kind: 'browser.action', ownerEpoch: 7,
+      actor: { id: 'agent-1', kind: 'psyche' },
+      payload: {
+        taskId: 'task-1', leaseId: lease.id, leaseRevision: lease.revision,
+        tabId: 'tab-1', generation: 1, snapshotId: 'snapshot-1',
+        action: { kind: 'submit', elementRef: 'e17' },
+      },
+    });
+    const requested = await runtime.submit(original);
+    const approval = (requested as { value: { approvalId: string; payloadDigest: string } }).value;
+    ((original as unknown as { payload: { action: { elementRef: string } } }).payload.action).elementRef = 'attacker-ref';
+    await expect(runtime.submit(command({
+      id: 'resolve-bad', idempotencyKey: 'resolve-bad', kind: 'approval.resolve', ownerEpoch: 7,
+      payload: { approvalId: approval.approvalId, payloadDigest: '0'.repeat(64), decision: 'approve' },
+    }))).resolves.toMatchObject({ status: 'failed', code: 'approval_digest_mismatch' });
+    await expect(runtime.submit(command({
+      id: 'resolve-good', idempotencyKey: 'resolve-good', kind: 'approval.resolve', ownerEpoch: 7,
+      payload: { approvalId: approval.approvalId, payloadDigest: approval.payloadDigest, decision: 'approve' },
+    }))).resolves.toMatchObject({ status: 'succeeded', value: { state: 'succeeded' } });
+    expect(resolver).toHaveBeenCalledTimes(2);
+    expect(handlers.actOnBrowser).toHaveBeenCalledTimes(1);
+    expect(handlers.actOnBrowser).toHaveBeenCalledWith(expect.objectContaining({
+      action: expect.objectContaining({ elementRef: 'e17' }),
+    }));
+  });
+
+  it('records an ambiguous browser effect as unknown and never retries it', async () => {
+    handlers.actOnBrowser = vi.fn(async () => {
+      throw Object.assign(new Error('provider disconnected'), { ambiguous: true });
+    });
+    const surfaces = new SurfaceRegistry();
+    surfaces.upsertBrowserTab({
+      id: 'tab-1', projectRoot: '/repo', worktreeRoot: '/repo', providerId: 'provider-1',
+      webviewLabel: 'current', url: 'https://example.test', title: 'Example', loading: false,
+      viewport: { width: 800, height: 600 },
+    });
+    const capabilityLeases = new CapabilityLeaseStore(() => new Date('2026-08-12T12:00:00.000Z'), 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces, capabilityLeases });
+    const grant = await runtime.submit(command({
+      id: 'grant-1', idempotencyKey: 'grant-1', ownerEpoch: 7, kind: 'lease.grant',
+      payload: { requestId: 'r', actorId: 'agent-1', taskId: 'task-1', ttlMs: 60_000,
+        grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.history'] }] },
+    }));
+    const lease = (grant as { value: { lease: { id: string; revision: number } } }).value.lease;
+    const action = command({ id: 'reload', idempotencyKey: 'reload', kind: 'browser.action', ownerEpoch: 7,
+      actor: { id: 'agent-1', kind: 'psyche' }, payload: { taskId: 'task-1', leaseId: lease.id,
+        leaseRevision: lease.revision, tabId: 'tab-1', generation: 1, action: { kind: 'reload' } } });
+    await expect(runtime.submit(action)).resolves.toMatchObject({ status: 'unknown', code: 'effect_unknown' });
+    await expect(runtime.submit({ ...action, id: 'reload-again' })).resolves.toMatchObject({ status: 'unknown' });
+    expect(handlers.actOnBrowser).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects grants for missing generations and non-canonical project targets', async () => {
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
+    await expect(runtime.submit(command({
+      id: 'bad-surface', idempotencyKey: 'bad-surface', kind: 'lease.grant', ownerEpoch: 7,
+      payload: { requestId: 'r1', actorId: 'a', taskId: 't', ttlMs: 1,
+        grants: [{ target: { kind: 'pane', id: 'missing', generation: 9 }, capabilities: ['pane.input'] }] },
+    }))).resolves.toMatchObject({ status: 'failed', code: 'resource_missing' });
+    await expect(runtime.submit(command({
+      id: 'bad-project', idempotencyKey: 'bad-project', kind: 'lease.grant', ownerEpoch: 7,
+      payload: { requestId: 'r2', actorId: 'a', taskId: 't', ttlMs: 1,
+        grants: [{ target: { kind: 'project', id: '/other' }, capabilities: ['pane.create'] }] },
+    }))).resolves.toMatchObject({ status: 'failed', code: 'capability_denied' });
+  });
+
+  it('revalidates lease expiry before an approved effect', async () => {
+    let now = new Date('2026-08-12T12:00:00.000Z');
+    const clock = () => now;
+    const surfaces = new SurfaceRegistry();
+    surfaces.upsertBrowserTab({ id: 'tab-1', projectRoot: '/repo', worktreeRoot: '/repo', providerId: 'p',
+      webviewLabel: 'w', url: 'https://example.test', title: 'Example', loading: false,
+      viewport: { width: 800, height: 600 } });
+    const capabilityLeases = new CapabilityLeaseStore(clock, 7);
+    const approvals = new ApprovalStore(clock, () => 'approval-expiry');
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(),
+      surfaces, capabilityLeases, approvals,
+      resolveBrowserElementSemantics: () => createCanonicalElementSemantics({ role: 'button', submit: true }) });
+    const grant = await runtime.submit(command({ id: 'g', idempotencyKey: 'g', kind: 'lease.grant', ownerEpoch: 7,
+      payload: { requestId: 'r', actorId: 'agent-1', taskId: 'task-1', ttlMs: 60_000,
+        grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.interact'] }] } }));
+    const lease = (grant as { value: { lease: { id: string; revision: number } } }).value.lease;
+    const requested = await runtime.submit(command({ id: 'a', idempotencyKey: 'a', kind: 'browser.action', ownerEpoch: 7,
+      actor: { id: 'agent-1', kind: 'psyche' }, payload: { taskId: 'task-1', leaseId: lease.id,
+        leaseRevision: lease.revision, tabId: 'tab-1', generation: 1, snapshotId: 's',
+        action: { kind: 'submit', elementRef: 'e' } } }));
+    const approval = (requested as { value: { approvalId: string; payloadDigest: string } }).value;
+    now = new Date('2026-08-12T12:01:01.000Z');
+    await expect(runtime.submit(command({ id: 'resolve', idempotencyKey: 'resolve', kind: 'approval.resolve', ownerEpoch: 7,
+      payload: { approvalId: approval.approvalId, payloadDigest: approval.payloadDigest, decision: 'approve' } })))
+      .resolves.toMatchObject({ status: 'failed', code: 'lease_expired' });
+    expect(handlers.actOnBrowser).not.toHaveBeenCalled();
+  });
+
+  it('revokes matching authority on provider removal, pane takeover, and owner restart', async () => {
+    const surfaces = new SurfaceRegistry();
+    const tab = surfaces.upsertBrowserTab({ id: 'tab-1', projectRoot: '/repo', worktreeRoot: '/repo', providerId: 'p',
+      webviewLabel: 'w', url: 'https://example.test', title: 'Example', loading: false,
+      viewport: { width: 800, height: 600 } });
+    const pane = surfaces.upsertPane({ id: 'pane-1', projectRoot: '/repo', worktreeRoot: '/repo', tmuxPaneId: '%1',
+      writable: true, outputSequence: 0 });
+    const capabilityLeases = new CapabilityLeaseStore(() => new Date('2026-08-12T12:00:00.000Z'), 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces, capabilityLeases });
+    for (const [requestId, target, capabilities] of [
+      ['tab-r', { kind: 'browser_tab', id: tab.id, generation: tab.generation }, ['browser.history']],
+      ['pane-r', { kind: 'pane', id: pane.id, generation: pane.generation }, ['pane.input']],
+    ] as const) {
+      await runtime.submit(command({ id: requestId, idempotencyKey: requestId, kind: 'lease.grant', ownerEpoch: 7,
+        payload: { requestId, actorId: 'agent-1', taskId: 'task-1', ttlMs: 60_000, grants: [{ target, capabilities }] } }));
+    }
+    await runtime.submit(command({ id: 'remove', idempotencyKey: 'remove', kind: 'provider.resource.remove', ownerEpoch: 7,
+      payload: { id: tab.id, generation: tab.generation } }));
+    expect(runtime.snapshot().capabilityLeases).toHaveLength(1);
+    await runtime.submit(command({ id: 'takeover', idempotencyKey: 'takeover', kind: 'pane.takeover', ownerEpoch: 7,
+      payload: { paneId: pane.id } }));
+    expect(runtime.snapshot().capabilityLeases).toHaveLength(0);
+
+    capabilityLeases.grant({ requestId: 'old-owner', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator',
+      ttlMs: 60_000, grants: [{ target: { kind: 'project', id: '/repo' }, capabilities: ['pane.create'] }] });
+    const restarted = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal: createMemoryJournal(),
+      capabilityLeases });
+    expect(restarted.snapshot().capabilityLeases).toHaveLength(0);
   });
 });

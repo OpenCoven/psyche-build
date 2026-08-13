@@ -3,6 +3,7 @@ import { canonicalizeProjectRoot } from './projectIdentity.js';
 import { controlEndpointForProject } from './endpoint.js';
 import { encodeControlMessage, type ControlRequest, type ControlResponse } from './protocol.js';
 import type {
+  ActionReceipt,
   ControlCommandInput,
   CommandOutcome,
   ControlSnapshot,
@@ -163,6 +164,33 @@ export class ControlClient {
     });
   }
 
+  requestLease(command: Extract<ControlCommandInput, { kind: 'lease.request' }>): Promise<CommandOutcome> {
+    return this.submit(command);
+  }
+
+  releaseLease(command: Extract<ControlCommandInput, { kind: 'lease.release' }>): Promise<CommandOutcome> {
+    return this.submit(command);
+  }
+
+  resolveApproval(command: Extract<ControlCommandInput, { kind: 'approval.resolve' }>): Promise<CommandOutcome> {
+    return this.submit(command);
+  }
+
+  async actionStatus(actionId: string): Promise<ActionReceipt | undefined> {
+    const snapshot = await this.getState();
+    const recent = snapshot.receipts.find((receipt) => receipt.actionId === actionId);
+    if (recent) return recent;
+    const page = await this.readEvents(0);
+    for (const event of [...page.events].reverse()) {
+      if (!event || typeof event !== 'object') continue;
+      const payload = (event as { payload?: unknown }).payload;
+      if (!payload || typeof payload !== 'object') continue;
+      const receipt = (payload as { receipt?: unknown }).receipt;
+      if (isActionReceipt(receipt) && receipt.actionId === actionId) return receipt;
+    }
+    return undefined;
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -254,4 +282,10 @@ export class ControlClient {
 function responseError(response: ControlResponse, context: string): Error {
   if (response.type === 'error') return new Error(`${response.code}: ${response.message}`);
   return new Error(`unexpected ${response.type} response to ${context}`);
+}
+
+function isActionReceipt(value: unknown): value is ActionReceipt {
+  return Boolean(value && typeof value === 'object'
+    && (value as { schema?: unknown }).schema === 'psyche.control.receipt/v1'
+    && typeof (value as { actionId?: unknown }).actionId === 'string');
 }

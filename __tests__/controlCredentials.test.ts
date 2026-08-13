@@ -46,7 +46,10 @@ function takeoverInput(): ControlCommandInput {
 function stubRuntime(submit: ControlServerRuntime['submit']): ControlServerRuntime {
   return {
     submit,
-    snapshot: () => ({ ownerEpoch: 1, sequence: 0, commands: {}, leases: {} }),
+  snapshot: () => ({
+    ownerEpoch: 1, sequence: 0, commands: {}, leases: {}, resources: [],
+    capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
+  }),
     readEvents: () => ({ events: [], nextSequence: 0, gap: false }),
   };
 }
@@ -123,5 +126,19 @@ describe('control server authorization', () => {
       { id: 'operator-1', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] },
       takeoverInput(),
     )).resolves.toMatchObject({ status: 'succeeded', value: { kind: 'human' } });
+  });
+
+  it('restricts new authority commands and compatibility access', async () => {
+    const submit = vi.fn(async () => ({ status: 'succeeded' as const }));
+    const server = createControlServerForTest({ runtime: stubRuntime(submit) });
+    const agent: ControlPrincipal = { id: 'agent-1', kind: 'agent', capabilities: ['read', 'mutate', 'delegate'] };
+    const compatibility: ControlPrincipal = { id: 'compat-1', kind: 'compatibility', capabilities: ['read', 'mutate'] };
+    const base = delegationInput();
+    const grant = { ...base, kind: 'lease.grant' as const, payload: { requestId: 'r', actorId: 'a', taskId: 't', ttlMs: 1, grants: [] } };
+    const request = { ...base, kind: 'lease.request' as const, payload: { taskId: 't', ttlMs: 1, grants: [] } };
+    await expect(server.submitAs(agent, grant)).resolves.toMatchObject({ status: 'rejected', code: 'operator_required' });
+    await expect(server.submitAs(compatibility, request)).resolves.toMatchObject({ status: 'rejected', code: 'compatibility_not_authorized' });
+    await expect(server.submitAs(agent, request)).resolves.toMatchObject({ status: 'succeeded' });
+    expect(submit).toHaveBeenCalledTimes(1);
   });
 });

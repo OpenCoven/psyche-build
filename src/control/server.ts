@@ -45,6 +45,18 @@ const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 /** Every command kind the runtime knows how to execute. */
 const KNOWN_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
   'orchestration.execute',
+  'lease.request',
+  'lease.grant',
+  'lease.release',
+  'lease.revoke',
+  'pane.observe',
+  'pane.action',
+  'browser.inspect',
+  'browser.action',
+  'browser.script',
+  'approval.resolve',
+  'provider.resource.upsert',
+  'provider.resource.remove',
   'pane.spawn',
   'pane.prompt',
   'pane.interrupt',
@@ -96,6 +108,27 @@ export function authorizeCommand(
   principal: ControlPrincipal,
   kind: ControlCommand['kind'],
 ): CommandOutcome | null {
+  const agentControlKinds: ReadonlySet<ControlCommand['kind']> = new Set([
+    'lease.request', 'lease.grant', 'lease.release', 'lease.revoke', 'pane.observe',
+    'pane.action', 'browser.inspect', 'browser.action', 'browser.script',
+    'approval.resolve', 'provider.resource.upsert', 'provider.resource.remove',
+  ]);
+  if (principal.kind === 'compatibility' && agentControlKinds.has(kind)) {
+    return {
+      status: 'rejected', code: 'compatibility_not_authorized',
+      message: 'compatibility principals cannot use agent surface controls',
+    };
+  }
+  if (
+    (kind === 'lease.grant' || kind === 'lease.revoke' || kind === 'approval.resolve'
+      || kind === 'provider.resource.upsert' || kind === 'provider.resource.remove')
+    && principal.kind !== 'operator'
+  ) {
+    return {
+      status: 'rejected', code: 'operator_required',
+      message: 'only an operator principal may administer surface authority',
+    };
+  }
   if (kind === 'pane.delegate') {
     if (principal.kind !== 'operator' || !principal.capabilities.includes('delegate')) {
       return {

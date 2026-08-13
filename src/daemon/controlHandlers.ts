@@ -110,6 +110,11 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       });
     },
     launchRitual: notSupported('ritual.launch'),
+    observePane: notSupported('pane.observe'),
+    actOnPane: notSupported('pane.action'),
+    inspectBrowser: notSupported('browser.inspect'),
+    actOnBrowser: notSupported('browser.action'),
+    runBrowserScript: notSupported('browser.script'),
 
     async launchCovenSession(payload) {
       return launchProjectCovenSession(

@@ -3,6 +3,9 @@ import { acquireOwnerLock } from './ownerLock.js';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 import { ControlRuntime, type ControlHandlers } from './runtime.js';
 import { bootstrapSession } from './resources/sessionBootstrap.js';
+import { ApprovalStore } from './approvals.js';
+import { CapabilityLeaseStore } from './capabilityLeases.js';
+import { SurfaceRegistry } from './surfaces.js';
 
 export interface HostControlPlane {
   epoch: number;
@@ -33,6 +36,9 @@ export async function createHostControlPlane(
       ownerEpoch: lock.epoch,
       handlers: options.handlers,
       journal,
+      surfaces: new SurfaceRegistry(),
+      capabilityLeases: new CapabilityLeaseStore(undefined, lock.epoch),
+      approvals: new ApprovalStore(),
     });
 
     return {

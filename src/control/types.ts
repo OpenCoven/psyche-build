@@ -1,9 +1,11 @@
 import type { OrchestrationTaskRequest } from '../orchestration/types.js';
 import type {
+  CapabilityLease,
   LeaseTarget,
   SurfaceCapability,
 } from './capabilityLeases.js';
-import type { BrowserTabSurface } from './surfaces.js';
+import type { BrowserTabSurface, SurfaceResource } from './surfaces.js';
+import type { Approval } from './approvals.js';
 
 export interface LeaseGrant {
   readonly target: LeaseTarget;
@@ -312,4 +314,15 @@ export interface ControlSnapshot {
     revision: number;
     expiresAt: string;
   }>;
+  resources: readonly SurfaceResource[];
+  capabilityLeases: readonly CapabilityLease[];
+  leaseRequests: readonly {
+    id: string;
+    actorId: string;
+    taskId: string;
+    status: 'pending' | 'granted' | 'released' | 'revoked';
+    createdAt: string;
+  }[];
+  approvals: readonly Approval[];
+  receipts: readonly ActionReceipt[];
 }
