@@ -230,7 +230,7 @@ describe('Tauri workspace panels', () => {
 
     it('returns contextual shortcuts to terminal mode through every Web close path', () => {
       expect(mainJs).toMatch(
-        /function closeThread\(id, options\)[\s\S]{0,700}thread\.kind === "web"[\s\S]{0,120}state\.activeThreadId === id[\s\S]{0,120}markActiveSurface\("terminal"\)/
+        /function closeThread\(id, options\)[\s\S]{0,160}var wasActive = state\.activeThreadId === id;[\s\S]{0,120}thread\.kind === "web" && wasActive[\s\S]{0,120}markActiveSurface\("terminal"\)/
       );
     });
 

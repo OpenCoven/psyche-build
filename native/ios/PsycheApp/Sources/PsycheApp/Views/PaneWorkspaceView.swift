@@ -18,6 +18,7 @@ struct PaneWorkspaceView: View {
     /// every change would let the pushed pane overrule the switcher, so
     /// choosing another pane would snap straight back.
     @State private var didApplyRequestedPane = false
+    @State private var inspectionTarget: InspectionTarget?
 
     init(primaryPaneID: String? = nil) {
         requestedPrimaryPaneID = primaryPaneID
@@ -65,12 +66,28 @@ struct PaneWorkspaceView: View {
         .toolbar {
             if let pane = primaryPane {
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        inspectionTarget = InspectionTarget(
+                            paneID: focusedVisiblePane?.id ?? pane.id
+                        )
+                    } label: {
+                        Label("Browse files", systemImage: "folder")
+                    }
+                    .disabled(store.isStale)
+                    .accessibilityIdentifier("pane-files")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     PaneControlsMenu(
                         paneID: pane.id,
                         paneTitle: pane.title ?? pane.id,
                         projectTitle: projectTitle(forPane: pane.id) ?? "this project"
                     )
                 }
+            }
+        }
+        .sheet(item: $inspectionTarget) { target in
+            NavigationStack {
+                FileBrowserView(paneID: target.paneID)
             }
         }
         // `.contain` matters: an identifier on this container otherwise masks
@@ -177,6 +194,13 @@ struct PaneWorkspaceView: View {
         return secondary
     }
 
+    private var focusedVisiblePane: WorkspacePaneSnapshot? {
+        guard let focusedPaneID = registry.focusedPaneID else { return nil }
+        return [primaryPane, secondaryPane]
+            .compactMap { $0 }
+            .first { $0.id == focusedPaneID }
+    }
+
     private func projectTitle(forPane paneID: String) -> String? {
         store.workspace?.projects.first { project in
             project.projectPanes.contains { $0.id == paneID }
@@ -197,4 +221,10 @@ struct PaneWorkspaceView: View {
         if horizontalSizeClass == .regular { return size.width >= 700 }
         return size.width > size.height && size.width >= 640
     }
+}
+
+private struct InspectionTarget: Identifiable {
+    let paneID: String
+
+    var id: String { paneID }
 }

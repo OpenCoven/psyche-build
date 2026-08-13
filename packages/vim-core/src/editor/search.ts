@@ -10,19 +10,18 @@ function isWordCharacter(value: string): boolean {
   return /[\p{Letter}\p{Number}_]/u.test(value);
 }
 
-function isWholeWord(text: string, from: number, to: number): boolean {
-  const before = from > 0 ? String.fromCodePoint(text.codePointAt(from - 1)!) : '';
-  const after = to < text.length ? String.fromCodePoint(text.codePointAt(to)!) : '';
+function isWholeWord(before: string, after: string): boolean {
   return !isWordCharacter(before) && !isWordCharacter(after);
 }
 
 function collectCandidate(
-  text: string,
   from: number,
   to: number,
   wholeWord: boolean,
+  before: string,
+  after: string,
 ): SearchMatch | undefined {
-  if (wholeWord && !isWholeWord(text, from, to)) return undefined;
+  if (wholeWord && !isWholeWord(before, after)) return undefined;
   return { from, to };
 }
 
@@ -48,10 +47,14 @@ function scanMatches(
     }
     while (toBoundary < boundaries.length && boundaries[toBoundary]! < rawTo) toBoundary += 1;
     const candidate = collectCandidate(
-      text,
       boundaries[fromBoundary] ?? 0,
       boundaries[Math.min(toBoundary, boundaries.length - 1)] ?? text.length,
       wholeWord,
+      text.slice(boundaries[Math.max(0, fromBoundary - 1)] ?? 0, boundaries[fromBoundary] ?? 0),
+      text.slice(
+        boundaries[Math.min(toBoundary, boundaries.length - 1)] ?? text.length,
+        boundaries[Math.min(toBoundary + 1, boundaries.length - 1)] ?? text.length,
+      ),
     );
     if (candidate && candidate.from !== previousFrom) {
       previousFrom = candidate.from;

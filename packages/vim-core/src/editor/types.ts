@@ -129,8 +129,8 @@ export interface EditorMachineOptions {
     position: number,
     around: boolean,
   ) => { from: number; to: number } | undefined;
-  readonly expressionResult?: string;
-  readonly currentFilename?: string;
+  readonly expressionResult?: string | (() => string | undefined);
+  readonly currentFilename?: string | (() => string | undefined);
   readonly clipboard?: {
     read(register: '+' | '*'): string | undefined;
     write(register: '+' | '*', value: EditorRegister): void;

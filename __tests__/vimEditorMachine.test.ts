@@ -410,7 +410,7 @@ describe('Vim editor editing, repeat, macros, Unicode, and undo grouping', () =>
 
     await send(machine, 'i', 'x', 'y', 'Escape', 'R', 'z', 'Escape');
 
-    expect(document.value).toBe('xyzbc');
+    expect(document.value).toBe('xzabc');
     expect(document.edits.filter((edit) => edit.changes.some((change) => change.insert))
       .map((edit) => edit.history)).toEqual([
       'new', 'join', 'new',
@@ -457,7 +457,7 @@ describe('Vim editor editing, repeat, macros, Unicode, and undo grouping', () =>
 
     await send(machine, ...keys('vlcxy'), 'Escape', '.');
 
-    expect(document.value).toBe('xyxyef');
+    expect(document.value).toBe('xxydef');
     expect(machine.snapshot().pending).toBe('');
   });
 

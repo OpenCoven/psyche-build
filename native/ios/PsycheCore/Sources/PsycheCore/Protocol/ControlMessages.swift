@@ -365,7 +365,7 @@ public struct MobileActionResult: Codable, Sendable, Equatable {
     public let progress: Double?
     public let targetPaneID: String?
     public let reviewData: MobileActionReviewData?
-    public let data: String?
+    public let data: [String: String]?
     public let relatedFiles: [String]?
     public let dismissable: Bool?
 
@@ -1010,20 +1010,20 @@ public struct MobileActionStartRequest: Codable, Sendable, Equatable {
 public struct MobileActionRespondRequest: Codable, Sendable, Equatable {
     public let type: String
     public let requestID: String
-    public let paneID: String
+    public let sessionID: String
     public let response: MobileActionResponse
 
-    public init(requestID: String, paneID: String, response: MobileActionResponse) {
+    public init(requestID: String, sessionID: String, response: MobileActionResponse) {
         self.type = "actions.respond"
         self.requestID = requestID
-        self.paneID = paneID
+        self.sessionID = sessionID
         self.response = response
     }
 
     enum CodingKeys: String, CodingKey {
         case type, response
         case requestID = "requestId"
-        case paneID = "paneId"
+        case sessionID = "sessionId"
     }
 }
 
@@ -1165,17 +1165,19 @@ public struct MobileFilesReadResult: Codable, Sendable, Equatable {
     public let paneID: String
     public let path: String
     public let content: String
+    public let truncated: Bool
 
-    public init(requestID: String, paneID: String, path: String, content: String) {
+    public init(requestID: String, paneID: String, path: String, content: String, truncated: Bool) {
         self.type = "files.read.result"
         self.requestID = requestID
         self.paneID = paneID
         self.path = path
         self.content = content
+        self.truncated = truncated
     }
 
     enum CodingKeys: String, CodingKey {
-        case type, path, content
+        case type, path, content, truncated
         case requestID = "requestId"
         case paneID = "paneId"
     }

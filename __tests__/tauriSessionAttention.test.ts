@@ -547,7 +547,10 @@ describe('desktop shell wiring', () => {
 
   it('routes terminal input through the attention-aware sender', () => {
     expect(mainJs).toMatch(
-      /term\.onData\(function \(data\) \{\s*sendToThread\(thread, data\);\s*\}\);/
+      /function routeTerminalData\(thread, data\) \{\s*if \(consumeTerminalDataSuppression\(thread, data\)\) return false;\s*sendToThread\(thread, data\);\s*return true;\s*\}/
+    );
+    expect(mainJs).toMatch(
+      /term\.onData\(function \(data\) \{\s*routeTerminalData\(thread, data\);\s*\}\);/
     );
     expect(functionSource('localSessionContextActions')).toContain(
       'actions.push({ label: "Interrupt", run: callbacks.interrupt });',
@@ -555,6 +558,36 @@ describe('desktop shell wiring', () => {
     expect(functionSource('renderSessionList')).toContain(
       'interrupt: function () { sendToThread(thread, "\\x03"); }',
     );
+  });
+
+  it('executes the terminal input routing helper against suppression and ordinary input', () => {
+    const thread = { id: 'thread-a' };
+    const suppressed = '\x1b[I';
+    const ordinary = 'git status\r';
+    const sendCalls: Array<[typeof thread, string]> = [];
+    const suppressionChecks: Array<[typeof thread, string]> = [];
+    const routeTerminalData = compileFunction<(
+      currentThread: typeof thread,
+      data: string,
+    ) => boolean>(functionSource('routeTerminalData'), {
+      consumeTerminalDataSuppression(currentThread: typeof thread, data: string) {
+        suppressionChecks.push([currentThread, data]);
+        return data === suppressed;
+      },
+      sendToThread(currentThread: typeof thread, data: string) {
+        sendCalls.push([currentThread, data]);
+      },
+    });
+
+    expect(routeTerminalData(thread, suppressed)).toBe(false);
+    expect(sendCalls).toEqual([]);
+
+    expect(routeTerminalData(thread, ordinary)).toBe(true);
+    expect(sendCalls).toEqual([[thread, ordinary]]);
+    expect(suppressionChecks).toEqual([
+      [thread, suppressed],
+      [thread, ordinary],
+    ]);
   });
 
   it('distinguishes interrupts from answers before applying attention state', () => {
