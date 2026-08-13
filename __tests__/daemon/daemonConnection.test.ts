@@ -10,6 +10,7 @@ import {
   tokensMatch,
   type ConnectionDeps,
 } from '../../src/daemon/index.js';
+import { PaneOutputFanout } from '../../src/daemon/paneOutputFanout.js';
 import { TmuxControl } from '../../src/services/tmuxControl.js';
 import { AgenticCapabilityRouter } from '../../src/orchestration/capabilityRouter.js';
 import { ControlRuntime } from '../../src/control/runtime.js';
@@ -85,6 +86,7 @@ async function buildConnection(
       request: BridgeSpawnRequest,
     ) => Promise<import('../../src/daemon/bridge.js').BridgeSpawnResult>;
     controlRuntime?: ConnectionDeps['controlRuntime'];
+    paneOutput?: ConnectionDeps['paneOutput'];
   } = {},
 ) {
   const ws = new FakeSocket();
@@ -113,6 +115,7 @@ async function buildConnection(
     serverVersion: 'test',
     authedViaHeader: opts.authed ?? true,
     tmux,
+    paneOutput: opts.paneOutput ?? new PaneOutputFanout(tmux),
     workspaceProvider: opts.workspaceProvider,
     controlRuntime,
     ownerEpoch,
@@ -271,7 +274,7 @@ describe('daemon connection project scoping', () => {
     await request(ws, { type: 'panes.attach', requestId: 'r1', id: FOREIGN_PANE });
 
     expect(ws.sent[0]).toMatchObject({ type: 'error', code: 'pane_not_found' });
-    expect(tmux.listenerCount('output')).toBe(0);
+    expect(tmux.listenerCount('output')).toBe(1);
   });
 
   it('will not focus a pane this project does not own', async () => {
@@ -481,9 +484,8 @@ describe('daemon connection resilience', () => {
 
   it('reports an unexpected handler failure as an error frame', async () => {
     const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
-    const tmux = new RecordingTmux('psyche-test');
-    tmux.on = () => { throw new Error('emitter exploded'); };
-    const { ws } = await buildConnection(root, { tmux });
+    const paneOutput = { subscribe: () => { throw new Error('fanout exploded'); } };
+    const { ws } = await buildConnection(root, { paneOutput });
 
     await request(ws, { type: 'panes.attach', requestId: 'r1', id: '%3' });
 
@@ -557,16 +559,16 @@ describe('daemon connection resilience', () => {
     ]);
     const { ws, tmux } = await buildConnection(root);
 
-    expect(tmux.listenerCount('output')).toBe(0);
+    expect(tmux.listenerCount('output')).toBe(1);
     await request(ws, { type: 'panes.attach', requestId: 'r1', id: '%3' });
     await request(ws, { type: 'panes.attach', requestId: 'r2', id: '%4' });
     expect(tmux.listenerCount('output')).toBe(1);
 
     ws.emit('close');
-    expect(tmux.listenerCount('output')).toBe(0);
+    expect(tmux.listenerCount('output')).toBe(1);
   });
 
-  it('releases the listener once the last stream detaches', async () => {
+  it('detaches the connection subscriber without removing the global listener', async () => {
     const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
     const { ws, tmux } = await buildConnection(root);
 
@@ -575,7 +577,7 @@ describe('daemon connection resilience', () => {
     expect(tmux.listenerCount('output')).toBe(1);
 
     await request(ws, { type: 'panes.detach', requestId: 'r2', streamId });
-    expect(tmux.listenerCount('output')).toBe(0);
+    expect(tmux.listenerCount('output')).toBe(1);
   });
 
   it('routes pane output only to the streams watching that pane', async () => {

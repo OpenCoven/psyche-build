@@ -3,7 +3,14 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { listPaneSurfaceBindings, listPanes } from '../../src/daemon/panes.js';
-import { installDaemonPaneLifecycleHooks, updatePaneMeta } from '../../src/daemon/index.js';
+import {
+  installDaemonPaneLifecycleHooks,
+  refreshPaneSurfaces,
+  uninstallDaemonPaneLifecycleHooks,
+  updatePaneMeta,
+} from '../../src/daemon/index.js';
+import { SurfaceRegistry } from '../../src/control/surfaces.js';
+import { PaneObservationStore } from '../../src/control/resources/paneObservation.js';
 
 let tempRoots: string[] = [];
 
@@ -32,6 +39,32 @@ describe('daemon pane config helpers', () => {
         'run-shell "kill -USR2 1234 2>/dev/null || true # psyche-daemon-control"'], { stdio: 'ignore' }],
       ['tmux', ['set-hook', '-t', 'psyche-test', 'after-split-window[987654321]',
         'run-shell "kill -USR2 1234 2>/dev/null || true # psyche-daemon-control"'], { stdio: 'ignore' }],
+    ]);
+  });
+
+  it('rolls back installed hooks when installation fails partway through', () => {
+    const failure = new Error('hook install failed');
+    const run = vi.fn((_file: string, args: readonly string[]) => {
+      if (args.includes('after-split-window[987654321]')) throw failure;
+    });
+
+    expect(() => installDaemonPaneLifecycleHooks('psyche-test', 1234, run as never)).toThrow(failure);
+    expect(run.mock.calls.at(-1)).toEqual([
+      'tmux', ['set-hook', '-u', '-t', 'psyche-test', 'pane-exited[987654321]'],
+      { stdio: 'ignore' },
+    ]);
+  });
+
+  it('uninstalls every daemon-owned lifecycle hook', () => {
+    const run = vi.fn();
+
+    uninstallDaemonPaneLifecycleHooks('psyche-test', run as never);
+
+    expect(run.mock.calls).toEqual([
+      ['tmux', ['set-hook', '-u', '-t', 'psyche-test', 'pane-exited[987654321]'],
+        { stdio: 'ignore' }],
+      ['tmux', ['set-hook', '-u', '-t', 'psyche-test', 'after-split-window[987654321]'],
+        { stdio: 'ignore' }],
     ]);
   });
 
@@ -68,10 +101,33 @@ describe('daemon pane config helpers', () => {
       }],
     });
 
-    await expect(listPaneSurfaceBindings(root)).resolves.toEqual([{
+    await expect(listPaneSurfaceBindings(root, async () => true)).resolves.toEqual([{
       id: 'psyche-2', tmuxPaneId: '%3', worktreeRoot: '/repo/worktree',
       title: 'Agent', agent: 'codex',
     }]);
+  });
+
+  it('does not resurrect a stale exited pane record and increments on a confirmed rebind', async () => {
+    const root = await writeConfig({
+      panes: [{ id: 'psyche-2', paneId: '%3', worktreeDir: '/repo/worktree' }],
+    });
+    const surfaces = new SurfaceRegistry();
+    const observations = new PaneObservationStore();
+    const first = surfaces.upsertPane({
+      id: 'psyche-2', tmuxPaneId: '%3', projectRoot: root, worktreeRoot: '/repo/worktree',
+      writable: true, outputSequence: 0,
+    });
+
+    await refreshPaneSurfaces(root, surfaces, observations, async () => false);
+    expect(surfaces.get('psyche-2')).toBeUndefined();
+
+    await writeFile(path.join(root, '.psyche', 'psyche.config.json'), JSON.stringify({
+      panes: [{ id: 'psyche-2', paneId: '%4', worktreeDir: '/repo/worktree' }],
+    }));
+    await refreshPaneSurfaces(root, surfaces, observations, async (paneId) => paneId === '%4');
+    expect(surfaces.get('psyche-2')).toMatchObject({
+      tmuxPaneId: '%4', generation: first.generation + 1,
+    });
   });
 
   it('updates pane metadata by tmux pane id from panes.list results', async () => {

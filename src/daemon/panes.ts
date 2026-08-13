@@ -1,7 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import type { PaneSummary } from './protocol.js';
+import { assertTmuxPaneId } from '../utils/tmuxTarget.js';
 
 /**
  * Read psyche's on-disk config for a project root and return a summary list.
@@ -36,20 +37,41 @@ export interface PaneSurfaceBinding {
   agent?: string;
 }
 
-export async function listPaneSurfaceBindings(projectRoot: string): Promise<PaneSurfaceBinding[]> {
+export type PaneLivenessProbe = (tmuxPaneId: string) => boolean | Promise<boolean>;
+
+export function isTmuxPaneLive(
+  tmuxPaneId: string,
+  run: typeof execFileSync = execFileSync,
+): boolean {
+  const target = assertTmuxPaneId(tmuxPaneId);
+  try {
+    return String(run('tmux', ['display-message', '-p', '-t', target, '#{pane_id}'], {
+      encoding: 'utf8',
+    })).trim() === target;
+  } catch {
+    return false;
+  }
+}
+
+export async function listPaneSurfaceBindings(
+  projectRoot: string,
+  isPaneLive: PaneLivenessProbe = isTmuxPaneLive,
+): Promise<PaneSurfaceBinding[]> {
   const panes = await readPaneRecords(projectRoot);
-  return panes.flatMap((pane) => {
+  const bindings: PaneSurfaceBinding[] = [];
+  for (const pane of panes) {
     const id = String(pane.id ?? pane.paneId ?? '');
     const tmuxPaneId = String(pane.paneId ?? '');
-    if (!id || !tmuxPaneId) return [];
-    return [{
+    if (!id || !tmuxPaneId || !await isPaneLive(tmuxPaneId)) continue;
+    bindings.push({
       id,
       tmuxPaneId,
       worktreeRoot: String(pane.worktreePath ?? pane.worktreeDir ?? pane.cwd ?? projectRoot),
       ...(typeof pane.title === 'string' ? { title: pane.title } : {}),
       ...(typeof pane.agent === 'string' ? { agent: pane.agent } : {}),
-    }];
-  });
+    });
+  }
+  return bindings;
 }
 
 async function readPaneRecords(projectRoot: string): Promise<Array<Record<string, unknown>>> {

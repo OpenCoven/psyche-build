@@ -3,7 +3,12 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { execFileSync, execSync } from 'node:child_process';
 import { readOrCreateToken, tokenFilePath } from './token.js';
-import { listPaneSurfaceBindings, listPanes, capturePaneSync } from './panes.js';
+import {
+  listPaneSurfaceBindings,
+  listPanes,
+  capturePaneSync,
+  type PaneLivenessProbe,
+} from './panes.js';
 import {
   PROTOCOL_VERSION,
   type ClientRequest,
@@ -49,6 +54,7 @@ import {
 import { readDaemonWorkspaceSnapshot } from './workspace.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
 import type { BridgeSpawnRequest, BridgeSpawnResult } from './bridge.js';
+import { PaneOutputFanout } from './paneOutputFanout.js';
 
 export interface DaemonOptions {
   port: number;
@@ -83,12 +89,13 @@ export const MAX_STREAMS_PER_CONNECTION = 64;
 export const MAX_BATCH_LANES = 16;
 export const MAX_IDEMPOTENT_SPAWNS = 128;
 
-async function refreshPaneSurfaces(
+export async function refreshPaneSurfaces(
   projectRoot: string,
   surfaces: SurfaceRegistry,
   observations: PaneObservationStore,
+  isPaneLive?: PaneLivenessProbe,
 ): Promise<readonly PaneSurface[]> {
-  const panes = await listPaneSurfaceBindings(projectRoot);
+  const panes = await listPaneSurfaceBindings(projectRoot, isPaneLive);
   const seen = new Set(panes.map((pane) => pane.id));
   for (const pane of panes) {
     const previous = surfaces.get(pane.id);
@@ -128,12 +135,38 @@ export function installDaemonPaneLifecycleHooks(
   run: typeof execFileSync = execFileSync,
 ): void {
   const notify = `run-shell "kill -USR2 ${pid} 2>/dev/null || true # psyche-daemon-control"`;
-  for (const hook of ['pane-exited', 'after-split-window'] as const) {
+  const installed: string[] = [];
+  try {
+    for (const hook of DAEMON_PANE_LIFECYCLE_HOOKS) {
+      const hookName = `${hook}[${DAEMON_PANE_HOOK_INDEX}]`;
+      run('tmux', ['set-hook', '-t', sessionName, hookName, notify], { stdio: 'ignore' });
+      installed.push(hookName);
+    }
+  } catch (error) {
+    for (const hookName of installed.reverse()) {
+      try {
+        run('tmux', ['set-hook', '-u', '-t', sessionName, hookName], { stdio: 'ignore' });
+      } catch {
+        // Preserve the installation failure; cleanup is best effort.
+      }
+    }
+    throw error;
+  }
+}
+
+export function uninstallDaemonPaneLifecycleHooks(
+  sessionName: string,
+  run: typeof execFileSync = execFileSync,
+): void {
+  for (const hook of DAEMON_PANE_LIFECYCLE_HOOKS) {
     run('tmux', [
-      'set-hook', '-t', sessionName, `${hook}[987654321]`, notify,
+      'set-hook', '-u', '-t', sessionName, `${hook}[${DAEMON_PANE_HOOK_INDEX}]`,
     ], { stdio: 'ignore' });
   }
 }
+
+const DAEMON_PANE_LIFECYCLE_HOOKS = ['pane-exited', 'after-split-window'] as const;
+const DAEMON_PANE_HOOK_INDEX = 987654321;
 
 export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void> {
   const projectRoot = opts.projectRoot ?? findGitRoot() ?? process.cwd();
@@ -177,16 +210,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       console.error(`[daemon] failed to refresh pane surfaces: ${String(error)}`);
     });
   };
-  process.on('SIGUSR2', handlePaneLifecycleSignal);
-  try {
-    if (tmuxSessionExists(sessionName)) {
-      installDaemonPaneLifecycleHooks(sessionName);
-    }
-  } catch (error) {
-    process.off('SIGUSR2', handlePaneLifecycleSignal);
-    throw error;
-  }
-  tmux.on('output', (tmuxPaneId: string, data: Buffer) => {
+  const paneOutput = new PaneOutputFanout(tmux, (tmuxPaneId: string, data: Buffer) => {
     const pane = surfaces.list().find(
       (resource) => resource.kind === 'pane' && resource.tmuxPaneId === tmuxPaneId,
     );
@@ -217,6 +241,29 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     handlers: controlHandlers,
     surfaces,
   });
+  let paneHooksInstalled = false;
+  process.on('SIGUSR2', handlePaneLifecycleSignal);
+  try {
+    if (tmuxSessionExists(sessionName)) {
+      installDaemonPaneLifecycleHooks(sessionName);
+      paneHooksInstalled = true;
+    }
+  } catch (error) {
+    process.off('SIGUSR2', handlePaneLifecycleSignal);
+    paneOutput.close();
+    await host.close().catch(() => undefined);
+    throw error;
+  }
+  const uninstallPaneHooks = (): void => {
+    if (!paneHooksInstalled) return;
+    paneHooksInstalled = false;
+    try {
+      uninstallDaemonPaneLifecycleHooks(sessionName);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error(`[daemon] failed to uninstall pane lifecycle hooks: ${String(error)}`);
+    }
+  };
 
   // Mount the canonical control socket alongside the v0 WebSocket. Both share
   // the one host runtime, so every mutation — from either transport — passes
@@ -238,6 +285,8 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     });
   } catch (error) {
     process.off('SIGUSR2', handlePaneLifecycleSignal);
+    uninstallPaneHooks();
+    paneOutput.close();
     await host.close().catch(() => undefined);
     throw error;
   }
@@ -283,6 +332,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       serverVersion,
       authedViaHeader,
       tmux,
+      paneOutput,
       controlRuntime: host.runtime,
       ownerEpoch: host.epoch,
     });
@@ -293,6 +343,8 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     // eslint-disable-next-line no-console
     console.log(`\npsyche daemon shutting down (${signal})`);
     process.off('SIGUSR2', handlePaneLifecycleSignal);
+    uninstallPaneHooks();
+    paneOutput.close();
     tmux.stop();
     wss.close();
     // Close the control socket before releasing the owner fence. host.close()
@@ -316,6 +368,7 @@ export interface ConnectionDeps {
   serverVersion: string;
   authedViaHeader: boolean;
   tmux: TmuxControl;
+  paneOutput: Pick<PaneOutputFanout, 'subscribe'>;
   /**
    * The single authority for pane mutations.
    *
@@ -353,16 +406,8 @@ export class Connection {
     result: Promise<BridgeSpawnResult>;
   }>();
   private authTimer: NodeJS.Timeout | null = null;
-  /**
-   * One `output` listener per connection, not one per stream.
-   *
-   * TmuxControl is a shared EventEmitter. Registering a listener per attach
-   * meant a client with many panes open blew past Node's default listener
-   * cap — the "possible memory leak" warning — and every attach leaked a
-   * listener until the socket closed. Fanning out inside a single handler
-   * keeps the registration count at one and makes detach cleanup exact.
-   */
-  private outputHandler: ((paneId: string, data: Buffer) => void) | null = null;
+  /** Subscription to the daemon-level fan-out; never a direct tmux listener. */
+  private unsubscribeOutput: (() => void) | null = null;
 
   /** Stable identity for every command this connection translates. */
   private readonly actorId = randomUUID();
@@ -424,21 +469,20 @@ export class Connection {
 
   /** Attach the shared output listener once the first stream needs it. */
   private ensureOutputHandler(): void {
-    if (this.outputHandler) return;
+    if (this.unsubscribeOutput) return;
     const handler = (paneId: string, data: Buffer) => {
       for (const [streamId, stream] of this.activeStreams) {
         if (stream.paneId === paneId) this.sendBinary(streamId, data);
       }
     };
-    this.outputHandler = handler;
-    this.deps.tmux.on('output', handler);
+    this.unsubscribeOutput = this.deps.paneOutput.subscribe(handler);
   }
 
   /** Detach it again once the last stream goes away. */
   private releaseOutputHandler(): void {
-    if (!this.outputHandler || this.activeStreams.size > 0) return;
-    this.deps.tmux.off('output', this.outputHandler);
-    this.outputHandler = null;
+    if (!this.unsubscribeOutput || this.activeStreams.size > 0) return;
+    this.unsubscribeOutput();
+    this.unsubscribeOutput = null;
   }
 
   private send(msg: ServerResponse): void {
