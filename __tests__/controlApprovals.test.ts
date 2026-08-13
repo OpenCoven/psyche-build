@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  APPROVAL_ACTIVE_LIMIT,
+  APPROVAL_TERMINAL_LIMIT,
   ApprovalStore,
+  createRedactedApprovalEffect,
   type ApprovalConsumeAssertion,
   type ApprovalRequest,
 } from '../src/control/approvals.js';
@@ -13,7 +16,7 @@ const baseRequest = (): ApprovalRequest => ({
   leaseRevision: 2,
   resource: { kind: 'browser_tab', id: 'tab-1', generation: 3 },
   capability: 'browser.interact',
-  effect: { kind: 'submit', target: 'Create issue' },
+  effect: createRedactedApprovalEffect({ kind: 'submit', target: 'Create issue' }),
 });
 
 const assertionFor = (
@@ -104,7 +107,9 @@ describe('ApprovalStore', () => {
     ['resource id', { resource: { kind: 'browser_tab', id: 'tab-2', generation: 3 } }],
     ['resource generation', { resource: { kind: 'browser_tab', id: 'tab-1', generation: 4 } }],
     ['capability', { capability: 'browser.close' }],
-    ['redacted effect', { effect: { kind: 'submit', target: 'Merge pull request' } }],
+    ['redacted effect', {
+      effect: createRedactedApprovalEffect({ kind: 'submit', target: 'Merge pull request' }),
+    }],
   ] as const)('changes the digest when %s changes', (_label, override) => {
     const clock = () => new Date('2026-08-12T12:00:00.000Z');
     const original = new ApprovalStore(clock).request(baseRequest());
@@ -159,7 +164,10 @@ describe('ApprovalStore', () => {
     const changedEffect = store.request({
       ...baseRequest(),
       actionId: 'effect-probe',
-      effect: { kind: 'submit', target: typeof override === 'string' ? override : 'Create issue' },
+      effect: createRedactedApprovalEffect({
+        kind: 'submit',
+        target: typeof override === 'string' ? override : 'Create issue',
+      }),
     }).effect;
     store.approve(pending.id, 'operator', pending.payloadDigest);
 
@@ -269,7 +277,7 @@ describe('ApprovalStore', () => {
     store.request(baseRequest());
     expect(() => store.request({
       ...baseRequest(),
-      effect: { kind: 'submit', target: 'Changed intent' },
+      effect: createRedactedApprovalEffect({ kind: 'submit', target: 'Changed intent' }),
     })).toThrowError(expect.objectContaining({ code: 'approval_action_conflict' }));
   });
 
@@ -309,7 +317,6 @@ describe('ApprovalStore', () => {
     ['empty lease id', { leaseId: '' }],
     ['empty resource id', { resource: { kind: 'browser_tab', id: '', generation: 3 } }],
     ['unknown capability', { capability: 'browser.unknown' }],
-    ['unknown effect', { effect: { kind: 'future_effect', target: 'target' } }],
   ] as const)('rejects invalid %s with a stable identity code', (_label, override) => {
     const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
     expect(() => store.request({ ...baseRequest(), ...override } as ApprovalRequest)).toThrowError(
@@ -326,21 +333,117 @@ describe('ApprovalStore', () => {
     'header',
     'filePath',
     'arbitraryExtra',
-  ])('rejects unsafe or unknown approval field %s', (field) => {
+  ])('rejects unsafe or unknown effect factory field %s', (field) => {
+    expect(() => createRedactedApprovalEffect({
+      kind: 'submit', target: 'safe label', [field]: 'SENSITIVE_VALUE',
+    } as never)).toThrowError(
+      expect.objectContaining({ code: 'approval_payload_invalid' }),
+    );
     const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
+    expect(() => store.request({
+      ...baseRequest(), [field]: 'SENSITIVE_VALUE',
+    } as ApprovalRequest)).toThrowError(
+      expect.objectContaining({ code: 'approval_payload_invalid' }),
+    );
+  });
 
-    for (const request of [
-      { ...baseRequest(), [field]: 'SENSITIVE_VALUE' },
-      {
-        ...baseRequest(),
-        effect: { ...baseRequest().effect, [field]: 'SENSITIVE_VALUE' },
-      },
-    ]) {
-      expect(() => store.request(request as ApprovalRequest)).toThrowError(
+  it('rejects raw, cloned, accessor-backed, and prototype-backed effects', () => {
+    const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
+    const canonical = createRedactedApprovalEffect({ kind: 'submit', target: 'Create issue' });
+    const accessor = { kind: 'submit' } as Record<string, unknown>;
+    Object.defineProperty(accessor, 'target', { enumerable: true, get: () => 'stolen page text' });
+    const candidates = [
+      { kind: 'submit', target: 'Create issue' },
+      { ...canonical },
+      JSON.parse(JSON.stringify(canonical)),
+      accessor,
+      Object.assign(Object.create({ hidden: true }), { kind: 'submit', target: 'Create issue' }),
+    ];
+
+    for (const effect of candidates) {
+      expect(() => store.request({ ...baseRequest(), effect } as ApprovalRequest)).toThrowError(
         expect.objectContaining({ code: 'approval_payload_invalid' }),
       );
     }
     expect(store.snapshot()).toEqual([]);
+  });
+
+  it.each([
+    ['secret', 'password=hunter2 token=abc123', '[redacted]'],
+    ['high entropy', 'AKIAIOSFODNN7EXAMPLE', '[redacted]'],
+    ['script', 'document.cookie = window.localStorage.token', '[redacted]'],
+    ['page text', 'Account settings\nEmail val@example.test\nPrivate content', '[redacted]'],
+    ['url', 'https://alice:secret@example.test/path?token=secret#private', 'https://example.test/path'],
+    ['url path token', 'https://example.test/AKIAIOSFODNN7EXAMPLE?view=1', '[redacted]'],
+    ['upload path', '/Users/val/private/report.txt', 'report.txt'],
+    ['download path', 'C:\\Users\\val\\private\\report.zip', 'report.zip'],
+    ['controls', 'Close\u0000\u0007 tab', 'Close tab'],
+  ] as const)('normalizes adversarial %s targets without retaining source payload', (_label, target, expected) => {
+    const kind = _label === 'upload path'
+      ? 'upload'
+      : _label === 'download path'
+        ? 'download'
+        : 'submit';
+    const effect = createRedactedApprovalEffect({ kind, target });
+    const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
+    const approval = store.request({ ...baseRequest(), effect });
+
+    expect(approval.effect).toEqual({ kind, target: expected });
+    expect(JSON.stringify(store.snapshot())).not.toContain(target);
+  });
+
+  it('caps normalized targets by UTF-8 bytes', () => {
+    const effect = createRedactedApprovalEffect({ kind: 'submit', target: 'é'.repeat(400) });
+    expect(Buffer.byteLength(effect.target, 'utf8')).toBeLessThanOrEqual(
+      AGENT_CONTROL_LIMITS.accessibleNameBytes,
+    );
+  });
+
+  it('rejects new active approvals at the fixed capacity without growing state', () => {
+    const store = new ApprovalStore(
+      () => new Date('2026-08-12T12:00:00.000Z'),
+      (() => { let id = 0; return () => `approval-${id++}`; })(),
+    );
+    for (let index = 0; index < APPROVAL_ACTIVE_LIMIT; index += 1) {
+      store.request({ ...baseRequest(), actionId: `action-${index}` });
+    }
+
+    expect(() => store.request({ ...baseRequest(), actionId: 'over-capacity' })).toThrowError(
+      expect.objectContaining({ code: 'approval_capacity_exceeded' }),
+    );
+    expect(store.snapshot()).toHaveLength(APPROVAL_ACTIVE_LIMIT);
+  });
+
+  it('retains a bounded terminal idempotency window and evicts both indexes together', () => {
+    let id = 0;
+    const store = new ApprovalStore(
+      () => new Date('2026-08-12T12:00:00.000Z'),
+      () => `approval-${id++}`,
+    );
+    const active = store.request({ ...baseRequest(), actionId: 'active' });
+    let last!: ReturnType<ApprovalStore['request']>;
+    for (let index = 0; index <= APPROVAL_TERMINAL_LIMIT; index += 1) {
+      const pending = store.request({ ...baseRequest(), actionId: `terminal-${index}` });
+      last = store.deny(pending.id, 'operator', pending.payloadDigest);
+    }
+
+    expect(store.snapshot()).toHaveLength(APPROVAL_TERMINAL_LIMIT + 1);
+    expect(store.request({ ...baseRequest(), actionId: 'active' })).toBe(active);
+    expect(store.request({ ...baseRequest(), actionId: `terminal-${APPROVAL_TERMINAL_LIMIT}` }))
+      .toBe(last);
+    const replacement = store.request({ ...baseRequest(), actionId: 'terminal-0' });
+    expect(replacement.id).not.toBe('approval-1');
+    expect(store.snapshot()).toHaveLength(APPROVAL_TERMINAL_LIMIT + 2);
+  });
+
+  it('expires an identical retry at the exact TTL boundary before returning it', () => {
+    let now = Date.parse('2026-08-12T12:00:00.000Z');
+    const store = new ApprovalStore(() => new Date(now), () => 'approval-1');
+    const pending = store.request(baseRequest());
+    now += AGENT_CONTROL_LIMITS.approvalTtlMs;
+
+    expect(store.request(baseRequest())).toEqual({ ...pending, status: 'expired' });
+    expect(store.snapshot()).toEqual([expect.objectContaining({ id: pending.id, status: 'expired' })]);
   });
 
   it('binds consumption to the exact validated redacted effect', () => {
@@ -349,7 +452,7 @@ describe('ApprovalStore', () => {
     const changed = store.request({
       ...baseRequest(),
       actionId: 'changed-probe',
-      effect: { kind: 'submit', target: 'Changed target' },
+      effect: createRedactedApprovalEffect({ kind: 'submit', target: 'Changed target' }),
     });
     store.approve(pending.id, 'operator', pending.payloadDigest);
 
@@ -371,7 +474,7 @@ describe('ApprovalStore', () => {
     expect(Object.isFrozen(snapshot)).toBe(true);
     expect(Object.isFrozen(snapshot[0])).toBe(true);
     (request.resource as { id: string }).id = 'caller-mutated';
-    (request.effect as { target: string }).target = 'caller-mutated';
+    expect(() => { (request.effect as { target: string }).target = 'caller-mutated'; }).toThrow();
     expect(pending.resource.id).toBe('tab-1');
     expect(pending.effect).toEqual({ kind: 'submit', target: 'Create issue' });
   });

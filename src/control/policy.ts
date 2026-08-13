@@ -1,52 +1,31 @@
 import type { SurfaceCapability } from './capabilityLeases.js';
-import type {
-  BrowserSemanticAction,
-  BrowserSemanticMetadata,
-  PaneAction,
-} from './types.js';
+import type { BrowserSemanticAction, PaneAction } from './types.js';
 
 export interface PolicyClassification {
   readonly decision: 'allow' | 'approval';
   readonly capability: SurfaceCapability;
 }
 
+declare const canonicalElementSemanticsBrand: unique symbol;
+export interface CanonicalElementSemantics {
+  readonly role?: string;
+  readonly submit?: boolean;
+  readonly secret?: boolean;
+  readonly [canonicalElementSemanticsBrand]: true;
+}
+
+export interface CanonicalElementSemanticsInput {
+  readonly role?: string;
+  readonly submit?: boolean;
+  readonly secret?: boolean;
+}
+
 export interface BrowserPolicyAction {
   readonly kind: BrowserSemanticAction['kind'];
-  readonly semantic?: BrowserSemanticMetadata;
+  readonly semantic?: CanonicalElementSemantics;
 }
 
-declare const browserRiskContextBrand: unique symbol;
-export type BrowserResolvedRiskContext = (
-  | {
-      readonly source: 'canonical_snapshot';
-      readonly actionKind: 'click';
-      readonly submit: boolean;
-    }
-  | {
-      readonly source: 'canonical_snapshot';
-      readonly actionKind: 'type';
-      readonly secret: boolean;
-    }
-) & { readonly [browserRiskContextBrand]: true };
-
-export type CanonicalSnapshotRiskNode =
-  | { readonly actionKind: 'click'; readonly submit: boolean }
-  | { readonly actionKind: 'type'; readonly secret: boolean };
-
-export interface BrowserPolicyAuthority {
-  readonly resolveFromCanonicalSnapshot: (
-    node: CanonicalSnapshotRiskNode,
-  ) => BrowserResolvedRiskContext;
-  readonly classifyBrowserAction: (
-    action: BrowserSemanticAction,
-    risk?: BrowserResolvedRiskContext,
-  ) => PolicyClassification;
-}
-
-const authorityClassifiers = new WeakMap<
-  BrowserPolicyAuthority,
-  BrowserPolicyAuthority['classifyBrowserAction']
->();
+const canonicalSemantics = new WeakSet<object>();
 
 const POLICY = {
   paneInput: Object.freeze({ decision: 'allow', capability: 'pane.input' }),
@@ -63,6 +42,30 @@ const POLICY = {
   browserClose: Object.freeze({ decision: 'approval', capability: 'browser.close' }),
   browserScript: Object.freeze({ decision: 'approval', capability: 'browser.script' }),
 } as const satisfies Record<string, PolicyClassification>;
+
+export function createCanonicalElementSemantics(
+  input: CanonicalElementSemanticsInput,
+): CanonicalElementSemantics {
+  assertPlainDataObject(input);
+  const keys = Object.keys(input);
+  if (keys.some((key) => !['role', 'submit', 'secret'].includes(key))) {
+    return capabilityDenied(input);
+  }
+  if (
+    (input.role !== undefined && typeof input.role !== 'string')
+    || (input.submit !== undefined && typeof input.submit !== 'boolean')
+    || (input.secret !== undefined && typeof input.secret !== 'boolean')
+  ) {
+    return capabilityDenied(input);
+  }
+  const semantic = Object.freeze({
+    ...(input.role === undefined ? {} : { role: input.role }),
+    ...(input.submit === undefined ? {} : { submit: input.submit }),
+    ...(input.secret === undefined ? {} : { secret: input.secret }),
+  }) as CanonicalElementSemantics;
+  canonicalSemantics.add(semantic);
+  return semantic;
+}
 
 export function classifyPaneAction(action: PaneAction): PolicyClassification {
   if (!isAction(action)) return capabilityDenied(action);
@@ -85,68 +88,22 @@ export function classifyPaneAction(action: PaneAction): PolicyClassification {
   }
 }
 
-export function createBrowserPolicyAuthority(): BrowserPolicyAuthority {
-  const trustedContexts = new WeakSet<object>();
-  const resolveFromCanonicalSnapshot = (
-    node: CanonicalSnapshotRiskNode,
-  ): BrowserResolvedRiskContext => {
-    if (!node || typeof node !== 'object') return capabilityDenied(node);
-    let context: BrowserResolvedRiskContext;
-    if (node.actionKind === 'click' && typeof node.submit === 'boolean') {
-      context = Object.freeze({
-        source: 'canonical_snapshot', actionKind: 'click', submit: node.submit,
-      }) as BrowserResolvedRiskContext;
-    } else if (node.actionKind === 'type' && typeof node.secret === 'boolean') {
-      context = Object.freeze({
-        source: 'canonical_snapshot', actionKind: 'type', secret: node.secret,
-      }) as BrowserResolvedRiskContext;
-    } else {
-      return capabilityDenied(node);
-    }
-    trustedContexts.add(context);
-    return context;
-  };
-  const authority: BrowserPolicyAuthority = Object.freeze({
-    resolveFromCanonicalSnapshot,
-    classifyBrowserAction: (
-      action: BrowserSemanticAction,
-      risk?: BrowserResolvedRiskContext,
-    ) => classifyBrowserActionWithTrust(action, risk, trustedContexts),
-  });
-  authorityClassifiers.set(authority, authority.classifyBrowserAction);
-  return authority;
-}
-
-export function classifyBrowserAction(action: BrowserPolicyAction): PolicyClassification;
-export function classifyBrowserAction(
-  action: BrowserSemanticAction,
-  risk: BrowserResolvedRiskContext | undefined,
-  authority: BrowserPolicyAuthority,
-): PolicyClassification;
-export function classifyBrowserAction(
-  action: BrowserPolicyAction,
-  risk?: BrowserResolvedRiskContext,
-  authority?: BrowserPolicyAuthority,
-): PolicyClassification {
-  if (authority !== undefined || risk !== undefined) {
-    const classify = authority && authorityClassifiers.get(authority);
-    if (!classify) return capabilityDenied(authority);
-    return classify(action as BrowserSemanticAction, risk);
-  }
-  return classifyBrowserActionDirect(action);
-}
-
-function classifyBrowserActionDirect(action: BrowserPolicyAction): PolicyClassification {
+export function classifyBrowserAction(action: BrowserPolicyAction): PolicyClassification {
   if (!isAction(action)) return capabilityDenied(action);
+  if (action.semantic !== undefined && !isCanonicalSemantics(action.semantic)) {
+    return capabilityDenied(action.semantic);
+  }
   switch (action.kind) {
     case 'click':
-      return action.semantic?.submit === true
-        ? POLICY.browserInteractApproval
-        : POLICY.browserInteract;
+      if (!isCanonicalSemantics(action.semantic) || typeof action.semantic.submit !== 'boolean') {
+        return capabilityDenied(action.semantic);
+      }
+      return action.semantic.submit ? POLICY.browserInteractApproval : POLICY.browserInteract;
     case 'type':
-      return action.semantic?.secret === true
-        ? POLICY.browserInteractApproval
-        : POLICY.browserInteract;
+      if (!isCanonicalSemantics(action.semantic) || typeof action.semantic.secret !== 'boolean') {
+        return capabilityDenied(action.semantic);
+      }
+      return action.semantic.secret ? POLICY.browserInteractApproval : POLICY.browserInteract;
     case 'select':
     case 'scroll':
     case 'focus':
@@ -171,51 +128,27 @@ function classifyBrowserActionDirect(action: BrowserPolicyAction): PolicyClassif
   }
 }
 
-function classifyBrowserActionWithTrust(
-  action: BrowserSemanticAction,
-  risk: BrowserResolvedRiskContext | undefined,
-  trustedContexts: WeakSet<object>,
-): PolicyClassification {
-  if (!isAction(action)) return capabilityDenied(action);
-  switch (action.kind) {
-    case 'click': {
-      if (!isTrustedClickRisk(risk, trustedContexts)) return capabilityDenied(risk);
-      return risk.submit
-        ? POLICY.browserInteractApproval
-        : POLICY.browserInteract;
-    }
-    case 'type': {
-      if (!isTrustedTypeRisk(risk, trustedContexts)) return capabilityDenied(risk);
-      return risk.secret
-        ? POLICY.browserInteractApproval
-        : POLICY.browserInteract;
-    }
-    case 'select':
-    case 'scroll':
-    case 'focus':
-      return POLICY.browserInteract;
-    case 'submit':
-    case 'upload':
-    case 'download':
-    case 'permission_response':
-      return POLICY.browserInteractApproval;
-    case 'navigate':
-      return POLICY.browserNavigate;
-    case 'reload':
-    case 'back':
-    case 'forward':
-      return POLICY.browserHistory;
-    case 'screenshot':
-      return POLICY.browserScreenshot;
-    case 'close':
-      return POLICY.browserClose;
-    default:
-      return assertNever(action);
-  }
-}
-
 export function classifyBrowserScript(): PolicyClassification {
   return POLICY.browserScript;
+}
+
+function isCanonicalSemantics(value: unknown): value is CanonicalElementSemantics {
+  return typeof value === 'object' && value !== null && canonicalSemantics.has(value);
+}
+
+function assertPlainDataObject(value: unknown): asserts value is Record<string, unknown> {
+  if (
+    !value
+    || typeof value !== 'object'
+    || Object.getPrototypeOf(value) !== Object.prototype
+    || Reflect.ownKeys(value).some((key) => typeof key !== 'string')
+    || Object.getOwnPropertyNames(value).some((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return !descriptor || !('value' in descriptor) || !descriptor.enumerable;
+    })
+  ) {
+    return capabilityDenied(value);
+  }
 }
 
 function assertNever(action: never): never {
@@ -233,28 +166,4 @@ function isAction(value: unknown): value is { readonly kind: string } {
   return typeof value === 'object'
     && value !== null
     && typeof (value as { kind?: unknown }).kind === 'string';
-}
-
-function isTrustedClickRisk(
-  value: unknown,
-  trustedContexts: WeakSet<object>,
-): value is Extract<BrowserResolvedRiskContext, { actionKind: 'click' }> {
-  return typeof value === 'object'
-    && value !== null
-    && trustedContexts.has(value)
-    && (value as { source?: unknown }).source === 'canonical_snapshot'
-    && (value as { actionKind?: unknown }).actionKind === 'click'
-    && typeof (value as { submit?: unknown }).submit === 'boolean';
-}
-
-function isTrustedTypeRisk(
-  value: unknown,
-  trustedContexts: WeakSet<object>,
-): value is Extract<BrowserResolvedRiskContext, { actionKind: 'type' }> {
-  return typeof value === 'object'
-    && value !== null
-    && trustedContexts.has(value)
-    && (value as { source?: unknown }).source === 'canonical_snapshot'
-    && (value as { actionKind?: unknown }).actionKind === 'type'
-    && typeof (value as { secret?: unknown }).secret === 'boolean';
 }

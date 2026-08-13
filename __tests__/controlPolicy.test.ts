@@ -1,35 +1,31 @@
 import { describe, expect, it } from 'vitest';
 import {
-  classifyBrowserAction as classifyBrowserActionDirect,
+  classifyBrowserAction,
   classifyBrowserScript,
   classifyPaneAction,
-  createBrowserPolicyAuthority,
-  type BrowserResolvedRiskContext,
+  createCanonicalElementSemantics,
+  type CanonicalElementSemantics,
 } from '../src/control/policy.js';
-import type { BrowserSemanticAction, PaneAction } from '../src/control/types.js';
+import type { PaneAction } from '../src/control/types.js';
 
 describe('agent control policy', () => {
-  const authority = createBrowserPolicyAuthority();
-  const classifyBrowserAction = authority.classifyBrowserAction;
-  const trustedClick = (submit: boolean): BrowserResolvedRiskContext => (
-    authority.resolveFromCanonicalSnapshot({ actionKind: 'click', submit })
-  );
-  const trustedType = (secret: boolean): BrowserResolvedRiskContext => (
-    authority.resolveFromCanonicalSnapshot({ actionKind: 'type', secret })
-  );
-
-  it('supports direct classification from semantic metadata', () => {
-    expect(classifyBrowserActionDirect({
+  it('classifies canonical click and secret metadata through the direct API', () => {
+    expect(classifyBrowserAction({
       kind: 'click',
-      semantic: { role: 'button', submit: false },
+      semantic: createCanonicalElementSemantics({ role: 'button', submit: false }),
     })).toEqual({ decision: 'allow', capability: 'browser.interact' });
-    expect(classifyBrowserActionDirect({
+    expect(classifyBrowserAction({
+      kind: 'click',
+      semantic: createCanonicalElementSemantics({ role: 'button', submit: true }),
+    })).toEqual({ decision: 'approval', capability: 'browser.interact' });
+    expect(classifyBrowserAction({
       kind: 'type',
-      semantic: { secret: true },
+      semantic: createCanonicalElementSemantics({ secret: true }),
     })).toMatchObject({ decision: 'approval', capability: 'browser.interact' });
-    for (const kind of ['submit', 'upload', 'download', 'permission_response', 'close'] as const) {
-      expect(classifyBrowserActionDirect({ kind })).toMatchObject({ decision: 'approval' });
-    }
+    expect(classifyBrowserAction({
+      kind: 'type',
+      semantic: createCanonicalElementSemantics({ secret: false }),
+    })).toEqual({ decision: 'allow', capability: 'browser.interact' });
   });
 
   it.each<[PaneAction, 'allow' | 'approval', string]>([
@@ -44,84 +40,52 @@ describe('agent control policy', () => {
     expect(classifyPaneAction(action)).toEqual({ decision, capability });
   });
 
-  it.each<[BrowserSemanticAction, BrowserResolvedRiskContext | undefined, 'allow' | 'approval', string]>([
-    [{ kind: 'click', elementRef: 'button-1', semantic: { role: 'button', submit: false } }, trustedClick(false), 'allow', 'browser.interact'],
-    [{ kind: 'click', elementRef: 'submit-1', semantic: { role: 'button', submit: true } }, trustedClick(true), 'approval', 'browser.interact'],
-    [{ kind: 'type', elementRef: 'field-1', text: 'hello', semantic: { secret: false } }, trustedType(false), 'allow', 'browser.interact'],
-    [{ kind: 'type', elementRef: 'password-1', text: 'redacted-test-value', semantic: { secret: true } }, trustedType(true), 'approval', 'browser.interact'],
-    [{ kind: 'select', elementRef: 'select-1', values: ['one'] }, undefined, 'allow', 'browser.interact'],
-    [{ kind: 'submit', elementRef: 'form-1' }, undefined, 'approval', 'browser.interact'],
-    [{ kind: 'upload', elementRef: 'upload-1', path: 'relative-upload.bin' }, undefined, 'approval', 'browser.interact'],
-    [{ kind: 'download', elementRef: 'download-1', destination: 'relative-download.bin' }, undefined, 'approval', 'browser.interact'],
-    [{ kind: 'scroll', elementRef: 'region-1', deltaY: 100 }, undefined, 'allow', 'browser.interact'],
-    [{ kind: 'focus', elementRef: 'field-1' }, undefined, 'allow', 'browser.interact'],
-    [{ kind: 'navigate', url: 'https://example.test' }, undefined, 'allow', 'browser.navigate'],
-    [{ kind: 'permission_response', permission: 'camera', origin: 'https://example.test', decision: 'deny' }, undefined, 'approval', 'browser.interact'],
-    [{ kind: 'reload' }, undefined, 'allow', 'browser.history'],
-    [{ kind: 'back' }, undefined, 'allow', 'browser.history'],
-    [{ kind: 'forward' }, undefined, 'allow', 'browser.history'],
-    [{ kind: 'screenshot' }, undefined, 'allow', 'browser.screenshot'],
-    [{ kind: 'close' }, undefined, 'approval', 'browser.close'],
-  ])('classifies browser action $kind as $decision with $capability', (action, context, decision, capability) => {
-    expect(classifyBrowserAction(action, context)).toEqual({ decision, capability });
-  });
-
-  it('uses trusted click risk instead of caller semantic metadata', () => {
-    expect(classifyBrowserAction(
-      { kind: 'click', elementRef: 'button', semantic: { submit: false } },
-      trustedClick(true),
-    ).decision).toBe('approval');
-    expect(classifyBrowserAction(
-      { kind: 'click', elementRef: 'button', semantic: { submit: true } },
-      trustedClick(false),
-    ).decision).toBe('allow');
-  });
-
-  it('uses trusted type risk instead of caller semantic metadata', () => {
-    expect(classifyBrowserAction(
-      { kind: 'type', elementRef: 'field', text: 'value', semantic: { secret: false } },
-      trustedType(true),
-    ).decision).toBe('approval');
-    expect(classifyBrowserAction(
-      { kind: 'type', elementRef: 'field', text: 'value', semantic: { secret: true } },
-      trustedType(false),
-    ).decision).toBe('allow');
-  });
-
   it.each([
-    ['missing click context', { kind: 'click', elementRef: 'button' }, undefined],
-    ['missing type context', { kind: 'type', elementRef: 'field', text: 'value' }, undefined],
-    ['nonboolean submit', { kind: 'click', elementRef: 'button' }, { source: 'canonical_snapshot', actionKind: 'click', submit: 'false' }],
-    ['nonboolean secret', { kind: 'type', elementRef: 'field', text: 'value' }, { source: 'canonical_snapshot', actionKind: 'type', secret: 0 }],
-    ['null context', { kind: 'click', elementRef: 'button' }, null],
-    ['non-object context', { kind: 'type', elementRef: 'field', text: 'value' }, 42],
-    ['wrong provenance', { kind: 'click', elementRef: 'button' }, { source: 'caller', actionKind: 'click', submit: false }],
-    ['wrong action context', { kind: 'click', elementRef: 'button' }, { source: 'canonical_snapshot', actionKind: 'type', secret: false }],
-  ] as const)('fails closed for %s', (_label, action, context) => {
-    expect(() => classifyBrowserAction(
-      action as BrowserSemanticAction,
-      context as BrowserResolvedRiskContext | undefined,
-    )).toThrowError(expect.objectContaining({ code: 'capability_denied' }));
+    ['select', 'allow', 'browser.interact'],
+    ['scroll', 'allow', 'browser.interact'],
+    ['focus', 'allow', 'browser.interact'],
+    ['submit', 'approval', 'browser.interact'],
+    ['upload', 'approval', 'browser.interact'],
+    ['download', 'approval', 'browser.interact'],
+    ['permission_response', 'approval', 'browser.interact'],
+    ['navigate', 'allow', 'browser.navigate'],
+    ['reload', 'allow', 'browser.history'],
+    ['back', 'allow', 'browser.history'],
+    ['forward', 'allow', 'browser.history'],
+    ['screenshot', 'allow', 'browser.screenshot'],
+    ['close', 'approval', 'browser.close'],
+  ] as const)('classifies browser %s as %s with %s', (kind, decision, capability) => {
+    expect(classifyBrowserAction({ kind })).toEqual({ decision, capability });
   });
 
-  it('rejects forged, cloned, round-tripped, and foreign authority contexts', () => {
-    const action = { kind: 'click', elementRef: 'button' } as const;
-    const valid = trustedClick(true);
-    const foreignAuthority = createBrowserPolicyAuthority();
-    const foreign = foreignAuthority.resolveFromCanonicalSnapshot({ actionKind: 'click', submit: true });
+  it('rejects raw, cloned, round-tripped, missing, and malformed semantic metadata', () => {
+    const canonical = createCanonicalElementSemantics({ role: 'button', submit: false });
     const candidates = [
-      { source: 'canonical_snapshot', actionKind: 'click', submit: true },
-      { ...valid },
-      JSON.parse(JSON.stringify(valid)),
-      foreign,
+      { role: 'button', submit: false },
+      { ...canonical },
+      JSON.parse(JSON.stringify(canonical)),
+      undefined,
+      null,
+      42,
     ];
 
-    expect(classifyBrowserAction(action, valid).decision).toBe('approval');
-    for (const context of candidates) {
-      expect(() => classifyBrowserAction(
-        action,
-        context as BrowserResolvedRiskContext,
-      )).toThrowError(expect.objectContaining({ code: 'capability_denied' }));
+    for (const semantic of candidates) {
+      expect(() => classifyBrowserAction({
+        kind: 'click',
+        semantic: semantic as CanonicalElementSemantics,
+      })).toThrowError(expect.objectContaining({ code: 'capability_denied' }));
+    }
+  });
+
+  it('rejects malformed canonical semantic source objects', () => {
+    for (const input of [
+      { role: 'button', submit: false, extra: true },
+      { role: 'button', submit: 'false' },
+      Object.create({ role: 'button' }),
+    ]) {
+      expect(() => createCanonicalElementSemantics(input as never)).toThrowError(
+        expect.objectContaining({ code: 'capability_denied' }),
+      );
     }
   });
 

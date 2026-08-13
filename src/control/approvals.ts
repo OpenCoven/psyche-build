@@ -10,7 +10,11 @@ export type ApprovalErrorCode =
   | 'approval_identity_mismatch'
   | 'approval_action_conflict'
   | 'approval_id_collision'
-  | 'approval_payload_invalid';
+  | 'approval_payload_invalid'
+  | 'approval_capacity_exceeded';
+
+export const APPROVAL_ACTIVE_LIMIT = 256;
+export const APPROVAL_TERMINAL_LIMIT = 1_000;
 
 export type ApprovalEffectKind =
   | 'submit'
@@ -21,14 +25,38 @@ export type ApprovalEffectKind =
   | 'close'
   | 'script';
 
-export type RedactedApprovalEffect =
+declare const redactedApprovalEffectBrand: unique symbol;
+export type RedactedApprovalEffect = (
   | { readonly kind: 'submit'; readonly target: string }
   | { readonly kind: 'secret_input'; readonly target: string }
   | { readonly kind: 'upload'; readonly target: string }
   | { readonly kind: 'download'; readonly target: string }
   | { readonly kind: 'permission_response'; readonly target: string }
   | { readonly kind: 'close'; readonly target: string }
-  | { readonly kind: 'script'; readonly target: string };
+  | { readonly kind: 'script'; readonly target: string }
+) & { readonly [redactedApprovalEffectBrand]: true };
+
+export interface RedactedApprovalEffectInput {
+  readonly kind: ApprovalEffectKind;
+  readonly target: string;
+}
+
+const redactedEffects = new WeakSet<object>();
+
+export function createRedactedApprovalEffect(
+  input: RedactedApprovalEffectInput,
+): RedactedApprovalEffect {
+  assertExactKeys(input, ['kind', 'target'], 'approval effect source');
+  if (!isApprovalEffectKind(input.kind) || typeof input.target !== 'string') {
+    throw codedError('approval_payload_invalid', 'approval effect source is invalid');
+  }
+  const effect = Object.freeze({
+    kind: input.kind,
+    target: normalizeEffectTarget(input.kind, input.target),
+  }) as RedactedApprovalEffect;
+  redactedEffects.add(effect);
+  return effect;
+}
 
 export interface ApprovalRequest {
   readonly actionId: string;
@@ -104,6 +132,7 @@ export class ApprovalStore {
 
   request(input: ApprovalRequest): Approval {
     const now = this.clock();
+    this.expireAt(now);
     const identity = copyIdentity(input);
     const payloadDigest = digestIdentity(identity);
     const existingId = this.approvalIdsByAction.get(identity.actionId);
@@ -111,6 +140,9 @@ export class ApprovalStore {
       const existing = this.approvals.get(existingId);
       if (existing?.payloadDigest === payloadDigest) return existing;
       throw codedError('approval_action_conflict', 'action id was reused for another approval intent');
+    }
+    if ([...this.approvals.values()].filter(isActive).length >= APPROVAL_ACTIVE_LIMIT) {
+      throw codedError('approval_capacity_exceeded', 'active approval capacity exceeded');
     }
     const id = this.generateId();
     if (!isNonemptyString(id) || this.approvals.has(id)) {
@@ -161,6 +193,7 @@ export class ApprovalStore {
       consumedAt: now.toISOString(),
     });
     this.approvals.set(approval.id, consumed);
+    this.pruneTerminal();
     return consumed;
   }
 
@@ -178,6 +211,7 @@ export class ApprovalStore {
         expired.push(replacement);
       }
     }
+    this.pruneTerminal();
     return Object.freeze(expired);
   }
 
@@ -220,6 +254,7 @@ export class ApprovalStore {
       resolvedAt: now.toISOString(),
     });
     this.approvals.set(id, resolved);
+    this.pruneTerminal();
     return resolved;
   }
 
@@ -229,6 +264,7 @@ export class ApprovalStore {
     if (isActive(approval) && Date.parse(approval.expiresAt) <= now.getTime()) {
       const expired = freezeApproval({ ...approval, status: 'expired' });
       this.approvals.set(id, expired);
+      this.pruneTerminal();
       throw codedError('approval_expired', 'approval expired');
     }
     if (approval.status === 'expired') {
@@ -247,7 +283,22 @@ export class ApprovalStore {
         revoked.push(replacement);
       }
     }
+    this.pruneTerminal();
     return Object.freeze(revoked);
+  }
+
+  private pruneTerminal(): void {
+    let terminalCount = [...this.approvals.values()].filter(isTerminal).length;
+    if (terminalCount <= APPROVAL_TERMINAL_LIMIT) return;
+    for (const [id, approval] of this.approvals) {
+      if (!isTerminal(approval)) continue;
+      this.approvals.delete(id);
+      if (this.approvalIdsByAction.get(approval.actionId) === id) {
+        this.approvalIdsByAction.delete(approval.actionId);
+      }
+      terminalCount -= 1;
+      if (terminalCount <= APPROVAL_TERMINAL_LIMIT) return;
+    }
   }
 }
 
@@ -331,30 +382,78 @@ function copyTarget(target: LeaseTarget): LeaseTarget {
 }
 
 function copyEffect(effect: RedactedApprovalEffect): RedactedApprovalEffect {
-  assertExactKeys(effect, ['kind', 'target'], 'approval effect');
   if (
-    !isNonemptyString(effect.target)
-    || Buffer.byteLength(effect.target, 'utf8') > AGENT_CONTROL_LIMITS.accessibleNameBytes
+    !effect
+    || typeof effect !== 'object'
+    || !redactedEffects.has(effect)
+    || !Object.isFrozen(effect)
   ) {
-    throw codedError('approval_payload_invalid', 'approval effect target must be bounded redacted metadata');
+    throw codedError('approval_payload_invalid', 'approval effect lacks redaction provenance');
   }
-  switch (effect.kind) {
-    case 'submit':
-    case 'secret_input':
-    case 'upload':
-    case 'download':
-    case 'permission_response':
-    case 'close':
-    case 'script':
-      return Object.freeze({ kind: effect.kind, target: effect.target });
-    default:
-      return invalidEffect(effect);
-  }
+  return effect;
 }
 
-function invalidEffect(effect: unknown): never {
-  void effect;
-  throw codedError('approval_identity_mismatch', 'approval effect is not allowlisted');
+function normalizeEffectTarget(kind: ApprovalEffectKind, source: string): string {
+  const hadMultipleLines = source.split(/\r?\n/).filter((line) => line.trim().length > 0).length > 1;
+  let target = source.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!target) return '[redacted]';
+
+  if (/^https?:\/\//i.test(target)) {
+    try {
+      const url = new URL(target);
+      url.username = '';
+      url.password = '';
+      url.search = '';
+      url.hash = '';
+      if (containsSensitiveTarget(url.pathname)) return '[redacted]';
+      target = url.toString();
+      if (url.pathname !== '/' && target.endsWith('/')) target = target.slice(0, -1);
+      return truncateUtf8(target, AGENT_CONTROL_LIMITS.accessibleNameBytes);
+    } catch {
+      return '[redacted]';
+    }
+  }
+
+  if (kind === 'upload' || kind === 'download') {
+    const portablePath = target.replace(/\\/g, '/');
+    if (portablePath.startsWith('/') || /^[A-Za-z]:\//.test(portablePath)) {
+      target = portablePath.split('/').filter(Boolean).at(-1) ?? '[redacted]';
+    }
+  }
+
+  if (
+    hadMultipleLines
+    || containsSensitiveTarget(target)
+    || (kind === 'script' && /(?:[;{}]|=>|\bfunction\s*\()/i.test(target))
+  ) {
+    return '[redacted]';
+  }
+  return truncateUtf8(target, AGENT_CONTROL_LIMITS.accessibleNameBytes);
+}
+
+function containsSensitiveTarget(value: string): boolean {
+  return /(?:password|passwd|secret|token|api[ _-]?key|authorization|bearer|cookie|localstorage|document\.)/i.test(value)
+    || /(?=[A-Za-z0-9+/_=-]{20,})(?=[A-Za-z0-9+/_=-]*[A-Za-z])(?=[A-Za-z0-9+/_=-]*\d)[A-Za-z0-9+/_=-]{20,}/.test(value);
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes) return value;
+  let result = '';
+  for (const character of value) {
+    if (Buffer.byteLength(result + character, 'utf8') > maxBytes) break;
+    result += character;
+  }
+  return result || '[redacted]';
+}
+
+function isApprovalEffectKind(value: unknown): value is ApprovalEffectKind {
+  return value === 'submit'
+    || value === 'secret_input'
+    || value === 'upload'
+    || value === 'download'
+    || value === 'permission_response'
+    || value === 'close'
+    || value === 'script';
 }
 
 function digestIdentity(identity: ApprovalIdentity): string {
@@ -458,6 +557,10 @@ function targetsEqual(left: LeaseTarget, right: LeaseTarget): boolean {
 
 function isActive(approval: Approval): boolean {
   return approval.status === 'pending' || approval.status === 'approved';
+}
+
+function isTerminal(approval: Approval): boolean {
+  return !isActive(approval);
 }
 
 function freezeApproval(approval: Approval): Approval {
