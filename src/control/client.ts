@@ -20,6 +20,7 @@ export interface ControlClientOptions {
   token: string;
   clientName: string;
   endpoint?: string;
+  signal?: AbortSignal;
 }
 
 interface PendingRequest {
@@ -51,6 +52,15 @@ export class ControlClient {
 
   static async connect(options: ControlClientOptions): Promise<ControlClient> {
     const canonicalRoot = await canonicalizeProjectRoot(options.projectRoot);
+    return ControlClient.connectCanonical({ ...options, projectRoot: canonicalRoot });
+  }
+
+  /**
+   * Connect using a root already resolved by the trusted owner bootstrap.
+   * Normal callers should use connect(), which canonicalizes defensively.
+   */
+  static async connectCanonical(options: ControlClientOptions): Promise<ControlClient> {
+    const canonicalRoot = options.projectRoot;
     const endpoint = options.endpoint ?? controlEndpointForProject(canonicalRoot);
 
     const socket = connect(endpoint);
@@ -59,6 +69,11 @@ export class ControlClient {
     const welcome = await new Promise<Extract<ControlResponse, { type: 'welcome' }>>(
       (resolve, reject) => {
         let buffer = '';
+        const rejectAndClose = (error: Error): void => {
+          cleanup();
+          socket.destroy();
+          reject(error);
+        };
         const onError = (error: Error): void => {
           cleanup();
           reject(error);
@@ -66,6 +81,13 @@ export class ControlClient {
         const onClose = (): void => {
           cleanup();
           reject(new Error('control connection closed before welcome'));
+        };
+        const onAbort = (): void => {
+          const error = Object.assign(new Error('control connection aborted'), {
+            name: 'AbortError',
+            code: 'ABORT_ERR',
+          });
+          rejectAndClose(error);
         };
         const onData = (chunk: string): void => {
           buffer += chunk;
@@ -76,23 +98,19 @@ export class ControlClient {
           try {
             message = JSON.parse(line) as ControlResponse;
           } catch {
-            cleanup();
-            reject(new Error('invalid welcome frame'));
+            rejectAndClose(new Error('invalid welcome frame'));
             return;
           }
           if (message.type === 'error') {
-            cleanup();
-            reject(new Error(`${message.code}: ${message.message}`));
+            rejectAndClose(new Error(`${message.code}: ${message.message}`));
             return;
           }
           if (message.type !== 'welcome') {
-            cleanup();
-            reject(new Error(`expected welcome, received ${message.type}`));
+            rejectAndClose(new Error(`expected welcome, received ${message.type}`));
             return;
           }
           if (message.projectRoot !== canonicalRoot) {
-            cleanup();
-            reject(new Error('welcome project root does not match the requested project'));
+            rejectAndClose(new Error('welcome project root does not match the requested project'));
             return;
           }
           cleanup();
@@ -102,10 +120,16 @@ export class ControlClient {
           socket.off('data', onData);
           socket.off('error', onError);
           socket.off('close', onClose);
+          options.signal?.removeEventListener('abort', onAbort);
         };
+        if (options.signal?.aborted) {
+          onAbort();
+          return;
+        }
         socket.on('data', onData);
         socket.once('error', onError);
         socket.once('close', onClose);
+        options.signal?.addEventListener('abort', onAbort, { once: true });
         socket.write(`${encodeControlMessage({
           version: 1,
           type: 'hello',

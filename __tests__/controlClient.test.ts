@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { createServer } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ControlServer, type ControlServerRuntime } from '../src/control/server.js';
 import { createControlCredentialStore } from '../src/control/credentials.js';
@@ -88,6 +89,37 @@ function inputCommand(id: string): Parameters<ControlClient['submit']>[0] {
 }
 
 describe('ControlClient over the socket transport', () => {
+  it('aborts and closes a socket that accepts but never sends welcome', async () => {
+    const endpoint = socketPath();
+    let markConnected!: () => void;
+    let markClosed!: () => void;
+    const connected = new Promise<void>((resolve) => { markConnected = resolve; });
+    const closed = new Promise<void>((resolve) => { markClosed = resolve; });
+    const server = createServer((socket) => {
+      markConnected();
+      socket.on('data', () => undefined);
+      socket.once('close', () => markClosed());
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(endpoint, resolve);
+    });
+    cleanups.push(async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+
+    const controller = new AbortController();
+    const pending = ControlClient.connectCanonical({
+      projectRoot: '/canonical/project', endpoint, token: 'secret', clientName: 'deadline-test',
+      signal: controller.signal,
+    });
+    await connected;
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError', code: 'ABORT_ERR' });
+    await closed;
+  });
+
   it('learns the owner epoch and principal from welcome', async () => {
     const harness = await startHarness();
     const client = await ControlClient.connect({

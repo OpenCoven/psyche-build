@@ -1,8 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { ControlClient, type ControlClientOptions } from './client.js';
+import { controlEndpointForProject } from './endpoint.js';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 
-type ConnectControl = (options: ControlClientOptions) => Promise<ControlClient>;
+export type ConnectControl = (options: ControlClientOptions) => Promise<ControlClient>;
 type SpawnOwner = (
   command: string,
   args: readonly string[],
@@ -35,7 +36,15 @@ export async function ensureHostControlPlane(
   options: EnsureHostOptions,
 ): Promise<ControlClient> {
   const canonicalRoot = await (options.canonicalize ?? canonicalizeProjectRoot)(options.projectRoot);
-  const connectControl = options.connect ?? ControlClient.connect;
+  return ensureCanonicalHostControlPlane(canonicalRoot, options);
+}
+
+/** Trusted internal path for callers that already resolved the project once. */
+export async function ensureCanonicalHostControlPlane(
+  canonicalRoot: string,
+  options: Omit<EnsureHostOptions, 'projectRoot' | 'canonicalize'>,
+): Promise<ControlClient> {
+  const connectControl = options.connect ?? ControlClient.connectCanonical;
   const spawnOwner = options.spawn ?? ((command, args, spawnOptions) => (
     spawn(command, [...args], spawnOptions)
   ));
@@ -45,12 +54,14 @@ export async function ensureHostControlPlane(
   }));
   const connection = {
     projectRoot: canonicalRoot,
+    endpoint: controlEndpointForProject(canonicalRoot),
     token: options.token,
     clientName: options.clientName,
   };
+  const deadline = now() + OWNER_START_TIMEOUT_MS;
 
   try {
-    return await connectControl(connection);
+    return await connectBeforeDeadline(connectControl, connection, deadline, now);
   } catch (error) {
     if (!isOwnerAbsent(error)) throw error;
   }
@@ -62,11 +73,10 @@ export async function ensureHostControlPlane(
   );
   child.unref();
 
-  const deadline = now() + OWNER_START_TIMEOUT_MS;
   let delayMs = INITIAL_POLL_DELAY_MS;
   for (;;) {
     try {
-      return await connectControl(connection);
+      return await connectBeforeDeadline(connectControl, connection, deadline, now);
     } catch (error) {
       if (!isOwnerAbsent(error)) throw error;
     }
@@ -74,6 +84,48 @@ export async function ensureHostControlPlane(
     if (remaining <= 0) throw ownerUnavailable();
     await sleep(Math.min(delayMs, remaining));
     delayMs = Math.min(delayMs * 2, MAX_POLL_DELAY_MS);
+  }
+}
+
+async function connectBeforeDeadline(
+  connectControl: ConnectControl,
+  connection: Omit<ControlClientOptions, 'signal'>,
+  deadline: number,
+  now: () => number,
+): Promise<ControlClient> {
+  const remaining = deadline - now();
+  if (remaining <= 0) throw ownerUnavailable();
+
+  const controller = new AbortController();
+  let timedOut = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const attempt = Promise.resolve().then(() => connectControl({
+    ...connection,
+    signal: controller.signal,
+  }));
+  const guardedAttempt = attempt.then(
+    (client) => {
+      if (!timedOut) return client;
+      void client.close().catch(() => undefined);
+      throw ownerUnavailable();
+    },
+    (error: unknown) => {
+      if (timedOut) throw ownerUnavailable();
+      throw error;
+    },
+  );
+  const deadlineReached = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      reject(ownerUnavailable());
+    }, remaining);
+  });
+
+  try {
+    return await Promise.race([guardedAttempt, deadlineReached]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }
 

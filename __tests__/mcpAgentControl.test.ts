@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { TOOLS, handleMcpRequest, setMcpDeps } from '../src/mcp/server.js';
+import {
+  TOOLS,
+  createMcpControlClientForRoot,
+  handleMcpRequest,
+  setMcpDeps,
+} from '../src/mcp/server.js';
 
 const restores: Array<() => void> = [];
 afterEach(() => {
@@ -129,8 +134,52 @@ describe('agent surface MCP tools', () => {
     });
   });
 
+  it('canonicalizes once across token load and owner connection retries', async () => {
+    const canonicalize = vi.fn(async () => '/canonical/repo');
+    const agentToken = vi.fn(async () => 'agent-token');
+    const credentialStoreForCanonicalRoot = vi.fn(async () => ({ agentToken } as any));
+    const client = fakeClient({ projectRoot: '/canonical/repo' });
+    const connect = vi.fn()
+      .mockRejectedValueOnce(connectionError('ENOENT'))
+      .mockRejectedValueOnce(connectionError('ECONNREFUSED'))
+      .mockResolvedValueOnce(client);
+    let now = 0;
+
+    await expect(createMcpControlClientForRoot('/symlink/repo', {
+      canonicalize,
+      credentialStoreForCanonicalRoot,
+      connect,
+      spawn: vi.fn(() => ({ unref: vi.fn() } as never)),
+      now: () => now,
+      sleep: async (delay) => { now += delay; },
+      entryPath: '/entry.js',
+    })).resolves.toBe(client);
+
+    expect(canonicalize).toHaveBeenCalledOnce();
+    expect(credentialStoreForCanonicalRoot).toHaveBeenCalledWith({
+      canonicalProjectRoot: '/canonical/repo',
+    });
+    expect(agentToken).toHaveBeenCalledOnce();
+    expect(connect).toHaveBeenCalledTimes(3);
+    expect(connect.mock.calls.every(([options]) => options.projectRoot === '/canonical/repo')).toBe(true);
+  });
+
+  it('maps an unavailable action transaction to unknown', async () => {
+    inject({ controlClientForRoot: vi.fn(async () => fakeClient({
+      actionStatus: vi.fn(async () => undefined),
+    })) });
+
+    expect(payload(await call('psyche_control_action_status', {
+      action_id: 'missing-action', project_root: '/repo',
+    }))).toEqual({ status: 'unknown', action_id: 'missing-action' });
+  });
+
   it('contains no direct mutation dependencies', () => {
     const source = readFileSync(new URL('../src/mcp/server.ts', import.meta.url), 'utf8');
     expect(source).not.toMatch(/spawnBridgePane|killBridgePane|TmuxControl|execFileSync/);
   });
 });
+
+function connectionError(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(code), { code });
+}

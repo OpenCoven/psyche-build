@@ -73,6 +73,24 @@ export async function createControlCredentialStore(options: {
   filePath?: string;
 }): Promise<ControlCredentialStore> {
   const root = await canonicalizeProjectRoot(options.projectRoot);
+  return createControlCredentialStoreForCanonicalRoot({
+    canonicalProjectRoot: root,
+    ...(options.filePath === undefined ? {} : { filePath: options.filePath }),
+  });
+}
+
+/**
+ * Build a credential store for a root already canonicalized by the caller.
+ *
+ * Owner-bootstrap code uses this seam so token loading, endpoint derivation,
+ * and connection retries share one identity resolution. General callers
+ * should use createControlCredentialStore, which retains the realpath guard.
+ */
+export async function createControlCredentialStoreForCanonicalRoot(options: {
+  canonicalProjectRoot: string;
+  filePath?: string;
+}): Promise<ControlCredentialStore> {
+  const root = options.canonicalProjectRoot;
   const filePath = options.filePath
     ?? path.join(root, '.psyche', 'runtime', 'control-credentials.json');
 

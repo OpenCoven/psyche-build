@@ -157,7 +157,7 @@ same authenticated authority, policy, approval, and receipt path as the UI.
 | `psyche_browser_inspect` | Capture a bounded semantic snapshot of an exact leased tab generation |
 | `psyche_browser_action` | Perform one typed leased browser action and return its canonical receipt |
 | `psyche_browser_script` | Submit an approval-gated browser script through an exact leased tab generation |
-| `psyche_control_action_status` | Read the latest canonical receipt without retrying the action |
+| `psyche_control_action_status` | Read the latest canonical receipt without retrying; missing bounded history reports `unknown` |
 | `psyche_list_panes` | Compatibility alias that lists pane resources through the owner |
 | `psyche_create_pane` | Compatibility alias for leased pane creation through the owner |
 | `psyche_execute_task` | Compatibility alias that submits orchestration through the owner |

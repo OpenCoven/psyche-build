@@ -5,8 +5,16 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { ControlClient } from '../control/client.js';
-import { createControlCredentialStore } from '../control/credentials.js';
-import { ensureHostControlPlane } from '../control/hostProcess.js';
+import {
+  createControlCredentialStoreForCanonicalRoot,
+  type ControlCredentialStore,
+} from '../control/credentials.js';
+import {
+  ensureCanonicalHostControlPlane,
+  type ConnectControl,
+  type EnsureHostOptions,
+} from '../control/hostProcess.js';
+import { canonicalizeProjectRoot } from '../control/projectIdentity.js';
 import type {
   ActionReceipt,
   CommandOutcome,
@@ -86,17 +94,40 @@ interface WorktreeSummary {
 
 const entryPath = fileURLToPath(new URL('../index.js', import.meta.url));
 
+export interface McpControlClientBootstrapOptions {
+  canonicalize?: typeof canonicalizeProjectRoot;
+  credentialStoreForCanonicalRoot?: (options: {
+    canonicalProjectRoot: string;
+  }) => Promise<ControlCredentialStore>;
+  connect?: ConnectControl;
+  spawn?: EnsureHostOptions['spawn'];
+  now?: EnsureHostOptions['now'];
+  sleep?: EnsureHostOptions['sleep'];
+  entryPath?: string;
+}
+
+export async function createMcpControlClientForRoot(
+  projectRoot: string,
+  options: McpControlClientBootstrapOptions = {},
+): Promise<ControlClient> {
+  const canonicalRoot = await (options.canonicalize ?? canonicalizeProjectRoot)(projectRoot);
+  const credentials = await (
+    options.credentialStoreForCanonicalRoot ?? createControlCredentialStoreForCanonicalRoot
+  )({ canonicalProjectRoot: canonicalRoot });
+  const token = await credentials.agentToken();
+  return ensureCanonicalHostControlPlane(canonicalRoot, {
+    token,
+    clientName: 'psyche-mcp',
+    entryPath: options.entryPath ?? entryPath,
+    ...(options.connect === undefined ? {} : { connect: options.connect }),
+    ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+  });
+}
+
 export const defaultMcpDeps: McpDeps = {
-  async controlClientForRoot(projectRoot) {
-    const credentials = await createControlCredentialStore({ projectRoot });
-    const token = await credentials.agentToken();
-    return ensureHostControlPlane({
-      projectRoot,
-      token,
-      clientName: 'psyche-mcp',
-      entryPath,
-    });
-  },
+  controlClientForRoot: createMcpControlClientForRoot,
   async listRitualsForRoot(projectRoot) {
     return {
       builtin: getBuiltInRituals().map((ritual) => ({ ...ritual, scope: 'builtin' as const })),
@@ -421,7 +452,7 @@ export const TOOLS: ToolDef[] = [
     handler: async (args) => {
       const actionId = requiredString(args, 'action_id');
       const receipt = await (await deps.controlClientForRoot(resolveProjectRoot(args))).actionStatus(actionId);
-      return receipt ?? { status: 'not_found', action_id: actionId };
+      return receipt ?? { status: 'unknown', action_id: actionId };
     },
   },
   {

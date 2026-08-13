@@ -1,5 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ensureHostControlPlane } from '../src/control/hostProcess.js';
+import { controlEndpointForProject } from '../src/control/endpoint.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function connectionError(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(code), { code });
@@ -47,6 +52,8 @@ describe('ensureHostControlPlane', () => {
     expect(connect).toHaveBeenCalledTimes(3);
     expect(connect).toHaveBeenLastCalledWith({
       projectRoot: '/canonical/project', token: 'secret-agent-token', clientName: 'mcp',
+      endpoint: controlEndpointForProject('/canonical/project'),
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -76,5 +83,41 @@ describe('ensureHostControlPlane', () => {
     });
     await expect(result).rejects.toMatchObject({ code: 'control_owner_unavailable' });
     await expect(result).rejects.not.toThrow(token);
+  });
+
+  it('includes a hanging authenticated welcome in the fixed five-second deadline', async () => {
+    vi.useFakeTimers();
+    const connect = vi.fn(() => new Promise<never>(() => undefined));
+    const result = ensureHostControlPlane({
+      projectRoot: '/project', token: 'secret', clientName: 'mcp', entryPath: '/entry.js',
+      connect, spawn: vi.fn(), canonicalize: async (root) => root,
+    });
+    let rejection: unknown;
+    void result.catch((error) => { rejection = error; });
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(rejection).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(rejection).toMatchObject({ code: 'control_owner_unavailable' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('closes a stale client that arrives after the owner deadline', async () => {
+    vi.useFakeTimers();
+    const close = vi.fn(async () => undefined);
+    const connect = vi.fn(() => new Promise<any>((resolve) => {
+      setTimeout(() => resolve({ close }), 5_100);
+    }));
+    const result = ensureHostControlPlane({
+      projectRoot: '/project', token: 'secret', clientName: 'mcp', entryPath: '/entry.js',
+      connect, spawn: vi.fn(), canonicalize: async (root) => root,
+    });
+    void result.catch(() => undefined);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(result).rejects.toMatchObject({ code: 'control_owner_unavailable' });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(close).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
