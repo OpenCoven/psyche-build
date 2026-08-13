@@ -339,7 +339,7 @@ describe('createDaemonControlHandlers browser provider', () => {
     }));
     expect(dispatch).toHaveBeenNthCalledWith(3, expect.objectContaining({
       operation: { kind: 'script', source: 'return 1' },
-      timeoutMs: 5_000,
+      timeoutMs: 15_000,
     }));
   });
 });

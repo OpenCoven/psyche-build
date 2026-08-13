@@ -230,7 +230,8 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
     runBrowserScript: deps.browserProvider
       ? async (payload) => providerValue(await deps.browserProvider!.dispatch({
           actionId: randomUUID(), tabId: payload.tabId, generation: payload.generation,
-          operation: { kind: 'script', source: payload.source, args: payload.args },
+          operation: { kind: 'script', source: payload.source,
+            ...(payload.args === undefined ? {} : { args: payload.args }) },
           timeoutMs: AGENT_CONTROL_LIMITS.actionTimeoutMs,
         }))
       : notSupported('browser.script'),
