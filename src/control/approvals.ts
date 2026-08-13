@@ -12,11 +12,6 @@ export type ApprovalErrorCode =
   | 'approval_id_collision'
   | 'approval_payload_invalid';
 
-declare const actionPayloadDigestBrand: unique symbol;
-export type ActionPayloadDigest = string & {
-  readonly [actionPayloadDigestBrand]: 'psyche.action-payload/v1';
-};
-
 export type ApprovalEffectKind =
   | 'submit'
   | 'secret_input'
@@ -35,11 +30,6 @@ export type RedactedApprovalEffect =
   | { readonly kind: 'close'; readonly target: string }
   | { readonly kind: 'script'; readonly target: string };
 
-export interface NormalizedApprovalEffect {
-  readonly kind: ApprovalEffectKind;
-  readonly targetDigest: string;
-}
-
 export interface ApprovalRequest {
   readonly actionId: string;
   readonly ownerEpoch: number;
@@ -48,8 +38,6 @@ export interface ApprovalRequest {
   readonly resource: LeaseTarget;
   readonly capability: SurfaceCapability;
   readonly effect: RedactedApprovalEffect;
-  /** Transient immutable typed payload; canonicalized and discarded by request. */
-  readonly actionPayload: unknown;
 }
 
 interface ApprovalIdentity {
@@ -59,8 +47,7 @@ interface ApprovalIdentity {
   readonly leaseRevision: number;
   readonly resource: LeaseTarget;
   readonly capability: SurfaceCapability;
-  readonly effect: NormalizedApprovalEffect;
-  readonly actionPayloadDigest: ActionPayloadDigest;
+  readonly effect: RedactedApprovalEffect;
 }
 
 export interface ApprovalConsumeAssertion {
@@ -72,9 +59,7 @@ export interface ApprovalConsumeAssertion {
   readonly leaseRevision: number;
   readonly resource: LeaseTarget;
   readonly capability: SurfaceCapability;
-  readonly effect: NormalizedApprovalEffect;
-  /** Current immutable typed payload; canonicalized and discarded by consume. */
-  readonly actionPayload: unknown;
+  readonly effect: RedactedApprovalEffect;
 }
 
 interface NormalizedApprovalConsumeAssertion extends ApprovalIdentity {
@@ -99,8 +84,7 @@ export interface Approval {
   readonly leaseRevision: number;
   readonly resource: LeaseTarget;
   readonly capability: SurfaceCapability;
-  readonly effect: NormalizedApprovalEffect;
-  readonly actionPayloadDigest: ActionPayloadDigest;
+  readonly effect: RedactedApprovalEffect;
   readonly payloadDigest: string;
   readonly createdAt: string;
   readonly expiresAt: string;
@@ -268,6 +252,9 @@ export class ApprovalStore {
 }
 
 function copyIdentity(input: ApprovalRequest): ApprovalIdentity {
+  assertExactKeys(input, [
+    'actionId', 'ownerEpoch', 'leaseId', 'leaseRevision', 'resource', 'capability', 'effect',
+  ], 'approval request');
   assertIdentityFields(input);
   return {
     actionId: input.actionId,
@@ -276,12 +263,15 @@ function copyIdentity(input: ApprovalRequest): ApprovalIdentity {
     leaseRevision: input.leaseRevision,
     resource: copyTarget(input.resource),
     capability: input.capability,
-    effect: normalizeEffect(input.effect),
-    actionPayloadDigest: digestActionPayload(input.actionPayload),
+    effect: copyEffect(input.effect),
   };
 }
 
 function copyAssertion(input: ApprovalConsumeAssertion): NormalizedApprovalConsumeAssertion {
+  assertExactKeys(input, [
+    'approvalId', 'payloadDigest', 'actionId', 'ownerEpoch', 'leaseId', 'leaseRevision',
+    'resource', 'capability', 'effect',
+  ], 'approval assertion');
   if (!isNonemptyString(input?.approvalId)) {
     throw codedError('approval_identity_mismatch', 'approval id is missing');
   }
@@ -298,8 +288,7 @@ function copyAssertion(input: ApprovalConsumeAssertion): NormalizedApprovalConsu
     leaseRevision: input.leaseRevision,
     resource: copyTarget(input.resource),
     capability: input.capability,
-    effect: copyNormalizedEffect(input.effect),
-    actionPayloadDigest: digestActionPayload(input.actionPayload),
+    effect: copyEffect(input.effect),
   };
 }
 
@@ -323,10 +312,12 @@ function assertIdentityFields(input: ApprovalIdentity | ApprovalRequest | Approv
 }
 
 function copyTarget(target: LeaseTarget): LeaseTarget {
-  if (!target || !isNonemptyString(target.id)) {
+  assertPlainDataObject(target, 'approval resource');
+  if (!isNonemptyString(target.id)) {
     throw codedError('approval_identity_mismatch', 'approval resource identity is missing');
   }
   if (target.kind === 'project') {
+    assertExactKeys(target, ['kind', 'id'], 'approval resource');
     return Object.freeze({ kind: target.kind, id: target.id });
   }
   if (
@@ -335,12 +326,17 @@ function copyTarget(target: LeaseTarget): LeaseTarget {
   ) {
     throw codedError('approval_identity_mismatch', 'approval resource identity is invalid');
   }
+  assertExactKeys(target, ['kind', 'id', 'generation'], 'approval resource');
   return Object.freeze({ kind: target.kind, id: target.id, generation: target.generation });
 }
 
-function normalizeEffect(effect: RedactedApprovalEffect): NormalizedApprovalEffect {
-  if (typeof effect?.target !== 'string') {
-    throw codedError('approval_denied', 'approval effect target must be redacted display metadata');
+function copyEffect(effect: RedactedApprovalEffect): RedactedApprovalEffect {
+  assertExactKeys(effect, ['kind', 'target'], 'approval effect');
+  if (
+    !isNonemptyString(effect.target)
+    || Buffer.byteLength(effect.target, 'utf8') > AGENT_CONTROL_LIMITS.accessibleNameBytes
+  ) {
+    throw codedError('approval_payload_invalid', 'approval effect target must be bounded redacted metadata');
   }
   switch (effect.kind) {
     case 'submit':
@@ -350,34 +346,13 @@ function normalizeEffect(effect: RedactedApprovalEffect): NormalizedApprovalEffe
     case 'permission_response':
     case 'close':
     case 'script':
-      return Object.freeze({
-        kind: effect.kind,
-        targetDigest: digestCanonical('psyche.approval-effect-target/v1', effect.target),
-      });
+      return Object.freeze({ kind: effect.kind, target: effect.target });
     default:
       return invalidEffect(effect);
   }
 }
 
-function copyNormalizedEffect(effect: NormalizedApprovalEffect): NormalizedApprovalEffect {
-  if (!/^[a-f0-9]{64}$/.test(effect?.targetDigest)) {
-    throw codedError('approval_digest_mismatch', 'normalized approval effect digest is invalid');
-  }
-  switch (effect.kind) {
-    case 'submit':
-    case 'secret_input':
-    case 'upload':
-    case 'download':
-    case 'permission_response':
-    case 'close':
-    case 'script':
-      return Object.freeze({ kind: effect.kind, targetDigest: effect.targetDigest });
-    default:
-      return invalidEffect(effect.kind);
-  }
-}
-
-function invalidEffect(effect: never): never {
+function invalidEffect(effect: unknown): never {
   void effect;
   throw codedError('approval_identity_mismatch', 'approval effect is not allowlisted');
 }
@@ -393,105 +368,54 @@ function digestIdentity(identity: ApprovalIdentity): string {
   const payload = {
     actionId: identity.actionId,
     ownerEpoch: identity.ownerEpoch,
-    lease: { id: identity.leaseId, revision: identity.leaseRevision },
+    leaseId: identity.leaseId,
+    leaseRevision: identity.leaseRevision,
     resource,
     capability: identity.capability,
-    effect: { kind: identity.effect.kind, targetDigest: identity.effect.targetDigest },
-    actionPayloadDigest: identity.actionPayloadDigest,
+    effect: identity.effect,
   };
-  return digestCanonical('psyche.approval-payload/v1', payload);
+  return createHash('sha256').update(stableKeyJson(payload), 'utf8').digest('hex');
 }
 
-export function digestActionPayload(payload: unknown): ActionPayloadDigest {
-  return digestCanonical('psyche.action-payload/v1', payload) as ActionPayloadDigest;
+function stableKeyJson(value: unknown): string {
+  return JSON.stringify(sortObjectKeys(value));
 }
 
-function digestCanonical(domain: string, value: unknown): string {
-  const encoded = canonicalEncode(value, new WeakSet<object>());
-  const framed = `${domain.length}:${domain}|${encoded.length}:${encoded}`;
-  return createHash('sha256').update(framed, 'utf8').digest('hex');
-}
-
-function canonicalEncode(value: unknown, ancestors: WeakSet<object>): string {
-  if (value === null) return 'null;';
-  if (typeof value === 'boolean') return value ? 'bool:1;' : 'bool:0;';
-  if (typeof value === 'string') return encodeString(value);
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) return invalidPayload('numbers must be finite');
-    return `number:${Object.is(value, -0) ? '-0' : value.toString()};`;
+function sortObjectKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortObjectKeys);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [
+        key,
+        sortObjectKeys((value as Record<string, unknown>)[key]),
+      ]),
+    );
   }
-  if (typeof value !== 'object') return invalidPayload(`unsupported ${typeof value} value`);
-  if (ancestors.has(value)) return invalidPayload('cyclic values are unsupported');
-  ancestors.add(value);
-  try {
-    if (Array.isArray(value)) {
-      if (Object.getOwnPropertySymbols(value).length > 0) {
-        return invalidPayload('array symbol properties are unsupported');
-      }
-      const keys = Object.keys(value);
-      const propertyNames = Object.getOwnPropertyNames(value);
-      if (
-        keys.length !== value.length
-        || keys.some((key, index) => key !== String(index))
-        || propertyNames.length !== value.length + 1
-        || !propertyNames.includes('length')
-      ) return invalidPayload('sparse arrays and extra array properties are unsupported');
-      const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
-      if (
-        !lengthDescriptor
-        || !('value' in lengthDescriptor)
-        || lengthDescriptor.value !== value.length
-        || lengthDescriptor.enumerable
-        || lengthDescriptor.configurable
-      ) return invalidPayload('array length descriptor is invalid');
-      let encoded = `array:${value.length}:[`;
-      for (let index = 0; index < value.length; index += 1) {
-        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-        if (
-          !descriptor
-          || !('value' in descriptor)
-          || !descriptor.enumerable
-        ) {
-          return invalidPayload('array indices must be enumerable data properties');
-        }
-        encoded += canonicalEncode(descriptor.value, ancestors);
-      }
-      return `${encoded}]`;
-    }
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      return invalidPayload('only plain JSON objects are supported');
-    }
-    if (Object.getOwnPropertySymbols(value).length > 0) {
-      return invalidPayload('symbol keys are unsupported');
-    }
-    const keys = Object.keys(value).sort();
-    if (Reflect.ownKeys(value).length !== keys.length) {
-      return invalidPayload('non-enumerable properties are unsupported');
-    }
-    let encoded = `object:${keys.length}:{`;
-    for (const key of keys) {
+  return value;
+}
+
+function assertPlainDataObject(value: unknown, label: string): asserts value is Record<string, unknown> {
+  if (
+    !value
+    || typeof value !== 'object'
+    || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+    || Reflect.ownKeys(value).some((key) => typeof key !== 'string')
+    || Object.getOwnPropertyNames(value).some((key) => {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (!descriptor || !('value' in descriptor)) return invalidPayload('accessor properties are unsupported');
-      encoded += encodeString(key);
-      encoded += canonicalEncode(descriptor.value, ancestors);
-    }
-    return `${encoded}}`;
-  } finally {
-    ancestors.delete(value);
+      return !descriptor || !('value' in descriptor) || !descriptor.enumerable;
+    })
+  ) {
+    throw codedError('approval_payload_invalid', `${label} must be a plain data object`);
   }
 }
 
-function encodeString(value: string): string {
-  let codeUnits = '';
-  for (let index = 0; index < value.length; index += 1) {
-    codeUnits += value.charCodeAt(index).toString(16).padStart(4, '0');
+function assertExactKeys(value: unknown, expected: readonly string[], label: string): void {
+  assertPlainDataObject(value, label);
+  const actual = Object.keys(value).sort();
+  const allowed = [...expected].sort();
+  if (actual.length !== allowed.length || actual.some((key, index) => key !== allowed[index])) {
+    throw codedError('approval_payload_invalid', `${label} contains unsupported fields`);
   }
-  return `string:${value.length}:${codeUnits};`;
-}
-
-function invalidPayload(reason: string): never {
-  throw codedError('approval_payload_invalid', `action payload is not canonical JSON: ${reason}`);
 }
 
 function isNonemptyString(value: unknown): value is string {
@@ -502,7 +426,7 @@ function isAuthorityInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
-function isSha256(value: unknown): value is ActionPayloadDigest {
+function isSha256(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 }
 
@@ -540,7 +464,7 @@ function freezeApproval(approval: Approval): Approval {
   return Object.freeze({
     ...approval,
     resource: copyTarget(approval.resource),
-    effect: copyNormalizedEffect(approval.effect),
+    effect: copyEffect(approval.effect),
   });
 }
 
