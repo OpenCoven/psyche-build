@@ -102,6 +102,7 @@ interface QueuedCommand {
   readonly automation: boolean;
   readonly generation: number;
   readonly requested: Promise<RuntimeEvent>;
+  readonly queueKey: string;
   started: boolean;
   preempted: boolean;
   terminalized: boolean;
@@ -141,7 +142,6 @@ export class ControlRuntime {
     sequence: number;
   }>();
   private readonly paneBarrierGenerations = new Map<string, number>();
-  private readonly paneQueues = new Map<string, PaneQueueState>();
   private readonly promptDispatcher: PromptDispatcher;
   private readonly resourceQueues = new Map<string, PaneQueueState>();
   private readonly leaseRequests = new Map<string, LeaseRequestRecord>();
@@ -239,19 +239,7 @@ export class ControlRuntime {
   }
 
   blockPaneQueue(paneId: string): () => void {
-    const queue = this.queueForPane(paneId);
-    let released = false;
-    let release!: () => void;
-    queue.blocker = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    return () => {
-      if (released) return;
-      released = true;
-      const current = queue.blocker;
-      release();
-      if (queue.blocker === current) delete queue.blocker;
-    };
+    return this.blockResourceQueue(this.resourceTargetForPane(paneId));
   }
 
   blockResourceQueue(target: LeaseTarget): () => void {
@@ -269,7 +257,10 @@ export class ControlRuntime {
   }
 
   private submitFresh(command: ControlCommand): Promise<CommandOutcome> {
-    if (command.ownerEpoch < this.ownerEpoch) return this.rejectStaleOwnerEpoch(command);
+    if (
+      command.ownerEpoch < this.ownerEpoch
+      || (isSurfaceControlCommand(command) && command.ownerEpoch !== this.ownerEpoch)
+    ) return this.rejectStaleOwnerEpoch(command);
 
     if (isSurfaceControlCommand(command)) return this.executeSurfaceControlCommand(command);
 
@@ -450,7 +441,7 @@ export class ControlRuntime {
             }));
           }
           const receipt = await this.enqueueSurfaceEffect(context);
-          return this.appendTerminal(command, outcomeForReceipt(receipt));
+          return this.appendTerminal(command, outcomeForReceipt(receipt), receipt);
         }
       }
     } catch (error) {
@@ -551,7 +542,7 @@ export class ControlRuntime {
       });
       this.pendingApprovals.delete(approval.id);
       const receipt = await this.enqueueSurfaceEffect(context);
-      return this.appendTerminal(command, outcomeForReceipt(receipt));
+      return this.appendTerminal(command, outcomeForReceipt(receipt), receipt);
     } catch (error) {
       this.approvals.revokeForLease(approval.leaseId);
       this.pendingApprovals.delete(approval.id);
@@ -586,8 +577,7 @@ export class ControlRuntime {
     } catch (error) {
       const ambiguous = Boolean(error && typeof error === 'object' && (error as { ambiguous?: unknown }).ambiguous);
       const receipt = this.makeReceipt(context.command, context.target, ambiguous ? 'unknown' : 'failed', {
-        code: ambiguous ? 'effect_unknown' : errorCode(error),
-        message: error instanceof Error ? error.message : String(error),
+        code: ambiguous ? 'effect_unknown' : 'effect_failed',
       });
       this.rememberReceipt(receipt);
       return receipt;
@@ -602,6 +592,7 @@ export class ControlRuntime {
     run: () => Promise<CommandOutcome>,
   ): Promise<CommandOutcome> {
     const queue = this.queueForPane(paneId);
+    const queueKey = resourceKey(this.resourceTargetForPane(paneId));
     const requested = this.appendRequested(command);
     const generation = this.paneBarrierGenerations.get(paneId) ?? 0;
 
@@ -612,6 +603,7 @@ export class ControlRuntime {
         automation: command.actor.kind === 'psyche',
         generation,
         requested,
+        queueKey,
         started: false,
         preempted: false,
         terminalized: false,
@@ -630,7 +622,7 @@ export class ControlRuntime {
   private async runQueuedItem(item: QueuedCommand, run: () => Promise<CommandOutcome>): Promise<void> {
     try {
       await item.requested;
-      await this.waitForPaneBlocker(item.paneId);
+      await this.waitForQueueBlocker(item.queueKey);
       if (item.terminalized) return;
       if (item.preempted || this.isStaleAutomationGeneration(item)) {
         await this.terminalizeQueuedItem(item, automationPreemptedOutcome());
@@ -648,7 +640,7 @@ export class ControlRuntime {
         }
       }
     } finally {
-      const queue = this.paneQueues.get(item.paneId);
+      const queue = this.resourceQueues.get(item.queueKey);
       queue?.items.delete(item);
     }
   }
@@ -827,8 +819,7 @@ export class ControlRuntime {
   }
 
   private rememberReceipt(receipt: ActionReceipt): void {
-    const { value: _sensitiveValue, ...safeReceipt } = receipt;
-    const redacted = Object.freeze(safeReceipt);
+    const redacted = redactReceipt(receipt);
     this.receipts.delete(receipt.actionId);
     this.receipts.set(receipt.actionId, redacted);
     while (this.receipts.size > MAX_COMMAND_RECORDS) {
@@ -876,11 +867,17 @@ export class ControlRuntime {
     return event;
   }
 
-  private async appendTerminal(command: ControlCommand, outcome: CommandOutcome): Promise<CommandOutcome> {
+  private async appendTerminal(
+    command: ControlCommand,
+    outcome: CommandOutcome,
+    receipt?: ActionReceipt,
+  ): Promise<CommandOutcome> {
     const event = await this.journal.append(terminalKindForOutcome(outcome), {
       commandId: command.id,
       idempotencyKey: command.idempotencyKey,
-      ...(isSurfaceControlCommand(command) ? redactedPayloadForOutcome(outcome) : payloadForOutcome(outcome)),
+      ...(isSurfaceControlCommand(command)
+        ? redactedPayloadForOutcome(outcome, receipt)
+        : payloadForOutcome(outcome)),
     });
     this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
     const record = this.commandRecords.get(command.id);
@@ -916,12 +913,7 @@ export class ControlRuntime {
   }
 
   private queueForPane(paneId: string): PaneQueueState {
-    let queue = this.paneQueues.get(paneId);
-    if (!queue) {
-      queue = { items: new Set<QueuedCommand>(), tail: Promise.resolve() };
-      this.paneQueues.set(paneId, queue);
-    }
-    return queue;
+    return this.queueForResource(this.resourceTargetForPane(paneId));
   }
 
   private queueForResource(target: LeaseTarget): PaneQueueState {
@@ -934,8 +926,8 @@ export class ControlRuntime {
     return queue;
   }
 
-  private waitForPaneBlocker(paneId: string): Promise<void> {
-    return this.paneQueues.get(paneId)?.blocker ?? Promise.resolve();
+  private waitForQueueBlocker(key: string): Promise<void> {
+    return this.resourceQueues.get(key)?.blocker ?? Promise.resolve();
   }
 
   private bumpPaneBarrier(paneId: string): void {
@@ -943,7 +935,7 @@ export class ControlRuntime {
   }
 
   private preemptQueuedAutomation(paneId: string): Promise<CommandOutcome>[] {
-    const queue = this.paneQueues.get(paneId);
+    const queue = this.resourceQueues.get(resourceKey(this.resourceTargetForPane(paneId)));
     if (!queue) return [];
     const preemptions: Promise<CommandOutcome>[] = [];
     for (const item of queue.items) {
@@ -956,6 +948,13 @@ export class ControlRuntime {
 
   private isStaleAutomationGeneration(item: QueuedCommand): boolean {
     return item.automation && item.generation !== (this.paneBarrierGenerations.get(item.paneId) ?? 0);
+  }
+
+  private resourceTargetForPane(paneId: string): LeaseTarget {
+    const surface = this.surfaces.get(paneId);
+    return surface?.kind === 'pane'
+      ? { kind: 'pane', id: paneId, generation: surface.generation }
+      : { kind: 'pane', id: paneId, generation: 0 };
   }
 }
 
@@ -988,12 +987,6 @@ function rejectedOutcome(code: string, message: string): CommandOutcome {
 
 function codedRuntimeError(code: string, message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
-}
-
-function errorCode(error: unknown): string {
-  return error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
-    ? (error as { code: string }).code
-    : 'command_failed';
 }
 
 function requiresOperator(kind: ControlCommand['kind']): boolean {
@@ -1082,7 +1075,11 @@ function outcomeForReceipt(receipt: ActionReceipt): CommandOutcome {
     return { status: 'unknown', code: receipt.code ?? 'effect_unknown', message: receipt.message ?? 'effect outcome is unknown' };
   }
   if (receipt.state === 'failed' || receipt.state === 'expired' || receipt.state === 'denied') {
-    return { status: 'failed', code: receipt.code ?? `action_${receipt.state}`, message: receipt.message ?? `action ${receipt.state}` };
+    return {
+      status: 'failed',
+      code: receipt.code ?? `action_${receipt.state}`,
+      message: receipt.state === 'failed' ? 'surface effect failed' : `action ${receipt.state}`,
+    };
   }
   return succeededOutcome(receipt);
 }
@@ -1094,11 +1091,24 @@ function contextsMatch(left: SurfaceActionContext, right: SurfaceActionContext):
     && JSON.stringify(left.effect) === JSON.stringify(right.effect);
 }
 
-function redactedPayloadForOutcome(outcome: CommandOutcome): Record<string, unknown> {
-  if (outcome.status !== 'succeeded') return payloadForOutcome(outcome);
-  if (!('value' in outcome) || !isActionReceiptLike(outcome.value)) return { status: 'succeeded' };
-  const { value: _sensitiveValue, ...receipt } = outcome.value;
-  return { status: 'succeeded', receipt };
+function redactedPayloadForOutcome(
+  outcome: CommandOutcome,
+  explicitReceipt?: ActionReceipt,
+): Record<string, unknown> {
+  const receipt = explicitReceipt
+    ?? (outcome.status === 'succeeded' && 'value' in outcome && isActionReceiptLike(outcome.value)
+      ? outcome.value
+      : undefined);
+  if (receipt) return { status: outcome.status, receipt: redactReceipt(receipt) };
+  return {
+    status: outcome.status,
+    ...(outcome.status === 'succeeded' ? {} : { code: 'surface_command_failed' }),
+  };
+}
+
+function redactReceipt(receipt: ActionReceipt): ActionReceipt {
+  const { value: _sensitiveValue, message: _sensitiveMessage, ...safeReceipt } = receipt;
+  return Object.freeze(safeReceipt);
 }
 
 function isActionReceiptLike(value: unknown): value is ActionReceipt {
@@ -1147,32 +1157,40 @@ function payloadForOutcome(outcome: CommandOutcome): Record<string, unknown> {
 }
 
 function outcomeFromEvent(event: RuntimeEvent): CommandOutcome {
+  const receipt = actionReceiptPayload(event);
   switch (event.kind) {
     case 'command.succeeded':
-      return Object.prototype.hasOwnProperty.call(event.payload, 'value')
+      return receipt
+        ? { status: 'succeeded', value: receipt }
+        : Object.prototype.hasOwnProperty.call(event.payload, 'value')
         ? { status: 'succeeded', value: event.payload.value }
         : { status: 'succeeded' };
     case 'command.rejected':
       return {
         status: 'rejected',
-        code: stringPayload(event, 'code') ?? 'command_rejected',
-        message: stringPayload(event, 'message') ?? 'command was rejected',
+        code: receipt?.code ?? stringPayload(event, 'code') ?? 'command_rejected',
+        message: receipt ? 'surface action was rejected' : stringPayload(event, 'message') ?? 'command was rejected',
       };
     case 'command.failed':
       return {
         status: 'failed',
-        code: stringPayload(event, 'code') ?? 'command_failed',
-        message: stringPayload(event, 'message') ?? 'command failed',
+        code: receipt?.code ?? stringPayload(event, 'code') ?? 'command_failed',
+        message: receipt ? 'surface effect failed' : stringPayload(event, 'message') ?? 'command failed',
       };
     case 'command.unknown':
       return {
         status: 'unknown',
-        code: stringPayload(event, 'code') ?? stringPayload(event, 'reason') ?? 'command_unknown',
-        message: stringPayload(event, 'message') ?? 'command outcome is unknown',
+        code: receipt?.code ?? stringPayload(event, 'code') ?? stringPayload(event, 'reason') ?? 'command_unknown',
+        message: receipt ? 'surface effect outcome is unknown' : stringPayload(event, 'message') ?? 'command outcome is unknown',
       };
     default:
       throw new Error(`not a terminal command event: ${event.kind}`);
   }
+}
+
+function actionReceiptPayload(event: RuntimeEvent): ActionReceipt | undefined {
+  const receipt = event.payload.receipt;
+  return isActionReceiptLike(receipt) ? receipt : undefined;
 }
 
 function stringPayload(event: RuntimeEvent, key: string): string | undefined {
