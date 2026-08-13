@@ -121,7 +121,13 @@ export function installBrowserAutomation(globalObject, options = {}) {
       assertActionRequest(request.action);
       const target = requireCurrent({ snapshotId: request.snapshotId, ref: request.action.elementRef });
       assertActionTarget(target.element, target.semantic, current, globalObject);
-      const result = performAction(target.element, target.semantic, request.action, current, globalObject);
+      let result;
+      try {
+        result = performAction(target.element, target.semantic, request.action, current, globalObject);
+      } catch (error) {
+        if (error?.invalidate === true) invalidate();
+        throw error;
+      }
       if (result.invalidate === true) invalidate();
       const { invalidate: _invalidate, ...boundedResult } = result;
       return boundedResult;
@@ -141,14 +147,16 @@ export function installBrowserAutomation(globalObject, options = {}) {
       throw automationError('backend_unavailable', 'backend_unavailable: trusted automation receipt bridge is unavailable');
     }
     const correlation = { actionId: receipt.actionId, tabId: receipt.tabId, generation: receipt.generation };
+    let payload;
     try {
       const value = await dispatch(request);
-      await trustedEmit('browser:automation-result', { ...correlation, value });
+      payload = { ...correlation, value };
     } catch (error) {
       const allowed = new TrustedSet(['action_cancelled', 'automation_failed', 'backend_unavailable', 'bad_request', 'effect_unknown', 'ref_missing', 'result_too_large', 'serialization_failed', 'snapshot_stale', 'target_changed', 'target_unavailable', 'unsupported_operation']);
       const code = allowed.has(error?.code) ? error.code : 'automation_failed';
-      await trustedEmit('browser:automation-result', { ...correlation, error: { code } });
+      payload = { ...correlation, error: { code } };
     }
+    await trustedEmit('browser:automation-result', payload);
   }
 
   const api = { schema: 'psyche.browser.automation/v1', dispatch, dispatchAndEmit, invalidate };
@@ -438,21 +446,32 @@ function performAction(element, semantic, action, current, globalObject) {
       const wanted = new TrustedSet(action.values);
       const selectedValues = [];
       const options = readWebIdl(trustedSelectOptionsGetter, element, 'options') || readChildren(element);
-      for (const option of options) {
-        const optionValue = readWebIdl(trustedOptionValueGetter, option, 'value');
-        const value = String(optionValue ?? readAttribute(option, 'value') ?? '');
-        const selected = wanted.has(value);
-        if (trustedOptionSelectedSetter && trustedElementTagNameGetter) reflectApply(trustedOptionSelectedSetter, option, [selected]); else option.selected = selected;
-        if (selected && selectedValues.length < 128) selectedValues.push(boundedText(value, MAX_NAME_BYTES));
-      }
-      if (readWebIdl(trustedSelectMultipleGetter, element, 'multiple') !== true && selectedValues.length) {
-        if (trustedSelectValueSetter && trustedElementTagNameGetter) reflectApply(trustedSelectValueSetter, element, [selectedValues[0]]); else element.value = selectedValues[0];
-      }
-      dispatchInputEvent(element, globalObject, 'input');
       assertActionTarget(element, semantic, current, globalObject);
-      dispatchInputEvent(element, globalObject, 'change');
-      assertActionTarget(element, semantic, current, globalObject);
-      return { selected: true };
+      let effectStarted = false;
+      try {
+        for (const option of options) {
+          const optionValue = readWebIdl(trustedOptionValueGetter, option, 'value');
+          const value = String(optionValue ?? readAttribute(option, 'value') ?? '');
+          const selected = wanted.has(value);
+          effectStarted = true;
+          if (trustedOptionSelectedSetter && trustedElementTagNameGetter) reflectApply(trustedOptionSelectedSetter, option, [selected]); else option.selected = selected;
+          if (selected && selectedValues.length < 128) selectedValues.push(boundedText(value, MAX_NAME_BYTES));
+        }
+        if (readWebIdl(trustedSelectMultipleGetter, element, 'multiple') !== true && selectedValues.length) {
+          effectStarted = true;
+          if (trustedSelectValueSetter && trustedElementTagNameGetter) reflectApply(trustedSelectValueSetter, element, [selectedValues[0]]); else element.value = selectedValues[0];
+        }
+        effectStarted = true;
+        dispatchInputEvent(element, globalObject, 'input');
+        dispatchInputEvent(element, globalObject, 'change');
+      } catch (error) {
+        if (!effectStarted) throw error;
+        const unknown = automationError('effect_unknown', 'effect_unknown: selection may have changed');
+        unknown.ambiguous = true;
+        unknown.invalidate = true;
+        throw unknown;
+      }
+      return { selected: true, invalidate: true };
     }
     case 'scroll': {
       const dx = finiteBound(action.deltaX || 0, -100_000, 100_000);

@@ -348,6 +348,16 @@ describe('Tauri semantic browser provider lifecycle', () => {
     expect(project(scrollEffect, { scrolled: true })).toEqual({ scrolled: true });
     expect(() => project(scrollEffect, { scrolled: true, scrollLeft: 8675309 }))
       .toThrowError(expect.objectContaining({ code: 'automation_failed' }));
+
+    snapshots.set('select-snap', {
+      tabId: 'tab', generation: 1, expiresAt: Date.now() + 1_000,
+      semantics: new Map([['e3', { secret: false }]]),
+    });
+    const selectEffect = { tabId: 'tab', generation: 1, operation: {
+      kind: 'action', snapshotId: 'select-snap', action: { kind: 'select', elementRef: 'e3', values: ['missing-secret-value'] },
+    } };
+    expect(project(selectEffect, { selected: true })).toEqual({ selected: true });
+    expect(JSON.stringify(project(selectEffect, { selected: true }))).not.toContain('missing-secret-value');
   });
 
   it('uses only the initialization-captured automation receipt bridge', () => {
@@ -390,5 +400,33 @@ describe('Tauri semantic browser provider lifecycle', () => {
     expect(forgedEmit).not.toHaveBeenCalled();
     expect(JSON.stringify(originalEmit.mock.calls)).not.toContain('8675309');
     expect(snapshot.nodes[0]).toMatchObject({ role: 'button' });
+  });
+
+  it('does not retry emission when the trusted result emitter rejects after a successful effect', async () => {
+    const emit = vi.fn(async () => { throw new Error('transport rejected'); });
+    const click = vi.fn();
+    const button: any = {
+      tagName: 'BUTTON', children: [], textContent: 'Save', parentElement: null, isConnected: true,
+      attributes: {}, getAttribute: () => null, hasAttribute: () => false,
+      getBoundingClientRect: () => ({ x: 0, y: 0, width: 10, height: 10, top: 0, left: 0, right: 10, bottom: 10 }),
+      click, focus: vi.fn(), dispatchEvent: vi.fn(() => true),
+    };
+    const body: any = { ...button, tagName: 'BODY', textContent: '', children: [button], click: vi.fn() };
+    button.parentElement = body;
+    const globalObject: any = {
+      __TAURI__: { event: { emit } }, document: { body, documentElement: body },
+      innerWidth: 100, innerHeight: 100, location: { href: 'https://example.test/' },
+      Date, URL, Event: class { constructor(public type: string) {} },
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
+    };
+    const api = installBrowserAutomation(globalObject);
+    const snapshot = api.dispatch({ type: 'snapshot' });
+    await expect(api.dispatchAndEmit(
+      { type: 'action', snapshotId: snapshot.snapshotId, action: { kind: 'click', elementRef: 'e1' } },
+      { actionId: 'action', tabId: 'tab', generation: 1 },
+    )).rejects.toThrow('transport rejected');
+    expect(click).toHaveBeenCalledOnce();
+    expect(emit).toHaveBeenCalledOnce();
+    expect(emit).toHaveBeenCalledWith('browser:automation-result', expect.objectContaining({ value: { clicked: true } }));
   });
 });

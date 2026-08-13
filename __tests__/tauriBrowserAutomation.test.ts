@@ -559,6 +559,29 @@ describe('bounded semantic browser automation', () => {
     expect(order).toEqual(['input', 'change']);
   });
 
+  it('invalidates selection snapshots without deterministic failure after the first effect', () => {
+    for (const phase of ['input-disable', 'change-replace'] as const) {
+      const { globalObject, select } = fixture();
+      select.options = select.children;
+      select.children[0].value = 'blue';
+      select.dispatchEvent = vi.fn((event: { type: string }) => {
+        if (phase === 'input-disable' && event.type === 'input') select.disabled = true;
+        if (phase === 'change-replace' && event.type === 'change') {
+          globalObject.document.body.children[3] = node('select');
+        }
+        return true;
+      });
+      const api = installBrowserAutomation(globalObject);
+      const snapshot = api.dispatch({ type: 'snapshot' });
+      expect(api.dispatch({
+        type: 'action', snapshotId: snapshot.snapshotId,
+        action: { kind: 'select', elementRef: 'e4', values: ['blue'] },
+      })).toEqual({ selected: true });
+      expect(() => api.dispatch({ type: 'resolve', snapshotId: snapshot.snapshotId, ref: 'e4' }))
+        .toThrowError(expect.objectContaining({ code: 'snapshot_stale' }));
+    }
+  });
+
   it('fails hidden, disabled, detached, and replaced targets before effect', () => {
     for (const mode of ['hidden', 'disabled', 'detached', 'replaced'] as const) {
       const { globalObject, button } = fixture();

@@ -10,6 +10,10 @@ export interface BrowserAutomationSnapshot {
 export interface BrowserAutomationApi {
   schema: 'psyche.browser.automation/v1';
   dispatch(request: Record<string, unknown> & { type: string }): any;
+  dispatchAndEmit(
+    request: Record<string, unknown> & { type: string },
+    receipt: { actionId: string; tabId: string; generation: number },
+  ): Promise<void>;
   invalidate(): void;
 }
 

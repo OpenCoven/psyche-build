@@ -8877,7 +8877,7 @@
     }
     if (action.kind === "select") {
       if (value.selected !== true) fail("select result is malformed");
-      return { selectedValues: action.values.slice(0, 128).map(function (item) { return String(item).slice(0, 512); }) };
+      return { selected: true };
     }
     if (action.kind === "scroll") {
       if (value.scrolled !== true) fail("scroll result is malformed");
