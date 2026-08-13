@@ -77,6 +77,11 @@ export function createCanonicalElementSemantics(
 
 export function classifyPaneAction(action: PaneAction): PolicyClassification {
   if (!isAction(action)) return capabilityDenied(action);
+  assertActionKeys(action, {
+    send_text: ['kind', 'text'], send_keys: ['kind', 'keys'], interrupt: ['kind', 'key'],
+    focus: ['kind'], resize: ['kind', 'cols', 'rows'], create: ['kind', 'cwd', 'title', 'agent', 'branch'],
+    close: ['kind'],
+  });
   switch (action.kind) {
     case 'send_text':
     case 'send_keys':
@@ -98,6 +103,11 @@ export function classifyPaneAction(action: PaneAction): PolicyClassification {
 
 export function classifyBrowserAction(action: BrowserPolicyAction): PolicyClassification {
   if (!isAction(action)) return capabilityDenied(action);
+  assertActionKeys(action, { click: ['kind', 'semantic'], type: ['kind', 'semantic'],
+    select: ['kind', 'semantic'], submit: ['kind', 'semantic'], upload: ['kind', 'semantic'],
+    download: ['kind', 'semantic'], scroll: ['kind', 'semantic'], focus: ['kind', 'semantic'],
+    permission_response: ['kind'], navigate: ['kind'], reload: ['kind'], back: ['kind'],
+    forward: ['kind'], screenshot: ['kind'], close: ['kind'] });
   if (action.semantic !== undefined && !isCanonicalSemantics(action.semantic)) {
     return capabilityDenied(action.semantic);
   }
@@ -134,6 +144,20 @@ export function classifyBrowserAction(action: BrowserPolicyAction): PolicyClassi
     default:
       return assertNever(action.kind);
   }
+}
+
+export function assertBrowserActionFields(action: BrowserSemanticAction): void {
+  if (!isAction(action)) capabilityDenied(action);
+  assertActionKeys(action, {
+    click: ['kind', 'elementRef', 'semantic'],
+    type: ['kind', 'elementRef', 'text', 'append', 'semantic'],
+    select: ['kind', 'elementRef', 'values', 'semantic'],
+    submit: ['kind', 'elementRef', 'semantic'], upload: ['kind', 'elementRef', 'path', 'semantic'],
+    download: ['kind', 'elementRef', 'destination', 'semantic'],
+    scroll: ['kind', 'elementRef', 'deltaX', 'deltaY'], focus: ['kind', 'elementRef', 'semantic'],
+    permission_response: ['kind', 'permission', 'origin', 'decision'], navigate: ['kind', 'url'],
+    reload: ['kind'], back: ['kind'], forward: ['kind'], screenshot: ['kind'], close: ['kind'],
+  });
 }
 
 export function classifyBrowserScript(): PolicyClassification {
@@ -174,4 +198,12 @@ function isAction(value: unknown): value is { readonly kind: string } {
   return typeof value === 'object'
     && value !== null
     && typeof (value as { kind?: unknown }).kind === 'string';
+}
+
+function assertActionKeys(
+  action: { readonly kind: string },
+  allowedByKind: Readonly<Record<string, readonly string[]>>,
+): void {
+  const allowed = allowedByKind[action.kind];
+  if (!allowed || Object.keys(action).some((key) => !allowed.includes(key))) capabilityDenied(action);
 }

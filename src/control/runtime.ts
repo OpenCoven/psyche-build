@@ -6,6 +6,7 @@ import { ApprovalStore, createRedactedApprovalEffect, type Approval, type Redact
 import { CapabilityLeaseStore, type LeaseTarget, type SurfaceCapability } from './capabilityLeases.js';
 import {
   classifyBrowserAction,
+  assertBrowserActionFields,
   classifyBrowserScript,
   classifyPaneAction,
   type CanonicalElementSemantics,
@@ -13,6 +14,7 @@ import {
 } from './policy.js';
 import { SurfaceRegistry } from './surfaces.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
+import { agentControlJournalPayload } from './journal.js';
 import type {
   ActionReceipt,
   CommandOutcome,
@@ -459,7 +461,7 @@ export class ControlRuntime {
             if (!this.pendingApprovals.has(approval.id)) {
               this.pendingApprovals.set(approval.id, immutableContext);
             }
-            await this.journal.append('approval.requested', {
+            const journalEvent = agentControlJournalPayload({ kind: 'approval.requested',
               commandId: command.id,
               approvalId: approval.id,
               payloadDigest: approval.payloadDigest,
@@ -467,6 +469,7 @@ export class ControlRuntime {
               capability: approval.capability,
               effect: approval.effect,
             });
+            await this.journal.append(journalEvent.kind, journalEvent.payload);
             const receipt = this.makeReceipt(command, context.target, 'approval_required', {
               value: { approvalId: approval.id, payloadDigest: approval.payloadDigest },
             });
@@ -534,6 +537,7 @@ export class ControlRuntime {
       case 'browser.action': {
         target = { kind: 'browser_tab', id: command.payload.tabId, generation: command.payload.generation };
         const action = command.payload.action;
+        assertBrowserActionFields(action);
         let semantic: CanonicalElementSemantics | undefined;
         if ('elementRef' in action) {
           if (!command.payload.snapshotId || !this.resolveBrowserElementSemantics) {
@@ -1046,6 +1050,13 @@ export class ControlRuntime {
   }
 
   private async appendRequested(command: ControlCommand): Promise<RuntimeEvent> {
+    if (isSurfaceControlCommand(command)) {
+      const built = agentControlJournalPayload({ kind: 'command.requested',
+        commandId: command.id, idempotencyKey: command.idempotencyKey,
+        commandKind: command.kind, ownerEpoch: command.ownerEpoch });
+      const event = await this.journal.append(built.kind, built.payload);
+      return event;
+    }
     const event = await this.journal.append('command.requested', {
       commandId: command.id,
       idempotencyKey: command.idempotencyKey,
@@ -1063,12 +1074,19 @@ export class ControlRuntime {
     outcome: CommandOutcome,
     receipt?: ActionReceipt,
   ): Promise<CommandOutcome> {
+    if (isSurfaceControlCommand(command)) {
+      const built = agentControlJournalPayload({
+        kind: terminalKindForOutcome(outcome), commandId: command.id,
+        idempotencyKey: command.idempotencyKey, outcome, ...(receipt ? { receipt } : {}),
+      });
+      await this.journal.append(built.kind, built.payload);
+      this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
+      return outcome;
+    }
     const event = await this.journal.append(terminalKindForOutcome(outcome), {
       commandId: command.id,
       idempotencyKey: command.idempotencyKey,
-      ...(isSurfaceControlCommand(command)
-        ? redactedPayloadForOutcome(outcome, receipt)
-        : payloadForOutcome(outcome)),
+      ...payloadForOutcome(outcome),
     });
     this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
     const record = this.commandRecords.get(command.id);
@@ -1432,7 +1450,8 @@ function automationPreemptedOutcome(): CommandOutcome {
   };
 }
 
-function terminalKindForOutcome(outcome: CommandOutcome): string {
+function terminalKindForOutcome(outcome: CommandOutcome):
+  'command.succeeded' | 'command.failed' | 'command.unknown' | 'command.rejected' {
   switch (outcome.status) {
     case 'succeeded':
       return 'command.succeeded';

@@ -2,6 +2,66 @@ import { mkdir, open, readFile, rename, truncate } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { ControlSnapshot } from './types.js';
+import type { ActionReceipt, CommandOutcome, ControlCommand } from './types.js';
+import type { RedactedApprovalEffect } from './approvals.js';
+
+export type AgentControlJournalKind =
+  | 'command.requested' | 'command.succeeded' | 'command.failed'
+  | 'command.unknown' | 'command.rejected' | 'approval.requested';
+
+export type AgentControlJournalInput =
+  | { kind: 'command.requested'; commandId: string; idempotencyKey: string;
+      commandKind: ControlCommand['kind']; ownerEpoch: number }
+  | { kind: 'approval.requested'; commandId: string; approvalId: string; payloadDigest: string;
+      resource: ActionReceipt['resource']; capability: string; effect: {
+        readonly kind: RedactedApprovalEffect['kind']; readonly target: string;
+      } }
+  | { kind: Exclude<AgentControlJournalKind, 'command.requested' | 'approval.requested'>;
+      commandId: string; idempotencyKey: string; outcome: CommandOutcome; receipt?: ActionReceipt };
+
+/** Construct-only boundary: sensitive effect values are never accepted here. */
+export function agentControlJournalPayload(input: AgentControlJournalInput): {
+  kind: AgentControlJournalKind;
+  payload: Record<string, unknown>;
+} {
+  if (input.kind === 'command.requested') return {
+    kind: input.kind,
+    payload: { commandId: input.commandId, idempotencyKey: input.idempotencyKey,
+      kind: input.commandKind, ownerEpoch: input.ownerEpoch },
+  };
+  if (input.kind === 'approval.requested') return {
+    kind: input.kind,
+    payload: { commandId: input.commandId, approvalId: input.approvalId,
+      payloadDigest: input.payloadDigest, resource: input.resource,
+      capability: input.capability, effect: input.effect },
+  };
+  const receipt = input.receipt ? journalReceipt(input.receipt) : undefined;
+  return {
+    kind: input.kind,
+    payload: receipt
+      ? { commandId: input.commandId, idempotencyKey: input.idempotencyKey,
+          status: input.outcome.status, receipt }
+      : { commandId: input.commandId, idempotencyKey: input.idempotencyKey,
+          status: input.outcome.status,
+          ...(input.outcome.status === 'succeeded' ? {} : { code: 'surface_command_failed' }) },
+  };
+}
+
+function journalReceipt(receipt: ActionReceipt): ActionReceipt {
+  return Object.freeze({
+    schema: receipt.schema,
+    actionId: receipt.actionId,
+    state: receipt.state,
+    resource: receipt.resource,
+    createdAt: receipt.createdAt,
+    ...(receipt.completedAt ? { completedAt: receipt.completedAt } : {}),
+    ...(receipt.code ? { code: receipt.code } : {}),
+    ...(receipt.sourceDigest ? { sourceDigest: receipt.sourceDigest } : {}),
+    ...(receipt.sourceBytes !== undefined ? { sourceBytes: receipt.sourceBytes } : {}),
+    ...(receipt.resultBytes !== undefined ? { resultBytes: receipt.resultBytes } : {}),
+    ...(receipt.durationMs !== undefined ? { durationMs: receipt.durationMs } : {}),
+  });
+}
 
 export interface ControlEvent {
   sequence: number;
