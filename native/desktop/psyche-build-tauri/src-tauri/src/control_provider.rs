@@ -730,8 +730,15 @@ async fn connect_provider(
                     pending.insert(request_id.clone());
                 }
                 if let Some(main) = app.get_webview_window("main") {
+                    let mut desktop_frame = frame.clone();
+                    if let Some(object) = desktop_frame.as_object_mut() {
+                        object.insert(
+                            "projectRoot".to_string(),
+                            Value::String(provider_key.clone()),
+                        );
+                    }
                     if main
-                        .emit("control:provider-effect-request", &frame)
+                        .emit("control:provider-effect-request", &desktop_frame)
                         .is_err()
                     {
                         if let Some(request_id) = &request_id {

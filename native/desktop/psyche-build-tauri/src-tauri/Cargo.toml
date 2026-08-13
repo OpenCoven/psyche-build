@@ -35,6 +35,11 @@ portable-pty = { path = "vendor/portable-pty", version = "=0.8.1" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 window-vibrancy = "0.6"
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSBitmapImageRep", "NSImage", "NSImageRep"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSData", "NSDictionary", "NSError", "NSObject", "NSString"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["WKContentWorld", "WKFrameInfo", "WKSnapshotConfiguration", "WKWebView", "block2"] }
 
 [dev-dependencies]
 tempfile = "3"

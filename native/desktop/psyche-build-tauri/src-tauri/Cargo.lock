@@ -3159,9 +3159,14 @@ name = "psyche-build-tauri"
 version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
+ "block2",
  "env_logger",
  "libc",
  "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-web-kit",
  "once_cell",
  "parking_lot",
  "portable-pty",

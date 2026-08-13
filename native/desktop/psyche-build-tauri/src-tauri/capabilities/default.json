@@ -3,6 +3,7 @@
   "identifier": "default",
   "description": "Capability for the main psyche Tauri window",
   "windows": ["main"],
+  "webviews": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

@@ -3510,7 +3510,7 @@
     requestAnimationFrame(function () {
       scheduleVisiblePaneFit();
       if (thread.term) thread.term.focus();
-      syncBrowserBounds();
+      Promise.resolve(syncBrowserBounds()).catch(function () {});
     });
 
     setProjectStatus(project, statusLevel(thread.status));
@@ -3657,6 +3657,8 @@
         if (!savedTab) continue;
         try {
           await invoke("browser_navigate", {
+            tabId: currentTab.id,
+            generation: tabLifecycle.generation + 1,
             label: savedTab.label,
             url: savedTab.url,
             x: -10000,
@@ -3671,6 +3673,9 @@
           tabLifecycle.liveGeneration = tabLifecycle.generation;
           tabLifecycle.liveUrl = savedTab.url;
           tabLifecycle.viewLive = true;
+          tabLifecycle.nativeBounds = { x: -10000, y: -10000, w: 1, h: 1 };
+          if (typeof publishBrowserResource === "function") await publishBrowserResource({ project: project,
+            worktreePath: thread.worktreePath, browser: browser, tab: currentTab });
           recreated += 1;
         } catch (recoveryError) {
           currentTab.created = false;
@@ -3700,6 +3705,13 @@
     browser.tabs.forEach(function (tab) {
       invalidateBrowserNavigation(tab);
     });
+    if (typeof invalidateBrowserAutomation === "function") {
+      await Promise.all(browser.tabs.map(function (tab) { return invalidateBrowserAutomation(tab); }));
+    }
+    browser.tabs.forEach(function (tab) { browserTabLifecycle(tab).publicationSequence += 1; });
+    var publicationTails = browser.tabs.map(function (tab) { return browserTabLifecycle(tab).publicationTail; })
+      .filter(function (tail) { return !!tail; });
+    if (publicationTails.length) await Promise.all(publicationTails);
     var navigationTails = browser.tabs.map(function (tab) {
       return browserTabLifecycle(tab).navigationTail;
     }).filter(function (tail) {
@@ -3760,6 +3772,9 @@
       if (recovery.recoveryErrors.length) recoveryStatus += "; recreation failures: " + recovery.recoveryErrors.join(", ");
       setStatus(recoveryStatus, "error");
       return false;
+    }
+    if (typeof removeBrowserResource === "function") {
+      await Promise.all(browser.tabs.map(function (tab) { return removeBrowserResource(project, tab); }));
     }
     var wasActive = state.activeThreadId === thread.id;
     browser.tabs.forEach(function (tab) {
@@ -4058,7 +4073,7 @@
   }
   window.addEventListener("resize", function () {
     scheduleVisiblePaneFit();
-    syncBrowserBounds();
+    Promise.resolve(syncBrowserBounds()).catch(function () {});
     // Whether the strip overflows is a function of width, not of its contents.
     syncTabStripOverflow();
     syncSessionListScroll();
@@ -6234,7 +6249,25 @@
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
       .map(function (t) { return t.id; });
-    threadIds.forEach(function (tid) { closeThread(tid, { focus: false }); });
+    var closeResults = await Promise.all(threadIds.map(async function (tid) {
+      var thread = findThread(tid);
+      var closed = thread && thread.kind === "web" ? await closeBrowserPane(thread) : await Promise.resolve(closeThread(tid, { focus: false }));
+      return { threadId: tid, closed: closed !== false };
+    }));
+    var failedCloses = closeResults.filter(function (result) { return !result.closed; });
+    if (failedCloses.length) {
+      if (typeof replayBrowserResources === "function") await replayBrowserResources(project.root).catch(function () {});
+      var closedCount = closeResults.length - failedCloses.length;
+      setStatus("project removal partially completed: " + closedCount + " pane(s) closed; " +
+        failedCloses.length + " failed (" + failedCloses.map(function (result) { return result.threadId; }).join(", ") + "); project retained", "error");
+      return false;
+    }
+    var providerStopError = null;
+    if (typeof invoke === "function") {
+      try { await invoke("control_provider_stop", { projectRoot: project.root }); }
+      catch (error) { providerStopError = error; }
+    }
+    if (typeof browserControlProviders !== "undefined") delete browserControlProviders[project.root];
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
@@ -6265,6 +6298,7 @@
     if (restoredTerminalView) syncPaneMetricsVisibility();
     syncProjectBrowser();
     saveWorkspaceSoon();
+    if (providerStopError) setStatus("project removed after control provider stop failed: " + String(providerStopError), "warn");
     if (typeof refreshStatusController === "function") refreshStatusController();
     return true;
   }
@@ -7649,10 +7683,10 @@
     return projectId + "__" + tabId;
   }
   function browserTabLifecycle(tab) {
-    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
+    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: false, navigationSnapshot: null, controlGeneration: 0, controlLabel: null, publicationSequence: 0, publicationTail: null, nativeBounds: null, documentId: null, documentSequence: 0 };
     var lifecycle = browserTabLifecycleStates.get(tab);
     if (!lifecycle) {
-      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
+      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null, controlGeneration: 0, controlLabel: null, publicationSequence: 0, publicationTail: null, nativeBounds: null, documentId: null, documentSequence: 0 };
       browserTabLifecycleStates.set(tab, lifecycle);
     }
     return lifecycle;
@@ -7717,7 +7751,7 @@
     lifecycle.liveUrl = null;
     lifecycle.viewLive = false;
     try {
-      await invoke("browser_destroy", { label: context.label });
+      await invoke("browser_destroy", { tabId: context.tab.id });
     } catch (error) {
       setStatus("obsolete browser navigation cleanup failed for " + context.label + ": " + String(error), "error");
       return false;
@@ -7796,14 +7830,224 @@
     saveWorkspaceSoon();
     return true;
   }
+  function boundedBrowserResourceText(value, limit) {
+    var text = String(value || "");
+    if (typeof TextEncoder === "undefined" || new TextEncoder().encode(text).byteLength <= limit) return text.slice(0, limit);
+    var low = 0; var high = text.length;
+    while (low < high) {
+      var middle = Math.ceil((low + high) / 2);
+      if (new TextEncoder().encode(text.slice(0, middle)).byteLength <= limit) low = middle;
+      else high = middle - 1;
+    }
+    if (low > 0 && /[\uD800-\uDBFF]/.test(text[low - 1])) low -= 1;
+    return text.slice(0, low);
+  }
+  function browserResource(pair) {
+    if (!pair || !pair.project || !pair.tab) return null;
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var bounds = lifecycle.nativeBounds || { w: 0, h: 0 };
+    return { id: pair.tab.id, kind: "browser_tab", generation: lifecycle.controlGeneration || 0,
+      projectRoot: pair.project.root, worktreeRoot: pair.worktreePath,
+      providerId: "", webviewLabel: lifecycle.nativeLabel,
+      url: boundedBrowserResourceText(pair.tab.url || "about:blank", 2048),
+      title: boundedBrowserResourceText(pair.tab.title || "New tab", 512),
+      loading: !!pair.tab.loading, viewport: { width: Math.max(0, Math.round(bounds.w)), height: Math.max(0, Math.round(bounds.h)) } };
+  }
+  var browserControlProviders = {};
+  var browserControlReplayNeeded = {};
+  function ensureBrowserControlProvider(projectRoot) {
+    if (!browserControlProviders[projectRoot]) {
+      browserControlReplayNeeded[projectRoot] = true;
+      browserControlProviders[projectRoot] = invoke("control_provider_start", { projectRoot: projectRoot })
+        .then(function (provider) {
+          return provider;
+        })
+        .catch(function (error) { delete browserControlProviders[projectRoot]; throw error; });
+    }
+    return browserControlProviders[projectRoot];
+  }
+  async function replayBrowserResources(projectRoot, excludeTab) {
+    var project = state.projects.find(function (candidate) { return candidate.root === projectRoot; });
+    if (!project) return false;
+    var pairs = [];
+    Object.keys(project.browsersByWorktree || {}).forEach(function (worktreePath) {
+      var browser = project.browsersByWorktree[worktreePath];
+      browser.tabs.forEach(function (tab) {
+        if (tab !== excludeTab && tab.created && browserTabLifecycle(tab).nativeLabel && !browserTabIsClosing(tab)) {
+          pairs.push({ project: project, worktreePath: worktreePath, browser: browser, tab: tab });
+        }
+      });
+    });
+    await Promise.all(pairs.map(function (pair) { return publishBrowserResource(pair); }));
+    return true;
+  }
+  function publishBrowserResource(pair) {
+    var resource = browserResource(pair); if (!resource || !resource.webviewLabel) return Promise.resolve({ status: "deferred" });
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var publicationSequence = ++lifecycle.publicationSequence;
+    var label = resource.webviewLabel;
+    var run = function () {
+      if (lifecycle.closing || lifecycle.nativeLabel !== label) return { status: "deferred" };
+      if (publicationSequence !== lifecycle.publicationSequence) return { status: "superseded" };
+      var upsert = function (retry) {
+        return ensureBrowserControlProvider(pair.project.root).then(function (provider) {
+          resource.providerId = provider.providerId;
+          return invoke("control_provider_upsert", { projectRoot: pair.project.root, resource: resource });
+        }).catch(function (error) {
+          delete browserControlProviders[pair.project.root];
+          if (retry) return upsert(false);
+          throw error;
+        });
+      };
+      return upsert(true).then(async function (canonical) {
+        if (lifecycle.closing || lifecycle.nativeLabel !== label) return { status: "deferred" };
+        if (publicationSequence !== lifecycle.publicationSequence) return { status: "superseded" };
+        if (!canonical || canonical.webviewLabel !== label) return { status: "deferred" };
+        await invoke("browser_bind_control_generation", { tabId: pair.tab.id, generation: canonical.generation });
+        lifecycle.controlGeneration = canonical.generation;
+        lifecycle.controlLabel = canonical.webviewLabel;
+        if (browserControlReplayNeeded[pair.project.root]) {
+          browserControlReplayNeeded[pair.project.root] = false;
+          await replayBrowserResources(pair.project.root, pair.tab);
+        }
+        return { status: "published", generation: canonical.generation };
+      }, function (error) {
+        delete browserControlProviders[pair.project.root];
+        lifecycle.controlGeneration = 0;
+        lifecycle.controlLabel = null;
+        setTimeout(function () {
+          if (!lifecycle.closing && lifecycle.nativeLabel === label) publishBrowserResource(pair).catch(function () {});
+        }, 250);
+        return { status: "deferred", error: String(error) };
+      });
+    };
+    var publication = lifecycle.publicationTail ? lifecycle.publicationTail.then(run, run) : run();
+    lifecycle.publicationTail = publication.then(function () {}, function () {});
+    return publication;
+  }
+  function removeBrowserResource(project, tab) {
+    if (!project || !tab) return Promise.resolve(false);
+    var remove = function (retry) {
+      return invoke("control_provider_remove", { projectRoot: project.root, tabId: tab.id })
+        .catch(async function (error) {
+          var message = String(error).trim().replace(/^Error:\s*/, "");
+          if (message === "browser resource is not registered") return { removed: true };
+          delete browserControlProviders[project.root];
+          if (retry) {
+            await ensureBrowserControlProvider(project.root);
+            await replayBrowserResources(project.root);
+            return remove(false);
+          }
+          var lifecycle = browserTabLifecycle(tab);
+          lifecycle.controlGeneration = 0;
+          lifecycle.controlLabel = null;
+          return false;
+        });
+    };
+    return remove(true).then(function (result) { return result !== false; });
+  }
+  function invalidateBrowserAutomation(tab) {
+    var lifecycle = browserTabLifecycle(tab);
+    lifecycle.documentId = null;
+    lifecycle.documentSequence += 1;
+    return Promise.resolve();
+  }
+  function installBrowserAutomationCompatibility(pair) {
+    var lifecycle = browserTabLifecycle(pair.tab);
+    if (!lifecycle.nativeLabel) return Promise.resolve(false);
+    return invoke("browser_install_automation", { tabId: pair.tab.id, generation: lifecycle.generation })
+      .then(function () { return true; }, function () { return false; });
+  }
+  function validatePendingBrowserInspection(pending) {
+    var lifecycle = browserTabLifecycle(pending.pair.tab);
+    if (lifecycle.closing || lifecycle.nativeLabel !== pending.label || lifecycle.controlLabel !== pending.label ||
+        lifecycle.controlGeneration !== pending.generation || lifecycle.documentId !== pending.documentId ||
+        !pending.documentId || (pending.snapshotId && !String(pending.snapshotId))) throw new Error("snapshot_stale");
+    return lifecycle;
+  }
+  async function queueBrowserInspection(pair, request) {
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var run = async function () {
+      if (lifecycle.publicationTail) await lifecycle.publicationTail;
+      var pending = { pair: pair, label: request.label, generation: request.generation,
+        documentId: lifecycle.documentId, snapshotId: null };
+      validatePendingBrowserInspection(pending);
+      var inspected = await invoke("browser_inspect", { request: { tabId: pair.tab.id,
+        generation: request.generation, documentId: pending.documentId } });
+      var snapshot;
+      try { snapshot = JSON.parse(inspected.snapshotJson); } catch (_) { throw new Error("invalid_snapshot"); }
+      pending.snapshotId = snapshot.snapshotId;
+      validatePendingBrowserInspection(pending);
+      if (!request.includeScreenshot) return snapshot;
+      var screenshot = await invoke("browser_snapshot", { tabId: pair.tab.id, generation: request.generation });
+      if (screenshot.navigationEpoch !== inspected.navigationEpoch ||
+          screenshot.navigationUrl !== inspected.navigationUrl) throw new Error("snapshot_stale");
+      validatePendingBrowserInspection(pending);
+      return { snapshot: snapshot, screenshot: screenshot };
+    };
+    var inspection = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
+    lifecycle.navigationTail = inspection.then(function () {}, function () {});
+    return inspection;
+  }
+  function handleBrowserProviderEffect(event) {
+    var payload = event.payload || {}; var operation = payload.operation || {};
+    if (operation.kind !== "inspect") return false;
+    var pair = state.projects.reduce(function (found, project) {
+      if (found || project.root !== payload.projectRoot) return found; var roots = Object.keys(project.browsersByWorktree || {});
+      for (var i = 0; i < roots.length; i++) { var browser = project.browsersByWorktree[roots[i]];
+        var tab = browser.tabs.find(function (candidate) { return candidate.id === payload.tabId; });
+        if (tab) return { project: project, worktreePath: roots[i], browser: browser, tab: tab }; }
+      return null;
+    }, null);
+    if (!pair || pair.tab.id !== payload.tabId) {
+      invoke("control_provider_complete", { projectRoot: payload.projectRoot, requestId: payload.requestId,
+        result: { actionId: payload.actionId, status: "failed", code: "provider_unavailable", message: "exact browser tab is unavailable" } }).catch(function () {});
+      return false;
+    }
+    var lifecycle = browserTabLifecycle(pair.tab);
+    // lifecycle.generation !== payload.generation is intentionally not the trust boundary;
+    // the provider-returned control generation is authoritative.
+    if (lifecycle.controlGeneration !== payload.generation || lifecycle.controlLabel !== lifecycle.nativeLabel) {
+      invoke("control_provider_complete", { projectRoot: payload.projectRoot, requestId: payload.requestId,
+        result: { actionId: payload.actionId, status: "failed", code: "snapshot_stale", message: "browser tab generation is stale" } }).catch(function () {});
+      return false;
+    }
+    queueBrowserInspection(pair, { requestId: payload.requestId, generation: payload.generation,
+      label: lifecycle.nativeLabel, includeScreenshot: operation.includeScreenshot === true }).then(function (value) {
+      var completedSnapshot = value && value.snapshot ? value.snapshot : value;
+      var completionLifecycle = browserTabLifecycle(pair.tab);
+      if (!completedSnapshot || completionLifecycle.closing || completionLifecycle.nativeLabel !== lifecycle.nativeLabel ||
+          completionLifecycle.controlLabel !== lifecycle.nativeLabel || completionLifecycle.controlGeneration !== payload.generation ||
+          completionLifecycle.documentId !== completedSnapshot.documentId) throw new Error("snapshot_stale");
+      return invoke("control_provider_complete", { projectRoot: pair.project.root, requestId: payload.requestId,
+        result: { actionId: payload.actionId, status: "succeeded", value: value } });
+    }).catch(function (error) {
+      invoke("control_provider_complete", { projectRoot: pair.project.root, requestId: payload.requestId,
+        result: { actionId: payload.actionId, status: "failed",
+          code: String(error).indexOf("backend_unavailable") !== -1 ? "backend_unavailable" :
+            (String(error).indexOf("invalid_snapshot") !== -1 ? "invalid_snapshot" : "snapshot_stale"),
+          message: String(error) } }).catch(function () {});
+    }); return true;
+  }
   function handleBrowserPageLoad(event) {
     var payload = event.payload || {};
     var pair = browserNativeEventContext(payload.label, payload.url);
     if (!pair) return false;
     if (payload.phase === "started") {
+      if (typeof invalidateBrowserAutomation === "function") invalidateBrowserAutomation(pair.tab);
       pair.tab.loading = true;
     } else if (payload.phase === "finished") {
-      return markBrowserTabLoaded(payload.label, payload.url, "");
+      var loaded = markBrowserTabLoaded(payload.label, payload.url, "");
+      var lifecycle = typeof browserTabLifecycle === "function" ? browserTabLifecycle(pair.tab) : null;
+      if (lifecycle) lifecycle.documentId = lifecycle.nativeLabel + ":" + (++lifecycle.documentSequence) + ":" +
+        (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "document");
+      var installed = lifecycle && typeof installBrowserAutomationCompatibility === "function"
+        ? installBrowserAutomationCompatibility(pair) : Promise.resolve(true);
+      // queueBrowserInspection is dispatched only for a provider effect, never as a synthetic load inspection.
+      if (typeof publishBrowserResource === "function") installed.then(function () {
+        return publishBrowserResource(pair);
+      }).catch(function (error) { setStatus("browser resource publish failed: " + String(error), "error"); });
+      return loaded;
     } else {
       return false;
     }
@@ -7811,13 +8055,22 @@
         activeWorkspaceRoot(pair.project) === pair.worktreePath) {
       renderBrowserTabs(); updateBrowserControls();
     }
+    if (typeof publishBrowserResource === "function") publishBrowserResource(pair)
+      .catch(function (error) { setStatus("browser resource publish failed: " + String(error), "error"); });
     return true;
   }
   function handleBrowserTitle(event) {
     var payload = event.payload || {};
-    return markBrowserTabLoaded(payload.label, payload.url, payload.title);
+    var loaded = markBrowserTabLoaded(payload.label, payload.url, payload.title);
+    if (loaded && typeof publishBrowserResource === "function") {
+      var pair = browserTabForNativeLabel(payload.label);
+      if (pair) publishBrowserResource(pair)
+        .catch(function (error) { setStatus("browser resource publish failed: " + String(error), "error"); });
+    }
+    return loaded;
   }
   listen("browser:page-load", handleBrowserPageLoad).catch(function () {});
+  listen("control:provider-effect-request", handleBrowserProviderEffect).catch(function () {});
   listen("browser:title", handleBrowserTitle).catch(function () {});
   listen("browser:focus", function (event) {
     markActiveSurface("browser");
@@ -7825,6 +8078,7 @@
     var pair = browserTabForNativeLabel(payload.label);
     var pane = pair && findBrowserPane(pair.project.id, pair.worktreePath);
     if (pane && state.activeThreadId !== pane.id) focusThread(pane.id);
+    if (pair && typeof syncBrowserBounds === "function") syncBrowserBounds().catch(function () {});
   }).catch(function () {});
   function ensureBrowserModel(project, workspaceRoot) {
     if (!project) return null;
@@ -7871,14 +8125,24 @@
     var lifecycle = browserTabLifecycle(tab);
     if (lifecycle.closing) return false;
     lifecycle.closing = true;
+    lifecycle.publicationSequence += 1;
+    if (lifecycle.publicationTail) await lifecycle.publicationTail;
     invalidateBrowserNavigation(tab);
+    if (typeof invalidateBrowserAutomation === "function") await invalidateBrowserAutomation(tab);
     try {
-      await invoke("browser_destroy", { label: browserLabelForTab(project, tab) });
+      await invoke("browser_destroy", { tabId: tab.id });
     } catch (error) {
       lifecycle.closing = false;
+      lifecycle.documentId = lifecycle.nativeLabel + ":" + (++lifecycle.documentSequence) + ":" +
+        (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "recovered");
+      if (typeof installBrowserAutomationCompatibility === "function") await installBrowserAutomationCompatibility({
+        project: project, worktreePath: activeWorkspaceRoot(project), browser: browser, tab: tab }).catch(function () {});
+      if (typeof publishBrowserResource === "function") await publishBrowserResource({ project: project,
+        worktreePath: activeWorkspaceRoot(project), browser: browser, tab: tab }).catch(function () {});
       setStatus("browser tab close failed: " + String(error), "error");
       return false;
     }
+    if (typeof removeBrowserResource === "function") await removeBrowserResource(project, tab);
     idx = browser.tabs.findIndex(function (t) { return t === tab; });
     if (idx < 0) {
       lifecycle.closing = false;
@@ -7896,9 +8160,11 @@
     var worktreePath = activeWorkspaceRoot(project);
     var pane = project && findBrowserPane(project.id, worktreePath);
     if (!tab || browserTabIsClosing(tab) || browserPaneIsClosing(pane) ||
-        tab.created || !tab.url || tab.url === "about:blank") return false;
+        tab.created || !tab.url) return false;
     var navigated = await navigateBrowser(tab.url, { tabId: tab.id, preserveHistory: true });
     pane = project && findBrowserPane(project.id, worktreePath);
+    if (typeof publishBrowserResource === "function") await publishBrowserResource({ project: project,
+      worktreePath: worktreePath, browser: ensureBrowserModel(project, worktreePath), tab: tab });
     return navigated && !browserTabIsClosing(tab) && !browserPaneIsClosing(pane) &&
       tab.created === true;
   }
@@ -7911,7 +8177,12 @@
     if (!tab || browserTabIsClosing(tab) || browserPaneIsClosing(pane)) return false;
     markActiveSurface("browser");
     browser.activeTabId = tabId;
-    renderBrowserTabs(); syncProjectBrowser(); saveWorkspaceSoon();
+    renderBrowserTabs();
+    if (tab.created && typeof syncBrowserBounds === "function") await syncBrowserBounds();
+    if (tab.created && typeof publishBrowserResource === "function") await publishBrowserResource({ project: project,
+      worktreePath: activeWorkspaceRoot(project), browser: browser, tab: tab });
+    if (!tab.created) syncProjectBrowser();
+    saveWorkspaceSoon();
     if (!tab.created) await restoreDormantBrowserTab(project, tab);
     pane = findBrowserPane(project.id, activeWorkspaceRoot(project));
     return browser.tabs.indexOf(tab) !== -1 && !browserTabIsClosing(tab) &&
@@ -7935,6 +8206,7 @@
       renderBrowserTabs();
     }
     syncProjectBrowser();
+    if (tab && !tab.created) await restoreDormantBrowserTab(project, tab);
     if (!options.requireNew && !tab) {
       var activeTab = currentBrowserTab(project);
       if (activeTab && !activeTab.created) await restoreDormantBrowserTab(project, activeTab);
@@ -7997,12 +8269,51 @@
     if (rect.width <= 0 || rect.height <= 0) return null;
     return { x: rect.left, y: rect.top, w: rect.width, h: rect.height };
   }
-  function syncProjectBrowser() { renderBrowserTabs(); syncBrowserBounds(); }
-  function syncBrowserBounds() {
-    var project = activeProject(); var tab = currentBrowserTab(project); var label = browserLabelForTab(project, tab); var b = visibleBrowserBounds();
-    if (!b || !tab || !tab.created) { invoke("browser_hide_all_except", { label: null }).catch(function () {}); return; }
-    invoke("browser_hide_all_except", { label: label }).catch(function () {});
-    invoke("browser_set_bounds", { label: label, x: b.x, y: b.y, w: b.w, h: b.h }).catch(function () {});
+  function syncProjectBrowser() { renderBrowserTabs(); Promise.resolve(syncBrowserBounds()).catch(function () {}); }
+  var browserBoundsSyncTail = Promise.resolve();
+  function queueBrowserBoundsSync(run) {
+    var pending = browserBoundsSyncTail.then(run, run);
+    browserBoundsSyncTail = pending.catch(function (error) {
+      setStatus("browser bounds sync failed: " + String(error), "error");
+    });
+    return pending;
+  }
+  function syncBrowserBounds() { return queueBrowserBoundsSync(applyBrowserBoundsSync); }
+  async function applyBrowserBoundsSync() {
+    var project = activeProject(); var tab = currentBrowserTab(project); var label = tab ? browserLabelForTab(project, tab) : null; var b = visibleBrowserBounds();
+    var allPairs = [];
+    var projects = typeof state !== "undefined" && state.projects ? state.projects : (project ? [project] : []);
+    projects.forEach(function (candidateProject) {
+      Object.keys(candidateProject.browsersByWorktree || {}).forEach(function (worktreePath) {
+        var candidateBrowser = candidateProject.browsersByWorktree[worktreePath];
+        candidateBrowser.tabs.forEach(function (candidate) {
+          if (candidate.created) allPairs.push({ project: candidateProject, worktreePath: worktreePath,
+            browser: candidateBrowser, tab: candidate });
+        });
+      });
+    });
+    if (!b || !tab || !tab.created) {
+      await invoke("browser_hide_all_except", { label: null });
+      allPairs.forEach(function (pair) { browserTabLifecycle(pair.tab).nativeBounds = { x: -10000, y: -10000, w: 1, h: 1 }; });
+      if (typeof publishBrowserResource === "function") await Promise.all(allPairs.map(function (pair) { return publishBrowserResource(pair); }));
+      return;
+    }
+    var hide = invoke("browser_hide_all_except", { label: label });
+    var resize = invoke("browser_set_bounds", { label: label, x: b.x, y: b.y, w: b.w, h: b.h });
+    if (!project.browsersByWorktree) { await Promise.all([hide, resize]); return; }
+    var worktreePath = Object.keys(project.browsersByWorktree || {}).find(function (root) {
+      return project.browsersByWorktree[root].tabs.indexOf(tab) !== -1;
+    });
+    if (!worktreePath) { await Promise.all([hide, resize]); return; }
+    var browser = project.browsersByWorktree[worktreePath];
+    var changed = allPairs;
+    await Promise.all([hide, resize]);
+    changed.forEach(function (pair) {
+      if (pair.tab !== tab) browserTabLifecycle(pair.tab).nativeBounds = { x: -10000, y: -10000, w: 1, h: 1 };
+    });
+    browserTabLifecycle(tab).nativeBounds = { x: b.x, y: b.y, w: b.w, h: b.h };
+    if (typeof publishBrowserResource !== "function") return;
+    await Promise.all(changed.map(function (pair) { return publishBrowserResource(pair); }));
   }
   async function navigateBrowser(rawUrl, opts) {
     opts = opts || {}; var project = activeProject(); if (!project) return false;
@@ -8052,6 +8363,7 @@
         viewLive: lifecycle.viewLive,
       };
       var generation = beginBrowserNavigation(tab);
+      if (typeof invalidateBrowserAutomation === "function") await invalidateBrowserAutomation(tab);
       var label = browserLabelForTab(project, tab);
       var nativeLabel = nativeBrowserLabel(label);
       lifecycle.nativeLabel = nativeLabel;
@@ -8059,6 +8371,7 @@
       lifecycle.pendingUrl = normalised;
       lifecycle.eventUrl = null;
       lifecycle.viewLive = true;
+      lifecycle.nativeBounds = { x: b.x, y: b.y, w: b.w, h: b.h };
       lifecycle.navigationSnapshot = {
         url: previousUrl,
         title: previousTitle,
@@ -8077,7 +8390,8 @@
       };
       tab.loading = true; tab.title = tabTitle(normalised); renderBrowserTabs(); updateBrowserControls();
       try {
-        await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h });
+        await invoke("browser_navigate", { tabId: tab.id, generation: generation,
+          label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h });
         if (!browserNavigationIsCurrent(context)) {
           await discardObsoleteBrowserNavigation(context);
           return false;
@@ -8097,9 +8411,12 @@
           tab.history.push(normalised);
           tab.historyIndex = tab.history.length - 1;
         }
-        if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
-        else syncBrowserBounds();
+        if (browserNavigationOwnsVisiblePane(context)) renderBrowserTabs();
+        await syncBrowserBounds();
         saveWorkspaceSoon();
+        if (typeof publishBrowserResource === "function") {
+          await publishBrowserResource({ project: project, worktreePath: worktreePath, browser: browser, tab: tab });
+        }
         setTimeout(function () {
           if (browserNavigationIsCurrent(context) && tab.loading &&
               browserUrlsMatch(tab.url, normalised)) {
@@ -8123,8 +8440,8 @@
         tab.loading = false;
         tab.title = previousTitle;
         tab.url = previousUrl;
-        if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
-        else syncBrowserBounds();
+        if (browserNavigationOwnsVisiblePane(context)) renderBrowserTabs();
+        try { await syncBrowserBounds(); } catch (_) {}
         writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
         return false;
       }
@@ -8143,13 +8460,26 @@
   urlInput.addEventListener("keydown", function (e) { if (e.key === "Enter") navigateBrowser(urlInput.value); });
   document.getElementById("reload").addEventListener("click", function () {
     var project = activeProject(); var tab = currentBrowserTab(project); var pane = project && findBrowserPane(project.id, activeWorkspaceRoot(project));
-    if (tab && tab.created && !browserTabIsClosing(tab) && !browserPaneIsClosing(pane)) { tab.loading = true; renderBrowserTabs(); updateBrowserControls(); invoke("browser_reload", { label: browserLabelForTab(project, tab) }).catch(function () {}).finally(function () { setTimeout(function () { if (!browserTabIsClosing(tab) && !browserPaneIsClosing(pane)) tab.loading = false; renderBrowserTabs(); updateBrowserControls(); }, 350); }); }
+    if (tab && tab.created && !browserTabIsClosing(tab) && !browserPaneIsClosing(pane)) queueBrowserReload(project, tab, pane);
   });
+  async function queueBrowserReload(project, tab, pane) {
+    var lifecycle = browserTabLifecycle(tab);
+    var run = async function () {
+      if (browserTabIsClosing(tab) || browserPaneIsClosing(pane)) return false;
+      await invalidateBrowserAutomation(tab);
+      tab.loading = true; renderBrowserTabs(); updateBrowserControls();
+      await invoke("browser_reload", { tabId: tab.id, generation: lifecycle.controlGeneration });
+      return true;
+    };
+    var reload = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
+    lifecycle.navigationTail = reload.then(function () {}, function () {});
+    return reload.catch(function () { return false; });
+  }
   document.getElementById("back").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex > 0) { var index = tab.historyIndex - 1; navigateBrowser(tab.history[index], { fromHistory: true, historyIndex: index }); } });
   document.getElementById("forward").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex < tab.history.length - 1) { var index = tab.historyIndex + 1; navigateBrowser(tab.history[index], { fromHistory: true, historyIndex: index }); } });
   document.getElementById("open-surprise").addEventListener("click", openDiceBrowserTab);
   document.getElementById("open-external").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.url && tab.url !== "about:blank" && openUrl) openUrl(tab.url).catch(function () {}); });
-  if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { syncBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }
+  if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { Promise.resolve(syncBrowserBounds()).catch(function () {}); }); ro.observe(preview); ro.observe(detail); }
   window.addEventListener("beforeunload", function () {
     saveWorkspaceNow();
     if (statusController) statusController.stop();
@@ -8285,7 +8615,7 @@
     if (!open) closeNewPaneMenu();
     requestAnimationFrame(function () {
       scheduleVisiblePaneFit();
-      syncBrowserBounds();
+      Promise.resolve(syncBrowserBounds()).catch(function () {});
     });
   }
   function toggleSidebar() { setSidebarOpen(!sidebarOpen()); }
@@ -8314,7 +8644,7 @@
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", up);
         sidebarResizeEl.classList.remove("dragging");
-        requestAnimationFrame(function () { scheduleVisiblePaneFit(); syncBrowserBounds(); });
+        requestAnimationFrame(function () { scheduleVisiblePaneFit(); Promise.resolve(syncBrowserBounds()).catch(function () {}); });
       }
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);

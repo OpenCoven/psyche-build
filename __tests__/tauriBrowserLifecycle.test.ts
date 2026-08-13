@@ -6,6 +6,7 @@ const repoRoot = process.cwd();
 const webRoot = join(repoRoot, 'native/desktop/psyche-build-tauri');
 const mainJs = readFileSync(join(webRoot, 'web/main.js'), 'utf8');
 const nativeLib = readFileSync(join(webRoot, 'src-tauri/src/lib.rs'), 'utf8');
+const indexHtml = readFileSync(join(webRoot, 'web/index.html'), 'utf8');
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -458,9 +459,8 @@ describe('Tauri native browser lifecycle', () => {
     );
 
     const browserDestroy = rustFunctionSource(nativeLib, 'browser_destroy');
-    expect(browserDestroy).toMatch(
-      /^#\[tauri::command\]\nfn browser_destroy\(app: AppHandle, label: Option<String>\) -> Result<\(\), String> \{\n\s*destroy_browser_webview\(&app, label\)\n\}$/s,
-    );
+    expect(browserDestroy).toContain('require_main_webview(&caller)?');
+    expect(browserDestroy).toContain('bindings.bindings.lock().remove(&tab_id)');
 
     const browserDestroyMany = rustFunctionSource(nativeLib, 'browser_destroy_many');
     expect(nativeLib).toContain(
@@ -471,11 +471,16 @@ describe('Tauri native browser lifecycle', () => {
     expect(nativeLib).toContain('failures: Vec<BrowserDestroyFailure>');
     expect(browserDestroyMany).toContain('#[tauri::command]\nfn browser_destroy_many(');
     expect(browserDestroyMany).toContain(') -> BrowserDestroyManyOutcome {');
+    expect(browserDestroyMany).toContain('if require_main_webview(&caller).is_err() {');
+    expect(browserDestroyMany).toContain('error: "permission_denied".to_string()');
     expect(browserDestroyMany).toContain('for label in labels {');
     expect(browserDestroyMany).toContain(
       'match destroy_browser_webview(&app, Some(label.clone())) {',
     );
-    expect(browserDestroyMany).toContain('Ok(()) => outcome.destroyed.push(label)');
+    expect(browserDestroyMany).toContain(
+      '.retain(|_, binding| binding.label != label)',
+    );
+    expect(browserDestroyMany).toContain('outcome.destroyed.push(label)');
     expect(browserDestroyMany).toContain(
       '.push(BrowserDestroyFailure { label, error })',
     );
@@ -515,7 +520,7 @@ describe('Tauri native browser lifecycle', () => {
       'discardObsoleteBrowserNavigation',
     );
     expect(discardObsoleteNavigation).toContain(
-      'await invoke("browser_destroy", { label: context.label })',
+      'await invoke("browser_destroy", { tabId: context.tab.id })',
     );
     expect(discardObsoleteNavigation).toContain('context.tab.created = false');
   });
@@ -540,8 +545,8 @@ describe('Tauri native browser lifecycle', () => {
       ...browserLifecycleHarness(),
       activeProject: () => project,
       ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
-      invoke: async (command: string, args: { label: string }) => {
-        calls.push(`${command}:${args.label}:${project.browsersByWorktree['/workspace'].tabs.length}`);
+      invoke: async (command: string, args: { tabId: string }) => {
+        calls.push(`${command}:${args.tabId}:${project.browsersByWorktree['/workspace'].tabs.length}`);
       },
       browserLabelForTab: (value: typeof project, tab: { id: string }) => `${value.id}:${tab.id}`,
       setStatus: () => {},
@@ -552,7 +557,7 @@ describe('Tauri native browser lifecycle', () => {
 
     await expect(closeBrowserTab(project, 'tab-a')).resolves.toBe(true);
     expect(calls).toEqual([
-      'browser_destroy:project-a:tab-a:2',
+      'browser_destroy:tab-a:2',
       'render',
       'sync',
       'save',
@@ -621,8 +626,8 @@ describe('Tauri native browser lifecycle', () => {
       ...browserLifecycleHarness(),
       activeProject: () => project,
       ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
-      invoke: (command: string, args: { label: string }) => {
-        calls.push(`${command}:${args.label}`);
+      invoke: (command: string, args: { tabId: string }) => {
+        calls.push(`${command}:${args.tabId}`);
         return new Promise<void>((resolve) => destroyResolvers.push(resolve));
       },
       browserLabelForTab: (value: typeof project, tab: { id: string }) => `${value.id}:${tab.id}`,
@@ -649,7 +654,7 @@ describe('Tauri native browser lifecycle', () => {
       ],
     });
     expect(calls).toEqual([
-      'browser_destroy:project-a:tab-b',
+      'browser_destroy:tab-b',
       'render',
       'sync',
       'save',
@@ -1222,7 +1227,7 @@ describe('Tauri native browser lifecycle', () => {
     });
     const syncBrowserBounds = compileFunction<
       () => void
-    >(functionSource(mainJs, 'syncBrowserBounds'), {
+    >(functionSource(mainJs, 'applyBrowserBoundsSync'), {
       activeProject,
       currentBrowserTab,
       browserLabelForTab,
@@ -1266,6 +1271,8 @@ describe('Tauri native browser lifecycle', () => {
     expect(nativeCalls).toEqual([[
       'browser_navigate',
       {
+        tabId: 'tab-a',
+        generation: 1,
         label: 'project-a:tab-a',
         url: 'https://new-a.example',
         x: 10,
@@ -2113,20 +2120,23 @@ describe('Tauri native browser lifecycle', () => {
     });
   });
 
-  it('does not restore missing, blank, or already-created browser tabs', async () => {
+  it('restores native blank tabs but skips missing or already-created tabs', async () => {
+    const navigated: string[] = [];
+    const blank = { id: 'blank', url: 'about:blank', created: false };
     const restoreDormantBrowserTab = compileFunction<
       (project: unknown, tab: { created?: boolean; url?: string; id?: string } | null) => Promise<boolean>
     >(functionSource(mainJs, 'restoreDormantBrowserTab'), {
       ...browserLifecycleHarness(),
       activeWorkspaceRoot: () => '/workspace',
       findBrowserPane: () => null,
-      navigateBrowser: async () => { throw new Error('must not navigate'); },
+      navigateBrowser: async (url: string) => { navigated.push(url); blank.created = true; return true; },
     });
 
     await expect(restoreDormantBrowserTab({}, null)).resolves.toBe(false);
     await expect(restoreDormantBrowserTab({}, { id: 'created', url: 'https://example.com', created: true })).resolves.toBe(false);
-    await expect(restoreDormantBrowserTab({}, { id: 'blank', url: 'about:blank', created: false })).resolves.toBe(false);
+    await expect(restoreDormantBrowserTab({}, blank)).resolves.toBe(true);
     await expect(restoreDormantBrowserTab({}, { id: 'missing-url', created: false })).resolves.toBe(false);
+    expect(navigated).toEqual(['about:blank']);
   });
 
   it('activates valid tabs and lazily restores dormant ones', async () => {
@@ -2190,6 +2200,44 @@ describe('Tauri native browser lifecycle', () => {
 
     await expect(openBlankBrowserTab()).resolves.toBe(activeTab);
     expect(calls).toEqual(['surface', 'render', 'sync', 'restore:tab-a', 'focus']);
+  });
+
+  it('creates and publishes a native-backed blank tab before returning it', async () => {
+    const calls: string[] = [];
+    const project = { id: 'project-a', root: '/project' };
+    const browser = { tabs: [] as Array<Record<string, unknown>>, activeTabId: null as string | null };
+    const blank = { id: 'blank', created: false, url: 'about:blank', title: 'New tab' };
+    const openBlankBrowserTab = compileFunction<
+      () => Promise<typeof blank | null>
+    >(functionSource(mainJs, 'openBlankBrowserTab'), {
+      ...browserLifecycleHarness(),
+      activeProject: () => project,
+      activeWorkspaceRoot: () => '/project',
+      findBrowserPane: () => null,
+      createBrowserPane: async () => ({ id: 'pane' }),
+      markActiveSurface: () => calls.push('surface'),
+      ensureBrowserModel: () => browser,
+      createBrowserTab: () => {
+        browser.tabs.push(blank); browser.activeTabId = blank.id; calls.push('model:create'); return blank;
+      },
+      renderBrowserTabs: () => {},
+      syncProjectBrowser: () => calls.push('bounds:sync'),
+      restoreDormantBrowserTab: async () => {
+        calls.push('native:browser_navigate:about:blank');
+        blank.created = true;
+        calls.push('provider:upsert:browser_tab:about:blank');
+        calls.push('native:bind-generation:1');
+        return true;
+      },
+      currentBrowserTab: () => blank,
+      urlInput: null,
+    });
+    await expect(openBlankBrowserTab()).resolves.toBe(blank);
+    expect(blank.created).toBe(true);
+    expect(calls).toEqual([
+      'surface', 'model:create', 'bounds:sync', 'native:browser_navigate:about:blank',
+      'provider:upsert:browser_tab:about:blank', 'native:bind-generation:1',
+    ]);
   });
 
   it('invalidates in-flight navigation and blocks navigation or new tabs during pane teardown', async () => {
@@ -3008,5 +3056,229 @@ describe('Tauri native browser lifecycle', () => {
     expect(mainJs).toMatch(
       /btn\.addEventListener\("click", async function \(event\) \{ if \(event\.target.*await closeBrowserTab\(project, tab\.id\); else await activateBrowserTab\(project, tab\.id\); \}\)/,
     );
+  });
+});
+
+describe('agent browser inspection lifecycle', () => {
+  it('sends typed inspection identity and never caller-selected code or a child label', () => {
+    const queue = functionSource(mainJs, 'queueBrowserInspection');
+    const invokeAt = queue.indexOf('invoke("browser_inspect"');
+    expect(invokeAt).toBeGreaterThan(-1);
+    const invocation = queue.slice(invokeAt, invokeAt + 500);
+    expect(invocation).toContain('tabId: pair.tab.id');
+    expect(invocation).toContain('generation: request.generation');
+    expect(invocation).not.toContain('script:');
+    expect(invocation).not.toContain('label:');
+    expect(mainJs).not.toContain('invoke("browser_eval"');
+  });
+
+  it('binds navigation identity natively and verifies it across inspect and screenshot', () => {
+    const navigate = functionSource(mainJs, 'navigateBrowser');
+    expect(navigate).toContain('tabId: tab.id');
+    expect(navigate).toContain('generation: generation');
+    const inspect = functionSource(mainJs, 'queueBrowserInspection');
+    expect(inspect).toContain('navigationEpoch');
+    expect(inspect).toContain('navigationUrl');
+    expect(inspect).toContain('browser_snapshot');
+    expect(inspect).toContain('screenshot.navigationEpoch !== inspected.navigationEpoch');
+  });
+
+  it('uses native isolated-world inspection and never accepts page-owned globals or event results', () => {
+    expect(nativeLib).toContain('WKContentWorld');
+    expect(nativeLib).toContain('evaluateJavaScript_inFrame_inContentWorld_completionHandler');
+    expect(mainJs).toContain('invoke("browser_inspect"');
+    expect(nativeLib).toContain('validate_browser_snapshot_json');
+    expect(mainJs).not.toContain('browser:automation-result');
+    expect(mainJs).not.toContain("window.__TAURI__.event.emit('browser:automation-result'");
+  });
+
+  it('installs on finished load without running a synthetic page-load inspection', () => {
+    const handler = functionSource(mainJs, 'handleBrowserPageLoad');
+    expect(handler).toContain('installBrowserAutomationCompatibility');
+    expect(handler).not.toContain('requestId: "page-load"');
+  });
+
+  it('tracks canonical bindings and serializes publication against close and recovery', () => {
+    expect(mainJs).toContain('controlGeneration');
+    expect(mainJs).toContain('publicationSequence');
+    expect(functionSource(mainJs, 'publishBrowserResource')).toContain('canonical.generation');
+    expect(functionSource(mainJs, 'closeBrowserTab')).toMatch(/browser_destroy[\s\S]*removeBrowserResource/);
+    expect(functionSource(mainJs, 'closeBrowserPane')).toContain('publishBrowserResource');
+    expect(functionSource(mainJs, 'handleBrowserProviderEffect')).toContain('controlGeneration');
+  });
+
+  it('awaits publication failures, reconciles removal, and replays every live project tab', () => {
+    const publish = functionSource(mainJs, 'publishBrowserResource');
+    expect(publish).toContain('status: "superseded"');
+    expect(publish).toContain('status: "deferred"');
+    expect(publish).toContain('status: "published"');
+    expect(publish).toContain('replayBrowserResources(pair.project.root, pair.tab)');
+    expect(publish).toContain('throw error');
+    expect(publish).not.toMatch(/return false;\s*\}\);\s*\};$/s);
+    const remove = functionSource(mainJs, 'removeBrowserResource');
+    expect(remove).not.toContain('control_provider_stop');
+    expect(remove).toContain('replayBrowserResources(project.root)');
+    expect(remove).not.toMatch(/not found\|missing\|unknown resource/);
+    expect(mainJs).toContain('replayBrowserResources');
+    expect(functionSource(mainJs, 'removeProject')).toContain('control_provider_stop');
+    expect(functionSource(mainJs, 'removeProject')).toContain('failedCloses.length');
+    expect(functionSource(mainJs, 'removeProject')).toContain('project removal partially completed');
+    expect(functionSource(mainJs, 'removeProject')).toContain('replayBrowserResources(project.root)');
+    expect(functionSource(mainJs, 'navigateBrowser')).toContain('await publishBrowserResource');
+  });
+
+  it('publishes exact active and inactive bounds after native positioning', () => {
+    const sync = functionSource(mainJs, 'applyBrowserBoundsSync');
+    expect(sync).toContain('nativeBounds = { x: -10000, y: -10000, w: 1, h: 1 }');
+    expect(sync).toContain('return publishBrowserResource(pair)');
+    expect(sync.indexOf('browser_set_bounds')).toBeLessThan(sync.indexOf('await Promise.all(changed.map'));
+  });
+
+  it('serializes overlapping global bounds transactions, including no-visible transitions', async () => {
+    const order: string[] = [];
+    let releaseA!: () => void;
+    const queueBrowserBoundsSync = compileFunction<
+      (run: () => Promise<void>) => Promise<void>
+    >(functionSource(mainJs, 'queueBrowserBoundsSync'), {
+      browserBoundsSyncTail: Promise.resolve(),
+      setStatus: () => {},
+    });
+    const first = queueBrowserBoundsSync(async () => {
+      order.push('A:start');
+      await new Promise<void>((resolve) => { releaseA = resolve; });
+      order.push('A:publish');
+    });
+    const second = queueBrowserBoundsSync(async () => {
+      order.push('B:no-visible-hide');
+      order.push('B:publish-hidden');
+    });
+    await Promise.resolve();
+    expect(order).toEqual(['A:start']);
+    releaseA();
+    await Promise.all([first, second]);
+    expect(order).toEqual(['A:start', 'A:publish', 'B:no-visible-hide', 'B:publish-hidden']);
+  });
+
+  it('treats the exact native unregistered-resource error as idempotent removal', async () => {
+    const calls: string[] = [];
+    const removeBrowserResource = compileFunction<
+      (project: { root: string }, tab: { id: string }) => Promise<boolean>
+    >(functionSource(mainJs, 'removeBrowserResource'), {
+      invoke: async (command: string) => {
+        calls.push(command);
+        throw new Error('browser resource is not registered');
+      },
+      browserControlProviders: {},
+      ensureBrowserControlProvider: async () => { calls.push('restart'); throw new Error('unexpected'); },
+      replayBrowserResources: async () => { calls.push('replay'); },
+      browserTabLifecycle: () => ({ controlGeneration: 1, controlLabel: 'label' }),
+    });
+    await expect(removeBrowserResource({ root: '/project' }, { id: 'tab' })).resolves.toBe(true);
+    expect(calls).toEqual(['control_provider_remove']);
+  });
+
+  it.each([
+    'provider connection is missing',
+    'socket not found',
+    'unknown resource response shape',
+    'browser resource is not registered: extra context',
+    'a different message',
+  ])('recovers rather than accepting near-miss removal error %s', async (message) => {
+    const calls: string[] = [];
+    let removes = 0;
+    const lifecycle = { controlGeneration: 4, controlLabel: 'label' };
+    const removeBrowserResource = compileFunction<
+      (project: { root: string }, tab: { id: string }) => Promise<boolean>
+    >(functionSource(mainJs, 'removeBrowserResource'), {
+      invoke: async (command: string) => {
+        calls.push(command);
+        removes += 1;
+        throw new Error(message);
+      },
+      browserControlProviders: {},
+      ensureBrowserControlProvider: async () => { calls.push('restart'); return { providerId: 'replacement' }; },
+      replayBrowserResources: async () => { calls.push('replay'); return true; },
+      browserTabLifecycle: () => lifecycle,
+    });
+    await expect(removeBrowserResource({ root: '/project' }, { id: 'tab' })).resolves.toBe(false);
+    expect(removes).toBe(2);
+    expect(calls).toEqual(['control_provider_remove', 'restart', 'replay', 'control_provider_remove']);
+    expect(lifecycle).toEqual({ controlGeneration: 0, controlLabel: null });
+  });
+
+  it('projects long multibyte canonical resource URLs with the shared byte limit', () => {
+    const boundedBrowserResourceText = compileFunction<(value: string, limit: number) => string>(
+      functionSource(mainJs, 'boundedBrowserResourceText'), { TextEncoder },
+    );
+    const browserResource = compileFunction<(pair: Record<string, unknown>) => { url: string; generation: number }>(
+      functionSource(mainJs, 'browserResource'), {
+        browserTabLifecycle: () => ({ nativeBounds: { w: 800, h: 600 }, controlGeneration: 17,
+          nativeLabel: 'psyche-browser-tab' }),
+        boundedBrowserResourceText,
+      },
+    );
+    const url = `https://example.test/${'é'.repeat(2_000)}#tail`;
+    const resource = browserResource({ project: { root: '/project' }, worktreePath: '/project',
+      tab: { id: 'tab', url, title: 'Title', loading: false } });
+    expect(new TextEncoder().encode(resource.url).byteLength).toBeLessThanOrEqual(2_048);
+    expect(resource.url.endsWith('\uFFFD')).toBe(false);
+    expect(resource.generation).toBe(17);
+  });
+
+  it('synchronizes native bounds before a focus publication', () => {
+    const focusAt = mainJs.indexOf('listen("browser:focus"');
+    const focus = mainJs.slice(focusAt, focusAt + 700);
+    expect(focus).toContain('syncBrowserBounds');
+    expect(focus).not.toContain('publishBrowserResource(pair)');
+  });
+
+  it('invalidates reload and page-started navigation and revalidates screenshot correlation', () => {
+    expect(mainJs).toContain('queueBrowserReload');
+    expect(functionSource(mainJs, 'handleBrowserPageLoad')).toContain('invalidateBrowserAutomation');
+    expect(mainJs).toContain('validatePendingBrowserInspection');
+    expect(mainJs).toContain('documentId');
+    expect(mainJs).toContain('snapshotId');
+  });
+
+  it('stores viewport per exact tab rather than reading the active preview during publication', () => {
+    expect(mainJs).toContain('nativeBounds');
+    expect(functionSource(mainJs, 'browserResource')).not.toContain('visibleBrowserBounds');
+  });
+  it('loads PsycheControl and injects automation only after an exact finished page load', () => {
+    expect(indexHtml).toContain('<script src="./control.bundle.js" defer></script>');
+    expect(mainJs).toContain('browser_install_automation');
+    const handler = functionSource(mainJs, 'handleBrowserPageLoad');
+    expect(handler).toContain('payload.phase === "finished"');
+    expect(handler).not.toContain('queueBrowserInspection(pair');
+    expect(functionSource(mainJs, 'queueBrowserInspection')).toContain('browser_inspect');
+  });
+
+  it('queues inspect after navigation and requires the exact tab generation', () => {
+    expect(mainJs).toContain('control:provider-effect-request');
+    const dispatch = functionSource(mainJs, 'handleBrowserProviderEffect');
+    expect(dispatch).toContain('operation.kind !== "inspect"');
+    expect(dispatch).toContain('pair.tab.id !== payload.tabId');
+    expect(dispatch).toContain('lifecycle.generation !== payload.generation');
+    expect(functionSource(mainJs, 'queueBrowserInspection')).toContain('lifecycle.navigationTail');
+    expect(dispatch).toContain('control_provider_complete');
+    expect(dispatch).not.toContain('currentBrowserTab');
+  });
+
+  it('invalidates the page snapshot before native navigation and destroy', () => {
+    expect(functionSource(mainJs, 'navigateBrowser')).toContain('invalidateBrowserAutomation');
+    expect(functionSource(mainJs, 'closeBrowserTab')).toContain('invalidateBrowserAutomation');
+  });
+
+  it('publishes and removes typed resources at all tab lifecycle boundaries', () => {
+    for (const functionName of [
+      'navigateBrowser', 'restoreDormantBrowserTab',
+      'activateBrowserTab', 'handleBrowserPageLoad',
+    ]) expect(functionSource(mainJs, functionName)).toContain('publishBrowserResource');
+    expect(functionSource(mainJs, 'closeBrowserTab')).toContain('removeBrowserResource');
+    expect(functionSource(mainJs, 'closeBrowserPane')).toContain('removeBrowserResource');
+    expect(mainJs).toContain('control_provider_upsert');
+    expect(mainJs).toContain('control_provider_remove');
+    expect(mainJs).toContain('worktreeRoot: pair.worktreePath');
+    expect(mainJs).toContain('webviewLabel: lifecycle.nativeLabel');
   });
 });

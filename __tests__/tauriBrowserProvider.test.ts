@@ -53,6 +53,7 @@ describe('desktop control browser provider transport', () => {
     expect(provider).toContain('BufReader');
     expect(provider).toContain('mpsc::');
     expect(provider).toContain('control:provider-effect-request');
+    expect(provider).toContain('"projectRoot".to_string()');
     expect(provider).toMatch(/get_webview_window\("main"\)/);
     expect(provider).toContain('connected: Arc<AtomicBool>');
     expect(provider).toContain('pending_effects.lock().remove');
@@ -77,6 +78,37 @@ describe('desktop control browser provider transport', () => {
     expect(provider).not.toMatch(/control_operator_submit[^\{]+serde_json::Value/s);
     expect(provider).toMatch(/enum\s+ProviderEffectResult/);
     expect(provider).toMatch(/enum\s+BrowserResourceKind/);
+  });
+
+  it('returns isolated inspection through native correlation and validates snapshot bounds', () => {
+    expect(lib).toContain('browser_inspect');
+    expect(lib).toContain('WKContentWorld');
+    expect(lib).toContain('backend_unavailable');
+    expect(lib).toContain('BROWSER_INSPECTION_TIMEOUT');
+  });
+
+  it('exposes typed trusted-shell inspection with fixed embedded script provenance', () => {
+    const inspect = lib.slice(lib.indexOf('async fn browser_inspect'), lib.indexOf('async fn browser_inspect') + 5_000);
+    expect(inspect).toContain('caller: tauri::Webview');
+    expect(inspect).toContain('require_main_webview');
+    expect(inspect).toContain('BrowserInspectRequest');
+    expect(inspect).not.toMatch(/label:\s*Option<String>/);
+    expect(inspect).not.toMatch(/script:\s*String/);
+    expect(lib).toContain('include_str!("../../web/control/browser-automation-runtime.js")');
+    expect(lib).toContain('BrowserBindingState');
+    expect(lib).toContain('navigation_epoch');
+    const reload = lib.slice(lib.indexOf('fn browser_reload'), lib.indexOf('fn browser_reload') + 1_500);
+    expect(reload).toContain('browser_binding');
+    expect(reload).toContain('navigation_epoch');
+    expect(lib).not.toMatch(/fn browser_eval\s*\(/);
+  });
+
+  it('keeps exactly the three reviewed browser automation public exports', () => {
+    const entry = readFileSync(new URL(
+      '../native/desktop/psyche-build-tauri/web/control/control-entry.js', import.meta.url), 'utf8');
+    expect(entry.match(/\b(browserAutomationSource|dispatchBrowserAutomation|installBrowserAutomation)\b/g))
+      .toHaveLength(3);
+    expect(entry).not.toContain('validateBrowserSnapshot');
   });
 
   it('clears pending effects on stop and reconnect and declares crypto dependencies', () => {
