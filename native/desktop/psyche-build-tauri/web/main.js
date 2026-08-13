@@ -8571,8 +8571,7 @@
       });
       return true;
     }
-    if (lifecycle.navigationTail) await lifecycle.navigationTail;
-    if (effect.generation !== lifecycle.liveGeneration) {
+    var completeReplaced = async function () {
       await completeBrowserProviderEffect(pair.project, {
         actionId: effect.actionId,
         status: "failed",
@@ -8580,24 +8579,42 @@
         message: "browser tab generation was replaced",
       });
       return false;
-    }
-    try {
-      await installBrowserAutomationForPair(pair);
-      var resultFlight = awaitBrowserAutomationResult(effect);
-      await invoke("browser_eval", {
-        label: browserLabelForTab(pair.project, pair.tab),
-        script: browserAutomationDispatchScript(effect),
-      });
-      var value = await resultFlight;
-      if (effect.operation.includeScreenshot) {
-        value.screenshot = await invoke("browser_snapshot", { label: browserLabelForTab(pair.project, pair.tab) });
+    };
+    var exactPairIsCurrent = function () {
+      var current = browserControlPairByTabId(effect.tabId, effect.projectRoot);
+      if (!current || current.project !== pair.project || current.browser !== pair.browser ||
+          current.tab !== pair.tab || current.worktreePath !== pair.worktreePath) return false;
+      var currentLifecycle = browserTabLifecycle(current.tab);
+      return effect.generation === currentLifecycle.liveGeneration && !!currentLifecycle.nativeLabel;
+    };
+    var runInspect = async function () {
+      if (!exactPairIsCurrent()) return completeReplaced();
+      try {
+        var installed = await installBrowserAutomationForPair(pair);
+        if (!installed || !exactPairIsCurrent()) return completeReplaced();
+        var resultFlight = awaitBrowserAutomationResult(effect);
+        await invoke("browser_eval", {
+          label: browserLabelForTab(pair.project, pair.tab),
+          script: browserAutomationDispatchScript(effect),
+        });
+        var value = await resultFlight;
+        if (!exactPairIsCurrent()) return completeReplaced();
+        if (effect.operation.includeScreenshot) {
+          value.screenshot = await invoke("browser_snapshot", { label: browserLabelForTab(pair.project, pair.tab) });
+          if (!exactPairIsCurrent()) return completeReplaced();
+        }
+        await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "succeeded", value: value });
+      } catch (error) {
+        var code = error && error.code || (String(error).indexOf("backend_unavailable") !== -1 ? "backend_unavailable" : "automation_failed");
+        await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "failed", code: code, message: String(error && error.message || error) });
       }
-      await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "succeeded", value: value });
-    } catch (error) {
-      var code = error && error.code || (String(error).indexOf("backend_unavailable") !== -1 ? "backend_unavailable" : "automation_failed");
-      await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "failed", code: code, message: String(error && error.message || error) });
-    }
-    return true;
+      return true;
+    };
+    var inspect = lifecycle.navigationTail
+      ? lifecycle.navigationTail.then(runInspect, runInspect)
+      : runInspect();
+    lifecycle.navigationTail = Promise.resolve(inspect).then(function () {}, function () {});
+    return inspect;
   }
   listen("browser:automation-result", function (event) {
     var payload = event && event.payload || {};

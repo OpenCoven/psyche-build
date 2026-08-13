@@ -74,6 +74,10 @@ function fixture(now = 1_000) {
     location: { href: 'https://example.test/account' },
     Event: class { constructor(public type: string, public init?: unknown) {} },
     Date: { now: () => now },
+    getComputedStyle: (element: FakeNode) => ({
+      display: element.attributes['data-display'] ?? 'block',
+      visibility: element.attributes['data-visibility'] ?? 'visible',
+    }),
   };
   return { globalObject, button, password, checkbox, hidden, disabled, frame };
 }
@@ -162,6 +166,50 @@ describe('bounded semantic browser automation', () => {
     const snapshot = dispatchBrowserAutomation(globalObject, { type: 'snapshot' });
     expect(snapshot.nodes).toHaveLength(2_000);
     expect(snapshot.nodes.every((entry: { name?: string }) => new TextEncoder().encode(entry.name ?? '').length <= 512)).toBe(true);
+  });
+
+  it('builds fallback names from visible descendants without leaking hidden text', () => {
+    const { globalObject } = fixture();
+    const visible = node('span', { textContent: 'Visible label' });
+    const hiddenSecret = node('span', { textContent: 'hidden-secret', hidden: true });
+    const nestedSecret = node('span', { textContent: 'nested-secret' });
+    const hiddenTree = node('span', {
+      textContent: 'raw nested-secret',
+      attrs: { 'aria-hidden': 'true' },
+      children: [nestedSecret],
+    });
+    const displayNone = node('span', { textContent: 'display-secret', attrs: { 'data-display': 'none' } });
+    const invisible = node('span', { textContent: 'visibility-secret', attrs: { 'data-visibility': 'hidden' } });
+    const offscreen = node('span', { textContent: 'offscreen-secret', rect: [900, 900, 50, 20] });
+    const button = node('button', {
+      textContent: 'Visible label hidden-secret nested-secret display-secret visibility-secret offscreen-secret',
+      children: [visible, hiddenSecret, hiddenTree, displayNone, invisible, offscreen],
+    });
+    globalObject.document.body = node('body', { children: [button] });
+    globalObject.document.documentElement = globalObject.document.body;
+
+    const snapshot = dispatchBrowserAutomation(globalObject, { type: 'snapshot' });
+    expect(snapshot.nodes[0]).toMatchObject({ role: 'button', name: 'Visible label' });
+  });
+
+  it('stops accessible-name traversal once its output budget is exhausted', () => {
+    const { globalObject } = fixture();
+    let reads = 0;
+    const children = Array.from({ length: 2_500 }, () => {
+      const child = node('span');
+      Object.defineProperty(child, 'textContent', {
+        get() { reads += 1; return 'x'; },
+      });
+      return child;
+    });
+    const button = node('button', { children });
+    globalObject.document.body = node('body', { children: [button] });
+    globalObject.document.documentElement = globalObject.document.body;
+
+    const snapshot = dispatchBrowserAutomation(globalObject, { type: 'snapshot' });
+    expect(new TextEncoder().encode(snapshot.nodes[0].name).length).toBeLessThanOrEqual(512);
+    expect(reads).toBeGreaterThan(0);
+    expect(reads).toBeLessThan(children.length);
   });
 
   it('resolves an exact current ref without exposing mutation or arbitrary evaluation', () => {

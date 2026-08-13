@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 const root = new URL('../native/desktop/psyche-build-tauri/', import.meta.url);
 const main = readFileSync(new URL('web/main.js', root), 'utf8');
@@ -76,5 +76,47 @@ describe('Tauri semantic browser provider lifecycle', () => {
 
     await expect(handler({ payload: { actionId: 'a1', tabId: 'tab', projectRoot: '/project', generation: 1 } })).resolves.toBe(false);
     expect(completions).toEqual([{ actionId: 'a1', status: 'failed', code: 'resource_replaced', message: 'browser tab generation was replaced' }]);
+  });
+
+  it('serializes inspect and rejects a generation replaced during automation install', async () => {
+    const completions: unknown[] = [];
+    const pair = { project: { root: '/project' }, tab: {} };
+    const lifecycle = { liveGeneration: 1, nativeLabel: 'native', navigationTail: null as Promise<void> | null };
+    let finishInstall!: () => void;
+    const installFlight = new Promise<void>((resolve) => { finishInstall = resolve; });
+    const install = vi.fn(async () => installFlight);
+    const dispatch = vi.fn(async () => ({}));
+    const awaitResult = vi.fn(async () => ({ schema: 'psyche.browser.snapshot/v1' }));
+    const handler = Function(
+      'browserControlPairByTabId', 'browserTabLifecycle', 'completeBrowserProviderEffect',
+      'installBrowserAutomationForPair', 'awaitBrowserAutomationResult', 'invoke',
+      'browserLabelForTab', 'browserAutomationDispatchScript',
+      `return (${functionSource(main, 'handleBrowserProviderEffect')});`,
+    )(
+      () => pair,
+      () => lifecycle,
+      async (_project: unknown, result: unknown) => { completions.push(result); },
+      install, awaitResult, dispatch, () => 'label', () => 'dispatch-script',
+    );
+
+    const effectFlight = handler({
+      payload: {
+        actionId: 'a2', tabId: 'tab', projectRoot: '/project', generation: 1,
+        operation: { kind: 'inspect' },
+      },
+    });
+    await vi.waitFor(() => expect(install).toHaveBeenCalledOnce());
+    expect(lifecycle.navigationTail).toBeInstanceOf(Promise);
+
+    lifecycle.liveGeneration = 2;
+    finishInstall();
+
+    await expect(effectFlight).resolves.toBe(false);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(awaitResult).not.toHaveBeenCalled();
+    expect(completions).toEqual([{
+      actionId: 'a2', status: 'failed', code: 'resource_replaced',
+      message: 'browser tab generation was replaced',
+    }]);
   });
 });
