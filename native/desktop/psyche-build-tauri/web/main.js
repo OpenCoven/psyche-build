@@ -133,6 +133,8 @@
   var paneFooterPopoverThreadId = null;
   var browserTabLifecycleStates = new WeakMap();
   var browserPaneLifecycleStates = new WeakMap();
+  var browserControlProviders = new Map();
+  var browserAutomationWaiters = new Map();
   // Matches --pane-min-w / --pane-min-h: the tree's arithmetic and the pane's
   // own CSS floor have to agree, or a layout the tree calls valid renders
   // overflowing. 200x137 includes the fixed 27px footer rail.
@@ -4108,6 +4110,15 @@
         affectedLiveTabs: affectedLiveTabs,
         recoveryErrors: recoveryErrors,
       };
+    }
+    if (typeof invalidateBrowserAutomation === "function" &&
+        typeof removeBrowserControlResource === "function") {
+      await Promise.all(browser.tabs.map(function (tab) {
+        var pair = { project: project, worktreePath: thread.worktreePath, browser: browser, tab: tab };
+        return invalidateBrowserAutomation(pair).then(function () {
+          return removeBrowserControlResource(pair);
+        });
+      }));
     }
     browser.tabs.forEach(function (tab) {
       invalidateBrowserNavigation(tab);
@@ -8283,10 +8294,10 @@
     return projectId + "__" + tabId;
   }
   function browserTabLifecycle(tab) {
-    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
+    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
     var lifecycle = browserTabLifecycleStates.get(tab);
     if (!lifecycle) {
-      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
+      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
       browserTabLifecycleStates.set(tab, lifecycle);
     }
     return lifecycle;
@@ -8371,6 +8382,194 @@
     }).join("").slice(0, 64) || "default";
     return "psyche-browser-" + safe;
   }
+  function browserControlPairByTabId(tabId, projectRoot) {
+    var match = null;
+    for (var i = 0; i < state.projects.length; i++) {
+      var project = state.projects[i];
+      var provider = browserControlProviders.get(project.root);
+      if (!provider || !provider.status || provider.status.projectRoot !== projectRoot) continue;
+      var browsersByWorktree = project.browsersByWorktree || {};
+      var roots = Object.keys(browsersByWorktree);
+      for (var w = 0; w < roots.length; w++) {
+        var browser = browsersByWorktree[roots[w]];
+        var tab = browser.tabs.find(function (candidate) { return candidate.id === tabId; });
+        if (!tab) continue;
+        if (match) return null;
+        match = { project: project, worktreePath: roots[w], browser: browser, tab: tab };
+      }
+    }
+    return match;
+  }
+  function browserControlViewport(pair) {
+    var pane = findBrowserPane(pair.project.id, pair.worktreePath);
+    var rect = pane && pane.pane && pane.pane.isConnected && pane.browserBody
+      ? pane.browserBody.getBoundingClientRect()
+      : null;
+    return {
+      width: Math.max(1, Math.round(rect && rect.width || 1)),
+      height: Math.max(1, Math.round(rect && rect.height || 1)),
+    };
+  }
+  function ensureBrowserControlProvider(project) {
+    if (!project || !project.root) return Promise.reject(new Error("browser project is unavailable"));
+    var current = browserControlProviders.get(project.root);
+    if (current && current.status) return Promise.resolve(current.status);
+    if (current && current.flight) return current.flight;
+    var entry = current || { status: null, flight: null };
+    entry.flight = invoke("control_provider_start", { projectRoot: project.root }).then(function (status) {
+      entry.status = status;
+      entry.flight = null;
+      return status;
+    }, function (error) {
+      entry.flight = null;
+      throw error;
+    });
+    browserControlProviders.set(project.root, entry);
+    return entry.flight;
+  }
+  function browserControlResource(pair, status) {
+    var lifecycle = browserTabLifecycle(pair.tab);
+    return {
+      id: pair.tab.id,
+      kind: "browser_tab",
+      generation: lifecycle.liveGeneration || lifecycle.pendingGeneration || lifecycle.generation,
+      providerId: status.providerId,
+      webviewLabel: lifecycle.nativeLabel,
+      projectRoot: status.projectRoot,
+      worktreeRoot: pair.worktreePath,
+      url: pair.tab.url || lifecycle.pendingUrl || "about:blank",
+      title: pair.tab.title || tabTitle(pair.tab.url),
+      loading: !!pair.tab.loading,
+      viewport: browserControlViewport(pair),
+    };
+  }
+  function publishBrowserControlResource(pair) {
+    if (!pair || browserTabIsClosing(pair.tab)) return Promise.resolve(false);
+    var lifecycle = browserTabLifecycle(pair.tab);
+    if (!lifecycle.nativeLabel || !(lifecycle.liveGeneration || lifecycle.pendingGeneration)) return Promise.resolve(false);
+    return ensureBrowserControlProvider(pair.project).then(function (status) {
+      return invoke("control_provider_upsert", {
+        projectRoot: pair.project.root,
+        resource: browserControlResource(pair, status),
+      }).then(function () { return true; });
+    }).catch(function () { return false; });
+  }
+  function removeBrowserControlResource(pair) {
+    if (!pair) return Promise.resolve(false);
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var generation = lifecycle.liveGeneration || lifecycle.pendingGeneration;
+    if (!generation) return Promise.resolve(false);
+    return ensureBrowserControlProvider(pair.project).then(function () {
+      return invoke("control_provider_remove", {
+        projectRoot: pair.project.root,
+        tabId: pair.tab.id,
+        generation: generation,
+      }).then(function () { return true; });
+    }).catch(function () { return false; });
+  }
+  function invalidateBrowserAutomation(pair) {
+    if (!pair) return Promise.resolve(false);
+    var lifecycle = browserTabLifecycle(pair.tab);
+    if (!lifecycle.nativeLabel) return Promise.resolve(false);
+    return invoke("browser_eval", {
+      label: browserLabelForTab(pair.project, pair.tab),
+      script: "window.__PSYCHE_AUTOMATION__ && window.__PSYCHE_AUTOMATION__.invalidate();",
+    }).then(function () { return true; }, function () { return false; });
+  }
+  function installBrowserAutomationForPair(pair) {
+    if (!pair || !window.PsycheControl) return Promise.resolve(false);
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var expectedGeneration = lifecycle.liveGeneration || lifecycle.pendingGeneration;
+    if (!expectedGeneration || !lifecycle.nativeLabel) return Promise.resolve(false);
+    var run = function () {
+      if ((lifecycle.liveGeneration || lifecycle.pendingGeneration) !== expectedGeneration) return false;
+      return invoke("browser_eval", {
+        label: browserLabelForTab(pair.project, pair.tab),
+        script: PsycheControl.browserAutomationSource(),
+      }).then(function () { return publishBrowserControlResource(pair); });
+    };
+    var flight = lifecycle.automationTail ? lifecycle.automationTail.then(run, run) : run();
+    lifecycle.automationTail = Promise.resolve(flight).then(function () {}, function () {});
+    return Promise.resolve(flight);
+  }
+  function browserAutomationDispatchScript(effect) {
+    var request = { type: "snapshot" };
+    var actionId = JSON.stringify(effect.actionId);
+    var requestJson = JSON.stringify(request);
+    var tabId = JSON.stringify(effect.tabId);
+    var generation = JSON.stringify(effect.generation);
+    return "(function(){var emit=function(name,payload){if(window.__TAURI__&&window.__TAURI__.event)window.__TAURI__.event.emit(name,payload);};" +
+      "try{var value=window.__PSYCHE_AUTOMATION__.dispatch(" + requestJson + ");emit('browser:automation-result',{actionId:" + actionId + ",tabId:" + tabId + ",generation:" + generation + ",value:value});}" +
+      "catch(error){emit('browser:automation-result',{actionId:" + actionId + ",tabId:" + tabId + ",generation:" + generation + ",error:{code:error&&error.code||'automation_failed',message:String(error&&error.message||error)}});}})();";
+  }
+  function awaitBrowserAutomationResult(effect) {
+    return new Promise(function (resolve, reject) {
+      var timeout = setTimeout(function () {
+        browserAutomationWaiters.delete(effect.actionId);
+        reject(Object.assign(new Error("browser automation timed out"), { code: "effect_unknown" }));
+      }, 15000);
+      browserAutomationWaiters.set(effect.actionId, {
+        tabId: effect.tabId,
+        generation: effect.generation,
+        resolve: function (value) { clearTimeout(timeout); resolve(value); },
+        reject: function (error) { clearTimeout(timeout); reject(error); },
+      });
+    });
+  }
+  function completeBrowserProviderEffect(project, result) {
+    return invoke("control_provider_complete", { projectRoot: project.root, result: result });
+  }
+  async function handleBrowserProviderEffect(event) {
+    var effect = event && event.payload || {};
+    var pair = browserControlPairByTabId(effect.tabId, effect.projectRoot);
+    if (!pair) {
+      var owner = state.projects.find(function (project) {
+        var provider = browserControlProviders.get(project.root);
+        return provider && provider.status && provider.status.projectRoot === effect.projectRoot;
+      });
+      if (owner) await completeBrowserProviderEffect(owner, {
+        actionId: effect.actionId, status: "failed", code: "resource_missing", message: "browser tab is unavailable",
+      });
+      return false;
+    }
+    var lifecycle = browserTabLifecycle(pair.tab);
+    if (effect.generation !== lifecycle.liveGeneration || !lifecycle.nativeLabel) return false;
+    if (!effect.operation || effect.operation.kind !== "inspect") {
+      await completeBrowserProviderEffect(pair.project, {
+        actionId: effect.actionId, status: "failed", code: "unsupported_operation", message: "browser operation is not supported",
+      });
+      return true;
+    }
+    if (lifecycle.navigationTail) await lifecycle.navigationTail;
+    if (effect.generation !== lifecycle.liveGeneration) return false;
+    try {
+      await installBrowserAutomationForPair(pair);
+      var resultFlight = awaitBrowserAutomationResult(effect);
+      await invoke("browser_eval", {
+        label: browserLabelForTab(pair.project, pair.tab),
+        script: browserAutomationDispatchScript(effect),
+      });
+      var value = await resultFlight;
+      if (effect.operation.includeScreenshot) {
+        value.screenshot = await invoke("browser_snapshot", { label: browserLabelForTab(pair.project, pair.tab) });
+      }
+      await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "succeeded", value: value });
+    } catch (error) {
+      var code = error && error.code || (String(error).indexOf("backend_unavailable") !== -1 ? "backend_unavailable" : "automation_failed");
+      await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "failed", code: code, message: String(error && error.message || error) });
+    }
+    return true;
+  }
+  listen("browser:automation-result", function (event) {
+    var payload = event && event.payload || {};
+    var waiter = browserAutomationWaiters.get(payload.actionId);
+    if (!waiter) return;
+    if (waiter.tabId !== payload.tabId || waiter.generation !== payload.generation) return;
+    browserAutomationWaiters.delete(payload.actionId);
+    if (payload.error) waiter.reject(Object.assign(new Error(payload.error.message), { code: payload.error.code }));
+    else waiter.resolve(payload.value);
+  }).catch(function () {});
+  listen("control:provider-effect-request", handleBrowserProviderEffect).catch(function () {});
   function browserTabForNativeLabel(nativeLabel) {
     for (var i = 0; i < state.projects.length; i++) {
       var project = state.projects[i];
@@ -8436,8 +8635,15 @@
     if (!pair) return false;
     if (payload.phase === "started") {
       pair.tab.loading = true;
+      if (typeof publishBrowserControlResource === "function") {
+        publishBrowserControlResource(pair).catch(function () {});
+      }
     } else if (payload.phase === "finished") {
-      return markBrowserTabLoaded(payload.label, payload.url, "");
+      var loaded = markBrowserTabLoaded(payload.label, payload.url, "");
+      if (loaded && typeof installBrowserAutomationForPair === "function") {
+        installBrowserAutomationForPair(pair).catch(function () {});
+      }
+      return loaded;
     } else {
       return false;
     }
@@ -8449,7 +8655,14 @@
   }
   function handleBrowserTitle(event) {
     var payload = event.payload || {};
-    return markBrowserTabLoaded(payload.label, payload.url, payload.title);
+    var marked = markBrowserTabLoaded(payload.label, payload.url, payload.title);
+    var pair = marked && typeof browserTabForNativeLabel === "function"
+      ? browserTabForNativeLabel(payload.label)
+      : null;
+    if (pair && typeof publishBrowserControlResource === "function") {
+      publishBrowserControlResource(pair).catch(function () {});
+    }
+    return marked;
   }
   listen("browser:page-load", handleBrowserPageLoad).catch(function () {});
   listen("browser:title", handleBrowserTitle).catch(function () {});
@@ -8459,6 +8672,7 @@
     var pair = browserTabForNativeLabel(payload.label);
     var pane = pair && findBrowserPane(pair.project.id, pair.worktreePath);
     if (pane && state.activeThreadId !== pane.id) focusThread(pane.id);
+    if (pair) publishBrowserControlResource(pair).catch(function () {});
   }).catch(function () {});
   function ensureBrowserModel(project, workspaceRoot) {
     if (!project) return null;
@@ -8505,6 +8719,12 @@
     var lifecycle = browserTabLifecycle(tab);
     if (lifecycle.closing) return false;
     lifecycle.closing = true;
+    var closingRoot = Object.keys(project.browsersByWorktree || {}).find(function (root) {
+      return project.browsersByWorktree[root] === browser;
+    }) || project.root;
+    var closingPair = { project: project, worktreePath: closingRoot, browser: browser, tab: tab };
+    if (typeof invalidateBrowserAutomation === "function") await invalidateBrowserAutomation(closingPair);
+    if (typeof removeBrowserControlResource === "function") await removeBrowserControlResource(closingPair);
     invalidateBrowserNavigation(tab);
     try {
       await invoke("browser_destroy", { label: browserLabelForTab(project, tab) });
@@ -8685,6 +8905,10 @@
         eventUrl: lifecycle.eventUrl,
         viewLive: lifecycle.viewLive,
       };
+      var navigationPair = { project: project, worktreePath: worktreePath, browser: browser, tab: tab };
+      if (typeof invalidateBrowserAutomation === "function") await invalidateBrowserAutomation(navigationPair);
+      if (typeof removeBrowserControlResource === "function") await removeBrowserControlResource(navigationPair);
+      if (lifecycle.invalidationGeneration !== invalidationGeneration || !requestIsCurrent()) return false;
       var generation = beginBrowserNavigation(tab);
       var label = browserLabelForTab(project, tab);
       var nativeLabel = nativeBrowserLabel(label);
@@ -8724,6 +8948,9 @@
         lifecycle.liveUrl = committedUrl;
         lifecycle.viewLive = true;
         lifecycle.navigationSnapshot = null;
+        if (typeof publishBrowserControlResource === "function") {
+          await publishBrowserControlResource(navigationPair);
+        }
         if (opts.fromHistory && typeof opts.historyIndex === "number") {
           tab.historyIndex = opts.historyIndex;
         } else if (!opts.fromHistory && !opts.preserveHistory) {

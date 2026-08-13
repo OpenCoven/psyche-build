@@ -55,6 +55,7 @@ describe('Tauri browser control provider contract', () => {
     expect(provider).toMatch(/effect\.frame_type != "provider\.effect\.request"/);
     expect(provider).toMatch(/pending_effects\.contains/);
     expect(provider).toMatch(/effect\.request_id != effect\.action_id/);
+    expect(provider).toContain('effect.project_root = Some(root_key.clone())');
   });
 
   it('exposes typed commands and a closed operator command enum', () => {

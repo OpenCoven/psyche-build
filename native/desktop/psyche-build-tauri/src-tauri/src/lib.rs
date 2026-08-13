@@ -48,6 +48,7 @@ use pty_transport::{
 };
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
+const MAX_BROWSER_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
 const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
@@ -2536,6 +2537,31 @@ fn browser_eval(app: AppHandle, label: Option<String>, script: String) -> Result
     Ok(())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserSnapshot {
+    png_base64: String,
+    width: u32,
+    height: u32,
+}
+
+/// Captures only an exact child browser webview. Tauri 2 does not currently
+/// expose a stable cross-platform child-WKWebView snapshot API, so this stays
+/// fail-closed until the macOS backend can return a bounded PNG without falling
+/// back to desktop or coordinate capture.
+#[tauri::command]
+fn browser_snapshot(app: AppHandle, label: Option<String>) -> Result<BrowserSnapshot, String> {
+    let label = safe_browser_label(label);
+    let _webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser webview missing".to_string())?;
+    let _maximum = MAX_BROWSER_SNAPSHOT_BYTES;
+    #[cfg(target_os = "macos")]
+    return Err("backend_unavailable: exact child WKWebView snapshot is unavailable".to_string());
+    #[cfg(not(target_os = "macos"))]
+    Err("backend_unavailable: browser snapshot is unsupported on this platform".to_string())
+}
+
 // ----------------------------------------------------------------------------
 // Environment introspection so the JS layer can locate `node` + the bundled
 // psyche entrypoint when the app is invoked from a worktree (dev mode).
@@ -3899,6 +3925,7 @@ pub fn run() {
             browser_destroy_many,
             browser_reload,
             browser_eval,
+            browser_snapshot,
             app_environment,
             coven_sessions,
             coven_session_kill,

@@ -201,6 +201,8 @@ pub struct ProviderEffectRequest {
     tab_id: String,
     generation: u64,
     operation: Value,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    project_root: Option<String>,
 }
 
 fn validate_effect_request(effect: &ProviderEffectRequest) -> Result<(), String> {
@@ -560,7 +562,7 @@ async fn provider_loop<R, W>(
                 let Some(line) = line.ok().flatten() else { break };
                 let Ok(value) = serde_json::from_slice::<Value>(&line) else { break };
                 if value.get("type").and_then(Value::as_str) == Some("provider.effect.request") {
-                    let Ok(effect) = serde_json::from_value::<ProviderEffectRequest>(value) else { break };
+                    let Ok(mut effect) = serde_json::from_value::<ProviderEffectRequest>(value) else { break };
                     if validate_effect_request(&effect).is_err() {
                         break;
                     }
@@ -573,6 +575,7 @@ async fn provider_loop<R, W>(
                         }
                         pending_effects.insert(effect.action_id.clone());
                     }
+                    effect.project_root = Some(root_key.clone());
                     let emitted = app
                         .get_webview_window("main")
                         .ok_or(())
@@ -1156,6 +1159,7 @@ mod control_provider_tests {
             tab_id: "tab-1".to_string(),
             generation: 1,
             operation: json!({ "kind": "inspect" }),
+            project_root: None,
         };
         assert!(validate_effect_request(&effect).is_ok());
         effect.request_id = "other-request".to_string();
