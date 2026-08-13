@@ -32,6 +32,11 @@ function functionSource(name: string) {
   throw new Error(`unterminated function ${name}`);
 }
 
+function renderPaneWorkspaceCalls(name: string) {
+  return (functionSource(name).match(/renderPaneWorkspace\([^;]*\);/g) || [])
+    .map((call) => call.replace(/\s+/g, ' '));
+}
+
 function cssDeclarations(selector: string) {
   const source = stylesCss.replace(/\/\*[\s\S]*?\*\//g, '');
   const normalizedSelector = selector.replace(/\s+/g, ' ').trim();
@@ -104,6 +109,187 @@ class FakeEventTarget {
   focus() {
     this.focusCalls += 1;
   }
+}
+
+type FocusReportPolicy = 'suppress' | 'allow';
+type FocusReportToken = {
+  report: string;
+  policy: FocusReportPolicy;
+};
+type PaneFocusThread = {
+  id: string;
+  kind: string;
+  projectId: string;
+  worktreePath: string;
+  status: string;
+  closing?: boolean;
+  closeStarted?: boolean;
+  hidden?: boolean;
+  metricsGeneration?: number;
+  metricsRefreshTimer?: number;
+  startInFlight?: boolean;
+  pane: { id: string } | null;
+  host: { contains: (node: unknown) => boolean } | null;
+  term: { blur: () => void; focus: () => void; dispose?: () => void } | null;
+  internalFocusReportTokens?: FocusReportToken[];
+};
+
+function compileFocusTokenRuntime() {
+  const isTerminalFocusReport = compileFunction<(data: unknown) => boolean>(
+    functionSource('isTerminalFocusReport'),
+    {},
+  );
+  const beginTerminalFocusReportToken = compileFunction<(
+    thread: PaneFocusThread | null,
+    report: string,
+    policy: FocusReportPolicy,
+  ) => FocusReportToken | null>(functionSource('beginTerminalFocusReportToken'), {
+    isTerminalFocusReport,
+  });
+  const clearTerminalFocusReportToken = compileFunction<(
+    thread: PaneFocusThread | null,
+    token: FocusReportToken | null,
+  ) => void>(functionSource('clearTerminalFocusReportToken'), {});
+  const consumeTerminalFocusReportToken = compileFunction<(
+    thread: PaneFocusThread | null,
+    report: string,
+  ) => FocusReportToken | null>(functionSource('consumeTerminalFocusReportToken'), {
+    clearTerminalFocusReportToken,
+  });
+  const shouldSuppressTerminalData = compileFunction<(
+    thread: PaneFocusThread | null,
+    data: unknown,
+  ) => boolean>(functionSource('consumeTerminalDataSuppression'), {
+    isTerminalFocusReport,
+    consumeTerminalFocusReportToken,
+  });
+  const withTerminalFocusReportToken = compileFunction<(<T>(
+    thread: PaneFocusThread | null,
+    report: string,
+    policy: FocusReportPolicy,
+    action: () => T,
+  ) => T)>(functionSource('withTerminalFocusReportToken'), {
+    beginTerminalFocusReportToken,
+    clearTerminalFocusReportToken,
+  });
+
+  return {
+    isTerminalFocusReport,
+    beginTerminalFocusReportToken,
+    clearTerminalFocusReportToken,
+    shouldSuppressTerminalData,
+    withTerminalFocusReportToken,
+  };
+}
+
+function createPaneFocusHarness(
+  threads: PaneFocusThread[],
+  activeThreadId: string,
+  activeElement: unknown = null,
+) {
+  const tokens = compileFocusTokenRuntime();
+  const queued: Array<() => void> = [];
+  const documentRef = { activeElement };
+  const state = {
+    activeProjectId: 'project-a',
+    activeThreadId,
+    activeFileId: null as string | null,
+    threads,
+  };
+  const project = {
+    id: 'project-a',
+    root: '/repo',
+    lastActiveThreadId: activeThreadId as string | null,
+    selectedWorktreePath: '/repo' as string | null,
+  };
+  const attachedPanes = new Set(
+    threads.map((thread) => thread.pane).filter((pane) => pane !== null),
+  );
+  const terminalHost = {
+    hidden: false,
+    contains: (pane: unknown) => attachedPanes.has(pane as { id: string }),
+    replaceChildren: () => undefined,
+    appendChild: () => undefined,
+  };
+  const requestAnimationFrame = (callback: () => void) => {
+    queued.push(callback);
+    return queued.length;
+  };
+  const isLiveThread = (thread: PaneFocusThread | null) => (
+    Boolean(thread) && !thread?.closing && state.threads.includes(thread as PaneFocusThread)
+  );
+  const focusedTerminalThreadForRender = compileFunction<
+    () => PaneFocusThread | null
+  >(functionSource('focusedTerminalThreadForRender'), {
+    document: documentRef,
+    state,
+  });
+  const restoreRenderedTerminalFocus = compileFunction<(
+    thread: PaneFocusThread | null,
+  ) => void>(functionSource('restoreRenderedTerminalFocus'), {
+    requestAnimationFrame,
+    isLiveThread,
+    state,
+    terminalHost,
+    withTerminalFocusReportToken: tokens.withTerminalFocusReportToken,
+  });
+  const renderPaneWorkspace = compileFunction<(
+    options?: {
+      focusTargetThread?: PaneFocusThread | null;
+      preserveTerminalFocus?: boolean;
+    },
+  ) => void>(functionSource('renderPaneWorkspace'), {
+    terminalHost,
+    focusedTerminalThreadForRender,
+    withTerminalFocusReportToken: tokens.withTerminalFocusReportToken,
+    stageBrowserSurface: () => undefined,
+    stageGitSurface: () => undefined,
+    activePaneLayout: () => null,
+    renderTerminalEmptyState: () => undefined,
+    renderPaneMinimap: () => undefined,
+    findOpenFile: () => null,
+    state,
+    restoreRenderedTerminalFocus,
+  });
+  const focusThread = compileFunction<(
+    id: string,
+    options?: { refreshStatus?: boolean },
+  ) => Promise<boolean>>(functionSource('focusThread'), {
+    findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+    showTerminalView: async () => true,
+    focusedTerminalThreadForRender,
+    markActiveSurface: () => undefined,
+    state,
+    findProject: (id: string) => id === project.id ? project : null,
+    activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
+    paneLayoutFor: () => null,
+    PsychePanes: { findLeafByThreadId: () => null },
+    withTerminalFocusReportToken: tokens.withTerminalFocusReportToken,
+    renderPaneWorkspace,
+    renderGitSurface: () => false,
+    refreshSidebar: () => undefined,
+    requestAnimationFrame,
+    scheduleVisiblePaneFit: () => undefined,
+    isLiveThread,
+    terminalHost,
+    syncBrowserBounds: () => undefined,
+    setProjectStatus: () => undefined,
+    statusLevel: () => 'ok',
+    refreshStatusController: () => undefined,
+  });
+
+  return {
+    ...tokens,
+    attachedPanes,
+    documentRef,
+    focusThread,
+    focusedTerminalThreadForRender,
+    project,
+    queued,
+    renderPaneWorkspace,
+    state,
+    terminalHost,
+  };
 }
 
 describe('Tauri physical terminal panes', () => {
@@ -387,6 +573,10 @@ describe('Tauri physical terminal panes', () => {
   it('reserves geometry before mutating the thread list', () => {
     const createThread = functionSource('createThread');
     expect(createThread).toMatch(/opts\.worktreePath \|\| launch\.cwd \|\| launch\.projectRoot/);
+    expect(createThread).not.toMatch(/internalPaneRenderDepth/);
+    expect(mainJs).not.toMatch(
+      /internalPaneRenderDepth|beginPaneRenderFocusSuppression|endPaneRenderFocusSuppression/,
+    );
     expect(createThread.indexOf('preparePanePlacement(')).toBeGreaterThan(-1);
     expect(createThread.indexOf('preparePanePlacement(')).toBeLessThan(
       createThread.indexOf('state.threads.push(thread)'),
@@ -406,8 +596,1131 @@ describe('Tauri physical terminal panes', () => {
     expect(mountTerminal).toMatch(/className = "term-instance"/);
     expect(mountTerminal).toMatch(/title = "Stop and close terminal"/);
     expect(mountTerminal).toMatch(/"Stop and close " \+ thread\.name/);
-    expect(mountTerminal).toMatch(/thread\.pane = pane[\s\S]*thread\.host = container[\s\S]*renderPaneWorkspace\(\)/);
+    expect(mountTerminal).toMatch(
+      /thread\.pane = pane[\s\S]*thread\.host = container[\s\S]*renderPaneWorkspace\(\{ preserveTerminalFocus: false \}\)/,
+    );
     expect(mountTerminal).not.toMatch(/terminalHost\.appendChild\(container\)/);
+  });
+
+  it('classifies every pane workspace render by caller intent', () => {
+    const transitionOnly = [
+      'activateProjectWorktree',
+      'setActiveProject',
+      'mountToolPane',
+      'mountBrowserPane',
+      'mountTerminal',
+      'reopenThread',
+      'removeProject',
+      'returnFromFileFocus',
+      'revealFileForDecision',
+      'closeFileTab',
+    ];
+    for (const name of transitionOnly) {
+      expect(renderPaneWorkspaceCalls(name), name).toEqual([
+        'renderPaneWorkspace({ preserveTerminalFocus: false });',
+      ]);
+    }
+
+    const preserveOnly = [
+      'movePaneTo',
+      'updateActiveSplit',
+      'cyclePaneSpan',
+      'togglePaneMaximize',
+      'exitPaneMaximize',
+      'refreshSidebar',
+    ];
+    for (const name of preserveOnly) {
+      expect(renderPaneWorkspaceCalls(name), name).toEqual([
+        'renderPaneWorkspace();',
+      ]);
+    }
+
+    expect(renderPaneWorkspaceCalls('focusThread')).toEqual([
+      'renderPaneWorkspace({ focusTargetThread: thread });',
+    ]);
+    expect(renderPaneWorkspaceCalls('closeToolPane')).toEqual([]);
+    expect(renderPaneWorkspaceCalls('closeThread')).toEqual([
+      'renderPaneWorkspace({ preserveTerminalFocus: false });',
+      'renderPaneWorkspace({ preserveTerminalFocus: false });',
+      'renderPaneWorkspace({ preserveTerminalFocus: false });',
+      'renderPaneWorkspace();',
+    ]);
+    expect(renderPaneWorkspaceCalls('hideThread')).toEqual([
+      'renderPaneWorkspace({ preserveTerminalFocus: false });',
+      'renderPaneWorkspace();',
+    ]);
+
+    const expectedCallCount =
+      transitionOnly.length + preserveOnly.length + 1 + 4 + 2 + 1;
+    expect((mainJs.match(/renderPaneWorkspace\(/g) || []).length - 1).toBe(
+      expectedCallCount,
+    );
+
+    const createThread = functionSource('createThread');
+    expect(createThread.indexOf('mountTerminal(thread)')).toBeLessThan(
+      createThread.indexOf('refreshSidebar()'),
+    );
+    expect(functionSource('removeProject')).toMatch(
+      /var preserveTerminalFocus = state\.activeProjectId !== id;[\s\S]*closeThread\(tid, \{\s*focus: false,\s*preserveTerminalFocus: preserveTerminalFocus,\s*\}\)/,
+    );
+  });
+
+  it('uses exact one-shot focus report tokens with independent identities', () => {
+    const runtime = compileFocusTokenRuntime();
+    const thread: PaneFocusThread = {
+      id: 'thread-token',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: null,
+      host: null,
+      term: null,
+    };
+
+    expect(runtime.isTerminalFocusReport('\x1b[I')).toBe(true);
+    expect(runtime.isTerminalFocusReport('\x1b[O')).toBe(true);
+    expect(runtime.isTerminalFocusReport('\x1b[I\x1b[O')).toBe(false);
+    expect(runtime.isTerminalFocusReport('\x1b[Iordinary text')).toBe(false);
+    expect(runtime.isTerminalFocusReport(new Uint8Array([0x1b, 0x5b, 0x49]))).toBe(false);
+    expect(runtime.shouldSuppressTerminalData(thread, '\x1b[I')).toBe(false);
+
+    runtime.withTerminalFocusReportToken(thread, '\x1b[O', 'suppress', () => {
+      expect(runtime.shouldSuppressTerminalData(thread, '\x1b[O')).toBe(true);
+      expect(runtime.shouldSuppressTerminalData(thread, '\x1b[O')).toBe(false);
+    });
+
+    runtime.withTerminalFocusReportToken(thread, '\x1b[I', 'suppress', () => {
+      expect(runtime.shouldSuppressTerminalData(thread, '\x1b[Iordinary text')).toBe(false);
+      expect(runtime.shouldSuppressTerminalData(thread, '\x1b[I\x1b[O')).toBe(false);
+      expect(runtime.shouldSuppressTerminalData(thread, '\x1b[I')).toBe(true);
+    });
+
+    runtime.withTerminalFocusReportToken(thread, '\x1b[I', 'suppress', () => {
+      runtime.withTerminalFocusReportToken(thread, '\x1b[I', 'allow', () => {
+        expect(runtime.shouldSuppressTerminalData(thread, '\x1b[I')).toBe(false);
+      });
+      expect(runtime.shouldSuppressTerminalData(thread, '\x1b[I')).toBe(true);
+    });
+
+    const suppress = runtime.beginTerminalFocusReportToken(
+      thread, '\x1b[O', 'suppress',
+    );
+    const allow = runtime.beginTerminalFocusReportToken(thread, '\x1b[O', 'allow');
+    runtime.clearTerminalFocusReportToken(thread, suppress);
+    expect(thread.internalFocusReportTokens).toEqual([allow]);
+    expect(runtime.shouldSuppressTerminalData(thread, '\x1b[O')).toBe(false);
+    expect(thread.internalFocusReportTokens).toBeUndefined();
+
+    expect(runtime.withTerminalFocusReportToken(
+      thread, '\x1b[I', 'suppress', () => 42,
+    )).toBe(42);
+    expect(thread.internalFocusReportTokens).toBeUndefined();
+    expect(runtime.shouldSuppressTerminalData(thread, '\x1b[I')).toBe(false);
+
+    const actionError = new Error('focus failed');
+    expect(() => runtime.withTerminalFocusReportToken(
+      thread,
+      '\x1b[I',
+      'allow',
+      () => { throw actionError; },
+    )).toThrow(actionError);
+    expect(thread.internalFocusReportTokens).toBeUndefined();
+  });
+
+  it('checks focus report tokens before writing xterm input to the PTY', () => {
+    const mountTerminal = functionSource('mountTerminal');
+    expect(mountTerminal).toMatch(
+      /term\.onData\(function \(data\) \{\s*routeTerminalData\(thread, data\);\s*\}\);/,
+    );
+  });
+
+  it('skips pure rerender focus restoration while the terminal canvas is hidden', () => {
+    const thread: PaneFocusThread = {
+      id: 'thread-hidden-restore',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-hidden-restore' },
+      host: { contains: () => false },
+      term: { blur: () => undefined, focus: () => { throw new Error('unexpected focus'); } },
+    };
+    const queued: Array<() => void> = [];
+    let tokenCalls = 0;
+    let focusCalls = 0;
+    const terminalHost = {
+      hidden: false,
+      contains: () => true,
+    };
+    const restoreRenderedTerminalFocus = compileFunction<(
+      target: PaneFocusThread | null,
+    ) => void>(functionSource('restoreRenderedTerminalFocus'), {
+      requestAnimationFrame(callback: () => void) {
+        queued.push(callback);
+      },
+      isLiveThread: () => true,
+      state: { activeThreadId: thread.id },
+      terminalHost,
+      withTerminalFocusReportToken: (
+        _target: PaneFocusThread | null,
+        _report: string,
+        _policy: FocusReportPolicy,
+        action: () => void,
+      ) => {
+        tokenCalls += 1;
+        return action();
+      },
+    });
+    thread.term = { blur: () => undefined, focus: () => { focusCalls += 1; } };
+
+    restoreRenderedTerminalFocus(thread);
+    expect(queued).toHaveLength(1);
+
+    terminalHost.hidden = true;
+    queued.shift()?.();
+
+    expect(focusCalls).toBe(0);
+    expect(tokenCalls).toBe(0);
+    expect(thread.internalFocusReportTokens).toBeUndefined();
+  });
+
+  it('suppresses only the synchronous blur and focus reports during a pure rerender', () => {
+    const activeElement = { id: 'active-source' };
+    const pane = { id: 'pane-source' };
+    const thread: PaneFocusThread = {
+      id: 'thread-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane,
+      host: { contains: (node: unknown) => node === activeElement },
+      term: null,
+    };
+    const harness = createPaneFocusHarness([thread], thread.id, activeElement);
+    const events: string[] = [];
+    thread.term = {
+      blur: () => {
+        events.push(`blur:${harness.shouldSuppressTerminalData(thread, '\x1b[O')}`);
+        harness.documentRef.activeElement = null;
+      },
+      focus: () => {
+        events.push(`focus:${harness.shouldSuppressTerminalData(thread, '\x1b[I')}`);
+        harness.documentRef.activeElement = activeElement;
+      },
+    };
+    harness.terminalHost.replaceChildren = () => {
+      events.push('replace');
+    };
+
+    harness.renderPaneWorkspace();
+    expect(events).toEqual(['blur:true', 'replace']);
+    expect(harness.shouldSuppressTerminalData(thread, '\x1b[O')).toBe(false);
+    expect(thread.internalFocusReportTokens).toBeUndefined();
+    expect(harness.queued).toHaveLength(1);
+
+    harness.queued.shift()?.();
+    expect(events).toEqual(['blur:true', 'replace', 'focus:true']);
+    expect(harness.shouldSuppressTerminalData(thread, '\x1b[O')).toBe(false);
+    expect(harness.shouldSuppressTerminalData(thread, '\x1b[I')).toBe(false);
+    expect(thread.internalFocusReportTokens).toBeUndefined();
+  });
+
+  it('keeps refreshSidebar focus-preserving across its workspace rerender', () => {
+    const activeElement = { id: 'refresh-source' };
+    const thread: PaneFocusThread = {
+      id: 'thread-refresh',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-refresh' },
+      host: { contains: (node: unknown) => node === activeElement },
+      term: null,
+    };
+    const harness = createPaneFocusHarness([thread], thread.id, activeElement);
+    const reports: Array<[string, boolean]> = [];
+    thread.term = {
+      blur: () => {
+        reports.push([
+          'source-out',
+          harness.shouldSuppressTerminalData(thread, '\x1b[O'),
+        ]);
+        harness.documentRef.activeElement = null;
+      },
+      focus: () => {
+        reports.push([
+          'source-in',
+          harness.shouldSuppressTerminalData(thread, '\x1b[I'),
+        ]);
+        harness.documentRef.activeElement = activeElement;
+      },
+    };
+    const refreshSidebar = compileFunction<() => void>(
+      functionSource('refreshSidebar'),
+      {
+        refreshTabs: () => undefined,
+        renderSessionList: () => undefined,
+        renderPaneWorkspace: harness.renderPaneWorkspace,
+        syncComposerChrome: () => undefined,
+        syncDaemonStatus: () => undefined,
+        syncSessionListScroll: () => undefined,
+      },
+    );
+
+    refreshSidebar();
+    expect(reports).toEqual([['source-out', true]]);
+    expect(harness.queued).toHaveLength(1);
+
+    harness.queued.shift()?.();
+    expect(reports).toEqual([
+      ['source-out', true],
+      ['source-in', true],
+    ]);
+    expect(thread.internalFocusReportTokens).toBeUndefined();
+  });
+
+  it('allows source focus-out before creating and explicitly focusing a new pane', async () => {
+    const sourceElement = { id: 'creation-source' };
+    const targetElement = { id: 'creation-target' };
+    const source: PaneFocusThread = {
+      id: 'thread-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-source' },
+      host: { contains: (node: unknown) => node === sourceElement },
+      term: null,
+    };
+    const harness = createPaneFocusHarness([source], source.id, sourceElement);
+    const reports: Array<[string, boolean]> = [];
+    let sourceFocusCalls = 0;
+    let target: PaneFocusThread | null = null;
+    source.term = {
+      blur: () => {
+        reports.push([
+          'source-out',
+          harness.shouldSuppressTerminalData(source, '\x1b[O'),
+        ]);
+        harness.documentRef.activeElement = null;
+      },
+      focus: () => {
+        sourceFocusCalls += 1;
+        harness.documentRef.activeElement = sourceElement;
+      },
+    };
+
+    const createThread = compileFunction<(
+      options: Record<string, unknown>,
+    ) => PaneFocusThread | null>(functionSource('createThread'), {
+      makeThreadId: () => 'thread-target',
+      activeProject: () => harness.project,
+      activeWorkspaceRoot: () => '/repo',
+      preparePanePlacement: () => ({ key: 'layout', value: {} }),
+      commitPanePlacement: () => undefined,
+      setStatus: () => undefined,
+      state: harness.state,
+      refreshSidebar: () => harness.renderPaneWorkspace(),
+      refreshTabs: () => undefined,
+      mountTerminal: (thread: PaneFocusThread) => {
+        target = thread;
+        const pane = { id: 'pane-target' };
+        thread.pane = pane;
+        thread.host = { contains: (node: unknown) => node === targetElement };
+        thread.term = {
+          blur: () => undefined,
+          focus: () => {
+            reports.push([
+              'target-in',
+              harness.shouldSuppressTerminalData(thread, '\x1b[I'),
+            ]);
+            harness.documentRef.activeElement = targetElement;
+          },
+        };
+        harness.attachedPanes.add(pane);
+        harness.renderPaneWorkspace({ preserveTerminalFocus: false });
+      },
+      focusThread: harness.focusThread,
+      requestAnimationFrame: (callback: () => void) => {
+        harness.queued.push(callback);
+        return harness.queued.length;
+      },
+      isLiveThread: (thread: PaneFocusThread) => (
+        !thread.closing && harness.state.threads.includes(thread)
+      ),
+      spawnPty: () => undefined,
+    });
+
+    expect(createThread({
+      project: harness.project,
+      command: '/bin/zsh',
+      name: 'New pane',
+    })).toBe(target);
+    await Promise.resolve();
+    await Promise.resolve();
+    while (harness.queued.length) harness.queued.shift()?.();
+
+    expect(reports).toEqual([
+      ['source-out', false],
+      ['target-in', false],
+    ]);
+    expect(sourceFocusCalls).toBe(0);
+    expect(harness.state.activeThreadId).toBe('thread-target');
+    expect(source.internalFocusReportTokens).toBeUndefined();
+    const createdTarget = target as PaneFocusThread | null;
+    expect(createdTarget).not.toBeNull();
+    expect(createdTarget?.internalFocusReportTokens).toBeUndefined();
+  });
+
+  it('explicitly blurs the focused source and allows both switch reports', async () => {
+    const activeElement = { id: 'active-source' };
+    const source: PaneFocusThread = {
+      id: 'thread-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-source' },
+      host: { contains: (node: unknown) => node === activeElement },
+      term: null,
+    };
+    const target: PaneFocusThread = {
+      id: 'thread-target',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-target' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const harness = createPaneFocusHarness([source, target], source.id, activeElement);
+    const events: string[] = [];
+    const reports: Array<[string, boolean]> = [];
+    source.term = {
+      blur: () => {
+        events.push(`blur:${harness.state.activeThreadId}`);
+        reports.push([
+          'source-out',
+          harness.shouldSuppressTerminalData(source, '\x1b[O'),
+        ]);
+        harness.documentRef.activeElement = null;
+      },
+      focus: () => {
+        events.push('unexpected-source-focus');
+      },
+    };
+    target.term = {
+      blur: () => {
+        events.push('unexpected-target-blur');
+      },
+      focus: () => {
+        events.push('focus:thread-target');
+        reports.push([
+          'target-in',
+          harness.shouldSuppressTerminalData(target, '\x1b[I'),
+        ]);
+      },
+    };
+    harness.terminalHost.replaceChildren = () => {
+      events.push(`replace:${harness.state.activeThreadId}`);
+    };
+
+    await expect(harness.focusThread(target.id)).resolves.toBe(true);
+    expect(events).toEqual([
+      'blur:thread-source',
+      'replace:thread-target',
+    ]);
+    expect(reports).toEqual([['source-out', false]]);
+    expect(harness.shouldSuppressTerminalData(source, '\x1b[O')).toBe(false);
+    expect(harness.queued).toHaveLength(1);
+
+    harness.queued.shift()?.();
+    expect(events).toEqual([
+      'blur:thread-source',
+      'replace:thread-target',
+      'focus:thread-target',
+    ]);
+    expect(reports).toEqual([
+      ['source-out', false],
+      ['target-in', false],
+    ]);
+    expect(source.internalFocusReportTokens).toBeUndefined();
+    expect(target.internalFocusReportTokens).toBeUndefined();
+  });
+
+  it('allows explicit focus-out and focus-in when refocusing the current target', async () => {
+    const activeElement = { id: 'same-target' };
+    const thread: PaneFocusThread = {
+      id: 'thread-current',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-current' },
+      host: { contains: (node: unknown) => node === activeElement },
+      term: null,
+    };
+    const harness = createPaneFocusHarness([thread], thread.id, activeElement);
+    const reports: Array<[string, boolean]> = [];
+    thread.term = {
+      blur: () => {
+        reports.push([
+          'target-out',
+          harness.shouldSuppressTerminalData(thread, '\x1b[O'),
+        ]);
+        harness.documentRef.activeElement = null;
+      },
+      focus: () => {
+        reports.push([
+          'target-in',
+          harness.shouldSuppressTerminalData(thread, '\x1b[I'),
+        ]);
+        harness.documentRef.activeElement = activeElement;
+      },
+    };
+
+    await expect(harness.focusThread(thread.id)).resolves.toBe(true);
+    expect(reports).toEqual([['target-out', false]]);
+    expect(harness.queued).toHaveLength(1);
+
+    harness.queued.shift()?.();
+    expect(reports).toEqual([
+      ['target-out', false],
+      ['target-in', false],
+    ]);
+    expect(thread.internalFocusReportTokens).toBeUndefined();
+  });
+
+  it('blurs an active hidden pane before removal and only focuses its validated successor', async () => {
+    const sourceElement = { id: 'hide-source' };
+    const targetElement = { id: 'hide-target' };
+    const source: PaneFocusThread = {
+      id: 'thread-hide-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      hidden: false,
+      metricsGeneration: 0,
+      metricsRefreshTimer: 0,
+      pane: { id: 'pane-hide-source' },
+      host: { contains: (node: unknown) => node === sourceElement },
+      term: null,
+    };
+    const target: PaneFocusThread = {
+      id: 'thread-hide-target',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      hidden: false,
+      pane: { id: 'pane-hide-target' },
+      host: { contains: (node: unknown) => node === targetElement },
+      term: null,
+    };
+    const harness = createPaneFocusHarness(
+      [source, target],
+      source.id,
+      sourceElement,
+    );
+    const events: string[] = [];
+    source.term = {
+      blur: () => {
+        events.push(
+          `source-out:${harness.shouldSuppressTerminalData(source, '\x1b[O')}`,
+        );
+        harness.documentRef.activeElement = null;
+      },
+      focus: () => {
+        events.push('unexpected-source-focus');
+      },
+    };
+    target.term = {
+      blur: () => {
+        events.push('unexpected-target-blur');
+      },
+      focus: () => {
+        events.push(
+          `target-in:${harness.shouldSuppressTerminalData(target, '\x1b[I')}`,
+        );
+        harness.documentRef.activeElement = targetElement;
+      },
+    };
+
+    const key = 'project-a\0/repo';
+    const root = PsychePanes.insertBelow(
+      PsychePanes.createLeaf('leaf-source', source.id),
+      'leaf-source',
+      PsychePanes.createLeaf('leaf-target', target.id),
+      'split-hide',
+    );
+    const paneLayouts = new Map([[key, {
+      root,
+      focusedLeafId: 'leaf-source',
+    }]]);
+    const detachThreadPaneImpl = compileFunction<(
+      thread: PaneFocusThread,
+    ) => string | null>(functionSource('detachThreadPane'), {
+      focusedTerminalThreadForRender: harness.focusedTerminalThreadForRender,
+      withTerminalFocusReportToken: harness.withTerminalFocusReportToken,
+      paneLayoutKey: () => key,
+      paneLayouts,
+      PsychePanes,
+    });
+    const detachThreadPane = (thread: PaneFocusThread) => {
+      const nextThreadId = detachThreadPaneImpl(thread);
+      events.push('detach');
+      if (thread.pane) harness.attachedPanes.delete(thread.pane);
+      harness.documentRef.activeElement = null;
+      return nextThreadId;
+    };
+    const hideThread = compileFunction<(id: string) => boolean>(
+      functionSource('hideThread'),
+      {
+        findThread: (id: string) => (
+          harness.state.threads.find((thread) => thread.id === id) || null
+        ),
+        detachThreadPane,
+        retainFileFocusAfterThreadRemoval: () => false,
+        state: harness.state,
+        focusThread: harness.focusThread,
+        renderPaneWorkspace: harness.renderPaneWorkspace,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      },
+    );
+
+    expect(hideThread(source.id)).toBe(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    while (harness.queued.length) harness.queued.shift()?.();
+
+    expect(events).toEqual([
+      'source-out:false',
+      'detach',
+      'target-in:false',
+    ]);
+    expect(source.hidden).toBe(true);
+    expect(harness.state.activeThreadId).toBe(target.id);
+    expect(source.internalFocusReportTokens).toBeUndefined();
+    expect(target.internalFocusReportTokens).toBeUndefined();
+  });
+
+  it('allows focus-out when closing the active pane without a successor', () => {
+    const sourceElement = { id: 'close-source' };
+    const source: PaneFocusThread = {
+      id: 'thread-close-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      closing: false,
+      closeStarted: false,
+      metricsGeneration: 0,
+      metricsRefreshTimer: 0,
+      startInFlight: false,
+      pane: { id: 'pane-close-source' },
+      host: { contains: (node: unknown) => node === sourceElement },
+      term: null,
+    };
+    const harness = createPaneFocusHarness([source], source.id, sourceElement);
+    const events: string[] = [];
+    source.term = {
+      blur: () => {
+        events.push(
+          `source-out:${harness.shouldSuppressTerminalData(source, '\x1b[O')}`,
+        );
+        harness.documentRef.activeElement = null;
+      },
+      focus: () => {
+        events.push('unexpected-source-focus');
+      },
+      dispose: () => {
+        events.push('dispose');
+      },
+    };
+
+    const key = 'project-a\0/repo';
+    const paneLayouts = new Map([[key, {
+      root: PsychePanes.createLeaf('leaf-source', source.id),
+      focusedLeafId: 'leaf-source',
+    }]]);
+    const detachThreadPaneImpl = compileFunction<(
+      thread: PaneFocusThread,
+    ) => string | null>(functionSource('detachThreadPane'), {
+      focusedTerminalThreadForRender: harness.focusedTerminalThreadForRender,
+      withTerminalFocusReportToken: harness.withTerminalFocusReportToken,
+      paneLayoutKey: () => key,
+      paneLayouts,
+      PsychePanes,
+    });
+    const closeThread = compileFunction<(id: string) => boolean>(
+      functionSource('closeThread'),
+      {
+        forgetThreadInSets: () => undefined,
+        findThread: (id: string) => (
+          harness.state.threads.find((thread) => thread.id === id) || null
+        ),
+        detachThreadPane: (thread: PaneFocusThread) => {
+          const nextThreadId = detachThreadPaneImpl(thread);
+          events.push('detach');
+          if (thread.pane) harness.attachedPanes.delete(thread.pane);
+          harness.documentRef.activeElement = null;
+          return nextThreadId;
+        },
+        retainFileFocusAfterThreadRemoval: () => false,
+        pendingDataBuffers: new Map(),
+        stopThreadPty: () => Promise.resolve(true),
+        state: harness.state,
+        renderPaneWorkspace: harness.renderPaneWorkspace,
+        setProjectStatus: () => undefined,
+        findProject: () => harness.project,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        focusThread: () => {
+          events.push('unexpected-target-focus');
+        },
+      },
+    );
+
+    expect(closeThread(source.id)).toBe(true);
+    expect(events).toEqual([
+      'source-out:false',
+      'detach',
+      'dispose',
+    ]);
+    expect(harness.state.activeThreadId).toBeNull();
+    expect(harness.queued).toHaveLength(0);
+    expect(source.internalFocusReportTokens).toBeUndefined();
+  });
+
+  it('allows focus-out without restoring the old worktree layout', async () => {
+    const sourceElement = { id: 'worktree-source' };
+    const source: PaneFocusThread = {
+      id: 'thread-worktree-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/old',
+      status: 'running',
+      pane: { id: 'pane-worktree-source' },
+      host: { contains: (node: unknown) => node === sourceElement },
+      term: null,
+    };
+    const target: PaneFocusThread = {
+      id: 'thread-worktree-target',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/target',
+      status: 'running',
+      pane: { id: 'pane-worktree-target' },
+      host: { contains: () => false },
+      term: { blur: () => undefined, focus: () => undefined },
+    };
+    const harness = createPaneFocusHarness(
+      [source, target],
+      source.id,
+      sourceElement,
+    );
+    const reports: Array<[string, boolean]> = [];
+    source.term = {
+      blur: () => {
+        reports.push([
+          'source-out',
+          harness.shouldSuppressTerminalData(source, '\x1b[O'),
+        ]);
+        harness.documentRef.activeElement = null;
+      },
+      focus: () => {
+        reports.push(['unexpected-source-in', false]);
+      },
+    };
+    const activateProjectWorktree = compileFunction<(
+      project: typeof harness.project,
+      worktreePath: string,
+    ) => Promise<boolean>>(functionSource('activateProjectWorktree'), {
+      showTerminalView: async () => true,
+      state: harness.state,
+      setActiveProject: async () => {
+        throw new Error('unexpected project switch');
+      },
+      activatePaneLayoutFocus: (
+        _project: typeof harness.project,
+        worktreePath: string,
+      ) => {
+        expect(worktreePath).toBe('/target');
+        harness.state.activeThreadId = target.id;
+      },
+      renderPaneWorkspace: harness.renderPaneWorkspace,
+      renderGitSurface: () => false,
+      renderPanel: () => undefined,
+      currentPanel: () => 'browser',
+      loadAgentSkills: () => undefined,
+      refreshSidebar: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+    });
+
+    await expect(
+      activateProjectWorktree(harness.project, '/target'),
+    ).resolves.toBe(true);
+    expect(reports).toEqual([['source-out', false]]);
+    expect(harness.queued).toHaveLength(0);
+    expect(harness.state.activeThreadId).toBe(target.id);
+    expect(source.internalFocusReportTokens).toBeUndefined();
+  });
+
+  it('preserves the focused terminal while removing an inactive project', async () => {
+    const activeProject = { id: 'active-project' };
+    const removedProject = { id: 'removed-project' };
+    const removedThread = {
+      id: 'removed-thread',
+      projectId: removedProject.id,
+    };
+    const state = {
+      activeProjectId: activeProject.id,
+      activeThreadId: 'active-thread',
+      activeFileId: null as string | null,
+      projects: [activeProject, removedProject],
+      threads: [removedThread],
+      openFiles: [] as Array<{ id: string; projectId: string }>,
+    };
+    const closeOptions: Array<Record<string, unknown> | undefined> = [];
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: (id: string) => (
+        state.projects.find((project) => project.id === id) || null
+      ),
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: {
+        invalidateCovenRequests: (value: unknown) => value,
+      },
+      closeThread: (
+        _id: string,
+        options?: Record<string, unknown>,
+      ) => {
+        closeOptions.push(options);
+        return true;
+      },
+      fileViewEl: null,
+      terminalHost: null,
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      setStatus: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+    });
+
+    await expect(removeProject(removedProject.id)).resolves.toBe(true);
+    expect(closeOptions).toEqual([{
+      focus: false,
+      preserveTerminalFocus: true,
+    }]);
+    expect(state.activeProjectId).toBe(activeProject.id);
+    expect(state.activeThreadId).toBe('active-thread');
+  });
+
+  it('skips explicit target focus while the terminal canvas is hidden before RAF', async () => {
+    const state = { activeProjectId: 'project', activeThreadId: null as string | null };
+    const project = {
+      id: 'project',
+      lastActiveThreadId: null as string | null,
+      selectedWorktreePath: null as string | null,
+    };
+    const thread = {
+      id: 'thread-hidden-focus',
+      kind: 'shell',
+      projectId: project.id,
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-hidden-focus' },
+      term: { blur: () => undefined, focus: () => undefined },
+    };
+    const queued: Array<() => void> = [];
+    const tokenCalls: Array<{ report: string; policy: FocusReportPolicy }> = [];
+    let focusCalls = 0;
+    const terminalHost = {
+      hidden: false,
+      contains: () => true,
+    };
+    thread.term = { blur: () => undefined, focus: () => { focusCalls += 1; } };
+
+    const focusThread = compileFunction<(
+      id: string,
+      options?: { refreshStatus?: boolean },
+    ) => Promise<boolean>>(functionSource('focusThread'), {
+      findThread: (id: string) => (id === thread.id ? thread : null),
+      showTerminalView: async () => true,
+      focusedTerminalThreadForRender: () => null,
+      markActiveSurface: () => undefined,
+      state,
+      findProject: () => project,
+      activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
+      paneLayoutFor: () => null,
+      PsychePanes,
+      renderPaneWorkspace: () => undefined,
+      renderGitSurface: () => false,
+      withTerminalFocusReportToken: (
+        _thread: typeof thread,
+        report: string,
+        policy: FocusReportPolicy,
+        action: () => void,
+      ) => {
+        tokenCalls.push({ report, policy });
+        return action();
+      },
+      refreshSidebar: () => undefined,
+      requestAnimationFrame: (callback: () => void) => {
+        queued.push(callback);
+      },
+      scheduleVisiblePaneFit: () => undefined,
+      isLiveThread: () => true,
+      terminalHost,
+      syncBrowserBounds: () => undefined,
+      setProjectStatus: () => undefined,
+      statusLevel: () => 'ok',
+      refreshStatusController: () => undefined,
+    });
+
+    await expect(focusThread(thread.id)).resolves.toBe(true);
+    expect(queued).toHaveLength(1);
+
+    terminalHost.hidden = true;
+    queued.shift()?.();
+
+    expect(focusCalls).toBe(0);
+    expect(tokenCalls).toEqual([]);
+  });
+
+  it('skips a superseded focus callback and never synthesizes blur for its target', async () => {
+    const activeElement = { id: 'active-source' };
+    const source: PaneFocusThread = {
+      id: 'thread-a',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-a' },
+      host: { contains: (node: unknown) => node === activeElement },
+      term: null,
+    };
+    const targetB: PaneFocusThread = {
+      id: 'thread-b',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-b' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const targetC: PaneFocusThread = {
+      id: 'thread-c',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-c' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const harness = createPaneFocusHarness(
+      [source, targetB, targetC],
+      source.id,
+      activeElement,
+    );
+    const events: string[] = [];
+    source.term = {
+      blur: () => {
+        events.push(
+          `blur:a:${harness.shouldSuppressTerminalData(source, '\x1b[O')}`,
+        );
+        harness.documentRef.activeElement = null;
+      },
+      focus: () => {
+        events.push('focus:a');
+      },
+    };
+    targetB.term = {
+      blur: () => {
+        events.push(
+          `blur:b:${harness.shouldSuppressTerminalData(targetB, '\x1b[O')}`,
+        );
+      },
+      focus: () => {
+        events.push(
+          `focus:b:${harness.shouldSuppressTerminalData(targetB, '\x1b[I')}`,
+        );
+      },
+    };
+    targetC.term = {
+      blur: () => {
+        events.push(
+          `blur:c:${harness.shouldSuppressTerminalData(targetC, '\x1b[O')}`,
+        );
+      },
+      focus: () => {
+        events.push(
+          `focus:c:${harness.shouldSuppressTerminalData(targetC, '\x1b[I')}`,
+        );
+      },
+    };
+
+    const focusB = harness.focusThread(targetB.id);
+    const focusC = harness.focusThread(targetC.id);
+    await expect(Promise.all([focusB, focusC])).resolves.toEqual([true, true]);
+    expect(harness.queued).toHaveLength(2);
+
+    harness.queued.splice(0).forEach((callback) => callback());
+    expect(events).toEqual([
+      'blur:a:false',
+      'focus:c:false',
+    ]);
+    expect(harness.state.activeThreadId).toBe(targetC.id);
+    expect(targetB.internalFocusReportTokens).toBeUndefined();
+    expect(targetC.internalFocusReportTokens).toBeUndefined();
+  });
+
+  it('does not focus or grant a token to stale, closed, incomplete, or detached targets', async () => {
+    const scenarios = [
+      'inactive',
+      'removed',
+      'closing',
+      'missing-term',
+      'missing-pane',
+      'detached',
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const source: PaneFocusThread = {
+        id: `source-${scenario}`,
+        kind: 'shell',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        status: 'running',
+        pane: { id: `pane-source-${scenario}` },
+        host: { contains: () => false },
+        term: { blur: () => undefined, focus: () => undefined },
+      };
+      const target: PaneFocusThread = {
+        id: `target-${scenario}`,
+        kind: 'shell',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        status: 'running',
+        pane: { id: `pane-target-${scenario}` },
+        host: { contains: () => false },
+        term: null,
+      };
+      const harness = createPaneFocusHarness([source, target], source.id);
+      let focusCalls = 0;
+      target.term = {
+        blur: () => undefined,
+        focus: () => {
+          focusCalls += 1;
+          harness.shouldSuppressTerminalData(target, '\x1b[I');
+        },
+      };
+
+      await expect(harness.focusThread(target.id)).resolves.toBe(true);
+      expect(harness.queued).toHaveLength(1);
+      if (scenario === 'inactive') harness.state.activeThreadId = source.id;
+      if (scenario === 'removed') harness.state.threads = [source];
+      if (scenario === 'closing') target.closing = true;
+      if (scenario === 'missing-term') target.term = null;
+      if (scenario === 'missing-pane') target.pane = null;
+      if (scenario === 'detached' && target.pane) {
+        harness.attachedPanes.delete(target.pane);
+      }
+
+      harness.queued.shift()?.();
+      expect(focusCalls, scenario).toBe(0);
+      expect(target.internalFocusReportTokens, scenario).toBeUndefined();
+    }
+  });
+
+  it('cleans rerender tokens while surfacing blur, render, and focus errors', () => {
+    const activeElement = { id: 'active-source' };
+    const blurThread: PaneFocusThread = {
+      id: 'thread-blur-error',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-blur-error' },
+      host: { contains: (node: unknown) => node === activeElement },
+      term: null,
+    };
+    const blurHarness = createPaneFocusHarness(
+      [blurThread],
+      blurThread.id,
+      activeElement,
+    );
+    const blurError = new Error('blur failed');
+    let blurReplaceCalls = 0;
+    blurThread.term = {
+      blur: () => { throw blurError; },
+      focus: () => undefined,
+    };
+    blurHarness.terminalHost.replaceChildren = () => {
+      blurReplaceCalls += 1;
+    };
+
+    expect(() => blurHarness.renderPaneWorkspace()).toThrow(blurError);
+    expect(blurReplaceCalls).toBe(0);
+    expect(blurThread.internalFocusReportTokens).toBeUndefined();
+    expect(blurHarness.shouldSuppressTerminalData(blurThread, '\x1b[O')).toBe(false);
+    expect(blurHarness.queued).toHaveLength(1);
+    blurHarness.queued.shift()?.();
+    expect(blurThread.internalFocusReportTokens).toBeUndefined();
+
+    const renderThread: PaneFocusThread = {
+      id: 'thread-render-error',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-render-error' },
+      host: { contains: (node: unknown) => node === activeElement },
+      term: null,
+    };
+    const renderHarness = createPaneFocusHarness(
+      [renderThread],
+      renderThread.id,
+      activeElement,
+    );
+    const renderError = new Error('replace failed');
+    const focusError = new Error('focus failed');
+    renderThread.term = {
+      blur: () => {
+        expect(
+          renderHarness.shouldSuppressTerminalData(renderThread, '\x1b[O'),
+        ).toBe(true);
+      },
+      focus: () => { throw focusError; },
+    };
+    renderHarness.terminalHost.replaceChildren = () => {
+      throw renderError;
+    };
+
+    expect(() => renderHarness.renderPaneWorkspace()).toThrow(renderError);
+    expect(renderThread.internalFocusReportTokens).toBeUndefined();
+    expect(renderHarness.queued).toHaveLength(1);
+    expect(() => renderHarness.queued.shift()?.()).toThrow(focusError);
+    expect(renderThread.internalFocusReportTokens).toBeUndefined();
+    expect(renderHarness.shouldSuppressTerminalData(renderThread, '\x1b[I')).toBe(false);
   });
 
   it('uses the shared accessible-name fallback for terminal, Web, and tool panes', () => {
@@ -477,6 +1790,13 @@ describe('Tauri physical terminal panes', () => {
     };
     const renderPaneWorkspace = compileFunction<() => void>(functionSource('renderPaneWorkspace'), {
       terminalHost,
+      focusedTerminalThreadForRender: () => null,
+      withTerminalFocusReportToken: (
+        _thread: unknown,
+        _report: string,
+        _policy: FocusReportPolicy,
+        action: () => unknown,
+      ) => action(),
       stageBrowserSurface: () => { calls.push('stage'); },
       stageGitSurface: () => { calls.push('stage-git'); },
       activePaneLayout: () => null,
@@ -491,6 +1811,7 @@ describe('Tauri physical terminal panes', () => {
         return activeFile;
       },
       state: { activeFileId: 'file-a' },
+      restoreRenderedTerminalFocus: () => undefined,
     });
 
     renderPaneWorkspace();
@@ -1299,6 +2620,7 @@ describe('Tauri physical terminal panes', () => {
     expect(refreshes).toBe(1);
   });
 
+
   it('refreshes an inactive-project worktree switch once after nested project activation', async () => {
     const project = {
       id: 'project',
@@ -1444,6 +2766,7 @@ describe('Tauri physical terminal panes', () => {
     expect(syncCalls).toBe(2);
   });
 
+
   it('refreshes direct focusThread by default and allows batched suppression', async () => {
     const state = { activeProjectId: 'project', activeThreadId: null as string | null };
     const project = {
@@ -1457,7 +2780,8 @@ describe('Tauri physical terminal panes', () => {
       projectId: project.id,
       worktreePath: '/repo',
       status: 'running',
-      term: { focus: () => undefined },
+      pane: { id: 'pane-a' },
+      term: { blur: () => undefined, focus: () => undefined },
     };
     let refreshes = 0;
     const focusThread = compileFunction<(
@@ -1466,6 +2790,7 @@ describe('Tauri physical terminal panes', () => {
     ) => Promise<boolean>>(functionSource('focusThread'), {
       findThread: (id: string) => (id === thread.id ? thread : null),
       showTerminalView: async () => true,
+      focusedTerminalThreadForRender: () => null,
       markActiveSurface: () => undefined,
       state,
       findProject: () => project,
@@ -1473,10 +2798,18 @@ describe('Tauri physical terminal panes', () => {
       paneLayoutFor: () => null,
       PsychePanes,
       renderPaneWorkspace: () => undefined,
+      withTerminalFocusReportToken: (
+        _thread: unknown,
+        _report: string,
+        _policy: FocusReportPolicy,
+        action: () => unknown,
+      ) => action(),
       renderGitSurface: () => false,
       refreshSidebar: () => undefined,
       requestAnimationFrame: (callback: () => void) => callback(),
       scheduleVisiblePaneFit: () => undefined,
+      isLiveThread: () => true,
+      terminalHost: { contains: () => true },
       syncBrowserBounds: () => undefined,
       setProjectStatus: () => undefined,
       statusLevel: () => 'ok',
@@ -1532,6 +2865,7 @@ describe('Tauri physical terminal panes', () => {
       functionSource('focusThread'), {
         findThread: (id: string) => id === thread.id ? thread : null,
         showTerminalView: async () => true,
+        focusedTerminalThreadForRender: () => null,
         markActiveSurface: () => undefined,
         state,
         findProject: (id: string) => id === nextProject.id ? nextProject : null,
@@ -1545,8 +2879,16 @@ describe('Tauri physical terminal panes', () => {
           return true;
         },
         refreshSidebar: () => undefined,
+        withTerminalFocusReportToken: (
+          _thread: unknown,
+          _report: string,
+          _policy: FocusReportPolicy,
+          action: () => unknown,
+        ) => action(),
         requestAnimationFrame: (callback: () => void) => callback(),
         scheduleVisiblePaneFit: () => undefined,
+        isLiveThread: () => true,
+        terminalHost: { hidden: false, contains: () => true },
         syncBrowserBounds: () => undefined,
         setProjectStatus: () => undefined,
         statusLevel: () => 'ok',
@@ -1599,6 +2941,8 @@ describe('Tauri physical terminal panes', () => {
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
+      ensureProjectCoven: async () => null,
+      setStatus: () => undefined,
       saveWorkspaceSoon: () => undefined,
       refreshStatusController: () => { refreshes.count += 1; },
     });
@@ -1619,7 +2963,7 @@ describe('Tauri physical terminal panes', () => {
         hidden: false,
       }],
     };
-    const defaultOptions = { refreshStatus: true };
+    const defaultOptions = { ensureCoven: false };
     const defaultFocusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }> = [];
     const defaultRefreshes = { count: 0 };
     const setActiveProject = createSetActiveProject(
@@ -1632,10 +2976,10 @@ describe('Tauri physical terminal panes', () => {
     await expect(setActiveProject(directProject.id, defaultOptions)).resolves.toBe(true);
     expect(defaultState.activeProjectId).toBe(directProject.id);
     expect(defaultFocusCalls).toEqual([
-      { id: 'thread-a', options: { refreshStatus: false } },
+      { id: 'thread-a', options: { ensureCoven: false, refreshStatus: false } },
     ]);
     expect(defaultRefreshes.count).toBe(1);
-    expect(defaultOptions).toEqual({ refreshStatus: true });
+    expect(defaultOptions).toEqual({ ensureCoven: false });
 
     const suppressedState = {
       activeProjectId: 'other',
@@ -2150,121 +3494,6 @@ describe('Tauri physical terminal panes', () => {
       expect(() => cssDeclarations(
         '.terminal-pane.focused:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)',
       )).toThrow();
-    });
-
-    it('hosts single and maximized root leaves directly on the pane canvas', () => {
-      expect(functionSource('renderPaneNode')).toMatch(
-        /if \(node\.type === "leaf"\)[\s\S]*return thread && thread\.pane \? thread\.pane : document\.createDocumentFragment\(\);/,
-      );
-      expect(functionSource('renderPaneWorkspace')).toMatch(
-        /var root = effectivePaneRoot\(layout\);[\s\S]*terminalHost\.appendChild\(renderPaneNode\(root, splitRatios\)\);/,
-      );
-      expect(functionSource('effectivePaneRoot')).toMatch(
-        /if \(layout\.maximizedLeafId\)[\s\S]*if \(maximized\) return maximized;/,
-      );
-    });
-
-    it('clips pane subtrees and owns the glow on each direct leaf branch', () => {
-      expect(cssDeclarations('.terminal-pane-branch').get('overflow')).toBe('hidden');
-      expect(cssDeclarations('.terminal-pane').get('overflow')).toBe('hidden');
-      expect(functionSource('renderPaneNode')).toMatch(
-        /first\.className = "terminal-pane-branch";[\s\S]*first\.appendChild\(renderPaneNode\(node\.first, splitRatios\)\);\s*syncPaneBranchStatusChrome\(first\);[\s\S]*second\.className = "terminal-pane-branch";[\s\S]*second\.appendChild\(renderPaneNode\(node\.second, splitRatios\)\);\s*syncPaneBranchStatusChrome\(second\)/,
-      );
-      expect(stylesCss).not.toMatch(
-        /\.terminal-pane-branch\s*\{[^}]*overflow:\s*visible;/s,
-      );
-    });
-
-    it('seeds replacement branches from current pane status without moving focus state', () => {
-      type FakeElement = {
-        className: string;
-        classList: { contains: (name: string) => boolean };
-        dataset: Record<string, string>;
-        style: Record<string, string>;
-        children: FakeElement[];
-        parentElement: FakeElement | null;
-        firstElementChild: FakeElement | null;
-        appendChild: (child: FakeElement) => FakeElement;
-      };
-      const createElement = (): FakeElement => {
-        let className = '';
-        const element = {
-          classList: {
-            contains: (name: string) => className.split(/\s+/).includes(name),
-          },
-          dataset: {} as Record<string, string>,
-          style: {} as Record<string, string>,
-          children: [] as FakeElement[],
-          parentElement: null as FakeElement | null,
-          appendChild(child: FakeElement) {
-            child.parentElement = element;
-            element.children.push(child);
-            return child;
-          },
-          get firstElementChild() {
-            return element.children[0] || null;
-          },
-          get className() {
-            return className;
-          },
-          set className(value: string) {
-            className = value;
-          },
-        };
-        return element;
-      };
-      const startingPane = createElement();
-      startingPane.className = 'terminal-pane focused';
-      startingPane.dataset.status = 'starting';
-      const failedPane = createElement();
-      failedPane.className = 'terminal-pane';
-      failedPane.dataset.status = 'failed';
-      const threads = new Map([
-        ['thread-a', { pane: startingPane }],
-        ['thread-b', { pane: failedPane }],
-      ]);
-      const syncPaneBranchStatusChrome = compileFunction<(branch: FakeElement) => void>(
-        functionSource('syncPaneBranchStatusChrome'),
-        {},
-      );
-      const renderPaneNode = compileFunction<(
-        node: Record<string, unknown>, ratios: Map<string, number>,
-      ) => FakeElement>(functionSource('renderPaneNode'), {
-        findThread: (id: string) => threads.get(id),
-        browserSurface: null,
-        gitSurfaceEl: null,
-        document: {
-          createElement,
-          createDocumentFragment: createElement,
-        },
-        createPaneDivider: () => createElement(),
-        syncPaneBranchStatusChrome,
-      });
-      const tree = {
-        id: 'split-a',
-        type: 'split',
-        orientation: 'column',
-        ratio: 0.5,
-        first: { type: 'leaf', threadId: 'thread-a' },
-        second: { type: 'leaf', threadId: 'thread-b' },
-      };
-
-      const initial = renderPaneNode(tree, new Map());
-      expect(initial.children[0].dataset.status).toBe('starting');
-      expect(initial.children[2].dataset.status).toBe('failed');
-      expect(startingPane.classList.contains('focused')).toBe(true);
-
-      startingPane.dataset.status = 'running';
-      failedPane.className = 'terminal-pane needs-attention';
-      const replacement = renderPaneNode(tree, new Map());
-      expect('status' in replacement.children[0].dataset).toBe(false);
-      expect('status' in replacement.children[2].dataset).toBe(false);
-
-      startingPane.dataset.status = 'exited';
-      failedPane.className = 'terminal-pane';
-      const cleared = renderPaneNode(tree, new Map());
-      expect(cleared.children[0].dataset.status).toBe('exited');
-      expect(cleared.children[2].dataset.status).toBe('failed');
     });
 
     it('double-clicking the header enters focus mode, but not on its buttons', () => {
