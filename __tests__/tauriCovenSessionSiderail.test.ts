@@ -459,6 +459,7 @@ function createRenderer(options: {
   setPicking?: { key: string; picked: string[] } | null;
   selectedSessionKey?: string;
   typeFilter?: string;
+  localStorageReadError?: unknown;
   localStorageWriteError?: unknown;
 } = {}) {
   const document = new FakeDocument();
@@ -472,7 +473,12 @@ function createRenderer(options: {
     storage.set(projectAppearancesKey, JSON.stringify(options.projectAppearances));
   }
   const localStorage = {
-    getItem: vi.fn((key: string) => storage.get(key) ?? null),
+    getItem: vi.fn((key: string) => {
+      if (options.localStorageReadError && key === projectAppearancesKey) {
+        throw options.localStorageReadError;
+      }
+      return storage.get(key) ?? null;
+    }),
     setItem: vi.fn((key: string, value: string) => {
       if (options.localStorageWriteError) throw options.localStorageWriteError;
       storage.set(key, String(value));
@@ -542,7 +548,6 @@ function createRenderer(options: {
     sessionFilter: options.typeFilter ?? 'all',
     sidebarTab: 'sessions',
   };
-  let projectAppearances = { ...(options.projectAppearances ?? {}) };
   const saveSettings = vi.fn();
   const saveWorkspaceSoon = vi.fn();
   const setSessionTypeFilter = vi.fn();
@@ -558,9 +563,13 @@ function createRenderer(options: {
     'var PROJECT_APPEARANCES_KEY = "psyche.tauri.project-appearances.v1";',
     'var focusSets = seedFocusSets;',
     'var setPicking = seedSetPicking;',
-    'var projectAppearances = seedProjectAppearances;',
+    'var deferredStatusMessages = [];',
     'var sessionTreeFocusKey = "";',
     'var isRestoringWorkspace = false;',
+    extractFunctionSource(mainJs, 'queueDeferredStatus'),
+    extractFunctionSource(mainJs, 'flushDeferredStatusMessages'),
+    extractFunctionSource(mainJs, 'loadProjectAppearances'),
+    'var projectAppearances = loadProjectAppearances();',
     extractFunctionSource(mainJs, 'paneLayoutKey'),
     extractFunctionSource(mainJs, 'findFocusSet'),
     extractFunctionSource(mainJs, 'setsForThread'),
@@ -620,9 +629,11 @@ function createRenderer(options: {
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
     'saveWorkspaceSoon', 'activateProjectWorktree', 'setSessionTypeFilter',
     'openSessionContextMenu', 'invoke', 'refreshCovenSessions', 'localStorage',
-    'seedProjectAppearances',
     `"use strict"; ${sources.join('\n')}; return {
-      render: renderSessionList,
+      render: function () {
+        renderSessionList();
+        flushDeferredStatusMessages();
+      },
       setFilter: function (value) { sessionFilter = value; },
       setDiscovery: function (value) { covenDiscovery = value; },
       armSessionClose: armSessionClose,
@@ -694,7 +705,6 @@ function createRenderer(options: {
     invoke,
     refreshCovenSessions,
     localStorage,
-    projectAppearances,
   ) as {
     render: () => void;
     setFilter: (value: string) => void;
@@ -943,6 +953,63 @@ describe('Tauri Coven session project rail', () => {
     expect(projectHead?.style.getPropertyValue('--project-accent-rgb')).toBe('145 111 235');
     expect(glyph?.textContent).toBe('✦');
     expect(glyph?.getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('keeps project header accent styles on slash-alpha rgb syntax', () => {
+    const projectHeaderStyles = styles.match(
+      /\/\* -------- Project header appearance bands --------[\s\S]*?\.session-project-head \.session-project-count \{[\s\S]*?\n\}/,
+    )?.[0] ?? '';
+
+    expect(projectHeaderStyles).toContain(
+      'rgb(var(--project-accent-rgb) / var(--project-band-border-alpha, 0.16))',
+    );
+    expect(projectHeaderStyles.match(/rgb\(var\(--project-accent-rgb\)\s*\/\s*/g) ?? [])
+      .toHaveLength(10);
+    expect(projectHeaderStyles).not.toContain('rgba(var(--project-accent-rgb),');
+  });
+
+  it('renders projects and surfaces deferred appearance load failures', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha',
+        name: 'Alpha',
+        root: '/alpha',
+        collapsed: false,
+        selectedWorktreePath: '/alpha',
+        worktrees: [{
+          path: '/alpha',
+          branch: 'main',
+          is_main: true,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'alpha',
+        worktreePath: '/alpha',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+      activeProjectId: 'alpha',
+      localStorageReadError: new Error('storage unavailable'),
+    });
+
+    renderer.render();
+
+    const projectGroup = renderer.sessionListEl.querySelector('.session-project');
+    const projectHead = renderer.sessionListEl.querySelector('.session-project-head');
+
+    expect(projectGroup).not.toBeNull();
+    expect(projectGroup?.dataset.projectAppearance).toBe('automatic');
+    expect(projectHead?.textContent).toContain('Alpha');
+    expect(renderer.projectAppearances()).toEqual({});
+    expect(renderer.setStatus).toHaveBeenCalledWith(
+      'project appearance load failed: Error: storage unavailable',
+      'error',
+    );
   });
 
   it('preserves in-memory project appearances and rerenders after save failures', () => {

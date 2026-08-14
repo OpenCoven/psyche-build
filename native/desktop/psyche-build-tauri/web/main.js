@@ -912,6 +912,7 @@
   var SETTINGS_KEY = "psyche.tauri.settings.v1";
   var PROJECT_APPEARANCES_KEY = "psyche.tauri.project-appearances.v1";
   var WORKSPACE_STATE_KEY = "psyche.tauri.workspace.v1";
+  var deferredStatusMessages = [];
   var settings = loadSettings();
   var projectAppearances = loadProjectAppearances();
   var isRestoringWorkspace = false;
@@ -926,6 +927,19 @@
     var n = parseFloat(value);
     if (!Number.isFinite(n)) return fallback;
     return Math.max(min, Math.min(max, n));
+  }
+  function queueDeferredStatus(text, level) {
+    deferredStatusMessages.push({
+      text: String(text),
+      level: typeof level === "string" ? level : "",
+    });
+  }
+  function flushDeferredStatusMessages() {
+    if (!deferredStatusMessages.length) return;
+    deferredStatusMessages.forEach(function (entry) {
+      setStatus(entry.text, entry.level);
+    });
+    deferredStatusMessages = [];
   }
   function loadSettings() {
     var defaults = {
@@ -957,7 +971,8 @@
       return PsycheSessions.parseProjectAppearances(
         localStorage.getItem(PROJECT_APPEARANCES_KEY)
       );
-    } catch (_) {
+    } catch (error) {
+      queueDeferredStatus("project appearance load failed: " + String(error), "error");
       return {};
     }
   }
@@ -11386,6 +11401,7 @@
     paneMetricsPollTimer = setInterval(refreshVisiblePaneMetrics, 15000);
     refreshVisiblePaneMetrics();
     if (typeof refreshStatusController === "function") refreshStatusController();
+    flushDeferredStatusMessages();
   }
 
   invoke("app_environment")
