@@ -1,5 +1,12 @@
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ControlClient } from '../src/control/client.js';
+import { createControlCredentialStore } from '../src/control/credentials.js';
+import { ControlServer, type ControlServerRuntime } from '../src/control/server.js';
+import type { ControlSnapshot } from '../src/control/types.js';
 import {
   TOOLS,
   closeMcpControlClients,
@@ -9,8 +16,14 @@ import {
 } from '../src/mcp/server.js';
 
 const restores: Array<() => void> = [];
+let cleanups: Array<() => Promise<void>> = [];
+let tempRoots: string[] = [];
 afterEach(async () => {
   while (restores.length) restores.pop()!();
+  await Promise.allSettled(cleanups.map(async (close) => close()));
+  cleanups = [];
+  await Promise.all(tempRoots.map((root) => rm(root, { recursive: true, force: true })));
+  tempRoots = [];
   await closeMcpControlClients();
   vi.restoreAllMocks();
 });
@@ -33,6 +46,257 @@ function fakeClient(overrides: Record<string, unknown> = {}): any {
   return {
     submit: vi.fn(), getState: vi.fn(), actionStatus: vi.fn(), close: vi.fn(async () => undefined),
     ...overrides,
+  };
+}
+
+function scopedSnapshot(projectRoot: string): ControlSnapshot {
+  return {
+    ownerEpoch: 1,
+    sequence: 9,
+    commands: {
+      'approval-own-action': {
+        command: { id: 'approval-own-action', payload: { taskId: 'task-own' } },
+        outcome: { status: 'succeeded' },
+        sequence: 4,
+      },
+      'approval-other-action': {
+        command: { id: 'approval-other-action', payload: { taskId: 'task-other' } },
+        outcome: { status: 'succeeded' },
+        sequence: 5,
+      },
+      'receipt-own-action': {
+        command: { id: 'receipt-own-action', payload: { taskId: 'task-own' } },
+        outcome: { status: 'succeeded' },
+        sequence: 6,
+      },
+      'receipt-other-action': {
+        command: { id: 'receipt-other-action', payload: { taskId: 'task-other' } },
+        outcome: { status: 'succeeded' },
+        sequence: 7,
+      },
+    },
+    leases: {
+      'pane-own': {
+        paneId: 'pane-own',
+        actorId: 'agent',
+        actorKind: 'psyche',
+        taskId: 'task-own',
+        revision: 2,
+        expiresAt: '2026-08-12T01:00:00.000Z',
+      },
+      'pane-other': {
+        paneId: 'pane-other',
+        actorId: 'agent',
+        actorKind: 'psyche',
+        taskId: 'task-other',
+        revision: 3,
+        expiresAt: '2026-08-12T01:00:00.000Z',
+      },
+    },
+    resources: [
+      {
+        kind: 'pane',
+        id: 'pane-own',
+        generation: 2,
+        projectRoot,
+        worktreeRoot: projectRoot,
+        tmuxPaneId: '%1',
+        writable: true,
+        outputSequence: 3,
+      },
+      {
+        kind: 'pane',
+        id: 'pane-other',
+        generation: 3,
+        projectRoot,
+        worktreeRoot: projectRoot,
+        tmuxPaneId: '%2',
+        writable: true,
+        outputSequence: 4,
+      },
+      {
+        kind: 'browser_tab',
+        id: 'tab-own',
+        generation: 4,
+        projectRoot,
+        worktreeRoot: projectRoot,
+        providerId: 'desktop-own',
+        webviewLabel: 'own',
+        url: 'https://own.example',
+        title: 'Own',
+        loading: false,
+        viewport: { width: 1280, height: 720 },
+      },
+      {
+        kind: 'browser_tab',
+        id: 'tab-other',
+        generation: 5,
+        projectRoot,
+        worktreeRoot: projectRoot,
+        providerId: 'desktop-other',
+        webviewLabel: 'other',
+        url: 'https://other.example',
+        title: 'Other',
+        loading: false,
+        viewport: { width: 1280, height: 720 },
+      },
+    ],
+    capabilityLeases: [
+      {
+        id: 'lease-own',
+        requestId: 'request-own',
+        revision: 2,
+        ownerEpoch: 1,
+        actorId: 'agent',
+        taskId: 'task-own',
+        grantedBy: 'operator',
+        grants: [
+          {
+            target: { kind: 'browser_tab', id: 'tab-own', generation: 4 },
+            capabilities: ['browser.inspect'],
+          },
+        ],
+        createdAt: '2026-08-12T00:00:00.000Z',
+        expiresAt: '2026-08-12T01:00:00.000Z',
+      },
+      {
+        id: 'lease-other',
+        requestId: 'request-other',
+        revision: 1,
+        ownerEpoch: 1,
+        actorId: 'agent',
+        taskId: 'task-other',
+        grantedBy: 'operator',
+        grants: [
+          {
+            target: { kind: 'browser_tab', id: 'tab-other', generation: 5 },
+            capabilities: ['browser.inspect'],
+          },
+        ],
+        createdAt: '2026-08-12T00:00:00.000Z',
+        expiresAt: '2026-08-12T01:00:00.000Z',
+      },
+    ],
+    leaseRequests: [
+      {
+        id: 'request-own',
+        ownerEpoch: 1,
+        actorId: 'agent',
+        taskId: 'task-own',
+        status: 'pending',
+        createdAt: '2026-08-12T00:00:00.000Z',
+        ttlMs: 60_000,
+        grants: [
+          {
+            target: { kind: 'pane', id: 'pane-own', generation: 2 },
+            capabilities: ['pane.observe'],
+          },
+        ],
+      },
+      {
+        id: 'request-other',
+        ownerEpoch: 1,
+        actorId: 'agent',
+        taskId: 'task-other',
+        status: 'pending',
+        createdAt: '2026-08-12T00:00:00.000Z',
+        ttlMs: 60_000,
+        grants: [
+          {
+            target: { kind: 'pane', id: 'pane-other', generation: 3 },
+            capabilities: ['pane.observe'],
+          },
+        ],
+      },
+    ],
+    approvals: [
+      {
+        id: 'approval-own',
+        status: 'pending',
+        actionId: 'approval-own-action',
+        ownerEpoch: 1,
+        leaseId: 'lease-own',
+        leaseRevision: 2,
+        resource: { kind: 'browser_tab', id: 'tab-own', generation: 4 },
+        capability: 'browser.inspect',
+        effect: { kind: 'script', target: 'tab-own' },
+        executablePayloadDigest: 'a'.repeat(64),
+        payloadDigest: 'b'.repeat(64),
+        createdAt: '2026-08-12T00:00:00.000Z',
+        expiresAt: '2026-08-12T01:00:00.000Z',
+      },
+      {
+        id: 'approval-other',
+        status: 'pending',
+        actionId: 'approval-other-action',
+        ownerEpoch: 1,
+        leaseId: 'lease-other',
+        leaseRevision: 1,
+        resource: { kind: 'browser_tab', id: 'tab-other', generation: 5 },
+        capability: 'browser.inspect',
+        effect: { kind: 'script', target: 'tab-other' },
+        executablePayloadDigest: 'c'.repeat(64),
+        payloadDigest: 'd'.repeat(64),
+        createdAt: '2026-08-12T00:00:00.000Z',
+        expiresAt: '2026-08-12T01:00:00.000Z',
+      },
+    ],
+    receipts: [
+      {
+        schema: 'psyche.control.receipt/v1',
+        actionId: 'receipt-own-action',
+        state: 'succeeded',
+        resource: { kind: 'pane', id: 'pane-own', generation: 2 },
+        createdAt: '2026-08-12T00:00:00.000Z',
+      },
+      {
+        schema: 'psyche.control.receipt/v1',
+        actionId: 'receipt-other-action',
+        state: 'succeeded',
+        resource: { kind: 'pane', id: 'pane-other', generation: 3 },
+        createdAt: '2026-08-12T00:00:00.000Z',
+      },
+    ],
+  } as unknown as ControlSnapshot;
+}
+
+async function realAgentHarness(
+  buildSnapshot: (projectRoot: string) => ControlSnapshot,
+): Promise<{ connect: () => Promise<ControlClient>; projectRoot: string }> {
+  const projectRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'psyche-mcp-agent-')));
+  tempRoots.push(projectRoot);
+  const endpoint = path.join(projectRoot, 'control.sock');
+  const credentials = await createControlCredentialStore({
+    projectRoot,
+    filePath: path.join(projectRoot, 'control-credentials.json'),
+  });
+  const snapshot = buildSnapshot(projectRoot);
+  const runtime: ControlServerRuntime = {
+    submit: vi.fn(async () => ({ status: 'succeeded' as const })),
+    snapshot: () => snapshot,
+    readEvents: () => ({ events: [], nextSequence: snapshot.sequence, gap: false }),
+  };
+  const server = await ControlServer.start({
+    endpoint,
+    projectRoot,
+    ownerEpoch: snapshot.ownerEpoch,
+    runtime,
+    credentials,
+  });
+  cleanups.push(() => server.close());
+  const token = await credentials.agentToken();
+  return {
+    projectRoot,
+    connect: async () => {
+      const client = await ControlClient.connect({
+        projectRoot,
+        endpoint,
+        token,
+        clientName: 'agent',
+      });
+      cleanups.push(() => client.close());
+      return client;
+    },
   };
 }
 
@@ -132,11 +396,81 @@ describe('agent surface MCP tools', () => {
     })) });
     inject({ controlClientForRoot: vi.fn(async () => client) });
 
-    const body = payload(await call('psyche_control_list', { project_root: '/repo' }));
+    const body = payload(await call('psyche_control_list', { project_root: '/repo', task_id: 'task-victim' }));
     expect(body).not.toHaveProperty('leases');
     expect(body).not.toHaveProperty('lease_requests');
     expect(JSON.stringify(body)).not.toContain('lease-victim');
     expect(JSON.stringify(body)).not.toContain('request-victim');
+  });
+
+  it('requires task scope for task-scoped read helpers', async () => {
+    const client = fakeClient();
+    inject({ controlClientForRoot: vi.fn(async () => client) });
+
+    for (const name of ['psyche_control_list', 'psyche_list_panes']) {
+      const response = await call(name, { project_root: '/repo' });
+      expect(response.error.code).toBe(-32602);
+    }
+    expect(client.getState).not.toHaveBeenCalled();
+  });
+
+  it('keeps own scoped control data visible to an agent while hiding unrelated state', async () => {
+    const { connect, projectRoot } = await realAgentHarness(scopedSnapshot);
+    inject({ controlClientForRoot: vi.fn(async () => connect()) });
+
+    const listed = payload(await call('psyche_control_list', {
+      project_root: projectRoot,
+      task_id: 'task-own',
+    }));
+    expect(listed).toMatchObject({
+      project_root: projectRoot,
+      resources: [
+        { kind: 'pane', id: 'pane-own', generation: 2 },
+        { kind: 'browser_tab', id: 'tab-own', generation: 4 },
+      ],
+      approvals: [{ id: 'approval-own', actionId: 'approval-own-action' }],
+      receipts: [{ actionId: 'receipt-own-action' }],
+    });
+    expect(listed.resources).toHaveLength(2);
+    expect(listed.approvals).toHaveLength(1);
+    expect(listed.receipts).toHaveLength(1);
+
+    const status = payload(await call('psyche_control_lease', {
+      operation: 'status',
+      project_root: projectRoot,
+      task_id: 'task-own',
+      request_id: 'request-own',
+    }));
+    expect(status).toMatchObject({
+      leases: [{ id: 'lease-own', taskId: 'task-own' }],
+      requests: [{ id: 'request-own', taskId: 'task-own' }],
+    });
+    expect(status.leases).toHaveLength(1);
+    expect(status.requests).toHaveLength(1);
+
+    const panes = payload(await call('psyche_list_panes', {
+      project_root: projectRoot,
+      task_id: 'task-own',
+    }));
+    expect(panes).toMatchObject({
+      project_root: projectRoot,
+      count: 1,
+      panes: [{ kind: 'pane', id: 'pane-own', generation: 2 }],
+    });
+
+    for (const body of [listed, status, panes]) {
+      for (const hidden of [
+        'pane-other',
+        'tab-other',
+        'lease-other',
+        'request-other',
+        'approval-other',
+        'receipt-other-action',
+        'task-other',
+      ]) {
+        expect(JSON.stringify(body)).not.toContain(hidden);
+      }
+    }
   });
 
   it('requires the originating request id to inspect a task lease', async () => {
@@ -235,7 +569,7 @@ describe('agent surface MCP tools', () => {
       })),
     })) });
 
-    await call('psyche_control_list', { project_root: '/repo' });
+    await call('psyche_control_list', { project_root: '/repo', task_id: 'task-1' });
     expect(close).toHaveBeenCalledOnce();
   });
 

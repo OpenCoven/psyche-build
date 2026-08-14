@@ -330,3 +330,7 @@ export interface ControlSnapshot {
   approvals: readonly Approval[];
   receipts: readonly ActionReceipt[];
 }
+
+export interface ControlSnapshotScope {
+  taskId?: string;
+}

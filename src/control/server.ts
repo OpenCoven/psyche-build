@@ -23,6 +23,7 @@ import type {
   ControlCommandInput,
   CommandOutcome,
   ControlSnapshot,
+  ControlSnapshotScope,
 } from './types.js';
 
 /** The minimal runtime surface the control server drives. */
@@ -199,9 +200,10 @@ export class ControlAuthority {
     return this.runtime.submit(command);
   }
 
-  snapshot(principal: ControlPrincipal): ControlSnapshot {
+  snapshot(principal: ControlPrincipal, scope: ControlSnapshotScope = {}): ControlSnapshot {
     const snapshot = this.runtime.snapshot();
     if (principal.kind === 'operator') return snapshot;
+    if (scope.taskId) return taskScopedSnapshot(snapshot, scope.taskId);
 
     // Surface metadata, command history, and authority records are
     // operator-only. In particular, capability leases are bearer-like:
@@ -211,6 +213,7 @@ export class ControlAuthority {
     return {
       ...snapshot,
       commands: {},
+      leases: {},
       resources: [],
       capabilityLeases: [],
       leaseRequests: [],
@@ -241,6 +244,91 @@ export class ControlAuthority {
       },
     };
   }
+}
+
+function taskScopedSnapshot(
+  snapshot: ControlSnapshot,
+  taskId: string,
+): ControlSnapshot {
+  const visibleActionIds = new Set(Object.values(snapshot.commands)
+    .filter((record) => commandTaskId(record.command) === taskId)
+    .map((record) => record.command.id));
+  const capabilityLeases = snapshot.capabilityLeases.filter((lease) => lease.taskId === taskId);
+  const leaseRequests = snapshot.leaseRequests.filter((request) => request.taskId === taskId);
+  const approvals = snapshot.approvals.filter((approval) => visibleActionIds.has(approval.actionId));
+  const receipts = snapshot.receipts.filter((receipt) => visibleActionIds.has(receipt.actionId));
+  const visibleResources = collectScopedResources(
+    snapshot,
+    taskId,
+    capabilityLeases,
+    leaseRequests,
+    approvals,
+    receipts,
+  );
+  return {
+    ...snapshot,
+    commands: {},
+    leases: {},
+    resources: visibleResources,
+    capabilityLeases,
+    leaseRequests,
+    approvals,
+    receipts,
+  };
+}
+
+function commandTaskId(command: ControlCommand): string | undefined {
+  const payload = command.payload as { taskId?: unknown };
+  return typeof payload.taskId === 'string' && payload.taskId ? payload.taskId : undefined;
+}
+
+function collectScopedResources(
+  snapshot: ControlSnapshot,
+  taskId: string,
+  capabilityLeases: readonly ControlSnapshot['capabilityLeases'][number][],
+  leaseRequests: readonly ControlSnapshot['leaseRequests'][number][],
+  approvals: readonly ControlSnapshot['approvals'][number][],
+  receipts: readonly ControlSnapshot['receipts'][number][],
+): readonly ControlSnapshot['resources'][number][] {
+  const resourcesById = new Map(snapshot.resources.map((resource) => [resource.id, resource]));
+  const visibleKeys = new Set<string>();
+  for (const lease of capabilityLeases) {
+    for (const grant of lease.grants) addVisibleTarget(visibleKeys, resourcesById, grant.target);
+  }
+  for (const request of leaseRequests) {
+    for (const grant of request.grants) addVisibleTarget(visibleKeys, resourcesById, grant.target);
+  }
+  for (const approval of approvals) addVisibleTarget(visibleKeys, resourcesById, approval.resource);
+  for (const receipt of receipts) addVisibleTarget(visibleKeys, resourcesById, receipt.resource);
+  for (const lease of Object.values(snapshot.leases)) {
+    if (lease.taskId === taskId) addVisiblePane(visibleKeys, resourcesById, lease.paneId);
+  }
+  return snapshot.resources.filter((resource) => visibleKeys.has(resourceKey(resource)));
+}
+
+function addVisibleTarget(
+  visibleKeys: Set<string>,
+  resourcesById: ReadonlyMap<string, ControlSnapshot['resources'][number]>,
+  target: { kind: string; id: string; generation?: number },
+): void {
+  if (target.kind === 'project') return;
+  const resource = resourcesById.get(target.id);
+  if (!resource || resource.kind !== target.kind) return;
+  if (typeof target.generation === 'number' && resource.generation !== target.generation) return;
+  visibleKeys.add(resourceKey(resource));
+}
+
+function addVisiblePane(
+  visibleKeys: Set<string>,
+  resourcesById: ReadonlyMap<string, ControlSnapshot['resources'][number]>,
+  paneId: string,
+): void {
+  const resource = resourcesById.get(paneId);
+  if (resource?.kind === 'pane') visibleKeys.add(resourceKey(resource));
+}
+
+function resourceKey(resource: ControlSnapshot['resources'][number]): string {
+  return `${resource.kind}\0${resource.id}\0${resource.generation}`;
 }
 
 /** Build an in-process authority for authorization unit tests. */
@@ -527,7 +615,7 @@ export class ControlServer {
           version: 1,
           type: 'state.result',
           requestId: request.requestId,
-          snapshot: this.authority.snapshot(principal),
+          snapshot: this.authority.snapshot(principal, { taskId: request.taskId }),
         });
         return;
       case 'events.read': {

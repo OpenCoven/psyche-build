@@ -7,6 +7,7 @@ import type {
   ControlCommandInput,
   CommandOutcome,
   ControlSnapshot,
+  ControlSnapshotScope,
 } from './types.js';
 
 export interface ControlClientPrincipal {
@@ -158,11 +159,12 @@ export class ControlClient {
     });
   }
 
-  getState(): Promise<ControlSnapshot> {
+  getState(scope: ControlSnapshotScope = {}): Promise<ControlSnapshot> {
     return this.request({
       version: 1,
       type: 'state.get',
       requestId: this.allocateRequestId(),
+      ...(scope.taskId === undefined ? {} : { taskId: scope.taskId }),
     }).then((response) => {
       if (response.type === 'state.result') return response.snapshot;
       throw responseError(response, 'state.get');

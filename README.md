@@ -150,7 +150,7 @@ same authenticated authority, policy, approval, and receipt path as the UI.
 
 | Tool | Does |
 |---|---|
-| `psyche_control_list` | List bounded controllable pane/browser resources, generations, and approvals |
+| `psyche_control_list` | List the bounded pane/browser resources, approvals, and receipts visible to one task |
 | `psyche_control_lease` | Request, inspect, or release scoped authority; it cannot grant or approve authority |
 | `psyche_pane_observe` | Read bounded pane output and status through an exact leased generation |
 | `psyche_pane_action` | Perform one typed leased pane action and return its canonical receipt |
@@ -158,7 +158,7 @@ same authenticated authority, policy, approval, and receipt path as the UI.
 | `psyche_browser_action` | Perform one typed leased browser action and return its canonical receipt |
 | `psyche_browser_script` | Submit an approval-gated browser script through an exact leased tab generation |
 | `psyche_control_action_status` | Read the latest canonical receipt without retrying; missing bounded history reports `unknown` |
-| `psyche_list_panes` | Compatibility alias that lists pane resources through the owner |
+| `psyche_list_panes` | Compatibility alias that lists pane resources visible to one task |
 | `psyche_create_pane` | Compatibility alias for leased pane creation through the owner |
 | `psyche_execute_task` | Compatibility alias that submits orchestration through the owner |
 | `psyche_kill_pane` | Compatibility alias for approved pane close through the owner |
@@ -166,10 +166,11 @@ same authenticated authority, policy, approval, and receipt path as the UI.
 | `psyche_list_rituals` | List built-in and project rituals |
 | `psyche_list_worktrees` | List git worktrees for the project |
 
-The compatibility mutation aliases require `task_id`, `lease_id`, and
-`lease_revision`; pane-specific aliases also require the current generation.
-Missing authority returns a structured `lease_missing` result without an
-effect.
+`psyche_control_list` and `psyche_list_panes` are task-scoped and require
+`task_id`. The compatibility mutation aliases require `task_id`, `lease_id`,
+and `lease_revision`; pane-specific aliases also require the current
+generation. Missing authority returns a structured `lease_missing` result
+without an effect.
 
 See [Agent surface control](./docs/AGENT-SURFACE-CONTROL.md) for the complete
 lease, approval, generation, browser-provider, redaction, and recovery model.

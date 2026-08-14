@@ -86,12 +86,232 @@ function sensitiveSnapshot(): ControlSnapshot {
         sequence: 2,
       },
     },
-    leases: {},
+    leases: {
+      'pane-secret': {
+        paneId: 'pane-secret',
+        actorId: 'agent-secret',
+        actorKind: 'psyche',
+        taskId: 'task-secret',
+        revision: 7,
+        expiresAt: '2026-08-12T01:00:00.000Z',
+      },
+    },
     resources: [{ id: 'tab-secret' }],
     capabilityLeases: [{ id: 'lease-secret' }],
     leaseRequests: [{ id: 'request-secret' }],
     approvals: [{ id: 'approval-secret' }],
     receipts: [{ id: 'receipt-secret' }],
+  } as unknown as ControlSnapshot;
+}
+
+function taskScopedSnapshot(): ControlSnapshot {
+  return {
+    ownerEpoch: 1,
+    sequence: 9,
+    commands: {
+      'approval-own-action': {
+        command: { id: 'approval-own-action', payload: { taskId: 'task-own' } },
+        outcome: { status: 'succeeded' },
+        sequence: 4,
+      },
+      'approval-other-action': {
+        command: { id: 'approval-other-action', payload: { taskId: 'task-other' } },
+        outcome: { status: 'succeeded' },
+        sequence: 5,
+      },
+      'receipt-own-action': {
+        command: { id: 'receipt-own-action', payload: { taskId: 'task-own' } },
+        outcome: { status: 'succeeded' },
+        sequence: 6,
+      },
+      'receipt-other-action': {
+        command: { id: 'receipt-other-action', payload: { taskId: 'task-other' } },
+        outcome: { status: 'succeeded' },
+        sequence: 7,
+      },
+    },
+    leases: {
+      'pane-own': {
+        paneId: 'pane-own',
+        actorId: 'agent',
+        actorKind: 'psyche',
+        taskId: 'task-own',
+        revision: 2,
+        expiresAt: '2026-08-12T01:00:00.000Z',
+      },
+      'pane-other': {
+        paneId: 'pane-other',
+        actorId: 'agent',
+        actorKind: 'psyche',
+        taskId: 'task-other',
+        revision: 3,
+        expiresAt: '2026-08-12T01:00:00.000Z',
+      },
+    },
+    resources: [
+      {
+        kind: 'pane',
+        id: 'pane-own',
+        generation: 2,
+        projectRoot: '/canonical/project',
+        worktreeRoot: '/canonical/project',
+        tmuxPaneId: '%1',
+        writable: true,
+        outputSequence: 3,
+      },
+      {
+        kind: 'pane',
+        id: 'pane-other',
+        generation: 3,
+        projectRoot: '/canonical/project',
+        worktreeRoot: '/canonical/project',
+        tmuxPaneId: '%2',
+        writable: true,
+        outputSequence: 4,
+      },
+      {
+        kind: 'browser_tab',
+        id: 'tab-own',
+        generation: 4,
+        projectRoot: '/canonical/project',
+        worktreeRoot: '/canonical/project',
+        providerId: 'desktop-own',
+        webviewLabel: 'own',
+        url: 'https://own.example',
+        title: 'Own',
+        loading: false,
+        viewport: { width: 1280, height: 720 },
+      },
+      {
+        kind: 'browser_tab',
+        id: 'tab-other',
+        generation: 5,
+        projectRoot: '/canonical/project',
+        worktreeRoot: '/canonical/project',
+        providerId: 'desktop-other',
+        webviewLabel: 'other',
+        url: 'https://other.example',
+        title: 'Other',
+        loading: false,
+        viewport: { width: 1280, height: 720 },
+      },
+    ],
+    capabilityLeases: [
+      {
+        id: 'lease-own',
+        requestId: 'request-own',
+        revision: 2,
+        ownerEpoch: 1,
+        actorId: 'agent',
+        taskId: 'task-own',
+        grantedBy: 'operator',
+        grants: [
+          {
+            target: { kind: 'browser_tab', id: 'tab-own', generation: 4 },
+            capabilities: ['browser.inspect'],
+          },
+        ],
+        createdAt: '2026-08-12T00:00:00.000Z',
+        expiresAt: '2026-08-12T01:00:00.000Z',
+      },
+      {
+        id: 'lease-other',
+        requestId: 'request-other',
+        revision: 1,
+        ownerEpoch: 1,
+        actorId: 'agent',
+        taskId: 'task-other',
+        grantedBy: 'operator',
+        grants: [
+          {
+            target: { kind: 'browser_tab', id: 'tab-other', generation: 5 },
+            capabilities: ['browser.inspect'],
+          },
+        ],
+        createdAt: '2026-08-12T00:00:00.000Z',
+        expiresAt: '2026-08-12T01:00:00.000Z',
+      },
+    ],
+    leaseRequests: [
+      {
+        id: 'request-own',
+        ownerEpoch: 1,
+        actorId: 'agent',
+        taskId: 'task-own',
+        status: 'pending',
+        createdAt: '2026-08-12T00:00:00.000Z',
+        ttlMs: 60_000,
+        grants: [
+          {
+            target: { kind: 'pane', id: 'pane-own', generation: 2 },
+            capabilities: ['pane.observe'],
+          },
+        ],
+      },
+      {
+        id: 'request-other',
+        ownerEpoch: 1,
+        actorId: 'agent',
+        taskId: 'task-other',
+        status: 'pending',
+        createdAt: '2026-08-12T00:00:00.000Z',
+        ttlMs: 60_000,
+        grants: [
+          {
+            target: { kind: 'pane', id: 'pane-other', generation: 3 },
+            capabilities: ['pane.observe'],
+          },
+        ],
+      },
+    ],
+    approvals: [
+      {
+        id: 'approval-own',
+        status: 'pending',
+        actionId: 'approval-own-action',
+        ownerEpoch: 1,
+        leaseId: 'lease-own',
+        leaseRevision: 2,
+        resource: { kind: 'browser_tab', id: 'tab-own', generation: 4 },
+        capability: 'browser.inspect',
+        effect: { kind: 'script', target: 'tab-own' },
+        executablePayloadDigest: 'a'.repeat(64),
+        payloadDigest: 'b'.repeat(64),
+        createdAt: '2026-08-12T00:00:00.000Z',
+        expiresAt: '2026-08-12T01:00:00.000Z',
+      },
+      {
+        id: 'approval-other',
+        status: 'pending',
+        actionId: 'approval-other-action',
+        ownerEpoch: 1,
+        leaseId: 'lease-other',
+        leaseRevision: 1,
+        resource: { kind: 'browser_tab', id: 'tab-other', generation: 5 },
+        capability: 'browser.inspect',
+        effect: { kind: 'script', target: 'tab-other' },
+        executablePayloadDigest: 'c'.repeat(64),
+        payloadDigest: 'd'.repeat(64),
+        createdAt: '2026-08-12T00:00:00.000Z',
+        expiresAt: '2026-08-12T01:00:00.000Z',
+      },
+    ],
+    receipts: [
+      {
+        schema: 'psyche.control.receipt/v1',
+        actionId: 'receipt-own-action',
+        state: 'succeeded',
+        resource: { kind: 'pane', id: 'pane-own', generation: 2 },
+        createdAt: '2026-08-12T00:00:00.000Z',
+      },
+      {
+        schema: 'psyche.control.receipt/v1',
+        actionId: 'receipt-other-action',
+        state: 'succeeded',
+        resource: { kind: 'pane', id: 'pane-other', generation: 3 },
+        createdAt: '2026-08-12T00:00:00.000Z',
+      },
+    ],
   } as unknown as ControlSnapshot;
 }
 
@@ -279,6 +499,7 @@ describe('control server authorization', () => {
         ownerEpoch: 1,
         sequence: 2,
         commands: {},
+        leases: {},
         resources: [],
         capabilityLeases: [],
         leaseRequests: [],
@@ -286,6 +507,46 @@ describe('control server authorization', () => {
         receipts: [],
       });
       expect(JSON.stringify(snapshot)).not.toContain('secret');
+    }
+  });
+
+  it('returns task-scoped surface data to non-operator principals without exposing legacy leases', () => {
+    const server = createControlServerForTest({
+      runtime: stubRuntime(vi.fn(), taskScopedSnapshot()),
+    });
+
+    for (const kind of ['agent', 'compatibility'] as const) {
+      const snapshot = server.snapshot({ id: kind, kind, capabilities: ['read'] }, { taskId: 'task-own' });
+      expect(snapshot).toMatchObject({
+        ownerEpoch: 1,
+        sequence: 9,
+        commands: {},
+        leases: {},
+        resources: [
+          { kind: 'pane', id: 'pane-own', generation: 2 },
+          { kind: 'browser_tab', id: 'tab-own', generation: 4 },
+        ],
+        capabilityLeases: [{ id: 'lease-own', taskId: 'task-own' }],
+        leaseRequests: [{ id: 'request-own', taskId: 'task-own' }],
+        approvals: [{ id: 'approval-own', actionId: 'approval-own-action' }],
+        receipts: [{ actionId: 'receipt-own-action' }],
+      });
+      expect(snapshot.resources).toHaveLength(2);
+      expect(snapshot.capabilityLeases).toHaveLength(1);
+      expect(snapshot.leaseRequests).toHaveLength(1);
+      expect(snapshot.approvals).toHaveLength(1);
+      expect(snapshot.receipts).toHaveLength(1);
+      for (const hidden of [
+        'pane-other',
+        'tab-other',
+        'lease-other',
+        'request-other',
+        'approval-other',
+        'receipt-other-action',
+        'task-other',
+      ]) {
+        expect(JSON.stringify(snapshot)).not.toContain(hidden);
+      }
     }
   });
 
@@ -328,6 +589,7 @@ describe('control server authorization', () => {
         ownerEpoch: 1,
         sequence: 2,
         commands: {},
+        leases: {},
         resources: [],
         capabilityLeases: [],
         leaseRequests: [],
