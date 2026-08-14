@@ -286,7 +286,12 @@ export function renderAgentControlDrawer(container, model, callbacks = {}) {
   for (const lease of model.groups.active) {
     container.append(renderLease(document, lease, normalizedCallbacks, state, renderedKeys));
   }
-  appendOverflow(document, container, model.overflow?.leaseRequests, 'lease requests');
+  appendOverflow(
+    document,
+    container,
+    model.overflow?.leaseRequests,
+    model.overflow?.leaseRequests === 1 ? 'requested lease request' : 'requested lease requests',
+  );
   appendOverflow(document, container, model.overflow?.leases, 'leases');
   appendOverflow(document, container, model.overflow?.approvals, 'approvals');
   for (const [actionKey, failure] of state.failures) {

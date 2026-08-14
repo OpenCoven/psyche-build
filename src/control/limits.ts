@@ -1,5 +1,6 @@
 export const AGENT_CONTROL_LIMITS = Object.freeze({
   leaseTtlMs: 30 * 60_000,
+  leaseRequestRecords: 1_000,
   leaseRequestGrants: 32,
   leaseRequestCapabilitiesPerGrant: 12,
   leaseRequestTextBytes: 128,

@@ -106,6 +106,7 @@ export function createAgentControlModel(snapshot, options = {}) {
       lease
       && !lease.expired
       && lease.ownerEpoch === ownerEpoch
+      && Number(approval.ownerEpoch || 0) === ownerEpoch
       && lease.revision === Number(approval.leaseRevision || 0),
     );
     return {
@@ -178,7 +179,7 @@ export function createAgentControlModel(snapshot, options = {}) {
     badges,
     resources,
     overflow: {
-      leaseRequests: boundedRequests.overflow + boundedRevokedRequests.overflow,
+      leaseRequests: boundedRequests.overflow,
       leases: Math.max(0, asArray(snapshot && snapshot.capabilityLeases).length
         - AGENT_CONTROL_UI_LIMITS.cardsPerGroup),
       approvals: boundedApprovals.overflow,

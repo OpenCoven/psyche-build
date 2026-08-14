@@ -388,6 +388,9 @@ export class ControlRuntime {
           if (this.leaseRequests.has(command.id)) {
             throw codedRuntimeError('lease_request_conflict', 'lease request ID already exists');
           }
+          if (this.leaseRequests.size >= AGENT_CONTROL_LIMITS.leaseRequestRecords) {
+            throw codedRuntimeError('lease_request_capacity', 'lease request capacity is exhausted');
+          }
           this.assertLeaseRequestBounds(command);
           const request: LeaseRequestRecord = Object.freeze({
             id: command.id, ownerEpoch: command.ownerEpoch,
@@ -400,11 +403,6 @@ export class ControlRuntime {
             }))),
           });
           this.leaseRequests.set(request.id, request);
-          while (this.leaseRequests.size > MAX_COMMAND_RECORDS) {
-            const oldest = this.leaseRequests.keys().next().value;
-            if (oldest === undefined) break;
-            this.leaseRequests.delete(oldest);
-          }
           return this.appendTerminal(command, succeededOutcome({ requestId: request.id }));
         }
         case 'lease.grant': {

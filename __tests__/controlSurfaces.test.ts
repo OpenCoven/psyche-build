@@ -131,6 +131,7 @@ describe('SurfaceRegistry', () => {
   it('pins all fixed agent-control limits', () => {
     expect(AGENT_CONTROL_LIMITS).toEqual({
       leaseTtlMs: 30 * 60_000,
+      leaseRequestRecords: 1_000,
       leaseRequestGrants: 32,
       leaseRequestCapabilitiesPerGrant: 12,
       leaseRequestTextBytes: 128,

@@ -671,7 +671,7 @@ describe('agent control operator model', () => {
     const document = new FakeDocument();
     const content = document.createElement('div');
     renderAgentControlDrawer(content, model);
-    expect(content.textContent).toContain('+901 more lease requests');
+    expect(content.textContent).toContain('+901 more requested lease requests');
     expect(content.textContent).toContain('+969 more resources');
     expect(content.textContent).toContain('+989 more capabilities');
     expect(content.textContent).not.toContain('x'.repeat(256));
@@ -743,6 +743,36 @@ describe('agent control operator model', () => {
     expect(model.approvals[0]).toMatchObject({
       leaseCurrent: false, canApprove: false, canDeny: false, canRevokeLease: false,
     });
+  });
+
+  it('disables approval actions when the approval belongs to another owner epoch', () => {
+    const restarted = snapshot(8);
+    restarted.approvals[0].ownerEpoch = 7;
+    const model = createAgentControlModel(restarted, { now: NOW, operator: true });
+    expect(model.approvals[0]).toMatchObject({
+      leaseCurrent: false, canApprove: false, canDeny: false, canRevokeLease: false,
+    });
+  });
+
+  it('reports only rendered pending request overflow with an exact label', () => {
+    const crowded = snapshot();
+    const template = crowded.leaseRequests[0];
+    crowded.leaseRequests = [
+      ...Array.from({ length: 101 }, (_, index) => ({
+        ...template, id: `pending-${index}`, status: 'pending',
+      })),
+      ...Array.from({ length: 102 }, (_, index) => ({
+        ...template, id: `revoked-${index}`, status: 'revoked',
+      })),
+    ];
+    const model = createAgentControlModel(crowded, { now: NOW, operator: true });
+    expect(model.overflow).toMatchObject({ leaseRequests: 1 });
+    expect(model.overflow).not.toHaveProperty('revokedLeaseRequests');
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    renderAgentControlDrawer(content, model);
+    expect(content.textContent).toContain('+1 more requested lease request');
+    expect(content.textContent).not.toContain('more revoked lease request');
   });
 
   it('unlocks an action and exposes a synchronous refresh failure', async () => {

@@ -792,6 +792,51 @@ describe('ControlRuntime', () => {
     })).resolves.toMatchObject({ status: 'failed', code: 'lease_request_conflict' });
   });
 
+  it('retains every request identity and rejects new requests at capacity', async () => {
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
+    const request = (id: string, taskId = `task-${id}`) => command({
+      id, idempotencyKey: `idem-${id}`, kind: 'lease.request', ownerEpoch: 7,
+      actor: { id: `agent-${id}`, kind: 'psyche' }, payload: {
+        taskId, ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: '/repo' }, capabilities: ['pane.create'] }],
+      },
+    }) as ControlCommand;
+    const retained = request('retained');
+    const retainedOutcome = await runtime.submit(retained);
+    for (let index = 1; index < 1_000; index += 1) {
+      await runtime.submit(request(`request-${index}`));
+    }
+
+    await expect(runtime.submit(request('request-1001')))
+      .resolves.toMatchObject({ status: 'failed', code: 'lease_request_capacity' });
+    await expect(runtime.submit(retained)).resolves.toEqual(retainedOutcome);
+    await expect(runtime.submit({
+      ...retained,
+      idempotencyKey: 'retained-widened',
+      payload: {
+        taskId: 'task-widened', ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: '/other' }, capabilities: ['pane.create'] }],
+      },
+    } as ControlCommand)).resolves.toMatchObject({ status: 'failed', code: 'lease_request_conflict' });
+
+    const beforeGrant = runtime.snapshot();
+    expect(beforeGrant.leaseRequests).toHaveLength(1_000);
+    expect(beforeGrant.leaseRequests).toContainEqual(expect.objectContaining({
+      id: 'retained', taskId: 'task-retained', status: 'pending',
+    }));
+    expect(beforeGrant.leaseRequests).toContainEqual(expect.objectContaining({
+      id: 'request-999', status: 'pending',
+    }));
+    await expect(runtime.submit(command({
+      id: 'grant-retained', idempotencyKey: 'grant-retained', kind: 'lease.grant', ownerEpoch: 7,
+      payload: { requestId: 'retained' },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'succeeded' });
+    expect(runtime.snapshot()).toMatchObject({
+      leaseRequests: expect.arrayContaining([expect.objectContaining({ id: 'retained', status: 'granted' })]),
+      capabilityLeases: [expect.objectContaining({ requestId: 'retained', actorId: 'agent-retained' })],
+    });
+  });
+
   it('requires a project pane-create lease before orchestration execution', async () => {
     handlers.executeOrchestration = vi.fn(async () => ({ ok: true }));
     const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
