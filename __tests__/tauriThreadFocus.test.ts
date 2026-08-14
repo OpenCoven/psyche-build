@@ -68,7 +68,7 @@ function focusDependencies(
     isLiveThread: (thread: unknown) => state.threads.includes(thread),
     terminalHost: { hidden: false, contains: () => true },
     scheduleTerminalPaneFits: vi.fn(),
-    syncBrowserBounds: vi.fn(),
+    scheduleBrowserBounds: vi.fn(),
     setProjectStatus: vi.fn(),
     statusLevel: () => 'ok',
     refreshStatusController: vi.fn(),
@@ -154,7 +154,7 @@ describe('Tauri thread focus activation', () => {
     frames.shift()!();
     expect(thread.terminalController.focus).not.toHaveBeenCalled();
     expect(dependencies.scheduleTerminalPaneFits).toHaveBeenCalledTimes(1);
-    expect(dependencies.syncBrowserBounds).toHaveBeenCalledTimes(1);
+    expect(dependencies.scheduleBrowserBounds).toHaveBeenCalledTimes(1);
   });
 
   it.each(['exited', 'failed'])(
