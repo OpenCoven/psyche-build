@@ -275,7 +275,7 @@ describe('desktop shell wiring', () => {
 
   it('timestamps PTY output as soon as a live thread receives bytes', () => {
     expect(mainJs).toMatch(
-      /listen\("pty:data-batch", function \(event\) \{[\s\S]{0,260}var thread = findThread\(payload\.threadId\);[\s\S]{0,120}if \(!isLiveThread\(thread\)\) return;[\s\S]{0,160}routePtyBatch\(payload\)[\s\S]{0,120}thread\.lastOutputAt = Date\.now\(\);/,
+      /listen\("pty:data-batch", function \(event\) \{[\s\S]{0,260}var thread = findThread\(payload\.threadId\);[\s\S]{0,120}if \(!isLiveThread\(thread\)\) return;[\s\S]{0,200}terminalController\.receive\(payload\)[\s\S]{0,120}thread\.lastOutputAt = Date\.now\(\);/,
 
     );
   });
@@ -309,7 +309,7 @@ describe('desktop shell wiring', () => {
 
   it('samples terminal tails once for working state before gating attention', () => {
     expect(functionSource('sampleThreadAttention')).toMatch(
-      /var tail = terminalTail\(thread\.term, ATTENTION_TAIL_LINES\);[\s\S]{0,120}thread\.isWorking = PsycheSessions\.sidebarTailIsWorking\(tail\);[\s\S]{0,420}if \(!threadWantsAttentionTracking\(thread\)\) \{/,
+      /var tail = thread\.terminalController\.tail\(ATTENTION_TAIL_LINES\);[\s\S]{0,160}thread\.isWorking = PsycheSessions\.sidebarTailIsWorking\(tail\);[\s\S]{0,420}if \(!threadWantsAttentionTracking\(thread\)\) \{/,
     );
   });
 
@@ -408,6 +408,9 @@ describe('desktop shell wiring', () => {
       }>,
       attentionById: Map<string, boolean>,
     ) => {
+      threads.forEach((thread) => {
+        Object.assign(thread, { terminalController: { tail: () => '' } });
+      });
       const renderCalls: string[] = [];
       const syncCalls: string[] = [];
       const retained: string[] = [];
@@ -433,7 +436,6 @@ describe('desktop shell wiring', () => {
       const sampleThreadAttention = compileFunction<() => void>(source, {
         ATTENTION_TAIL_LINES: 14,
         Date: { now: () => 1000 },
-        terminalTail: () => '',
         PsycheSessions: {
           sidebarTailIsWorking: () => false,
           deriveLocalSidebarStatus: (thread: { needsAttention?: boolean; steadyStatusKey: string }) => ({
@@ -536,8 +538,10 @@ describe('desktop shell wiring', () => {
     });
   });
 
-  it('reads what the terminal shows rather than the bytes that produced it', () => {
-    expect(mainJs).toMatch(/function terminalTail\(term, lines\)[\s\S]{0,400}translateToString\(true\)/);
+  it('reads terminal tails through the pane controller', () => {
+    expect(functionSource('sampleThreadAttention')).toContain(
+      'thread.terminalController.tail(ATTENTION_TAIL_LINES)',
+    );
   });
 
   it('keeps shells out of attention tracking even while sampling their work state', () => {
@@ -551,7 +555,7 @@ describe('desktop shell wiring', () => {
       /function routeTerminalData\(thread, data\) \{\s*if \(consumeTerminalDataSuppression\(thread, data\)\) return false;\s*sendToThread\(thread, data\);\s*return true;\s*\}/
     );
     expect(mainJs).toMatch(
-      /term\.onData\(function \(data\) \{\s*routeTerminalData\(thread, data\);\s*\}\);/
+      /onData: function \(data\) \{\s*routeTerminalData\(thread, data\);\s*\}/
     );
     expect(functionSource('localSessionContextActions')).toContain(
       'actions.push({ label: "Interrupt", run: callbacks.interrupt });',
@@ -645,7 +649,7 @@ describe('desktop shell wiring', () => {
 
   it('clears attention on the bell and on exit', () => {
     const handlePtyExit = functionSource('handlePtyExit');
-    expect(mainJs).toMatch(/term\.onBell\(function \(\)[\s\S]{0,200}attentionTracker\.bell\(thread\.id\)/);
+    expect(mainJs).toMatch(/onBell: function \(\)[\s\S]{0,200}attentionTracker\.bell\(thread\.id\)/);
     expect(handlePtyExit).toMatch(
       /thread\.status = "exited";[\s\S]*thread\.isWorking = false;[\s\S]*clearThreadAttention\(thread\)/,
     );

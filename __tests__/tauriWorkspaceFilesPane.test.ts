@@ -270,8 +270,10 @@ describe('native Files pane layout contract', () => {
     ]) {
       expect(extractFunctionSource(name), name).toContain('canvasSurfaceById');
     }
+    const terminalFitSource = extractFunctionSource('scheduleTerminalPaneFits');
+    expect(terminalFitSource).toContain('thread.terminalController.scheduleFit()');
+    expect(terminalFitSource).not.toContain('canvasSurfaceById');
     for (const name of [
-      'fitVisiblePanes',
       'handlePtyExit',
       'resolveImageDropTarget',
       'applySetScopeForThread',

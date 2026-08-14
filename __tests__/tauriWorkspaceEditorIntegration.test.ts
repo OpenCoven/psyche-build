@@ -781,7 +781,7 @@ describe('native CodeMirror workspace editor surface', () => {
         renderPaneMinimap: () => undefined,
         refreshTabs: () => undefined,
         requestAnimationFrame: () => undefined,
-        scheduleVisiblePaneFit: () => undefined,
+        scheduleTerminalPaneFits: () => undefined,
         guardDirtyFile: () => { dirtyGuards += 1; return false; },
       },
     );
@@ -1172,7 +1172,7 @@ describe('native CodeMirror workspace editor surface', () => {
         renderPaneMinimap: () => undefined,
         refreshTabs: () => undefined,
         requestAnimationFrame: () => undefined,
-        scheduleVisiblePaneFit: () => undefined,
+        scheduleTerminalPaneFits: () => undefined,
       },
     );
 
@@ -1206,7 +1206,7 @@ describe('native CodeMirror workspace editor surface', () => {
         },
         refreshTabs: () => { calls.push('tabs'); },
         requestAnimationFrame: (callback: () => void) => callback(),
-        scheduleVisiblePaneFit: () => { calls.push('fit'); },
+        scheduleTerminalPaneFits: () => { calls.push('fit'); },
       },
     );
 
