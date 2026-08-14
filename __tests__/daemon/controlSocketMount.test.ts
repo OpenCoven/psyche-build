@@ -39,6 +39,8 @@ async function startMountedDaemon(): Promise<{
   operatorToken: string;
   recordedKeys: string[];
   recordedResizes: Array<{ paneId: string; cols: number; rows: number }>;
+  recordedFocuses: string[];
+  recordedKills: string[];
   launched: Array<{ harness: string; prompt: string }>;
 }> {
   const projectRoot = await mkdtemp(path.join(tmpdir(), 'psyche-mount-proj-'));
@@ -51,17 +53,23 @@ async function startMountedDaemon(): Promise<{
   );
 
   // Recording tmux: capture the effect-boundary calls so a mutation driven
-  // through the mounted socket can be asserted to reach real tmux. The resize
-  // test asserts against recordedResizes; recordedKeys is captured for parity
-  // with the sendKeysHex boundary.
+  // through the mounted socket can be asserted to reach real tmux.
   const recordedKeys: string[] = [];
   const recordedResizes: Array<{ paneId: string; cols: number; rows: number }> = [];
+  const recordedFocuses: string[] = [];
+  const recordedKills: string[] = [];
   const tmux = new TmuxControl('psyche-mount-test');
   vi.spyOn(tmux, 'sendKeysHex').mockImplementation((_paneId: string, data: Buffer) => {
     recordedKeys.push(data.toString('hex'));
   });
   vi.spyOn(tmux, 'resizePane').mockImplementation((paneId: string, cols: unknown, rows: unknown) => {
     recordedResizes.push({ paneId, cols: Number(cols), rows: Number(rows) });
+  });
+  vi.spyOn(tmux, 'selectPane').mockImplementation((paneId: string) => {
+    recordedFocuses.push(paneId);
+  });
+  vi.spyOn(tmux, 'killPane').mockImplementation((paneId: string) => {
+    recordedKills.push(paneId);
   });
 
   // Stub coven client: launchSession returns a summary scoped INSIDE the
@@ -116,6 +124,8 @@ async function startMountedDaemon(): Promise<{
     operatorToken: await credentials.operatorToken(),
     recordedKeys,
     recordedResizes,
+    recordedFocuses,
+    recordedKills,
     launched,
   };
 }
@@ -163,6 +173,60 @@ describe('mounted control socket end-to-end', () => {
 
     expect(outcome).toMatchObject({ status: 'failed', errorCode: 'pane_not_found' });
     expect(daemon.recordedResizes).toEqual([]);
+  });
+
+  it('sendInput rejects an unregistered pane with pane_not_found', async () => {
+    const daemon = await startMountedDaemon();
+    const client = await ControlClient.connect({
+      projectRoot: daemon.projectRoot,
+      endpoint: daemon.endpoint,
+      token: daemon.operatorToken,
+      clientName: 'test-operator',
+    });
+    cleanups.push(() => client.close());
+
+    const outcome = await client.submit(
+      inputCommand('pane.input', { paneId: '%999', dataBase64: Buffer.from('x').toString('base64') }),
+    );
+
+    expect(outcome).toMatchObject({ status: 'failed', errorCode: 'pane_not_found' });
+    expect(daemon.recordedKeys).toEqual([]);
+  });
+
+  it('focusPane rejects an unregistered pane with pane_not_found', async () => {
+    const daemon = await startMountedDaemon();
+    const client = await ControlClient.connect({
+      projectRoot: daemon.projectRoot,
+      endpoint: daemon.endpoint,
+      token: daemon.operatorToken,
+      clientName: 'test-operator',
+    });
+    cleanups.push(() => client.close());
+
+    const outcome = await client.submit(
+      inputCommand('pane.focus', { paneId: '%999' }),
+    );
+
+    expect(outcome).toMatchObject({ status: 'failed', errorCode: 'pane_not_found' });
+    expect(daemon.recordedFocuses).toEqual([]);
+  });
+
+  it('killPane rejects an unregistered pane with pane_not_found', async () => {
+    const daemon = await startMountedDaemon();
+    const client = await ControlClient.connect({
+      projectRoot: daemon.projectRoot,
+      endpoint: daemon.endpoint,
+      token: daemon.operatorToken,
+      clientName: 'test-operator',
+    });
+    cleanups.push(() => client.close());
+
+    const outcome = await client.submit(
+      inputCommand('pane.kill', { paneId: '%999' }),
+    );
+
+    expect(outcome).toMatchObject({ status: 'failed', errorCode: 'pane_not_found' });
+    expect(daemon.recordedKills).toEqual([]);
   });
 
   it('drives a coven session launch and returns a typed summary', async () => {

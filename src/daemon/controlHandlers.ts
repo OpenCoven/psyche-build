@@ -83,19 +83,23 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       if (!bytes) {
         throw Object.assign(new Error('input must be base64'), { code: 'bad_base64' });
       }
-      deps.tmux.sendKeysHex(await resolvePaneId(payload.paneId), bytes);
+      const tmuxPaneId = await resolvePaneId(payload.paneId);
+      deps.tmux.sendKeysHex(tmuxPaneId, bytes);
     },
 
     async resizePane(payload): Promise<void> {
-      deps.tmux.resizePane(await resolvePaneId(payload.paneId), payload.cols, payload.rows);
+      const tmuxPaneId = await resolvePaneId(payload.paneId);
+      deps.tmux.resizePane(tmuxPaneId, payload.cols, payload.rows);
     },
 
     async focusPane(payload): Promise<void> {
-      deps.tmux.selectPane(await resolvePaneId(payload.paneId));
+      const tmuxPaneId = await resolvePaneId(payload.paneId);
+      deps.tmux.selectPane(tmuxPaneId);
     },
 
     async killPane(payload): Promise<void> {
-      deps.tmux.killPane(await resolvePaneId(payload.paneId));
+      const tmuxPaneId = await resolvePaneId(payload.paneId);
+      deps.tmux.killPane(tmuxPaneId);
     },
 
     executeOrchestration: notSupported('orchestration.execute'),
