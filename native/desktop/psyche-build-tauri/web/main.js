@@ -139,6 +139,8 @@
   var paneFooterPopoverOwner = null;
   var paneFooterPopoverTrigger = null;
   var paneFooterPopoverThreadId = null;
+  var projectAppearancePopover = null;
+  var projectAppearancePopoverRestoreKey = "";
   var browserTabLifecycleStates = new WeakMap();
   var browserPaneLifecycleStates = new WeakMap();
   var browserControlProviders = new Map();
@@ -4730,6 +4732,16 @@
     return actions;
   }
 
+  function projectAppearanceContextActions(project, anchor) {
+    if (!project) return [];
+    return [{
+      label: "Customize appearance",
+      run: function () {
+        openProjectAppearancePopover(project, anchor);
+      },
+    }];
+  }
+
   var sessionContextMenu = null;
   function closeSessionContextMenu() {
     if (sessionContextMenu && sessionContextMenu.parentNode) {
@@ -4737,15 +4749,31 @@
     }
     sessionContextMenu = null;
   }
-  function openSessionContextMenu(event, actions) {
+  function openSessionContextMenu(event, actions, anchor) {
     event.preventDefault();
     event.stopPropagation();
+    closeProjectAppearancePopover({ restoreFocus: false });
     closeSessionContextMenu();
     var menu = document.createElement("div");
     menu.className = "session-context-menu";
     menu.setAttribute("role", "menu");
-    menu.style.left = Math.max(8, event.clientX) + "px";
-    menu.style.top = Math.max(8, event.clientY) + "px";
+    var menuAnchor = anchor || event.currentTarget || event.target || null;
+    var usePointerPosition = Number(event.clientX) > 0 && Number(event.clientY) > 0;
+    var anchorRect = !usePointerPosition &&
+      menuAnchor &&
+      typeof menuAnchor.getBoundingClientRect === "function"
+      ? menuAnchor.getBoundingClientRect()
+      : null;
+    menu.style.left = Math.max(8, usePointerPosition
+      ? event.clientX
+      : anchorRect
+        ? anchorRect.left
+        : 8) + "px";
+    menu.style.top = Math.max(8, usePointerPosition
+      ? event.clientY
+      : anchorRect
+        ? anchorRect.bottom + 6
+        : 8) + "px";
     actions.forEach(function (action) {
       if (!action) return;
       var item = document.createElement("button");
@@ -4778,6 +4806,17 @@
   });
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape") closeSessionContextMenu();
+  });
+  document.addEventListener("pointerdown", function (event) {
+    if (projectAppearancePopover && !projectAppearancePopover.contains(event.target)) {
+      closeProjectAppearancePopover();
+    }
+  });
+  document.addEventListener("keydown", function (event) {
+    if (!projectAppearancePopover || event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeProjectAppearancePopover();
   });
 
   function fitVisiblePanes() {
@@ -6194,6 +6233,7 @@
       + (options.current ? " is-current" : "");
     group.dataset.treeItem = "project";
     group.dataset.treeKey = projectModel.key;
+    group.dataset.projectId = projectModel.project.id;
     group.dataset.projectAccent = appearance.accent.id;
     group.dataset.projectAppearance = appearance.customized ? "custom" : "automatic";
     group.setAttribute("role", "treeitem");
@@ -6356,6 +6396,16 @@
     if (index === -1) return;
     sessionTreeFocusKey = item.dataset.treeKey || "";
 
+    if (item.dataset.treeItem === "project" &&
+        (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey))) {
+      var project = findProject(item.dataset.projectId);
+      if (!project) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openSessionContextMenu(event, projectAppearanceContextActions(project, item), item);
+      return;
+    }
+
     if (event.key === "ArrowDown" || event.key === "ArrowUp" ||
         event.key === "Home" || event.key === "End") {
       var next = index;
@@ -6422,6 +6472,7 @@
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
+    closeProjectAppearancePopover({ restoreFocus: false });
     var now = Date.now();
     syncLocalSidebarStatusKeys(now);
     // A re-render would strand an armed confirm on a row that no longer exists.
@@ -6582,6 +6633,13 @@
             targetWithin(event, projectParts.disclosure)) return;
         clearFocusSet();
         setActiveProject(project.id);
+      });
+      projectParts.head.addEventListener("contextmenu", function (event) {
+        openSessionContextMenu(
+          event,
+          projectAppearanceContextActions(project, projectParts.group),
+          projectParts.group
+        );
       });
       if (projectModel.expanded) {
         projectModel.branches.forEach(function (branchModel) {
@@ -6875,6 +6933,185 @@
       restoreSessionTreeFocus(focusKey);
     }
     return true;
+  }
+
+  function closeProjectAppearancePopover(options) {
+    var restoreFocus = !options || options.restoreFocus !== false;
+    var restoreKey = projectAppearancePopoverRestoreKey;
+    if (projectAppearancePopover && projectAppearancePopover.parentNode) {
+      projectAppearancePopover.parentNode.removeChild(projectAppearancePopover);
+    }
+    projectAppearancePopover = null;
+    projectAppearancePopoverRestoreKey = "";
+    if (restoreFocus && restoreKey) {
+      sessionTreeFocusKey = restoreKey;
+      restoreSessionTreeFocus(restoreKey);
+    }
+  }
+
+  function openProjectAppearancePopover(project, anchor) {
+    if (!project || !anchor || typeof anchor.getBoundingClientRect !== "function") return null;
+    closeSessionContextMenu();
+    closeProjectAppearancePopover({ restoreFocus: false });
+
+    var appearance = PsycheSessions.resolveProjectAppearance(project, projectAppearances);
+    var stored = appearance.override || {};
+    var hasOwn = Object.prototype.hasOwnProperty;
+    var draftAccent = hasOwn.call(stored, "accent") ? stored.accent : null;
+    var draftGlyph = hasOwn.call(stored, "glyph") ? stored.glyph : null;
+
+    var popover = document.createElement("div");
+    popover.className = "project-appearance-popover";
+    popover.setAttribute("role", "dialog");
+    popover.setAttribute("aria-label", "Customize appearance for " + project.name);
+
+    var title = document.createElement("div");
+    title.className = "project-appearance-title";
+    title.textContent = project.name;
+    popover.appendChild(title);
+
+    var accentLabel = document.createElement("div");
+    accentLabel.className = "project-appearance-label";
+    popover.appendChild(accentLabel);
+
+    var accentGrid = document.createElement("div");
+    accentGrid.className = "project-appearance-grid project-appearance-accent-grid";
+    popover.appendChild(accentGrid);
+
+    var accentButtons = [];
+    PsycheSessions.PROJECT_ACCENTS.forEach(function (accent) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "project-appearance-choice project-appearance-accent";
+      button.setAttribute("aria-label", accent.label);
+      button.style.setProperty("--project-accent-rgb", accent.rgb);
+      var swatch = document.createElement("span");
+      swatch.className = "project-appearance-accent-swatch";
+      button.appendChild(swatch);
+      button.addEventListener("click", function () {
+        draftAccent = accent.id;
+        syncDraftState();
+      });
+      accentGrid.appendChild(button);
+      accentButtons.push({ id: accent.id, label: accent.label, button: button });
+    });
+
+    var glyphLabel = document.createElement("div");
+    glyphLabel.className = "project-appearance-label";
+    popover.appendChild(glyphLabel);
+
+    var glyphGrid = document.createElement("div");
+    glyphGrid.className = "project-appearance-grid project-appearance-glyph-grid";
+    popover.appendChild(glyphGrid);
+
+    var glyphButtons = [];
+    var noGlyphButton = document.createElement("button");
+    noGlyphButton.type = "button";
+    noGlyphButton.className = "project-appearance-choice project-appearance-glyph";
+    noGlyphButton.textContent = "No glyph";
+    noGlyphButton.addEventListener("click", function () {
+      draftGlyph = null;
+      syncDraftState();
+    });
+    glyphGrid.appendChild(noGlyphButton);
+    glyphButtons.push({ id: null, label: "No glyph", button: noGlyphButton });
+
+    PsycheSessions.PROJECT_GLYPHS.forEach(function (glyph) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "project-appearance-choice project-appearance-glyph";
+      button.setAttribute("aria-label", glyph.label);
+      var glyphValue = document.createElement("span");
+      glyphValue.className = "project-appearance-glyph-value";
+      glyphValue.textContent = glyph.value;
+      var glyphText = document.createElement("span");
+      glyphText.className = "project-appearance-glyph-name";
+      glyphText.textContent = glyph.label;
+      button.appendChild(glyphValue);
+      button.appendChild(glyphText);
+      button.addEventListener("click", function () {
+        draftGlyph = glyph.id;
+        syncDraftState();
+      });
+      glyphGrid.appendChild(button);
+      glyphButtons.push({ id: glyph.id, label: glyph.label, button: button });
+    });
+
+    var actions = document.createElement("div");
+    actions.className = "project-appearance-actions";
+    var reset = document.createElement("button");
+    reset.type = "button";
+    reset.className = "project-appearance-action";
+    reset.textContent = "Reset to automatic";
+    reset.addEventListener("click", function () {
+      closeProjectAppearancePopover({ restoreFocus: false });
+      applyProjectAppearance(project, null);
+    });
+    var spacer = document.createElement("span");
+    spacer.className = "project-appearance-spacer";
+    spacer.setAttribute("aria-hidden", "true");
+    var cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "project-appearance-action";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", function () {
+      closeProjectAppearancePopover();
+    });
+    var apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "project-appearance-action is-primary";
+    apply.textContent = "Apply";
+    apply.addEventListener("click", function () {
+      closeProjectAppearancePopover({ restoreFocus: false });
+      applyProjectAppearance(project, { accent: draftAccent, glyph: draftGlyph });
+    });
+    actions.appendChild(reset);
+    actions.appendChild(spacer);
+    actions.appendChild(cancel);
+    actions.appendChild(apply);
+    popover.appendChild(actions);
+
+    function syncDraftState() {
+      var accentMatch = PsycheSessions.PROJECT_ACCENTS.find(function (accent) {
+        return accent.id === draftAccent;
+      }) || appearance.accent;
+      accentLabel.textContent = draftAccent
+        ? "Accent · " + accentMatch.label
+        : "Accent · Automatic (" + appearance.accent.label + ")";
+      accentButtons.forEach(function (entry) {
+        entry.button.setAttribute("aria-pressed", entry.id === draftAccent ? "true" : "false");
+      });
+      var glyphMatch = PsycheSessions.PROJECT_GLYPHS.find(function (glyph) {
+        return glyph.id === draftGlyph;
+      });
+      glyphLabel.textContent = glyphMatch
+        ? "Glyph · " + glyphMatch.label
+        : "Glyph · No glyph";
+      glyphButtons.forEach(function (entry) {
+        entry.button.setAttribute("aria-pressed", entry.id === draftGlyph ? "true" : "false");
+      });
+    }
+
+    syncDraftState();
+    projectAppearancePopover = popover;
+    projectAppearancePopoverRestoreKey =
+      (anchor.dataset && anchor.dataset.treeKey) || sessionTreeFocusKey || "";
+    document.body.appendChild(popover);
+    popover.style.maxWidth = Math.max(0, Math.min(420, window.innerWidth - 16)) + "px";
+    var anchorRect = anchor.getBoundingClientRect();
+    var popoverRect = popover.getBoundingClientRect();
+    popover.style.left = Math.max(8, Math.min(
+      window.innerWidth - popoverRect.width - 8,
+      anchorRect.left
+    )) + "px";
+    popover.style.top = Math.max(8, Math.min(
+      window.innerHeight - popoverRect.height - 8,
+      anchorRect.bottom + 8
+    )) + "px";
+    var preferredFocus = popover.querySelector('button[aria-pressed="true"]') ||
+      popover.querySelector("button");
+    if (preferredFocus) preferredFocus.focus();
+    return popover;
   }
 
   if (bgOpacityInput) {

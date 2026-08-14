@@ -73,6 +73,10 @@ type Listener = (event: FakeEvent) => unknown;
 
 class FakeStyle {
   private readonly properties = new Map<string, string>();
+  left = '';
+  top = '';
+  maxWidth = '';
+  maxHeight = '';
 
   setProperty(name: string, value: string) {
     this.properties.set(name, String(value));
@@ -90,12 +94,22 @@ class FakeStyle {
 class FakeEvent {
   target: FakeElement;
   key: string;
+  shiftKey: boolean;
+  clientX: number;
+  clientY: number;
   propagationStopped = false;
   defaultPrevented = false;
 
-  constructor(target: FakeElement, key = '') {
+  constructor(
+    target: FakeElement,
+    key = '',
+    options: { shiftKey?: boolean; clientX?: number; clientY?: number } = {},
+  ) {
     this.target = target;
     this.key = key;
+    this.shiftKey = Boolean(options.shiftKey);
+    this.clientX = options.clientX ?? 0;
+    this.clientY = options.clientY ?? 0;
   }
 
   stopPropagation() {
@@ -126,6 +140,14 @@ class FakeElement {
   focused = false;
   selected = false;
   hidden = false;
+  private rect = {
+    left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: 0,
+    height: 0,
+  };
   private ownText = '';
   private html = '';
 
@@ -326,6 +348,7 @@ class FakeElement {
   matches(selector: string) {
     if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
     if (selector === '[data-tree-item]') return Boolean(this.dataset.treeItem);
+    if (/^[a-z]+$/i.test(selector)) return this.tagName === selector.toUpperCase();
     return false;
   }
 
@@ -342,8 +365,32 @@ class FakeElement {
     this.listeners.set(name, listeners);
   }
 
-  async emit(name: string, options: { target?: FakeElement; key?: string } = {}) {
-    const event = new FakeEvent(options.target ?? this, options.key);
+  setBoundingClientRect(rect: Partial<typeof this.rect>) {
+    this.rect = {
+      ...this.rect,
+      ...rect,
+    };
+    if (!('right' in rect)) this.rect.right = this.rect.left + this.rect.width;
+    if (!('bottom' in rect)) this.rect.bottom = this.rect.top + this.rect.height;
+    if (!('width' in rect)) this.rect.width = this.rect.right - this.rect.left;
+    if (!('height' in rect)) this.rect.height = this.rect.bottom - this.rect.top;
+  }
+
+  getBoundingClientRect() {
+    return { ...this.rect };
+  }
+
+  async emit(
+    name: string,
+    options: {
+      target?: FakeElement;
+      key?: string;
+      shiftKey?: boolean;
+      clientX?: number;
+      clientY?: number;
+    } = {},
+  ) {
+    const event = new FakeEvent(options.target ?? this, options.key, options);
     for (const listener of this.listeners.get(name) ?? []) {
       await listener(event);
     }
@@ -452,6 +499,7 @@ function createRenderer(options: {
   openCovenSession?: (project: Project, session: RemoteSession) => unknown;
   invoke?: (command: string, args: Record<string, unknown>) => Promise<unknown>;
   refreshCovenSessions?: (options?: { force?: boolean }) => Promise<unknown>;
+  openProjectAppearancePopover?: (project: Project, anchor: FakeElement) => unknown;
   realEdit?: boolean;
   canvasThreadIds?: string[];
   focusSets?: Array<{ id: string; index: number; name: string; key: string; threadIds: string[] }>;
@@ -552,6 +600,9 @@ function createRenderer(options: {
   const saveWorkspaceSoon = vi.fn();
   const setSessionTypeFilter = vi.fn();
   const openSessionContextMenu = vi.fn();
+  const openProjectAppearancePopover = vi.fn(
+    options.openProjectAppearancePopover ?? (() => undefined),
+  );
   const paneGlyphFor = (kind: string) =>
     kind === 'shell' ? '❯_' : kind === 'web' ? '◍' : '✳';
 
@@ -613,6 +664,10 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'threadIsToolPane'),
     extractFunctionSource(mainJs, 'sessionCloseLabel'),
     extractFunctionSource(mainJs, 'localSessionContextActions'),
+    'var projectAppearancePopover = null;',
+    'var projectAppearancePopoverRestoreKey = "";',
+    extractFunctionSource(mainJs, 'closeProjectAppearancePopover'),
+    extractFunctionSource(mainJs, 'projectAppearanceContextActions'),
     extractFunctionSource(mainJs, 'saveProjectAppearances'),
     extractFunctionSource(mainJs, 'applyProjectAppearance'),
     extractFunctionSource(mainJs, 'renderSessionList'),
@@ -628,7 +683,8 @@ function createRenderer(options: {
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
     'saveWorkspaceSoon', 'activateProjectWorktree', 'setSessionTypeFilter',
-    'openSessionContextMenu', 'invoke', 'refreshCovenSessions', 'localStorage',
+    'openSessionContextMenu', 'openProjectAppearancePopover',
+    'invoke', 'refreshCovenSessions', 'localStorage',
     `"use strict"; ${sources.join('\n')}; return {
       render: function () {
         renderSessionList();
@@ -702,6 +758,7 @@ function createRenderer(options: {
     activateProjectWorktree,
     setSessionTypeFilter,
     openSessionContextMenu,
+    openProjectAppearancePopover,
     invoke,
     refreshCovenSessions,
     localStorage,
@@ -758,6 +815,7 @@ function createRenderer(options: {
     refreshCovenSessions,
     setStatus,
     canvasThreadIds,
+    openProjectAppearancePopover,
   };
 }
 
@@ -1061,6 +1119,57 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.document.activeElement).toBe(rerenderedProject);
   });
 
+  it('opens a project header context menu with customize appearance anchored to the treeitem', async () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'psyche',
+        name: 'PSYCHE-BUILD',
+        root: '/repo/psyche-build',
+        collapsed: false,
+        selectedWorktreePath: '/repo/psyche-build',
+        worktrees: [{
+          path: '/repo/psyche-build',
+          branch: 'main',
+          is_main: true,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'psyche',
+        worktreePath: '/repo/psyche-build',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+    });
+
+    renderer.render();
+    const projectHead = renderer.sessionListEl.querySelector('.session-project-head');
+    const projectTreeitem = renderer.sessionListEl.querySelector('.session-project');
+
+    await projectHead?.emit('contextmenu', {
+      target: projectHead ?? undefined,
+      clientX: 160,
+      clientY: 48,
+    });
+
+    expect(projectTreeitem?.dataset.projectId).toBe('psyche');
+    expect(renderer.openSessionContextMenu).toHaveBeenCalledTimes(1);
+    const [, actions, anchor] = renderer.openSessionContextMenu.mock.calls[0];
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ label: 'Customize appearance' });
+    expect(anchor).toBe(projectTreeitem);
+
+    actions[0].run();
+    expect(renderer.openProjectAppearancePopover).toHaveBeenCalledWith(
+      renderer.state.projects[0],
+      projectTreeitem,
+    );
+  });
+
   it('renders daemon-backed Coven sessions inside Agents with Coven metadata', () => {
     const renderer = createRenderer({
       projects: [{
@@ -1251,6 +1360,62 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.setActiveProject).toHaveBeenCalledWith('psyche');
     expect(renderer.state.projects[0].collapsed).toBe(true);
     expect(renderer.saveWorkspaceSoon).toHaveBeenCalledOnce();
+  });
+
+  it('opens focused project treeitem context menus from keyboard shortcuts', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'psyche',
+        name: 'PSYCHE-BUILD',
+        root: '/repo/psyche-build',
+        collapsed: false,
+        selectedWorktreePath: '/repo/psyche-build',
+        worktrees: [{
+          path: '/repo/psyche-build',
+          branch: 'main',
+          is_main: true,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'psyche',
+        worktreePath: '/repo/psyche-build',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+    });
+
+    renderer.render();
+    const project = renderer.sessionListEl.querySelector('.session-project');
+    expect(project).not.toBeNull();
+
+    project?.focus();
+    const contextMenu = new FakeEvent(project!, 'ContextMenu');
+    renderer.handleTreeKeydown(contextMenu);
+
+    expect(contextMenu.defaultPrevented).toBe(true);
+    expect(contextMenu.propagationStopped).toBe(true);
+    expect(renderer.openSessionContextMenu).toHaveBeenCalledTimes(1);
+    expect(renderer.openSessionContextMenu.mock.calls[0][2]).toBe(project);
+    expect(renderer.openSessionContextMenu.mock.calls[0][1][0]).toMatchObject({
+      label: 'Customize appearance',
+    });
+
+    renderer.openSessionContextMenu.mockClear();
+    const shiftF10 = new FakeEvent(project!, 'F10', { shiftKey: true });
+    renderer.handleTreeKeydown(shiftF10);
+
+    expect(shiftF10.defaultPrevented).toBe(true);
+    expect(shiftF10.propagationStopped).toBe(true);
+    expect(renderer.openSessionContextMenu).toHaveBeenCalledTimes(1);
+    expect(renderer.openSessionContextMenu.mock.calls[0][2]).toBe(project);
+    expect(renderer.openSessionContextMenu.mock.calls[0][1][0]).toMatchObject({
+      label: 'Customize appearance',
+    });
   });
 
   it('activates focused branch treeitems on Enter and toggles them on Space', async () => {
@@ -1518,6 +1683,25 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.state.projects[0].collapsed).toBe(false);
     expect(renderer.state.projects[0].worktrees?.[0].collapsed).toBe(false);
     expect(renderer.saveWorkspaceSoon).not.toHaveBeenCalled();
+  });
+
+  it('ships a non-modal project appearance popover contract with fixed presets', () => {
+    const popoverSource = extractFunctionSource(mainJs, 'openProjectAppearancePopover');
+
+    expect(mainJs).toContain('function closeProjectAppearancePopover(');
+    expect(popoverSource).toContain('project-appearance-popover');
+    expect(popoverSource).toContain('setAttribute("role", "dialog")');
+    expect(popoverSource).toContain('project.name');
+    expect(popoverSource).toContain('PsycheSessions.PROJECT_ACCENTS.forEach');
+    expect(popoverSource).toContain('PsycheSessions.PROJECT_GLYPHS.forEach');
+    expect(popoverSource).toContain('aria-pressed');
+    expect(popoverSource).toContain('Reset to automatic');
+    expect(popoverSource).toContain('No glyph');
+    expect(popoverSource).not.toMatch(/type\s*=\s*["']color["']/);
+    expect(styles).toContain('.project-appearance-popover {');
+    expect(styles).toContain('.project-appearance-accent-grid {');
+    expect(styles).toContain('.project-appearance-glyph-grid {');
+    expect(styles).toContain('.project-appearance-choice[aria-pressed="true"]');
   });
 
   // Fixtures arrived with main's worktree-ownership tests further down, which
