@@ -208,6 +208,7 @@ describe('Tauri Coven launch project scope', () => {
         loadAgentSkills: () => { calls.push('loadAgentSkills'); },
         saveWorkspaceNow: () => { calls.push('saveWorkspaceNow'); },
         startCovenPolling: () => { calls.push('startCovenPolling'); },
+        installAgentControlUi: () => undefined,
         paneMetricsPollTimer: 0,
         clearInterval: () => { calls.push('clearInterval'); },
         setInterval: (_callback: () => void, ms: number) => {
@@ -350,6 +351,7 @@ describe('Tauri Coven launch project scope', () => {
         loadAgentSkills: () => { calls.push('loadAgentSkills'); },
         saveWorkspaceNow: () => { calls.push('saveWorkspaceNow'); },
         startCovenPolling: () => { calls.push('startCovenPolling'); },
+        installAgentControlUi: () => undefined,
         paneMetricsPollTimer: 0,
         clearInterval: () => { calls.push('clearInterval'); },
         setInterval: (_callback: () => void, ms: number) => {
