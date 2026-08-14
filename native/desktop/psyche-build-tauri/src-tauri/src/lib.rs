@@ -80,6 +80,7 @@ const MAX_BROWSER_SNAPSHOT_BYTES: usize =
 const MAX_BROWSER_SNAPSHOT_DIMENSION: u32 = 8192;
 const MAX_BROWSER_SNAPSHOT_PIXELS: u64 = 16 * 1024 * 1024;
 const MAX_BROWSER_SCRIPT_SOURCE_BYTES: usize = 64 * 1024;
+const MAX_BROWSER_SCRIPT_ARGS_BYTES: usize = 256 * 1024;
 const MAX_BROWSER_SCRIPT_RESULT_BYTES: usize = 256 * 1024;
 const BROWSER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
 const BROWSER_SCRIPT_CONTEXT_WORLD_NAME: &str = "com.opencoven.psyche.browser-script-context";
@@ -3700,6 +3701,11 @@ async fn browser_script(
     if request.source.len() > MAX_BROWSER_SCRIPT_SOURCE_BYTES {
         return Err("script_source_too_large".to_string());
     }
+    let argument_bytes =
+        serde_json::to_vec(&request.args).map_err(|_| "serialization_failed".to_string())?;
+    if argument_bytes.len() > MAX_BROWSER_SCRIPT_ARGS_BYTES {
+        return Err("args_too_large".to_string());
+    }
     let label = safe_browser_label(label);
     let browser = app
         .get_webview(&label)
@@ -3713,6 +3719,7 @@ async fn browser_script(
     let input = serde_json::to_string(&serde_json::json!({
         "source": request.source,
         "args": request.args,
+        "workerSource": include_str!("../../web/control/browser-script-worker-runtime.js"),
     }))
     .map_err(|_| "serialization_failed".to_string())?;
     let script = format!(
@@ -3745,7 +3752,14 @@ async fn browser_script(
             .filter(|code| {
                 matches!(
                     *code,
-                    "automation_failed" | "result_too_large" | "serialization_failed"
+                    "automation_failed"
+                        | "effect_unknown"
+                        | "result_too_large"
+                        | "serialization_failed"
+                        | "snapshot_too_large"
+                        | "mutation_plan_invalid"
+                        | "mutation_target_stale"
+                        | "mutation_not_allowed"
                 )
             })
             .unwrap_or("automation_failed");
@@ -5688,6 +5702,15 @@ mod browser_app_shortcut_tests {
         assert_ne!(first, second);
         assert_ne!(first, BROWSER_SCRIPT_CONTEXT_WORLD_NAME);
         assert_ne!(second, BROWSER_SCRIPT_CONTEXT_WORLD_NAME);
+    }
+
+    #[test]
+    fn browser_script_worker_runtime_is_embedded_and_bounded() {
+        assert!(
+            include_str!("../../web/control/browser-script-worker-runtime.js")
+                .contains("installBrowserScriptWorkerRuntime")
+        );
+        assert_eq!(MAX_BROWSER_SCRIPT_ARGS_BYTES, 256 * 1024);
     }
 }
 

@@ -159,6 +159,20 @@ describe('native browser script authority', () => {
     expect(main).not.toMatch(/operation\.kind === "script"[\s\S]{0,500}browserAutomationDispatchScript\(effect\)/);
   });
 
+  it('embeds the trusted Worker runtime without exposing it to page source', () => {
+    expect(lib).toContain('include_str!("../../web/control/browser-script-worker-runtime.js")');
+    expect(lib).toMatch(/"workerSource":\s*include_str!/);
+    expect(lib).toContain('"mutation_plan_invalid"');
+    expect(lib).toContain('"mutation_target_stale"');
+    expect(lib).toContain('"mutation_not_allowed"');
+    expect(lib).toContain('"snapshot_too_large"');
+  });
+
+  it('bounds serialized script arguments at the native boundary', () => {
+    expect(lib).toContain('MAX_BROWSER_SCRIPT_ARGS_BYTES');
+    expect(lib).toMatch(/serde_json::to_vec\(&request\.args\)[\s\S]*args_too_large/);
+  });
+
   it('captures serialization intrinsics before approved source can replace globals', async () => {
     const envelope = await runIsolated(`
       try {
