@@ -227,7 +227,6 @@ describe('ControlRuntime', () => {
       actionId: 'missing-lease-action', state: 'failed', code: 'action_validation_failed',
     }));
   });
-
   it('revokes automation before accepting human input', async () => {
     const runtime = await ControlRuntime.create({
       ownerEpoch: 4,

@@ -98,7 +98,6 @@ describe('SurfaceRegistry', () => {
     expect(registry.upsertPane({ ...input, tmuxPaneId: '%4' }).generation)
       .toBe(first.generation + 1);
   });
-
   it('does not retain caller aliases or expose mutable registry records', () => {
     const registry = new SurfaceRegistry();
     const viewport = { width: 800, height: 600 };
