@@ -12276,7 +12276,7 @@
     await installTerminalImageDrop();
     if (typeof statusController !== "undefined" && statusController) statusController.start();
     flushDeferredStatusMessages();
-    var saved = await loadSavedWorkspace();
+    var saved = await readSavedWorkspace();
     var bootRoot = state.env.repo_root || state.env.home || "/";
     var project = null;
     isRestoringWorkspace = true;

@@ -146,7 +146,7 @@ describe('Tauri footer status bar shell', () => {
       boot.indexOf('flushDeferredStatusMessages()'),
     );
     expect(boot.indexOf('flushDeferredStatusMessages()')).toBeLessThan(
-      boot.indexOf('loadSavedWorkspace()'),
+      boot.indexOf('readSavedWorkspace()'),
     );
 
     const attributes = new Map([
