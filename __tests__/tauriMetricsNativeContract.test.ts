@@ -63,14 +63,14 @@ describe('Tauri workspace metrics native contract', () => {
       /#\[derive\(Clone,\s*Default\)\]\s*struct\s+MetricsState\s*\{[\s\S]*collector\s*:\s*Arc<Mutex<MetricsCollector>>[\s\S]*\}/,
     );
 
-    const ptyStart = functionBody(libSource, 'pty_start_blocking');
-    expect(ptyStart).toMatch(
+    const ptyClient = functionBody(libSource, 'register_pty_client');
+    expect(ptyClient).toMatch(
       /let\s+spawn_time_unix_secs\s*=\s*SystemTime::now\(\)[\s\S]*?duration_since\(UNIX_EPOCH\)[\s\S]*?as_secs\(\)\s*;/,
     );
-    expect(ptyStart).toMatch(
-      /let\s+mut\s+child\s*=\s*pair\.slave\.spawn_command\(cmd\)\.map_err\(\|e\| e\.to_string\(\)\)\?\s*;\s*let\s+pid\s*=\s*child\.process_id\(\)\s*;/,
+    expect(ptyClient).toMatch(
+      /let\s+pid\s*=\s*child\.process_id\(\)\s*;/,
     );
-    expect(ptyStart).toMatch(
+    expect(ptyClient).toMatch(
       /PtySession\s*\{[\s\S]*writer:\s*Arc::new\(Mutex::new\(writer\)\)\s*,[\s\S]*pid,\s*[\s\S]*spawn_time_unix_secs,\s*[\s\S]*\}/,
     );
 
@@ -133,7 +133,7 @@ describe('Tauri workspace metrics native contract', () => {
       /function\s+handlePtyExit\s*\([\s\S]*thread\.finishedAt\s*=\s*Date\.now\(\)\s*;[\s\S]*thread\.exitCode\s*=\s*payload\.code == null \? null : payload\.code\s*;/,
     );
     expect(mainSource).toMatch(
-      /function\s+handlePtyExit\s*\([\s\S]*thread\.status\s*=\s*"exited"\s*;[\s\S]*if\s*\(!stoppedByUser\s*&&\s*payload\.code != null\s*&&\s*payload\.code !== 0\)\s*\{[\s\S]*thread\.status\s*=\s*"failed"\s*;/,
+      /function\s+handlePtyExit\s*\([\s\S]*thread\.status\s*=\s*persistentLive \? "failed" : "exited"\s*;[\s\S]*if\s*\(!persistentLive\s*&&\s*!stoppedByUser\s*&&\s*payload\.code != null\s*&&\s*payload\.code !== 0\)\s*\{[\s\S]*thread\.status\s*=\s*"failed"\s*;/,
     );
   });
 });

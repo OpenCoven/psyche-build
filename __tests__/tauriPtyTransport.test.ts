@@ -206,6 +206,7 @@ describe('Tauri PTY command threading contract', () => {
     const install = implMethodSource(source, 'PendingPtyStart', 'install');
     const command = commandSource(source, 'pty_start');
     const blocking = rustFunctionSource(source, 'pty_start_blocking');
+    const register = rustFunctionSource(source, 'register_pty_client');
 
     const reserve = prepare.indexOf('PendingPtyStart::reserve(&thread_id)?');
     const openCwd = prepare.indexOf('open_pty_cwd(project_root, cwd)?');
@@ -218,18 +219,18 @@ describe('Tauri PTY command threading contract', () => {
 
     const openPty = blocking.indexOf('.openpty(');
     const spawnCommand = blocking.indexOf('.spawn_command(');
-    const prepareReader = blocking.indexOf('prepare_pty_reader(');
-    const takeWriter = blocking.indexOf('.take_writer()');
-    const installCall = blocking.indexOf('pending_start.install(PtySession');
-    const dataThread = blocking.indexOf('let data_thread = std::thread::spawn');
+    const prepareReader = register.indexOf('prepare_pty_reader(');
+    const takeWriter = register.indexOf('.take_writer()');
+    const installCall = register.indexOf('pending_start.install(PtySession');
+    const dataThread = register.indexOf('let data_thread = std::thread::spawn');
 
     expect(openPty).toBeGreaterThan(-1);
     expect(spawnCommand).toBeGreaterThan(openPty);
-    expect(prepareReader).toBeGreaterThan(spawnCommand);
+    expect(prepareReader).toBeGreaterThan(-1);
     expect(takeWriter).toBeGreaterThan(prepareReader);
     expect(installCall).toBeGreaterThan(takeWriter);
     expect(dataThread).toBeGreaterThan(installCall);
-    expect(blocking).toMatch(
+    expect(register).toMatch(
       /let\s+data_thread\s*=\s*std::thread::spawn\s*\(\s*move\s*\|\|\s*\{[\s\S]*pump_pty_reader\s*\(/,
     );
   });

@@ -31,10 +31,17 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
 ) {
+  const resolvedDependencies = {
+    saveWorkspaceSoon: () => undefined,
+    saveWorkspaceNow: async () => true,
+    isPersistentThread: () => false,
+    invoke: async () => undefined,
+    ...dependencies,
+  };
   return Function(
-    ...Object.keys(dependencies),
+    ...Object.keys(resolvedDependencies),
     `"use strict"; return (${source});`,
-  )(...Object.values(dependencies)) as T;
+  )(...Object.values(resolvedDependencies)) as T;
 }
 
 describe('native Files pane layout contract', () => {
@@ -217,7 +224,7 @@ describe('native Files pane layout contract', () => {
     expect(set.threadIds).toEqual(['missing-thread']);
   });
 
-  it('renders a surviving Files surface after closing the active terminal', () => {
+  it('renders a surviving Files surface after closing the active terminal', async () => {
     const thread = {
       id: 'thread-a', kind: 'shell', projectId: 'project-a', worktreePath: '/worktree',
       closeStarted: false, closing: false, startInFlight: false,
@@ -232,7 +239,7 @@ describe('native Files pane layout contract', () => {
     };
     let renders = 0;
     let threadFocuses = 0;
-    const closeThread = compileFunction<(id: string) => boolean>(
+    const closeThread = compileFunction<(id: string) => Promise<boolean>>(
       extractFunctionSource('closeThread'),
       {
         findThread: (id: string) => state.threads.find((item) => item.id === id) || null,
@@ -253,7 +260,7 @@ describe('native Files pane layout contract', () => {
       },
     );
 
-    expect(closeThread(thread.id)).toBe(true);
+    await expect(closeThread(thread.id)).resolves.toBe(true);
     expect(layout.focusedLeafId).toBe(filesPane.id);
     expect(state.activeThreadId).toBeNull();
     expect(threadFocuses).toBe(0);
