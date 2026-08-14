@@ -1452,14 +1452,24 @@
   // Short-lived confirmation for actions whose effect happens off-screen
   // (for example, a pane spawned behind a maximised pane).
   var toastTimer = 0;
-  function toast(message, duration) {
+  function toast(message, duration, options) {
     if (!toastEl) return;
+    var announce = !options || options.announce !== false;
+    if (announce) {
+      if (toastEl.getAttribute("aria-hidden") === "true") {
+        toastEl.textContent = "";
+      }
+      toastEl.removeAttribute("aria-hidden");
+    } else {
+      toastEl.setAttribute("aria-hidden", "true");
+    }
     toastEl.textContent = message;
     toastEl.classList.add("is-visible");
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(function () {
       toastEl.classList.remove("is-visible");
       toastEl.textContent = "";
+      toastEl.removeAttribute("aria-hidden");
       toastTimer = 0;
     }, duration || 2600);
   }
@@ -1467,7 +1477,7 @@
   function showStatusError(message) {
     var text = String(message);
     if (statusAlertEl) statusAlertEl.textContent = text;
-    toast(text, 6000);
+    toast(text, 6000, { announce: false });
   }
 
   function showPanePlacementWarning(message) {

@@ -127,10 +127,10 @@ function footerSection(source: string) {
 }
 
 describe('Tauri footer status bar shell', () => {
-  it('routes project appearance storage errors through the retained alert and visible toast', () => {
+  it('routes project appearance storage errors through one alert and a silent visible toast', () => {
     const showStatusError = functionSource(mainJs, 'showStatusError');
     expect(showStatusError).toContain('statusAlertEl.textContent = text');
-    expect(showStatusError).toContain('toast(text, 6000)');
+    expect(showStatusError).toContain('toast(text, 6000, { announce: false })');
     expect(showStatusError).not.toContain('statusEl');
     expect(showStatusError).not.toContain('setStatus(');
     expect(functionSource(mainJs, 'flushDeferredStatusMessages')).toContain(
@@ -148,6 +148,58 @@ describe('Tauri footer status bar shell', () => {
     expect(boot.indexOf('flushDeferredStatusMessages()')).toBeLessThan(
       boot.indexOf('loadSavedWorkspace()'),
     );
+
+    const attributes = new Map([
+      ['role', 'status'],
+      ['aria-live', 'polite'],
+    ]);
+    const classes = new Set<string>();
+    const toastEl = {
+      textContent: '',
+      getAttribute: (name: string) => attributes.get(name) ?? null,
+      setAttribute: (name: string, value: string) => attributes.set(name, value),
+      removeAttribute: (name: string) => attributes.delete(name),
+      classList: {
+        add: (name: string) => classes.add(name),
+        remove: (name: string) => classes.delete(name),
+      },
+    };
+    const statusAlertEl = { textContent: '', role: 'alert' };
+    let runTimer: () => void = () => undefined;
+    let delay = 0;
+    const toast = Function(
+      'toastEl', 'setTimeout', 'clearTimeout',
+      `"use strict"; var toastTimer = 0; return (${functionSource(mainJs, 'toast')});`,
+    )(
+      toastEl,
+      (callback: () => void, milliseconds: number) => {
+        runTimer = callback;
+        delay = milliseconds;
+        return 1;
+      },
+      () => undefined,
+    ) as (message: string, duration?: number, options?: { announce?: boolean }) => void;
+    const reportError = Function(
+      'statusAlertEl', 'toast',
+      `"use strict"; return (${showStatusError});`,
+    )(statusAlertEl, toast) as (message: string) => void;
+
+    reportError('project appearance load failed');
+
+    expect(statusAlertEl.textContent).toBe('project appearance load failed');
+    expect(toastEl.textContent).toBe('project appearance load failed');
+    expect(classes.has('is-visible')).toBe(true);
+    expect(attributes.get('aria-hidden')).toBe('true');
+    expect(delay).toBe(6000);
+
+    toast('unrelated confirmation');
+    expect(attributes.get('aria-hidden')).toBeUndefined();
+    expect(attributes.get('role')).toBe('status');
+    expect(attributes.get('aria-live')).toBe('polite');
+
+    runTimer();
+    expect(classes.has('is-visible')).toBe(false);
+    expect(toastEl.textContent).toBe('');
   });
 
   it('wraps the composer, detail panel, and status rail in one footer stack', () => {

@@ -633,7 +633,11 @@ function createRenderer(options: {
   const refreshCovenSessions = vi.fn(options.refreshCovenSessions ?? (() => Promise.resolve()));
   const setStatus = vi.fn();
   const statusAlertEl = new FakeElement('div', document);
+  statusAlertEl.setAttribute('role', 'alert');
   const toastEl = new FakeElement('div', document);
+  toastEl.setAttribute('role', 'status');
+  toastEl.setAttribute('aria-live', 'polite');
+  const toastTimeouts: number[] = [];
   const onCanvasIds = options.canvasThreadIds ?? [];
   const canvasThreadIds = vi.fn(() => onCanvasIds);
   // Focus sets: the membership model is real (setsForThread / isPicked run from
@@ -801,7 +805,10 @@ function createRenderer(options: {
     paneGlyphFor,
     setInterval,
     clearInterval,
-    () => 1,
+    (_callback: () => void, delay: number) => {
+      toastTimeouts.push(delay);
+      return 1;
+    },
     () => undefined,
     focusSets,
     options.setPicking ?? null,
@@ -881,6 +888,7 @@ function createRenderer(options: {
     setStatus,
     statusAlertEl,
     toastEl,
+    toastTimeouts,
     canvasThreadIds,
     openProjectAppearancePopover,
   };
@@ -1201,6 +1209,13 @@ describe('Tauri Coven session project rail', () => {
       'project appearance load failed: Error: storage unavailable',
     );
     expect(renderer.toastEl.classList.contains('is-visible')).toBe(true);
+    expect(renderer.toastEl.getAttribute('aria-hidden')).toBe('true');
+    expect(renderer.toastTimeouts).toEqual([6000]);
+    expect([
+      renderer.statusAlertEl,
+      renderer.toastEl,
+    ].filter((element) => element.getAttribute('aria-hidden') !== 'true'))
+      .toEqual([renderer.statusAlertEl]);
     expect(renderer.setStatus).not.toHaveBeenCalled();
   });
 
@@ -1248,6 +1263,13 @@ describe('Tauri Coven session project rail', () => {
       'project appearance save failed: Error: disk full',
     );
     expect(renderer.toastEl.classList.contains('is-visible')).toBe(true);
+    expect(renderer.toastEl.getAttribute('aria-hidden')).toBe('true');
+    expect(renderer.toastTimeouts).toEqual([6000]);
+    expect([
+      renderer.statusAlertEl,
+      renderer.toastEl,
+    ].filter((element) => element.getAttribute('aria-hidden') !== 'true'))
+      .toEqual([renderer.statusAlertEl]);
     expect(renderer.setStatus).not.toHaveBeenCalled();
     expect(renderer.projectAppearances()).toEqual({
       '/alpha': { accent: 'violet' },
