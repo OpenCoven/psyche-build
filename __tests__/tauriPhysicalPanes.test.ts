@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { FrameScheduler } from '../native/desktop/psyche-build-tauri/web/runtime/frame-scheduler';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
@@ -73,6 +74,7 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     }),
     saveWorkspaceSoon: () => undefined,
     saveWorkspaceNow: async () => true,
+    scheduleBrowserBounds: () => undefined,
     isPersistentThread: (thread: Record<string, any>) =>
       ['shell', 'psyche', 'coven-chat', 'coven-attach'].includes(thread?.launch?.launchKind),
     nativeSessionRequest: (thread: Record<string, any>) => ({ id: thread.id }),
@@ -472,6 +474,70 @@ describe('Tauri physical terminal panes', () => {
     expect(prevented).toBe(3);
   });
 
+  it('accumulates repeated divider keys before one coalesced pane-tree frame', () => {
+    const leafA = PsychePanes.createLeaf('leaf-a', 'thread-a');
+    const leafB = PsychePanes.createLeaf('leaf-b', 'thread-b');
+    const layout = {
+      root: PsychePanes.insertBelow(leafA, 'leaf-a', leafB, 'split-a'),
+      focusedLeafId: 'leaf-a',
+    };
+    const frames: Array<(timestamp: number) => void> = [];
+    const scheduler = new FrameScheduler((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const renderPaneWorkspace = vi.fn();
+    const focusPaneDivider = vi.fn(() => true);
+    const saveWorkspaceSoon = vi.fn();
+    const schedulePaneTreeLayout = compileFunction<(
+      focusSplitId?: string | null,
+    ) => void>(functionSource('schedulePaneTreeLayout'), {
+      pendingPaneDividerFocusId: null,
+      terminalFrameScheduler: scheduler,
+      renderPaneWorkspace,
+      focusPaneDivider,
+      saveWorkspaceSoon,
+    });
+    const updateActiveSplit = compileFunction<(
+      splitId: string,
+      ratio: number,
+      expectedLayout?: typeof layout,
+      restoreFocus?: boolean,
+    ) => boolean>(functionSource('updateActiveSplit'), {
+      activePaneLayout: () => layout,
+      PsychePanes,
+      schedulePaneTreeLayout,
+    });
+    const divider = new FakeEventTarget();
+    const createPaneDivider = compileFunction<(
+      node: typeof layout.root,
+      ratio: number,
+    ) => FakeEventTarget>(functionSource('createPaneDivider'), {
+      document: { createElement: () => divider },
+      window: new FakeEventTarget(),
+      activePaneLayout: () => layout,
+      updateActiveSplit,
+    });
+    createPaneDivider(layout.root, layout.root.ratio);
+
+    divider.dispatch('keydown', {
+      key: 'ArrowDown', shiftKey: false, preventDefault: () => undefined,
+    });
+    divider.dispatch('keydown', {
+      key: 'ArrowDown', shiftKey: false, preventDefault: () => undefined,
+    });
+
+    expect(layout.root.ratio).toBeCloseTo(0.58);
+    expect(frames).toHaveLength(1);
+    expect(renderPaneWorkspace).not.toHaveBeenCalled();
+
+    frames.shift()!(16);
+    expect(renderPaneWorkspace).toHaveBeenCalledTimes(1);
+    expect(focusPaneDivider).toHaveBeenCalledOnce();
+    expect(focusPaneDivider).toHaveBeenCalledWith('split-a');
+    expect(saveWorkspaceSoon).toHaveBeenCalledTimes(1);
+  });
+
   it('ignores pointer resizing when the split has no measurable height', () => {
     const windowTarget = new FakeEventTarget();
     const divider = new FakeEventTarget();
@@ -565,8 +631,10 @@ describe('Tauri physical terminal panes', () => {
       {
         activePaneLayout: () => layout,
         PsychePanes,
-        renderPaneWorkspace: () => { renders += 1; },
-        focusPaneDivider,
+        schedulePaneTreeLayout: (splitId: string | null) => {
+          renders += 1;
+          if (splitId) focusPaneDivider(splitId);
+        },
       },
     );
     expect(updateActiveSplit('split-a', Number.NaN)).toBe(false);
@@ -666,7 +734,7 @@ describe('Tauri physical terminal panes', () => {
 
     const preserveOnly = [
       'movePaneTo',
-      'updateActiveSplit',
+      'schedulePaneTreeLayout',
       'restoreSetScopePresentation',
       'cyclePaneSpan',
       'togglePaneMaximize',

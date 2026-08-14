@@ -1434,6 +1434,7 @@ describe('Tauri native browser lifecycle', () => {
         controlCalls.push(`sync:${state.activeProjectId}`);
         syncBrowserBounds();
       },
+      scheduleBrowserBounds: syncBrowserBounds,
       syncBrowserBounds,
       browserNavigationOwnsVisiblePane,
     });
@@ -1578,6 +1579,7 @@ describe('Tauri native browser lifecycle', () => {
         return pane;
       },
       browserNavigationOwnsVisiblePane: () => false,
+      scheduleBrowserBounds: () => {},
       syncBrowserBounds: () => {},
     });
     const navigateBrowser = compileFunction<

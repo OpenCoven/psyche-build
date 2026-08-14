@@ -288,38 +288,20 @@ describe('Tauri project/worktree/pane rail', () => {
   });
 
   it('routes sidebar state changes and handlers through the shared toggle helper', () => {
-    const syncSidebarToggleState = vi.fn();
     const closeNewPaneMenu = vi.fn();
-    const scheduleTerminalPaneFits = vi.fn();
-    const syncBrowserBounds = vi.fn();
-    const requestAnimationFrame = vi.fn((callback: (timestamp: number) => void) => {
-      callback(0);
-      return 1;
-    });
+    const scheduleSidebarLayout = vi.fn();
     const appEl = { dataset: { sidebar: 'open' as 'open' | 'collapsed' } };
-    const sidebarMiniEl = { hidden: true };
     const setSidebarOpen = compileFunction<(open: boolean) => void>(mainJs, 'setSidebarOpen', {
       appEl,
-      sidebarMiniEl,
-      syncSidebarToggleState,
+      pendingSidebarOpen: null,
       closeNewPaneMenu,
-      requestAnimationFrame,
-      scheduleTerminalPaneFits,
-      syncBrowserBounds,
+      scheduleSidebarLayout,
     });
 
     setSidebarOpen(true);
-    expect(appEl.dataset.sidebar).toBe('open');
-    expect(sidebarMiniEl.hidden).toBe(true);
-    expect(syncSidebarToggleState).toHaveBeenLastCalledWith(false);
-
     setSidebarOpen(false);
-    expect(appEl.dataset.sidebar).toBe('collapsed');
-    expect(sidebarMiniEl.hidden).toBe(false);
-    expect(syncSidebarToggleState).toHaveBeenLastCalledWith(true);
     expect(closeNewPaneMenu).toHaveBeenCalledTimes(1);
-    expect(scheduleTerminalPaneFits).toHaveBeenCalledTimes(2);
-    expect(syncBrowserBounds).toHaveBeenCalledTimes(2);
+    expect(scheduleSidebarLayout).toHaveBeenCalledTimes(2);
     expect(mainJs).toContain('onRailClick("sidebar-collapse", function () { toggleSidebar(); });');
     expect(mainJs).toContain('onRailClick("sidebar-expand", function () { setSidebarOpen(true); });');
   });

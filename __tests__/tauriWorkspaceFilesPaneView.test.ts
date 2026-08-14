@@ -312,8 +312,7 @@ describe('native Files pane view', () => {
       escapeHtml: (value: string) => value,
       activateFileTab: async () => true,
       closeFileTab: async () => true,
-      syncTabStripOverflow: () => false,
-      scrollActiveTabIntoView: () => false,
+      scheduleTabMeasurements: () => undefined,
     });
 
     refreshTabs();

@@ -943,7 +943,6 @@ describe('Tauri workspace persistence model', () => {
 
   test.each([
     'commitPanePlacement',
-    'updateActiveSplit',
     'movePaneTo',
     'focusThread',
     'detachThreadPane',
@@ -952,6 +951,11 @@ describe('Tauri workspace persistence model', () => {
     'renameThread',
   ])('saves after durable pane mutation in %s', (name) => {
     expect(functionSource(name)).toContain('saveWorkspaceSoon()');
+  });
+
+  test('saves coalesced split mutations with the pane-tree frame', () => {
+    expect(functionSource('updateActiveSplit')).toContain('schedulePaneTreeLayout(');
+    expect(functionSource('schedulePaneTreeLayout')).toContain('saveWorkspaceSoon()');
   });
 
   test('creates the durable session before mutating webview thread state', () => {

@@ -3571,6 +3571,19 @@
     divider.setAttribute("aria-valuemax", "100");
     divider.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
     divider.tabIndex = 0;
+    function latestSplitRatio(layout) {
+      if (!layout || !layout.root) return NaN;
+      var spanning = Boolean(layout.spanMode) && Boolean(layout.spanRoot) &&
+        !layout.maximizedLeafId && layout.spanRoot !== layout.root;
+      var root = spanning ? layout.spanRoot : layout.root;
+      function findRatio(candidate) {
+        if (!candidate || candidate.type === "leaf") return NaN;
+        if (candidate.id === node.id) return candidate.ratio;
+        var firstRatio = findRatio(candidate.first);
+        return Number.isFinite(firstRatio) ? firstRatio : findRatio(candidate.second);
+      }
+      return findRatio(root);
+    }
     divider.addEventListener("pointerdown", function (event) {
       event.preventDefault();
       var dragLayout = activePaneLayout();
@@ -3612,10 +3625,13 @@
       if (event.key !== shrinkKey && event.key !== growKey) return;
       event.preventDefault();
       var step = event.shiftKey ? 0.01 : 0.04;
+      var keyLayout = activePaneLayout();
+      var currentRatio = latestSplitRatio(keyLayout);
+      if (!Number.isFinite(currentRatio)) currentRatio = ratio;
       updateActiveSplit(
         node.id,
-        ratio + (event.key === shrinkKey ? -step : step),
-        activePaneLayout(),
+        currentRatio + (event.key === shrinkKey ? -step : step),
+        keyLayout,
         true
       );
     });
@@ -3646,9 +3662,7 @@
     if (nextRoot === current) return false;
     if (spanning) layout.spanRoot = nextRoot;
     else layout.root = nextRoot;
-    renderPaneWorkspace();
-    if (restoreFocus) focusPaneDivider(splitId);
-    saveWorkspaceSoon();
+    schedulePaneTreeLayout(restoreFocus ? splitId : null);
     return true;
   }
 
@@ -4141,7 +4155,7 @@
       );
       syncAllPtyVisibility();
       scheduleTerminalPaneFits();
-      requestAnimationFrame(syncBrowserBounds);
+      scheduleBrowserBounds();
     } finally {
       if (preserveTerminalFocus) restoreRenderedTerminalFocus(focusedThread);
     }
@@ -4437,7 +4451,7 @@
           });
         }
       }
-      syncBrowserBounds();
+      scheduleBrowserBounds();
     });
 
     setProjectStatus(project, statusLevel(thread.status));
@@ -5097,12 +5111,34 @@
       if (thread.terminalController) thread.terminalController.scheduleFit();
     });
   }
+  var pendingPaneDividerFocusId = null;
+  function schedulePaneTreeLayout(focusSplitId) {
+    pendingPaneDividerFocusId = focusSplitId || null;
+    terminalFrameScheduler.schedule("layout:pane-tree", function () {
+      var restoreSplitId = pendingPaneDividerFocusId;
+      pendingPaneDividerFocusId = null;
+      renderPaneWorkspace();
+      if (restoreSplitId) focusPaneDivider(restoreSplitId);
+      saveWorkspaceSoon();
+    });
+  }
+
+  var pendingTabScroll = false;
+  function scheduleTabMeasurements(scrollActive) {
+    pendingTabScroll = pendingTabScroll || Boolean(scrollActive);
+    terminalFrameScheduler.schedule("layout:tabs", function () {
+      var shouldScroll = pendingTabScroll;
+      pendingTabScroll = false;
+      syncTabStripOverflow();
+      if (shouldScroll) scrollActiveTabIntoView();
+    });
+  }
   window.addEventListener("resize", function () {
     scheduleTerminalPaneFits();
-    syncBrowserBounds();
+    scheduleBrowserBounds();
     // Whether the strip overflows is a function of width, not of its contents.
-    syncTabStripOverflow();
-    syncSessionListScroll();
+    scheduleTabMeasurements();
+    scheduleSidebarLayout();
   });
 
   // ============================================================
@@ -8471,7 +8507,10 @@
 
     // Left empty on purpose: `.tab-strip:empty` collapses the row so the pane
     // canvas owns the full height until a file is actually open.
-    if (files.length === 0) return;
+    if (files.length === 0) {
+      scheduleTabMeasurements();
+      return;
+    }
 
     files.forEach(function (file, idx) {
       var isActive = state.activeFileId === file.id;
@@ -8525,8 +8564,7 @@
       item.appendChild(close);
       tabStripEl.appendChild(item);
     });
-    syncTabStripOverflow();
-    scrollActiveTabIntoView();
+    scheduleTabMeasurements(true);
   }
 
   // ============================================================
@@ -10353,12 +10391,29 @@
     if (rect.width <= 0 || rect.height <= 0) return null;
     return { x: rect.left, y: rect.top, w: rect.width, h: rect.height };
   }
-  function syncProjectBrowser() { renderBrowserTabs(); syncBrowserBounds(); }
+  function syncProjectBrowser() { renderBrowserTabs(); scheduleBrowserBounds(); }
   function syncBrowserBounds() {
     var project = activeProject(); var tab = currentBrowserTab(project); var label = browserLabelForTab(project, tab); var b = visibleBrowserBounds();
     if (!b || !tab || !tab.created) { invoke("browser_hide_all_except", { label: null }).catch(function () {}); return; }
     invoke("browser_hide_all_except", { label: label }).catch(function () {});
     invoke("browser_set_bounds", { label: label, x: b.x, y: b.y, w: b.w, h: b.h }).catch(function () {});
+  }
+  function scheduleBrowserBounds() {
+    var project = activeProject();
+    var pane = project && findBrowserPane(project.id, activeWorkspaceRoot(project));
+    var tab = currentBrowserTab(project);
+    var identity = pane ? pane.id : project && tab ? browserLabelForTab(project, tab) : "visible";
+    terminalFrameScheduler.schedule("browser:" + identity + ":bounds", function () {
+      var currentProject = activeProject();
+      var currentPane = currentProject && findBrowserPane(
+        currentProject.id,
+        activeWorkspaceRoot(currentProject)
+      );
+      if (currentProject !== project || currentPane !== pane || currentBrowserTab(currentProject) !== tab) {
+        return;
+      }
+      syncBrowserBounds();
+    });
   }
   async function navigateBrowser(rawUrl, opts) {
     opts = opts || {}; var project = activeProject(); if (!project) return false;
@@ -10476,7 +10531,7 @@
           tab.historyIndex = tab.history.length - 1;
         }
         if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
-        else syncBrowserBounds();
+        else scheduleBrowserBounds();
         var automationInstalled = await Promise.resolve(
           installBrowserAutomationForPair(navigationPair)
         ).catch(function () { return false; });
@@ -10504,7 +10559,7 @@
           tab.created = false;
           tab.loading = false;
           if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
-          else syncBrowserBounds();
+          else scheduleBrowserBounds();
           writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
           return false;
         }
@@ -10522,7 +10577,7 @@
         tab.title = previousTitle;
         tab.url = previousUrl;
         if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
-        else syncBrowserBounds();
+        else scheduleBrowserBounds();
         writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
         return false;
       }
@@ -10549,7 +10604,7 @@
   document.getElementById("forward").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex < tab.history.length - 1) { var index = tab.historyIndex + 1; navigateBrowser(tab.history[index], { fromHistory: true, historyIndex: index }); } });
   document.getElementById("open-surprise").addEventListener("click", openDiceBrowserTab);
   document.getElementById("open-external").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.url && tab.url !== "about:blank" && openUrl) openUrl(tab.url).catch(function () {}); });
-  if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { syncBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }
+  if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { scheduleBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }
   function handleWindowBeforeUnload(event) {
     saveWorkspaceNow().catch(function () {});
     if (destroyingWindow || !state.openFiles.some(function (file) {
@@ -10724,7 +10779,12 @@
   // 11a. Shell chrome — sidebar, new-pane menu, help
   // ============================================================
 
-  function sidebarOpen() { return !appEl || appEl.dataset.sidebar !== "collapsed"; }
+  var pendingSidebarOpen = null;
+  var pendingSidebarWidth = null;
+  function sidebarOpen() {
+    if (pendingSidebarOpen !== null) return pendingSidebarOpen;
+    return !appEl || appEl.dataset.sidebar !== "collapsed";
+  }
   function syncSidebarToggleState(collapsed) {
     var titlebarLabel = collapsed ? "Expand sidebar" : "Collapse sidebar";
     if (sidebarCollapseEl) {
@@ -10741,13 +10801,35 @@
   }
   function setSidebarOpen(open) {
     if (!appEl) return;
-    appEl.dataset.sidebar = open ? "open" : "collapsed";
-    if (sidebarMiniEl) sidebarMiniEl.hidden = open;
-    syncSidebarToggleState(!open);
+    pendingSidebarOpen = Boolean(open);
     if (!open) closeNewPaneMenu();
-    requestAnimationFrame(function () {
-      scheduleTerminalPaneFits();
-      syncBrowserBounds();
+    scheduleSidebarLayout();
+  }
+  function scheduleSidebarWidth(width) {
+    pendingSidebarWidth = width;
+    scheduleSidebarLayout();
+  }
+  function scheduleSidebarLayout() {
+    terminalFrameScheduler.schedule("layout:sidebar", function () {
+      var layoutChanged = false;
+      if (pendingSidebarOpen !== null) {
+        var open = pendingSidebarOpen;
+        pendingSidebarOpen = null;
+        appEl.dataset.sidebar = open ? "open" : "collapsed";
+        if (sidebarMiniEl) sidebarMiniEl.hidden = open;
+        syncSidebarToggleState(!open);
+        layoutChanged = true;
+      }
+      if (pendingSidebarWidth !== null) {
+        document.documentElement.style.setProperty("--sidebar-w", pendingSidebarWidth + "px");
+        pendingSidebarWidth = null;
+        layoutChanged = true;
+      }
+      if (layoutChanged) {
+        scheduleTerminalPaneFits();
+        scheduleBrowserBounds();
+      }
+      syncSessionListScroll();
     });
   }
   function toggleSidebar() { setSidebarOpen(!sidebarOpen()); }
@@ -10770,13 +10852,13 @@
       sidebarResizeEl.classList.add("dragging");
       function move(moveEvent) {
         var next = Math.min(440, Math.max(210, startWidth + (moveEvent.clientX - startX)));
-        document.documentElement.style.setProperty("--sidebar-w", next + "px");
+        scheduleSidebarWidth(next);
       }
       function up() {
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", up);
         sidebarResizeEl.classList.remove("dragging");
-        requestAnimationFrame(function () { scheduleTerminalPaneFits(); syncBrowserBounds(); });
+        scheduleSidebarLayout();
       }
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);

@@ -117,8 +117,10 @@ describe('Tauri desktop tab shortcuts', () => {
       /function syncTabStripOverflow\(\)[\s\S]*scrollWidth > tabStripEl\.clientWidth \+ 1[\s\S]*toggle\("is-overflowing"/
     );
     expect(mainJs).toMatch(/function scrollActiveTabIntoView\(\)[\s\S]*scrollIntoView/);
-    // Refreshing the strip and resizing the window both re-measure.
-    expect(mainJs).toMatch(/syncTabStripOverflow\(\);\n    scrollActiveTabIntoView\(\);/);
+    // Refreshing the strip and resizing the window both re-measure on the
+    // shared keyed frame lane.
+    expect(mainJs).toContain('scheduleTabMeasurements(true);');
+    expect(mainJs).toContain('scheduleTabMeasurements();');
     expect(stylesCss).toMatch(/\.tab-strip\.is-overflowing \{[^}]*mask-image/);
     expect(stylesCss).not.toMatch(/\.tab-strip \{[^}]*[^.]mask-image/);
   });
