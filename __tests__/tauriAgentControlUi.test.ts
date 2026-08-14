@@ -193,6 +193,8 @@ describe('agent control operator model', () => {
         agentControlOwnerEpoch: null,
         agentControlProjectRoot: null,
         agentControlRefreshRequestId: 0,
+        agentControlRefreshFlight: null,
+        agentControlRefreshQueued: false,
         renderAgentControl: () => { rendered.push(latestModel.id); },
       },
     );
@@ -205,7 +207,7 @@ describe('agent control operator model', () => {
     expect(rendered).toEqual([]);
   });
 
-  it('ignores an older control-state response that completes last', async () => {
+  it('coalesces overlapping control-state polls into one follow-up request', async () => {
     const main = await readFile('native/desktop/psyche-build-tauri/web/main.js', 'utf8');
     const olderResponse = deferred<Record<string, unknown>>();
     const newerResponse = deferred<Record<string, unknown>>();
@@ -227,18 +229,24 @@ describe('agent control operator model', () => {
         agentControlOwnerEpoch: null,
         agentControlProjectRoot: null,
         agentControlRefreshRequestId: 0,
+        agentControlRefreshFlight: null,
+        agentControlRefreshQueued: false,
         renderAgentControl: () => { rendered.push(latestModel.id); },
       },
     );
 
     const older = refresh();
     const newer = refresh();
-    newerResponse.resolve({ snapshot: { id: 'newer', ownerEpoch: 1 } });
-    await newer;
+    expect(responses).toHaveLength(1);
     olderResponse.resolve({ snapshot: { id: 'older', ownerEpoch: 1 } });
     await older;
+    await newer;
+    await flushActions();
+    expect(responses).toHaveLength(0);
+    newerResponse.resolve({ snapshot: { id: 'newer', ownerEpoch: 1 } });
+    await flushActions();
 
-    expect(rendered).toEqual(['newer']);
+    expect(rendered).toEqual(['older', 'newer']);
   });
 
   it('does not let an older control-state rejection clear newer state', async () => {
@@ -263,18 +271,22 @@ describe('agent control operator model', () => {
         agentControlOwnerEpoch: null,
         agentControlProjectRoot: null,
         agentControlRefreshRequestId: 0,
+        agentControlRefreshFlight: null,
+        agentControlRefreshQueued: false,
         renderAgentControl: () => { rendered.push(latestModel?.id ?? 'cleared'); },
       },
     );
 
     const older = refresh();
     const newer = refresh();
-    newerResponse.resolve({ snapshot: { id: 'newer', ownerEpoch: 1 } });
-    await newer;
     olderResponse.reject(new Error('older request failed'));
     expect(await older).toBeNull();
+    await newer;
+    await flushActions();
+    newerResponse.resolve({ snapshot: { id: 'newer', ownerEpoch: 1 } });
+    await flushActions();
 
-    expect(rendered).toEqual(['newer']);
+    expect(rendered).toEqual(['cleared', 'newer']);
   });
 
   it('rejects a drawer action after its project is no longer active', async () => {
@@ -380,9 +392,19 @@ describe('agent control operator model', () => {
     expect(operator.approvals).toEqual([expect.objectContaining({
       approvalId: 'approval-1', payloadDigest: 'digest-1', effect: {
         kind: 'close', target: 'pane:pane-1',
-      }, canApprove: true, canDeny: true,
+      }, agentId: 'agent-b', taskId: 'task-active',
+      resource: { kind: 'pane', id: 'pane-1', generation: 3 },
+      leaseCurrent: true, canRevokeLease: true, canApprove: true, canDeny: true,
     })]);
     expect(JSON.stringify(operator)).not.toContain('executablePayloadDigest');
+
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    renderAgentControlDrawer(content, operator);
+    expect(content.textContent).toContain('agent-b · task-active');
+    expect(content.textContent).toContain('pane pane-1 generation 3');
+    expect(content.textContent).toContain('expires 2026-08-13T01:03:00.000Z');
+    expect(buttonByLabel(content, 'Revoke entire lease for pane pane-1 generation 3')).toBeDefined();
 
     const agent = createAgentControlModel(snapshot(), { now: NOW, operator: false });
     expect(agent.approvals[0]).toMatchObject({ canApprove: false, canDeny: false });
@@ -552,28 +574,104 @@ describe('agent control operator model', () => {
     });
 
     renderAgentControlDrawer(content, model, { onRevoke });
-    const paneRevoke = buttonByLabel(content, 'Revoke pane pane-1 generation 3');
-    const tabRevoke = buttonByLabel(content, 'Revoke browser tab tab-2 generation 9');
-    const projectRevoke = buttonByLabel(content, 'Revoke project project-1');
+    const paneRevoke = buttonByLabel(content, 'Revoke entire lease for pane pane-1 generation 3');
+    const tabRevoke = buttonByLabel(content, 'Revoke entire lease for browser tab tab-2 generation 9');
+    const projectRevoke = buttonByLabel(content, 'Revoke entire lease for project project-1');
     expect(paneRevoke).toBeDefined();
     expect(tabRevoke).toBeDefined();
     expect(projectRevoke).toBeDefined();
-    paneRevoke!.dispatch('click');
     tabRevoke!.dispatch('click');
+    paneRevoke!.dispatch('click');
     projectRevoke!.dispatch('click');
     await flushActions();
-    expect(onRevoke).toHaveBeenNthCalledWith(1, {
-      leaseId: 'lease-active', revision: 2,
-      resource: { kind: 'pane', id: 'pane-1', generation: 3 },
-    });
-    expect(onRevoke).toHaveBeenNthCalledWith(2, {
+    expect(onRevoke).toHaveBeenCalledOnce();
+    expect(onRevoke).toHaveBeenCalledWith({
       leaseId: 'lease-active', revision: 2,
       resource: { kind: 'browser_tab', id: 'tab-2', generation: 9 },
     });
-    expect(onRevoke).toHaveBeenNthCalledWith(3, {
-      leaseId: 'lease-active', revision: 2,
-      resource: { kind: 'project', id: 'project-1' },
+  });
+
+  it('locks duplicate grants and competing approval decisions by action cohort', async () => {
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    const grantResult = deferred<void>();
+    const approvalResult = deferred<void>();
+    const onGrant = vi.fn(() => grantResult.promise);
+    const onApprove = vi.fn(() => approvalResult.promise);
+    const onDeny = vi.fn(() => approvalResult.promise);
+    const model = createAgentControlModel(snapshot(), { now: NOW, operator: true, projectRoot: '/repo' });
+
+    renderAgentControlDrawer(content, model, { onGrant, onApprove, onDeny });
+    const grant = buttonByLabel(content, 'Grant request request-pending')!;
+    const approve = buttonByLabel(content, 'Approve once')!;
+    const deny = buttonByLabel(content, 'Deny')!;
+    grant.dispatch('click');
+    grant.dispatch('click');
+    approve.dispatch('click');
+    deny.dispatch('click');
+
+    expect(onGrant).toHaveBeenCalledOnce();
+    expect(onApprove).toHaveBeenCalledOnce();
+    expect(onDeny).not.toHaveBeenCalled();
+    expect(grant.disabled).toBe(true);
+    expect(approve.disabled).toBe(true);
+    expect(deny.disabled).toBe(true);
+    grantResult.resolve();
+    approvalResult.resolve();
+    await flushActions();
+  });
+
+  it('drops stale failures and retry closures when project or owner context changes', async () => {
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    const failedGrant = deferred<void>();
+    const first = createAgentControlModel(snapshot(7), {
+      now: NOW, operator: true, projectRoot: '/repo-a',
     });
+    renderAgentControlDrawer(content, first, { onGrant: () => failedGrant.promise });
+    const staleGrant = buttonByLabel(content, 'Grant request request-pending')!;
+    staleGrant.dispatch('click');
+
+    const restartedSnapshot = snapshot(8);
+    restartedSnapshot.leaseRequests = [];
+    const restarted = createAgentControlModel(restartedSnapshot, {
+      now: NOW, operator: true, projectRoot: '/repo-a', previousOwnerEpoch: 7,
+    });
+    renderAgentControlDrawer(content, restarted, { onGrant: vi.fn() });
+    failedGrant.reject(new Error('old owner unavailable'));
+    await flushActions();
+
+    expect(content.textContent).not.toContain('old owner unavailable');
+    expect(document.activeElement).not.toBe(staleGrant);
+    expect(content.children.some((card) => card.dataset.failedActionKey === 'grant:request-pending')).toBe(false);
+    expect(buttonByLabel(content, 'Grant request request-pending')).toBeUndefined();
+  });
+
+  it('bounds hostile control snapshots and reports every overflow', () => {
+    const huge = snapshot();
+    huge.leaseRequests = Array.from({ length: 1_001 }, (_, index) => ({
+      id: `request-${index}-${'x'.repeat(1_000)}`,
+      actorId: 'a'.repeat(1_000), taskId: 't'.repeat(1_000), status: 'pending', ttlMs: 1,
+      createdAt: '2026-08-13T00:55:00.000Z',
+      grants: index === 0 ? Array.from({ length: 1_001 }, (__, resourceIndex) => ({
+        target: { kind: 'pane', id: `pane-${resourceIndex}`, generation: resourceIndex },
+        capabilities: resourceIndex === 0
+          ? Array.from({ length: 1_001 }, (___, capabilityIndex) => `cap-${capabilityIndex}`)
+          : ['pane.observe'],
+      })) : [],
+    }));
+    const model = createAgentControlModel(huge, { now: NOW, operator: true });
+    expect(model.groups.requested).toHaveLength(100);
+    expect(model.groups.requested[0].resources).toHaveLength(32);
+    expect(model.groups.requested[0].resources[0].capabilities).toHaveLength(12);
+
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    renderAgentControlDrawer(content, model);
+    expect(content.textContent).toContain('+901 more lease requests');
+    expect(content.textContent).toContain('+969 more resources');
+    expect(content.textContent).toContain('+989 more capabilities');
+    expect(content.textContent).not.toContain('x'.repeat(256));
   });
 
   it('retains command focus and exposes the failure without removing its card', async () => {

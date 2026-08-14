@@ -98,6 +98,7 @@ interface ControlRuntimeOptions {
 
 interface LeaseRequestRecord {
   id: string;
+  ownerEpoch: number;
   actorId: string;
   taskId: string;
   status: 'pending' | 'granted' | 'released' | 'revoked';
@@ -244,7 +245,13 @@ export class ControlRuntime {
       leases: this.leases.snapshot(),
       resources: this.surfaces.list(),
       capabilityLeases: this.capabilityLeases.snapshot(),
-      leaseRequests: [...this.leaseRequests.values()].map((request) => ({ ...request })),
+      leaseRequests: [...this.leaseRequests.values()].map((request) => ({
+        ...request,
+        grants: request.grants.map((grant) => ({
+          target: { ...grant.target },
+          capabilities: [...grant.capabilities],
+        })),
+      })),
       approvals,
       receipts: [...this.receipts.values()],
     };
@@ -378,14 +385,16 @@ export class ControlRuntime {
       }
       switch (command.kind) {
         case 'lease.request': {
-          const request: LeaseRequestRecord = {
-            id: command.id, actorId: command.actor.id, taskId: command.payload.taskId,
+          const request: LeaseRequestRecord = Object.freeze({
+            id: command.id, ownerEpoch: command.ownerEpoch,
+            actorId: command.actor.id, taskId: command.payload.taskId,
             status: 'pending', createdAt: command.createdAt,
             ttlMs: command.payload.ttlMs,
-            grants: command.payload.grants.map((grant) => ({
-              target: { ...grant.target }, capabilities: [...grant.capabilities],
-            })),
-          };
+            grants: Object.freeze(command.payload.grants.map((grant) => Object.freeze({
+              target: Object.freeze({ ...grant.target }),
+              capabilities: Object.freeze([...grant.capabilities]),
+            }))),
+          });
           this.leaseRequests.set(request.id, request);
           while (this.leaseRequests.size > MAX_COMMAND_RECORDS) {
             const oldest = this.leaseRequests.keys().next().value;
@@ -395,10 +404,26 @@ export class ControlRuntime {
           return this.appendTerminal(command, succeededOutcome({ requestId: request.id }));
         }
         case 'lease.grant': {
-          this.assertGrantTargets(command.payload.grants, command.projectRoot);
-          const lease = this.capabilityLeases.grant({ ...command.payload, grantedBy: command.actor.id });
           const request = this.leaseRequests.get(command.payload.requestId);
-          if (request) request.status = 'granted';
+          if (!request) {
+            throw codedRuntimeError('lease_request_missing', 'lease request does not exist');
+          }
+          if (request.ownerEpoch !== this.ownerEpoch || request.ownerEpoch !== command.ownerEpoch) {
+            throw codedRuntimeError('lease_request_stale', 'lease request belongs to another owner epoch');
+          }
+          if (request.status !== 'pending') {
+            throw codedRuntimeError('lease_request_consumed', 'lease request has already been resolved');
+          }
+          this.assertGrantTargets(request.grants, command.projectRoot);
+          const lease = this.capabilityLeases.grant({
+            requestId: request.id,
+            actorId: request.actorId,
+            taskId: request.taskId,
+            ttlMs: request.ttlMs,
+            grants: request.grants,
+            grantedBy: command.actor.id,
+          });
+          this.leaseRequests.set(request.id, Object.freeze({ ...request, status: 'granted' }));
           return this.appendTerminal(command, succeededOutcome({ lease }));
         }
         case 'lease.release': {
@@ -410,7 +435,7 @@ export class ControlRuntime {
           this.capabilityLeases.release(lease.id);
           await this.revokeApprovalsForLease(lease.id);
           const request = this.leaseRequests.get(lease.requestId);
-          if (request) request.status = 'released';
+          if (request) this.leaseRequests.set(request.id, Object.freeze({ ...request, status: 'released' }));
           return this.appendTerminal(command, succeededOutcome());
         }
         case 'lease.revoke': {
@@ -418,7 +443,7 @@ export class ControlRuntime {
           if (lease) {
             await this.revokeApprovalsForLease(lease.id);
             const request = this.leaseRequests.get(lease.requestId);
-            if (request) request.status = 'revoked';
+            if (request) this.leaseRequests.set(request.id, Object.freeze({ ...request, status: 'revoked' }));
           }
           return this.appendTerminal(command, succeededOutcome());
         }
@@ -909,7 +934,7 @@ export class ControlRuntime {
     for (const lease of this.capabilityLeases.revokeTarget(target)) {
       await this.revokeApprovalsForLease(lease.id);
       const request = this.leaseRequests.get(lease.requestId);
-      if (request) request.status = 'revoked';
+      if (request) this.leaseRequests.set(request.id, Object.freeze({ ...request, status: 'revoked' }));
     }
   }
 

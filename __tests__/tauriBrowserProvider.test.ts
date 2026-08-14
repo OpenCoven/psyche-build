@@ -67,6 +67,8 @@ describe('Tauri browser control provider contract', () => {
       expect(lib).toContain(command);
     }
     expect(provider).toMatch(/enum OperatorCommand[\s\S]*LeaseGrant[\s\S]*LeaseRevoke[\s\S]*ApprovalResolve/);
+    expect(provider).toMatch(/LeaseGrant\s*\{\s*request_id:\s*String,\s*\}/);
+    expect(provider).toMatch(/"lease\.grant",\s*json!\(\{\s*"requestId": request_id\s*\}\)/);
     expect(provider).not.toMatch(/control_operator_submit[^(]*\([^)]*serde_json::Value/);
     expect(provider).not.toMatch(/control_provider_(?:upsert|complete)[^(]*\([^)]*serde_json::Value/);
     expect(provider).toMatch(/control_operator_submit[\s\S]*standalone_control_request/);

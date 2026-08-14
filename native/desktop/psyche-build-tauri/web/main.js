@@ -181,6 +181,8 @@
   var agentControlOwnerEpoch = null;
   var agentControlProjectRoot = null;
   var agentControlRefreshRequestId = 0;
+  var agentControlRefreshFlight = null;
+  var agentControlRefreshQueued = false;
   var agentControlUiLifecycle = null;
 
   function agentControlCommand(project, command) {
@@ -215,8 +217,8 @@
       if (!badge || !header) return;
       var node = document.createElement("span");
       node.className = "agent-control-badge";
-      node.textContent = "leased";
-      node.setAttribute("aria-label", "Leased to " + badge.agentId + " for " + badge.taskId + " until " + badge.expiresAt);
+      node.textContent = "leased · " + badge.capabilitySummary;
+      node.setAttribute("aria-label", "Leased to " + badge.agentId + " for " + badge.taskId + " with " + badge.capabilitySummary + " until " + badge.expiresAt);
       node.dataset.leaseId = badge.leaseId;
       node.dataset.leaseRevision = String(badge.revision);
       header.appendChild(node);
@@ -229,8 +231,8 @@
       if (!badge) return;
       var node = document.createElement("span");
       node.className = "agent-control-badge";
-      node.textContent = "leased";
-      node.setAttribute("aria-label", "Leased to " + badge.agentId + " for " + badge.taskId + " until " + badge.expiresAt);
+      node.textContent = "leased · " + badge.capabilitySummary;
+      node.setAttribute("aria-label", "Leased to " + badge.agentId + " for " + badge.taskId + " with " + badge.capabilitySummary + " until " + badge.expiresAt);
       node.dataset.leaseId = badge.leaseId;
       node.dataset.leaseRevision = String(badge.revision);
       tabNode.appendChild(node);
@@ -255,11 +257,7 @@
     window.PsycheControl.renderAgentControlDrawer(content, model, {
       onGrant: function (request) {
         return agentControlCommand(project, {
-          type: "lease_grant", requestId: request.requestId, actorId: request.agentId,
-          taskId: request.taskId, ttlMs: request.ttlMs,
-          grants: request.resources.map(function (resource) {
-            return { target: { kind: resource.kind, id: resource.id, generation: resource.generation }, capabilities: resource.capabilities };
-          }),
+          type: "lease_grant", requestId: request.requestId,
         });
       },
       onDeny: function (approval) {
@@ -284,9 +282,13 @@
   function refreshAgentControlState() {
     var project = activeProject();
     if (!project || !window.PsycheControl) return Promise.resolve(null);
+    if (agentControlRefreshFlight) {
+      agentControlRefreshQueued = true;
+      return agentControlRefreshFlight;
+    }
     var projectRoot = project.root;
     var requestId = ++agentControlRefreshRequestId;
-    return invoke("control_state", { projectRoot: projectRoot }).then(function (response) {
+    var flight = invoke("control_state", { projectRoot: projectRoot }).then(function (response) {
       var currentProject = activeProject();
       if (requestId !== agentControlRefreshRequestId || !currentProject || currentProject.root !== projectRoot) {
         return null;
@@ -295,6 +297,7 @@
       agentControlModel = window.PsycheControl.createAgentControlModel(snapshot || {}, {
         operator: true,
         previousOwnerEpoch: agentControlOwnerEpoch,
+        projectRoot: projectRoot,
       });
       agentControlOwnerEpoch = agentControlModel.ownerEpoch;
       agentControlProjectRoot = projectRoot;
@@ -310,11 +313,20 @@
       agentControlProjectRoot = null;
       renderAgentControl();
       return null;
+    }).finally(function () {
+      if (agentControlRefreshFlight === flight) agentControlRefreshFlight = null;
+      if (agentControlRefreshQueued) {
+        agentControlRefreshQueued = false;
+        void refreshAgentControlState();
+      }
     });
+    agentControlRefreshFlight = flight;
+    return flight;
   }
 
   function resetAgentControlProject(project) {
     agentControlRefreshRequestId += 1;
+    agentControlRefreshQueued = false;
     agentControlModel = null;
     agentControlOwnerEpoch = null;
     agentControlProjectRoot = null;
