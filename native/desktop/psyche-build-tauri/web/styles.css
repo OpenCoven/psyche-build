@@ -80,6 +80,8 @@
   --composer-h: 54px;
   --status-h: 26px;
   --session-row-h: 44px;
+  --file-row-h: 26px;
+  --status-detail-row-h: 68px;
   --pane-head-h: 32px;
   --pane-foot-h: 27px;
   --pane-gap: 2px;
@@ -2606,11 +2608,21 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
-  min-height: 24px;
+  min-height: calc(var(--status-detail-row-h) - 8px);
   padding: 4px 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-1);
+}
+
+/* Virtual status spacers use a 68px stride: 60px row + the body's 8px gap. */
+.status-agent-row,
+.status-shell-row {
+  height: calc(var(--status-detail-row-h) - 8px);
+  max-height: calc(var(--status-detail-row-h) - 8px);
+  overflow: hidden;
+  grid-auto-rows: minmax(0, 1fr);
+  row-gap: 2px;
 }
 
 .status-task-group {
@@ -2985,6 +2997,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   background: transparent;
   color: var(--text-soft);
   font-size: 11.5px;
+  min-height: var(--file-row-h);
   text-align: left;
   white-space: nowrap;
 }
@@ -3000,6 +3013,18 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .file-row.open .twisty { transform: rotate(90deg); }
 .file-row .file-name { overflow: hidden; text-overflow: ellipsis; }
 .file-row.is-dir .file-name { color: var(--text); }
+.file-row-error {
+  display: flex;
+  align-items: center;
+  height: var(--file-row-h);
+  min-height: var(--file-row-h);
+  max-height: var(--file-row-h);
+  padding: 3px 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-row-error:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 /* -------- File view (Files pane) --------
    The one editor host is staged outside the canvas until a Files surface
