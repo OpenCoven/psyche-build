@@ -284,14 +284,7 @@
           continue;
         }
         if (character === "/") {
-          if (canStartRegex) {
-            return { rejected: true, index: length };
-          } else {
-            index += source[index + 1] === "=" ? 2 : 1;
-            canStartRegex = true;
-            previousToken = "operator";
-          }
-          continue;
+          return { rejected: true, index: length };
         }
         if (code > 127 || character === "\\") {
           return { rejected: true, index: length };

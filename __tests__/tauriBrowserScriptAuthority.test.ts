@@ -432,6 +432,12 @@ describe('native browser script authority', () => {
       mark("unicode-identifier");
       return null;
     `, null, { nodes: [] }, { globals });
+    const regexQuote = await runWorker(`
+      if (true) {} /"/.test("x");
+      mark("regex-quote");
+      return import("data:,export default 7");
+      //"
+    `, null, { nodes: [] }, { globals });
 
     expect(direct).toEqual({ ok: false, code: 'automation_failed' });
     expect(obfuscated).toEqual({ ok: false, code: 'automation_failed' });
@@ -439,6 +445,7 @@ describe('native browser script authority', () => {
     expect(templateExpression).toEqual({ ok: false, code: 'automation_failed' });
     expect(divisionObfuscated).toEqual({ ok: false, code: 'automation_failed' });
     expect(unicodeIdentifier).toEqual({ ok: false, code: 'automation_failed' });
+    expect(regexQuote).toEqual({ ok: false, code: 'automation_failed' });
     expect(executions).toEqual([]);
   });
 
@@ -522,16 +529,23 @@ describe('native browser script authority', () => {
     });
   });
 
-  it('rejects regex literals rather than guessing whether a slash starts a regex', async () => {
+  it('rejects executable slash tokens rather than guessing division versus regex', async () => {
     const executions: string[] = [];
-    const envelope = await runWorker(`
+    const regex = await runWorker(`
       mark("executed");
       return /safe/.test("safe");
     `, null, { nodes: [] }, {
       globals: { mark(value: string) { executions.push(value); } },
     });
+    const division = await runWorker(`
+      mark("executed");
+      return 6 / 2;
+    `, null, { nodes: [] }, {
+      globals: { mark(value: string) { executions.push(value); } },
+    });
 
-    expect(envelope).toEqual({ ok: false, code: 'automation_failed' });
+    expect(regex).toEqual({ ok: false, code: 'automation_failed' });
+    expect(division).toEqual({ ok: false, code: 'automation_failed' });
     expect(executions).toEqual([]);
   });
 
