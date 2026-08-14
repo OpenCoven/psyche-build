@@ -1643,22 +1643,51 @@ function outcomeFromEvent(event: RuntimeEvent): CommandOutcome {
   }
 }
 
-type DurableJournalReceiptResult = Pick<AgentControlJournalReceipt, 'schema' | 'state' | 'code'>;
+interface DurableJournalReceiptResult {
+  readonly schema: 'psyche.control.receipt/v1';
+  readonly state: AgentControlJournalReceipt['state'];
+  readonly resource: {
+    readonly kind: 'project' | 'pane' | 'browser_tab';
+    readonly idDigest: string;
+    readonly generation?: number;
+  };
+  readonly code?: string;
+}
 
 function durableJournalReceiptPayload(event: RuntimeEvent): DurableJournalReceiptResult | undefined {
   const receipt = event.payload.receipt;
   if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return undefined;
   const metadata = receipt as Record<string, unknown>;
+  const resource = metadata.resource;
   if (
     metadata.schema !== 'psyche.control.receipt/v1'
     || !isActionReceiptState(metadata.state)
     || (metadata.code !== undefined && typeof metadata.code !== 'string')
+    || !resource || typeof resource !== 'object' || Array.isArray(resource)
+  ) return undefined;
+  const redactedResource = resource as Record<string, unknown>;
+  if (
+    !isJournalResourceKind(redactedResource.kind)
+    || typeof redactedResource.idDigest !== 'string'
+    || !/^[a-f0-9]{64}$/.test(redactedResource.idDigest)
+    || (redactedResource.kind === 'project'
+      ? redactedResource.generation !== undefined
+      : !Number.isSafeInteger(redactedResource.generation) || (redactedResource.generation as number) < 1)
   ) return undefined;
   return {
     schema: metadata.schema,
     state: metadata.state,
+    resource: {
+      kind: redactedResource.kind,
+      idDigest: redactedResource.idDigest,
+      ...(redactedResource.kind === 'project' ? {} : { generation: redactedResource.generation as number }),
+    },
     ...(typeof metadata.code === 'string' ? { code: metadata.code } : {}),
   };
+}
+
+function isJournalResourceKind(value: unknown): value is DurableJournalReceiptResult['resource']['kind'] {
+  return value === 'project' || value === 'pane' || value === 'browser_tab';
 }
 
 function isActionReceiptState(value: unknown): value is AgentControlJournalReceipt['state'] {
