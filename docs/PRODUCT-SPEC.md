@@ -77,6 +77,13 @@ Rituals should make common project layouts fast without depending on brittle tmu
 
 OpenMeow, OpenClaw, Coven, and future clients should talk to structured local state instead of blind terminal puppeteering.
 
+The agent control surface is capability-leased and project-scoped. Agents may
+act only on registered pane/browser resources at exact generations. Risky
+effects pause for operator approval; resource replacement, provider disconnect,
+or owner restart fails closed. The product does not substitute whole-desktop,
+accessibility, coordinate, raw tmux, or shell control when a typed provider is
+unavailable. See [Agent surface control](./AGENT-SURFACE-CONTROL.md).
+
 ## Capability targets
 
 Psyche Build should keep the core user promise sharp:

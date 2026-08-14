@@ -1,5 +1,11 @@
 export const AGENT_CONTROL_LIMITS = Object.freeze({
   leaseTtlMs: 30 * 60_000,
+  leaseRequestRecords: 1_000,
+  leaseRequestPending: 100,
+  leaseRequestGrants: 32,
+  leaseRequestCapabilitiesPerGrant: 12,
+  leaseRequestTextBytes: 128,
+  leaseRequestCapabilityBytes: 64,
   approvalTtlMs: 5 * 60_000,
   paneOutputBytes: 64 * 1024,
   paneOutputChunks: 512,
@@ -12,4 +18,6 @@ export const AGENT_CONTROL_LIMITS = Object.freeze({
   scriptResultBytes: 256 * 1024,
   actionTimeoutMs: 15_000,
   scriptTimeoutMs: 5_000,
+  pendingCommands: 256,
+  resourceQueueDepth: 64,
 });

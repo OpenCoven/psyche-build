@@ -171,6 +171,9 @@ The compatibility mutation aliases require `task_id`, `lease_id`, and
 Missing authority returns a structured `lease_missing` result without an
 effect.
 
+See [Agent surface control](./docs/AGENT-SURFACE-CONTROL.md) for the complete
+lease, approval, generation, browser-provider, redaction, and recovery model.
+
 `psyche_kill_pane` **does not delete the pane's worktree or branch.** It returns
 both so you can inspect or merge the work; removing them stays an explicit
 action in the TUI, because a worktree can hold the only copy of uncommitted

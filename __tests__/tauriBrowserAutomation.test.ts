@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { createContext, runInContext } from 'node:vm';
 
 import {
   browserAutomationSource,
@@ -96,6 +97,200 @@ describe('bounded semantic browser automation', () => {
     const api = installBrowserAutomation(globalObject);
     await expect(api.dispatch({ type: 'script', source: 'return { answer: args.value + 1 };', args: { value: 41 } }))
       .resolves.toMatchObject({ value: { answer: 42 }, resultBytes: 13 });
+  });
+
+  it.each([
+    ['history/hash mutation', 'args.history.replaceState({}, "", "#changed");', (globalObject: any) => ({
+      history: { replaceState: () => { globalObject.location.href = 'https://example.test/account#changed'; } },
+    })],
+    ['document replacement', 'args.replaceDocument();', (globalObject: any) => ({
+      replaceDocument: () => { globalObject.document = { ...globalObject.document, documentElement: node('html') }; },
+    })],
+    ['documentElement replacement', 'args.replaceDocumentElement();', (globalObject: any) => ({
+      replaceDocumentElement: () => { globalObject.document.documentElement = node('html'); },
+    })],
+    ['document.write replacement', 'args.document.write();', (globalObject: any) => ({
+      document: { write: () => { globalObject.document.documentElement = node('html'); } },
+    })],
+  ])('invalidates script results after synchronous %s', async (_kind, mutationSource, createArgs) => {
+    const { globalObject } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    const snapshot = api.dispatch({ type: 'snapshot' });
+    await expect(api.dispatch({
+      type: 'script',
+      source: `${mutationSource} return { leaked: "script-result-secret" };`,
+      args: createArgs(globalObject),
+    })).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true, invalidate: true });
+    expect(() => api.dispatch({ type: 'resolve', snapshotId: snapshot.snapshotId, ref: 'e1' }))
+      .toThrowError(/snapshot_stale/);
+  });
+
+  it('invalidates an asynchronously resolved script after pushState changes the URL', async () => {
+    const { globalObject } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    await expect(api.dispatch({
+      type: 'script',
+      source: 'await Promise.resolve(); args.history.pushState({}, "", "/next"); return { leaked: "async-result-secret" };',
+      args: { history: { pushState: () => { globalObject.location.href = 'https://example.test/next'; } } },
+    })).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true, invalidate: true });
+  });
+
+  it('checks document identity again after result serialization', async () => {
+    const { globalObject } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    await expect(api.dispatch({
+      type: 'script',
+      source: `return { get value() {
+        args.replaceDocumentElement();
+        return "serialization-result-secret";
+      } };`,
+      args: { replaceDocumentElement: () => { globalObject.document.documentElement = node('html'); } },
+    })).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true, invalidate: true });
+  });
+
+  it('uses initialization-captured document and location getters for script identity checks', async () => {
+    class FakeWindow {}
+    class FakeDocument {}
+    class FakeLocation {}
+    const documents = new WeakMap<object, object>();
+    const roots = new WeakMap<object, object>();
+    const locations = new WeakMap<object, object>();
+    const hrefs = new WeakMap<object, string>();
+    Object.defineProperties(FakeWindow.prototype, {
+      document: { configurable: true, get() { return documents.get(this); } },
+      location: { configurable: true, get() { return locations.get(this); } },
+    });
+    Object.defineProperties(FakeDocument.prototype, {
+      documentElement: { configurable: true, get() { return roots.get(this); } },
+      URL: { configurable: true, get() {
+        const location = locations.get(globalObject);
+        return location ? hrefs.get(location) : undefined;
+      } },
+    });
+    Object.defineProperty(FakeLocation.prototype, 'href', {
+      configurable: true, get() { return hrefs.get(this); },
+    });
+    const base = fixture().globalObject;
+    const document = Object.assign(new FakeDocument(), { body: base.document.body });
+    const location = new FakeLocation();
+    const globalObject: any = Object.assign(new FakeWindow(), {
+      innerWidth: base.innerWidth, innerHeight: base.innerHeight, Event: base.Event,
+      Date: base.Date, URL: base.URL, getComputedStyle: base.getComputedStyle,
+      Window: FakeWindow, Document: FakeDocument, Location: FakeLocation,
+    });
+    documents.set(globalObject, document);
+    roots.set(document, base.document.documentElement);
+    locations.set(globalObject, location);
+    hrefs.set(location, base.location.href);
+    Function('globalThis', browserAutomationSource())(globalObject);
+
+    Object.defineProperties(FakeWindow.prototype, {
+      document: { configurable: true, get() { return { documentElement: node('html') }; } },
+      location: { configurable: true, get() { return { href: 'https://attacker.test/' }; } },
+    });
+    Object.defineProperty(FakeDocument.prototype, 'documentElement', {
+      configurable: true, get() { return node('html'); },
+    });
+    Object.defineProperty(FakeLocation.prototype, 'href', {
+      configurable: true, get() { return 'https://attacker.test/'; },
+    });
+
+    const api = globalObject.__PSYCHE_AUTOMATION__;
+    await expect(api.dispatch({ type: 'script', source: 'return { ok: true };' }))
+      .resolves.toMatchObject({ value: { ok: true } });
+    await expect(api.dispatch({
+      type: 'script', source: 'args.navigate(); return { leaked: true };',
+      args: { navigate: () => hrefs.set(location, 'https://example.test/changed') },
+    })).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true, invalidate: true });
+  });
+
+  it('uses only document-start script intrinsics after hostile page monkeypatches', async () => {
+    const { globalObject } = fixture();
+    Object.assign(globalObject, {
+      Function, Promise, setTimeout, clearTimeout, WeakSet, Object, JSON, Math, Reflect, TextEncoder,
+    });
+    Function('globalThis', browserAutomationSource())(globalObject);
+    const api = (globalObject as any).__PSYCHE_AUTOMATION__;
+    Object.assign(globalObject, {
+      Function: () => { throw new Error('page Function'); },
+      Promise: class { static resolve() { throw new Error('page Promise.resolve'); } static race() { throw new Error('page Promise.race'); } },
+      setTimeout: () => { throw new Error('page setTimeout'); },
+      clearTimeout: () => { throw new Error('page clearTimeout'); },
+      WeakSet: class { constructor() { throw new Error('page WeakSet'); } },
+      Object: { getPrototypeOf: () => { throw new Error('page getPrototypeOf'); }, values: () => { throw new Error('page values'); }, keys: () => { throw new Error('page keys'); } },
+      JSON: { stringify: () => '"forged"', parse: () => ({ forged: true }) },
+      Math: { max: () => 8675309 }, Reflect: { apply: () => { throw new Error('page Reflect.apply'); } },
+      TextEncoder: class { encode() { return new Uint8Array(); } },
+    });
+    const exact = await api.dispatch({ type: 'script', source: 'return { answer: args.value + 1 };', args: { value: 41 } });
+    let oversized: unknown;
+    try { await api.dispatch({ type: 'script', source: 'return "x".repeat(256 * 1024 + 1);' }); }
+    catch (error) { oversized = error; }
+    expect(exact).toMatchObject({ value: { answer: 42 }, resultBytes: 13 });
+    expect(oversized).toMatchObject({ code: 'result_too_large' });
+  });
+
+  it('does not trust child Promise methods or Array iteration after document-start', async () => {
+    vi.useFakeTimers();
+    try {
+      const emitted: Array<{ event: string; payload: any }> = [];
+      const completed: string[] = [];
+      let executions = 0;
+      const root = {};
+      const context = createContext({
+        document: { body: root, documentElement: root },
+        location: { href: 'https://example.test/' },
+        URL, TextEncoder, setTimeout, clearTimeout,
+        __TAURI__: { core: { invoke: async (event: string, args: { result: unknown }) => { emitted.push({ event, payload: args.result }); } } },
+        increment: () => { executions += 1; },
+        completed: (label: string) => { completed.push(label); },
+      });
+      runInContext(browserAutomationSource(), context);
+      runInContext(`
+        globalThis.__PSYCHE_ORIGINAL_PROMISE__ = Promise;
+        Promise.prototype.then = function () { throw new Error('page then'); };
+        Promise.prototype.catch = function () { throw new Error('page catch'); };
+        Array.prototype[Symbol.iterator] = function () { throw new Error('page iterator'); };
+        globalThis.Promise = class { constructor() { throw new Error('page Promise'); } };
+      `, context);
+      runInContext(`
+        (async () => {
+          await __PSYCHE_AUTOMATION__.dispatchAndEmit(
+            { type: 'script', source: 'args.increment(); return { ok: true };', args: { increment } },
+            { actionId: 'success', tabId: 'tab', generation: 1 }
+          );
+          completed('success');
+        })();
+        (async () => {
+          await __PSYCHE_AUTOMATION__.dispatchAndEmit(
+            { type: 'script', source: 'throw new Error("script failure");' },
+            { actionId: 'error', tabId: 'tab', generation: 1 }
+          );
+          completed('error');
+        })();
+        (async () => {
+          await __PSYCHE_AUTOMATION__.dispatchAndEmit(
+            { type: 'script', source: 'await new __PSYCHE_ORIGINAL_PROMISE__(() => {});' },
+            { actionId: 'timeout', tabId: 'tab', generation: 1 }
+          );
+          completed('timeout');
+        })();
+      `, context);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(executions).toBe(1);
+      expect(completed.sort()).toEqual(['error', 'success', 'timeout']);
+      expect(emitted).toHaveLength(3);
+      expect(emitted.find(({ payload }) => payload.actionId === 'success')?.payload)
+        .toMatchObject({ value: { value: { ok: true } } });
+      expect(emitted.find(({ payload }) => payload.actionId === 'error')?.payload)
+        .toMatchObject({ error: { code: 'automation_failed' } });
+      expect(emitted.find(({ payload }) => payload.actionId === 'timeout')?.payload)
+        .toMatchObject({ error: { code: 'effect_unknown' } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([

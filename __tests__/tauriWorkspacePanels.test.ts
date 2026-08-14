@@ -67,6 +67,22 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function parseBuildWebSteps(script: string) {
+  return script
+    .split(/\s*&&\s*/)
+    .map((command) => command.trim().split(/\s+/))
+    .map((argv) => {
+      expect(argv[0]).toBe('esbuild');
+      const outfileArg = argv.find((arg) => arg.startsWith('--outfile='));
+      if (!outfileArg) throw new Error(`missing --outfile in build:web step: ${argv.join(' ')}`);
+      return {
+        entry: argv[1],
+        outfile: outfileArg.slice('--outfile='.length),
+      };
+    });
+
+}
+
 describe('Tauri workspace panels', () => {
   it('registers a scoped pane-session metrics command', () => {
     expect(tauriLib).toContain('mod pane_metrics;');
@@ -155,9 +171,18 @@ describe('Tauri workspace panels', () => {
   });
 
   it('pins a repository-local Tauri 2 CLI for native builds', () => {
-    expect(tauriPackage.scripts['build:web']).toBe(
-      'esbuild web/control/control-entry.js --bundle --minify --format=iife --global-name=PsycheControl --outfile=web/control.bundle.js && esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js && esbuild web/sessions/session-entry.js --bundle --minify --format=iife --global-name=PsycheSessions --outfile=web/sessions.bundle.js && esbuild web/panes/pane-entry.js --bundle --minify --format=iife --global-name=PsychePanes --outfile=web/panes.bundle.js && esbuild web/input/input-entry.js --bundle --minify --format=iife --global-name=PsycheTerminalInput --outfile=web/input.bundle.js && esbuild web/diffs/diff-entry.js --bundle --minify --format=iife --global-name=PsycheDiffs --outfile=web/diffs.bundle.js && esbuild web/status/status-entry.js --bundle --minify --format=iife --global-name=PsycheStatus --outfile=web/status.bundle.js && esbuild web/workspace/workspace-entry.js --bundle --minify --format=iife --global-name=PsycheWorkspace --outfile=web/workspace.bundle.js'
-    );
+    expect(parseBuildWebSteps(tauriPackage.scripts['build:web'])).toEqual([
+      { entry: 'web/control/control-entry.js', outfile: 'web/control.bundle.js' },
+      { entry: 'web/editor/editor-entry.js', outfile: 'web/editor.bundle.js' },
+      { entry: 'web/sessions/session-entry.js', outfile: 'web/sessions.bundle.js' },
+      { entry: 'web/panes/pane-entry.js', outfile: 'web/panes.bundle.js' },
+      { entry: 'web/input/input-entry.js', outfile: 'web/input.bundle.js' },
+      { entry: 'web/diffs/diff-entry.js', outfile: 'web/diffs.bundle.js' },
+      { entry: 'web/status/status-entry.js', outfile: 'web/status.bundle.js' },
+      { entry: 'web/workspace/workspace-entry.js', outfile: 'web/workspace.bundle.js' },
+      { entry: 'web/runtime/runtime-entry.ts', outfile: 'web/runtime.bundle.js' },
+    ]);
+
     expect(tauriPackage.scripts.build).toBe('pnpm build:web && tauri build');
     expect(tauriPackage.scripts.dev).toBe('pnpm build:web && tauri dev');
     expect(tauriPackage.devDependencies['@tauri-apps/cli']).toMatch(/^2\./);
@@ -1056,11 +1081,18 @@ describe('Tauri workspace panels', () => {
       expect(visibleToastCss).toMatch(/padding:\s*8px 13px/);
       const warning = 'Not enough space for another pane';
       const classes = new Set<string>();
+      const attributes = new Map([
+        ['role', 'status'],
+        ['aria-live', 'polite'],
+      ]);
       const liveStatus = {
         hidden: false,
         textContent: '',
         role: 'status',
         ariaLive: 'polite',
+        getAttribute: (name: string) => attributes.get(name) ?? null,
+        setAttribute: (name: string, value: string) => attributes.set(name, value),
+        removeAttribute: (name: string) => attributes.delete(name),
         classList: {
           add: (name: string) => classes.add(name),
           remove: (name: string) => classes.delete(name),
@@ -1190,7 +1222,7 @@ describe('Tauri workspace panels', () => {
     expect(stylesCss).not.toContain('@keyframes browser-pane-in');
   });
 
-  it('stages Git before every shared close path and preserves the Git close label', () => {
+  it('stages Git before every shared close path and preserves the Git close label', async () => {
     const calls: string[] = [];
     const attributes = new Map<string, string>();
     const thread = {
@@ -1221,6 +1253,7 @@ describe('Tauri workspace panels', () => {
       'detachThreadPane', 'stopThreadPty', 'state',
       'retainFileFocusAfterThreadRemoval', 'renderPaneWorkspace',
       'setProjectStatus', 'findProject', 'focusThread', 'refreshSidebar', 'refreshTabs',
+      'isPersistentThread', 'invoke', 'saveWorkspaceNow', 'setStatus',
       `"use strict"; return (${functionSource('closeThread')});`,
     )(
       () => thread,
@@ -1241,9 +1274,13 @@ describe('Tauri workspace panels', () => {
       () => undefined,
       () => undefined,
       () => undefined,
-    ) as (id: string) => boolean;
+      () => false,
+      async () => undefined,
+      async () => true,
+      () => undefined,
+    ) as (id: string) => Promise<boolean>;
 
-    expect(closeThread(thread.id)).toBe(true);
+    await expect(closeThread(thread.id)).resolves.toBe(true);
     expect(calls.slice(0, 3)).toEqual(['suspend', 'stage', 'detach']);
     expect(calls).not.toContain('stop');
 

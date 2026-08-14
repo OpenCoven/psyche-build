@@ -133,15 +133,14 @@ describe('ApprovalStore', () => {
 
   it.each([
     'allow camera token=supersecret for https://example.test',
-    'allow camera\ntoken for https://example.test',
-    'allow camera\u0000token for https://example.test',
+    'allow camera\\ntoken for https://example.test',
+    'allow camera\\u0000token for https://example.test',
     `allow ${'a'.repeat(65)} for https://example.test`,
     'allow camera;download for https://example.test',
   ])('redacts unsafe permission label %j', (target) => {
     expect(createRedactedApprovalEffect({ kind: 'permission_response', target }).target)
       .toBe('[redacted]');
   });
-
   it.each([
     ['action id', { actionId: 'action-2' }],
     ['owner epoch', { ownerEpoch: 8 }],
@@ -281,7 +280,6 @@ describe('ApprovalStore', () => {
     expect(store.peek()).toEqual([pending]);
     expect(store.expire()).toEqual([expect.objectContaining({ id: pending.id, status: 'expired' })]);
   });
-
   it('revokes approvals for a lease and all approvals fail closed', () => {
     const store = new ApprovalStore(() => new Date('2026-08-12T12:00:00.000Z'));
     const first = store.request(baseRequest());

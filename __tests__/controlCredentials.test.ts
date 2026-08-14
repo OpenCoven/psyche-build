@@ -288,7 +288,7 @@ describe('control server authorization', () => {
     const agent: ControlPrincipal = { id: 'agent-1', kind: 'agent', capabilities: ['read', 'mutate', 'delegate'] };
     const compatibility: ControlPrincipal = { id: 'compat-1', kind: 'compatibility', capabilities: ['read', 'mutate'] };
     const base = delegationInput();
-    const grant = { ...base, kind: 'lease.grant' as const, payload: { requestId: 'r', actorId: 'a', taskId: 't', ttlMs: 1, grants: [] } };
+    const grant = { ...base, kind: 'lease.grant' as const, payload: { requestId: 'r' } };
     const request = { ...base, kind: 'lease.request' as const, payload: { taskId: 't', ttlMs: 1, grants: [] } };
     await expect(server.submitAs(agent, grant)).resolves.toMatchObject({ status: 'rejected', code: 'operator_required' });
     await expect(server.submitAs(compatibility, request)).resolves.toMatchObject({ status: 'rejected', code: 'compatibility_not_authorized' });

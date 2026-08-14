@@ -96,6 +96,33 @@ function runPlainText(
   return { sent, toasts };
 }
 
+function routeCommand(line: string) {
+  const calls: Array<[string, string?]> = [];
+  const commandInput = { value: '' };
+  const runCommand = compileRunCommand({
+    runShellSigil: (value: string) => calls.push(['shell', value]),
+    runPaneSigil: (value: string) => calls.push(['pane', value]),
+    findThread: () => ({ kind: 'agent', status: 'running' }),
+    state: { activeThreadId: 'focused-pane' },
+    toast: () => {},
+    sendToThread: (_thread: unknown, text: string) => calls.push(['plain', text]),
+    commandHistory: { push: (value: string) => calls.push(['history', value]) },
+    rememberCommand: (value: string) => calls.push(['remember', value]),
+    commands: [{
+      cmd: '/known',
+      run: (value: string) => calls.push(['slash', value]),
+    }],
+    writeToActive: () => {},
+    sendToActive: (text: string) => calls.push(['active', text]),
+    commandInput,
+    openPalette: (value: string) => calls.push(['search', value]),
+    syncComposerChrome: () => calls.push(['sync']),
+  });
+
+  runCommand(line);
+  return { calls, commandInput };
+}
+
 describe('Tauri composer target', () => {
   it('removes the composer scope picker and all of its implementation hooks', () => {
     expect(indexHtml).not.toContain('id="scope-btn"');
@@ -118,5 +145,31 @@ describe('Tauri composer target', () => {
     [{ kind: 'agent', status: 'failed' }, 'Focused pane cannot receive text'],
   ])('does not silently discard text when the focused pane is unavailable', (focused, toast) => {
     expect(runPlainText(focused)).toEqual({ sent: [], toasts: [toast] });
+  });
+
+  it('preserves shell, pane, slash-command, and plain-text routing', () => {
+    expect(routeCommand('! echo hello').calls).toEqual([['shell', 'echo hello']]);
+    expect(routeCommand('% agent').calls).toEqual([['pane', ' agent']]);
+    expect(routeCommand('/known value').calls).toEqual([
+      ['history', '/known value'],
+      ['remember', '/known value'],
+      ['slash', 'value'],
+    ]);
+    expect(routeCommand('hello').calls).toEqual([['plain', 'hello\n']]);
+  });
+
+  it('intercepts session search before plain-text routing', () => {
+    const runCommand = functionSource(mainJs, 'runCommand');
+    const guard = runCommand.indexOf('if (trimmed.charAt(0) === "?")');
+    const plainText = runCommand.indexOf('if (trimmed[0] !== "/")');
+    const result = routeCommand('  ? active  ');
+
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(plainText);
+    expect(result.commandInput.value).toBe('? active');
+    expect(result.calls).toEqual([
+      ['search', '? active'],
+      ['sync'],
+    ]);
   });
 });

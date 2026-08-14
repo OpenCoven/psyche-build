@@ -77,7 +77,9 @@ it('uses a branded sidebar cap and keeps sidebar controls below it', () => {
   expect(indexHtml).not.toContain('id="sidebar-collapse" class="sidebar-head-action');
   expect(styles).not.toMatch(/\.session-search(?:-wrap|-key)?\b/);
   expect(indexHtml).toMatch(/role="tablist" aria-label="Sidebar sections"/);
-  expect(indexHtml).toContain('onerror="this.remove()"');
+  expect(indexHtml).toContain('id="titlebar-brand-mark"');
+  expect(indexHtml).not.toMatch(/\sonerror=/);
+  expect(mainJs).toContain('initializeTitlebarBrandMark();');
   expect(indexHtml).toContain('data-sidebar-tab="sessions"');
   expect(indexHtml).toContain('data-sidebar-tab="files"');
   expect(indexHtml).toContain('id="rail-new-tab"');
@@ -191,10 +193,10 @@ Replace the current `<header class="titlebar">` in `index.html` with:
       <span class="titlebar-brand-icon" aria-hidden="true">
         <span class="titlebar-brand-fallback">P</span>
         <img
+          id="titlebar-brand-mark"
           class="titlebar-brand-mark"
           src="./assets/psyche-mark.png"
           alt=""
-          onerror="this.remove()"
         />
       </span>
       <span class="titlebar-brand-name">Psyche</span>
@@ -217,6 +219,11 @@ Replace the current `<header class="titlebar">` in `index.html` with:
   </div>
 </header>
 ```
+
+In `main.js`, attach a normal `error` listener to `#titlebar-brand-mark` that
+removes the failed decorative image, and run the same removal during boot when
+`mark.complete && mark.naturalWidth === 0`. Do not use inline event handlers;
+the visible fallback `P` remains behind the image.
 
 Remove the `session-search-wrap` block and the old `#sidebar-collapse` button from `.sidebar-head`. Keep this exact sidebar hierarchy:
 
@@ -296,6 +303,7 @@ Replace the monolithic title-bar layout with:
   overflow: hidden;
   border-radius: 5px;
   background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  pointer-events: none;
 }
 
 .titlebar-brand-fallback {
@@ -316,6 +324,7 @@ Replace the monolithic title-bar layout with:
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  pointer-events: none;
 }
 
 .titlebar-sidebar-toggle {
@@ -333,6 +342,11 @@ Replace the monolithic title-bar layout with:
   color: var(--text-muted);
   transform: translate(-50%, -50%);
   -webkit-app-region: no-drag;
+}
+
+.app[data-sidebar="collapsed"] .titlebar-sidebar-toggle {
+  left: calc(var(--titlebar-pad-l) - var(--mini-rail-w));
+  transform: translateY(-50%);
 }
 
 .titlebar-sidebar-toggle:hover,
@@ -702,6 +716,7 @@ git commit -m "feat(macos): expose ordered session search results"
 - Modify: `native/macos/psyche-build-tauri/web/styles.css:3600-3900`
 - Modify: `native/macos/psyche-build-tauri/web/main.js:4100-4140, 5530-6030, 7180-7460`
 - Create: `__tests__/tauriSessionSearchPalette.test.ts`
+- Create: `__tests__/tauriThreadFocus.test.ts`
 - Modify: `__tests__/tauriWorkspaceRail.test.ts:205-230`
 - Modify: `__tests__/tauriComposerScope.test.ts:1-end`
 
@@ -781,7 +796,9 @@ describe('Tauri composer session search', () => {
     expect(indexHtml).toMatch(
       /id="palette"[^>]*role="listbox"[^>]*aria-label="Composer suggestions"/,
     );
-    expect(indexHtml).toMatch(/id="command-input"[^>]*aria-controls="palette"/);
+    expect(indexHtml).toMatch(
+      /id="command-input"[^>]*role="combobox"[^>]*aria-controls="palette"/,
+    );
     expect(stylesCss).toMatch(/\.palette\s*\{[^}]*bottom:\s*calc\(100%\s*\+/s);
     expect(stylesCss).toMatch(/\.palette-item\.palette-session\s*\{/);
     expect(stylesCss).toMatch(/\.palette-empty\s*\{/);
@@ -818,16 +835,23 @@ describe('Tauri composer session search', () => {
   it('revalidates local and Coven matches immediately before activation', () => {
     const selection = functionSource(mainJs, 'runSessionSearchPick');
     expect(selection).toContain('findThread(pick.sessionId)');
-    expect(selection).toContain('thread.hidden');
-    expect(selection).toContain('isDormantThread(thread)');
-    expect(selection).toContain('setActiveProject(project.id)');
+    expect(selection).toContain('candidate.hidden');
+    expect(selection).toContain('isDormantThread(candidate)');
+    expect(selection).toContain('activateProjectWorktree(');
+    expect(selection).toContain('thread.worktreePath, { focusTerminal: false }');
+    expect(selection).toContain('snapshotSetScopePresentation(thread)');
     expect(selection).toContain('applySetScopeForThread(thread)');
+    expect(selection).toContain(
+      'restoreSetScopePresentation(previousPresentation, appliedPresentation)',
+    );
     expect(selection).toContain('covenSessionsForProject(project)');
-    expect(selection).toContain('session.id === pick.sessionId');
+    expect(selection).toContain('candidate.id === pick.sessionId');
     expect(selection).toContain('settings.selectedSessionKey = pick.selectionKey');
     expect(selection).toContain('saveSettings()');
-    expect(selection).toContain('focusThread(thread.id)');
-    expect(selection).toContain('openCovenSession(project, session)');
+    expect(selection).toContain('focusThread(thread.id, { focusTerminal: false })');
+    expect(selection).toContain(
+      'openCovenSession(project, session, { focusTerminal: false })',
+    );
     expect(selection).toContain('toast("Session is no longer available")');
   });
 });
@@ -957,6 +981,7 @@ Update the existing composer controls in `index.html`:
 Add these attributes to `#command-input`:
 
 ```html
+role="combobox"
 aria-controls="palette"
 aria-autocomplete="list"
 aria-expanded="false"
@@ -1005,7 +1030,10 @@ var PALETTE_SIGILS = "/!%?";
 Change the composer input listener to inspect the actual first character rather than trimmed input:
 
 ```js
+var sessionSearchActivationGeneration = 0;
+
 commandInput.addEventListener("input", function () {
+  sessionSearchActivationGeneration += 1;
   if (PALETTE_SIGILS.indexOf(commandInput.value.charAt(0)) !== -1) openPalette();
   else hidePalette();
   syncComposerChrome();
@@ -1166,31 +1194,156 @@ This is the final guard that prevents a `?` query from reaching an active PTY if
 
 - [ ] **Step 7: Revalidate and activate selected sessions**
 
-Add before `runPalettePick`:
+Harden `focusThread` so the thread is resolved again after file navigation and
+inside the queued autofocus frame. Generic focus keeps visible exited or failed
+panes viewable; composer search performs its stricter live-status validation
+before calling focus. Composer activation passes `{ focusTerminal: false }`;
+all other callers retain the default autofocus:
 
 ```js
+async function focusThread(id, options) {
+  function resolveFocusableThread() {
+    var candidate = findThread(id);
+    if (!candidate || candidate.hidden || candidate.closing ||
+        candidate.closeStarted) return null;
+    return candidate;
+  }
+  var thread = resolveFocusableThread();
+  if (!thread) return false;
+  if (!(await showTerminalView())) return false;
+  thread = resolveFocusableThread();
+  if (!thread) return false;
+  markActiveSurface(thread.kind === "web" ? "browser" : "terminal");
+  state.activeThreadId = id;
+  if (thread.projectId && state.activeProjectId !== thread.projectId) {
+    state.activeProjectId = thread.projectId;
+  }
+  var project = findProject(thread.projectId);
+  if (project) {
+    project.lastActiveThreadId = id;
+    project.selectedWorktreePath = thread.worktreePath;
+  }
+  var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
+  var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
+  if (layout && leaf) layout.focusedLeafId = leaf.id;
+  renderPaneWorkspace();
+  refreshSidebar();
+  requestAnimationFrame(function () {
+    var focusedThread = resolveFocusableThread();
+    if (!focusedThread || state.activeThreadId !== id) return;
+    scheduleVisiblePaneFit();
+    if ((!options || options.focusTerminal !== false) && focusedThread.term) {
+      focusedThread.term.focus();
+    }
+    syncBrowserBounds();
+  });
+
+  setProjectStatus(project, statusLevel(thread.status));
+  if ((!options || options.refreshStatus !== false) &&
+      typeof refreshStatusController === "function") {
+    refreshStatusController();
+  }
+  return true;
+}
+```
+
+Extend `openCovenSession(project, session, options)` so an existing attachment
+still passes the caller options through project activation and `focusThread`.
+For a new attachment, keep one option-neutral coalesced creation promise: use
+`{ focusTerminal: false }` for its project activation and `createThread`, then
+have every caller apply its own options with
+`focusCovenAttachmentForCaller(opening, options)`. Immediately after the
+terminal-layout frame, re-resolve the project, owned worktree, and Coven
+session from current state before `createThread`; stale targets use the existing
+neutral unavailable warning and return `null`. Extend `createThread` narrowly:
+
+```js
+focusThread(id, opts.focusTerminal === false ? { focusTerminal: false } : undefined);
+```
+
+Ordinary callers omit the option and keep terminal autofocus. Then add:
+
+```js
+function snapshotSetScopePresentation(thread) {
+  var layout = paneLayoutForThread(thread);
+  if (!layout) return null;
+  return {
+    projectId: thread.projectId,
+    worktreePath: thread.worktreePath,
+    layout: layout,
+    root: layout.root,
+    activeSetId: layout.activeSetId,
+    maximizedLeafId: layout.maximizedLeafId,
+    spanRoot: layout.spanRoot,
+    spanSignature: layout.spanSignature,
+  };
+}
+
+function restoreSetScopePresentation(snapshot, applied) {
+  if (!snapshot || !applied || snapshot.layout !== applied.layout) return false;
+  var layout = paneLayoutFor(snapshot.projectId, snapshot.worktreePath);
+  if (layout !== snapshot.layout ||
+      layout.root !== applied.root ||
+      layout.activeSetId !== applied.activeSetId ||
+      layout.maximizedLeafId !== applied.maximizedLeafId ||
+      layout.spanRoot !== applied.spanRoot ||
+      layout.spanSignature !== applied.spanSignature) return false;
+  layout.activeSetId = snapshot.activeSetId;
+  layout.maximizedLeafId = snapshot.maximizedLeafId;
+  layout.spanRoot = snapshot.spanRoot;
+  layout.spanSignature = snapshot.spanSignature;
+  renderPaneWorkspace();
+  refreshSidebar();
+  return true;
+}
+
 async function runSessionSearchPick(pick) {
   var project = findProject(pick.projectId);
-  if (!project) {
-    toast("Session is no longer available");
-    return false;
-  }
-
+  if (!project) { toast("Session is no longer available"); return false; }
   if (pick.sessionSource === "psyche") {
-    var thread = findThread(pick.sessionId);
-    if (!thread
-      || thread.projectId !== project.id
-      || thread.hidden
-      || isDormantThread(thread)) {
+    function resolveLocalThread() {
+      var candidate = findThread(pick.sessionId);
+      if (!candidate || candidate.projectId !== project.id || candidate.hidden ||
+          candidate.closing || candidate.closeStarted ||
+          isDormantThread(candidate) || candidate.status === "failed") return null;
+      return candidate;
+    }
+    var thread = resolveLocalThread();
+    if (!thread) {
       toast("Session is no longer available");
       return false;
     }
-    if (project.id !== state.activeProjectId &&
-        !(await setActiveProject(project.id))) return false;
+    if ((project.id !== state.activeProjectId ||
+         project.selectedWorktreePath !== thread.worktreePath) &&
+        !(await activateProjectWorktree(
+          project, thread.worktreePath, { focusTerminal: false }
+        ))) return false;
+    project = findProject(pick.projectId);
+    if (!project) return false;
+    thread = resolveLocalThread();
+    if (!thread) return false;
+    var previousPresentation = snapshotSetScopePresentation(thread);
+    var scopeChanged = applySetScopeForThread(thread);
+    var appliedPresentation = scopeChanged
+      ? snapshotSetScopePresentation(thread)
+      : null;
+    function restorePreviousPresentation() {
+      if (!scopeChanged) return;
+      restoreSetScopePresentation(previousPresentation, appliedPresentation);
+    }
+    var focused = await focusThread(thread.id, { focusTerminal: false });
+    if (!focused) {
+      restorePreviousPresentation();
+      return false;
+    }
+    thread = resolveLocalThread();
+    if (!thread || state.activeThreadId !== thread.id) {
+      restorePreviousPresentation();
+      return false;
+    }
     settings.selectedSessionKey = pick.selectionKey;
     saveSettings();
-    applySetScopeForThread(thread);
-    return !!(await focusThread(thread.id));
+    return true;
   }
 
   var session = covenSessionsForProject(project).find(function (candidate) {
@@ -1200,23 +1353,43 @@ async function runSessionSearchPick(pick) {
     toast("Session is no longer available");
     return false;
   }
+  var opened = await openCovenSession(
+    project, session, { focusTerminal: false }
+  );
+  if (!opened) return false;
   settings.selectedSessionKey = pick.selectionKey;
   saveSettings();
-  return !!(await openCovenSession(project, session));
+  return true;
 }
 ```
 
-Make `runPalettePick` async and branch before command execution:
+Make `runPalettePick` async, invalidate older activations when a newer pick
+starts, capture the query, and restore composer UI/focus only while both still
+match. Coven activation suppresses terminal autofocus at its source, so no
+post-selection frame drain is needed:
 
 ```js
 async function runPalettePick(pick, mode) {
   if (!pick) return;
   if (pick.kind === "session") {
-    var selected = await runSessionSearchPick(pick);
-    if (selected) commandInput.value = "";
-    if (selected) hidePalette();
-    syncComposerChrome();
-    commandInput.focus();
+    var activationGeneration = ++sessionSearchActivationGeneration;
+    var activationQuery = commandInput.value;
+    var selected = false;
+    try {
+      selected = await runSessionSearchPick(pick);
+    } finally {
+      var activationCurrent =
+        activationGeneration === sessionSearchActivationGeneration &&
+        commandInput.value === activationQuery;
+      if (activationCurrent) {
+        if (selected) {
+          commandInput.value = "";
+          hidePalette();
+        }
+        syncComposerChrome();
+        commandInput.focus();
+      }
+    }
     return;
   }
 
@@ -1237,7 +1410,10 @@ async function runPalettePick(pick, mode) {
 }
 ```
 
-Existing click and Enter callers may invoke the async function without awaiting it; the function owns its own error/status UI through `focusThread`, `openCovenSession`, and `toast`.
+Existing click and Enter callers may invoke the async function without awaiting
+it. Older activations may still complete their requested session focus, but
+their generation/query guard prevents them from clearing, hiding, or focusing
+over a newer composer interaction.
 
 - [ ] **Step 8: Make keyboard and composer chrome behavior explicit**
 
@@ -1329,6 +1505,7 @@ git add \
   native/macos/psyche-build-tauri/web/styles.css \
   native/macos/psyche-build-tauri/web/main.js \
   __tests__/tauriSessionSearchPalette.test.ts \
+  __tests__/tauriThreadFocus.test.ts \
   __tests__/tauriComposerScope.test.ts \
   __tests__/tauriWorkspaceRail.test.ts
 git commit -m "feat(macos): move session search into composer"
