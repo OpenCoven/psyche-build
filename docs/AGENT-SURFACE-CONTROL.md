@@ -26,7 +26,7 @@ Pane and browser operations additionally require the current resource
 
 | Tool | Required arguments |
 |---|---|
-| `psyche_control_list` | `task_id` (`project_root` optional) |
+| `psyche_control_list` | none (`project_root` optional) |
 | `psyche_control_lease` | `operation`, `task_id`; requests also require `ttl_ms`, `grants`; release requires `lease_id`, `lease_revision` |
 | `psyche_pane_observe` | `task_id`, `lease_id`, `lease_revision`, `pane_id`, `generation` |
 | `psyche_pane_action` | `task_id`, `lease_id`, `lease_revision`, `action`; existing-pane actions require `pane_id`, `generation`, creation requires `project_id` |
@@ -34,13 +34,10 @@ Pane and browser operations additionally require the current resource
 | `psyche_browser_action` | `task_id`, `lease_id`, `lease_revision`, `tab_id`, `generation`, `action`; element actions additionally require `snapshot_id` and `action.elementRef` |
 | `psyche_browser_script` | `task_id`, `lease_id`, `lease_revision`, `tab_id`, `generation`, `source` |
 | `psyche_control_action_status` | `action_id` |
-| `psyche_list_panes` | `task_id` (`project_root` optional) |
 
-Read helpers are task-scoped for non-operator callers: `psyche_control_list`
-and `psyche_list_panes` return only the resources, approvals, receipts, and
-lease status that match the supplied task. Compatibility aliases route through
-the same owner. Create, execute-task, kill, and pane-output operations require
-lease fields; missing authority returns `lease_missing` before an effect.
+Compatibility aliases route through the same owner. Create, execute-task, kill,
+and pane-output operations require lease fields; missing authority returns
+`lease_missing` before an effect.
 
 ## Lease lifecycle
 
