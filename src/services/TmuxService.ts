@@ -63,6 +63,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function quoteShellArgument(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 function isPermanentError(error: unknown): boolean {
   const message = String(error).toLowerCase();
   return PERMANENT_ERRORS.some(pattern => message.includes(pattern));
@@ -698,7 +702,9 @@ export class TmuxService {
   async setPaneTitle(paneId: string, title: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        this.execute(`tmux select-pane -t '${paneId}' -T '${title}'`);
+        this.execute(
+          `tmux select-pane -t ${quoteShellArgument(paneId)} -T ${quoteShellArgument(title)}`
+        );
       },
       RetryStrategy.FAST,
       `setPaneTitle(${paneId})`
