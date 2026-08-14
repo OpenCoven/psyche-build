@@ -11,21 +11,21 @@ const $now = $performance.now;
 const $apply = Reflect.apply;
 const $getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const $elementGetAttribute = typeof Element === "function"
-  ? $getOwnPropertyDescriptor(Element.prototype, "getAttribute").value
+  ? $getOwnPropertyDescriptor(Element.prototype, "getAttribute")?.value || null
   : null;
 const $inputValueGetter = typeof HTMLInputElement === "function"
-  ? $getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").get
+  ? $getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.get || null
   : null;
 const $textAreaValueGetter = typeof HTMLTextAreaElement === "function"
-  ? $getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").get
+  ? $getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.get || null
   : null;
 const $selectValueGetter = typeof HTMLSelectElement === "function"
-  ? $getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").get
+  ? $getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.get || null
   : null;
 const encoder = new $TextEncoder();
-const started = Reflect.apply($now, $performance, []);
-const stringify = (value) => Reflect.apply($jsonStringify, $JSON, [value]);
-const textEncode = (value) => Reflect.apply($textEncode, encoder, [value]);
+const started = $apply($now, $performance, []);
+const stringify = (value) => $apply($jsonStringify, $JSON, [value]);
+const textEncode = (value) => $apply($textEncode, encoder, [value]);
 const fail = (code) => stringify({ ok: false, code });
 const LIMITS = Object.freeze({
   snapshotNodes: 2048,

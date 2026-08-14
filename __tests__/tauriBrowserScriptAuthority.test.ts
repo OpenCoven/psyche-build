@@ -107,6 +107,7 @@ async function runPageRuntime(
   }) => void;
   documentToken?: string;
   expectedDocumentToken?: string;
+  globals?: Record<string, unknown>;
 } = {}): Promise<{
   envelope: Record<string, unknown>;
   terminated: number;
@@ -157,6 +158,7 @@ async function runPageRuntime(
     __PSYCHE_BROWSER_SCRIPT_DOCUMENT_CONTEXT__: documentContext,
     setTimeout,
     clearTimeout,
+    ...options.globals,
   });
   const input = JSON.stringify({
     source: 'return null;',
@@ -830,6 +832,23 @@ describe('native browser script authority', () => {
     expect(encoded).not.toContain('4111111111111111');
     expect(encoded).not.toContain('recovery-secret');
     expect(encoded).not.toContain('payment-option-secret');
+  });
+
+  it('falls back safely when DOM accessors are not own prototype properties', async () => {
+    const result = await runPageRuntime(
+      { ok: true, value: null, mutations: [] },
+      fakeElement('HTML', [fakeElement('INPUT')]),
+      {
+        globals: {
+          Element: class {},
+          HTMLInputElement: class {},
+          HTMLTextAreaElement: class {},
+          HTMLSelectElement: class {},
+        },
+      },
+    );
+
+    expect(result.envelope).toMatchObject({ ok: true });
   });
 
   it('captures bounded direct text without materializing aggregate descendant text', async () => {
