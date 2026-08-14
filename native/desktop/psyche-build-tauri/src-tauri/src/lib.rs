@@ -54,8 +54,17 @@ use pty_transport::{
 };
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
+const TRUSTED_APP_WEBVIEW_LABEL: &str = "main";
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
 const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
+
+fn require_trusted_app_webview(webview: &tauri::Webview) -> Result<(), String> {
+    if webview.label() == TRUSTED_APP_WEBVIEW_LABEL {
+        Ok(())
+    } else {
+        Err("command is only available to the trusted application webview".to_string())
+    }
+}
 
 fn safe_browser_label(label: Option<String>) -> String {
     let raw = label.unwrap_or_else(|| "default".to_string());
@@ -2359,7 +2368,8 @@ pub fn latest_pty_transport_snapshot(thread_id: &str) -> Option<FinalOutputPumpS
 }
 
 #[tauri::command]
-fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
+fn pty_start(webview: tauri::Webview, app: AppHandle, options: StartOptions) -> Result<(), String> {
+    require_trusted_app_webview(&webview)?;
     let thread_id = options.thread_id.clone();
     let (pending_start, resolved_cwd) = prepare_pty_start(&options)?;
     validate_coven_launch(&options)?;
@@ -2517,7 +2527,8 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
+fn pty_write(webview: tauri::Webview, thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
+    require_trusted_app_webview(&webview)?;
     let writer = {
         let guard = PTY_LIFECYCLES.lock();
         let session = guard

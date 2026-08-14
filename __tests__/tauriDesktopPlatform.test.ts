@@ -74,6 +74,19 @@ describe('desktop Tauri layout', () => {
     }
   });
 
+  it('rejects PTY shell access from untrusted child webviews', () => {
+    const libSource = readFileSync(libSourcePath, 'utf8');
+    const ptyStart = bracedItem(libSource, 'fn pty_start');
+    const ptyWrite = bracedItem(libSource, 'fn pty_write');
+
+    expect(libSource).toContain('fn require_trusted_app_webview(webview: &tauri::Webview)');
+    expect(libSource).toContain('webview.label() == TRUSTED_APP_WEBVIEW_LABEL');
+    expect(ptyStart).toContain('webview: tauri::Webview');
+    expect(ptyStart).toContain('require_trusted_app_webview(&webview)?;');
+    expect(ptyWrite).toContain('webview: tauri::Webview');
+    expect(ptyWrite).toContain('require_trusted_app_webview(&webview)?;');
+  });
+
   it('has no stale desktop app paths in tracked text source', () => {
     expect(stalePathReferences()).toEqual([]);
   });
