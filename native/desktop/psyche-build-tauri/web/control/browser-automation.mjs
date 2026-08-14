@@ -79,6 +79,7 @@ export function installBrowserAutomation(globalObject, options = {}) {
   const now = typeof options.now === 'function' ? options.now : () => globalObject.Date?.now?.() ?? Date.now();
   const eventApi = globalObject.__TAURI__?.event;
   const trustedEmit = typeof eventApi?.emit === 'function' ? eventApi.emit.bind(eventApi) : null;
+  const readScriptIdentity = createScriptIdentityReader(globalObject);
   let sequence = 0;
   let current = null;
 
@@ -132,7 +133,12 @@ export function installBrowserAutomation(globalObject, options = {}) {
       const { invalidate: _invalidate, ...boundedResult } = result;
       return boundedResult;
     }
-    if (request.type === 'script') return runScript(request, globalObject, now);
+    if (request.type === 'script') {
+      return runScript(request, globalObject, now, readScriptIdentity).catch((error) => {
+        if (error?.invalidate === true) invalidate();
+        throw error;
+      });
+    }
     if (request.type !== 'resolve') {
       throw automationError('unsupported_operation', 'unsupported_operation: automation operation is not allowed');
     }
@@ -271,6 +277,8 @@ export function browserAutomationSource() {
     ${performAction.toString()}
     ${submitMetadata.toString()}
     ${assertJsonValue.toString()}
+    ${createScriptIdentityReader.toString()}
+    ${assertScriptIdentity.toString()}
     ${runScript.toString()}
     ${captureSnapshot.toString()}
     ${installBrowserAutomation.toString()}
@@ -297,10 +305,57 @@ function assertJsonValue(value, seen, depth = 0) {
   seen.delete(value);
 }
 
-async function runScript(request, globalObject, now) {
+function createScriptIdentityReader(globalObject) {
+  const windowDocumentGetter = objectGetOwnPropertyDescriptor(globalObject.Window?.prototype || {}, 'document')?.get;
+  const documentElementGetter = objectGetOwnPropertyDescriptor(globalObject.Document?.prototype || {}, 'documentElement')?.get;
+  const windowLocationGetter = objectGetOwnPropertyDescriptor(globalObject.Window?.prototype || {}, 'location')?.get;
+  const locationHrefGetter = objectGetOwnPropertyDescriptor(globalObject.Location?.prototype || {}, 'href')?.get;
+  const documentUrlGetter = objectGetOwnPropertyDescriptor(globalObject.Document?.prototype || {}, 'URL')?.get;
+  return function readScriptIdentity() {
+    const document = windowDocumentGetter
+      ? reflectApply(windowDocumentGetter, globalObject, [])
+      : globalObject.document;
+    const documentElement = documentElementGetter
+      ? reflectApply(documentElementGetter, document, [])
+      : document?.documentElement;
+    const location = windowLocationGetter
+      ? reflectApply(windowLocationGetter, globalObject, [])
+      : globalObject.location;
+    const href = locationHrefGetter
+      ? reflectApply(locationHrefGetter, location, [])
+      : location?.href;
+    const url = documentUrlGetter
+      ? reflectApply(documentUrlGetter, document, [])
+      : (document?.URL ?? href);
+    return { document, documentElement, href, url };
+  };
+}
+
+function assertScriptIdentity(readIdentity, expected) {
+  let actual;
+  try { actual = readIdentity(); }
+  catch {
+    const error = automationError('effect_unknown', 'effect_unknown: browser document identity became unreadable during script evaluation');
+    error.ambiguous = true;
+    error.invalidate = true;
+    throw error;
+  }
+  if (actual.document !== expected.document || actual.documentElement !== expected.documentElement ||
+      actual.href !== expected.href || actual.url !== expected.url) {
+    const error = automationError('effect_unknown', 'effect_unknown: browser document changed during script evaluation');
+    error.ambiguous = true;
+    error.invalidate = true;
+    throw error;
+  }
+}
+
+async function runScript(request, globalObject, now, readIdentity) {
   if (typeof request.source !== 'string' || encodeText(request.source).length > SCRIPT_SOURCE_BYTES) {
     throw automationError('script_source_too_large', 'script_source_too_large: browser script source exceeds maximum');
   }
+  let identity;
+  try { identity = readIdentity(); }
+  catch { throw automationError('backend_unavailable', 'backend_unavailable: browser document identity is unavailable'); }
   const startedAt = now();
   let timeoutId;
   const timeout = new Promise((_, reject) => {
@@ -317,16 +372,29 @@ async function runScript(request, globalObject, now) {
   } finally {
     clearTimeout(timeoutId);
   }
-  assertJsonValue(value, new WeakSet());
+  assertScriptIdentity(readIdentity, identity);
+  let serializedError;
+  let hasSerializedError = false;
   let encoded;
-  try { encoded = JSON.stringify(value); }
-  catch { throw automationError('serialization_failed', 'serialization_failed: result cannot be encoded'); }
-  if (encoded === undefined) throw automationError('serialization_failed', 'serialization_failed: result is not JSON data');
-  const resultBytes = encodeText(encoded).length;
-  if (resultBytes > SCRIPT_RESULT_BYTES) throw automationError('result_too_large', 'result_too_large: browser script result exceeds maximum');
   let parsed;
-  try { parsed = JSON.parse(encoded); }
-  catch { throw automationError('serialization_failed', 'serialization_failed: result cannot be decoded'); }
+  let resultBytes;
+  try {
+    assertJsonValue(value, new WeakSet());
+    try { encoded = JSON.stringify(value); }
+    catch { throw automationError('serialization_failed', 'serialization_failed: result cannot be encoded'); }
+    if (encoded === undefined) throw automationError('serialization_failed', 'serialization_failed: result is not JSON data');
+    resultBytes = encodeText(encoded).length;
+    if (resultBytes > SCRIPT_RESULT_BYTES) throw automationError('result_too_large', 'result_too_large: browser script result exceeds maximum');
+    try { parsed = JSON.parse(encoded); }
+    catch { throw automationError('serialization_failed', 'serialization_failed: result cannot be decoded'); }
+  } catch (error) {
+    hasSerializedError = true;
+    serializedError = error?.code === 'serialization_failed' || error?.code === 'result_too_large'
+      ? error
+      : automationError('serialization_failed', 'serialization_failed: result cannot be encoded');
+  }
+  assertScriptIdentity(readIdentity, identity);
+  if (hasSerializedError) throw serializedError;
   return { value: parsed, resultBytes, durationMs: Math.max(0, now() - startedAt) };
 }
 

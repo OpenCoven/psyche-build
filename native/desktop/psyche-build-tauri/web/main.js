@@ -9205,7 +9205,10 @@
           await quarantineBrowserAutomation(pair);
         }
         var code = ambiguous ? "effect_unknown" : error && error.code || (String(error).indexOf("backend_unavailable") !== -1 ? "backend_unavailable" : "automation_failed");
-        await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: ambiguous ? "unknown" : "failed", code: code, message: String(error && error.message || error) });
+        var message = ambiguous && effect.operation.kind === "script"
+          ? "browser script outcome is unknown"
+          : String(error && error.message || error);
+        await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: ambiguous ? "unknown" : "failed", code: code, message: message });
       }
       return true;
     };

@@ -218,7 +218,7 @@ describe('Tauri semantic browser provider lifecycle', () => {
       () => pair, () => lifecycle,
       async (_project: unknown, result: unknown) => { completions.push(result); },
       () => 'page', vi.fn(), async () => true,
-      vi.fn(async () => { throw Object.assign(new Error('script may still be running'), { code: 'effect_unknown', ambiguous: true }); }),
+      vi.fn(async () => { throw Object.assign(new Error('script-source-secret result-secret'), { code: 'effect_unknown', ambiguous: true }); }),
       dispatch, () => 'label', { browserAutomationSource: () => '' }, () => 'dispatch-script',
       vi.fn(), vi.fn(), vi.fn(), quarantine,
     );
@@ -232,6 +232,8 @@ describe('Tauri semantic browser provider lifecycle', () => {
       actionId: 'script-timeout', status: 'unknown', code: 'effect_unknown',
     })]);
     expect(completions).not.toContainEqual(expect.objectContaining({ status: 'failed' }));
+    expect(JSON.stringify(completions)).not.toContain('script-source-secret');
+    expect(JSON.stringify(completions)).not.toContain('result-secret');
     expect(lifecycle).toMatchObject({ liveGeneration: 0, controlGeneration: 0, nativeLabel: null });
   });
 

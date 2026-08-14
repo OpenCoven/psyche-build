@@ -99,6 +99,111 @@ describe('bounded semantic browser automation', () => {
   });
 
   it.each([
+    ['history/hash mutation', 'args.history.replaceState({}, "", "#changed");', (globalObject: any) => ({
+      history: { replaceState: () => { globalObject.location.href = 'https://example.test/account#changed'; } },
+    })],
+    ['document replacement', 'args.replaceDocument();', (globalObject: any) => ({
+      replaceDocument: () => { globalObject.document = { ...globalObject.document, documentElement: node('html') }; },
+    })],
+    ['documentElement replacement', 'args.replaceDocumentElement();', (globalObject: any) => ({
+      replaceDocumentElement: () => { globalObject.document.documentElement = node('html'); },
+    })],
+    ['document.write replacement', 'args.document.write();', (globalObject: any) => ({
+      document: { write: () => { globalObject.document.documentElement = node('html'); } },
+    })],
+  ])('invalidates script results after synchronous %s', async (_kind, mutationSource, createArgs) => {
+    const { globalObject } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    const snapshot = api.dispatch({ type: 'snapshot' });
+    await expect(api.dispatch({
+      type: 'script',
+      source: `${mutationSource} return { leaked: "script-result-secret" };`,
+      args: createArgs(globalObject),
+    })).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true, invalidate: true });
+    expect(() => api.dispatch({ type: 'resolve', snapshotId: snapshot.snapshotId, ref: 'e1' }))
+      .toThrowError(/snapshot_stale/);
+  });
+
+  it('invalidates an asynchronously resolved script after pushState changes the URL', async () => {
+    const { globalObject } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    await expect(api.dispatch({
+      type: 'script',
+      source: 'await Promise.resolve(); args.history.pushState({}, "", "/next"); return { leaked: "async-result-secret" };',
+      args: { history: { pushState: () => { globalObject.location.href = 'https://example.test/next'; } } },
+    })).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true, invalidate: true });
+  });
+
+  it('checks document identity again after result serialization', async () => {
+    const { globalObject } = fixture();
+    const api = installBrowserAutomation(globalObject);
+    await expect(api.dispatch({
+      type: 'script',
+      source: `return { get value() {
+        args.replaceDocumentElement();
+        return "serialization-result-secret";
+      } };`,
+      args: { replaceDocumentElement: () => { globalObject.document.documentElement = node('html'); } },
+    })).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true, invalidate: true });
+  });
+
+  it('uses initialization-captured document and location getters for script identity checks', async () => {
+    class FakeWindow {}
+    class FakeDocument {}
+    class FakeLocation {}
+    const documents = new WeakMap<object, object>();
+    const roots = new WeakMap<object, object>();
+    const locations = new WeakMap<object, object>();
+    const hrefs = new WeakMap<object, string>();
+    Object.defineProperties(FakeWindow.prototype, {
+      document: { configurable: true, get() { return documents.get(this); } },
+      location: { configurable: true, get() { return locations.get(this); } },
+    });
+    Object.defineProperties(FakeDocument.prototype, {
+      documentElement: { configurable: true, get() { return roots.get(this); } },
+      URL: { configurable: true, get() {
+        const location = locations.get(globalObject);
+        return location ? hrefs.get(location) : undefined;
+      } },
+    });
+    Object.defineProperty(FakeLocation.prototype, 'href', {
+      configurable: true, get() { return hrefs.get(this); },
+    });
+    const base = fixture().globalObject;
+    const document = Object.assign(new FakeDocument(), { body: base.document.body });
+    const location = new FakeLocation();
+    const globalObject: any = Object.assign(new FakeWindow(), {
+      innerWidth: base.innerWidth, innerHeight: base.innerHeight, Event: base.Event,
+      Date: base.Date, URL: base.URL, getComputedStyle: base.getComputedStyle,
+      Window: FakeWindow, Document: FakeDocument, Location: FakeLocation,
+    });
+    documents.set(globalObject, document);
+    roots.set(document, base.document.documentElement);
+    locations.set(globalObject, location);
+    hrefs.set(location, base.location.href);
+    Function('globalThis', browserAutomationSource())(globalObject);
+
+    Object.defineProperties(FakeWindow.prototype, {
+      document: { configurable: true, get() { return { documentElement: node('html') }; } },
+      location: { configurable: true, get() { return { href: 'https://attacker.test/' }; } },
+    });
+    Object.defineProperty(FakeDocument.prototype, 'documentElement', {
+      configurable: true, get() { return node('html'); },
+    });
+    Object.defineProperty(FakeLocation.prototype, 'href', {
+      configurable: true, get() { return 'https://attacker.test/'; },
+    });
+
+    const api = globalObject.__PSYCHE_AUTOMATION__;
+    await expect(api.dispatch({ type: 'script', source: 'return { ok: true };' }))
+      .resolves.toMatchObject({ value: { ok: true } });
+    await expect(api.dispatch({
+      type: 'script', source: 'args.navigate(); return { leaked: true };',
+      args: { navigate: () => hrefs.set(location, 'https://example.test/changed') },
+    })).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true, invalidate: true });
+  });
+
+  it.each([
     ['function', 'return function nope() {};'],
     ['cycle', 'const value = {}; value.self = value; return value;'],
     ['native', 'return new Date();'],

@@ -653,6 +653,34 @@ describe('ControlRuntime', () => {
     expect(handlers.runBrowserScript).toHaveBeenCalledOnce();
   });
 
+  it('records a document-changing browser script as unknown without retrying or retaining source and result data', async () => {
+    handlers.runBrowserScript = vi.fn(async () => {
+      throw Object.assign(new Error('script-source-secret result-secret'), {
+        code: 'effect_unknown', ambiguous: true, invalidate: true,
+      });
+    });
+    const harness = await createBrowserActionHarness();
+    const action = command({ id: 'script-document-change', idempotencyKey: 'script-document-change',
+      kind: 'browser.script', ownerEpoch: 7, actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation,
+        source: 'history.pushState({}, "", "/secret-source"); return "result-secret";',
+      } }) as unknown as Extract<ControlCommand, { kind: 'browser.script' }>;
+    const requested = await harness.runtime.submit(action);
+    const approval = (requested as { value: { approvalId: string; payloadDigest: string } }).value;
+    await submit(harness.runtime, command({ id: 'approve-document-change', idempotencyKey: 'approve-document-change',
+      kind: 'approval.resolve', ownerEpoch: 7, payload: { approvalId: approval.approvalId,
+        payloadDigest: approval.payloadDigest, decision: 'approve' } }));
+
+    await expect(harness.runtime.submit(action)).resolves.toMatchObject({ status: 'unknown', code: 'effect_unknown' });
+    await expect(harness.runtime.submit({ ...action, id: 'script-document-change-again' }))
+      .resolves.toMatchObject({ status: 'unknown', code: 'effect_unknown' });
+    expect(handlers.runBrowserScript).toHaveBeenCalledOnce();
+    const durable = JSON.stringify({ snapshot: harness.runtime.snapshot(), journal: harness.journal.read() });
+    expect(durable).not.toContain('secret-source');
+    expect(durable).not.toContain('result-secret');
+  });
+
   it('rejects grants for missing generations and non-canonical project targets', async () => {
     const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
     await expect(submit(runtime, command({
