@@ -76,6 +76,27 @@ five seconds, and JSON results to 256 KiB. Functions, cycles, DOM/native objects
 and other non-JSON results fail closed. Script bodies are represented durably by
 SHA-256 and byte counts, never source.
 
+Approved source receives `args` and a bounded `page` API. `page.snapshot` and
+`page.get(nodeId)` are immutable. Mutations are declarative, validated as one
+plan, and applied synchronously only after the one-shot script worker has been
+terminated:
+
+```js
+const button = page.get("n17");
+if (!button) return { changed: false };
+
+page.setText(button.id, "Ready");
+page.setAttribute(button.id, "aria-label", "Ready");
+page.focus(button.id);
+
+return { changed: true };
+```
+
+Live `window`/`document`, timers, network, listeners, observers, imports,
+nested workers, navigation, HTML sinks, executable URLs, and external resource
+creation are unavailable. Node IDs expire after the invocation. Unsupported
+operations return `mutation_not_allowed`.
+
 ## Evidence and failure semantics
 
 Durable journal events and journaled receipts contain allowlisted metadata only.
