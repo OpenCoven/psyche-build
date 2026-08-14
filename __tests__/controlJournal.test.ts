@@ -2,7 +2,12 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/pro
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { agentControlJournalPayload, ControlJournal } from '../src/control/journal.js';
+import {
+  agentControlJournalPayload,
+  ControlJournal,
+  createAgentControlJournalResource,
+} from '../src/control/journal.js';
+import { createRedactedApprovalEffect } from '../src/control/approvals.js';
 import type { ActionReceipt } from '../src/control/types.js';
 
 const roots: string[] = [];
@@ -17,7 +22,7 @@ describe('ControlJournal', () => {
       status: 'succeeded',
       receipt: {
         schema: 'psyche.control.receipt/v1', actionId: 'script-1', state: 'succeeded',
-        resource: { kind: 'browser_tab', id: 'tab-1', generation: 2 },
+        resource: createAgentControlJournalResource({ kind: 'browser_tab', id: 'tab-1', generation: 2 }),
         createdAt: '2026-08-12T00:00:00.000Z', sourceDigest: 'digest', sourceBytes: 10,
         resultBytes: 2, durationMs: 1,
       },
@@ -37,8 +42,8 @@ describe('ControlJournal', () => {
       });
       agentControlJournalPayload({
         kind: 'approval.requested', commandId: 'c', approvalId: 'a', payloadDigest: 'd',
-        resource: { kind: 'browser_tab', id: 'tab', generation: 1 }, capability: 'browser.script',
-        effect: { kind: 'script', target: 'digest' },
+        resource: createAgentControlJournalResource({ kind: 'browser_tab', id: 'tab', generation: 1 }),
+        capability: 'browser.script', effect: createRedactedApprovalEffect({ kind: 'script', target: 'digest' }),
         // @ts-expect-error raw script is intentionally forbidden at the journal boundary
         script: 'return document.cookie',
       });
@@ -57,7 +62,7 @@ describe('ControlJournal', () => {
       agentControlJournalPayload({ ...terminal, receipt: fullReceipt });
       agentControlJournalPayload({ ...terminal, receipt: {
         schema: 'psyche.control.receipt/v1', actionId: 'c', state: 'failed',
-        resource: { kind: 'browser_tab', id: 'tab', generation: 1 },
+        resource: createAgentControlJournalResource({ kind: 'browser_tab', id: 'tab', generation: 1 }),
         // @ts-expect-error full action receipts are not accepted at the journal boundary
         createdAt: '2026-08-12T00:00:00.000Z', value: 'secret',
       } });
@@ -77,6 +82,16 @@ describe('ControlJournal', () => {
       agentControlJournalPayload({ ...terminal, header: 'Authorization: secret' });
       // @ts-expect-error absolute paths are forbidden
       agentControlJournalPayload({ ...terminal, absolutePath: '/Users/val/secret.txt' });
+      agentControlJournalPayload({ kind: 'approval.requested', commandId: 'c', approvalId: 'a',
+        payloadDigest: 'd', resource: createAgentControlJournalResource({ kind: 'project', id: '/repo' }),
+        // @ts-expect-error approval effects must be constructor-produced redacted metadata
+        capability: 'pane.close', effect: { kind: 'close', target: '/Users/val/secret-repo' } });
+      agentControlJournalPayload({ ...terminal, receipt: {
+        schema: 'psyche.control.receipt/v1', actionId: 'c', state: 'failed',
+        // @ts-expect-error receipt resources must be constructor-produced path-free metadata
+        resource: { kind: 'project', id: '/Users/val/secret-repo' },
+        createdAt: '2026-08-12T00:00:00.000Z',
+      } });
     }
     expect(true).toBe(true);
   });
@@ -90,6 +105,23 @@ describe('ControlJournal', () => {
     const reopened = await ControlJournal.open(root, 3);
     expect(reopened.sequence).toBe(2);
     expect(reopened.findByIdempotencyKey('i1')?.kind).toBe('command.succeeded');
+  });
+
+  it('recovers a reused command id by the nonterminal idempotency key', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
+    roots.push(root);
+    const journal = await ControlJournal.open(root, 7);
+    await journal.append('command.requested', { commandId: 'reused', idempotencyKey: 'old-key' });
+    await journal.append('command.succeeded', { commandId: 'reused', idempotencyKey: 'old-key' });
+    await journal.append('command.requested', { commandId: 'reused', idempotencyKey: 'new-key' });
+    await journal.append('command.running', { commandId: 'reused', idempotencyKey: 'new-key' });
+
+    await expect(journal.recoverNonterminalCommands()).resolves.toEqual([
+      expect.objectContaining({ kind: 'command.unknown', payload: expect.objectContaining({
+        commandId: 'reused', idempotencyKey: 'new-key', reason: 'recovered-nonterminal',
+      }) }),
+    ]);
+    expect(journal.findByIdempotencyKey('new-key')).toMatchObject({ kind: 'command.unknown' });
   });
 
   it('truncates only an incomplete final line', async () => {

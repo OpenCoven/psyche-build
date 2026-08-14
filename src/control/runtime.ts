@@ -14,7 +14,11 @@ import {
 } from './policy.js';
 import { SurfaceRegistry } from './surfaces.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
-import { agentControlJournalPayload, type AgentControlJournalReceipt } from './journal.js';
+import {
+  agentControlJournalPayload,
+  createAgentControlJournalResource,
+  type AgentControlJournalReceipt,
+} from './journal.js';
 import { canonicalizeBoundedJson } from './boundedJson.js';
 import type {
   ActionReceipt,
@@ -500,7 +504,7 @@ export class ControlRuntime {
               commandId: command.id,
               approvalId: approval.id,
               payloadDigest: approval.payloadDigest,
-              resource: approval.resource,
+              resource: createAgentControlJournalResource(approval.resource),
               capability: approval.capability,
               effect: approval.effect,
             });
@@ -1541,7 +1545,8 @@ function redactedPayloadForOutcome(
 }
 
 function redactReceipt(receipt: ActionReceipt): ActionReceipt {
-  return journalReceiptMetadata(receipt);
+  const { value: _sensitiveValue, message: _sensitiveMessage, ...safeReceipt } = receipt;
+  return Object.freeze(safeReceipt);
 }
 
 function journalReceiptMetadata(receipt: ActionReceipt): AgentControlJournalReceipt {
@@ -1549,7 +1554,7 @@ function journalReceiptMetadata(receipt: ActionReceipt): AgentControlJournalRece
     schema: receipt.schema,
     actionId: receipt.actionId,
     state: receipt.state,
-    resource: receipt.resource,
+    resource: createAgentControlJournalResource(receipt.resource),
     createdAt: receipt.createdAt,
     ...(receipt.completedAt ? { completedAt: receipt.completedAt } : {}),
     ...(receipt.code ? { code: receipt.code } : {}),

@@ -1,5 +1,5 @@
 import { mkdir, open, readFile, rename, truncate } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { ControlSnapshot } from './types.js';
 import type { ActionReceipt, CommandOutcome, ControlCommand } from './types.js';
@@ -22,11 +22,33 @@ interface ForbiddenAgentControlJournalData {
   readonly absolutePath?: never;
 }
 
+declare const agentControlJournalResourceBrand: unique symbol;
+export type AgentControlJournalResource = Readonly<{
+  kind: ActionReceipt['resource']['kind'];
+  idDigest: string;
+  generation?: number;
+  [agentControlJournalResourceBrand]: true;
+}>;
+
+const agentControlJournalResources = new WeakSet<object>();
+
+export function createAgentControlJournalResource(
+  resource: ActionReceipt['resource'],
+): AgentControlJournalResource {
+  const metadata = Object.freeze({
+    kind: resource.kind,
+    idDigest: createHash('sha256').update(resource.id, 'utf8').digest('hex'),
+    ...(resource.kind === 'project' ? {} : { generation: resource.generation }),
+  }) as AgentControlJournalResource;
+  agentControlJournalResources.add(metadata);
+  return metadata;
+}
+
 export type AgentControlJournalReceipt = ForbiddenAgentControlJournalData & {
   readonly schema: ActionReceipt['schema'];
   readonly actionId: string;
   readonly state: ActionReceipt['state'];
-  readonly resource: ActionReceipt['resource'];
+  readonly resource: AgentControlJournalResource;
   readonly createdAt: string;
   readonly completedAt?: string;
   readonly code?: string;
@@ -41,9 +63,7 @@ export type AgentControlJournalInput =
       commandKind: ControlCommand['kind']; ownerEpoch: number }
     )
   | (ForbiddenAgentControlJournalData & { kind: 'approval.requested'; commandId: string; approvalId: string; payloadDigest: string;
-      resource: ActionReceipt['resource']; capability: string; effect: {
-        readonly kind: RedactedApprovalEffect['kind']; readonly target: string;
-      } })
+      resource: AgentControlJournalResource; capability: string; effect: RedactedApprovalEffect })
   | (ForbiddenAgentControlJournalData & {
       kind: Exclude<AgentControlJournalKind, 'command.requested' | 'approval.requested'>;
       commandId: string;
@@ -63,12 +83,15 @@ export function agentControlJournalPayload(input: AgentControlJournalInput): {
     payload: { commandId: input.commandId, idempotencyKey: input.idempotencyKey,
       kind: input.commandKind, ownerEpoch: input.ownerEpoch },
   };
-  if (input.kind === 'approval.requested') return {
-    kind: input.kind,
-    payload: { commandId: input.commandId, approvalId: input.approvalId,
-      payloadDigest: input.payloadDigest, resource: input.resource,
-      capability: input.capability, effect: input.effect },
-  };
+  if (input.kind === 'approval.requested') {
+    assertJournalResource(input.resource);
+    return {
+      kind: input.kind,
+      payload: { commandId: input.commandId, approvalId: input.approvalId,
+        payloadDigest: input.payloadDigest, resource: input.resource,
+        capability: input.capability, effect: input.effect },
+    };
+  }
   const receipt = input.receipt ? journalReceipt(input.receipt) : undefined;
   return {
     kind: input.kind,
@@ -82,6 +105,7 @@ export function agentControlJournalPayload(input: AgentControlJournalInput): {
 }
 
 function journalReceipt(receipt: AgentControlJournalReceipt): AgentControlJournalReceipt {
+  assertJournalResource(receipt.resource);
   return Object.freeze({
     schema: receipt.schema,
     actionId: receipt.actionId,
@@ -95,6 +119,12 @@ function journalReceipt(receipt: AgentControlJournalReceipt): AgentControlJourna
     ...(receipt.resultBytes !== undefined ? { resultBytes: receipt.resultBytes } : {}),
     ...(receipt.durationMs !== undefined ? { durationMs: receipt.durationMs } : {}),
   });
+}
+
+function assertJournalResource(resource: AgentControlJournalResource): void {
+  if (!resource || typeof resource !== 'object' || !agentControlJournalResources.has(resource)) {
+    throw new Error('agent control journal resource lacks redaction provenance');
+  }
 }
 
 export interface ControlEvent {
@@ -261,21 +291,22 @@ export class ControlJournal {
   }
 
   async recoverNonterminalCommands(): Promise<ControlEvent[]> {
-    const terminalByCommand = new Map<string, boolean>();
+    const terminalTransactions = new Set<string>();
     const nonterminal = new Map<string, ControlEvent>();
     const terminalKinds = new Set(['command.succeeded', 'command.failed', 'command.unknown', 'command.rejected']);
     const openKinds = new Set(['command.requested', 'command.accepted', 'command.running']);
     for (const event of this.events) {
       const commandId = event.payload.commandId as string | undefined;
       if (!commandId) continue;
-      if (terminalKinds.has(event.kind)) terminalByCommand.set(commandId, true);
-      else if (openKinds.has(event.kind)) nonterminal.set(commandId, event);
+      const transaction = commandTransactionKey(commandId, event.payload.idempotencyKey);
+      if (terminalKinds.has(event.kind)) terminalTransactions.add(transaction);
+      else if (openKinds.has(event.kind)) nonterminal.set(transaction, event);
     }
     const recovered: ControlEvent[] = [];
-    for (const [commandId, event] of nonterminal) {
-      if (terminalByCommand.get(commandId)) continue;
+    for (const [transaction, event] of nonterminal) {
+      if (terminalTransactions.has(transaction)) continue;
       recovered.push(await this.append('command.unknown', {
-        commandId,
+        commandId: event.payload.commandId,
         idempotencyKey: event.payload.idempotencyKey,
         reason: 'recovered-nonterminal',
       }));
@@ -298,4 +329,8 @@ export class ControlJournal {
     const key = event.payload.idempotencyKey as string | undefined;
     if (key) this.idempotencyIndex.set(key, event);
   }
+}
+
+function commandTransactionKey(commandId: string, idempotencyKey: unknown): string {
+  return JSON.stringify([commandId, typeof idempotencyKey === 'string' ? idempotencyKey : '']);
 }
