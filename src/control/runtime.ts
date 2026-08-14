@@ -385,6 +385,10 @@ export class ControlRuntime {
       }
       switch (command.kind) {
         case 'lease.request': {
+          if (this.leaseRequests.has(command.id)) {
+            throw codedRuntimeError('lease_request_conflict', 'lease request ID already exists');
+          }
+          this.assertLeaseRequestBounds(command);
           const request: LeaseRequestRecord = Object.freeze({
             id: command.id, ownerEpoch: command.ownerEpoch,
             actorId: command.actor.id, taskId: command.payload.taskId,
@@ -891,6 +895,31 @@ export class ControlRuntime {
           throw codedRuntimeError('resource_scope_mismatch', 'surface belongs to another project');
         }
       }
+    }
+  }
+
+  private assertLeaseRequestBounds(command: Extract<ControlCommand, { kind: 'lease.request' }>): void {
+    const textValues = [
+      command.id,
+      command.actor.id,
+      command.payload.taskId,
+      ...command.payload.grants.flatMap((grant) => [grant.target.kind, grant.target.id]),
+    ];
+    const tooLarge = command.payload.grants.length > AGENT_CONTROL_LIMITS.leaseRequestGrants
+      || command.payload.grants.some((grant) => (
+        grant.capabilities.length > AGENT_CONTROL_LIMITS.leaseRequestCapabilitiesPerGrant
+        || grant.capabilities.some((capability) => (
+          Buffer.byteLength(capability, 'utf8') > AGENT_CONTROL_LIMITS.leaseRequestCapabilityBytes
+        ))
+      ))
+      || textValues.some((value) => (
+        Buffer.byteLength(value, 'utf8') > AGENT_CONTROL_LIMITS.leaseRequestTextBytes
+      ));
+    if (tooLarge) {
+      throw codedRuntimeError(
+        'lease_request_too_large',
+        'lease request exceeds the operator display limits',
+      );
     }
   }
 

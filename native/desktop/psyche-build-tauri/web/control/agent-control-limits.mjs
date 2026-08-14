@@ -1,5 +1,6 @@
 export const AGENT_CONTROL_UI_LIMITS = Object.freeze({
   cardsPerGroup: 100,
+  leaseContextIndex: 1_000,
   resourcesPerCard: 32,
   capabilitiesPerResource: 12,
   registeredResources: 256,

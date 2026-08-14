@@ -700,6 +700,98 @@ describe('ControlRuntime', () => {
     expect(runtime.snapshot().capabilityLeases).toHaveLength(1);
   });
 
+  it('rejects hidden lease authority beyond the operator display bounds', async () => {
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
+    const grants = Array.from({ length: 33 }, (_, index) => ({
+      target: index < 32
+        ? { kind: 'project' as const, id: '/repo' }
+        : { kind: 'project' as const, id: '/dangerous-overflow' },
+      capabilities: ['pane.create' as const],
+    }));
+    await expect(submit(runtime, command({
+      id: 'oversized-request', idempotencyKey: 'oversized-request', kind: 'lease.request', ownerEpoch: 7,
+      actor: { id: 'agent-bounded', kind: 'psyche' },
+      payload: { taskId: 'task-bounded', ttlMs: 60_000, grants },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'failed', code: 'lease_request_too_large' });
+    expect(runtime.snapshot().leaseRequests).toEqual([]);
+    await expect(runtime.submit(command({
+      id: 'oversized-grant', idempotencyKey: 'oversized-grant', kind: 'lease.grant', ownerEpoch: 7,
+      payload: { requestId: 'oversized-request' },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'failed', code: 'lease_request_missing' });
+    expect(runtime.snapshot().capabilityLeases).toEqual([]);
+  });
+
+  it.each([
+    ['capability count', {
+      taskId: 'task-bounded',
+      grants: [{
+        target: { kind: 'project' as const, id: '/repo' },
+        capabilities: Array.from({ length: 13 }, () => 'pane.create' as const),
+      }],
+    }],
+    ['request text', {
+      taskId: 't'.repeat(129),
+      grants: [{
+        target: { kind: 'project' as const, id: '/repo' },
+        capabilities: ['pane.create' as const],
+      }],
+    }],
+    ['capability text', {
+      taskId: 'task-bounded',
+      grants: [{
+        target: { kind: 'project' as const, id: '/repo' },
+        capabilities: [`pane.${'x'.repeat(65)}` as 'pane.create'],
+      }],
+    }],
+  ])('rejects a lease request beyond the %s bound', async (_case, payload) => {
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
+    await expect(runtime.submit(command({
+      id: `bounded-${_case}`, idempotencyKey: `bounded-${_case}`, kind: 'lease.request', ownerEpoch: 7,
+      actor: { id: 'agent-bounded', kind: 'psyche' },
+      payload: { ttlMs: 60_000, ...payload },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'failed', code: 'lease_request_too_large' });
+    expect(runtime.snapshot().leaseRequests).toEqual([]);
+  });
+
+  it('never replaces an existing lease request ID under a new idempotency key', async () => {
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
+    const original = command({
+      id: 'immutable-request', idempotencyKey: 'immutable-request-v1', kind: 'lease.request', ownerEpoch: 7,
+      actor: { id: 'agent-original', kind: 'psyche' }, payload: {
+        taskId: 'task-original', ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: '/repo' }, capabilities: ['pane.create'] }],
+      },
+    }) as ControlCommand;
+    const first = await runtime.submit(original);
+    expect(first).toMatchObject({ status: 'succeeded' });
+    await expect(runtime.submit(original)).resolves.toEqual(first);
+    await expect(runtime.submit({
+      ...original,
+      idempotencyKey: 'immutable-request-v2',
+      payload: {
+        taskId: 'task-widened', ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: '/other' }, capabilities: ['pane.create'] }],
+      },
+    } as ControlCommand)).resolves.toMatchObject({ status: 'failed', code: 'lease_request_conflict' });
+    expect(runtime.snapshot().leaseRequests).toMatchObject([{
+      id: 'immutable-request', actorId: 'agent-original', taskId: 'task-original', status: 'pending',
+      grants: [{ target: { kind: 'project', id: '/repo' }, capabilities: ['pane.create'] }],
+    }]);
+
+    const granted = await runtime.submit(command({
+      id: 'immutable-grant', idempotencyKey: 'immutable-grant', kind: 'lease.grant', ownerEpoch: 7,
+      payload: { requestId: 'immutable-request' },
+    }) as ControlCommand);
+    expect(granted).toMatchObject({ status: 'succeeded', value: { lease: {
+      actorId: 'agent-original', taskId: 'task-original',
+      grants: [{ target: { kind: 'project', id: '/repo' }, capabilities: ['pane.create'] }],
+    } } });
+    await expect(runtime.submit({
+      ...original,
+      idempotencyKey: 'immutable-request-after-grant',
+    })).resolves.toMatchObject({ status: 'failed', code: 'lease_request_conflict' });
+  });
+
   it('requires a project pane-create lease before orchestration execution', async () => {
     handlers.executeOrchestration = vi.fn(async () => ({ ok: true }));
     const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });

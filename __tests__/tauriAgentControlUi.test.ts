@@ -649,6 +649,9 @@ describe('agent control operator model', () => {
 
   it('bounds hostile control snapshots and reports every overflow', () => {
     const huge = snapshot();
+    huge.capabilityLeases[0].actorId = 'lease-agent-'.repeat(100);
+    huge.capabilityLeases[0].taskId = 'lease-task-'.repeat(100);
+    huge.capabilityLeases[0].expiresAt = `2099-${'9'.repeat(1_000)}`;
     huge.leaseRequests = Array.from({ length: 1_001 }, (_, index) => ({
       id: `request-${index}-${'x'.repeat(1_000)}`,
       actorId: 'a'.repeat(1_000), taskId: 't'.repeat(1_000), status: 'pending', ttlMs: 1,
@@ -672,6 +675,89 @@ describe('agent control operator model', () => {
     expect(content.textContent).toContain('+969 more resources');
     expect(content.textContent).toContain('+989 more capabilities');
     expect(content.textContent).not.toContain('x'.repeat(256));
+    expect(content.textContent).not.toContain('lease-agent-'.repeat(20));
+    expect(content.textContent).not.toContain('lease-task-'.repeat(20));
+    expect(content.textContent).not.toContain('9'.repeat(256));
+  });
+
+  it('never offers Grant when a request contains hidden overflow authority', () => {
+    const hidden = snapshot();
+    hidden.leaseRequests[0].grants = Array.from({ length: 33 }, (_, index) => ({
+      target: { kind: 'pane', id: `pane-${index}`, generation: index },
+      capabilities: ['pane.observe'],
+    }));
+    const model = createAgentControlModel(hidden, { now: NOW, operator: true });
+    expect(model.groups.requested[0]).toMatchObject({
+      canGrant: false, requiresNarrowerRequest: true, resourceOverflow: 1,
+    });
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    renderAgentControlDrawer(content, model);
+    expect(buttonByLabel(content, 'Grant request request-pending')).toBeUndefined();
+    expect(content.textContent).toContain('Request exceeds display limits; submit a narrower request');
+  });
+
+  it('projects actionable requests and approvals before terminal history', () => {
+    const crowded = snapshot();
+    const pendingRequest = crowded.leaseRequests[0];
+    crowded.leaseRequests = [
+      ...Array.from({ length: 101 }, (_, index) => ({
+        ...pendingRequest, id: `terminal-${index}`, status: 'granted',
+      })),
+      pendingRequest,
+    ];
+    const pendingApproval = crowded.approvals[0];
+    crowded.approvals = [
+      ...Array.from({ length: 101 }, (_, index) => ({
+        ...pendingApproval, id: `terminal-approval-${index}`, status: 'denied',
+      })),
+      pendingApproval,
+    ];
+    const model = createAgentControlModel(crowded, { now: NOW, operator: true });
+    expect(model.groups.requested[0].requestId).toBe('request-pending');
+    expect(model.approvals[0]).toMatchObject({ approvalId: 'approval-1', canApprove: true, canDeny: true });
+    expect(model.overflow).toMatchObject({ leaseRequests: 0, approvals: 0 });
+  });
+
+  it('authorizes a pending approval whose exact lease is beyond the rendered lease cap', () => {
+    const crowded = snapshot();
+    const matchingLease = crowded.capabilityLeases[0];
+    crowded.capabilityLeases = [
+      ...Array.from({ length: 101 }, (_, index) => ({
+        ...matchingLease, id: `unrelated-${index}`, requestId: `request-${index}`,
+      })),
+      matchingLease,
+    ];
+    const model = createAgentControlModel(crowded, { now: NOW, operator: true });
+    expect(model.groups.active).toHaveLength(100);
+    expect(model.approvals[0]).toMatchObject({
+      agentId: 'agent-b', taskId: 'task-active', leaseCurrent: true,
+      canApprove: true, canDeny: true, canRevokeLease: true,
+    });
+  });
+
+  it('disables approval actions when the lease belongs to another owner epoch', () => {
+    const restarted = snapshot(8);
+    restarted.capabilityLeases[0].ownerEpoch = 7;
+    const model = createAgentControlModel(restarted, { now: NOW, operator: true });
+    expect(model.approvals[0]).toMatchObject({
+      leaseCurrent: false, canApprove: false, canDeny: false, canRevokeLease: false,
+    });
+  });
+
+  it('unlocks an action and exposes a synchronous refresh failure', async () => {
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    const model = createAgentControlModel(snapshot(), { now: NOW, operator: true });
+    const onGrant = vi.fn(() => Promise.resolve());
+    renderAgentControlDrawer(content, model, {
+      onGrant,
+      onStateChange: () => { throw new Error('refresh failed synchronously'); },
+    });
+    const grant = buttonByLabel(content, 'Grant request request-pending')!;
+    grant.dispatch('click');
+    await vi.waitFor(() => expect(grant.disabled).toBe(false));
+    expect(content.textContent).toContain('refresh failed synchronously');
   });
 
   it('retains command focus and exposes the failure without removing its card', async () => {

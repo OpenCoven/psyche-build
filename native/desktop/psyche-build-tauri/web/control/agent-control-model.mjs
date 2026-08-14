@@ -35,9 +35,10 @@ function leaseCard(lease, now, operator) {
     leaseId: String(lease.id || ''),
     requestId: String(lease.requestId || ''),
     revision: Number(lease.revision || 0),
-    agentId: String(lease.actorId || ''),
-    taskId: String(lease.taskId || ''),
-    expiresAt: String(lease.expiresAt || ''),
+    ownerEpoch: Number(lease.ownerEpoch || 0),
+    agentId: boundedAgentControlText(lease.actorId),
+    taskId: boundedAgentControlText(lease.taskId),
+    expiresAt: boundedAgentControlText(lease.expiresAt),
     resources,
     resourceOverflow: boundedGrants.overflow,
     canRevoke: operator && !expired,
@@ -61,15 +62,18 @@ function requestCard(request, operator) {
   });
   const createdAt = String(request.createdAt || '');
   const ttlMs = Number(request.ttlMs || 0);
+  const requiresNarrowerRequest = boundedGrants.overflow > 0
+    || resources.some((resource) => resource.capabilityOverflow > 0);
   return {
     requestId: String(request.id || ''),
-    agentId: String(request.actorId || ''),
-    taskId: String(request.taskId || ''),
-    createdAt,
+    agentId: boundedAgentControlText(request.actorId),
+    taskId: boundedAgentControlText(request.taskId),
+    createdAt: boundedAgentControlText(createdAt),
     ttlMs,
     resources,
     resourceOverflow: boundedGrants.overflow,
-    canGrant: operator && request.status === 'pending',
+    requiresNarrowerRequest,
+    canGrant: operator && request.status === 'pending' && !requiresNarrowerRequest,
   };
 }
 
@@ -79,22 +83,30 @@ export function createAgentControlModel(snapshot, options = {}) {
   const now = Number.isFinite(options.now) ? options.now : Date.now();
   const epochChanged = Number.isSafeInteger(options.previousOwnerEpoch)
     && options.previousOwnerEpoch !== ownerEpoch;
-  const boundedLeases = boundedAgentControlList(
+  const indexedLeases = boundedAgentControlList(
     snapshot && snapshot.capabilityLeases,
-    AGENT_CONTROL_UI_LIMITS.cardsPerGroup,
+    AGENT_CONTROL_UI_LIMITS.leaseContextIndex,
   );
-  const leases = boundedLeases.items.map((lease) =>
+  const leaseIndex = indexedLeases.items.map((lease) =>
     leaseCard(lease, now, operator));
+  const sortedLeases = [...leaseIndex].sort((left, right) => Number(left.expired) - Number(right.expired));
+  const boundedLeases = boundedAgentControlList(sortedLeases, AGENT_CONTROL_UI_LIMITS.cardsPerGroup);
+  const leases = boundedLeases.items;
   const active = leases.filter((lease) => !lease.expired);
-  const leaseById = new Map(leases.map((lease) => [lease.leaseId, lease]));
+  const leaseById = new Map(leaseIndex.map((lease) => [lease.leaseId, lease]));
+  const allApprovals = asArray(snapshot && snapshot.approvals);
+  const pendingApprovals = allApprovals.filter((approval) => approval?.status === 'pending');
   const boundedApprovals = boundedAgentControlList(
-    snapshot && snapshot.approvals,
+    pendingApprovals,
     AGENT_CONTROL_UI_LIMITS.cardsPerGroup,
   );
   const approvals = boundedApprovals.items.map((approval) => {
     const lease = leaseById.get(String(approval.leaseId || ''));
     const leaseCurrent = Boolean(
-      lease && !lease.expired && lease.revision === Number(approval.leaseRevision || 0),
+      lease
+      && !lease.expired
+      && lease.ownerEpoch === ownerEpoch
+      && lease.revision === Number(approval.leaseRevision || 0),
     );
     return {
       approvalId: String(approval.id || ''),
@@ -103,23 +115,31 @@ export function createAgentControlModel(snapshot, options = {}) {
       leaseRevision: Number(approval.leaseRevision || 0),
       payloadDigest: String(approval.payloadDigest || ''),
       resource: copyTarget(approval.resource),
-      capability: String(approval.capability || ''),
+      capability: boundedAgentControlText(
+        approval.capability,
+        AGENT_CONTROL_UI_LIMITS.capabilityBytes,
+      ),
       effect: {
-        kind: String(approval.effect && approval.effect.kind || ''),
-        target: String(approval.effect && approval.effect.target || ''),
+        kind: boundedAgentControlText(approval.effect && approval.effect.kind),
+        target: boundedAgentControlText(approval.effect && approval.effect.target),
       },
-      expiresAt: String(approval.expiresAt || ''),
+      expiresAt: boundedAgentControlText(approval.expiresAt),
       agentId: lease?.agentId || '',
       taskId: lease?.taskId || '',
       leaseCurrent,
       canRevokeLease: operator && leaseCurrent,
-      canApprove: operator && approval.status === 'pending',
-      canDeny: operator && approval.status === 'pending',
+      canApprove: operator && approval.status === 'pending' && leaseCurrent,
+      canDeny: operator && approval.status === 'pending' && leaseCurrent,
     };
   });
   const allRequests = asArray(snapshot && snapshot.leaseRequests);
-  const boundedRequests = boundedAgentControlList(allRequests, AGENT_CONTROL_UI_LIMITS.cardsPerGroup);
-  const requests = boundedRequests.items;
+  const pendingRequests = allRequests.filter((request) => request?.status === 'pending');
+  const revokedRequests = allRequests.filter((request) => request?.status === 'revoked');
+  const boundedRequests = boundedAgentControlList(pendingRequests, AGENT_CONTROL_UI_LIMITS.cardsPerGroup);
+  const boundedRevokedRequests = boundedAgentControlList(
+    revokedRequests,
+    AGENT_CONTROL_UI_LIMITS.cardsPerGroup,
+  );
   const boundedResources = boundedAgentControlList(
     snapshot && snapshot.resources,
     AGENT_CONTROL_UI_LIMITS.registeredResources,
@@ -147,22 +167,20 @@ export function createAgentControlModel(snapshot, options = {}) {
   return {
     ownerEpoch,
     contextKey: `${String(options.projectRoot || '')}\u0000${ownerEpoch}`,
-    pendingCount: allRequests.filter((request) => request.status === 'pending').length
-      + asArray(snapshot && snapshot.approvals).filter((approval) => approval.status === 'pending').length,
+    pendingCount: pendingRequests.length + pendingApprovals.length,
     groups: {
-      requested: requests.filter((request) => request.status === 'pending')
-        .map((request) => requestCard(request, operator)),
+      requested: boundedRequests.items.map((request) => requestCard(request, operator)),
       active,
       expired: leases.filter((lease) => lease.expired),
-      revoked: requests.filter((request) => request.status === 'revoked')
-        .map((request) => requestCard(request, operator)),
+      revoked: boundedRevokedRequests.items.map((request) => requestCard(request, operator)),
     },
     approvals,
     badges,
     resources,
     overflow: {
-      leaseRequests: boundedRequests.overflow,
-      leases: boundedLeases.overflow,
+      leaseRequests: boundedRequests.overflow + boundedRevokedRequests.overflow,
+      leases: Math.max(0, asArray(snapshot && snapshot.capabilityLeases).length
+        - AGENT_CONTROL_UI_LIMITS.cardsPerGroup),
       approvals: boundedApprovals.overflow,
       resources: boundedResources.overflow,
     },

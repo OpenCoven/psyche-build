@@ -61,7 +61,13 @@ function actionButton(document, label, actionKey, cohortKey, action, state, erro
       state.focusKey = null;
       error.textContent = '';
       error.hidden = true;
-      return Promise.resolve(onStateChange()).finally(() => {
+      return Promise.resolve().then(() => onStateChange()).catch((refreshError) => {
+        if (state.contextToken !== contextToken) return;
+        const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
+        state.failures.set(actionKey, { action, label, message });
+        error.textContent = message;
+        error.hidden = false;
+      }).finally(() => {
         if (state.contextToken !== contextToken) return;
         state.inFlight.delete(cohortKey);
         setCohortDisabled(state.container, cohortKey, false);
@@ -154,6 +160,14 @@ function renderRequestedAuthority(document, request, callbacks, state, renderedK
     appendOverflow(document, row, resource.capabilityOverflow, 'capabilities');
   }
   appendOverflow(document, card, request.resourceOverflow, 'resources');
+  if (request.requiresNarrowerRequest) {
+    card.append(element(
+      document,
+      'div',
+      'agent-control-error',
+      'Request exceeds display limits; submit a narrower request',
+    ));
+  }
   if (request.canGrant) {
     renderedKeys.add(appendAction(
       document,
