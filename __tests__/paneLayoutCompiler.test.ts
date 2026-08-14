@@ -68,6 +68,28 @@ describe('compileSidebarPaneLayout', () => {
     })).toThrow('missing tmux pane binding for missing');
   });
 
+  it('rejects malformed content pane bindings', () => {
+    expect(() => compileSidebarPaneLayout({
+      controlPaneId: '%0',
+      root: { kind: 'leaf', paneId: 'psyche-1' },
+      panes: new Map([['psyche-1', "%1'; touch /tmp/pwn; #"]]),
+      sidebarWidth: 40,
+      windowWidth: 120,
+      windowHeight: 40,
+    })).toThrow('invalid pane id');
+  });
+
+  it('rejects malformed control pane bindings', () => {
+    expect(() => compileSidebarPaneLayout({
+      controlPaneId: "%0'; touch /tmp/pwn; #",
+      root: null,
+      panes,
+      sidebarWidth: 40,
+      windowWidth: 120,
+      windowHeight: 40,
+    })).toThrow('invalid control pane id');
+  });
+
   it('renders a valid sidebar-only layout when the visible tree is empty', () => {
     const layout = compileSidebarPaneLayout({
       controlPaneId: '%0',

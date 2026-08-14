@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import { LogService } from './LogService.js';
 import { execAsync } from '../utils/execAsync.js';
 import type { PanePosition, WindowDimensions } from '../types.js';
@@ -8,6 +8,7 @@ import {
   parseTmuxServerIdentity,
   type TmuxServerIdentity,
 } from './TmuxServerIdentity.js';
+import { assertTmuxPaneId } from '../utils/tmuxTarget.js';
 
 export type PaneListScope = 'window' | 'session';
 
@@ -652,13 +653,14 @@ export class TmuxService {
    * Resize a pane
    */
   async resizePane(paneId: string, dimensions: { width?: number; height?: number }): Promise<void> {
+    const target = assertTmuxPaneId(paneId);
     await this.executeWithRetry(
       () => {
         if (dimensions.width !== undefined) {
-          this.execute(`tmux resize-pane -t '${paneId}' -x ${dimensions.width}`);
+          this.execute(`tmux resize-pane -t '${target}' -x ${dimensions.width}`);
         }
         if (dimensions.height !== undefined) {
-          this.execute(`tmux resize-pane -t '${paneId}' -y ${dimensions.height}`);
+          this.execute(`tmux resize-pane -t '${target}' -y ${dimensions.height}`);
         }
       },
       RetryStrategy.FAST,
@@ -685,7 +687,7 @@ export class TmuxService {
   async selectLayout(layoutString: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        this.execute(`tmux select-layout '${layoutString}'`);
+        execFileSync('tmux', ['select-layout', layoutString], { stdio: 'pipe' });
       },
       RetryStrategy.FAST,
       'selectLayout'
