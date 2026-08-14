@@ -849,6 +849,14 @@ describe('native Coven launch routing', () => {
       covenAttachKey: () => 'project:safe-session',
       covenAttachInFlight: new Map(),
       covenWorktreeForSession: () => ({ path: '/repo/wt' }),
+      resolveCurrentCovenAttachTarget: () => ({
+        project,
+        session,
+        worktree: { path: '/repo/wt' },
+      }),
+      focusCovenAttachmentForCaller: async (
+        opening: Promise<Record<string, unknown> | null>,
+      ) => opening,
       activateProjectWorktree: async () => true,
       waitForTerminalLayout: async () => undefined,
       createThread: (options: Record<string, unknown>) => {
@@ -970,6 +978,54 @@ describe('native Coven launch routing', () => {
       }),
     });
     expect((invoked[0].options as Record<string, unknown>)).not.toHaveProperty('metricsProvider');
+  });
+
+  it('suppresses initial terminal focus only when thread creation requests it', () => {
+    const state = { threads: [] as Array<Record<string, any>>, activeThreadId: null };
+    const focusCalls: Array<{
+      id: string;
+      options?: { focusTerminal?: boolean };
+    }> = [];
+    let nextId = 0;
+    const createThread = compileFunction<(opts: Record<string, any>) => Record<string, any>>(
+      functionSource('createThread'),
+      {
+        makeThreadId: () => `thread-${nextId += 1}`,
+        activeProject: () => null,
+        activeWorkspaceRoot: () => '/repo',
+        preparePanePlacement: () => ({ key: 'layout', value: {} }),
+        setStatus: () => undefined,
+        commitPanePlacement: () => undefined,
+        state,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        mountTerminal: () => undefined,
+        focusThread: (
+          id: string,
+          options?: { focusTerminal?: boolean },
+        ) => {
+          focusCalls.push({ id, options });
+        },
+        requestAnimationFrame: () => undefined,
+        isLiveThread: () => true,
+        spawnPty: () => undefined,
+      },
+    );
+
+    createThread({
+      worktreePath: '/repo',
+      command: '/bin/zsh',
+      focusTerminal: false,
+    });
+    createThread({
+      worktreePath: '/repo',
+      command: '/bin/zsh',
+    });
+
+    expect(focusCalls).toEqual([
+      { id: 'thread-1', options: { focusTerminal: false } },
+      { id: 'thread-2', options: undefined },
+    ]);
   });
 
   it('falls back to opts.metricsProvider when launch omits it and preserves launch precedence', () => {

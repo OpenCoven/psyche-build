@@ -1,9 +1,14 @@
+import {
+  AGENT_CONTROL_UI_LIMITS,
+  boundedAgentControlText,
+} from './agent-control-limits.mjs';
+
 export async function runFocusedOperatorAction(target, action, onError = () => {}) {
   try {
     return await action();
   } catch (error) {
-    onError(error instanceof Error ? error.message : String(error));
-    if (target && typeof target.focus === 'function') target.focus();
+    const shouldFocus = onError(error instanceof Error ? error.message : String(error)) !== false;
+    if (shouldFocus && target && typeof target.focus === 'function') target.focus();
     throw error;
   }
 }
@@ -23,34 +28,61 @@ function actionTarget(container, actionKey) {
     .find((node) => node.dataset.actionKey === actionKey) || null;
 }
 
-function actionButton(document, label, actionKey, action, state, error, onStateChange) {
+function setCohortDisabled(container, cohortKey, disabled) {
+  for (const node of container.querySelectorAll('[data-action-key]')) {
+    if (node.dataset.actionCohort === cohortKey) node.disabled = disabled;
+  }
+}
+
+function actionButton(document, label, actionKey, cohortKey, action, state, error, onStateChange) {
   const button = element(document, 'button', 'agent-control-action', label);
   button.type = 'button';
   button.dataset.actionKey = actionKey;
+  button.dataset.actionCohort = cohortKey;
+  button.disabled = state.inFlight.has(cohortKey);
   button.setAttribute('aria-label', label);
   button.addEventListener('click', () => {
+    if (state.inFlight.has(cohortKey)) return;
+    const contextToken = state.contextToken;
+    state.inFlight.add(cohortKey);
+    setCohortDisabled(state.container, cohortKey, true);
     state.focusKey = actionKey;
     void runFocusedOperatorAction(button, action, (message) => {
+      if (state.contextToken !== contextToken) return false;
+      state.inFlight.delete(cohortKey);
+      setCohortDisabled(state.container, cohortKey, false);
       state.failures.set(actionKey, { action, label, message });
       error.textContent = message;
       error.hidden = false;
+      return true;
     }).then(() => {
+      if (state.contextToken !== contextToken) return undefined;
       state.failures.delete(actionKey);
       state.focusKey = null;
       error.textContent = '';
       error.hidden = true;
-      return onStateChange();
+      return Promise.resolve().then(() => onStateChange()).catch((refreshError) => {
+        if (state.contextToken !== contextToken) return;
+        const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
+        state.failures.set(actionKey, { action, label, message });
+        error.textContent = message;
+        error.hidden = false;
+      }).finally(() => {
+        if (state.contextToken !== contextToken) return;
+        state.inFlight.delete(cohortKey);
+        setCohortDisabled(state.container, cohortKey, false);
+      });
     }).catch(() => {});
   });
   return button;
 }
 
-function appendAction(document, parent, label, actionKey, action, state, onStateChange) {
+function appendAction(document, parent, label, actionKey, action, state, onStateChange, cohortKey = actionKey) {
   const failure = state.failures.get(actionKey);
   const error = element(document, 'div', 'agent-control-error', failure?.message || '');
   error.setAttribute('role', 'alert');
   error.hidden = !failure;
-  parent.append(actionButton(document, label, actionKey, action, state, error, onStateChange));
+  parent.append(actionButton(document, label, actionKey, cohortKey, action, state, error, onStateChange));
   parent.append(error);
   if (failure) {
     const dismiss = element(document, 'button', 'agent-control-action', 'Dismiss error');
@@ -76,15 +108,17 @@ function resourceLabel(resource) {
   return Number.isSafeInteger(resource.generation) ? `${base} generation ${resource.generation}` : base;
 }
 
-function boundedText(value, limit) {
-  const text = String(value ?? '');
-  return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 1))}…`;
+function boundedText(value, limit = AGENT_CONTROL_UI_LIMITS.textBytes) {
+  return boundedAgentControlText(value, limit);
 }
 
 function capabilityText(capabilities) {
-  const visible = capabilities.slice(0, 12).map((capability) => boundedText(capability, 64));
-  if (capabilities.length > visible.length) visible.push(`+${capabilities.length - visible.length} more`);
+  const visible = capabilities.map((capability) => boundedText(capability, AGENT_CONTROL_UI_LIMITS.capabilityBytes));
   return visible.join(', ');
+}
+
+function appendOverflow(document, parent, count, noun) {
+  if (count > 0) parent.append(element(document, 'div', 'agent-control-overflow', `+${count} more ${noun}`));
 }
 
 function renderRequestedAuthority(document, request, callbacks, state, renderedKeys) {
@@ -123,6 +157,16 @@ function renderRequestedAuthority(document, request, callbacks, state, renderedK
       `Requested ${resourceLabel(resource)}; capabilities ${capabilities}`,
     );
     card.append(row);
+    appendOverflow(document, row, resource.capabilityOverflow, 'capabilities');
+  }
+  appendOverflow(document, card, request.resourceOverflow, 'resources');
+  if (request.requiresNarrowerRequest) {
+    card.append(element(
+      document,
+      'div',
+      'agent-control-error',
+      'Request exceeds display limits; submit a narrower request',
+    ));
   }
   if (request.canGrant) {
     renderedKeys.add(appendAction(
@@ -144,16 +188,18 @@ function renderLease(document, lease, callbacks, state, renderedKeys) {
   card.append(element(document, 'strong', '', `${lease.agentId} · ${lease.taskId}`));
   card.append(element(document, 'div', 'agent-control-meta', `expires ${lease.expiresAt}`));
   for (const resource of lease.resources) {
+    const capabilities = capabilityText(resource.capabilities);
     const row = element(
       document,
       'div',
       'agent-control-resource',
-      `${resource.kind}:${resource.id}@${resource.generation ?? '-'} · ${resource.capabilities.join(', ')}`,
+      `${boundedText(resource.kind, 32)}:${boundedText(resource.id)}@${resource.generation ?? '-'} · ${capabilities}`,
     );
+    appendOverflow(document, row, resource.capabilityOverflow, 'capabilities');
     if (lease.canRevoke) {
       const target = { kind: resource.kind, id: resource.id };
       if (Number.isSafeInteger(resource.generation)) target.generation = resource.generation;
-      const label = `Revoke ${resourceLabel(resource)}`;
+      const label = `Revoke entire lease for ${resourceLabel(resource)}`;
       const actionKey = `revoke:${lease.leaseId}:${lease.revision}:${resource.kind}:${resource.id}:${resource.generation ?? '-'}`;
       renderedKeys.add(appendAction(
         document,
@@ -163,23 +209,38 @@ function renderLease(document, lease, callbacks, state, renderedKeys) {
         () => callbacks.onRevoke({ leaseId: lease.leaseId, revision: lease.revision, resource: target }),
         state,
         callbacks.onStateChange,
+        `lease:${lease.leaseId}:${lease.revision}`,
       ));
     }
     card.append(row);
   }
+  appendOverflow(document, card, lease.resourceOverflow, 'resources');
   return card;
 }
 
 function renderApproval(document, approval, callbacks, state, renderedKeys) {
   const card = element(document, 'article', 'agent-control-card agent-control-approval');
   card.dataset.approvalId = approval.approvalId;
-  card.append(element(document, 'strong', '', `${approval.effect.kind} · ${approval.capability}`));
-  card.append(element(document, 'div', 'agent-control-meta', approval.effect.target));
+  card.append(element(document, 'strong', '', `${boundedText(approval.agentId)} · ${boundedText(approval.taskId)}`));
+  card.append(element(document, 'div', 'agent-control-meta', `${boundedText(approval.effect.kind)} · ${boundedText(approval.capability, AGENT_CONTROL_UI_LIMITS.capabilityBytes)}`));
+  card.append(element(document, 'div', 'agent-control-meta', boundedText(approval.effect.target)));
+  if (approval.resource) card.append(element(document, 'div', 'agent-control-resource', resourceLabel(approval.resource)));
+  card.append(element(document, 'div', 'agent-control-meta', `expires ${boundedText(approval.expiresAt)}`));
+  card.append(element(document, 'div', 'agent-control-meta', approval.leaseCurrent ? 'current lease context' : 'stale lease context'));
+  const approvalCohort = `approval:${approval.approvalId}`;
   if (approval.canDeny) {
-    renderedKeys.add(appendAction(document, card, 'Deny', `deny:${approval.approvalId}`, () => callbacks.onDeny(approval), state, callbacks.onStateChange));
+    renderedKeys.add(appendAction(document, card, 'Deny', `deny:${approval.approvalId}`, () => callbacks.onDeny(approval), state, callbacks.onStateChange, approvalCohort));
   }
   if (approval.canApprove) {
-    renderedKeys.add(appendAction(document, card, 'Approve once', `approve:${approval.approvalId}`, () => callbacks.onApprove(approval), state, callbacks.onStateChange));
+    renderedKeys.add(appendAction(document, card, 'Approve once', `approve:${approval.approvalId}`, () => callbacks.onApprove(approval), state, callbacks.onStateChange, approvalCohort));
+  }
+  if (approval.canRevokeLease && approval.resource) {
+    const label = `Revoke entire lease for ${resourceLabel(approval.resource)}`;
+    renderedKeys.add(appendAction(document, card, label, `approval-revoke:${approval.approvalId}`, () => callbacks.onRevoke({
+      leaseId: approval.leaseId,
+      revision: approval.leaseRevision,
+      resource: approval.resource,
+    }), state, callbacks.onStateChange, `lease:${approval.leaseId}:${approval.leaseRevision}`));
   }
   return card;
 }
@@ -193,7 +254,18 @@ export function renderAgentControlDrawer(container, model, callbacks = {}) {
     onRevoke: callbacks.onRevoke || (() => Promise.resolve()),
     onStateChange: callbacks.onStateChange || (() => Promise.resolve()),
   };
-  const state = drawerStates.get(container) || { failures: new Map(), focusKey: null };
+  let state = drawerStates.get(container);
+  if (!state || state.contextKey !== model.contextKey) {
+    if (state) state.contextToken = {};
+    state = {
+      contextKey: model.contextKey,
+      contextToken: {},
+      container,
+      failures: new Map(),
+      inFlight: new Set(),
+      focusKey: null,
+    };
+  }
   drawerStates.set(container, state);
   const focusedKey = container.ownerDocument.activeElement?.dataset?.actionKey || state.focusKey;
   container.replaceChildren();
@@ -214,6 +286,14 @@ export function renderAgentControlDrawer(container, model, callbacks = {}) {
   for (const lease of model.groups.active) {
     container.append(renderLease(document, lease, normalizedCallbacks, state, renderedKeys));
   }
+  appendOverflow(
+    document,
+    container,
+    model.overflow?.leaseRequests,
+    model.overflow?.leaseRequests === 1 ? 'requested lease request' : 'requested lease requests',
+  );
+  appendOverflow(document, container, model.overflow?.leases, 'leases');
+  appendOverflow(document, container, model.overflow?.approvals, 'approvals');
   for (const [actionKey, failure] of state.failures) {
     if (renderedKeys.has(actionKey)) continue;
     const card = element(document, 'article', 'agent-control-card agent-control-failed');

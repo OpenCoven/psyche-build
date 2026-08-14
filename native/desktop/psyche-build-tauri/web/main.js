@@ -26,6 +26,17 @@
     showBootError("Unhandled promise rejection:\n" + String(e.reason));
   });
 
+  function initializeTitlebarBrandMark() {
+    var mark = document.getElementById("titlebar-brand-mark");
+    if (!mark) return;
+    function removeFailedMark() {
+      mark.remove();
+    }
+    mark.addEventListener("error", removeFailedMark, { once: true });
+    if (mark.complete && mark.naturalWidth === 0) removeFailedMark();
+  }
+  initializeTitlebarBrandMark();
+
   if (typeof window.Terminal !== "function") {
     showBootError("xterm.js did not register a global Terminal constructor.");
     return;
@@ -132,6 +143,8 @@
   var COVEN_POLL_MS = 5000;
   var paneCounter = 0;
   var visiblePaneFitFrame = 0;
+  var MAX_PENDING_PTY_INPUT_BYTES = 1024 * 1024;
+  var MAX_PENDING_PTY_INPUT_WRITES = 256;
   var PANE_METRICS_POLL_MS = 15000;
   var paneMetricsPollTimer = 0;
   var paneFooterPopoverCleanup = null;
@@ -183,6 +196,8 @@
   var agentControlOwnerEpoch = null;
   var agentControlProjectRoot = null;
   var agentControlRefreshRequestId = 0;
+  var agentControlRefreshFlight = null;
+  var agentControlRefreshQueued = false;
   var agentControlUiLifecycle = null;
 
   function agentControlCommand(project, command) {
@@ -217,8 +232,8 @@
       if (!badge || !header) return;
       var node = document.createElement("span");
       node.className = "agent-control-badge";
-      node.textContent = "leased";
-      node.setAttribute("aria-label", "Leased to " + badge.agentId + " for " + badge.taskId + " until " + badge.expiresAt);
+      node.textContent = "leased · " + badge.capabilitySummary;
+      node.setAttribute("aria-label", "Leased to " + badge.agentId + " for " + badge.taskId + " with " + badge.capabilitySummary + " until " + badge.expiresAt);
       node.dataset.leaseId = badge.leaseId;
       node.dataset.leaseRevision = String(badge.revision);
       header.appendChild(node);
@@ -231,8 +246,8 @@
       if (!badge) return;
       var node = document.createElement("span");
       node.className = "agent-control-badge";
-      node.textContent = "leased";
-      node.setAttribute("aria-label", "Leased to " + badge.agentId + " for " + badge.taskId + " until " + badge.expiresAt);
+      node.textContent = "leased · " + badge.capabilitySummary;
+      node.setAttribute("aria-label", "Leased to " + badge.agentId + " for " + badge.taskId + " with " + badge.capabilitySummary + " until " + badge.expiresAt);
       node.dataset.leaseId = badge.leaseId;
       node.dataset.leaseRevision = String(badge.revision);
       tabNode.appendChild(node);
@@ -257,11 +272,7 @@
     window.PsycheControl.renderAgentControlDrawer(content, model, {
       onGrant: function (request) {
         return agentControlCommand(project, {
-          type: "lease_grant", requestId: request.requestId, actorId: request.agentId,
-          taskId: request.taskId, ttlMs: request.ttlMs,
-          grants: request.resources.map(function (resource) {
-            return { target: { kind: resource.kind, id: resource.id, generation: resource.generation }, capabilities: resource.capabilities };
-          }),
+          type: "lease_grant", requestId: request.requestId,
         });
       },
       onDeny: function (approval) {
@@ -286,9 +297,13 @@
   function refreshAgentControlState() {
     var project = activeProject();
     if (!project || !window.PsycheControl) return Promise.resolve(null);
+    if (agentControlRefreshFlight) {
+      agentControlRefreshQueued = true;
+      return agentControlRefreshFlight;
+    }
     var projectRoot = project.root;
     var requestId = ++agentControlRefreshRequestId;
-    return invoke("control_state", { projectRoot: projectRoot }).then(function (response) {
+    var flight = invoke("control_state", { projectRoot: projectRoot }).then(function (response) {
       var currentProject = activeProject();
       if (requestId !== agentControlRefreshRequestId || !currentProject || currentProject.root !== projectRoot) {
         return null;
@@ -297,6 +312,7 @@
       agentControlModel = window.PsycheControl.createAgentControlModel(snapshot || {}, {
         operator: true,
         previousOwnerEpoch: agentControlOwnerEpoch,
+        projectRoot: projectRoot,
       });
       agentControlOwnerEpoch = agentControlModel.ownerEpoch;
       agentControlProjectRoot = projectRoot;
@@ -312,11 +328,20 @@
       agentControlProjectRoot = null;
       renderAgentControl();
       return null;
+    }).finally(function () {
+      if (agentControlRefreshFlight === flight) agentControlRefreshFlight = null;
+      if (agentControlRefreshQueued) {
+        agentControlRefreshQueued = false;
+        void refreshAgentControlState();
+      }
     });
+    agentControlRefreshFlight = flight;
+    return flight;
   }
 
   function resetAgentControlProject(project) {
     agentControlRefreshRequestId += 1;
+    agentControlRefreshQueued = false;
     agentControlModel = null;
     agentControlOwnerEpoch = null;
     agentControlProjectRoot = null;
@@ -1153,6 +1178,8 @@
   var appEl = document.getElementById("app");
   var sidebarEl = document.getElementById("sidebar");
   var sidebarMiniEl = document.getElementById("sidebar-mini");
+  var sidebarCollapseEl = document.getElementById("sidebar-collapse");
+  var sidebarExpandEl = document.getElementById("sidebar-expand");
   var sidebarResizeEl = document.getElementById("sidebar-resize");
   var newPaneMenuEl = document.getElementById("new-pane-menu");
   var newPaneMenuHeadEl = document.getElementById("new-pane-menu-head");
@@ -1547,7 +1574,6 @@
       },
     });
     thread.terminalController = controller;
-    thread.ptyClient = controller;
     return controller;
   }
 
@@ -1566,6 +1592,51 @@
     state.threads.forEach(function (thread) {
       syncThreadPtyVisibility(thread);
     });
+  }
+
+  function createThreadPtyIoQueue() {
+    return {
+      closed: false,
+      inputTail: Promise.resolve(),
+      pendingInputBytes: 0,
+      pendingInputWrites: 0,
+      pendingResize: null,
+      resizeFlight: null,
+    };
+  }
+
+  function scheduleThreadPtyResize(thread, size) {
+    var queue = thread && thread.ptyIoQueue;
+    if (!queue || queue.closed) return Promise.resolve(false);
+    queue.pendingResize = { cols: size.cols, rows: size.rows };
+    if (queue.resizeFlight) return queue.resizeFlight;
+
+    function drainLatestResize() {
+      if (queue.closed || !queue.pendingResize) return Promise.resolve(false);
+      var next = queue.pendingResize;
+      queue.pendingResize = null;
+      return invoke("pty_resize", {
+        threadId: thread.id,
+        thread_id: thread.id,
+        cols: next.cols,
+        rows: next.rows,
+      }).then(function () {
+        return true;
+      }).catch(function () {
+        if (!queue.closed && !queue.pendingResize) {
+          queue.pendingResize = next;
+        }
+        return new Promise(function (resolve) { requestAnimationFrame(resolve); }).then(drainLatestResize);
+      }).then(function (result) {
+        return queue.pendingResize ? drainLatestResize() : result;
+      });
+    }
+
+    var flight = drainLatestResize().finally(function () {
+      if (queue.resizeFlight === flight) queue.resizeFlight = null;
+    });
+    queue.resizeFlight = flight;
+    return flight;
   }
 
   listen("pty:data-batch", function (event) {
@@ -1590,6 +1661,15 @@
       thread.terminalController.markPtyExited();
     }
     thread.ptyStarted = false;
+    if (thread.ptyIoQueue) thread.ptyIoQueue.closed = true;
+    thread.ptyIoQueue = {
+      closed: false,
+      inputTail: Promise.resolve(),
+      pendingInputBytes: 0,
+      pendingInputWrites: 0,
+      pendingResize: null,
+      resizeFlight: null,
+    };
     if (thread.startInFlight) {
       thread.exitDuringStart = true;
     }
@@ -2120,7 +2200,14 @@
       stopRequested: false,
       ptyStarted: false,
       terminalController: null,
-      ptyClient: null,
+      ptyIoQueue: {
+        closed: false,
+        inputTail: Promise.resolve(),
+        pendingInputBytes: 0,
+        pendingInputWrites: 0,
+        pendingResize: null,
+        resizeFlight: null,
+      },
       metricsGeneration: 0,
       metrics: launch.launchKind === "coven-chat" && launch.covenSessionId
         ? loadingPaneMetrics(launch)
@@ -2137,7 +2224,7 @@
     state.threads.push(thread);
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountTerminal(thread);
-    focusThread(id);
+    focusThread(id, opts.focusTerminal === false ? { focusTerminal: false } : undefined);
     refreshSidebar();
     refreshTabs();
     // Run fit() now so the PTY starts at the actual visible size, not at
@@ -3131,12 +3218,7 @@
       });
     }
     term.onResize(function (size) {
-      invoke("pty_resize", {
-        threadId: thread.id,
-        thread_id: thread.id,
-        cols: size.cols,
-        rows: size.rows,
-      }).catch(function () {});
+      scheduleThreadPtyResize(thread, size);
     });
 
     thread.term = term;
@@ -3647,6 +3729,39 @@
     return activateFocusSet(sets[0].id);
   }
 
+  function snapshotSetScopePresentation(thread) {
+    var layout = paneLayoutForThread(thread);
+    if (!layout) return null;
+    return {
+      projectId: thread.projectId,
+      worktreePath: thread.worktreePath,
+      layout: layout,
+      root: layout.root,
+      activeSetId: layout.activeSetId,
+      maximizedLeafId: layout.maximizedLeafId,
+      spanRoot: layout.spanRoot,
+      spanSignature: layout.spanSignature,
+    };
+  }
+
+  function restoreSetScopePresentation(snapshot, applied) {
+    if (!snapshot || !applied || snapshot.layout !== applied.layout) return false;
+    var layout = paneLayoutFor(snapshot.projectId, snapshot.worktreePath);
+    if (layout !== snapshot.layout ||
+        layout.root !== applied.root ||
+        layout.activeSetId !== applied.activeSetId ||
+        layout.maximizedLeafId !== applied.maximizedLeafId ||
+        layout.spanRoot !== applied.spanRoot ||
+        layout.spanSignature !== applied.spanSignature) return false;
+    layout.activeSetId = snapshot.activeSetId;
+    layout.maximizedLeafId = snapshot.maximizedLeafId;
+    layout.spanRoot = snapshot.spanRoot;
+    layout.spanSignature = snapshot.spanSignature;
+    renderPaneWorkspace();
+    refreshSidebar();
+    return true;
+  }
+
   function removeFromFocusSet(setId, threadId) {
     var set = findFocusSet(setId);
     if (!set) return false;
@@ -4139,9 +4254,17 @@
   }
 
   async function focusThread(id, options) {
-    var thread = findThread(id);
+    function resolveFocusableThread() {
+      var candidate = findThread(id);
+      if (!candidate || candidate.hidden || candidate.closing ||
+          candidate.closeStarted) return null;
+      return candidate;
+    }
+    var thread = resolveFocusableThread();
     if (!thread) return false;
     if (!(await showTerminalView())) return false;
+    thread = resolveFocusableThread();
+    if (!thread) return false;
     var focusedSourceThread = focusedTerminalThreadForRender();
     if (focusedSourceThread) {
       withTerminalFocusReportToken(
@@ -4177,20 +4300,22 @@
     if (scopeChanged) renderGitSurface();
     refreshSidebar();
     requestAnimationFrame(function () {
+      var focusedThread = resolveFocusableThread();
+      if (!focusedThread || state.activeThreadId !== id) return;
       if (
-        !isLiveThread(thread) ||
-        state.activeThreadId !== thread.id ||
-        !thread.term ||
-        !thread.pane ||
-        terminalHost.hidden ||
-        !terminalHost.contains(thread.pane)
+        isLiveThread(focusedThread) &&
+        focusedThread.term &&
+        focusedThread.pane &&
+        !terminalHost.hidden &&
+        terminalHost.contains(focusedThread.pane)
       ) {
-        return;
+        scheduleVisiblePaneFit();
+        if (!options || options.focusTerminal !== false) {
+          withTerminalFocusReportToken(focusedThread, "\x1b[I", "allow", function () {
+            focusedThread.term.focus();
+          });
+        }
       }
-      scheduleVisiblePaneFit();
-      withTerminalFocusReportToken(thread, "\x1b[I", "allow", function () {
-        thread.term.focus();
-      });
       syncBrowserBounds();
     });
 
@@ -4535,6 +4660,10 @@
     }
     thread.closeStarted = true;
     thread.closing = true;
+    if (thread.ptyIoQueue) {
+      thread.ptyIoQueue.closed = true;
+      thread.ptyIoQueue.pendingResize = null;
+    }
     thread.metricsGeneration += 1;
     if (thread.metricsRefreshTimer) {
       clearTimeout(thread.metricsRefreshTimer);
@@ -4545,7 +4674,6 @@
       try { thread.terminalController.dispose(); } catch (_) {}
     }
     thread.terminalController = null;
-    thread.ptyClient = null;
     // A set must never point at a thread that no longer exists, or scoping the
     // canvas to it would silently show fewer panes than it claims.
     forgetThreadInSets(id);
@@ -5055,11 +5183,8 @@
       btn.addEventListener("click", function () { setGitTab(btn.dataset.gitTab); });
     }
   );
-  var sessionSearchEl = document.getElementById("session-search");
-  var sessionFilter = "";
   var sessionTypeFilter = settings.sessionFilter;
   var sessionTreeFocusKey = "";
-  var sessionSearchRestoreKey = "";
 
   function setSessionTypeFilter(value, options) {
     sessionTypeFilter = PsycheSessions.normalizeSidebarFilter(value);
@@ -5914,7 +6039,32 @@
     }) || selectedWorktree(project);
   }
 
-  function openCovenSession(project, session) {
+  function resolveCurrentCovenAttachTarget(expected) {
+    var project = findProject(expected.projectId);
+    if (!project || project.root !== expected.projectRoot) return null;
+    var session = covenSessionsForProject(project).find(function (candidate) {
+      return candidate.id === expected.sessionId;
+    });
+    if (!session ||
+        (session.projectRoot || null) !== expected.sessionProjectRoot ||
+        (session.cwd || null) !== expected.sessionCwd) return null;
+    var worktree = covenWorktreeForSession(project, session);
+    if (!worktree || worktree.path !== expected.worktreePath) return null;
+    var ownsWorktree = worktree.path === project.root ||
+      (project.worktrees || []).some(function (candidate) {
+        return candidate.path === worktree.path;
+      });
+    return ownsWorktree ? { project: project, session: session, worktree: worktree } : null;
+  }
+
+  function focusCovenAttachmentForCaller(opening, options) {
+    return opening.then(async function (thread) {
+      if (!thread || !(await focusThread(thread.id, options))) return null;
+      return thread;
+    });
+  }
+
+  function openCovenSession(project, session, options) {
     if (!project || !session || !PsycheSessions.isSafeCovenSessionId(session.id)) {
       setStatus("Invalid Coven session", "error");
       return Promise.resolve(null);
@@ -5930,9 +6080,7 @@
       return Promise.resolve().then(async function () {
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
-        if (!(await activateProjectWorktree(
-          project, existing.worktreePath
-        ))) return null;
+        if (!(await activateProjectWorktree(project, existing.worktreePath, options))) return null;
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
         await waitForTerminalLayout();
@@ -5940,37 +6088,67 @@
         if (!existing) return null;
         if (existing.hidden && !reopenThread(existing.id)) return null;
         existing = findCovenAttachment(project, session, existingId);
-        if (!existing || !(await focusThread(existing.id))) return null;
+        if (!existing || !(await focusThread(existing.id, options))) return null;
         return findCovenAttachment(project, session, existingId);
       });
     }
 
     var key = covenAttachKey(project, session);
-    if (covenAttachInFlight.has(key)) return covenAttachInFlight.get(key);
-
-    var opening = Promise.resolve().then(async function () {
+    var opening = covenAttachInFlight.get(key);
+    if (!opening) {
       var worktree = covenWorktreeForSession(project, session);
-      if (!worktree || !worktree.path) return null;
-      if (!(await activateProjectWorktree(project, worktree.path))) return null;
-      await waitForTerminalLayout();
-      return createThread({
-        project: project,
-        name: session.title || "Coven " + session.id.slice(0, 8),
-        kind: "coven-attach",
-        command: state.env.coven_path,
-        args: ["attach", session.id],
+      if (!worktree || !worktree.path) return Promise.resolve(null);
+      var expected = {
+        projectId: project.id,
         projectRoot: project.root,
-        cwd: session.cwd || worktree.path,
+        sessionId: session.id,
+        sessionProjectRoot: session.projectRoot || null,
+        sessionCwd: session.cwd || null,
         worktreePath: worktree.path,
-        launchKind: "coven-attach",
-        covenSessionId: session.id,
-        metricsProvider: session.harness || "coven",
+      };
+      opening = Promise.resolve().then(async function () {
+        var current = resolveCurrentCovenAttachTarget(expected);
+        if (!current) {
+          setStatus(
+            "Coven session is no longer available; refresh the rail before retrying",
+            "warn"
+          );
+          return null;
+        }
+        if (!(await activateProjectWorktree(
+          current.project,
+          current.worktree.path,
+          { focusTerminal: false }
+        ))) return null;
+        await waitForTerminalLayout();
+        current = resolveCurrentCovenAttachTarget(expected);
+        if (!current) {
+          setStatus(
+            "Coven session is no longer available; refresh the rail before retrying",
+            "warn"
+          );
+          return null;
+        }
+        return createThread({
+          project: current.project,
+          name: current.session.title || "Coven " + current.session.id.slice(0, 8),
+          kind: "coven-attach",
+          command: state.env.coven_path,
+          args: ["attach", current.session.id],
+          projectRoot: current.project.root,
+          cwd: current.session.cwd || current.worktree.path,
+          worktreePath: current.worktree.path,
+          launchKind: "coven-attach",
+          covenSessionId: current.session.id,
+          metricsProvider: current.session.harness || "coven",
+          focusTerminal: false,
+        });
+      }).finally(function () {
+        covenAttachInFlight.delete(key);
       });
-    }).finally(function () {
-      covenAttachInFlight.delete(key);
-    });
-    covenAttachInFlight.set(key, opening);
-    return opening;
+      covenAttachInFlight.set(key, opening);
+    }
+    return focusCovenAttachmentForCaller(opening, options);
   }
 
   function attachTooltip(element, text) {
@@ -6519,8 +6697,7 @@
     else sessionListEl.removeAttribute("aria-multiselectable");
     sessionListEl.replaceChildren();
 
-    var currentSearchQuery = sessionFilter;
-    var needle = currentSearchQuery.trim().toLowerCase();
+    var currentSearchQuery = "";
     var matched = 0;
     var inlineState = covenInlineState(covenDiscovery);
     // Walked once per render: every row tests membership against this list.
@@ -6591,7 +6768,7 @@
       });
     });
 
-    if (needle || sessionTypeFilter !== "all") {
+    if (sessionTypeFilter !== "all") {
       var summary = document.createElement("div");
       summary.className = "session-result-summary";
       summary.setAttribute("role", "status");
@@ -6601,22 +6778,12 @@
       var reset = document.createElement("button");
       reset.type = "button";
       reset.className = "session-result-reset";
-      if (needle) {
-        reset.textContent = "Clear search";
-        reset.addEventListener("click", function () {
-          sessionSearchEl.value = "";
-          sessionFilter = "";
-          renderSessionList();
-          sessionSearchEl.focus();
-        });
-      } else {
-        reset.textContent = "Reset filter";
-        reset.addEventListener("click", function () {
-          setSessionTypeFilter("all");
-          var allFilter = document.querySelector('[data-session-filter="all"]');
-          if (allFilter) allFilter.focus();
-        });
-      }
+      reset.textContent = "Reset filter";
+      reset.addEventListener("click", function () {
+        setSessionTypeFilter("all");
+        var allFilter = document.querySelector('[data-session-filter="all"]');
+        if (allFilter) allFilter.focus();
+      });
       summary.appendChild(summaryText);
       summary.appendChild(reset);
       sessionListEl.appendChild(summary);
@@ -6904,13 +7071,11 @@
     if (matched === 0 && !inlineState) {
       var empty = document.createElement("div");
       empty.className = "session-empty";
-      empty.textContent = needle
-        ? "No sessions match “" + sessionFilter.trim() + "”"
-        : sessionTypeFilter !== "all"
-          ? "No sessions match the " + sessionTypeFilter + " filter."
-          : state.projects.length
-            ? "No sessions yet."
-            : "No project open — ⌘O to add one.";
+      empty.textContent = sessionTypeFilter !== "all"
+        ? "No sessions match the " + sessionTypeFilter + " filter."
+        : state.projects.length
+          ? "No sessions yet."
+          : "No project open — ⌘O to add one.";
       sessionListEl.appendChild(empty);
     }
 
@@ -7153,26 +7318,6 @@
   applySolidBg(settings.solidBg, { persist: false });
   applyBgOpacity(settings.bgOpacity, { persist: false });
 
-  if (sessionSearchEl) {
-    sessionSearchEl.addEventListener("focus", function () {
-      sessionSearchRestoreKey = sessionTreeFocusKey;
-    });
-    sessionSearchEl.addEventListener("input", function () {
-      sessionFilter = sessionSearchEl.value || "";
-      renderSessionList();
-    });
-    // Escape clears the filter rather than bubbling to the terminal.
-    sessionSearchEl.addEventListener("keydown", function (e) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        sessionSearchEl.value = "";
-        sessionFilter = "";
-        renderSessionList();
-        restoreSessionTreeFocus(sessionSearchRestoreKey);
-      }
-    });
-  }
   if (sessionListEl) {
     sessionListEl.addEventListener("focusin", function (event) {
       if (event.target && event.target.matches &&
@@ -7190,19 +7335,6 @@
       });
     }
   );
-  document.addEventListener("keydown", function (event) {
-    var target = event.target;
-    var editing = target && (
-      target.tagName === "INPUT" || target.tagName === "TEXTAREA" ||
-      target.tagName === "SELECT" || target.isContentEditable
-    );
-    if (event.key === "/" && !editing && sidebarTab === "sessions") {
-      event.preventDefault();
-      sessionSearchRestoreKey = sessionTreeFocusKey;
-      sessionSearchEl.focus();
-      sessionSearchEl.select();
-    }
-  });
   setSidebarTab(settings.sidebarTab, { persist: false });
   setSessionTypeFilter(settings.sessionFilter, { persist: false });
 
@@ -8548,6 +8680,12 @@
   function runCommand(line) {
     var trimmed = line.trim();
     if (!trimmed) return;
+    if (trimmed.charAt(0) === "?") {
+      commandInput.value = trimmed;
+      openPalette(trimmed, true);
+      syncComposerChrome();
+      return;
+    }
     if (trimmed[0] === "!") { runShellSigil(trimmed.slice(1).trim()); return; }
     if (trimmed[0] === "%") { runPaneSigil(trimmed.slice(1)); return; }
     if (trimmed[0] !== "/") {
@@ -8605,19 +8743,30 @@
   // Plain text always lands in the focused pane, so the composer only has to
   // keep the send button and its hint in step with what has been typed.
   function syncComposerChrome() {
-    var value = commandInput ? commandInput.value.trim() : "";
+    var rawValue = commandInput ? commandInput.value : "";
+    var value = rawValue.trim();
+    var sessionSearchOpen = rawValue.charAt(0) === "?";
     if (composerSendEl) {
-      composerSendEl.hidden = value.length === 0;
+      composerSendEl.hidden = sessionSearchOpen || value.length === 0;
       composerSendEl.firstChild.textContent = value[0] === "/" ? "Run " : "Send ";
     }
-    if (composerMicEl) composerMicEl.hidden = value.length > 0;
+    if (composerMicEl) composerMicEl.hidden = rawValue.length > 0;
     if (composerSendHintEl) {
-      composerSendHintEl.textContent = !value
+      composerSendHintEl.textContent = sessionSearchOpen || !value
         ? ""
         : value[0] === "/" ? "runs command"
         : value[0] === "!" ? "runs in the focused terminal"
         : value[0] === "%" ? "jumps to a pane"
         : "→ focused pane";
+    }
+    if (commandInput) {
+      commandInput.setAttribute(
+        "aria-label",
+        sessionSearchOpen
+          ? "Search sessions, " + paletteFiltered.length +
+            (paletteFiltered.length === 1 ? " result" : " results")
+          : "Command composer"
+      );
     }
   }
 
@@ -8641,20 +8790,48 @@
   }
   function sendToThread(thread, text) {
     if (!thread || thread.kind === "web") return Promise.resolve(false);
+    var queue = thread.ptyIoQueue;
+    if (!queue) {
+      queue = createThreadPtyIoQueue();
+      thread.ptyIoQueue = queue;
+    }
+    var encoded = new TextEncoder().encode(text);
+    var pendingBytes = queue.pendingInputBytes;
+    var pendingWrites = queue.pendingInputWrites;
+    if (queue.closed ||
+        pendingBytes + encoded.length > MAX_PENDING_PTY_INPUT_BYTES ||
+        pendingWrites >= MAX_PENDING_PTY_INPUT_WRITES) {
+      if (thread.term) {
+        thread.term.write("\r\n\x1b[31m[pty_write]\x1b[0m input queue is full\r\n");
+      }
+      return Promise.resolve(false);
+    }
+    var bytes = Array.from(encoded);
     noteThreadInput(thread, text);
-    var bytes = Array.from(new TextEncoder().encode(text));
-    return invoke("pty_write", {
-      threadId: thread.id,
-      thread_id: thread.id,
-      bytes: bytes,
-    }).then(function () {
-      return true;
+    queue.pendingInputBytes = pendingBytes + bytes.length;
+    queue.pendingInputWrites = pendingWrites + 1;
+    var previous = queue.inputTail;
+    var result = previous.then(function () {
+      if (queue.closed) return false;
+      return invoke("pty_write", {
+        threadId: thread.id,
+        thread_id: thread.id,
+        bytes: bytes,
+      }).then(function () {
+        return true;
+      });
     }).catch(function (err) {
       if (thread.term) {
         thread.term.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
       }
       return false;
     });
+    queue.inputTail = result.then(function (delivered) {
+      queue.pendingInputBytes = Math.max(0, queue.pendingInputBytes - bytes.length);
+      queue.pendingInputWrites = Math.max(0, queue.pendingInputWrites - 1);
+      return delivered;
+    });
+    return result;
   }
   function writeToActive(text) {
     var thread = findThread(state.activeThreadId);
@@ -8671,6 +8848,7 @@
   var paletteIndex = 0;
   var paletteVisible = false;
   var paletteFiltered = [];
+  var sessionSearchActivationGeneration = 0;
 
   function builtinPaletteEntries() {
     return commands.map(function (c) {
@@ -8702,7 +8880,7 @@
     });
   }
 
-  var PALETTE_SIGILS = "/!%";
+  var PALETTE_SIGILS = "/!%?";
 
   /** `%` lists the project's panes so the composer can jump between them. */
   function panePaletteEntries() {
@@ -8741,6 +8919,48 @@
     return entries;
   }
 
+  function buildSessionSearchEntries(query) {
+    var now = Date.now();
+    var selectedThread = findThread(state.activeThreadId);
+    var selectedProject = selectedThread && findProject(selectedThread.projectId);
+    var selectedKey = selectedThread && selectedProject
+      ? PsycheSessions.localSidebarSelectionKey(selectedProject, selectedThread)
+      : settings.selectedSessionKey;
+    var assignments = covenSessionAssignments();
+    var projectModels = state.projects.map(function (project) {
+      var projectModel = PsycheSessions.buildSidebarProjectModel({
+        project: project,
+        localSessions: state.threads.filter(function (thread) {
+          return thread.projectId === project.id &&
+            !thread.hidden && !isDormantThread(thread);
+        }),
+        covenSessions: covenSessionsForProject(project, assignments),
+        query: query,
+        filter: sessionTypeFilter,
+        selectedKey: selectedKey,
+        now: now,
+      });
+      return projectModel.visibleCount === 0 ? null : projectModel;
+    }).filter(Boolean);
+
+    return PsycheSessions.flattenSidebarSearchResults(projectModels).map(function (result) {
+      return {
+        cmd: result.title,
+        desc: [result.projectTitle, result.branchTitle, result.meta]
+          .filter(Boolean).join(" · "),
+        badge: result.status.label,
+        hint: "↵",
+        kind: "session",
+        group: "Sessions",
+        key: result.key,
+        sessionSource: result.source,
+        sessionId: result.id,
+        selectionKey: result.selectionKey,
+        projectId: result.projectId,
+      };
+    });
+  }
+
   function paletteCorpus(sigil, rest) {
     if (sigil === "%") return panePaletteEntries();
     if (sigil === "!") return shellPaletteEntries(rest);
@@ -8748,25 +8968,31 @@
   }
 
   function openPalette(query, force) {
-    var raw = (query || commandInput.value).trim();
-    var sigil = raw[0] || "/";
-    if (!force && PALETTE_SIGILS.indexOf(commandInput.value.trim()[0]) === -1) {
+    var raw = String(query == null ? commandInput.value : query).trim();
+    var typedSigil = commandInput.value.charAt(0);
+    var sigil = force ? (raw.charAt(0) || "/") : typedSigil;
+    if (!force && PALETTE_SIGILS.indexOf(typedSigil) === -1) {
       hidePalette();
       return;
     }
     if (PALETTE_SIGILS.indexOf(sigil) === -1) sigil = "/";
     var rest = raw.slice(1).trim();
     var q = sigil === "/" ? raw.toLowerCase() : rest.toLowerCase();
-    paletteFiltered = paletteCorpus(sigil, rest).filter(function (c) {
-      if (c.pinned) return true;
-      var hay = (c.cmd + " " + (c.desc || "") + " " + (c.badge || "")).toLowerCase();
-      return c.cmd.toLowerCase().indexOf(q) === 0 || hay.indexOf(q) !== -1;
-    });
-    if (paletteFiltered.length === 0) {
+    if (sigil === "?") {
+      paletteFiltered = buildSessionSearchEntries(rest);
+    } else {
+      paletteFiltered = paletteCorpus(sigil, rest).filter(function (c) {
+        if (c.pinned) return true;
+        var hay = (c.cmd + " " + (c.desc || "") + " " + (c.badge || "")).toLowerCase();
+        return c.cmd.toLowerCase().indexOf(q) === 0 || hay.indexOf(q) !== -1;
+      });
+    }
+    if (paletteFiltered.length === 0 && sigil !== "?") {
       hidePalette();
       return;
     }
-    paletteIndex = Math.min(paletteIndex, paletteFiltered.length - 1);
+    paletteIndex = Math.min(paletteIndex, Math.max(0, paletteFiltered.length - 1));
+    commandInput.setAttribute("aria-expanded", "true");
     renderPalette();
     paletteEl.hidden = false;
     paletteVisible = true;
@@ -8775,9 +9001,89 @@
     paletteEl.hidden = true;
     paletteVisible = false;
     paletteIndex = 0;
+    commandInput.setAttribute("aria-expanded", "false");
+    commandInput.removeAttribute("aria-activedescendant");
   }
-  function runPalettePick(pick, mode) {
+  async function runSessionSearchPick(pick) {
+    var project = findProject(pick.projectId);
+    if (!project) { toast("Session is no longer available"); return false; }
+    if (pick.sessionSource === "psyche") {
+      function resolveLocalThread() {
+        var candidate = findThread(pick.sessionId);
+        if (!candidate || candidate.projectId !== project.id || candidate.hidden ||
+            candidate.closing || candidate.closeStarted ||
+            isDormantThread(candidate) || candidate.status === "failed") return null;
+        return candidate;
+      }
+      var thread = resolveLocalThread();
+      if (!thread) {
+        toast("Session is no longer available"); return false;
+      }
+      if ((project.id !== state.activeProjectId ||
+           project.selectedWorktreePath !== thread.worktreePath) &&
+          !(await activateProjectWorktree(
+            project, thread.worktreePath, { focusTerminal: false }
+          ))) return false;
+      project = findProject(pick.projectId);
+      if (!project) return false;
+      thread = resolveLocalThread();
+      if (!thread) return false;
+      var previousPresentation = snapshotSetScopePresentation(thread);
+      var scopeChanged = applySetScopeForThread(thread);
+      var appliedPresentation = scopeChanged
+        ? snapshotSetScopePresentation(thread)
+        : null;
+      function restorePreviousPresentation() {
+        if (!scopeChanged) return;
+        restoreSetScopePresentation(previousPresentation, appliedPresentation);
+      }
+      var focused = await focusThread(thread.id, { focusTerminal: false });
+      if (!focused) {
+        restorePreviousPresentation();
+        return false;
+      }
+      thread = resolveLocalThread();
+      if (!thread || state.activeThreadId !== thread.id) {
+        restorePreviousPresentation();
+        return false;
+      }
+      settings.selectedSessionKey = pick.selectionKey;
+      saveSettings();
+      return true;
+    }
+    var session = covenSessionsForProject(project).find(function (candidate) {
+      return candidate.id === pick.sessionId;
+    });
+    if (!session) { toast("Session is no longer available"); return false; }
+    var opened = await openCovenSession(project, session, { focusTerminal: false });
+    if (!opened) return false;
+    settings.selectedSessionKey = pick.selectionKey;
+    saveSettings();
+    return true;
+  }
+  async function runPalettePick(pick, mode) {
     if (!pick) return;
+    if (pick.kind === "session") {
+      var activationGeneration = ++sessionSearchActivationGeneration;
+      var activationQuery = commandInput.value;
+      var selected = false;
+      try {
+        selected = await runSessionSearchPick(pick);
+      } finally {
+        var activationCurrent =
+          activationGeneration === sessionSearchActivationGeneration &&
+          commandInput.value === activationQuery;
+        if (activationCurrent) {
+          if (selected) {
+            commandInput.value = "";
+            hidePalette();
+          }
+          syncComposerChrome();
+          commandInput.focus();
+        }
+      }
+      return;
+    }
     var runsImmediately = pick.kind === "agent" || pick.kind === "recent" ||
       pick.kind === "pane" || pick.kind === "shell" || mode === "run";
     if (runsImmediately) {
@@ -8801,7 +9107,17 @@
   }
 
   function renderPalette() {
-    paletteEl.innerHTML = "";
+    paletteEl.replaceChildren();
+    commandInput.removeAttribute("aria-activedescendant");
+    if (paletteFiltered.length === 0 && commandInput.value.charAt(0) === "?") {
+      var empty = document.createElement("div");
+      empty.className = "palette-empty";
+      empty.textContent = "No matching sessions";
+      paletteEl.appendChild(empty);
+      paletteEl.hidden = false;
+      paletteVisible = true;
+      return;
+    }
     var lastGroup = "";
     paletteFiltered.forEach(function (c, idx) {
       if (c.group !== lastGroup) {
@@ -8812,8 +9128,11 @@
         paletteEl.appendChild(heading);
       }
       var div = document.createElement("div");
-      div.className =
-        "palette-item palette-" + c.kind + (idx === paletteIndex ? " active" : "");
+      var kindClass = c.kind === "session" ? " palette-session" : " palette-" + c.kind;
+      div.className = "palette-item" + kindClass + (idx === paletteIndex ? " active" : "");
+      div.id = "palette-option-" + idx;
+      div.setAttribute("role", "option");
+      div.setAttribute("aria-selected", idx === paletteIndex ? "true" : "false");
       div.innerHTML =
         '<span class="cmd">' + escapeHtml(c.cmd) + "</span>" +
         '<span class="desc">' +
@@ -8823,26 +9142,53 @@
         '<span class="hint-key">' + escapeHtml(c.hint || "↵") + "</span>";
       div.addEventListener("click", function () { runPalettePick(c); });
       paletteEl.appendChild(div);
+      if (idx === paletteIndex) {
+        commandInput.setAttribute("aria-activedescendant", div.id);
+      }
     });
     ensurePaletteActiveVisible();
   }
 
   commandInput.addEventListener("input", function () {
-    if (PALETTE_SIGILS.indexOf(commandInput.value.trim()[0]) !== -1) openPalette();
+    sessionSearchActivationGeneration += 1;
+    if (PALETTE_SIGILS.indexOf(commandInput.value.charAt(0)) !== -1) openPalette();
     else hidePalette();
     syncComposerChrome();
   });
   commandInput.addEventListener("keydown", function (e) {
+    var sessionSearchOpen = commandInput.value.charAt(0) === "?";
     if (paletteVisible) {
       if (e.key === "ArrowDown") {
-        paletteIndex = (paletteIndex + 1) % paletteFiltered.length;
-        renderPalette(); e.preventDefault(); return;
+        if (paletteFiltered.length > 0) {
+          paletteIndex = (paletteIndex + 1) % paletteFiltered.length;
+          renderPalette();
+        }
+        if (sessionSearchOpen) e.stopPropagation();
+        e.preventDefault();
+        return;
       }
       if (e.key === "ArrowUp") {
-        paletteIndex = (paletteIndex - 1 + paletteFiltered.length) % paletteFiltered.length;
-        renderPalette(); e.preventDefault(); return;
+        if (paletteFiltered.length > 0) {
+          paletteIndex = (paletteIndex - 1 + paletteFiltered.length) % paletteFiltered.length;
+          renderPalette();
+        }
+        if (sessionSearchOpen) e.stopPropagation();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "Enter" && sessionSearchOpen) {
+        e.stopPropagation();
+        e.preventDefault();
+        var sessionPick = paletteFiltered[paletteIndex];
+        if (sessionPick) runPalettePick(sessionPick);
+        return;
       }
       if (e.key === "Tab") {
+        if (sessionSearchOpen) {
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
         var pick = paletteFiltered[paletteIndex];
         if (pick.kind === "recent") commandInput.value = pick.cmd;
         else commandInput.value = pick.cmd + (pick.kind === "agent" ? "" : " ");
@@ -8850,7 +9196,17 @@
         e.preventDefault();
         return;
       }
-      if (e.key === "Escape") { hidePalette(); e.preventDefault(); return; }
+      if (e.key === "Escape") {
+        if (sessionSearchOpen) {
+          commandInput.value = "";
+          e.stopPropagation();
+        }
+        hidePalette();
+        syncComposerChrome();
+        commandInput.focus();
+        e.preventDefault();
+        return;
+      }
     }
     if (e.key === "Enter") {
       var line = commandInput.value;
@@ -9079,12 +9435,13 @@
       script: "window.__PSYCHE_AUTOMATION__ && window.__PSYCHE_AUTOMATION__.invalidate();",
     }).then(function () { return true; }, function () { return false; });
   }
-  async function quarantineBrowserAutomation(pair) {
+  async function quarantineBrowserAutomation(pair, destroyChild) {
     if (!pair) return false;
     var lifecycle = browserTabLifecycle(pair.tab);
     var generation = lifecycle.controlGeneration || lifecycle.liveGeneration;
-    await invalidateBrowserAutomation(pair);
-    await removeBrowserControlResource(pair);
+    var label = lifecycle.nativeLabel ? browserLabelForTab(pair.project, pair.tab) : null;
+    var invalidateFlight = destroyChild ? Promise.resolve(false) : invalidateBrowserAutomation(pair);
+    var removeFlight = removeBrowserControlResource(pair);
     browserAutomationSnapshotRefs.forEach(function (entry, id) {
       if (entry && entry.tabId === pair.tab.id && (!generation || entry.generation === generation)) {
         browserAutomationSnapshotRefs.delete(id);
@@ -9093,7 +9450,12 @@
     invalidateBrowserNavigation(pair.tab);
     lifecycle.controlGeneration = 0;
     lifecycle.liveGeneration = 0;
+    lifecycle.nativeLabel = null;
     lifecycle.automationSource = null;
+    var destroyFlight = destroyChild && label
+      ? invoke("browser_destroy", { label: label }).catch(function () { return false; })
+      : Promise.resolve(false);
+    await Promise.allSettled([invalidateFlight, removeFlight, destroyFlight]);
     return true;
   }
   function installBrowserAutomationForPair(pair) {
@@ -9132,7 +9494,7 @@
     }
     return mapped.rawSnapshotId;
   }
-  function awaitBrowserAutomationResult(effect) {
+  function awaitBrowserAutomationResult(effect, timeoutMs) {
     var cancel;
     var promise = new Promise(function (resolve, reject) {
       var settled = false;
@@ -9145,7 +9507,7 @@
       };
       var timeout = setTimeout(function () {
         settle(reject, Object.assign(new Error("browser automation timed out"), { code: "effect_unknown", ambiguous: true }));
-      }, 15000);
+      }, timeoutMs || 15000);
       browserAutomationWaiters.set(effect.actionId, {
         tabId: effect.tabId,
         generation: effect.generation,
@@ -9347,7 +9709,7 @@
     if (!plain || Object.keys(value).some(function (key) {
       return ["value", "resultBytes", "durationMs"].indexOf(key) === -1;
     }) || !Number.isSafeInteger(value.resultBytes) || value.resultBytes < 0 || value.resultBytes > 256 * 1024 ||
-      !Number.isFinite(value.durationMs) || value.durationMs < 0 || value.durationMs > 60000) {
+      !Number.isFinite(value.durationMs) || value.durationMs < 0 || value.durationMs > 5000) {
       throw Object.assign(new Error("browser script result is malformed"), { code: "serialization_failed" });
     }
     var encoded;
@@ -9482,11 +9844,12 @@
       try {
         var installed = await installBrowserAutomationForPair(pair);
         if (!installed || !exactPairIsCurrent()) return completeReplaced();
-        var resultFlight = awaitBrowserAutomationResult(effect);
+        var resultFlight = awaitBrowserAutomationResult(effect, effect.operation.kind === "script" ? 5000 : 15000);
         try {
           await invoke("browser_eval", {
             label: browserLabelForTab(pair.project, pair.tab),
             script: (browserTabLifecycle(pair.tab).automationSource || PsycheControl.browserAutomationSource()) + "\n" + browserAutomationDispatchScript(effect),
+            automationReceipt: { actionId: effect.actionId, tabId: effect.tabId, generation: effect.generation },
           });
         } catch (evalError) {
           resultFlight.cancel(evalError);
@@ -9501,6 +9864,7 @@
             : canonicalizeBrowserActionResult(effect, automationValue);
         if (!exactPairIsCurrent()) {
           if (effect.operation.kind === "script") {
+            await quarantineBrowserAutomation(pair, true);
             await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "unknown", code: "effect_unknown", message: "browser tab changed during script evaluation" });
             return false;
           }
@@ -9514,10 +9878,13 @@
       } catch (error) {
         var ambiguous = !!(error && (error.ambiguous || error.code === "effect_unknown"));
         if (ambiguous && effect.operation.kind === "script") {
-          await quarantineBrowserAutomation(pair);
+          await quarantineBrowserAutomation(pair, true);
         }
         var code = ambiguous ? "effect_unknown" : error && error.code || (String(error).indexOf("backend_unavailable") !== -1 ? "backend_unavailable" : "automation_failed");
-        await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: ambiguous ? "unknown" : "failed", code: code, message: String(error && error.message || error) });
+        var message = ambiguous && effect.operation.kind === "script"
+          ? "browser script outcome is unknown"
+          : String(error && error.message || error);
+        await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: ambiguous ? "unknown" : "failed", code: code, message: message });
       }
       return true;
     };
@@ -10208,10 +10575,25 @@
   // ============================================================
 
   function sidebarOpen() { return !appEl || appEl.dataset.sidebar !== "collapsed"; }
+  function syncSidebarToggleState(collapsed) {
+    var titlebarLabel = collapsed ? "Expand sidebar" : "Collapse sidebar";
+    if (sidebarCollapseEl) {
+      sidebarCollapseEl.setAttribute("title", titlebarLabel + " (⌘B)");
+      sidebarCollapseEl.setAttribute("aria-label", titlebarLabel);
+      sidebarCollapseEl.setAttribute("aria-pressed", collapsed ? "true" : "false");
+    }
+    if (sidebarExpandEl) {
+      sidebarExpandEl.hidden = !collapsed;
+      sidebarExpandEl.setAttribute("title", "Expand sidebar (⌘B)");
+      sidebarExpandEl.setAttribute("aria-label", "Expand sidebar");
+      sidebarExpandEl.setAttribute("aria-pressed", collapsed ? "true" : "false");
+    }
+  }
   function setSidebarOpen(open) {
     if (!appEl) return;
     appEl.dataset.sidebar = open ? "open" : "collapsed";
     if (sidebarMiniEl) sidebarMiniEl.hidden = open;
+    syncSidebarToggleState(!open);
     if (!open) closeNewPaneMenu();
     requestAnimationFrame(function () {
       scheduleVisiblePaneFit();
@@ -10220,7 +10602,7 @@
   }
   function toggleSidebar() { setSidebarOpen(!sidebarOpen()); }
 
-  onRailClick("sidebar-collapse", function () { setSidebarOpen(false); });
+  onRailClick("sidebar-collapse", function () { toggleSidebar(); });
   onRailClick("sidebar-expand", function () { setSidebarOpen(true); });
   if (sidebarMiniEl) {
     sidebarMiniEl.addEventListener("click", function (event) {

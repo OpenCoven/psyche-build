@@ -1,3 +1,9 @@
+import {
+  AGENT_CONTROL_UI_LIMITS,
+  boundedAgentControlList,
+  boundedAgentControlText,
+} from './agent-control-limits.mjs';
+
 function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -10,40 +16,64 @@ function copyTarget(target) {
 }
 
 function leaseCard(lease, now, operator) {
-  const resources = asArray(lease.grants).flatMap((grant) => {
+  const boundedGrants = boundedAgentControlList(lease.grants, AGENT_CONTROL_UI_LIMITS.resourcesPerCard);
+  const resources = boundedGrants.items.flatMap((grant) => {
     const target = copyTarget(grant && grant.target);
     if (!target) return [];
-    return [{ ...target, capabilities: asArray(grant.capabilities).map(String) }];
+    const capabilities = boundedAgentControlList(
+      grant.capabilities,
+      AGENT_CONTROL_UI_LIMITS.capabilitiesPerResource,
+    );
+    return [{
+      ...target,
+      capabilities: capabilities.items.map(String),
+      capabilityOverflow: capabilities.overflow,
+    }];
   });
   const expired = Date.parse(String(lease.expiresAt || '')) <= now;
   return {
     leaseId: String(lease.id || ''),
     requestId: String(lease.requestId || ''),
     revision: Number(lease.revision || 0),
-    agentId: String(lease.actorId || ''),
-    taskId: String(lease.taskId || ''),
-    expiresAt: String(lease.expiresAt || ''),
+    ownerEpoch: Number(lease.ownerEpoch || 0),
+    agentId: boundedAgentControlText(lease.actorId),
+    taskId: boundedAgentControlText(lease.taskId),
+    expiresAt: boundedAgentControlText(lease.expiresAt),
     resources,
+    resourceOverflow: boundedGrants.overflow,
     canRevoke: operator && !expired,
     expired,
   };
 }
 
 function requestCard(request, operator) {
-  const resources = asArray(request.grants).flatMap((grant) => {
+  const boundedGrants = boundedAgentControlList(request.grants, AGENT_CONTROL_UI_LIMITS.resourcesPerCard);
+  const resources = boundedGrants.items.flatMap((grant) => {
     const target = copyTarget(grant && grant.target);
-    return target ? [{ ...target, capabilities: asArray(grant.capabilities).map(String) }] : [];
+    const capabilities = boundedAgentControlList(
+      grant && grant.capabilities,
+      AGENT_CONTROL_UI_LIMITS.capabilitiesPerResource,
+    );
+    return target ? [{
+      ...target,
+      capabilities: capabilities.items.map(String),
+      capabilityOverflow: capabilities.overflow,
+    }] : [];
   });
   const createdAt = String(request.createdAt || '');
   const ttlMs = Number(request.ttlMs || 0);
+  const requiresNarrowerRequest = boundedGrants.overflow > 0
+    || resources.some((resource) => resource.capabilityOverflow > 0);
   return {
     requestId: String(request.id || ''),
-    agentId: String(request.actorId || ''),
-    taskId: String(request.taskId || ''),
-    createdAt,
+    agentId: boundedAgentControlText(request.actorId),
+    taskId: boundedAgentControlText(request.taskId),
+    createdAt: boundedAgentControlText(createdAt),
     ttlMs,
     resources,
-    canGrant: operator && request.status === 'pending',
+    resourceOverflow: boundedGrants.overflow,
+    requiresNarrowerRequest,
+    canGrant: operator && request.status === 'pending' && !requiresNarrowerRequest,
   };
 }
 
@@ -53,27 +83,69 @@ export function createAgentControlModel(snapshot, options = {}) {
   const now = Number.isFinite(options.now) ? options.now : Date.now();
   const epochChanged = Number.isSafeInteger(options.previousOwnerEpoch)
     && options.previousOwnerEpoch !== ownerEpoch;
-  const leases = asArray(snapshot && snapshot.capabilityLeases).map((lease) =>
+  const indexedLeases = boundedAgentControlList(
+    snapshot && snapshot.capabilityLeases,
+    AGENT_CONTROL_UI_LIMITS.leaseContextIndex,
+  );
+  const leaseIndex = indexedLeases.items.map((lease) =>
     leaseCard(lease, now, operator));
+  const sortedLeases = [...leaseIndex].sort((left, right) => Number(left.expired) - Number(right.expired));
+  const boundedLeases = boundedAgentControlList(sortedLeases, AGENT_CONTROL_UI_LIMITS.cardsPerGroup);
+  const leases = boundedLeases.items;
   const active = leases.filter((lease) => !lease.expired);
-  const approvals = asArray(snapshot && snapshot.approvals).map((approval) => ({
-    approvalId: String(approval.id || ''),
-    status: String(approval.status || ''),
-    leaseId: String(approval.leaseId || ''),
-    leaseRevision: Number(approval.leaseRevision || 0),
-    payloadDigest: String(approval.payloadDigest || ''),
-    resource: copyTarget(approval.resource),
-    capability: String(approval.capability || ''),
-    effect: {
-      kind: String(approval.effect && approval.effect.kind || ''),
-      target: String(approval.effect && approval.effect.target || ''),
-    },
-    expiresAt: String(approval.expiresAt || ''),
-    canApprove: operator && approval.status === 'pending',
-    canDeny: operator && approval.status === 'pending',
-  }));
-  const requests = asArray(snapshot && snapshot.leaseRequests);
-  const resources = asArray(snapshot && snapshot.resources).flatMap((resource) => {
+  const leaseById = new Map(leaseIndex.map((lease) => [lease.leaseId, lease]));
+  const allApprovals = asArray(snapshot && snapshot.approvals);
+  const pendingApprovals = allApprovals.filter((approval) => approval?.status === 'pending');
+  const boundedApprovals = boundedAgentControlList(
+    pendingApprovals,
+    AGENT_CONTROL_UI_LIMITS.cardsPerGroup,
+  );
+  const approvals = boundedApprovals.items.map((approval) => {
+    const lease = leaseById.get(String(approval.leaseId || ''));
+    const leaseCurrent = Boolean(
+      lease
+      && !lease.expired
+      && lease.ownerEpoch === ownerEpoch
+      && Number(approval.ownerEpoch || 0) === ownerEpoch
+      && lease.revision === Number(approval.leaseRevision || 0),
+    );
+    return {
+      approvalId: String(approval.id || ''),
+      status: String(approval.status || ''),
+      leaseId: String(approval.leaseId || ''),
+      leaseRevision: Number(approval.leaseRevision || 0),
+      payloadDigest: String(approval.payloadDigest || ''),
+      resource: copyTarget(approval.resource),
+      capability: boundedAgentControlText(
+        approval.capability,
+        AGENT_CONTROL_UI_LIMITS.capabilityBytes,
+      ),
+      effect: {
+        kind: boundedAgentControlText(approval.effect && approval.effect.kind),
+        target: boundedAgentControlText(approval.effect && approval.effect.target),
+      },
+      expiresAt: boundedAgentControlText(approval.expiresAt),
+      agentId: lease?.agentId || '',
+      taskId: lease?.taskId || '',
+      leaseCurrent,
+      canRevokeLease: operator && leaseCurrent,
+      canApprove: operator && approval.status === 'pending' && leaseCurrent,
+      canDeny: operator && approval.status === 'pending' && leaseCurrent,
+    };
+  });
+  const allRequests = asArray(snapshot && snapshot.leaseRequests);
+  const pendingRequests = allRequests.filter((request) => request?.status === 'pending');
+  const revokedRequests = allRequests.filter((request) => request?.status === 'revoked');
+  const boundedRequests = boundedAgentControlList(pendingRequests, AGENT_CONTROL_UI_LIMITS.cardsPerGroup);
+  const boundedRevokedRequests = boundedAgentControlList(
+    revokedRequests,
+    AGENT_CONTROL_UI_LIMITS.cardsPerGroup,
+  );
+  const boundedResources = boundedAgentControlList(
+    snapshot && snapshot.resources,
+    AGENT_CONTROL_UI_LIMITS.registeredResources,
+  );
+  const resources = boundedResources.items.flatMap((resource) => {
     const target = copyTarget(resource);
     return target && Number.isSafeInteger(target.generation) ? [target] : [];
   });
@@ -85,22 +157,34 @@ export function createAgentControlModel(snapshot, options = {}) {
       agentId: lease.agentId,
       taskId: lease.taskId,
       expiresAt: lease.expiresAt,
+      capabilitySummary: boundedAgentControlText(
+        resource.capabilities.slice(0, 2).join(', ')
+          + (resource.capabilities.length + resource.capabilityOverflow > 2
+            ? ` +${resource.capabilities.length + resource.capabilityOverflow - 2}`
+            : ''),
+        AGENT_CONTROL_UI_LIMITS.capabilityBytes,
+      ),
     })));
   return {
     ownerEpoch,
-    pendingCount: requests.filter((request) => request.status === 'pending').length
-      + approvals.filter((approval) => approval.status === 'pending').length,
+    contextKey: `${String(options.projectRoot || '')}\u0000${ownerEpoch}`,
+    pendingCount: pendingRequests.length + pendingApprovals.length,
     groups: {
-      requested: requests.filter((request) => request.status === 'pending')
-        .map((request) => requestCard(request, operator)),
+      requested: boundedRequests.items.map((request) => requestCard(request, operator)),
       active,
       expired: leases.filter((lease) => lease.expired),
-      revoked: requests.filter((request) => request.status === 'revoked')
-        .map((request) => requestCard(request, operator)),
+      revoked: boundedRevokedRequests.items.map((request) => requestCard(request, operator)),
     },
     approvals,
     badges,
     resources,
+    overflow: {
+      leaseRequests: boundedRequests.overflow,
+      leases: Math.max(0, asArray(snapshot && snapshot.capabilityLeases).length
+        - AGENT_CONTROL_UI_LIMITS.cardsPerGroup),
+      approvals: boundedApprovals.overflow,
+      resources: boundedResources.overflow,
+    },
   };
 }
 

@@ -14,7 +14,12 @@ import {
 } from './policy.js';
 import { SurfaceRegistry } from './surfaces.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
-import { agentControlJournalPayload } from './journal.js';
+import {
+  agentControlJournalPayload,
+  createAgentControlJournalResource,
+  type AgentControlJournalReceipt,
+} from './journal.js';
+import { canonicalizeBoundedJson } from './boundedJson.js';
 import type {
   ActionReceipt,
   CommandOutcome,
@@ -36,6 +41,8 @@ const STABLE_SURFACE_EFFECT_CODES = new Set([
   'resource_replaced',
   'result_too_large',
   'script_source_too_large',
+  'script_args_invalid',
+  'script_args_too_large',
   'serialization_failed',
   'snapshot_stale',
 ]);
@@ -98,6 +105,7 @@ interface ControlRuntimeOptions {
 
 interface LeaseRequestRecord {
   id: string;
+  ownerEpoch: number;
   actorId: string;
   taskId: string;
   status: 'pending' | 'granted' | 'released' | 'revoked';
@@ -169,6 +177,7 @@ export class ControlRuntime {
   private readonly promptDispatcher: PromptDispatcher;
   private readonly resourceQueues = new Map<string, PaneQueueState>();
   private readonly leaseRequests = new Map<string, LeaseRequestRecord>();
+  private readonly leaseRequestTombstones = new Set<string>();
   private readonly pendingApprovals = new Map<string, SurfaceActionContext>();
   private readonly receipts = new Map<string, ActionReceipt>();
   private readonly passiveTerminalizations = new Map<string, Promise<unknown>>();
@@ -244,7 +253,13 @@ export class ControlRuntime {
       leases: this.leases.snapshot(),
       resources: this.surfaces.list(),
       capabilityLeases: this.capabilityLeases.snapshot(),
-      leaseRequests: [...this.leaseRequests.values()].map((request) => ({ ...request })),
+      leaseRequests: [...this.leaseRequests.values()].map((request) => ({
+        ...request,
+        grants: request.grants.map((grant) => ({
+          target: { ...grant.target },
+          capabilities: [...grant.capabilities],
+        })),
+      })),
       approvals,
       receipts: [...this.receipts.values()],
     };
@@ -378,27 +393,53 @@ export class ControlRuntime {
       }
       switch (command.kind) {
         case 'lease.request': {
-          const request: LeaseRequestRecord = {
-            id: command.id, actorId: command.actor.id, taskId: command.payload.taskId,
+          if (this.leaseRequests.has(command.id) || this.leaseRequestTombstones.has(command.id)
+            || this.capabilityLeases.snapshot().some((lease) => lease.requestId === command.id)) {
+            throw codedRuntimeError('lease_request_conflict', 'lease request ID already exists');
+          }
+          if (this.leaseRequests.size >= AGENT_CONTROL_LIMITS.leaseRequestPending) {
+            throw codedRuntimeError('lease_request_capacity', 'lease request capacity is exhausted');
+          }
+          this.assertLeaseRequestBounds(command);
+          const request: LeaseRequestRecord = Object.freeze({
+            id: command.id, ownerEpoch: command.ownerEpoch,
+            actorId: command.actor.id, taskId: command.payload.taskId,
             status: 'pending', createdAt: command.createdAt,
             ttlMs: command.payload.ttlMs,
-            grants: command.payload.grants.map((grant) => ({
-              target: { ...grant.target }, capabilities: [...grant.capabilities],
-            })),
-          };
+            grants: Object.freeze(command.payload.grants.map((grant) => Object.freeze({
+              target: Object.freeze({ ...grant.target }),
+              capabilities: Object.freeze([...grant.capabilities]),
+            }))),
+          });
           this.leaseRequests.set(request.id, request);
-          while (this.leaseRequests.size > MAX_COMMAND_RECORDS) {
-            const oldest = this.leaseRequests.keys().next().value;
-            if (oldest === undefined) break;
-            this.leaseRequests.delete(oldest);
-          }
           return this.appendTerminal(command, succeededOutcome({ requestId: request.id }));
         }
         case 'lease.grant': {
-          this.assertGrantTargets(command.payload.grants, command.projectRoot);
-          const lease = this.capabilityLeases.grant({ ...command.payload, grantedBy: command.actor.id });
           const request = this.leaseRequests.get(command.payload.requestId);
-          if (request) request.status = 'granted';
+          if (!request) {
+            if (this.leaseRequestTombstones.has(command.payload.requestId)
+              || this.capabilityLeases.snapshot().some((lease) => lease.requestId === command.payload.requestId)) {
+              throw codedRuntimeError('lease_request_consumed', 'lease request has already been resolved');
+            }
+            throw codedRuntimeError('lease_request_missing', 'lease request does not exist');
+          }
+          if (request.ownerEpoch !== this.ownerEpoch || request.ownerEpoch !== command.ownerEpoch) {
+            throw codedRuntimeError('lease_request_stale', 'lease request belongs to another owner epoch');
+          }
+          if (request.status !== 'pending') {
+            throw codedRuntimeError('lease_request_consumed', 'lease request has already been resolved');
+          }
+          this.assertGrantTargets(request.grants, command.projectRoot);
+          const lease = this.capabilityLeases.grant({
+            requestId: request.id,
+            actorId: request.actorId,
+            taskId: request.taskId,
+            ttlMs: request.ttlMs,
+            grants: request.grants,
+            grantedBy: command.actor.id,
+          });
+          this.leaseRequests.delete(request.id);
+          this.rememberLeaseRequestIdentity(request.id);
           return this.appendTerminal(command, succeededOutcome({ lease }));
         }
         case 'lease.release': {
@@ -409,16 +450,14 @@ export class ControlRuntime {
           }
           this.capabilityLeases.release(lease.id);
           await this.revokeApprovalsForLease(lease.id);
-          const request = this.leaseRequests.get(lease.requestId);
-          if (request) request.status = 'released';
+          this.rememberLeaseRequestIdentity(lease.requestId);
           return this.appendTerminal(command, succeededOutcome());
         }
         case 'lease.revoke': {
           const lease = this.capabilityLeases.revoke(command.payload.leaseId);
           if (lease) {
             await this.revokeApprovalsForLease(lease.id);
-            const request = this.leaseRequests.get(lease.requestId);
-            if (request) request.status = 'revoked';
+            this.rememberLeaseRequestIdentity(lease.requestId);
           }
           return this.appendTerminal(command, succeededOutcome());
         }
@@ -465,7 +504,7 @@ export class ControlRuntime {
               commandId: command.id,
               approvalId: approval.id,
               payloadDigest: approval.payloadDigest,
-              resource: approval.resource,
+              resource: createAgentControlJournalResource(approval.resource),
               capability: approval.capability,
               effect: approval.effect,
             });
@@ -493,7 +532,9 @@ export class ControlRuntime {
           ? (error as { code: string }).code
           : 'action_validation_failed';
         return this.terminalizeValidationFailure(command, targetForSurfaceAction(command),
-          code === 'script_source_too_large' ? code : 'action_validation_failed');
+          code === 'script_source_too_large' || code === 'script_args_invalid' || code === 'script_args_too_large'
+            ? code
+            : 'action_validation_failed');
       }
       return this.appendTerminal(command, failedOutcome(error));
     }
@@ -503,6 +544,7 @@ export class ControlRuntime {
     command: SurfaceActionContext['command'],
   ): Promise<SurfaceActionContext> {
     this.assertCommandCurrent(command);
+    let preparedCommand = command;
     let target: LeaseTarget;
     let classification: PolicyClassification;
     let effect: RedactedApprovalEffect | undefined;
@@ -560,16 +602,28 @@ export class ControlRuntime {
           throw codedRuntimeError('script_source_too_large', 'browser script source exceeds maximum size');
         }
         target = { kind: 'browser_tab', id: command.payload.tabId, generation: command.payload.generation };
+        if (command.payload.args !== undefined) {
+          const canonicalArgs = canonicalizeBoundedJson(command.payload.args, {
+            maxBytes: AGENT_CONTROL_LIMITS.scriptResultBytes,
+            invalidCode: 'script_args_invalid',
+            sizeCode: 'script_args_too_large',
+            label: 'browser script arguments',
+          });
+          preparedCommand = {
+            ...command,
+            payload: { ...command.payload, args: canonicalArgs.value },
+          } as SurfaceActionContext['command'];
+        }
         classification = classifyBrowserScript();
         effect = createRedactedApprovalEffect({ kind: 'script', target: command.payload.source });
         break;
     }
     this.assertSurfaceAndLease(command, target, classification.capability);
     return {
-      command,
+      command: preparedCommand,
       target,
       classification,
-      executablePayloadDigest: digestExecutablePayload(command, canonicalSemantic),
+      executablePayloadDigest: digestExecutablePayload(preparedCommand, canonicalSemantic),
       ...(effect ? { effect } : {}),
     };
   }
@@ -670,9 +724,16 @@ export class ControlRuntime {
         this.rememberReceipt(receipt);
         return receipt;
       }
-      const receipt = context.command.kind === 'browser.script'
-        ? this.makeScriptReceipt(context.command, context.target, value)
-        : this.makeReceipt(context.command, context.target, 'succeeded', { value });
+      let receipt: ActionReceipt;
+      try {
+        receipt = context.command.kind === 'browser.script'
+          ? this.makeScriptReceipt(context.command, context.target, value)
+          : this.makeReceipt(context.command, context.target, 'succeeded', { value });
+      } catch (error) {
+        receipt = this.makeReceipt(context.command, context.target, 'failed', {
+          code: stableSurfaceEffectCode(error),
+        });
+      }
       this.rememberReceipt(receipt);
       return receipt;
     } finally {
@@ -869,6 +930,31 @@ export class ControlRuntime {
     }
   }
 
+  private assertLeaseRequestBounds(command: Extract<ControlCommand, { kind: 'lease.request' }>): void {
+    const textValues = [
+      command.id,
+      command.actor.id,
+      command.payload.taskId,
+      ...command.payload.grants.flatMap((grant) => [grant.target.kind, grant.target.id]),
+    ];
+    const tooLarge = command.payload.grants.length > AGENT_CONTROL_LIMITS.leaseRequestGrants
+      || command.payload.grants.some((grant) => (
+        grant.capabilities.length > AGENT_CONTROL_LIMITS.leaseRequestCapabilitiesPerGrant
+        || grant.capabilities.some((capability) => (
+          Buffer.byteLength(capability, 'utf8') > AGENT_CONTROL_LIMITS.leaseRequestCapabilityBytes
+        ))
+      ))
+      || textValues.some((value) => (
+        Buffer.byteLength(value, 'utf8') > AGENT_CONTROL_LIMITS.leaseRequestTextBytes
+      ));
+    if (tooLarge) {
+      throw codedRuntimeError(
+        'lease_request_too_large',
+        'lease request exceeds the operator display limits',
+      );
+    }
+  }
+
   private assertCommandCurrent(command: SurfaceActionContext['command']): void {
     if (command.ownerEpoch !== this.ownerEpoch) {
       throw codedRuntimeError('stale_owner_epoch', 'action belongs to another owner epoch');
@@ -908,8 +994,17 @@ export class ControlRuntime {
   private async revokeTarget(target: LeaseTarget): Promise<void> {
     for (const lease of this.capabilityLeases.revokeTarget(target)) {
       await this.revokeApprovalsForLease(lease.id);
-      const request = this.leaseRequests.get(lease.requestId);
-      if (request) request.status = 'revoked';
+      this.rememberLeaseRequestIdentity(lease.requestId);
+    }
+  }
+
+  private rememberLeaseRequestIdentity(requestId: string): void {
+    this.leaseRequestTombstones.delete(requestId);
+    this.leaseRequestTombstones.add(requestId);
+    while (this.leaseRequestTombstones.size > AGENT_CONTROL_LIMITS.leaseRequestRecords) {
+      const oldest = this.leaseRequestTombstones.values().next().value;
+      if (oldest === undefined) break;
+      this.leaseRequestTombstones.delete(oldest);
     }
   }
 
@@ -983,16 +1078,42 @@ export class ControlRuntime {
     target: LeaseTarget,
     result: unknown,
   ): ActionReceipt {
-    if (!result || typeof result !== 'object') {
+    let canonicalEnvelope: unknown;
+    try {
+      canonicalEnvelope = canonicalizeBoundedJson(result, {
+        maxBytes: AGENT_CONTROL_LIMITS.scriptResultBytes + 1024,
+        invalidCode: 'serialization_failed',
+        sizeCode: 'result_too_large',
+        label: 'browser script result envelope',
+      }).value;
+    } catch (error) {
+      throw error;
+    }
+    if (!canonicalEnvelope || typeof canonicalEnvelope !== 'object' || Array.isArray(canonicalEnvelope)) {
       throw codedRuntimeError('serialization_failed', 'browser script returned an invalid result envelope');
     }
-    const envelope = result as { value?: unknown; resultBytes?: unknown; durationMs?: unknown };
+    const keys = Object.keys(canonicalEnvelope);
+    if (keys.length !== 3 || !keys.includes('value') || !keys.includes('resultBytes') || !keys.includes('durationMs')) {
+      throw codedRuntimeError('serialization_failed', 'browser script returned an invalid result envelope');
+    }
+    const envelope = canonicalEnvelope as { value: unknown; resultBytes: unknown; durationMs: unknown };
     if (!Number.isSafeInteger(envelope.resultBytes) || (envelope.resultBytes as number) < 0
-      || !Number.isFinite(envelope.durationMs) || (envelope.durationMs as number) < 0) {
+      || (envelope.resultBytes as number) > AGENT_CONTROL_LIMITS.scriptResultBytes
+      || !Number.isFinite(envelope.durationMs) || (envelope.durationMs as number) < 0
+      || (envelope.durationMs as number) > AGENT_CONTROL_LIMITS.scriptTimeoutMs) {
       throw codedRuntimeError('serialization_failed', 'browser script returned invalid result metadata');
     }
+    const canonicalValue = canonicalizeBoundedJson(envelope.value, {
+      maxBytes: AGENT_CONTROL_LIMITS.scriptResultBytes,
+      invalidCode: 'serialization_failed',
+      sizeCode: 'result_too_large',
+      label: 'browser script result',
+    });
+    if (canonicalValue.bytes !== envelope.resultBytes) {
+      throw codedRuntimeError('serialization_failed', 'browser script returned a mismatched result byte count');
+    }
     return this.makeReceipt(command, target, 'succeeded', {
-      value: envelope.value,
+      value: canonicalValue.value,
       sourceDigest: createHash('sha256').update(command.payload.source, 'utf8').digest('hex'),
       sourceBytes: Buffer.byteLength(command.payload.source, 'utf8'),
       resultBytes: envelope.resultBytes as number,
@@ -1077,7 +1198,10 @@ export class ControlRuntime {
     if (isSurfaceControlCommand(command)) {
       const built = agentControlJournalPayload({
         kind: terminalKindForOutcome(outcome), commandId: command.id,
-        idempotencyKey: command.idempotencyKey, outcome, ...(receipt ? { receipt } : {}),
+        idempotencyKey: command.idempotencyKey,
+        status: outcome.status,
+        ...(outcome.status === 'succeeded' ? {} : { code: 'surface_command_failed' }),
+        ...(receipt ? { receipt: journalReceiptMetadata(receipt) } : {}),
       });
       await this.journal.append(built.kind, built.payload);
       this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
@@ -1425,6 +1549,22 @@ function redactReceipt(receipt: ActionReceipt): ActionReceipt {
   return Object.freeze(safeReceipt);
 }
 
+function journalReceiptMetadata(receipt: ActionReceipt): AgentControlJournalReceipt {
+  return Object.freeze({
+    schema: receipt.schema,
+    actionId: receipt.actionId,
+    state: receipt.state,
+    resource: createAgentControlJournalResource(receipt.resource),
+    createdAt: receipt.createdAt,
+    ...(receipt.completedAt ? { completedAt: receipt.completedAt } : {}),
+    ...(receipt.code ? { code: receipt.code } : {}),
+    ...(receipt.sourceDigest ? { sourceDigest: receipt.sourceDigest } : {}),
+    ...(receipt.sourceBytes !== undefined ? { sourceBytes: receipt.sourceBytes } : {}),
+    ...(receipt.resultBytes !== undefined ? { resultBytes: receipt.resultBytes } : {}),
+    ...(receipt.durationMs !== undefined ? { durationMs: receipt.durationMs } : {}),
+  });
+}
+
 function isActionReceiptLike(value: unknown): value is ActionReceipt {
   return Boolean(value && typeof value === 'object'
     && (value as { schema?: unknown }).schema === 'psyche.control.receipt/v1');
@@ -1472,11 +1612,11 @@ function payloadForOutcome(outcome: CommandOutcome): Record<string, unknown> {
 }
 
 function outcomeFromEvent(event: RuntimeEvent): CommandOutcome {
-  const receipt = actionReceiptPayload(event);
+  const receipt = durableJournalReceiptPayload(event);
   switch (event.kind) {
     case 'command.succeeded':
       return receipt
-        ? { status: 'succeeded', value: receipt }
+        ? { status: 'succeeded' }
         : Object.prototype.hasOwnProperty.call(event.payload, 'value')
         ? { status: 'succeeded', value: event.payload.value }
         : { status: 'succeeded' };
@@ -1503,9 +1643,62 @@ function outcomeFromEvent(event: RuntimeEvent): CommandOutcome {
   }
 }
 
-function actionReceiptPayload(event: RuntimeEvent): ActionReceipt | undefined {
+interface DurableJournalReceiptResult {
+  readonly schema: 'psyche.control.receipt/v1';
+  readonly state: AgentControlJournalReceipt['state'];
+  readonly resource: {
+    readonly kind: 'project' | 'pane' | 'browser_tab';
+    readonly idDigest: string;
+    readonly generation?: number;
+  };
+  readonly code?: string;
+}
+
+function durableJournalReceiptPayload(event: RuntimeEvent): DurableJournalReceiptResult | undefined {
   const receipt = event.payload.receipt;
-  return isActionReceiptLike(receipt) ? receipt : undefined;
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return undefined;
+  const metadata = receipt as Record<string, unknown>;
+  const resource = metadata.resource;
+  if (
+    metadata.schema !== 'psyche.control.receipt/v1'
+    || !isActionReceiptState(metadata.state)
+    || (metadata.code !== undefined && typeof metadata.code !== 'string')
+    || !resource || typeof resource !== 'object' || Array.isArray(resource)
+  ) return undefined;
+  const redactedResource = resource as Record<string, unknown>;
+  if (
+    !isJournalResourceKind(redactedResource.kind)
+    || typeof redactedResource.idDigest !== 'string'
+    || !/^[a-f0-9]{64}$/.test(redactedResource.idDigest)
+    || (redactedResource.kind === 'project'
+      ? redactedResource.generation !== undefined
+      : !Number.isSafeInteger(redactedResource.generation) || (redactedResource.generation as number) < 1)
+  ) return undefined;
+  return {
+    schema: metadata.schema,
+    state: metadata.state,
+    resource: {
+      kind: redactedResource.kind,
+      idDigest: redactedResource.idDigest,
+      ...(redactedResource.kind === 'project' ? {} : { generation: redactedResource.generation as number }),
+    },
+    ...(typeof metadata.code === 'string' ? { code: metadata.code } : {}),
+  };
+}
+
+function isJournalResourceKind(value: unknown): value is DurableJournalReceiptResult['resource']['kind'] {
+  return value === 'project' || value === 'pane' || value === 'browser_tab';
+}
+
+function isActionReceiptState(value: unknown): value is AgentControlJournalReceipt['state'] {
+  return value === 'queued'
+    || value === 'running'
+    || value === 'approval_required'
+    || value === 'succeeded'
+    || value === 'failed'
+    || value === 'denied'
+    || value === 'expired'
+    || value === 'unknown';
 }
 
 function stringPayload(event: RuntimeEvent, key: string): string | undefined {

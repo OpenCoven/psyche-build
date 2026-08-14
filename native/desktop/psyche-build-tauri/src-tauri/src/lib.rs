@@ -64,7 +64,6 @@ use pty_transport::{
     OutputPumpSnapshot as TransportOutputPumpSnapshot, PaneVisibility as TransportPaneVisibility,
     PumpMetrics as TransportPumpMetrics, RecentOutputSnapshots, TransportSessionKey,
     EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
-
 };
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
@@ -123,6 +122,8 @@ fn validate_browser_snapshot_dimensions(width: u32, height: u32) -> Result<(), S
 struct PtySession {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    operation_lane: Arc<tokio::sync::Mutex<()>>,
+    operation_admission: Arc<tokio::sync::Semaphore>,
     pump: OutputPump,
     terminator: PtyProcessTerminator,
     reader_cancellation: PtyReaderCancellation,
@@ -2366,7 +2367,14 @@ impl From<TransportOutputPumpSnapshot> for PtyTransportSnapshot {
 }
 
 #[tauri::command]
-fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
+async fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
+    match tauri::async_runtime::spawn_blocking(move || pty_start_blocking(app, options)).await {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY start task: {error}")),
+    }
+}
+
+fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let thread_id = options.thread_id.clone();
     let (pending_start, resolved_cwd) = prepare_pty_start(&options)?;
     validate_coven_launch(&options)?;
@@ -2440,6 +2448,8 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let (session_token, install_outcome) = pending_start.install(PtySession {
         master: Arc::new(Mutex::new(pair.master)),
         writer: Arc::new(Mutex::new(writer)),
+        operation_lane: Arc::new(tokio::sync::Mutex::new(())),
+        operation_admission: Arc::new(tokio::sync::Semaphore::new(2)),
         pump: pump.clone(),
         terminator: terminator.clone(),
         reader_cancellation: reader_cancellation.clone(),
@@ -2524,16 +2534,51 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
-    let writer = {
-        let guard = PTY_LIFECYCLES.lock();
-        let session = guard
-            .live(&thread_id)
-            .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
-        let writer = Arc::clone(&session.writer);
-        drop(guard);
-        writer
-    };
+async fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
+    let (writer, operation_lane, operation_admission) = pty_write_operation(&thread_id)?;
+    let operation_permit = operation_admission
+        .try_acquire_owned()
+        .map_err(|_| format!("thread '{}' PTY operation queue is full", thread_id))?;
+    let operation_guard = operation_lane.lock_owned().await;
+    match tauri::async_runtime::spawn_blocking(move || {
+        pty_write_blocking(writer, bytes, operation_guard, operation_permit)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY write task: {error}")),
+    }
+}
+
+fn pty_write_operation(
+    thread_id: &str,
+) -> Result<
+    (
+        Arc<Mutex<Box<dyn Write + Send>>>,
+        Arc<tokio::sync::Mutex<()>>,
+        Arc<tokio::sync::Semaphore>,
+    ),
+    String,
+> {
+    let guard = PTY_LIFECYCLES.lock();
+    let session = guard
+        .live(thread_id)
+        .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
+    let operation = (
+        Arc::clone(&session.writer),
+        Arc::clone(&session.operation_lane),
+        Arc::clone(&session.operation_admission),
+    );
+    drop(guard);
+    Ok(operation)
+}
+
+fn pty_write_blocking(
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    bytes: Vec<u8>,
+    _operation_guard: tokio::sync::OwnedMutexGuard<()>,
+    _operation_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(), String> {
     let mut writer = writer.lock();
     writer.write_all(&bytes).map_err(|e| e.to_string())?;
     writer.flush().map_err(|e| e.to_string())?;
@@ -2541,40 +2586,60 @@ fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pty_ack(thread_id: String, sequence: u64) -> Result<(), String> {
-    let pump = {
-        let guard = PTY_LIFECYCLES.lock();
-        let session = guard
-            .live(&thread_id)
-            .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
-        session.pump.clone()
+async fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
+    let Some((master, operation_lane, operation_admission)) = pty_resize_operation(&thread_id)
+    else {
+        return Ok(());
     };
-    pump.acknowledge(sequence)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    let operation_permit = operation_admission
+        .try_acquire_owned()
+        .map_err(|_| format!("thread '{}' PTY operation queue is full", thread_id))?;
+    let operation_guard = operation_lane.lock_owned().await;
+    match tauri::async_runtime::spawn_blocking(move || {
+        pty_resize_blocking(master, cols, rows, operation_guard, operation_permit)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY resize task: {error}")),
+    }
 }
 
-#[tauri::command]
-fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
-    let master = {
-        let guard = PTY_LIFECYCLES.lock();
-        let master = guard
-            .live(&thread_id)
-            .map(|session| Arc::clone(&session.master));
-        drop(guard);
-        master
-    };
-    if let Some(master) = master {
-        master
-            .lock()
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| e.to_string())?;
-    }
+fn pty_resize_operation(
+    thread_id: &str,
+) -> Option<(
+    Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    Arc<tokio::sync::Mutex<()>>,
+    Arc<tokio::sync::Semaphore>,
+)> {
+    let guard = PTY_LIFECYCLES.lock();
+    let operation = guard.live(thread_id).map(|session| {
+        (
+            Arc::clone(&session.master),
+            Arc::clone(&session.operation_lane),
+            Arc::clone(&session.operation_admission),
+        )
+    });
+    drop(guard);
+    operation
+}
+
+fn pty_resize_blocking(
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    cols: u16,
+    rows: u16,
+    _operation_guard: tokio::sync::OwnedMutexGuard<()>,
+    _operation_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(), String> {
+    master
+        .lock()
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -2708,6 +2773,124 @@ async fn workspace_metrics(
 struct BrowserAppShortcutPayload {
     label: String,
     url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserAutomationResultError {
+    code: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserAutomationCorrelation {
+    action_id: String,
+    tab_id: String,
+    generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserAutomationSuccessResult {
+    action_id: String,
+    tab_id: String,
+    generation: u64,
+    value: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserAutomationFailureResult {
+    action_id: String,
+    tab_id: String,
+    generation: u64,
+    error: BrowserAutomationResultError,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+enum BrowserAutomationResultPayload {
+    Success(BrowserAutomationSuccessResult),
+    Failure(BrowserAutomationFailureResult),
+}
+
+#[derive(Default)]
+struct BrowserAutomationAuthorizations {
+    by_label: Mutex<HashMap<String, BrowserAutomationCorrelation>>,
+}
+
+impl BrowserAutomationAuthorizations {
+    fn install(&self, label: &str, correlation: BrowserAutomationCorrelation) {
+        self.by_label.lock().insert(label.to_string(), correlation);
+    }
+
+    fn consume(&self, label: &str, correlation: &BrowserAutomationCorrelation) -> bool {
+        let mut authorizations = self.by_label.lock();
+        if authorizations.get(label) != Some(correlation) {
+            return false;
+        }
+        authorizations.remove(label);
+        true
+    }
+
+    fn remove(&self, label: &str) -> bool {
+        self.by_label.lock().remove(label).is_some()
+    }
+}
+
+impl BrowserAutomationResultPayload {
+    fn correlation(&self) -> BrowserAutomationCorrelation {
+        match self {
+            Self::Success(result) => BrowserAutomationCorrelation {
+                action_id: result.action_id.clone(),
+                tab_id: result.tab_id.clone(),
+                generation: result.generation,
+            },
+            Self::Failure(result) => BrowserAutomationCorrelation {
+                action_id: result.action_id.clone(),
+                tab_id: result.tab_id.clone(),
+                generation: result.generation,
+            },
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let correlation = self.correlation();
+        if correlation.action_id.is_empty()
+            || correlation.action_id.len() > 128
+            || correlation.tab_id.is_empty()
+            || correlation.tab_id.len() > 128
+        {
+            return Err("browser automation result correlation is invalid".to_string());
+        }
+        if correlation.generation > 9_007_199_254_740_991 {
+            return Err("browser automation result generation is invalid".to_string());
+        }
+        if let Self::Failure(result) = self {
+            const ALLOWED_CODES: &[&str] = &[
+                "action_cancelled",
+                "automation_failed",
+                "backend_unavailable",
+                "bad_request",
+                "effect_unknown",
+                "ref_missing",
+                "result_too_large",
+                "serialization_failed",
+                "snapshot_stale",
+                "target_changed",
+                "target_unavailable",
+                "unsupported_operation",
+            ];
+            if !ALLOWED_CODES.contains(&result.error.code.as_str()) {
+                return Err("browser automation result error code is invalid".to_string());
+            }
+        }
+        let encoded = serde_json::to_vec(self).map_err(|error| error.to_string())?;
+        if encoded.len() > MAX_PROVIDER_RESULT_BYTES {
+            return Err("browser automation result is too large".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -2912,6 +3095,27 @@ fn browser_app_shortcut(
     )
 }
 
+#[tauri::command]
+fn browser_automation_result(
+    webview: tauri::Webview,
+    authorizations: State<'_, BrowserAutomationAuthorizations>,
+    result: BrowserAutomationResultPayload,
+) -> Result<(), String> {
+    if !webview.label().starts_with(BROWSER_LABEL_PREFIX) {
+        return Err(
+            "browser automation result caller is not an embedded browser webview".to_string(),
+        );
+    }
+    result.validate()?;
+    if !authorizations.consume(webview.label(), &result.correlation()) {
+        return Err("browser automation result does not match a pending action".to_string());
+    }
+    webview
+        .app_handle()
+        .emit_to("main", "browser:automation-result", result)
+        .map_err(|error| error.to_string())
+}
+
 fn ensure_browser(
     app: &AppHandle,
     label: &str,
@@ -2945,6 +3149,9 @@ fn ensure_browser(
                 app_for_load
                     .state::<BrowserShortcutAuthorizations>()
                     .reset(&browser_label);
+                app_for_load
+                    .state::<BrowserAutomationAuthorizations>()
+                    .remove(&browser_label);
             }
             let phase = match payload.event() {
                 PageLoadEvent::Started => "started",
@@ -3207,6 +3414,8 @@ fn destroy_browser_webview(app: &AppHandle, label: Option<String>) -> Result<(),
         webview.close().map_err(|error| error.to_string())?;
     }
     app.state::<BrowserShortcutAuthorizations>().remove(&label);
+    app.state::<BrowserAutomationAuthorizations>()
+        .remove(&label);
     Ok(())
 }
 
@@ -3276,11 +3485,21 @@ fn browser_eval(
     app: AppHandle,
     label: Option<String>,
     script: String,
+    automation_receipt: Option<BrowserAutomationCorrelation>,
 ) -> Result<(), String> {
     ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
-        webview.eval(&script).map_err(|e| e.to_string())?;
+        if let Some(correlation) = automation_receipt {
+            let authorizations = app.state::<BrowserAutomationAuthorizations>();
+            authorizations.install(&label, correlation.clone());
+            if let Err(error) = webview.eval(&script) {
+                authorizations.consume(&label, &correlation);
+                return Err(error.to_string());
+            }
+        } else {
+            webview.eval(&script).map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }
@@ -4724,12 +4943,12 @@ pub fn run() {
         .manage(MetricsState::default())
         .manage(ControlProviderState::default())
         .manage(BrowserShortcutAuthorizations::default())
+        .manage(BrowserAutomationAuthorizations::default())
         .invoke_handler(tauri::generate_handler![
             pty_start,
             pane_session_metrics,
             canonical_project_path,
             pty_write,
-            pty_ack,
             pty_resize,
             pty_ack,
             pty_set_visibility,
@@ -4737,6 +4956,7 @@ pub fn run() {
             pty_list,
             pty_transport_metrics,
             browser_app_shortcut,
+            browser_automation_result,
             browser_navigate,
             browser_set_bounds,
             browser_hide,
@@ -4997,12 +5217,88 @@ mod browser_app_shortcut_tests {
         assert_eq!(secret.len(), 64);
         assert!(secret.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
+
+    #[test]
+    fn browser_automation_result_accepts_bounded_success_and_failure_payloads() {
+        let success: BrowserAutomationResultPayload = serde_json::from_value(serde_json::json!({
+            "actionId": "action-1",
+            "tabId": "tab-1",
+            "generation": 1,
+            "value": null
+        }))
+        .unwrap();
+        assert!(success.validate().is_ok());
+
+        let failure: BrowserAutomationResultPayload = serde_json::from_value(serde_json::json!({
+            "actionId": "action-1",
+            "tabId": "tab-1",
+            "generation": 1,
+            "error": { "code": "effect_unknown" }
+        }))
+        .unwrap();
+        assert!(failure.validate().is_ok());
+    }
+
+    #[test]
+    fn browser_automation_result_rejects_unbounded_or_ambiguous_payloads() {
+        let unknown_code: BrowserAutomationResultPayload =
+            serde_json::from_value(serde_json::json!({
+                "actionId": "action-1",
+                "tabId": "tab-1",
+                "generation": 1,
+                "error": { "code": "forged" }
+            }))
+            .unwrap();
+        assert!(unknown_code.validate().is_err());
+
+        assert!(
+            serde_json::from_value::<BrowserAutomationResultPayload>(serde_json::json!({
+                "actionId": "action-1",
+                "tabId": "tab-1",
+                "generation": 1,
+                "value": {},
+                "error": { "code": "automation_failed" }
+            }))
+            .is_err()
+        );
+
+        let oversized: BrowserAutomationResultPayload = serde_json::from_value(serde_json::json!({
+            "actionId": "action-1",
+            "tabId": "tab-1",
+            "generation": 1,
+            "value": "x".repeat(MAX_PROVIDER_RESULT_BYTES)
+        }))
+        .unwrap();
+        assert!(oversized.validate().is_err());
+    }
+
+    #[test]
+    fn browser_automation_result_consumes_only_the_exact_pending_correlation() {
+        let authorizations = BrowserAutomationAuthorizations::default();
+        let correlation = BrowserAutomationCorrelation {
+            action_id: "action-1".to_string(),
+            tab_id: "tab-1".to_string(),
+            generation: 7,
+        };
+        authorizations.install("psyche-browser-project-1", correlation.clone());
+        assert!(!authorizations.consume("psyche-browser-project-2", &correlation));
+        assert!(!authorizations.consume(
+            "psyche-browser-project-1",
+            &BrowserAutomationCorrelation {
+                generation: 8,
+                ..correlation.clone()
+            },
+        ));
+        assert!(authorizations.consume("psyche-browser-project-1", &correlation));
+        assert!(!authorizations.consume("psyche-browser-project-1", &correlation));
+    }
 }
 
 #[cfg(test)]
 mod pty_runtime_tests {
     #[cfg(unix)]
     use std::collections::VecDeque;
+    use std::future::Future;
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc};
@@ -5011,6 +5307,71 @@ mod pty_runtime_tests {
     use super::*;
     #[cfg(not(windows))]
     use portable_pty::ChildKiller;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pty_operation_lane_prevents_a_later_operation_from_overtaking() {
+        let lane = Arc::new(tokio::sync::Mutex::new(()));
+        let initial_guard = Arc::clone(&lane).lock_owned().await;
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let (first_waiting_tx, first_waiting_rx) = tokio::sync::oneshot::channel();
+        let first_lane = Arc::clone(&lane);
+        let first_order = Arc::clone(&order);
+        let first = tokio::spawn(async move {
+            let mut first_waiting_tx = Some(first_waiting_tx);
+            let lock = first_lane.lock_owned();
+            tokio::pin!(lock);
+            let _guard = std::future::poll_fn(|context| {
+                let result = lock.as_mut().poll(context);
+                if result.is_pending() {
+                    if let Some(waiting_tx) = first_waiting_tx.take() {
+                        let _ = waiting_tx.send(());
+                    }
+                }
+                result
+            })
+            .await;
+            first_order.lock().push(1);
+        });
+        first_waiting_rx.await.unwrap();
+
+        let (second_waiting_tx, second_waiting_rx) = tokio::sync::oneshot::channel();
+        let second_lane = Arc::clone(&lane);
+        let second_order = Arc::clone(&order);
+        let second = tokio::spawn(async move {
+            let mut second_waiting_tx = Some(second_waiting_tx);
+            let lock = second_lane.lock_owned();
+            tokio::pin!(lock);
+            let _guard = std::future::poll_fn(|context| {
+                let result = lock.as_mut().poll(context);
+                if result.is_pending() {
+                    if let Some(waiting_tx) = second_waiting_tx.take() {
+                        let _ = waiting_tx.send(());
+                    }
+                }
+                result
+            })
+            .await;
+            second_order.lock().push(2);
+        });
+        second_waiting_rx.await.unwrap();
+
+        drop(initial_guard);
+        first.await.unwrap();
+        second.await.unwrap();
+        assert_eq!(*order.lock(), vec![1, 2]);
+    }
+
+    #[test]
+    fn pty_operation_admission_is_bounded() {
+        let admission = Arc::new(tokio::sync::Semaphore::new(2));
+        let first = Arc::clone(&admission).try_acquire_owned().unwrap();
+        let second = Arc::clone(&admission).try_acquire_owned().unwrap();
+        assert!(Arc::clone(&admission).try_acquire_owned().is_err());
+        drop(first);
+        assert!(Arc::clone(&admission).try_acquire_owned().is_ok());
+        drop(second);
+    }
 
     #[test]
     fn browser_privileged_commands_reject_external_callers() {
@@ -5167,6 +5528,8 @@ mod pty_runtime_tests {
                 .install(PtySession {
                     master: Arc::new(Mutex::new(pair.master)),
                     writer: Arc::new(Mutex::new(writer)),
+                    operation_lane: Arc::new(tokio::sync::Mutex::new(())),
+                    operation_admission: Arc::new(tokio::sync::Semaphore::new(2)),
                     pump: pump.clone(),
                     terminator: PtyProcessTerminator::from_parts(
                         Box::new(RecordingChildKiller {
@@ -5768,7 +6131,10 @@ mod pty_runtime_tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].thread_id, "metrics-a");
         assert_eq!(filtered[0].pending_bytes, b"secret-metadata".len());
-        assert_eq!(filtered[0].metrics.state.bytes_accepted, b"secret-metadata".len() as u64);
+        assert_eq!(
+            filtered[0].metrics.state.bytes_accepted,
+            b"secret-metadata".len() as u64
+        );
         assert!(pty_transport_metrics(Some("metrics-missing".to_string())).is_empty());
         assert!(pty_transport_metrics(Some("../unsafe".to_string())).is_empty());
 
@@ -5800,13 +6166,10 @@ mod pty_runtime_tests {
         assert!(pty_transport_metrics(Some("metrics-b".to_string())).is_empty());
         drop(first);
         assert!(pty_transport_metrics(Some("metrics-a".to_string())).is_empty());
-        assert!(
-            pty_transport_metrics(None)
-                .into_iter()
-                .all(|snapshot| !owned_ids.contains(&snapshot.thread_id.as_str()))
-        );
+        assert!(pty_transport_metrics(None)
+            .into_iter()
+            .all(|snapshot| !owned_ids.contains(&snapshot.thread_id.as_str())));
     }
-
 
     #[cfg(not(windows))]
     #[test]

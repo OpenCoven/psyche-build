@@ -651,13 +651,12 @@ describe('desktop shell wiring', () => {
   });
 
   it('clears attention on the bell and on exit', () => {
+    const handlePtyExit = functionSource('handlePtyExit');
     expect(mainJs).toMatch(/term\.onBell\(function \(\)[\s\S]{0,200}attentionTracker\.bell\(thread\.id\)/);
-    expect(mainJs).toMatch(
-      /function handlePtyExit\(payload\)[\s\S]{0,750}thread\.status = "exited";[\s\S]{0,120}thread\.isWorking = false;[\s\S]{0,300}clearThreadAttention\(thread\)/,
+    expect(handlePtyExit).toMatch(
+      /thread\.status = "exited";[\s\S]*thread\.isWorking = false;[\s\S]*clearThreadAttention\(thread\)/,
     );
-    expect(mainJs).toMatch(
-      /function handlePtyExit\(payload\)[\s\S]{0,450}thread\.terminalController\.markPtyExited\(\)/,
-    );
+    expect(handlePtyExit).toContain('thread.terminalController.markPtyExited()');
   });
 
   it('marks dead or failed PTYs as no longer working', () => {

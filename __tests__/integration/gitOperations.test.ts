@@ -16,6 +16,7 @@ const { mockExecSync, mockExecFileSync } = vi.hoisted(() => ({
 }));
 vi.mock('child_process', () => ({
   execSync: mockExecSync,
+  execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
 }));
 
 vi.mock('node:child_process', () => ({

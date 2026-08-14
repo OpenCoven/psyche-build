@@ -24,6 +24,7 @@ export {
   buildSidebarProjectModel,
   deriveCovenSidebarStatus,
   deriveLocalSidebarStatus,
+  flattenSidebarSearchResults,
   localSidebarSelectionKey,
   matchTextRanges,
   normalizeSidebarFilter,

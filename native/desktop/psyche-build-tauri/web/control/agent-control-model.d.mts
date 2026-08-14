@@ -2,6 +2,7 @@ export interface AgentControlModelOptions {
   now?: number;
   operator?: boolean;
   previousOwnerEpoch?: number;
+  projectRoot?: string;
 }
 
 export function createAgentControlModel(

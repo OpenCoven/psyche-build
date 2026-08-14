@@ -194,8 +194,6 @@ importers:
 
   packages/vim-core: {}
 
-  packages/vim-core: {}
-
 packages:
 
   '@alcalzone/ansi-tokenize@0.3.0':

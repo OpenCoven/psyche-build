@@ -96,7 +96,7 @@ const clients = new Map<string, PtyClientState>();
 
 function normalizeBatchBytes(batch: PtyDataBatch): Uint8Array {
   const count = Number.isFinite(batch.byteCount) ? Math.max(0, batch.byteCount) : batch.bytes.length;
-  return Uint8Array.from(batch.bytes.slice(0, count));
+  return Uint8Array.from(batch.bytes).subarray(0, count);
 }
 
 function visibilityArgs(threadId: string, visible: boolean): Record<string, unknown> {

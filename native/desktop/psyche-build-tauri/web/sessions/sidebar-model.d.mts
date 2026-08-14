@@ -166,6 +166,24 @@ export interface SidebarProjectModel<
   branches: Array<SidebarBranchModel<L, C>>;
 }
 
+export interface SidebarSearchResult<T = unknown> {
+  key: string;
+  selectionKey: string;
+  source: SidebarRowSource;
+  id: string;
+  projectId: string;
+  projectRoot: string;
+  worktreePath: string | null;
+  projectTitle: string;
+  branchTitle: string;
+  title: string;
+  meta: string;
+  status: SidebarStatusPresentation;
+  kind: string;
+  type: SidebarRowType;
+  value: T;
+}
+
 export function normalizeSidebarFilter(value?: unknown): SidebarFilter;
 export function sidebarTailIsWorking(tail: string): boolean;
 export function deriveLocalSidebarStatus(
@@ -197,3 +215,9 @@ export function buildSidebarProjectModel<
   selectedKey?: string;
   now?: number;
 }): SidebarProjectModel<L, C>;
+export function flattenSidebarSearchResults<
+  L extends LocalSidebarSession = LocalSidebarSession,
+  C extends CovenSession = CovenSession,
+>(
+  projectModels?: Array<SidebarProjectModel<L, C>>,
+): Array<SidebarSearchResult<L | C>>;

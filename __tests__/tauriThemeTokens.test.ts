@@ -37,6 +37,13 @@ function customProperty(block: string, name: string) {
   return found ? found[1].replace(/\s+/g, ' ').trim() : null;
 }
 
+function ruleBlock(selector: string) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const matches = [...stylesCss.matchAll(new RegExp(`(^|\\n)${escaped}\\s*\\{([^}]*)\\}`, 'gs'))];
+  const match = matches[matches.length - 1];
+  return match ? match[2] : null;
+}
+
 /** Channel spread: 0 is pure grey, larger is more saturated. */
 function chroma(triplet: string) {
   const channels = triplet.split(',').map((n) => Number(n.trim()));
@@ -143,5 +150,50 @@ describe('theme tokens', () => {
     expect(
       customProperty('/* --accent: #111111; */ --accent: #222222;', '--accent'),
     ).toBe('#222222');
+  });
+
+  it('declares the Dia shell surface tokens in :root', () => {
+    expect(stylesCss).toContain(
+      '--sidebar-surface: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));',
+    );
+    expect(stylesCss).toContain(
+      '--workspace-surface: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.72));',
+    );
+    expect(stylesCss).toContain('--workspace-radius: 18px;');
+  });
+
+  it('maps titlebar and workspace surfaces onto the correct shell regions', () => {
+    expect(ruleBlock('.titlebar-sidebar')).toMatch(/background:\s*var\(--sidebar-surface\);/);
+    expect(ruleBlock('.sidebar')).toMatch(/background:\s*var\(--sidebar-surface\);/);
+    expect(ruleBlock('.titlebar-workspace')).toMatch(/background:\s*var\(--workspace-surface\);/);
+    expect(ruleBlock('.detail')).toMatch(/background:\s*var\(--workspace-surface\);/);
+    expect(ruleBlock('.workbench')).toMatch(/background:\s*var\(--sidebar-surface\);/);
+  });
+
+  it('keeps the shared titlebar/workspace seam borderless', () => {
+    expect(stylesCss).not.toMatch(/\.titlebar\s*\{[^}]*border-bottom\s*:/s);
+  });
+
+  it('keeps the detail surface square on the bottom edge with only the inward top-left curve', () => {
+    const detail = ruleBlock('.detail') ?? '';
+    expect(detail).toMatch(/border-radius:\s*var\(--workspace-radius\)\s+0\s+0\s+0;/);
+    expect(detail).not.toMatch(/border-bottom-left-radius\s*:/);
+    expect(detail).not.toMatch(/border-bottom-right-radius\s*:/);
+    expect(detail).not.toMatch(/border-top-right-radius\s*:/);
+  });
+
+  it('keeps the titlebar workspace square and the detail as the only curved shell surface', () => {
+    for (const selector of [
+      '.titlebar',
+      '.titlebar-sidebar',
+      '.titlebar-workspace',
+      '.workbench',
+      '.sidebar',
+    ]) {
+      expect(ruleBlock(selector)).not.toMatch(/border-(?:top-left-)?radius\s*:/);
+    }
+    expect(ruleBlock('.detail')).toMatch(
+      /border-radius:\s*var\(--workspace-radius\)\s+0\s+0\s+0;/,
+    );
   });
 });

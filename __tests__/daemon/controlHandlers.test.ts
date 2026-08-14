@@ -260,11 +260,14 @@ describe('createDaemonControlHandlers leased pane controls', () => {
       createdAt: '2026-08-12T12:00:00.000Z',
       ...input,
     }) as ControlCommand;
-    const granted = await runtime.submit(makeCommand({
-      id: 'grant-close', kind: 'lease.grant', payload: {
-        requestId: 'request-close', actorId: 'agent-1', taskId: 'task-1', ttlMs: 60_000,
+    await runtime.submit(makeCommand({
+      id: 'request-close', kind: 'lease.request', actor: { id: 'agent-1', kind: 'psyche' }, payload: {
+        taskId: 'task-1', ttlMs: 60_000,
         grants: [{ target: { kind: 'pane', id: 'pane-1', generation: 1 }, capabilities: ['pane.close'] }],
       },
+    }));
+    const granted = await runtime.submit(makeCommand({
+      id: 'grant-close', kind: 'lease.grant', payload: { requestId: 'request-close' },
     }));
     const lease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
     const close = makeCommand({
@@ -339,7 +342,7 @@ describe('createDaemonControlHandlers browser provider', () => {
     }));
     expect(dispatch).toHaveBeenNthCalledWith(3, expect.objectContaining({
       operation: { kind: 'script', source: 'return 1' },
-      timeoutMs: 15_000,
+      timeoutMs: 5_000,
     }));
   });
 });

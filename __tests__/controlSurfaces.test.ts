@@ -98,7 +98,6 @@ describe('SurfaceRegistry', () => {
     expect(registry.upsertPane({ ...input, tmuxPaneId: '%4' }).generation)
       .toBe(first.generation + 1);
   });
-
   it('does not retain caller aliases or expose mutable registry records', () => {
     const registry = new SurfaceRegistry();
     const viewport = { width: 800, height: 600 };
@@ -131,6 +130,12 @@ describe('SurfaceRegistry', () => {
   it('pins all fixed agent-control limits', () => {
     expect(AGENT_CONTROL_LIMITS).toEqual({
       leaseTtlMs: 30 * 60_000,
+      leaseRequestRecords: 1_000,
+      leaseRequestPending: 100,
+      leaseRequestGrants: 32,
+      leaseRequestCapabilitiesPerGrant: 12,
+      leaseRequestTextBytes: 128,
+      leaseRequestCapabilityBytes: 64,
       approvalTtlMs: 5 * 60_000,
       paneOutputBytes: 64 * 1024,
       paneOutputChunks: 512,

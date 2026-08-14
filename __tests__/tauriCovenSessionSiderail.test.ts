@@ -483,6 +483,10 @@ class FakeDocument {
     }
     return event;
   }
+
+  querySelector() {
+    return null;
+  }
 }
 
 type Project = {
@@ -540,7 +544,7 @@ function createRenderer(options: {
   phase?: string;
   message?: string | null;
   stale?: boolean;
-  filter?: string;
+  composerQuery?: string;
   activeProjectId?: string | null;
   activeThreadId?: string | null;
   openCovenSession?: (project: Project, session: RemoteSession) => unknown;
@@ -559,9 +563,10 @@ function createRenderer(options: {
 } = {}) {
   const document = new FakeDocument();
   const sessionListEl = new FakeElement('div', document);
-  const sessionSearchEl = new FakeElement('input', document);
+  const composerInputEl = new FakeElement('textarea', document);
   document.connectRoot(sessionListEl);
-  document.connectRoot(sessionSearchEl);
+  document.connectRoot(composerInputEl);
+  composerInputEl.value = options.composerQuery ?? '';
   const projectAppearancesKey = 'psyche.tauri.project-appearances.v1';
   const storage = new Map<string, string>();
   if (options.projectAppearances) {
@@ -579,7 +584,6 @@ function createRenderer(options: {
       storage.set(key, String(value));
     }),
   };
-  sessionSearchEl.value = options.filter ?? '';
   const state = {
     env: { home: '/Users/val' },
     projects: options.projects ?? [{ id: 'alpha', name: 'Alpha', root: '/alpha' }],
@@ -720,7 +724,7 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'renderSessionList'),
   ];
   const harness = Function(
-    'document', 'sessionListEl', 'sessionSearchEl', 'editingContext', 'sessionFilter', 'state',
+    'document', 'sessionListEl', 'editingContext', 'state',
     'covenDiscovery', 'PsycheSessions', 'sessionStatusClass', 'shortenRoot',
     'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread', 'closeBrowserPane',
     'requestThreadClose', 'hideThread', 'renameThread', 'editLabelInline',
@@ -737,7 +741,6 @@ function createRenderer(options: {
         renderSessionList();
         flushDeferredStatusMessages();
       },
-      setFilter: function (value) { sessionFilter = value; },
       setDiscovery: function (value) { covenDiscovery = value; },
       armSessionClose: armSessionClose,
       disarmSessionClose: disarmSessionClose,
@@ -757,9 +760,7 @@ function createRenderer(options: {
   )(
     document,
     sessionListEl,
-    sessionSearchEl,
     null,
-    options.filter ?? '',
     state,
     discovery,
     PsycheSessions,
@@ -816,7 +817,6 @@ function createRenderer(options: {
     localStorage,
   ) as {
     render: () => void;
-    setFilter: (value: string) => void;
     setDiscovery: (value: typeof discovery) => void;
     armSessionClose: (
       host: FakeElement, close: FakeElement, label: string, onConfirm: () => unknown,
@@ -843,7 +843,7 @@ function createRenderer(options: {
     ...harness,
     document,
     sessionListEl,
-    sessionSearchEl,
+    composerInputEl,
     state,
     discovery,
     focusSets,
@@ -1715,7 +1715,7 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.saveWorkspaceSoon).toHaveBeenCalledTimes(4);
   });
 
-  it('does not overwrite saved collapse state while search temporarily expands groups', async () => {
+  it('keeps saved collapse state while composer search leaves the sidebar tree unchanged', () => {
     const renderer = createRenderer({
       projects: [{
         id: 'psyche',
@@ -1740,32 +1740,19 @@ describe('Tauri Coven session project rail', () => {
         kind: 'shell',
         status: 'running',
       }],
-      filter: 'matching',
+      composerQuery: '? matching',
     });
 
     renderer.render();
     const project = renderer.sessionListEl.querySelector('.session-project');
     const branch = renderer.sessionListEl.querySelector('.session-branch');
     const disclosures = renderer.sessionListEl.querySelectorAll('.session-disclosure');
-    expect(project?.getAttribute('aria-expanded')).toBe('true');
-    expect(branch?.getAttribute('aria-expanded')).toBe('true');
-    expect(project?.getAttribute('aria-label')).toContain('temporarily expanded for search');
-    expect(branch?.getAttribute('aria-label')).toContain('temporarily expanded for search');
-    expect(disclosures[0].getAttribute('aria-label')).toContain('clear search');
-    expect(disclosures[1].getAttribute('aria-label')).toContain('clear search');
-
-    await disclosures[0].emit('click');
-    await disclosures[1].emit('click');
-    project?.focus();
-    await project?.emit('keydown', { key: ' ' });
-    await project?.emit('keydown', { key: 'ArrowLeft' });
-    branch?.focus();
-    await branch?.emit('keydown', { key: ' ' });
-    await branch?.emit('keydown', { key: 'ArrowLeft' });
-    await branch?.emit('dblclick', {
-      target: renderer.sessionListEl.querySelector('.session-branch-head') ?? undefined,
-    });
-
+    expect(renderer.composerInputEl.value).toBe('? matching');
+    expect(project?.getAttribute('aria-expanded')).toBe('false');
+    expect(branch).toBeNull();
+    expect(project?.getAttribute('aria-label')).not.toContain('temporarily expanded for search');
+    expect(disclosures).toHaveLength(1);
+    expect(disclosures[0].getAttribute('aria-label')).toContain('Expand');
     expect(renderer.state.projects[0].collapsed).toBe(true);
     expect(renderer.state.projects[0].worktrees?.[0].collapsed).toBe(true);
     expect(renderer.saveWorkspaceSoon).not.toHaveBeenCalled();
@@ -2235,14 +2222,13 @@ describe('Tauri Coven session project rail', () => {
       .toContain('coven-tone-warn');
   });
 
-  it('renders one global loading state across filtered nonmatching projects', () => {
+  it('renders one global loading state across empty projects', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
         { id: 'beta', name: 'Beta', root: '/beta' },
       ],
       phase: 'loading',
-      filter: 'not-a-project',
     });
 
     renderer.render();
@@ -2308,7 +2294,7 @@ describe('Tauri Coven session project rail', () => {
       .toEqual(['attached', 'local']);
   });
 
-  it('renders one global error across filtered nonmatching projects', () => {
+  it('renders one global error across empty projects', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
@@ -2316,7 +2302,6 @@ describe('Tauri Coven session project rail', () => {
       ],
       phase: 'error',
       message: 'Discovery failed',
-      filter: 'not-a-project',
     });
 
     renderer.render();
@@ -2327,20 +2312,20 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.querySelector('.session-empty')).toBeNull();
   });
 
-  it('treats idle discovery as silent and preserves the filtered empty state', () => {
+  it('treats idle discovery as silent and preserves the type-filter empty state', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
         { id: 'beta', name: 'Beta', root: '/beta' },
       ],
       phase: 'idle',
-      filter: 'not-a-project',
+      typeFilter: 'attention',
     });
 
     renderer.render();
     expect(renderer.sessionListEl.querySelector('.session-inline-state')).toBeNull();
     expect(renderer.sessionListEl.querySelector('.session-empty')?.textContent)
-      .toBe('No sessions match “not-a-project”');
+      .toBe('No sessions match the attention filter.');
   });
 
   it('hides selected empty worktrees while preserving populated worktree ownership and attention', () => {
@@ -2495,26 +2480,27 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.focusThread).toHaveBeenCalledWith('missing-session');
   });
 
-  it('searches local and daemon session metadata', () => {
+  it('leaves local and daemon sidebar rows unchanged while composer search owns matching', () => {
     const renderer = createRenderer({
       threads: [{ id: 'local', projectId: 'alpha', name: 'Review locally', status: 'running' }],
       sessions: [{
         id: 'daemon', projectRoot: '/alpha', title: 'Ship release', status: 'waiting',
         labels: ['source:psyche-build'],
       }],
+      composerQuery: '? ship',
     });
 
-    renderer.setFilter('ship');
     renderer.render();
-    expect(renderer.sessionListEl.querySelectorAll('.session-row')
-      .find((row) => row.dataset.sessionId === 'daemon')).toBeDefined();
+    expect(renderer.sessionListEl.querySelectorAll('.session-row').map((row) =>
+      row.dataset.sessionId ?? row.dataset.threadId)).toEqual(['daemon', 'local']);
 
-    renderer.setFilter('review');
+    renderer.composerInputEl.value = '? review';
     renderer.render();
-    expect(renderer.sessionListEl.querySelector('.session-row')?.dataset.threadId).toBe('local');
+    expect(renderer.sessionListEl.querySelectorAll('.session-row').map((row) =>
+      row.dataset.sessionId ?? row.dataset.threadId)).toEqual(['daemon', 'local']);
   });
 
-  it('highlights every visible matching field, including Coven source and status', () => {
+  it('renders session metadata without sidebar query highlighting', () => {
     const renderer = createRenderer({
       projects: [{
         id: 'psyche', name: 'PSYCHE-BUILD', root: '/repo/psyche-build',
@@ -2528,7 +2514,7 @@ describe('Tauri Coven session project rail', () => {
         title: 'Release agent', harness: 'codex', status: 'waiting',
         labels: ['source:psyche-build'],
       }],
-      filter: 'reply',
+      composerQuery: '? reply',
     });
 
     renderer.render();
@@ -2536,17 +2522,17 @@ describe('Tauri Coven session project rail', () => {
     const status = renderer.sessionListEl.querySelector('.session-status-label');
     expect(status?.textContent).toBe('REPLY');
     expect(descendants(status!).filter((element) => element.tagName === 'MARK')
-      .map((element) => element.textContent)).toEqual(['REPLY']);
+      .map((element) => element.textContent)).toEqual([]);
 
-    renderer.setFilter('coven');
+    renderer.composerInputEl.value = '? coven';
     renderer.render();
     const meta = renderer.sessionListEl.querySelector('.session-meta');
     expect(meta?.textContent).toContain('Coven');
     expect(descendants(meta!).filter((element) => element.tagName === 'MARK')
-      .map((element) => element.textContent)).toContain('Coven');
+      .map((element) => element.textContent)).toEqual([]);
   });
 
-  it('renders accurate result summaries and clear-search or reset-filter actions', () => {
+  it('renders accurate filter-only summaries and reset actions', () => {
     const renderer = createRenderer({
       projects: [
         {
@@ -2582,33 +2568,19 @@ describe('Tauri Coven session project rail', () => {
         title: 'Search durable', harness: 'Coven', status: 'running',
         labels: ['source:psyche-build'],
       }],
-      filter: 'search',
+      typeFilter: 'agents',
     });
 
     renderer.render();
     expect(renderer.sessionListEl.querySelector('.session-result-summary')?.textContent)
-      .toContain('3 sessions');
-    expect(renderer.sessionListEl.querySelector('.session-result-reset')?.textContent)
-      .toBe('Clear search');
-
-    const filtered = createRenderer({
-      projects: renderer.state.projects,
-      threads: renderer.state.threads,
-      sessions: [{
-        id: 'coven-search', projectRoot: '/repo/coven-cave', cwd: '/repo/coven-cave',
-        title: 'Search durable', harness: 'Coven', status: 'running',
-        labels: ['source:psyche-build'],
-      }],
-      typeFilter: 'agents',
-    });
-    filtered.render();
-    expect(filtered.sessionListEl.querySelector('.session-result-summary')?.textContent)
       .toContain('2 sessions');
-    expect(filtered.sessionListEl.querySelector('.session-result-reset')?.textContent)
+    expect(renderer.sessionListEl.querySelector('.session-result-reset')?.textContent)
       .toBe('Reset filter');
+    renderer.sessionListEl.querySelector('.session-result-reset')?.click();
+    expect(renderer.setSessionTypeFilter).toHaveBeenCalledWith('all');
   });
 
-  it('keeps search focus while results rerender and restores tree focus by stable key', () => {
+  it('keeps composer focus while the sidebar rerenders and restores tree focus by stable key', () => {
     const renderer = createRenderer({
       projects: [{
         id: 'psyche', name: 'PSYCHE-BUILD', root: '/repo/psyche-build',
@@ -2629,20 +2601,19 @@ describe('Tauri Coven session project rail', () => {
     renderer.render();
     expect(renderer.document.activeElement?.dataset.treeKey).toBe(branch?.dataset.treeKey);
 
-    renderer.sessionSearchEl.focus();
-    renderer.setFilter('search');
+    renderer.composerInputEl.focus();
     renderer.render();
-    expect(renderer.document.activeElement).toBe(renderer.sessionSearchEl);
+    expect(renderer.document.activeElement).toBe(renderer.composerInputEl);
   });
 
-  it('does not clear a valid persisted selection merely because search hides it', () => {
+  it('does not clear a valid persisted selection while composer search is open', () => {
     const renderer = createRenderer({
       selectedSessionKey: 'coven:daemon',
       sessions: [{
         id: 'daemon', projectRoot: '/alpha', title: 'Ship release', status: 'waiting',
         labels: ['source:psyche-build'],
       }],
-      filter: 'missing',
+      composerQuery: '? missing',
     });
 
     renderer.render();
@@ -2685,7 +2656,7 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.saveSettings).not.toHaveBeenCalled();
   });
 
-  it('does not reveal an empty worktree when its branch matches the search', () => {
+  it('does not reveal an empty worktree when composer search matches its branch', () => {
     const renderer = createRenderer({
       projects: [{
         id: 'alpha', name: 'Alpha', root: '/alpha',
@@ -2698,14 +2669,33 @@ describe('Tauri Coven session project rail', () => {
         id: 'feature', projectId: 'alpha', name: 'Feature work',
         status: 'running', worktreePath: '/alpha-feature',
       }],
+      composerQuery: '? main',
     });
 
-    renderer.setFilter('main');
     renderer.render();
 
-    expect(renderer.sessionListEl.querySelector('.session-worktree-group')).toBeNull();
-    expect(renderer.sessionListEl.querySelector('.session-empty')?.textContent)
-      .toBe('No sessions match “main”');
+    expect(renderer.sessionListEl.querySelectorAll('.session-worktree-group')).toHaveLength(1);
+    expect(renderer.sessionListEl.querySelector('.session-branch-name')?.textContent)
+      .toBe('feature');
+    expect(renderer.sessionListEl.querySelector('.session-empty')).toBeNull();
+  });
+
+  it('keeps sidebar query wiring removed while retaining persisted type filters', () => {
+    const rendererSource = extractFunctionSource(mainJs, 'renderSessionList');
+    const setTypeFilterSource = extractFunctionSource(mainJs, 'setSessionTypeFilter');
+
+    expect(indexHtml).not.toContain('id="session-search"');
+    expect(mainJs).not.toContain('var sessionSearchEl');
+    expect(mainJs).not.toContain('var sessionFilter');
+    expect(mainJs).not.toContain('sessionSearchEl.addEventListener');
+    expect(mainJs).not.toContain('if (event.key === "/")');
+    expect(mainJs).not.toContain('if (e.key === "/")');
+    expect(mainJs).toContain('var sessionTypeFilter = settings.sessionFilter;');
+    expect(setTypeFilterSource).toContain('settings.sessionFilter = sessionTypeFilter');
+    expect(rendererSource).toContain('var currentSearchQuery = "";');
+    expect(rendererSource).toContain('query: currentSearchQuery');
+    expect(rendererSource).toContain('filter: sessionTypeFilter');
+    expect(rendererSource).not.toContain('sessionSearch');
   });
 
   it('uses sibling local controls and preserves activation, keyboard rename, close, and empty behavior', async () => {
@@ -3397,7 +3387,7 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.closeThread).not.toHaveBeenCalled();
     });
 
-    it('does not steal search focus when rerender disarms confirmation', async () => {
+    it('does not steal composer focus when rerender disarms confirmation', async () => {
       const renderer = createRenderer({
         threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
       });
@@ -3406,26 +3396,26 @@ describe('Tauri Coven session project rail', () => {
       await row.querySelector('.session-close')?.emit('click');
       expect(row.querySelector('.session-close-confirm')).not.toBeNull();
 
-      renderer.sessionSearchEl.focus();
+      renderer.composerInputEl.focus();
       renderer.render();
 
-      expect(renderer.document.activeElement === renderer.sessionSearchEl).toBe(true);
+      expect(renderer.document.activeElement === renderer.composerInputEl).toBe(true);
       expect(renderer.sessionListEl.querySelector('.session-close-confirm')).toBeNull();
     });
 
-    it('does not steal search focus when an abandoned confirmation times out', async () => {
+    it('does not steal composer focus when an abandoned confirmation times out', async () => {
       const renderer = createRenderer({
         threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
       });
       renderer.render();
       const row = renderer.sessionListEl.querySelector('.session-row')!;
       await row.querySelector('.session-close')?.emit('click');
-      renderer.sessionSearchEl.focus();
+      renderer.composerInputEl.focus();
 
       vi.advanceTimersByTime(3000);
 
       expect(row.querySelector('.session-close-confirm')).toBeNull();
-      expect(renderer.document.activeElement === renderer.sessionSearchEl).toBe(true);
+      expect(renderer.document.activeElement === renderer.composerInputEl).toBe(true);
       expect(renderer.document.activeElement === row).toBe(false);
       expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
         (item) => item.getAttribute('tabindex') === '0',
@@ -3433,19 +3423,19 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.closeThread).not.toHaveBeenCalled();
     });
 
-    it('does not steal search focus when Escape disarms an abandoned confirmation', async () => {
+    it('does not steal composer focus when Escape disarms an abandoned confirmation', async () => {
       const renderer = createRenderer({
         threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
       });
       renderer.render();
       const row = renderer.sessionListEl.querySelector('.session-row')!;
       await row.querySelector('.session-close')?.emit('click');
-      renderer.sessionSearchEl.focus();
+      renderer.composerInputEl.focus();
 
       renderer.disarmSessionClose();
 
       expect(row.querySelector('.session-close-confirm')).toBeNull();
-      expect(renderer.document.activeElement === renderer.sessionSearchEl).toBe(true);
+      expect(renderer.document.activeElement === renderer.composerInputEl).toBe(true);
       expect(renderer.document.activeElement === row).toBe(false);
       expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
         (item) => item.getAttribute('tabindex') === '0',
@@ -3526,7 +3516,7 @@ describe('Tauri Coven session project rail', () => {
       )).toHaveLength(1);
     });
 
-    it('does not steal focus moved to search while a failed Coven close is pending', async () => {
+    it('does not steal focus moved to the composer while a failed Coven close is pending', async () => {
       let rejectInvoke!: (error: Error) => void;
       const pending = new Promise<never>((_resolve, reject) => { rejectInvoke = reject; });
       const renderer = createRenderer({ sessions: [session], invoke: () => pending });
@@ -3536,11 +3526,11 @@ describe('Tauri Coven session project rail', () => {
 
       await row.querySelector('.session-close')!.emit('click');
       await row.querySelector('.session-close-confirm')!.emit('click');
-      renderer.sessionSearchEl.focus();
+      renderer.composerInputEl.focus();
       rejectInvoke(new Error('daemon refused'));
       await vi.waitFor(() => expect(renderer.setStatus).toHaveBeenCalled());
 
-      expect(renderer.document.activeElement).toBe(renderer.sessionSearchEl);
+      expect(renderer.document.activeElement).toBe(renderer.composerInputEl);
       expect(renderer.document.activeElement).not.toBe(row);
       expect(renderer.refreshCovenSessions).not.toHaveBeenCalled();
     });
