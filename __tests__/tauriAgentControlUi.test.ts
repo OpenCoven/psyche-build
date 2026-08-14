@@ -160,8 +160,9 @@ describe('agent control operator model', () => {
     }]);
   });
 
-  it('renders exact requested resources, capabilities, and expiry before granting the unchanged request', async () => {
+  it('renders exact requested resources and after-grant TTL without fabricating an absolute expiry', async () => {
     const requested = snapshot();
+    requested.leaseRequests[0].createdAt = '2001-01-01T00:00:00.000Z';
     const longCapability = `browser.${'x'.repeat(1_000)}`;
     requested.leaseRequests[0].grants = [
       {
@@ -176,12 +177,12 @@ describe('agent control operator model', () => {
     const model = createAgentControlModel(requested, { now: NOW, operator: true });
     expect(model.groups.requested[0]).toMatchObject({
       ttlMs: 60_000,
-      expiresAt: '2026-08-13T00:56:00.000Z',
       resources: [
         { kind: 'pane', id: 'pane-2', generation: 5, capabilities: ['pane.observe', 'pane.input'] },
         { kind: 'browser_tab', id: 'tab-2', generation: 8, capabilities: ['browser.inspect', longCapability] },
       ],
     });
+    expect(model.groups.requested[0]).not.toHaveProperty('expiresAt');
 
     const document = new FakeDocument();
     const content = document.createElement('div');
@@ -190,8 +191,10 @@ describe('agent control operator model', () => {
 
     expect(content.textContent).toContain('pane:pane-2@5 · pane.observe, pane.input');
     expect(content.textContent).toContain('browser_tab:tab-2@8 · browser.inspect');
-    expect(content.textContent).toContain('60 seconds');
-    expect(content.textContent).toContain('2026-08-13T00:56:00.000Z');
+    expect(content.textContent).toContain('Expires 60s after grant');
+    expect(content.textContent).not.toContain('2001-01-01');
+    expect(content.textContent).not.toContain('2001-01-01T00:01:00.000Z');
+    expect(content.textContent).toContain('expires 2026-08-13T01:10:00.000Z');
     expect(content.textContent).not.toContain('payload');
     expect(content.textContent).not.toContain(longCapability);
     const requestRows = content.children[0].children

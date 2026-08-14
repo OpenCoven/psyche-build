@@ -103,11 +103,11 @@ function renderRequestedAuthority(document, request, callbacks, state, renderedK
     document,
     'div',
     'agent-control-meta',
-    `requested for ${ttlSeconds} seconds · expires ${boundedText(request.expiresAt, 40)}`,
+    `Expires ${ttlSeconds}s after grant`,
   );
   timing.setAttribute(
     'aria-label',
-    `Requested authority duration ${ttlSeconds} seconds; expires ${boundedText(request.expiresAt, 40)}`,
+    `Requested authority expires ${ttlSeconds} seconds after grant`,
   );
   card.append(timing);
   for (const resource of request.resources) {

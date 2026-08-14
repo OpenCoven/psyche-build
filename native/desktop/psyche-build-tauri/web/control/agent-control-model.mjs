@@ -36,21 +36,12 @@ function requestCard(request, operator) {
   });
   const createdAt = String(request.createdAt || '');
   const ttlMs = Number(request.ttlMs || 0);
-  const createdAtMs = Date.parse(createdAt);
-  const expiresAtMs = createdAtMs + ttlMs;
-  const expiresAt = Number.isFinite(createdAtMs)
-    && Number.isFinite(ttlMs)
-    && Number.isFinite(expiresAtMs)
-    && Math.abs(expiresAtMs) <= 8.64e15
-    ? new Date(expiresAtMs).toISOString()
-    : '';
   return {
     requestId: String(request.id || ''),
     agentId: String(request.actorId || ''),
     taskId: String(request.taskId || ''),
     createdAt,
     ttlMs,
-    expiresAt,
     resources,
     canGrant: operator && request.status === 'pending',
   };
