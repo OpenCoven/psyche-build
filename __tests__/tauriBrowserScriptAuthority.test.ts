@@ -30,11 +30,38 @@ function runtimeSource(): string {
   ), 'utf8');
 }
 
+function workerRuntimeSource(): string {
+  return readFileSync(new URL(
+    '../native/desktop/psyche-build-tauri/web/control/browser-script-worker-runtime.js',
+    import.meta.url,
+  ), 'utf8');
+}
+
 async function runIsolated(source: string, args: unknown = null): Promise<Record<string, unknown>> {
   const context = createContext({ TextEncoder, performance });
   const encoded = JSON.stringify({ source, args });
   const result = await runInContext(`${runtimeSource()}(${encoded})`, context) as string;
   return JSON.parse(result) as Record<string, unknown>;
+}
+
+async function runWorker(
+  source: string,
+  args: unknown = null,
+  snapshot: unknown = { nodes: [] },
+): Promise<Record<string, unknown>> {
+  const messages: unknown[] = [];
+  const context = createContext({
+    TextEncoder,
+    performance,
+    postMessage(value: unknown) { messages.push(value); },
+  });
+  runInContext(workerRuntimeSource(), context);
+  await runInContext(
+    `onmessage({ data: ${JSON.stringify({ source, args, snapshot })} })`,
+    context,
+  );
+  expect(messages).toHaveLength(1);
+  return messages[0] as Record<string, unknown>;
 }
 
 describe('native browser script authority', () => {
@@ -90,5 +117,200 @@ describe('native browser script authority', () => {
     `);
 
     expect(envelope).toEqual({ ok: false, code: 'serialization_failed' });
+  });
+
+  it('removes scheduling, network, import, and nested-worker authority', async () => {
+    const envelope = await runWorker(`
+      return {
+        fetch: typeof fetch,
+        xhr: typeof XMLHttpRequest,
+        socket: typeof WebSocket,
+        eventSource: typeof EventSource,
+        timer: typeof setTimeout,
+        clearTimer: typeof clearTimeout,
+        interval: typeof setInterval,
+        clearInterval: typeof clearInterval,
+        animation: typeof requestAnimationFrame,
+        cancelAnimation: typeof cancelAnimationFrame,
+        microtask: typeof queueMicrotask,
+        importScripts: typeof importScripts,
+        worker: typeof Worker,
+        sharedWorker: typeof SharedWorker,
+        broadcastChannel: typeof BroadcastChannel,
+        postMessage: typeof postMessage,
+        close: typeof close,
+        addEventListener: typeof addEventListener,
+        removeEventListener: typeof removeEventListener,
+        mutationObserver: typeof MutationObserver,
+        resizeObserver: typeof ResizeObserver,
+        intersectionObserver: typeof IntersectionObserver,
+        indexedDB: typeof indexedDB,
+        caches: typeof caches,
+      };
+    `);
+
+    expect(envelope).toEqual({
+      ok: true,
+      value: {
+        fetch: 'undefined',
+        xhr: 'undefined',
+        socket: 'undefined',
+        eventSource: 'undefined',
+        timer: 'undefined',
+        clearTimer: 'undefined',
+        interval: 'undefined',
+        clearInterval: 'undefined',
+        animation: 'undefined',
+        cancelAnimation: 'undefined',
+        microtask: 'undefined',
+        importScripts: 'undefined',
+        worker: 'undefined',
+        sharedWorker: 'undefined',
+        broadcastChannel: 'undefined',
+        postMessage: 'undefined',
+        close: 'undefined',
+        addEventListener: 'undefined',
+        removeEventListener: 'undefined',
+        mutationObserver: 'undefined',
+        resizeObserver: 'undefined',
+        intersectionObserver: 'undefined',
+        indexedDB: 'undefined',
+        caches: 'undefined',
+      },
+      mutations: [],
+    });
+  });
+
+  it('exposes immutable snapshot queries and all declarative mutation builders', async () => {
+    const envelope = await runWorker(`
+      const node = page.get("n1");
+      const snapshotIsFrozen = Object.isFrozen(page.snapshot)
+        && Object.isFrozen(page.snapshot.nodes)
+        && Object.isFrozen(page.snapshot.nodes[0]);
+      try { page.snapshot.nodes[0].tagName = "BUTTON"; } catch (_) {}
+      page.setText(node.id, args.text);
+      page.setAttribute(node.id, "aria-label", "Updated");
+      page.removeAttribute(node.id, "title");
+      page.setProperty(node.id, "disabled", false);
+      page.setFormValue(node.id, "value");
+      page.setChecked(node.id, true);
+      page.focus(node.id);
+      return {
+        tag: page.get("n1").tagName,
+        missing: page.get("missing"),
+        snapshotIsFrozen,
+      };
+    `, { text: 'Hello' }, {
+      nodes: [{
+        id: 'n1',
+        tagName: 'INPUT',
+        text: '',
+        attributes: { title: 'Old' },
+        value: '',
+      }],
+    });
+
+    expect(envelope).toEqual({
+      ok: true,
+      value: { tag: 'INPUT', missing: null, snapshotIsFrozen: true },
+      mutations: [
+        { kind: 'set_text', nodeId: 'n1', value: 'Hello' },
+        { kind: 'set_attribute', nodeId: 'n1', name: 'aria-label', value: 'Updated' },
+        { kind: 'remove_attribute', nodeId: 'n1', name: 'title' },
+        { kind: 'set_property', nodeId: 'n1', name: 'disabled', value: false },
+        { kind: 'set_form_value', nodeId: 'n1', value: 'value' },
+        { kind: 'set_checked', nodeId: 'n1', value: true },
+        { kind: 'focus', nodeId: 'n1' },
+      ],
+    });
+  });
+
+  it('returns canonical cloned JSON after approved source poisons ambient intrinsics', async () => {
+    const envelope = await runWorker(`
+      try {
+        Object.defineProperty(Object.prototype, "toJSON", {
+          value() { return "forged"; },
+        });
+      } catch (_) {}
+      globalThis.JSON = {
+        parse() { return "forged"; },
+        stringify() { return '"forged"'; },
+      };
+      globalThis.Object = {
+        getPrototypeOf() { return null; },
+        getOwnPropertyDescriptor() { return null; },
+      };
+      globalThis.TextEncoder = class {
+        encode() { return new Uint8Array(); }
+      };
+      page.setProperty("n1", "state", { enabled: true });
+      return { answer: args.value + 1, items: [null, "ok", 3] };
+    `, { value: 41 }, {
+      nodes: [{ id: 'n1', tagName: 'DIV', text: '', attributes: {} }],
+    });
+
+    expect(envelope).toEqual({
+      ok: true,
+      value: { answer: 42, items: [null, 'ok', 3] },
+      mutations: [{
+        kind: 'set_property',
+        nodeId: 'n1',
+        name: 'state',
+        value: { enabled: true },
+      }],
+    });
+  });
+
+  it('rejects accessors and non-canonical values', async () => {
+    const accessor = await runWorker('return { get secret() { return 1; } };');
+    const cyclic = await runWorker('const value = {}; value.self = value; return value;');
+    const symbol = await runWorker('return { value: Symbol("secret") };');
+    const nonFinite = await runWorker('return { value: Infinity };');
+    const prototype = await runWorker('return new Date(0);');
+
+    expect(accessor).toEqual({ ok: false, code: 'serialization_failed' });
+    expect(cyclic).toEqual({ ok: false, code: 'serialization_failed' });
+    expect(symbol).toEqual({ ok: false, code: 'serialization_failed' });
+    expect(nonFinite).toEqual({ ok: false, code: 'serialization_failed' });
+    expect(prototype).toEqual({ ok: false, code: 'serialization_failed' });
+  });
+
+  it('rejects more than 256 mutations', async () => {
+    const envelope = await runWorker(`
+      for (let index = 0; index < 257; index += 1) page.setText("n1", "x");
+      return null;
+    `, null, {
+      nodes: [{ id: 'n1', tagName: 'DIV', text: '', attributes: {} }],
+    });
+    const caught = await runWorker(`
+      try {
+        for (let index = 0; index < 257; index += 1) page.setText("n1", "x");
+      } catch (_) {}
+      return null;
+    `, null, {
+      nodes: [{ id: 'n1', tagName: 'DIV', text: '', attributes: {} }],
+    });
+
+    expect(envelope).toEqual({ ok: false, code: 'mutation_plan_invalid' });
+    expect(caught).toEqual({ ok: false, code: 'mutation_plan_invalid' });
+  });
+
+  it('rejects result envelopes larger than 256 KiB', async () => {
+    const envelope = await runWorker('return "x".repeat(262144);');
+
+    expect(envelope).toEqual({ ok: false, code: 'result_too_large' });
+  });
+
+  it('does not share poisoned globals between Worker VM invocations', async () => {
+    const first = await runWorker(`
+      globalThis.__psycheWorkerPoison = true;
+      return { installed: globalThis.__psycheWorkerPoison };
+    `);
+    const second = await runWorker(`
+      return { poisoned: globalThis.__psycheWorkerPoison === true };
+    `);
+
+    expect(first).toEqual({ ok: true, value: { installed: true }, mutations: [] });
+    expect(second).toEqual({ ok: true, value: { poisoned: false }, mutations: [] });
   });
 });
