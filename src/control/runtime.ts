@@ -123,7 +123,10 @@ interface SurfaceActionContext {
 }
 
 interface PaneQueueState {
+  readonly target: LeaseTarget;
   readonly items: Set<QueuedCommand>;
+  pendingEffects: number;
+  quarantined: boolean;
   tail: Promise<void>;
   blocker?: Promise<void>;
 }
@@ -211,11 +214,16 @@ export class ControlRuntime {
   private readonly resolveBrowserElementSemantics?: ControlRuntimeOptions['resolveBrowserElementSemantics'];
 
   submit(command: ControlCommand): Promise<CommandOutcome> {
+    this.pruneInactiveResourceQueues();
     const prior = this.outcomesByIdempotencyKey.get(command.idempotencyKey);
     if (prior) return Promise.resolve(prior);
 
     const pending = this.pendingByIdempotencyKey.get(command.idempotencyKey);
     if (pending) return pending;
+
+    if (this.pendingByIdempotencyKey.size >= AGENT_CONTROL_LIMITS.pendingCommands) {
+      return Promise.resolve(rejectedOutcome('runtime_busy', 'control runtime pending command capacity exceeded'));
+    }
 
     const execution = this.submitFresh(command).finally(() => {
       this.pendingByIdempotencyKey.delete(command.idempotencyKey);
@@ -684,6 +692,17 @@ export class ControlRuntime {
 
   private async enqueueSurfaceEffect(context: SurfaceActionContext): Promise<ActionReceipt> {
     const queue = this.queueForResource(context.target);
+    if (queue.quarantined) {
+      const receipt = this.makeReceipt(context.command, context.target, 'unknown', { code: 'effect_unknown' });
+      this.rememberReceipt(receipt);
+      return receipt;
+    }
+    if (queue.pendingEffects >= AGENT_CONTROL_LIMITS.resourceQueueDepth) {
+      const receipt = this.makeReceipt(context.command, context.target, 'failed', { code: 'queue_full' });
+      this.rememberReceipt(receipt);
+      return receipt;
+    }
+    queue.pendingEffects += 1;
     const key = resourceKey(context.target);
     const prior = queue.tail;
     let release!: () => void;
@@ -709,15 +728,24 @@ export class ControlRuntime {
       }
       let value: unknown;
       try {
-        switch (context.command.kind) {
-          case 'pane.observe': value = await this.handlers.observePane(context.command.payload); break;
-          case 'pane.action': value = await this.handlers.actOnPane(context.command.payload); break;
-          case 'browser.inspect': value = await this.handlers.inspectBrowser(context.command.payload); break;
-          case 'browser.action': value = await this.handlers.actOnBrowser(executableBrowserPayload(context.command.payload)); break;
-          case 'browser.script': value = await this.handlers.runBrowserScript(context.command.payload); break;
-        }
+        const effect = (() => {
+          switch (context.command.kind) {
+            case 'pane.observe': return this.handlers.observePane(context.command.payload);
+            case 'pane.action': return this.handlers.actOnPane(context.command.payload);
+            case 'browser.inspect': return this.handlers.inspectBrowser(context.command.payload);
+            case 'browser.action': return this.handlers.actOnBrowser(executableBrowserPayload(context.command.payload));
+            case 'browser.script': return this.handlers.runBrowserScript(context.command.payload);
+          }
+        })();
+        value = await withTimeout(
+          effect,
+          context.command.kind === 'browser.script'
+            ? AGENT_CONTROL_LIMITS.scriptTimeoutMs
+            : AGENT_CONTROL_LIMITS.actionTimeoutMs,
+        );
       } catch (error) {
         const ambiguous = Boolean(error && typeof error === 'object' && (error as { ambiguous?: unknown }).ambiguous);
+        if (errorCodeIs(error, 'effect_timeout')) queue.quarantined = true;
         const receipt = this.makeReceipt(context.command, context.target, ambiguous ? 'unknown' : 'failed', {
           code: ambiguous ? 'effect_unknown' : stableSurfaceEffectCode(error),
         });
@@ -737,6 +765,7 @@ export class ControlRuntime {
       this.rememberReceipt(receipt);
       return receipt;
     } finally {
+      queue.pendingEffects -= 1;
       release();
       void tail.then(() => this.pruneResourceQueue(key, queue, tail));
     }
@@ -1253,10 +1282,26 @@ export class ControlRuntime {
     const key = resourceKey(target);
     let queue = this.resourceQueues.get(key);
     if (!queue) {
-      queue = { items: new Set<QueuedCommand>(), tail: Promise.resolve() };
+      queue = {
+        target: Object.freeze({ ...target }), items: new Set<QueuedCommand>(), pendingEffects: 0,
+        quarantined: false, tail: Promise.resolve(),
+      };
       this.resourceQueues.set(key, queue);
     }
     return queue;
+  }
+
+  private pruneInactiveResourceQueues(): void {
+    for (const [key, queue] of this.resourceQueues) {
+      if (!queue.quarantined || queue.items.size > 0 || queue.pendingEffects > 0 || queue.blocker !== undefined) {
+        continue;
+      }
+      if (queue.target.kind === 'project') continue;
+      const current = this.surfaces.get(queue.target.id);
+      if (!current || current.kind !== queue.target.kind || current.generation !== queue.target.generation) {
+        this.resourceQueues.delete(key);
+      }
+    }
   }
 
   private pruneResourceQueue(key: string, queue: PaneQueueState, tail: Promise<void>): void {
@@ -1264,6 +1309,8 @@ export class ControlRuntime {
       this.resourceQueues.get(key) === queue
       && queue.tail === tail
       && queue.items.size === 0
+      && queue.pendingEffects === 0
+      && !queue.quarantined
       && queue.blocker === undefined
     ) {
       this.resourceQueues.delete(key);
@@ -1299,6 +1346,23 @@ export class ControlRuntime {
     return surface?.kind === 'pane'
       ? { kind: 'pane', id: paneId, generation: surface.generation }
       : { kind: 'pane', id: paneId, generation: 0 };
+  }
+}
+
+async function withTimeout<T>(effect: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      reject(Object.assign(new Error('surface effect timed out'), {
+        ambiguous: true,
+        code: 'effect_timeout',
+      }));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([effect, expired]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }
 

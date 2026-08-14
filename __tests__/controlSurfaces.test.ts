@@ -137,6 +137,8 @@ describe('SurfaceRegistry', () => {
       leaseRequestTextBytes: 128,
       leaseRequestCapabilityBytes: 64,
       approvalTtlMs: 5 * 60_000,
+      pendingCommands: 256,
+      resourceQueueDepth: 64,
       paneOutputBytes: 64 * 1024,
       paneOutputChunks: 512,
       semanticNodes: 2_000,

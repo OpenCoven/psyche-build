@@ -18,4 +18,6 @@ export const AGENT_CONTROL_LIMITS = Object.freeze({
   scriptResultBytes: 256 * 1024,
   actionTimeoutMs: 15_000,
   scriptTimeoutMs: 5_000,
+  pendingCommands: 256,
+  resourceQueueDepth: 64,
 });

@@ -88,6 +88,7 @@ async function submit(runtime: ControlRuntime, input: ControlCommand) {
 async function createBrowserActionHarness(options: {
   resolver?: (input: { snapshotId: string; elementRef: string }) => ReturnType<typeof createCanonicalElementSemantics>;
   actOnBrowser?: ControlHandlers['actOnBrowser'];
+  runBrowserScript?: ControlHandlers['runBrowserScript'];
 } = {}) {
   const journal = createMemoryJournal();
   const surfaces = new SurfaceRegistry();
@@ -103,6 +104,7 @@ async function createBrowserActionHarness(options: {
     () => `approval-review-${++approvalId}`,
   );
   if (options.actOnBrowser) handlers.actOnBrowser = options.actOnBrowser;
+  if (options.runBrowserScript) handlers.runBrowserScript = options.runBrowserScript;
   const runtime = await ControlRuntime.create({
     ownerEpoch: 7, handlers, journal, surfaces, capabilityLeases, approvals,
     resolveBrowserElementSemantics: options.resolver
@@ -116,6 +118,20 @@ async function createBrowserActionHarness(options: {
   }));
   const lease = (grant as { value: { lease: { id: string; revision: number } } }).value.lease;
   return { runtime, journal, surfaces, capabilityLeases, approvals, tab, lease };
+}
+
+function browserScriptCommand(
+  harness: Awaited<ReturnType<typeof createBrowserActionHarness>>,
+  id: string,
+  source: string,
+) {
+  return command({
+    id, idempotencyKey: id, kind: 'browser.script', ownerEpoch: 7,
+    actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+      taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+      tabId: harness.tab.id, generation: harness.tab.generation, source,
+    },
+  }) as unknown as Extract<ControlCommand, { kind: 'browser.script' }>;
 }
 
 async function requestReviewApproval(harness: Awaited<ReturnType<typeof createBrowserActionHarness>>) {
@@ -725,6 +741,119 @@ describe('ControlRuntime', () => {
     await expect(harness.runtime.submit(action)).resolves.toMatchObject({ status: 'failed' });
     expect(harness.runtime.snapshot().approvals).toHaveLength(0);
     expect(handlers.runBrowserScript).not.toHaveBeenCalled();
+  });
+
+  it('marks timed out browser scripts unknown without retrying them', async () => {
+    vi.useFakeTimers();
+    try {
+      const runBrowserScript = vi.fn(() => new Promise<never>(() => undefined));
+      const harness = await createBrowserActionHarness({ runBrowserScript });
+      const action = browserScriptCommand(harness, 'script-timeout', 'return pending;');
+      const requested = await harness.runtime.submit(action);
+      const approval = (requested as { value: { approvalId: string; payloadDigest: string } }).value;
+      const resolution = harness.runtime.submit(command({
+        id: 'script-timeout-resolve', idempotencyKey: 'script-timeout-resolve',
+        kind: 'approval.resolve', ownerEpoch: 7, payload: {
+          approvalId: approval.approvalId, payloadDigest: approval.payloadDigest, decision: 'approve',
+        },
+      }));
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runBrowserScript).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(resolution).resolves.toMatchObject({ status: 'unknown', code: 'effect_unknown' });
+
+      const grant = await submit(harness.runtime, command({
+        id: 'grant-after-timeout', idempotencyKey: 'grant-after-timeout', kind: 'lease.grant', ownerEpoch: 7,
+        payload: { requestId: 'request-after-timeout', actorId: 'agent-review', taskId: 'task-review', ttlMs: 60_000,
+          grants: [{ target: { kind: 'browser_tab', id: harness.tab.id, generation: harness.tab.generation },
+            capabilities: ['browser.inspect'] }] },
+      }));
+      const lease = (grant as { value: { lease: { id: string; revision: number } } }).value.lease;
+      await expect(harness.runtime.submit(command({
+        id: 'inspect-after-timeout', idempotencyKey: 'inspect-after-timeout',
+        kind: 'browser.inspect', ownerEpoch: 7, actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+          taskId: 'task-review', leaseId: lease.id, leaseRevision: lease.revision,
+          tabId: harness.tab.id, generation: harness.tab.generation,
+        },
+      }))).resolves.toMatchObject({ status: 'unknown', code: 'effect_unknown' });
+      expect(handlers.inspectBrowser).not.toHaveBeenCalled();
+
+      expect((harness.runtime as unknown as {
+        resourceQueues: Map<string, unknown>;
+      }).resourceQueues.size).toBe(1);
+      harness.surfaces.upsertBrowserTab({
+        id: harness.tab.id, projectRoot: harness.tab.projectRoot, worktreeRoot: harness.tab.worktreeRoot,
+        providerId: 'replacement-provider', webviewLabel: 'replacement', url: harness.tab.url,
+        title: harness.tab.title, loading: harness.tab.loading, viewport: harness.tab.viewport,
+      });
+      await harness.runtime.submit(command({
+        id: 'prune-stale-quarantine', idempotencyKey: 'prune-stale-quarantine',
+        kind: 'orchestration.execute', ownerEpoch: 7, payload: { request: {} },
+      }));
+      expect((harness.runtime as unknown as {
+        resourceQueues: Map<string, unknown>;
+      }).resourceQueues.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds pending commands before retaining another unresolved execution', async () => {
+    handlers.executeOrchestration = vi.fn(() => new Promise<never>(() => undefined));
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
+    for (let index = 0; index < 256; index += 1) {
+      void runtime.submit(command({
+        id: `pending-${index}`, idempotencyKey: `pending-${index}`,
+        kind: 'orchestration.execute', ownerEpoch: 7, payload: { request: {} },
+      }));
+    }
+
+    await expect(runtime.submit(command({
+      id: 'pending-overflow', idempotencyKey: 'pending-overflow',
+      kind: 'orchestration.execute', ownerEpoch: 7, payload: { request: {} },
+    }))).resolves.toMatchObject({ status: 'rejected', code: 'runtime_busy' });
+  });
+
+  it('bounds queued effects per resource and recovers capacity after draining', async () => {
+    const harness = await createBrowserActionHarness();
+    const grant = await submit(harness.runtime, command({
+      id: 'grant-inspection', idempotencyKey: 'grant-inspection', kind: 'lease.grant', ownerEpoch: 7,
+      payload: { requestId: 'request-inspection', actorId: 'agent-review', taskId: 'task-review', ttlMs: 60_000,
+        grants: [{ target: { kind: 'browser_tab', id: harness.tab.id, generation: harness.tab.generation },
+          capabilities: ['browser.inspect'] }] },
+    }));
+    const inspectionLease = (grant as { value: { lease: { id: string; revision: number } } }).value.lease;
+    const release = harness.runtime.blockResourceQueue({
+      kind: 'browser_tab', id: harness.tab.id, generation: harness.tab.generation,
+    });
+    const actions = Array.from({ length: 64 }, (_, index) =>
+      harness.runtime.submit(command({
+        id: `inspect-${index}`, idempotencyKey: `inspect-${index}`,
+        kind: 'browser.inspect', ownerEpoch: 7, actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+          taskId: 'task-review', leaseId: inspectionLease.id, leaseRevision: inspectionLease.revision,
+          tabId: harness.tab.id, generation: harness.tab.generation,
+        },
+      })),
+    );
+    const overflow = harness.runtime.submit(command({
+      id: 'inspect-overflow', idempotencyKey: 'inspect-overflow',
+      kind: 'browser.inspect', ownerEpoch: 7, actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: inspectionLease.id, leaseRevision: inspectionLease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation,
+      },
+    }));
+
+    await expect(overflow).resolves.toMatchObject({ status: 'failed', code: 'queue_full' });
+    release();
+    await expect(Promise.all(actions)).resolves.toHaveLength(64);
+    await expect(harness.runtime.submit(command({
+      id: 'inspect-after-drain', idempotencyKey: 'inspect-after-drain',
+      kind: 'browser.inspect', ownerEpoch: 7, actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: inspectionLease.id, leaseRevision: inspectionLease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation,
+      },
+    }))).resolves.toMatchObject({ status: 'succeeded' });
   });
 
   it('rejects grants for missing generations and non-canonical project targets', async () => {
