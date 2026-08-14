@@ -80,9 +80,10 @@ SHA-256 and byte counts, never source.
 
 State, events, and stored receipts contain allowlisted metadata only. They do
 not persist terminal output, semantic/page contents, screenshots, typed/secret
-values, scripts, cookies, headers, full paths, directory names, or backend error
-details. A redacted basename may be retained only for approval context, and a
-redacted target description may identify the requested effect. Pane reads,
+values, scripts, cookies, headers, absolute/full paths or unredacted path
+components, or backend error details. A redacted basename may be retained only
+for approval context, and a redacted target description may identify the
+requested effect. Pane reads,
 semantic trees, screenshots, and script return values are bounded response data,
 not journal payloads.
 
