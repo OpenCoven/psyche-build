@@ -18,6 +18,11 @@ function element(document, tag, className, text) {
 const drawerStates = new WeakMap();
 const lifecycleByToggle = new WeakMap();
 
+function actionTarget(container, actionKey) {
+  return [...container.querySelectorAll('[data-action-key]')]
+    .find((node) => node.dataset.actionKey === actionKey) || null;
+}
+
 function actionButton(document, label, actionKey, action, state, error, onStateChange) {
   const button = element(document, 'button', 'agent-control-action', label);
   button.type = 'button';
@@ -57,7 +62,7 @@ function appendAction(document, parent, label, actionKey, action, state, onState
       error.textContent = '';
       error.hidden = true;
       dismiss.hidden = true;
-      const target = parent.querySelector(`[data-action-key="${actionKey}"]`);
+      const target = actionTarget(parent, actionKey);
       if (target && typeof target.focus === 'function') target.focus();
     });
     parent.append(dismiss);
@@ -163,7 +168,7 @@ export function renderAgentControlDrawer(container, model, callbacks = {}) {
     container.append(card);
   }
   if (focusedKey) {
-    const focusTarget = container.querySelector(`[data-action-key="${focusedKey}"]`);
+    const focusTarget = actionTarget(container, focusedKey);
     if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
   }
   return { failures: state.failures };

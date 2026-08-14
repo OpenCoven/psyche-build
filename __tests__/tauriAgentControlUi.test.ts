@@ -104,6 +104,7 @@ class FakeElement {
   querySelectorAll(selector: string): FakeElement[] {
     const descendants = this.children.flatMap((child) => [child, ...child.querySelectorAll(selector)]);
     if (selector.includes('button')) return descendants.filter((child) => child.tagName === 'BUTTON' && !child.disabled && !child.hidden);
+    if (selector === '[data-action-key]') return descendants.filter((child) => Boolean(child.dataset.actionKey));
     const actionKey = selector.match(/^\[data-action-key="(.+)"\]$/)?.[1];
     return actionKey ? descendants.filter((child) => child.dataset.actionKey === actionKey) : [];
   }
@@ -211,6 +212,12 @@ describe('agent control operator model', () => {
     expect(setIntervalFn).toHaveBeenCalledOnce();
     expect(toggle.listeners.get('click')?.size).toBe(1);
     expect(overlay.listeners.get('keydown')?.size).toBe(1);
+    toggle.dispatch('click');
+    expect(overlay.hidden).toBe(false);
+    const escape = overlay.dispatch('keydown', { key: 'Escape' });
+    expect(escape.preventDefault).toHaveBeenCalledOnce();
+    expect(overlay.hidden).toBe(true);
+    expect(document.activeElement).toBe(toggle);
     restoredBoot!.dispose();
     expect(clearIntervalFn).toHaveBeenCalledWith(41);
     expect(toggle.listeners.get('click')?.size).toBe(0);
