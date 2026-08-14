@@ -227,7 +227,12 @@ describe('native browser script authority', () => {
         fetch: typeof fetch,
         xhr: typeof XMLHttpRequest,
         socket: typeof WebSocket,
+        socketStream: typeof WebSocketStream,
+        webTransport: typeof WebTransport,
         eventSource: typeof EventSource,
+        fontFace: typeof FontFace,
+        fontFaceSet: typeof FontFaceSet,
+        fonts: typeof fonts,
         timer: typeof setTimeout,
         clearTimer: typeof clearTimeout,
         interval: typeof setInterval,
@@ -248,6 +253,15 @@ describe('native browser script authority', () => {
         intersectionObserver: typeof IntersectionObserver,
         indexedDB: typeof indexedDB,
         caches: typeof caches,
+        peerConnection: typeof RTCPeerConnection,
+        messageChannel: typeof MessageChannel,
+        messagePort: typeof MessagePort,
+        scheduler: typeof scheduler,
+        cookieStore: typeof cookieStore,
+        navigator: typeof navigator,
+        location: typeof location,
+        notification: typeof Notification,
+        reportError: typeof reportError,
       };
     `);
 
@@ -257,7 +271,12 @@ describe('native browser script authority', () => {
         fetch: 'undefined',
         xhr: 'undefined',
         socket: 'undefined',
+        socketStream: 'undefined',
+        webTransport: 'undefined',
         eventSource: 'undefined',
+        fontFace: 'undefined',
+        fontFaceSet: 'undefined',
+        fonts: 'undefined',
         timer: 'undefined',
         clearTimer: 'undefined',
         interval: 'undefined',
@@ -278,6 +297,15 @@ describe('native browser script authority', () => {
         intersectionObserver: 'undefined',
         indexedDB: 'undefined',
         caches: 'undefined',
+        peerConnection: 'undefined',
+        messageChannel: 'undefined',
+        messagePort: 'undefined',
+        scheduler: 'undefined',
+        cookieStore: 'undefined',
+        navigator: 'undefined',
+        location: 'undefined',
+        notification: 'undefined',
+        reportError: 'undefined',
       },
       mutations: [],
     });
@@ -286,13 +314,16 @@ describe('native browser script authority', () => {
   it('scrubs callable authority from the complete Worker global prototype chain', async () => {
     let inheritedFetchCalls = 0;
     const authorityNames = [
-      'fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource',
+      'fetch', 'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'WebTransport', 'EventSource',
+      'FontFace', 'FontFaceSet', 'fonts',
       'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
       'requestAnimationFrame', 'cancelAnimationFrame', 'queueMicrotask',
       'importScripts', 'Worker', 'SharedWorker', 'BroadcastChannel',
       'postMessage', 'close', 'addEventListener', 'removeEventListener',
       'MutationObserver', 'ResizeObserver', 'IntersectionObserver',
-      'indexedDB', 'caches',
+      'RTCPeerConnection', 'MessageChannel', 'MessagePort', 'scheduler',
+      'indexedDB', 'caches', 'cookieStore', 'navigator', 'location',
+      'Notification', 'reportError',
     ];
     const envelope = await runWorker(`
       const callable = [];
@@ -330,6 +361,39 @@ describe('native browser script authority', () => {
     expect(inheritedFetchCalls).toBe(0);
   });
 
+  it('removes Worker font-loading authority before approved source runs', async () => {
+    let fontLoadCalls = 0;
+    const envelope = await runWorker(`
+      return {
+        fontFace: typeof FontFace,
+        fontFaceSet: typeof FontFaceSet,
+        fonts: typeof fonts,
+      };
+    `, null, { nodes: [] }, {
+      globals: {
+        FontFace: class {
+          load() {
+            fontLoadCalls += 1;
+            return Promise.resolve(this);
+          }
+        },
+        FontFaceSet: class {},
+        fonts: { load() { fontLoadCalls += 1; return Promise.resolve([]); } },
+      },
+    });
+
+    expect(envelope).toEqual({
+      ok: true,
+      value: {
+        fontFace: 'undefined',
+        fontFaceSet: 'undefined',
+        fonts: 'undefined',
+      },
+      mutations: [],
+    });
+    expect(fontLoadCalls).toBe(0);
+  });
+
   it('rejects direct and comment-obfuscated ImportExpression syntax before execution', async () => {
     const executions: string[] = [];
     const globals = { mark(value: string) { executions.push(value); } };
@@ -356,12 +420,19 @@ describe('native browser script authority', () => {
       }
       return null;
     `, null, { nodes: [] }, { globals });
+    const unicodeIdentifier = await runWorker(`
+      const π = 1;
+      π / await import("data:,export default 6") / 2;
+      mark("unicode-identifier");
+      return null;
+    `, null, { nodes: [] }, { globals });
 
     expect(direct).toEqual({ ok: false, code: 'automation_failed' });
     expect(obfuscated).toEqual({ ok: false, code: 'automation_failed' });
     expect(unicodeWhitespace).toEqual({ ok: false, code: 'automation_failed' });
     expect(templateExpression).toEqual({ ok: false, code: 'automation_failed' });
     expect(divisionObfuscated).toEqual({ ok: false, code: 'automation_failed' });
+    expect(unicodeIdentifier).toEqual({ ok: false, code: 'automation_failed' });
     expect(executions).toEqual([]);
   });
 
@@ -420,19 +491,17 @@ describe('native browser script authority', () => {
     });
   });
 
-  it('allows inert import text in strings, comments, template raw text, and regex literals', async () => {
+  it('allows inert import text in strings, comments, and template raw text', async () => {
     const envelope = await runWorker(`
       const single = 'import("string")';
       const double = "import('string')";
       const template = \`import("template")\`;
-      const regex = /import\\(/;
       // import("line-comment")
       /* import("block-comment") */
       return {
         single,
         double,
         template,
-        regexMatches: regex.test("import("),
       };
     `);
 
@@ -442,10 +511,22 @@ describe('native browser script authority', () => {
         single: 'import("string")',
         double: "import('string')",
         template: 'import("template")',
-        regexMatches: true,
       },
       mutations: [],
     });
+  });
+
+  it('rejects regex literals rather than guessing whether a slash starts a regex', async () => {
+    const executions: string[] = [];
+    const envelope = await runWorker(`
+      mark("executed");
+      return /safe/.test("safe");
+    `, null, { nodes: [] }, {
+      globals: { mark(value: string) { executions.push(value); } },
+    });
+
+    expect(envelope).toEqual({ ok: false, code: 'automation_failed' });
+    expect(executions).toEqual([]);
   });
 
   it('exposes immutable snapshot queries and all declarative mutation builders', async () => {

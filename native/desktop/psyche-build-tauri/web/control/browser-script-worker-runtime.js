@@ -72,13 +72,16 @@
   const MAX_MUTATIONS = 256;
   const MAX_RESULT_BYTES = 262144;
   const blocked = [
-    "fetch", "XMLHttpRequest", "WebSocket", "EventSource",
+    "fetch", "XMLHttpRequest", "WebSocket", "WebSocketStream", "WebTransport", "EventSource",
+    "FontFace", "FontFaceSet", "fonts",
     "setTimeout", "clearTimeout", "setInterval", "clearInterval",
     "requestAnimationFrame", "cancelAnimationFrame", "queueMicrotask",
     "importScripts", "Worker", "SharedWorker", "BroadcastChannel",
     "postMessage", "close", "addEventListener", "removeEventListener",
     "MutationObserver", "ResizeObserver", "IntersectionObserver",
-    "indexedDB", "caches",
+    "RTCPeerConnection", "MessageChannel", "MessagePort", "scheduler",
+    "indexedDB", "caches", "cookieStore", "navigator", "location",
+    "Notification", "reportError",
   ];
   const shadowed = ["eval", "Function"];
   for (let index = 0; index < blocked.length; index += 1) {
@@ -174,7 +177,7 @@
     code === 36 || code === 95;
   const isIdentifierPart = (code) =>
     isIdentifierStart(code) || (code >= 48 && code <= 57);
-  const hasImportExpression = (value) => {
+  const sourceIsUnsafe = (value) => {
     const source = $String(value);
     const length = source.length;
     const skipSpaceAndComments = (start) => {
@@ -212,35 +215,6 @@
           index += 2;
         } else if (character === quote) {
           return index + 1;
-        } else if (character === "\n" || character === "\r" ||
-                   character === "\u2028" || character === "\u2029") {
-          return -1;
-        } else {
-          index += 1;
-        }
-      }
-      return -1;
-    };
-    const skipRegex = (start) => {
-      let index = start + 1;
-      let characterClass = false;
-      while (index < length) {
-        const character = source[index];
-        if (character === "\\") {
-          index += 2;
-        } else if (character === "[" && !characterClass) {
-          characterClass = true;
-          index += 1;
-        } else if (character === "]" && characterClass) {
-          characterClass = false;
-          index += 1;
-        } else if (character === "/" && !characterClass) {
-          index += 1;
-          while (index < length &&
-                 isIdentifierPart(source.charCodeAt(index))) {
-            index += 1;
-          }
-          return index;
         } else if (character === "\n" || character === "\r" ||
                    character === "\u2028" || character === "\u2029") {
           return -1;
@@ -311,16 +285,16 @@
         }
         if (character === "/") {
           if (canStartRegex) {
-            index = skipRegex(index);
-            if (index < 0) return { rejected: true, index: length };
-            canStartRegex = false;
-            previousToken = "literal";
+            return { rejected: true, index: length };
           } else {
             index += source[index + 1] === "=" ? 2 : 1;
             canStartRegex = true;
             previousToken = "operator";
           }
           continue;
+        }
+        if (code > 127 || character === "\\") {
+          return { rejected: true, index: length };
         }
         if (isIdentifierStart(code)) {
           const identifierStart = index;
@@ -593,7 +567,7 @@
       const args = input.args === undefined ? null : input.args;
       const snapshot = input.snapshot === undefined ? { nodes: [] } : input.snapshot;
       const source = $String(input.source || "");
-      if (!authorityScrubbed || hasImportExpression(source)) {
+      if (!authorityScrubbed || sourceIsUnsafe(source)) {
         finish({ ok: false, code: "automation_failed" });
         return;
       }
