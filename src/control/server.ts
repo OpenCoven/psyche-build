@@ -43,6 +43,8 @@ export interface ControlServerOptions {
   runtime: ControlServerRuntime;
   credentials: ControlCredentialStore;
   broker?: BrowserProviderBroker;
+  /** Never enable outside isolated tests; bearer tokens are not human-presence proof. */
+  operatorCommandPolicy?: 'disabled' | 'trusted-test-only';
 }
 
 /** Cap a single newline-delimited frame so a peer cannot exhaust host memory. */
@@ -256,6 +258,7 @@ export class ControlServer {
     private readonly authority: ControlAuthority,
     private readonly credentials: ControlCredentialStore,
     private readonly canonicalRoot: string,
+    private readonly operatorCommandPolicy: NonNullable<ControlServerOptions['operatorCommandPolicy']>,
     private readonly broker?: BrowserProviderBroker,
   ) {}
 
@@ -274,6 +277,7 @@ export class ControlServer {
       authority,
       options.credentials,
       canonicalRoot,
+      options.operatorCommandPolicy ?? 'disabled',
       options.broker,
     );
 
@@ -474,6 +478,20 @@ export class ControlServer {
           });
           return;
         }
+        if (principal.kind === 'operator' && this.operatorCommandPolicy === 'disabled') {
+          write({
+            version: 1,
+            type: 'command.result',
+            requestId: request.requestId,
+            commandId: request.command.id,
+            outcome: {
+              status: 'rejected',
+              code: 'operator_authority_unavailable',
+              message: 'operator commands require a native user-presence approval broker',
+            },
+          });
+          return;
+        }
         const outcome = await this.authority.submitAs(
           principal,
           request.command,
@@ -509,6 +527,14 @@ export class ControlServer {
         return;
       }
       case 'provider.register': {
+        if (this.operatorCommandPolicy === 'disabled') {
+          write({
+            version: 1, type: 'error', requestId: request.requestId,
+            code: 'provider_authority_unavailable',
+            message: 'provider registration requires a native identity broker',
+          });
+          return;
+        }
         if (principal.kind !== 'operator') {
           write({
             version: 1, type: 'error', requestId: request.requestId,
