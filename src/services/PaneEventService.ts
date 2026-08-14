@@ -178,7 +178,8 @@ export class PaneEventService extends EventEmitter {
       });
 
       this.pollingWorker.on('error', (error) => {
-        this.logger.error(`Polling worker error: ${error.message}`, 'paneEvents');
+        const workerError = error instanceof Error ? error : new Error(String(error));
+        this.logger.error(`Polling worker error: ${workerError.message}`, 'paneEvents');
       });
 
       this.pollingWorker.on('exit', (code) => {

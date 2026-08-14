@@ -12,12 +12,15 @@ export function substituteText(
   global: boolean,
   limit: number,
 ): SubstituteResult | undefined {
-  const expression = new RegExp(compiled.source, compiled.flags.replace('g', '') + (global ? 'g' : ''));
   let replacements = 0;
-  const next = text.replace(expression, (...args: unknown[]) => {
-    replacements += 1;
-    return replacements <= limit ? replacement : String(args[0]);
-  });
+  const flags = compiled.flags.replace('g', '') + (global ? 'g' : '');
+  const next = text.split('\n').map((line) => line.replace(
+    new RegExp(compiled.source, flags),
+    (...args: unknown[]) => {
+      replacements += 1;
+      return replacements <= limit ? replacement : String(args[0]);
+    },
+  )).join('\n');
   if (replacements > limit) return undefined;
   return { text: next, replacements };
 }

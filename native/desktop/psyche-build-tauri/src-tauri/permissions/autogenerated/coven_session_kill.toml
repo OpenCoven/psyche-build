@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-coven-session-kill"
+description = "Enables the coven_session_kill command without any pre-configured scope."
+commands.allow = ["coven_session_kill"]
+
+[[permission]]
+identifier = "deny-coven-session-kill"
+description = "Denies the coven_session_kill command without any pre-configured scope."
+commands.deny = ["coven_session_kill"]

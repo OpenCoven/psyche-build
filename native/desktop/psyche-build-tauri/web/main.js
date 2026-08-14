@@ -1,5 +1,5 @@
 // psyche — Tauri prototype workspace shell
-// One module, no bundler. Uses UMD globals (Terminal, FitAddon) and the
+// One module, no bundler. The runtime bundle owns xterm's UMD globals and the
 // global Tauri API surface exposed via `withGlobalTauri: true`.
 
 (function () {
@@ -26,6 +26,17 @@
     showBootError("Unhandled promise rejection:\n" + String(e.reason));
   });
 
+  function initializeTitlebarBrandMark() {
+    var mark = document.getElementById("titlebar-brand-mark");
+    if (!mark) return;
+    function removeFailedMark() {
+      mark.remove();
+    }
+    mark.addEventListener("error", removeFailedMark, { once: true });
+    if (mark.complete && mark.naturalWidth === 0) removeFailedMark();
+  }
+  initializeTitlebarBrandMark();
+
   if (typeof window.Terminal !== "function") {
     showBootError("xterm.js did not register a global Terminal constructor.");
     return;
@@ -38,8 +49,16 @@
     );
     return;
   }
+  if (!window.PsycheRuntime ||
+      typeof window.PsycheRuntime.createTerminalPaneController !== "function" ||
+      typeof window.PsycheRuntime.FrameScheduler !== "function") {
+    showBootError("PTY runtime bundle missing. Run `pnpm --dir native/desktop/psyche-build-tauri build:web`.");
+    return;
+  }
 
   var statusController = null;
+  var ptyRuntime = window.PsycheRuntime;
+  var terminalFrameScheduler = new ptyRuntime.FrameScheduler(requestAnimationFrame);
   var invokeNative = window.__TAURI__.core.invoke;
   var listen = window.__TAURI__.event.listen;
   var opener = window.__TAURI__.opener || null;
@@ -82,7 +101,7 @@
   /**
    * threads = ordered list of { id, projectId, name, kind, command, args, env,
    *                             status: 'starting'|'running'|'exited',
-   *                             term, fit, host, lastBytes }
+   *                             term, terminalController, host, lastBytes }
    *   `pane` is the thread's framed pane in the canvas; `host` is the xterm
    *   container inside it. Placement lives in the per-worktree pane tree
    *   (`paneLayouts`), not on the thread.
@@ -94,12 +113,12 @@
     threads: [],
     activeProjectId: null,
     activeThreadId: null,
-    /** Files opened from the Files panel. These are the *only* things the main
-     *  tab strip shows; projects are switched from the sessions sidebar.
+    /** Files opened from the Files panel. These are the only things the Files
+     *  pane's tab strip shows; projects are switched from the sessions sidebar.
      *  { id, path, rel, name, projectId, text, originalText, dirty, saving,
      *    languageId, cursor, selection, truncated, binary, size, error, saveError } */
     openFiles: [],
-    /** Non-null while a file tab owns the main area instead of the terminal. */
+    /** The selected tab in the mounted Files pane, whether or not it has focus. */
     activeFileId: null,
     /** Discovered slash commands the active agent harness will recognise.
      *  Refreshed on boot and on project switch via `agent_skills`. */
@@ -111,6 +130,7 @@
     returnThreadId: null,
   };
   var paneLayouts = new Map();
+  var filesPanes = new Map();
   var imageDropScaleFactor = 1;
   var imageDropTarget = null;
   var covenEnsureFlights = new Map();
@@ -122,7 +142,8 @@
   var covenPollTimer = null;
   var COVEN_POLL_MS = 5000;
   var paneCounter = 0;
-  var visiblePaneFitFrame = 0;
+  var MAX_PENDING_PTY_INPUT_BYTES = 1024 * 1024;
+  var MAX_PENDING_PTY_INPUT_WRITES = 256;
   var PANE_METRICS_POLL_MS = 15000;
   var paneMetricsPollTimer = 0;
   var paneFooterPopoverCleanup = null;
@@ -130,8 +151,13 @@
   var paneFooterPopoverOwner = null;
   var paneFooterPopoverTrigger = null;
   var paneFooterPopoverThreadId = null;
+  var projectAppearancePopover = null;
+  var projectAppearancePopoverRestoreKey = "";
   var browserTabLifecycleStates = new WeakMap();
   var browserPaneLifecycleStates = new WeakMap();
+  var browserControlProviders = new Map();
+  var browserAutomationWaiters = new Map();
+  var browserAutomationSnapshotRefs = new Map();
   // Matches --pane-min-w / --pane-min-h: the tree's arithmetic and the pane's
   // own CSS floor have to agree, or a layout the tree calls valid renders
   // overflowing. 200x137 includes the fixed 27px footer rail.
@@ -139,13 +165,14 @@
 
   function handleVisibilityChange() {
     if (document.hidden || document.visibilityState === "hidden") {
-      saveWorkspaceNow();
+      saveWorkspaceNow().catch(function () {});
       stopCovenPolling();
     } else {
       startCovenPolling();
       if (typeof refreshStatusController === "function") refreshStatusController();
     }
     syncPaneMetricsVisibility();
+    syncAllPtyVisibility();
   }
 
   /**
@@ -164,6 +191,189 @@
   function activeProject() {
     return findProject(state.activeProjectId) || state.projects[0] || null;
   }
+  var agentControlModel = null;
+  var agentControlOwnerEpoch = null;
+  var agentControlProjectRoot = null;
+  var agentControlRefreshRequestId = 0;
+  var agentControlRefreshFlight = null;
+  var agentControlRefreshQueued = false;
+  var agentControlUiLifecycle = null;
+
+  function agentControlCommand(project, command) {
+    var currentProject = activeProject();
+    if (!project || !currentProject || currentProject.root !== project.root ||
+        agentControlProjectRoot !== project.root) {
+      var projectError = new Error("agent control project changed");
+      projectError.code = "control_project_changed";
+      return Promise.reject(projectError);
+    }
+    return invoke("control_operator_submit", { projectRoot: project.root, command: command }).then(function (response) {
+      var outcome = response && response.outcome;
+      if (!outcome || outcome.status !== "succeeded") {
+        var error = new Error(outcome && outcome.message || "operator command failed");
+        error.code = outcome && outcome.code;
+        throw error;
+      }
+      return outcome;
+    });
+  }
+
+  function updateAgentControlBadges(model) {
+    document.querySelectorAll(".agent-control-badge").forEach(function (badge) { badge.remove(); });
+    if (!model || !window.PsycheControl) return;
+    document.querySelectorAll(".terminal-pane[data-thread-id]").forEach(function (pane) {
+      var threadId = pane.dataset.threadId;
+      var resource = window.PsycheControl.surfaceResourceIdentity(model, "pane", threadId);
+      if (resource) pane.dataset.controlGeneration = String(resource.generation);
+      else delete pane.dataset.controlGeneration;
+      var badge = window.PsycheControl.resourceLeaseBadge(model, resource);
+      var header = pane.querySelector(".terminal-pane-header");
+      if (!badge || !header) return;
+      var node = document.createElement("span");
+      node.className = "agent-control-badge";
+      node.textContent = "leased · " + badge.capabilitySummary;
+      node.setAttribute("aria-label", "Leased to " + badge.agentId + " for " + badge.taskId + " with " + badge.capabilitySummary + " until " + badge.expiresAt);
+      node.dataset.leaseId = badge.leaseId;
+      node.dataset.leaseRevision = String(badge.revision);
+      header.appendChild(node);
+    });
+    document.querySelectorAll(".browser-tab[data-tab-id]").forEach(function (tabNode) {
+      var resource = window.PsycheControl.surfaceResourceIdentity(model, "browser_tab", tabNode.dataset.tabId);
+      if (resource) tabNode.dataset.controlGeneration = String(resource.generation);
+      else delete tabNode.dataset.controlGeneration;
+      var badge = window.PsycheControl.resourceLeaseBadge(model, resource);
+      if (!badge) return;
+      var node = document.createElement("span");
+      node.className = "agent-control-badge";
+      node.textContent = "leased · " + badge.capabilitySummary;
+      node.setAttribute("aria-label", "Leased to " + badge.agentId + " for " + badge.taskId + " with " + badge.capabilitySummary + " until " + badge.expiresAt);
+      node.dataset.leaseId = badge.leaseId;
+      node.dataset.leaseRevision = String(badge.revision);
+      tabNode.appendChild(node);
+    });
+  }
+
+  function renderAgentControl() {
+    var content = document.getElementById("agent-control-content");
+    var count = document.getElementById("agent-control-count");
+    var project = activeProject();
+    var model = project && project.root === agentControlProjectRoot ? agentControlModel : null;
+    if (count) {
+      count.textContent = String(model ? model.pendingCount : 0);
+      count.hidden = !model || model.pendingCount === 0;
+    }
+    updateAgentControlBadges(model);
+    if (!content || !window.PsycheControl) return;
+    if (!model || !project) {
+      content.replaceChildren();
+      return;
+    }
+    window.PsycheControl.renderAgentControlDrawer(content, model, {
+      onGrant: function (request) {
+        return agentControlCommand(project, {
+          type: "lease_grant", requestId: request.requestId,
+        });
+      },
+      onDeny: function (approval) {
+        return agentControlCommand(project, {
+          type: "approval_resolve", approvalId: approval.approvalId,
+          payloadDigest: approval.payloadDigest, decision: "deny",
+        });
+      },
+      onApprove: function (approval) {
+        return agentControlCommand(project, {
+          type: "approval_resolve", approvalId: approval.approvalId,
+          payloadDigest: approval.payloadDigest, decision: "approve",
+        });
+      },
+      onRevoke: function (target) {
+        return agentControlCommand(project, { type: "lease_revoke", leaseId: target.leaseId });
+      },
+      onStateChange: refreshAgentControlState,
+    });
+  }
+
+  function refreshAgentControlState() {
+    var project = activeProject();
+    if (!project || !window.PsycheControl) return Promise.resolve(null);
+    if (agentControlRefreshFlight) {
+      agentControlRefreshQueued = true;
+      return agentControlRefreshFlight;
+    }
+    var projectRoot = project.root;
+    var requestId = ++agentControlRefreshRequestId;
+    var flight = invoke("control_state", { projectRoot: projectRoot }).then(function (response) {
+      var currentProject = activeProject();
+      if (requestId !== agentControlRefreshRequestId || !currentProject || currentProject.root !== projectRoot) {
+        return null;
+      }
+      var snapshot = response && response.snapshot ? response.snapshot : response;
+      agentControlModel = window.PsycheControl.createAgentControlModel(snapshot || {}, {
+        operator: true,
+        previousOwnerEpoch: agentControlOwnerEpoch,
+        projectRoot: projectRoot,
+      });
+      agentControlOwnerEpoch = agentControlModel.ownerEpoch;
+      agentControlProjectRoot = projectRoot;
+      renderAgentControl();
+      return agentControlModel;
+    }).catch(function () {
+      var currentProject = activeProject();
+      if (requestId !== agentControlRefreshRequestId || !currentProject || currentProject.root !== projectRoot) {
+        return null;
+      }
+      agentControlModel = null;
+      agentControlOwnerEpoch = null;
+      agentControlProjectRoot = null;
+      renderAgentControl();
+      return null;
+    }).finally(function () {
+      if (agentControlRefreshFlight === flight) agentControlRefreshFlight = null;
+      if (agentControlRefreshQueued) {
+        agentControlRefreshQueued = false;
+        void refreshAgentControlState();
+      }
+    });
+    agentControlRefreshFlight = flight;
+    return flight;
+  }
+
+  function resetAgentControlProject(project) {
+    agentControlRefreshRequestId += 1;
+    agentControlRefreshQueued = false;
+    agentControlModel = null;
+    agentControlOwnerEpoch = null;
+    agentControlProjectRoot = null;
+    renderAgentControl();
+    if (project) void refreshAgentControlState();
+  }
+
+  function assignActiveProjectId(id, options) {
+    if (state.activeProjectId === id) return false;
+    state.activeProjectId = id;
+    if (!options || options.resetAgentControl !== false) {
+      resetAgentControlProject(findProject(id));
+    }
+    return true;
+  }
+
+  function installAgentControlUi() {
+    var toggle = document.getElementById("agent-control-toggle");
+    var overlay = document.getElementById("agent-control-overlay");
+    var close = document.getElementById("agent-control-close");
+    if (!toggle || !overlay || !close || !window.PsycheControl) return null;
+    agentControlUiLifecycle = window.PsycheControl.installAgentControlUiLifecycle({
+      toggle: toggle,
+      overlay: overlay,
+      close: close,
+      refresh: refreshAgentControlState,
+    });
+    return agentControlUiLifecycle;
+  }
+  window.addEventListener("beforeunload", function () {
+    if (agentControlUiLifecycle) agentControlUiLifecycle.dispose();
+    agentControlUiLifecycle = null;
+  });
   function mergeWorktreePresentationState(project, discovered) {
     var existing = Array.isArray(project.worktrees) ? project.worktrees : [];
     return (Array.isArray(discovered) ? discovered : []).map(function (worktree) {
@@ -193,6 +403,28 @@
   }
   function paneLayoutFor(projectId, worktreePath) {
     return paneLayouts.get(paneLayoutKey(projectId, worktreePath)) || null;
+  }
+  function filesPaneKey(projectId, workspaceRoot) {
+    return paneLayoutKey(projectId, workspaceRoot);
+  }
+  function ensureFilesPane(project, workspaceRoot) {
+    var key = filesPaneKey(project.id, workspaceRoot);
+    var existing = filesPanes.get(key);
+    if (existing) return existing;
+    var filesPane = {
+      id: nextPaneId("files"),
+      kind: "files",
+      projectId: project.id,
+      workspaceRoot: workspaceRoot,
+      activeFileId: null,
+      previousFocusedSessionId: state.activeThreadId || null,
+      pane: null,
+      host: null,
+    };
+    filesPanes.set(key, filesPane);
+    commitPanePlacement(prepareFilesPanePlacement(filesPane));
+    mountFilesPane(filesPane);
+    return filesPane;
   }
   function activePaneLayout() {
     var project = activeProject();
@@ -248,20 +480,27 @@
     project.selectedWorktreePath = worktreePath;
     var layout = paneLayoutFor(project.id, worktreePath);
     var leaf = layout && PsychePanes.findLeafById(layout.root, layout.focusedLeafId);
-    var thread = leaf && findThread(leaf.threadId);
+    var surface = leaf && (typeof canvasSurfaceById === "function"
+      ? canvasSurfaceById(leaf.threadId)
+      : findThread(leaf.threadId));
+    var thread = surface && findThread(surface.id);
     var activeThread = thread &&
       thread.kind !== "coven-chat" && thread.kind !== "coven-attach"
         ? thread
         : null;
     state.activeThreadId = activeThread ? activeThread.id : null;
     if (activeThread) project.lastActiveThreadId = activeThread.id;
+    if (typeof restoreFilesPaneSelection === "function") {
+      restoreFilesPaneSelection(project, worktreePath);
+    }
     clearPassiveCovenPaneFocus(layout);
   }
   async function activateProjectWorktree(project, worktreePath, options) {
     var refreshStatus = !options || options.refreshStatus !== false;
-    if (!project || !(await showTerminalView())) return false;
+    if (!project) return false;
     var previousWorktreePath = project.selectedWorktreePath;
     var projectChanged = project.id !== state.activeProjectId;
+    if (!(await showTerminalView())) return false;
     project.selectedWorktreePath = worktreePath;
     if (projectChanged) {
       var projectOptions = Object.assign({}, options || {}, { refreshStatus: false });
@@ -273,7 +512,7 @@
       activatePaneLayoutFocus(project, worktreePath);
     }
     if (!projectChanged) {
-      renderPaneWorkspace();
+      renderPaneWorkspace({ preserveTerminalFocus: false });
       renderGitSurface();
     }
     loadAgentSkills();
@@ -320,8 +559,41 @@
     if (!PsychePanes.canFit(root, measuredTerminalHost(), PANE_MINIMUMS)) return null;
     return { key: key, value: { root: root, focusedLeafId: leaf.id } };
   }
+  function prepareFilesPanePlacement(filesPane) {
+    var key = filesPaneKey(filesPane.projectId, filesPane.workspaceRoot);
+    var current = paneLayouts.get(key) || null;
+    var filesLeaf = PsychePanes.createLeaf(filesPane.id, filesPane.id);
+    var focusedLeaf = current && current.root
+      ? PsychePanes.findLeafById(current.root, current.focusedLeafId)
+      : null;
+    var focusedLeafId = focusedLeaf
+      ? focusedLeaf.id
+      : (current && current.root ? PsychePanes.leafIds(current.root)[0] : null);
+    var proposedRoot = current && current.root
+      ? PsychePanes.insertRelative(
+          current.root,
+          focusedLeafId,
+          filesLeaf,
+          nextPaneId("split"),
+          "right"
+        )
+      : filesLeaf;
+    var value = Object.assign({}, current || {}, {
+      root: proposedRoot,
+      focusedLeafId: filesLeaf.id,
+      spanRoot: null,
+      spanSignature: null,
+    });
+    value.maximizedLeafId = PsychePanes.canFit(
+      proposedRoot,
+      measuredTerminalHost(),
+      PANE_MINIMUMS
+    ) ? null : filesLeaf.id;
+    return { key: key, value: value };
+  }
   function commitPanePlacement(placement) {
     paneLayouts.set(placement.key, placement.value);
+    saveWorkspaceSoon();
   }
   function covenDiscoveryScopes() {
     return state.projects.map(function (project) {
@@ -596,14 +868,18 @@
     var refreshStatus = !options || options.refreshStatus !== false;
     if (state.activeProjectId === id) return true;
     if (!(await showTerminalView())) return false;
-    state.activeProjectId = id;
     var project = findProject(id);
     if (!project) return false;
+    if (typeof assignActiveProjectId === "function") assignActiveProjectId(id);
+    else Object.assign(state, { activeProjectId: id });
     clearPassiveCovenPaneFocus();
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
     // Restore the project's last-focused thread, falling back to its first.
     var workspaceRoot = activeWorkspaceRoot(project);
+    if (typeof restoreFilesPaneSelection === "function") {
+      restoreFilesPaneSelection(project, workspaceRoot);
+    }
     var threads = state.threads.filter(function (t) {
       return t.projectId === id && t.worktreePath === workspaceRoot && !t.hidden &&
         t.kind !== "coven-chat" && t.kind !== "coven-attach";
@@ -624,7 +900,7 @@
       await focusThread(nextId, focusOptions);
     } else {
       state.activeThreadId = null;
-      renderPaneWorkspace();
+      renderPaneWorkspace({ preserveTerminalFocus: false });
       refreshSidebar();
       refreshTabs();
       syncProjectBrowser();
@@ -661,10 +937,22 @@
   var MIN_BG_OPACITY = 0.3;
   var MAX_BG_OPACITY = 1;
   var SETTINGS_KEY = "psyche.tauri.settings.v1";
-  var WORKSPACE_STATE_KEY = "psyche.tauri.workspace.v1";
+  var PROJECT_APPEARANCES_KEY = "psyche.tauri.project-appearances.v1";
+  var deferredStatusMessages = [];
+  var LEGACY_WORKSPACE_STATE_KEY = "psyche.tauri.workspace.v1";
   var settings = loadSettings();
+  var projectAppearances = loadProjectAppearances();
   var isRestoringWorkspace = false;
   var saveWorkspaceTimer = 0;
+
+  function terminalTheme() {
+    return {
+      background: "rgba(0, 0, 0, 0)",
+      foreground: "#ece9f5",
+      cursor: "#a78bfa",
+      selectionBackground: "rgba(167,139,250,0.30)",
+    };
+  }
 
   function clampInt(value, fallback, min, max) {
     var n = parseInt(value, 10);
@@ -675,6 +963,20 @@
     var n = parseFloat(value);
     if (!Number.isFinite(n)) return fallback;
     return Math.max(min, Math.min(max, n));
+  }
+  function queueDeferredStatus(text, level) {
+    deferredStatusMessages.push({
+      text: String(text),
+      level: typeof level === "string" ? level : "",
+    });
+  }
+  function flushDeferredStatusMessages() {
+    if (!deferredStatusMessages.length) return;
+    deferredStatusMessages.forEach(function (entry) {
+      if (entry.level === "error") showStatusError(entry.text);
+      else setStatus(entry.text, entry.level);
+    });
+    deferredStatusMessages = [];
   }
   function loadSettings() {
     var defaults = {
@@ -701,6 +1003,16 @@
       };
     } catch (_) { return defaults; }
   }
+  function loadProjectAppearances() {
+    try {
+      return PsycheSessions.parseProjectAppearances(
+        localStorage.getItem(PROJECT_APPEARANCES_KEY)
+      );
+    } catch (error) {
+      queueDeferredStatus("project appearance load failed: " + String(error), "error");
+      return {};
+    }
+  }
   function saveSettings() {
     settings.maxProjects = clampInt(settings.maxProjects, 10, 1, HARD_MAX_PROJECTS);
     settings.maxBrowserTabsPerProject = clampInt(settings.maxBrowserTabsPerProject, 10, 1, HARD_MAX_BROWSER_TABS_PER_PROJECT);
@@ -711,6 +1023,18 @@
     settings.sessionFilter = PsycheSessions.normalizeSidebarFilter(settings.sessionFilter);
     settings.selectedSessionKey = typeof settings.selectedSessionKey === "string" ? settings.selectedSessionKey.slice(0, 1024) : "";
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }
+  function saveProjectAppearances() {
+    try {
+      localStorage.setItem(
+        PROJECT_APPEARANCES_KEY,
+        JSON.stringify(projectAppearances)
+      );
+      return true;
+    } catch (error) {
+      showStatusError("project appearance save failed: " + String(error));
+      return false;
+    }
   }
 
   // ---- Background opacity ----
@@ -725,6 +1049,9 @@
     settings.theme = t;
     document.documentElement.setAttribute("data-theme", t);
     if (themeSelectEl && themeSelectEl.value !== t) themeSelectEl.value = t;
+    state.threads.forEach(function (thread) {
+      if (thread.terminalController) thread.terminalController.setTheme(terminalTheme());
+    });
     if (!opts || opts.persist !== false) saveSettings();
   }
   function applySolidBg(on, opts) {
@@ -756,28 +1083,64 @@
   function persistableProject(project) {
     return { id: project.id, name: project.name, root: project.root, collapsed: !!project.collapsed, selectedWorktreePath: project.selectedWorktreePath, worktreePresentation: (project.worktrees || []).map(function (worktree) { return { path: worktree.path, collapsed: !!worktree.collapsed }; }), browsersByWorktree: persistableBrowsers(project) };
   }
+  function persistableSession(thread) {
+    if (!thread || !thread.launch ||
+        ["shell", "psyche", "coven-chat", "coven-attach"].indexOf(thread.launch.launchKind) === -1) {
+      return null;
+    }
+    return {
+      id: thread.id,
+      projectId: thread.projectId,
+      worktreePath: thread.worktreePath,
+      name: thread.name,
+      kind: thread.kind,
+      launchKind: thread.launch.launchKind,
+      hidden: thread.hidden === true,
+      covenSessionId: thread.launch.covenSessionId || null,
+    };
+  }
+  function persistablePaneLayouts() {
+    var records = [];
+    paneLayouts.forEach(function (layout, key) {
+      var separator = key.indexOf("\u0000");
+      if (separator === -1 || !layout || !layout.root) return;
+      records.push({
+        projectId: key.slice(0, separator),
+        worktreePath: key.slice(separator + 1),
+        root: layout.root,
+        focusedLeafId: layout.focusedLeafId || null,
+      });
+    });
+    return records;
+  }
+  function buildPersistedWorkspace() {
+    return {
+      version: 3,
+      activeProjectId: state.activeProjectId || null,
+      activeThreadId: state.activeThreadId || null,
+      projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS),
+      sessions: state.threads.map(persistableSession).filter(Boolean),
+      paneLayouts: persistablePaneLayouts(),
+    };
+  }
   function workspaceModel() {
     return window.PsycheWorkspace || null;
-  }
-  function workspaceSnapshotV2() {
-    return { version: 2, activeProjectId: state.activeProjectId || null, projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS) };
   }
   var workspaceSaveQueue = Promise.resolve();
   function saveWorkspaceNow() {
     if (isRestoringWorkspace) return workspaceSaveQueue;
-    var snapshot = workspaceSnapshotV2();
-    try {
-      localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify(snapshot));
-    } catch (_) {}
-    // The native store is authoritative on load; localStorage above stays as a
-    // fallback for webviews where the command is unavailable.
     var model = workspaceModel();
-    if (!model) return workspaceSaveQueue;
-    var workspace = model.importWorkspaceV2(snapshot);
+    if (!model) return Promise.reject(new Error("workspace model is unavailable"));
+    var workspace = model.sanitizeWorkspaceV3(buildPersistedWorkspace());
+    if (!workspace) return Promise.reject(new Error("workspace state is invalid"));
+    workspaceSaveQueue = workspaceSaveQueue.catch(function () {});
     workspaceSaveQueue = workspaceSaveQueue.then(function () {
       return invoke("workspace_save", { workspace: workspace });
+    }).then(function () {
+      return true;
     }).catch(function (error) {
       setStatus("workspace save failed: " + String(error), "error");
+      throw error;
     });
     return workspaceSaveQueue;
   }
@@ -786,22 +1149,31 @@
     if (saveWorkspaceTimer) cancelAnimationFrame(saveWorkspaceTimer);
     saveWorkspaceTimer = requestAnimationFrame(function () {
       saveWorkspaceTimer = 0;
-      saveWorkspaceNow();
+      saveWorkspaceNow().catch(function () {});
     });
   }
-  function readSavedWorkspace() {
-    try { var saved = JSON.parse(localStorage.getItem(WORKSPACE_STATE_KEY) || "null"); return saved && Array.isArray(saved.projects) ? saved : null; } catch (_) { return null; }
+  async function readSavedWorkspace() {
+    var model = workspaceModel();
+    if (!model) return null;
+    try {
+      var saved = await invoke("workspace_load");
+      if (saved) {
+        var sanitized = model.sanitizeWorkspaceV3(saved);
+        if (!sanitized) setStatus("workspace restore failed: invalid workspace v3", "error");
+        return sanitized;
+      }
+    } catch (error) {
+      setStatus("workspace restore failed: " + String(error), "error");
+      return null;
+    }
+    try {
+      var legacy = JSON.parse(localStorage.getItem(LEGACY_WORKSPACE_STATE_KEY) || "null");
+      return legacy && Array.isArray(legacy.projects) ? model.importWorkspaceV2(legacy) : null;
+    } catch (_) {
+      return null;
+    }
   }
   async function loadSavedWorkspace() {
-    var model = workspaceModel();
-    if (model) {
-      try {
-        var native = model.sanitizeWorkspaceV3(await invoke("workspace_load"));
-        if (native && native.projects.length) {
-          return { version: 2, activeProjectId: native.activeProjectId, projects: native.projects };
-        }
-      } catch (_) {}
-    }
     return readSavedWorkspace();
   }
   function sanitizeSavedProject(saved) {
@@ -864,9 +1236,12 @@
   var appEl = document.getElementById("app");
   var sidebarEl = document.getElementById("sidebar");
   var sidebarMiniEl = document.getElementById("sidebar-mini");
+  var sidebarCollapseEl = document.getElementById("sidebar-collapse");
+  var sidebarExpandEl = document.getElementById("sidebar-expand");
   var sidebarResizeEl = document.getElementById("sidebar-resize");
   var newPaneMenuEl = document.getElementById("new-pane-menu");
   var newPaneMenuHeadEl = document.getElementById("new-pane-menu-head");
+  var statusAlertEl = document.getElementById("status-alert");
   var toastEl = document.getElementById("toast");
   var helpOverlayEl = document.getElementById("help-overlay");
   var agentPickerOverlayEl = document.getElementById("agent-picker-overlay");
@@ -1123,20 +1498,37 @@
   // Short-lived confirmation for actions whose effect happens off-screen
   // (for example, a pane spawned behind a maximised pane).
   var toastTimer = 0;
-  function toast(message) {
+  function toast(message, duration, options) {
     if (!toastEl) return;
+    var announce = !options || options.announce !== false;
+    if (announce) {
+      if (toastEl.getAttribute("aria-hidden") === "true") {
+        toastEl.textContent = "";
+      }
+      toastEl.removeAttribute("aria-hidden");
+    } else {
+      toastEl.setAttribute("aria-hidden", "true");
+    }
     toastEl.textContent = message;
-    toastEl.hidden = false;
+    toastEl.classList.add("is-visible");
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(function () {
-      toastEl.hidden = true;
+      toastEl.classList.remove("is-visible");
+      toastEl.textContent = "";
+      toastEl.removeAttribute("aria-hidden");
       toastTimer = 0;
-    }, 2600);
+    }, duration || 2600);
+  }
+
+  function showStatusError(message) {
+    var text = String(message);
+    if (statusAlertEl) statusAlertEl.textContent = text;
+    toast(text, 6000, { announce: false });
   }
 
   function showPanePlacementWarning(message) {
     setStatus(message, "warn");
-    toast(message);
+    toast(message, 6000);
   }
 
   async function copyPaneFooterValue(label, value) {
@@ -1232,32 +1624,80 @@
   // 5. PTY event plumbing
   // ============================================================
 
-  var pendingDataBuffers = new Map(); // threadId → array of Uint8Array (pre-mount)
+  function threadTerminalVisibility(thread) {
+    var snapshot = thread && thread.terminalController &&
+      thread.terminalController.rendererSnapshot
+        ? thread.terminalController.rendererSnapshot()
+        : null;
+    return {
+      documentVisible: !document.hidden,
+      paneVisible: !!thread && !thread.hidden && !!terminalHost &&
+        terminalHost.isConnected && !terminalHost.hidden && !!thread.pane &&
+        thread.pane.isConnected,
+      intersecting: snapshot ? snapshot.visibility.intersecting : true,
+    };
+  }
 
-  listen("pty:data", function (event) {
-    var payload = event.payload || {};
-    if (!payload.thread_id || !payload.bytes) return;
-    var bytes = new Uint8Array(payload.bytes);
-    var thread = findThread(payload.thread_id);
-    if (!isLiveThread(thread)) return;
-    thread.lastOutputAt = Date.now();
-    if (typeof noteStatusPtyData === "function") noteStatusPtyData(payload.thread_id, bytes);
-    if (thread.term) {
-      thread.term.write(bytes);
-    } else {
-      var arr = pendingDataBuffers.get(payload.thread_id) || [];
-      arr.push(bytes);
-      pendingDataBuffers.set(payload.thread_id, arr);
+  function ensureThreadPtyController(thread) {
+    if (!thread || thread.kind === "web") return null;
+    return thread.terminalController || null;
+  }
+
+  function syncThreadPtyVisibility(thread) {
+    if (!thread || !thread.terminalController ||
+        typeof thread.terminalController.setVisibility !== "function") {
+      return Promise.resolve(false);
+
     }
+    return thread.terminalController.setVisibility(threadTerminalVisibility(thread)).catch(function () {
+      return false;
+    });
+  }
+
+  function syncAllPtyVisibility() {
+    state.threads.forEach(function (thread) {
+      syncThreadPtyVisibility(thread);
+    });
+  }
+
+  function createThreadPtyIoQueue() {
+    return {
+      closed: false,
+      inputTail: Promise.resolve(),
+      pendingInputBytes: 0,
+      pendingInputWrites: 0,
+    };
+  }
+
+  listen("pty:data-batch", function (event) {
+    var payload = event.payload || {};
+    if (!payload.threadId || !payload.bytes) return;
+    var thread = findThread(payload.threadId);
+    if (!isLiveThread(thread)) return;
+    if (!thread.terminalController || !thread.terminalController.receive(payload)) return;
+    var bytes = new Uint8Array(payload.bytes);
+    thread.lastOutputAt = Date.now();
+    if (typeof noteStatusPtyData === "function") noteStatusPtyData(payload.threadId, bytes);
     schedulePaneMetricsRefresh(thread, 1200);
   }).catch(function () {});
 
-  function handlePtyExit(payload) {
+  async function handlePtyExit(payload) {
     payload = payload || {};
     var thread = findThread(payload.thread_id);
     if (!thread || thread.closing || thread.closeStarted) return false;
     var stoppedByUser = thread.stopRequested;
+    if (thread.terminalController &&
+        typeof thread.terminalController.markPtyExited === "function") {
+      thread.terminalController.markPtyExited();
+    }
     thread.ptyStarted = false;
+    if (thread.ptyIoQueue) thread.ptyIoQueue.closed = true;
+    thread.ptyIoQueue = {
+      closed: false,
+      inputTail: Promise.resolve(),
+      pendingInputBytes: 0,
+      pendingInputWrites: 0,
+    };
     if (thread.startInFlight) {
       thread.exitDuringStart = true;
     }
@@ -1265,17 +1705,30 @@
     thread.spawning = false;
     thread.finishedAt = Date.now();
     thread.exitCode = payload.code == null ? null : payload.code;
-    thread.status = "exited";
+    var persistentLive = false;
+    if (isPersistentThread(thread)) {
+      try {
+        var liveSessionIds = await invoke("native_session_list");
+        persistentLive = Array.isArray(liveSessionIds) && liveSessionIds.indexOf(thread.id) !== -1;
+      } catch (error) {
+        console.warn("[native_session_list] failed after client exit: " + String(error));
+        persistentLive = true;
+      }
+    }
+    thread.persistentLive = persistentLive;
+    thread.status = persistentLive ? "failed" : "exited";
     thread.isWorking = false;
-    if (!stoppedByUser && payload.code != null && payload.code !== 0) {
+    if (!persistentLive && !stoppedByUser && payload.code != null && payload.code !== 0) {
       thread.status = "failed";
     }
     // An exited pane is not waiting on an answer, it is over. Leaving the badge
     // would send the user to a pane with nothing to say.
     clearThreadAttention(thread);
     syncThreadPaneMetadata(thread);
-    if (thread.term) {
-      thread.term.write("\r\n\x1b[2;90m[process exited]\x1b[0m\r\n");
+    if (thread.terminalController) {
+      thread.terminalController.write(persistentLive
+        ? "\r\n\x1b[33m[session connection lost — retry to reattach]\x1b[0m\r\n"
+        : "\r\n\x1b[2;90m[process exited]\x1b[0m\r\n");
     }
     refreshSidebar();
     refreshTabs();
@@ -1283,11 +1736,14 @@
       setProjectStatus(findProject(thread.projectId), "warn");
     }
     if (typeof refreshStatusController === "function") refreshStatusController();
+    saveWorkspaceSoon();
     return true;
   }
 
   listen("pty:exit", function (event) {
-    handlePtyExit(event.payload || {});
+    handlePtyExit(event.payload || {}).catch(function (error) {
+      console.warn("[pty:exit] reconciliation failed: " + String(error));
+    });
   }).catch(function () {});
 
   function findThread(id) {
@@ -1295,6 +1751,33 @@
       if (state.threads[i].id === id) return state.threads[i];
     }
     return null;
+  }
+  function findFilesPaneBySurfaceId(id) {
+    var match = null;
+    filesPanes.forEach(function (pane) {
+      if (!match && pane.id === id) match = pane;
+    });
+    return match;
+  }
+  function canvasSurfaceById(id) {
+    return findThread(id) || findFilesPaneBySurfaceId(id);
+  }
+  function filesPaneHasCanvasFocus(filesPane) {
+    if (!filesPane) {
+      var file = findOpenFile(state.activeFileId);
+      filesPane = file
+        ? filesPanes.get(filesPaneKey(file.projectId, file.workspaceRoot))
+        : null;
+    }
+    var project = findProject(state.activeProjectId);
+    if (!filesPane || !project ||
+        filesPane.projectId !== project.id ||
+        filesPane.workspaceRoot !== activeWorkspaceRoot(project)) return false;
+    var layout = paneLayoutForThread(filesPane);
+    var leaf = layout && layout.root
+      ? PsychePanes.findLeafById(layout.root, layout.focusedLeafId)
+      : null;
+    return !!filesPane && !!leaf && canvasSurfaceById(leaf.threadId) === filesPane;
   }
 
   function acceptsImageDrop(thread) {
@@ -1537,26 +2020,6 @@
   }
 
   /**
-   * The last `lines` non-empty rows of what the terminal is actually showing.
-   * Read off the buffer rather than accumulated PTY bytes so redraws, cursor
-   * moves and cleared spinners are already resolved into what the user sees.
-   */
-  function terminalTail(term, lines) {
-    if (!term || !term.buffer || !term.buffer.active) return "";
-    var buffer = term.buffer.active;
-    var end = buffer.baseY + buffer.cursorY;
-    var out = [];
-    for (var row = end; row >= 0 && out.length < lines; row--) {
-      var line = buffer.getLine(row);
-      if (!line) continue;
-      var text = line.translateToString(true);
-      if (!text.trim() && out.length === 0) continue;
-      out.push(text);
-    }
-    return out.reverse().join("\n");
-  }
-
-  /**
    * Push a session's attention state onto every surface that shows it. Only the
    * rail is re-rendered wholesale; the pane and its minimap entry are touched
    * in place, because this runs on a timer and re-tiling the canvas under a
@@ -1618,8 +2081,8 @@
     var tracked = [];
     var needsFinalRender = false;
     state.threads.forEach(function (thread) {
-      if (!thread || !thread.term) return;
-      var tail = terminalTail(thread.term, ATTENTION_TAIL_LINES);
+      if (!thread || !thread.terminalController) return;
+      var tail = thread.terminalController.tail(ATTENTION_TAIL_LINES);
       thread.isWorking = PsycheSessions.sidebarTailIsWorking(tail);
       var attentionChanged = false;
       if (!threadWantsAttentionTracking(thread)) {
@@ -1695,6 +2158,21 @@
     return thread && thread.launch && thread.launch.covenSessionId || null;
   }
 
+  function isPersistentThread(thread) {
+    var launchKind = thread && thread.launch && thread.launch.launchKind;
+    return ["shell", "psyche", "coven-chat", "coven-attach"].indexOf(launchKind) !== -1;
+  }
+
+  function nativeSessionRequest(thread) {
+    return {
+      id: thread.id,
+      projectRoot: thread.launch.projectRoot,
+      cwd: thread.launch.cwd,
+      launchKind: thread.launch.launchKind,
+      covenSessionId: thread.launch.covenSessionId || null,
+    };
+  }
+
   // An exited pane is not an attachment you can focus, so it must not make a
   // row read as attached. main added that guard to isReusableCovenAttachment
   // alongside createCovenSessionRow; this branch replaced that render path with
@@ -1709,7 +2187,7 @@
     });
   }
 
-  function createThread(opts) {
+  async function createThread(opts) {
     var id = makeThreadId();
     var project = opts.project || activeProject();
     var sourceLaunch = opts.launch || {
@@ -1751,7 +2229,6 @@
       status: "starting",
       spawning: true,
       term: null,
-      fit: null,
       host: null,
       pane: null,
       closing: false,
@@ -1760,6 +2237,13 @@
       exitDuringStart: false,
       stopRequested: false,
       ptyStarted: false,
+      terminalController: null,
+      ptyIoQueue: {
+        closed: false,
+        inputTail: Promise.resolve(),
+        pendingInputBytes: 0,
+        pendingInputWrites: 0,
+      },
       metricsGeneration: 0,
       metrics: launch.launchKind === "coven-chat" && launch.covenSessionId
         ? loadingPaneMetrics(launch)
@@ -1772,20 +2256,27 @@
       finishedAt: null,
       exitCode: null,
     };
+    if (isPersistentThread(thread)) {
+      try {
+        await invoke("native_session_create", { request: nativeSessionRequest(thread) });
+      } catch (error) {
+        setStatus(thread.name + " failed to start: " + String(error), "error");
+        return null;
+      }
+    }
     commitPanePlacement(placement);
     state.threads.push(thread);
     if (typeof noteStatusActivity === "function") noteStatusActivity();
+    mountTerminal(thread);
+    focusThread(id, opts.focusTerminal === false ? { focusTerminal: false } : undefined);
     refreshSidebar();
     refreshTabs();
-    mountTerminal(thread);
-    focusThread(id);
-    // Run fit() now so the PTY starts at the actual visible size, not at
-    // xterm.js's default 80x24. Otherwise psyche/Ink draw the first frame at
-    // the wrong size and leave artifacts.
+    // The controller's initial keyed frame fits before this later spawn frame,
+    // so the PTY starts at the visible xterm size instead of 80x24.
     requestAnimationFrame(function () {
       if (!isLiveThread(thread)) return;
-      try { if (thread.fit) thread.fit.fit(); } catch (_) {}
-      spawnPty(thread);
+      if (isPersistentThread(thread)) attachThreadClient(thread);
+      else spawnPty(thread);
     });
     return thread;
   }
@@ -1857,6 +2348,11 @@
       return Promise.resolve(false);
     }
     var launch = thread.launch;
+    var terminalController = ensureThreadPtyController(thread);
+    var ptyStartAttempt = null;
+    if (terminalController && typeof terminalController.prepareForPtyStart === "function") {
+      ptyStartAttempt = terminalController.prepareForPtyStart();
+    }
     thread.lastOutputAt = 0;
     thread.isWorking = false;
     thread.sidebarStatusKey = "busy";
@@ -1875,6 +2371,9 @@
     syncThreadPaneMetadata(thread);
     refreshSidebar();
     refreshTabs();
+    var terminalSize = terminalController && typeof terminalController.dimensions === "function"
+      ? terminalController.dimensions()
+      : { cols: 120, rows: 40 };
     return invoke("pty_start", {
       options: {
         threadId: thread.id,
@@ -1888,14 +2387,17 @@
         coven_session_id: launch.covenSessionId,
         command: launch.command,
         args: launch.args,
-        cols: thread.term ? thread.term.cols : 120,
-        rows: thread.term ? thread.term.rows : 40,
+        cols: terminalSize.cols,
+        rows: terminalSize.rows,
         env: launch.env,
       },
     }).then(function () {
       thread.startInFlight = false;
       if (!isLiveThread(thread)) {
-        pendingDataBuffers.delete(thread.id);
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         return stopThreadPty(thread).then(function () { return false; });
       }
       if (thread.exitDuringStart) {
@@ -1903,6 +2405,10 @@
         thread.ptyStarted = false;
         thread.spawning = false;
         thread.isWorking = false;
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         syncThreadPaneMetadata(thread);
         refreshSidebar();
         refreshTabs();
@@ -1911,6 +2417,10 @@
       thread.ptyStarted = true;
       thread.status = "running";
       thread.spawning = false;
+      if (thread.terminalController &&
+          typeof thread.terminalController.markPtyStarted === "function") {
+        thread.terminalController.markPtyStarted(ptyStartAttempt).catch(function () {});
+      }
       syncThreadPaneMetadata(thread);
       refreshSidebar();
       refreshTabs();
@@ -1918,18 +2428,15 @@
         setProjectStatus(findProject(thread.projectId), "ok");
       }
       if (launch.launchKind === "coven-chat") refreshCovenSessions();
-      // Flush any data that arrived before the xterm was mounted.
-      var pending = pendingDataBuffers.get(thread.id);
-      if (pending && thread.term) {
-        for (var i = 0; i < pending.length; i++) thread.term.write(pending[i]);
-        pendingDataBuffers.delete(thread.id);
-      }
       return true;
     }).catch(function (err) {
       thread.startInFlight = false;
       var msg = String(err);
       if (!isLiveThread(thread)) {
-        pendingDataBuffers.delete(thread.id);
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         if (msg.indexOf("already running") !== -1) {
           thread.ptyStarted = true;
           return stopThreadPty(thread).then(function () { return false; });
@@ -1941,6 +2448,10 @@
         thread.ptyStarted = false;
         thread.spawning = false;
         thread.isWorking = false;
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         syncThreadPaneMetadata(thread);
         refreshSidebar();
         refreshTabs();
@@ -1948,9 +2459,13 @@
       }
       thread.spawning = false;
       if (msg.indexOf("cleanup in progress") !== -1) {
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         thread.ptyStarted = false;
         if (thread.terminalController) thread.terminalController.stopPtyDelivery();
-        thread.ptyClient = null;
+
         thread.status = "exited";
         thread.finishedAt = Date.now();
         thread.exitCode = null;
@@ -1961,23 +2476,29 @@
         thread.ptyStarted = true;
         thread.status = "running";
         thread.stopRequested = false;
+        if (thread.terminalController &&
+            typeof thread.terminalController.adoptRunningPty === "function") {
+          thread.terminalController.adoptRunningPty(ptyStartAttempt).catch(function () {});
+        } else if (thread.terminalController &&
+            typeof thread.terminalController.markPtyStarted === "function") {
+          thread.terminalController.markPtyStarted(ptyStartAttempt).catch(function () {});
+        }
         if (state.activeThreadId === thread.id) {
           setProjectStatus(findProject(thread.projectId), "ok");
         }
         if (launch.launchKind === "coven-chat") refreshCovenSessions();
-        var pending = pendingDataBuffers.get(thread.id);
-        if (pending && thread.term) {
-          for (var i = 0; i < pending.length; i++) thread.term.write(pending[i]);
-          pendingDataBuffers.delete(thread.id);
-        }
       } else {
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         thread.ptyStarted = false;
         thread.status = "failed";
         thread.isWorking = false;
         thread.finishedAt = Date.now();
         thread.exitCode = null;
-        if (thread.term) {
-          thread.term.write("\r\n\x1b[31m[pty_start error]\x1b[0m " + msg + "\r\n");
+        if (thread.terminalController) {
+          thread.terminalController.write("\r\n\x1b[31m[pty_start error]\x1b[0m " + msg + "\r\n");
         }
         if (state.activeThreadId === thread.id) {
           setStatus(thread.name + " failed to start: " + msg, "error");
@@ -1987,6 +2508,84 @@
       refreshSidebar();
       refreshTabs();
       return thread.status === "running";
+    });
+  }
+
+  function attachThreadClient(thread) {
+    if (!isLiveThread(thread) || thread.startInFlight || thread.closeStarted ||
+        thread.ptyStarted) {
+      return Promise.resolve(false);
+    }
+    var terminalController = ensureThreadPtyController(thread);
+    var ptyStartAttempt = terminalController &&
+      typeof terminalController.prepareForPtyStart === "function"
+        ? terminalController.prepareForPtyStart()
+        : null;
+    thread.lastOutputAt = 0;
+    thread.isWorking = false;
+    thread.sidebarStatusKey = "busy";
+    attentionTracker.forget(thread.id);
+    thread.needsAttention = false;
+    thread.attentionReason = null;
+    syncThreadAttentionChrome(thread);
+    thread.stopRequested = false;
+    thread.exitDuringStart = false;
+    thread.startInFlight = true;
+    thread.status = "starting";
+    thread.spawning = true;
+    thread.startedAt = Date.now();
+    thread.finishedAt = null;
+    thread.exitCode = null;
+    syncThreadPaneMetadata(thread);
+    refreshSidebar();
+    refreshTabs();
+    return invoke("pty_attach", {
+      options: {
+        threadId: thread.id,
+        sessionId: thread.id,
+        cols: thread.term ? thread.term.cols : 120,
+        rows: thread.term ? thread.term.rows : 40,
+      },
+    }).then(function () {
+      thread.startInFlight = false;
+      if (!isLiveThread(thread)) return stopThreadPty(thread).then(function () { return false; });
+      if (thread.exitDuringStart) {
+        thread.exitDuringStart = false;
+        thread.spawning = false;
+        return false;
+      }
+      thread.ptyStarted = true;
+      thread.status = "running";
+      thread.spawning = false;
+      if (terminalController && typeof terminalController.markPtyStarted === "function") {
+        terminalController.markPtyStarted(ptyStartAttempt).catch(function () {});
+      }
+      syncThreadPaneMetadata(thread);
+      refreshSidebar();
+      refreshTabs();
+      if (state.activeThreadId === thread.id) setProjectStatus(findProject(thread.projectId), "ok");
+      return true;
+    }).catch(function (error) {
+      thread.startInFlight = false;
+      if (terminalController &&
+          typeof terminalController.restoreAfterFailedPtyStart === "function") {
+        terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+      }
+      if (!isLiveThread(thread)) return false;
+      thread.ptyStarted = false;
+      thread.spawning = false;
+      thread.status = "failed";
+      thread.isWorking = false;
+      thread.finishedAt = Date.now();
+      thread.exitCode = null;
+      if (thread.term) {
+        thread.term.write("\r\n\x1b[31m[attach error]\x1b[0m " + String(error) + "\r\n");
+      }
+      syncThreadPaneMetadata(thread);
+      refreshSidebar();
+      refreshTabs();
+      saveWorkspaceSoon();
+      return false;
     });
   }
 
@@ -2008,7 +2607,15 @@
       }
     }
     if (typeof noteStatusActivity === "function") noteStatusActivity();
-    return spawnPty(thread);
+    if (!isPersistentThread(thread)) return spawnPty(thread);
+    if (thread.persistentLive) return attachThreadClient(thread);
+    try {
+      await invoke("native_session_create", { request: nativeSessionRequest(thread) });
+    } catch (error) {
+      setStatus(thread.name + " failed to restart: " + String(error), "error");
+      return false;
+    }
+    return attachThreadClient(thread);
   }
 
   var TERMINAL_URL_RE = /\b((?:https?:\/\/|localhost(?::\d+)?|(?:127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?:[^\s<>"'`]*)?)/ig;
@@ -2101,20 +2708,28 @@
   }
 
   function registerTerminalLinkHandling(term, container) {
+    var linkRegistration = null;
     if (typeof term.registerLinkProvider === "function") {
-      term.registerLinkProvider({
+      linkRegistration = term.registerLinkProvider({
         provideLinks: function (y, callback) {
           callback(terminalLinksForLine(terminalLineText(term, y), y));
         },
       });
     }
-    container.addEventListener("contextmenu", function (event) {
+    function handleContextMenu(event) {
       var url = terminalUrlAtEvent(term, event);
       if (!url) return;
       event.preventDefault();
       event.stopPropagation();
       openTerminalLink(url, event);
-    }, true);
+    }
+    container.addEventListener("contextmenu", handleContextMenu, true);
+    return {
+      dispose: function () {
+        container.removeEventListener("contextmenu", handleContextMenu, true);
+        if (linkRegistration && linkRegistration.dispose) linkRegistration.dispose();
+      },
+    };
   }
 
   function stageBrowserSurface() {
@@ -2278,7 +2893,85 @@
     thread.paneMax = maximize;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
-    renderPaneWorkspace();
+    renderPaneWorkspace({ preserveTerminalFocus: false });
+  }
+
+  function mountFilesPane(filesPane) {
+    var pane = document.createElement("section");
+    pane.className = "terminal-pane is-files";
+    pane.id = "canvas-surface-" + filesPane.id;
+    pane.dataset.surfaceId = filesPane.id;
+    pane.setAttribute("aria-label", "Files pane");
+    pane.setAttribute("aria-current", "false");
+
+    var header = document.createElement("header");
+    header.className = "terminal-pane-header";
+    var glyph = document.createElement("span");
+    glyph.className = "terminal-pane-glyph is-files";
+    glyph.textContent = "F";
+    glyph.setAttribute("aria-hidden", "true");
+    var label = document.createElement("span");
+    label.className = "terminal-pane-label";
+    var title = document.createElement("span");
+    title.className = "terminal-pane-title";
+    title.id = "terminal-pane-title-" + filesPane.id;
+    title.textContent = "Files";
+    var meta = document.createElement("span");
+    meta.className = "terminal-pane-meta";
+    meta.textContent = filesPane.workspaceRoot || "";
+    label.appendChild(title);
+    label.appendChild(meta);
+
+    var span = document.createElement("button");
+    span.type = "button";
+    span.className = "terminal-pane-span";
+    span.addEventListener("click", function (event) {
+      event.stopPropagation();
+      cyclePaneSpan(filesPane);
+    });
+    var maximize = document.createElement("button");
+    maximize.type = "button";
+    maximize.className = "terminal-pane-max";
+    maximize.addEventListener("click", function (event) {
+      event.stopPropagation();
+      togglePaneMaximize(filesPane);
+    });
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "terminal-pane-close";
+    close.title = "Close Files pane";
+    close.setAttribute("aria-label", "Close Files pane");
+    close.textContent = "\u00d7";
+    close.addEventListener("click", function (event) {
+      event.stopPropagation();
+      closeFilesPane(filesPane);
+    });
+
+    header.appendChild(glyph);
+    header.appendChild(label);
+    header.appendChild(span);
+    header.appendChild(maximize);
+    header.appendChild(close);
+    var body = document.createElement("div");
+    body.className = "terminal-pane-body files-pane-body";
+    body.appendChild(fileViewEl);
+    pane.appendChild(header);
+    pane.appendChild(body);
+    pane.addEventListener("pointerdown", function () {
+      focusCanvasSurface(filesPane);
+    }, true);
+    pane.addEventListener("focusin", function () {
+      focusCanvasSurface(filesPane);
+    });
+
+    filesPane.pane = pane;
+    filesPane.host = body;
+    filesPane.paneTitle = title;
+    filesPane.paneMeta = meta;
+    filesPane.paneSpan = span;
+    filesPane.paneMax = maximize;
+    filesPane.paneClose = close;
+    return pane;
   }
 
   /**
@@ -2432,7 +3125,70 @@
     thread.paneMax = maximize;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
-    renderPaneWorkspace();
+    renderPaneWorkspace({ preserveTerminalFocus: false });
+  }
+
+  function isTerminalFocusReport(data) {
+    return data === "\x1b[I" || data === "\x1b[O";
+  }
+
+  function beginTerminalFocusReportToken(thread, report, policy) {
+    if (
+      !thread ||
+      !isTerminalFocusReport(report) ||
+      (policy !== "suppress" && policy !== "allow")
+    ) {
+      return null;
+    }
+    var token = { report: report, policy: policy };
+    if (!thread.internalFocusReportTokens) {
+      thread.internalFocusReportTokens = [];
+    }
+    thread.internalFocusReportTokens.push(token);
+    return token;
+  }
+
+  function clearTerminalFocusReportToken(thread, token) {
+    var tokens = thread && thread.internalFocusReportTokens;
+    if (!tokens || !token) return;
+    var index = tokens.indexOf(token);
+    if (index !== -1) tokens.splice(index, 1);
+    if (tokens.length === 0) {
+      delete thread.internalFocusReportTokens;
+    }
+  }
+
+  function consumeTerminalFocusReportToken(thread, report) {
+    var tokens = thread && thread.internalFocusReportTokens;
+    if (!tokens) return null;
+    for (var i = tokens.length - 1; i >= 0; i--) {
+      if (tokens[i].report !== report) continue;
+      var token = tokens[i];
+      clearTerminalFocusReportToken(thread, token);
+      return token;
+    }
+    return null;
+  }
+
+  function withTerminalFocusReportToken(thread, report, policy, action) {
+    var token = beginTerminalFocusReportToken(thread, report, policy);
+    try {
+      return action();
+    } finally {
+      clearTerminalFocusReportToken(thread, token);
+    }
+  }
+
+  function consumeTerminalDataSuppression(thread, data) {
+    if (!thread || !isTerminalFocusReport(data)) return false;
+    var token = consumeTerminalFocusReportToken(thread, data);
+    return !!token && token.policy === "suppress";
+  }
+
+  function routeTerminalData(thread, data) {
+    if (consumeTerminalDataSuppression(thread, data)) return false;
+    sendToThread(thread, data);
+    return true;
   }
 
   function mountTerminal(thread) {
@@ -2546,70 +3302,48 @@
     thread.paneMax = maximize;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
-    renderPaneWorkspace();
+    renderPaneWorkspace({ preserveTerminalFocus: false });
 
-    var term = new window.Terminal({
-      fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
-      fontSize: 13,
-      lineHeight: 1.18,
-      // Fully transparent canvas: the terminal's tint comes from
-      // .terminal-area's CSS background, which already tracks --bg-opacity.
-      // Driving it through the xterm theme instead left .xterm-viewport
-      // painted an opaque black that ignored the setting.
-      allowTransparency: true,
-      theme: {
-        background: "rgba(0, 0, 0, 0)",
-        foreground: "#ece9f5",
-        cursor: "#a78bfa",
-        selectionBackground: "rgba(167,139,250,0.30)",
+    var controller = PsycheRuntime.createTerminalPaneController({
+      paneId: thread.id,
+      threadId: thread.id,
+      container: container,
+      frameScheduler: terminalFrameScheduler,
+      invoke: invoke,
+      initialVisibility: threadTerminalVisibility(thread),
+      isSelected: function () { return state.activeThreadId === thread.id; },
+      terminalOptions: {
+        fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
+        fontSize: 13,
+        lineHeight: 1.18,
+        // Fully transparent canvas: the terminal's tint comes from
+        // .terminal-area's CSS background, which already tracks --bg-opacity.
+        allowTransparency: true,
+        theme: terminalTheme(),
+        cursorBlink: true,
+        convertEol: false,
+        allowProposedApi: true,
       },
-      cursorBlink: true,
-      convertEol: false,
-      allowProposedApi: true,
+      registerLinks: registerTerminalLinkHandling,
+      onData: function (data) {
+        routeTerminalData(thread, data);
+      },
+      onBell: function () {
+        if (!threadWantsAttentionTracking(thread)) return;
+        applyThreadAttention(thread, attentionTracker.bell(thread.id));
+      },
     });
-    var fit = window.FitAddon ? new window.FitAddon.FitAddon() : null;
-    if (fit) term.loadAddon(fit);
-    term.open(container);
-    registerTerminalLinkHandling(term, container);
+    thread.terminalController = controller;
+    // Temporary compatibility alias for legacy link/tail inspection callers.
+    thread.term = controller.compatibilityTerminal();
     container.addEventListener("pointerdown", function () {
       if (state.activeThreadId !== thread.id) {
         focusThread(thread.id);
       } else {
-        term.focus();
+        controller.focus();
       }
     });
-
-    // Premium upgrade: try the WebGL renderer for sharp text + truecolor.
-    // Fall back silently to the default canvas renderer if WebGL is
-    // unavailable (e.g. virtualised GPU).
-    try {
-      if (window.WebglAddon && window.WebglAddon.WebglAddon) {
-        var webgl = new window.WebglAddon.WebglAddon();
-        webgl.onContextLoss(function () { try { webgl.dispose(); } catch (_) {} });
-        term.loadAddon(webgl);
-      }
-    } catch (_) { /* canvas fallback is fine */ }
-
-    term.onData(function (data) { sendToThread(thread, data); });
-    // Agents ring the bell for exactly one reason -- they want the user back --
-    // so it is trusted immediately instead of waiting for the tail to settle.
-    if (typeof term.onBell === "function") {
-      term.onBell(function () {
-        if (!threadWantsAttentionTracking(thread)) return;
-        applyThreadAttention(thread, attentionTracker.bell(thread.id));
-      });
-    }
-    term.onResize(function (size) {
-      invoke("pty_resize", {
-        threadId: thread.id,
-        thread_id: thread.id,
-        cols: size.cols,
-        rows: size.rows,
-      }).catch(function () {});
-    });
-
-    thread.term = term;
-    thread.fit = fit;
+    syncThreadPtyVisibility(thread);
   }
 
   function applyPaneStatus(pane, status) {
@@ -2708,7 +3442,8 @@
     layout.root = nextRoot;
     layout.focusedLeafId = source.id;
     renderPaneWorkspace();
-    scheduleVisiblePaneFit();
+    scheduleTerminalPaneFits();
+    saveWorkspaceSoon();
     return true;
   }
 
@@ -2836,6 +3571,19 @@
     divider.setAttribute("aria-valuemax", "100");
     divider.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
     divider.tabIndex = 0;
+    function latestSplitRatio(layout) {
+      if (!layout || !layout.root) return NaN;
+      var spanning = Boolean(layout.spanMode) && Boolean(layout.spanRoot) &&
+        !layout.maximizedLeafId && layout.spanRoot !== layout.root;
+      var root = spanning ? layout.spanRoot : layout.root;
+      function findRatio(candidate) {
+        if (!candidate || candidate.type === "leaf") return NaN;
+        if (candidate.id === node.id) return candidate.ratio;
+        var firstRatio = findRatio(candidate.first);
+        return Number.isFinite(firstRatio) ? firstRatio : findRatio(candidate.second);
+      }
+      return findRatio(root);
+    }
     divider.addEventListener("pointerdown", function (event) {
       event.preventDefault();
       var dragLayout = activePaneLayout();
@@ -2877,10 +3625,13 @@
       if (event.key !== shrinkKey && event.key !== growKey) return;
       event.preventDefault();
       var step = event.shiftKey ? 0.01 : 0.04;
+      var keyLayout = activePaneLayout();
+      var currentRatio = latestSplitRatio(keyLayout);
+      if (!Number.isFinite(currentRatio)) currentRatio = ratio;
       updateActiveSplit(
         node.id,
-        ratio + (event.key === shrinkKey ? -step : step),
-        activePaneLayout(),
+        currentRatio + (event.key === shrinkKey ? -step : step),
+        keyLayout,
         true
       );
     });
@@ -2911,8 +3662,7 @@
     if (nextRoot === current) return false;
     if (spanning) layout.spanRoot = nextRoot;
     else layout.root = nextRoot;
-    renderPaneWorkspace();
-    if (restoreFocus) focusPaneDivider(splitId);
+    schedulePaneTreeLayout(restoreFocus ? splitId : null);
     return true;
   }
 
@@ -2939,11 +3689,23 @@
       layout.activeSetId = null;
       return layout.root;
     }
-    var scoped = PsychePanes.retainThreads(layout.root, set.threadIds);
-    if (!scoped) {
+    var scopedSessions = PsychePanes.retainThreads(layout.root, set.threadIds);
+    if (!scopedSessions) {
       layout.activeSetId = null;
       return layout.root;
     }
+    var projectedSurfaceIds = set.threadIds.slice();
+    if (typeof canvasSurfaceById === "function") {
+      PsychePanes.leafIds(layout.root).forEach(function (leafId) {
+        var leaf = PsychePanes.findLeafById(layout.root, leafId);
+        var surface = leaf && canvasSurfaceById(leaf.threadId);
+        if (surface && surface.kind === "files" &&
+            projectedSurfaceIds.indexOf(surface.id) === -1) {
+          projectedSurfaceIds.push(surface.id);
+        }
+      });
+    }
+    var scoped = PsychePanes.retainThreads(layout.root, projectedSurfaceIds);
     return scoped;
   }
 
@@ -2979,8 +3741,11 @@
     return layout.spanRoot;
   }
 
-  function paneLayoutForThread(thread) {
-    return thread ? paneLayoutFor(thread.projectId, thread.worktreePath) : null;
+  function paneLayoutForThread(surface) {
+    return surface ? paneLayoutFor(
+      surface.projectId,
+      surface.worktreePath || surface.workspaceRoot
+    ) : null;
   }
 
   /** Make a Git leaf visible without discarding compatible presentation state. */
@@ -3090,11 +3855,46 @@
    * flows through the rows themselves rather than a standing chip bar.
    */
   function applySetScopeForThread(thread) {
+    thread = thread && findThread(thread.id);
+    if (!thread) return false;
     var sets = setsForThread(thread);
     if (!sets.length) return clearFocusSet();
     var layout = paneLayoutForThread(thread);
     if (layout && layout.activeSetId === sets[0].id) return false;
     return activateFocusSet(sets[0].id);
+  }
+
+  function snapshotSetScopePresentation(thread) {
+    var layout = paneLayoutForThread(thread);
+    if (!layout) return null;
+    return {
+      projectId: thread.projectId,
+      worktreePath: thread.worktreePath,
+      layout: layout,
+      root: layout.root,
+      activeSetId: layout.activeSetId,
+      maximizedLeafId: layout.maximizedLeafId,
+      spanRoot: layout.spanRoot,
+      spanSignature: layout.spanSignature,
+    };
+  }
+
+  function restoreSetScopePresentation(snapshot, applied) {
+    if (!snapshot || !applied || snapshot.layout !== applied.layout) return false;
+    var layout = paneLayoutFor(snapshot.projectId, snapshot.worktreePath);
+    if (layout !== snapshot.layout ||
+        layout.root !== applied.root ||
+        layout.activeSetId !== applied.activeSetId ||
+        layout.maximizedLeafId !== applied.maximizedLeafId ||
+        layout.spanRoot !== applied.spanRoot ||
+        layout.spanSignature !== applied.spanSignature) return false;
+    layout.activeSetId = snapshot.activeSetId;
+    layout.maximizedLeafId = snapshot.maximizedLeafId;
+    layout.spanRoot = snapshot.spanRoot;
+    layout.spanSignature = snapshot.spanSignature;
+    renderPaneWorkspace();
+    refreshSidebar();
+    return true;
   }
 
   function removeFromFocusSet(setId, threadId) {
@@ -3122,10 +3922,13 @@
     focusSets = focusSets.filter(function (set) { return set.threadIds.length > 0; });
   }
 
-  function cyclePaneSpan(thread) {
-    var layout = paneLayoutForThread(thread);
+  function cyclePaneSpan(surface) {
+    surface = (surface && typeof canvasSurfaceById === "function"
+      ? canvasSurfaceById(surface.id)
+      : surface) || surface;
+    var layout = paneLayoutForThread(surface);
     if (!layout || !layout.root) return;
-    var leaf = PsychePanes.findLeafByThreadId(layout.root, thread.id);
+    var leaf = PsychePanes.findLeafByThreadId(layout.root, surface.id);
     if (!leaf) return;
     // Spanning a different pane restarts the cycle rather than continuing the
     // previous pane's position in it.
@@ -3137,22 +3940,31 @@
     layout.maximizedLeafId = null;
     layout.spanRoot = null;
     layout.spanSignature = null;
-    if (state.activeThreadId !== thread.id) {
-      focusThread(thread.id);
+    var thread = typeof findThread === "function" ? findThread(surface.id) : surface;
+    if (surface.kind === "files") {
+      focusCanvasSurface(surface);
+    } else if (state.activeThreadId !== surface.id && thread) {
+      focusThread(surface.id);
       return;
     }
     renderPaneWorkspace();
   }
 
-  function togglePaneMaximize(thread) {
-    var layout = paneLayoutForThread(thread);
+  function togglePaneMaximize(surface) {
+    surface = (surface && typeof canvasSurfaceById === "function"
+      ? canvasSurfaceById(surface.id)
+      : surface) || surface;
+    var layout = paneLayoutForThread(surface);
     if (!layout || !layout.root) return;
-    var leaf = PsychePanes.findLeafByThreadId(layout.root, thread.id);
+    var leaf = PsychePanes.findLeafByThreadId(layout.root, surface.id);
     if (!leaf) return;
     layout.maximizedLeafId = layout.maximizedLeafId === leaf.id ? null : leaf.id;
     layout.focusedLeafId = leaf.id;
-    if (state.activeThreadId !== thread.id) {
-      focusThread(thread.id);
+    var thread = typeof findThread === "function" ? findThread(surface.id) : surface;
+    if (surface.kind === "files") {
+      focusCanvasSurface(surface);
+    } else if (state.activeThreadId !== surface.id && thread) {
+      focusThread(surface.id);
       return;
     }
     renderPaneWorkspace();
@@ -3203,9 +4015,49 @@
     thread.paneMax.setAttribute("aria-pressed", maxed ? "true" : "false");
   }
 
+  function focusedTerminalThreadForRender() {
+    var activeElement = document.activeElement;
+    if (!activeElement) return null;
+    for (var i = 0; i < state.threads.length; i++) {
+      var thread = state.threads[i];
+      if (thread.terminalController && thread.host && thread.host.contains(activeElement)) {
+        return thread;
+      }
+    }
+    return null;
+  }
+
+  function restoreRenderedTerminalFocus(thread) {
+    if (!thread) return;
+    requestAnimationFrame(function () {
+      if (
+        !isLiveThread(thread) ||
+        state.activeThreadId !== thread.id ||
+        !thread.terminalController ||
+        !thread.pane ||
+        terminalHost.hidden ||
+        !terminalHost.contains(thread.pane)
+      ) {
+        return;
+      }
+      withTerminalFocusReportToken(thread, "\x1b[I", "suppress", function () {
+        thread.terminalController.focus();
+      });
+    });
+  }
+
   function renderPaneNode(node, splitRatios) {
     if (node.type === "leaf") {
-      var thread = findThread(node.threadId);
+      var thread = typeof canvasSurfaceById === "function"
+        ? canvasSurfaceById(node.threadId)
+        : findThread(node.threadId);
+      if (thread && thread.kind === "files" && !thread.pane) {
+        mountFilesPane(thread);
+      }
+      if (thread && thread.kind === "files" && thread.host && fileViewEl &&
+          fileViewEl.parentElement !== thread.host) {
+        thread.host.appendChild(fileViewEl);
+      }
       if (thread && thread.kind === "web" && thread.browserBody && browserSurface) {
         thread.browserBody.appendChild(browserSurface);
       }
@@ -3236,42 +4088,78 @@
     return split;
   }
 
-  function renderPaneWorkspace() {
+  function renderPaneWorkspace(options) {
     if (!terminalHost) return;
-    stageBrowserSurface();
-    stageGitSurface();
-    terminalHost.replaceChildren();
-    var layout = activePaneLayout();
-    if (!layout || !layout.root) {
-      renderTerminalEmptyState();
-      renderPaneMinimap(layout, findOpenFile(state.activeFileId));
-      return;
+    var focusTargetThread = options && options.focusTargetThread || null;
+    var preserveTerminalFocus = !focusTargetThread &&
+      (!options || options.preserveTerminalFocus !== false);
+    var focusedThread = focusedTerminalThreadForRender();
+    try {
+      if (focusedThread && focusedThread.terminalController) {
+        withTerminalFocusReportToken(
+          focusedThread,
+          "\x1b[O",
+          preserveTerminalFocus ? "suppress" : "allow",
+          function () {
+            focusedThread.terminalController.blur();
+          }
+        );
+      }
+      stageBrowserSurface();
+      stageGitSurface();
+      terminalHost.replaceChildren();
+      var layout = activePaneLayout();
+      if (!layout || !layout.root) {
+        renderTerminalEmptyState();
+        renderPaneMinimap(
+          layout,
+          filesPaneHasCanvasFocus() ? findOpenFile(state.activeFileId) : null
+        );
+        syncAllPtyVisibility();
+        return;
+      }
+      var root = effectivePaneRoot(layout);
+      var projected = PsychePanes.layoutRects(
+        root,
+        measuredTerminalHost(),
+        PANE_MINIMUMS
+      );
+      var splitRatios = new Map();
+      projected.splits.forEach(function (split) {
+        splitRatios.set(split.splitId, split.ratio);
+      });
+      terminalHost.appendChild(renderPaneNode(root, splitRatios));
+      // Span and maximise change what every *other* pane's controls should say,
+      // so the whole tiled tree is synced, not just the panes on screen.
+      PsychePanes.leafIds(layout.root).forEach(function (leafId) {
+        var leaf = PsychePanes.findLeafById(layout.root, leafId);
+        var surface = leaf && (typeof canvasSurfaceById === "function"
+          ? canvasSurfaceById(leaf.threadId)
+          : findThread(leaf.threadId));
+        if (!surface || !surface.pane) return;
+        var focused = leaf.id === layout.focusedLeafId;
+        surface.pane.classList.toggle("focused", focused);
+        surface.pane.setAttribute("aria-current", focused ? "true" : "false");
+        syncPaneSpanControl(surface, layout, leaf);
+        syncPaneMaxControl(surface, layout, leaf);
+        var thread = findThread(surface.id);
+        if (thread) {
+          syncPanePicking(thread);
+          syncThreadPaneMetadata(thread);
+        }
+      });
+      renderSetPickBar();
+      renderPaneMinimap(
+        layout,
+        filesPaneHasCanvasFocus() ? findOpenFile(state.activeFileId) : null
+      );
+      syncAllPtyVisibility();
+      scheduleTerminalPaneFits();
+      scheduleBrowserBounds();
+    } finally {
+      if (preserveTerminalFocus) restoreRenderedTerminalFocus(focusedThread);
     }
-    var root = effectivePaneRoot(layout);
-    var projected = PsychePanes.layoutRects(
-      root,
-      measuredTerminalHost(),
-      PANE_MINIMUMS
-    );
-    var splitRatios = new Map();
-    projected.splits.forEach(function (split) {
-      splitRatios.set(split.splitId, split.ratio);
-    });
-    terminalHost.appendChild(renderPaneNode(root, splitRatios));
-    // Span and maximise change what every *other* pane's controls should say,
-    // so the whole tiled tree is synced, not just the panes on screen.
-    PsychePanes.leafIds(layout.root).forEach(function (leafId) {
-      var leaf = PsychePanes.findLeafById(layout.root, leafId);
-      var thread = leaf && findThread(leaf.threadId);
-      if (!thread || !thread.pane) return;
-      thread.pane.classList.toggle("focused", thread.id === state.activeThreadId);
-      syncPanePicking(thread);
-      syncThreadPaneMetadata(thread);
-    });
-    renderSetPickBar();
-    renderPaneMinimap(layout, findOpenFile(state.activeFileId));
-    scheduleVisiblePaneFit();
-    requestAnimationFrame(syncBrowserBounds);
+
   }
 
   /**
@@ -3452,7 +4340,7 @@
         entry.addEventListener("click", async function () {
           var leaf = PsychePanes.findLeafByThreadId(layout.root, item.thread.id);
           if (!leaf) return;
-          if (state.activeFileId) {
+          if (filesPaneHasCanvasFocus()) {
             await returnFromFileFocus(item.thread.id, true);
             return;
           }
@@ -3465,10 +4353,64 @@
     });
   }
 
+  function focusCanvasSurface(surface) {
+    if (!surface) return false;
+    if (surface.kind !== "files") {
+      focusThread(surface.id);
+      return true;
+    }
+    if (typeof rememberFilesPaneReturnThread === "function") {
+      rememberFilesPaneReturnThread(surface);
+    }
+    var project = findProject(surface.projectId);
+    if (project) {
+      if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
+      else Object.assign(state, { activeProjectId: project.id });
+      project.selectedWorktreePath = surface.workspaceRoot;
+    }
+    state.activeThreadId = null;
+    var layout = paneLayoutFor(surface.projectId, surface.workspaceRoot);
+    var leaf = layout && layout.root
+      ? PsychePanes.findLeafByThreadId(layout.root, surface.id)
+      : null;
+    if (!layout || !leaf) return false;
+    layout.focusedLeafId = leaf.id;
+    PsychePanes.leafIds(layout.root).forEach(function (leafId) {
+      var candidateLeaf = PsychePanes.findLeafById(layout.root, leafId);
+      var candidate = candidateLeaf && canvasSurfaceById(candidateLeaf.threadId);
+      if (candidate && candidate.pane) {
+        var focused = candidateLeaf.id === leaf.id;
+        candidate.pane.classList.toggle("focused", focused);
+        candidate.pane.setAttribute("aria-current", focused ? "true" : "false");
+      }
+    });
+    refreshSidebar();
+    return true;
+  }
+
   async function focusThread(id, options) {
-    var thread = findThread(id);
+    function resolveFocusableThread() {
+      var candidate = findThread(id);
+      if (!candidate || candidate.hidden || candidate.closing ||
+          candidate.closeStarted) return null;
+      return candidate;
+    }
+    var thread = resolveFocusableThread();
     if (!thread) return false;
     if (!(await showTerminalView())) return false;
+    thread = resolveFocusableThread();
+    if (!thread) return false;
+    var focusedSourceThread = focusedTerminalThreadForRender();
+    if (focusedSourceThread) {
+      withTerminalFocusReportToken(
+        focusedSourceThread,
+        "\x1b[O",
+        "allow",
+        function () {
+          focusedSourceThread.terminalController.blur();
+        }
+      );
+    }
     var project = findProject(thread.projectId);
     var scopeChanged = state.activeProjectId !== thread.projectId ||
       !project || activeWorkspaceRoot(project) !== thread.worktreePath;
@@ -3477,7 +4419,8 @@
     // Make the thread's project the active one so the sidebar/tabs
     // stay in sync if the user clicked into a different project's thread.
     if (thread.projectId && state.activeProjectId !== thread.projectId) {
-      state.activeProjectId = thread.projectId;
+      if (typeof assignActiveProjectId === "function") assignActiveProjectId(thread.projectId);
+      else Object.assign(state, { activeProjectId: thread.projectId });
     }
     if (project) {
       if (thread.kind !== "coven-chat" && thread.kind !== "coven-attach") {
@@ -3488,13 +4431,27 @@
     var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
     var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
     if (layout && leaf) layout.focusedLeafId = leaf.id;
-    renderPaneWorkspace();
+    renderPaneWorkspace({ focusTargetThread: thread });
     if (scopeChanged) renderGitSurface();
     refreshSidebar();
     requestAnimationFrame(function () {
-      scheduleVisiblePaneFit();
-      if (thread.term) thread.term.focus();
-      syncBrowserBounds();
+      var focusedThread = resolveFocusableThread();
+      if (!focusedThread || state.activeThreadId !== id) return;
+      if (
+        isLiveThread(focusedThread) &&
+        focusedThread.terminalController &&
+        focusedThread.pane &&
+        !terminalHost.hidden &&
+        terminalHost.contains(focusedThread.pane)
+      ) {
+        scheduleTerminalPaneFits();
+        if (!options || options.focusTerminal !== false) {
+          withTerminalFocusReportToken(focusedThread, "\x1b[I", "allow", function () {
+            focusedThread.terminalController.focus();
+          });
+        }
+      }
+      scheduleBrowserBounds();
     });
 
     setProjectStatus(project, statusLevel(thread.status));
@@ -3502,6 +4459,7 @@
         typeof refreshStatusController === "function") {
       refreshStatusController();
     }
+    saveWorkspaceSoon();
     return true;
   }
 
@@ -3542,29 +4500,47 @@
     }
   }
 
-  function detachThreadPane(thread) {
-    if (!thread) return null;
-    if (typeof paneFooterPopoverThreadId !== "undefined" &&
+  function detachThreadPane(surface) {
+    surface = surface && (typeof canvasSurfaceById === "function"
+      ? canvasSurfaceById(surface.id)
+      : surface);
+    if (!surface) return null;
+    var thread = typeof findThread === "function" ? findThread(surface.id) : surface;
+    if (thread && thread.terminalController) {
+      var focusedThread = focusedTerminalThreadForRender();
+      if (focusedThread === thread) {
+        withTerminalFocusReportToken(thread, "\x1b[O", "allow", function () {
+          thread.terminalController.blur();
+        });
+      }
+    }
+    if (thread && typeof paneFooterPopoverThreadId !== "undefined" &&
         paneFooterPopoverThreadId === thread.id &&
         typeof closePaneFooterPopovers === "function") {
       closePaneFooterPopovers(false);
     }
-    if (typeof closePaneFooterMenu === "function") closePaneFooterMenu(thread, false);
-    if (thread.paneFooterObserver) thread.paneFooterObserver.disconnect();
-    thread.paneFooterObserver = null;
-    thread.paneFooter = null;
-    thread.paneFooterItems = null;
-    thread.paneFooterOverflow = null;
-    thread.paneFooterMenuTrigger = null;
-    thread.createPaneFooterButton = null;
-    var key = paneLayoutKey(thread.projectId, thread.worktreePath);
+    if (thread && typeof closePaneFooterMenu === "function") closePaneFooterMenu(thread, false);
+    if (thread && thread.paneFooterObserver) thread.paneFooterObserver.disconnect();
+    if (thread) {
+      thread.paneFooterObserver = null;
+      thread.paneFooter = null;
+      thread.paneFooterItems = null;
+      thread.paneFooterOverflow = null;
+      thread.paneFooterMenuTrigger = null;
+      thread.createPaneFooterButton = null;
+    }
+    var key = paneLayoutKey(
+      surface.projectId,
+      surface.worktreePath || surface.workspaceRoot
+    );
     var layout = paneLayouts.get(key);
     if (!layout || !layout.root) return null;
-    var leaf = PsychePanes.findLeafByThreadId(layout.root, thread.id);
+    var leaf = PsychePanes.findLeafByThreadId(layout.root, surface.id);
     if (!leaf) return null;
     var removed = PsychePanes.removeLeaf(layout.root, leaf.id);
     if (!removed.root) {
       paneLayouts.delete(key);
+      saveWorkspaceSoon();
       return null;
     }
     layout.root = removed.root;
@@ -3572,6 +4548,7 @@
       layout.focusedLeafId = removed.nextLeafId;
     }
     paneLayouts.set(key, layout);
+    saveWorkspaceSoon();
     var nextLeaf = PsychePanes.findLeafById(removed.root, removed.nextLeafId);
     return nextLeaf ? nextLeaf.threadId : null;
   }
@@ -3640,6 +4617,8 @@
         if (skippedLabels.has(label)) continue;
         if (!savedTab) continue;
         try {
+          var recoveryNavigationToken = "recovery:" + Date.now() + ":" + index;
+          if (!tabLifecycle.automationSource) tabLifecycle.automationSource = PsycheControl.browserAutomationSource();
           await invoke("browser_navigate", {
             label: savedTab.label,
             url: savedTab.url,
@@ -3647,6 +4626,8 @@
             y: -10000,
             w: 1,
             h: 1,
+            navigationToken: recoveryNavigationToken,
+            automationSource: tabLifecycle.automationSource,
           });
           currentTab.created = true;
           currentTab.loading = false;
@@ -3654,6 +4635,7 @@
           tabLifecycle.nativeLabel = nativeBrowserLabel(savedTab.label);
           tabLifecycle.liveGeneration = tabLifecycle.generation;
           tabLifecycle.liveUrl = savedTab.url;
+          tabLifecycle.liveNavigationToken = recoveryNavigationToken;
           tabLifecycle.viewLive = true;
           recreated += 1;
         } catch (recoveryError) {
@@ -3680,6 +4662,16 @@
         affectedLiveTabs: affectedLiveTabs,
         recoveryErrors: recoveryErrors,
       };
+    }
+    for (var automationIndex = 0; automationIndex < browser.tabs.length; automationIndex += 1) {
+      var automationTab = browser.tabs[automationIndex];
+      if (!browserTabLifecycle(automationTab).nativeLabel) continue;
+      var automationPair = { project: project, worktreePath: thread.worktreePath, browser: browser, tab: automationTab };
+      if (!(await invalidateBrowserAutomation(automationPair))) {
+        setStatus("browser automation invalidation failed", "error");
+        return false;
+      }
+      await removeBrowserControlResource(automationPair);
     }
     browser.tabs.forEach(function (tab) {
       invalidateBrowserNavigation(tab);
@@ -3761,7 +4753,7 @@
     });
     saveWorkspaceSoon();
     stageBrowserSurface();
-    var closed = closeThread(thread.id);
+    var closed = await closeThread(thread.id);
     if (closed && wasActive) markActiveSurface("terminal");
     return closed;
     } finally {
@@ -3770,10 +4762,17 @@
   }
 
   function retainFileFocusAfterThreadRemoval(removedThreadId, nextThreadId, projectId) {
-    if (!state.activeFileId) return false;
+    if (!state.activeFileId || !filesPaneHasCanvasFocus()) return false;
     state.activeThreadId = nextThreadId || null;
     if (fileFocus.returnThreadId === removedThreadId) {
       fileFocus.returnThreadId = nextThreadId || null;
+    }
+    if (typeof filesPanes !== "undefined") {
+      filesPanes.forEach(function (filesPane) {
+        if (filesPane.previousFocusedSessionId === removedThreadId) {
+          filesPane.previousFocusedSessionId = null;
+        }
+      });
     }
     var project = findProject(projectId);
     if (project) {
@@ -3786,61 +4785,88 @@
     return true;
   }
 
-  function closeThread(id, options) {
+  async function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread || thread.closeStarted) return false;
+    var wasActive = state.activeThreadId === id;
     if (thread.kind === "git") {
       suspendGitRequests();
       stageGitSurface();
     }
-    if (thread.kind === "web" && state.activeThreadId === id) {
+    if (thread.kind === "web" && wasActive) {
       markActiveSurface("terminal");
     }
     thread.closeStarted = true;
     thread.closing = true;
+    if (isPersistentThread(thread)) {
+      try {
+        await invoke("native_session_stop", { id: thread.id });
+      } catch (error) {
+        thread.closeStarted = false;
+        thread.closing = false;
+        setStatus("failed to stop " + thread.name + ": " + String(error), "error");
+        return false;
+      }
+    }
+    if (thread.ptyIoQueue) {
+      thread.ptyIoQueue.closed = true;
+    }
     thread.metricsGeneration += 1;
     if (thread.metricsRefreshTimer) {
       clearTimeout(thread.metricsRefreshTimer);
       thread.metricsRefreshTimer = 0;
     }
     if (typeof noteStatusActivity === "function") noteStatusActivity();
-    pendingDataBuffers.delete(id);
+    if (thread.terminalController && thread.terminalController.dispose) {
+      try { thread.terminalController.dispose(); } catch (_) {}
+    }
     // A set must never point at a thread that no longer exists, or scoping the
     // canvas to it would silently show fewer panes than it claims.
     forgetThreadInSets(id);
     var nextThreadId = detachThreadPane(thread);
-    if (thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
-      stopThreadPty(thread);
+    thread.terminalController = null;
+    thread.term = null;
+    if (nextThreadId && !findThread(nextThreadId)) {
+      nextThreadId = canvasThreadIds()[0] || null;
     }
-    if (thread.term && thread.term.dispose) {
-      try { thread.term.dispose(); } catch (_) {}
+    if (thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
+      await stopThreadPty(thread);
     }
     var closingProjectId = thread.projectId;
     state.threads = state.threads.filter(function (t) { return t.id !== id; });
-    if (state.activeThreadId === id) {
+    if (wasActive) {
       // Prefer the next thread in the same project so closing a tab doesn't
       // teleport the user into a different project.
       state.activeThreadId = null;
       if (retainFileFocusAfterThreadRemoval(id, nextThreadId, closingProjectId)) {
-        renderPaneWorkspace();
+        renderPaneWorkspace({ preserveTerminalFocus: false });
         if (!nextThreadId) setProjectStatus(findProject(closingProjectId), "");
       } else if (nextThreadId && (!options || options.focus !== false)) {
-        focusThread(nextThreadId);
+        var nextThread = findThread(nextThreadId);
+        var nextSurface = nextThread || (typeof canvasSurfaceById === "function"
+          ? canvasSurfaceById(nextThreadId)
+          : null);
+        if (nextThread) focusThread(nextThreadId);
+        else if (nextSurface) renderPaneWorkspace();
       } else {
-        renderPaneWorkspace();
+        renderPaneWorkspace({ preserveTerminalFocus: false });
         setProjectStatus(findProject(closingProjectId), "");
       }
+    } else if (options && options.preserveTerminalFocus === false) {
+      renderPaneWorkspace({ preserveTerminalFocus: false });
     } else {
       renderPaneWorkspace();
     }
     refreshSidebar();
     refreshTabs();
+    await saveWorkspaceNow();
     return true;
   }
 
   function hideThread(id) {
     var thread = findThread(id);
     if (!thread || thread.hidden) return false;
+    var wasActive = state.activeThreadId === id;
     if (thread.kind === "git") suspendGitRequests();
     thread.metricsGeneration += 1;
     if (thread.metricsRefreshTimer) {
@@ -3849,17 +4875,29 @@
     }
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     var nextThreadId = detachThreadPane(thread);
+    if (nextThreadId && !findThread(nextThreadId)) {
+      nextThreadId = canvasThreadIds()[0] || null;
+    }
     thread.hidden = true;
-    if (state.activeThreadId === id) {
+    var focusingNext = false;
+    if (wasActive) {
       state.activeThreadId = null;
       if (!retainFileFocusAfterThreadRemoval(id, nextThreadId, thread.projectId) && nextThreadId) {
+        focusingNext = true;
         focusThread(nextThreadId);
       }
     }
-    renderPaneWorkspace();
+    if (!focusingNext) {
+      if (wasActive) {
+        renderPaneWorkspace({ preserveTerminalFocus: false });
+      } else {
+        renderPaneWorkspace();
+      }
+    }
     if (thread.kind === "git") stageGitSurface();
     refreshSidebar();
     refreshTabs();
+    saveWorkspaceSoon();
     return true;
   }
 
@@ -3886,10 +4924,11 @@
       project.lastActiveThreadId = thread.id;
     }
     state.activeThreadId = thread.id;
+    renderPaneWorkspace({ preserveTerminalFocus: false });
     if (thread.kind === "git") revealGitPane(thread);
-    renderPaneWorkspace();
     if (thread.kind === "git") renderGitSurface();
     refreshSidebar();
+    saveWorkspaceSoon();
     return true;
   }
 
@@ -3969,22 +5008,56 @@
     return actions;
   }
 
+  function projectAppearanceContextActions(project, anchor) {
+    if (!project) return [];
+    return [{
+      label: "Customize appearance",
+      run: function () {
+        openProjectAppearancePopover(project, anchor);
+      },
+    }];
+  }
+
   var sessionContextMenu = null;
-  function closeSessionContextMenu() {
+  var sessionContextMenuRestoreKey = "";
+  function closeSessionContextMenu(options) {
+    var restoreFocus = !options || options.restoreFocus !== false;
+    var restoreKey = sessionContextMenuRestoreKey;
     if (sessionContextMenu && sessionContextMenu.parentNode) {
       sessionContextMenu.parentNode.removeChild(sessionContextMenu);
     }
     sessionContextMenu = null;
+    sessionContextMenuRestoreKey = "";
+    if (restoreFocus && restoreKey) {
+      sessionTreeFocusKey = restoreKey;
+      restoreSessionTreeFocus(restoreKey);
+    }
   }
-  function openSessionContextMenu(event, actions) {
+  function openSessionContextMenu(event, actions, anchor) {
     event.preventDefault();
     event.stopPropagation();
-    closeSessionContextMenu();
+    closeProjectAppearancePopover({ restoreFocus: false });
+    closeSessionContextMenu({ restoreFocus: false });
     var menu = document.createElement("div");
     menu.className = "session-context-menu";
     menu.setAttribute("role", "menu");
-    menu.style.left = Math.max(8, event.clientX) + "px";
-    menu.style.top = Math.max(8, event.clientY) + "px";
+    var menuAnchor = anchor || event.currentTarget || event.target || null;
+    var usePointerPosition = Number(event.clientX) > 0 && Number(event.clientY) > 0;
+    var anchorRect = !usePointerPosition &&
+      menuAnchor &&
+      typeof menuAnchor.getBoundingClientRect === "function"
+      ? menuAnchor.getBoundingClientRect()
+      : null;
+    menu.style.left = Math.max(8, usePointerPosition
+      ? event.clientX
+      : anchorRect
+        ? anchorRect.left
+        : 8) + "px";
+    menu.style.top = Math.max(8, usePointerPosition
+      ? event.clientY
+      : anchorRect
+        ? anchorRect.bottom + 6
+        : 8) + "px";
     actions.forEach(function (action) {
       if (!action) return;
       var item = document.createElement("button");
@@ -3993,13 +5066,16 @@
       item.setAttribute("role", "menuitem");
       item.textContent = action.label;
       item.addEventListener("click", function () {
-        closeSessionContextMenu();
+        closeSessionContextMenu({ restoreFocus: false });
         action.run();
       });
       menu.appendChild(item);
     });
     document.body.appendChild(menu);
     sessionContextMenu = menu;
+    sessionContextMenuRestoreKey = anchor && anchor.dataset
+      ? anchor.dataset.treeKey || ""
+      : "";
     var rect = menu.getBoundingClientRect();
     if (rect.right > window.innerWidth - 8) {
       menu.style.left = Math.max(8, window.innerWidth - rect.width - 8) + "px";
@@ -4018,34 +5094,51 @@
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape") closeSessionContextMenu();
   });
+  document.addEventListener("pointerdown", function (event) {
+    if (projectAppearancePopover && !projectAppearancePopover.contains(event.target)) {
+      closeProjectAppearancePopover();
+    }
+  });
+  document.addEventListener("keydown", function (event) {
+    if (!projectAppearancePopover || event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeProjectAppearancePopover();
+  });
 
-  function fitVisiblePanes() {
-    visiblePaneFitFrame = 0;
-    if (!terminalHost || terminalHost.hidden) return;
-    var layout = activePaneLayout();
-    if (!layout || !layout.root) return;
-    var projected = PsychePanes.layoutRects(
-      effectivePaneRoot(layout),
-      measuredTerminalHost(),
-      PANE_MINIMUMS
-    );
-    projected.leaves.forEach(function (leaf) {
-      var thread = findThread(leaf.threadId);
-      if (!thread || !thread.fit) return;
-      try { thread.fit.fit(); } catch (err) { console.warn("terminal pane fit failed", err); }
+  function scheduleTerminalPaneFits() {
+    state.threads.forEach(function (thread) {
+      if (thread.terminalController) thread.terminalController.scheduleFit();
+    });
+  }
+  var pendingPaneDividerFocusId = null;
+  function schedulePaneTreeLayout(focusSplitId) {
+    pendingPaneDividerFocusId = focusSplitId || null;
+    terminalFrameScheduler.schedule("layout:pane-tree", function () {
+      var restoreSplitId = pendingPaneDividerFocusId;
+      pendingPaneDividerFocusId = null;
+      renderPaneWorkspace();
+      if (restoreSplitId) focusPaneDivider(restoreSplitId);
+      saveWorkspaceSoon();
     });
   }
 
-  function scheduleVisiblePaneFit() {
-    if (visiblePaneFitFrame) return;
-    visiblePaneFitFrame = requestAnimationFrame(fitVisiblePanes);
+  var pendingTabScroll = false;
+  function scheduleTabMeasurements(scrollActive) {
+    pendingTabScroll = pendingTabScroll || Boolean(scrollActive);
+    terminalFrameScheduler.schedule("layout:tabs", function () {
+      var shouldScroll = pendingTabScroll;
+      pendingTabScroll = false;
+      syncTabStripOverflow();
+      if (shouldScroll) scrollActiveTabIntoView();
+    });
   }
   window.addEventListener("resize", function () {
-    scheduleVisiblePaneFit();
-    syncBrowserBounds();
+    scheduleTerminalPaneFits();
+    scheduleBrowserBounds();
     // Whether the strip overflows is a function of width, not of its contents.
-    syncTabStripOverflow();
-    syncSessionListScroll();
+    scheduleTabMeasurements();
+    scheduleSidebarLayout();
   });
 
   // ============================================================
@@ -4161,6 +5254,65 @@
     return more;
   }
 
+  function createVirtualListSpacer(position, height) {
+    var spacer = document.createElement("div");
+    spacer.className = "virtual-list-spacer virtual-list-spacer-" + position;
+    spacer.style.height = Math.max(0, height || 0) + "px";
+    spacer.setAttribute("role", "presentation");
+    spacer.setAttribute("aria-hidden", "true");
+    return spacer;
+  }
+
+  function collectionRowHeight(element, property, fallback) {
+    if (!element || typeof getComputedStyle !== "function") return fallback;
+    var value = parseFloat(getComputedStyle(element).getPropertyValue(property));
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+  }
+
+  function sessionVirtualScrollTop(rowHeight) {
+    if (!sessionListEl || typeof sessionListEl.getBoundingClientRect !== "function") {
+      return sessionListEl ? sessionListEl.scrollTop : 0;
+    }
+    var listTop = sessionListEl.getBoundingClientRect().top;
+    var categories = sessionListEl.querySelectorAll("[data-virtual-row-start]");
+    for (var index = 0; index < categories.length; index++) {
+      var category = categories[index];
+      if (typeof category.getBoundingClientRect !== "function") continue;
+      var rect = category.getBoundingClientRect();
+      if (rect.bottom <= listTop) continue;
+      var start = Number(category.dataset.virtualRowStart) || 0;
+      var count = Number(category.dataset.virtualRowCount) || 0;
+      var labelHeight = category.firstElementChild
+        ? category.firstElementChild.offsetHeight || 0
+        : 0;
+      var withinRows = Math.max(0, listTop - rect.top - labelHeight);
+      return start * rowHeight + Math.min(count * rowHeight, withinRows);
+    }
+    return sessionListEl.scrollTop;
+  }
+
+  function sessionOuterScrollTopForRow(rowIndex, rowHeight) {
+    if (!sessionListEl || typeof sessionListEl.getBoundingClientRect !== "function") {
+      return rowIndex * rowHeight;
+    }
+    var listTop = sessionListEl.getBoundingClientRect().top;
+    var categories = sessionListEl.querySelectorAll("[data-virtual-row-start]");
+    for (var index = 0; index < categories.length; index++) {
+      var category = categories[index];
+      var start = Number(category.dataset.virtualRowStart) || 0;
+      var count = Number(category.dataset.virtualRowCount) || 0;
+      if (rowIndex < start || rowIndex >= start + count ||
+          typeof category.getBoundingClientRect !== "function") continue;
+      var categoryTop = sessionListEl.scrollTop +
+        category.getBoundingClientRect().top - listTop;
+      var labelHeight = category.firstElementChild
+        ? category.firstElementChild.offsetHeight || 0
+        : 0;
+      return Math.max(0, categoryTop + labelHeight + (rowIndex - start) * rowHeight);
+    }
+    return rowIndex * rowHeight;
+  }
+
   function refreshSidebar() {
     refreshTabs();
     renderSessionList();
@@ -4184,7 +5336,22 @@
   var sessionListEl = document.getElementById("session-list");
   var sidebarFilesEl = document.getElementById("sidebar-files");
   if (sessionListEl) {
-    sessionListEl.addEventListener("scroll", function () { syncSessionListScroll(); });
+    sessionListEl.__psycheVirtualRuntime = ptyRuntime;
+    sessionListEl.addEventListener("scroll", function () {
+      syncSessionListScroll();
+      if (!sessionListEl.__psycheVirtualState ||
+          !sessionListEl.__psycheVirtualState.virtualized) return;
+      var sessionScrollFocusKey = sessionListEl.contains(document.activeElement) &&
+        document.activeElement.dataset
+        ? document.activeElement.dataset.treeKey || ""
+        : "";
+      terminalFrameScheduler.schedule("collection:sessions", function () {
+        renderSessionList({
+          preserveFocus: false,
+          restoreFocusKey: sessionScrollFocusKey,
+        });
+      });
+    });
   }
   var sidebarTab = settings.sidebarTab;
 
@@ -4244,11 +5411,8 @@
       btn.addEventListener("click", function () { setGitTab(btn.dataset.gitTab); });
     }
   );
-  var sessionSearchEl = document.getElementById("session-search");
-  var sessionFilter = "";
   var sessionTypeFilter = settings.sessionFilter;
   var sessionTreeFocusKey = "";
-  var sessionSearchRestoreKey = "";
 
   function setSessionTypeFilter(value, options) {
     sessionTypeFilter = PsycheSessions.normalizeSidebarFilter(value);
@@ -4283,7 +5447,9 @@
     return PsychePanes.leafIds(layout.root).map(function (leafId) {
       var leaf = PsychePanes.findLeafById(layout.root, leafId);
       return leaf ? leaf.threadId : null;
-    }).filter(Boolean);
+    }).filter(function (id) {
+      return !!id && !!findThread(id);
+    });
   }
 
   function effectiveCanvasThreadIds() {
@@ -5101,7 +6267,32 @@
     }) || selectedWorktree(project);
   }
 
-  function openCovenSession(project, session) {
+  function resolveCurrentCovenAttachTarget(expected) {
+    var project = findProject(expected.projectId);
+    if (!project || project.root !== expected.projectRoot) return null;
+    var session = covenSessionsForProject(project).find(function (candidate) {
+      return candidate.id === expected.sessionId;
+    });
+    if (!session ||
+        (session.projectRoot || null) !== expected.sessionProjectRoot ||
+        (session.cwd || null) !== expected.sessionCwd) return null;
+    var worktree = covenWorktreeForSession(project, session);
+    if (!worktree || worktree.path !== expected.worktreePath) return null;
+    var ownsWorktree = worktree.path === project.root ||
+      (project.worktrees || []).some(function (candidate) {
+        return candidate.path === worktree.path;
+      });
+    return ownsWorktree ? { project: project, session: session, worktree: worktree } : null;
+  }
+
+  function focusCovenAttachmentForCaller(opening, options) {
+    return opening.then(async function (thread) {
+      if (!thread || !(await focusThread(thread.id, options))) return null;
+      return thread;
+    });
+  }
+
+  function openCovenSession(project, session, options) {
     if (!project || !session || !PsycheSessions.isSafeCovenSessionId(session.id)) {
       setStatus("Invalid Coven session", "error");
       return Promise.resolve(null);
@@ -5117,9 +6308,7 @@
       return Promise.resolve().then(async function () {
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
-        if (!(await activateProjectWorktree(
-          project, existing.worktreePath
-        ))) return null;
+        if (!(await activateProjectWorktree(project, existing.worktreePath, options))) return null;
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
         await waitForTerminalLayout();
@@ -5127,37 +6316,67 @@
         if (!existing) return null;
         if (existing.hidden && !reopenThread(existing.id)) return null;
         existing = findCovenAttachment(project, session, existingId);
-        if (!existing || !(await focusThread(existing.id))) return null;
+        if (!existing || !(await focusThread(existing.id, options))) return null;
         return findCovenAttachment(project, session, existingId);
       });
     }
 
     var key = covenAttachKey(project, session);
-    if (covenAttachInFlight.has(key)) return covenAttachInFlight.get(key);
-
-    var opening = Promise.resolve().then(async function () {
+    var opening = covenAttachInFlight.get(key);
+    if (!opening) {
       var worktree = covenWorktreeForSession(project, session);
-      if (!worktree || !worktree.path) return null;
-      if (!(await activateProjectWorktree(project, worktree.path))) return null;
-      await waitForTerminalLayout();
-      return createThread({
-        project: project,
-        name: session.title || "Coven " + session.id.slice(0, 8),
-        kind: "coven-attach",
-        command: state.env.coven_path,
-        args: ["attach", session.id],
+      if (!worktree || !worktree.path) return Promise.resolve(null);
+      var expected = {
+        projectId: project.id,
         projectRoot: project.root,
-        cwd: session.cwd || worktree.path,
+        sessionId: session.id,
+        sessionProjectRoot: session.projectRoot || null,
+        sessionCwd: session.cwd || null,
         worktreePath: worktree.path,
-        launchKind: "coven-attach",
-        covenSessionId: session.id,
-        metricsProvider: session.harness || "coven",
+      };
+      opening = Promise.resolve().then(async function () {
+        var current = resolveCurrentCovenAttachTarget(expected);
+        if (!current) {
+          setStatus(
+            "Coven session is no longer available; refresh the rail before retrying",
+            "warn"
+          );
+          return null;
+        }
+        if (!(await activateProjectWorktree(
+          current.project,
+          current.worktree.path,
+          { focusTerminal: false }
+        ))) return null;
+        await waitForTerminalLayout();
+        current = resolveCurrentCovenAttachTarget(expected);
+        if (!current) {
+          setStatus(
+            "Coven session is no longer available; refresh the rail before retrying",
+            "warn"
+          );
+          return null;
+        }
+        return createThread({
+          project: current.project,
+          name: current.session.title || "Coven " + current.session.id.slice(0, 8),
+          kind: "coven-attach",
+          command: state.env.coven_path,
+          args: ["attach", current.session.id],
+          projectRoot: current.project.root,
+          cwd: current.session.cwd || current.worktree.path,
+          worktreePath: current.worktree.path,
+          launchKind: "coven-attach",
+          covenSessionId: current.session.id,
+          metricsProvider: current.session.harness || "coven",
+          focusTerminal: false,
+        });
+      }).finally(function () {
+        covenAttachInFlight.delete(key);
       });
-    }).finally(function () {
-      covenAttachInFlight.delete(key);
-    });
-    covenAttachInFlight.set(key, opening);
-    return opening;
+      covenAttachInFlight.set(key, opening);
+    }
+    return focusCovenAttachmentForCaller(opening, options);
   }
 
   function attachTooltip(element, text) {
@@ -5424,11 +6643,16 @@
   }
 
   function createProjectGroup(projectModel, options) {
+    var appearance = options.appearance ||
+      PsycheSessions.resolveProjectAppearance(projectModel.project, projectAppearances);
     var group = document.createElement("section");
     group.className = "session-project session-group"
       + (options.current ? " is-current" : "");
     group.dataset.treeItem = "project";
     group.dataset.treeKey = projectModel.key;
+    group.dataset.projectId = projectModel.project.id;
+    group.dataset.projectAccent = appearance.accent.id;
+    group.dataset.projectAppearance = appearance.customized ? "custom" : "automatic";
     group.setAttribute("role", "treeitem");
     group.setAttribute("aria-level", "1");
     group.setAttribute("tabindex", options.tabindex);
@@ -5436,20 +6660,25 @@
 
     var head = document.createElement("div");
     head.className = "session-project-head session-group-head";
+    head.style.setProperty("--project-accent-rgb", appearance.accent.rgb);
     var disclosure = createDisclosure(
       projectModel.title,
       projectModel.expanded,
       projectModel.autoExpanded
     );
+    if (appearance.glyph) {
+      var glyph = document.createElement("span");
+      glyph.className = "session-project-glyph";
+      glyph.textContent = appearance.glyph.value;
+      glyph.setAttribute("aria-hidden", "true");
+      head.appendChild(disclosure);
+      head.appendChild(glyph);
+    } else {
+      head.appendChild(disclosure);
+    }
     var title = document.createElement("span");
     title.className = "session-project-name";
     appendHighlightedText(title, projectModel.title, projectModel.titleMatches);
-    if (options.current) {
-      var current = document.createElement("span");
-      current.className = "session-current-badge";
-      current.textContent = "CURRENT";
-      title.appendChild(current);
-    }
     var count = document.createElement("span");
     count.className = "session-project-count";
     count.textContent = String(projectModel.count);
@@ -5466,7 +6695,6 @@
       attention.textContent = "!" + projectModel.attentionCount;
       count.appendChild(attention);
     }
-    head.appendChild(disclosure);
     head.appendChild(title);
     head.appendChild(count);
     attachTooltip(
@@ -5532,6 +6760,23 @@
     return true;
   }
 
+  function focusLogicalSessionTreeKey(key) {
+    var items = visibleSessionTreeItems();
+    var mounted = items.find(function (item) { return item.dataset.treeKey === key; });
+    if (mounted) return focusSessionTreeItem(mounted);
+    var virtualState = sessionListEl && sessionListEl.__psycheVirtualState;
+    var rowIndex = virtualState && virtualState.rowIndexes.get(key);
+    if (rowIndex === undefined || !sessionListEl) return false;
+    virtualState.focusKey = key;
+    sessionTreeFocusKey = key;
+    sessionListEl.scrollTop = sessionOuterScrollTopForRow(
+      rowIndex,
+      virtualState.rowHeight || 44
+    );
+    renderSessionList();
+    return true;
+  }
+
   function parentSessionTreeItem(item) {
     var parent = item && item.parentElement;
     while (parent && parent !== sessionListEl) {
@@ -5585,6 +6830,34 @@
     if (index === -1) return;
     sessionTreeFocusKey = item.dataset.treeKey || "";
 
+    var virtualState = sessionListEl && sessionListEl.__psycheVirtualState;
+    if (virtualState && virtualState.virtualized &&
+        (event.key === "ArrowDown" || event.key === "ArrowUp" ||
+          event.key === "Home" || event.key === "End")) {
+      var logicalIndex = virtualState.logicalKeys.indexOf(sessionTreeFocusKey);
+      if (logicalIndex !== -1) {
+        var logicalNext = logicalIndex;
+        if (event.key === "Home") logicalNext = 0;
+        else if (event.key === "End") logicalNext = virtualState.logicalKeys.length - 1;
+        else if (event.key === "ArrowDown") {
+          logicalNext = Math.min(virtualState.logicalKeys.length - 1, logicalIndex + 1);
+        } else logicalNext = Math.max(0, logicalIndex - 1);
+        event.preventDefault();
+        focusLogicalSessionTreeKey(virtualState.logicalKeys[logicalNext]);
+        return;
+      }
+    }
+
+    if (item.dataset.treeItem === "project" &&
+        (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey))) {
+      var project = findProject(item.dataset.projectId);
+      if (!project) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openSessionContextMenu(event, projectAppearanceContextActions(project, item), item);
+      return;
+    }
+
     if (event.key === "ArrowDown" || event.key === "ArrowUp" ||
         event.key === "Home" || event.key === "End") {
       var next = index;
@@ -5623,6 +6896,12 @@
       if (child) {
         event.preventDefault();
         focusSessionTreeItem(child);
+      } else if (virtualState && virtualState.childKeys) {
+        var logicalChildKey = virtualState.childKeys.get(item.dataset.treeKey || "");
+        if (logicalChildKey) {
+          event.preventDefault();
+          focusLogicalSessionTreeKey(logicalChildKey);
+        }
       }
       return;
     }
@@ -5648,9 +6927,13 @@
     return focusSessionTreeItem(target);
   }
 
-  function renderSessionList() {
+  function renderSessionList(options) {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
+    var popoverRestoreKey = projectAppearancePopoverRestoreKey;
+    var popoverOwnsFocus = projectAppearancePopover &&
+      projectAppearancePopover.contains(document.activeElement);
+    closeProjectAppearancePopover({ restoreFocus: false });
     var now = Date.now();
     syncLocalSidebarStatusKeys(now);
     // A re-render would strand an armed confirm on a row that no longer exists.
@@ -5667,12 +6950,24 @@
       }
       return false;
     }
-    var activeTreeKey = (document.activeElement && document.activeElement.dataset
+    var virtualState = sessionListEl.__psycheVirtualState || {
+      virtualized: false,
+      logicalKeys: [],
+      rowIndexes: new Map(),
+      childKeys: new Map(),
+      focusKey: "",
+    };
+    sessionListEl.__psycheVirtualState = virtualState;
+    var preserveFocus = !options || options.preserveFocus !== false;
+    var requestedRestoreKey = options && options.restoreFocusKey;
+    var activeTreeKey = virtualState.focusKey || (preserveFocus &&
+      document.activeElement && document.activeElement.dataset
       ? document.activeElement.dataset.treeKey
-      : "") || armedCloseTreeKey;
-    var shouldRestoreTreeFocus = Boolean(activeTreeKey);
+      : "") || armedCloseTreeKey ||
+      (popoverOwnsFocus ? popoverRestoreKey : "");
+    var shouldRestoreTreeFocus = Boolean(activeTreeKey || requestedRestoreKey);
     if (activeTreeKey) sessionTreeFocusKey = activeTreeKey;
-    var focusedKey = sessionTreeFocusKey;
+    var focusedKey = requestedRestoreKey || sessionTreeFocusKey;
     sessionListEl.setAttribute("role", "tree");
     sessionListEl.setAttribute(
       "aria-label",
@@ -5680,10 +6975,16 @@
     );
     if (setPicking) sessionListEl.setAttribute("aria-multiselectable", "true");
     else sessionListEl.removeAttribute("aria-multiselectable");
+    var virtualRuntime = sessionListEl.__psycheVirtualRuntime;
+    var sessionRowHeight = virtualRuntime
+      ? collectionRowHeight(sessionListEl, "--session-row-h", 44)
+      : 44;
+    var measuredSessionScrollTop = virtualRuntime
+      ? sessionVirtualScrollTop(sessionRowHeight)
+      : sessionListEl.scrollTop || 0;
     sessionListEl.replaceChildren();
 
-    var currentSearchQuery = sessionFilter;
-    var needle = currentSearchQuery.trim().toLowerCase();
+    var currentSearchQuery = "";
     var matched = 0;
     var inlineState = covenInlineState(covenDiscovery);
     // Walked once per render: every row tests membership against this list.
@@ -5747,10 +7048,65 @@
       });
       if (projectModel.visibleCount === 0) return;
       matched += projectModel.visibleCount;
-      projectModels.push({ project: project, model: projectModel });
+      projectModels.push({
+        project: project,
+        model: projectModel,
+        appearance: PsycheSessions.resolveProjectAppearance(project, projectAppearances),
+      });
     });
 
-    if (needle || sessionTypeFilter !== "all") {
+    var sessionRows = [];
+    virtualState.logicalKeys = [];
+    virtualState.rowIndexes = new Map();
+    virtualState.childKeys = new Map();
+    projectModels.forEach(function (entry) {
+      virtualState.logicalKeys.push(entry.model.key);
+      if (!entry.model.expanded) return;
+      if (entry.model.branches.length) {
+        virtualState.childKeys.set(entry.model.key, entry.model.branches[0].key);
+      }
+      entry.model.branches.forEach(function (branch) {
+        virtualState.logicalKeys.push(branch.key);
+        if (!branch.expanded) return;
+        var firstCategoryWithRows = branch.categories.find(function (category) {
+          return category.rows.length > 0;
+        });
+        if (firstCategoryWithRows) {
+          virtualState.childKeys.set(branch.key, firstCategoryWithRows.rows[0].key);
+        }
+        branch.categories.forEach(function (category) {
+          category.rows.forEach(function (row) {
+            virtualState.rowIndexes.set(row.key, sessionRows.length);
+            sessionRows.push(row);
+            virtualState.logicalKeys.push(row.key);
+          });
+        });
+      });
+    });
+    var sessionActiveIndex = sessionRows.findIndex(function (item) {
+      return activeTreeKey && item.key === activeTreeKey;
+    });
+    var sessionVirtualWindow = null;
+    var sessionVisibleKeys = null;
+    virtualState.rowHeight = sessionRowHeight;
+    virtualState.virtualized = Boolean(
+      virtualRuntime && virtualRuntime.shouldVirtualize(sessionRows.length)
+    );
+    if (virtualState.virtualized) {
+      sessionVirtualWindow = virtualRuntime.virtualizeItems(sessionRows, {
+        rowHeight: sessionRowHeight,
+        viewportHeight: sessionListEl.clientHeight,
+        scrollTop: measuredSessionScrollTop,
+        overscan: virtualRuntime.VIRTUAL_LIST_OVERSCAN,
+        activeIndex: sessionActiveIndex >= 0 ? sessionActiveIndex : undefined,
+        getKey: function (item) { return item.key; },
+      });
+      sessionVisibleKeys = new Set(sessionVirtualWindow.items.map(function (item) {
+        return item.key;
+      }));
+    }
+
+    if (sessionTypeFilter !== "all") {
       var summary = document.createElement("div");
       summary.className = "session-result-summary";
       summary.setAttribute("role", "status");
@@ -5760,31 +7116,24 @@
       var reset = document.createElement("button");
       reset.type = "button";
       reset.className = "session-result-reset";
-      if (needle) {
-        reset.textContent = "Clear search";
-        reset.addEventListener("click", function () {
-          sessionSearchEl.value = "";
-          sessionFilter = "";
-          renderSessionList();
-          sessionSearchEl.focus();
-        });
-      } else {
-        reset.textContent = "Reset filter";
-        reset.addEventListener("click", function () {
-          setSessionTypeFilter("all");
-          var allFilter = document.querySelector('[data-session-filter="all"]');
-          if (allFilter) allFilter.focus();
-        });
-      }
+      reset.textContent = "Reset filter";
+      reset.addEventListener("click", function () {
+        setSessionTypeFilter("all");
+        var allFilter = document.querySelector('[data-session-filter="all"]');
+        if (allFilter) allFilter.focus();
+      });
       summary.appendChild(summaryText);
       summary.appendChild(reset);
       sessionListEl.appendChild(summary);
     }
 
+    var sessionRenderRowIndex = 0;
     projectModels.forEach(function (entry) {
       var project = entry.project;
       var projectModel = entry.model;
+      var appearance = entry.appearance;
       var projectParts = createProjectGroup(projectModel, {
+        appearance: appearance,
         current: project.id === state.activeProjectId,
         tabindex: "-1",
       });
@@ -5805,6 +7154,15 @@
             targetWithin(event, projectParts.disclosure)) return;
         clearFocusSet();
         setActiveProject(project.id);
+      });
+      projectParts.head.addEventListener("contextmenu", function (event) {
+        var focusKey = projectParts.group.dataset.treeKey || "";
+        if (focusKey) sessionTreeFocusKey = focusKey;
+        openSessionContextMenu(
+          event,
+          projectAppearanceContextActions(project, projectParts.group),
+          projectParts.group
+        );
       });
       if (projectModel.expanded) {
         projectModel.branches.forEach(function (branchModel) {
@@ -5872,7 +7230,30 @@
             categoryGroup.setAttribute("role", "none");
             categoryGroup.appendChild(createCategoryLabel(category));
 
+            var categoryStart = sessionRenderRowIndex;
+            var categoryEnd = categoryStart + category.rows.length;
+            sessionRenderRowIndex = categoryEnd;
+            categoryGroup.dataset.virtualRowStart = String(categoryStart);
+            categoryGroup.dataset.virtualRowCount = String(category.rows.length);
+            var categoryWindow = sessionVirtualWindow
+              ? virtualRuntime.computeVirtualGroup(
+                  categoryStart,
+                  category.rows.length,
+                  sessionVirtualWindow
+                )
+              : null;
+            if (sessionVirtualWindow) {
+              var categoryBeforeCount = categoryWindow.beforeCount;
+              if (categoryBeforeCount) {
+                categoryGroup.appendChild(createVirtualListSpacer(
+                  "before",
+                  categoryBeforeCount * sessionRowHeight
+                ));
+              }
+            }
+
             category.rows.forEach(function (rowModel) {
+              if (sessionVisibleKeys && !sessionVisibleKeys.has(rowModel.key)) return;
               var selected = rowModel.selectionKey === selectedKey;
               var rowParts = createSessionRow(rowModel, {
                 selected: selected,
@@ -5885,6 +7266,7 @@
                 sets: rowModel.source === "psyche" ? setsForThread(rowModel.value) : [],
               });
               var row = rowParts.row;
+              row.dataset.virtualKey = rowModel.key;
               var wrapper = rowParts.wrapper;
               if (rowModel.source === "coven") {
                 var attached = covenRowAttached(state, project.id, rowModel.id);
@@ -6031,6 +7413,15 @@
               row.appendChild(close);
               categoryGroup.appendChild(wrapper);
             });
+            if (sessionVirtualWindow) {
+              var categoryAfterCount = categoryWindow.afterCount;
+              if (categoryAfterCount) {
+                categoryGroup.appendChild(createVirtualListSpacer(
+                  "after",
+                  categoryAfterCount * sessionRowHeight
+                ));
+              }
+            }
             branchParts.children.appendChild(categoryGroup);
           });
           branchParts.group.appendChild(branchParts.children);
@@ -6052,20 +7443,21 @@
     if (matched === 0 && !inlineState) {
       var empty = document.createElement("div");
       empty.className = "session-empty";
-      empty.textContent = needle
-        ? "No sessions match “" + sessionFilter.trim() + "”"
-        : sessionTypeFilter !== "all"
-          ? "No sessions match the " + sessionTypeFilter + " filter."
-          : state.projects.length
-            ? "No sessions yet."
-            : "No project open — ⌘O to add one.";
+      empty.textContent = sessionTypeFilter !== "all"
+        ? "No sessions match the " + sessionTypeFilter + " filter."
+        : state.projects.length
+          ? "No sessions yet."
+          : "No project open — ⌘O to add one.";
       sessionListEl.appendChild(empty);
     }
 
     var renderedItems = Array.prototype.slice.call(
       sessionListEl.querySelectorAll("[data-tree-item]")
     );
-    var preferred = renderedItems.find(function (item) {
+    var requestedFocusItem = renderedItems.find(function (item) {
+      return requestedRestoreKey && item.dataset.treeKey === requestedRestoreKey;
+    });
+    var preferred = requestedFocusItem || renderedItems.find(function (item) {
       return focusedKey && item.dataset.treeKey === focusedKey;
     }) || renderedItems.find(function (item) {
       return item.dataset.selectionKey === selectedKey;
@@ -6078,8 +7470,206 @@
     });
     if (preferred) {
       sessionTreeFocusKey = preferred.dataset.treeKey || "";
-      if (shouldRestoreTreeFocus) preferred.focus();
+      if (shouldRestoreTreeFocus && (!requestedRestoreKey || requestedFocusItem)) preferred.focus();
     }
+    virtualState.focusKey = "";
+  }
+
+  function applyProjectAppearance(project, patch) {
+    var key = PsycheSessions.normalizeProjectAppearanceKey(project && project.root);
+    if (!project || !key) return false;
+    projectAppearances = PsycheSessions.updateProjectAppearance(
+      projectAppearances,
+      key,
+      patch
+    );
+    var focusKey = sessionTreeFocusKey;
+    saveProjectAppearances();
+    renderSessionList();
+    if (focusKey) {
+      sessionTreeFocusKey = focusKey;
+      restoreSessionTreeFocus(focusKey);
+    }
+    return true;
+  }
+
+  function closeProjectAppearancePopover(options) {
+    var restoreFocus = !options || options.restoreFocus !== false;
+    var restoreKey = projectAppearancePopoverRestoreKey;
+    if (projectAppearancePopover && projectAppearancePopover.parentNode) {
+      projectAppearancePopover.parentNode.removeChild(projectAppearancePopover);
+    }
+    projectAppearancePopover = null;
+    projectAppearancePopoverRestoreKey = "";
+    if (restoreFocus && restoreKey) {
+      sessionTreeFocusKey = restoreKey;
+      restoreSessionTreeFocus(restoreKey);
+    }
+  }
+
+  function openProjectAppearancePopover(project, anchor) {
+    if (!project || !anchor || typeof anchor.getBoundingClientRect !== "function") return null;
+    closeSessionContextMenu({ restoreFocus: false });
+    closeProjectAppearancePopover({ restoreFocus: false });
+
+    var appearance = PsycheSessions.resolveProjectAppearance(project, projectAppearances);
+    var stored = appearance.override || {};
+    var hasOwn = Object.prototype.hasOwnProperty;
+    var draftAccent = hasOwn.call(stored, "accent") ? stored.accent : null;
+    var draftGlyph = hasOwn.call(stored, "glyph") ? stored.glyph : null;
+
+    var popover = document.createElement("div");
+    popover.className = "project-appearance-popover";
+    popover.setAttribute("role", "dialog");
+    popover.setAttribute("aria-label", "Customize appearance for " + project.name);
+
+    var title = document.createElement("div");
+    title.className = "project-appearance-title";
+    title.textContent = project.name;
+    popover.appendChild(title);
+
+    var accentLabel = document.createElement("div");
+    accentLabel.className = "project-appearance-label";
+    popover.appendChild(accentLabel);
+
+    var accentGrid = document.createElement("div");
+    accentGrid.className = "project-appearance-grid project-appearance-accent-grid";
+    popover.appendChild(accentGrid);
+
+    var accentButtons = [];
+    PsycheSessions.PROJECT_ACCENTS.forEach(function (accent) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "project-appearance-choice project-appearance-accent";
+      button.setAttribute("aria-label", accent.label);
+      button.style.setProperty("--project-accent-rgb", accent.rgb);
+      var swatch = document.createElement("span");
+      swatch.className = "project-appearance-accent-swatch";
+      button.appendChild(swatch);
+      button.addEventListener("click", function () {
+        draftAccent = accent.id;
+        syncDraftState();
+      });
+      accentGrid.appendChild(button);
+      accentButtons.push({ id: accent.id, label: accent.label, button: button });
+    });
+
+    var glyphLabel = document.createElement("div");
+    glyphLabel.className = "project-appearance-label";
+    popover.appendChild(glyphLabel);
+
+    var glyphGrid = document.createElement("div");
+    glyphGrid.className = "project-appearance-grid project-appearance-glyph-grid";
+    popover.appendChild(glyphGrid);
+
+    var glyphButtons = [];
+    var noGlyphButton = document.createElement("button");
+    noGlyphButton.type = "button";
+    noGlyphButton.className = "project-appearance-choice project-appearance-glyph";
+    noGlyphButton.textContent = "No glyph";
+    noGlyphButton.addEventListener("click", function () {
+      draftGlyph = null;
+      syncDraftState();
+    });
+    glyphGrid.appendChild(noGlyphButton);
+    glyphButtons.push({ id: null, label: "No glyph", button: noGlyphButton });
+
+    PsycheSessions.PROJECT_GLYPHS.forEach(function (glyph) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "project-appearance-choice project-appearance-glyph";
+      button.setAttribute("aria-label", glyph.label);
+      var glyphValue = document.createElement("span");
+      glyphValue.className = "project-appearance-glyph-value";
+      glyphValue.textContent = glyph.value;
+      var glyphText = document.createElement("span");
+      glyphText.className = "project-appearance-glyph-name";
+      glyphText.textContent = glyph.label;
+      button.appendChild(glyphValue);
+      button.appendChild(glyphText);
+      button.addEventListener("click", function () {
+        draftGlyph = glyph.id;
+        syncDraftState();
+      });
+      glyphGrid.appendChild(button);
+      glyphButtons.push({ id: glyph.id, label: glyph.label, button: button });
+    });
+
+    var actions = document.createElement("div");
+    actions.className = "project-appearance-actions";
+    var reset = document.createElement("button");
+    reset.type = "button";
+    reset.className = "project-appearance-action";
+    reset.textContent = "Reset to automatic";
+    reset.addEventListener("click", function () {
+      closeProjectAppearancePopover({ restoreFocus: false });
+      applyProjectAppearance(project, null);
+    });
+    var spacer = document.createElement("span");
+    spacer.className = "project-appearance-spacer";
+    spacer.setAttribute("aria-hidden", "true");
+    var cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "project-appearance-action";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", function () {
+      closeProjectAppearancePopover();
+    });
+    var apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "project-appearance-action is-primary";
+    apply.textContent = "Apply";
+    apply.addEventListener("click", function () {
+      closeProjectAppearancePopover({ restoreFocus: false });
+      applyProjectAppearance(project, { accent: draftAccent, glyph: draftGlyph });
+    });
+    actions.appendChild(reset);
+    actions.appendChild(spacer);
+    actions.appendChild(cancel);
+    actions.appendChild(apply);
+    popover.appendChild(actions);
+
+    function syncDraftState() {
+      var accentMatch = PsycheSessions.PROJECT_ACCENTS.find(function (accent) {
+        return accent.id === draftAccent;
+      }) || appearance.accent;
+      accentLabel.textContent = draftAccent
+        ? "Accent · " + accentMatch.label
+        : "Accent · Automatic (" + appearance.accent.label + ")";
+      accentButtons.forEach(function (entry) {
+        entry.button.setAttribute("aria-pressed", entry.id === draftAccent ? "true" : "false");
+      });
+      var glyphMatch = PsycheSessions.PROJECT_GLYPHS.find(function (glyph) {
+        return glyph.id === draftGlyph;
+      });
+      glyphLabel.textContent = glyphMatch
+        ? "Glyph · " + glyphMatch.label
+        : "Glyph · No glyph";
+      glyphButtons.forEach(function (entry) {
+        entry.button.setAttribute("aria-pressed", entry.id === draftGlyph ? "true" : "false");
+      });
+    }
+
+    syncDraftState();
+    projectAppearancePopover = popover;
+    projectAppearancePopoverRestoreKey =
+      (anchor.dataset && anchor.dataset.treeKey) || sessionTreeFocusKey || "";
+    document.body.appendChild(popover);
+    popover.style.maxWidth = Math.max(0, Math.min(420, window.innerWidth - 16)) + "px";
+    var anchorRect = anchor.getBoundingClientRect();
+    var popoverRect = popover.getBoundingClientRect();
+    popover.style.left = Math.max(8, Math.min(
+      window.innerWidth - popoverRect.width - 8,
+      anchorRect.left
+    )) + "px";
+    popover.style.top = Math.max(8, Math.min(
+      window.innerHeight - popoverRect.height - 8,
+      anchorRect.bottom + 8
+    )) + "px";
+    var preferredFocus = popover.querySelector('button[aria-pressed="true"]') ||
+      popover.querySelector("button");
+    if (preferredFocus) preferredFocus.focus();
+    return popover;
   }
 
   if (bgOpacityInput) {
@@ -6104,26 +7694,6 @@
   applySolidBg(settings.solidBg, { persist: false });
   applyBgOpacity(settings.bgOpacity, { persist: false });
 
-  if (sessionSearchEl) {
-    sessionSearchEl.addEventListener("focus", function () {
-      sessionSearchRestoreKey = sessionTreeFocusKey;
-    });
-    sessionSearchEl.addEventListener("input", function () {
-      sessionFilter = sessionSearchEl.value || "";
-      renderSessionList();
-    });
-    // Escape clears the filter rather than bubbling to the terminal.
-    sessionSearchEl.addEventListener("keydown", function (e) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        sessionSearchEl.value = "";
-        sessionFilter = "";
-        renderSessionList();
-        restoreSessionTreeFocus(sessionSearchRestoreKey);
-      }
-    });
-  }
   if (sessionListEl) {
     sessionListEl.addEventListener("focusin", function (event) {
       if (event.target && event.target.matches &&
@@ -6141,19 +7711,6 @@
       });
     }
   );
-  document.addEventListener("keydown", function (event) {
-    var target = event.target;
-    var editing = target && (
-      target.tagName === "INPUT" || target.tagName === "TEXTAREA" ||
-      target.tagName === "SELECT" || target.isContentEditable
-    );
-    if (event.key === "/" && !editing && sidebarTab === "sessions") {
-      event.preventDefault();
-      sessionSearchRestoreKey = sessionTreeFocusKey;
-      sessionSearchEl.focus();
-      sessionSearchEl.select();
-    }
-  });
   setSidebarTab(settings.sidebarTab, { persist: false });
   setSessionTypeFilter(settings.sessionFilter, { persist: false });
 
@@ -6182,7 +7739,7 @@
         '<button type="button" class="canvas-empty-action" data-empty-action="term">' +
           '<span class="glyph mono">❯_</span>Terminal<span class="key">⌘T</span></button>' +
         '<button type="button" class="canvas-empty-action" data-empty-action="agent">' +
-          '<span class="glyph">✳</span>Agent<span class="key">⌘P</span></button>' +
+          '<span class="glyph">✳</span>Agent<span class="key">⌘D</span></button>' +
         '<button type="button" class="canvas-empty-action" data-empty-action="web">' +
           '<span class="glyph">◍</span>Browser<span class="key">Web +</span></button>' +
       "</div>";
@@ -6213,15 +7770,31 @@
       fileNavigationInFlight = false;
     }
     if (!canRemove) return false;
+    var projectFilesPanes = [];
+    if (typeof filesPanes !== "undefined") {
+      filesPanes.forEach(function (filesPane) {
+        if (filesPane.projectId === id) projectFilesPanes.push(filesPane);
+      });
+    }
     covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
     // Close every thread that belongs to this project.
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
       .map(function (t) { return t.id; });
-    threadIds.forEach(function (tid) { closeThread(tid, { focus: false }); });
+    var preserveTerminalFocus = state.activeProjectId !== id;
+    var closeResults = await Promise.all(threadIds.map(function (tid) {
+      return closeThread(tid, {
+        focus: false,
+        preserveTerminalFocus: preserveTerminalFocus,
+      });
+    }));
+    if (closeResults.some(function (closed) { return closed === false; })) return false;
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
+    projectFilesPanes.forEach(function (filesPane) {
+      if (typeof removeFilesPaneNow === "function") removeFilesPaneNow(filesPane);
+    });
     var restoredTerminalView = false;
     if (dropped.some(function (f) { return f.id === state.activeFileId; })) {
       state.activeFileId = null;
@@ -6236,12 +7809,13 @@
       var next = state.projects[0] || null;
       // Force setActiveProject to do its restore work even though the id
       // matches — clear first.
-      state.activeProjectId = null;
+      if (typeof assignActiveProjectId === "function") assignActiveProjectId(null);
+      else Object.assign(state, { activeProjectId: null });
       if (next) {
         await setActiveProject(next.id);
       } else {
         state.activeThreadId = null;
-        renderPaneWorkspace();
+        renderPaneWorkspace({ preserveTerminalFocus: false });
         setStatus("no project — click + to open one", "");
       }
     }
@@ -6266,8 +7840,9 @@
   // Tabs == projects. Opening a project launches or focuses its Coven pane.
   // and clicking the tab restores the project's last-active physical pane.
   // Threads remain project/worktree-scoped and are managed in the sessions rail.
-  // ---- File tabs (main area) ----
+  // ---- File tabs (Files pane) ----
 
+  var fileSurfaceStagingEl = document.getElementById("file-surface-staging");
   var fileViewEl = document.getElementById("file-view");
   var fileViewPathEl = document.getElementById("file-view-path");
   var fileViewMetaEl = document.getElementById("file-view-meta");
@@ -6314,7 +7889,7 @@
 
   function restoreFileEditorFocus() {
     requestAnimationFrame(function () {
-      if (state.activeFileId && fileViewEl && !fileViewEl.hidden) fileEditor.focus();
+      if (filesPaneHasCanvasFocus() && fileViewEl && !fileViewEl.hidden) fileEditor.focus();
     });
   }
 
@@ -6381,13 +7956,127 @@
     return state.openFiles.filter(function (f) { return f.id === id; })[0] || null;
   }
 
+  function projectFiles(projectId, workspaceRoot) {
+    var project = projectId && !workspaceRoot ? findProject(projectId) :
+      (!projectId ? activeProject() : null);
+    var pid = projectId || (project && project.id) || state.activeProjectId;
+    var root = workspaceRoot || (project ? activeWorkspaceRoot(project) : null);
+    var model = workspaceModel();
+    if (model && typeof model.workspaceFiles === "function") {
+      return model.workspaceFiles(state.openFiles, pid, root);
+    }
+    return state.openFiles.filter(function (file) {
+      return file.projectId === pid && file.workspaceRoot === root;
+    });
+  }
+
+  function filesForPane(filesPane) {
+    return filesPane
+      ? projectFiles(filesPane.projectId, filesPane.workspaceRoot)
+      : [];
+  }
+
+  function nextFileIdAfterClose(files, closingId) {
+    var model = workspaceModel();
+    if (model && typeof model.nextFileIdAfterClose === "function") {
+      return model.nextFileIdAfterClose(files, closingId);
+    }
+    var index = files.findIndex(function (file) { return file.id === closingId; });
+    var remaining = files.filter(function (file) { return file.id !== closingId; });
+    var next = remaining[Math.min(Math.max(index, 0), remaining.length - 1)];
+    return next ? next.id : null;
+  }
+
+  function restoreFilesPaneSelection(project, workspaceRoot) {
+    var filesPane = project
+      ? filesPanes.get(filesPaneKey(project.id, workspaceRoot))
+      : null;
+    var files = filesForPane(filesPane);
+    var active = files.find(function (file) {
+      return file.id === filesPane.activeFileId;
+    }) || files[0] || null;
+    if (filesPane) filesPane.activeFileId = active ? active.id : null;
+    state.activeFileId = active ? active.id : null;
+    if (fileViewEl) fileViewEl.hidden = !active;
+    if (active) renderFileView();
+    return active;
+  }
+
+  function activeFilesPane() {
+    var project = activeProject();
+    if (!project) return null;
+    return filesPanes.get(filesPaneKey(project.id, activeWorkspaceRoot(project))) || null;
+  }
+
+  function rememberFilesPaneReturnThread(filesPane) {
+    if (!filesPane) return null;
+    var thread = findThread(state.activeThreadId);
+    var processBacked = thread && thread.kind !== "web" && thread.kind !== "git" &&
+      thread.kind !== "coven-chat" && thread.kind !== "coven-attach";
+    var live = processBacked && !thread.hidden && !thread.closing &&
+      thread.status !== "exited" && thread.status !== "failed";
+    if (!live || thread.projectId !== filesPane.projectId ||
+        thread.worktreePath !== filesPane.workspaceRoot) {
+      return filesPane.previousFocusedSessionId || null;
+    }
+    filesPane.previousFocusedSessionId = thread.id;
+    fileFocus.returnThreadId = thread.id;
+    return thread.id;
+  }
+
+  function removeFilesPaneNow(filesPane) {
+    if (!filesPane) return null;
+    var removedActiveFileId = filesPane.activeFileId;
+    var removedReturnThreadId = filesPane.previousFocusedSessionId;
+    var ownsFileSurface = fileViewEl && fileViewEl.parentElement === filesPane.host;
+    var nextSurfaceId = detachThreadPane(filesPane);
+    filesPanes.delete(filesPaneKey(filesPane.projectId, filesPane.workspaceRoot));
+    if (state.activeFileId === removedActiveFileId) clearFileFocusPresentation();
+    if (typeof fileFocus !== "undefined" &&
+        fileFocus.returnThreadId === removedReturnThreadId) {
+      fileFocus.returnThreadId = null;
+    }
+    filesPane.activeFileId = null;
+    filesPane.previousFocusedSessionId = null;
+    if (ownsFileSurface && fileSurfaceStagingEl) fileSurfaceStagingEl.appendChild(fileViewEl);
+    if (ownsFileSurface) fileViewEl.hidden = true;
+    if (filesPane.pane && typeof filesPane.pane.remove === "function") filesPane.pane.remove();
+    filesPane.pane = null;
+    filesPane.host = null;
+    refreshTabs();
+    renderPaneWorkspace();
+    if (nextSurfaceId && typeof focusThread === "function") focusThread(nextSurfaceId);
+    return nextSurfaceId;
+  }
+
+  async function closeFilesPane(filesPane) {
+    if (!filesPane || fileNavigationInFlight || fileDecisionInFlight) return false;
+    var files = filesForPane(filesPane).slice();
+    fileNavigationInFlight = true;
+    var canClose;
+    try {
+      canClose = await guardDirtyFiles(files);
+    } finally {
+      fileNavigationInFlight = false;
+    }
+    if (!canClose) return false;
+    state.openFiles = state.openFiles.filter(function (file) {
+      return files.indexOf(file) === -1;
+    });
+    removeFilesPaneNow(filesPane);
+    return true;
+  }
+
   function fileFocusThreadIsAvailable(thread, root, project, workspaceRoot, allowCoven) {
     return !!thread &&
       !thread.hidden &&
+      !thread.closing &&
+      thread.status !== "exited" && thread.status !== "failed" &&
       thread.projectId === project.id &&
       thread.worktreePath === workspaceRoot &&
       (allowCoven ||
         (thread.kind !== "coven-chat" && thread.kind !== "coven-attach")) &&
+      thread.kind !== "web" && thread.kind !== "git" &&
       !!PsychePanes.findLeafByThreadId(root, thread.id);
   }
 
@@ -6404,17 +8093,23 @@
       return preferred.id;
     }
 
-    var focused = layout.focusedLeafId
-      ? PsychePanes.findLeafById(root, layout.focusedLeafId)
-      : null;
-    var focusedThread = focused ? findThread(focused.threadId) : null;
-    if (fileFocusThreadIsAvailable(focusedThread, root, project, workspaceRoot, false)) {
-      return focusedThread.id;
-    }
-
     var leafIds = PsychePanes.leafIds(root);
-    for (var i = 0; i < leafIds.length; i++) {
-      var leaf = PsychePanes.findLeafById(root, leafIds[i]);
+    var filesPane = activeFilesPane();
+    var filesLeaf = filesPane
+      ? PsychePanes.findLeafByThreadId(root, filesPane.id)
+      : null;
+    var filesIndex = filesLeaf ? leafIds.indexOf(filesLeaf.id) : -1;
+    var candidates = [];
+    if (filesIndex === -1) {
+      candidates = leafIds.slice();
+    } else {
+      for (var distance = 1; distance < leafIds.length; distance += 1) {
+        if (filesIndex - distance >= 0) candidates.push(leafIds[filesIndex - distance]);
+        if (filesIndex + distance < leafIds.length) candidates.push(leafIds[filesIndex + distance]);
+      }
+    }
+    for (var i = 0; i < candidates.length; i++) {
+      var leaf = PsychePanes.findLeafById(root, candidates[i]);
       var thread = leaf ? findThread(leaf.threadId) : null;
       if (fileFocusThreadIsAvailable(thread, root, project, workspaceRoot, false)) {
         return thread.id;
@@ -6429,10 +8124,17 @@
       fileFocus.returnThreadId = state.activeThreadId || null;
     }
     state.activeFileId = file.id;
-    terminalArea.classList.add("is-file-focused");
     fileViewEl.hidden = false;
-    terminalHost.hidden = true;
+    var filesPane = filesPanes.get(filesPaneKey(file.projectId, file.workspaceRoot));
+    if (filesPane) {
+      if (typeof rememberFilesPaneReturnThread === "function") {
+        rememberFilesPaneReturnThread(filesPane);
+      }
+      filesPane.activeFileId = file.id;
+      focusCanvasSurface(filesPane);
+    }
     syncPaneMetricsVisibility();
+    syncAllPtyVisibility();
     renderPaneMinimap(activePaneLayout(), file);
     return true;
   }
@@ -6440,10 +8142,9 @@
   function clearFileFocusPresentation() {
     state.activeFileId = null;
     fileFocus.returnThreadId = null;
-    terminalArea.classList.remove("is-file-focused");
     fileViewEl.hidden = true;
-    terminalHost.hidden = false;
     syncPaneMetricsVisibility();
+    syncAllPtyVisibility();
   }
 
   function clearPassiveCovenPaneFocus(layout) {
@@ -6474,10 +8175,13 @@
   }
 
   async function returnFromFileFocus(explicitThreadId, maximizeDestination) {
-    if (!state.activeFileId) return false;
+    if (!filesPaneHasCanvasFocus()) return false;
     var activeFile = findOpenFile(state.activeFileId);
+    var filesPane = activeFilesPane();
     var destinationId = resolveFileFocusThreadId(
-      explicitThreadId || fileFocus.returnThreadId,
+      explicitThreadId || (filesPane
+        ? filesPane.previousFocusedSessionId
+        : fileFocus.returnThreadId),
       Boolean(explicitThreadId)
     );
     if (destinationId) {
@@ -6503,7 +8207,7 @@
     }
     if (!(await showTerminalView())) return false;
     clearPassiveCovenPaneFocus();
-    renderPaneWorkspace();
+    renderPaneWorkspace({ preserveTerminalFocus: false });
     refreshSidebar();
     return true;
   }
@@ -6513,19 +8217,13 @@
     if (!project) return;
     var workspaceRoot = activeWorkspaceRoot(project);
     var existing = state.openFiles.filter(function (f) {
-      return f.path === path && f.projectId === project.id;
+      return f.path === path && f.projectId === project.id &&
+        f.workspaceRoot === workspaceRoot;
     })[0];
     if (existing) return activateFileTab(existing.id);
     if (fileNavigationInFlight || fileDecisionInFlight) return false;
-    fileNavigationInFlight = true;
-    var canOpen;
-    try {
-      canOpen = await guardDirtyFile(findOpenFile(state.activeFileId));
-    } finally {
-      fileNavigationInFlight = false;
-    }
-    if (!canOpen) return false;
 
+    var filesPane = ensureFilesPane(project, workspaceRoot);
     fileCounter += 1;
     var rel = relativeToRoot(workspaceRoot, path);
     var file = {
@@ -6552,6 +8250,7 @@
       loading: true,
     };
     state.openFiles.push(file);
+    filesPane.activeFileId = file.id;
     activateFileTabNow(file.id);
     try {
       var res = await invoke("fs_read_text", { root: workspaceRoot, path: path });
@@ -6570,7 +8269,16 @@
   function activateFileTabNow(id) {
     var file = findOpenFile(id);
     if (!file) return false;
+    var project = findProject(file.projectId);
+    if (project) {
+      if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
+      else Object.assign(state, { activeProjectId: project.id });
+      project.selectedWorktreePath = file.workspaceRoot;
+    }
+    var filesPane = project ? ensureFilesPane(project, file.workspaceRoot) : null;
+    if (filesPane) filesPane.activeFileId = file.id;
     enterFileFocus(file);
+    renderPaneWorkspace();
     markActiveSurface("terminal");
     refreshTabs();
     renderFileView();
@@ -6581,8 +8289,10 @@
     if (!file || !findOpenFile(file.id)) return false;
     var project = findProject(file.projectId);
     if (project) {
-      state.activeProjectId = project.id;
-      var workspaceRoot = activeWorkspaceRoot(project);
+      if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
+      else Object.assign(state, { activeProjectId: project.id });
+      var workspaceRoot = file.workspaceRoot || project.root || activeWorkspaceRoot(project);
+      project.selectedWorktreePath = workspaceRoot;
       var threads = state.threads.filter(function (thread) {
         return thread.projectId === project.id && !thread.hidden &&
           thread.worktreePath === workspaceRoot &&
@@ -6594,7 +8304,7 @@
           : (threads[0] ? threads[0].id : null);
       state.activeThreadId = nextThreadId;
       clearPassiveCovenPaneFocus();
-      renderPaneWorkspace();
+      renderPaneWorkspace({ preserveTerminalFocus: false });
       renderGitSurface();
       loadAgentSkills();
       syncProjectBrowser();
@@ -6612,36 +8322,17 @@
       fileEditor.focus();
       return true;
     }
-    if (fileNavigationInFlight || fileDecisionInFlight) return false;
-    fileNavigationInFlight = true;
-    var canActivate;
-    try {
-      canActivate = await guardDirtyFile(findOpenFile(state.activeFileId));
-    } finally {
-      fileNavigationInFlight = false;
-    }
-    if (!canActivate) return false;
     return activateFileTabNow(id);
   }
 
-  // Hands the main area back to the terminal. Called whenever a session is
-  // focused, so clicking a sidebar row always lands you on its terminal.
+  // Guard a focus transfer back to a canvas session. The Files pane remains
+  // mounted and visible; only the active canvas leaf changes.
   async function showTerminalView() {
-    if (!state.activeFileId) return true;
-    if (fileNavigationInFlight || fileDecisionInFlight) return false;
-    fileNavigationInFlight = true;
-    var canShowTerminal;
-    try {
-      canShowTerminal = await guardDirtyFile(findOpenFile(state.activeFileId));
-    } finally {
-      fileNavigationInFlight = false;
-    }
-    if (!canShowTerminal) return false;
-    clearFileFocusPresentation();
+    if (!filesPaneHasCanvasFocus()) return true;
     clearPassiveCovenPaneFocus();
     renderPaneMinimap(activePaneLayout(), null);
     refreshTabs();
-    requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
+    requestAnimationFrame(function () { scheduleTerminalPaneFits(); });
     return true;
   }
 
@@ -6657,19 +8348,35 @@
       fileNavigationInFlight = false;
     }
     if (!canClose) return false;
-    var siblings = projectFiles(file.projectId);
-    var idx = siblings.indexOf(file);
+    var filesPane = typeof filesPanes !== "undefined"
+      ? filesPanes.get(filesPaneKey(file.projectId, file.workspaceRoot))
+      : null;
+    var siblings = filesPane
+      ? filesForPane(filesPane)
+      : projectFiles(file.projectId, file.workspaceRoot);
+    var nextId = typeof nextFileIdAfterClose === "function"
+      ? nextFileIdAfterClose(siblings, id)
+      : ((siblings[siblings.indexOf(file) + 1] || siblings[siblings.indexOf(file) - 1]) || {}).id;
+    var paneWasActive = filesPane && filesPane.activeFileId === id;
+    var globallyActive = state.activeFileId === id;
     state.openFiles = state.openFiles.filter(function (f) { return f.id !== id; });
-    if (state.activeFileId !== id) { refreshTabs(); return true; }
-    var remaining = projectFiles(file.projectId);
-    var next = remaining[Math.min(idx, remaining.length - 1)];
-    if (next) activateFileTabNow(next.id);
-    else {
-      clearFileFocusPresentation();
-      clearPassiveCovenPaneFocus();
-      refreshTabs();
-      renderPaneWorkspace();
+    if (filesPane && paneWasActive && nextId) filesPane.activeFileId = nextId;
+    var remaining = filesPane
+      ? filesForPane(filesPane)
+      : projectFiles(file.projectId, file.workspaceRoot);
+    if (!remaining.length) {
+      if (filesPane && typeof removeFilesPaneNow === "function") {
+        removeFilesPaneNow(filesPane);
+      } else if (globallyActive) {
+        clearFileFocusPresentation();
+        clearPassiveCovenPaneFocus();
+        refreshTabs();
+        renderPaneWorkspace({ preserveTerminalFocus: false });
+      }
+      return true;
     }
+    if (globallyActive && nextId) activateFileTabNow(nextId);
+    else refreshTabs();
     return true;
   }
 
@@ -6932,6 +8639,7 @@
   }
 
   async function handleExplicitFileSave(event) {
+    if (!filesPaneHasCanvasFocus()) return false;
     event.preventDefault();
     if (fileDecisionInFlight || fileNavigationInFlight || closeRequestInFlight) return false;
     return saveFile(findOpenFile(state.activeFileId));
@@ -6967,11 +8675,6 @@
 
   // Tabs are opened files only — projects live in the sessions sidebar.
   // An empty strip means "terminal", which is the default view.
-  function projectFiles(projectId) {
-    var pid = projectId || state.activeProjectId;
-    return state.openFiles.filter(function (f) { return f.projectId === pid; });
-  }
-
   // The edge fade is only honest when the strip actually scrolls, so it is
   // driven by measurement rather than applied unconditionally.
   function syncTabStripOverflow() {
@@ -6990,6 +8693,35 @@
     return true;
   }
 
+  function focusFileTabControl(fileId) {
+    if (!tabStripEl) return false;
+    var tabs = tabStripEl.querySelectorAll('[role="tab"]');
+    for (var i = 0; i < tabs.length; i++) {
+      if (tabs[i].dataset.fileId === fileId) {
+        tabs[i].focus();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function handleFileTabKeydown(event, fileId) {
+    var files = projectFiles();
+    var currentIndex = files.findIndex(function (file) { return file.id === fileId; });
+    if (currentIndex === -1 || files.length === 0) return false;
+    var nextIndex;
+    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + files.length) % files.length;
+    else if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % files.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = files.length - 1;
+    else return false;
+    event.preventDefault();
+    var nextFile = files[nextIndex];
+    if (!(await activateFileTab(nextFile.id))) return false;
+    focusFileTabControl(nextFile.id);
+    return true;
+  }
+
   function refreshTabs() {
     if (editingContext && editingContext.surface === "tabs") return;
     tabStripEl.innerHTML = "";
@@ -6997,41 +8729,64 @@
 
     // Left empty on purpose: `.tab-strip:empty` collapses the row so the pane
     // canvas owns the full height until a file is actually open.
-    if (files.length === 0) return;
+    if (files.length === 0) {
+      scheduleTabMeasurements();
+      return;
+    }
 
     files.forEach(function (file, idx) {
       var isActive = state.activeFileId === file.id;
-      var tab = document.createElement("div");
+      var item = document.createElement("div");
+      item.className = "file-tab-item" + (isActive ? " active" : "");
+      item.dataset.fileId = file.id;
+
+      var tab = document.createElement("button");
+      tab.type = "button";
       tab.className = "tab" + (isActive ? " active" : "");
       tab.dataset.fileId = file.id;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", isActive ? "true" : "false");
+      tab.tabIndex = isActive ? 0 : -1;
       tab.title = file.rel + (idx < 9 ? "  (\u2318" + (idx + 1) + ")" : "");
-      // Dot and close share one 16px slot so revealing the close button on
-      // hover cannot shift the strip sideways.
-      tab.innerHTML =
-        '<span class="label">' + escapeHtml(file.name) + "</span>" +
-        '<span class="tab-end">' +
-        (file.dirty ? '<span class="dot dirty-dot" title="Unsaved changes" aria-label="Unsaved changes"></span>' : "") +
-        '<button class="close" title="Close file (\u2318W)" aria-label="Close ' +
-        escapeHtml(file.name) + '">\u00d7</button>' +
-        "</span>";
-      tab.addEventListener("click", async function (e) {
-        if (e.target.classList.contains("close")) return;
-        await activateFileTab(file.id);
+      var label = document.createElement("span");
+      label.className = "label";
+      label.textContent = file.name;
+      tab.appendChild(label);
+      if (file.dirty) {
+        var dot = document.createElement("span");
+        dot.className = "dot dirty-dot";
+        dot.title = "Unsaved changes";
+        dot.setAttribute("aria-label", "Unsaved changes");
+        tab.appendChild(dot);
+      }
+      tab.addEventListener("click", async function () { await activateFileTab(file.id); });
+      tab.addEventListener("keydown", function (event) {
+        handleFileTabKeydown(event, file.id);
       });
+
+      var close = document.createElement("button");
+      close.type = "button";
+      close.className = "close";
+      close.title = "Close file (\u2318W)";
+      close.setAttribute("aria-label", "Close " + file.name);
+      close.tabIndex = -1;
+      close.textContent = "\u00d7";
+      close.addEventListener("click", async function (event) {
+        event.stopPropagation();
+        await closeFileTab(file.id);
+      });
+
       // Middle-click closes, the way every other tab strip behaves.
-      tab.addEventListener("auxclick", async function (e) {
+      item.addEventListener("auxclick", async function (e) {
         if (e.button !== 1) return;
         e.preventDefault();
         await closeFileTab(file.id);
       });
-      tab.querySelector(".close").addEventListener("click", async function (e) {
-        e.stopPropagation();
-        await closeFileTab(file.id);
-      });
-      tabStripEl.appendChild(tab);
+      item.appendChild(tab);
+      item.appendChild(close);
+      tabStripEl.appendChild(item);
     });
-    syncTabStripOverflow();
-    scrollActiveTabIntoView();
+    scheduleTabMeasurements(true);
   }
 
   // ============================================================
@@ -7304,6 +9059,12 @@
   function runCommand(line) {
     var trimmed = line.trim();
     if (!trimmed) return;
+    if (trimmed.charAt(0) === "?") {
+      commandInput.value = trimmed;
+      openPalette(trimmed, true);
+      syncComposerChrome();
+      return;
+    }
     if (trimmed[0] === "!") { runShellSigil(trimmed.slice(1).trim()); return; }
     if (trimmed[0] === "%") { runPaneSigil(trimmed.slice(1)); return; }
     if (trimmed[0] !== "/") {
@@ -7361,19 +9122,30 @@
   // Plain text always lands in the focused pane, so the composer only has to
   // keep the send button and its hint in step with what has been typed.
   function syncComposerChrome() {
-    var value = commandInput ? commandInput.value.trim() : "";
+    var rawValue = commandInput ? commandInput.value : "";
+    var value = rawValue.trim();
+    var sessionSearchOpen = rawValue.charAt(0) === "?";
     if (composerSendEl) {
-      composerSendEl.hidden = value.length === 0;
+      composerSendEl.hidden = sessionSearchOpen || value.length === 0;
       composerSendEl.firstChild.textContent = value[0] === "/" ? "Run " : "Send ";
     }
-    if (composerMicEl) composerMicEl.hidden = value.length > 0;
+    if (composerMicEl) composerMicEl.hidden = rawValue.length > 0;
     if (composerSendHintEl) {
-      composerSendHintEl.textContent = !value
+      composerSendHintEl.textContent = sessionSearchOpen || !value
         ? ""
         : value[0] === "/" ? "runs command"
         : value[0] === "!" ? "runs in the focused terminal"
         : value[0] === "%" ? "jumps to a pane"
         : "→ focused pane";
+    }
+    if (commandInput) {
+      commandInput.setAttribute(
+        "aria-label",
+        sessionSearchOpen
+          ? "Search sessions, " + paletteFiltered.length +
+            (paletteFiltered.length === 1 ? " result" : " results")
+          : "Command composer"
+      );
     }
   }
 
@@ -7397,24 +9169,52 @@
   }
   function sendToThread(thread, text) {
     if (!thread || thread.kind === "web") return Promise.resolve(false);
+    var queue = thread.ptyIoQueue;
+    if (!queue) {
+      queue = createThreadPtyIoQueue();
+      thread.ptyIoQueue = queue;
+    }
+    var encoded = new TextEncoder().encode(text);
+    var pendingBytes = queue.pendingInputBytes;
+    var pendingWrites = queue.pendingInputWrites;
+    if (queue.closed ||
+        pendingBytes + encoded.length > MAX_PENDING_PTY_INPUT_BYTES ||
+        pendingWrites >= MAX_PENDING_PTY_INPUT_WRITES) {
+      if (thread.terminalController) {
+        thread.terminalController.write("\r\n\x1b[31m[pty_write]\x1b[0m input queue is full\r\n");
+      }
+      return Promise.resolve(false);
+    }
+    var bytes = Array.from(encoded);
     noteThreadInput(thread, text);
-    var bytes = Array.from(new TextEncoder().encode(text));
-    return invoke("pty_write", {
-      threadId: thread.id,
-      thread_id: thread.id,
-      bytes: bytes,
-    }).then(function () {
-      return true;
+    queue.pendingInputBytes = pendingBytes + bytes.length;
+    queue.pendingInputWrites = pendingWrites + 1;
+    var previous = queue.inputTail;
+    var result = previous.then(function () {
+      if (queue.closed) return false;
+      return invoke("pty_write", {
+        threadId: thread.id,
+        thread_id: thread.id,
+        bytes: bytes,
+      }).then(function () {
+        return true;
+      });
     }).catch(function (err) {
-      if (thread.term) {
-        thread.term.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
+      if (thread.terminalController) {
+        thread.terminalController.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
       }
       return false;
     });
+    queue.inputTail = result.then(function (delivered) {
+      queue.pendingInputBytes = Math.max(0, queue.pendingInputBytes - bytes.length);
+      queue.pendingInputWrites = Math.max(0, queue.pendingInputWrites - 1);
+      return delivered;
+    });
+    return result;
   }
   function writeToActive(text) {
     var thread = findThread(state.activeThreadId);
-    if (thread && thread.term) thread.term.write(text);
+    if (thread && thread.terminalController) thread.terminalController.write(text);
   }
 
   // -------- Palette --------
@@ -7427,6 +9227,7 @@
   var paletteIndex = 0;
   var paletteVisible = false;
   var paletteFiltered = [];
+  var sessionSearchActivationGeneration = 0;
 
   function builtinPaletteEntries() {
     return commands.map(function (c) {
@@ -7458,7 +9259,7 @@
     });
   }
 
-  var PALETTE_SIGILS = "/!%";
+  var PALETTE_SIGILS = "/!%?";
 
   /** `%` lists the project's panes so the composer can jump between them. */
   function panePaletteEntries() {
@@ -7497,6 +9298,48 @@
     return entries;
   }
 
+  function buildSessionSearchEntries(query) {
+    var now = Date.now();
+    var selectedThread = findThread(state.activeThreadId);
+    var selectedProject = selectedThread && findProject(selectedThread.projectId);
+    var selectedKey = selectedThread && selectedProject
+      ? PsycheSessions.localSidebarSelectionKey(selectedProject, selectedThread)
+      : settings.selectedSessionKey;
+    var assignments = covenSessionAssignments();
+    var projectModels = state.projects.map(function (project) {
+      var projectModel = PsycheSessions.buildSidebarProjectModel({
+        project: project,
+        localSessions: state.threads.filter(function (thread) {
+          return thread.projectId === project.id &&
+            !thread.hidden && !isDormantThread(thread);
+        }),
+        covenSessions: covenSessionsForProject(project, assignments),
+        query: query,
+        filter: sessionTypeFilter,
+        selectedKey: selectedKey,
+        now: now,
+      });
+      return projectModel.visibleCount === 0 ? null : projectModel;
+    }).filter(Boolean);
+
+    return PsycheSessions.flattenSidebarSearchResults(projectModels).map(function (result) {
+      return {
+        cmd: result.title,
+        desc: [result.projectTitle, result.branchTitle, result.meta]
+          .filter(Boolean).join(" · "),
+        badge: result.status.label,
+        hint: "↵",
+        kind: "session",
+        group: "Sessions",
+        key: result.key,
+        sessionSource: result.source,
+        sessionId: result.id,
+        selectionKey: result.selectionKey,
+        projectId: result.projectId,
+      };
+    });
+  }
+
   function paletteCorpus(sigil, rest) {
     if (sigil === "%") return panePaletteEntries();
     if (sigil === "!") return shellPaletteEntries(rest);
@@ -7504,25 +9347,31 @@
   }
 
   function openPalette(query, force) {
-    var raw = (query || commandInput.value).trim();
-    var sigil = raw[0] || "/";
-    if (!force && PALETTE_SIGILS.indexOf(commandInput.value.trim()[0]) === -1) {
+    var raw = String(query == null ? commandInput.value : query).trim();
+    var typedSigil = commandInput.value.charAt(0);
+    var sigil = force ? (raw.charAt(0) || "/") : typedSigil;
+    if (!force && PALETTE_SIGILS.indexOf(typedSigil) === -1) {
       hidePalette();
       return;
     }
     if (PALETTE_SIGILS.indexOf(sigil) === -1) sigil = "/";
     var rest = raw.slice(1).trim();
     var q = sigil === "/" ? raw.toLowerCase() : rest.toLowerCase();
-    paletteFiltered = paletteCorpus(sigil, rest).filter(function (c) {
-      if (c.pinned) return true;
-      var hay = (c.cmd + " " + (c.desc || "") + " " + (c.badge || "")).toLowerCase();
-      return c.cmd.toLowerCase().indexOf(q) === 0 || hay.indexOf(q) !== -1;
-    });
-    if (paletteFiltered.length === 0) {
+    if (sigil === "?") {
+      paletteFiltered = buildSessionSearchEntries(rest);
+    } else {
+      paletteFiltered = paletteCorpus(sigil, rest).filter(function (c) {
+        if (c.pinned) return true;
+        var hay = (c.cmd + " " + (c.desc || "") + " " + (c.badge || "")).toLowerCase();
+        return c.cmd.toLowerCase().indexOf(q) === 0 || hay.indexOf(q) !== -1;
+      });
+    }
+    if (paletteFiltered.length === 0 && sigil !== "?") {
       hidePalette();
       return;
     }
-    paletteIndex = Math.min(paletteIndex, paletteFiltered.length - 1);
+    paletteIndex = Math.min(paletteIndex, Math.max(0, paletteFiltered.length - 1));
+    commandInput.setAttribute("aria-expanded", "true");
     renderPalette();
     paletteEl.hidden = false;
     paletteVisible = true;
@@ -7531,9 +9380,89 @@
     paletteEl.hidden = true;
     paletteVisible = false;
     paletteIndex = 0;
+    commandInput.setAttribute("aria-expanded", "false");
+    commandInput.removeAttribute("aria-activedescendant");
   }
-  function runPalettePick(pick, mode) {
+  async function runSessionSearchPick(pick) {
+    var project = findProject(pick.projectId);
+    if (!project) { toast("Session is no longer available"); return false; }
+    if (pick.sessionSource === "psyche") {
+      function resolveLocalThread() {
+        var candidate = findThread(pick.sessionId);
+        if (!candidate || candidate.projectId !== project.id || candidate.hidden ||
+            candidate.closing || candidate.closeStarted ||
+            isDormantThread(candidate) || candidate.status === "failed") return null;
+        return candidate;
+      }
+      var thread = resolveLocalThread();
+      if (!thread) {
+        toast("Session is no longer available"); return false;
+      }
+      if ((project.id !== state.activeProjectId ||
+           project.selectedWorktreePath !== thread.worktreePath) &&
+          !(await activateProjectWorktree(
+            project, thread.worktreePath, { focusTerminal: false }
+          ))) return false;
+      project = findProject(pick.projectId);
+      if (!project) return false;
+      thread = resolveLocalThread();
+      if (!thread) return false;
+      var previousPresentation = snapshotSetScopePresentation(thread);
+      var scopeChanged = applySetScopeForThread(thread);
+      var appliedPresentation = scopeChanged
+        ? snapshotSetScopePresentation(thread)
+        : null;
+      function restorePreviousPresentation() {
+        if (!scopeChanged) return;
+        restoreSetScopePresentation(previousPresentation, appliedPresentation);
+      }
+      var focused = await focusThread(thread.id, { focusTerminal: false });
+      if (!focused) {
+        restorePreviousPresentation();
+        return false;
+      }
+      thread = resolveLocalThread();
+      if (!thread || state.activeThreadId !== thread.id) {
+        restorePreviousPresentation();
+        return false;
+      }
+      settings.selectedSessionKey = pick.selectionKey;
+      saveSettings();
+      return true;
+    }
+    var session = covenSessionsForProject(project).find(function (candidate) {
+      return candidate.id === pick.sessionId;
+    });
+    if (!session) { toast("Session is no longer available"); return false; }
+    var opened = await openCovenSession(project, session, { focusTerminal: false });
+    if (!opened) return false;
+    settings.selectedSessionKey = pick.selectionKey;
+    saveSettings();
+    return true;
+  }
+  async function runPalettePick(pick, mode) {
     if (!pick) return;
+    if (pick.kind === "session") {
+      var activationGeneration = ++sessionSearchActivationGeneration;
+      var activationQuery = commandInput.value;
+      var selected = false;
+      try {
+        selected = await runSessionSearchPick(pick);
+      } finally {
+        var activationCurrent =
+          activationGeneration === sessionSearchActivationGeneration &&
+          commandInput.value === activationQuery;
+        if (activationCurrent) {
+          if (selected) {
+            commandInput.value = "";
+            hidePalette();
+          }
+          syncComposerChrome();
+          commandInput.focus();
+        }
+      }
+      return;
+    }
     var runsImmediately = pick.kind === "agent" || pick.kind === "recent" ||
       pick.kind === "pane" || pick.kind === "shell" || mode === "run";
     if (runsImmediately) {
@@ -7557,7 +9486,17 @@
   }
 
   function renderPalette() {
-    paletteEl.innerHTML = "";
+    paletteEl.replaceChildren();
+    commandInput.removeAttribute("aria-activedescendant");
+    if (paletteFiltered.length === 0 && commandInput.value.charAt(0) === "?") {
+      var empty = document.createElement("div");
+      empty.className = "palette-empty";
+      empty.textContent = "No matching sessions";
+      paletteEl.appendChild(empty);
+      paletteEl.hidden = false;
+      paletteVisible = true;
+      return;
+    }
     var lastGroup = "";
     paletteFiltered.forEach(function (c, idx) {
       if (c.group !== lastGroup) {
@@ -7568,8 +9507,11 @@
         paletteEl.appendChild(heading);
       }
       var div = document.createElement("div");
-      div.className =
-        "palette-item palette-" + c.kind + (idx === paletteIndex ? " active" : "");
+      var kindClass = c.kind === "session" ? " palette-session" : " palette-" + c.kind;
+      div.className = "palette-item" + kindClass + (idx === paletteIndex ? " active" : "");
+      div.id = "palette-option-" + idx;
+      div.setAttribute("role", "option");
+      div.setAttribute("aria-selected", idx === paletteIndex ? "true" : "false");
       div.innerHTML =
         '<span class="cmd">' + escapeHtml(c.cmd) + "</span>" +
         '<span class="desc">' +
@@ -7579,26 +9521,53 @@
         '<span class="hint-key">' + escapeHtml(c.hint || "↵") + "</span>";
       div.addEventListener("click", function () { runPalettePick(c); });
       paletteEl.appendChild(div);
+      if (idx === paletteIndex) {
+        commandInput.setAttribute("aria-activedescendant", div.id);
+      }
     });
     ensurePaletteActiveVisible();
   }
 
   commandInput.addEventListener("input", function () {
-    if (PALETTE_SIGILS.indexOf(commandInput.value.trim()[0]) !== -1) openPalette();
+    sessionSearchActivationGeneration += 1;
+    if (PALETTE_SIGILS.indexOf(commandInput.value.charAt(0)) !== -1) openPalette();
     else hidePalette();
     syncComposerChrome();
   });
   commandInput.addEventListener("keydown", function (e) {
+    var sessionSearchOpen = commandInput.value.charAt(0) === "?";
     if (paletteVisible) {
       if (e.key === "ArrowDown") {
-        paletteIndex = (paletteIndex + 1) % paletteFiltered.length;
-        renderPalette(); e.preventDefault(); return;
+        if (paletteFiltered.length > 0) {
+          paletteIndex = (paletteIndex + 1) % paletteFiltered.length;
+          renderPalette();
+        }
+        if (sessionSearchOpen) e.stopPropagation();
+        e.preventDefault();
+        return;
       }
       if (e.key === "ArrowUp") {
-        paletteIndex = (paletteIndex - 1 + paletteFiltered.length) % paletteFiltered.length;
-        renderPalette(); e.preventDefault(); return;
+        if (paletteFiltered.length > 0) {
+          paletteIndex = (paletteIndex - 1 + paletteFiltered.length) % paletteFiltered.length;
+          renderPalette();
+        }
+        if (sessionSearchOpen) e.stopPropagation();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "Enter" && sessionSearchOpen) {
+        e.stopPropagation();
+        e.preventDefault();
+        var sessionPick = paletteFiltered[paletteIndex];
+        if (sessionPick) runPalettePick(sessionPick);
+        return;
       }
       if (e.key === "Tab") {
+        if (sessionSearchOpen) {
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
         var pick = paletteFiltered[paletteIndex];
         if (pick.kind === "recent") commandInput.value = pick.cmd;
         else commandInput.value = pick.cmd + (pick.kind === "agent" ? "" : " ");
@@ -7606,7 +9575,17 @@
         e.preventDefault();
         return;
       }
-      if (e.key === "Escape") { hidePalette(); e.preventDefault(); return; }
+      if (e.key === "Escape") {
+        if (sessionSearchOpen) {
+          commandInput.value = "";
+          e.stopPropagation();
+        }
+        hidePalette();
+        syncComposerChrome();
+        commandInput.focus();
+        e.preventDefault();
+        return;
+      }
     }
     if (e.key === "Enter") {
       var line = commandInput.value;
@@ -7633,10 +9612,10 @@
     return projectId + "__" + tabId;
   }
   function browserTabLifecycle(tab) {
-    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
+    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
     var lifecycle = browserTabLifecycleStates.get(tab);
     if (!lifecycle) {
-      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
+      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
       browserTabLifecycleStates.set(tab, lifecycle);
     }
     return lifecycle;
@@ -7671,6 +9650,7 @@
     lifecycle.invalidationGeneration += 1;
     lifecycle.pendingGeneration = 0;
     lifecycle.pendingUrl = null;
+    lifecycle.pendingNavigationToken = null;
     lifecycle.eventUrl = null;
     lifecycle.navigationSnapshot = null;
     return lifecycle.generation;
@@ -7694,8 +9674,21 @@
     return !!visibleBrowserBounds();
   }
   async function discardObsoleteBrowserNavigation(context) {
-    invalidateBrowserNavigation(context.tab);
     var lifecycle = browserTabLifecycle(context.tab);
+    if (lifecycle.nativeLabel) {
+      var pair = {
+        project: context.project,
+        worktreePath: context.worktreePath,
+        browser: context.browser,
+        tab: context.tab,
+      };
+      if (!(await invalidateBrowserAutomation(pair))) {
+        setStatus("browser automation invalidation failed", "error");
+        return false;
+      }
+      await removeBrowserControlResource(pair);
+    }
+    invalidateBrowserNavigation(context.tab);
     lifecycle.nativeLabel = null;
     lifecycle.liveGeneration = 0;
     lifecycle.liveUrl = null;
@@ -7721,6 +9714,606 @@
     }).join("").slice(0, 64) || "default";
     return "psyche-browser-" + safe;
   }
+  function browserControlPairByTabId(tabId, projectRoot) {
+    var match = null;
+    for (var i = 0; i < state.projects.length; i++) {
+      var project = state.projects[i];
+      var provider = browserControlProviders.get(project.root);
+      if (!provider || !provider.status || provider.status.projectRoot !== projectRoot) continue;
+      var browsersByWorktree = project.browsersByWorktree || {};
+      var roots = Object.keys(browsersByWorktree);
+      for (var w = 0; w < roots.length; w++) {
+        var browser = browsersByWorktree[roots[w]];
+        var tab = browser.tabs.find(function (candidate) { return candidate.id === tabId; });
+        if (!tab) continue;
+        if (match) return null;
+        match = { project: project, worktreePath: roots[w], browser: browser, tab: tab };
+      }
+    }
+    return match;
+  }
+  function browserControlViewport(pair) {
+    var pane = findBrowserPane(pair.project.id, pair.worktreePath);
+    var rect = pane && pane.pane && pane.pane.isConnected && pane.browserBody
+      ? pane.browserBody.getBoundingClientRect()
+      : null;
+    return {
+      width: Math.max(1, Math.round(rect && rect.width || 1)),
+      height: Math.max(1, Math.round(rect && rect.height || 1)),
+    };
+  }
+  function ensureBrowserControlProvider(project) {
+    if (!project || !project.root) return Promise.reject(new Error("browser project is unavailable"));
+    var current = browserControlProviders.get(project.root);
+    if (current && current.status) return Promise.resolve(current.status);
+    if (current && current.flight) return current.flight;
+    var entry = current || { status: null, flight: null };
+    entry.flight = invoke("control_provider_start", { projectRoot: project.root }).then(function (status) {
+      entry.status = status;
+      entry.flight = null;
+      return status;
+    }, function (error) {
+      entry.flight = null;
+      throw error;
+    });
+    browserControlProviders.set(project.root, entry);
+    return entry.flight;
+  }
+  function browserControlResource(pair, status) {
+    var lifecycle = browserTabLifecycle(pair.tab);
+    return {
+      id: pair.tab.id,
+      kind: "browser_tab",
+      generation: lifecycle.controlGeneration || lifecycle.liveGeneration || lifecycle.pendingGeneration || lifecycle.generation,
+      providerId: status.providerId,
+      webviewLabel: lifecycle.nativeLabel,
+      projectRoot: status.projectRoot,
+      worktreeRoot: pair.worktreePath,
+      url: pair.tab.url || lifecycle.pendingUrl || "about:blank",
+      title: pair.tab.title || tabTitle(pair.tab.url),
+      loading: !!pair.tab.loading,
+      viewport: browserControlViewport(pair),
+    };
+  }
+  function publishBrowserControlResource(pair) {
+    if (!pair || browserTabIsClosing(pair.tab)) return Promise.resolve(false);
+    var lifecycle = browserTabLifecycle(pair.tab);
+    if (!lifecycle.nativeLabel || !lifecycle.liveGeneration || lifecycle.pendingGeneration) return Promise.resolve(false);
+    var nativeGeneration = lifecycle.liveGeneration;
+    return ensureBrowserControlProvider(pair.project).then(function (status) {
+      return invoke("control_provider_upsert", {
+        projectRoot: pair.project.root,
+        resource: browserControlResource(pair, status),
+      }).then(function (canonical) {
+        if (!canonical || typeof canonical.generation !== "number") return false;
+        if (lifecycle.liveGeneration !== nativeGeneration || lifecycle.pendingGeneration) return false;
+        lifecycle.controlGeneration = canonical.generation;
+        return true;
+      });
+    }).catch(function () { return false; });
+  }
+  function removeBrowserControlResource(pair) {
+    if (!pair) return Promise.resolve(false);
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var generation = lifecycle.controlGeneration || lifecycle.liveGeneration || lifecycle.pendingGeneration;
+    if (!generation) return Promise.resolve(false);
+    return ensureBrowserControlProvider(pair.project).then(function () {
+      return invoke("control_provider_remove", {
+        projectRoot: pair.project.root,
+        tabId: pair.tab.id,
+        generation: generation,
+      }).then(function () { return true; });
+    }).catch(function () { return false; });
+  }
+  function invalidateBrowserAutomation(pair) {
+    if (!pair) return Promise.resolve(false);
+    var lifecycle = browserTabLifecycle(pair.tab);
+    if (!lifecycle.nativeLabel) return Promise.resolve(false);
+    return invoke("browser_eval", {
+      label: browserLabelForTab(pair.project, pair.tab),
+      script: "window.__PSYCHE_AUTOMATION__ && window.__PSYCHE_AUTOMATION__.invalidate();",
+    }).then(function () { return true; }, function () { return false; });
+  }
+  async function quarantineBrowserAutomation(pair, destroyChild) {
+    if (!pair) return false;
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var generation = lifecycle.controlGeneration || lifecycle.liveGeneration;
+    var label = lifecycle.nativeLabel ? browserLabelForTab(pair.project, pair.tab) : null;
+    var invalidateFlight = destroyChild ? Promise.resolve(false) : invalidateBrowserAutomation(pair);
+    var removeFlight = removeBrowserControlResource(pair);
+    browserAutomationSnapshotRefs.forEach(function (entry, id) {
+      if (entry && entry.tabId === pair.tab.id && (!generation || entry.generation === generation)) {
+        browserAutomationSnapshotRefs.delete(id);
+      }
+    });
+    invalidateBrowserNavigation(pair.tab);
+    lifecycle.controlGeneration = 0;
+    lifecycle.liveGeneration = 0;
+    lifecycle.nativeLabel = null;
+    lifecycle.automationSource = null;
+    var destroyFlight = destroyChild && label
+      ? invoke("browser_destroy", { label: label }).catch(function () { return false; })
+      : Promise.resolve(false);
+    await Promise.allSettled([invalidateFlight, removeFlight, destroyFlight]);
+    return true;
+  }
+  function installBrowserAutomationForPair(pair) {
+    if (!pair || !window.PsycheControl) return Promise.resolve(false);
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var expectedGeneration = lifecycle.liveGeneration || lifecycle.pendingGeneration;
+    if (!expectedGeneration || !lifecycle.nativeLabel) return Promise.resolve(false);
+    var run = function () {
+      if ((lifecycle.liveGeneration || lifecycle.pendingGeneration) !== expectedGeneration) return false;
+      return invoke("browser_eval", {
+        label: browserLabelForTab(pair.project, pair.tab),
+        script: lifecycle.automationSource || PsycheControl.browserAutomationSource(),
+      }).then(function () { return publishBrowserControlResource(pair); });
+    };
+    var flight = lifecycle.automationTail ? lifecycle.automationTail.then(run, run) : run();
+    lifecycle.automationTail = Promise.resolve(flight).then(function () {}, function () {});
+    return Promise.resolve(flight);
+  }
+  function browserAutomationDispatchScript(effect) {
+    var operation = effect.operation || {};
+    var request = operation.kind === "action"
+      ? { type: "action", snapshotId: resolveBrowserAutomationSnapshotId(effect), action: operation.action }
+      : { type: "snapshot" };
+    var requestJson = JSON.stringify(request);
+    var receiptJson = JSON.stringify({ actionId: effect.actionId, tabId: effect.tabId, generation: effect.generation });
+    return "window.__PSYCHE_AUTOMATION__.dispatchAndEmit(" + requestJson + "," + receiptJson + ");";
+  }
+  function resolveBrowserAutomationSnapshotId(effect) {
+    var canonicalId = effect && effect.operation && effect.operation.snapshotId;
+    var mapped = typeof canonicalId === "string" ? browserAutomationSnapshotRefs.get(canonicalId) : null;
+    if (!mapped || mapped.tabId !== effect.tabId || mapped.generation !== effect.generation || mapped.expiresAt <= Date.now()) {
+      if (mapped) browserAutomationSnapshotRefs.delete(canonicalId);
+      throw Object.assign(new Error("semantic snapshot is missing or stale"), { code: "snapshot_missing" });
+    }
+    return mapped.rawSnapshotId;
+  }
+  function awaitBrowserAutomationResult(effect, timeoutMs) {
+    var cancel;
+    var promise = new Promise(function (resolve, reject) {
+      var settled = false;
+      var settle = function (callback, value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        browserAutomationWaiters.delete(effect.actionId);
+        callback(value);
+      };
+      var timeout = setTimeout(function () {
+        settle(reject, Object.assign(new Error("browser automation timed out"), { code: "effect_unknown", ambiguous: true }));
+      }, timeoutMs || 15000);
+      browserAutomationWaiters.set(effect.actionId, {
+        tabId: effect.tabId,
+        generation: effect.generation,
+        resolve: function (value) { settle(resolve, value); },
+        reject: function (error) { settle(reject, error); },
+      });
+      cancel = function (error) { settle(reject, error); };
+    });
+    promise.cancel = function (error) { cancel(error); };
+    return promise;
+  }
+  function completeBrowserProviderEffect(project, result) {
+    return invoke("control_provider_complete", { projectRoot: project.root, result: result });
+  }
+  function canonicalizeBrowserSemanticSnapshot(value, pair, effect, capturedAtMs) {
+    var fail = function (message) { throw Object.assign(new Error(message), { code: "automation_failed" }); };
+    var plain = function (item) { return !!item && typeof item === "object" && !Array.isArray(item); };
+    var exactKeys = function (item, allowed, label) {
+      var keys = Object.keys(item);
+      for (var i = 0; i < keys.length; i++) if (allowed.indexOf(keys[i]) === -1) fail(label + " has unknown field " + keys[i]);
+    };
+    if (!plain(value)) fail("snapshot is malformed");
+    var encoded = JSON.stringify(value);
+    if (new TextEncoder().encode(encoded).length > 1024 * 1024) fail("snapshot exceeds maximum size");
+    exactKeys(value, ["schema", "snapshotId", "url", "viewport", "nodes", "truncated"], "snapshot");
+    if (value.schema !== "psyche.browser.snapshot/v1" || typeof value.snapshotId !== "string" ||
+        typeof value.url !== "string" || !plain(value.viewport) || !Array.isArray(value.nodes) ||
+        typeof value.truncated !== "boolean") fail("snapshot is malformed");
+    exactKeys(value.viewport, ["width", "height"], "viewport");
+    var width = value.viewport.width;
+    var height = value.viewport.height;
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 0 || height < 0 || width > 100000 || height > 100000) fail("viewport is malformed");
+    if (value.nodes.length > 2000) fail("snapshot exceeds maximum node count");
+    var roles = ["button", "link", "textbox", "checkbox", "radio", "combobox", "option", "frame", "img", "heading", "status", "dialog", "menu", "menuitem", "tab", "tabpanel", "switch"];
+    var refs = new Set();
+    var opaqueFrames = 0;
+    var semantics = new Map();
+    var nodes = value.nodes.map(function (node) {
+      if (!plain(node)) fail("snapshot node is malformed");
+      exactKeys(node, ["ref", "role", "name", "bounds", "disabled", "checked", "selected", "submit", "submitMethod", "submitDestination", "value", "secret", "valuePresent", "opaque"], "snapshot node");
+      if (typeof node.ref !== "string" || !/^e[1-9][0-9]{0,5}$/.test(node.ref) || refs.has(node.ref) ||
+          typeof node.role !== "string" || roles.indexOf(node.role) === -1 || typeof node.name !== "string" || node.name.length > 512 ||
+          !plain(node.bounds)) fail("snapshot node is malformed");
+      refs.add(node.ref);
+      exactKeys(node.bounds, ["x", "y", "width", "height", "clipped"], "snapshot bounds");
+      var bounds = {};
+      ["x", "y", "width", "height"].forEach(function (key) {
+        if (!Number.isFinite(node.bounds[key])) fail("snapshot bounds are malformed");
+        bounds[key] = node.bounds[key];
+      });
+      var projected = { ref: node.ref, role: node.role, name: node.name, bounds: bounds };
+      var state = {};
+      ["disabled", "checked", "selected", "submit"].forEach(function (key) {
+        if (node[key] !== undefined) {
+          if (typeof node[key] !== "boolean") fail("snapshot state is malformed");
+          state[key] = node[key];
+        }
+      });
+      [["submitMethod", 16], ["submitDestination", 2048]].forEach(function (entry) {
+        var key = entry[0];
+        if (node[key] !== undefined) {
+          if (typeof node[key] !== "string" || node[key].length > entry[1]) fail("snapshot submit metadata is malformed");
+          state[key] = node[key];
+        }
+      });
+      if (Object.keys(state).length) projected.state = state;
+      if (node.secret === true) projected.value = { kind: "text", secret: true };
+      else if (node.value !== undefined) {
+        if (typeof node.value !== "string" || node.value.length > 512) fail("snapshot value is malformed");
+        projected.value = { kind: "text", value: node.value };
+      }
+      if (node.opaque === true || node.role === "frame") opaqueFrames += 1;
+      semantics.set(node.ref, {
+        role: node.role, disabled: node.disabled === true, submit: node.submit === true,
+        submitMethod: node.submitMethod, submitDestination: node.submitDestination,
+        secret: node.secret === true,
+      });
+      return projected;
+    });
+    var capturedAt = new Date(capturedAtMs);
+    browserAutomationSnapshotRefs.set(effect.actionId, {
+      rawSnapshotId: value.snapshotId,
+      tabId: pair.tab.id,
+      generation: effect.generation,
+      expiresAt: capturedAt.getTime() + 30000,
+      refs: new Set(refs),
+      semantics: semantics,
+    });
+    while (browserAutomationSnapshotRefs.size > 128) {
+      var oldestSnapshotId = browserAutomationSnapshotRefs.keys().next().value;
+      if (!oldestSnapshotId) break;
+      browserAutomationSnapshotRefs.delete(oldestSnapshotId);
+    }
+    return {
+      schema: "psyche.browser.snapshot/v1",
+      id: effect.actionId,
+      tabId: pair.tab.id,
+      generation: effect.generation,
+      url: String(pair.tab.url || "about:blank").slice(0, 2048),
+      title: String(pair.tab.title || "").slice(0, 512),
+      loading: !!pair.tab.loading,
+      viewport: { width: width, height: height },
+      capturedAt: capturedAt.toISOString(),
+      nodes: nodes,
+      truncated: value.truncated,
+      opaqueFrames: opaqueFrames,
+      expiresAt: new Date(capturedAt.getTime() + 30000).toISOString(),
+    };
+  }
+  function resolveBrowserNativeElementTarget(effect) {
+    var operation = effect && effect.operation;
+    var action = operation && operation.action;
+    var canonicalId = operation && operation.snapshotId;
+    var mapped = typeof canonicalId === "string" ? browserAutomationSnapshotRefs.get(canonicalId) : null;
+    if (!mapped || mapped.tabId !== effect.tabId || mapped.generation !== effect.generation || mapped.expiresAt <= Date.now()) {
+      if (mapped) browserAutomationSnapshotRefs.delete(canonicalId);
+      throw Object.assign(new Error("semantic snapshot is missing or stale"), { code: "snapshot_stale" });
+    }
+    if (!action || typeof action.elementRef !== "string" || !mapped.refs || !mapped.refs.has(action.elementRef)) {
+      throw Object.assign(new Error("semantic element reference is missing"), { code: "element_missing" });
+    }
+    return { rawSnapshotId: mapped.rawSnapshotId, elementRef: action.elementRef };
+  }
+  function browserProviderOperationPreflight(effect) {
+    var operation = effect && effect.operation;
+    if (!operation || (operation.kind !== "inspect" && operation.kind !== "action" && operation.kind !== "script")) {
+      throw Object.assign(new Error("browser operation is not supported"), { code: "unsupported_operation" });
+    }
+    if (operation.kind === "inspect" || operation.kind === "script") return "page";
+    var action = operation.action;
+    if (!action || typeof action !== "object" || Array.isArray(action) || typeof action.kind !== "string") {
+      throw Object.assign(new Error("browser action is malformed"), { code: "automation_failed" });
+    }
+    if (action.kind === "upload" || action.kind === "download") {
+      resolveBrowserNativeElementTarget(effect);
+      throw Object.assign(new Error("backend_unavailable: native interception is unavailable"), { code: "backend_unavailable" });
+    }
+    if (action.kind === "permission_response") {
+      if (typeof action.permission !== "string" || !action.permission || typeof action.origin !== "string" ||
+          !action.origin || (action.decision !== "allow" && action.decision !== "deny")) {
+        throw Object.assign(new Error("permission response contract is malformed"), { code: "automation_failed" });
+      }
+      throw Object.assign(new Error("backend_unavailable: native interception is unavailable"), { code: "backend_unavailable" });
+    }
+    if (["navigate", "reload", "back", "forward", "close", "screenshot"].indexOf(action.kind) !== -1) return "lifecycle";
+    if (!operation.snapshotId || typeof operation.snapshotId !== "string") {
+      throw Object.assign(new Error("semantic snapshot identity is required"), { code: "snapshot_missing" });
+    }
+    return "page";
+  }
+  function canonicalizeBrowserActionResult(effect, value) {
+    var fail = function (message) { throw Object.assign(new Error(message), { code: "automation_failed" }); };
+    var plain = value && typeof value === "object" && !Array.isArray(value) &&
+      (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+    if (!plain) fail("browser action result is malformed");
+    var action = effect.operation.action;
+    var mapped = browserAutomationSnapshotRefs.get(effect.operation.snapshotId);
+    var semantic = mapped && mapped.tabId === effect.tabId && mapped.generation === effect.generation && mapped.semantics
+      ? mapped.semantics.get(action.elementRef) : null;
+    if (!semantic) fail("browser action result snapshot is stale");
+    var allowed = {
+      click: ["clicked"], type: semantic && semantic.secret ? ["valuePresent", "secret"] : ["typed"], select: ["selected"],
+      scroll: ["scrolled"], focus: ["focused"], submit: ["submitted"],
+    }[action.kind];
+    if (!allowed || Object.keys(value).some(function (key) { return allowed.indexOf(key) === -1; })) fail("browser action result has unknown fields");
+    if (action.kind === "click") {
+      if (value.clicked !== true) fail("click result is malformed");
+      return { clicked: true };
+    }
+    if (action.kind === "type") {
+      if (semantic.secret) {
+        if (typeof value.valuePresent !== "boolean" || value.secret !== true) fail("secret input result is malformed");
+        return { valuePresent: value.valuePresent, secret: true };
+      }
+      if (value.typed !== true) fail("type result is malformed");
+      return { typed: true };
+    }
+    if (action.kind === "select") {
+      if (value.selected !== true) fail("select result is malformed");
+      return { selected: true };
+    }
+    if (action.kind === "scroll") {
+      if (value.scrolled !== true) fail("scroll result is malformed");
+      return { scrolled: true };
+    }
+    if (action.kind === "focus") {
+      if (value.focused !== true) fail("focus result is malformed");
+      return { focused: true };
+    }
+    if (action.kind === "submit") {
+      if (value.submitted !== true) fail("submit result is malformed");
+      return { submitted: true };
+    }
+    fail("browser action result is unsupported");
+  }
+  function canonicalizeBrowserScriptResult(value) {
+    var plain = value && typeof value === "object" && !Array.isArray(value) &&
+      (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+    if (!plain || Object.keys(value).some(function (key) {
+      return ["value", "resultBytes", "durationMs"].indexOf(key) === -1;
+    }) || !Number.isSafeInteger(value.resultBytes) || value.resultBytes < 0 || value.resultBytes > 256 * 1024 ||
+      !Number.isFinite(value.durationMs) || value.durationMs < 0 || value.durationMs > 5000) {
+      throw Object.assign(new Error("browser script result is malformed"), { code: "serialization_failed" });
+    }
+    var encoded;
+    try { encoded = JSON.stringify(value.value); }
+    catch (_) { throw Object.assign(new Error("browser script result cannot be encoded"), { code: "serialization_failed" }); }
+    if (encoded === undefined || new TextEncoder().encode(encoded).length !== value.resultBytes) {
+      throw Object.assign(new Error("browser script result byte count is invalid"), { code: "serialization_failed" });
+    }
+    return { value: JSON.parse(encoded), resultBytes: value.resultBytes, durationMs: value.durationMs };
+  }
+  function browserNativeScriptError(error) {
+    var message = String(error && error.message || error);
+    var allowed = [
+      "args_too_large",
+      "backend_unavailable",
+      "effect_unknown",
+      "mutation_not_allowed",
+      "mutation_plan_invalid",
+      "mutation_target_stale",
+      "result_too_large",
+      "script_source_too_large",
+      "serialization_failed",
+      "snapshot_too_large",
+      "target_unavailable",
+      "automation_failed",
+    ];
+    var supplied = error && typeof error.code === "string" ? error.code : null;
+    var code = allowed.indexOf(supplied) !== -1 ? supplied
+      : allowed.find(function (candidate) { return message.indexOf(candidate) !== -1; }) || "automation_failed";
+    return Object.assign(new Error("browser script failed: " + code), { code: code, ambiguous: code === "effect_unknown" });
+  }
+  function ambiguousBrowserLifecycle(message) {
+    return Object.assign(new Error(message), { code: "effect_unknown", ambiguous: true });
+  }
+  async function runBrowserLifecycleOperation(pair, effect) {
+    var action = effect.operation.action;
+    if (state.activeProjectId !== pair.project.id || activeProject() !== pair.project ||
+        activeWorkspaceRoot(pair.project) !== pair.worktreePath) {
+      throw Object.assign(new Error("backend_unavailable: exact browser tab is not active"), { code: "backend_unavailable" });
+    }
+    if (action.kind === "navigate") {
+      var navigated;
+      try { navigated = await navigateBrowser(action.url, { tabId: pair.tab.id }); }
+      catch (_) { throw ambiguousBrowserLifecycle("browser navigation outcome is unknown"); }
+      if (!navigated) throw ambiguousBrowserLifecycle("browser navigation outcome is unknown");
+      return { url: pair.tab.url, title: pair.tab.title };
+    }
+    if (action.kind === "reload") {
+      var reloaded;
+      try { reloaded = await navigateBrowser(pair.tab.url, { tabId: pair.tab.id, replace: true, preserveHistory: true }); }
+      catch (_) { throw ambiguousBrowserLifecycle("browser reload outcome is unknown"); }
+      if (!reloaded) throw ambiguousBrowserLifecycle("browser reload outcome is unknown");
+      return { url: pair.tab.url, title: pair.tab.title };
+    }
+    if (action.kind === "back" || action.kind === "forward") {
+      var delta = action.kind === "back" ? -1 : 1;
+      var index = pair.tab.historyIndex + delta;
+      if (index < 0 || index >= pair.tab.history.length) throw Object.assign(new Error("browser history target is unavailable"), { code: "resource_missing" });
+      var moved;
+      try { moved = await navigateBrowser(pair.tab.history[index], { tabId: pair.tab.id, fromHistory: true, historyIndex: index }); }
+      catch (_) { throw ambiguousBrowserLifecycle("browser history navigation outcome is unknown"); }
+      if (!moved) throw ambiguousBrowserLifecycle("browser history navigation outcome is unknown");
+      return { url: pair.tab.url, title: pair.tab.title, historyIndex: pair.tab.historyIndex };
+    }
+    if (action.kind === "close") {
+      var lifecycle = browserTabLifecycle(pair.tab);
+      if (lifecycle.navigationTail) await lifecycle.navigationTail;
+      var closed;
+      try { closed = await closeBrowserTab(pair.project, pair.tab.id); }
+      catch (_) { throw ambiguousBrowserLifecycle("browser close outcome is unknown"); }
+      if (!closed) throw ambiguousBrowserLifecycle("browser close outcome is unknown");
+      return { closed: true };
+    }
+    if (action.kind === "screenshot") {
+      return invoke("browser_snapshot", { label: browserLabelForTab(pair.project, pair.tab) });
+    }
+    throw Object.assign(new Error("browser lifecycle action is not supported"), { code: "unsupported_operation" });
+  }
+  async function handleBrowserProviderEffect(event) {
+    var effect = event && event.payload || {};
+    var pair = browserControlPairByTabId(effect.tabId, effect.projectRoot);
+    if (!pair) {
+      var owner = state.projects.find(function (project) {
+        var provider = browserControlProviders.get(project.root);
+        return provider && provider.status && provider.status.projectRoot === effect.projectRoot;
+      });
+      if (owner) await completeBrowserProviderEffect(owner, {
+        actionId: effect.actionId, status: "failed", code: "resource_missing", message: "browser tab is unavailable",
+      });
+      return false;
+    }
+    var lifecycle = browserTabLifecycle(pair.tab);
+    if (effect.generation !== (lifecycle.controlGeneration || lifecycle.liveGeneration) || lifecycle.pendingGeneration) {
+      await completeBrowserProviderEffect(pair.project, {
+        actionId: effect.actionId,
+        status: "failed",
+        code: "resource_replaced",
+        message: "browser tab generation was replaced",
+      });
+      return false;
+    }
+    if (!lifecycle.nativeLabel) {
+      await completeBrowserProviderEffect(pair.project, {
+        actionId: effect.actionId,
+        status: "failed",
+        code: "resource_missing",
+        message: "browser tab is unavailable",
+      });
+      return false;
+    }
+    var completeReplaced = async function () {
+      await completeBrowserProviderEffect(pair.project, {
+        actionId: effect.actionId,
+        status: "failed",
+        code: "resource_replaced",
+        message: "browser tab generation was replaced",
+      });
+      return false;
+    };
+    var exactPairIsCurrent = function () {
+      var current = browserControlPairByTabId(effect.tabId, effect.projectRoot);
+      if (!current || current.project !== pair.project || current.browser !== pair.browser ||
+          current.tab !== pair.tab || current.worktreePath !== pair.worktreePath) return false;
+      var currentLifecycle = browserTabLifecycle(current.tab);
+      return effect.generation === (currentLifecycle.controlGeneration || currentLifecycle.liveGeneration) && !currentLifecycle.pendingGeneration && !!currentLifecycle.nativeLabel;
+    };
+    var operationClass;
+    try {
+      operationClass = browserProviderOperationPreflight(effect);
+    } catch (preflightError) {
+      await completeBrowserProviderEffect(pair.project, {
+        actionId: effect.actionId, status: "failed", code: preflightError.code || "automation_failed",
+        message: String(preflightError.message || preflightError),
+      });
+      return true;
+    }
+    if (operationClass === "lifecycle") {
+      try {
+        var lifecycleValue = await runBrowserLifecycleOperation(pair, effect);
+        await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "succeeded", value: lifecycleValue });
+      } catch (lifecycleError) {
+        var lifecycleAmbiguous = !!(lifecycleError && (lifecycleError.ambiguous || lifecycleError.code === "effect_unknown"));
+        await completeBrowserProviderEffect(pair.project, {
+          actionId: effect.actionId, status: lifecycleAmbiguous ? "unknown" : "failed",
+          code: lifecycleAmbiguous ? "effect_unknown" : lifecycleError.code || "automation_failed",
+          message: String(lifecycleError.message || lifecycleError),
+        });
+      }
+      return true;
+    }
+    var runInspect = async function () {
+      if (!exactPairIsCurrent()) return completeReplaced();
+      try {
+        var automationValue;
+        if (effect.operation.kind === "script") {
+          try {
+            automationValue = await invoke("browser_script", {
+              label: browserLabelForTab(pair.project, pair.tab),
+              request: { source: effect.operation.source, args: effect.operation.args === undefined ? null : effect.operation.args },
+            });
+          } catch (scriptError) {
+            throw browserNativeScriptError(scriptError);
+          }
+        } else {
+          var installed = await installBrowserAutomationForPair(pair);
+          if (!installed || !exactPairIsCurrent()) return completeReplaced();
+          var resultFlight = awaitBrowserAutomationResult(effect, 15000);
+          try {
+            await invoke("browser_eval", {
+              label: browserLabelForTab(pair.project, pair.tab),
+              script: (browserTabLifecycle(pair.tab).automationSource || PsycheControl.browserAutomationSource()) + "\n" + browserAutomationDispatchScript(effect),
+              automationReceipt: { actionId: effect.actionId, tabId: effect.tabId, generation: effect.generation },
+            });
+          } catch (evalError) {
+            resultFlight.cancel(evalError);
+            await resultFlight.catch(function () {});
+            throw evalError;
+          }
+          automationValue = await resultFlight;
+        }
+        var value = effect.operation.kind === "inspect"
+          ? canonicalizeBrowserSemanticSnapshot(automationValue, pair, effect, Date.now())
+          : effect.operation.kind === "script"
+            ? canonicalizeBrowserScriptResult(automationValue)
+            : canonicalizeBrowserActionResult(effect, automationValue);
+        if (!exactPairIsCurrent()) {
+          if (effect.operation.kind === "script") {
+            await quarantineBrowserAutomation(pair, true);
+            await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "unknown", code: "effect_unknown", message: "browser tab changed during script evaluation" });
+            return false;
+          }
+          return completeReplaced();
+        }
+        if (effect.operation.kind === "inspect" && effect.operation.includeScreenshot) {
+          value.screenshot = await invoke("browser_snapshot", { label: browserLabelForTab(pair.project, pair.tab) });
+          if (!exactPairIsCurrent()) return completeReplaced();
+        }
+        await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "succeeded", value: value });
+      } catch (error) {
+        var ambiguous = !!(error && (error.ambiguous || error.code === "effect_unknown"));
+        if (ambiguous && effect.operation.kind === "script") {
+          await quarantineBrowserAutomation(pair, true);
+        }
+        var code = ambiguous ? "effect_unknown" : error && error.code || (String(error).indexOf("backend_unavailable") !== -1 ? "backend_unavailable" : "automation_failed");
+        var message = ambiguous && effect.operation.kind === "script"
+          ? "browser script outcome is unknown"
+          : String(error && error.message || error);
+        await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: ambiguous ? "unknown" : "failed", code: code, message: message });
+      }
+      return true;
+    };
+    var inspect = lifecycle.navigationTail
+      ? lifecycle.navigationTail.then(runInspect, runInspect)
+      : runInspect();
+    lifecycle.navigationTail = Promise.resolve(inspect).then(function () {}, function () {});
+    return inspect;
+  }
+  listen("browser:automation-result", function (event) {
+    var payload = event && event.payload || {};
+    var waiter = browserAutomationWaiters.get(payload.actionId);
+    if (!waiter) return;
+    if (waiter.tabId !== payload.tabId || waiter.generation !== payload.generation) return;
+    browserAutomationWaiters.delete(payload.actionId);
+    if (payload.error) waiter.reject(Object.assign(new Error(payload.error.message), { code: payload.error.code }));
+    else waiter.resolve(payload.value);
+  }).catch(function () {});
+  listen("control:provider-effect-request", handleBrowserProviderEffect).catch(function () {});
   function browserTabForNativeLabel(nativeLabel) {
     for (var i = 0; i < state.projects.length; i++) {
       var project = state.projects[i];
@@ -7743,7 +10336,7 @@
     try { return new URL(String(left)).href === new URL(String(right)).href; }
     catch (_) { return String(left) === String(right); }
   }
-  function browserNativeEventContext(nativeLabel, url) {
+  function browserNativeEventContext(nativeLabel, url, navigationToken) {
     var pair = browserTabForNativeLabel(nativeLabel);
     if (!pair || findProject(pair.project.id) !== pair.project) return null;
     if (!pair.project.browsersByWorktree ||
@@ -7756,6 +10349,8 @@
         findThread(pane.id) !== pane || browserPaneIsClosing(pane)) return null;
     var lifecycle = browserTabLifecycle(pair.tab);
     var hasPendingNavigation = lifecycle.pendingGeneration > 0;
+    if (hasPendingNavigation && lifecycle.pendingNavigationToken && navigationToken !== lifecycle.pendingNavigationToken) return null;
+    if (!hasPendingNavigation && navigationToken && navigationToken !== lifecycle.liveNavigationToken) return null;
     var expectedUrl = hasPendingNavigation ? lifecycle.pendingUrl : lifecycle.liveUrl;
     if (!lifecycle.viewLive || lifecycle.nativeLabel !== nativeLabel ||
         (hasPendingNavigation && lifecycle.pendingGeneration !== lifecycle.generation) ||
@@ -7766,9 +10361,20 @@
     if (url) lifecycle.eventUrl = url;
     return pair;
   }
-  function markBrowserTabLoaded(nativeLabel, url, title) {
-    var pair = browserNativeEventContext(nativeLabel, url);
+  function markBrowserTabLoaded(nativeLabel, url, title, navigationToken) {
+    var pair = browserNativeEventContext(nativeLabel, url, navigationToken);
     if (!pair) return false;
+    var lifecycle = browserTabLifecycle(pair.tab);
+    if (lifecycle.pendingGeneration) {
+      lifecycle.liveGeneration = lifecycle.pendingGeneration;
+      lifecycle.liveUrl = url || lifecycle.pendingUrl;
+      lifecycle.liveNavigationToken = lifecycle.pendingNavigationToken;
+      lifecycle.pendingGeneration = 0;
+      lifecycle.pendingUrl = null;
+      lifecycle.pendingNavigationToken = null;
+      lifecycle.navigationSnapshot = null;
+      pair.tab.created = true;
+    }
     pair.tab.loading = false;
     if (url) pair.tab.url = url;
     if (title && String(title).trim()) pair.tab.title = String(title).trim();
@@ -7782,12 +10388,22 @@
   }
   function handleBrowserPageLoad(event) {
     var payload = event.payload || {};
-    var pair = browserNativeEventContext(payload.label, payload.url);
+    var pair = browserNativeEventContext(payload.label, payload.url, payload.navigationToken);
     if (!pair) return false;
     if (payload.phase === "started") {
       pair.tab.loading = true;
+      if (typeof publishBrowserControlResource === "function") {
+        publishBrowserControlResource(pair).catch(function () {});
+      }
     } else if (payload.phase === "finished") {
-      return markBrowserTabLoaded(payload.label, payload.url, "");
+      var loaded = markBrowserTabLoaded(payload.label, payload.url, "", payload.navigationToken);
+      if (loaded && typeof installBrowserAutomationForPair === "function") {
+        installBrowserAutomationForPair(pair).catch(function () {});
+      }
+      if (loaded && typeof publishBrowserControlResource === "function") {
+        publishBrowserControlResource(pair).catch(function () {});
+      }
+      return loaded;
     } else {
       return false;
     }
@@ -7799,7 +10415,14 @@
   }
   function handleBrowserTitle(event) {
     var payload = event.payload || {};
-    return markBrowserTabLoaded(payload.label, payload.url, payload.title);
+    var marked = markBrowserTabLoaded(payload.label, payload.url, payload.title, payload.navigationToken);
+    var pair = marked && typeof browserTabForNativeLabel === "function"
+      ? browserTabForNativeLabel(payload.label)
+      : null;
+    if (pair && typeof publishBrowserControlResource === "function") {
+      publishBrowserControlResource(pair).catch(function () {});
+    }
+    return marked;
   }
   listen("browser:page-load", handleBrowserPageLoad).catch(function () {});
   listen("browser:title", handleBrowserTitle).catch(function () {});
@@ -7809,6 +10432,7 @@
     var pair = browserTabForNativeLabel(payload.label);
     var pane = pair && findBrowserPane(pair.project.id, pair.worktreePath);
     if (pane && state.activeThreadId !== pane.id) focusThread(pane.id);
+    if (pair) publishBrowserControlResource(pair).catch(function () {});
   }).catch(function () {});
   function ensureBrowserModel(project, workspaceRoot) {
     if (!project) return null;
@@ -7855,6 +10479,18 @@
     var lifecycle = browserTabLifecycle(tab);
     if (lifecycle.closing) return false;
     lifecycle.closing = true;
+    var closingRoot = Object.keys(project.browsersByWorktree || {}).find(function (root) {
+      return project.browsersByWorktree[root] === browser;
+    }) || project.root;
+    var closingPair = { project: project, worktreePath: closingRoot, browser: browser, tab: tab };
+    if (lifecycle.nativeLabel) {
+      if (!(await invalidateBrowserAutomation(closingPair))) {
+        lifecycle.closing = false;
+        setStatus("browser automation invalidation failed", "error");
+        return false;
+      }
+      await removeBrowserControlResource(closingPair);
+    }
     invalidateBrowserNavigation(tab);
     try {
       await invoke("browser_destroy", { label: browserLabelForTab(project, tab) });
@@ -7938,6 +10574,13 @@
   listen("browser:shortcut-terminal-pane", function () {
     createTerminalPane();
   }).catch(function () {});
+  listen("browser:shortcut-agent-pane", function () {
+    openAgentPicker();
+  }).catch(function () {});
+  listen("browser:shortcut-composer", function () {
+    commandInput.focus();
+    openPalette("/", true);
+  }).catch(function () {});
   function appendBrowserTabAddButton() {
     if (!browserTabStrip) return;
     var add = document.createElement("button"); add.className = "browser-tab-add"; add.textContent = "+"; add.title = "New browser tab for this project"; add.addEventListener("click", openBlankBrowserTab); browserTabStrip.appendChild(add);
@@ -7951,6 +10594,7 @@
     browser.tabs.forEach(function (tab) {
       var btn = document.createElement("button");
       btn.className = "browser-tab" + (tab.id === browser.activeTabId ? " active" : "") + (tab.loading ? " loading" : "");
+      btn.dataset.tabId = tab.id;
       btn.title = tab.url || "New tab";
       btn.innerHTML = '<span class="browser-tab-favicon" aria-hidden="true"></span><span class="browser-tab-title">' + escapeHtml(tab.title || "New tab") + '</span><span class="browser-tab-close">×</span>';
       btn.addEventListener("click", async function (event) { if (event.target && event.target.classList.contains("browser-tab-close")) await closeBrowserTab(project, tab.id); else await activateBrowserTab(project, tab.id); });
@@ -7981,12 +10625,29 @@
     if (rect.width <= 0 || rect.height <= 0) return null;
     return { x: rect.left, y: rect.top, w: rect.width, h: rect.height };
   }
-  function syncProjectBrowser() { renderBrowserTabs(); syncBrowserBounds(); }
+  function syncProjectBrowser() { renderBrowserTabs(); scheduleBrowserBounds(); }
   function syncBrowserBounds() {
     var project = activeProject(); var tab = currentBrowserTab(project); var label = browserLabelForTab(project, tab); var b = visibleBrowserBounds();
     if (!b || !tab || !tab.created) { invoke("browser_hide_all_except", { label: null }).catch(function () {}); return; }
     invoke("browser_hide_all_except", { label: label }).catch(function () {});
     invoke("browser_set_bounds", { label: label, x: b.x, y: b.y, w: b.w, h: b.h }).catch(function () {});
+  }
+  function scheduleBrowserBounds() {
+    var project = activeProject();
+    var pane = project && findBrowserPane(project.id, activeWorkspaceRoot(project));
+    var tab = currentBrowserTab(project);
+    var identity = pane ? pane.id : project && tab ? browserLabelForTab(project, tab) : "visible";
+    terminalFrameScheduler.schedule("browser:" + identity + ":bounds", function () {
+      var currentProject = activeProject();
+      var currentPane = currentProject && findBrowserPane(
+        currentProject.id,
+        activeWorkspaceRoot(currentProject)
+      );
+      if (currentProject !== project || currentPane !== pane || currentBrowserTab(currentProject) !== tab) {
+        return;
+      }
+      syncBrowserBounds();
+    });
   }
   async function navigateBrowser(rawUrl, opts) {
     opts = opts || {}; var project = activeProject(); if (!project) return false;
@@ -8031,16 +10692,30 @@
       var previousView = {
         nativeLabel: lifecycle.nativeLabel,
         liveGeneration: lifecycle.liveGeneration,
+        controlGeneration: lifecycle.controlGeneration,
         liveUrl: lifecycle.liveUrl,
         eventUrl: lifecycle.eventUrl,
         viewLive: lifecycle.viewLive,
       };
+      var navigationPair = { project: project, worktreePath: worktreePath, browser: browser, tab: tab };
+      if (lifecycle.nativeLabel) {
+        if (!(await invalidateBrowserAutomation(navigationPair))) {
+          setStatus("browser automation invalidation failed", "error");
+          return false;
+        }
+        await removeBrowserControlResource(navigationPair);
+      }
+      if (lifecycle.invalidationGeneration !== invalidationGeneration || !requestIsCurrent()) return false;
       var generation = beginBrowserNavigation(tab);
+      lifecycle.controlGeneration = 0;
+      var navigationToken = generation + ":" + (globalThis.crypto && globalThis.crypto.randomUUID ? globalThis.crypto.randomUUID() : Date.now() + ":" + Math.random());
+      if (!lifecycle.automationSource) lifecycle.automationSource = PsycheControl.browserAutomationSource();
       var label = browserLabelForTab(project, tab);
       var nativeLabel = nativeBrowserLabel(label);
       lifecycle.nativeLabel = nativeLabel;
       lifecycle.pendingGeneration = generation;
       lifecycle.pendingUrl = normalised;
+      lifecycle.pendingNavigationToken = navigationToken;
       lifecycle.eventUrl = null;
       lifecycle.viewLive = true;
       lifecycle.navigationSnapshot = {
@@ -8061,45 +10736,73 @@
       };
       tab.loading = true; tab.title = tabTitle(normalised); renderBrowserTabs(); updateBrowserControls();
       try {
-        await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h });
+        var nativeNavigation = await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h, navigationToken: navigationToken, automationSource: lifecycle.automationSource });
         if (!browserNavigationIsCurrent(context)) {
           await discardObsoleteBrowserNavigation(context);
           return false;
         }
-        var committedUrl = lifecycle.eventUrl || normalised;
-        tab.created = true; tab.url = committedUrl;
+        var terminalUrl = nativeNavigation && nativeNavigation.terminalUrl
+          ? String(nativeNavigation.terminalUrl)
+          : normalised;
+        tab.created = true;
+        tab.url = terminalUrl;
+        tab.loading = false;
+        lifecycle.liveGeneration = generation;
+        lifecycle.liveUrl = terminalUrl;
+        lifecycle.liveNavigationToken = navigationToken;
         lifecycle.pendingGeneration = 0;
         lifecycle.pendingUrl = null;
-        lifecycle.liveGeneration = generation;
-        lifecycle.liveUrl = committedUrl;
-        lifecycle.viewLive = true;
+        lifecycle.pendingNavigationToken = null;
+        lifecycle.eventUrl = terminalUrl;
         lifecycle.navigationSnapshot = null;
+        lifecycle.viewLive = true;
+        if (!browserUrlsMatch(terminalUrl, normalised)) tab.title = tabTitle(terminalUrl);
         if (opts.fromHistory && typeof opts.historyIndex === "number") {
           tab.historyIndex = opts.historyIndex;
         } else if (!opts.fromHistory && !opts.preserveHistory) {
           tab.history = opts.replace ? [] : tab.history.slice(0, tab.historyIndex + 1);
-          tab.history.push(normalised);
+          tab.history.push(terminalUrl);
           tab.historyIndex = tab.history.length - 1;
         }
         if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
-        else syncBrowserBounds();
+        else scheduleBrowserBounds();
+        var automationInstalled = await Promise.resolve(
+          installBrowserAutomationForPair(navigationPair)
+        ).catch(function () { return false; });
+        if (!automationInstalled) {
+          await Promise.resolve(publishBrowserControlResource(navigationPair)).catch(function () { return false; });
+        }
         saveWorkspaceSoon();
-        setTimeout(function () {
-          if (browserNavigationIsCurrent(context) && tab.loading &&
-              browserUrlsMatch(tab.url, normalised)) {
-            markBrowserTabLoaded(nativeBrowserLabel(label), normalised, "");
-          }
-        }, 4500);
         return true;
       } catch (err) {
         if (!browserNavigationIsCurrent(context)) {
           await discardObsoleteBrowserNavigation(context);
           return false;
         }
+        var navigationTimedOut = String(err).indexOf("browser navigation timed out") !== -1;
+        if (navigationTimedOut) {
+          await removeBrowserControlResource(navigationPair);
+          invalidateBrowserNavigation(tab);
+          lifecycle.nativeLabel = null;
+          lifecycle.liveGeneration = 0;
+          lifecycle.liveUrl = null;
+          lifecycle.liveNavigationToken = null;
+          lifecycle.eventUrl = null;
+          lifecycle.viewLive = false;
+          lifecycle.navigationSnapshot = null;
+          tab.created = false;
+          tab.loading = false;
+          if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
+          else scheduleBrowserBounds();
+          writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
+          return false;
+        }
         lifecycle.nativeLabel = previousView.nativeLabel;
         lifecycle.pendingGeneration = 0;
         lifecycle.pendingUrl = null;
+        lifecycle.pendingNavigationToken = null;
         lifecycle.liveGeneration = previousView.liveGeneration;
+        lifecycle.controlGeneration = previousView.controlGeneration;
         lifecycle.liveUrl = previousView.liveUrl;
         lifecycle.eventUrl = previousView.eventUrl;
         lifecycle.viewLive = previousView.viewLive;
@@ -8108,7 +10811,7 @@
         tab.title = previousTitle;
         tab.url = previousUrl;
         if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
-        else syncBrowserBounds();
+        else scheduleBrowserBounds();
         writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
         return false;
       }
@@ -8127,17 +10830,25 @@
   urlInput.addEventListener("keydown", function (e) { if (e.key === "Enter") navigateBrowser(urlInput.value); });
   document.getElementById("reload").addEventListener("click", function () {
     var project = activeProject(); var tab = currentBrowserTab(project); var pane = project && findBrowserPane(project.id, activeWorkspaceRoot(project));
-    if (tab && tab.created && !browserTabIsClosing(tab) && !browserPaneIsClosing(pane)) { tab.loading = true; renderBrowserTabs(); updateBrowserControls(); invoke("browser_reload", { label: browserLabelForTab(project, tab) }).catch(function () {}).finally(function () { setTimeout(function () { if (!browserTabIsClosing(tab) && !browserPaneIsClosing(pane)) tab.loading = false; renderBrowserTabs(); updateBrowserControls(); }, 350); }); }
+    if (tab && tab.created && !browserTabIsClosing(tab) && !browserPaneIsClosing(pane)) {
+      navigateBrowser(tab.url, { tabId: tab.id, replace: true, preserveHistory: true }).catch(function () {});
+    }
   });
   document.getElementById("back").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex > 0) { var index = tab.historyIndex - 1; navigateBrowser(tab.history[index], { fromHistory: true, historyIndex: index }); } });
   document.getElementById("forward").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex < tab.history.length - 1) { var index = tab.historyIndex + 1; navigateBrowser(tab.history[index], { fromHistory: true, historyIndex: index }); } });
   document.getElementById("open-surprise").addEventListener("click", openDiceBrowserTab);
   document.getElementById("open-external").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.url && tab.url !== "about:blank" && openUrl) openUrl(tab.url).catch(function () {}); });
-  if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { syncBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }
-  window.addEventListener("beforeunload", function () {
-    saveWorkspaceNow();
-    if (statusController) statusController.stop();
-  });
+  if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { scheduleBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }
+  function handleWindowBeforeUnload(event) {
+    saveWorkspaceNow().catch(function () {});
+    if (destroyingWindow || !state.openFiles.some(function (file) {
+      return file.dirty || file.savePromise;
+    })) return;
+    event.preventDefault();
+    event.returnValue = true;
+    return true;
+  }
+  window.addEventListener("beforeunload", handleWindowBeforeUnload);
   document.addEventListener("visibilitychange", handleVisibilityChange);
 
   // ============================================================
@@ -8186,35 +10897,82 @@
     return true;
   }
 
+  function routeFilesShortcut(e) {
+    if (!filesPaneHasCanvasFocus()) return false;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      returnFromFileFocus();
+      return true;
+    }
+    var meta = e.metaKey || e.ctrlKey;
+    if (!meta) return false;
+    var key = String(e.key).toLowerCase();
+    if (key === "s") {
+      handleExplicitFileSave(e);
+      return true;
+    }
+    if (key === "w") {
+      e.preventDefault();
+      if (state.activeFileId) closeFileTab(state.activeFileId);
+      return true;
+    }
+    if (e.key === "[") { e.preventDefault(); switchTab(-1); return true; }
+    if (e.key === "]") { e.preventDefault(); switchTab(+1); return true; }
+    var index = parseInt(e.key, 10);
+    if (Number.isInteger(index) && index >= 1 && index <= 9) {
+      if (e.ctrlKey && !e.metaKey) return false;
+      e.preventDefault();
+      var files = projectFiles();
+      if (files[index - 1]) {
+        activateFileTab(files[index - 1].id);
+      }
+      return true;
+    }
+    return false;
+  }
+
   async function routeGlobalShortcut(e) {
+    if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      if (e.code === "KeyT") {
+        e.preventDefault();
+        await runNewShellCommand();
+        return;
+      }
+      if (e.code === "KeyA") {
+        e.preventDefault();
+        await runNewThreadCommand();
+        return;
+      }
+    }
     if (routeAgentPickerModalKeydown(e)) return;
     if (routeGitPaneShortcut(e)) return;
     var meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
-    if (String(e.key).toLowerCase() === "s") {
-      await handleExplicitFileSave(e);
-      return;
-    }
+    if (routeFilesShortcut(e)) return;
     // ⌘T always opens a plain login shell in the terminal canvas.
     if (String(e.key).toLowerCase() === "t") {
       e.preventDefault();
       await createTerminalPane();
       return;
     }
-    if (String(e.key).toLowerCase() === "p") {
+    if (String(e.key).toLowerCase() === "d" && !e.altKey && !e.shiftKey) {
       if (openAgentPicker()) e.preventDefault();
       return;
     }
     // ⌘O opens a new project (folder picker → addProject → Coven).
     if (e.key === "o") { openProjectPicker(); e.preventDefault(); return; }
-    // ⌘W closes the active file tab; with none open it closes the project.
+    // Outside Files, ⌘W keeps its workspace-level project behavior.
     if (e.key === "w") {
       e.preventDefault();
-      if (state.activeFileId) await closeFileTab(state.activeFileId);
-      else if (state.activeProjectId) await removeProject(state.activeProjectId);
+      if (state.activeProjectId) await removeProject(state.activeProjectId);
       return;
     }
-    if (e.key === "k") { commandInput.focus(); openPalette("/", true); e.preventDefault(); return; }
+    if (String(e.key).toLowerCase() === "f" && !e.altKey && !e.shiftKey) {
+      commandInput.focus();
+      openPalette("/", true);
+      e.preventDefault();
+      return;
+    }
     // ⌘B collapses the sessions sidebar.
     if (e.code === "KeyB" && !e.altKey && !e.shiftKey) { toggleSidebar(); e.preventDefault(); return; }
     // ⌃1–9 addresses the panes on the canvas; ⌘1–9 stays on file tabs.
@@ -8226,17 +10984,11 @@
         return;
       }
     }
-    // The tab strip shows files, so ⌘[ / ⌘] and ⌘1-9 address file tabs. With
-    // no files open they fall back to projects, which the sidebar also drives.
+    // With another surface focused, tab navigation addresses projects.
     if (e.key === "[") { e.preventDefault(); await switchTab(-1); return; }
     if (e.key === "]") { e.preventDefault(); await switchTab(+1); return; }
     var n = parseInt(e.key, 10);
     if (Number.isInteger(n) && n >= 1 && n <= 9) {
-      var files = projectFiles();
-      if (files.length) {
-        if (files[n - 1]) { e.preventDefault(); await activateFileTab(files[n - 1].id); }
-        return;
-      }
       var p = state.projects[n - 1];
       if (p) { e.preventDefault(); await setActiveProject(p.id); }
     }
@@ -8261,20 +11013,62 @@
   // 11a. Shell chrome — sidebar, new-pane menu, help
   // ============================================================
 
-  function sidebarOpen() { return !appEl || appEl.dataset.sidebar !== "collapsed"; }
+  var pendingSidebarOpen = null;
+  var pendingSidebarWidth = null;
+  function sidebarOpen() {
+    if (pendingSidebarOpen !== null) return pendingSidebarOpen;
+    return !appEl || appEl.dataset.sidebar !== "collapsed";
+  }
+  function syncSidebarToggleState(collapsed) {
+    var titlebarLabel = collapsed ? "Expand sidebar" : "Collapse sidebar";
+    if (sidebarCollapseEl) {
+      sidebarCollapseEl.setAttribute("title", titlebarLabel + " (⌘B)");
+      sidebarCollapseEl.setAttribute("aria-label", titlebarLabel);
+      sidebarCollapseEl.setAttribute("aria-pressed", collapsed ? "true" : "false");
+    }
+    if (sidebarExpandEl) {
+      sidebarExpandEl.hidden = !collapsed;
+      sidebarExpandEl.setAttribute("title", "Expand sidebar (⌘B)");
+      sidebarExpandEl.setAttribute("aria-label", "Expand sidebar");
+      sidebarExpandEl.setAttribute("aria-pressed", collapsed ? "true" : "false");
+    }
+  }
   function setSidebarOpen(open) {
     if (!appEl) return;
-    appEl.dataset.sidebar = open ? "open" : "collapsed";
-    if (sidebarMiniEl) sidebarMiniEl.hidden = open;
+    pendingSidebarOpen = Boolean(open);
     if (!open) closeNewPaneMenu();
-    requestAnimationFrame(function () {
-      scheduleVisiblePaneFit();
-      syncBrowserBounds();
+    scheduleSidebarLayout();
+  }
+  function scheduleSidebarWidth(width) {
+    pendingSidebarWidth = width;
+    scheduleSidebarLayout();
+  }
+  function scheduleSidebarLayout() {
+    terminalFrameScheduler.schedule("layout:sidebar", function () {
+      var layoutChanged = false;
+      if (pendingSidebarOpen !== null) {
+        var open = pendingSidebarOpen;
+        pendingSidebarOpen = null;
+        appEl.dataset.sidebar = open ? "open" : "collapsed";
+        if (sidebarMiniEl) sidebarMiniEl.hidden = open;
+        syncSidebarToggleState(!open);
+        layoutChanged = true;
+      }
+      if (pendingSidebarWidth !== null) {
+        document.documentElement.style.setProperty("--sidebar-w", pendingSidebarWidth + "px");
+        pendingSidebarWidth = null;
+        layoutChanged = true;
+      }
+      if (layoutChanged) {
+        scheduleTerminalPaneFits();
+        scheduleBrowserBounds();
+      }
+      syncSessionListScroll();
     });
   }
   function toggleSidebar() { setSidebarOpen(!sidebarOpen()); }
 
-  onRailClick("sidebar-collapse", function () { setSidebarOpen(false); });
+  onRailClick("sidebar-collapse", function () { toggleSidebar(); });
   onRailClick("sidebar-expand", function () { setSidebarOpen(true); });
   if (sidebarMiniEl) {
     sidebarMiniEl.addEventListener("click", function (event) {
@@ -8292,13 +11086,13 @@
       sidebarResizeEl.classList.add("dragging");
       function move(moveEvent) {
         var next = Math.min(440, Math.max(210, startWidth + (moveEvent.clientX - startX)));
-        document.documentElement.style.setProperty("--sidebar-w", next + "px");
+        scheduleSidebarWidth(next);
       }
       function up() {
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", up);
         sidebarResizeEl.classList.remove("dragging");
-        requestAnimationFrame(function () { scheduleVisiblePaneFit(); syncBrowserBounds(); });
+        scheduleSidebarLayout();
       }
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);
@@ -8412,8 +11206,9 @@
     var thread = await createTerminalPane();
     if (thread) toast("Terminal pane opened");
   });
-  onMenuClick("new-pane-agent", function () {
-    openAgentPicker();
+  onMenuClick("new-pane-agent", async function () {
+    var thread = await runNewThreadCommand();
+    if (thread) toast("Coven chat opened");
   });
   onMenuClick("new-pane-web", async function () {
     await openBlankBrowserTab();
@@ -8488,7 +11283,8 @@
     if (
       (event.metaKey || event.ctrlKey) &&
       !event.altKey &&
-      String(event.key).toLowerCase() === "p"
+      !event.shiftKey &&
+      String(event.key).toLowerCase() === "d"
     ) {
       consumeAgentPickerKey(event);
       openAgentPicker();
@@ -8518,19 +11314,21 @@
 
   // ---- Keyboard shortcuts overlay ----
   var HELP_ROWS = [
-    ["Open the composer", "⌘K"],
+    ["Open the composer", "⌘F"],
     ["Toggle the sessions sidebar", "⌘B"],
     ["Focus a pane on the canvas", "⌃1–9"],
     ["Resize a pane split", "drag the divider"],
+    ["New shell pane", "⌃T"],
     ["New terminal pane", "⌘T"],
-    ["Choose an agent", "⌘P"],
+    ["New agent pane (coven chat)", "⌃A"],
+    ["Choose an agent", "⌘D"],
     ["New browser tab", "Web pane +"],
     ["Open or focus Git", "⌘G"],
-    ["Close the focused file / project", "⌘W"],
+    ["Close the focused file or project", "⌘W"],
     ["Rename a session", "double-click"],
     ["Cycle file tabs", "⌘[ · ⌘]"],
-    ["Save the open file", "⌘S"],
-    ["Leave a fullscreen file", "esc"],
+    ["Save the focused file", "⌘S"],
+    ["Return from the Files pane", "esc"],
     ["This overlay", "?"],
   ];
   function renderHelpRows() {
@@ -8575,11 +11373,7 @@
       // A call is the most transient thing on screen after a menu, and ending
       // it is always safe: nothing is transmitting.
       if (endCall()) return;
-      if (state.activeFileId) {
-        event.preventDefault();
-        await returnFromFileFocus();
-        return;
-      }
+      if (routeFilesShortcut(event)) return;
       if (!typing && exitPaneMaximize()) return;
       return;
     }
@@ -8613,6 +11407,8 @@
   var gitViewEl = document.getElementById("git-view");
   var gitBranchEl = document.getElementById("git-branch");
   var gitOpenRemoteBtn = document.getElementById("git-open-remote");
+  var renderedFileRows = [];
+  var fileVirtualFocusKey = "";
 
   // Directory paths the user has expanded, so a refresh keeps the tree open.
   var expandedDirs = Object.create(null);
@@ -8690,7 +11486,7 @@
     if (diffsSummaryEl) diffsSummaryEl.textContent = "error";
   }
 
-  // The tree highlights whichever file currently owns the main area.
+  // The tree highlights the selected tab in the mounted Files pane.
   function activeFilePath() {
     var f = findOpenFile(state.activeFileId);
     return f ? f.path : null;
@@ -8735,23 +11531,74 @@
     if (!project) { panelMessage(fileTreeEl, "No project open — ⌘O to add one."); return; }
     var workspaceRoot = activeWorkspaceRoot(project);
     if (filesCrumbEl) filesCrumbEl.textContent = shortenRoot(workspaceRoot);
-    fileTreeEl.innerHTML = "";
-    await appendDirInto(fileTreeEl, workspaceRoot, workspaceRoot, 0);
+    var fileRows = [];
+    await appendDirInto(fileRows, workspaceRoot, workspaceRoot, 0);
+    renderedFileRows = fileRows;
+    renderFileRows(fileRows);
     if (!fileTreeEl.firstChild) panelMessage(fileTreeEl, "Empty directory.");
   }
 
-  async function appendDirInto(container, root, dirPath, depth) {
+  async function appendDirInto(fileRows, root, dirPath, depth) {
     var entries;
     try {
       entries = await invoke("fs_list_dir", { root: root, path: dirPath });
     } catch (err) {
-      var e = document.createElement("div");
-      e.className = "panel-error";
-      e.textContent = String(err);
-      container.appendChild(e);
+      fileRows.push({ error: String(err), key: "error:" + dirPath, depth: depth });
       return;
     }
-    entries.forEach(function (entry) {
+    for (var entryIndex = 0; entryIndex < entries.length; entryIndex++) {
+      var entry = entries[entryIndex];
+      fileRows.push({ entry: entry, key: entry.path, depth: depth });
+      if (entry.is_dir && expandedDirs[entry.path]) {
+        await appendDirInto(fileRows, root, entry.path, depth + 1);
+      }
+    }
+  }
+
+  function renderFileRows(fileRows, options) {
+    if (!fileTreeEl) return;
+    var preserveFocus = !options || options.preserveFocus !== false;
+    var activeFileFocusKey = fileVirtualFocusKey || (preserveFocus &&
+      fileTreeEl.contains(document.activeElement) &&
+      document.activeElement.dataset
+      ? document.activeElement.dataset.virtualKey || ""
+      : "");
+    var restoreFileFocusKey = options && options.restoreFocusKey;
+    var focusedKey = restoreFileFocusKey || activeFileFocusKey;
+    var fileActiveIndex = fileRows.findIndex(function (item) {
+      return activeFileFocusKey && item.key === activeFileFocusKey;
+    });
+    var fileVirtualWindow = null;
+    var visibleRows = fileRows;
+    var fileRowHeight = collectionRowHeight(fileTreeEl, "--file-row-h", 26);
+    fileTreeEl.__psycheVirtualRowHeight = fileRowHeight;
+    if (ptyRuntime.shouldVirtualize(fileRows.length)) {
+      fileVirtualWindow = ptyRuntime.virtualizeItems(fileRows, {
+        rowHeight: fileRowHeight,
+        viewportHeight: fileTreeEl.clientHeight,
+        scrollTop: fileTreeEl.scrollTop,
+        overscan: ptyRuntime.VIRTUAL_LIST_OVERSCAN,
+        activeIndex: fileActiveIndex >= 0 ? fileActiveIndex : undefined,
+        getKey: function (item) { return item.entry ? item.entry.path : item.key; },
+      });
+      visibleRows = fileVirtualWindow.items.map(function (item) { return item.item; });
+    }
+    fileTreeEl.replaceChildren();
+    if (fileVirtualWindow) {
+      fileTreeEl.appendChild(createVirtualListSpacer("before", fileVirtualWindow.before));
+    }
+    visibleRows.forEach(function (fileRow) {
+      if (fileRow.error) {
+        var error = document.createElement("div");
+        error.className = "panel-error file-row-error";
+        error.textContent = fileRow.error;
+        error.dataset.virtualKey = fileRow.key;
+        error.tabIndex = 0;
+        fileTreeEl.appendChild(error);
+        return;
+      }
+      var entry = fileRow.entry;
+      var depth = fileRow.depth;
       var row = document.createElement("button");
       row.type = "button";
       var isOpen = !!expandedDirs[entry.path];
@@ -8762,6 +11609,7 @@
         '<span class="twisty">' + (entry.is_dir ? "▶" : "") + "</span>" +
         '<span class="file-name">' + escapeHtml(entry.name) + "</span>";
       row.title = entry.path;
+      row.dataset.virtualKey = entry.path;
       row.addEventListener("click", async function () {
         if (entry.is_dir) {
           if (expandedDirs[entry.path]) delete expandedDirs[entry.path];
@@ -8771,13 +11619,74 @@
           await openFileTab(entry.path, activeProject());
         }
       });
-      container.appendChild(row);
-      if (entry.is_dir && isOpen) {
-        // Children render inline under the row, indented one level.
-        var slot = document.createElement("div");
-        container.appendChild(slot);
-        appendDirInto(slot, root, entry.path, depth + 1);
-      }
+      fileTreeEl.appendChild(row);
+    });
+    if (fileVirtualWindow) {
+      fileTreeEl.appendChild(createVirtualListSpacer("after", fileVirtualWindow.after));
+    }
+    if (focusedKey) {
+      var replacement = Array.prototype.find.call(
+        fileTreeEl.querySelectorAll("[data-virtual-key]"),
+        function (item) { return item.dataset.virtualKey === focusedKey; }
+      );
+      if (replacement) replacement.focus();
+    }
+    fileVirtualFocusKey = "";
+  }
+
+  function focusLogicalFileRow(key) {
+    if (!fileTreeEl) return false;
+    var mounted = Array.prototype.find.call(
+      fileTreeEl.querySelectorAll("[data-virtual-key]"),
+      function (item) { return item.dataset.virtualKey === key; }
+    );
+    if (mounted) {
+      mounted.focus();
+      return true;
+    }
+    var index = renderedFileRows.findIndex(function (item) { return item.key === key; });
+    if (index === -1) return false;
+    var offset = index * (fileTreeEl.__psycheVirtualRowHeight || 26);
+    fileVirtualFocusKey = key;
+    fileTreeEl.scrollTop = offset;
+    renderFileRows(renderedFileRows);
+    return true;
+  }
+
+  function handleVirtualFileTreeKeydown(event) {
+    var item = event.target && event.target.dataset && event.target.dataset.virtualKey
+      ? event.target
+      : null;
+    if (!item || document.activeElement !== item) return;
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp" &&
+        event.key !== "Home" && event.key !== "End") return;
+    var index = renderedFileRows.findIndex(function (row) {
+      return row.key === item.dataset.virtualKey;
+    });
+    if (index === -1) return;
+    var next = index;
+    if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = renderedFileRows.length - 1;
+    else if (event.key === "ArrowDown") next = Math.min(renderedFileRows.length - 1, index + 1);
+    else next = Math.max(0, index - 1);
+    event.preventDefault();
+    focusLogicalFileRow(renderedFileRows[next].key);
+  }
+
+  if (fileTreeEl) {
+    fileTreeEl.addEventListener("keydown", handleVirtualFileTreeKeydown);
+    fileTreeEl.addEventListener("scroll", function () {
+      if (!ptyRuntime.shouldVirtualize(renderedFileRows.length)) return;
+      var fileScrollFocusKey = fileTreeEl.contains(document.activeElement) &&
+        document.activeElement.dataset
+        ? document.activeElement.dataset.virtualKey || ""
+        : "";
+      terminalFrameScheduler.schedule("collection:files", function () {
+        renderFileRows(renderedFileRows, {
+          preserveFocus: false,
+          restoreFocusKey: fileScrollFocusKey,
+        });
+      });
     });
   }
 
@@ -9188,7 +12097,7 @@
 
   async function switchTab(delta) {
     var files = projectFiles();
-    if (files.length) {
+    if (filesPaneHasCanvasFocus() && files.length) {
       var fi = files.findIndex(function (f) { return f.id === state.activeFileId; });
       if (fi === -1) fi = 0;
       await activateFileTab(files[(fi + delta + files.length) % files.length].id);
@@ -9355,6 +12264,123 @@
     return { projects: projects, activeProjectId: activeProjectId };
   }
 
+  function restoredSessionLaunch(descriptor, project) {
+    var launchKind = descriptor.launchKind;
+    return {
+      command: null,
+      args: [],
+      env: {},
+      projectRoot: project.root,
+      cwd: descriptor.worktreePath,
+      launchKind: launchKind,
+      covenSessionId: descriptor.covenSessionId || null,
+      metricsProvider: launchKind === "coven-chat" || launchKind === "coven-attach"
+        ? "coven"
+        : null,
+    };
+  }
+
+  function restoredSessionThread(descriptor, project) {
+    var launch = restoredSessionLaunch(descriptor, project);
+    return {
+      id: descriptor.id,
+      projectId: project.id,
+      worktreePath: descriptor.worktreePath,
+      name: descriptor.name || descriptor.launchKind,
+      kind: descriptor.kind || descriptor.launchKind,
+      launch: launch,
+      hidden: descriptor.hidden === true,
+      status: descriptor.status,
+      persistentLive: descriptor.persistentLive === true,
+      spawning: descriptor.persistentLive === true,
+      term: null,
+      fit: null,
+      host: null,
+      pane: null,
+      closing: false,
+      closeStarted: false,
+      startInFlight: false,
+      exitDuringStart: false,
+      stopRequested: false,
+      ptyStarted: false,
+      terminalController: null,
+      ptyIoQueue: createThreadPtyIoQueue(),
+      metricsGeneration: 0,
+      metrics: launch.metricsProvider ? loadingPaneMetrics(launch) : null,
+      metricsRefreshTimer: 0,
+      lastOutputAt: 0,
+      isWorking: false,
+      sidebarStatusKey: descriptor.persistentLive ? "busy" : "done",
+      startedAt: Date.now(),
+      finishedAt: descriptor.persistentLive ? null : Date.now(),
+      exitCode: null,
+    };
+  }
+
+  function restorePersistedPaneLayouts(savedLayouts, restoredIds) {
+    paneLayouts.clear();
+    (savedLayouts || []).forEach(function (record) {
+      if (!record || !record.root) return;
+      var project = findProject(record.projectId);
+      if (!project) return;
+      var threadIds = PsychePanes.leafIds(record.root).map(function (leafId) {
+        var leaf = PsychePanes.findLeafById(record.root, leafId);
+        return leaf && leaf.threadId;
+      }).filter(Boolean);
+      if (!threadIds.length || threadIds.some(function (id) { return !restoredIds.has(id); })) return;
+      paneLayouts.set(paneLayoutKey(project.id, record.worktreePath), {
+        root: record.root,
+        focusedLeafId: record.focusedLeafId || null,
+      });
+    });
+  }
+
+  function ensureRestoredSessionPlacements(threads) {
+    threads.forEach(function (thread) {
+      if (thread.hidden) return;
+      var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
+      if (layout && PsychePanes.findLeafByThreadId(layout.root, thread.id)) return;
+      var placement = preparePanePlacement(thread.id, thread.projectId, thread.worktreePath);
+      if (placement) commitPanePlacement(placement);
+      else thread.hidden = true;
+    });
+  }
+
+  async function restorePersistedSessions(saved, liveSessionIds) {
+    if (!saved || !window.PsycheWorkspace) return { sessions: [], unknownLiveIds: [] };
+    var reconciled = PsycheWorkspace.reconcileSessions(saved.sessions || [], liveSessionIds || []);
+    var restored = reconciled.sessions.map(function (descriptor) {
+      var project = findProject(descriptor.projectId);
+      return project ? restoredSessionThread(descriptor, project) : null;
+    }).filter(Boolean);
+    state.threads = restored;
+    var restoredIds = new Set(restored.map(function (thread) { return thread.id; }));
+    restorePersistedPaneLayouts(saved.paneLayouts, restoredIds);
+    ensureRestoredSessionPlacements(restored);
+    restored.forEach(function (thread) { mountTerminal(thread); });
+    for (var i = 0; i < restored.length; i += 1) {
+      var thread = restored[i];
+      if (!thread.ptyStarted && thread.status === "running") {
+        try {
+          var capture = await invoke("native_session_capture", { id: thread.id });
+          if (thread.term && capture && capture.length) thread.term.write(new Uint8Array(capture));
+        } catch (error) {
+          console.warn("[native_session_capture] failed for " + thread.id + ": " + String(error));
+        }
+        attachThreadClient(thread);
+      }
+    }
+    var active = saved.activeThreadId && findThread(saved.activeThreadId);
+    state.activeThreadId = active && !active.hidden ? active.id : null;
+    state.projects.forEach(function (project) {
+      var projectThread = state.threads.find(function (thread) {
+        return thread.projectId === project.id && !thread.hidden;
+      });
+      project.lastActiveThreadId = projectThread ? projectThread.id : null;
+    });
+    return reconciled;
+  }
+
   async function addProject(rootPath) {
     if (!rootPath) return null;
     rootPath = await canonicalProjectPath(rootPath);
@@ -9367,7 +12393,8 @@
     var name = parts[parts.length - 1] || rootPath;
     var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], browsersByWorktree: {} };
     state.projects.push(project);
-    state.activeProjectId = project.id;
+    if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
+    else Object.assign(state, { activeProjectId: project.id });
     state.activeThreadId = null;
     renderPaneWorkspace();
     refreshSidebar();
@@ -9375,6 +12402,7 @@
     syncProjectBrowser();
     saveWorkspaceSoon();
     startCovenPolling();
+    installAgentControlUi();
     if (typeof refreshStatusController === "function") refreshStatusController();
     return project;
   }
@@ -9466,7 +12494,7 @@
     if (!agentPickerOpen()) agentPickerPreviousFocus = document.activeElement;
     setHelpOpen(false);
     closeNewPaneMenu();
-    closeSessionContextMenu();
+    closeSessionContextMenu({ restoreFocus: false });
     agentPickerIndex = 0;
     renderAgentPicker();
     agentPickerOverlayEl.hidden = false;
@@ -9621,6 +12649,7 @@
       kind: "shell",
       command: state.env.default_shell,
       args: state.env.default_shell_args,
+      launchKind: "shell",
       projectRoot: project && project.root,
       cwd: worktree && worktree.path,
       worktreePath: worktree && worktree.path,
@@ -9644,6 +12673,7 @@
       kind: "psyche",
       command: state.env.node_path,
       args: [state.env.psyche_entry],
+      launchKind: "psyche",
       projectRoot: project && project.root,
       cwd: worktree && worktree.path,
       worktreePath: worktree && worktree.path,
@@ -9676,31 +12706,49 @@
     state.env = env || {};
     await installTerminalImageDrop();
     if (typeof statusController !== "undefined" && statusController) statusController.start();
-    var saved = await loadSavedWorkspace();
+    flushDeferredStatusMessages();
+    var saved = await readSavedWorkspace();
     var bootRoot = state.env.repo_root || state.env.home || "/";
     var project = null;
-    if (saved && saved.projects.length) {
-      isRestoringWorkspace = true;
-      var restored = await restoreSavedProjects(
-        saved.projects,
-        saved.activeProjectId,
-        Math.min(settings.maxProjects, HARD_MAX_PROJECTS)
-      );
-      state.projects = restored.projects;
-      state.activeProjectId = restored.activeProjectId;
-      project = activeProject();
+    isRestoringWorkspace = true;
+    try {
+      if (saved && saved.projects.length) {
+        var restored = await restoreSavedProjects(
+          saved.projects,
+          saved.activeProjectId,
+          Math.min(settings.maxProjects, HARD_MAX_PROJECTS)
+        );
+        state.projects = restored.projects;
+        if (typeof assignActiveProjectId === "function") {
+          assignActiveProjectId(restored.activeProjectId, { resetAgentControl: false });
+        } else {
+          Object.assign(state, { activeProjectId: restored.activeProjectId });
+        }
+        project = activeProject();
+        await Promise.all(state.projects.map(function (savedProject) {
+          return refreshProjectWorktrees(savedProject);
+        }));
+      }
+      var liveSessionIds = [];
+      try {
+        liveSessionIds = await invoke("native_session_list");
+      } catch (error) {
+        setStatus("native session discovery failed: " + String(error), "error");
+      }
+      if (saved) await restorePersistedSessions(saved, liveSessionIds);
+    } finally {
       isRestoringWorkspace = false;
-      await Promise.all(state.projects.map(function (savedProject) {
-        return refreshProjectWorktrees(savedProject);
-      }));
     }
     if (!project) project = await addProject(bootRoot);
     if (project) {
       var activeTab = currentBrowserTab(project);
       if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
     }
-    refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
+    renderPaneWorkspace({ preserveTerminalFocus: false });
+    refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills();
+    await saveWorkspaceNow();
     startCovenPolling();
+    installAgentControlUi();
     if (paneMetricsPollTimer) clearInterval(paneMetricsPollTimer);
     paneMetricsPollTimer = setInterval(refreshVisiblePaneMetrics, 15000);
     refreshVisiblePaneMetrics();

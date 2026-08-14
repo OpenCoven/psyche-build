@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pty-set-visibility"
+description = "Enables the pty_set_visibility command without any pre-configured scope."
+commands.allow = ["pty_set_visibility"]
+
+[[permission]]
+identifier = "deny-pty-set-visibility"
+description = "Denies the pty_set_visibility command without any pre-configured scope."
+commands.deny = ["pty_set_visibility"]

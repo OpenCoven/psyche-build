@@ -19,7 +19,7 @@ describe('tmux generation guard', () => {
 
     const result = await tearDownGenerationBoundPane({
       getServerIdentity: () => current,
-      probePanePresence: vi.fn(async () => 'present'),
+      probePanePresence: vi.fn(async (): Promise<'present'> => 'present'),
       killPane,
     }, '%7', expected, { generationMismatch: 'unknown' } as never);
 

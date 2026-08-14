@@ -116,10 +116,12 @@ describe('committed web bundles', () => {
     // If a bundle stops being produced, the freshness checks below would have
     // nothing to compare and would quietly pass.
     expect(steps.map((step) => step.outfile).sort()).toEqual([
+      'web/control.bundle.js',
       'web/diffs.bundle.js',
       'web/editor.bundle.js',
       'web/input.bundle.js',
       'web/panes.bundle.js',
+      'web/runtime.bundle.js',
       'web/sessions.bundle.js',
       'web/status.bundle.js',
       'web/workspace.bundle.js',
@@ -130,10 +132,20 @@ describe('committed web bundles', () => {
     const html = readFileSync(join(webRoot, 'index.html'), 'utf8');
     const sources = [...html.matchAll(/src="\.\/([^"]+)"/g)].map((match) => match[1]);
     expect(sources.length).toBeGreaterThan(0);
+    expect(sources.indexOf('runtime.bundle.js')).toBeGreaterThan(-1);
+    expect(sources.indexOf('runtime.bundle.js')).toBeLessThan(sources.indexOf('main.js'));
     // The blanket `native/` ignore once let a referenced bundle be deleted with
     // nothing in `git status` to show for it, leaving the app unable to boot.
     const missing = sources.filter((source) => !existsSync(join(webRoot, source)));
     expect(missing).toEqual([]);
+  });
+
+  it('exposes flattenSidebarSearchResults in the source entry and committed bundle', () => {
+    const sessionEntry = readFileSync(join(webRoot, 'sessions', 'session-entry.js'), 'utf8');
+    const sessionsBundle = readFileSync(join(webRoot, 'sessions.bundle.js'), 'utf8');
+
+    expect(sessionEntry).toContain('flattenSidebarSearchResults');
+    expect(sessionsBundle).toContain('flattenSidebarSearchResults');
   });
 
   for (const step of steps) {

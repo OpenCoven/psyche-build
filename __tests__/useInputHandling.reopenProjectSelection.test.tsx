@@ -33,9 +33,9 @@ vi.mock('../src/utils/settingsManager.js', async () => {
   const actual = await vi.importActual<typeof import('../src/utils/settingsManager.js')>('../src/utils/settingsManager.js');
   return {
     ...actual,
-    SettingsManager: vi.fn(() => ({
+    SettingsManager: vi.fn(function SettingsManager() { return {
       getSettings: vi.fn(() => ({ colorTheme: 'orange' })),
-    })),
+    }; }),
   };
 });
 

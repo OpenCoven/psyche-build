@@ -62,7 +62,7 @@ describe('Tauri Coven session native contract', () => {
     expect(applyLaunchEnv).toContain('launch_kind == Some("coven-attach")');
     expect(applyLaunchEnv).toContain('cmd.env_remove(COVEN_SESSION_SOURCE)');
 
-    const ptyStart = functionBody(libSource, 'pty_start');
+    const ptyStart = functionBody(libSource, 'pty_start_blocking');
     expect(ptyStart.indexOf('prepare_pty_start(&options)?')).toBeLessThan(
       ptyStart.indexOf('validate_coven_launch(&options)?'),
     );

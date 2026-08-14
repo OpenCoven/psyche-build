@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Connection, type ConnectionDeps } from '../../src/daemon/index.js';
+import { PaneOutputFanout } from '../../src/daemon/paneOutputFanout.js';
 import { TmuxControl } from '../../src/services/tmuxControl.js';
 import type { CommandOutcome, ControlCommand } from '../../src/control/types.js';
 
@@ -78,6 +79,7 @@ function buildConnection(
     serverVersion: 'test',
     authedViaHeader: true,
     tmux,
+    paneOutput: new PaneOutputFanout(tmux),
     controlRuntime,
     ownerEpoch: 1,
   };

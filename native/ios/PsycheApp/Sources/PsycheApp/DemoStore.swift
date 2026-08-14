@@ -10,13 +10,19 @@ import PsycheCore
 @MainActor
 enum DemoStore {
     /// Builds the deterministic store a `-uiFixture` launch runs against.
-    static func makeWorkspaceStore(fixture name: String) -> WorkspaceStore {
+    static func makeWorkspaceStore(
+        fixture name: String,
+        inspectionFails: Bool = false
+    ) -> WorkspaceStore {
         let workspace = WorkspaceFixtures.workspace(named: name)
         // A fixture control client, so create/rename/stop actually run and
         // republish the workspace the way a host broadcast would. Without it
         // every command would fail with "not connected" and those flows could
         // not be exercised at all.
-        let requests = FixtureControlRequests(workspace: workspace)
+        let requests = FixtureControlRequests(
+            workspace: workspace,
+            inspectionFails: inspectionFails
+        )
         let store = WorkspaceStore(controlRequests: requests)
         store.applySnapshot(workspace: workspace, sequence: 1)
 

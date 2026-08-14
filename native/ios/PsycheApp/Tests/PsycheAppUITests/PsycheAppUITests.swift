@@ -90,7 +90,8 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(
             app.staticTexts.containing(
                 NSPredicate(format: "label CONTAINS[c] %@", "Waiting for review input")
-            ).firstMatch.waitForExistence(timeout: 10)
+            ).firstMatch.waitForExistence(timeout: 20),
+            "Fixture terminal output did not become accessible before the simulator timeout"
         )
     }
 
@@ -117,6 +118,73 @@ final class PsycheAppUITests: XCTestCase {
 
         XCTAssertFalse(app.otherElements["terminal-pane-ios-cockpit"].exists)
         XCTAssertFalse(app.otherElements["terminal-pane-bridge-protocol"].exists)
+    }
+
+    func testOpenPaneOffersFileInspection() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        let files = element("pane-files", in: app)
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        XCTAssertTrue(files.isEnabled)
+    }
+
+    func testFileBrowserRoutesDeletedFileToNativeDiffWithSpokenSemantics() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+        let files = app.buttons["pane-files"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+
+        XCTAssertTrue(element("file-browser", in: app).waitForExistence(timeout: 10))
+        let sources = app.buttons["Sources"]
+        XCTAssertTrue(sources.waitForExistence(timeout: 10))
+        sources.tap()
+
+        let deleted = row("file-Sources/Deleted.swift", in: app)
+        XCTAssertTrue(deleted.waitForExistence(timeout: 10))
+        XCTAssertTrue(deleted.label.contains("deleted"), deleted.label)
+        deleted.tap()
+
+        XCTAssertTrue(element("file-diff", in: app).waitForExistence(timeout: 10))
+        let deletion = element("diff-line-1", in: app)
+        let addition = element("diff-line-2", in: app)
+        XCTAssertTrue(deletion.waitForExistence(timeout: 10))
+        XCTAssertEqual(deletion.label, "Deleted: old")
+        XCTAssertEqual(addition.label, "Added: new")
+    }
+
+    func testFilePreviewShowsTruncationBanner() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+        let files = app.buttons["pane-files"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+
+        let sources = app.buttons["Sources"]
+        XCTAssertTrue(sources.waitForExistence(timeout: 10))
+        sources.tap()
+        let file = row("file-Sources/App.swift", in: app)
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        file.tap()
+
+        XCTAssertTrue(
+            element("file-preview-truncated", in: app).waitForExistence(timeout: 10)
+        )
+    }
+
+    func testFileBrowserShowsHostInspectionErrors() throws {
+        let app = launchApp(arguments: [
+            "-uiFixture", "multiproject", "-uiInspectionFailure",
+        ])
+        openWebHomePane(in: app)
+        let files = app.buttons["pane-files"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+
+        XCTAssertTrue(
+            app.staticTexts["Fixture inspection unavailable."].waitForExistence(timeout: 10)
+        )
     }
 
     /// The switcher previews panes from the workspace snapshot, so every pane

@@ -465,11 +465,12 @@ function spawnLockfProcess(
 }
 
 async function waitForPaths(paths: readonly string[]): Promise<void> {
-  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
     if (paths.every((candidate) => existsSync(candidate))) {
       return;
     }
-    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 1));
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
   }
   throw new Error(`Timed out waiting for paths: ${paths.join(', ')}`);
 }
@@ -1011,6 +1012,7 @@ describe('macOS build channels', () => {
       runGit(gitRepository, ['init', '--quiet']);
       runGit(gitRepository, ['config', 'user.name', 'Psyche Build Tests']);
       runGit(gitRepository, ['config', 'user.email', 'tests@example.invalid']);
+      runGit(gitRepository, ['config', 'commit.gpgsign', 'false']);
       runGit(gitRepository, ['config', 'core.warnAmbiguousRefs', 'false']);
       writeFileSync(join(gitRepository, 'tracked.txt'), 'tracked\n', 'utf8');
       runGit(gitRepository, ['add', 'tracked.txt']);
@@ -3130,6 +3132,7 @@ fi
       runGit(sourceRoot, ['init', '--quiet']);
       runGit(sourceRoot, ['config', 'user.name', 'Psyche Build Tests']);
       runGit(sourceRoot, ['config', 'user.email', 'tests@example.invalid']);
+      runGit(sourceRoot, ['config', 'commit.gpgsign', 'false']);
       writeFileSync(join(sourceRoot, 'tracked.txt'), 'committed source\n', 'utf8');
       runGit(sourceRoot, ['add', 'tracked.txt']);
       runGit(sourceRoot, ['commit', '--quiet', '-m', 'initial source']);

@@ -280,11 +280,12 @@ describe('ReopenWorktreePopupApp', () => {
       />
     );
 
-    await sleep(50);
+    await vi.waitFor(() => {
+      expect(loadRemoteBranches).toHaveBeenCalledWith('/repo-selected', []);
+      expect(stripAnsi(lastFrame() ?? '')).toContain('remote-only');
+    });
 
     const output = stripAnsi(lastFrame() ?? '');
-    expect(loadRemoteBranches).toHaveBeenCalledWith('/repo-selected', []);
-    expect(output).toContain('remote-only');
     expect(output).toContain('Remote');
 
     unmount();

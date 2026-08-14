@@ -504,11 +504,13 @@ describe('pane metrics refresh contract', () => {
     expect(functionSource(mainJs, 'handleVisibilityChange'))
       .toMatch(/syncPaneMetricsVisibility\(\)/);
     expect(functionSource(mainJs, 'enterFileFocus'))
-      .toMatch(/terminalHost\.hidden = true;[\s\S]*syncPaneMetricsVisibility\(\)/);
+      .toMatch(/fileViewEl\.hidden = false;[\s\S]*syncPaneMetricsVisibility\(\)/);
+    expect(functionSource(mainJs, 'enterFileFocus'))
+      .not.toMatch(/terminalHost\.hidden/);
     expect(functionSource(mainJs, 'clearFileFocusPresentation'))
-      .toMatch(/terminalHost\.hidden = false;[\s\S]*syncPaneMetricsVisibility\(\)/);
+      .toMatch(/fileViewEl\.hidden = true;[\s\S]*syncPaneMetricsVisibility\(\)/);
     expect(functionSource(mainJs, 'showTerminalView'))
-      .toMatch(/clearFileFocusPresentation\(\)/);
+      .not.toMatch(/clearFileFocusPresentation\(\)|terminalHost\.hidden/);
     expect(functionSource(mainJs, 'closeFileTab'))
       .toMatch(/clearFileFocusPresentation\(\)/);
   });
