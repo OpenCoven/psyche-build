@@ -11,6 +11,7 @@
 		04E83890A129FB1782F79F98 /* BridgeMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0899D0A654BB447D7D88380A /* BridgeMessages.swift */; };
 		054F31B1D48F28B5BFCDC16C /* DiffView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC95135143B5BA7FEFB904A9 /* DiffView.swift */; };
 		063961D94B8EF85F48AFBF1D /* PaneComposerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B84BDEB14FE60F2EF185773 /* PaneComposerTests.swift */; };
+		07CD5CF1A0EC6D104609AC2E /* BonjourServiceResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E457435611B4FE24E9F7CCA /* BonjourServiceResolver.swift */; };
 		081E43EFCA60F4E5ADED0047 /* WorkspaceFixturesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C43E6A1E83A7A2553415A2E /* WorkspaceFixturesTests.swift */; };
 		0F01384040440B16FD0E79F4 /* ProjectsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FC6CD0D46E3ABC60ECA196E /* ProjectsView.swift */; };
 		2330B5B27CE5005482E42520 /* PsycheApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56D912A6A487EC289774C800 /* PsycheApp.swift */; };
@@ -141,6 +142,7 @@
 		0899D0A654BB447D7D88380A /* BridgeMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeMessages.swift; sourceTree = "<group>"; };
 		09B68FCC9AC1EECDE02B981A /* URLSessionControlTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSessionControlTransport.swift; sourceTree = "<group>"; };
 		0A673F1BEBAB99E38B91C69D /* ControlRequestClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlRequestClientTests.swift; sourceTree = "<group>"; };
+		0E457435611B4FE24E9F7CCA /* BonjourServiceResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BonjourServiceResolver.swift; sourceTree = "<group>"; };
 		1364AD74F9298BF79AF4F2E9 /* PairedHostStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairedHostStore.swift; sourceTree = "<group>"; };
 		145FE2009F0E817AF44D610E /* PaneIndicatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneIndicatorTests.swift; sourceTree = "<group>"; };
 		158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireProtocolContractTests.swift; sourceTree = "<group>"; };
@@ -347,6 +349,7 @@
 			isa = PBXGroup;
 			children = (
 				AE6A20F50E5972C57510BADB /* BonjourHostDiscovery.swift */,
+				0E457435611B4FE24E9F7CCA /* BonjourServiceResolver.swift */,
 				A997355FB217A6A644109877 /* PairedHost.swift */,
 				1364AD74F9298BF79AF4F2E9 /* PairedHostStore.swift */,
 				79423F6893871C3D7AD45E8C /* SecureStore.swift */,
@@ -621,6 +624,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				62D14BA5029FD3FBA7358F3F /* BonjourHostDiscovery.swift in Sources */,
+				07CD5CF1A0EC6D104609AC2E /* BonjourServiceResolver.swift in Sources */,
 				04E83890A129FB1782F79F98 /* BridgeMessages.swift in Sources */,
 				FAA2378B1D113CFC11C31E0D /* ConnectionManager.swift in Sources */,
 				ED4430FA791BE75586527F53 /* ControlMessages.swift in Sources */,
