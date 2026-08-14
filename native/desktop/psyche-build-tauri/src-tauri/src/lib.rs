@@ -7154,6 +7154,16 @@ mod workspace_panel_tests {
     }
 
     #[cfg(unix)]
+    fn write_marker_executable(path: &Path) {
+        std::fs::write(
+            path,
+            "#!/bin/sh\n: \"${PSYCHE_TEST_MARKER:?missing marker}\"\ntouch \"$PSYCHE_TEST_MARKER\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn resolves_the_first_executable_on_path_to_its_canonical_path() {
         let tree = TempTree::new("coven-path-order");
@@ -8084,14 +8094,26 @@ mod workspace_panel_tests {
         let tree = TempTree::new("git-fsmonitor");
         let hook = tree.root.join("fsmonitor.sh");
         let marker = tree.root.join("fsmonitor-ran");
-        std::fs::write(
-            &hook,
-            format!("#!/bin/sh\ntouch '{}'\n", path_text(&marker)),
-        )
-        .unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_marker_executable(&hook);
         run_test_git(&tree.root, &["init", "-q"]);
         run_test_git(&tree.root, &["config", "core.fsmonitor", path_text(&hook)]);
+
+        let control = std::process::Command::new("git")
+            .current_dir(&tree.root)
+            .env("PSYCHE_TEST_MARKER", path_text(&marker))
+            .args(["status", "--porcelain"])
+            .output()
+            .expect("unhardened git status must run");
+        assert!(
+            control.status.success(),
+            "unhardened git status failed: {}",
+            String::from_utf8_lossy(&control.stderr),
+        );
+        assert!(
+            marker.exists(),
+            "unhardened git status must execute fsmonitor"
+        );
+        std::fs::remove_file(&marker).unwrap();
 
         git_status(path_text(&tree.root).to_string()).unwrap();
 
@@ -8104,12 +8126,7 @@ mod workspace_panel_tests {
         let tree = TempTree::new("git-external-diff");
         let helper = tree.root.join("external-diff.sh");
         let marker = tree.root.join("external-diff-ran");
-        std::fs::write(
-            &helper,
-            format!("#!/bin/sh\ntouch '{}'\n", path_text(&marker)),
-        )
-        .unwrap();
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_marker_executable(&helper);
         std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
         run_test_git(&tree.root, &["init", "-q"]);
         run_test_git(&tree.root, &["add", "tracked.txt"]);
@@ -8127,6 +8144,23 @@ mod workspace_panel_tests {
         );
         run_test_git(&tree.root, &["config", "diff.external", path_text(&helper)]);
         std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
+
+        let control = std::process::Command::new("git")
+            .current_dir(&tree.root)
+            .env("PSYCHE_TEST_MARKER", path_text(&marker))
+            .args(["diff", "--no-color", "--relative", "--", "tracked.txt"])
+            .output()
+            .expect("unhardened git diff must run");
+        assert!(
+            control.status.success(),
+            "unhardened git diff failed: {}",
+            String::from_utf8_lossy(&control.stderr),
+        );
+        assert!(
+            marker.exists(),
+            "unhardened git diff must execute the configured helper"
+        );
+        std::fs::remove_file(&marker).unwrap();
 
         let diff = git_diff(
             path_text(&tree.root).to_string(),
