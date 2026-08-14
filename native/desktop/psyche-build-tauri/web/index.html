@@ -44,14 +44,6 @@
             </svg>
           </button>
           <span class="titlebar-spacer" data-tauri-drag-region></span>
-          <span
-            class="daemon-status"
-            id="daemon-status"
-            title="Local session runtime. Green: a pane is running. Amber: starting. Red: the last pane exited. Hollow: no pane open."
-          >
-            <span class="daemon-dot" id="daemon-dot"></span>
-            <span class="daemon-label" id="daemon-label">psyche · local</span>
-          </span>
           <button
             id="agent-control-toggle"
             class="chrome-btn agent-control-toggle"
@@ -60,15 +52,6 @@
             aria-expanded="false"
             aria-controls="agent-control-drawer"
           >Agent control <span id="agent-control-count" hidden>0</span></button>
-          <span class="titlebar-sep" aria-hidden="true"></span>
-          <span class="status-pill" id="shell-status" hidden>starting…</span>
-          <button
-            id="help-toggle"
-            class="chrome-btn help-btn"
-            type="button"
-            title="Keyboard shortcuts (?)"
-            aria-label="Keyboard shortcuts"
-          >?</button>
         </div>
       </header>
 

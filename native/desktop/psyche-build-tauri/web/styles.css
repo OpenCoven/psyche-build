@@ -1134,12 +1134,9 @@ kbd {
   overflow: hidden;
   background: var(--workspace-surface);
   border-radius: var(--workspace-radius) 0 0 0;
-  /* Pane mins are relaxed so a narrow window can still hold the canvas beside
-     the Git dock. Browser surfaces now tile inside the canvas itself. */
+  /* Pane minimums are relaxed so a narrow window can still hold the canvas. */
   --terminal-min:   220px;
   --browser-min:    72px;
-  --split-frac: 0.6;
-  --terminal-col: calc(var(--split-frac, 0.6) * 100%);
   transition: grid-template-columns var(--transition-layout),
               grid-template-rows    var(--transition-layout);
   will-change: grid-template-columns, grid-template-rows;
