@@ -76,7 +76,7 @@ describe('compileSidebarPaneLayout', () => {
       sidebarWidth: 40,
       windowWidth: 120,
       windowHeight: 40,
-    })).toThrow('invalid pane id');
+    })).toThrow(/invalid pane id/i);
   });
 
   it('rejects malformed control pane bindings', () => {
@@ -87,7 +87,7 @@ describe('compileSidebarPaneLayout', () => {
       sidebarWidth: 40,
       windowWidth: 120,
       windowHeight: 40,
-    })).toThrow('invalid control pane id');
+    })).toThrow(/invalid control pane id/i);
   });
 
   it('renders a valid sidebar-only layout when the visible tree is empty', () => {

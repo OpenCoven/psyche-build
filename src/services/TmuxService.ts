@@ -654,18 +654,31 @@ export class TmuxService {
    */
   async resizePane(paneId: string, dimensions: { width?: number; height?: number }): Promise<void> {
     const target = assertTmuxPaneId(paneId);
+    const width = dimensions.width === undefined
+      ? undefined
+      : this.assertPositiveIntegerDimension(dimensions.width, 'width');
+    const height = dimensions.height === undefined
+      ? undefined
+      : this.assertPositiveIntegerDimension(dimensions.height, 'height');
     await this.executeWithRetry(
       () => {
-        if (dimensions.width !== undefined) {
-          this.execute(`tmux resize-pane -t '${target}' -x ${dimensions.width}`);
+        if (width !== undefined) {
+          this.execute(`tmux resize-pane -t '${target}' -x ${width}`);
         }
-        if (dimensions.height !== undefined) {
-          this.execute(`tmux resize-pane -t '${target}' -y ${dimensions.height}`);
+        if (height !== undefined) {
+          this.execute(`tmux resize-pane -t '${target}' -y ${height}`);
         }
       },
       RetryStrategy.FAST,
       `resizePane(${paneId})`
     );
+  }
+
+  private assertPositiveIntegerDimension(value: number, label: 'width' | 'height'): number {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`invalid ${label}: expected a positive integer`);
+    }
+    return value;
   }
 
   /**
