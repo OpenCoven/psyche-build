@@ -48,13 +48,19 @@ async function runWorker(
   source: string,
   args: unknown = null,
   snapshot: unknown = { nodes: [] },
+  options: {
+    globals?: Record<string, unknown>;
+    setup?: string;
+  } = {},
 ): Promise<Record<string, unknown>> {
   const messages: unknown[] = [];
   const context = createContext({
+    ...options.globals,
     TextEncoder,
     performance,
     postMessage(value: unknown) { messages.push(value); },
   });
+  if (options.setup) runInContext(options.setup, context);
   runInContext(workerRuntimeSource(), context);
   await runInContext(
     `onmessage({ data: ${JSON.stringify({ source, args, snapshot })} })`,
@@ -176,6 +182,171 @@ describe('native browser script authority', () => {
         intersectionObserver: 'undefined',
         indexedDB: 'undefined',
         caches: 'undefined',
+      },
+      mutations: [],
+    });
+  });
+
+  it('scrubs callable authority from the complete Worker global prototype chain', async () => {
+    let inheritedFetchCalls = 0;
+    const authorityNames = [
+      'fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource',
+      'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
+      'requestAnimationFrame', 'cancelAnimationFrame', 'queueMicrotask',
+      'importScripts', 'Worker', 'SharedWorker', 'BroadcastChannel',
+      'postMessage', 'close', 'addEventListener', 'removeEventListener',
+      'MutationObserver', 'ResizeObserver', 'IntersectionObserver',
+      'indexedDB', 'caches',
+    ];
+    const envelope = await runWorker(`
+      const callable = [];
+      let prototype = Object.getPrototypeOf(globalThis);
+      while (prototype !== null) {
+        for (const name of args.authorityNames) {
+          const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+          if (descriptor && typeof descriptor.value === "function") {
+            callable.push(name);
+            if (name === "fetch") descriptor.value("https://example.invalid");
+          }
+        }
+        prototype = Object.getPrototypeOf(prototype);
+      }
+      return { callable };
+    `, { authorityNames }, { nodes: [] }, {
+      globals: {
+        inheritedAuthority() {},
+        inheritedFetch() { inheritedFetchCalls += 1; },
+      },
+      setup: `
+        const workerGlobalPrototype = Object.create(Object.getPrototypeOf(globalThis));
+        for (const name of ${JSON.stringify(authorityNames)}) {
+          Object.defineProperty(workerGlobalPrototype, name, {
+            value: name === "fetch" ? inheritedFetch : inheritedAuthority,
+            writable: true,
+            configurable: true,
+          });
+        }
+        Object.setPrototypeOf(globalThis, workerGlobalPrototype);
+      `,
+    });
+
+    expect(envelope).toEqual({ ok: true, value: { callable: [] }, mutations: [] });
+    expect(inheritedFetchCalls).toBe(0);
+  });
+
+  it('rejects direct and comment-obfuscated ImportExpression syntax before execution', async () => {
+    const executions: string[] = [];
+    const globals = { mark(value: string) { executions.push(value); } };
+    const direct = await runWorker(`
+      mark("direct");
+      return import("data:text/javascript,export default 1");
+    `, null, { nodes: [] }, { globals });
+    const obfuscated = await runWorker(`
+      mark("obfuscated");
+      return import /* one */ \n /* two */ ("data:text/javascript,export default 2");
+    `, null, { nodes: [] }, { globals });
+    const unicodeWhitespace = await runWorker(`
+      mark("unicode-whitespace");
+      return import\u2003("data:text/javascript,export default 3");
+    `, null, { nodes: [] }, { globals });
+    const templateExpression = await runWorker(`
+      mark("template-expression");
+      return \`\${import("data:text/javascript,export default 4")}\`;
+    `, null, { nodes: [] }, { globals });
+    const divisionObfuscated = await runWorker(`
+      try { throw new Error("expected"); } catch {
+        (1) / import("data:,export default 5") / 2;
+        mark("division-obfuscated");
+      }
+      return null;
+    `, null, { nodes: [] }, { globals });
+
+    expect(direct).toEqual({ ok: false, code: 'automation_failed' });
+    expect(obfuscated).toEqual({ ok: false, code: 'automation_failed' });
+    expect(unicodeWhitespace).toEqual({ ok: false, code: 'automation_failed' });
+    expect(templateExpression).toEqual({ ok: false, code: 'automation_failed' });
+    expect(divisionObfuscated).toEqual({ ok: false, code: 'automation_failed' });
+    expect(executions).toEqual([]);
+  });
+
+  it('rejects eval and recovered code-generation constructors', async () => {
+    const recovered: string[] = [];
+    const globals = { mark(value: string) { recovered.push(value); } };
+    const evalImport = await runWorker(`
+      if (typeof eval === "function") mark("eval");
+      return await eval('import("data:text/javascript,export default 1")');
+    `, null, { nodes: [] }, { globals });
+    const functionImport = await runWorker(`
+      if (typeof Function === "function") mark("Function");
+      return await Function('return import("data:text/javascript,export default 2")')();
+    `, null, { nodes: [] }, { globals });
+    const asyncFunctionImport = await runWorker(`
+      const AsyncFunction = (async () => {}).constructor;
+      if (typeof AsyncFunction === "function") mark("AsyncFunction");
+      return await AsyncFunction('return import("data:text/javascript,export default 3")')();
+    `, null, { nodes: [] }, { globals });
+
+    expect(evalImport).toEqual({ ok: false, code: 'automation_failed' });
+    expect(functionImport).toEqual({ ok: false, code: 'automation_failed' });
+    expect(asyncFunctionImport).toEqual({ ok: false, code: 'automation_failed' });
+    expect(recovered).toEqual([]);
+  });
+
+  it('removes constructor recovery paths from function prototypes', async () => {
+    const envelope = await runWorker(`
+      return {
+        eval: typeof eval,
+        publicFunction: typeof Function,
+        arrow: typeof (() => {}).constructor,
+        async: typeof (async () => {}).constructor,
+        generator: typeof (function* () {}).constructor,
+        asyncGenerator: typeof (async function* () {}).constructor,
+        arrayMethod: typeof [].map.constructor,
+        functionPrototype: typeof Object.getPrototypeOf(() => {}).constructor,
+        asyncPrototype: typeof Object.getPrototypeOf(async () => {}).constructor,
+      };
+    `);
+
+    expect(envelope).toEqual({
+      ok: true,
+      value: {
+        eval: 'undefined',
+        publicFunction: 'undefined',
+        arrow: 'undefined',
+        async: 'undefined',
+        generator: 'undefined',
+        asyncGenerator: 'undefined',
+        arrayMethod: 'undefined',
+        functionPrototype: 'undefined',
+        asyncPrototype: 'undefined',
+      },
+      mutations: [],
+    });
+  });
+
+  it('allows inert import text in strings, comments, template raw text, and regex literals', async () => {
+    const envelope = await runWorker(`
+      const single = 'import("string")';
+      const double = "import('string')";
+      const template = \`import("template")\`;
+      const regex = /import\\(/;
+      // import("line-comment")
+      /* import("block-comment") */
+      return {
+        single,
+        double,
+        template,
+        regexMatches: regex.test("import("),
+      };
+    `);
+
+    expect(envelope).toEqual({
+      ok: true,
+      value: {
+        single: 'import("string")',
+        double: "import('string')",
+        template: 'import("template")',
+        regexMatches: true,
       },
       mutations: [],
     });

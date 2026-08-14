@@ -29,9 +29,26 @@
   const $mapGet = $Map.prototype.get;
   const $mapSet = $Map.prototype.set;
   const $arrayPush = $Array.prototype.push;
+  const $arrayPop = $Array.prototype.pop;
   const $textEncode = $TextEncoder.prototype.encode;
   const $objectPrototype = $Object.prototype;
   const $arrayPrototype = $Array.prototype;
+  const $functionPrototype = $Function.prototype;
+  const $asyncFunctionPrototype = $apply(
+    $getPrototypeOf,
+    $Object,
+    [async function () {}],
+  );
+  const $generatorFunctionPrototype = $apply(
+    $getPrototypeOf,
+    $Object,
+    [function* () {}],
+  );
+  const $asyncGeneratorFunctionPrototype = $apply(
+    $getPrototypeOf,
+    $Object,
+    [async function* () {}],
+  );
   const $setPrototype = $Set.prototype;
   const $mapPrototype = $Map.prototype;
   const $textEncoderPrototype = $TextEncoder.prototype;
@@ -63,6 +80,82 @@
     "MutationObserver", "ResizeObserver", "IntersectionObserver",
     "indexedDB", "caches",
   ];
+  const shadowed = ["eval", "Function"];
+  for (let index = 0; index < blocked.length; index += 1) {
+    $apply($arrayPush, shadowed, [blocked[index]]);
+  }
+
+  let authorityScrubbed = true;
+  const replaceWithUndefined = (target, name, defineMissing) => {
+    const descriptor = $apply(
+      $getOwnPropertyDescriptor,
+      $Object,
+      [target, name],
+    );
+    if (!descriptor && !defineMissing) return;
+    try {
+      if (!descriptor || descriptor.configurable ||
+          ("value" in descriptor && descriptor.writable)) {
+        $apply($defineProperty, $Object, [target, name, {
+          value: undefined,
+          writable: false,
+          enumerable: descriptor ? descriptor.enumerable : false,
+          configurable: false,
+        }]);
+      }
+    } catch (_) {
+      authorityScrubbed = false;
+    }
+    const replacement = $apply(
+      $getOwnPropertyDescriptor,
+      $Object,
+      [target, name],
+    );
+    if (!replacement || !("value" in replacement) ||
+        replacement.value !== undefined || replacement.writable ||
+        replacement.configurable) {
+      authorityScrubbed = false;
+    }
+  };
+
+  for (let index = 0; index < shadowed.length; index += 1) {
+    const name = shadowed[index];
+    let target = $global;
+    while (target !== null) {
+      replaceWithUndefined(target, name, target === $global);
+      target = $apply($getPrototypeOf, $Object, [target]);
+    }
+  }
+
+  const codeGenerationPrototypes = [
+    $functionPrototype,
+    $asyncFunctionPrototype,
+    $generatorFunctionPrototype,
+    $asyncGeneratorFunctionPrototype,
+  ];
+  for (let index = 0; index < codeGenerationPrototypes.length; index += 1) {
+    const prototype = codeGenerationPrototypes[index];
+    try {
+      $apply($defineProperty, $Object, [prototype, "constructor", {
+        value: undefined,
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      }]);
+    } catch (_) {
+      authorityScrubbed = false;
+    }
+    const descriptor = $apply(
+      $getOwnPropertyDescriptor,
+      $Object,
+      [prototype, "constructor"],
+    );
+    if (!descriptor || !("value" in descriptor) ||
+        descriptor.value !== undefined || descriptor.writable ||
+        descriptor.configurable) {
+      authorityScrubbed = false;
+    }
+  }
 
   $apply($freeze, $Object, [$objectPrototype]);
   $apply($freeze, $Object, [$arrayPrototype]);
@@ -70,21 +163,266 @@
   $apply($freeze, $Object, [$mapPrototype]);
   $apply($freeze, $Object, [$textEncoderPrototype]);
 
-  for (let index = 0; index < blocked.length; index += 1) {
-    const name = blocked[index];
-    try {
-      $apply($defineProperty, $Object, [$global, name, {
-        value: undefined,
-        writable: false,
-        enumerable: false,
-        configurable: false,
-      }]);
-    } catch (_) {
-      try {
-        $global[name] = undefined;
-      } catch (_) {}
-    }
-  }
+  const isWhitespace = (code) =>
+    code === 9 || code === 10 || code === 11 || code === 12 ||
+    code === 13 || code === 32 || code === 160 || code === 0x1680 ||
+    (code >= 0x2000 && code <= 0x200a) || code === 0x2028 ||
+    code === 0x2029 || code === 0x202f || code === 0x205f ||
+    code === 0x3000 || code === 0xfeff;
+  const isIdentifierStart = (code) =>
+    (code >= 65 && code <= 90) || (code >= 97 && code <= 122) ||
+    code === 36 || code === 95;
+  const isIdentifierPart = (code) =>
+    isIdentifierStart(code) || (code >= 48 && code <= 57);
+  const hasImportExpression = (value) => {
+    const source = $String(value);
+    const length = source.length;
+    const skipSpaceAndComments = (start) => {
+      let index = start;
+      while (index < length) {
+        const code = source.charCodeAt(index);
+        if (isWhitespace(code)) {
+          index += 1;
+          continue;
+        }
+        if (source[index] === "/" && source[index + 1] === "/") {
+          index += 2;
+          while (index < length && source[index] !== "\n" &&
+                 source[index] !== "\r" && source[index] !== "\u2028" &&
+                 source[index] !== "\u2029") {
+            index += 1;
+          }
+          continue;
+        }
+        if (source[index] === "/" && source[index + 1] === "*") {
+          const end = source.indexOf("*/", index + 2);
+          if (end < 0) return -1;
+          index = end + 2;
+          continue;
+        }
+        break;
+      }
+      return index;
+    };
+    const skipQuoted = (start, quote) => {
+      let index = start + 1;
+      while (index < length) {
+        const character = source[index];
+        if (character === "\\") {
+          index += 2;
+        } else if (character === quote) {
+          return index + 1;
+        } else if (character === "\n" || character === "\r" ||
+                   character === "\u2028" || character === "\u2029") {
+          return -1;
+        } else {
+          index += 1;
+        }
+      }
+      return -1;
+    };
+    const skipRegex = (start) => {
+      let index = start + 1;
+      let characterClass = false;
+      while (index < length) {
+        const character = source[index];
+        if (character === "\\") {
+          index += 2;
+        } else if (character === "[" && !characterClass) {
+          characterClass = true;
+          index += 1;
+        } else if (character === "]" && characterClass) {
+          characterClass = false;
+          index += 1;
+        } else if (character === "/" && !characterClass) {
+          index += 1;
+          while (index < length &&
+                 isIdentifierPart(source.charCodeAt(index))) {
+            index += 1;
+          }
+          return index;
+        } else if (character === "\n" || character === "\r" ||
+                   character === "\u2028" || character === "\u2029") {
+          return -1;
+        } else {
+          index += 1;
+        }
+      }
+      return -1;
+    };
+    const scanTemplate = (start, depth) => {
+      if (depth >= MAX_DEPTH) return { rejected: true, index: length };
+      let index = start + 1;
+      while (index < length) {
+        if (source[index] === "\\") {
+          index += 2;
+        } else if (source[index] === "`") {
+          return { rejected: false, index: index + 1 };
+        } else if (source[index] === "$" && source[index + 1] === "{") {
+          const expression = scanCode(index + 2, true, depth + 1);
+          if (expression.rejected) return expression;
+          index = expression.index;
+        } else {
+          index += 1;
+        }
+      }
+      return { rejected: true, index: length };
+    };
+    const scanCode = (start, templateExpression, depth) => {
+      let index = start;
+      let braces = 0;
+      let canStartRegex = true;
+      let pendingControl = false;
+      let previousToken = "";
+      const controlParentheses = new $Array();
+      while (index < length) {
+        const code = source.charCodeAt(index);
+        const character = source[index];
+        if (isWhitespace(code)) {
+          index += 1;
+          continue;
+        }
+        if (character === "/" && source[index + 1] === "/") {
+          const next = skipSpaceAndComments(index);
+          if (next < 0) return { rejected: true, index: length };
+          index = next;
+          continue;
+        }
+        if (character === "/" && source[index + 1] === "*") {
+          const next = skipSpaceAndComments(index);
+          if (next < 0) return { rejected: true, index: length };
+          index = next;
+          continue;
+        }
+        if (character === "'" || character === "\"") {
+          index = skipQuoted(index, character);
+          if (index < 0) return { rejected: true, index: length };
+          canStartRegex = false;
+          previousToken = "literal";
+          continue;
+        }
+        if (character === "`") {
+          const template = scanTemplate(index, depth);
+          if (template.rejected) return template;
+          index = template.index;
+          canStartRegex = false;
+          previousToken = "literal";
+          continue;
+        }
+        if (character === "/") {
+          if (canStartRegex) {
+            index = skipRegex(index);
+            if (index < 0) return { rejected: true, index: length };
+            canStartRegex = false;
+            previousToken = "literal";
+          } else {
+            index += source[index + 1] === "=" ? 2 : 1;
+            canStartRegex = true;
+            previousToken = "operator";
+          }
+          continue;
+        }
+        if (isIdentifierStart(code)) {
+          const identifierStart = index;
+          index += 1;
+          while (index < length &&
+                 isIdentifierPart(source.charCodeAt(index))) {
+            index += 1;
+          }
+          const identifier = source.slice(identifierStart, index);
+          if (identifier === "import" && previousToken !== ".") {
+            const next = skipSpaceAndComments(index);
+            if (next < 0 || source[next] === "(") {
+              return { rejected: true, index: length };
+            }
+          }
+          pendingControl = identifier === "if" || identifier === "while" ||
+            identifier === "for" || identifier === "with" ||
+            identifier === "switch" || identifier === "catch";
+          canStartRegex = identifier === "return" || identifier === "throw" ||
+            identifier === "case" || identifier === "delete" ||
+            identifier === "void" || identifier === "typeof" ||
+            identifier === "new" || identifier === "in" ||
+            identifier === "of" || identifier === "yield" ||
+            identifier === "await" || identifier === "else" ||
+            identifier === "do" || identifier === "instanceof";
+          previousToken = identifier;
+          continue;
+        }
+        if (code >= 48 && code <= 57) {
+          index += 1;
+          while (index < length) {
+            const numberCode = source.charCodeAt(index);
+            if (!isIdentifierPart(numberCode) && source[index] !== ".") break;
+            index += 1;
+          }
+          canStartRegex = false;
+          previousToken = "literal";
+          continue;
+        }
+        if (character === "(") {
+          $apply($arrayPush, controlParentheses, [pendingControl]);
+          pendingControl = false;
+          canStartRegex = true;
+          previousToken = "(";
+          index += 1;
+          continue;
+        }
+        if (character === ")") {
+          canStartRegex = $apply($arrayPop, controlParentheses, []) === true;
+          previousToken = ")";
+          index += 1;
+          continue;
+        }
+        if (character === "{") {
+          braces += 1;
+          pendingControl = false;
+          canStartRegex = true;
+          previousToken = "{";
+          index += 1;
+          continue;
+        }
+        if (character === "}") {
+          if (templateExpression && braces === 0) {
+            return { rejected: false, index: index + 1 };
+          }
+          if (braces === 0) return { rejected: true, index: length };
+          braces -= 1;
+          canStartRegex = false;
+          previousToken = "}";
+          index += 1;
+          continue;
+        }
+        if (character === "[") {
+          canStartRegex = true;
+          previousToken = "[";
+        } else if (character === "]") {
+          canStartRegex = false;
+          previousToken = "]";
+        } else if (character === ".") {
+          canStartRegex = false;
+          previousToken = ".";
+        } else if (character === "+" && source[index + 1] === "+" ||
+                   character === "-" && source[index + 1] === "-") {
+          canStartRegex = false;
+          previousToken = "update";
+          index += 1;
+        } else {
+          canStartRegex = true;
+          previousToken = "operator";
+        }
+        pendingControl = false;
+        index += 1;
+      }
+      return {
+        rejected: templateExpression || braces !== 0 ||
+          controlParentheses.length !== 0,
+        index,
+      };
+    };
+
+    return scanCode(0, false, 0).rejected;
+  };
 
   const canonical = (value, seen, depth) => {
     if (value === null || typeof value === "string" || typeof value === "boolean") {
@@ -254,6 +592,11 @@
       const input = event && event.data ? event.data : {};
       const args = input.args === undefined ? null : input.args;
       const snapshot = input.snapshot === undefined ? { nodes: [] } : input.snapshot;
+      const source = $String(input.source || "");
+      if (!authorityScrubbed || hasImportExpression(source)) {
+        finish({ ok: false, code: "automation_failed" });
+        return;
+      }
       if (!isCanonical(args) || !isCanonical(snapshot)) {
         finish({ ok: false, code: "serialization_failed" });
         return;
@@ -262,7 +605,7 @@
       const execute = $Function(
         "args",
         "page",
-        "\"use strict\";return (async()=>{" + $String(input.source || "") + "\n})()",
+        "\"use strict\";return (async()=>{" + source + "\n})()",
       );
       const value = await execute(clone(args), page);
       if (plan.invalid) {
