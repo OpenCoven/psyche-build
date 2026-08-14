@@ -100,6 +100,7 @@ struct ActionSheetView: View {
                     axis: .vertical
                 )
                 .lineLimit(ActionSheetPresentation.inputLineRange(input.maxVisibleLines))
+                .disabled(ActionSheetPresentation.editingDisabled(isSubmitting: store.isSubmitting))
             }
         case .pullRequestReview(let review):
             pullRequestReviewSection(
@@ -152,6 +153,7 @@ struct ActionSheetView: View {
 
             TextField("Summary", text: $draft, axis: .vertical)
                 .lineLimit(1...12)
+                .disabled(ActionSheetPresentation.editingDisabled(isSubmitting: store.isSubmitting))
 
             if !review.details.files.isEmpty {
                 LabeledContent("Review files") {

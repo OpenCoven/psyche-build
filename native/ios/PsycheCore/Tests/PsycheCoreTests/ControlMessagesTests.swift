@@ -307,7 +307,7 @@ final class ControlMessagesTests: XCTestCase {
             placeholder: "Leave a review comment",
             defaultValue: "Looks good",
             inputMaxVisibleLines: 4,
-            progress: 0.75,
+            progress: 75.0,
             targetPaneID: "%11",
             reviewData: reviewData,
             data: [
@@ -334,7 +334,7 @@ final class ControlMessagesTests: XCTestCase {
         XCTAssertEqual(result.placeholder, "Leave a review comment")
         XCTAssertEqual(result.defaultValue, "Looks good")
         XCTAssertEqual(result.inputMaxVisibleLines, 4)
-        XCTAssertEqual(result.progress, 0.75)
+        XCTAssertEqual(result.progress, 75.0)
         XCTAssertEqual(result.targetPaneID, "%11")
         XCTAssertEqual(result.reviewData, reviewData)
         XCTAssertEqual(
@@ -372,7 +372,10 @@ final class ControlMessagesTests: XCTestCase {
         XCTAssertEqual(encodedResult["placeholder"] as? String, "Leave a review comment")
         XCTAssertEqual(encodedResult["defaultValue"] as? String, "Looks good")
         XCTAssertEqual(try XCTUnwrap(encodedResult["inputMaxVisibleLines"] as? NSNumber).intValue, 4)
-        XCTAssertEqual(try XCTUnwrap(encodedResult["progress"] as? NSNumber).doubleValue, 0.75)
+        XCTAssertEqual(
+            try XCTUnwrap(encodedResult["progress"] as? NSNumber).doubleValue,
+            75.0
+        )
         XCTAssertEqual(encodedResult["targetPaneId"] as? String, "%11")
         XCTAssertNil(encodedResult["targetPaneID"])
         XCTAssertEqual(encodedOption["id"] as? String, "approve")

@@ -58,6 +58,8 @@ enum ActionSheetPresentation {
         1...min(max(requestedMaximum ?? 6, 1), 12)
     }
 
+    static func editingDisabled(isSubmitting: Bool) -> Bool { isSubmitting }
+
     static func status(for kind: RemoteActionTerminalKind) -> ActionSheetStatus {
         switch kind {
         case .success:

@@ -79,6 +79,11 @@ final class ActionSheetPresentationTests: XCTestCase {
         XCTAssertEqual(ActionSheetPresentation.inputLineRange(8), 1...8)
     }
 
+    func testEditableFieldsDisableOnlyWhileSubmitting() {
+        XCTAssertFalse(ActionSheetPresentation.editingDisabled(isSubmitting: false))
+        XCTAssertTrue(ActionSheetPresentation.editingDisabled(isSubmitting: true))
+    }
+
     func testTerminalStatusesHaveDistinctAccessibleSemantics() {
         let success = ActionSheetPresentation.status(for: .success)
         let info = ActionSheetPresentation.status(for: .info)
