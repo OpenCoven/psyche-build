@@ -8,10 +8,24 @@ const $jsonStringify = $JSON.stringify;
 const $numberIsFinite = $Number.isFinite;
 const $textEncode = $TextEncoder.prototype.encode;
 const $now = $performance.now;
+const $apply = Reflect.apply;
+const $getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const $elementGetAttribute = typeof Element === "function"
+  ? $getOwnPropertyDescriptor(Element.prototype, "getAttribute")?.value || null
+  : null;
+const $inputValueGetter = typeof HTMLInputElement === "function"
+  ? $getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.get || null
+  : null;
+const $textAreaValueGetter = typeof HTMLTextAreaElement === "function"
+  ? $getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.get || null
+  : null;
+const $selectValueGetter = typeof HTMLSelectElement === "function"
+  ? $getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.get || null
+  : null;
 const encoder = new $TextEncoder();
-const started = Reflect.apply($now, $performance, []);
-const stringify = (value) => Reflect.apply($jsonStringify, $JSON, [value]);
-const textEncode = (value) => Reflect.apply($textEncode, encoder, [value]);
+const started = $apply($now, $performance, []);
+const stringify = (value) => $apply($jsonStringify, $JSON, [value]);
+const textEncode = (value) => $apply($textEncode, encoder, [value]);
 const fail = (code) => stringify({ ok: false, code });
 const LIMITS = Object.freeze({
   snapshotNodes: 2048,
@@ -28,6 +42,11 @@ const SAFE_ATTRIBUTES = /^(?:aria-[a-z0-9_.:-]+|title|alt|placeholder|role|name)
 const SAFE_BOOLEAN_PROPERTIES = new Set(["disabled", "readOnly"]);
 const SAFE_FORM_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
 const BLOCKED_TAGS = new Set(["SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "LINK"]);
+const SENSITIVE_INPUT_TYPES = new Set(["file", "hidden", "password"]);
+const SENSITIVE_AUTOCOMPLETE = new Set([
+  "cc-csc", "cc-exp", "cc-exp-month", "cc-exp-year", "cc-number",
+  "current-password", "new-password", "one-time-code",
+]);
 const DOCUMENT_CONTEXT_KEY = "__PSYCHE_BROWSER_SCRIPT_DOCUMENT_CONTEXT__";
 
 const encodeSuccess = (value) => {
@@ -55,6 +74,30 @@ const directText = (node) => {
     text += child.data.slice(0, LIMITS.nodeText - text.length);
   }
   return text;
+};
+const readAttribute = (node, name) => {
+  if ($elementGetAttribute) return $apply($elementGetAttribute, node, [name]);
+  if (node.attributes && typeof node.attributes.get === "function") {
+    return node.attributes.get(name) || null;
+  }
+  return typeof node.getAttribute === "function" ? node.getAttribute(name) : null;
+};
+const readFormValue = (node, tagName) => {
+  const getter = tagName === "INPUT"
+    ? $inputValueGetter
+    : tagName === "TEXTAREA"
+      ? $textAreaValueGetter
+      : $selectValueGetter;
+  return getter ? $apply(getter, node, []) : node.value;
+};
+const formValueIsSensitive = (node, tagName) => {
+  const autocomplete = String(readAttribute(node, "autocomplete") || "")
+    .toLowerCase()
+    .split(/\s+/);
+  if (autocomplete.some((token) => SENSITIVE_AUTOCOMPLETE.has(token))) return true;
+  if (tagName !== "INPUT") return false;
+  const type = String(readAttribute(node, "type") || "text").toLowerCase();
+  return SENSITIVE_INPUT_TYPES.has(type);
 };
 
 const captureSnapshot = (invocationDocument, invocationRoot) => {
@@ -106,10 +149,12 @@ const captureSnapshot = (invocationDocument, invocationRoot) => {
         attributes[attribute.name] = attribute.value;
       }
     }
-    const text = BLOCKED_TAGS.has(tagName) ? "" : directText(node);
+    const formValue = SAFE_FORM_TAGS.has(tagName);
+    const valueRedacted = formValue && formValueIsSensitive(node, tagName);
+    const text = BLOCKED_TAGS.has(tagName) || valueRedacted ? "" : directText(node);
     accountField(text);
-    const value = SAFE_FORM_TAGS.has(tagName)
-      ? String(node.value || "").slice(0, LIMITS.mutationValue)
+    const value = formValue && !valueRedacted
+      ? String(readFormValue(node, tagName) || "").slice(0, LIMITS.mutationValue)
       : undefined;
     if (value !== undefined) accountField(value);
     const record = {
@@ -119,6 +164,7 @@ const captureSnapshot = (invocationDocument, invocationRoot) => {
       text,
       attributes,
       value,
+      valueRedacted: formValue ? valueRedacted : undefined,
       checked: typeof node.checked === "boolean" ? node.checked : undefined,
       disabled: node.disabled === true,
       readOnly: node.readOnly === true,
@@ -129,7 +175,7 @@ const captureSnapshot = (invocationDocument, invocationRoot) => {
     }
     nodes.push(record);
     liveNodes.set(id, node);
-    if (BLOCKED_TAGS.has(tagName)) continue;
+    if (BLOCKED_TAGS.has(tagName) || valueRedacted) continue;
     const children = node.children;
     const childCount = children && typeof children.length === "number" ? children.length : 0;
     const available = LIMITS.snapshotNodes - queue.length;
