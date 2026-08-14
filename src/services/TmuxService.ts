@@ -687,7 +687,8 @@ export class TmuxService {
   async selectLayout(layoutString: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        execFileSync('tmux', ['select-layout', layoutString], { stdio: 'pipe' });
+        const escapedLayoutString = layoutString.replace(/'/g, `'\\''`);
+        this.execute(`tmux select-layout '${escapedLayoutString}'`);
       },
       RetryStrategy.FAST,
       'selectLayout'
