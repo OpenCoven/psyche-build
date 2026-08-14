@@ -778,6 +778,22 @@ describe('ControlRuntime', () => {
         },
       }))).resolves.toMatchObject({ status: 'unknown', code: 'effect_unknown' });
       expect(handlers.inspectBrowser).not.toHaveBeenCalled();
+
+      expect((harness.runtime as unknown as {
+        resourceQueues: Map<string, unknown>;
+      }).resourceQueues.size).toBe(1);
+      harness.surfaces.upsertBrowserTab({
+        id: harness.tab.id, projectRoot: harness.tab.projectRoot, worktreeRoot: harness.tab.worktreeRoot,
+        providerId: 'replacement-provider', webviewLabel: 'replacement', url: harness.tab.url,
+        title: harness.tab.title, loading: harness.tab.loading, viewport: harness.tab.viewport,
+      });
+      await harness.runtime.submit(command({
+        id: 'prune-stale-quarantine', idempotencyKey: 'prune-stale-quarantine',
+        kind: 'orchestration.execute', ownerEpoch: 7, payload: { request: {} },
+      }));
+      expect((harness.runtime as unknown as {
+        resourceQueues: Map<string, unknown>;
+      }).resourceQueues.size).toBe(0);
     } finally {
       vi.useRealTimers();
     }

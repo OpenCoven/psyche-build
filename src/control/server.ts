@@ -43,7 +43,7 @@ export interface ControlServerOptions {
   runtime: ControlServerRuntime;
   credentials: ControlCredentialStore;
   broker?: BrowserProviderBroker;
-  /** Never enable outside isolated tests; bearer tokens are not human-presence proof. */
+  /** Gates bearer operator commands and provider registration; never enable outside isolated tests. */
   operatorCommandPolicy?: 'disabled' | 'trusted-test-only';
 }
 

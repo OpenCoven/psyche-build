@@ -123,6 +123,7 @@ interface SurfaceActionContext {
 }
 
 interface PaneQueueState {
+  readonly target: LeaseTarget;
   readonly items: Set<QueuedCommand>;
   pendingEffects: number;
   quarantined: boolean;
@@ -213,6 +214,7 @@ export class ControlRuntime {
   private readonly resolveBrowserElementSemantics?: ControlRuntimeOptions['resolveBrowserElementSemantics'];
 
   submit(command: ControlCommand): Promise<CommandOutcome> {
+    this.pruneInactiveResourceQueues();
     const prior = this.outcomesByIdempotencyKey.get(command.idempotencyKey);
     if (prior) return Promise.resolve(prior);
 
@@ -1280,10 +1282,26 @@ export class ControlRuntime {
     const key = resourceKey(target);
     let queue = this.resourceQueues.get(key);
     if (!queue) {
-      queue = { items: new Set<QueuedCommand>(), pendingEffects: 0, quarantined: false, tail: Promise.resolve() };
+      queue = {
+        target: Object.freeze({ ...target }), items: new Set<QueuedCommand>(), pendingEffects: 0,
+        quarantined: false, tail: Promise.resolve(),
+      };
       this.resourceQueues.set(key, queue);
     }
     return queue;
+  }
+
+  private pruneInactiveResourceQueues(): void {
+    for (const [key, queue] of this.resourceQueues) {
+      if (!queue.quarantined || queue.items.size > 0 || queue.pendingEffects > 0 || queue.blocker !== undefined) {
+        continue;
+      }
+      if (queue.target.kind === 'project') continue;
+      const current = this.surfaces.get(queue.target.id);
+      if (!current || current.kind !== queue.target.kind || current.generation !== queue.target.generation) {
+        this.resourceQueues.delete(key);
+      }
+    }
   }
 
   private pruneResourceQueue(key: string, queue: PaneQueueState, tail: Promise<void>): void {
