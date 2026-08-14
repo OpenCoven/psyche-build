@@ -172,13 +172,13 @@ describe('Tauri PTY command threading contract', () => {
     const metrics = commandSource(source, 'pty_transport_metrics');
 
     expect(ack).toMatch(
-      /#\[tauri::command\]\s*fn\s+pty_ack\s*\(\s*thread_id:\s*String,\s*sequence:\s*u64\s*\)\s*->\s*Result<AckOutcome,\s*String>/,
+      /#\[tauri::command\]\s*fn\s+pty_ack\s*\(\s*webview:\s*tauri::Webview,\s*thread_id:\s*String,\s*sequence:\s*u64,?\s*\)\s*->\s*Result<AckOutcome,\s*String>/,
     );
     expect(visibility).toMatch(
-      /#\[tauri::command\]\s*fn\s+pty_set_visibility\s*\(\s*thread_id:\s*String,\s*visible:\s*bool\s*\)\s*->\s*Result<\(\),\s*String>/,
+      /#\[tauri::command\]\s*fn\s+pty_set_visibility\s*\(\s*webview:\s*tauri::Webview,\s*thread_id:\s*String,\s*visible:\s*bool,?\s*\)\s*->\s*Result<\(\),\s*String>/,
     );
     expect(metrics).toMatch(
-      /#\[tauri::command\]\s*fn\s+pty_transport_metrics\s*\(\s*thread_id:\s*Option<String>\s*\)\s*->\s*Vec<PtyTransportSnapshot>/,
+      /#\[tauri::command\]\s*fn\s+pty_transport_metrics\s*\(\s*webview:\s*tauri::Webview,\s*thread_id:\s*Option<String>,?\s*\)\s*->\s*Result<Vec<PtyTransportSnapshot>,\s*String>/,
     );
   });
 
