@@ -820,6 +820,26 @@ describe('native browser script authority', () => {
     expect(result.envelope).toEqual({ ok: false, code: 'snapshot_too_large' });
   });
 
+  it('rejects oversized snapshot tag and attribute names', async () => {
+    const oversizedTag = fakeElement('X'.repeat(257));
+    const tagResult = await runPageRuntime(
+      { ok: true, value: null, mutations: [] },
+      oversizedTag,
+    );
+    expect(tagResult.envelope).toEqual({ ok: false, code: 'snapshot_too_large' });
+
+    const target = fakeElement('DIV');
+    target.attributes = {
+      length: 1,
+      item: () => ({ name: `aria-${'x'.repeat(257)}`, value: 'safe' }),
+    } as unknown as Map<string, string>;
+    const attributeResult = await runPageRuntime(
+      { ok: true, value: null, mutations: [] },
+      fakeElement('HTML', [target]),
+    );
+    expect(attributeResult.envelope).toEqual({ ok: false, code: 'snapshot_too_large' });
+  });
+
   it('rechecks document identity before applying any mutation', async () => {
     const target = fakeElement('DIV');
     target.textContent = 'before';

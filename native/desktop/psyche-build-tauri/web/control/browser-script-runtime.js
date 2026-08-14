@@ -16,6 +16,7 @@ const fail = (code) => stringify({ ok: false, code });
 const LIMITS = Object.freeze({
   snapshotNodes: 2048,
   snapshotDepth: 64,
+  snapshotName: 256,
   nodeText: 2048,
   snapshotBytes: 262144,
   mutations: 256,
@@ -71,6 +72,9 @@ const captureSnapshot = (invocationDocument, invocationRoot) => {
     }
     const node = current.node;
     if (!node || typeof node.tagName !== "string") continue;
+    if (node.tagName.length > LIMITS.snapshotName) {
+      throw Object.assign(new Error("snapshot_too_large"), { code: "snapshot_too_large" });
+    }
     const id = "n" + (nodes.length + 1);
     const tagName = node.tagName.toUpperCase();
     const attributes = {};
@@ -90,8 +94,14 @@ const captureSnapshot = (invocationDocument, invocationRoot) => {
         ? nodeAttributes.item(index)
         : nodeAttributes[index];
       if (attribute && typeof attribute.name === "string" &&
-          typeof attribute.value === "string" && SAFE_ATTRIBUTES.test(attribute.name) &&
-          attribute.value.length <= LIMITS.mutationValue) {
+          typeof attribute.value === "string") {
+        if (attribute.name.length > LIMITS.snapshotName) {
+          throw Object.assign(new Error("snapshot_too_large"), { code: "snapshot_too_large" });
+        }
+        if (!SAFE_ATTRIBUTES.test(attribute.name) ||
+            attribute.value.length > LIMITS.mutationValue) {
+          continue;
+        }
         accountField([attribute.name, attribute.value]);
         attributes[attribute.name] = attribute.value;
       }
