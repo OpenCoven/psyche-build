@@ -364,7 +364,7 @@ describe('Tauri desktop tab shortcuts', () => {
       /window\.PsycheRuntime[\s\S]*typeof window\.PsycheRuntime\.createTerminalPaneController !== "function"/,
     );
     expect(tauriLib).toMatch(
-      /fn\s+pty_ack\(thread_id:\s*String,\s*sequence:\s*u64\)[\s\S]*?clone_live_pty_pump\(&thread_id\)\?[\s\S]*?pump\.acknowledge\(sequence\)/,
+      /fn\s+pty_ack\([\s\S]*?webview:\s*tauri::Webview,[\s\S]*?ensure_trusted_pty_caller\(webview\.label\(\)\)\?;[\s\S]*?pty_ack_inner\(thread_id,\s*sequence\)[\s\S]*?fn\s+pty_ack_inner\(thread_id:\s*String,\s*sequence:\s*u64\)[\s\S]*?clone_live_pty_pump\(&thread_id\)\?[\s\S]*?pump\.acknowledge\(sequence\)/,
     );
     expect(tauriLib).toMatch(/generate_handler!\[[\s\S]*?pty_ack,/);
   });
