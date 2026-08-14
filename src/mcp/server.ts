@@ -21,6 +21,7 @@ import type {
   CommandOutcome,
   ControlCommandInput,
   ControlSnapshot,
+  ControlSnapshotScope,
 } from '../control/types.js';
 import type { CapabilityLeaseGrantItem } from '../control/capabilityLeases.js';
 import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
@@ -71,8 +72,8 @@ export interface ToolDef {
 export interface McpControlClient {
   readonly projectRoot?: string;
   submit(command: ControlCommandInput): Promise<CommandOutcome>;
-  getState(): Promise<ControlSnapshot>;
-  actionStatus(actionId: string): Promise<ActionReceipt | undefined>;
+  getState(scope?: ControlSnapshotScope): Promise<ControlSnapshot>;
+  actionStatus(actionId: string, scope?: ControlSnapshotScope): Promise<ActionReceipt | undefined>;
   close(): Promise<void>;
 }
 
@@ -183,8 +184,8 @@ function borrowedControlClient(shared: SharedControlClient): McpControlClient {
   return {
     projectRoot: shared.canonicalRoot,
     submit: (command) => use((client) => client.submit(command)),
-    getState: () => use((client) => client.getState()),
-    actionStatus: (actionId) => use((client) => client.actionStatus(actionId)),
+    getState: (scope) => use((client) => client.getState(scope)),
+    actionStatus: (actionId, scope) => use((client) => client.actionStatus(actionId, scope)),
     async close() {
       if (released) return;
       released = true;
@@ -256,6 +257,10 @@ function requiredPositiveInteger(args: Record<string, unknown>, key: string): nu
   const value = args[key];
   if (!Number.isSafeInteger(value) || (value as number) < 1) invalid(`requires positive integer \`${key}\``);
   return value as number;
+}
+
+function requiredTaskScope(args: Record<string, unknown>): ControlSnapshotScope {
+  return { taskId: requiredString(args, 'task_id') };
 }
 
 function leaseAuthorization(args: Record<string, unknown>): {
@@ -346,20 +351,24 @@ const authorizationRequired = ['task_id', 'lease_id', 'lease_revision'];
 export const TOOLS: ToolDef[] = [
   {
     name: 'psyche_control_list',
-    description: 'List the bounded pane and browser resources and approvals owned by this project.',
-    inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
+    description: 'List the bounded pane and browser resources and active approvals visible to one task.',
+    inputSchema: {
+      type: 'object',
+      required: ['task_id'],
+      properties: { project_root: projectRootProperty, task_id: { type: 'string' } },
+    },
     handler: async (args) => {
+      const taskScope = requiredTaskScope(args);
       const requestedRoot = resolveProjectRoot(args);
       return withControlClient(requestedRoot, async (client) => {
         const projectRoot = client.projectRoot ?? requestedRoot;
-        const snapshot = await client.getState();
+        const snapshot = await client.getState(taskScope);
         return {
           project_root: projectRoot,
           owner_epoch: snapshot.ownerEpoch,
           sequence: snapshot.sequence,
           resources: snapshot.resources,
           approvals: snapshot.approvals,
-          receipts: snapshot.receipts,
         };
       });
     },
@@ -392,7 +401,7 @@ export const TOOLS: ToolDef[] = [
         const canonicalRoot = client.projectRoot ?? projectRoot;
         if (operation === 'status') {
           const requestId = requiredString(args, 'request_id');
-          const snapshot = await client.getState();
+          const snapshot = await client.getState({ taskId });
           const leaseId = typeof args.lease_id === 'string' ? args.lease_id : undefined;
           return {
             leases: snapshot.capabilityLeases.filter((lease) => (
@@ -553,27 +562,38 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'psyche_control_action_status',
-    description: 'Read the latest canonical receipt for an action without retrying the action.',
+    description: 'Read the latest task-scoped canonical receipt for an action without retrying it.',
     inputSchema: {
-      type: 'object', required: ['action_id'],
-      properties: { action_id: { type: 'string' }, project_root: projectRootProperty },
+      type: 'object',
+      required: ['action_id', 'task_id'],
+      properties: {
+        action_id: { type: 'string' },
+        task_id: { type: 'string' },
+        project_root: projectRootProperty,
+      },
     },
     handler: async (args) => {
       const actionId = requiredString(args, 'action_id');
+      const taskScope = requiredTaskScope(args);
       return withControlClient(resolveProjectRoot(args), async (client) => (
-        (await client.actionStatus(actionId)) ?? { status: 'unknown', action_id: actionId }
+        (await client.actionStatus(actionId, taskScope)) ?? { status: 'unknown', action_id: actionId }
       ));
     },
   },
   {
     name: 'psyche_list_panes',
-    description: 'Compatibility alias for listing pane resources through the project control owner.',
-    inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
+    description: 'Compatibility alias for listing pane resources visible to one task.',
+    inputSchema: {
+      type: 'object',
+      required: ['task_id'],
+      properties: { project_root: projectRootProperty, task_id: { type: 'string' } },
+    },
     handler: async (args) => {
+      const taskScope = requiredTaskScope(args);
       const requestedRoot = resolveProjectRoot(args);
       return withControlClient(requestedRoot, async (client) => {
         const projectRoot = client.projectRoot ?? requestedRoot;
-        const snapshot = await client.getState();
+        const snapshot = await client.getState(taskScope);
         const panes = snapshot.resources.filter((resource) => resource.kind === 'pane');
         return { project_root: projectRoot, count: panes.length, panes };
       });

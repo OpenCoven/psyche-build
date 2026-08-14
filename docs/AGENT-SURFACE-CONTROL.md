@@ -26,14 +26,15 @@ Pane and browser operations additionally require the current resource
 
 | Tool | Required arguments |
 |---|---|
-| `psyche_control_list` | none (`project_root` optional) |
+| `psyche_control_list` | `task_id` (`project_root` optional) |
 | `psyche_control_lease` | `operation`, `task_id`; requests also require `ttl_ms`, `grants`; release requires `lease_id`, `lease_revision` |
 | `psyche_pane_observe` | `task_id`, `lease_id`, `lease_revision`, `pane_id`, `generation` |
 | `psyche_pane_action` | `task_id`, `lease_id`, `lease_revision`, `action`; existing-pane actions require `pane_id`, `generation`, creation requires `project_id` |
 | `psyche_browser_inspect` | `task_id`, `lease_id`, `lease_revision`, `tab_id`, `generation` |
 | `psyche_browser_action` | `task_id`, `lease_id`, `lease_revision`, `tab_id`, `generation`, `action`; element actions additionally require `snapshot_id` and `action.elementRef` |
 | `psyche_browser_script` | `task_id`, `lease_id`, `lease_revision`, `tab_id`, `generation`, `source` |
-| `psyche_control_action_status` | `action_id` |
+| `psyche_control_action_status` | `action_id`, `task_id` |
+| `psyche_list_panes` | `task_id` (`project_root` optional) |
 
 Compatibility aliases route through the same owner. Create, execute-task, kill,
 and pane-output operations require lease fields; missing authority returns
@@ -110,7 +111,11 @@ be retained only for approval context, and a redacted target description may
 identify the requested effect. Live in-memory control state may retain exact
 operational resource IDs until owner restart. Pane reads, semantic trees,
 screenshots, and script return values are bounded response data, not journal
-payloads.
+payloads. Agent task-scoped reads expose only resources named by persisted
+capability-lease grants or pending lease requests, plus active approvals whose
+lease id/revision still matches a visible task lease. Receipts are not
+task-attributed durably and stay redacted from agent-scoped reads, so
+`psyche_control_action_status` can legitimately return `unknown`.
 
 Psyche Build never retries a mutation whose delivery may have occurred. A
 timeout, provider disconnect after dispatch, navigation during script

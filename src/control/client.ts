@@ -7,6 +7,7 @@ import type {
   ControlCommandInput,
   CommandOutcome,
   ControlSnapshot,
+  ControlSnapshotScope,
 } from './types.js';
 
 export interface ControlClientPrincipal {
@@ -158,11 +159,12 @@ export class ControlClient {
     });
   }
 
-  getState(): Promise<ControlSnapshot> {
+  getState(scope: ControlSnapshotScope = {}): Promise<ControlSnapshot> {
     return this.request({
       version: 1,
       type: 'state.get',
       requestId: this.allocateRequestId(),
+      ...(scope.taskId === undefined ? {} : { taskId: scope.taskId }),
     }).then((response) => {
       if (response.type === 'state.result') return response.snapshot;
       throw responseError(response, 'state.get');
@@ -200,10 +202,14 @@ export class ControlClient {
     return this.submit(command);
   }
 
-  async actionStatus(actionId: string): Promise<ActionReceipt | undefined> {
-    const snapshot = await this.getState();
+  async actionStatus(
+    actionId: string,
+    scope: ControlSnapshotScope = {},
+  ): Promise<ActionReceipt | undefined> {
+    const snapshot = await this.getState(scope);
     const recent = snapshot.receipts.find((receipt) => receipt.actionId === actionId);
     if (recent) return recent;
+    if (scope.taskId !== undefined || this.principal.kind !== 'operator') return undefined;
     const pageLimit = 256;
     const historyLimit = 1_000;
     const maxPages = Math.ceil(historyLimit / pageLimit);

@@ -90,9 +90,13 @@ describe('MCP canonical delegation and read-only helpers', () => {
     })) });
     inject({ controlClientForRoot: vi.fn(async () => fake) });
 
-    expect(payload(await call('psyche_list_panes', { project_root: '/repo' }))).toMatchObject({
+    expect(payload(await call('psyche_list_panes', {
+      project_root: '/repo',
+      task_id: 'task-1',
+    }))).toMatchObject({
       project_root: '/repo', count: 1, panes: [{ kind: 'pane', id: 'pane-1', generation: 2 }],
     });
+    expect(fake.getState).toHaveBeenCalledWith({ taskId: 'task-1' });
   });
 
   it('uses injected read-only ritual and worktree functions', async () => {
