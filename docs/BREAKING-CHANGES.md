@@ -80,7 +80,7 @@ grep -rlZ -- COMUX_ .psyche-hooks | xargs -0 sed -i '' -e 's/COMUX_/PSYCHE_/g'
 On GNU sed (Linux), use this version instead:
 
 ```sh
-grep -rlZ -- COMUX_ .psyche-hooks | xargs -0 -r sed -i 's/COMUX_/PSYCHE_/g' --
+grep -rlZ -- COMUX_ .psyche-hooks | xargs -0 -r sed -i -e 's/COMUX_/PSYCHE_/g' --
 ```
 
 ### Hook environment variables
