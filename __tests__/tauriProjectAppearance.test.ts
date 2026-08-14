@@ -39,6 +39,13 @@ describe('desktop project appearance model', () => {
     expect(projectAppearance.normalizeProjectAppearanceKey(input)).toBe(expected);
   });
 
+  it('preserves trailing spaces in nonblank roots', () => {
+    expect(projectAppearance.normalizeProjectAppearanceKey('/repo/project ')).toBe('/repo/project ');
+    expect(projectAppearance.normalizeProjectAppearanceKey('/repo/project ')).not.toBe(
+      projectAppearance.normalizeProjectAppearanceKey('/repo/project'),
+    );
+  });
+
   it('prefers the normalized root over a renamed project when deriving the automatic accent', () => {
     const first = projectAppearance.resolveProjectAppearance(
       { root: '/repo/project', name: 'Project' },
@@ -125,5 +132,28 @@ describe('desktop project appearance model', () => {
       '/repo/project',
       { accent: 'url(javascript:bad)', glyph: '<script>' },
     )).toEqual({});
+  });
+
+  it.each([
+    ['undefined', undefined],
+    ['string', 'ruby'],
+    ['array', ['ruby']],
+  ] as const)('treats %s patches as immutable no-ops', (_label, patch) => {
+    const original = { '/repo/project': { accent: 'ruby', glyph: 'spark' } };
+
+    expect(() => projectAppearance.updateProjectAppearance(
+      original,
+      '/repo/project',
+      patch as Parameters<typeof projectAppearance.updateProjectAppearance>[2],
+    )).not.toThrow();
+
+    const next = projectAppearance.updateProjectAppearance(
+      original,
+      '/repo/project',
+      patch as Parameters<typeof projectAppearance.updateProjectAppearance>[2],
+    );
+
+    expect(next).not.toBe(original);
+    expect(next).toEqual(original);
   });
 });

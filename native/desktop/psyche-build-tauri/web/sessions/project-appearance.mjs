@@ -26,7 +26,7 @@ const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 
 export function normalizeProjectAppearanceKey(root, fallback = '') {
   let value = typeof root === 'string' && root.trim()
-    ? root.trim()
+    ? root
     : String(fallback || '').trim();
   if (!value) return '';
 
@@ -102,6 +102,9 @@ export function updateProjectAppearance(appearances, rawKey, patch) {
   const nextAppearances = { ...(appearances && typeof appearances === 'object' ? appearances : {}) };
   if (patch === null) {
     delete nextAppearances[key];
+    return nextAppearances;
+  }
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
     return nextAppearances;
   }
 
