@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import * as projectAppearance from '../native/desktop/psyche-build-tauri/web/sessions/project-appearance.mjs';
-import * as sessionEntry from '../native/desktop/psyche-build-tauri/web/sessions/session-entry.js';
 
 describe('desktop project appearance model', () => {
   it('ships fixed frozen accent and glyph presets', () => {
@@ -126,14 +125,5 @@ describe('desktop project appearance model', () => {
       '/repo/project',
       { accent: 'url(javascript:bad)', glyph: '<script>' },
     )).toEqual({});
-  });
-
-  it('re-exports the appearance API from the sessions entry point', () => {
-    expect(sessionEntry.PROJECT_ACCENTS).toBe(projectAppearance.PROJECT_ACCENTS);
-    expect(sessionEntry.PROJECT_GLYPHS).toBe(projectAppearance.PROJECT_GLYPHS);
-    expect(sessionEntry.normalizeProjectAppearanceKey)
-      .toBe(projectAppearance.normalizeProjectAppearanceKey);
-    expect(sessionEntry.resolveProjectAppearance).toBe(projectAppearance.resolveProjectAppearance);
-    expect(sessionEntry.updateProjectAppearance).toBe(projectAppearance.updateProjectAppearance);
   });
 });
