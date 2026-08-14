@@ -782,6 +782,56 @@ describe('native browser script authority', () => {
     expect(JSON.stringify(snapshot)).not.toContain('embedded-secret');
   });
 
+  it('redacts sensitive form values from Worker snapshots', async () => {
+    const password = fakeElement('INPUT');
+    password.value = 'password-secret';
+    password.attributes.set('type', 'password');
+    const hidden = fakeElement('INPUT');
+    hidden.value = 'csrf-secret';
+    hidden.attributes.set('type', 'hidden');
+    const payment = fakeElement('INPUT');
+    payment.value = '4111111111111111';
+    payment.attributes.set('autocomplete', 'cc-number');
+    const recovery = fakeElement('TEXTAREA');
+    recovery.value = 'recovery-secret';
+    recovery.textContent = 'recovery-secret';
+    recovery.childNodes = [{ nodeType: 3, data: 'recovery-secret' }];
+    recovery.attributes.set('autocomplete', 'current-password');
+    const option = fakeElement('OPTION');
+    option.textContent = 'payment-option-secret';
+    option.childNodes = [{ nodeType: 3, data: 'payment-option-secret' }];
+    const expiry = fakeElement('SELECT', [option]);
+    expiry.value = '12';
+    expiry.attributes.set('autocomplete', 'billing cc-exp-month');
+    const visible = fakeElement('INPUT');
+    visible.value = 'visible value';
+    visible.attributes.set('type', 'text');
+    const root = fakeElement('HTML', [
+      password,
+      hidden,
+      payment,
+      recovery,
+      expiry,
+      visible,
+    ]);
+
+    const { workerInput } = await runPageRuntime({ ok: true, value: null, mutations: [] }, root);
+    const snapshot = workerInput?.snapshot as {
+      nodes: Array<{ value?: string; valueRedacted?: boolean }>;
+    };
+    const encoded = JSON.stringify(snapshot);
+
+    expect(snapshot.nodes.filter((node) => node.valueRedacted)).toHaveLength(5);
+    expect(snapshot.nodes).toContainEqual(
+      expect.objectContaining({ value: 'visible value', valueRedacted: false }),
+    );
+    expect(encoded).not.toContain('password-secret');
+    expect(encoded).not.toContain('csrf-secret');
+    expect(encoded).not.toContain('4111111111111111');
+    expect(encoded).not.toContain('recovery-secret');
+    expect(encoded).not.toContain('payment-option-secret');
+  });
+
   it('captures bounded direct text without materializing aggregate descendant text', async () => {
     const target = fakeElement('DIV');
     target.childNodes = [{ nodeType: 3, data: 'direct text' }];
