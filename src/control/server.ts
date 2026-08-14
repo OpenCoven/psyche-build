@@ -199,8 +199,25 @@ export class ControlAuthority {
     return this.runtime.submit(command);
   }
 
-  snapshot(): ControlSnapshot {
-    return this.runtime.snapshot();
+  snapshot(principal: ControlPrincipal): ControlSnapshot {
+    const snapshot = this.runtime.snapshot();
+    if (principal.kind === 'operator') return snapshot;
+
+    // Surface metadata, command history, and authority records are
+    // operator-only. In particular, capability leases are bearer-like:
+    // exposing their IDs, revisions, task IDs, grants, or the command
+    // payloads that carry them would let another holder of the shared agent
+    // credential replay a lease that was issued for a different task.
+    return {
+      ...snapshot,
+      commands: {},
+      leases: {},
+      resources: [],
+      capabilityLeases: [],
+      leaseRequests: [],
+      approvals: [],
+      receipts: [],
+    };
   }
 
   readEvents(afterSequence: number, limit?: number): {
@@ -511,7 +528,7 @@ export class ControlServer {
           version: 1,
           type: 'state.result',
           requestId: request.requestId,
-          snapshot: this.authority.snapshot(),
+          snapshot: this.authority.snapshot(principal),
         });
         return;
       case 'events.read': {
