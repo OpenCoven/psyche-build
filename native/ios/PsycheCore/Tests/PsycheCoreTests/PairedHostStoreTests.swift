@@ -107,7 +107,7 @@ final class PairedHostStoreTests: XCTestCase {
                 authorizedBy: authorization
             )
         }
-        await secureStore.waitUntilReadBegins()
+        try await secureStore.waitUntilReadBegins()
         generation.invalidate()
         secureStore.releaseRead()
 

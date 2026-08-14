@@ -8,7 +8,10 @@ const mainJs = readFileSync(
   'utf8',
 ).replace(/\r\n/g, '\n');
 const stylesCss = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'), 'utf8');
-const tauriLib = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
+const tauriLib = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'),
+  'utf8',
+).replace(/\r\n/g, '\n');
 const tauriBuild = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/build.rs'),
   'utf8',
