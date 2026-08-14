@@ -1,79 +1,48 @@
-/**
- * psyche MCP server (stdio JSON-RPC 2.0).
- *
- * Exposes psyche's pane/ritual/worktree surface to MCP-capable clients
- * (coven-code, Claude Code, OpenCode, etc.) so any familiar can fan work
- * into parallel psyche panes mid-conversation without leaving its session.
- *
- * Wire-up on the client side (e.g. ~/.coven-code/settings.json):
- *
- *   {
- *     "mcp_servers": [
- *       { "name": "psyche", "command": "psyche", "args": ["mcp"], "type": "stdio" }
- *     ]
- *   }
- *
- * Protocol: a minimal JSON-RPC 2.0 implementation of the MCP `initialize`,
- * `tools/list`, and `tools/call` methods. We intentionally hand-roll instead
- * of pulling in `@modelcontextprotocol/sdk` so this first ship has zero new
- * runtime dependencies — easy to revisit if the surface grows.
- *
- * Reuses psyche's existing pane primitives from `../daemon/panes.ts` so the
- * MCP path and the Ink TUI path share state and don't fork.
- */
+/** psyche MCP server (newline-delimited JSON-RPC 2.0 over stdio). */
 
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
-import { capturePaneSync, listPanes } from '../daemon/panes.js';
-import type { PaneSummary } from '../daemon/protocol.js';
+import { ControlClient } from '../control/client.js';
+import {
+  createControlCredentialStoreForCanonicalRoot,
+  type ControlCredentialStore,
+} from '../control/credentials.js';
+import {
+  ensureCanonicalHostControlPlane,
+  type ConnectControl,
+  type EnsureHostOptions,
+} from '../control/hostProcess.js';
+import { canonicalizeProjectRoot } from '../control/projectIdentity.js';
+import { controlEndpointForProject } from '../control/endpoint.js';
+import type {
+  ActionReceipt,
+  CommandOutcome,
+  ControlCommandInput,
+  ControlSnapshot,
+} from '../control/types.js';
+import type { CapabilityLeaseGrantItem } from '../control/capabilityLeases.js';
 import { getBuiltInRituals, listProjectRituals } from '../utils/rituals.js';
-import {
-  killBridgePane,
-  spawnBridgePane,
-  type BridgeKillResult,
-  type BridgeSpawnRequest,
-  type BridgeSpawnResult,
-} from '../daemon/bridge.js';
-import { tmuxSessionNameForRoot } from '../services/tmuxControl.js';
-import { Orchestrator } from '../orchestration/orchestrator.js';
-import { createBridgePaneBackend } from '../orchestration/bridgePaneBackend.js';
-import {
-  composeLaneBackends,
-  createCovenSessionBackend,
-} from '../orchestration/covenSessionBackend.js';
-import {
-  ORCHESTRATION_LANE_MODES,
-  type OrchestrationTaskRequest,
-  type OrchestrationTaskResult,
-} from '../orchestration/types.js';
+import type { OrchestrationTaskRequest } from '../orchestration/types.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 export const SERVER_NAME = 'psyche';
 const SERVER_VERSION = '0.0.1';
 
-// ---- JSON-RPC plumbing ----------------------------------------------------
-
 type JsonRpcId = string | number | null;
-
 interface JsonRpcRequest {
   jsonrpc: '2.0';
   id?: JsonRpcId;
   method: string;
   params?: unknown;
 }
-
-interface JsonRpcSuccess<T = unknown> {
-  jsonrpc: '2.0';
-  id: JsonRpcId;
-  result: T;
-}
-
+interface JsonRpcSuccess<T = unknown> { jsonrpc: '2.0'; id: JsonRpcId; result: T }
 interface JsonRpcError {
   jsonrpc: '2.0';
   id: JsonRpcId;
   error: { code: number; message: string; data?: unknown };
 }
-
 type JsonRpcResponse = JsonRpcSuccess | JsonRpcError;
 
 const ERR_PARSE = -32700;
@@ -82,65 +51,178 @@ const ERR_METHOD_NOT_FOUND = -32601;
 const ERR_INVALID_PARAMS = -32602;
 const ERR_INTERNAL = -32603;
 
-function writeResponse(res: JsonRpcResponse): void {
-  process.stdout.write(JSON.stringify(res) + '\n');
+function writeResponse(response: JsonRpcResponse): void {
+  process.stdout.write(`${JSON.stringify(response)}\n`);
 }
 
 function fail(id: JsonRpcId, code: number, message: string, data?: unknown): void {
   writeResponse({ jsonrpc: '2.0', id, error: { code, message, data } });
 }
 
-// ---- Tool registry --------------------------------------------------------
-
-interface ToolDef {
+export interface ToolDef {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
   handler: (args: Record<string, unknown>) => Promise<unknown>;
 }
 
-/**
- * Side-effecting collaborators, injectable so tools/call can be tested without
- * a live tmux server or a real git repository.
- */
+export interface McpControlClient {
+  readonly projectRoot?: string;
+  submit(command: ControlCommandInput): Promise<CommandOutcome>;
+  getState(): Promise<ControlSnapshot>;
+  actionStatus(actionId: string): Promise<ActionReceipt | undefined>;
+  close(): Promise<void>;
+}
+
 export interface McpDeps {
-  spawnPane: (
-    projectRoot: string,
-    sessionName: string,
-    request: BridgeSpawnRequest,
-  ) => Promise<BridgeSpawnResult>;
-  killPane: (projectRoot: string, paneId: string) => Promise<BridgeKillResult>;
-  sessionNameForRoot: (projectRoot: string) => string;
-  executeTask: (
-    request: OrchestrationTaskRequest,
-    sessionName: string,
-  ) => Promise<{
-    result: OrchestrationTaskResult;
-    spawned: Map<string, BridgeSpawnResult>;
+  controlClientForRoot(projectRoot: string): Promise<McpControlClient>;
+  listRitualsForRoot(projectRoot: string): Promise<{
+    builtin: readonly unknown[];
+    project: readonly unknown[];
   }>;
+  listWorktreesForRoot(projectRoot: string): Promise<readonly WorktreeSummary[]>;
+  now(): Date;
+  randomId(): string;
+}
+
+interface WorktreeSummary {
+  path: string;
+  head?: string;
+  branch?: string;
+  bare?: boolean;
+  detached?: boolean;
+  locked?: boolean;
+}
+
+const entryPath = fileURLToPath(new URL('../index.js', import.meta.url));
+
+export interface McpControlClientBootstrapOptions {
+  canonicalize?: typeof canonicalizeProjectRoot;
+  credentialStoreForCanonicalRoot?: (options: {
+    canonicalProjectRoot: string;
+  }) => Promise<ControlCredentialStore>;
+  connect?: ConnectControl;
+  spawn?: EnsureHostOptions['spawn'];
+  now?: EnsureHostOptions['now'];
+  sleep?: EnsureHostOptions['sleep'];
+  entryPath?: string;
+}
+
+interface SharedControlClient {
+  key: string;
+  canonicalRoot: string;
+  refs: number;
+  promise: Promise<ControlClient>;
+  closePromise?: Promise<void>;
+}
+
+const sharedControlClients = new Map<string, SharedControlClient>();
+const controlStartupFlights = new Map<string, Promise<ControlClient>>();
+
+export async function createMcpControlClientForRoot(
+  projectRoot: string,
+  options: McpControlClientBootstrapOptions = {},
+): Promise<McpControlClient> {
+  const canonicalRoot = await (options.canonicalize ?? canonicalizeProjectRoot)(projectRoot);
+  const key = `${canonicalRoot}\0${controlEndpointForProject(canonicalRoot)}`;
+  let shared = sharedControlClients.get(key);
+  if (!shared) {
+    let startup = controlStartupFlights.get(key);
+    if (!startup) {
+      startup = startMcpControlClient(canonicalRoot, options);
+      controlStartupFlights.set(key, startup);
+      void startup.finally(() => {
+        if (controlStartupFlights.get(key) === startup) controlStartupFlights.delete(key);
+      }).catch(() => undefined);
+    }
+    shared = { key, canonicalRoot, refs: 0, promise: startup };
+    sharedControlClients.set(key, shared);
+    void startup.catch(() => {
+      if (sharedControlClients.get(key) === shared) sharedControlClients.delete(key);
+    });
+  }
+  shared.refs += 1;
+  try {
+    await shared.promise;
+  } catch (error) {
+    shared.refs -= 1;
+    throw error;
+  }
+  return borrowedControlClient(shared);
+}
+
+async function startMcpControlClient(
+  canonicalRoot: string,
+  options: McpControlClientBootstrapOptions,
+): Promise<ControlClient> {
+  const credentials = await (
+    options.credentialStoreForCanonicalRoot ?? createControlCredentialStoreForCanonicalRoot
+  )({ canonicalProjectRoot: canonicalRoot });
+  const token = await credentials.agentToken();
+  return ensureCanonicalHostControlPlane(canonicalRoot, {
+    token, clientName: 'psyche-mcp', entryPath: options.entryPath ?? entryPath,
+    ...(options.connect === undefined ? {} : { connect: options.connect }),
+    ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+  });
+}
+
+function borrowedControlClient(shared: SharedControlClient): McpControlClient {
+  let released = false;
+  const use = async <T>(operation: (client: ControlClient) => Promise<T>): Promise<T> => {
+    try {
+      return await operation(await shared.promise);
+    } catch (error) {
+      await invalidateSharedControlClient(shared);
+      throw error;
+    }
+  };
+  return {
+    projectRoot: shared.canonicalRoot,
+    submit: (command) => use((client) => client.submit(command)),
+    getState: () => use((client) => client.getState()),
+    actionStatus: (actionId) => use((client) => client.actionStatus(actionId)),
+    async close() {
+      if (released) return;
+      released = true;
+      shared.refs -= 1;
+      if (shared.refs <= 0) await closeSharedControlClient(shared);
+    },
+  };
+}
+
+async function invalidateSharedControlClient(shared: SharedControlClient): Promise<void> {
+  if (sharedControlClients.get(shared.key) === shared) sharedControlClients.delete(shared.key);
+  await closeSharedControlClient(shared);
+}
+
+async function closeSharedControlClient(shared: SharedControlClient): Promise<void> {
+  if (sharedControlClients.get(shared.key) === shared) sharedControlClients.delete(shared.key);
+  shared.closePromise ??= shared.promise.then(
+    (client) => client.close(),
+    () => undefined,
+  );
+  await shared.closePromise;
+}
+
+export async function closeMcpControlClients(): Promise<void> {
+  const active = [...sharedControlClients.values()];
+  sharedControlClients.clear();
+  await Promise.all(active.map((shared) => closeSharedControlClient(shared)));
 }
 
 export const defaultMcpDeps: McpDeps = {
-  spawnPane: (projectRoot, sessionName, request) =>
-    spawnBridgePane(projectRoot, sessionName, request),
-  killPane: (projectRoot, paneId) => killBridgePane(projectRoot, paneId),
-  sessionNameForRoot: tmuxSessionNameForRoot,
-  executeTask: async (request, sessionName) => {
-    // One task can mix local panes and Coven sessions; each backend stays
-    // unaware of the other and the router owns which mode goes where.
-    const panes = createBridgePaneBackend({ sessionName });
-    const coven = createCovenSessionBackend();
-    const orchestrator = new Orchestrator({
-      executeLane: composeLaneBackends({
-        'isolated-worktree': panes.execute,
-        'shared-worktree': panes.execute,
-        terminal: panes.execute,
-        'coven-session': coven.execute,
-      }),
-    });
-    const result = await orchestrator.execute(request);
-    return { result, spawned: panes.spawned() };
+  controlClientForRoot: createMcpControlClientForRoot,
+  async listRitualsForRoot(projectRoot) {
+    return {
+      builtin: getBuiltInRituals().map((ritual) => ({ ...ritual, scope: 'builtin' as const })),
+      project: listProjectRituals(projectRoot).map((ritual) => ({ ...ritual, scope: 'project' as const })),
+    };
   },
+  listWorktreesForRoot: readWorktrees,
+  now: () => new Date(),
+  randomId: randomUUID,
 };
 
 let deps: McpDeps = defaultMcpDeps;
@@ -149,438 +231,566 @@ let deps: McpDeps = defaultMcpDeps;
 export function setMcpDeps(next: Partial<McpDeps>): () => void {
   const previous = deps;
   deps = { ...deps, ...next };
-  return () => {
-    deps = previous;
-  };
+  return () => { deps = previous; };
 }
 
 function resolveProjectRoot(args: Record<string, unknown>): string {
   const raw = args.project_root ?? args.projectRoot;
-  if (typeof raw === 'string' && raw.length > 0) return raw;
+  if (typeof raw === 'string' && raw.trim()) return raw;
   return process.env.PSYCHE_PROJECT_ROOT ?? process.cwd();
 }
 
+function invalid(message: string): never {
+  throw Object.assign(new Error(message), { code: ERR_INVALID_PARAMS });
+}
+
+function requiredString(args: Record<string, unknown>, key: string): string {
+  const value = args[key];
+  if (typeof value !== 'string' || !value.trim()) invalid(`requires \`${key}\``);
+  return value.trim();
+}
+
+function requiredPositiveInteger(args: Record<string, unknown>, key: string): number {
+  const value = args[key];
+  if (!Number.isSafeInteger(value) || (value as number) < 1) invalid(`requires positive integer \`${key}\``);
+  return value as number;
+}
+
+function leaseAuthorization(args: Record<string, unknown>): {
+  taskId: string;
+  leaseId: string;
+  leaseRevision: number;
+} | undefined {
+  if (
+    typeof args.task_id !== 'string' || !args.task_id.trim()
+    || typeof args.lease_id !== 'string' || !args.lease_id.trim()
+    || !Number.isSafeInteger(args.lease_revision) || (args.lease_revision as number) < 1
+  ) return undefined;
+  return {
+    taskId: args.task_id.trim(),
+    leaseId: args.lease_id.trim(),
+    leaseRevision: args.lease_revision as number,
+  };
+}
+
+function leaseMissing(): CommandOutcome {
+  return {
+    status: 'rejected',
+    code: 'lease_missing',
+    message: 'task_id, lease_id, and lease_revision are required for this surface operation',
+  };
+}
+
+function command(
+  kind: ControlCommandInput['kind'],
+  projectRoot: string,
+  payload: unknown,
+): ControlCommandInput {
+  const id = deps.randomId();
+  return {
+    id,
+    idempotencyKey: `mcp:${id}`,
+    kind,
+    projectRoot,
+    createdAt: deps.now().toISOString(),
+    payload,
+  } as ControlCommandInput;
+}
+
+async function withControlClient<T>(
+  projectRoot: string,
+  operation: (client: McpControlClient) => Promise<T>,
+): Promise<T> {
+  const client = await deps.controlClientForRoot(projectRoot);
+  try {
+    return await operation(client);
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
+async function submit(
+  args: Record<string, unknown>,
+  kind: ControlCommandInput['kind'],
+  payload: unknown,
+): Promise<CommandOutcome> {
+  const requestedRoot = resolveProjectRoot(args);
+  return withControlClient(requestedRoot, (client) => (
+    client.submit(command(kind, client.projectRoot ?? requestedRoot, payload))
+  ));
+}
+
+function actionResult(outcome: CommandOutcome): ActionReceipt | CommandOutcome {
+  if (
+    outcome.status === 'succeeded'
+    && outcome.value
+    && typeof outcome.value === 'object'
+    && (outcome.value as { schema?: unknown }).schema === 'psyche.control.receipt/v1'
+  ) return outcome.value as ActionReceipt;
+  return outcome;
+}
+
+const projectRootProperty = {
+  type: 'string',
+  description: 'Absolute project root. Defaults to PSYCHE_PROJECT_ROOT, then the current directory.',
+};
+const authorizationProperties = {
+  task_id: { type: 'string' },
+  lease_id: { type: 'string' },
+  lease_revision: { type: 'integer', minimum: 1 },
+};
+const authorizationRequired = ['task_id', 'lease_id', 'lease_revision'];
+
 export const TOOLS: ToolDef[] = [
   {
-    name: 'psyche_list_panes',
-    description:
-      'List all psyche panes for the active project. Each entry includes the tmux pane id, working directory, branch, agent, and human-readable title.',
+    name: 'psyche_control_list',
+    description: 'List the bounded pane and browser resources, leases, requests, and approvals owned by this project.',
+    inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
+    handler: async (args) => {
+      const requestedRoot = resolveProjectRoot(args);
+      return withControlClient(requestedRoot, async (client) => {
+        const projectRoot = client.projectRoot ?? requestedRoot;
+        const snapshot = await client.getState();
+        return {
+          project_root: projectRoot,
+          owner_epoch: snapshot.ownerEpoch,
+          sequence: snapshot.sequence,
+          resources: snapshot.resources,
+          leases: snapshot.capabilityLeases,
+          lease_requests: snapshot.leaseRequests,
+          approvals: snapshot.approvals,
+          receipts: snapshot.receipts,
+        };
+      });
+    },
+  },
+  {
+    name: 'psyche_control_lease',
+    description: 'Request, inspect, or release agent surface authority. This tool cannot grant, expand, or approve authority.',
     inputSchema: {
       type: 'object',
+      required: ['operation', 'task_id'],
       properties: {
-        project_root: {
-          type: 'string',
-          description:
-            'Absolute path to the project root whose panes to list. Defaults to $PSYCHE_PROJECT_ROOT then process.cwd() if omitted.',
-        },
+        operation: { type: 'string', enum: ['request', 'status', 'release'] },
+        task_id: { type: 'string' },
+        request_id: { type: 'string' },
+        lease_id: { type: 'string' },
+        lease_revision: { type: 'integer', minimum: 1 },
+        ttl_ms: { type: 'integer', minimum: 1 },
+        grants: { type: 'array', minItems: 1 },
+        project_root: projectRootProperty,
       },
     },
     handler: async (args) => {
+      const operation = requiredString(args, 'operation');
+      const taskId = requiredString(args, 'task_id');
+      if (!['request', 'status', 'release'].includes(operation)) {
+        invalid('psyche_control_lease supports only request, status, and release');
+      }
       const projectRoot = resolveProjectRoot(args);
-      const panes: PaneSummary[] = await listPanes(projectRoot);
-      return {
-        project_root: projectRoot,
-        count: panes.length,
-        panes,
-      };
+      return withControlClient(projectRoot, async (client) => {
+        const canonicalRoot = client.projectRoot ?? projectRoot;
+        if (operation === 'status') {
+          const snapshot = await client.getState();
+          const leaseId = typeof args.lease_id === 'string' ? args.lease_id : undefined;
+          const requestId = typeof args.request_id === 'string' ? args.request_id : undefined;
+          return {
+            leases: snapshot.capabilityLeases.filter((lease) => (
+              lease.taskId === taskId && (!leaseId || lease.id === leaseId)
+            )),
+            requests: snapshot.leaseRequests.filter((request) => (
+              request.taskId === taskId && (!requestId || request.id === requestId)
+            )),
+          };
+        }
+        if (operation === 'release') return client.submit(command('lease.release', canonicalRoot, {
+          taskId,
+          leaseId: requiredString(args, 'lease_id'),
+          leaseRevision: requiredPositiveInteger(args, 'lease_revision'),
+        }));
+        if (!Array.isArray(args.grants) || args.grants.length === 0) invalid('lease request requires `grants`');
+        const grants = args.grants as CapabilityLeaseGrantItem[];
+        return client.submit(command('lease.request', canonicalRoot, {
+          taskId, ttlMs: requiredPositiveInteger(args, 'ttl_ms'), grants,
+        }));
+      });
+    },
+  },
+  {
+    name: 'psyche_pane_observe',
+    description: 'Read bounded pane output and status through an exact leased pane generation.',
+    inputSchema: {
+      type: 'object',
+      required: [...authorizationRequired, 'pane_id', 'generation'],
+      properties: {
+        ...authorizationProperties,
+        pane_id: { type: 'string' }, generation: { type: 'integer', minimum: 1 },
+        after_sequence: { type: 'integer', minimum: 0 }, project_root: projectRootProperty,
+      },
+    },
+    handler: async (args) => {
+      const auth = leaseAuthorization(args);
+      if (!auth) return leaseMissing();
+      return actionResult(await submit(args, 'pane.observe', {
+        ...auth,
+        paneId: requiredString(args, 'pane_id'),
+        generation: requiredPositiveInteger(args, 'generation'),
+        ...(Number.isSafeInteger(args.after_sequence) ? { afterSequence: args.after_sequence as number } : {}),
+      }));
+    },
+  },
+  {
+    name: 'psyche_pane_action',
+    description: 'Perform one typed pane action through an exact capability lease.',
+    inputSchema: {
+      type: 'object',
+      required: [...authorizationRequired, 'action'],
+      properties: {
+        ...authorizationProperties,
+        pane_id: { type: 'string' }, generation: { type: 'integer', minimum: 1 },
+        project_id: { type: 'string' }, action: { type: 'object' }, project_root: projectRootProperty,
+      },
+    },
+    handler: async (args) => {
+      const auth = leaseAuthorization(args);
+      if (!auth) return leaseMissing();
+      if (!args.action || typeof args.action !== 'object' || Array.isArray(args.action)) invalid('requires `action`');
+      const action = args.action as Record<string, unknown>;
+      const payload = action.kind === 'create'
+        ? { ...auth, projectId: requiredString(args, 'project_id'), action }
+        : {
+            ...auth,
+            paneId: requiredString(args, 'pane_id'),
+            generation: requiredPositiveInteger(args, 'generation'),
+            action,
+          };
+      return actionResult(await submit(args, 'pane.action', payload as never));
+    },
+  },
+  {
+    name: 'psyche_browser_inspect',
+    description: 'Capture a bounded semantic snapshot of an exact leased browser tab generation.',
+    inputSchema: {
+      type: 'object',
+      required: [...authorizationRequired, 'tab_id', 'generation'],
+      properties: {
+        ...authorizationProperties,
+        tab_id: { type: 'string' }, generation: { type: 'integer', minimum: 1 },
+        include_screenshot: { type: 'boolean' }, project_root: projectRootProperty,
+      },
+    },
+    handler: async (args) => {
+      const auth = leaseAuthorization(args);
+      if (!auth) return leaseMissing();
+      return actionResult(await submit(args, 'browser.inspect', {
+        ...auth,
+        tabId: requiredString(args, 'tab_id'),
+        generation: requiredPositiveInteger(args, 'generation'),
+        ...(args.include_screenshot === true ? { includeScreenshot: true } : {}),
+      }));
+    },
+  },
+  {
+    name: 'psyche_browser_action',
+    description: 'Perform one typed browser action through an exact leased tab generation. Application-defined effects behind a generic click cannot be perfectly predicted.',
+    inputSchema: {
+      type: 'object',
+      required: [...authorizationRequired, 'tab_id', 'generation', 'action'],
+      properties: {
+        ...authorizationProperties,
+        tab_id: { type: 'string' }, generation: { type: 'integer', minimum: 1 },
+        snapshot_id: { type: 'string' }, action: { type: 'object' }, project_root: projectRootProperty,
+      },
+    },
+    handler: async (args) => {
+      const auth = leaseAuthorization(args);
+      if (!auth) return leaseMissing();
+      if (!args.action || typeof args.action !== 'object' || Array.isArray(args.action)) invalid('requires `action`');
+      return actionResult(await submit(args, 'browser.action', {
+        ...auth,
+        tabId: requiredString(args, 'tab_id'),
+        generation: requiredPositiveInteger(args, 'generation'),
+        ...(typeof args.snapshot_id === 'string' ? { snapshotId: args.snapshot_id } : {}),
+        action: args.action,
+      } as never));
+    },
+  },
+  {
+    name: 'psyche_browser_script',
+    description: 'Run an explicitly approved script in an exact leased browser tab generation.',
+    inputSchema: {
+      type: 'object',
+      required: [...authorizationRequired, 'tab_id', 'generation', 'source'],
+      properties: {
+        ...authorizationProperties,
+        tab_id: { type: 'string' }, generation: { type: 'integer', minimum: 1 },
+        source: { type: 'string' }, args: {}, project_root: projectRootProperty,
+      },
+    },
+    handler: async (args) => {
+      const auth = leaseAuthorization(args);
+      if (!auth) return leaseMissing();
+      return actionResult(await submit(args, 'browser.script', {
+        ...auth,
+        tabId: requiredString(args, 'tab_id'),
+        generation: requiredPositiveInteger(args, 'generation'),
+        source: requiredString(args, 'source'),
+        ...('args' in args ? { args: args.args } : {}),
+      }));
+    },
+  },
+  {
+    name: 'psyche_control_action_status',
+    description: 'Read the latest canonical receipt for an action without retrying the action.',
+    inputSchema: {
+      type: 'object', required: ['action_id'],
+      properties: { action_id: { type: 'string' }, project_root: projectRootProperty },
+    },
+    handler: async (args) => {
+      const actionId = requiredString(args, 'action_id');
+      return withControlClient(resolveProjectRoot(args), async (client) => (
+        (await client.actionStatus(actionId)) ?? { status: 'unknown', action_id: actionId }
+      ));
+    },
+  },
+  {
+    name: 'psyche_list_panes',
+    description: 'Compatibility alias for listing pane resources through the project control owner.',
+    inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
+    handler: async (args) => {
+      const requestedRoot = resolveProjectRoot(args);
+      return withControlClient(requestedRoot, async (client) => {
+        const projectRoot = client.projectRoot ?? requestedRoot;
+        const snapshot = await client.getState();
+        const panes = snapshot.resources.filter((resource) => resource.kind === 'pane');
+        return { project_root: projectRoot, count: panes.length, panes };
+      });
     },
   },
   {
     name: 'psyche_execute_task',
-    description:
-      'Run one task across several parallel lanes. Each lane gets its own git worktree, branch, tmux pane, and harness, all seeded with the same prompt — the way to compare two agents on one problem, or to split work across several. Lanes run with bounded concurrency and fail independently: the task reports completed, partial, or failed, and successful lanes stay usable when siblings fail.',
+    description: 'Compatibility alias that submits leased orchestration to the project control owner.',
     inputSchema: {
-      type: 'object',
-      required: ['prompt', 'lanes'],
+      type: 'object', required: ['prompt', 'lanes', ...authorizationRequired],
       properties: {
-        prompt: { type: 'string', description: 'Prompt seeded into every lane.' },
-        lanes: {
-          type: 'array',
-          minItems: 1,
-          description: 'One entry per parallel worker.',
-          items: {
-            type: 'object',
-            required: ['id'],
-            properties: {
-              id: { type: 'string', description: 'Unique lane id, e.g. the agent name.' },
-              agent: {
-                type: 'string',
-                description: 'Harness id. Omit together with mode "terminal" for a plain shell.',
-              },
-              mode: {
-                type: 'string',
-                enum: [...ORCHESTRATION_LANE_MODES],
-                description:
-                  'Defaults to isolated-worktree. shared-worktree and coven-session are not available on this path yet.',
-              },
-            },
-          },
-        },
-        task_id: { type: 'string', description: 'Stable id for this task. Generated when omitted.' },
-        concurrency: { type: 'number', description: 'Max lanes running at once. Defaults to the lane count, capped at 4.' },
-        branch: { type: 'string', description: 'Start-point branch for the new worktrees.' },
-        project_root: { type: 'string' },
+        prompt: { type: 'string' }, lanes: { type: 'array', minItems: 1 },
+        ...authorizationProperties,
+        concurrency: { type: 'integer', minimum: 1 }, branch: { type: 'string' }, project_root: projectRootProperty,
       },
     },
     handler: async (args) => {
-      const prompt = String(args.prompt ?? '').trim();
-      if (!prompt) {
-        throw Object.assign(new Error('psyche_execute_task requires `prompt`'), { code: ERR_INVALID_PARAMS });
-      }
-      const rawLanes = Array.isArray(args.lanes) ? args.lanes : [];
-      if (rawLanes.length === 0) {
-        throw Object.assign(new Error('psyche_execute_task requires at least one lane'), { code: ERR_INVALID_PARAMS });
-      }
-
-      const projectRoot = resolveProjectRoot(args);
-      const request: OrchestrationTaskRequest = {
-        taskId: typeof args.task_id === 'string' && args.task_id.trim()
-          ? args.task_id.trim()
-          : `mcp-task-${Date.now()}`,
-        projectRoot,
-        prompt,
-        ...(typeof args.branch === 'string' ? { startPointBranch: args.branch } : {}),
-        ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}),
-        lanes: rawLanes.map((raw) => {
-          const lane = (raw ?? {}) as Record<string, unknown>;
-          const agent = typeof lane.agent === 'string' ? lane.agent : undefined;
-          return {
-            id: String(lane.id ?? '').trim(),
-            mode: (typeof lane.mode === 'string' ? lane.mode : agent ? 'isolated-worktree' : 'terminal') as never,
-            ...(agent ? { agent: agent as never } : {}),
-          };
-        }),
-      };
-
-      const { result, spawned } = await deps.executeTask(request, deps.sessionNameForRoot(projectRoot));
-
-      return {
-        task_id: result.taskId,
-        status: result.status,
-        lanes: result.lanes.map((lane) => {
-          const spawn = spawned.get(lane.id);
-          return {
-            id: lane.id,
-            status: lane.status,
-            ...(spawn
-              ? { pane_id: spawn.id, worktree_path: spawn.worktreePath, branch: spawn.branch }
-              : {}),
-            ...(lane.status === 'failed' ? { error: lane.error } : {}),
-          };
-        }),
-      };
+      const auth = leaseAuthorization(args);
+      if (!auth) return leaseMissing();
+      const prompt = requiredString(args, 'prompt');
+      if (!Array.isArray(args.lanes) || args.lanes.length === 0) invalid('requires at least one lane');
+      const requestedRoot = resolveProjectRoot(args);
+      return withControlClient(requestedRoot, (client) => {
+        const projectRoot = client.projectRoot ?? requestedRoot;
+        const request: OrchestrationTaskRequest = {
+          taskId: auth.taskId,
+          projectRoot, prompt, lanes: args.lanes as OrchestrationTaskRequest['lanes'],
+          ...(typeof args.branch === 'string' ? { startPointBranch: args.branch } : {}),
+          ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}),
+        };
+        return client.submit(command('orchestration.execute', projectRoot, { ...auth, request }));
+      });
     },
   },
   {
     name: 'psyche_create_pane',
-    description:
-      'Create a new psyche pane: a fresh git worktree and branch off the project root, a tmux pane, and the chosen harness launched with the prompt. Returns the tmux pane id, worktree path, and branch. The psyche tmux session for this project must already be running.',
+    description: 'Compatibility alias for leased pane creation through the project control owner.',
     inputSchema: {
-      type: 'object',
-      required: ['prompt', 'agent'],
+      type: 'object', required: ['prompt', 'agent', ...authorizationRequired],
       properties: {
-        prompt: { type: 'string', description: 'Initial prompt to seed the harness with.' },
-        agent: {
-          type: 'string',
-          description:
-            "Harness id (`coven-code`, `claude`, `codex`, `opencode`, `cline`, `gemini`, `qwen`, `amp`, `pi`, `cursor`, `copilot`, `crush`).",
-        },
-        branch: {
-          type: 'string',
-          description: 'Branch name for the new worktree. If omitted, psyche derives one from the prompt slug.',
-        },
-        title: { type: 'string', description: 'Human-readable pane title. Defaults to the derived slug.' },
-        project_root: { type: 'string' },
+        prompt: { type: 'string' }, agent: { type: 'string' }, branch: { type: 'string' },
+        title: { type: 'string' }, ...authorizationProperties, project_root: projectRootProperty,
       },
     },
     handler: async (args) => {
-      const prompt = String(args.prompt ?? '').trim();
-      if (!prompt) {
-        throw Object.assign(new Error('psyche_create_pane requires `prompt`'), { code: ERR_INVALID_PARAMS });
-      }
-      const agent = String(args.agent ?? '').trim();
-      if (!agent) {
-        throw Object.assign(new Error('psyche_create_pane requires `agent`'), { code: ERR_INVALID_PARAMS });
-      }
-      const projectRoot = resolveProjectRoot(args);
-      const result = await deps.spawnPane(projectRoot, deps.sessionNameForRoot(projectRoot), {
-        requestId: `mcp-${Date.now()}`,
-        cwd: projectRoot,
-        agent,
-        prompt,
-        branch: typeof args.branch === 'string' ? args.branch : undefined,
-        title: typeof args.title === 'string' ? args.title : undefined,
+      const auth = leaseAuthorization(args);
+      if (!auth) return leaseMissing();
+      const requestedRoot = resolveProjectRoot(args);
+      return withControlClient(requestedRoot, async (client) => {
+        const projectRoot = client.projectRoot ?? requestedRoot;
+        return actionResult(await client.submit(command('pane.action', projectRoot, {
+          ...auth,
+          projectId: projectRoot,
+          action: {
+            kind: 'create', cwd: projectRoot,
+            agent: requiredString(args, 'agent'), prompt: requiredString(args, 'prompt'),
+            ...(typeof args.branch === 'string' ? { branch: args.branch } : {}),
+            ...(typeof args.title === 'string' ? { title: args.title } : {}),
+          } as never,
+        })));
       });
-      return {
-        pane_id: result.id,
-        worktree_path: result.worktreePath,
-        branch: result.branch,
-        pane: result.pane,
-      };
     },
   },
   {
     name: 'psyche_kill_pane',
-    description:
-      'Terminate a psyche pane and remove it from the project config. Does NOT delete the pane\'s git worktree or branch — those are returned so you can inspect or merge the work, and removing them stays an explicit action in the psyche TUI.',
+    description: 'Compatibility alias for approved pane close. It does NOT delete the worktree or branch.',
     inputSchema: {
-      type: 'object',
-      required: ['pane_id'],
+      type: 'object', required: ['pane_id', 'generation', ...authorizationRequired],
       properties: {
-        pane_id: {
-          type: 'string',
-          description: 'Pane id from `psyche_list_panes` — either the tmux pane id (e.g. `%3`) or the psyche pane id.',
-        },
-        project_root: { type: 'string' },
+        pane_id: { type: 'string' }, generation: { type: 'integer', minimum: 1 },
+        ...authorizationProperties, project_root: projectRootProperty,
       },
     },
     handler: async (args) => {
-      const paneId = String(args.pane_id ?? '').trim();
-      if (!paneId) {
-        throw Object.assign(new Error('psyche_kill_pane requires `pane_id`'), { code: ERR_INVALID_PARAMS });
-      }
-      const projectRoot = resolveProjectRoot(args);
-      const result = await deps.killPane(projectRoot, paneId);
-      return {
-        pane_id: result.paneId,
-        id: result.id,
-        killed: result.killed,
-        worktree_path: result.worktreePath,
-        branch: result.branch,
-        note: 'Worktree and branch were left in place. Remove them from the psyche TUI if you no longer need the work.',
-      };
+      const auth = leaseAuthorization(args);
+      if (!auth) return leaseMissing();
+      return actionResult(await submit(args, 'pane.action', {
+        ...auth,
+        paneId: requiredString(args, 'pane_id'),
+        generation: requiredPositiveInteger(args, 'generation'),
+        action: { kind: 'close' },
+      }));
     },
   },
   {
     name: 'psyche_get_pane_output',
-    description:
-      "Capture the current visible buffer plus scrollback of a psyche pane. Returns ANSI-escaped text — strip codes on the caller if you just want the plain content. Use this to read what a running agent has produced so far without attaching.",
+    description: 'Compatibility alias for bounded leased pane observation.',
     inputSchema: {
-      type: 'object',
-      required: ['pane_id'],
+      type: 'object', required: ['pane_id', 'generation', ...authorizationRequired],
       properties: {
-        pane_id: { type: 'string', description: 'tmux pane id (e.g. `%3`) returned by `psyche_list_panes`.' },
-        strip_ansi: {
-          type: 'boolean',
-          description: 'When true, strip ANSI escape sequences before returning. Default false (preserves colour for terminal renderers).',
-        },
+        pane_id: { type: 'string' }, generation: { type: 'integer', minimum: 1 },
+        after_sequence: { type: 'integer', minimum: 0 }, ...authorizationProperties,
+        project_root: projectRootProperty,
       },
     },
     handler: async (args) => {
-      const paneId = String(args.pane_id ?? '').trim();
-      if (!paneId) {
-        throw Object.assign(new Error('psyche_get_pane_output requires `pane_id`'), { code: ERR_INVALID_PARAMS });
-      }
-      const buf = capturePaneSync(paneId);
-      let text = buf.toString('utf8');
-      if (args.strip_ansi === true) {
-        // OSC, CSI, and standalone ESC sequences. Same surface as `strip-ansi`
-        // npm but avoids the runtime dep.
-        text = text.replace(/\x1B\][^\x07]*\x07/g, '').replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
-      }
-      return { pane_id: paneId, bytes: buf.length, content: text };
+      const auth = leaseAuthorization(args);
+      if (!auth) return leaseMissing();
+      return actionResult(await submit(args, 'pane.observe', {
+        ...auth,
+        paneId: requiredString(args, 'pane_id'),
+        generation: requiredPositiveInteger(args, 'generation'),
+        ...(Number.isSafeInteger(args.after_sequence) ? { afterSequence: args.after_sequence as number } : {}),
+      }));
     },
   },
   {
     name: 'psyche_list_rituals',
-    description:
-      "List every ritual available to the active project — both psyche built-ins (Start Coding, Terminal First, Review Stack, Release Check, Fix OpenClaw, …) and project-saved rituals from `<projectRoot>/.psyche/rituals/`. Each entry includes its id, name, scope (`builtin`|`project`), description, and pane spec.",
-    inputSchema: {
-      type: 'object',
-      properties: {
-        project_root: { type: 'string' },
-      },
-    },
+    description: 'List built-in and project rituals without mutating the host.',
+    inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
     handler: async (args) => {
       const projectRoot = resolveProjectRoot(args);
-      const builtin = getBuiltInRituals().map((r) => ({ ...r, scope: 'builtin' as const }));
-      const project = listProjectRituals(projectRoot).map((r) => ({ ...r, scope: 'project' as const }));
+      const rituals = await deps.listRitualsForRoot(projectRoot);
       return {
         project_root: projectRoot,
-        builtin,
-        project,
-        count: builtin.length + project.length,
+        ...rituals,
+        count: rituals.builtin.length + rituals.project.length,
       };
     },
   },
   {
     name: 'psyche_list_worktrees',
-    description:
-      "List every git worktree associated with the active project's repository, including the path, branch, current HEAD sha, and whether it is the main worktree. Useful when you need to know which branches are already checked out before suggesting a new pane.",
-    inputSchema: {
-      type: 'object',
-      properties: {
-        project_root: { type: 'string' },
-      },
-    },
+    description: 'List git worktrees for the project without mutating the host.',
+    inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
     handler: async (args) => {
       const projectRoot = resolveProjectRoot(args);
-      let raw: string;
-      try {
-        raw = execFileSync('git', ['-C', projectRoot, 'worktree', 'list', '--porcelain'], {
-          encoding: 'utf8',
-          timeout: 5000,
-        });
-      } catch (err) {
-        throw Object.assign(
-          new Error(`git worktree list failed: ${err instanceof Error ? err.message : String(err)}`),
-          { code: ERR_INTERNAL },
-        );
-      }
-
-      const worktrees: Array<{
-        path: string;
-        head?: string;
-        branch?: string;
-        bare?: boolean;
-        detached?: boolean;
-        locked?: boolean;
-      }> = [];
-
-      let current: (typeof worktrees)[number] | null = null;
-      for (const line of raw.split('\n')) {
-        if (line.startsWith('worktree ')) {
-          if (current) worktrees.push(current);
-          current = { path: line.slice('worktree '.length) };
-        } else if (current && line.startsWith('HEAD ')) {
-          current.head = line.slice('HEAD '.length);
-        } else if (current && line.startsWith('branch ')) {
-          current.branch = line.slice('branch '.length);
-        } else if (current && line === 'bare') {
-          current.bare = true;
-        } else if (current && line === 'detached') {
-          current.detached = true;
-        } else if (current && line.startsWith('locked')) {
-          current.locked = true;
-        }
-      }
-      if (current) worktrees.push(current);
-
+      const worktrees = await deps.listWorktreesForRoot(projectRoot);
       return { project_root: projectRoot, count: worktrees.length, worktrees };
     },
   },
 ];
 
-// ---- MCP method dispatch --------------------------------------------------
-
-async function handleInitialize(_params: unknown): Promise<unknown> {
+async function handleInitialize(): Promise<unknown> {
   return {
     protocolVersion: PROTOCOL_VERSION,
     serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
-    capabilities: {
-      tools: { listChanged: false },
-    },
+    capabilities: { tools: { listChanged: false } },
   };
 }
 
-async function handleToolsList(_params: unknown): Promise<unknown> {
+async function handleToolsList(): Promise<unknown> {
   return {
-    tools: TOOLS.map((t) => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: t.inputSchema,
-    })),
+    tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
   };
 }
 
 async function handleToolsCall(params: unknown): Promise<unknown> {
-  const p = (params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
-  if (!p.name || typeof p.name !== 'string') {
-    throw Object.assign(new Error('tools/call requires `name`'), { code: ERR_INVALID_PARAMS });
-  }
-  const tool = TOOLS.find((t) => t.name === p.name);
-  if (!tool) {
-    throw Object.assign(new Error(`Unknown tool: ${p.name}`), { code: ERR_METHOD_NOT_FOUND });
-  }
-  const result = await tool.handler(p.arguments ?? {});
-  // MCP `tools/call` wraps the result in a content array of text/json blocks.
-  // We always emit a single JSON block — clients that prefer text can stringify.
+  const parsed = (params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
+  if (!parsed.name || typeof parsed.name !== 'string') invalid('tools/call requires `name`');
+  const tool = TOOLS.find((candidate) => candidate.name === parsed.name);
+  if (!tool) throw Object.assign(new Error(`Unknown tool: ${parsed.name}`), { code: ERR_METHOD_NOT_FOUND });
+  const result = await tool.handler(parsed.arguments ?? {});
   return {
-    content: [
-      {
-        type: 'text',
-        text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
-      },
-    ],
+    content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result, null, 2) }],
   };
 }
 
-/**
- * Handle one JSON-RPC request and return the response.
- *
- * Returns null for notifications, which by protocol get no reply. Kept
- * separate from the stdio loop so tests can exercise the real tool dispatch
- * without spawning a process or touching stdout.
- */
-export async function handleMcpRequest(
-  req: JsonRpcRequest,
-): Promise<JsonRpcResponse | null> {
+export async function handleMcpRequest(req: JsonRpcRequest): Promise<JsonRpcResponse | null> {
   const id = req.id ?? null;
   try {
     let result: unknown;
     switch (req.method) {
-      case 'initialize':
-        result = await handleInitialize(req.params);
-        break;
-      case 'notifications/initialized':
-        return null;
-      case 'tools/list':
-        result = await handleToolsList(req.params);
-        break;
-      case 'tools/call':
-        result = await handleToolsCall(req.params);
-        break;
-      case 'ping':
-        result = {};
-        break;
+      case 'initialize': result = await handleInitialize(); break;
+      case 'notifications/initialized': return null;
+      case 'tools/list': result = await handleToolsList(); break;
+      case 'tools/call': result = await handleToolsCall(req.params); break;
+      case 'ping': result = {}; break;
       default:
-        return {
-          jsonrpc: '2.0',
-          id,
-          error: { code: ERR_METHOD_NOT_FOUND, message: `Method not found: ${req.method}` },
-        };
+        return { jsonrpc: '2.0', id, error: { code: ERR_METHOD_NOT_FOUND, message: `Method not found: ${req.method}` } };
     }
     return { jsonrpc: '2.0', id, result };
-  } catch (err) {
-    const code = (err as { code?: number }).code ?? ERR_INTERNAL;
-    const message = err instanceof Error ? err.message : String(err);
+  } catch (error) {
+    const code = (error as { code?: number }).code ?? ERR_INTERNAL;
+    const message = error instanceof Error ? error.message : String(error);
     return { jsonrpc: '2.0', id, error: { code, message } };
   }
 }
 
-async function dispatch(req: JsonRpcRequest): Promise<void> {
-  const response = await handleMcpRequest(req);
+async function dispatch(request: JsonRpcRequest): Promise<void> {
+  const response = await handleMcpRequest(request);
   if (response) writeResponse(response);
 }
 
-// ---- stdio loop -----------------------------------------------------------
-
 export async function runMcpServer(): Promise<void> {
-  // MCP frames are newline-delimited JSON-RPC objects on stdin/stdout.
-  // stderr is reserved for log output so it doesn't corrupt the protocol.
-  const rl = createInterface({ input: process.stdin, terminal: false });
-
-  rl.on('line', (line) => {
+  const lines = createInterface({ input: process.stdin, terminal: false });
+  lines.on('line', (line) => {
     const trimmed = line.trim();
     if (!trimmed) return;
-
-    let req: JsonRpcRequest;
+    let request: JsonRpcRequest;
     try {
-      req = JSON.parse(trimmed) as JsonRpcRequest;
+      request = JSON.parse(trimmed) as JsonRpcRequest;
     } catch {
       fail(null, ERR_PARSE, 'Parse error: stdin is not valid JSON');
       return;
     }
-    if (req.jsonrpc !== '2.0' || typeof req.method !== 'string') {
-      fail(req.id ?? null, ERR_INVALID_REQUEST, 'Invalid JSON-RPC 2.0 request');
+    if (request.jsonrpc !== '2.0' || typeof request.method !== 'string') {
+      fail(request.id ?? null, ERR_INVALID_REQUEST, 'Invalid JSON-RPC 2.0 request');
       return;
     }
-    void dispatch(req);
+    void dispatch(request);
   });
+  try {
+    await new Promise<void>((resolve) => { lines.on('close', resolve); });
+  } finally {
+    await closeMcpControlClients();
+  }
+}
 
-  // Stay alive until stdin closes — clients (coven-code, etc.) signal end-of-
-  // session by closing their write end.
-  await new Promise<void>((resolve) => {
-    rl.on('close', () => resolve());
+async function readWorktrees(projectRoot: string): Promise<readonly WorktreeSummary[]> {
+  const raw = await new Promise<string>((resolve, reject) => {
+    execFile('git', ['-C', projectRoot, 'worktree', 'list', '--porcelain'], {
+      encoding: 'utf8', timeout: 5_000,
+    }, (error, stdout) => {
+      if (error) reject(Object.assign(new Error(`git worktree list failed: ${error.message}`), { code: ERR_INTERNAL }));
+      else resolve(stdout);
+    });
   });
+  const worktrees: WorktreeSummary[] = [];
+  let current: WorktreeSummary | undefined;
+  for (const line of raw.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      if (current) worktrees.push(current);
+      current = { path: line.slice('worktree '.length) };
+    } else if (current && line.startsWith('HEAD ')) current.head = line.slice('HEAD '.length);
+    else if (current && line.startsWith('branch ')) current.branch = line.slice('branch '.length);
+    else if (current && line === 'bare') current.bare = true;
+    else if (current && line === 'detached') current.detached = true;
+    else if (current && line.startsWith('locked')) current.locked = true;
+  }
+  if (current) worktrees.push(current);
+  return worktrees;
 }

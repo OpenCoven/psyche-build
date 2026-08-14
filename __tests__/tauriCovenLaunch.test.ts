@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  createPtyClient,
+  disposePtyClient,
+  routePtyBatch,
+} from '../native/desktop/psyche-build-tauri/web/runtime/pty-client';
 
 const repoRoot = process.cwd();
 const libRs = readFileSync(
@@ -13,6 +18,7 @@ const mainJs = readFileSync(
 );
 const COVEN_SESSION_ID = '12345678-1234-4abc-8def-1234567890ab';
 const DUPLICATE_COVEN_SESSION_ID = '87654321-4321-4cba-8fed-0987654321ba';
+const runtimeThreadIds = new Set<string>();
 
 function functionSource(name: string) {
   const asyncStart = mainJs.indexOf(`async function ${name}(`);
@@ -52,9 +58,28 @@ async function flushPromises(times = 2) {
   for (let index = 0; index < times; index += 1) await Promise.resolve();
 }
 
+afterEach(() => {
+  runtimeThreadIds.forEach((threadId) => disposePtyClient(threadId));
+  runtimeThreadIds.clear();
+  vi.restoreAllMocks();
+});
+
 const spawnPtyRuntimeDeps = {
   attentionTracker: { forget: () => undefined },
   syncThreadAttentionChrome: () => undefined,
+  ensureThreadPtyController(thread: Record<string, unknown>) {
+    if (thread.terminalController) return thread.terminalController;
+    const controller = {
+      prepareForPtyStart: () => 1,
+      restoreAfterFailedPtyStart: () => undefined,
+      adoptRunningPty: () => Promise.resolve(false),
+      markPtyStarted: () => Promise.resolve(false),
+      stopPtyDelivery: () => undefined,
+      dispose: () => undefined,
+    };
+    thread.terminalController = controller;
+    return controller;
+  },
 };
 
 describe('Tauri Coven launch project scope', () => {
@@ -208,6 +233,7 @@ describe('Tauri Coven launch project scope', () => {
         loadAgentSkills: () => { calls.push('loadAgentSkills'); },
         saveWorkspaceNow: () => { calls.push('saveWorkspaceNow'); },
         startCovenPolling: () => { calls.push('startCovenPolling'); },
+        installAgentControlUi: () => undefined,
         paneMetricsPollTimer: 0,
         clearInterval: () => { calls.push('clearInterval'); },
         setInterval: (_callback: () => void, ms: number) => {
@@ -350,6 +376,7 @@ describe('Tauri Coven launch project scope', () => {
         loadAgentSkills: () => { calls.push('loadAgentSkills'); },
         saveWorkspaceNow: () => { calls.push('saveWorkspaceNow'); },
         startCovenPolling: () => { calls.push('startCovenPolling'); },
+        installAgentControlUi: () => undefined,
         paneMetricsPollTimer: 0,
         clearInterval: () => { calls.push('clearInterval'); },
         setInterval: (_callback: () => void, ms: number) => {
@@ -1408,7 +1435,12 @@ describe('native Coven launch routing', () => {
     expect(state.threads).toEqual([thread]);
     await expect(retryThread(thread.id)).resolves.toBe(true);
     expect(thread.status).toBe('running');
+    const markPtyExited = vi.fn();
+    (thread as typeof thread & {
+      terminalController: { markPtyExited: () => void };
+    }).terminalController.markPtyExited = markPtyExited;
     expect(handlePtyExit({ thread_id: thread.id })).toBe(true);
+    expect(markPtyExited).toHaveBeenCalledTimes(1);
     expect(thread.status).toBe('exited');
     expect(thread.startInFlight).toBe(false);
     await expect(retryThread(thread.id)).resolves.toBe(false);
@@ -1503,29 +1535,57 @@ describe('native Coven launch routing', () => {
   });
 
   it('adopts an already-running Rust PTY response as the live retry', async () => {
-    const writes: Uint8Array[] = [];
-    const acknowledgements: string[] = [];
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const ackedSequences: number[] = [];
+    runtimeThreadIds.add('thread-1');
+    const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'pty_start') throw new Error('PTY already running for thread');
+      if (command === 'pty_ack') ackedSequences.push(args?.sequence as number);
+      return undefined;
+    });
+    const controller = createPtyClient({
+      threadId: 'thread-1',
+      invoke,
+      visible: true,
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+      },
+    });
+    await controller.markPtyStarted();
+    expect(routePtyBatch({
+      threadId: 'thread-1',
+      sequence: 1,
+      bytes: [1],
+      byteCount: 1,
+    })).toBe(true);
+    writes[0].callback();
+    await flushPromises();
+    expect(routePtyBatch({
+      threadId: 'thread-1',
+      sequence: 2,
+      bytes: [2],
+      byteCount: 1,
+    })).toBe(true);
+    writes[1].callback();
+    await flushPromises();
+
     const thread = {
       id: 'thread-1', projectId: 'project', status: 'failed', spawning: false,
       closing: false, closeStarted: false, startInFlight: false, stopRequested: true,
       ptyStarted: false, launch: {
         command: '/bin/coven', args: ['code', '--session-id', COVEN_SESSION_ID], env: {}, projectRoot: '/repo', cwd: '/repo',
         launchKind: 'coven-chat', covenSessionId: COVEN_SESSION_ID, metricsProvider: 'coven',
-      }, term: { cols: 120, rows: 40, write: (value: Uint8Array, callback?: () => void) => { writes.push(value); callback?.(); } },
+      }, term: { cols: 120, rows: 40, write: () => undefined },
+      terminalController: controller,
     };
     const state = { threads: [thread], activeThreadId: thread.id };
-    const buffered = new Uint8Array([1, 2, 3]);
-    const pendingDataBuffers = new Map([[thread.id, [{
-      bytes: buffered,
-      acknowledge: () => acknowledgements.push('acked'),
-    }]]]);
+
     const projectLevels: string[] = [];
     const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
       functionSource('spawnPty'), {
         ...spawnPtyRuntimeDeps,
-        invoke: async () => { throw new Error('PTY already running for thread'); },
+        invoke,
         isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
-        pendingDataBuffers,
         syncThreadPaneMetadata: () => undefined,
         refreshSidebar: () => undefined,
         refreshTabs: () => undefined,
@@ -1542,10 +1602,17 @@ describe('native Coven launch routing', () => {
     expect(thread.status).toBe('running');
     expect(thread.ptyStarted).toBe(true);
     expect(thread.stopRequested).toBe(false);
-    expect(writes).toEqual([buffered]);
-    expect(acknowledgements).toEqual(['acked']);
-    expect(pendingDataBuffers.has(thread.id)).toBe(false);
     expect(projectLevels).toEqual(['ok']);
+    expect(routePtyBatch({
+      threadId: 'thread-1',
+      sequence: 3,
+      bytes: [3],
+      byteCount: 1,
+    })).toBe(true);
+    expect(Array.from(writes[2].bytes)).toEqual([3]);
+    writes[2].callback();
+    await flushPromises();
+    expect(ackedSequences).toEqual([1, 2, 3]);
   });
 
   it('resets stale runtime state only when a PTY retry actually starts', async () => {
@@ -1568,7 +1635,7 @@ describe('native Coven launch routing', () => {
       launch: {
         command: '/bin/zsh', args: [], env: {}, projectRoot: '/repo', cwd: '/repo',
         launchKind: 'shell', covenSessionId: null,
-      }, term: null,
+      }, term: null, terminalController: null as Record<string, unknown> | null,
     };
     const state = { threads: [thread], activeThreadId: null };
     const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(source, {
@@ -1580,6 +1647,19 @@ describe('native Coven launch routing', () => {
           needsAttention: value.needsAttention,
           attentionReason: value.attentionReason,
         });
+      },
+      ensureThreadPtyController(current: typeof thread) {
+        if (current.terminalController) return current.terminalController;
+        const controller = {
+          prepareForPtyStart: () => 1,
+          restoreAfterFailedPtyStart: () => undefined,
+          adoptRunningPty: () => Promise.resolve(false),
+          markPtyStarted: () => Promise.resolve(false),
+          stopPtyDelivery: () => undefined,
+          dispose: () => undefined,
+        };
+        current.terminalController = controller;
+        return controller;
       },
       invoke: async () => undefined,
       isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,

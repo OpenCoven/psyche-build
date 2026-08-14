@@ -12,8 +12,23 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "macos")]
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+#[cfg(target_os = "macos")]
+use objc2::{
+    runtime::{AnyObject, Imp, Sel},
+    sel,
+};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{
+    NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSImage,
+};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSDictionary, NSError, NSString, NSURLRequest, NSURL};
+#[cfg(target_os = "macos")]
+use objc2_web_kit::{WKNavigation, WKWebView};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -23,6 +38,7 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
 };
 
+mod control_provider;
 mod coven_sessions;
 mod metrics;
 mod native_workspace;
@@ -30,18 +46,35 @@ mod pane_metrics;
 mod platform;
 pub mod pty_transport;
 mod workspace_contract;
+use control_provider::{
+    control_operator_submit, control_provider_complete, control_provider_remove,
+    control_provider_shutdown, control_provider_start, control_provider_stop,
+    control_provider_upsert, control_state, ControlProviderState,
+};
+
 use coven_sessions::is_safe_session_id;
 use coven_sessions::{coven_session_kill, coven_sessions};
 use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
 use native_workspace::{workspace_load, workspace_save};
 use pane_metrics::PaneSessionMetrics;
 use pty_transport::{
-    coordinate_exit_shutdown, CompletionOutcome, DrainOutcome, EnqueueError, ExitShutdownHooks,
-    ExitShutdownOutcome, FinalOutputPumpSnapshot, OutputPump, RecentOutputSnapshots,
-    TransportSessionKey, EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
+    coordinate_exit_shutdown, AckOutcome as TransportAckOutcome, CompletionOutcome, DrainOutcome,
+    EnqueueError, ExitShutdownHooks, ExitShutdownOutcome, FinalOutputPumpSnapshot, OutputPump,
+    OutputPumpMetrics as TransportOutputPumpMetrics,
+    OutputPumpSnapshot as TransportOutputPumpSnapshot, PaneVisibility as TransportPaneVisibility,
+    PumpMetrics as TransportPumpMetrics, RecentOutputSnapshots, TransportSessionKey,
+    EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
+
 };
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
+const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_PROVIDER_RESULT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_BROWSER_SNAPSHOT_JSON_OVERHEAD: usize = 64 * 1024;
+const MAX_BROWSER_SNAPSHOT_BYTES: usize =
+    (MAX_PROVIDER_RESULT_BYTES - MAX_BROWSER_SNAPSHOT_JSON_OVERHEAD) / 4 * 3;
+const MAX_BROWSER_SNAPSHOT_DIMENSION: u32 = 8192;
+const MAX_BROWSER_SNAPSHOT_PIXELS: u64 = 16 * 1024 * 1024;
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
 const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
@@ -57,6 +90,30 @@ fn safe_browser_label(label: Option<String>) -> String {
         BROWSER_LABEL_PREFIX,
         if safe.is_empty() { "default" } else { &safe }
     )
+}
+
+fn ensure_trusted_browser_caller(label: &str) -> Result<(), String> {
+    if label == "main" {
+        return Ok(());
+    }
+    Err(format!(
+        "browser automation authority is only available to trusted webview 'main'; rejected caller '{label}'"
+    ))
+}
+
+fn validate_browser_snapshot_dimensions(width: u32, height: u32) -> Result<(), String> {
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| "browser snapshot dimensions overflow".to_string())?;
+    if width == 0
+        || height == 0
+        || width > MAX_BROWSER_SNAPSHOT_DIMENSION
+        || height > MAX_BROWSER_SNAPSHOT_DIMENSION
+        || pixels > MAX_BROWSER_SNAPSHOT_PIXELS
+    {
+        return Err("browser snapshot dimensions exceed maximum".to_string());
+    }
+    Ok(())
 }
 
 // ----------------------------------------------------------------------------
@@ -1596,6 +1653,111 @@ pub struct BrowserPageLoadEvent {
     pub label: String,
     pub url: String,
     pub phase: String,
+    pub navigation_token: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BrowserNavigationResult {
+    terminal_url: String,
+}
+
+struct BrowserNavigationWaiter {
+    token: String,
+    navigation_identity: Option<usize>,
+    completion: Option<tokio::sync::oneshot::Sender<Result<BrowserNavigationResult, String>>>,
+}
+
+struct BrowserNavigationWaiterGuard {
+    label: String,
+    token: String,
+}
+
+impl Drop for BrowserNavigationWaiterGuard {
+    fn drop(&mut self) {
+        let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+        if waiters
+            .get(&self.label)
+            .is_some_and(|waiter| waiter.token == self.token)
+        {
+            waiters.remove(&self.label);
+        }
+    }
+}
+
+static BROWSER_NAVIGATION_WAITERS: Lazy<Mutex<HashMap<String, BrowserNavigationWaiter>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn complete_browser_navigation(navigation_identity: usize, terminal_url: &str) -> bool {
+    let completion = {
+        let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+        let label = waiters.iter().find_map(|(label, waiter)| {
+            (waiter.navigation_identity == Some(navigation_identity)).then(|| label.clone())
+        });
+        label.and_then(|label| {
+            waiters
+                .remove(&label)
+                .and_then(|mut waiter| waiter.completion.take())
+        })
+    };
+    if let Some(completion) = completion {
+        let result = if terminal_url.is_empty() {
+            Err("browser navigation terminal URL is unavailable".to_string())
+        } else {
+            Ok(BrowserNavigationResult {
+                terminal_url: terminal_url.to_string(),
+            })
+        };
+        let _ = completion.send(result);
+        return true;
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+static ORIGINAL_BROWSER_DID_FINISH_NAVIGATION: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(target_os = "macos")]
+static BROWSER_NAVIGATION_HOOK_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn browser_did_finish_navigation(
+    delegate: &AnyObject,
+    selector: Sel,
+    webview: &WKWebView,
+    navigation: &WKNavigation,
+) {
+    let original = ORIGINAL_BROWSER_DID_FINISH_NAVIGATION.load(Ordering::Acquire);
+    if original != 0 {
+        let original: unsafe extern "C-unwind" fn(&AnyObject, Sel, &WKWebView, &WKNavigation) =
+            unsafe { std::mem::transmute(original) };
+        unsafe { original(delegate, selector, webview, navigation) };
+    }
+    let navigation_identity = navigation as *const WKNavigation as usize;
+    let terminal_url = unsafe { webview.URL() }
+        .and_then(|url| url.absoluteString())
+        .map(|url| url.to_string())
+        .unwrap_or_default();
+    complete_browser_navigation(navigation_identity, &terminal_url);
+}
+
+#[cfg(target_os = "macos")]
+fn install_browser_navigation_identity_hook(delegate: &AnyObject) -> Result<(), String> {
+    let _install_guard = BROWSER_NAVIGATION_HOOK_LOCK.lock();
+    if ORIGINAL_BROWSER_DID_FINISH_NAVIGATION.load(Ordering::Acquire) != 0 {
+        return Ok(());
+    }
+    let class = delegate.class();
+    let method = class
+        .instance_method(sel!(webView:didFinishNavigation:))
+        .ok_or_else(|| "browser navigation delegate finish hook is unavailable".to_string())?;
+    let replacement: unsafe extern "C-unwind" fn(&AnyObject, Sel, &WKWebView, &WKNavigation) =
+        browser_did_finish_navigation;
+    let replacement: Imp = unsafe { std::mem::transmute(replacement) };
+    let original = method.implementation() as usize;
+    ORIGINAL_BROWSER_DID_FINISH_NAVIGATION.store(original, Ordering::Release);
+    unsafe { method.set_implementation(replacement) };
+    Ok(())
 }
 
 fn pump_pty_reader<R: Read>(mut reader: R, pump: OutputPump) -> Result<(), String> {
@@ -2019,6 +2181,190 @@ pub fn latest_pty_transport_snapshot(thread_id: &str) -> Option<FinalOutputPumpS
         .cloned()
 }
 
+fn validate_pty_thread_id(thread_id: &str) -> Result<(), String> {
+    if is_safe_session_id(thread_id) {
+        Ok(())
+    } else {
+        Err("thread id is unsafe".to_string())
+    }
+}
+
+fn clone_live_pty_pump(thread_id: &str) -> Result<OutputPump, String> {
+    validate_pty_thread_id(thread_id)?;
+    let guard = PTY_LIFECYCLES.lock();
+    guard
+        .live(thread_id)
+        .map(|session| session.pump.clone())
+        .ok_or_else(|| format!("thread '{}' not found", thread_id))
+}
+
+fn duration_to_micros(duration: std::time::Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum AckOutcome {
+    Advanced {
+        sequence: u64,
+        bytes: usize,
+        latency_micros: u64,
+    },
+    Duplicate {
+        sequence: u64,
+    },
+}
+
+impl From<TransportAckOutcome> for AckOutcome {
+    fn from(outcome: TransportAckOutcome) -> Self {
+        match outcome {
+            TransportAckOutcome::Advanced {
+                sequence,
+                bytes,
+                latency,
+                ..
+            } => Self::Advanced {
+                sequence,
+                bytes,
+                latency_micros: duration_to_micros(latency),
+            },
+            TransportAckOutcome::Duplicate { sequence } => Self::Duplicate { sequence },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum PtyTransportVisibility {
+    Visible,
+    Hidden,
+}
+
+impl From<TransportPaneVisibility> for PtyTransportVisibility {
+    fn from(visibility: TransportPaneVisibility) -> Self {
+        match visibility {
+            TransportPaneVisibility::Visible => Self::Visible,
+            TransportPaneVisibility::Hidden => Self::Hidden,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PtyTransportStateMetrics {
+    bytes_accepted: u64,
+    fragments_accepted: u64,
+    bytes_emitted: u64,
+    batches_emitted: u64,
+    bytes_acknowledged: u64,
+    batches_acknowledged: u64,
+    push_would_block_count: u64,
+    pending_bytes_high_water: usize,
+    pending_fragments_high_water: usize,
+    in_flight_batches_high_water: usize,
+    in_flight_bytes_high_water: usize,
+    total_ack_latency_micros: u64,
+    max_ack_latency_micros: u64,
+}
+
+impl From<TransportPumpMetrics> for PtyTransportStateMetrics {
+    fn from(metrics: TransportPumpMetrics) -> Self {
+        Self {
+            bytes_accepted: metrics.bytes_accepted,
+            fragments_accepted: metrics.fragments_accepted,
+            bytes_emitted: metrics.bytes_emitted,
+            batches_emitted: metrics.batches_emitted,
+            bytes_acknowledged: metrics.bytes_acknowledged,
+            batches_acknowledged: metrics.batches_acknowledged,
+            push_would_block_count: metrics.push_would_block_count,
+            pending_bytes_high_water: metrics.pending_bytes_high_water,
+            pending_fragments_high_water: metrics.pending_fragments_high_water,
+            in_flight_batches_high_water: metrics.in_flight_batches_high_water,
+            in_flight_bytes_high_water: metrics.in_flight_bytes_high_water,
+            total_ack_latency_micros: duration_to_micros(metrics.total_ack_latency),
+            max_ack_latency_micros: duration_to_micros(metrics.max_ack_latency),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PtyTransportMetrics {
+    state: PtyTransportStateMetrics,
+    blocked_reader_count: u64,
+    total_blocked_reader_duration_micros: u64,
+    max_blocked_reader_duration_micros: u64,
+    emit_failure_count: u64,
+    emit_retry_count: u64,
+    visibility_transition_count: u64,
+    drain_timeout_count: u64,
+    worker_error_count: u64,
+}
+
+impl From<TransportOutputPumpMetrics> for PtyTransportMetrics {
+    fn from(metrics: TransportOutputPumpMetrics) -> Self {
+        Self {
+            state: metrics.state.into(),
+            blocked_reader_count: metrics.blocked_reader_count,
+            total_blocked_reader_duration_micros: duration_to_micros(
+                metrics.total_blocked_reader_duration,
+            ),
+            max_blocked_reader_duration_micros: duration_to_micros(
+                metrics.max_blocked_reader_duration,
+            ),
+            emit_failure_count: metrics.emit_failure_count,
+            emit_retry_count: metrics.emit_retry_count,
+            visibility_transition_count: metrics.visibility_transition_count,
+            drain_timeout_count: metrics.drain_timeout_count,
+            worker_error_count: metrics.worker_error_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PtyTransportSnapshot {
+    thread_id: String,
+    pending_bytes: usize,
+    pending_fragments: usize,
+    queued_bytes: usize,
+    queue_depth: usize,
+    prepared: bool,
+    in_flight_batches: usize,
+    in_flight_bytes: usize,
+    last_acked_sequence: u64,
+    blocked_producers: usize,
+    visibility: PtyTransportVisibility,
+    effective_cadence_micros: u64,
+    draining: bool,
+    cancelled: bool,
+    worker_running: bool,
+    metrics: PtyTransportMetrics,
+}
+
+impl From<TransportOutputPumpSnapshot> for PtyTransportSnapshot {
+    fn from(snapshot: TransportOutputPumpSnapshot) -> Self {
+        Self {
+            thread_id: snapshot.thread_id,
+            pending_bytes: snapshot.pending_bytes,
+            pending_fragments: snapshot.pending_fragments,
+            queued_bytes: snapshot.queued_bytes,
+            queue_depth: snapshot.queue_depth,
+            prepared: snapshot.prepared,
+            in_flight_batches: snapshot.in_flight_batches,
+            in_flight_bytes: snapshot.in_flight_bytes,
+            last_acked_sequence: snapshot.last_acked_sequence,
+            blocked_producers: snapshot.blocked_producers,
+            visibility: snapshot.visibility.into(),
+            effective_cadence_micros: duration_to_micros(snapshot.effective_cadence),
+            draining: snapshot.draining,
+            cancelled: snapshot.cancelled,
+            worker_running: snapshot.worker_running,
+            metrics: snapshot.metrics.into(),
+        }
+    }
+}
+
 #[tauri::command]
 fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let thread_id = options.thread_id.clone();
@@ -2184,7 +2530,9 @@ fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
         let session = guard
             .live(&thread_id)
             .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
-        Arc::clone(&session.writer)
+        let writer = Arc::clone(&session.writer);
+        drop(guard);
+        writer
     };
     let mut writer = writer.lock();
     writer.write_all(&bytes).map_err(|e| e.to_string())?;
@@ -2210,9 +2558,11 @@ fn pty_ack(thread_id: String, sequence: u64) -> Result<(), String> {
 fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
     let master = {
         let guard = PTY_LIFECYCLES.lock();
-        guard
+        let master = guard
             .live(&thread_id)
-            .map(|session| Arc::clone(&session.master))
+            .map(|session| Arc::clone(&session.master));
+        drop(guard);
+        master
     };
     if let Some(master) = master {
         master
@@ -2268,8 +2618,57 @@ fn pty_stop(thread_id: String) -> Result<PtyStopResult, String> {
 }
 
 #[tauri::command]
+fn pty_ack(thread_id: String, sequence: u64) -> Result<AckOutcome, String> {
+    let pump = clone_live_pty_pump(&thread_id)?;
+    pump.acknowledge(sequence)
+        .map(AckOutcome::from)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pty_set_visibility(thread_id: String, visible: bool) -> Result<(), String> {
+    let pump = clone_live_pty_pump(&thread_id)?;
+    pump.set_visibility(if visible {
+        TransportPaneVisibility::Visible
+    } else {
+        TransportPaneVisibility::Hidden
+    });
+    Ok(())
+}
+
+#[tauri::command]
 fn pty_list() -> Vec<String> {
     PTY_LIFECYCLES.lock().live_thread_ids()
+}
+
+#[tauri::command]
+fn pty_transport_metrics(thread_id: Option<String>) -> Vec<PtyTransportSnapshot> {
+    let pumps = match thread_id {
+        Some(thread_id) => {
+            if validate_pty_thread_id(&thread_id).is_err() {
+                return Vec::new();
+            }
+            let guard = PTY_LIFECYCLES.lock();
+            guard
+                .live(&thread_id)
+                .map(|session| vec![session.pump.clone()])
+                .unwrap_or_default()
+        }
+        None => {
+            let guard = PTY_LIFECYCLES.lock();
+            guard
+                .live_sessions()
+                .into_iter()
+                .map(|(_, session)| session.pump.clone())
+                .collect::<Vec<_>>()
+        }
+    };
+    let mut snapshots = pumps
+        .into_iter()
+        .map(|pump| PtyTransportSnapshot::from(pump.snapshot()))
+        .collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+    snapshots
 }
 
 #[tauri::command]
@@ -2305,6 +2704,214 @@ async fn workspace_metrics(
 // Embedded browser pane (Tauri child Webview)
 // ----------------------------------------------------------------------------
 
+#[derive(Clone, Serialize)]
+struct BrowserAppShortcutPayload {
+    label: String,
+    url: String,
+}
+
+#[derive(Debug)]
+struct BrowserShortcutAuthorization {
+    initial_secret: String,
+    current_secret: String,
+    last_accepted: Option<Instant>,
+}
+
+#[derive(Default)]
+struct BrowserShortcutAuthorizations {
+    by_label: Mutex<HashMap<String, BrowserShortcutAuthorization>>,
+}
+
+impl BrowserShortcutAuthorizations {
+    fn install(&self, label: &str, initial_secret: String) {
+        self.by_label.lock().insert(
+            label.to_string(),
+            BrowserShortcutAuthorization {
+                current_secret: initial_secret.clone(),
+                initial_secret,
+                last_accepted: None,
+            },
+        );
+    }
+
+    fn reset(&self, label: &str) -> bool {
+        let mut authorizations = self.by_label.lock();
+        let Some(authorization) = authorizations.get_mut(label) else {
+            return false;
+        };
+        authorization.current_secret = authorization.initial_secret.clone();
+        authorization.last_accepted = None;
+        true
+    }
+
+    fn remove(&self, label: &str) -> bool {
+        self.by_label.lock().remove(label).is_some()
+    }
+
+    fn authorize_and_rotate<GenerateSecret, Dispatch>(
+        &self,
+        label: &str,
+        supplied_secret: &str,
+        now: Instant,
+        generate_secret: GenerateSecret,
+        dispatch: Dispatch,
+    ) -> Result<String, String>
+    where
+        GenerateSecret: FnOnce() -> Result<String, String>,
+        Dispatch: FnOnce() -> Result<(), String>,
+    {
+        if !label.starts_with(BROWSER_LABEL_PREFIX) {
+            return Err(
+                "browser app shortcut caller is not an embedded browser webview".to_string(),
+            );
+        }
+
+        let mut authorizations = self.by_label.lock();
+        let authorization = authorizations
+            .get_mut(label)
+            .ok_or_else(|| "browser app shortcut authorization is missing".to_string())?;
+        if !browser_shortcut_secrets_match(&authorization.current_secret, supplied_secret) {
+            return Err("browser app shortcut secret is invalid".to_string());
+        }
+        if authorization.last_accepted.is_some_and(|last_accepted| {
+            now.saturating_duration_since(last_accepted) < MIN_BROWSER_SHORTCUT_INTERVAL
+        }) {
+            return Err("browser app shortcut rate limit exceeded".to_string());
+        }
+
+        let next_secret = generate_secret()?;
+        if next_secret.is_empty()
+            || browser_shortcut_secrets_match(&authorization.current_secret, &next_secret)
+        {
+            return Err("browser app shortcut secret rotation failed".to_string());
+        }
+        dispatch()?;
+        authorization.current_secret = next_secret.clone();
+        authorization.last_accepted = Some(now);
+        Ok(next_secret)
+    }
+}
+
+fn browser_shortcut_secrets_match(expected: &str, supplied: &str) -> bool {
+    expected.len() == supplied.len()
+        && expected
+            .bytes()
+            .zip(supplied.bytes())
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
+}
+
+fn random_browser_shortcut_secret() -> Result<String, String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| format!("failed to generate browser shortcut secret: {error}"))?;
+    let mut secret = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        secret.push(HEX[(byte >> 4) as usize] as char);
+        secret.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(secret)
+}
+
+fn browser_shortcut_initialization_script(initial_secret: &str) -> Result<String, String> {
+    let secret_json = serde_json::to_string(initial_secret).map_err(|error| error.to_string())?;
+    Ok(r#"(function(initialSecret) {
+          try {
+            if (window.top !== window) return;
+            var core = window.__TAURI__ && window.__TAURI__.core;
+            if (!core || typeof core.invoke !== "function") return;
+            var invoke = core.invoke;
+            var promiseThen = Promise.prototype.then;
+            var reflectApply = Reflect.apply;
+            var stringToLowerCase = String.prototype.toLowerCase;
+            var secret = initialSecret;
+            window.addEventListener("keydown", function(event) {
+              try {
+                if (event.isTrusted !== true || event.repeat) return;
+                var key = event.key ? reflectApply(stringToLowerCase, event.key, []) : "";
+                var primary = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
+                var shortcut = "";
+                if ((event.metaKey || event.ctrlKey) && key === "t") {
+                  shortcut = "terminal-pane";
+                } else if (primary && key === "d") {
+                  shortcut = "agent-pane";
+                } else if (primary && key === "f") {
+                  shortcut = "composer";
+                } else {
+                  return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                var pending = reflectApply(invoke, core, [
+                  "browser_app_shortcut",
+                  { shortcut: shortcut, url: location.href, secret: secret }
+                ]);
+                reflectApply(promiseThen, pending, [
+                  function(nextSecret) {
+                    if (typeof nextSecret === "string" && nextSecret) {
+                      secret = nextSecret;
+                    }
+                  },
+                  function() {}
+                ]);
+              } catch (_) {}
+            }, true);
+          } catch (_) {}
+        })(__PSYCHE_BROWSER_SHORTCUT_INITIAL_SECRET__);"#
+        .replace("__PSYCHE_BROWSER_SHORTCUT_INITIAL_SECRET__", &secret_json))
+}
+
+fn resolve_browser_app_shortcut(label: &str, shortcut: &str) -> Result<&'static str, String> {
+    if !label.starts_with(BROWSER_LABEL_PREFIX) {
+        return Err("browser app shortcut caller is not an embedded browser webview".to_string());
+    }
+
+    match shortcut {
+        "terminal-pane" => Ok("browser:shortcut-terminal-pane"),
+        "agent-pane" => Ok("browser:shortcut-agent-pane"),
+        "composer" => Ok("browser:shortcut-composer"),
+        _ => Err(format!("unknown browser app shortcut: {shortcut}")),
+    }
+}
+
+#[tauri::command]
+fn browser_app_shortcut(
+    webview: tauri::Webview,
+    authorizations: State<'_, BrowserShortcutAuthorizations>,
+    shortcut: String,
+    url: String,
+    secret: String,
+) -> Result<String, String> {
+    let event = resolve_browser_app_shortcut(webview.label(), &shortcut)?;
+    authorizations.authorize_and_rotate(
+        webview.label(),
+        &secret,
+        Instant::now(),
+        random_browser_shortcut_secret,
+        || {
+            let main = webview
+                .app_handle()
+                .get_webview("main")
+                .ok_or_else(|| "main webview missing".to_string())?;
+            main.set_focus().map_err(|error| error.to_string())?;
+            webview
+                .app_handle()
+                .emit_to(
+                    "main",
+                    event,
+                    BrowserAppShortcutPayload {
+                        label: webview.label().to_string(),
+                        url,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
 fn ensure_browser(
     app: &AppHandle,
     label: &str,
@@ -2313,6 +2920,7 @@ fn ensure_browser(
     w: f64,
     h: f64,
     url: &str,
+    automation_source: &str,
 ) -> Result<bool, String> {
     if app.webviews().keys().any(|existing| existing == label) {
         return Ok(false);
@@ -2323,20 +2931,36 @@ fn ensure_browser(
         .ok_or_else(|| "main window missing".to_string())?;
 
     let parsed_url = Url::parse(url).map_err(|e| e.to_string())?;
+    let initial_secret = random_browser_shortcut_secret()?;
+    let shortcut_script = browser_shortcut_initialization_script(&initial_secret)?;
+    app.state::<BrowserShortcutAuthorizations>()
+        .install(label, initial_secret.clone());
     let browser_label = label.to_string();
     let app_for_load = app.clone();
-    let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url)).on_page_load(
-        move |webview, payload| {
+    let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url))
+        .initialization_script(shortcut_script)
+        .initialization_script(automation_source)
+        .on_page_load(move |webview, payload| {
+            if matches!(payload.event(), PageLoadEvent::Started) {
+                app_for_load
+                    .state::<BrowserShortcutAuthorizations>()
+                    .reset(&browser_label);
+            }
             let phase = match payload.event() {
                 PageLoadEvent::Started => "started",
                 PageLoadEvent::Finished => "finished",
             };
+            // Wry's page-load callback omits WKNavigation identity. Controlled
+            // navigation therefore never attaches its token here; completion
+            // is resolved only by the exact native WKNavigation hook below.
+            let navigation_token = None;
             let _ = app_for_load.emit(
                 "browser:page-load",
                 BrowserPageLoadEvent {
                     label: browser_label.clone(),
                     url: payload.url().to_string(),
                     phase: phase.to_string(),
+                    navigation_token,
                 },
             );
             if matches!(payload.event(), PageLoadEvent::Finished) {
@@ -2351,17 +2975,8 @@ fn ensure_browser(
                         }};
                         var title = document.title || location.hostname || location.href;
                         emit("browser:title", {{ label: browserLabel, title: title, url: location.href }});
-                        if (!window.__PSYCHE_BROWSER_SHORTCUTS_INSTALLED__) {{
-                          window.__PSYCHE_BROWSER_SHORTCUTS_INSTALLED__ = true;
-                          window.addEventListener("keydown", function(event) {{
-                            try {{
-                              if ((event.metaKey || event.ctrlKey) && event.key && event.key.toLowerCase() === "t") {{
-                                event.preventDefault();
-                                event.stopPropagation();
-                                emit("browser:shortcut-terminal-pane", {{ label: browserLabel, url: location.href }});
-                              }}
-                            }} catch (_) {{}}
-                          }}, true);
+                        if (!window.__PSYCHE_BROWSER_FOCUS_INSTALLED__) {{
+                          window.__PSYCHE_BROWSER_FOCUS_INSTALLED__ = true;
                           window.addEventListener("pointerdown", function() {{
                             emit("browser:focus", {{ label: browserLabel, url: location.href }});
                           }}, true);
@@ -2375,15 +2990,16 @@ fn ensure_browser(
                 );
                 let _ = webview.eval(&script);
             }
-        },
-    );
+        });
 
-    main.add_child(
+    if let Err(error) = main.add_child(
         builder,
         LogicalPosition::new(x, y),
         LogicalSize::new(w.max(1.0), h.max(1.0)),
-    )
-    .map_err(|e| e.to_string())?;
+    ) {
+        app.state::<BrowserShortcutAuthorizations>().remove(label);
+        return Err(error.to_string());
+    }
 
     Ok(true)
 }
@@ -2398,8 +3014,68 @@ fn hide_webview(webview: &tauri::Webview) -> Result<(), String> {
     Ok(())
 }
 
+fn cleanup_created_browser_after_setup_failure(
+    created: bool,
+    close: impl FnOnce() -> Result<(), String>,
+) {
+    if created {
+        let _ = close();
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn start_browser_navigation(
+    webview: &tauri::Webview,
+    label: &str,
+    url: &str,
+) -> Result<(), String> {
+    let label = label.to_string();
+    let url = url.to_string();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    webview
+        .with_webview(move |platform_webview| unsafe {
+            let result = (|| {
+                let wk_webview = &*(platform_webview.inner().cast::<WKWebView>());
+                let delegate = wk_webview
+                    .navigationDelegate()
+                    .ok_or_else(|| "browser navigation delegate is unavailable".to_string())?;
+                let delegate_object = &*((&*delegate) as *const _ as *const AnyObject);
+                install_browser_navigation_identity_hook(delegate_object)?;
+                let url_string = NSString::from_str(&url);
+                let native_url = NSURL::URLWithString(&url_string)
+                    .ok_or_else(|| "browser navigation URL is invalid".to_string())?;
+                let request = NSURLRequest::requestWithURL(&native_url);
+                let navigation = wk_webview
+                    .loadRequest(&request)
+                    .ok_or_else(|| "browser navigation did not start".to_string())?;
+                let navigation_identity = (&*navigation) as *const WKNavigation as usize;
+                let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+                let waiter = waiters
+                    .get_mut(&label)
+                    .ok_or_else(|| "browser navigation waiter is missing".to_string())?;
+                waiter.navigation_identity = Some(navigation_identity);
+                Ok(())
+            })();
+            let _ = sender.send(result);
+        })
+        .map_err(|error| error.to_string())?;
+    receiver
+        .await
+        .map_err(|_| "browser navigation setup was cancelled".to_string())?
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn start_browser_navigation(
+    _webview: &tauri::Webview,
+    _label: &str,
+    _url: &str,
+) -> Result<(), String> {
+    Err("backend_unavailable: exact browser navigation identity is unsupported".to_string())
+}
+
 #[tauri::command]
-fn browser_navigate(
+async fn browser_navigate(
+    webview: tauri::Webview,
     app: AppHandle,
     label: Option<String>,
     url: String,
@@ -2407,27 +3083,72 @@ fn browser_navigate(
     y: f64,
     w: f64,
     h: f64,
-) -> Result<(), String> {
+    navigation_token: String,
+    automation_source: String,
+) -> Result<BrowserNavigationResult, String> {
+    ensure_trusted_browser_caller(webview.label())?;
+    if navigation_token.is_empty() || navigation_token.len() > 128 {
+        return Err("browser navigation token is invalid".to_string());
+    }
+    if automation_source.is_empty() || automation_source.len() > 1024 * 1024 {
+        return Err("browser automation initialization source is invalid".to_string());
+    }
     let label = safe_browser_label(label);
-    let created = ensure_browser(&app, &label, x, y, w, h, &url)?;
+    Url::parse(&url).map_err(|error| error.to_string())?;
+    let (completion, receiver) = tokio::sync::oneshot::channel();
+    {
+        let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+        if waiters.contains_key(&label) {
+            return Err("browser navigation is already in progress".to_string());
+        }
+        waiters.insert(
+            label.clone(),
+            BrowserNavigationWaiter {
+                token: navigation_token.clone(),
+                navigation_identity: None,
+                completion: Some(completion),
+            },
+        );
+    }
+    let _waiter_guard = BrowserNavigationWaiterGuard {
+        label: label.clone(),
+        token: navigation_token.clone(),
+    };
+    let created = ensure_browser(&app, &label, x, y, w, h, &url, &automation_source)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser webview missing".to_string())?;
     if !created {
-        let webview = app
-            .get_webview(&label)
-            .ok_or_else(|| "browser webview missing".to_string())?;
         webview
             .set_position(LogicalPosition::new(x, y))
             .map_err(|e| e.to_string())?;
         webview
             .set_size(LogicalSize::new(w.max(1.0), h.max(1.0)))
             .map_err(|e| e.to_string())?;
-        let parsed_url = Url::parse(&url).map_err(|e| e.to_string())?;
-        webview.navigate(parsed_url).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    if let Err(error) = start_browser_navigation(&webview, &label, &url).await {
+        cleanup_created_browser_after_setup_failure(created, || {
+            webview
+                .close()
+                .map_err(|close_error| close_error.to_string())
+        });
+        return Err(error);
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(30), receiver).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("browser navigation was cancelled".to_string()),
+        Err(_) => {
+            if let Some(webview) = app.get_webview(&label) {
+                let _ = webview.close();
+            }
+            Err("browser navigation timed out".to_string())
+        }
+    }
 }
 
 #[tauri::command]
 fn browser_set_bounds(
+    webview: tauri::Webview,
     app: AppHandle,
     label: Option<String>,
     x: f64,
@@ -2435,6 +3156,7 @@ fn browser_set_bounds(
     w: f64,
     h: f64,
 ) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
         webview
@@ -2448,7 +3170,12 @@ fn browser_set_bounds(
 }
 
 #[tauri::command]
-fn browser_hide(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_hide(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
         hide_webview(&webview)?;
@@ -2457,7 +3184,12 @@ fn browser_hide(app: AppHandle, label: Option<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn browser_hide_all_except(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_hide_all_except(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let keep = label.map(|raw| safe_browser_label(Some(raw)));
     for (existing_label, webview) in app.webviews() {
         if existing_label.starts_with(BROWSER_LABEL_PREFIX) && Some(existing_label.clone()) != keep
@@ -2470,14 +3202,21 @@ fn browser_hide_all_except(app: AppHandle, label: Option<String>) -> Result<(), 
 
 fn destroy_browser_webview(app: &AppHandle, label: Option<String>) -> Result<(), String> {
     let label = safe_browser_label(label);
+    BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
     if let Some(webview) = app.get_webview(&label) {
         webview.close().map_err(|error| error.to_string())?;
     }
+    app.state::<BrowserShortcutAuthorizations>().remove(&label);
     Ok(())
 }
 
 #[tauri::command]
-fn browser_destroy(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_destroy(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     destroy_browser_webview(&app, label)
 }
 
@@ -2496,7 +3235,12 @@ struct BrowserDestroyManyOutcome {
 }
 
 #[tauri::command]
-fn browser_destroy_many(app: AppHandle, labels: Vec<String>) -> BrowserDestroyManyOutcome {
+fn browser_destroy_many(
+    webview: tauri::Webview,
+    app: AppHandle,
+    labels: Vec<String>,
+) -> Result<BrowserDestroyManyOutcome, String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let mut outcome = BrowserDestroyManyOutcome {
         destroyed: Vec::new(),
         failures: Vec::new(),
@@ -2509,11 +3253,16 @@ fn browser_destroy_many(app: AppHandle, labels: Vec<String>) -> BrowserDestroyMa
                 .push(BrowserDestroyFailure { label, error }),
         }
     }
-    outcome
+    Ok(outcome)
 }
 
 #[tauri::command]
-fn browser_reload(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_reload(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
         webview.reload().map_err(|e| e.to_string())?;
@@ -2522,12 +3271,110 @@ fn browser_reload(app: AppHandle, label: Option<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn browser_eval(app: AppHandle, label: Option<String>, script: String) -> Result<(), String> {
+fn browser_eval(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+    script: String,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
         webview.eval(&script).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserSnapshot {
+    png_base64: String,
+    width: u32,
+    height: u32,
+}
+
+/// Captures only an exact child browser webview. macOS uses that child's native
+/// WKWebView snapshot API; other platforms fail closed without desktop or
+/// coordinate capture.
+#[tauri::command]
+async fn browser_snapshot(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<BrowserSnapshot, String> {
+    ensure_trusted_browser_caller(webview.label())?;
+    let label = safe_browser_label(label);
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser webview missing".to_string())?;
+    let size = webview.size().map_err(|error| error.to_string())?;
+    validate_browser_snapshot_dimensions(size.width, size.height)?;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = webview;
+        return Err(
+            "backend_unavailable: browser snapshot is unsupported on this platform".to_string(),
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        webview
+            .with_webview(move |platform_webview| unsafe {
+                let wk_webview = &*(platform_webview.inner().cast::<WKWebView>());
+                let sender = std::sync::Mutex::new(Some(sender));
+                let completion =
+                    block2::RcBlock::new(move |image: *mut NSImage, _error: *mut NSError| {
+                        let result = (|| {
+                            let image = image
+                                .as_ref()
+                                .ok_or_else(|| "browser snapshot failed".to_string())?;
+                            let tiff = image
+                                .TIFFRepresentation()
+                                .ok_or_else(|| "browser snapshot encoding failed".to_string())?;
+                            let bitmap =
+                                NSBitmapImageRep::imageRepWithData(&tiff).ok_or_else(|| {
+                                    "browser snapshot bitmap is unavailable".to_string()
+                                })?;
+                            let width = u32::try_from(bitmap.pixelsWide())
+                                .map_err(|_| "browser snapshot width is invalid".to_string())?;
+                            let height = u32::try_from(bitmap.pixelsHigh())
+                                .map_err(|_| "browser snapshot height is invalid".to_string())?;
+                            validate_browser_snapshot_dimensions(width, height)?;
+                            let properties =
+                                NSDictionary::<NSBitmapImageRepPropertyKey, AnyObject>::new();
+                            let png = bitmap
+                                .representationUsingType_properties(
+                                    NSBitmapImageFileType::PNG,
+                                    &properties,
+                                )
+                                .ok_or_else(|| {
+                                    "browser snapshot PNG encoding failed".to_string()
+                                })?;
+                            let bytes = png.as_bytes_unchecked();
+                            if bytes.len() > MAX_BROWSER_SNAPSHOT_BYTES {
+                                return Err("browser snapshot exceeds maximum size".to_string());
+                            }
+                            Ok(BrowserSnapshot {
+                                png_base64: BASE64_STANDARD.encode(bytes),
+                                width,
+                                height,
+                            })
+                        })();
+                        if let Some(sender) =
+                            sender.lock().ok().and_then(|mut sender| sender.take())
+                        {
+                            let _ = sender.send(result);
+                        }
+                    });
+                wk_webview.takeSnapshotWithConfiguration_completionHandler(None, &completion);
+            })
+            .map_err(|error| error.to_string())?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), receiver)
+            .await
+            .map_err(|_| "browser snapshot timed out".to_string())?
+            .map_err(|_| "browser snapshot callback was dropped".to_string())?
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -3875,6 +4722,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(MetricsState::default())
+        .manage(ControlProviderState::default())
+        .manage(BrowserShortcutAuthorizations::default())
         .invoke_handler(tauri::generate_handler![
             pty_start,
             pane_session_metrics,
@@ -3882,8 +4731,12 @@ pub fn run() {
             pty_write,
             pty_ack,
             pty_resize,
+            pty_ack,
+            pty_set_visibility,
             pty_stop,
             pty_list,
+            pty_transport_metrics,
+            browser_app_shortcut,
             browser_navigate,
             browser_set_bounds,
             browser_hide,
@@ -3892,6 +4745,7 @@ pub fn run() {
             browser_destroy_many,
             browser_reload,
             browser_eval,
+            browser_snapshot,
             app_environment,
             coven_sessions,
             coven_session_kill,
@@ -3906,6 +4760,14 @@ pub fn run() {
             git_diff,
             git_log,
             workspace_metrics,
+            control_provider_start,
+            control_provider_stop,
+            control_provider_upsert,
+            control_provider_remove,
+            control_provider_complete,
+            control_provider_shutdown,
+            control_operator_submit,
+            control_state,
         ])
         .setup(|app| {
             if let Err(error) = platform::configure_window(app) {
@@ -3915,6 +4777,226 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod browser_app_shortcut_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    fn authorize(
+        authorizations: &BrowserShortcutAuthorizations,
+        label: &str,
+        secret: &str,
+        now: Instant,
+        next_secret: &str,
+        dispatched: &Cell<usize>,
+    ) -> Result<String, String> {
+        authorizations.authorize_and_rotate(
+            label,
+            secret,
+            now,
+            || Ok(next_secret.to_string()),
+            || {
+                dispatched.set(dispatched.get() + 1);
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn browser_app_shortcut_accepts_supported_mappings() {
+        let label = "psyche-browser-project-1";
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "terminal-pane").unwrap(),
+            "browser:shortcut-terminal-pane"
+        );
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "agent-pane").unwrap(),
+            "browser:shortcut-agent-pane"
+        );
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "composer").unwrap(),
+            "browser:shortcut-composer"
+        );
+    }
+
+    #[test]
+    fn browser_app_shortcut_rejects_untrusted_callers_and_unknown_actions() {
+        assert!(resolve_browser_app_shortcut("main", "terminal-pane").is_err());
+        assert!(resolve_browser_app_shortcut("psyche-browser-project-1", "new-tab").is_err());
+    }
+
+    #[test]
+    fn browser_app_shortcut_rejects_invalid_secrets_without_dispatching() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let dispatched = Cell::new(0);
+
+        assert!(authorize(
+            &authorizations,
+            label,
+            "wrong-secret",
+            Instant::now(),
+            "next-secret",
+            &dispatched,
+        )
+        .is_err());
+        assert_eq!(dispatched.get(), 0);
+    }
+
+    #[test]
+    fn browser_app_shortcut_rotates_only_after_successful_dispatch() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let now = Instant::now();
+
+        let failed = authorizations.authorize_and_rotate(
+            label,
+            "initial-secret",
+            now,
+            || Ok("unused-secret".to_string()),
+            || Err("dispatch failed".to_string()),
+        );
+        assert_eq!(failed.unwrap_err(), "dispatch failed");
+
+        let dispatched = Cell::new(0);
+        assert_eq!(
+            authorize(
+                &authorizations,
+                label,
+                "initial-secret",
+                now,
+                "rotated-secret",
+                &dispatched,
+            )
+            .unwrap(),
+            "rotated-secret"
+        );
+        assert_eq!(dispatched.get(), 1);
+        assert!(authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            now + MIN_BROWSER_SHORTCUT_INTERVAL,
+            "another-secret",
+            &dispatched,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn browser_app_shortcut_rate_limits_without_rotating() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let now = Instant::now();
+        let dispatched = Cell::new(0);
+
+        authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            now,
+            "second-secret",
+            &dispatched,
+        )
+        .unwrap();
+        assert!(authorize(
+            &authorizations,
+            label,
+            "second-secret",
+            now + MIN_BROWSER_SHORTCUT_INTERVAL - Duration::from_millis(1),
+            "too-fast-secret",
+            &dispatched,
+        )
+        .is_err());
+        assert_eq!(dispatched.get(), 1);
+        assert_eq!(
+            authorize(
+                &authorizations,
+                label,
+                "second-secret",
+                now + MIN_BROWSER_SHORTCUT_INTERVAL,
+                "third-secret",
+                &dispatched,
+            )
+            .unwrap(),
+            "third-secret"
+        );
+        assert_eq!(dispatched.get(), 2);
+    }
+
+    #[test]
+    fn browser_app_shortcut_navigation_reset_restores_initial_secret() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let now = Instant::now();
+        let dispatched = Cell::new(0);
+
+        authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            now,
+            "rotated-secret",
+            &dispatched,
+        )
+        .unwrap();
+        assert!(authorizations.reset(label));
+        assert_eq!(
+            authorize(
+                &authorizations,
+                label,
+                "initial-secret",
+                now,
+                "post-navigation-secret",
+                &dispatched,
+            )
+            .unwrap(),
+            "post-navigation-secret"
+        );
+        assert!(authorize(
+            &authorizations,
+            label,
+            "rotated-secret",
+            now + MIN_BROWSER_SHORTCUT_INTERVAL,
+            "unused-secret",
+            &dispatched,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn browser_app_shortcut_cleanup_removes_authorization() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        assert!(authorizations.remove(label));
+
+        let dispatched = Cell::new(0);
+        assert!(authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            Instant::now(),
+            "next-secret",
+            &dispatched,
+        )
+        .is_err());
+        assert_eq!(dispatched.get(), 0);
+    }
+
+    #[test]
+    fn browser_app_shortcut_secret_is_random_hex() {
+        let secret = random_browser_shortcut_secret().unwrap();
+        assert_eq!(secret.len(), 64);
+        assert!(secret.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
 }
 
 #[cfg(test)]
@@ -3929,6 +5011,116 @@ mod pty_runtime_tests {
     use super::*;
     #[cfg(not(windows))]
     use portable_pty::ChildKiller;
+
+    #[test]
+    fn browser_privileged_commands_reject_external_callers() {
+        assert_eq!(ensure_trusted_browser_caller("main"), Ok(()));
+        assert!(ensure_trusted_browser_caller("psyche-browser-untrusted").is_err());
+    }
+
+    #[test]
+    fn browser_snapshot_dimensions_are_bounded_before_capture() {
+        assert!(validate_browser_snapshot_dimensions(800, 600).is_ok());
+        assert!(validate_browser_snapshot_dimensions(0, 600).is_err());
+        assert!(validate_browser_snapshot_dimensions(8192, 8192).is_err());
+    }
+
+    fn browser_navigation_waiter(_url: &str) -> BrowserNavigationWaiter {
+        let (completion, _receiver) = tokio::sync::oneshot::channel();
+        BrowserNavigationWaiter {
+            token: "requested-token".to_string(),
+            navigation_identity: None,
+            completion: Some(completion),
+        }
+    }
+
+    #[test]
+    fn browser_navigation_waiters_correlate_only_exact_native_identity() {
+        let requested_label = "browser-native-identity-requested".to_string();
+        let unrelated_label = "browser-native-identity-unrelated".to_string();
+        let (requested_sender, mut requested_receiver) = tokio::sync::oneshot::channel();
+        let (unrelated_sender, mut unrelated_receiver) = tokio::sync::oneshot::channel();
+        BROWSER_NAVIGATION_WAITERS.lock().insert(
+            requested_label.clone(),
+            BrowserNavigationWaiter {
+                token: "requested".to_string(),
+                navigation_identity: Some(41),
+                completion: Some(requested_sender),
+            },
+        );
+        BROWSER_NAVIGATION_WAITERS.lock().insert(
+            unrelated_label.clone(),
+            BrowserNavigationWaiter {
+                token: "unrelated".to_string(),
+                navigation_identity: Some(42),
+                completion: Some(unrelated_sender),
+            },
+        );
+
+        assert!(!complete_browser_navigation(99, "https://user.example"));
+        assert!(requested_receiver.try_recv().is_err());
+        assert!(unrelated_receiver.try_recv().is_err());
+        assert!(complete_browser_navigation(41, "https://terminal.example"));
+        assert_eq!(
+            requested_receiver.try_recv().unwrap().unwrap().terminal_url,
+            "https://terminal.example"
+        );
+        assert!(unrelated_receiver.try_recv().is_err());
+        BROWSER_NAVIGATION_WAITERS.lock().remove(&unrelated_label);
+    }
+
+    #[test]
+    fn browser_navigation_waiter_guard_cleans_every_early_exit_without_removing_a_successor() {
+        for stage in ["ensure", "lookup", "bounds", "navigate", "timeout"] {
+            let label = format!("browser-waiter-guard-{stage}");
+            let token = format!("token-{stage}");
+            BROWSER_NAVIGATION_WAITERS.lock().insert(
+                label.clone(),
+                browser_navigation_waiter("https://example.test"),
+            );
+            BROWSER_NAVIGATION_WAITERS
+                .lock()
+                .get_mut(&label)
+                .unwrap()
+                .token = token.clone();
+            {
+                let _guard = BrowserNavigationWaiterGuard {
+                    label: label.clone(),
+                    token: token.clone(),
+                };
+            }
+            assert!(!BROWSER_NAVIGATION_WAITERS.lock().contains_key(&label));
+
+            BROWSER_NAVIGATION_WAITERS.lock().insert(
+                label.clone(),
+                browser_navigation_waiter("https://example.test"),
+            );
+            {
+                let _old_guard = BrowserNavigationWaiterGuard {
+                    label: label.clone(),
+                    token,
+                };
+            }
+            assert!(BROWSER_NAVIGATION_WAITERS.lock().contains_key(&label));
+            BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
+        }
+    }
+
+    #[test]
+    fn browser_navigation_setup_failure_closes_only_a_newly_created_view() {
+        let closes = AtomicUsize::new(0);
+        cleanup_created_browser_after_setup_failure(true, || {
+            closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+
+        cleanup_created_browser_after_setup_failure(false, || {
+            closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+    }
 
     #[cfg(not(windows))]
     #[derive(Debug)]
@@ -3947,6 +5139,62 @@ mod pty_runtime_tests {
             Box::new(Self {
                 calls: Arc::clone(&self.calls),
             })
+        }
+    }
+
+    #[cfg(not(windows))]
+    struct TestLivePtySession {
+        token: PtySessionToken,
+        pump: OutputPump,
+    }
+
+    #[cfg(not(windows))]
+    impl TestLivePtySession {
+        fn register(thread_id: &str) -> Self {
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 10,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            let writer = pair.master.take_writer().unwrap();
+            let (_, reader_cancellation) = prepare_pty_reader(pair.master.as_ref()).unwrap();
+            let pump = OutputPump::new(thread_id.to_string()).unwrap();
+            let pending = PendingPtyStart::reserve(thread_id).unwrap();
+            let (token, install_outcome) = pending
+                .install(PtySession {
+                    master: Arc::new(Mutex::new(pair.master)),
+                    writer: Arc::new(Mutex::new(writer)),
+                    pump: pump.clone(),
+                    terminator: PtyProcessTerminator::from_parts(
+                        Box::new(RecordingChildKiller {
+                            calls: Arc::new(AtomicUsize::new(0)),
+                        }),
+                        PtyProcessIdentity::direct_child(None),
+                    ),
+                    reader_cancellation,
+                    pid: Some(42),
+                    spawn_time_unix_secs: 99,
+                })
+                .unwrap();
+            assert!(matches!(install_outcome, InstallSessionOutcome::Running));
+            Self { token, pump }
+        }
+    }
+
+    #[cfg(not(windows))]
+    impl Drop for TestLivePtySession {
+        fn drop(&mut self) {
+            let action = {
+                let mut registry = PTY_LIFECYCLES.lock();
+                registry.stop(&self.token.thread_id)
+            };
+            if let Ok(StopSessionOutcome::Terminate { session, .. }) = action {
+                drop(session);
+            }
+            PTY_LIFECYCLES.lock().finish_exit(&self.token);
         }
     }
 
@@ -4095,6 +5343,23 @@ mod pty_runtime_tests {
                 "process group {process_group} remained observable after SIGKILL"
             );
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_no_output_fields(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    assert_no_output_fields(value);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for (key, value) in values {
+                    assert!(!matches!(key.as_str(), "bytes" | "data" | "payload"));
+                    assert_no_output_fields(value);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -4376,6 +5641,172 @@ mod pty_runtime_tests {
         let replacement = registry.lock().reserve("timed-out-pane").unwrap();
         assert_ne!(replacement.generation, old.generation);
     }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pty_ack_reports_missing_invalid_duplicate_future_and_skipped_sequences() {
+        assert_eq!(
+            pty_ack("missing-pane".to_string(), 1).unwrap_err(),
+            "thread 'missing-pane' not found"
+        );
+        assert_eq!(
+            pty_ack("../unsafe".to_string(), 1).unwrap_err(),
+            "thread id is unsafe"
+        );
+
+        let session = TestLivePtySession::register("ack-pane");
+        session.pump.enqueue(vec![b'a']).unwrap();
+        assert_eq!(
+            session.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 1 })
+        );
+        session.pump.enqueue(vec![b'b']).unwrap();
+        std::thread::sleep(pty_transport::VISIBLE_CADENCE + Duration::from_millis(5));
+        assert_eq!(
+            session.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 2 })
+        );
+
+        assert!(matches!(
+            pty_ack("ack-pane".to_string(), 1).unwrap(),
+            AckOutcome::Advanced {
+                sequence: 1,
+                bytes: 1,
+                latency_micros,
+            } if latency_micros >= duration_to_micros(pty_transport::VISIBLE_CADENCE)
+        ));
+        assert_eq!(
+            pty_ack("ack-pane".to_string(), 1).unwrap(),
+            AckOutcome::Duplicate { sequence: 1 }
+        );
+        assert!(matches!(
+            pty_ack("ack-pane".to_string(), 2).unwrap(),
+            AckOutcome::Advanced {
+                sequence: 2,
+                bytes: 1,
+                ..
+            }
+        ));
+
+        let skipped = TestLivePtySession::register("ack-skipped-pane");
+        skipped.pump.enqueue(vec![b'a']).unwrap();
+        assert_eq!(
+            skipped.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 1 })
+        );
+        skipped.pump.enqueue(vec![b'b']).unwrap();
+        std::thread::sleep(pty_transport::VISIBLE_CADENCE + Duration::from_millis(5));
+        assert_eq!(
+            skipped.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 2 })
+        );
+        assert_eq!(
+            pty_ack("ack-skipped-pane".to_string(), 2).unwrap_err(),
+            "PTY batch acknowledgement 2 skipped expected sequence 1"
+        );
+        assert_eq!(
+            pty_ack("ack-skipped-pane".to_string(), 3).unwrap_err(),
+            "PTY batch acknowledgement 3 is newer than emitted sequence 2"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pty_set_visibility_only_updates_metrics_on_actual_transitions() {
+        assert_eq!(
+            pty_set_visibility("missing-visibility".to_string(), false).unwrap_err(),
+            "thread 'missing-visibility' not found"
+        );
+
+        let session = TestLivePtySession::register("visibility-pane");
+        let visible_cadence = duration_to_micros(pty_transport::VISIBLE_CADENCE);
+        let hidden_cadence = duration_to_micros(pty_transport::HIDDEN_CADENCE);
+
+        let initial = pty_transport_metrics(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(initial.visibility, PtyTransportVisibility::Visible);
+        assert_eq!(initial.effective_cadence_micros, visible_cadence);
+        assert_eq!(initial.metrics.visibility_transition_count, 0);
+
+        pty_set_visibility("visibility-pane".to_string(), true).unwrap();
+        let noop_visible = pty_transport_metrics(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(noop_visible.visibility, PtyTransportVisibility::Visible);
+        assert_eq!(noop_visible.effective_cadence_micros, visible_cadence);
+        assert_eq!(noop_visible.metrics.visibility_transition_count, 0);
+
+        pty_set_visibility("visibility-pane".to_string(), false).unwrap();
+        let hidden = pty_transport_metrics(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(hidden.visibility, PtyTransportVisibility::Hidden);
+        assert_eq!(hidden.effective_cadence_micros, hidden_cadence);
+        assert_eq!(hidden.metrics.visibility_transition_count, 1);
+
+        pty_set_visibility("visibility-pane".to_string(), false).unwrap();
+        let noop_hidden = pty_transport_metrics(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(noop_hidden.visibility, PtyTransportVisibility::Hidden);
+        assert_eq!(noop_hidden.effective_cadence_micros, hidden_cadence);
+        assert_eq!(noop_hidden.metrics.visibility_transition_count, 1);
+
+        drop(session);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pty_transport_metrics_filters_live_sessions_and_serializes_metadata_only() {
+        let owned_ids = ["metrics-a", "metrics-b"];
+        let first = TestLivePtySession::register("metrics-a");
+        let second = TestLivePtySession::register("metrics-b");
+        first.pump.enqueue(b"secret-metadata".to_vec()).unwrap();
+
+        let mut filtered = pty_transport_metrics(Some("metrics-a".to_string()));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].thread_id, "metrics-a");
+        assert_eq!(filtered[0].pending_bytes, b"secret-metadata".len());
+        assert_eq!(filtered[0].metrics.state.bytes_accepted, b"secret-metadata".len() as u64);
+        assert!(pty_transport_metrics(Some("metrics-missing".to_string())).is_empty());
+        assert!(pty_transport_metrics(Some("../unsafe".to_string())).is_empty());
+
+        let all = pty_transport_metrics(None);
+        let owned_from_all = all
+            .into_iter()
+            .filter(|snapshot| owned_ids.contains(&snapshot.thread_id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            owned_from_all
+                .iter()
+                .map(|snapshot| snapshot.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["metrics-a", "metrics-b"]
+        );
+        assert_eq!(
+            owned_from_all
+                .iter()
+                .find(|snapshot| snapshot.thread_id == "metrics-a")
+                .unwrap(),
+            &filtered[0]
+        );
+
+        let serialized = serde_json::to_value(filtered.pop().unwrap()).unwrap();
+        assert_no_output_fields(&serialized);
+        assert!(!serialized.to_string().contains("secret-metadata"));
+
+        drop(second);
+        assert!(pty_transport_metrics(Some("metrics-b".to_string())).is_empty());
+        drop(first);
+        assert!(pty_transport_metrics(Some("metrics-a".to_string())).is_empty());
+        assert!(
+            pty_transport_metrics(None)
+                .into_iter()
+                .all(|snapshot| !owned_ids.contains(&snapshot.thread_id.as_str()))
+        );
+    }
+
 
     #[cfg(not(windows))]
     #[test]

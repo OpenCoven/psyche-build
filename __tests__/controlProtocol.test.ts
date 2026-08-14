@@ -105,6 +105,24 @@ describe('control protocol v1', () => {
     }
   });
 
+  it('rejects surface actions missing common authorization fields or generation', () => {
+    const base = {
+      id: 'cmd-1', idempotencyKey: 'idem-1', kind: 'browser.action', projectRoot: '/repo',
+      createdAt: '2026-08-12T12:00:00.000Z',
+      payload: {
+        taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
+        tabId: 'tab-1', generation: 2, action: { kind: 'reload' },
+      },
+    };
+    for (const field of ['taskId', 'leaseId', 'leaseRevision', 'generation'] as const) {
+      const payload = { ...base.payload };
+      delete payload[field];
+      expect(() => decodeControlRequest(JSON.stringify({
+        version: 1, type: 'command.submit', requestId: 'req-1', command: { ...base, payload },
+      }))).toThrow('invalid surface authorization');
+    }
+  });
+
   it('rejects events.read requests with a non-number afterSequence', () => {
     expect(() => decodeControlRequest(JSON.stringify({
       version: CONTROL_PROTOCOL_VERSION,
@@ -134,5 +152,26 @@ describe('control protocol v1', () => {
       type: 'unknown',
       requestId: 'req-1',
     }))).toThrow('unsupported control request type');
+  });
+
+  it('decodes bounded typed provider frames', () => {
+    expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.register', requestId: 'register-1', providerId: 'desktop-1',
+    }))).toMatchObject({ type: 'provider.register', providerId: 'desktop-1' });
+    expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.result', requestId: 'effect-1',
+      result: { actionId: 'action-1', status: 'succeeded', value: { ok: true } },
+    }))).toMatchObject({ type: 'provider.effect.result', result: { actionId: 'action-1' } });
+  });
+
+  it('rejects malformed provider resources and effect results', () => {
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.resource.upsert', requestId: 'upsert-1',
+      resource: { id: 'tab-1', kind: 'browser_tab', generation: 1 },
+    }))).toThrow('invalid provider resource');
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.result', requestId: 'effect-1',
+      result: { actionId: 'action-1', status: 'invented' },
+    }))).toThrow('invalid provider effect result');
   });
 });

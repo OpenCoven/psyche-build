@@ -2,7 +2,7 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/pro
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ControlJournal } from '../src/control/journal.js';
+import { agentControlJournalPayload, ControlJournal } from '../src/control/journal.js';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -10,6 +10,43 @@ afterEach(async () => {
 });
 
 describe('ControlJournal', () => {
+  it('constructs agent-control records from allowlisted metadata only', () => {
+    const built = agentControlJournalPayload({
+      kind: 'command.succeeded', commandId: 'script-1', idempotencyKey: 'idem-1',
+      outcome: { status: 'succeeded', value: { page: 'must-not-persist' } },
+      receipt: {
+        schema: 'psyche.control.receipt/v1', actionId: 'script-1', state: 'succeeded',
+        resource: { kind: 'browser_tab', id: 'tab-1', generation: 2 },
+        createdAt: '2026-08-12T00:00:00.000Z', value: { password: 'secret' },
+        message: 'page transcript', sourceDigest: 'digest', sourceBytes: 10,
+        resultBytes: 2, durationMs: 1,
+      },
+    });
+    expect(built.payload).toMatchObject({ receipt: {
+      sourceDigest: 'digest', sourceBytes: 10, resultBytes: 2, durationMs: 1,
+    } });
+    expect(JSON.stringify(built)).not.toMatch(/password|secret|transcript|must-not-persist/);
+  });
+
+  it('keeps forbidden fields outside the typed agent-control builder contract', () => {
+    if (false) {
+      agentControlJournalPayload({
+        kind: 'command.requested', commandId: 'c', idempotencyKey: 'i',
+        commandKind: 'browser.script', ownerEpoch: 1,
+        // @ts-expect-error transcript is intentionally forbidden at the journal boundary
+        transcript: 'secret',
+      });
+      agentControlJournalPayload({
+        kind: 'approval.requested', commandId: 'c', approvalId: 'a', payloadDigest: 'd',
+        resource: { kind: 'browser_tab', id: 'tab', generation: 1 }, capability: 'browser.script',
+        effect: { kind: 'script', target: 'digest' },
+        // @ts-expect-error raw script is intentionally forbidden at the journal boundary
+        script: 'return document.cookie',
+      });
+    }
+    expect(true).toBe(true);
+  });
+
   it('assigns monotonic sequences and restores idempotency records', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
     roots.push(root);

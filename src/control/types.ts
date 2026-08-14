@@ -1,4 +1,140 @@
 import type { OrchestrationTaskRequest } from '../orchestration/types.js';
+import type {
+  CapabilityLease,
+  LeaseTarget,
+  SurfaceCapability,
+} from './capabilityLeases.js';
+import type { BrowserTabSurface, SurfaceResource } from './surfaces.js';
+import type { Approval } from './approvals.js';
+
+export interface LeaseGrant {
+  readonly target: LeaseTarget;
+  readonly capabilities: readonly SurfaceCapability[];
+}
+
+export type PaneNamedKey =
+  | 'Enter' | 'Tab' | 'Escape' | 'Backspace'
+  | 'Up' | 'Down' | 'Left' | 'Right'
+  | 'C-c' | 'C-d';
+
+export type ExistingPaneAction =
+  | { kind: 'send_text'; text: string }
+  | { kind: 'send_keys'; keys: readonly PaneNamedKey[] }
+  | { kind: 'interrupt'; key?: 'C-c' | 'Escape' }
+  | { kind: 'focus' }
+  | { kind: 'resize'; cols: number; rows: number }
+  | { kind: 'close' };
+
+export type PaneCreateAction = {
+  kind: 'create'; cwd: string; title?: string; agent?: string; branch?: string;
+};
+
+export type PaneAction = ExistingPaneAction | PaneCreateAction;
+
+export interface BrowserSemanticMetadata {
+  role?: string;
+  name?: string;
+  submit?: boolean;
+  secret?: boolean;
+}
+
+export type BrowserElementAction =
+  | { kind: 'click'; elementRef: string; semantic?: BrowserSemanticMetadata }
+  | { kind: 'type'; elementRef: string; text: string; append?: boolean; semantic?: BrowserSemanticMetadata }
+  | { kind: 'select'; elementRef: string; values: readonly string[]; semantic?: BrowserSemanticMetadata }
+  | { kind: 'submit'; elementRef: string; semantic?: BrowserSemanticMetadata }
+  | { kind: 'upload'; elementRef: string; path: string; semantic?: BrowserSemanticMetadata }
+  | { kind: 'download'; elementRef: string; destination: string; semantic?: BrowserSemanticMetadata }
+  | { kind: 'scroll'; elementRef: string; deltaX?: number; deltaY?: number }
+  | { kind: 'focus'; elementRef: string; semantic?: BrowserSemanticMetadata };
+
+export type BrowserSurfaceAction =
+  | { kind: 'navigate'; url: string }
+  | { kind: 'permission_response'; permission: string; origin: string; decision: 'allow' | 'deny' }
+  | { kind: 'reload' }
+  | { kind: 'back' }
+  | { kind: 'forward' }
+  | { kind: 'screenshot' }
+  | { kind: 'close' };
+
+export type BrowserSemanticAction = BrowserElementAction | BrowserSurfaceAction;
+
+export interface SemanticSnapshot {
+  schema: 'psyche.browser.snapshot/v1';
+  id: string;
+  tabId: string;
+  generation: number;
+  url: string;
+  title: string;
+  loading: boolean;
+  viewport: { width: number; height: number };
+  capturedAt: string;
+  nodes: readonly {
+    ref: string;
+    role: string;
+    name: string;
+    state?: Readonly<Record<string, boolean | string | number>>;
+    value?: { kind: string; value?: string; secret?: boolean };
+    bounds?: { x: number; y: number; width: number; height: number };
+    actions?: readonly string[];
+    children?: readonly string[];
+  }[];
+  truncated: boolean;
+  opaqueFrames: number;
+  expiresAt: string;
+  screenshot?: Readonly<{ pngBase64: string; width: number; height: number }>;
+}
+
+export interface ActionReceipt {
+  schema: 'psyche.control.receipt/v1';
+  actionId: string;
+  state:
+    | 'queued' | 'running' | 'approval_required' | 'succeeded'
+    | 'failed' | 'denied' | 'expired' | 'unknown';
+  resource: LeaseTarget;
+  createdAt: string;
+  completedAt?: string;
+  code?: string;
+  message?: string;
+  value?: unknown;
+  sourceDigest?: string;
+  sourceBytes?: number;
+  resultBytes?: number;
+  durationMs?: number;
+}
+
+interface AgentSurfaceAuthorization {
+  taskId: string;
+  leaseId: string;
+  leaseRevision: number;
+}
+
+interface PaneAuthorization extends AgentSurfaceAuthorization {
+  paneId: string;
+  generation: number;
+}
+
+interface BrowserAuthorization extends AgentSurfaceAuthorization {
+  tabId: string;
+  generation: number;
+}
+
+type PaneActionPayload =
+  | (PaneAuthorization & {
+      projectId?: never;
+      action: ExistingPaneAction;
+    })
+  | (AgentSurfaceAuthorization & {
+      projectId: string;
+      paneId?: never;
+      generation?: never;
+      action: PaneCreateAction;
+    });
+
+type BrowserActionPayload = BrowserAuthorization & (
+  | { snapshotId: string; action: BrowserElementAction }
+  | { snapshotId?: never; action: BrowserSurfaceAction }
+);
 
 export type ControlActorKind = 'human' | 'psyche' | 'compatibility';
 
@@ -33,7 +169,42 @@ export interface PromptEnvelope {
 }
 
 export type ControlCommand =
-  | CommandBase<'orchestration.execute', { request: OrchestrationTaskRequest }>
+  | CommandBase<'orchestration.execute', AgentSurfaceAuthorization & { request: OrchestrationTaskRequest }>
+  | CommandBase<'lease.request', {
+      taskId: string;
+      ttlMs: number;
+      grants: readonly LeaseGrant[];
+    }>
+  | CommandBase<'lease.grant', {
+      requestId: string;
+      actorId: string;
+      taskId: string;
+      ttlMs: number;
+      grants: readonly LeaseGrant[];
+    }>
+  | CommandBase<'lease.release', {
+      taskId: string;
+      leaseId: string;
+      leaseRevision: number;
+    }>
+  | CommandBase<'lease.revoke', { leaseId: string }>
+  | CommandBase<'pane.observe', PaneAuthorization & { afterSequence?: number }>
+  | CommandBase<'pane.action', PaneActionPayload>
+  | CommandBase<'browser.inspect', BrowserAuthorization & {
+      includeScreenshot?: boolean;
+    }>
+  | CommandBase<'browser.action', BrowserActionPayload>
+  | CommandBase<'browser.script', BrowserAuthorization & {
+      source: string;
+      args?: unknown;
+    }>
+  | CommandBase<'approval.resolve', {
+      approvalId: string;
+      payloadDigest: string;
+      decision: 'approve' | 'deny';
+    }>
+  | CommandBase<'provider.resource.upsert', { resource: BrowserTabSurface }>
+  | CommandBase<'provider.resource.remove', { id: string; generation: number }>
   | CommandBase<'pane.spawn', {
       cwd: string;
       agent?: string;
@@ -148,4 +319,17 @@ export interface ControlSnapshot {
     revision: number;
     expiresAt: string;
   }>;
+  resources: readonly SurfaceResource[];
+  capabilityLeases: readonly CapabilityLease[];
+  leaseRequests: readonly {
+    id: string;
+    actorId: string;
+    taskId: string;
+    status: 'pending' | 'granted' | 'released' | 'revoked';
+    createdAt: string;
+    ttlMs: number;
+    grants: readonly LeaseGrant[];
+  }[];
+  approvals: readonly Approval[];
+  receipts: readonly ActionReceipt[];
 }

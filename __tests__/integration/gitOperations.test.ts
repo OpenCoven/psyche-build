@@ -10,12 +10,14 @@ import type { ActionContext } from '../../src/actions/types.js';
 import { createMockGitRepo, addWorktree, type MockGitRepo } from '../fixtures/integration/gitRepo.js';
 
 // Mock child_process
-const mockExecSync = vi.fn();
+const { mockExecSync, mockExecFileSync } = vi.hoisted(() => ({
+  mockExecSync: vi.fn(),
+  mockExecFileSync: vi.fn(),
+}));
 vi.mock('child_process', () => ({
   execSync: mockExecSync,
 }));
 
-const mockExecFileSync = vi.fn();
 vi.mock('node:child_process', () => ({
   execSync: mockExecSync,
   execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
@@ -522,6 +524,7 @@ index abc123..def456 100644
       ));
 
       try {
+        vi.resetModules();
         const { generateCommitMessage } = await import('../../src/utils/aiMerge.js');
 
         const message = await generateCommitMessage('/test');
