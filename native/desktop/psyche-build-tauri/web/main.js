@@ -973,7 +973,8 @@
   function flushDeferredStatusMessages() {
     if (!deferredStatusMessages.length) return;
     deferredStatusMessages.forEach(function (entry) {
-      setStatus(entry.text, entry.level);
+      if (entry.level === "error") showStatusError(entry.text);
+      else setStatus(entry.text, entry.level);
     });
     deferredStatusMessages = [];
   }
@@ -1031,7 +1032,7 @@
       );
       return true;
     } catch (error) {
-      setStatus("project appearance save failed: " + String(error), "error");
+      showStatusError("project appearance save failed: " + String(error));
       return false;
     }
   }
@@ -1240,6 +1241,7 @@
   var sidebarResizeEl = document.getElementById("sidebar-resize");
   var newPaneMenuEl = document.getElementById("new-pane-menu");
   var newPaneMenuHeadEl = document.getElementById("new-pane-menu-head");
+  var statusAlertEl = document.getElementById("status-alert");
   var toastEl = document.getElementById("toast");
   var helpOverlayEl = document.getElementById("help-overlay");
   var agentPickerOverlayEl = document.getElementById("agent-picker-overlay");
@@ -1496,16 +1498,32 @@
   // Short-lived confirmation for actions whose effect happens off-screen
   // (for example, a pane spawned behind a maximised pane).
   var toastTimer = 0;
-  function toast(message, duration) {
+  function toast(message, duration, options) {
     if (!toastEl) return;
+    var announce = !options || options.announce !== false;
+    if (announce) {
+      if (toastEl.getAttribute("aria-hidden") === "true") {
+        toastEl.textContent = "";
+      }
+      toastEl.removeAttribute("aria-hidden");
+    } else {
+      toastEl.setAttribute("aria-hidden", "true");
+    }
     toastEl.textContent = message;
     toastEl.classList.add("is-visible");
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(function () {
       toastEl.classList.remove("is-visible");
       toastEl.textContent = "";
+      toastEl.removeAttribute("aria-hidden");
       toastTimer = 0;
     }, duration || 2600);
+  }
+
+  function showStatusError(message) {
+    var text = String(message);
+    if (statusAlertEl) statusAlertEl.textContent = text;
+    toast(text, 6000, { announce: false });
   }
 
   function showPanePlacementWarning(message) {
@@ -12257,6 +12275,7 @@
     state.env = env || {};
     await installTerminalImageDrop();
     if (typeof statusController !== "undefined" && statusController) statusController.start();
+    flushDeferredStatusMessages();
     var saved = await readSavedWorkspace();
     var bootRoot = state.env.repo_root || state.env.home || "/";
     var project = null;
@@ -12303,7 +12322,6 @@
     paneMetricsPollTimer = setInterval(refreshVisiblePaneMetrics, 15000);
     refreshVisiblePaneMetrics();
     if (typeof refreshStatusController === "function") refreshStatusController();
-    flushDeferredStatusMessages();
   }
 
   invoke("app_environment")

@@ -1081,11 +1081,18 @@ describe('Tauri workspace panels', () => {
       expect(visibleToastCss).toMatch(/padding:\s*8px 13px/);
       const warning = 'Not enough space for another pane';
       const classes = new Set<string>();
+      const attributes = new Map([
+        ['role', 'status'],
+        ['aria-live', 'polite'],
+      ]);
       const liveStatus = {
         hidden: false,
         textContent: '',
         role: 'status',
         ariaLive: 'polite',
+        getAttribute: (name: string) => attributes.get(name) ?? null,
+        setAttribute: (name: string, value: string) => attributes.set(name, value),
+        removeAttribute: (name: string) => attributes.delete(name),
         classList: {
           add: (name: string) => classes.add(name),
           remove: (name: string) => classes.delete(name),
