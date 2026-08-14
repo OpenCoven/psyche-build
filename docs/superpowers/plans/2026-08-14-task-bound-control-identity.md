@@ -62,6 +62,8 @@ git -C .worktrees/task-bound-control cherry-pick 4a24bd84 d6ff8bf0
 git -C .worktrees/task-bound-control status --short --branch
 ```
 
+Bootstrap note: This two-commit cherry-pick is used once to create `fix/task-bound-control-identity`. After the branch exists, its tip is authoritative; recreate the worktree by fetching and checking out that branch rather than replaying these commits, so later plan refinements are preserved.
+
 Expected: the design and both plans are committed on the implementation branch.
 
 - [ ] **Step 4: Install dependencies and run the focused baseline**
