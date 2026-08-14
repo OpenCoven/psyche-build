@@ -138,7 +138,145 @@ async function flushActions() {
   await Promise.resolve();
 }
 
+function extractFunction(source: string, name: string) {
+  const start = source.indexOf(`function ${name}(`);
+  if (start === -1) throw new Error(`missing function ${name}`);
+  const bodyStart = source.indexOf('{', start);
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}') depth -= 1;
+    if (depth === 0) return source.slice(start, index + 1);
+  }
+  throw new Error(`unterminated function ${name}`);
+}
+
+function compileFunction<T extends (...args: never[]) => unknown>(
+  source: string,
+  dependencies: Record<string, unknown>,
+) {
+  return Function(
+    ...Object.keys(dependencies),
+    `"use strict"; return (${source});`,
+  )(...Object.values(dependencies)) as T;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('agent control operator model', () => {
+  it('ignores a control-state response after the active project changes', async () => {
+    const main = await readFile('native/desktop/psyche-build-tauri/web/main.js', 'utf8');
+    let project = { root: '/project-a' };
+    const response = deferred<Record<string, unknown>>();
+    const rendered: string[] = [];
+    let latestModel: any = null;
+    const refresh = compileFunction<() => Promise<unknown>>(
+      extractFunction(main, 'refreshAgentControlState'),
+      {
+        activeProject: () => project,
+        window: { PsycheControl: {
+          createAgentControlModel: (snapshot: any) => {
+            latestModel = snapshot;
+            return snapshot;
+          },
+        } },
+        invoke: () => response.promise,
+        agentControlModel: null,
+        agentControlOwnerEpoch: null,
+        agentControlProjectRoot: null,
+        agentControlRefreshRequestId: 0,
+        renderAgentControl: () => { rendered.push(latestModel.id); },
+      },
+    );
+
+    const pending = refresh();
+    project = { root: '/project-b' };
+    response.resolve({ snapshot: { id: 'project-a', ownerEpoch: 1 } });
+
+    expect(await pending).toBeNull();
+    expect(rendered).toEqual([]);
+  });
+
+  it('ignores an older control-state response that completes last', async () => {
+    const main = await readFile('native/desktop/psyche-build-tauri/web/main.js', 'utf8');
+    const olderResponse = deferred<Record<string, unknown>>();
+    const newerResponse = deferred<Record<string, unknown>>();
+    const responses = [olderResponse, newerResponse];
+    const rendered: string[] = [];
+    let latestModel: any = null;
+    const refresh = compileFunction<() => Promise<unknown>>(
+      extractFunction(main, 'refreshAgentControlState'),
+      {
+        activeProject: () => ({ root: '/project-a' }),
+        window: { PsycheControl: {
+          createAgentControlModel: (snapshot: any) => {
+            latestModel = snapshot;
+            return snapshot;
+          },
+        } },
+        invoke: () => responses.shift()!.promise,
+        agentControlModel: null,
+        agentControlOwnerEpoch: null,
+        agentControlProjectRoot: null,
+        agentControlRefreshRequestId: 0,
+        renderAgentControl: () => { rendered.push(latestModel.id); },
+      },
+    );
+
+    const older = refresh();
+    const newer = refresh();
+    newerResponse.resolve({ snapshot: { id: 'newer', ownerEpoch: 1 } });
+    await newer;
+    olderResponse.resolve({ snapshot: { id: 'older', ownerEpoch: 1 } });
+    await older;
+
+    expect(rendered).toEqual(['newer']);
+  });
+
+  it('does not let an older control-state rejection clear newer state', async () => {
+    const main = await readFile('native/desktop/psyche-build-tauri/web/main.js', 'utf8');
+    const olderResponse = deferred<Record<string, unknown>>();
+    const newerResponse = deferred<Record<string, unknown>>();
+    const responses = [olderResponse, newerResponse];
+    const rendered: string[] = [];
+    let latestModel: any = null;
+    const refresh = compileFunction<() => Promise<unknown>>(
+      extractFunction(main, 'refreshAgentControlState'),
+      {
+        activeProject: () => ({ root: '/project-a' }),
+        window: { PsycheControl: {
+          createAgentControlModel: (snapshot: any) => {
+            latestModel = snapshot;
+            return snapshot;
+          },
+        } },
+        invoke: () => responses.shift()!.promise,
+        agentControlModel: null,
+        agentControlOwnerEpoch: null,
+        agentControlProjectRoot: null,
+        agentControlRefreshRequestId: 0,
+        renderAgentControl: () => { rendered.push(latestModel?.id ?? 'cleared'); },
+      },
+    );
+
+    const older = refresh();
+    const newer = refresh();
+    newerResponse.resolve({ snapshot: { id: 'newer', ownerEpoch: 1 } });
+    await newer;
+    olderResponse.reject(new Error('older request failed'));
+    expect(await older).toBeNull();
+
+    expect(rendered).toEqual(['newer']);
+  });
+
   it('groups request, active, expired, and revoked authority with exact details', () => {
     const model = createAgentControlModel(snapshot(), { now: NOW, operator: true });
 
@@ -438,9 +576,10 @@ describe('agent control operator model', () => {
     expect(main).toContain('invoke("control_state"');
     expect(main).toContain('invoke("control_operator_submit"');
     expect(main).toMatch(/async function boot[\s\S]*installAgentControlUi\(\)/);
-    expect(main).toContain('surfaceResourceIdentity(agentControlModel, "pane", threadId)');
-    expect(main).toContain('surfaceResourceIdentity(agentControlModel, "browser_tab", tabNode.dataset.tabId)');
+    expect(main).toContain('surfaceResourceIdentity(model, "pane", threadId)');
+    expect(main).toContain('surfaceResourceIdentity(model, "browser_tab", tabNode.dataset.tabId)');
     expect(main).toContain('dataset.controlGeneration');
+    expect(main).toMatch(/async function setActiveProject[\s\S]*resetAgentControlProject\(project\)/);
     expect(main).not.toMatch(/control_operator_submit[\s\S]{0,300}(spawnBridgePane|TmuxControl|execFileSync)/);
     expect(entry).toContain("from './agent-control-model.mjs'");
     expect(entry).toContain("from './agent-control-drawer.mjs'");

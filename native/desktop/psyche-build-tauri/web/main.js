@@ -170,6 +170,8 @@
   }
   var agentControlModel = null;
   var agentControlOwnerEpoch = null;
+  var agentControlProjectRoot = null;
+  var agentControlRefreshRequestId = 0;
   var agentControlUiLifecycle = null;
 
   function agentControlCommand(project, command) {
@@ -184,15 +186,15 @@
     });
   }
 
-  function updateAgentControlBadges() {
+  function updateAgentControlBadges(model) {
     document.querySelectorAll(".agent-control-badge").forEach(function (badge) { badge.remove(); });
-    if (!agentControlModel || !window.PsycheControl) return;
+    if (!model || !window.PsycheControl) return;
     document.querySelectorAll(".terminal-pane[data-thread-id]").forEach(function (pane) {
       var threadId = pane.dataset.threadId;
-      var resource = window.PsycheControl.surfaceResourceIdentity(agentControlModel, "pane", threadId);
+      var resource = window.PsycheControl.surfaceResourceIdentity(model, "pane", threadId);
       if (resource) pane.dataset.controlGeneration = String(resource.generation);
       else delete pane.dataset.controlGeneration;
-      var badge = window.PsycheControl.resourceLeaseBadge(agentControlModel, resource);
+      var badge = window.PsycheControl.resourceLeaseBadge(model, resource);
       var header = pane.querySelector(".terminal-pane-header");
       if (!badge || !header) return;
       var node = document.createElement("span");
@@ -204,10 +206,10 @@
       header.appendChild(node);
     });
     document.querySelectorAll(".browser-tab[data-tab-id]").forEach(function (tabNode) {
-      var resource = window.PsycheControl.surfaceResourceIdentity(agentControlModel, "browser_tab", tabNode.dataset.tabId);
+      var resource = window.PsycheControl.surfaceResourceIdentity(model, "browser_tab", tabNode.dataset.tabId);
       if (resource) tabNode.dataset.controlGeneration = String(resource.generation);
       else delete tabNode.dataset.controlGeneration;
-      var badge = window.PsycheControl.resourceLeaseBadge(agentControlModel, resource);
+      var badge = window.PsycheControl.resourceLeaseBadge(model, resource);
       if (!badge) return;
       var node = document.createElement("span");
       node.className = "agent-control-badge";
@@ -222,14 +224,19 @@
   function renderAgentControl() {
     var content = document.getElementById("agent-control-content");
     var count = document.getElementById("agent-control-count");
-    if (count) {
-      count.textContent = String(agentControlModel ? agentControlModel.pendingCount : 0);
-      count.hidden = !agentControlModel || agentControlModel.pendingCount === 0;
-    }
-    updateAgentControlBadges();
-    if (!content || !agentControlModel || !window.PsycheControl) return;
     var project = activeProject();
-    window.PsycheControl.renderAgentControlDrawer(content, agentControlModel, {
+    var model = project && project.root === agentControlProjectRoot ? agentControlModel : null;
+    if (count) {
+      count.textContent = String(model ? model.pendingCount : 0);
+      count.hidden = !model || model.pendingCount === 0;
+    }
+    updateAgentControlBadges(model);
+    if (!content || !window.PsycheControl) return;
+    if (!model || !project) {
+      content.replaceChildren();
+      return;
+    }
+    window.PsycheControl.renderAgentControlDrawer(content, model, {
       onGrant: function (request) {
         return agentControlCommand(project, {
           type: "lease_grant", requestId: request.requestId, actorId: request.agentId,
@@ -261,20 +268,42 @@
   function refreshAgentControlState() {
     var project = activeProject();
     if (!project || !window.PsycheControl) return Promise.resolve(null);
-    return invoke("control_state", { projectRoot: project.root }).then(function (response) {
+    var projectRoot = project.root;
+    var requestId = ++agentControlRefreshRequestId;
+    return invoke("control_state", { projectRoot: projectRoot }).then(function (response) {
+      var currentProject = activeProject();
+      if (requestId !== agentControlRefreshRequestId || !currentProject || currentProject.root !== projectRoot) {
+        return null;
+      }
       var snapshot = response && response.snapshot ? response.snapshot : response;
       agentControlModel = window.PsycheControl.createAgentControlModel(snapshot || {}, {
         operator: true,
         previousOwnerEpoch: agentControlOwnerEpoch,
       });
       agentControlOwnerEpoch = agentControlModel.ownerEpoch;
+      agentControlProjectRoot = projectRoot;
       renderAgentControl();
       return agentControlModel;
     }).catch(function () {
+      var currentProject = activeProject();
+      if (requestId !== agentControlRefreshRequestId || !currentProject || currentProject.root !== projectRoot) {
+        return null;
+      }
       agentControlModel = null;
+      agentControlOwnerEpoch = null;
+      agentControlProjectRoot = null;
       renderAgentControl();
       return null;
     });
+  }
+
+  function resetAgentControlProject(project) {
+    agentControlRefreshRequestId += 1;
+    agentControlModel = null;
+    agentControlOwnerEpoch = null;
+    agentControlProjectRoot = null;
+    renderAgentControl();
+    if (project) void refreshAgentControlState();
   }
 
   function installAgentControlUi() {
@@ -790,6 +819,7 @@
     state.activeProjectId = id;
     var project = findProject(id);
     if (!project) return false;
+    if (typeof resetAgentControlProject === "function") resetAgentControlProject(project);
     clearPassiveCovenPaneFocus();
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
