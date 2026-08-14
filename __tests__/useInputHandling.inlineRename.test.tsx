@@ -194,11 +194,17 @@ describe('useInputHandling inline rename', () => {
 
     const savePanes = vi.fn(async () => {});
     let rename: InlineRenameState | null = null;
+    let inputReady = false;
     const { stdin, unmount } = render(
-      <Harness panes={[pane()]} savePanes={savePanes} onSettled={(s) => { rename = s; }} />
+      <Harness panes={[pane()]} savePanes={savePanes} onSettled={(s) => {
+        rename = s;
+        inputReady = true;
+      }} />
     );
 
-    await pressUntil(stdin, 'e', () => rename !== null, 'rename to open');
+    await waitFor(() => inputReady, 'input listener to attach');
+    stdin.write('e');
+    await waitFor(() => rename !== null, 'rename to open');
     stdin.write('-renamed');
     await waitFor(
       () => String(rename?.value ?? '').includes('-renamed'), 'typed name', 5000,

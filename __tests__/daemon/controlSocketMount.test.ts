@@ -93,7 +93,7 @@ async function startMountedDaemon(): Promise<{
 
   const credentials = await createControlCredentialStore({
     projectRoot: canonicalRoot,
-    filePath: path.join(projectRoot, 'creds.json'),
+    filePath: path.join(canonicalRoot, 'creds.json'),
   });
   const endpoint = socketPath();
   const server = await ControlServer.start({
@@ -102,6 +102,7 @@ async function startMountedDaemon(): Promise<{
     ownerEpoch: host.epoch,
     runtime: host.runtime,
     credentials,
+    operatorCommandPolicy: 'trusted-test-only',
   });
   cleanups.push(() => server.close());
 

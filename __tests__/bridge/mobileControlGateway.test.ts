@@ -1,8 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { WORKSPACE_SNAPSHOT_FIXTURE } from '../../protocol-fixtures/fixtures.js';
 import { MobileControlGateway } from '../../src/services/bridge/MobileControlGateway.js';
+import {
+  MobileInspectionError,
+  type MobileInspection,
+} from '../../src/services/bridge/mobileInspection.js';
+import type { BrowserSnapshot } from '../../src/utils/fileBrowser.js';
 import type { ReadonlyWorkspaceSnapshot } from '../../src/workspace/snapshot.js';
+import { PaneAction, type ActionResult } from '../../src/actions/types.js';
 
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -126,6 +132,121 @@ describe('MobileControlGateway', () => {
       code: 'command_not_supported',
       requestId: 'attach-1',
     });
+  });
+});
+
+describe('MobileControlGateway remote actions', () => {
+  function actionGateway(executeAction?: (input: {
+    paneId: string;
+    actionId: PaneAction;
+  }) => Promise<ActionResult>) {
+    return new MobileControlGateway({
+      workspaceSnapshot: () => ({
+        workspace: WORKSPACE_SNAPSHOT_FIXTURE.workspace,
+        sequence: 1,
+      }),
+      executeAction,
+    });
+  }
+
+  it('validates action and pane scope before invoking the live executor', async () => {
+    const calls: unknown[] = [];
+    const gateway = actionGateway(async (input) => {
+      calls.push(input);
+      return { type: 'success', message: 'opened' };
+    });
+
+    await expect(gateway.handle({
+      type: 'actions.start', requestId: 'action-1', paneId: '%3', action: PaneAction.VIEW,
+    }, context())).resolves.toEqual({
+      type: 'actions.result', requestId: 'action-1', result: { type: 'success', message: 'opened' },
+    });
+    expect(calls).toEqual([{ paneId: '%3', actionId: PaneAction.VIEW }]);
+
+    await expect(gateway.handle({
+      type: 'actions.start', requestId: 'bad-action', paneId: '%3', action: 'shell_escape',
+    } as any, context())).rejects.toMatchObject({ code: 'invalid_action' });
+    await expect(gateway.handle({
+      type: 'actions.start', requestId: 'bad-pane', paneId: '%404', action: PaneAction.VIEW,
+    }, context())).rejects.toMatchObject({ code: 'pane_scope_violation' });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('continues action sessions for their owner and clears them on disconnect', async () => {
+    const gateway = actionGateway(async () => ({
+      type: 'confirm',
+      message: 'Merge?',
+      onConfirm: async () => ({ type: 'success', message: 'Merged' }),
+    }));
+    const started = await gateway.handle({
+      type: 'actions.start', requestId: 'action-2', paneId: '%3', action: PaneAction.MERGE,
+    }, context());
+    expect(started).toMatchObject({ type: 'actions.result', sessionId: expect.any(String) });
+    if (started.type !== 'actions.result' || !started.sessionId) throw new Error('missing session');
+
+    await expect(gateway.handle({
+      type: 'actions.respond',
+      requestId: 'wrong-owner',
+      sessionId: started.sessionId,
+      response: { type: 'confirm' },
+    }, { ...context(), ownerId: 'owner-2' })).rejects.toMatchObject({
+      code: 'action_session_not_found',
+    });
+    await expect(gateway.handle({
+      type: 'actions.respond',
+      requestId: 'confirmed',
+      sessionId: started.sessionId,
+      response: { type: 'confirm' },
+    }, context())).resolves.toEqual({
+      type: 'actions.result',
+      requestId: 'confirmed',
+      result: { type: 'success', message: 'Merged' },
+    });
+
+    const pending = await gateway.handle({
+      type: 'actions.start', requestId: 'action-3', paneId: '%3', action: PaneAction.MERGE,
+    }, context());
+    if (pending.type !== 'actions.result' || !pending.sessionId) throw new Error('missing session');
+    gateway.clearOwner('owner-1');
+    await expect(gateway.handle({
+      type: 'actions.respond',
+      requestId: 'cleared',
+      sessionId: pending.sessionId,
+      response: { type: 'confirm' },
+    }, context())).rejects.toMatchObject({ code: 'action_session_not_found' });
+  });
+
+  it('revalidates pane scope before continuing and invalidates all sessions on teardown', async () => {
+    let workspace = WORKSPACE_SNAPSHOT_FIXTURE.workspace;
+    const callback = vi.fn(async () => ({ type: 'success', message: 'mutated' } as ActionResult));
+    const gateway = new MobileControlGateway({
+      workspaceSnapshot: () => ({ workspace, sequence: 1 }),
+      executeAction: async () => ({
+        type: 'confirm', message: 'Mutate?', onConfirm: callback,
+      }),
+    });
+    const first = await gateway.handle({
+      type: 'actions.start', requestId: 'scoped-start', paneId: '%3', action: PaneAction.MERGE,
+    }, context());
+    if (first.type !== 'actions.result' || !first.sessionId) throw new Error('missing session');
+    workspace = { ...workspace, projects: [] };
+    await expect(gateway.handle({
+      type: 'actions.respond', requestId: 'stale', sessionId: first.sessionId,
+      response: { type: 'confirm' },
+    }, context())).rejects.toMatchObject({ code: 'pane_scope_violation' });
+    expect(callback).not.toHaveBeenCalled();
+
+    workspace = WORKSPACE_SNAPSHOT_FIXTURE.workspace;
+    const second = await gateway.handle({
+      type: 'actions.start', requestId: 'teardown-start', paneId: '%3', action: PaneAction.MERGE,
+    }, context());
+    if (second.type !== 'actions.result' || !second.sessionId) throw new Error('missing session');
+    gateway.clearActions();
+    await expect(gateway.handle({
+      type: 'actions.respond', requestId: 'after-teardown', sessionId: second.sessionId,
+      response: { type: 'confirm' },
+    }, context())).rejects.toMatchObject({ code: 'action_session_not_found' });
+    expect(callback).not.toHaveBeenCalled();
   });
 });
 
@@ -311,6 +432,179 @@ describe('MobileControlGateway terminal streams', () => {
       await expect(gateway.handle(request, streamContext()))
         .rejects.toMatchObject({ code: 'command_not_supported' });
     }
+  });
+});
+
+describe('MobileControlGateway file inspection', () => {
+  const snapshot: BrowserSnapshot = {
+    rootPath: '/repo',
+    files: [{
+      path: 'src/index.ts',
+      name: 'index.ts',
+      parentPath: 'src',
+      exists: true,
+      changed: true,
+      statusCode: ' M',
+      statusLabel: 'M',
+    }, {
+      path: 'src/deleted.ts',
+      name: 'deleted.ts',
+      parentPath: 'src',
+      exists: false,
+      changed: true,
+      statusCode: ' D',
+      statusLabel: 'D',
+    }],
+  };
+
+  function inspectionGateway(overrides: Partial<MobileInspection> = {}) {
+    const inspection: MobileInspection = {
+      list: async () => snapshot,
+      readFile: async () => ({ text: 'export {};\n', truncated: false }),
+      diff: async () => '@@ -1 +1 @@\n-old\n+new',
+      ...overrides,
+    };
+    return {
+      gateway: new MobileControlGateway({
+        workspaceSnapshot: () => ({
+          workspace: WORKSPACE_SNAPSHOT_FIXTURE.workspace,
+          sequence: 1,
+        }),
+        mobileInspection: inspection,
+      }),
+      inspection,
+    };
+  }
+
+  it('lists files from the pane worktree and ignores a client-provided root', async () => {
+    const roots: string[] = [];
+    const { gateway } = inspectionGateway({
+      list: async (root) => {
+        roots.push(root);
+        return snapshot;
+      },
+    });
+
+    await expect(gateway.handle({
+      type: 'files.list',
+      requestId: 'list-1',
+      paneId: '%3',
+      root: '/outside/client-choice',
+    } as any, context())).resolves.toEqual({
+      type: 'files.list.result',
+      requestId: 'list-1',
+      paneId: '%3',
+      snapshot,
+    });
+    expect(roots).toEqual(['/repo']);
+  });
+
+  it('reads a file selected from the canonical snapshot', async () => {
+    const reads: Array<{ root: string; relativePath: string }> = [];
+    const { gateway } = inspectionGateway({
+      readFile: async (input) => {
+        reads.push(input);
+        return { text: 'export {};\n', truncated: false };
+      },
+    });
+
+    await expect(gateway.handle({
+      type: 'files.read',
+      requestId: 'read-1',
+      paneId: '%3',
+      path: 'src/index.ts',
+    }, context())).resolves.toEqual({
+      type: 'files.read.result',
+      requestId: 'read-1',
+      paneId: '%3',
+      path: 'src/index.ts',
+      content: 'export {};\n',
+      truncated: false,
+    });
+    expect(reads).toEqual([{ root: '/repo', relativePath: 'src/index.ts' }]);
+  });
+
+  it('returns file_deleted without reading an absent tracked file', async () => {
+    let reads = 0;
+    const { gateway } = inspectionGateway({
+      readFile: async () => {
+        reads += 1;
+        return { text: '', truncated: false };
+      },
+    });
+
+    await expect(gateway.handle({
+      type: 'files.read',
+      requestId: 'read-deleted',
+      paneId: '%3',
+      path: 'src/deleted.ts',
+    }, context())).rejects.toMatchObject({
+      code: 'file_deleted',
+      requestId: 'read-deleted',
+    });
+    expect(reads).toBe(0);
+  });
+
+  it('passes only the canonical snapshot status code to plain diff rendering', async () => {
+    const diffs: Array<{ root: string; path: string; statusCode: string }> = [];
+    const { gateway } = inspectionGateway({
+      diff: async (root, filePath, statusCode) => {
+        diffs.push({ root, path: filePath, statusCode });
+        return '@@ -1 +1 @@\n-old\n+new';
+      },
+    });
+
+    await expect(gateway.handle({
+      type: 'files.diff',
+      requestId: 'diff-1',
+      paneId: '%3',
+      path: 'src/deleted.ts',
+      statusCode: '??',
+    } as any, context())).resolves.toEqual({
+      type: 'files.diff.result',
+      requestId: 'diff-1',
+      paneId: '%3',
+      path: 'src/deleted.ts',
+      diff: '@@ -1 +1 @@\n-old\n+new',
+    });
+    expect(diffs).toEqual([{ root: '/repo', path: 'src/deleted.ts', statusCode: ' D' }]);
+  });
+
+  it('rejects panes without an available published worktree before inspection', async () => {
+    let lists = 0;
+    const { gateway } = inspectionGateway({
+      list: async () => {
+        lists += 1;
+        return snapshot;
+      },
+    });
+
+    for (const paneId of ['%404', 'coven:review']) {
+      await expect(gateway.handle({
+        type: 'files.list',
+        requestId: `list-${paneId}`,
+        paneId,
+      }, context())).rejects.toMatchObject({ code: 'unknown_target' });
+    }
+    expect(lists).toBe(0);
+  });
+
+  it('preserves typed adapter errors and attaches the request id', async () => {
+    const { gateway } = inspectionGateway({
+      readFile: async () => {
+        throw new MobileInspectionError('path_outside_root', 'outside selected worktree');
+      },
+    });
+
+    await expect(gateway.handle({
+      type: 'files.read',
+      requestId: 'read-escape',
+      paneId: '%3',
+      path: 'src/index.ts',
+    }, context())).rejects.toMatchObject({
+      code: 'path_outside_root',
+      requestId: 'read-escape',
+    });
   });
 });
 

@@ -1,8 +1,25 @@
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import {
+  access,
+  link,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createControlCredentialStore } from '../src/control/credentials.js';
+import {
+  createControlCredentialStore,
+  createControlCredentialStoreForCanonicalRoot,
+  type CredentialCreationOps,
+} from '../src/control/credentials.js';
 import { createControlServerForTest } from '../src/control/server.js';
 import type { ControlServerRuntime } from '../src/control/server.js';
 import type { ControlCommandInput } from '../src/control/types.js';
@@ -46,7 +63,10 @@ function takeoverInput(): ControlCommandInput {
 function stubRuntime(submit: ControlServerRuntime['submit']): ControlServerRuntime {
   return {
     submit,
-    snapshot: () => ({ ownerEpoch: 1, sequence: 0, commands: {}, leases: {} }),
+  snapshot: () => ({
+    ownerEpoch: 1, sequence: 0, commands: {}, leases: {}, resources: [],
+    capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
+  }),
     readEvents: () => ({ events: [], nextSequence: 0, gap: false }),
   };
 }
@@ -78,6 +98,143 @@ describe('control credential store', () => {
 
     const second = await createControlCredentialStore({ projectRoot: root, filePath });
     expect(await second.operatorToken()).toBe(operatorToken);
+  });
+
+  it('atomically converges concurrent stores on the on-disk credentials', async () => {
+    const root = await tempProject();
+    const filePath = path.join(root, '.psyche', 'runtime', 'control-credentials.json');
+    const stores = await Promise.all(Array.from(
+      { length: 64 },
+      () => createControlCredentialStore({ projectRoot: root, filePath }),
+    ));
+    const tokens = await Promise.all(stores.map(async (store) => ({
+      operator: await store.operatorToken(),
+      agent: await store.agentToken(),
+    })));
+    const onDisk = JSON.parse(await readFile(filePath, 'utf8'));
+
+    expect(new Set(tokens.map((token) => token.operator))).toEqual(new Set([onDisk.operatorToken]));
+    expect(new Set(tokens.map((token) => token.agent))).toEqual(new Set([onDisk.agentToken]));
+    expect((await stat(filePath)).mode & 0o777).toBe(0o600);
+  });
+
+  it('rejects a symlink credential target', async () => {
+    const root = await tempProject();
+    const victim = path.join(root, 'victim.json');
+    const filePath = path.join(root, 'control-credentials.json');
+    await symlink(victim, filePath);
+
+    const store = await createControlCredentialStore({ projectRoot: root, filePath });
+    await expect(store.agentToken()).rejects.toMatchObject({ code: 'credential_path_unsafe' });
+  });
+
+  it('rejects a symlink in the credential parent path', async () => {
+    const root = await tempProject();
+    const outside = await tempProject();
+    const linkedParent = path.join(root, '.psyche');
+    await symlink(outside, linkedParent);
+
+    const store = await createControlCredentialStore({
+      projectRoot: root,
+      filePath: path.join(linkedParent, 'runtime', 'control-credentials.json'),
+    });
+    await expect(store.agentToken()).rejects.toMatchObject({ code: 'credential_path_unsafe' });
+  });
+
+  it.each(['write', 'sync', 'close', 'publish'] as const)(
+    'removes temporary credential material after an injected %s failure',
+    async (failureStep) => {
+      const root = await realpath(await tempProject());
+      const filePath = path.join(root, 'control-credentials.json');
+      const failure = new Error(`injected ${failureStep} failure`);
+      let closeCalls = 0;
+      const creationOps: CredentialCreationOps = {
+        async openTemporary(temporary) {
+          const handle = await open(temporary, 'wx', 0o600);
+          return {
+            async writeFile(data, encoding) {
+              if (failureStep === 'write') throw failure;
+              return handle.writeFile(data, encoding);
+            },
+            async sync() {
+              if (failureStep === 'sync') throw failure;
+              return handle.sync();
+            },
+            async close() {
+              closeCalls += 1;
+              if (failureStep === 'close' && closeCalls === 1) {
+                throw failure;
+              }
+              await handle.close().catch(() => undefined);
+            },
+          };
+        },
+        async publish(temporary, target) {
+          if (failureStep === 'publish') throw failure;
+          await link(temporary, target);
+        },
+        removeTemporary: unlink,
+      };
+      const store = await createControlCredentialStoreForCanonicalRoot({
+        canonicalProjectRoot: root,
+        filePath,
+        creationOps,
+      });
+
+      await expect(store.agentToken()).rejects.toBe(failure);
+      await expect(access(filePath)).rejects.toMatchObject({ code: 'ENOENT' });
+      const leftovers = (await readdir(root)).filter((name) => name.endsWith('.tmp'));
+      expect(leftovers).toEqual([]);
+      expect(closeCalls).toBe(failureStep === 'close' ? 2 : 1);
+    },
+  );
+
+  it('rereads an atomic publication winner and removes only the losing temporary file', async () => {
+    const root = await realpath(await tempProject());
+    const filePath = path.join(root, 'control-credentials.json');
+    const winner = { operatorToken: 'winner-operator', agentToken: 'winner-agent' };
+    const creationOps: CredentialCreationOps = {
+      openTemporary: (temporary) => open(temporary, 'wx', 0o600),
+      async publish(_temporary, target) {
+        await writeFile(target, `${JSON.stringify(winner)}\n`, { mode: 0o600 });
+        throw Object.assign(new Error('winner exists'), { code: 'EEXIST' });
+      },
+      removeTemporary: unlink,
+    };
+    const store = await createControlCredentialStoreForCanonicalRoot({
+      canonicalProjectRoot: root,
+      filePath,
+      creationOps,
+    });
+
+    await expect(store.agentToken()).resolves.toBe(winner.agentToken);
+    expect(JSON.parse(await readFile(filePath, 'utf8'))).toEqual(winner);
+    expect((await readdir(root)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('surfaces losing temporary cleanup failure after validating a publication winner', async () => {
+    const root = await realpath(await tempProject());
+    const filePath = path.join(root, 'control-credentials.json');
+    const winner = { operatorToken: 'winner-operator', agentToken: 'winner-agent' };
+    const cleanupFailure = new Error('injected cleanup failure');
+    const creationOps: CredentialCreationOps = {
+      openTemporary: (temporary) => open(temporary, 'wx', 0o600),
+      async publish(_temporary, target) {
+        await writeFile(target, `${JSON.stringify(winner)}\n`, { mode: 0o600 });
+        throw Object.assign(new Error('winner exists'), { code: 'EEXIST' });
+      },
+      async removeTemporary() {
+        throw cleanupFailure;
+      },
+    };
+    const store = await createControlCredentialStoreForCanonicalRoot({
+      canonicalProjectRoot: root,
+      filePath,
+      creationOps,
+    });
+
+    await expect(store.agentToken()).rejects.toBe(cleanupFailure);
+    expect(JSON.parse(await readFile(filePath, 'utf8'))).toEqual(winner);
   });
 });
 
@@ -124,4 +281,32 @@ describe('control server authorization', () => {
       takeoverInput(),
     )).resolves.toMatchObject({ status: 'succeeded', value: { kind: 'human' } });
   });
+
+  it('restricts new authority commands and compatibility access', async () => {
+    const submit = vi.fn(async () => ({ status: 'succeeded' as const }));
+    const server = createControlServerForTest({ runtime: stubRuntime(submit) });
+    const agent: ControlPrincipal = { id: 'agent-1', kind: 'agent', capabilities: ['read', 'mutate', 'delegate'] };
+    const compatibility: ControlPrincipal = { id: 'compat-1', kind: 'compatibility', capabilities: ['read', 'mutate'] };
+    const base = delegationInput();
+    const grant = { ...base, kind: 'lease.grant' as const, payload: { requestId: 'r' } };
+    const request = { ...base, kind: 'lease.request' as const, payload: { taskId: 't', ttlMs: 1, grants: [] } };
+    await expect(server.submitAs(agent, grant)).resolves.toMatchObject({ status: 'rejected', code: 'operator_required' });
+    await expect(server.submitAs(compatibility, request)).resolves.toMatchObject({ status: 'rejected', code: 'compatibility_not_authorized' });
+    await expect(server.submitAs(agent, request)).resolves.toMatchObject({ status: 'succeeded' });
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['pane.spawn', 'pane.kill', 'pane.resize', 'coven.desktop.action'] as const)(
+    'blocks agent principals from legacy %s bypass',
+    async (kind) => {
+      const submit = vi.fn(async () => ({ status: 'succeeded' as const }));
+      const server = createControlServerForTest({ runtime: stubRuntime(submit) });
+      const legacy = { ...takeoverInput(), kind, payload: {} } as ControlCommandInput;
+      await expect(server.submitAs(
+        { id: 'agent-1', kind: 'agent', capabilities: ['read', 'mutate', 'delegate'] },
+        legacy,
+      )).resolves.toMatchObject({ status: 'rejected', code: 'agent_not_authorized' });
+      expect(submit).not.toHaveBeenCalled();
+    },
+  );
 });

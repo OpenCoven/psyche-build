@@ -75,6 +75,18 @@ describe('Vim bounded Ex contract', () => {
     expect(regexDocument.value).toBe('x x\nx');
   });
 
+  it('applies non-global substitutions once per selected line and global substitutions throughout each line', async () => {
+    const once = new ExDocument('a a\na a');
+    await createEditorMachine(once).executeEx('%s/a/x/');
+    expect(once.value).toBe('x a\nx a');
+    expect(once.ranges).toEqual([{ anchor: 0, head: 0 }]);
+
+    const global = new ExDocument('a a\na a');
+    await createEditorMachine(global).executeEx('%s/a/x/g');
+    expect(global.value).toBe('x x\nx x');
+    expect(global.ranges).toEqual([{ anchor: 0, head: 0 }]);
+  });
+
   it('requires the host confirmation capability for substitute c flag', async () => {
     const document = new ExDocument('one one');
     const machine = createEditorMachine(document);

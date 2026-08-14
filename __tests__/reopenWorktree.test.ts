@@ -71,13 +71,13 @@ vi.mock('../src/utils/layoutManager.js', () => ({
 }));
 
 vi.mock('../src/utils/settingsManager.js', () => ({
-  SettingsManager: vi.fn(() => ({
+  SettingsManager: vi.fn(function SettingsManager() { return {
     getSettings: vi.fn(() => ({
       permissionMode: 'plan',
       enabledAgents: ['claude', 'codex'],
       enableAutopilotByDefault: false,
     })),
-  })),
+  }; }),
 }));
 
 vi.mock('../src/utils/agentDetection.js', () => ({

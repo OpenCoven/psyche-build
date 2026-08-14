@@ -18,7 +18,12 @@ function createRepository(): string {
   execFileSync('git', ['init', '--quiet'], { cwd: root });
   execFileSync(
     'git',
-    ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', 'commit', '--quiet', '--allow-empty', '-m', 'initial'],
+    [
+      '-c', 'user.email=test@example.com',
+      '-c', 'user.name=Test',
+      '-c', 'commit.gpgsign=false',
+      'commit', '--quiet', '--allow-empty', '-m', 'initial',
+    ],
     { cwd: root },
   );
   return root;
@@ -43,7 +48,7 @@ describe('hook-created worktree commit ownership', () => {
       [
         '#!/bin/sh',
         'if [ "$3" = "1" ]; then',
-        '  git -c user.email=test@example.com -c user.name=Test commit --allow-empty -m post-checkout-hook',
+        '  git -c user.email=test@example.com -c user.name=Test -c commit.gpgsign=false commit --allow-empty -m post-checkout-hook',
         'fi',
         '',
       ].join('\n'),

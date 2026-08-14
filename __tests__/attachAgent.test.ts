@@ -52,12 +52,12 @@ vi.mock('../src/utils/paneCreation.js', () => ({
 }));
 
 vi.mock('../src/utils/settingsManager.js', () => ({
-  SettingsManager: vi.fn(() => ({
+  SettingsManager: vi.fn(function SettingsManager() { return {
     getSettings: vi.fn(() => ({
       permissionMode: 'plan',
       enableAutopilotByDefault: false,
     })),
-  })),
+  }; }),
 }));
 
 vi.mock('../src/utils/paneTitle.js', () => ({

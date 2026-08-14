@@ -1,5 +1,5 @@
 import XCTest
-@testable import PsycheCore
+import PsycheCore
 
 final class ControlMessagesTests: XCTestCase {
     func testEncodesWorkspaceSnapshotRequestWithCanonicalDiscriminator() throws {
@@ -208,6 +208,204 @@ final class ControlMessagesTests: XCTestCase {
         }
     }
 
+    func testFileInspectionFixturesDecodeEveryBoundedField() throws {
+        let fixtures = try loadMobileControlFixtures()
+
+        guard case let .listFiles(list) = try decodeRequestFixture("listFiles", fixtures: fixtures) else {
+            return XCTFail("Expected files.list")
+        }
+        XCTAssertEqual(list.requestID, "files-list-1")
+        XCTAssertEqual(list.paneID, "%3")
+
+        guard case let .filesList(listResult) = try decodeResponseFixture(
+            "filesListResult",
+            fixtures: fixtures
+        ) else {
+            return XCTFail("Expected files.list.result")
+        }
+        XCTAssertEqual(listResult.snapshot.rootPath, "/repo")
+        XCTAssertEqual(listResult.snapshot.files.first?.path, "src/index.ts")
+        XCTAssertEqual(listResult.snapshot.files.first?.statusLabel, "Modified")
+
+        guard case let .filesRead(readResult) = try decodeResponseFixture(
+            "filesReadResult",
+            fixtures: fixtures
+        ) else {
+            return XCTFail("Expected files.read.result")
+        }
+        XCTAssertEqual(readResult.path, "src/index.ts")
+        XCTAssertEqual(readResult.content, "export {};\n")
+        XCTAssertEqual(readResult.truncated, true)
+
+        guard case let .filesDiff(diffResult) = try decodeResponseFixture(
+            "filesDiffResult",
+            fixtures: fixtures
+        ) else {
+            return XCTFail("Expected files.diff.result")
+        }
+        XCTAssertEqual(diffResult.path, "src/index.ts")
+        XCTAssertEqual(diffResult.diff, "@@ -0,0 +1 @@\n+export {};\n")
+    }
+
+    func testActionResponseFixtureCarriesTheContinuationSession() throws {
+        let fixtures = try loadMobileControlFixtures()
+        guard case let .respondToAction(response) = try decodeRequestFixture(
+            "respondToAction",
+            fixtures: fixtures
+        ) else {
+            return XCTFail("Expected actions.respond")
+        }
+        XCTAssertEqual(response.requestID, "action-response-1")
+        XCTAssertEqual(response.sessionID, "action-session-1")
+        XCTAssertEqual(response.response, .confirm)
+    }
+
+    func testActionResultDecodesStringMetadata() throws {
+        let message = try JSONDecoder().decode(MobileServerMessage.self, from: Data("""
+        {
+          "type": "control",
+          "payload": {
+            "type": "actions.result",
+            "requestId": "action-1",
+            "result": {
+              "type": "success",
+              "message": "Created pane",
+              "data": {"action": "create_pane", "agent": "codex"}
+            }
+          }
+        }
+        """.utf8))
+
+        guard case let .control(.actionResult(response)) = message else {
+            return XCTFail("Expected actions.result")
+        }
+        XCTAssertEqual(response.result.data, ["action": "create_pane", "agent": "codex"])
+    }
+
+    func testConstructedActionResultPreservesEveryPresentationField() throws {
+        let option = MobileActionOption(
+            id: "approve",
+            label: "Approve",
+            description: "Approve the changes as-is",
+            danger: true,
+            isDefault: false
+        )
+        let reviewData = MobileActionReviewData(
+            repoPath: "/repo",
+            sourceBranch: "feature/mobile-actions",
+            targetBranch: "main",
+            files: ["Sources/App.swift", "Tests/AppTests.swift"],
+            aiFailed: false
+        )
+        let result = MobileActionResult(
+            type: "pr_review",
+            message: "Review the proposed changes",
+            title: "PR Review",
+            confirmLabel: "Submit review",
+            cancelLabel: "Cancel",
+            options: [option],
+            placeholder: "Leave a review comment",
+            defaultValue: "Looks good",
+            inputMaxVisibleLines: 4,
+            progress: 75.0,
+            targetPaneID: "%11",
+            reviewData: reviewData,
+            data: [
+                "host": "studio.local",
+                "projectTitle": "psyche-build",
+                "consequence": "Creates a public pull request"
+            ],
+            relatedFiles: ["Sources/App.swift", "Sources/SceneDelegate.swift"],
+            dismissable: false
+        )
+
+        XCTAssertEqual(option.id, "approve")
+        XCTAssertEqual(option.label, "Approve")
+        XCTAssertEqual(option.description, "Approve the changes as-is")
+        XCTAssertEqual(option.danger, true)
+        XCTAssertEqual(option.isDefault, false)
+
+        XCTAssertEqual(result.type, "pr_review")
+        XCTAssertEqual(result.message, "Review the proposed changes")
+        XCTAssertEqual(result.title, "PR Review")
+        XCTAssertEqual(result.confirmLabel, "Submit review")
+        XCTAssertEqual(result.cancelLabel, "Cancel")
+        XCTAssertEqual(result.options, [option])
+        XCTAssertEqual(result.placeholder, "Leave a review comment")
+        XCTAssertEqual(result.defaultValue, "Looks good")
+        XCTAssertEqual(result.inputMaxVisibleLines, 4)
+        XCTAssertEqual(result.progress, 75.0)
+        XCTAssertEqual(result.targetPaneID, "%11")
+        XCTAssertEqual(result.reviewData, reviewData)
+        XCTAssertEqual(
+            result.data,
+            [
+                "host": "studio.local",
+                "projectTitle": "psyche-build",
+                "consequence": "Creates a public pull request"
+            ]
+        )
+        XCTAssertEqual(result.relatedFiles, ["Sources/App.swift", "Sources/SceneDelegate.swift"])
+        XCTAssertEqual(result.dismissable, false)
+
+        let response = MobileActionsResultResponse(
+            requestID: "action-response-1",
+            sessionID: "session-1",
+            result: result
+        )
+        let message = MobileServerMessage.control(.actionResult(response))
+        let encoded = try encodedJSONObject(of: message)
+        let payloadObject = payload(from: encoded)
+        let encodedResult = try XCTUnwrap(payloadObject["result"] as? [String: Any])
+        let encodedOption = try XCTUnwrap((encodedResult["options"] as? [[String: Any]])?.first)
+        let encodedReviewData = try XCTUnwrap(encodedResult["reviewData"] as? [String: Any])
+
+        XCTAssertEqual(encoded["type"] as? String, "control")
+        XCTAssertEqual(payloadObject["type"] as? String, "actions.result")
+        XCTAssertEqual(payloadObject["requestId"] as? String, "action-response-1")
+        XCTAssertEqual(payloadObject["sessionId"] as? String, "session-1")
+        XCTAssertEqual(encodedResult["type"] as? String, "pr_review")
+        XCTAssertEqual(encodedResult["message"] as? String, "Review the proposed changes")
+        XCTAssertEqual(encodedResult["title"] as? String, "PR Review")
+        XCTAssertEqual(encodedResult["confirmLabel"] as? String, "Submit review")
+        XCTAssertEqual(encodedResult["cancelLabel"] as? String, "Cancel")
+        XCTAssertEqual(encodedResult["placeholder"] as? String, "Leave a review comment")
+        XCTAssertEqual(encodedResult["defaultValue"] as? String, "Looks good")
+        XCTAssertEqual(try XCTUnwrap(encodedResult["inputMaxVisibleLines"] as? NSNumber).intValue, 4)
+        XCTAssertEqual(
+            try XCTUnwrap(encodedResult["progress"] as? NSNumber).doubleValue,
+            75.0
+        )
+        XCTAssertEqual(encodedResult["targetPaneId"] as? String, "%11")
+        XCTAssertNil(encodedResult["targetPaneID"])
+        XCTAssertEqual(encodedOption["id"] as? String, "approve")
+        XCTAssertEqual(encodedOption["label"] as? String, "Approve")
+        XCTAssertEqual(encodedOption["description"] as? String, "Approve the changes as-is")
+        XCTAssertEqual(try XCTUnwrap(encodedOption["danger"] as? NSNumber).boolValue, true)
+        XCTAssertEqual(try XCTUnwrap(encodedOption["default"] as? NSNumber).boolValue, false)
+        XCTAssertNil(encodedOption["isDefault"])
+        XCTAssertEqual(encodedReviewData["repoPath"] as? String, "/repo")
+        XCTAssertEqual(encodedReviewData["sourceBranch"] as? String, "feature/mobile-actions")
+        XCTAssertEqual(encodedReviewData["targetBranch"] as? String, "main")
+        XCTAssertEqual(encodedReviewData["files"] as? [String], ["Sources/App.swift", "Tests/AppTests.swift"])
+        XCTAssertEqual(try XCTUnwrap(encodedReviewData["aiFailed"] as? NSNumber).boolValue, false)
+        XCTAssertEqual(try XCTUnwrap(encodedResult["data"] as? [String: String]), [
+            "host": "studio.local",
+            "projectTitle": "psyche-build",
+            "consequence": "Creates a public pull request"
+        ])
+        XCTAssertEqual(encodedResult["relatedFiles"] as? [String], ["Sources/App.swift", "Sources/SceneDelegate.swift"])
+        XCTAssertEqual(try XCTUnwrap(encodedResult["dismissable"] as? NSNumber).boolValue, false)
+
+        let decoded = try JSONDecoder().decode(MobileServerMessage.self, from: JSONEncoder().encode(message))
+
+        guard case let .control(.actionResult(decodedResponse)) = decoded else {
+            return XCTFail("Expected actions.result response")
+        }
+        XCTAssertEqual(decodedResponse.sessionID, "session-1")
+        XCTAssertEqual(decodedResponse.result, result)
+    }
+
     private func decodeRequestFixture(
         _ name: String,
         fixtures: [String: Data]
@@ -244,8 +442,8 @@ final class ControlMessagesTests: XCTestCase {
         return try object.mapValues { try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]) }
     }
 
-    private func encodedJSONObject(of message: MobileClientMessage) throws -> [String: Any] {
-        let data = try JSONEncoder().encode(message)
+    private func encodedJSONObject<T: Encodable>(of value: T) throws -> [String: Any] {
+        let data = try JSONEncoder().encode(value)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 

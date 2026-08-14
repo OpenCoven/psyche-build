@@ -1,0 +1,1 @@
+export const AGENT_CONTROL_GENERIC_CLICK_LIMITATION: string;

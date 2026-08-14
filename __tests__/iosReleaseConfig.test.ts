@@ -150,7 +150,7 @@ describe('iOS production release configuration', () => {
     try {
       cpSync(resolve(projectRoot, 'native/ios'), resolve(fixtureRoot, 'native/ios'), {
         recursive: true,
-        filter: (source) => !basename(source).startsWith('.build'),
+        filter: (source) => !['.build', '.derivedData'].includes(basename(source)),
       });
       writeFileSync(
         resolve(fixtureRoot, 'package.json'),
@@ -165,6 +165,8 @@ describe('iOS production release configuration', () => {
           'user.name=Psyche Test',
           '-c',
           'user.email=psyche-test@example.invalid',
+          '-c',
+          'commit.gpgsign=false',
           'commit',
           '--quiet',
           '-m',

@@ -44,8 +44,8 @@ export class PaneStreamHub {
   }
 
   /** Send raw bytes to a tmux pane via control-mode `send-keys -H`. */
-  sendInput(paneId: string, data: Buffer): void {
-    this.tmux.sendKeysHex(paneId, data);
+  sendInput(paneId: string, data: Buffer): void | Promise<void> {
+    return this.tmux.sendKeysHex(paneId, data);
   }
 
   /** Resize a tmux pane to the client's viewport. */

@@ -70,8 +70,8 @@ interface BrowserSearchEntryRecord {
   sortModifiedAt: number;
 }
 
-const MAX_GIT_BUFFER = 16 * 1024 * 1024;
-const MAX_PREVIEW_BYTES = 200_000;
+export const MAX_GIT_BUFFER = 16 * 1024 * 1024;
+export const MAX_PREVIEW_BYTES = 200_000;
 const DEPENDENCY_DIR_NAMES = new Set([
   'node_modules',
   'vendor',
@@ -176,7 +176,7 @@ function pickDominantStatus(labels: string[]): string {
   return best;
 }
 
-function hasDependencySegment(relativePath: string): boolean {
+export function isDependencyBrowserPath(relativePath: string): boolean {
   return relativePath
     .split('/')
     .some((segment) => DEPENDENCY_DIR_NAMES.has(segment));
@@ -194,7 +194,7 @@ function shouldIncludeDependencyPaths(
     return true;
   }
 
-  return !!activePath && hasDependencySegment(activePath);
+  return !!activePath && isDependencyBrowserPath(activePath);
 }
 
 function parseGitStatus(rootPath: string): Map<string, string> {
@@ -476,7 +476,7 @@ export function buildBrowserTree(
       continue;
     }
 
-    if (!includeDependencyPaths && hasDependencySegment(file.path)) {
+    if (!includeDependencyPaths && isDependencyBrowserPath(file.path)) {
       continue;
     }
 
@@ -527,7 +527,7 @@ export function buildBrowserSearchEntries(
       continue;
     }
 
-    if (!includeDependencyPaths && hasDependencySegment(file.path)) {
+    if (!includeDependencyPaths && isDependencyBrowserPath(file.path)) {
       continue;
     }
 
@@ -747,7 +747,8 @@ function runGitPreview(
 export function loadDiffPreview(
   rootPath: string,
   relativePath: string,
-  statusLabel: string
+  statusLabel: string,
+  color: 'always' | 'never' = 'always'
 ): string[] {
   const fullPath = path.join(rootPath, relativePath);
 
@@ -757,7 +758,8 @@ export function loadDiffPreview(
     diffOutput = runGitPreview(rootPath, [
       'diff',
       '--no-index',
-      '--color=always',
+      '--no-ext-diff',
+      `--color=${color}`,
       '--',
       '/dev/null',
       fullPath,
@@ -766,7 +768,7 @@ export function loadDiffPreview(
     diffOutput = runGitPreview(rootPath, [
       'diff',
       '--no-ext-diff',
-      '--color=always',
+      `--color=${color}`,
       'HEAD',
       '--',
       relativePath,

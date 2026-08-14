@@ -275,7 +275,8 @@ describe('desktop shell wiring', () => {
 
   it('timestamps PTY output as soon as a live thread receives bytes', () => {
     expect(mainJs).toMatch(
-      /listen\("pty:data", function \(event\) \{[\s\S]{0,260}var thread = findThread\(payload\.thread_id\);[\s\S]{0,120}if \(!isLiveThread\(thread\)\) return;[\s\S]{0,120}thread\.lastOutputAt = Date\.now\(\);/,
+      /listen\("pty:data-batch", function \(event\) \{[\s\S]{0,260}var thread = findThread\(payload\.threadId\);[\s\S]{0,120}if \(!isLiveThread\(thread\)\) return;[\s\S]{0,200}terminalController\.receive\(payload\)[\s\S]{0,120}thread\.lastOutputAt = Date\.now\(\);/,
+
     );
   });
 
@@ -308,7 +309,7 @@ describe('desktop shell wiring', () => {
 
   it('samples terminal tails once for working state before gating attention', () => {
     expect(functionSource('sampleThreadAttention')).toMatch(
-      /var tail = terminalTail\(thread\.term, ATTENTION_TAIL_LINES\);[\s\S]{0,120}thread\.isWorking = PsycheSessions\.sidebarTailIsWorking\(tail\);[\s\S]{0,420}if \(!threadWantsAttentionTracking\(thread\)\) \{/,
+      /var tail = thread\.terminalController\.tail\(ATTENTION_TAIL_LINES\);[\s\S]{0,160}thread\.isWorking = PsycheSessions\.sidebarTailIsWorking\(tail\);[\s\S]{0,420}if \(!threadWantsAttentionTracking\(thread\)\) \{/,
     );
   });
 
@@ -341,9 +342,16 @@ describe('desktop shell wiring', () => {
 
   it('synchronizes cached sidebar status keys at the start of every sidebar render', () => {
     const renderSource = functionSource('renderSessionList');
-    expect(renderSource).toMatch(
-      /if \(!sessionListEl\) return;[\s\S]{0,120}if \(editingContext && editingContext\.surface === "sidebar"\) return;[\s\S]{0,120}var now = Date\.now\(\);[\s\S]{0,80}syncLocalSidebarStatusKeys\(now\);/,
+    const missingListGuard = renderSource.indexOf('if (!sessionListEl) return;');
+    const editingGuard = renderSource.indexOf(
+      'if (editingContext && editingContext.surface === "sidebar") return;',
     );
+    const timestamp = renderSource.indexOf('var now = Date.now();');
+    const statusSync = renderSource.indexOf('syncLocalSidebarStatusKeys(now);');
+    expect(missingListGuard).toBeGreaterThanOrEqual(0);
+    expect(editingGuard).toBeGreaterThan(missingListGuard);
+    expect(timestamp).toBeGreaterThan(editingGuard);
+    expect(statusSync).toBeGreaterThan(timestamp);
     expect(renderSource).toMatch(/disarmSessionClose\([^)]*\);/);
 
     const source = functionSource('syncLocalSidebarStatusKeys');
@@ -407,6 +415,9 @@ describe('desktop shell wiring', () => {
       }>,
       attentionById: Map<string, boolean>,
     ) => {
+      threads.forEach((thread) => {
+        Object.assign(thread, { terminalController: { tail: () => '' } });
+      });
       const renderCalls: string[] = [];
       const syncCalls: string[] = [];
       const retained: string[] = [];
@@ -432,7 +443,6 @@ describe('desktop shell wiring', () => {
       const sampleThreadAttention = compileFunction<() => void>(source, {
         ATTENTION_TAIL_LINES: 14,
         Date: { now: () => 1000 },
-        terminalTail: () => '',
         PsycheSessions: {
           sidebarTailIsWorking: () => false,
           deriveLocalSidebarStatus: (thread: { needsAttention?: boolean; steadyStatusKey: string }) => ({
@@ -535,8 +545,10 @@ describe('desktop shell wiring', () => {
     });
   });
 
-  it('reads what the terminal shows rather than the bytes that produced it', () => {
-    expect(mainJs).toMatch(/function terminalTail\(term, lines\)[\s\S]{0,400}translateToString\(true\)/);
+  it('reads terminal tails through the pane controller', () => {
+    expect(functionSource('sampleThreadAttention')).toContain(
+      'thread.terminalController.tail(ATTENTION_TAIL_LINES)',
+    );
   });
 
   it('keeps shells out of attention tracking even while sampling their work state', () => {
@@ -547,7 +559,10 @@ describe('desktop shell wiring', () => {
 
   it('routes terminal input through the attention-aware sender', () => {
     expect(mainJs).toMatch(
-      /term\.onData\(function \(data\) \{\s*sendToThread\(thread, data\);\s*\}\);/
+      /function routeTerminalData\(thread, data\) \{\s*if \(consumeTerminalDataSuppression\(thread, data\)\) return false;\s*sendToThread\(thread, data\);\s*return true;\s*\}/
+    );
+    expect(mainJs).toMatch(
+      /onData: function \(data\) \{\s*routeTerminalData\(thread, data\);\s*\}/
     );
     expect(functionSource('localSessionContextActions')).toContain(
       'actions.push({ label: "Interrupt", run: callbacks.interrupt });',
@@ -555,6 +570,36 @@ describe('desktop shell wiring', () => {
     expect(functionSource('renderSessionList')).toContain(
       'interrupt: function () { sendToThread(thread, "\\x03"); }',
     );
+  });
+
+  it('executes the terminal input routing helper against suppression and ordinary input', () => {
+    const thread = { id: 'thread-a' };
+    const suppressed = '\x1b[I';
+    const ordinary = 'git status\r';
+    const sendCalls: Array<[typeof thread, string]> = [];
+    const suppressionChecks: Array<[typeof thread, string]> = [];
+    const routeTerminalData = compileFunction<(
+      currentThread: typeof thread,
+      data: string,
+    ) => boolean>(functionSource('routeTerminalData'), {
+      consumeTerminalDataSuppression(currentThread: typeof thread, data: string) {
+        suppressionChecks.push([currentThread, data]);
+        return data === suppressed;
+      },
+      sendToThread(currentThread: typeof thread, data: string) {
+        sendCalls.push([currentThread, data]);
+      },
+    });
+
+    expect(routeTerminalData(thread, suppressed)).toBe(false);
+    expect(sendCalls).toEqual([]);
+
+    expect(routeTerminalData(thread, ordinary)).toBe(true);
+    expect(sendCalls).toEqual([[thread, ordinary]]);
+    expect(suppressionChecks).toEqual([
+      [thread, suppressed],
+      [thread, ordinary],
+    ]);
   });
 
   it('distinguishes interrupts from answers before applying attention state', () => {
@@ -610,10 +655,12 @@ describe('desktop shell wiring', () => {
   });
 
   it('clears attention on the bell and on exit', () => {
-    expect(mainJs).toMatch(/term\.onBell\(function \(\)[\s\S]{0,200}attentionTracker\.bell\(thread\.id\)/);
-    expect(mainJs).toMatch(
-      /function handlePtyExit\(payload\)[\s\S]{0,500}thread\.status = "exited";[\s\S]{0,120}thread\.isWorking = false;[\s\S]{0,300}clearThreadAttention\(thread\)/,
+    const handlePtyExit = functionSource('handlePtyExit');
+    expect(mainJs).toMatch(/onBell: function \(\)[\s\S]{0,200}attentionTracker\.bell\(thread\.id\)/);
+    expect(handlePtyExit).toMatch(
+      /thread\.status = persistentLive \? "failed" : "exited";[\s\S]*thread\.isWorking = false;[\s\S]*clearThreadAttention\(thread\)/,
     );
+    expect(handlePtyExit).toContain('thread.terminalController.markPtyExited()');
   });
 
   it('marks dead or failed PTYs as no longer working', () => {

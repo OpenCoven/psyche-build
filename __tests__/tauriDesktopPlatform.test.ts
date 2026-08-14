@@ -197,7 +197,7 @@ describe('desktop Tauri layout', () => {
     expect(configs[0].build.beforeDevCommand).toBe('pnpm run serve:web');
     expect(desktopPackage.scripts['serve:web'])
       .toBe('vite web --host 127.0.0.1 --port 1420 --strictPort');
-    expect(desktopPackage.devDependencies.vite).toBe('6.4.3');
+    expect(desktopPackage.devDependencies.vite).toBe('8.2.1');
     expect(JSON.stringify(configs)).not.toMatch(/\bpython3?\b/);
   });
 
@@ -205,7 +205,7 @@ describe('desktop Tauri layout', () => {
     const libSource = readFileSync(libSourcePath, 'utf8');
     const mainSource = readFileSync(mainSourcePath, 'utf8');
     const appEnvironment = bracedItem(libSource, 'fn app_environment');
-    const ptyStart = bracedItem(libSource, 'fn pty_start');
+    const ptyStart = bracedItem(libSource, 'fn pty_start_blocking');
     const spawnShellThread = bracedItem(mainSource, 'function spawnShellThread');
     const spawnPsycheThread = bracedItem(mainSource, 'function spawnPsycheThread');
 

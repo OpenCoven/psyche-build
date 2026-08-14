@@ -91,6 +91,28 @@ public actor PairedHostStore {
         try write(records)
     }
 
+    /// The generation- and attempt-bound explicit re-pair path. Either a
+    /// replaced connection or a cancelled pairing attempt is forbidden from
+    /// rewriting a pinned fingerprint after it has been retired.
+    func replace(
+        _ host: PairedHost,
+        for generation: ConnectionGeneration,
+        authorizedBy authorization: PairingPersistenceAuthorization
+    ) throws -> Bool {
+        let normalized = try normalize(host)
+        var records = try records()
+        records[normalized.serverID] = normalized
+        guard let committed = try generation.withValidity({
+            try authorization.withAuthorization {
+                try write(records)
+                return true
+            } ?? false
+        }) else {
+            return false
+        }
+        return committed
+    }
+
     /// Tokens are reissued without the host identity changing, so this skips
     /// the fingerprint rule rather than forcing a re-pair on every refresh.
     public func updateToken(_ token: String?, forServerID serverID: String) throws {

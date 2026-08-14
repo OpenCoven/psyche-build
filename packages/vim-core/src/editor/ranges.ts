@@ -61,7 +61,7 @@ export function objectRange(
     if (from < lineStart(text, position) || to < 0 || to > lineEnd(text, position)) return undefined;
     return around ? { from, to: to + object.length } : { from: from + object.length, to };
   }
-  const open = ')]}'.includes(object) ? reversePairs[object]! : object;
+  const open = ')]}>'.includes(object) ? reversePairs[object]! : object;
   const close = pairs[open];
   if (!close) return undefined;
   for (let from = text.lastIndexOf(open, position); from >= 0; from = text.lastIndexOf(open, from - 1)) {

@@ -31,23 +31,65 @@ export function starts(text: string): number[] {
 
 export interface GraphemeNavigator {
   move(text: string, position: number, delta: number): number;
+  previous(text: string, position: number): number;
+  next(text: string, position: number): number;
+  parts(text: string): readonly { value: string; index: number }[];
+  isBoundary(text: string, position: number): boolean;
+  wordForward(text: string, position: number, count: number, big: boolean): number;
+  wordBackward(text: string, position: number, count: number, big: boolean): number;
+  wordEnd(text: string, position: number, count: number, big: boolean): number;
 }
 
 /** Reuses one immutable-text grapheme index and invalidates it whenever the document text changes. */
 export function createGraphemeNavigator(): GraphemeNavigator {
   let indexedText: string | undefined;
   let boundaries: readonly number[] = [];
+  let indexedParts: readonly { value: string; index: number }[] = [];
+  function index(text: string): void {
+    if (text === indexedText) return;
+    indexedText = text;
+    indexedParts = [...segmenter.segment(text)]
+      .map((part) => ({ value: part.segment, index: part.index }));
+    boundaries = [...indexedParts.map((part) => part.index), text.length];
+  }
   return {
     move(text, position, delta) {
-      if (text !== indexedText) {
-        indexedText = text;
-        boundaries = starts(text);
-      }
+      index(text);
       if (delta === 0) return Math.max(0, Math.min(text.length, position));
       const target = delta > 0
         ? upperBound(boundaries, position) + delta - 1
         : lowerBound(boundaries, position) + delta;
       return boundaries[Math.max(0, Math.min(boundaries.length - 1, target))] ?? 0;
+    },
+    previous(text, position) {
+      index(text);
+      const target = lowerBound(boundaries, position) - 1;
+      return boundaries[Math.max(0, target)] ?? 0;
+    },
+    next(text, position) {
+      index(text);
+      return boundaries[upperBound(boundaries, position)] ?? text.length;
+    },
+    parts(text) {
+      index(text);
+      return indexedParts;
+    },
+    isBoundary(text, position) {
+      index(text);
+      const bounded = Math.max(0, Math.min(text.length, position));
+      return boundaries[lowerBound(boundaries, bounded)] === bounded;
+    },
+    wordForward(text, position, count, big) {
+      index(text);
+      return wordForwardFromParts(indexedParts, text.length, position, count, big);
+    },
+    wordBackward(text, position, count, big) {
+      index(text);
+      return wordBackwardFromParts(indexedParts, position, count, big);
+    },
+    wordEnd(text, position, count, big) {
+      index(text);
+      return wordEndFromParts(indexedParts, text.length, position, count, big);
     },
   };
 }
@@ -134,21 +176,30 @@ export function graphemes(text: string): { value: string; index: number }[] {
     .map((part) => ({ value: part.segment, index: part.index }));
 }
 
-export function wordForward(text: string, position: number, count: number, big: boolean): number {
-  const parts = graphemes(text);
+function wordForwardFromParts(
+  parts: readonly { value: string; index: number }[],
+  textLength: number,
+  position: number,
+  count: number,
+  big: boolean,
+): number {
   const found = parts.findIndex((part) => part.index >= position);
-  if (found < 0) return text.length;
+  if (found < 0) return textLength;
   let index = found;
   for (let step = 0; step < count; step += 1) {
     const current = kind(parts[index]?.value ?? ' ', big);
     while (index < parts.length && kind(parts[index]!.value, big) === current) index += 1;
     while (index < parts.length && kind(parts[index]!.value, big) === 'space') index += 1;
   }
-  return parts[index]?.index ?? text.length;
+  return parts[index]?.index ?? textLength;
 }
 
-export function wordBackward(text: string, position: number, count: number, big: boolean): number {
-  const parts = graphemes(text);
+function wordBackwardFromParts(
+  parts: readonly { value: string; index: number }[],
+  position: number,
+  count: number,
+  big: boolean,
+): number {
   let index = parts.findIndex((part) => part.index >= position);
   if (index < 0) index = parts.length;
   index -= 1;
@@ -161,10 +212,15 @@ export function wordBackward(text: string, position: number, count: number, big:
   return parts[Math.max(0, index)]?.index ?? 0;
 }
 
-export function wordEnd(text: string, position: number, count: number, big: boolean): number {
-  const parts = graphemes(text);
+function wordEndFromParts(
+  parts: readonly { value: string; index: number }[],
+  textLength: number,
+  position: number,
+  count: number,
+  big: boolean,
+): number {
   const found = parts.findIndex((part) => part.index >= position);
-  if (found < 0) return text.length;
+  if (found < 0) return textLength;
   let index = found;
   for (let step = 0; step < count; step += 1) {
     if (step > 0) index += 1;
@@ -172,7 +228,19 @@ export function wordEnd(text: string, position: number, count: number, big: bool
     const current = kind(parts[index]?.value ?? ' ', big);
     while (index + 1 < parts.length && kind(parts[index + 1]!.value, big) === current) index += 1;
   }
-  return parts[index]?.index ?? text.length;
+  return parts[index]?.index ?? textLength;
+}
+
+export function wordForward(text: string, position: number, count: number, big: boolean): number {
+  return wordForwardFromParts(graphemes(text), text.length, position, count, big);
+}
+
+export function wordBackward(text: string, position: number, count: number, big: boolean): number {
+  return wordBackwardFromParts(graphemes(text), position, count, big);
+}
+
+export function wordEnd(text: string, position: number, count: number, big: boolean): number {
+  return wordEndFromParts(graphemes(text), text.length, position, count, big);
 }
 
 export const pairs: Readonly<Record<string, string>> = { '(': ')', '[': ']', '{': '}', '<': '>' };

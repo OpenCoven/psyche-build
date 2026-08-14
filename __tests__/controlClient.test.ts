@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { createServer } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ControlServer, type ControlServerRuntime } from '../src/control/server.js';
 import { createControlCredentialStore } from '../src/control/credentials.js';
@@ -25,6 +26,9 @@ function socketPath(): string {
 async function startHarness(overrides: {
   submit?: ControlServerRuntime['submit'];
   ownerEpoch?: number;
+  snapshot?: ControlServerRuntime['snapshot'];
+  readEvents?: ControlServerRuntime['readEvents'];
+  operatorCommandPolicy?: 'disabled' | 'trusted-test-only';
 } = {}): Promise<Harness> {
   const projectRoot = await mkdtemp(path.join(tmpdir(), 'psyche-ctl-proj-'));
   tempRoots.push(projectRoot);
@@ -33,12 +37,15 @@ async function startHarness(overrides: {
     ?? (async (command) => ({ status: 'succeeded' as const, value: { actorKind: command.actor.kind } })));
   const runtime: ControlServerRuntime = {
     submit: submit as unknown as ControlServerRuntime['submit'],
-    snapshot: () => ({ ownerEpoch: overrides.ownerEpoch ?? 7, sequence: 2, commands: {}, leases: {} }),
-    readEvents: (after) => ({
+    snapshot: overrides.snapshot ?? (() => ({
+      ownerEpoch: overrides.ownerEpoch ?? 7, sequence: 2, commands: {}, leases: {},
+      resources: [], capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
+    })),
+    readEvents: overrides.readEvents ?? ((after) => ({
       events: [{ sequence: after + 1, kind: 'command.requested', payload: {} }],
       nextSequence: after + 1,
       gap: false,
-    }),
+    })),
   };
 
   const credentials = await createControlCredentialStore({
@@ -52,6 +59,7 @@ async function startHarness(overrides: {
     ownerEpoch: overrides.ownerEpoch ?? 7,
     runtime,
     credentials,
+    operatorCommandPolicy: overrides.operatorCommandPolicy ?? 'trusted-test-only',
   });
   cleanups.push(() => server.close());
 
@@ -83,6 +91,53 @@ function inputCommand(id: string): Parameters<ControlClient['submit']>[0] {
 }
 
 describe('ControlClient over the socket transport', () => {
+  it('disables bearer-token operator commands unless a native authority broker opts in', async () => {
+    const harness = await startHarness({ operatorCommandPolicy: 'disabled' });
+    const client = await ControlClient.connect({
+      projectRoot: harness.projectRoot,
+      endpoint: harness.endpoint,
+      token: harness.operatorToken,
+      clientName: 'untrusted-operator',
+    });
+    cleanups.push(() => client.close());
+
+    await expect(client.submit(inputCommand('disabled-operator'))).resolves.toMatchObject({
+      status: 'rejected', code: 'operator_authority_unavailable',
+    });
+    expect(harness.submit).not.toHaveBeenCalled();
+  });
+
+  it('aborts and closes a socket that accepts but never sends welcome', async () => {
+    const endpoint = socketPath();
+    let markConnected!: () => void;
+    let markClosed!: () => void;
+    const connected = new Promise<void>((resolve) => { markConnected = resolve; });
+    const closed = new Promise<void>((resolve) => { markClosed = resolve; });
+    const server = createServer((socket) => {
+      markConnected();
+      socket.on('data', () => undefined);
+      socket.once('close', () => markClosed());
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(endpoint, resolve);
+    });
+    cleanups.push(async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+
+    const controller = new AbortController();
+    const pending = ControlClient.connectCanonical({
+      projectRoot: '/canonical/project', endpoint, token: 'secret', clientName: 'deadline-test',
+      signal: controller.signal,
+    });
+    await connected;
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError', code: 'ABORT_ERR' });
+    await closed;
+  });
+
   it('learns the owner epoch and principal from welcome', async () => {
     const harness = await startHarness();
     const client = await ControlClient.connect({
@@ -129,6 +184,109 @@ describe('ControlClient over the socket transport', () => {
 
     await expect(client.getState()).resolves.toMatchObject({ ownerEpoch: 7, sequence: 2 });
     await expect(client.readEvents(0)).resolves.toMatchObject({ nextSequence: 1, gap: false });
+  });
+
+  it('constructs lease, approval, and action-status helper envelopes', async () => {
+    const harness = await startHarness();
+    const client = await ControlClient.connect({
+      projectRoot: harness.projectRoot, endpoint: harness.endpoint,
+      token: harness.operatorToken, clientName: 'test-operator',
+    });
+    cleanups.push(() => client.close());
+    await client.requestLease({
+      id: 'request-1', idempotencyKey: 'request-1', kind: 'lease.request', projectRoot: '/ignored',
+      createdAt: '2026-08-12T12:00:00.000Z', payload: { taskId: 'task-1', ttlMs: 60_000, grants: [] },
+    });
+    await client.resolveApproval({
+      id: 'resolve-1', idempotencyKey: 'resolve-1', kind: 'approval.resolve', projectRoot: '/ignored',
+      createdAt: '2026-08-12T12:00:00.000Z',
+      payload: { approvalId: 'approval-1', payloadDigest: 'a'.repeat(64), decision: 'approve' },
+    });
+    await expect(client.actionStatus('missing')).resolves.toBeUndefined();
+    expect(harness.submit.mock.calls.map(([submitted]) => submitted.kind))
+      .toEqual(['lease.request', 'approval.resolve']);
+  });
+
+  it('bounds missing action history lookup to the recent journal window', async () => {
+    const readEvents = vi.fn((after: number, limit?: number) => ({
+      events: Array.from({ length: limit ?? 0 }, (_, index) => ({
+        sequence: after + index + 1, kind: 'command.succeeded', payload: {},
+      })),
+      nextSequence: after + (limit ?? 0),
+      gap: false,
+    }));
+    const harness = await startHarness({
+      snapshot: () => ({
+        ownerEpoch: 7, sequence: 50_000, commands: {}, leases: {}, resources: [],
+        capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
+      }),
+      readEvents,
+    });
+    const client = await ControlClient.connect({
+      projectRoot: harness.projectRoot, endpoint: harness.endpoint,
+      token: harness.operatorToken, clientName: 'bounded-history',
+    });
+    cleanups.push(() => client.close());
+
+    await expect(client.actionStatus('too-old-or-missing')).resolves.toBeUndefined();
+    expect(readEvents.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(readEvents.mock.calls[0][0]).toBeGreaterThanOrEqual(49_000);
+  });
+
+  it('recovers a recent receipt from the bounded tail of a large journal', async () => {
+    const receipt = {
+      schema: 'psyche.control.receipt/v1' as const,
+      actionId: 'recent-large-journal', state: 'succeeded' as const,
+      resource: { kind: 'pane' as const, id: 'pane-1', generation: 1 },
+      createdAt: '2026-08-12T12:00:00.000Z', completedAt: '2026-08-12T12:00:01.000Z',
+    };
+    const readEvents = vi.fn((after: number) => ({
+      events: [{ sequence: after + 1, kind: 'command.succeeded', payload: { receipt } }],
+      nextSequence: after + 1,
+      gap: false,
+    }));
+    const harness = await startHarness({
+      snapshot: () => ({
+        ownerEpoch: 7, sequence: 50_000, commands: {}, leases: {}, resources: [],
+        capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
+      }),
+      readEvents,
+    });
+    const client = await ControlClient.connect({
+      projectRoot: harness.projectRoot, endpoint: harness.endpoint,
+      token: harness.operatorToken, clientName: 'recent-history',
+    });
+    cleanups.push(() => client.close());
+
+    await expect(client.actionStatus(receipt.actionId)).resolves.toEqual(receipt);
+    expect(readEvents).toHaveBeenCalledOnce();
+    expect(readEvents.mock.calls[0][0]).toBe(49_000);
+  });
+
+  it.each([
+    ['failed', 'effect_failed'],
+    ['unknown', 'effect_unknown'],
+    ['failed', 'action_validation_failed'],
+    ['failed', 'action_invalidated'],
+    ['failed', 'approval_expired'],
+  ] as const)('recovers %s action status from the journal after receipt eviction', async (state, code) => {
+    const receipt = {
+      schema: 'psyche.control.receipt/v1' as const,
+      actionId: `evicted-${code}`, state,
+      resource: { kind: 'browser_tab' as const, id: 'tab-1', generation: 1 },
+      createdAt: '2026-08-12T12:00:00.000Z', completedAt: '2026-08-12T12:00:01.000Z',
+      code,
+    };
+    const harness = await startHarness({
+      readEvents: () => ({
+        events: [{ sequence: 9, kind: state === 'failed' ? 'command.failed' : 'command.unknown', payload: { receipt } }],
+        nextSequence: 9, gap: false,
+      }),
+    });
+    const client = await ControlClient.connect({ projectRoot: harness.projectRoot, endpoint: harness.endpoint,
+      token: harness.operatorToken, clientName: 'test-operator' });
+    cleanups.push(() => client.close());
+    await expect(client.actionStatus(`evicted-${code}`)).resolves.toEqual(receipt);
   });
 
   it('rejects a connection whose declared project root does not match the owner', async () => {

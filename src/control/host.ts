@@ -3,6 +3,10 @@ import { acquireOwnerLock } from './ownerLock.js';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 import { ControlRuntime, type ControlHandlers } from './runtime.js';
 import { bootstrapSession } from './resources/sessionBootstrap.js';
+import { ApprovalStore } from './approvals.js';
+import { CapabilityLeaseStore } from './capabilityLeases.js';
+import { SurfaceRegistry } from './surfaces.js';
+import type { BrowserSemanticSnapshotRegistry } from './browserSemanticSnapshots.js';
 
 export interface HostControlPlane {
   epoch: number;
@@ -12,9 +16,11 @@ export interface HostControlPlane {
 
 export interface HostControlPlaneOptions {
   handlers: ControlHandlers;
+  surfaces?: SurfaceRegistry;
   ownerLock?: typeof acquireOwnerLock;
   journalOpen?: typeof ControlJournal.open;
   bootstrap?: (projectRoot: string) => Promise<void>;
+  browserSemanticSnapshots?: BrowserSemanticSnapshotRegistry;
 }
 
 export async function createHostControlPlane(
@@ -33,6 +39,12 @@ export async function createHostControlPlane(
       ownerEpoch: lock.epoch,
       handlers: options.handlers,
       journal,
+      surfaces: options.surfaces ?? new SurfaceRegistry(),
+      capabilityLeases: new CapabilityLeaseStore(undefined, lock.epoch),
+      approvals: new ApprovalStore(),
+      resolveBrowserElementSemantics: options.browserSemanticSnapshots
+        ? (input) => options.browserSemanticSnapshots!.resolve(input)
+        : undefined,
     });
 
     return {

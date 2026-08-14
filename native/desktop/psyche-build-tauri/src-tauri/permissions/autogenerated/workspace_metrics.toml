@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-metrics"
+description = "Enables the workspace_metrics command without any pre-configured scope."
+commands.allow = ["workspace_metrics"]
+
+[[permission]]
+identifier = "deny-workspace-metrics"
+description = "Denies the workspace_metrics command without any pre-configured scope."
+commands.deny = ["workspace_metrics"]

@@ -33,9 +33,9 @@ vi.mock('../src/utils/layoutManager.js', () => ({
   insertPaneIntoStoredLayout: insertPaneIntoStoredLayoutMock,
 }));
 vi.mock('../src/utils/settingsManager.js', () => ({
-  SettingsManager: vi.fn(() => ({
+  SettingsManager: vi.fn(function SettingsManager() { return {
     getSettings: () => ({ permissionMode: 'plan' }),
-  })),
+  }; }),
 }));
 vi.mock('../src/utils/agentLaunch.js', () => ({
   buildAgentCommand: () => 'opencode',

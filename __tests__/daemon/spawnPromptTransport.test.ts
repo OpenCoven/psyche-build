@@ -397,7 +397,7 @@ describe('shared-worktree attach', () => {
     const h = harness();
     h.deps.beforeExistingWorktreePersist = () => {
       execSync(
-        'git -c user.email=t@t -c user.name=t commit -q --allow-empty -m changed-under-lease',
+        'git -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -q --allow-empty -m changed-under-lease',
         { cwd: first.worktreePath },
       );
     };
