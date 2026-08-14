@@ -700,7 +700,8 @@ function createRenderer(options: {
       picked: function () { return setPicking ? setPicking.picked.slice() : null; },
       saveProjectAppearances: saveProjectAppearances,
       applyProjectAppearance: applyProjectAppearance,
-      projectAppearances: function () { return projectAppearances; }
+      projectAppearances: function () { return projectAppearances; },
+      sessionTreeFocusKey: function () { return sessionTreeFocusKey; }
     };`,
   )(
     document,
@@ -780,6 +781,7 @@ function createRenderer(options: {
       patch: { accent?: string | null; glyph?: string | null } | null,
     ) => boolean;
     projectAppearances: () => Record<string, { accent?: string; glyph?: string }>;
+    sessionTreeFocusKey: () => string;
     settings: typeof settings;
     saveSettings: typeof saveSettings;
     saveWorkspaceSoon: typeof saveWorkspaceSoon;
@@ -1149,6 +1151,11 @@ describe('Tauri Coven session project rail', () => {
     renderer.render();
     const projectHead = renderer.sessionListEl.querySelector('.session-project-head');
     const projectTreeitem = renderer.sessionListEl.querySelector('.session-project');
+    const sessionTreeitem = renderer.sessionListEl.querySelector('.session-row');
+
+    sessionTreeitem?.focus();
+    renderer.handleTreeKeydown(new FakeEvent(sessionTreeitem!, 'a'));
+    expect(renderer.sessionTreeFocusKey()).toBe(sessionTreeitem?.dataset.treeKey);
 
     await projectHead?.emit('contextmenu', {
       target: projectHead ?? undefined,
@@ -1162,6 +1169,7 @@ describe('Tauri Coven session project rail', () => {
     expect(actions).toHaveLength(1);
     expect(actions[0]).toMatchObject({ label: 'Customize appearance' });
     expect(anchor).toBe(projectTreeitem);
+    expect(renderer.sessionTreeFocusKey()).toBe(projectTreeitem?.dataset.treeKey);
 
     actions[0].run();
     expect(renderer.openProjectAppearancePopover).toHaveBeenCalledWith(

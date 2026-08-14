@@ -6635,6 +6635,8 @@
         setActiveProject(project.id);
       });
       projectParts.head.addEventListener("contextmenu", function (event) {
+        var focusKey = projectParts.group.dataset.treeKey || "";
+        if (focusKey) sessionTreeFocusKey = focusKey;
         openSessionContextMenu(
           event,
           projectAppearanceContextActions(project, projectParts.group),
