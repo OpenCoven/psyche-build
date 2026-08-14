@@ -4,6 +4,15 @@
 
 ### Security
 
+- Added project-scoped agent control for registered panes and browser tabs with
+  exact resource generations, task-bound capability leases, approve-once risky
+  actions, operator revocation, and no whole-desktop fallback.
+- Browser automation now uses bounded semantic snapshots and typed actions.
+  Submit-capable actions bind captured form method/destination; approved scripts
+  are limited to 64 KiB source, five seconds, and 256 KiB JSON results.
+- Agent-control journal events and stored receipts now contain allowlisted
+  metadata only. Terminal/page content, screenshots, secret values, raw scripts,
+  cookies, headers, paths, and provider error details are not persisted.
 - The bridge and daemon no longer accept a tmux pane id that is not a real
   pane id. Control mode is line-oriented, so a pane id containing a newline
   used to end the intended command and start another one — reaching
