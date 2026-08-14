@@ -717,6 +717,7 @@ describe('Tauri physical terminal panes', () => {
     const preserveOnly = [
       'movePaneTo',
       'updateActiveSplit',
+      'restoreSetScopePresentation',
       'cyclePaneSpan',
       'togglePaneMaximize',
       'exitPaneMaximize',
