@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { agentControlJournalPayload, ControlJournal } from '../src/control/journal.js';
+import type { ActionReceipt } from '../src/control/types.js';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -13,19 +14,17 @@ describe('ControlJournal', () => {
   it('constructs agent-control records from allowlisted metadata only', () => {
     const built = agentControlJournalPayload({
       kind: 'command.succeeded', commandId: 'script-1', idempotencyKey: 'idem-1',
-      outcome: { status: 'succeeded', value: { page: 'must-not-persist' } },
+      status: 'succeeded',
       receipt: {
         schema: 'psyche.control.receipt/v1', actionId: 'script-1', state: 'succeeded',
         resource: { kind: 'browser_tab', id: 'tab-1', generation: 2 },
-        createdAt: '2026-08-12T00:00:00.000Z', value: { password: 'secret' },
-        message: 'page transcript', sourceDigest: 'digest', sourceBytes: 10,
+        createdAt: '2026-08-12T00:00:00.000Z', sourceDigest: 'digest', sourceBytes: 10,
         resultBytes: 2, durationMs: 1,
       },
     });
     expect(built.payload).toMatchObject({ receipt: {
       sourceDigest: 'digest', sourceBytes: 10, resultBytes: 2, durationMs: 1,
     } });
-    expect(JSON.stringify(built)).not.toMatch(/password|secret|transcript|must-not-persist/);
   });
 
   it('keeps forbidden fields outside the typed agent-control builder contract', () => {
@@ -43,6 +42,41 @@ describe('ControlJournal', () => {
         // @ts-expect-error raw script is intentionally forbidden at the journal boundary
         script: 'return document.cookie',
       });
+      const terminal = {
+        kind: 'command.failed' as const, commandId: 'c', idempotencyKey: 'i',
+        status: 'failed' as const, code: 'surface_command_failed',
+      };
+      // @ts-expect-error full command outcomes are not accepted at the journal boundary
+      agentControlJournalPayload({ ...terminal, outcome: { status: 'failed', code: 'x', message: 'secret' } });
+      const fullReceipt: ActionReceipt = {
+        schema: 'psyche.control.receipt/v1', actionId: 'c', state: 'failed',
+        resource: { kind: 'browser_tab', id: 'tab', generation: 1 },
+        createdAt: '2026-08-12T00:00:00.000Z', value: 'secret',
+      };
+      // @ts-expect-error ActionReceipt remains too broad for the durable journal boundary
+      agentControlJournalPayload({ ...terminal, receipt: fullReceipt });
+      agentControlJournalPayload({ ...terminal, receipt: {
+        schema: 'psyche.control.receipt/v1', actionId: 'c', state: 'failed',
+        resource: { kind: 'browser_tab', id: 'tab', generation: 1 },
+        // @ts-expect-error full action receipts are not accepted at the journal boundary
+        createdAt: '2026-08-12T00:00:00.000Z', value: 'secret',
+      } });
+      // @ts-expect-error transcripts are forbidden
+      agentControlJournalPayload({ ...terminal, transcript: 'terminal output' });
+      // @ts-expect-error page data is forbidden
+      agentControlJournalPayload({ ...terminal, page: { text: 'secret' } });
+      // @ts-expect-error screenshots are forbidden
+      agentControlJournalPayload({ ...terminal, screenshot: 'base64' });
+      // @ts-expect-error typed values are forbidden
+      agentControlJournalPayload({ ...terminal, typedValue: 'password' });
+      // @ts-expect-error scripts are forbidden
+      agentControlJournalPayload({ ...terminal, script: 'return secret' });
+      // @ts-expect-error cookies are forbidden
+      agentControlJournalPayload({ ...terminal, cookie: 'session=secret' });
+      // @ts-expect-error headers are forbidden
+      agentControlJournalPayload({ ...terminal, header: 'Authorization: secret' });
+      // @ts-expect-error absolute paths are forbidden
+      agentControlJournalPayload({ ...terminal, absolutePath: '/Users/val/secret.txt' });
     }
     expect(true).toBe(true);
   });

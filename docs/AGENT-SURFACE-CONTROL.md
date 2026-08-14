@@ -31,7 +31,7 @@ Pane and browser operations additionally require the current resource
 | `psyche_pane_observe` | `task_id`, `lease_id`, `lease_revision`, `pane_id`, `generation` |
 | `psyche_pane_action` | `task_id`, `lease_id`, `lease_revision`, `action`; existing-pane actions require `pane_id`, `generation`, creation requires `project_id` |
 | `psyche_browser_inspect` | `task_id`, `lease_id`, `lease_revision`, `tab_id`, `generation` |
-| `psyche_browser_action` | `task_id`, `lease_id`, `lease_revision`, `tab_id`, `generation`, `action` |
+| `psyche_browser_action` | `task_id`, `lease_id`, `lease_revision`, `tab_id`, `generation`, `action`; element actions additionally require `snapshot_id` and `action.elementRef` |
 | `psyche_browser_script` | `task_id`, `lease_id`, `lease_revision`, `tab_id`, `generation`, `source` |
 | `psyche_control_action_status` | `action_id` |
 
@@ -79,10 +79,12 @@ SHA-256 and byte counts, never source.
 ## Evidence and failure semantics
 
 State, events, and stored receipts contain allowlisted metadata only. They do
-not persist terminal output, page text, screenshots, typed/secret values,
-scripts, cookies, headers, or backend error details. Pane reads, semantic trees,
-screenshots, and script return values are bounded response data, not journal
-payloads.
+not persist terminal output, semantic/page contents, screenshots, typed/secret
+values, scripts, cookies, headers, full paths, directory names, or backend error
+details. A redacted basename may be retained only for approval context, and a
+redacted target description may identify the requested effect. Pane reads,
+semantic trees, screenshots, and script return values are bounded response data,
+not journal payloads.
 
 Psyche Build never retries a mutation whose delivery may have occurred. A
 timeout, provider disconnect after dispatch, navigation during script

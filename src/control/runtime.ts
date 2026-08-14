@@ -14,7 +14,7 @@ import {
 } from './policy.js';
 import { SurfaceRegistry } from './surfaces.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
-import { agentControlJournalPayload } from './journal.js';
+import { agentControlJournalPayload, type AgentControlJournalReceipt } from './journal.js';
 import { canonicalizeBoundedJson } from './boundedJson.js';
 import type {
   ActionReceipt,
@@ -1194,7 +1194,10 @@ export class ControlRuntime {
     if (isSurfaceControlCommand(command)) {
       const built = agentControlJournalPayload({
         kind: terminalKindForOutcome(outcome), commandId: command.id,
-        idempotencyKey: command.idempotencyKey, outcome, ...(receipt ? { receipt } : {}),
+        idempotencyKey: command.idempotencyKey,
+        status: outcome.status,
+        ...(outcome.status === 'succeeded' ? {} : { code: 'surface_command_failed' }),
+        ...(receipt ? { receipt: journalReceiptMetadata(receipt) } : {}),
       });
       await this.journal.append(built.kind, built.payload);
       this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
@@ -1538,8 +1541,23 @@ function redactedPayloadForOutcome(
 }
 
 function redactReceipt(receipt: ActionReceipt): ActionReceipt {
-  const { value: _sensitiveValue, message: _sensitiveMessage, ...safeReceipt } = receipt;
-  return Object.freeze(safeReceipt);
+  return journalReceiptMetadata(receipt);
+}
+
+function journalReceiptMetadata(receipt: ActionReceipt): AgentControlJournalReceipt {
+  return Object.freeze({
+    schema: receipt.schema,
+    actionId: receipt.actionId,
+    state: receipt.state,
+    resource: receipt.resource,
+    createdAt: receipt.createdAt,
+    ...(receipt.completedAt ? { completedAt: receipt.completedAt } : {}),
+    ...(receipt.code ? { code: receipt.code } : {}),
+    ...(receipt.sourceDigest ? { sourceDigest: receipt.sourceDigest } : {}),
+    ...(receipt.sourceBytes !== undefined ? { sourceBytes: receipt.sourceBytes } : {}),
+    ...(receipt.resultBytes !== undefined ? { resultBytes: receipt.resultBytes } : {}),
+    ...(receipt.durationMs !== undefined ? { durationMs: receipt.durationMs } : {}),
+  });
 }
 
 function isActionReceiptLike(value: unknown): value is ActionReceipt {

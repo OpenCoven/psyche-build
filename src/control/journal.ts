@@ -9,15 +9,49 @@ export type AgentControlJournalKind =
   | 'command.requested' | 'command.succeeded' | 'command.failed'
   | 'command.unknown' | 'command.rejected' | 'approval.requested';
 
+interface ForbiddenAgentControlJournalData {
+  readonly outcome?: never;
+  readonly transcript?: never;
+  readonly page?: never;
+  readonly screenshot?: never;
+  readonly typedValue?: never;
+  readonly value?: never;
+  readonly script?: never;
+  readonly cookie?: never;
+  readonly header?: never;
+  readonly absolutePath?: never;
+}
+
+export type AgentControlJournalReceipt = ForbiddenAgentControlJournalData & {
+  readonly schema: ActionReceipt['schema'];
+  readonly actionId: string;
+  readonly state: ActionReceipt['state'];
+  readonly resource: ActionReceipt['resource'];
+  readonly createdAt: string;
+  readonly completedAt?: string;
+  readonly code?: string;
+  readonly sourceDigest?: string;
+  readonly sourceBytes?: number;
+  readonly resultBytes?: number;
+  readonly durationMs?: number;
+};
+
 export type AgentControlJournalInput =
-  | { kind: 'command.requested'; commandId: string; idempotencyKey: string;
+  | (ForbiddenAgentControlJournalData & { kind: 'command.requested'; commandId: string; idempotencyKey: string;
       commandKind: ControlCommand['kind']; ownerEpoch: number }
-  | { kind: 'approval.requested'; commandId: string; approvalId: string; payloadDigest: string;
+    )
+  | (ForbiddenAgentControlJournalData & { kind: 'approval.requested'; commandId: string; approvalId: string; payloadDigest: string;
       resource: ActionReceipt['resource']; capability: string; effect: {
         readonly kind: RedactedApprovalEffect['kind']; readonly target: string;
-      } }
-  | { kind: Exclude<AgentControlJournalKind, 'command.requested' | 'approval.requested'>;
-      commandId: string; idempotencyKey: string; outcome: CommandOutcome; receipt?: ActionReceipt };
+      } })
+  | (ForbiddenAgentControlJournalData & {
+      kind: Exclude<AgentControlJournalKind, 'command.requested' | 'approval.requested'>;
+      commandId: string;
+      idempotencyKey: string;
+      status: CommandOutcome['status'];
+      code?: string;
+      receipt?: AgentControlJournalReceipt;
+    });
 
 /** Construct-only boundary: sensitive effect values are never accepted here. */
 export function agentControlJournalPayload(input: AgentControlJournalInput): {
@@ -40,14 +74,14 @@ export function agentControlJournalPayload(input: AgentControlJournalInput): {
     kind: input.kind,
     payload: receipt
       ? { commandId: input.commandId, idempotencyKey: input.idempotencyKey,
-          status: input.outcome.status, receipt }
+          status: input.status, receipt }
       : { commandId: input.commandId, idempotencyKey: input.idempotencyKey,
-          status: input.outcome.status,
-          ...(input.outcome.status === 'succeeded' ? {} : { code: 'surface_command_failed' }) },
+          status: input.status,
+          ...(input.status === 'succeeded' ? {} : { code: input.code ?? 'surface_command_failed' }) },
   };
 }
 
-function journalReceipt(receipt: ActionReceipt): ActionReceipt {
+function journalReceipt(receipt: AgentControlJournalReceipt): AgentControlJournalReceipt {
   return Object.freeze({
     schema: receipt.schema,
     actionId: receipt.actionId,

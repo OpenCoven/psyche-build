@@ -11,8 +11,10 @@
   Submit-capable actions bind captured form method/destination; approved scripts
   are limited to 64 KiB source, five seconds, and 256 KiB JSON results.
 - Agent-control journal events and stored receipts now contain allowlisted
-  metadata only. Terminal/page content, screenshots, secret values, raw scripts,
-  cookies, headers, paths, and provider error details are not persisted.
+  metadata only. Terminal output, semantic/page contents, screenshots, secret
+  values, raw scripts, cookies, headers, full paths, directory names, and
+  provider error details are not persisted. Approval context may retain only a
+  redacted basename and redacted target description.
 - The bridge and daemon no longer accept a tmux pane id that is not a real
   pane id. Control mode is line-oriented, so a pane id containing a newline
   used to end the intended command and start another one — reaching
