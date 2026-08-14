@@ -264,6 +264,7 @@ function createPaneFocusHarness(
     findOpenFile: () => null,
     state,
     restoreRenderedTerminalFocus,
+    syncAllPtyVisibility: () => undefined,
   });
   const focusThread = compileFunction<(
     id: string,
