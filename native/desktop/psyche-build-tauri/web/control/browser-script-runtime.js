@@ -23,10 +23,11 @@ const LIMITS = Object.freeze({
   mutationValue: 65536,
   workerTimeoutMs: 4000,
 });
-const SAFE_ATTRIBUTES = /^(?:aria-[a-z0-9_.:-]+|data-[a-z0-9_.:-]+|title|alt|placeholder|role|class|name|type)$/;
-const SAFE_BOOLEAN_PROPERTIES = new Set(["disabled", "readOnly", "hidden"]);
+const SAFE_ATTRIBUTES = /^(?:aria-[a-z0-9_.:-]+|title|alt|placeholder|role|name)$/;
+const SAFE_BOOLEAN_PROPERTIES = new Set(["disabled", "readOnly"]);
 const SAFE_FORM_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
 const BLOCKED_TAGS = new Set(["SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "LINK"]);
+const DOCUMENT_CONTEXT_KEY = "__PSYCHE_BROWSER_SCRIPT_DOCUMENT_CONTEXT__";
 
 const encodeSuccess = (value) => {
   const json = stringify(value);
@@ -38,44 +39,100 @@ const encodeSuccess = (value) => {
   return stringify({ ok: true, json, byteCount, durationMs });
 };
 
-const captureSnapshot = () => {
+const directText = (node) => {
+  let text = "";
+  const childNodes = node && node.childNodes;
+  const length = childNodes && typeof childNodes.length === "number"
+    ? Math.min(childNodes.length, LIMITS.nodeText)
+    : 0;
+  for (let index = 0; index < length && text.length < LIMITS.nodeText; index += 1) {
+    const child = childNodes[index];
+    if (!child || (child.nodeType !== 3 && child.nodeType !== 4) ||
+        typeof child.data !== "string") {
+      continue;
+    }
+    text += child.data.slice(0, LIMITS.nodeText - text.length);
+  }
+  return text;
+};
+
+const captureSnapshot = (invocationDocument, invocationRoot) => {
   const nodes = [];
   const liveNodes = new Map();
-  const queue = [{ node: document.documentElement, parentId: null, depth: 0 }];
-  while (queue.length && nodes.length < LIMITS.snapshotNodes) {
-    const current = queue.shift();
-    if (!current || current.depth >= LIMITS.snapshotDepth) continue;
+  const queue = [{ node: invocationRoot, parentId: null, depth: 0 }];
+  let cursor = 0;
+  let snapshotBytes = 0;
+  let truncated = false;
+  while (cursor < queue.length && nodes.length < LIMITS.snapshotNodes) {
+    const current = queue[cursor++];
+    if (!current || current.depth >= LIMITS.snapshotDepth) {
+      truncated = true;
+      continue;
+    }
     const node = current.node;
     if (!node || typeof node.tagName !== "string") continue;
     const id = "n" + (nodes.length + 1);
     const tagName = node.tagName.toUpperCase();
     const attributes = {};
-    for (const attribute of Array.from(node.attributes || [])) {
+    let recordBudget = 256;
+    const accountField = (value) => {
+      recordBudget += textEncode(stringify(value)).byteLength;
+      if (snapshotBytes + recordBudget > LIMITS.snapshotBytes) {
+        throw Object.assign(new Error("snapshot_too_large"), { code: "snapshot_too_large" });
+      }
+    };
+    const nodeAttributes = node.attributes;
+    const attributeCount = nodeAttributes && typeof nodeAttributes.length === "number"
+      ? Math.min(nodeAttributes.length, 64)
+      : 0;
+    for (let index = 0; index < attributeCount; index += 1) {
+      const attribute = typeof nodeAttributes.item === "function"
+        ? nodeAttributes.item(index)
+        : nodeAttributes[index];
       if (attribute && typeof attribute.name === "string" &&
           typeof attribute.value === "string" && SAFE_ATTRIBUTES.test(attribute.name) &&
           attribute.value.length <= LIMITS.mutationValue) {
+        accountField([attribute.name, attribute.value]);
         attributes[attribute.name] = attribute.value;
       }
     }
-    nodes.push({
+    const text = BLOCKED_TAGS.has(tagName) ? "" : directText(node);
+    accountField(text);
+    const value = SAFE_FORM_TAGS.has(tagName)
+      ? String(node.value || "").slice(0, LIMITS.mutationValue)
+      : undefined;
+    if (value !== undefined) accountField(value);
+    const record = {
       id,
       parentId: current.parentId,
       tagName,
-      text: BLOCKED_TAGS.has(tagName)
-        ? ""
-        : String(node.textContent || "").slice(0, LIMITS.nodeText),
+      text,
       attributes,
-      value: SAFE_FORM_TAGS.has(tagName) ? String(node.value || "").slice(0, LIMITS.mutationValue) : undefined,
+      value,
       checked: typeof node.checked === "boolean" ? node.checked : undefined,
       disabled: node.disabled === true,
       readOnly: node.readOnly === true,
-    });
+    };
+    snapshotBytes += textEncode(stringify(record)).byteLength + 1;
+    if (snapshotBytes > LIMITS.snapshotBytes) {
+      throw Object.assign(new Error("snapshot_too_large"), { code: "snapshot_too_large" });
+    }
+    nodes.push(record);
     liveNodes.set(id, node);
-    for (const child of Array.from(node.children || [])) {
+    if (BLOCKED_TAGS.has(tagName)) continue;
+    const children = node.children;
+    const childCount = children && typeof children.length === "number" ? children.length : 0;
+    const available = LIMITS.snapshotNodes - queue.length;
+    const enqueueCount = Math.min(childCount, Math.max(0, available));
+    if (enqueueCount < childCount) truncated = true;
+    for (let index = 0; index < enqueueCount; index += 1) {
+      const child = children[index];
+      if (!child) continue;
       queue.push({ node: child, parentId: id, depth: current.depth + 1 });
     }
   }
-  const snapshot = { nodes, truncated: queue.length > 0 };
+  if (cursor < queue.length) truncated = true;
+  const snapshot = { nodes, truncated };
   if (textEncode(stringify(snapshot)).byteLength > LIMITS.snapshotBytes) {
     throw Object.assign(new Error("snapshot_too_large"), { code: "snapshot_too_large" });
   }
@@ -120,7 +177,7 @@ const boundedString = (value) => {
 };
 const mutationError = (code) => Object.assign(new Error(code), { code });
 
-const preflightMutation = (liveNodes, mutation) => {
+const preflightMutation = (liveNodes, invocationDocument, mutation) => {
   if (!mutation || typeof mutation !== "object" || Array.isArray(mutation)) {
     throw mutationError("mutation_plan_invalid");
   }
@@ -139,17 +196,35 @@ const preflightMutation = (liveNodes, mutation) => {
   }
   const nodeId = boundedString(mutation.nodeId);
   const node = liveNodes.get(nodeId);
-  if (!node || node.isConnected !== true || node.ownerDocument !== document) {
-    throw mutationError("mutation_target_stale");
-  }
-  const tagName = String(node.tagName).toUpperCase();
-  if (tagName.includes("-") || BLOCKED_TAGS.has(tagName)) {
-    throw mutationError("mutation_not_allowed");
-  }
+  const validateTarget = () => {
+    if (!node || node.isConnected !== true || node.ownerDocument !== invocationDocument) {
+      throw mutationError("mutation_target_stale");
+    }
+    const currentTagName = String(node.tagName).toUpperCase();
+    if (currentTagName.includes("-") || BLOCKED_TAGS.has(currentTagName)) {
+      throw mutationError("mutation_not_allowed");
+    }
+    return currentTagName;
+  };
+  const operation = (validate, apply) => {
+    validateTarget();
+    validate();
+    return () => {
+      validateTarget();
+      validate();
+      apply();
+    };
+  };
+  validateTarget();
 
   if (kind === "set_text") {
     const value = boundedString(mutation.value);
-    return () => { node.textContent = value; };
+    const validate = () => {
+      if (node.children && node.children.length > 0) {
+        throw mutationError("mutation_not_allowed");
+      }
+    };
+    return operation(validate, () => { node.textContent = value; });
   }
   if (kind === "set_attribute" || kind === "remove_attribute") {
     const name = boundedString(mutation.name);
@@ -160,43 +235,80 @@ const preflightMutation = (liveNodes, mutation) => {
     }
     if (kind === "set_attribute") {
       const value = boundedString(mutation.value);
-      return () => node.setAttribute(name, value);
+      return operation(() => {}, () => node.setAttribute(name, value));
     }
-    return () => node.removeAttribute(name);
+    return operation(() => {}, () => node.removeAttribute(name));
   }
   if (kind === "set_property") {
     const name = boundedString(mutation.name);
     if (!SAFE_BOOLEAN_PROPERTIES.has(name) || typeof mutation.value !== "boolean") {
       throw mutationError("mutation_not_allowed");
     }
-    return () => { node[name] = mutation.value; };
+    return operation(() => {}, () => { node[name] = mutation.value; });
   }
   if (kind === "set_form_value") {
-    if (!SAFE_FORM_TAGS.has(tagName)) throw mutationError("mutation_not_allowed");
     const value = boundedString(mutation.value);
-    return () => { node.value = value; };
+    const validate = () => {
+      const currentTagName = String(node.tagName).toUpperCase();
+      const type = String(
+        node.type || (node.getAttribute && node.getAttribute("type")) || "",
+      ).toLowerCase();
+      if (!SAFE_FORM_TAGS.has(currentTagName) ||
+          (currentTagName === "INPUT" && type === "file")) {
+        throw mutationError("mutation_not_allowed");
+      }
+    };
+    return operation(validate, () => { node.value = value; });
   }
   if (kind === "set_checked") {
-    const type = String(node.type || (node.getAttribute && node.getAttribute("type")) || "").toLowerCase();
-    if (tagName !== "INPUT" || (type !== "checkbox" && type !== "radio") || typeof mutation.value !== "boolean") {
+    if (typeof mutation.value !== "boolean") {
       throw mutationError("mutation_not_allowed");
     }
-    return () => { node.checked = mutation.value; };
+    const validate = () => {
+      const currentTagName = String(node.tagName).toUpperCase();
+      const type = String(
+        node.type || (node.getAttribute && node.getAttribute("type")) || "",
+      ).toLowerCase();
+      if (currentTagName !== "INPUT" || (type !== "checkbox" && type !== "radio")) {
+        throw mutationError("mutation_not_allowed");
+      }
+    };
+    return operation(validate, () => { node.checked = mutation.value; });
   }
-  if (kind === "focus") return () => node.focus();
+  if (kind === "focus") return operation(() => {}, () => node.focus());
   throw mutationError("mutation_plan_invalid");
 };
 
+let applyStarted = false;
 try {
   if (!input || typeof input.source !== "string" || typeof input.workerSource !== "string") {
     return fail("automation_failed");
   }
-  const { snapshot, liveNodes } = captureSnapshot();
+  if (typeof input.expectedUrl !== "string" ||
+      typeof input.expectedDocumentToken !== "string") {
+    return fail("automation_failed");
+  }
+  const invocationDocument = document;
+  const invocationRoot = invocationDocument.documentElement;
+  const expectedUrl = input.expectedUrl;
+  const expectedDocumentToken = input.expectedDocumentToken;
+  const documentMatches = () => {
+    const context = globalThis[DOCUMENT_CONTEXT_KEY];
+    return document === invocationDocument &&
+      invocationDocument.documentElement === invocationRoot &&
+      String(location.href) === expectedUrl &&
+      context && context.document === invocationDocument &&
+      context.root === invocationRoot &&
+      context.token === expectedDocumentToken;
+  };
+  if (!documentMatches()) return fail("effect_unknown");
+  const { snapshot, liveNodes } = captureSnapshot(invocationDocument, invocationRoot);
   const workerEnvelope = await runWorker(input.workerSource, {
     source: input.source,
     args: input.args,
     snapshot,
   });
+  if (!documentMatches()) return fail("effect_unknown");
   if (!workerEnvelope || workerEnvelope.ok !== true) {
     return fail(workerEnvelope && workerEnvelope.code || "automation_failed");
   }
@@ -207,10 +319,19 @@ try {
   if (textEncode(encodedPlan).byteLength > LIMITS.mutationBytes) {
     return fail("mutation_plan_invalid");
   }
-  const apply = workerEnvelope.mutations.map((item) => preflightMutation(liveNodes, item));
-  for (const operation of apply) operation();
+  const apply = workerEnvelope.mutations.map(
+    (item) => preflightMutation(liveNodes, invocationDocument, item),
+  );
+  if (!documentMatches()) return fail("effect_unknown");
+  applyStarted = true;
+  for (const operation of apply) {
+    if (!documentMatches()) throw mutationError("effect_unknown");
+    operation();
+    if (!documentMatches()) throw mutationError("effect_unknown");
+  }
   return encodeSuccess(workerEnvelope.value);
 } catch (error) {
+  if (applyStarted) return fail("effect_unknown");
   return fail(error && typeof error.code === "string" ? error.code : "automation_failed");
 }
 })

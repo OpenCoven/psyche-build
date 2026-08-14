@@ -81,6 +81,7 @@ type FakeNode = {
   isConnected: boolean;
   ownerDocument?: unknown;
   children: FakeNode[];
+  childNodes: Array<{ nodeType: number; data?: string }>;
   focus: ReturnType<typeof vi.fn>;
 };
 
@@ -91,6 +92,7 @@ function fakeElement(tagName: string, children: FakeNode[] = []): FakeNode {
     attributes: new Map(),
     isConnected: true,
     children,
+    childNodes: [],
     focus: vi.fn(),
   };
 }
@@ -98,22 +100,21 @@ function fakeElement(tagName: string, children: FakeNode[] = []): FakeNode {
 async function runPageRuntime(
   workerMessage: unknown,
   root = fakeElement('HTML'),
-): Promise<{
+  options: {
+  beforeWorkerMessage?: (state: {
+    document: { documentElement: FakeNode };
+    location: { href: string };
+  }) => void;
+  documentToken?: string;
+  expectedDocumentToken?: string;
+} = {}): Promise<{
   envelope: Record<string, unknown>;
   terminated: number;
   workerInput: Record<string, unknown> | null;
 }> {
   let terminated = 0;
   let workerInput: Record<string, unknown> | null = null;
-  class FakeWorker {
-    onmessage: ((event: { data: unknown }) => void) | null = null;
-    onerror: (() => void) | null = null;
-    postMessage(value: Record<string, unknown>) {
-      workerInput = value;
-      queueMicrotask(() => this.onmessage?.({ data: workerMessage }));
-    }
-    terminate() { terminated += 1; }
-  }
+  const location = { href: 'https://example.test/' };
   const document = {
     documentElement: root,
     createTreeWalker: () => {
@@ -121,6 +122,24 @@ async function runPageRuntime(
       return { nextNode: () => queue.shift() ?? null };
     },
   };
+  const documentToken = options.documentToken ?? 'document-token';
+  const documentContext = Object.freeze({
+    document,
+    root,
+    token: documentToken,
+  });
+  class FakeWorker {
+    onmessage: ((event: { data: unknown }) => void) | null = null;
+    onerror: (() => void) | null = null;
+    postMessage(value: Record<string, unknown>) {
+      workerInput = value;
+      queueMicrotask(() => {
+        options.beforeWorkerMessage?.({ document, location });
+        this.onmessage?.({ data: workerMessage });
+      });
+    }
+    terminate() { terminated += 1; }
+  }
   const attachDocument = (node: FakeNode) => {
     node.ownerDocument = document;
     node.children.forEach(attachDocument);
@@ -134,10 +153,18 @@ async function runPageRuntime(
     TextEncoder,
     performance,
     document,
+    location,
+    __PSYCHE_BROWSER_SCRIPT_DOCUMENT_CONTEXT__: documentContext,
     setTimeout,
     clearTimeout,
   });
-  const input = JSON.stringify({ source: 'return null;', args: null, workerSource: 'trusted' });
+  const input = JSON.stringify({
+    source: 'return null;',
+    args: null,
+    workerSource: 'trusted',
+    expectedUrl: location.href,
+    expectedDocumentToken: options.expectedDocumentToken ?? documentToken,
+  });
   const encoded = await runInContext(`${runtimeSource()}(${input})`, context) as string;
   return { envelope: JSON.parse(encoded), terminated, workerInput };
 }
@@ -172,11 +199,11 @@ describe('native browser script authority', () => {
     }
   });
 
-  it('routes approved scripts through an invocation-scoped WKContentWorld', () => {
+  it('binds trusted script execution to the document-token WKContentWorld', () => {
     expect(lib).toMatch(/async fn browser_script\(/);
     expect(lib).toContain('WKContentWorld::worldWithName');
-    expect(lib).toContain('next_browser_script_execution_world_name');
     expect(lib).toContain('evaluate_browser_script_document_token');
+    expect(lib).toMatch(/evaluate_browser_script_in_world\([\s\S]*BROWSER_SCRIPT_CONTEXT_WORLD_NAME\.to_string\(\)/);
     expect(main).toMatch(/operation\.kind === "script"[\s\S]{0,500}invoke\("browser_script"/);
     expect(main).not.toMatch(/operation\.kind === "script"[\s\S]{0,500}browserAutomationDispatchScript\(effect\)/);
   });
@@ -184,6 +211,8 @@ describe('native browser script authority', () => {
   it('embeds the trusted Worker runtime without exposing it to page source', () => {
     expect(lib).toContain('include_str!("../../web/control/browser-script-worker-runtime.js")');
     expect(lib).toMatch(/"workerSource":\s*include_str!/);
+    expect(lib).toContain('"expectedUrl": before_url.as_str()');
+    expect(lib).toContain('"expectedDocumentToken": document_token');
     expect(lib).toContain('"mutation_plan_invalid"');
     expect(lib).toContain('"mutation_target_stale"');
     expect(lib).toContain('"mutation_not_allowed"');
@@ -670,15 +699,24 @@ describe('native browser script authority', () => {
   });
 
   it('rejects oversized results after approved source poisons typed-array byteLength', async () => {
-    const envelope = await runWorker(`
-      const bytes = new TextEncoder().encode("");
-      const typedArrayPrototype = Object.getPrototypeOf(Object.getPrototypeOf(bytes));
-      Object.defineProperty(typedArrayPrototype, "byteLength", {
-        configurable: true,
-        get() { return 0; },
-      });
-      return "x".repeat(262144);
-    `);
+    const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+    const originalByteLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteLength');
+    let envelope: Record<string, unknown>;
+    try {
+      envelope = await runWorker(`
+        const bytes = new TextEncoder().encode("");
+        const typedArrayPrototype = Object.getPrototypeOf(Object.getPrototypeOf(bytes));
+        Object.defineProperty(typedArrayPrototype, "byteLength", {
+          configurable: true,
+          get() { return 0; },
+        });
+        return "x".repeat(262144);
+      `);
+    } finally {
+      if (originalByteLength) {
+        Object.defineProperty(typedArrayPrototype, 'byteLength', originalByteLength);
+      }
+    }
 
     expect(envelope).toEqual({ ok: false, code: 'result_too_large' });
   });
@@ -720,7 +758,14 @@ describe('native browser script authority', () => {
     iframe.textContent = 'embedded-secret';
     const visible = fakeElement('P');
     visible.textContent = 'visible text';
+    visible.childNodes = [{ nodeType: 3, data: 'visible text' }];
     const root = fakeElement('HTML', [script, style, iframe, visible]);
+    root.textContent = [
+      script.textContent,
+      style.textContent,
+      iframe.textContent,
+      visible.textContent,
+    ].join('');
 
     const { workerInput } = await runPageRuntime({ ok: true, value: null, mutations: [] }, root);
     const snapshot = workerInput?.snapshot as { nodes: Array<{ tagName: string; text: string }> };
@@ -732,6 +777,86 @@ describe('native browser script authority', () => {
       ['IFRAME', ''],
       ['P', 'visible text'],
     ]);
+    expect(JSON.stringify(snapshot)).not.toContain('script-secret');
+    expect(JSON.stringify(snapshot)).not.toContain('style-secret');
+    expect(JSON.stringify(snapshot)).not.toContain('embedded-secret');
+  });
+
+  it('captures bounded direct text without materializing aggregate descendant text', async () => {
+    const target = fakeElement('DIV');
+    target.childNodes = [{ nodeType: 3, data: 'direct text' }];
+    Object.defineProperty(target, 'textContent', {
+      get() { throw new Error('aggregate text must not be read'); },
+      set() {},
+    });
+    const root = fakeElement('HTML', [target]);
+
+    const result = await runPageRuntime({ ok: true, value: null, mutations: [] }, root);
+    const snapshot = result.workerInput?.snapshot as {
+      nodes: Array<{ tagName: string; text: string }>;
+    };
+
+    expect(result.envelope).toMatchObject({ ok: true });
+    expect(snapshot.nodes.find((node) => node.tagName === 'DIV')?.text).toBe('direct text');
+  });
+
+  it('stops snapshot capture before reading fields beyond the aggregate byte budget', async () => {
+    const target = fakeElement('DIV');
+    let highestRead = -1;
+    const attributes = {
+      length: 4,
+      item(index: number) {
+        highestRead = Math.max(highestRead, index);
+        if (index >= 2) throw new Error('attribute beyond budget was read');
+        return { name: `aria-${index}`, value: '"'.repeat(65_536) };
+      },
+    };
+    target.attributes = attributes as unknown as Map<string, string>;
+    const root = fakeElement('HTML', [target]);
+
+    const result = await runPageRuntime({ ok: true, value: null, mutations: [] }, root);
+
+    expect(highestRead).toBeLessThan(2);
+    expect(result.envelope).toEqual({ ok: false, code: 'snapshot_too_large' });
+  });
+
+  it('rechecks document identity before applying any mutation', async () => {
+    const target = fakeElement('DIV');
+    target.textContent = 'before';
+    const root = fakeElement('HTML', [target]);
+
+    const result = await runPageRuntime({
+      ok: true,
+      value: null,
+      mutations: [{ kind: 'set_text', nodeId: 'n2', value: 'after' }],
+    }, root, {
+      beforeWorkerMessage: ({ location }) => {
+        location.href = 'https://example.test/changed';
+      },
+    });
+
+    expect(result.envelope).toEqual({ ok: false, code: 'effect_unknown' });
+    expect(target.textContent).toBe('before');
+    expect(result.terminated).toBe(1);
+  });
+
+  it('rejects a replacement document before snapshot or Worker dispatch', async () => {
+    const target = fakeElement('DIV');
+    target.textContent = 'before';
+    const root = fakeElement('HTML', [target]);
+
+    const result = await runPageRuntime({
+      ok: true,
+      value: null,
+      mutations: [{ kind: 'set_text', nodeId: 'n2', value: 'after' }],
+    }, root, {
+      documentToken: 'replacement-token',
+      expectedDocumentToken: 'captured-token',
+    });
+
+    expect(result.envelope).toEqual({ ok: false, code: 'effect_unknown' });
+    expect(result.workerInput).toBeNull();
+    expect(target.textContent).toBe('before');
   });
 
   it('rejects executable and stale mutation targets before applying anything', async () => {
@@ -757,6 +882,91 @@ describe('native browser script authority', () => {
       mutations: [{ kind: 'set_text', nodeId: 'n2', value: 'changed' }],
     }, root);
     expect(stale.envelope).toEqual({ ok: false, code: 'mutation_target_stale' });
+  });
+
+  it('rejects mutation plans that can detach later targets before applying anything', async () => {
+    const child = fakeElement('SPAN');
+    child.textContent = 'child';
+    const parent = fakeElement('DIV', [child]);
+    parent.textContent = 'child';
+    const root = fakeElement('HTML', [parent]);
+
+    const result = await runPageRuntime({
+      ok: true,
+      value: null,
+      mutations: [
+        { kind: 'set_property', nodeId: 'n2', name: 'disabled', value: true },
+        { kind: 'set_text', nodeId: 'n2', value: 'replacement' },
+        { kind: 'focus', nodeId: 'n3' },
+      ],
+    }, root);
+
+    expect(result.envelope).toEqual({ ok: false, code: 'mutation_not_allowed' });
+    expect(parent.disabled).not.toBe(true);
+    expect(parent.textContent).toBe('child');
+    expect(child.focus).not.toHaveBeenCalled();
+  });
+
+  it('rejects file-input values and direct resource-triggering mutations', async () => {
+    const file = fakeElement('INPUT');
+    file.value = '';
+    file.attributes.set('type', 'file');
+    Object.defineProperty(file, 'type', { value: 'file', configurable: true });
+    const root = fakeElement('HTML', [file]);
+
+    for (const mutation of [
+      { kind: 'set_form_value', nodeId: 'n2', value: '/tmp/secret' },
+      { kind: 'set_attribute', nodeId: 'n2', name: 'type', value: 'image' },
+      { kind: 'set_attribute', nodeId: 'n2', name: 'class', value: 'load-external' },
+      { kind: 'set_attribute', nodeId: 'n2', name: 'data-load', value: 'external' },
+      { kind: 'set_property', nodeId: 'n2', name: 'hidden', value: false },
+    ]) {
+      const result = await runPageRuntime({ ok: true, value: null, mutations: [mutation] }, root);
+      expect(result.envelope).toEqual({ ok: false, code: 'mutation_not_allowed' });
+      expect(file.value).toBe('');
+    }
+  });
+
+  it('classifies unexpected synchronous apply failures as ambiguous', async () => {
+    const target = fakeElement('DIV');
+    target.textContent = 'before';
+    target.focus = vi.fn(() => { throw new Error('page callback failed'); });
+    const root = fakeElement('HTML', [target]);
+
+    const result = await runPageRuntime({
+      ok: true,
+      value: null,
+      mutations: [
+        { kind: 'set_text', nodeId: 'n2', value: 'after' },
+        { kind: 'focus', nodeId: 'n2' },
+      ],
+    }, root);
+
+    expect(result.envelope).toEqual({ ok: false, code: 'effect_unknown' });
+    expect(target.textContent).toBe('after');
+  });
+
+  it('revalidates each mutation target after earlier page callbacks run', async () => {
+    const trigger = fakeElement('INPUT');
+    const later = fakeElement('DIV');
+    later.textContent = 'before';
+    trigger.focus = vi.fn(() => {
+      later.isConnected = false;
+    });
+    const root = fakeElement('HTML', [trigger, later]);
+
+    const result = await runPageRuntime({
+      ok: true,
+      value: null,
+      mutations: [
+        { kind: 'focus', nodeId: 'n2' },
+        { kind: 'set_text', nodeId: 'n3', value: 'after' },
+      ],
+    }, root);
+
+    expect(result.envelope).toEqual({ ok: false, code: 'effect_unknown' });
+    expect(trigger.focus).toHaveBeenCalledOnce();
+    expect(later.textContent).toBe('before');
   });
 
   it('rejects navigation, HTML, executable URL, style, and custom-element sinks', async () => {

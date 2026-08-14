@@ -94,8 +94,11 @@ return { changed: true };
 
 Live `window`/`document`, timers, network, listeners, observers, imports,
 nested workers, navigation, HTML sinks, executable URLs, and external resource
-creation are unavailable. Node IDs expire after the invocation. Unsupported
-operations return `mutation_not_allowed`.
+creation are unavailable. Node IDs expire after the invocation. Disallowed
+mutation plans return `mutation_not_allowed`; rejected source syntax or other
+unsupported Worker behavior returns `automation_failed`. Approved source also
+rejects executable slash tokens, including division and regular-expression
+literals, so import preflight can fail closed without lexical ambiguity.
 
 ## Evidence and failure semantics
 

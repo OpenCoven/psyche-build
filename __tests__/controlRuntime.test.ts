@@ -695,6 +695,46 @@ describe('ControlRuntime', () => {
   });
 
   it.each([
+    'args_too_large',
+    'snapshot_too_large',
+    'mutation_plan_invalid',
+    'mutation_target_stale',
+    'mutation_not_allowed',
+    'target_unavailable',
+  ])('preserves the stable browser script failure code %s', async (code) => {
+    handlers.runBrowserScript = vi.fn(async () => {
+      throw Object.assign(new Error(`${code}: secret`), { code });
+    });
+    const harness = await createBrowserActionHarness();
+    const id = `stable-script-code-${code}`;
+    const action = command({ id, idempotencyKey: id, kind: 'browser.script', ownerEpoch: 7,
+      actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation, source: 'return null;',
+      } }) as unknown as Extract<ControlCommand, { kind: 'browser.script' }>;
+    const requested = await harness.runtime.submit(action);
+    const approval = (requested as { value: { approvalId: string; payloadDigest: string } }).value;
+
+    await submit(harness.runtime, command({
+      id: `${id}-approve`,
+      idempotencyKey: `${id}-approve`,
+      kind: 'approval.resolve',
+      ownerEpoch: 7,
+      payload: {
+        approvalId: approval.approvalId,
+        payloadDigest: approval.payloadDigest,
+        decision: 'approve',
+      },
+    }));
+
+    await expect(harness.runtime.submit(action)).resolves.toMatchObject({
+      status: 'failed',
+      code,
+    });
+    expect(JSON.stringify(harness.journal.read())).not.toContain('secret');
+  });
+
+  it.each([
     ['forged byte count', 'serialization_failed', () => ({ value: { leaked: 'result-secret' }, resultBytes: 0, durationMs: 1 })],
     ['oversized value', 'result_too_large', () => ({ value: 'x'.repeat(256 * 1024 + 1), resultBytes: 0, durationMs: 1 })],
     ['cyclic value', 'serialization_failed', () => { const value: Record<string, unknown> = { leaked: 'result-secret' }; value.self = value; return { value, resultBytes: 0, durationMs: 1 }; }],

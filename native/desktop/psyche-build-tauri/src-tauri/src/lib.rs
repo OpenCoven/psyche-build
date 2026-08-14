@@ -84,7 +84,6 @@ const MAX_BROWSER_SCRIPT_ARGS_BYTES: usize = 256 * 1024;
 const MAX_BROWSER_SCRIPT_RESULT_BYTES: usize = 256 * 1024;
 const BROWSER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
 const BROWSER_SCRIPT_CONTEXT_WORLD_NAME: &str = "com.opencoven.psyche.browser-script-context";
-static BROWSER_SCRIPT_WORLD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
 const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
@@ -3589,11 +3588,8 @@ struct BrowserScriptResponse {
     duration_ms: f64,
 }
 
-fn next_browser_script_execution_world_name() -> String {
-    format!(
-        "com.opencoven.psyche.browser-script-invocation-{}",
-        BROWSER_SCRIPT_WORLD_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    )
+fn browser_script_execution_world_name() -> &'static str {
+    BROWSER_SCRIPT_CONTEXT_WORLD_NAME
 }
 
 fn classify_browser_script_callback<T>(
@@ -3720,6 +3716,8 @@ async fn browser_script(
         "source": request.source,
         "args": request.args,
         "workerSource": include_str!("../../web/control/browser-script-worker-runtime.js"),
+        "expectedUrl": before_url.as_str(),
+        "expectedDocumentToken": document_token,
     }))
     .map_err(|_| "serialization_failed".to_string())?;
     let script = format!(
@@ -3730,7 +3728,7 @@ async fn browser_script(
     let callback_result = evaluate_browser_script_in_world(
         &browser,
         script,
-        next_browser_script_execution_world_name(),
+        browser_script_execution_world_name().to_string(),
     )
     .await;
     let after_url = browser.url().map_err(|_| "effect_unknown".to_string())?;
@@ -5696,12 +5694,11 @@ mod browser_app_shortcut_tests {
     }
 
     #[test]
-    fn browser_script_invocations_use_distinct_worlds() {
-        let first = next_browser_script_execution_world_name();
-        let second = next_browser_script_execution_world_name();
-        assert_ne!(first, second);
-        assert_ne!(first, BROWSER_SCRIPT_CONTEXT_WORLD_NAME);
-        assert_ne!(second, BROWSER_SCRIPT_CONTEXT_WORLD_NAME);
+    fn browser_script_execution_uses_the_document_context_world() {
+        assert_eq!(
+            browser_script_execution_world_name(),
+            BROWSER_SCRIPT_CONTEXT_WORLD_NAME
+        );
     }
 
     #[test]
