@@ -9,12 +9,25 @@ import { TmuxControl } from '../../src/services/tmuxControl.js';
 function handlersWithCovenClient(
   sendInput: (sessionId: string, input: string) => Promise<void>,
 ) {
+  const projectRoot = process.cwd();
   return createDaemonControlHandlers({
     tmux: new TmuxControl('psyche-test'),
-    projectRoot: '/tmp/psyche-test-root',
+    projectRoot,
     sessionName: 'psyche-test',
     capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
-    createCovenClient: () => ({ listSessions: async () => [], sendInput }),
+    createCovenClient: () => ({
+      listSessions: async () => [],
+      getSession: async (sessionId) => ({
+        id: sessionId,
+        projectRoot,
+        harness: 'codex',
+        title: 'Test session',
+        status: 'running',
+        createdAt: '2026-08-12T00:00:00Z',
+        updatedAt: '2026-08-12T00:00:00Z',
+      }),
+      sendInput,
+    }),
   });
 }
 

@@ -9,6 +9,7 @@ import {
   buildScopedProject,
   capturePaneText,
   createCovenClient,
+  getProjectCovenSession,
   launchProjectCovenSession,
   listProjectCovenSessions,
   openProjectCovenSession,
@@ -83,6 +84,24 @@ describe('daemon bridge project scope helpers', () => {
 });
 
 describe('daemon bridge Coven helpers', () => {
+  it('rejects direct lookup of a Coven session outside the current project root', async () => {
+    const root = await tempDir('psyche-bridge-coven-lookup-root-');
+    const outside = await tempDir('psyche-bridge-coven-lookup-outside-');
+
+    await expect(getProjectCovenSession(root, 'outside-session', {
+      listSessions: async () => [],
+      getSession: async () => ({
+        id: 'outside-session',
+        projectRoot: outside,
+        harness: 'codex',
+        title: 'Outside',
+        status: 'running',
+        createdAt: '2026-04-27T10:00:00Z',
+        updatedAt: '2026-04-27T10:01:00Z',
+      }),
+    })).rejects.toMatchObject({ code: 'coven_session_scope_violation' });
+  });
+
   it('only displays Coven sessions inside the current project root', async () => {
     const root = await tempDir('psyche-bridge-coven-root-');
     const outside = await tempDir('psyche-bridge-coven-outside-');

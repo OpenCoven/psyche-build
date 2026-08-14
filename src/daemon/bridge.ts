@@ -308,6 +308,27 @@ export async function listProjectCovenSessions(
   return scopedSessions;
 }
 
+export async function getProjectCovenSession(
+  projectRoot: string,
+  sessionId: string,
+  client: CovenClient,
+): Promise<CovenSessionSummary> {
+  if (!isSafeCovenSessionId(sessionId)) {
+    throw bridgeError('invalid_coven_session_id', 'Coven session id contains unsupported characters');
+  }
+  if (!client.getSession) {
+    throw bridgeError('coven_session_lookup_unsupported', 'Coven client does not support fetching sessions');
+  }
+
+  const rootReal = await realpath(projectRoot);
+  const session = await client.getSession(sessionId);
+  const sessionRoot = await realpath(session.projectRoot);
+  if (!isPathInsideOrEqual(rootReal, sessionRoot)) {
+    throw bridgeError('coven_session_scope_violation', 'Coven session is outside this psyche project scope');
+  }
+  return { ...session, projectRoot: sessionRoot };
+}
+
 export async function launchProjectCovenSession(
   projectRoot: string,
   request: Partial<CovenSessionLaunchRequest> | undefined,
