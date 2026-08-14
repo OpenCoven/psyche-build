@@ -9,6 +9,7 @@ import {
   launchProjectCovenSession,
   openProjectCovenSession,
   routeProjectCovenSessionCapability,
+  resolveConfiguredPaneId,
   updatePaneMeta,
   defaultSpawnDeps,
   type BridgeSpawnRequest,
@@ -60,6 +61,7 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
   const spawn = deps.spawnPane ?? spawnBridgePane;
   const covenClientFactory = deps.createCovenClient ?? createCovenClient;
   const covenSpawnDeps = deps.covenSpawnDeps ?? defaultSpawnDeps;
+  const resolvePaneId = (paneId: string) => resolveConfiguredPaneId(deps.projectRoot, paneId);
 
   return {
     async spawnPane(payload): Promise<BridgeSpawnResult> {
@@ -81,19 +83,19 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       if (!bytes) {
         throw Object.assign(new Error('input must be base64'), { code: 'bad_base64' });
       }
-      deps.tmux.sendKeysHex(payload.paneId, bytes);
+      deps.tmux.sendKeysHex(await resolvePaneId(payload.paneId), bytes);
     },
 
     async resizePane(payload): Promise<void> {
-      deps.tmux.resizePane(payload.paneId, payload.cols, payload.rows);
+      deps.tmux.resizePane(await resolvePaneId(payload.paneId), payload.cols, payload.rows);
     },
 
     async focusPane(payload): Promise<void> {
-      deps.tmux.selectPane(payload.paneId);
+      deps.tmux.selectPane(await resolvePaneId(payload.paneId));
     },
 
     async killPane(payload): Promise<void> {
-      deps.tmux.killPane(payload.paneId);
+      deps.tmux.killPane(await resolvePaneId(payload.paneId));
     },
 
     executeOrchestration: notSupported('orchestration.execute'),
