@@ -242,6 +242,7 @@ describe('Tauri Coven launch project scope', () => {
         },
         refreshVisiblePaneMetrics: () => { calls.push('refreshVisiblePaneMetrics'); },
         refreshStatusController: null,
+        flushDeferredStatusMessages: () => undefined,
         ensureProjectCoven: async () => {
           ensureProjectCovenCalls += 1;
           throw new Error('ensureProjectCoven must not run');
@@ -385,6 +386,7 @@ describe('Tauri Coven launch project scope', () => {
         },
         refreshVisiblePaneMetrics: () => { calls.push('refreshVisiblePaneMetrics'); },
         refreshStatusController: null,
+        flushDeferredStatusMessages: () => undefined,
         ensureProjectCoven: async () => {
           ensureProjectCovenCalls += 1;
           throw new Error('ensureProjectCoven must not run');
