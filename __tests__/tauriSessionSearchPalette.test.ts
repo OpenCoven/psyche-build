@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const repoRoot = process.cwd();
-const webRoot = join(repoRoot, 'native/macos/psyche-build-tauri/web');
+const webRoot = join(repoRoot, 'native/desktop/psyche-build-tauri/web');
 const indexHtml = readFileSync(join(webRoot, 'index.html'), 'utf8');
 const mainJs = readFileSync(join(webRoot, 'main.js'), 'utf8');
 const stylesCss = readFileSync(join(webRoot, 'styles.css'), 'utf8');

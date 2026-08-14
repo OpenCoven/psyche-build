@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 const mainJs = readFileSync(
-  join(process.cwd(), 'native/macos/psyche-build-tauri/web/main.js'),
+  join(process.cwd(), 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
 
