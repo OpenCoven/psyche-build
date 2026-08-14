@@ -793,7 +793,6 @@ kbd {
   -webkit-app-region: drag;
   user-select: none;
 }
-.titlebar > * { -webkit-app-region: no-drag; }
 .agent-control-toggle { white-space: nowrap; }
 .agent-control-toggle span {
   display: inline-grid;
@@ -843,7 +842,6 @@ kbd {
   font-size: 10px;
 }
 .titlebar-spacer { flex: 1 1 auto; -webkit-app-region: drag; }
-.titlebar-sep { flex: none; width: 1px; height: 16px; background: var(--border-strong); }
 
 .app[data-sidebar="collapsed"] .titlebar {
   grid-template-columns: var(--mini-rail-w) minmax(0, 1fr);
@@ -961,19 +959,6 @@ kbd {
    Uses :has() (WebKit 15.4+ — Tauri's WebView is fine). */
 [data-browser-toggle] svg { transition: transform var(--transition-med); }
 
-.status-pill {
-  font-size: 11px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: var(--surface-2);
-  color: var(--muted);
-  border: 1px solid var(--border);
-  letter-spacing: 0.02em;
-}
-.status-pill.ok    { color: var(--ok);    border-color: rgba(123, 227, 179, 0.35); background: rgba(123, 227, 179, 0.08); }
-.status-pill.warn  { color: var(--warn);  border-color: rgba(251, 191, 36, 0.35);  background: rgba(251, 191, 36, 0.08); }
-.status-pill.error { color: var(--error); border-color: rgba(248, 113, 113, 0.35); background: rgba(248, 113, 113, 0.08); }
-
 /* -------- icon-btn (used by browser bar buttons) -------- */
 
 .icon-btn {
@@ -1011,11 +996,6 @@ kbd {
      the Git dock. Browser surfaces now tile inside the canvas itself. */
   --terminal-min:   220px;
   --browser-min:    72px;
-  --split-frac: 0.6;
-  --terminal-col: calc(var(--split-frac, 0.6) * 100%);
-  transition: grid-template-columns var(--transition-layout),
-              grid-template-rows    var(--transition-layout);
-  will-change: grid-template-columns, grid-template-rows;
 }
 .boot-error {
   color: #ff6b6b;
@@ -3511,11 +3491,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 .titlebar {
   min-height: var(--titlebar-h);
-}
-.status-pill.ok {
-  color: rgba(245, 242, 251, 0.72);
-  border-color: rgba(255,255,255,0.07);
-  background: rgba(255,255,255,0.045);
 }
 .chrome-btn,
 .icon-btn,

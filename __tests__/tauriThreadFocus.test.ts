@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 const mainJs = readFileSync(
-  join(process.cwd(), 'native/macos/psyche-build-tauri/web/main.js'),
+  join(process.cwd(), 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
 
@@ -47,14 +47,25 @@ function focusDependencies(
     findThread: (id: string) => state.threads.find((thread) => thread.id === id) ?? null,
     isDormantThread: (thread: { status?: string }) => thread.status === 'exited',
     showTerminalView,
+    focusedTerminalThreadForRender: () => null,
+    withTerminalFocusReportToken: (
+      _thread: unknown,
+      _report: string,
+      _policy: string,
+      action: () => unknown,
+    ) => action(),
     markActiveSurface: vi.fn(),
     state,
     findProject: () => ({ id: 'project-1' }),
+    activeWorkspaceRoot: () => '/repo',
     paneLayoutFor: () => ({ root: {}, focusedLeafId: null }),
     PsychePanes: { findLeafByThreadId: () => ({ id: 'leaf-1' }) },
     renderPaneWorkspace: vi.fn(),
+    renderGitSurface: vi.fn(),
     refreshSidebar: vi.fn(),
     requestAnimationFrame,
+    isLiveThread: (thread: unknown) => state.threads.includes(thread),
+    terminalHost: { hidden: false, contains: () => true },
     scheduleVisiblePaneFit: vi.fn(),
     syncBrowserBounds: vi.fn(),
     setProjectStatus: vi.fn(),
@@ -74,6 +85,7 @@ describe('Tauri thread focus activation', () => {
       hidden: false,
       closing: false,
       closeStarted: false,
+      pane: {},
       term: { focus: vi.fn() },
     };
     const state = {
@@ -115,6 +127,7 @@ describe('Tauri thread focus activation', () => {
       hidden: false,
       closing: false,
       closeStarted: false,
+      pane: {},
       term: { focus: vi.fn() },
     };
     const state = {
@@ -155,6 +168,7 @@ describe('Tauri thread focus activation', () => {
         hidden: false,
         closing: false,
         closeStarted: false,
+        pane: {},
         term: { focus: vi.fn() },
       };
       const state = {
@@ -190,6 +204,7 @@ describe('Tauri thread focus activation', () => {
       hidden: false,
       closing: false,
       closeStarted: false,
+      pane: {},
       term: { focus: vi.fn() },
     };
     const state = {
