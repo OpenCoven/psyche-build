@@ -8,7 +8,7 @@ class FakeTmux extends EventEmitter {
   stopCalls = 0;
   start() { this.startCalls++; }
   stop() { this.stopCalls++; }
-  sendKeysHex(paneId: string, data: Buffer) { this.sentHex.push({ paneId, data }); }
+  async sendKeysHex(paneId: string, data: Buffer) { this.sentHex.push({ paneId, data }); }
 }
 
 describe("PaneStreamHub", () => {
@@ -22,10 +22,10 @@ describe("PaneStreamHub", () => {
     expect(hub.bufferFor("%2").snapshot().data.toString()).toBe("yo");
   });
 
-  it("forwards sendInput to tmuxControl.sendKeysHex", () => {
+  it("forwards sendInput to tmuxControl.sendKeysHex", async () => {
     const fake = new FakeTmux();
     const hub = new PaneStreamHub("test", fake as any);
-    hub.sendInput("%3", Buffer.from([0x03]));
+    await hub.sendInput("%3", Buffer.from([0x03]));
     expect(fake.sentHex).toEqual([{ paneId: "%3", data: Buffer.from([0x03]) }]);
   });
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pty-transport-metrics"
+description = "Enables the pty_transport_metrics command without any pre-configured scope."
+commands.allow = ["pty_transport_metrics"]
+
+[[permission]]
+identifier = "deny-pty-transport-metrics"
+description = "Denies the pty_transport_metrics command without any pre-configured scope."
+commands.deny = ["pty_transport_metrics"]

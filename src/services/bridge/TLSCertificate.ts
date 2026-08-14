@@ -23,9 +23,12 @@ export async function loadOrCreateTLS(): Promise<TLSMaterial> {
 
 async function generateAndStore(): Promise<TLSMaterial> {
   const attrs = [{ name: "commonName", value: "psyche" }];
-  const opts = {
+  const notBeforeDate = new Date();
+  const notAfterDate = new Date(notBeforeDate.getTime() + 3650 * 24 * 60 * 60 * 1000);
+  const pems = await selfsigned.generate(attrs, {
     keySize: 2048,
-    days: 3650,
+    notBeforeDate,
+    notAfterDate,
     algorithm: "sha256",
     extensions: [
       { name: "basicConstraints", cA: false },
@@ -39,8 +42,7 @@ async function generateAndStore(): Promise<TLSMaterial> {
         ],
       },
     ],
-  };
-  const pems = selfsigned.generate(attrs, opts);
+  });
   await fs.writeFile(certPath, pems.cert, { mode: 0o600 });
   await fs.writeFile(keyPath, pems.private, { mode: 0o600 });
   return { cert: pems.cert, key: pems.private, fingerprint: fingerprintFromPEM(pems.cert) };

@@ -29,11 +29,11 @@ vi.mock('../src/utils/worktreeMetadata.js', () => ({
 }));
 
 vi.mock('../src/utils/settingsManager.js', () => ({
-  SettingsManager: vi.fn(() => ({
+  SettingsManager: vi.fn(function SettingsManager() { return {
     getSettings: vi.fn(() => ({
       permissionMode: 'plan',
     })),
-  })),
+  }; }),
 }));
 
 vi.mock('../src/services/GitMutationSupervisor.js', () => ({

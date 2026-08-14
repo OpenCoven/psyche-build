@@ -12,6 +12,24 @@ const model = await import(
 );
 
 describe('Tauri workspace editor model', () => {
+  test('filters open files by exact project and worktree', () => {
+    const files = [
+      { id: 'main-a', projectId: 'p1', workspaceRoot: '/repo' },
+      { id: 'wt-a', projectId: 'p1', workspaceRoot: '/repo-wt' },
+      { id: 'other', projectId: 'p2', workspaceRoot: '/repo' },
+    ];
+
+    expect(model.workspaceFiles(files, 'p1', '/repo-wt')).toEqual([files[1]]);
+  });
+
+  test('selects the nearest file after closing a file', () => {
+    const files = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+
+    expect(model.nextFileIdAfterClose(files, 'b')).toBe('c');
+    expect(model.nextFileIdAfterClose(files, 'c')).toBe('b');
+    expect(model.nextFileIdAfterClose([{ id: 'a' }], 'a')).toBeNull();
+  });
+
   test('selects approved languages from file paths', () => {
     expect(model.languageForPath('component.tsx')).toBe('typescript');
     expect(model.languageForPath('component.ts')).toBe('typescript');

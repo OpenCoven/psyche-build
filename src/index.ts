@@ -1621,9 +1621,9 @@ class Psyche {
   }
 
   if (process.argv[2] === 'mcp') {
-    // stdio MCP server — exposes psyche's pane/ritual/worktree surface to
-    // MCP-capable clients (coven-code, Claude Code, OpenCode, etc.).
-    // Lives in src/mcp/server.ts; reuses src/daemon primitives for state.
+    // The stdio MCP process is only a canonical control client. It obtains the
+    // project-scoped agent credential and connects to (or starts) the one
+    // detached project owner; no pane mutation is performed in this process.
     const { runMcpServer } = await import('./mcp/server.js');
     await runMcpServer();
     return;

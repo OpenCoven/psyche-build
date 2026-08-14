@@ -12,28 +12,47 @@
     <script src="./xterm-addon-webgl.js"></script>
   </head>
   <body>
-    <div class="app" id="app" data-sidebar="open" data-dock="open">
+    <div class="app" id="app" data-sidebar="open">
       <header class="titlebar" data-tauri-drag-region>
-        <span class="traffic-gutter" data-tauri-drag-region aria-hidden="true"></span>
-        <span class="brand" data-tauri-drag-region>psyche</span>
-        <span class="titlebar-spacer" data-tauri-drag-region></span>
-        <span
-          class="daemon-status"
-          id="daemon-status"
-          title="Local session runtime. Green: a pane is running. Amber: starting. Red: the last pane exited. Hollow: no pane open."
-        >
-          <span class="daemon-dot" id="daemon-dot"></span>
-          <span class="daemon-label" id="daemon-label">psyche · local</span>
-        </span>
-        <span class="titlebar-sep" aria-hidden="true"></span>
-        <span class="status-pill" id="shell-status" hidden>starting…</span>
-        <button
-          id="help-toggle"
-          class="chrome-btn help-btn"
-          type="button"
-          title="Keyboard shortcuts (?)"
-          aria-label="Keyboard shortcuts"
-        >?</button>
+        <div class="titlebar-sidebar" data-tauri-drag-region>
+          <span class="traffic-gutter" aria-hidden="true"></span>
+          <span class="titlebar-brand" data-tauri-drag-region>
+            <span class="titlebar-brand-icon" aria-hidden="true">
+              <span class="titlebar-brand-fallback">P</span>
+              <img
+                id="titlebar-brand-mark"
+                class="titlebar-brand-mark"
+                src="./assets/psyche-mark.png"
+                alt=""
+              />
+            </span>
+            <span class="titlebar-brand-name">Psyche</span>
+          </span>
+        </div>
+        <div class="titlebar-workspace" data-tauri-drag-region>
+          <button
+            id="sidebar-collapse"
+            class="titlebar-sidebar-toggle"
+            type="button"
+            title="Collapse sidebar (⌘B)"
+            aria-label="Collapse sidebar"
+            aria-pressed="false"
+          >
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+              <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
+              <line x1="5.5" y1="2.5" x2="5.5" y2="13.5" stroke="currentColor" stroke-width="1.3"/>
+            </svg>
+          </button>
+          <span class="titlebar-spacer" data-tauri-drag-region></span>
+          <button
+            id="agent-control-toggle"
+            class="chrome-btn agent-control-toggle"
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="agent-control-drawer"
+          >Agent control <span id="agent-control-count" hidden>0</span></button>
+        </div>
       </header>
 
       <div class="workbench" id="workbench">
@@ -51,24 +70,6 @@
             </div>
 
             <div class="sidebar-head">
-              <label
-                class="session-search-wrap has-tooltip"
-                for="session-search"
-                data-tooltip="Press / to search sessions"
-                title="Press / to search sessions"
-              >
-                <input
-                  id="session-search"
-                  class="session-search"
-                  type="search"
-                  spellcheck="false"
-                  autocomplete="off"
-                  placeholder="Search projects, branches, sessions…"
-                  aria-label="Search projects, branches, agents, shells, and session metadata"
-                  aria-keyshortcuts="/"
-                />
-                <kbd class="session-search-key">/</kbd>
-              </label>
               <button
                 id="rail-new-tab"
                 class="rail-btn has-tooltip"
@@ -78,24 +79,11 @@
                 aria-label="Create a new session"
                 aria-haspopup="menu"
                 aria-expanded="false"
+                aria-controls="new-pane-menu"
               >
                 <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
                   <path d="M8 3.75v8.5M3.75 8h8.5" fill="none" stroke="currentColor"
                         stroke-width="1.6" stroke-linecap="round"/>
-                </svg>
-              </button>
-              <button
-                id="sidebar-collapse"
-                class="rail-btn has-tooltip"
-                type="button"
-                data-tooltip="Collapse sidebar"
-                title="Collapse sidebar (⌘B)"
-                aria-label="Collapse sidebar"
-              >
-                <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-                  <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
-                  <line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" stroke-width="1.3"/>
-                  <path d="M10.5 6 8.5 8l2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </button>
             </div>
@@ -112,13 +100,16 @@
           <div class="new-pane-menu" id="new-pane-menu" role="menu" aria-label="New pane" hidden>
             <div class="new-pane-menu-head" id="new-pane-menu-head">New pane</div>
             <button id="new-pane-term" class="new-pane-item" type="button" role="menuitem">
-              <span class="new-pane-glyph mono">❯_</span>Shell — login shell<span class="new-pane-key">⌘T</span>
+              <span class="new-pane-glyph mono">❯_</span>Shell — login shell<span class="new-pane-key">⌃T</span>
             </button>
             <button id="new-pane-agent" class="new-pane-item" type="button" role="menuitem">
-              <span class="new-pane-glyph">✳</span>Agent — choose CLI<span class="new-pane-key">⌘P</span>
+              <span class="new-pane-glyph">✳</span>Agent — coven chat<span class="new-pane-key">⌃A</span>
             </button>
             <button id="new-pane-web" class="new-pane-item" type="button" role="menuitem">
               <span class="new-pane-glyph">◍</span>Browser — web<span class="new-pane-key">Web +</span>
+            </button>
+            <button id="new-pane-git" class="new-pane-item" type="button" role="menuitem">
+              <span class="new-pane-glyph">⑂</span>Git — changes and commits<span class="new-pane-key">⌘G</span>
             </button>
             <div class="new-pane-sep" role="separator"></div>
             <button id="new-pane-set" class="new-pane-item" type="button" role="menuitem"
@@ -189,14 +180,20 @@
         </aside>
 
         <aside class="mini-rail sidebar-mini" id="sidebar-mini" hidden aria-label="Sidebar (collapsed)">
-          <button id="sidebar-expand" class="mini-rail-btn" type="button" title="Expand sidebar (⌘B)" aria-label="Expand sidebar">»</button>
+          <button id="sidebar-expand" class="mini-rail-btn" type="button" title="Expand sidebar (⌘B)" aria-label="Expand sidebar" aria-pressed="false">»</button>
         </aside>
 
-        <main class="detail" id="detail" data-layout="terminal" data-panel="git">
+        <main class="detail" id="detail">
           <section class="terminal-area">
             <div class="terminal-host" id="terminal-host"></div>
+          </section>
+
+        </main>
+      </div>
+
+      <div id="file-surface-staging" hidden>
             <div class="file-view" id="file-view" hidden>
-              <div class="tab-strip" id="tab-strip"></div>
+              <div class="tab-strip" id="tab-strip" role="tablist" aria-label="Open files"></div>
               <div class="file-editor-toolbar" role="toolbar" aria-label="File editor actions">
                 <span class="file-language" id="file-language">Plain Text</span>
                 <span class="file-view-title" id="file-view-title">No file selected</span>
@@ -231,51 +228,19 @@
                 <span id="file-cursor" aria-label="Cursor position">Ln 1, Col 1</span>
               </div>
             </div>
-          </section>
+      </div>
 
-          <div
-            class="splitter"
-            id="splitter"
-            role="separator"
-            aria-orientation="vertical"
-            aria-valuemin="25"
-            aria-valuemax="85"
-            aria-valuenow="60"
-            tabindex="0"
-            title="Resize the canvas and the tools dock"
-          ></div>
-
-
-          <section class="git-dock dock" aria-label="Git tools">
-            <div class="panel panel-git">
-              <header class="pane-header panel-bar">
-                <button id="dock-collapse" class="rail-btn dock-collapse" type="button" title="Collapse Git dock (⌘⌥B)" aria-label="Collapse Git dock">
-                  <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-                    <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
-                    <line x1="10" y1="2.5" x2="10" y2="13.5" stroke="currentColor" stroke-width="1.3"/>
-                    <path d="M5.5 6 7.5 8l-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                </button>
-                <span class="panel-title">Git</span>
-                <span class="dock-tab-count" id="dock-git-count" hidden></span>
-                <button id="git-pop-out" class="icon-btn ghost-btn" type="button"
-                        draggable="true"
-                        title="Open Git as a pane — or drag it onto the canvas"
-                        aria-label="Open Git as a pane">
-                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M6.25 3.5H3.9c-.9 0-1.6.7-1.6 1.6v6c0 .9.7 1.6 1.6 1.6h6c.9 0 1.6-.7 1.6-1.6V8.75" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M9.25 2.75h4v4M13.25 2.75 7.75 8.25" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </button>
-                <span class="panel-crumb" id="git-branch"></span>
-                <button id="git-open-remote" class="icon-btn ghost-btn" title="Open repository on GitHub" aria-label="Open repository on GitHub" disabled>
-                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6.25 3.5H3.9c-.9 0-1.6.7-1.6 1.6v6c0 .9.7 1.6 1.6 1.6h6c.9 0 1.6-.7 1.6-1.6V8.75" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/><path d="M9.25 2.75h4v4M13.25 2.75 7.75 8.25" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </button>
-                <button id="git-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh git state">
-                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </button>
-              </header>
-              <div class="dock-popped-note" id="git-popped-note" hidden>
-                Git is open as a pane. <button id="git-dock-back" type="button">Return it to the dock</button>
-              </div>
-              <div class="panel-body panel-git-body" id="git-surface">
+      <div id="git-surface-staging" hidden>
+        <div class="panel-body panel-git-body" id="git-surface">
+                <div class="git-pane-toolbar" role="toolbar" aria-label="Git actions">
+                  <span class="panel-crumb" id="git-branch"></span>
+                  <button id="git-open-remote" class="icon-btn ghost-btn" title="Open repository on GitHub" aria-label="Open repository on GitHub" disabled>
+                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6.25 3.5H3.9c-.9 0-1.6.7-1.6 1.6v6c0 .9.7 1.6 1.6 1.6h6c.9 0 1.6-.7 1.6-1.6V8.75" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/><path d="M9.25 2.75h4v4M13.25 2.75 7.75 8.25" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                  <button id="git-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh git state">
+                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                </div>
                 <div class="sidebar-tabs dock-tabs-segmented" role="tablist" aria-label="Git sections">
                   <button class="sidebar-tab is-active" data-git-tab="changes" type="button" role="tab" aria-selected="true">
                     <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4.4 2.4v4.2M2.3 4.5h4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M9.5 11.5h4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M2.6 9.4h5M2.6 12.2h4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".5"/><path d="M9.3 4.2h4.4M9.3 6.9h3.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".5"/></svg>
@@ -313,25 +278,7 @@
                 <div class="git-tab-panel" id="git-tab-commit" hidden>
                   <div class="git-view" id="git-view"></div>
                 </div>
-              </div>
-            </div>
-          </section>
-        </main>
-
-        <nav class="mini-rail dock-mini" id="rail-right" hidden
-             role="toolbar" aria-orientation="vertical" aria-label="Panels">
-          <button class="mini-rail-btn" data-panel-btn="git" type="button" aria-pressed="false"
-                  title="Git / GitHub" aria-label="Git panel">
-            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-              <circle cx="4.8" cy="3.9" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
-              <circle cx="4.8" cy="12.1" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
-              <circle cx="11.2" cy="6.2" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
-              <path d="M4.8 5.6v4.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
-              <path d="M11.2 7.9c0 2.1-1.9 2.9-4.6 3.2" fill="none" stroke="currentColor"
-                    stroke-width="1.35" stroke-linecap="round"/>
-            </svg>
-          </button>
-        </nav>
+        </div>
       </div>
 
       <div id="browser-surface-staging" hidden>
@@ -373,10 +320,14 @@
             <input
               id="command-input"
               type="text"
+              role="combobox"
               spellcheck="false"
               autocomplete="off"
               placeholder="/ command · ! shell · % pane — or plain text to the focused pane"
               aria-label="Command composer"
+              aria-controls="palette"
+              aria-autocomplete="list"
+              aria-expanded="false"
             />
             <span class="composer-send-hint" id="composer-send-hint" aria-hidden="true"></span>
           </div>
@@ -404,7 +355,7 @@
             <button id="call-end" class="call-btn call-end" type="button">End call</button>
           </div>
 
-          <div class="palette" id="palette" hidden></div>
+          <div class="palette" id="palette" role="listbox" aria-label="Composer suggestions" hidden></div>
         </footer>
 
         <section class="status-detail" id="status-detail" aria-label="Workspace metrics" hidden>
@@ -503,7 +454,27 @@
         <div class="status-alert" id="status-alert" role="alert"></div>
       </div>
 
-      <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+      <div class="agent-control-overlay" id="agent-control-overlay" hidden>
+        <section
+          id="agent-control-drawer"
+          class="agent-control-drawer"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="agent-control-title"
+        >
+          <header class="agent-control-head">
+            <div>
+              <h2 id="agent-control-title">Agent control</h2>
+              <p>Review requested authority, approve one action, or revoke a lease immediately.</p>
+            </div>
+            <button id="agent-control-close" type="button" aria-label="Close Agent control">×</button>
+          </header>
+          <p class="agent-control-limitation">Application-defined effects behind a generic click cannot be perfectly predicted.</p>
+          <div id="agent-control-content"></div>
+        </section>
+      </div>
 
       <div class="help-overlay" id="help-overlay" hidden>
         <div class="help-card" role="dialog" aria-modal="true" aria-labelledby="help-title">
@@ -557,6 +528,7 @@
         </div>
       </div>
     </dialog>
+    <script src="./control.bundle.js" defer></script>
     <script src="./editor.bundle.js" defer></script>
     <script src="./diffs.bundle.js" defer></script>
     <script src="./sessions.bundle.js" defer></script>
@@ -564,6 +536,7 @@
     <script src="./input.bundle.js" defer></script>
     <script src="./status.bundle.js" defer></script>
     <script src="./workspace.bundle.js" defer></script>
+    <script src="./runtime.bundle.js" defer></script>
     <script src="./main.js" defer></script>
   </body>
 </html>

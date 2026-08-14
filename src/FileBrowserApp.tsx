@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Box, Text, useInput, useStdout } from 'ink';
+import { Box, Text, useInput, useStdout, type Key } from 'ink';
 import stringWidth from 'string-width';
 import path from 'path';
 import { spawn } from 'child_process';
@@ -167,7 +167,7 @@ function getSortOptionIndex(sortMode: BrowserSortMode, filterMode: BrowserFilter
   return SORT_OPTIONS.findIndex((option) => option.id === `sort-${sortMode}`);
 }
 
-function isFilterTypingInput(input: string, key: Record<string, boolean>): boolean {
+function isFilterTypingInput(input: string, key: Key): boolean {
   if (!input) {
     return false;
   }

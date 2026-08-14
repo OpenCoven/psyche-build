@@ -28,6 +28,7 @@ import { BridgeBonjour } from "./BridgeBonjour.js";
 import { isTmuxPaneId } from "../../utils/tmuxTarget.js";
 import type { PaneSpawnResult } from "../../daemon/protocol.js";
 import type { MobilePaneSpawnRequest } from "./wireProtocol.js";
+import type { ActionResult, PaneAction } from "../../actions/types.js";
 
 /**
  * Two visible terminals is what the mobile workspace renders; the extra
@@ -46,6 +47,13 @@ export interface MobilePaneExecutors {
     params: Record<string, string>,
   ) => Promise<void>;
 }
+
+export interface MobileActionExecutorInput {
+  paneId: string;
+  actionId: PaneAction;
+}
+
+export type MobileActionExecutor = (input: MobileActionExecutorInput) => Promise<ActionResult>;
 import { decodeBase64Payload } from "../../utils/base64.js";
 import { LogService } from "../LogService.js";
 import type { ReadonlyWorkspaceSnapshot } from "../../workspace/snapshot.js";
@@ -72,6 +80,7 @@ export class BridgeDaemon {
   private tls?: TLSMaterial;
   private hub?: PaneStreamHub;
   private mobilePaneExecutors?: MobilePaneExecutors;
+  private mobileActionExecutor?: MobileActionExecutor;
   private bonjour?: Pick<BridgeBonjour, "publish" | "stop">;
   private paneSubscribers = new Map<string, Set<Session>>();
   private tokens: TokenStore;
@@ -105,6 +114,7 @@ export class BridgeDaemon {
         updatePaneMeta: (paneId, meta) => this.requireMobileExecutors().updateMeta(paneId, meta),
         launchRitual: (projectId, ritualId, params) =>
           this.requireMobileExecutors().launchRitual(projectId, ritualId, params),
+        executeAction: (input) => this.requireActionExecutor()(input),
         // Only reached for a mutation that actually changed state, so a
         // replayed idempotent spawn does not announce a change twice.
         onWorkspaceChanged: () => this.notifyWorkspaceChanged(),
@@ -121,6 +131,12 @@ export class BridgeDaemon {
    */
   setRitualLauncher(fn: ((projectId: string, ritualId: string, params: Record<string, string>) => Promise<void>) | null): void {
     this.ritualLauncher = fn;
+  }
+
+  /** Register the current React-owned action context without rebuilding the gateway. */
+  setActionExecutor(executor: MobileActionExecutor | null): void {
+    this.mobileActionExecutor = executor ?? undefined;
+    if (!executor) this.mobileGateway?.clearActions();
   }
 
   /**
@@ -342,7 +358,7 @@ export class BridgeDaemon {
           s.send({ type: "error", payload: { code: "invalid_input", message: "data must be a base64 string" } });
           return;
         }
-        this.hub!.sendInput(m.payload.paneId, bytes);
+        await this.hub!.sendInput(m.payload.paneId, bytes);
         return;
       }
       case "listRituals": {
@@ -532,7 +548,7 @@ export class BridgeDaemon {
 
     try {
       const response = await this.mobileGateway.handle(request, {
-        ownerId: s.clientId ?? s.token ?? this.serverId,
+        ownerId: this.ownerIdForSession(s),
         connectionId: s.connectionId,
         sendBinary,
       });
@@ -624,6 +640,16 @@ export class BridgeDaemon {
       );
     }
     return this.mobilePaneExecutors;
+  }
+
+  private requireActionExecutor(): MobileActionExecutor {
+    if (!this.mobileActionExecutor) {
+      throw new MobileControlGatewayError(
+        "command_not_supported",
+        "this host does not support remote actions yet",
+      );
+    }
+    return this.mobileActionExecutor;
   }
 
   private sessionForConnection(connectionId: string): Session {
@@ -724,7 +750,7 @@ export class BridgeDaemon {
     data: Buffer,
   ): Promise<void> {
     const { stream } = this.controlStream(connectionId, streamId);
-    this.hub!.sendInput(stream.paneId, data);
+    await this.hub!.sendInput(stream.paneId, data);
   }
 
   private async resizePaneStream(
@@ -751,11 +777,19 @@ export class BridgeDaemon {
    * into a session nobody is reading.
    */
   private onSessionClose(s: Session): void {
+    this.mobileGateway?.clearOwner(this.ownerIdForSession(s));
     for (const stream of s.controlStreams.values()) stream.teardown();
     s.controlStreams.clear();
     for (const teardown of s.subscriptionTeardowns.values()) teardown();
     s.subscriptionTeardowns.clear();
     for (const subs of this.paneSubscribers.values()) subs.delete(s);
+  }
+
+  private ownerIdForSession(s: Session): string {
+    // connectionId is server-generated and cannot be spoofed by hello. It is
+    // deliberately stricter than clientId ownership: a second socket using
+    // the same device token cannot resume or clear the first socket's action.
+    return s.connectionId;
   }
 
   private subscribePane(s: Session, paneId: string, sinceSeq: number | null) {

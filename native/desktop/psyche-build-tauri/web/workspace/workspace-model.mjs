@@ -180,7 +180,7 @@ export function sanitizeSessionDescriptor(saved) {
   const name = safeString(saved.name, 256);
   if (name) descriptor.name = name;
 
-  if (launchKind === 'coven-attach') {
+  if (launchKind === 'coven-attach' || launchKind === 'coven-chat') {
     const covenSessionId = safeCovenAttachmentId(saved.covenSessionId);
     if (!covenSessionId) return null;
     descriptor.covenSessionId = covenSessionId;
