@@ -619,7 +619,7 @@ describe('ControlRuntime', () => {
 
   it('binds each browser script approval to its source digest and stores only bounded metadata', async () => {
     handlers.runBrowserScript = vi.fn(async () => ({
-      value: { secretResult: 'returned-only-to-caller' }, resultBytes: 41, durationMs: 7,
+      value: { secretResult: 'returned-only-to-caller' }, resultBytes: 42, durationMs: 7,
     }));
     const harness = await createBrowserActionHarness();
     const makeAction = (id: string, source: string) => command({ id, idempotencyKey: id,
@@ -644,10 +644,10 @@ describe('ControlRuntime', () => {
         payloadDigest: firstApproval.payloadDigest, decision: 'approve' } }));
     const completed = await harness.runtime.submit(first);
     expect(completed).toMatchObject({ status: 'succeeded', value: {
-      value: { secretResult: 'returned-only-to-caller' }, sourceBytes: 19, resultBytes: 41, durationMs: 7,
+      value: { secretResult: 'returned-only-to-caller' }, sourceBytes: 19, resultBytes: 42, durationMs: 7,
     } });
     const stored = harness.runtime.snapshot().receipts.find((receipt) => receipt.actionId === first.id);
-    expect(stored).toMatchObject({ sourceBytes: 19, resultBytes: 41, durationMs: 7 });
+    expect(stored).toMatchObject({ sourceBytes: 19, resultBytes: 42, durationMs: 7 });
     expect(stored).not.toHaveProperty('value');
     expect(JSON.stringify(harness.journal.read())).not.toContain('returned-only-to-caller');
     expect(handlers.runBrowserScript).toHaveBeenCalledOnce();
@@ -679,6 +679,55 @@ describe('ControlRuntime', () => {
     const durable = JSON.stringify({ snapshot: harness.runtime.snapshot(), journal: harness.journal.read() });
     expect(durable).not.toContain('secret-source');
     expect(durable).not.toContain('result-secret');
+  });
+
+  it.each([
+    ['forged byte count', 'serialization_failed', () => ({ value: { leaked: 'result-secret' }, resultBytes: 0, durationMs: 1 })],
+    ['oversized value', 'result_too_large', () => ({ value: 'x'.repeat(256 * 1024 + 1), resultBytes: 0, durationMs: 1 })],
+    ['cyclic value', 'serialization_failed', () => { const value: Record<string, unknown> = { leaked: 'result-secret' }; value.self = value; return { value, resultBytes: 0, durationMs: 1 }; }],
+    ['function value', 'serialization_failed', () => ({ value: { leaked: () => 'result-secret' }, resultBytes: 0, durationMs: 1 })],
+    ['native value', 'serialization_failed', () => ({ value: new Date(), resultBytes: 0, durationMs: 1 })],
+    ['unknown envelope keys', 'serialization_failed', () => ({ value: null, resultBytes: 4, durationMs: 1, injected: 'result-secret' })],
+    ['excessive duration', 'serialization_failed', () => ({ value: null, resultBytes: 4, durationMs: 5_001 })],
+  ])('rejects an untrusted browser script result with %s without retaining it', async (_kind, expectedCode, result) => {
+    handlers.runBrowserScript = vi.fn(async () => result());
+    const harness = await createBrowserActionHarness();
+    const id = `invalid-script-result-${_kind.replaceAll(' ', '-')}`;
+    const action = command({ id, idempotencyKey: id, kind: 'browser.script', ownerEpoch: 7,
+      actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation, source: 'return "result-secret";',
+      } }) as unknown as Extract<ControlCommand, { kind: 'browser.script' }>;
+    const requested = await harness.runtime.submit(action);
+    const approval = (requested as { value: { approvalId: string; payloadDigest: string } }).value;
+    await expect(submit(harness.runtime, command({ id: `${id}-approve`, idempotencyKey: `${id}-approve`,
+      kind: 'approval.resolve', ownerEpoch: 7, payload: { approvalId: approval.approvalId,
+        payloadDigest: approval.payloadDigest, decision: 'approve' } })))
+      .resolves.toMatchObject({ status: 'failed', code: expectedCode });
+    await expect(harness.runtime.submit(action)).resolves.toMatchObject({ status: 'failed', code: expectedCode });
+    expect(handlers.runBrowserScript).toHaveBeenCalledOnce();
+    const durable = JSON.stringify({ snapshot: harness.runtime.snapshot(), journal: harness.journal.read() });
+    expect(durable).not.toContain('result-secret');
+    expect(durable).not.toContain('"injected"');
+    expect(durable).not.toContain('x'.repeat(1_024));
+  });
+
+  it.each([
+    ['function', () => ({ callback: () => true })],
+    ['native object', () => ({ when: new Date() })],
+    ['cycle', () => { const value: Record<string, unknown> = {}; value.self = value; return value; }],
+    ['oversized', () => ({ text: 'x'.repeat(256 * 1024 + 1) })],
+  ])('rejects %s browser script arguments before approval and dispatch', async (_kind, args) => {
+    const harness = await createBrowserActionHarness();
+    const id = `invalid-script-args-${_kind.replaceAll(' ', '-')}`;
+    const action = command({ id, idempotencyKey: id, kind: 'browser.script', ownerEpoch: 7,
+      actor: { id: 'agent-review', kind: 'psyche' }, payload: {
+        taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation, source: 'return args;', args: args(),
+      } }) as unknown as Extract<ControlCommand, { kind: 'browser.script' }>;
+    await expect(harness.runtime.submit(action)).resolves.toMatchObject({ status: 'failed' });
+    expect(harness.runtime.snapshot().approvals).toHaveLength(0);
+    expect(handlers.runBrowserScript).not.toHaveBeenCalled();
   });
 
   it('rejects grants for missing generations and non-canonical project targets', async () => {

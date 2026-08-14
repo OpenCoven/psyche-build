@@ -203,6 +203,32 @@ describe('bounded semantic browser automation', () => {
     })).rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true, invalidate: true });
   });
 
+  it('uses only document-start script intrinsics after hostile page monkeypatches', async () => {
+    const { globalObject } = fixture();
+    Object.assign(globalObject, {
+      Function, Promise, setTimeout, clearTimeout, WeakSet, Object, JSON, Math, Reflect, TextEncoder,
+    });
+    Function('globalThis', browserAutomationSource())(globalObject);
+    const api = (globalObject as any).__PSYCHE_AUTOMATION__;
+    Object.assign(globalObject, {
+      Function: () => { throw new Error('page Function'); },
+      Promise: class { static resolve() { throw new Error('page Promise.resolve'); } static race() { throw new Error('page Promise.race'); } },
+      setTimeout: () => { throw new Error('page setTimeout'); },
+      clearTimeout: () => { throw new Error('page clearTimeout'); },
+      WeakSet: class { constructor() { throw new Error('page WeakSet'); } },
+      Object: { getPrototypeOf: () => { throw new Error('page getPrototypeOf'); }, values: () => { throw new Error('page values'); }, keys: () => { throw new Error('page keys'); } },
+      JSON: { stringify: () => '"forged"', parse: () => ({ forged: true }) },
+      Math: { max: () => 8675309 }, Reflect: { apply: () => { throw new Error('page Reflect.apply'); } },
+      TextEncoder: class { encode() { return new Uint8Array(); } },
+    });
+    const exact = await api.dispatch({ type: 'script', source: 'return { answer: args.value + 1 };', args: { value: 41 } });
+    let oversized: unknown;
+    try { await api.dispatch({ type: 'script', source: 'return "x".repeat(256 * 1024 + 1);' }); }
+    catch (error) { oversized = error; }
+    expect(exact).toMatchObject({ value: { answer: 42 }, resultBytes: 13 });
+    expect(oversized).toMatchObject({ code: 'result_too_large' });
+  });
+
   it.each([
     ['function', 'return function nope() {};'],
     ['cycle', 'const value = {}; value.self = value; return value;'],

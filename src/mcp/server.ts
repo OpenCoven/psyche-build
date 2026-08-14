@@ -23,6 +23,8 @@ import type {
   ControlSnapshot,
 } from '../control/types.js';
 import type { CapabilityLeaseGrantItem } from '../control/capabilityLeases.js';
+import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
+import { canonicalizeBoundedJson } from '../control/boundedJson.js';
 import { getBuiltInRituals, listProjectRituals } from '../utils/rituals.js';
 import type { OrchestrationTaskRequest } from '../orchestration/types.js';
 
@@ -530,12 +532,23 @@ export const TOOLS: ToolDef[] = [
     handler: async (args) => {
       const auth = leaseAuthorization(args);
       if (!auth) return leaseMissing();
+      let scriptArgs: unknown;
+      if ('args' in args) {
+        try {
+          scriptArgs = canonicalizeBoundedJson(args.args, {
+            maxBytes: AGENT_CONTROL_LIMITS.scriptResultBytes,
+            invalidCode: 'invalid_browser_script_arguments',
+            sizeCode: 'invalid_browser_script_arguments',
+            label: 'browser script arguments',
+          }).value;
+        } catch { invalid('requires bounded plain JSON `args`'); }
+      }
       return actionResult(await submit(args, 'browser.script', {
         ...auth,
         tabId: requiredString(args, 'tab_id'),
         generation: requiredPositiveInteger(args, 'generation'),
         source: requiredString(args, 'source'),
-        ...('args' in args ? { args: args.args } : {}),
+        ...('args' in args ? { args: scriptArgs } : {}),
       }));
     },
   },

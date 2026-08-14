@@ -15,6 +15,7 @@ import {
 import { SurfaceRegistry } from './surfaces.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
 import { agentControlJournalPayload } from './journal.js';
+import { canonicalizeBoundedJson } from './boundedJson.js';
 import type {
   ActionReceipt,
   CommandOutcome,
@@ -36,6 +37,8 @@ const STABLE_SURFACE_EFFECT_CODES = new Set([
   'resource_replaced',
   'result_too_large',
   'script_source_too_large',
+  'script_args_invalid',
+  'script_args_too_large',
   'serialization_failed',
   'snapshot_stale',
 ]);
@@ -520,7 +523,9 @@ export class ControlRuntime {
           ? (error as { code: string }).code
           : 'action_validation_failed';
         return this.terminalizeValidationFailure(command, targetForSurfaceAction(command),
-          code === 'script_source_too_large' ? code : 'action_validation_failed');
+          code === 'script_source_too_large' || code === 'script_args_invalid' || code === 'script_args_too_large'
+            ? code
+            : 'action_validation_failed');
       }
       return this.appendTerminal(command, failedOutcome(error));
     }
@@ -530,6 +535,7 @@ export class ControlRuntime {
     command: SurfaceActionContext['command'],
   ): Promise<SurfaceActionContext> {
     this.assertCommandCurrent(command);
+    let preparedCommand = command;
     let target: LeaseTarget;
     let classification: PolicyClassification;
     let effect: RedactedApprovalEffect | undefined;
@@ -587,16 +593,28 @@ export class ControlRuntime {
           throw codedRuntimeError('script_source_too_large', 'browser script source exceeds maximum size');
         }
         target = { kind: 'browser_tab', id: command.payload.tabId, generation: command.payload.generation };
+        if (command.payload.args !== undefined) {
+          const canonicalArgs = canonicalizeBoundedJson(command.payload.args, {
+            maxBytes: AGENT_CONTROL_LIMITS.scriptResultBytes,
+            invalidCode: 'script_args_invalid',
+            sizeCode: 'script_args_too_large',
+            label: 'browser script arguments',
+          });
+          preparedCommand = {
+            ...command,
+            payload: { ...command.payload, args: canonicalArgs.value },
+          } as SurfaceActionContext['command'];
+        }
         classification = classifyBrowserScript();
         effect = createRedactedApprovalEffect({ kind: 'script', target: command.payload.source });
         break;
     }
     this.assertSurfaceAndLease(command, target, classification.capability);
     return {
-      command,
+      command: preparedCommand,
       target,
       classification,
-      executablePayloadDigest: digestExecutablePayload(command, canonicalSemantic),
+      executablePayloadDigest: digestExecutablePayload(preparedCommand, canonicalSemantic),
       ...(effect ? { effect } : {}),
     };
   }
@@ -697,9 +715,16 @@ export class ControlRuntime {
         this.rememberReceipt(receipt);
         return receipt;
       }
-      const receipt = context.command.kind === 'browser.script'
-        ? this.makeScriptReceipt(context.command, context.target, value)
-        : this.makeReceipt(context.command, context.target, 'succeeded', { value });
+      let receipt: ActionReceipt;
+      try {
+        receipt = context.command.kind === 'browser.script'
+          ? this.makeScriptReceipt(context.command, context.target, value)
+          : this.makeReceipt(context.command, context.target, 'succeeded', { value });
+      } catch (error) {
+        receipt = this.makeReceipt(context.command, context.target, 'failed', {
+          code: stableSurfaceEffectCode(error),
+        });
+      }
       this.rememberReceipt(receipt);
       return receipt;
     } finally {
@@ -1035,16 +1060,42 @@ export class ControlRuntime {
     target: LeaseTarget,
     result: unknown,
   ): ActionReceipt {
-    if (!result || typeof result !== 'object') {
+    let canonicalEnvelope: unknown;
+    try {
+      canonicalEnvelope = canonicalizeBoundedJson(result, {
+        maxBytes: AGENT_CONTROL_LIMITS.scriptResultBytes + 1024,
+        invalidCode: 'serialization_failed',
+        sizeCode: 'result_too_large',
+        label: 'browser script result envelope',
+      }).value;
+    } catch (error) {
+      throw error;
+    }
+    if (!canonicalEnvelope || typeof canonicalEnvelope !== 'object' || Array.isArray(canonicalEnvelope)) {
       throw codedRuntimeError('serialization_failed', 'browser script returned an invalid result envelope');
     }
-    const envelope = result as { value?: unknown; resultBytes?: unknown; durationMs?: unknown };
+    const keys = Object.keys(canonicalEnvelope);
+    if (keys.length !== 3 || !keys.includes('value') || !keys.includes('resultBytes') || !keys.includes('durationMs')) {
+      throw codedRuntimeError('serialization_failed', 'browser script returned an invalid result envelope');
+    }
+    const envelope = canonicalEnvelope as { value: unknown; resultBytes: unknown; durationMs: unknown };
     if (!Number.isSafeInteger(envelope.resultBytes) || (envelope.resultBytes as number) < 0
-      || !Number.isFinite(envelope.durationMs) || (envelope.durationMs as number) < 0) {
+      || (envelope.resultBytes as number) > AGENT_CONTROL_LIMITS.scriptResultBytes
+      || !Number.isFinite(envelope.durationMs) || (envelope.durationMs as number) < 0
+      || (envelope.durationMs as number) > AGENT_CONTROL_LIMITS.scriptTimeoutMs) {
       throw codedRuntimeError('serialization_failed', 'browser script returned invalid result metadata');
     }
+    const canonicalValue = canonicalizeBoundedJson(envelope.value, {
+      maxBytes: AGENT_CONTROL_LIMITS.scriptResultBytes,
+      invalidCode: 'serialization_failed',
+      sizeCode: 'result_too_large',
+      label: 'browser script result',
+    });
+    if (canonicalValue.bytes !== envelope.resultBytes) {
+      throw codedRuntimeError('serialization_failed', 'browser script returned a mismatched result byte count');
+    }
     return this.makeReceipt(command, target, 'succeeded', {
-      value: envelope.value,
+      value: canonicalValue.value,
       sourceDigest: createHash('sha256').update(command.payload.source, 'utf8').digest('hex'),
       sourceBytes: Buffer.byteLength(command.payload.source, 'utf8'),
       resultBytes: envelope.resultBytes as number,

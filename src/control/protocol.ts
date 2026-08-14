@@ -5,6 +5,8 @@ import type {
 } from './types.js';
 import type { BrowserTabSurface } from './surfaces.js';
 import type { ProviderEffectResult, ProviderPush } from './browserProviderBroker.js';
+import { AGENT_CONTROL_LIMITS } from './limits.js';
+import { canonicalizeBoundedJson } from './boundedJson.js';
 
 export const CONTROL_PROTOCOL_VERSION = 1;
 
@@ -221,12 +223,31 @@ function isBrowserTabResource(value: unknown): value is BrowserTabSurface {
 
 function isProviderEffectResult(value: unknown): value is ProviderEffectResult {
   if (!isPlainObject(value) || !isBoundedString(value.actionId, 256)) return false;
+  const keys = Object.keys(value);
+  const exactKeys = (allowed: readonly string[]) => keys.length === allowed.length
+    && keys.every((key) => allowed.includes(key));
   switch (value.status) {
-    case 'succeeded': return true;
+    case 'succeeded': {
+      if (!exactKeys(value.value === undefined ? ['actionId', 'status'] : ['actionId', 'status', 'value'])) return false;
+      if (value.value !== undefined) {
+        try {
+          canonicalizeBoundedJson(value.value, {
+            maxBytes: 4 * 1024 * 1024,
+            invalidCode: 'invalid_provider_result',
+            sizeCode: 'invalid_provider_result',
+            label: 'provider result',
+          });
+        } catch { return false; }
+      }
+      return true;
+    }
     case 'failed':
-      return isBoundedString(value.code, 256) && isBoundedString(value.message, 4096);
+      return exactKeys(['actionId', 'status', 'code', 'message'])
+        && isBoundedString(value.code, 256) && isBoundedString(value.message, 4096);
     case 'unknown':
-      return (value.code === undefined || isBoundedString(value.code, 256))
+      return exactKeys(['actionId', 'status', ...(value.code === undefined ? [] : ['code']),
+        ...(value.message === undefined ? [] : ['message'])])
+        && (value.code === undefined || isBoundedString(value.code, 256))
         && (value.message === undefined || isBoundedString(value.message, 4096));
     default: return false;
   }
@@ -257,6 +278,18 @@ function validateSurfaceAuthorization(kind: unknown, payload: Record<string, unk
     if (typeof payload.paneId !== 'string') throw new Error('invalid surface authorization');
   } else if (typeof payload.tabId !== 'string') {
     throw new Error('invalid surface authorization');
+  }
+  if (kind === 'browser.script' && payload.args !== undefined) {
+    try {
+      canonicalizeBoundedJson(payload.args, {
+        maxBytes: AGENT_CONTROL_LIMITS.scriptResultBytes,
+        invalidCode: 'invalid_browser_script_arguments',
+        sizeCode: 'invalid_browser_script_arguments',
+        label: 'browser script arguments',
+      });
+    } catch {
+      throw new Error('invalid browser script arguments');
+    }
   }
 }
 

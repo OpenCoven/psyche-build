@@ -10,15 +10,32 @@ const SNAPSHOT_TTL_MS = 30_000;
 const SCRIPT_SOURCE_BYTES = 64 * 1024;
 const SCRIPT_RESULT_BYTES = 256 * 1024;
 const SCRIPT_TIMEOUT_MS = 5_000;
+const TrustedError = Error;
+const TrustedFunction = Function;
 const TrustedMap = Map;
 const TrustedWeakMap = WeakMap;
+const TrustedWeakSet = WeakSet;
 const TrustedSet = Set;
+const TrustedPromise = Promise;
+const promiseResolve = TrustedPromise.resolve.bind(TrustedPromise);
+const promiseRace = TrustedPromise.race.bind(TrustedPromise);
+const trustedSetTimeout = globalThis.setTimeout.bind(globalThis);
+const trustedClearTimeout = globalThis.clearTimeout.bind(globalThis);
 const textEncoder = new TextEncoder();
 const encodeText = textEncoder.encode.bind(textEncoder);
+const arrayIsArray = Array.isArray.bind(Array);
+const numberIsFinite = Number.isFinite.bind(Number);
 const objectAssign = Object.assign.bind(Object);
 const objectDefineProperty = Object.defineProperty.bind(Object);
 const objectFreeze = Object.freeze.bind(Object);
 const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor.bind(Object);
+const objectGetPrototypeOf = Object.getPrototypeOf.bind(Object);
+const objectKeys = Object.keys.bind(Object);
+const objectValues = Object.values.bind(Object);
+const objectPrototype = Object.prototype;
+const jsonStringify = JSON.stringify.bind(JSON);
+const jsonParse = JSON.parse.bind(JSON);
+const mathMax = Math.max.bind(Math);
 const reflectApply = Reflect.apply.bind(Reflect);
 const trustedElementGetAttribute = globalThis.Element?.prototype?.getAttribute;
 const trustedElementHasAttribute = globalThis.Element?.prototype?.hasAttribute;
@@ -193,10 +210,17 @@ export function browserAutomationSource() {
     const MAX_NODES=${MAX_NODES}; const MAX_VISITED_NODES=${MAX_VISITED_NODES}; const MAX_DEPTH=${MAX_DEPTH}; const MAX_NAME_BYTES=${MAX_NAME_BYTES};
     const MAX_NAME_NODES=${MAX_NAME_NODES};
     const MAX_NAME_WORK=${MAX_NAME_WORK}; const MAX_NAME_TOTAL_BYTES=${MAX_NAME_TOTAL_BYTES};
-    const TrustedMap=Map; const TrustedWeakMap=WeakMap; const TrustedSet=Set;
-    const textEncoder=new TextEncoder(); const encodeText=textEncoder.encode.bind(textEncoder);
-    const objectAssign=Object.assign.bind(Object); const objectDefineProperty=Object.defineProperty.bind(Object); const objectFreeze=Object.freeze.bind(Object); const objectGetOwnPropertyDescriptor=Object.getOwnPropertyDescriptor.bind(Object);
-    const reflectApply=Reflect.apply.bind(Reflect);
+    const TrustedError=globalObject.Error||Error; const TrustedFunction=globalObject.Function||Function;
+    const TrustedMap=globalObject.Map||Map; const TrustedWeakMap=globalObject.WeakMap||WeakMap; const TrustedWeakSet=globalObject.WeakSet||WeakSet; const TrustedSet=globalObject.Set||Set;
+    const TrustedPromise=globalObject.Promise||Promise; const promiseResolve=TrustedPromise.resolve.bind(TrustedPromise); const promiseRace=TrustedPromise.race.bind(TrustedPromise);
+    const trustedSetTimeout=(globalObject.setTimeout||setTimeout).bind(globalObject); const trustedClearTimeout=(globalObject.clearTimeout||clearTimeout).bind(globalObject);
+    const TrustedTextEncoder=globalObject.TextEncoder||TextEncoder; const textEncoder=new TrustedTextEncoder(); const encodeText=textEncoder.encode.bind(textEncoder);
+    const TrustedArray=globalObject.Array||Array; const TrustedNumber=globalObject.Number||Number; const TrustedObject=globalObject.Object||Object; const TrustedJSON=globalObject.JSON||JSON; const TrustedMath=globalObject.Math||Math; const TrustedReflect=globalObject.Reflect||Reflect;
+    const arrayIsArray=TrustedArray.isArray.bind(TrustedArray); const numberIsFinite=TrustedNumber.isFinite.bind(TrustedNumber);
+    const objectAssign=TrustedObject.assign.bind(TrustedObject); const objectDefineProperty=TrustedObject.defineProperty.bind(TrustedObject); const objectFreeze=TrustedObject.freeze.bind(TrustedObject); const objectGetOwnPropertyDescriptor=TrustedObject.getOwnPropertyDescriptor.bind(TrustedObject);
+    const objectGetPrototypeOf=TrustedObject.getPrototypeOf.bind(TrustedObject); const objectKeys=TrustedObject.keys.bind(TrustedObject); const objectValues=TrustedObject.values.bind(TrustedObject); const objectPrototype=TrustedObject.prototype;
+    const jsonStringify=TrustedJSON.stringify.bind(TrustedJSON); const jsonParse=TrustedJSON.parse.bind(TrustedJSON); const mathMax=TrustedMath.max.bind(TrustedMath);
+    const reflectApply=TrustedReflect.apply.bind(TrustedReflect);
     const trustedElementGetAttribute=globalObject.Element?.prototype?.getAttribute;
     const trustedElementHasAttribute=globalObject.Element?.prototype?.hasAttribute;
     const trustedElementGetBoundingClientRect=globalObject.Element?.prototype?.getBoundingClientRect;
@@ -290,17 +314,17 @@ function assertJsonValue(value, seen, depth = 0) {
   if (depth > 64) throw automationError('serialization_failed', 'serialization_failed: result nesting exceeds maximum');
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
   if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw automationError('serialization_failed', 'serialization_failed: result contains a non-finite number');
+    if (!numberIsFinite(value)) throw automationError('serialization_failed', 'serialization_failed: result contains a non-finite number');
     return;
   }
   if (typeof value !== 'object') throw automationError('serialization_failed', 'serialization_failed: result is not JSON data');
   if (seen.has(value)) throw automationError('serialization_failed', 'serialization_failed: result contains a cycle');
   seen.add(value);
-  const prototype = Object.getPrototypeOf(value);
-  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
+  const prototype = objectGetPrototypeOf(value);
+  if (!arrayIsArray(value) && prototype !== objectPrototype && prototype !== null) {
     throw automationError('serialization_failed', 'serialization_failed: result contains a native object');
   }
-  const entries = Array.isArray(value) ? value : Object.values(value);
+  const entries = arrayIsArray(value) ? value : objectValues(value);
   for (const item of entries) assertJsonValue(item, seen, depth + 1);
   seen.delete(value);
 }
@@ -358,8 +382,8 @@ async function runScript(request, globalObject, now, readIdentity) {
   catch { throw automationError('backend_unavailable', 'backend_unavailable: browser document identity is unavailable'); }
   const startedAt = now();
   let timeoutId;
-  const timeout = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => {
+  const timeout = new TrustedPromise((_, reject) => {
+    timeoutId = trustedSetTimeout(() => {
       const error = automationError('effect_unknown', 'effect_unknown: browser script exceeded five seconds and may still be running');
       error.ambiguous = true;
       reject(error);
@@ -367,10 +391,10 @@ async function runScript(request, globalObject, now, readIdentity) {
   });
   let value;
   try {
-    const execute = Function('args', `"use strict"; return (async()=>{${request.source}\n})();`);
-    value = await Promise.race([Promise.resolve().then(() => execute(request.args)), timeout]);
+    const execute = TrustedFunction('args', `"use strict"; return (async()=>{${request.source}\n})();`);
+    value = await promiseRace([promiseResolve().then(() => execute(request.args)), timeout]);
   } finally {
-    clearTimeout(timeoutId);
+    trustedClearTimeout(timeoutId);
   }
   assertScriptIdentity(readIdentity, identity);
   let serializedError;
@@ -379,13 +403,13 @@ async function runScript(request, globalObject, now, readIdentity) {
   let parsed;
   let resultBytes;
   try {
-    assertJsonValue(value, new WeakSet());
-    try { encoded = JSON.stringify(value); }
+    assertJsonValue(value, new TrustedWeakSet());
+    try { encoded = jsonStringify(value); }
     catch { throw automationError('serialization_failed', 'serialization_failed: result cannot be encoded'); }
     if (encoded === undefined) throw automationError('serialization_failed', 'serialization_failed: result is not JSON data');
     resultBytes = encodeText(encoded).length;
     if (resultBytes > SCRIPT_RESULT_BYTES) throw automationError('result_too_large', 'result_too_large: browser script result exceeds maximum');
-    try { parsed = JSON.parse(encoded); }
+    try { parsed = jsonParse(encoded); }
     catch { throw automationError('serialization_failed', 'serialization_failed: result cannot be decoded'); }
   } catch (error) {
     hasSerializedError = true;
@@ -395,7 +419,7 @@ async function runScript(request, globalObject, now, readIdentity) {
   }
   assertScriptIdentity(readIdentity, identity);
   if (hasSerializedError) throw serializedError;
-  return { value: parsed, resultBytes, durationMs: Math.max(0, now() - startedAt) };
+  return { value: parsed, resultBytes, durationMs: mathMax(0, now() - startedAt) };
 }
 
 function assertActionRequest(action) {
@@ -991,5 +1015,5 @@ function readInputType(element) {
 }
 
 function automationError(code, message) {
-  return objectAssign(new Error(message), { code });
+  return objectAssign(new TrustedError(message), { code });
 }

@@ -8767,12 +8767,13 @@
       script: "window.__PSYCHE_AUTOMATION__ && window.__PSYCHE_AUTOMATION__.invalidate();",
     }).then(function () { return true; }, function () { return false; });
   }
-  async function quarantineBrowserAutomation(pair) {
+  async function quarantineBrowserAutomation(pair, destroyChild) {
     if (!pair) return false;
     var lifecycle = browserTabLifecycle(pair.tab);
     var generation = lifecycle.controlGeneration || lifecycle.liveGeneration;
-    await invalidateBrowserAutomation(pair);
-    await removeBrowserControlResource(pair);
+    var label = lifecycle.nativeLabel ? browserLabelForTab(pair.project, pair.tab) : null;
+    var invalidateFlight = destroyChild ? Promise.resolve(false) : invalidateBrowserAutomation(pair);
+    var removeFlight = removeBrowserControlResource(pair);
     browserAutomationSnapshotRefs.forEach(function (entry, id) {
       if (entry && entry.tabId === pair.tab.id && (!generation || entry.generation === generation)) {
         browserAutomationSnapshotRefs.delete(id);
@@ -8781,7 +8782,12 @@
     invalidateBrowserNavigation(pair.tab);
     lifecycle.controlGeneration = 0;
     lifecycle.liveGeneration = 0;
+    lifecycle.nativeLabel = null;
     lifecycle.automationSource = null;
+    var destroyFlight = destroyChild && label
+      ? invoke("browser_destroy", { label: label }).catch(function () { return false; })
+      : Promise.resolve(false);
+    await Promise.allSettled([invalidateFlight, removeFlight, destroyFlight]);
     return true;
   }
   function installBrowserAutomationForPair(pair) {
@@ -8820,7 +8826,7 @@
     }
     return mapped.rawSnapshotId;
   }
-  function awaitBrowserAutomationResult(effect) {
+  function awaitBrowserAutomationResult(effect, timeoutMs) {
     var cancel;
     var promise = new Promise(function (resolve, reject) {
       var settled = false;
@@ -8833,7 +8839,7 @@
       };
       var timeout = setTimeout(function () {
         settle(reject, Object.assign(new Error("browser automation timed out"), { code: "effect_unknown", ambiguous: true }));
-      }, 15000);
+      }, timeoutMs || 15000);
       browserAutomationWaiters.set(effect.actionId, {
         tabId: effect.tabId,
         generation: effect.generation,
@@ -9035,7 +9041,7 @@
     if (!plain || Object.keys(value).some(function (key) {
       return ["value", "resultBytes", "durationMs"].indexOf(key) === -1;
     }) || !Number.isSafeInteger(value.resultBytes) || value.resultBytes < 0 || value.resultBytes > 256 * 1024 ||
-      !Number.isFinite(value.durationMs) || value.durationMs < 0 || value.durationMs > 60000) {
+      !Number.isFinite(value.durationMs) || value.durationMs < 0 || value.durationMs > 5000) {
       throw Object.assign(new Error("browser script result is malformed"), { code: "serialization_failed" });
     }
     var encoded;
@@ -9170,7 +9176,7 @@
       try {
         var installed = await installBrowserAutomationForPair(pair);
         if (!installed || !exactPairIsCurrent()) return completeReplaced();
-        var resultFlight = awaitBrowserAutomationResult(effect);
+        var resultFlight = awaitBrowserAutomationResult(effect, effect.operation.kind === "script" ? 5000 : 15000);
         try {
           await invoke("browser_eval", {
             label: browserLabelForTab(pair.project, pair.tab),
@@ -9189,6 +9195,7 @@
             : canonicalizeBrowserActionResult(effect, automationValue);
         if (!exactPairIsCurrent()) {
           if (effect.operation.kind === "script") {
+            await quarantineBrowserAutomation(pair, true);
             await completeBrowserProviderEffect(pair.project, { actionId: effect.actionId, status: "unknown", code: "effect_unknown", message: "browser tab changed during script evaluation" });
             return false;
           }
@@ -9202,7 +9209,7 @@
       } catch (error) {
         var ambiguous = !!(error && (error.ambiguous || error.code === "effect_unknown"));
         if (ambiguous && effect.operation.kind === "script") {
-          await quarantineBrowserAutomation(pair);
+          await quarantineBrowserAutomation(pair, true);
         }
         var code = ambiguous ? "effect_unknown" : error && error.code || (String(error).indexOf("backend_unavailable") !== -1 ? "backend_unavailable" : "automation_failed");
         var message = ambiguous && effect.operation.kind === "script"

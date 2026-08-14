@@ -194,6 +194,73 @@ describe('Tauri semantic browser provider lifecycle', () => {
     }
   });
 
+  it('destroys and quarantines an unresponsive script child at five seconds and ignores late success', async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: string[] = [];
+      const completions: unknown[] = [];
+      const waiters = new Map<string, any>();
+      const snapshots = new Map([['snapshot', { tabId: 'tab', generation: 1 }]]);
+      const pair = { project: { root: '/project' }, browser: {}, worktreePath: '/project', tab: { id: 'tab' } };
+      const lifecycle: any = {
+        liveGeneration: 1, controlGeneration: 1, pendingGeneration: 0,
+        nativeLabel: 'native', navigationTail: null, automationSource: 'source',
+      };
+      const invoke = vi.fn(async (command: string) => { calls.push(command); return {}; });
+      const remove = vi.fn(async () => { calls.push('remove'); return true; });
+      const invalidateNavigation = vi.fn(() => { calls.push('invalidate-navigation'); });
+      const quarantine = Function(
+        'browserTabLifecycle', 'invalidateBrowserAutomation', 'removeBrowserControlResource',
+        'browserAutomationSnapshotRefs', 'invalidateBrowserNavigation', 'invoke', 'browserLabelForTab',
+        `return (${functionSource(main, 'quarantineBrowserAutomation')});`,
+      )(
+        () => lifecycle, async () => { calls.push('invalidate-page'); return true; }, remove,
+        snapshots, invalidateNavigation, invoke, () => 'project:tab:1',
+      );
+      const awaitResult = Function(
+        'browserAutomationWaiters',
+        `return (${functionSource(main, 'awaitBrowserAutomationResult')});`,
+      )(waiters);
+      const dispatch = vi.fn(async () => ({}));
+      const handler = Function(
+        'browserControlPairByTabId', 'browserTabLifecycle', 'completeBrowserProviderEffect',
+        'browserProviderOperationPreflight', 'runBrowserLifecycleOperation', 'installBrowserAutomationForPair',
+        'awaitBrowserAutomationResult', 'invoke', 'browserLabelForTab', 'PsycheControl',
+        'browserAutomationDispatchScript', 'canonicalizeBrowserSemanticSnapshot', 'canonicalizeBrowserScriptResult',
+        'canonicalizeBrowserActionResult', 'quarantineBrowserAutomation',
+        `return (${functionSource(main, 'handleBrowserProviderEffect')});`,
+      )(
+        () => pair, () => lifecycle,
+        async (_project: unknown, result: unknown) => { completions.push(result); },
+        () => 'page', vi.fn(), async () => true, awaitResult,
+        dispatch, () => 'project:tab:1', { browserAutomationSource: () => '' }, () => 'dispatch-script',
+        vi.fn(), (value: unknown) => value, vi.fn(), quarantine,
+      );
+      const flight = handler({ payload: {
+        actionId: 'hung-script', tabId: 'tab', projectRoot: '/project', generation: 1,
+        operation: { kind: 'script', source: 'while (true) {}' },
+      } });
+      await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(5_000);
+      const completionCountAtFiveSeconds = completions.length;
+      await vi.advanceTimersByTimeAsync(10_000);
+      await flight;
+
+      expect(completionCountAtFiveSeconds).toBe(1);
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(invoke.mock.calls.filter(([command]) => command === 'browser_destroy')).toHaveLength(1);
+      expect(remove).toHaveBeenCalledOnce();
+      expect(snapshots.size).toBe(0);
+      expect(lifecycle).toMatchObject({ liveGeneration: 0, controlGeneration: 0, nativeLabel: null });
+      expect(completions).toEqual([expect.objectContaining({
+        actionId: 'hung-script', status: 'unknown', code: 'effect_unknown',
+      })]);
+      expect(waiters.has('hung-script')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('quarantines a tab after ambiguous script execution and never reports deterministic failure', async () => {
     const completions: unknown[] = [];
     const pair = { project: { root: '/project' }, browser: {}, worktreePath: '/project', tab: {} };
