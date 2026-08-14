@@ -98,12 +98,18 @@ function fakeElement(tagName: string, children: FakeNode[] = []): FakeNode {
 async function runPageRuntime(
   workerMessage: unknown,
   root = fakeElement('HTML'),
-): Promise<{ envelope: Record<string, unknown>; terminated: number }> {
+): Promise<{
+  envelope: Record<string, unknown>;
+  terminated: number;
+  workerInput: Record<string, unknown> | null;
+}> {
   let terminated = 0;
+  let workerInput: Record<string, unknown> | null = null;
   class FakeWorker {
     onmessage: ((event: { data: unknown }) => void) | null = null;
     onerror: (() => void) | null = null;
-    postMessage() {
+    postMessage(value: Record<string, unknown>) {
+      workerInput = value;
       queueMicrotask(() => this.onmessage?.({ data: workerMessage }));
     }
     terminate() { terminated += 1; }
@@ -133,7 +139,7 @@ async function runPageRuntime(
   });
   const input = JSON.stringify({ source: 'return null;', args: null, workerSource: 'trusted' });
   const encoded = await runInContext(`${runtimeSource()}(${input})`, context) as string;
-  return { envelope: JSON.parse(encoded), terminated };
+  return { envelope: JSON.parse(encoded), terminated, workerInput };
 }
 
 describe('native browser script authority', () => {
@@ -689,6 +695,29 @@ describe('native browser script authority', () => {
     expect(terminated).toBe(1);
     expect(input.value).toBe('after');
     expect(envelope).toMatchObject({ ok: true, json: '{"changed":true}' });
+  });
+
+  it('redacts executable and embedded element text from Worker snapshots', async () => {
+    const script = fakeElement('SCRIPT');
+    script.textContent = 'window.inlineSecret = "script-secret";';
+    const style = fakeElement('STYLE');
+    style.textContent = '.private { background: url("style-secret") }';
+    const iframe = fakeElement('IFRAME');
+    iframe.textContent = 'embedded-secret';
+    const visible = fakeElement('P');
+    visible.textContent = 'visible text';
+    const root = fakeElement('HTML', [script, style, iframe, visible]);
+
+    const { workerInput } = await runPageRuntime({ ok: true, value: null, mutations: [] }, root);
+    const snapshot = workerInput?.snapshot as { nodes: Array<{ tagName: string; text: string }> };
+
+    expect(snapshot.nodes.map(({ tagName, text }) => [tagName, text])).toEqual([
+      ['HTML', ''],
+      ['SCRIPT', ''],
+      ['STYLE', ''],
+      ['IFRAME', ''],
+      ['P', 'visible text'],
+    ]);
   });
 
   it('rejects executable and stale mutation targets before applying anything', async () => {

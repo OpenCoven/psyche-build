@@ -61,7 +61,9 @@ const captureSnapshot = () => {
       id,
       parentId: current.parentId,
       tagName,
-      text: String(node.textContent || "").slice(0, LIMITS.nodeText),
+      text: BLOCKED_TAGS.has(tagName)
+        ? ""
+        : String(node.textContent || "").slice(0, LIMITS.nodeText),
       attributes,
       value: SAFE_FORM_TAGS.has(tagName) ? String(node.value || "").slice(0, LIMITS.mutationValue) : undefined,
       checked: typeof node.checked === "boolean" ? node.checked : undefined,
