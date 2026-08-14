@@ -14,34 +14,62 @@
   <body>
     <div class="app" id="app" data-sidebar="open">
       <header class="titlebar" data-tauri-drag-region>
-        <span class="traffic-gutter" data-tauri-drag-region aria-hidden="true"></span>
-        <span class="brand" data-tauri-drag-region>psyche</span>
-        <span class="titlebar-spacer" data-tauri-drag-region></span>
-        <span
-          class="daemon-status"
-          id="daemon-status"
-          title="Local session runtime. Green: a pane is running. Amber: starting. Red: the last pane exited. Hollow: no pane open."
-        >
-          <span class="daemon-dot" id="daemon-dot"></span>
-          <span class="daemon-label" id="daemon-label">psyche · local</span>
-        </span>
-        <button
-          id="agent-control-toggle"
-          class="chrome-btn agent-control-toggle"
-          type="button"
-          aria-haspopup="dialog"
-          aria-expanded="false"
-          aria-controls="agent-control-drawer"
-        >Agent control <span id="agent-control-count" hidden>0</span></button>
-        <span class="titlebar-sep" aria-hidden="true"></span>
-        <span class="status-pill" id="shell-status" hidden>starting…</span>
-        <button
-          id="help-toggle"
-          class="chrome-btn help-btn"
-          type="button"
-          title="Keyboard shortcuts (?)"
-          aria-label="Keyboard shortcuts"
-        >?</button>
+        <div class="titlebar-sidebar" data-tauri-drag-region>
+          <span class="traffic-gutter" aria-hidden="true"></span>
+          <span class="titlebar-brand" data-tauri-drag-region>
+            <span class="titlebar-brand-icon" aria-hidden="true">
+              <span class="titlebar-brand-fallback">P</span>
+              <img
+                id="titlebar-brand-mark"
+                class="titlebar-brand-mark"
+                src="./assets/psyche-mark.png"
+                alt=""
+              />
+            </span>
+            <span class="titlebar-brand-name">Psyche</span>
+          </span>
+        </div>
+        <div class="titlebar-workspace" data-tauri-drag-region>
+          <button
+            id="sidebar-collapse"
+            class="titlebar-sidebar-toggle"
+            type="button"
+            title="Collapse sidebar (⌘B)"
+            aria-label="Collapse sidebar"
+            aria-pressed="false"
+          >
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+              <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
+              <line x1="5.5" y1="2.5" x2="5.5" y2="13.5" stroke="currentColor" stroke-width="1.3"/>
+            </svg>
+          </button>
+          <span class="titlebar-spacer" data-tauri-drag-region></span>
+          <span
+            class="daemon-status"
+            id="daemon-status"
+            title="Local session runtime. Green: a pane is running. Amber: starting. Red: the last pane exited. Hollow: no pane open."
+          >
+            <span class="daemon-dot" id="daemon-dot"></span>
+            <span class="daemon-label" id="daemon-label">psyche · local</span>
+          </span>
+          <button
+            id="agent-control-toggle"
+            class="chrome-btn agent-control-toggle"
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="agent-control-drawer"
+          >Agent control <span id="agent-control-count" hidden>0</span></button>
+          <span class="titlebar-sep" aria-hidden="true"></span>
+          <span class="status-pill" id="shell-status" hidden>starting…</span>
+          <button
+            id="help-toggle"
+            class="chrome-btn help-btn"
+            type="button"
+            title="Keyboard shortcuts (?)"
+            aria-label="Keyboard shortcuts"
+          >?</button>
+        </div>
       </header>
 
       <div class="workbench" id="workbench">
@@ -59,24 +87,6 @@
             </div>
 
             <div class="sidebar-head">
-              <label
-                class="session-search-wrap has-tooltip"
-                for="session-search"
-                data-tooltip="Press / to search sessions"
-                title="Press / to search sessions"
-              >
-                <input
-                  id="session-search"
-                  class="session-search"
-                  type="search"
-                  spellcheck="false"
-                  autocomplete="off"
-                  placeholder="Search projects, branches, sessions…"
-                  aria-label="Search projects, branches, agents, shells, and session metadata"
-                  aria-keyshortcuts="/"
-                />
-                <kbd class="session-search-key">/</kbd>
-              </label>
               <button
                 id="rail-new-tab"
                 class="rail-btn has-tooltip"
@@ -91,20 +101,6 @@
                 <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
                   <path d="M8 3.75v8.5M3.75 8h8.5" fill="none" stroke="currentColor"
                         stroke-width="1.6" stroke-linecap="round"/>
-                </svg>
-              </button>
-              <button
-                id="sidebar-collapse"
-                class="rail-btn has-tooltip"
-                type="button"
-                data-tooltip="Collapse sidebar"
-                title="Collapse sidebar (⌘B)"
-                aria-label="Collapse sidebar"
-              >
-                <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-                  <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
-                  <line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" stroke-width="1.3"/>
-                  <path d="M10.5 6 8.5 8l2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </button>
             </div>
@@ -201,7 +197,7 @@
         </aside>
 
         <aside class="mini-rail sidebar-mini" id="sidebar-mini" hidden aria-label="Sidebar (collapsed)">
-          <button id="sidebar-expand" class="mini-rail-btn" type="button" title="Expand sidebar (⌘B)" aria-label="Expand sidebar">»</button>
+          <button id="sidebar-expand" class="mini-rail-btn" type="button" title="Expand sidebar (⌘B)" aria-label="Expand sidebar" aria-pressed="false">»</button>
         </aside>
 
         <main class="detail" id="detail">
@@ -341,10 +337,14 @@
             <input
               id="command-input"
               type="text"
+              role="combobox"
               spellcheck="false"
               autocomplete="off"
               placeholder="/ command · ! shell · % pane — or plain text to the focused pane"
               aria-label="Command composer"
+              aria-controls="palette"
+              aria-autocomplete="list"
+              aria-expanded="false"
             />
             <span class="composer-send-hint" id="composer-send-hint" aria-hidden="true"></span>
           </div>
@@ -372,7 +372,7 @@
             <button id="call-end" class="call-btn call-end" type="button">End call</button>
           </div>
 
-          <div class="palette" id="palette" hidden></div>
+          <div class="palette" id="palette" role="listbox" aria-label="Composer suggestions" hidden></div>
         </footer>
 
         <section class="status-detail" id="status-detail" aria-label="Workspace metrics" hidden>

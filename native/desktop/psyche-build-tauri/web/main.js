@@ -26,6 +26,17 @@
     showBootError("Unhandled promise rejection:\n" + String(e.reason));
   });
 
+  function initializeTitlebarBrandMark() {
+    var mark = document.getElementById("titlebar-brand-mark");
+    if (!mark) return;
+    function removeFailedMark() {
+      mark.remove();
+    }
+    mark.addEventListener("error", removeFailedMark, { once: true });
+    if (mark.complete && mark.naturalWidth === 0) removeFailedMark();
+  }
+  initializeTitlebarBrandMark();
+
   if (typeof window.Terminal !== "function") {
     showBootError("xterm.js did not register a global Terminal constructor.");
     return;
@@ -1127,6 +1138,8 @@
   var appEl = document.getElementById("app");
   var sidebarEl = document.getElementById("sidebar");
   var sidebarMiniEl = document.getElementById("sidebar-mini");
+  var sidebarCollapseEl = document.getElementById("sidebar-collapse");
+  var sidebarExpandEl = document.getElementById("sidebar-expand");
   var sidebarResizeEl = document.getElementById("sidebar-resize");
   var newPaneMenuEl = document.getElementById("new-pane-menu");
   var newPaneMenuHeadEl = document.getElementById("new-pane-menu-head");
@@ -2171,7 +2184,7 @@
     state.threads.push(thread);
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountTerminal(thread);
-    focusThread(id);
+    focusThread(id, opts.focusTerminal === false ? { focusTerminal: false } : undefined);
     refreshSidebar();
     refreshTabs();
     // Run fit() now so the PTY starts at the actual visible size, not at
@@ -3676,6 +3689,39 @@
     return activateFocusSet(sets[0].id);
   }
 
+  function snapshotSetScopePresentation(thread) {
+    var layout = paneLayoutForThread(thread);
+    if (!layout) return null;
+    return {
+      projectId: thread.projectId,
+      worktreePath: thread.worktreePath,
+      layout: layout,
+      root: layout.root,
+      activeSetId: layout.activeSetId,
+      maximizedLeafId: layout.maximizedLeafId,
+      spanRoot: layout.spanRoot,
+      spanSignature: layout.spanSignature,
+    };
+  }
+
+  function restoreSetScopePresentation(snapshot, applied) {
+    if (!snapshot || !applied || snapshot.layout !== applied.layout) return false;
+    var layout = paneLayoutFor(snapshot.projectId, snapshot.worktreePath);
+    if (layout !== snapshot.layout ||
+        layout.root !== applied.root ||
+        layout.activeSetId !== applied.activeSetId ||
+        layout.maximizedLeafId !== applied.maximizedLeafId ||
+        layout.spanRoot !== applied.spanRoot ||
+        layout.spanSignature !== applied.spanSignature) return false;
+    layout.activeSetId = snapshot.activeSetId;
+    layout.maximizedLeafId = snapshot.maximizedLeafId;
+    layout.spanRoot = snapshot.spanRoot;
+    layout.spanSignature = snapshot.spanSignature;
+    renderPaneWorkspace();
+    refreshSidebar();
+    return true;
+  }
+
   function removeFromFocusSet(setId, threadId) {
     var set = findFocusSet(setId);
     if (!set) return false;
@@ -4168,9 +4214,17 @@
   }
 
   async function focusThread(id, options) {
-    var thread = findThread(id);
+    function resolveFocusableThread() {
+      var candidate = findThread(id);
+      if (!candidate || candidate.hidden || candidate.closing ||
+          candidate.closeStarted) return null;
+      return candidate;
+    }
+    var thread = resolveFocusableThread();
     if (!thread) return false;
     if (!(await showTerminalView())) return false;
+    thread = resolveFocusableThread();
+    if (!thread) return false;
     var focusedSourceThread = focusedTerminalThreadForRender();
     if (focusedSourceThread) {
       withTerminalFocusReportToken(
@@ -4206,20 +4260,22 @@
     if (scopeChanged) renderGitSurface();
     refreshSidebar();
     requestAnimationFrame(function () {
+      var focusedThread = resolveFocusableThread();
+      if (!focusedThread || state.activeThreadId !== id) return;
       if (
-        !isLiveThread(thread) ||
-        state.activeThreadId !== thread.id ||
-        !thread.term ||
-        !thread.pane ||
-        terminalHost.hidden ||
-        !terminalHost.contains(thread.pane)
+        isLiveThread(focusedThread) &&
+        focusedThread.term &&
+        focusedThread.pane &&
+        !terminalHost.hidden &&
+        terminalHost.contains(focusedThread.pane)
       ) {
-        return;
+        scheduleVisiblePaneFit();
+        if (!options || options.focusTerminal !== false) {
+          withTerminalFocusReportToken(focusedThread, "\x1b[I", "allow", function () {
+            focusedThread.term.focus();
+          });
+        }
       }
-      scheduleVisiblePaneFit();
-      withTerminalFocusReportToken(thread, "\x1b[I", "allow", function () {
-        thread.term.focus();
-      });
       syncBrowserBounds();
     });
 
@@ -5039,11 +5095,8 @@
       btn.addEventListener("click", function () { setGitTab(btn.dataset.gitTab); });
     }
   );
-  var sessionSearchEl = document.getElementById("session-search");
-  var sessionFilter = "";
   var sessionTypeFilter = settings.sessionFilter;
   var sessionTreeFocusKey = "";
-  var sessionSearchRestoreKey = "";
 
   function setSessionTypeFilter(value, options) {
     sessionTypeFilter = PsycheSessions.normalizeSidebarFilter(value);
@@ -5898,7 +5951,32 @@
     }) || selectedWorktree(project);
   }
 
-  function openCovenSession(project, session) {
+  function resolveCurrentCovenAttachTarget(expected) {
+    var project = findProject(expected.projectId);
+    if (!project || project.root !== expected.projectRoot) return null;
+    var session = covenSessionsForProject(project).find(function (candidate) {
+      return candidate.id === expected.sessionId;
+    });
+    if (!session ||
+        (session.projectRoot || null) !== expected.sessionProjectRoot ||
+        (session.cwd || null) !== expected.sessionCwd) return null;
+    var worktree = covenWorktreeForSession(project, session);
+    if (!worktree || worktree.path !== expected.worktreePath) return null;
+    var ownsWorktree = worktree.path === project.root ||
+      (project.worktrees || []).some(function (candidate) {
+        return candidate.path === worktree.path;
+      });
+    return ownsWorktree ? { project: project, session: session, worktree: worktree } : null;
+  }
+
+  function focusCovenAttachmentForCaller(opening, options) {
+    return opening.then(async function (thread) {
+      if (!thread || !(await focusThread(thread.id, options))) return null;
+      return thread;
+    });
+  }
+
+  function openCovenSession(project, session, options) {
     if (!project || !session || !PsycheSessions.isSafeCovenSessionId(session.id)) {
       setStatus("Invalid Coven session", "error");
       return Promise.resolve(null);
@@ -5914,9 +5992,7 @@
       return Promise.resolve().then(async function () {
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
-        if (!(await activateProjectWorktree(
-          project, existing.worktreePath
-        ))) return null;
+        if (!(await activateProjectWorktree(project, existing.worktreePath, options))) return null;
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
         await waitForTerminalLayout();
@@ -5924,37 +6000,67 @@
         if (!existing) return null;
         if (existing.hidden && !reopenThread(existing.id)) return null;
         existing = findCovenAttachment(project, session, existingId);
-        if (!existing || !(await focusThread(existing.id))) return null;
+        if (!existing || !(await focusThread(existing.id, options))) return null;
         return findCovenAttachment(project, session, existingId);
       });
     }
 
     var key = covenAttachKey(project, session);
-    if (covenAttachInFlight.has(key)) return covenAttachInFlight.get(key);
-
-    var opening = Promise.resolve().then(async function () {
+    var opening = covenAttachInFlight.get(key);
+    if (!opening) {
       var worktree = covenWorktreeForSession(project, session);
-      if (!worktree || !worktree.path) return null;
-      if (!(await activateProjectWorktree(project, worktree.path))) return null;
-      await waitForTerminalLayout();
-      return createThread({
-        project: project,
-        name: session.title || "Coven " + session.id.slice(0, 8),
-        kind: "coven-attach",
-        command: state.env.coven_path,
-        args: ["attach", session.id],
+      if (!worktree || !worktree.path) return Promise.resolve(null);
+      var expected = {
+        projectId: project.id,
         projectRoot: project.root,
-        cwd: session.cwd || worktree.path,
+        sessionId: session.id,
+        sessionProjectRoot: session.projectRoot || null,
+        sessionCwd: session.cwd || null,
         worktreePath: worktree.path,
-        launchKind: "coven-attach",
-        covenSessionId: session.id,
-        metricsProvider: session.harness || "coven",
+      };
+      opening = Promise.resolve().then(async function () {
+        var current = resolveCurrentCovenAttachTarget(expected);
+        if (!current) {
+          setStatus(
+            "Coven session is no longer available; refresh the rail before retrying",
+            "warn"
+          );
+          return null;
+        }
+        if (!(await activateProjectWorktree(
+          current.project,
+          current.worktree.path,
+          { focusTerminal: false }
+        ))) return null;
+        await waitForTerminalLayout();
+        current = resolveCurrentCovenAttachTarget(expected);
+        if (!current) {
+          setStatus(
+            "Coven session is no longer available; refresh the rail before retrying",
+            "warn"
+          );
+          return null;
+        }
+        return createThread({
+          project: current.project,
+          name: current.session.title || "Coven " + current.session.id.slice(0, 8),
+          kind: "coven-attach",
+          command: state.env.coven_path,
+          args: ["attach", current.session.id],
+          projectRoot: current.project.root,
+          cwd: current.session.cwd || current.worktree.path,
+          worktreePath: current.worktree.path,
+          launchKind: "coven-attach",
+          covenSessionId: current.session.id,
+          metricsProvider: current.session.harness || "coven",
+          focusTerminal: false,
+        });
+      }).finally(function () {
+        covenAttachInFlight.delete(key);
       });
-    }).finally(function () {
-      covenAttachInFlight.delete(key);
-    });
-    covenAttachInFlight.set(key, opening);
-    return opening;
+      covenAttachInFlight.set(key, opening);
+    }
+    return focusCovenAttachmentForCaller(opening, options);
   }
 
   function attachTooltip(element, text) {
@@ -6435,16 +6541,6 @@
     }
   }
 
-  function restoreSessionTreeFocus(key) {
-    var items = visibleSessionTreeItems();
-    var target = items.find(function (item) {
-      return key && item.dataset.treeKey === key;
-    }) || items.find(function (item) {
-      return item.getAttribute("tabindex") === "0";
-    }) || items[0];
-    return focusSessionTreeItem(target);
-  }
-
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
@@ -6479,8 +6575,7 @@
     else sessionListEl.removeAttribute("aria-multiselectable");
     sessionListEl.replaceChildren();
 
-    var currentSearchQuery = sessionFilter;
-    var needle = currentSearchQuery.trim().toLowerCase();
+    var currentSearchQuery = "";
     var matched = 0;
     var inlineState = covenInlineState(covenDiscovery);
     // Walked once per render: every row tests membership against this list.
@@ -6547,7 +6642,7 @@
       projectModels.push({ project: project, model: projectModel });
     });
 
-    if (needle || sessionTypeFilter !== "all") {
+    if (sessionTypeFilter !== "all") {
       var summary = document.createElement("div");
       summary.className = "session-result-summary";
       summary.setAttribute("role", "status");
@@ -6557,22 +6652,12 @@
       var reset = document.createElement("button");
       reset.type = "button";
       reset.className = "session-result-reset";
-      if (needle) {
-        reset.textContent = "Clear search";
-        reset.addEventListener("click", function () {
-          sessionSearchEl.value = "";
-          sessionFilter = "";
-          renderSessionList();
-          sessionSearchEl.focus();
-        });
-      } else {
-        reset.textContent = "Reset filter";
-        reset.addEventListener("click", function () {
-          setSessionTypeFilter("all");
-          var allFilter = document.querySelector('[data-session-filter="all"]');
-          if (allFilter) allFilter.focus();
-        });
-      }
+      reset.textContent = "Reset filter";
+      reset.addEventListener("click", function () {
+        setSessionTypeFilter("all");
+        var allFilter = document.querySelector('[data-session-filter="all"]');
+        if (allFilter) allFilter.focus();
+      });
       summary.appendChild(summaryText);
       summary.appendChild(reset);
       sessionListEl.appendChild(summary);
@@ -6849,13 +6934,11 @@
     if (matched === 0 && !inlineState) {
       var empty = document.createElement("div");
       empty.className = "session-empty";
-      empty.textContent = needle
-        ? "No sessions match “" + sessionFilter.trim() + "”"
-        : sessionTypeFilter !== "all"
-          ? "No sessions match the " + sessionTypeFilter + " filter."
-          : state.projects.length
-            ? "No sessions yet."
-            : "No project open — ⌘O to add one.";
+      empty.textContent = sessionTypeFilter !== "all"
+        ? "No sessions match the " + sessionTypeFilter + " filter."
+        : state.projects.length
+          ? "No sessions yet."
+          : "No project open — ⌘O to add one.";
       sessionListEl.appendChild(empty);
     }
 
@@ -6901,26 +6984,6 @@
   applySolidBg(settings.solidBg, { persist: false });
   applyBgOpacity(settings.bgOpacity, { persist: false });
 
-  if (sessionSearchEl) {
-    sessionSearchEl.addEventListener("focus", function () {
-      sessionSearchRestoreKey = sessionTreeFocusKey;
-    });
-    sessionSearchEl.addEventListener("input", function () {
-      sessionFilter = sessionSearchEl.value || "";
-      renderSessionList();
-    });
-    // Escape clears the filter rather than bubbling to the terminal.
-    sessionSearchEl.addEventListener("keydown", function (e) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        sessionSearchEl.value = "";
-        sessionFilter = "";
-        renderSessionList();
-        restoreSessionTreeFocus(sessionSearchRestoreKey);
-      }
-    });
-  }
   if (sessionListEl) {
     sessionListEl.addEventListener("focusin", function (event) {
       if (event.target && event.target.matches &&
@@ -6938,19 +7001,6 @@
       });
     }
   );
-  document.addEventListener("keydown", function (event) {
-    var target = event.target;
-    var editing = target && (
-      target.tagName === "INPUT" || target.tagName === "TEXTAREA" ||
-      target.tagName === "SELECT" || target.isContentEditable
-    );
-    if (event.key === "/" && !editing && sidebarTab === "sessions") {
-      event.preventDefault();
-      sessionSearchRestoreKey = sessionTreeFocusKey;
-      sessionSearchEl.focus();
-      sessionSearchEl.select();
-    }
-  });
   setSidebarTab(settings.sidebarTab, { persist: false });
   setSessionTypeFilter(settings.sessionFilter, { persist: false });
 
@@ -8296,6 +8346,12 @@
   function runCommand(line) {
     var trimmed = line.trim();
     if (!trimmed) return;
+    if (trimmed.charAt(0) === "?") {
+      commandInput.value = trimmed;
+      openPalette(trimmed, true);
+      syncComposerChrome();
+      return;
+    }
     if (trimmed[0] === "!") { runShellSigil(trimmed.slice(1).trim()); return; }
     if (trimmed[0] === "%") { runPaneSigil(trimmed.slice(1)); return; }
     if (trimmed[0] !== "/") {
@@ -8353,19 +8409,30 @@
   // Plain text always lands in the focused pane, so the composer only has to
   // keep the send button and its hint in step with what has been typed.
   function syncComposerChrome() {
-    var value = commandInput ? commandInput.value.trim() : "";
+    var rawValue = commandInput ? commandInput.value : "";
+    var value = rawValue.trim();
+    var sessionSearchOpen = rawValue.charAt(0) === "?";
     if (composerSendEl) {
-      composerSendEl.hidden = value.length === 0;
+      composerSendEl.hidden = sessionSearchOpen || value.length === 0;
       composerSendEl.firstChild.textContent = value[0] === "/" ? "Run " : "Send ";
     }
-    if (composerMicEl) composerMicEl.hidden = value.length > 0;
+    if (composerMicEl) composerMicEl.hidden = rawValue.length > 0;
     if (composerSendHintEl) {
-      composerSendHintEl.textContent = !value
+      composerSendHintEl.textContent = sessionSearchOpen || !value
         ? ""
         : value[0] === "/" ? "runs command"
         : value[0] === "!" ? "runs in the focused terminal"
         : value[0] === "%" ? "jumps to a pane"
         : "→ focused pane";
+    }
+    if (commandInput) {
+      commandInput.setAttribute(
+        "aria-label",
+        sessionSearchOpen
+          ? "Search sessions, " + paletteFiltered.length +
+            (paletteFiltered.length === 1 ? " result" : " results")
+          : "Command composer"
+      );
     }
   }
 
@@ -8447,6 +8514,7 @@
   var paletteIndex = 0;
   var paletteVisible = false;
   var paletteFiltered = [];
+  var sessionSearchActivationGeneration = 0;
 
   function builtinPaletteEntries() {
     return commands.map(function (c) {
@@ -8478,7 +8546,7 @@
     });
   }
 
-  var PALETTE_SIGILS = "/!%";
+  var PALETTE_SIGILS = "/!%?";
 
   /** `%` lists the project's panes so the composer can jump between them. */
   function panePaletteEntries() {
@@ -8517,6 +8585,48 @@
     return entries;
   }
 
+  function buildSessionSearchEntries(query) {
+    var now = Date.now();
+    var selectedThread = findThread(state.activeThreadId);
+    var selectedProject = selectedThread && findProject(selectedThread.projectId);
+    var selectedKey = selectedThread && selectedProject
+      ? PsycheSessions.localSidebarSelectionKey(selectedProject, selectedThread)
+      : settings.selectedSessionKey;
+    var assignments = covenSessionAssignments();
+    var projectModels = state.projects.map(function (project) {
+      var projectModel = PsycheSessions.buildSidebarProjectModel({
+        project: project,
+        localSessions: state.threads.filter(function (thread) {
+          return thread.projectId === project.id &&
+            !thread.hidden && !isDormantThread(thread);
+        }),
+        covenSessions: covenSessionsForProject(project, assignments),
+        query: query,
+        filter: sessionTypeFilter,
+        selectedKey: selectedKey,
+        now: now,
+      });
+      return projectModel.visibleCount === 0 ? null : projectModel;
+    }).filter(Boolean);
+
+    return PsycheSessions.flattenSidebarSearchResults(projectModels).map(function (result) {
+      return {
+        cmd: result.title,
+        desc: [result.projectTitle, result.branchTitle, result.meta]
+          .filter(Boolean).join(" · "),
+        badge: result.status.label,
+        hint: "↵",
+        kind: "session",
+        group: "Sessions",
+        key: result.key,
+        sessionSource: result.source,
+        sessionId: result.id,
+        selectionKey: result.selectionKey,
+        projectId: result.projectId,
+      };
+    });
+  }
+
   function paletteCorpus(sigil, rest) {
     if (sigil === "%") return panePaletteEntries();
     if (sigil === "!") return shellPaletteEntries(rest);
@@ -8524,25 +8634,31 @@
   }
 
   function openPalette(query, force) {
-    var raw = (query || commandInput.value).trim();
-    var sigil = raw[0] || "/";
-    if (!force && PALETTE_SIGILS.indexOf(commandInput.value.trim()[0]) === -1) {
+    var raw = String(query == null ? commandInput.value : query).trim();
+    var typedSigil = commandInput.value.charAt(0);
+    var sigil = force ? (raw.charAt(0) || "/") : typedSigil;
+    if (!force && PALETTE_SIGILS.indexOf(typedSigil) === -1) {
       hidePalette();
       return;
     }
     if (PALETTE_SIGILS.indexOf(sigil) === -1) sigil = "/";
     var rest = raw.slice(1).trim();
     var q = sigil === "/" ? raw.toLowerCase() : rest.toLowerCase();
-    paletteFiltered = paletteCorpus(sigil, rest).filter(function (c) {
-      if (c.pinned) return true;
-      var hay = (c.cmd + " " + (c.desc || "") + " " + (c.badge || "")).toLowerCase();
-      return c.cmd.toLowerCase().indexOf(q) === 0 || hay.indexOf(q) !== -1;
-    });
-    if (paletteFiltered.length === 0) {
+    if (sigil === "?") {
+      paletteFiltered = buildSessionSearchEntries(rest);
+    } else {
+      paletteFiltered = paletteCorpus(sigil, rest).filter(function (c) {
+        if (c.pinned) return true;
+        var hay = (c.cmd + " " + (c.desc || "") + " " + (c.badge || "")).toLowerCase();
+        return c.cmd.toLowerCase().indexOf(q) === 0 || hay.indexOf(q) !== -1;
+      });
+    }
+    if (paletteFiltered.length === 0 && sigil !== "?") {
       hidePalette();
       return;
     }
-    paletteIndex = Math.min(paletteIndex, paletteFiltered.length - 1);
+    paletteIndex = Math.min(paletteIndex, Math.max(0, paletteFiltered.length - 1));
+    commandInput.setAttribute("aria-expanded", "true");
     renderPalette();
     paletteEl.hidden = false;
     paletteVisible = true;
@@ -8551,9 +8667,89 @@
     paletteEl.hidden = true;
     paletteVisible = false;
     paletteIndex = 0;
+    commandInput.setAttribute("aria-expanded", "false");
+    commandInput.removeAttribute("aria-activedescendant");
   }
-  function runPalettePick(pick, mode) {
+  async function runSessionSearchPick(pick) {
+    var project = findProject(pick.projectId);
+    if (!project) { toast("Session is no longer available"); return false; }
+    if (pick.sessionSource === "psyche") {
+      function resolveLocalThread() {
+        var candidate = findThread(pick.sessionId);
+        if (!candidate || candidate.projectId !== project.id || candidate.hidden ||
+            candidate.closing || candidate.closeStarted ||
+            isDormantThread(candidate) || candidate.status === "failed") return null;
+        return candidate;
+      }
+      var thread = resolveLocalThread();
+      if (!thread) {
+        toast("Session is no longer available"); return false;
+      }
+      if ((project.id !== state.activeProjectId ||
+           project.selectedWorktreePath !== thread.worktreePath) &&
+          !(await activateProjectWorktree(
+            project, thread.worktreePath, { focusTerminal: false }
+          ))) return false;
+      project = findProject(pick.projectId);
+      if (!project) return false;
+      thread = resolveLocalThread();
+      if (!thread) return false;
+      var previousPresentation = snapshotSetScopePresentation(thread);
+      var scopeChanged = applySetScopeForThread(thread);
+      var appliedPresentation = scopeChanged
+        ? snapshotSetScopePresentation(thread)
+        : null;
+      function restorePreviousPresentation() {
+        if (!scopeChanged) return;
+        restoreSetScopePresentation(previousPresentation, appliedPresentation);
+      }
+      var focused = await focusThread(thread.id, { focusTerminal: false });
+      if (!focused) {
+        restorePreviousPresentation();
+        return false;
+      }
+      thread = resolveLocalThread();
+      if (!thread || state.activeThreadId !== thread.id) {
+        restorePreviousPresentation();
+        return false;
+      }
+      settings.selectedSessionKey = pick.selectionKey;
+      saveSettings();
+      return true;
+    }
+    var session = covenSessionsForProject(project).find(function (candidate) {
+      return candidate.id === pick.sessionId;
+    });
+    if (!session) { toast("Session is no longer available"); return false; }
+    var opened = await openCovenSession(project, session, { focusTerminal: false });
+    if (!opened) return false;
+    settings.selectedSessionKey = pick.selectionKey;
+    saveSettings();
+    return true;
+  }
+  async function runPalettePick(pick, mode) {
     if (!pick) return;
+    if (pick.kind === "session") {
+      var activationGeneration = ++sessionSearchActivationGeneration;
+      var activationQuery = commandInput.value;
+      var selected = false;
+      try {
+        selected = await runSessionSearchPick(pick);
+      } finally {
+        var activationCurrent =
+          activationGeneration === sessionSearchActivationGeneration &&
+          commandInput.value === activationQuery;
+        if (activationCurrent) {
+          if (selected) {
+            commandInput.value = "";
+            hidePalette();
+          }
+          syncComposerChrome();
+          commandInput.focus();
+        }
+      }
+      return;
+    }
     var runsImmediately = pick.kind === "agent" || pick.kind === "recent" ||
       pick.kind === "pane" || pick.kind === "shell" || mode === "run";
     if (runsImmediately) {
@@ -8577,7 +8773,17 @@
   }
 
   function renderPalette() {
-    paletteEl.innerHTML = "";
+    paletteEl.replaceChildren();
+    commandInput.removeAttribute("aria-activedescendant");
+    if (paletteFiltered.length === 0 && commandInput.value.charAt(0) === "?") {
+      var empty = document.createElement("div");
+      empty.className = "palette-empty";
+      empty.textContent = "No matching sessions";
+      paletteEl.appendChild(empty);
+      paletteEl.hidden = false;
+      paletteVisible = true;
+      return;
+    }
     var lastGroup = "";
     paletteFiltered.forEach(function (c, idx) {
       if (c.group !== lastGroup) {
@@ -8588,8 +8794,11 @@
         paletteEl.appendChild(heading);
       }
       var div = document.createElement("div");
-      div.className =
-        "palette-item palette-" + c.kind + (idx === paletteIndex ? " active" : "");
+      var kindClass = c.kind === "session" ? " palette-session" : " palette-" + c.kind;
+      div.className = "palette-item" + kindClass + (idx === paletteIndex ? " active" : "");
+      div.id = "palette-option-" + idx;
+      div.setAttribute("role", "option");
+      div.setAttribute("aria-selected", idx === paletteIndex ? "true" : "false");
       div.innerHTML =
         '<span class="cmd">' + escapeHtml(c.cmd) + "</span>" +
         '<span class="desc">' +
@@ -8599,26 +8808,53 @@
         '<span class="hint-key">' + escapeHtml(c.hint || "↵") + "</span>";
       div.addEventListener("click", function () { runPalettePick(c); });
       paletteEl.appendChild(div);
+      if (idx === paletteIndex) {
+        commandInput.setAttribute("aria-activedescendant", div.id);
+      }
     });
     ensurePaletteActiveVisible();
   }
 
   commandInput.addEventListener("input", function () {
-    if (PALETTE_SIGILS.indexOf(commandInput.value.trim()[0]) !== -1) openPalette();
+    sessionSearchActivationGeneration += 1;
+    if (PALETTE_SIGILS.indexOf(commandInput.value.charAt(0)) !== -1) openPalette();
     else hidePalette();
     syncComposerChrome();
   });
   commandInput.addEventListener("keydown", function (e) {
+    var sessionSearchOpen = commandInput.value.charAt(0) === "?";
     if (paletteVisible) {
       if (e.key === "ArrowDown") {
-        paletteIndex = (paletteIndex + 1) % paletteFiltered.length;
-        renderPalette(); e.preventDefault(); return;
+        if (paletteFiltered.length > 0) {
+          paletteIndex = (paletteIndex + 1) % paletteFiltered.length;
+          renderPalette();
+        }
+        if (sessionSearchOpen) e.stopPropagation();
+        e.preventDefault();
+        return;
       }
       if (e.key === "ArrowUp") {
-        paletteIndex = (paletteIndex - 1 + paletteFiltered.length) % paletteFiltered.length;
-        renderPalette(); e.preventDefault(); return;
+        if (paletteFiltered.length > 0) {
+          paletteIndex = (paletteIndex - 1 + paletteFiltered.length) % paletteFiltered.length;
+          renderPalette();
+        }
+        if (sessionSearchOpen) e.stopPropagation();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "Enter" && sessionSearchOpen) {
+        e.stopPropagation();
+        e.preventDefault();
+        var sessionPick = paletteFiltered[paletteIndex];
+        if (sessionPick) runPalettePick(sessionPick);
+        return;
       }
       if (e.key === "Tab") {
+        if (sessionSearchOpen) {
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
         var pick = paletteFiltered[paletteIndex];
         if (pick.kind === "recent") commandInput.value = pick.cmd;
         else commandInput.value = pick.cmd + (pick.kind === "agent" ? "" : " ");
@@ -8626,7 +8862,17 @@
         e.preventDefault();
         return;
       }
-      if (e.key === "Escape") { hidePalette(); e.preventDefault(); return; }
+      if (e.key === "Escape") {
+        if (sessionSearchOpen) {
+          commandInput.value = "";
+          e.stopPropagation();
+        }
+        hidePalette();
+        syncComposerChrome();
+        commandInput.focus();
+        e.preventDefault();
+        return;
+      }
     }
     if (e.key === "Enter") {
       var line = commandInput.value;
@@ -9995,10 +10241,25 @@
   // ============================================================
 
   function sidebarOpen() { return !appEl || appEl.dataset.sidebar !== "collapsed"; }
+  function syncSidebarToggleState(collapsed) {
+    var titlebarLabel = collapsed ? "Expand sidebar" : "Collapse sidebar";
+    if (sidebarCollapseEl) {
+      sidebarCollapseEl.setAttribute("title", titlebarLabel + " (⌘B)");
+      sidebarCollapseEl.setAttribute("aria-label", titlebarLabel);
+      sidebarCollapseEl.setAttribute("aria-pressed", collapsed ? "true" : "false");
+    }
+    if (sidebarExpandEl) {
+      sidebarExpandEl.hidden = !collapsed;
+      sidebarExpandEl.setAttribute("title", "Expand sidebar (⌘B)");
+      sidebarExpandEl.setAttribute("aria-label", "Expand sidebar");
+      sidebarExpandEl.setAttribute("aria-pressed", collapsed ? "true" : "false");
+    }
+  }
   function setSidebarOpen(open) {
     if (!appEl) return;
     appEl.dataset.sidebar = open ? "open" : "collapsed";
     if (sidebarMiniEl) sidebarMiniEl.hidden = open;
+    syncSidebarToggleState(!open);
     if (!open) closeNewPaneMenu();
     requestAnimationFrame(function () {
       scheduleVisiblePaneFit();
@@ -10007,7 +10268,7 @@
   }
   function toggleSidebar() { setSidebarOpen(!sidebarOpen()); }
 
-  onRailClick("sidebar-collapse", function () { setSidebarOpen(false); });
+  onRailClick("sidebar-collapse", function () { toggleSidebar(); });
   onRailClick("sidebar-expand", function () { setSidebarOpen(true); });
   if (sidebarMiniEl) {
     sidebarMiniEl.addEventListener("click", function (event) {

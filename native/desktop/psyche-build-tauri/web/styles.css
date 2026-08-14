@@ -41,6 +41,9 @@
   --surface-2: rgba(var(--rgb-s2), calc(var(--bg-opacity) * 0.62));
   --surface-3: rgba(var(--rgb-s3), calc(var(--bg-opacity) * 0.50));
   --surface-solid: rgba(var(--rgb-term), calc(var(--bg-opacity) * 1));  /* terminal bg */
+  --sidebar-surface: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));
+  --workspace-surface: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.72));
+  --workspace-radius: 18px;
   --border: rgba(255, 255, 255, 0.07);
   --border-strong: rgba(255, 255, 255, 0.14);
 
@@ -138,6 +141,7 @@ kbd {
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
+  background: var(--sidebar-surface);
 }
 .app[data-sidebar="collapsed"] .workbench { grid-template-columns: var(--mini-rail-w) minmax(0, 1fr); }
 .app[data-sidebar="collapsed"] .sidebar { display: none; }
@@ -156,14 +160,18 @@ kbd {
   align-items: center;
   gap: 4px;
   padding: 0 0 6px;
-  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));
+  background: var(--sidebar-surface);
   backdrop-filter: blur(24px) saturate(1.4);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
   user-select: none;
   overflow: hidden;
   border-right: 1px solid var(--border);
 }
-.sidebar { align-items: stretch; min-height: 0; }
+.sidebar {
+  align-items: stretch;
+  min-height: 0;
+  background: var(--sidebar-surface);
+}
 
 /* Collapsed rails — one click anywhere brings the surface back. */
 .mini-rail {
@@ -172,7 +180,7 @@ kbd {
   align-items: center;
   gap: 4px;
   padding: 8px 0;
-  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));
+  background: var(--sidebar-surface);
   backdrop-filter: blur(24px) saturate(1.4);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
   user-select: none;
@@ -220,26 +228,9 @@ kbd {
 .sidebar-head {
   display: flex;
   align-items: center;
-  gap: 4px;
   padding: 0 8px 8px;
   flex: none;
 }
-.session-search {
-  flex: 1 1 auto;
-  min-width: 0;
-  height: 28px;
-  padding: 0 9px;
-  border-radius: 7px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  color: var(--text);
-  font-size: 12.5px;
-  outline: none;
-  transition: border-color var(--transition-fast), background var(--transition-fast);
-}
-.session-search::placeholder { color: var(--muted); }
-.session-search:focus { border-color: var(--accent-line); background: var(--surface-3); }
-.session-search::-webkit-search-cancel-button { -webkit-appearance: none; }
 .sidebar-head .rail-btn { width: 26px; height: 26px; border-radius: 7px; }
 
 /* -------- Sidebar sections: Sessions | Files --------
@@ -292,25 +283,6 @@ kbd {
 .sidebar-tab.is-active svg { color: var(--accent); opacity: 1; }
 .sidebar-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-.session-search-wrap {
-  position: relative;
-  min-width: 0;
-  flex: 1 1 auto;
-}
-.session-search-wrap .session-search { width: 100%; padding-right: 27px; }
-.session-search-key {
-  position: absolute;
-  top: 50%;
-  right: 8px;
-  transform: translateY(-50%);
-  border: 1px solid var(--border-strong);
-  border-radius: 4px;
-  padding: 0 4px;
-  color: var(--text-soft);
-  background: var(--surface-3);
-  font: 10px/16px var(--font-mono);
-  pointer-events: none;
-}
 .session-filter-row {
   display: flex;
   align-items: center;
@@ -715,23 +687,6 @@ kbd {
   -webkit-backdrop-filter: blur(14px);
 }
 
-/* Search reads as a search field before it is focused. background-color rather
-   than the background shorthand, so the icon survives the focus state. */
-.session-search {
-  padding-left: 28px;
-  background-color: var(--surface-2);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%239a9aa3' stroke-width='1.5'%3E%3Ccircle cx='7' cy='7' r='4.25'/%3E%3Cpath d='M10.2 10.2 13.5 13.5' stroke-linecap='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: 9px center;
-  background-size: 13px 13px;
-  transition: border-color var(--transition-fast), background-color var(--transition-fast),
-              box-shadow var(--transition-fast);
-}
-.session-search:focus {
-  background-color: var(--surface-3);
-  box-shadow: 0 0 0 3px rgba(var(--rgb-accent), 0.14);
-}
-
 /* AGENTS / COVEN carry a trailing hairline, so sections separate without
    spending vertical space on gaps. */
 .session-subsection-label {
@@ -827,17 +782,14 @@ kbd {
 }
 .rail-btn[aria-pressed="true"] .panel-fill { opacity: 0.85; }
 
-/* The titlebar now spans the whole window, so it owns the traffic-light
-   gutter again — .traffic-gutter reserves it without drawing anything. */
+/* The titlebar splits into a sidebar cap and a blank workspace drag zone so
+   the detail corner can bite into the chrome below it. */
 .titlebar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.72));
-  backdrop-filter: blur(24px) saturate(1.4);
-  -webkit-backdrop-filter: blur(24px) saturate(1.4);
-  border-bottom: 1px solid var(--border);
-  padding: 0 10px 0 12px;
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  min-width: 0;
+  height: var(--titlebar-h);
+  background: var(--sidebar-surface);
   -webkit-app-region: drag;
   user-select: none;
 }
@@ -890,43 +842,97 @@ kbd {
   color: var(--accent);
   font-size: 10px;
 }
-.traffic-gutter { flex: none; width: calc(var(--titlebar-pad-l) - 24px); height: 1px; -webkit-app-region: drag; }
 .titlebar-spacer { flex: 1 1 auto; -webkit-app-region: drag; }
 .titlebar-sep { flex: none; width: 1px; height: 16px; background: var(--border-strong); }
 
-.brand {
-  font-weight: 700;
-  font-size: 13.5px;
-  letter-spacing: -0.01em;
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+.app[data-sidebar="collapsed"] .titlebar {
+  grid-template-columns: var(--mini-rail-w) minmax(0, 1fr);
 }
-
-/* Local runtime indicator. The dot mirrors the focused pane's real PTY
-   state — it is not a remote-connection light. */
-.daemon-status {
+.titlebar-sidebar,
+.titlebar-workspace {
+  min-width: 0;
+  height: 100%;
+  -webkit-app-region: drag;
+}
+.titlebar-sidebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-inline: 12px;
+  background: var(--sidebar-surface);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+}
+.titlebar-workspace {
+  position: relative;
+  background: var(--workspace-surface);
+}
+.traffic-gutter {
+  flex: none;
+  width: calc(var(--titlebar-pad-l) - 24px);
+  height: 1px;
+  -webkit-app-region: drag;
+}
+.titlebar-brand {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-soft);
+  gap: 7px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.titlebar-brand-icon {
+  position: relative;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 5px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  pointer-events: none;
+}
+.titlebar-brand-fallback { color: var(--text); font-size: 10px; font-weight: 800; }
+.titlebar-brand-mark {
+  position: absolute;
+  inset: 0;
+  width: 18px;
+  height: 18px;
+  object-fit: cover;
+}
+.titlebar-brand-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  pointer-events: none;
 }
-.daemon-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  flex: none;
-  background: var(--muted);
+.titlebar-sidebar-toggle {
+  position: absolute;
+  z-index: 4;
+  left: 0;
+  top: 50%;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--workspace-surface);
+  color: var(--muted);
+  transform: translate(-50%, -50%);
+  -webkit-app-region: no-drag;
 }
-.daemon-status[data-state="running"] .daemon-dot { background: var(--ok); box-shadow: 0 0 6px rgba(123, 227, 179, 0.5); }
-.daemon-status[data-state="starting"] .daemon-dot { background: var(--warn); box-shadow: 0 0 6px rgba(251, 191, 36, 0.5); animation: session-dot-pulse 1.4s ease-in-out infinite; }
-.daemon-status[data-state="exited"] .daemon-dot { background: var(--error); box-shadow: 0 0 6px rgba(248, 113, 113, 0.5); }
-.daemon-status[data-state="idle"] .daemon-dot { background: transparent; border: 1.5px solid var(--muted); }
-.help-btn { font-size: 12px; font-weight: 600; }
+.app[data-sidebar="collapsed"] .titlebar-sidebar-toggle {
+  left: calc(var(--titlebar-pad-l) - var(--mini-rail-w));
+  transform: translateY(-50%);
+}
+.titlebar-sidebar-toggle:hover,
+.titlebar-sidebar-toggle:focus-visible {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
 
 /* Modern collapse trigger — single button replaces the old 3-button group */
 .chrome-btn {
@@ -999,6 +1005,17 @@ kbd {
   min-height: 0;
   height: 100%;
   overflow: hidden;
+  background: var(--workspace-surface);
+  border-radius: var(--workspace-radius) 0 0 0;
+  /* Pane mins are relaxed so a narrow window can still hold the canvas beside
+     the Git dock. Browser surfaces now tile inside the canvas itself. */
+  --terminal-min:   220px;
+  --browser-min:    72px;
+  --split-frac: 0.6;
+  --terminal-col: calc(var(--split-frac, 0.6) * 100%);
+  transition: grid-template-columns var(--transition-layout),
+              grid-template-rows    var(--transition-layout);
+  will-change: grid-template-columns, grid-template-rows;
 }
 .boot-error {
   color: #ff6b6b;
@@ -2688,10 +2705,9 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 .palette {
   position: absolute;
-  left: 12px;
-  width: calc(100% - 24px);
-  max-width: 780px;
-  bottom: calc(var(--composer-h) - 4px);
+  right: 0;
+  bottom: calc(100% + 8px);
+  left: 0;
   background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.92));
   backdrop-filter: blur(28px) saturate(1.2);
   -webkit-backdrop-filter: blur(28px) saturate(1.2);
@@ -2699,8 +2715,8 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-radius: 10px;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
   padding: 6px;
-  max-height: 260px;
-  overflow-y: auto;
+  max-height: min(360px, 45vh);
+  overflow: auto;
   z-index: 10;
 }
 .palette[hidden] { display: none; }
@@ -2714,6 +2730,9 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   font-size: 12px;
   color: var(--text-soft);
   transition: background var(--transition-fast);
+}
+.palette-item.palette-session {
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
 }
 .palette-item .cmd { font-family: var(--font-mono); color: var(--accent); font-weight: 500; }
 .palette-item .desc {
@@ -2747,6 +2766,12 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .palette-item:hover, .palette-item.active {
   background: var(--accent-soft);
   color: var(--text);
+}
+.palette-empty {
+  padding: 14px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
 }
 
 /* -------- Browser pane -------- */
@@ -3474,9 +3499,9 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 /* -------- Native/window + hierarchy polish -------- */
 .titlebar,
-.brand,
-.daemon-status,
-.status-pill {
+.titlebar-sidebar,
+.titlebar-workspace,
+.titlebar-brand {
   -webkit-app-region: drag;
 }
 .titlebar button,
@@ -3486,7 +3511,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 .titlebar {
   min-height: var(--titlebar-h);
-  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.72));
 }
 .status-pill.ok {
   color: rgba(245, 242, 251, 0.72);
@@ -3580,18 +3604,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .preview-placeholder.loading .preview-empty {
   opacity: 0;
 }
-.titlebar .brand,
-.titlebar .titlebar-spacer,
-.titlebar .traffic-gutter,
-.titlebar .status-pill {
-  -webkit-app-region: drag !important;
-}
-.titlebar button,
-.titlebar input,
-.titlebar a {
-  -webkit-app-region: no-drag !important;
-}
-
 /* -------- Thin modern browser tabs + full-width drag polish -------- */
 :root {
   --titlebar-h: 42px;
@@ -3599,14 +3611,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .titlebar {
   align-items: center;
   min-height: var(--titlebar-h);
-}
-.brand {
-  line-height: var(--titlebar-h);
-}
-/* The runtime dot in the titlebar already reports session health; the pill is
-   kept in the DOM for its status text but stays out of the chrome. */
-.titlebar .status-pill {
-  display: none !important;
 }
 .chrome-btn {
   width: 30px;
@@ -3920,7 +3924,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
    outranks any rule here; solid mode is driven from JS (SOLID_BG_MULTIPLIER)
    so the two cannot disagree. */
 :root[data-surface="solid"] body { background: rgb(var(--rgb-term)); }
-:root[data-surface="solid"] .titlebar,
+:root[data-surface="solid"] .titlebar-sidebar,
 :root[data-surface="solid"] .rail,
 :root[data-surface="solid"] .mini-rail,
 :root[data-surface="solid"] .tab-strip,
@@ -3978,7 +3982,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-color: var(--border);
   background: var(--surface-2);
 }
-.session-search { height: 28px; font-size: 12px; }
 
 /* The keyboard hints lived here permanently to teach three shortcuts; the
    help overlay (?) already documents every one of them, so the footer is now

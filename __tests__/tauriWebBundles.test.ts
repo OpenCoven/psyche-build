@@ -140,6 +140,14 @@ describe('committed web bundles', () => {
     expect(missing).toEqual([]);
   });
 
+  it('exposes flattenSidebarSearchResults in the source entry and committed bundle', () => {
+    const sessionEntry = readFileSync(join(webRoot, 'sessions', 'session-entry.js'), 'utf8');
+    const sessionsBundle = readFileSync(join(webRoot, 'sessions.bundle.js'), 'utf8');
+
+    expect(sessionEntry).toContain('flattenSidebarSearchResults');
+    expect(sessionsBundle).toContain('flattenSidebarSearchResults');
+  });
+
   for (const step of steps) {
     it(`${step.outfile} matches its sources`, () => {
       const committed = join(packageRoot, step.outfile);

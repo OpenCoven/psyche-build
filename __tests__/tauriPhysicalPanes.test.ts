@@ -2983,6 +2983,9 @@ describe('Tauri physical terminal panes', () => {
       worktreePath: '/repo',
       status: 'running',
       pane: { id: 'pane-a' },
+      hidden: false,
+      closing: false,
+      closeStarted: false,
       term: { blur: () => undefined, focus: () => undefined },
     };
     let refreshes = 0;
@@ -2991,6 +2994,7 @@ describe('Tauri physical terminal panes', () => {
       options?: { refreshStatus?: boolean },
     ) => Promise<boolean>>(functionSource('focusThread'), {
       findThread: (id: string) => (id === thread.id ? thread : null),
+      isDormantThread: () => false,
       showTerminalView: async () => true,
       focusedTerminalThreadForRender: () => null,
       markActiveSurface: () => undefined,
