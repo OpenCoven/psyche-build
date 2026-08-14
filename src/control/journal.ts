@@ -50,6 +50,9 @@ export type AgentControlJournalReceipt = ForbiddenAgentControlJournalData & {
   readonly state: ActionReceipt['state'];
   readonly resource: AgentControlJournalResource;
   readonly createdAt: string;
+  readonly taskId?: string;
+  readonly leaseId?: string;
+  readonly leaseRevision?: number;
   readonly completedAt?: string;
   readonly code?: string;
   readonly sourceDigest?: string;
@@ -112,6 +115,9 @@ function journalReceipt(receipt: AgentControlJournalReceipt): AgentControlJourna
     state: receipt.state,
     resource: receipt.resource,
     createdAt: receipt.createdAt,
+    ...(receipt.taskId ? { taskId: receipt.taskId } : {}),
+    ...(receipt.leaseId ? { leaseId: receipt.leaseId } : {}),
+    ...(receipt.leaseRevision !== undefined ? { leaseRevision: receipt.leaseRevision } : {}),
     ...(receipt.completedAt ? { completedAt: receipt.completedAt } : {}),
     ...(receipt.code ? { code: receipt.code } : {}),
     ...(receipt.sourceDigest ? { sourceDigest: receipt.sourceDigest } : {}),

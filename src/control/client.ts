@@ -7,6 +7,7 @@ import type {
   ControlCommandInput,
   CommandOutcome,
   ControlSnapshot,
+  ControlSnapshotScope,
 } from './types.js';
 
 export interface ControlClientPrincipal {
@@ -158,18 +159,19 @@ export class ControlClient {
     });
   }
 
-  getState(): Promise<ControlSnapshot> {
+  getState(scope: ControlSnapshotScope = {}): Promise<ControlSnapshot> {
     return this.request({
       version: 1,
       type: 'state.get',
       requestId: this.allocateRequestId(),
+      ...(scope.taskId === undefined ? {} : { taskId: scope.taskId }),
     }).then((response) => {
       if (response.type === 'state.result') return response.snapshot;
       throw responseError(response, 'state.get');
     });
   }
 
-  readEvents(afterSequence: number, limit?: number): Promise<{
+  readEvents(afterSequence: number, limit?: number, scope: ControlSnapshotScope = {}): Promise<{
     events: unknown[];
     nextSequence: number;
     gap: boolean;
@@ -180,6 +182,7 @@ export class ControlClient {
       requestId: this.allocateRequestId(),
       afterSequence,
       ...(limit === undefined ? {} : { limit }),
+      ...(scope.taskId === undefined ? {} : { taskId: scope.taskId }),
     }).then((response) => {
       if (response.type === 'events.result') {
         return { events: response.events, nextSequence: response.nextSequence, gap: response.gap };
@@ -200,10 +203,14 @@ export class ControlClient {
     return this.submit(command);
   }
 
-  async actionStatus(actionId: string): Promise<ActionReceipt | undefined> {
-    const snapshot = await this.getState();
+  async actionStatus(
+    actionId: string,
+    scope: ControlSnapshotScope = {},
+  ): Promise<ActionReceipt | undefined> {
+    const snapshot = await this.getState(scope);
     const recent = snapshot.receipts.find((receipt) => receipt.actionId === actionId);
     if (recent) return recent;
+    if (scope.taskId === undefined && this.principal.kind !== 'operator') return undefined;
     const pageLimit = 256;
     const historyLimit = 1_000;
     const maxPages = Math.ceil(historyLimit / pageLimit);
@@ -212,13 +219,14 @@ export class ControlClient {
     for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
       const remaining = historyLimit - pageNumber * pageLimit;
       const limit = Math.min(pageLimit, remaining);
-      const page = await this.readEvents(afterSequence, limit);
+      const page = await this.readEvents(afterSequence, limit, scope);
       for (const event of page.events) {
         if (!event || typeof event !== 'object') continue;
         const payload = (event as { payload?: unknown }).payload;
         if (!payload || typeof payload !== 'object') continue;
         const receipt = (payload as { receipt?: unknown }).receipt;
-        if (isActionReceipt(receipt) && receipt.actionId === actionId) found = receipt;
+        const scoped = eventActionReceipt(receipt);
+        if (scoped && scoped.actionId === actionId) found = scoped;
       }
       if (page.events.length < limit || page.nextSequence <= afterSequence) return found;
       afterSequence = page.nextSequence;
@@ -323,4 +331,8 @@ function isActionReceipt(value: unknown): value is ActionReceipt {
   return Boolean(value && typeof value === 'object'
     && (value as { schema?: unknown }).schema === 'psyche.control.receipt/v1'
     && typeof (value as { actionId?: unknown }).actionId === 'string');
+}
+
+function eventActionReceipt(value: unknown): ActionReceipt | undefined {
+  return isActionReceipt(value) ? value : undefined;
 }

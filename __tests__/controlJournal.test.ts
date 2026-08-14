@@ -32,6 +32,44 @@ describe('ControlJournal', () => {
     } });
   });
 
+  it('persists optional receipt ownership metadata across journal replay', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
+    roots.push(root);
+    const journal = await ControlJournal.open(root, 7);
+    const event = agentControlJournalPayload({
+      kind: 'command.failed',
+      commandId: 'owned-receipt',
+      idempotencyKey: 'owned-receipt',
+      status: 'failed',
+      receipt: {
+        schema: 'psyche.control.receipt/v1',
+        actionId: 'owned-receipt',
+        state: 'failed',
+        resource: createAgentControlJournalResource({ kind: 'browser_tab', id: 'tab-1', generation: 2 }),
+        createdAt: '2026-08-12T00:00:00.000Z',
+        taskId: 'task-1',
+        leaseId: 'lease-1',
+        leaseRevision: 2,
+        completedAt: '2026-08-12T00:00:01.000Z',
+        code: 'effect_failed',
+      },
+    });
+
+    await journal.append(event.kind, event.payload);
+
+    const reopened = await ControlJournal.open(root, 7);
+    expect(reopened.read(0)).toContainEqual(expect.objectContaining({
+      kind: 'command.failed',
+      payload: expect.objectContaining({
+        receipt: expect.objectContaining({
+          taskId: 'task-1',
+          leaseId: 'lease-1',
+          leaseRevision: 2,
+        }),
+      }),
+    }));
+  });
+
   it('keeps forbidden fields outside the typed agent-control builder contract', () => {
     if (false) {
       agentControlJournalPayload({

@@ -25,6 +25,8 @@ import { ControlServer, createControlServerForTest } from '../src/control/server
 import type { ControlServerRuntime } from '../src/control/server.js';
 import type { ControlCommandInput, ControlSnapshot } from '../src/control/types.js';
 import type { ControlPrincipal } from '../src/control/credentials.js';
+import { createRedactedApprovalEffect } from '../src/control/approvals.js';
+import { createTaskScopedControlHarness } from './helpers/taskScopedControlHarness.js';
 
 let tempRoots: string[] = [];
 
@@ -296,6 +298,193 @@ describe('control server authorization', () => {
     }
   });
 
+  it('exposes only proven own-task receipts in a scoped non-operator snapshot', () => {
+    const scopedSnapshot = {
+      ownerEpoch: 7,
+      sequence: 5,
+      commands: {},
+      leases: {},
+      resources: [
+        {
+          kind: 'pane',
+          id: 'pane-own',
+          generation: 1,
+          projectRoot: '/repo',
+          worktreeRoot: '/repo',
+          tmuxPaneId: '%1',
+          writable: true,
+          outputSequence: 1,
+        },
+        {
+          kind: 'browser_tab',
+          id: 'tab-own',
+          generation: 1,
+          projectRoot: '/repo',
+          worktreeRoot: '/repo',
+          providerId: 'provider-own',
+          webviewLabel: 'own',
+          url: 'https://own.example',
+          title: 'Own',
+          loading: false,
+          viewport: { width: 1280, height: 720 },
+        },
+        {
+          kind: 'pane',
+          id: 'pane-other',
+          generation: 1,
+          projectRoot: '/repo',
+          worktreeRoot: '/repo',
+          tmuxPaneId: '%2',
+          writable: true,
+          outputSequence: 1,
+        },
+        {
+          kind: 'browser_tab',
+          id: 'tab-other',
+          generation: 1,
+          projectRoot: '/repo',
+          worktreeRoot: '/repo',
+          providerId: 'provider-other',
+          webviewLabel: 'other',
+          url: 'https://other.example',
+          title: 'Other',
+          loading: false,
+          viewport: { width: 1280, height: 720 },
+        },
+      ],
+      capabilityLeases: [
+        {
+          id: 'lease-own',
+          requestId: 'request-own-tab',
+          actorId: 'agent-own',
+          taskId: 'task-own',
+          grantedBy: 'operator',
+          revision: 2,
+          ownerEpoch: 7,
+          createdAt: '2026-08-12T12:00:00.000Z',
+          expiresAt: '2026-08-12T12:01:00.000Z',
+          grants: [{ target: { kind: 'browser_tab', id: 'tab-own', generation: 1 }, capabilities: ['browser.interact'] }],
+        },
+        {
+          id: 'lease-other',
+          requestId: 'request-other-tab',
+          actorId: 'agent-other',
+          taskId: 'task-other',
+          grantedBy: 'operator',
+          revision: 1,
+          ownerEpoch: 7,
+          createdAt: '2026-08-12T12:00:00.000Z',
+          expiresAt: '2026-08-12T12:01:00.000Z',
+          grants: [{ target: { kind: 'browser_tab', id: 'tab-other', generation: 1 }, capabilities: ['browser.interact'] }],
+        },
+      ],
+      leaseRequests: [
+        {
+          id: 'request-own-pane',
+          ownerEpoch: 7,
+          actorId: 'agent-own',
+          taskId: 'task-own',
+          status: 'pending' as const,
+          createdAt: '2026-08-12T12:00:00.000Z',
+          ttlMs: 60_000,
+          grants: [{ target: { kind: 'pane', id: 'pane-own', generation: 1 }, capabilities: ['pane.observe'] }],
+        },
+        {
+          id: 'request-other-pane',
+          ownerEpoch: 7,
+          actorId: 'agent-other',
+          taskId: 'task-other',
+          status: 'pending' as const,
+          createdAt: '2026-08-12T12:00:00.000Z',
+          ttlMs: 60_000,
+          grants: [{ target: { kind: 'pane', id: 'pane-other', generation: 1 }, capabilities: ['pane.observe'] }],
+        },
+      ],
+      approvals: [
+        {
+          id: 'approval-own',
+          actionId: 'action-own',
+          ownerEpoch: 7,
+          leaseId: 'lease-own',
+          leaseRevision: 2,
+          status: 'pending' as const,
+          createdAt: '2026-08-12T12:00:00.000Z',
+          expiresAt: '2026-08-12T12:05:00.000Z',
+          resource: { kind: 'browser_tab', id: 'tab-own', generation: 1 },
+          capability: 'browser.interact',
+          effect: createRedactedApprovalEffect({ kind: 'submit', target: 'submit-own' }),
+          payloadDigest: 'a'.repeat(64),
+          executablePayloadDigest: 'b'.repeat(64),
+        },
+        {
+          id: 'approval-other',
+          actionId: 'action-other',
+          ownerEpoch: 7,
+          leaseId: 'lease-other',
+          leaseRevision: 1,
+          status: 'pending' as const,
+          createdAt: '2026-08-12T12:00:00.000Z',
+          expiresAt: '2026-08-12T12:05:00.000Z',
+          resource: { kind: 'browser_tab', id: 'tab-other', generation: 1 },
+          capability: 'browser.interact',
+          effect: createRedactedApprovalEffect({ kind: 'submit', target: 'submit-other' }),
+          payloadDigest: 'c'.repeat(64),
+          executablePayloadDigest: 'd'.repeat(64),
+        },
+      ],
+      receipts: [
+        {
+          schema: 'psyche.control.receipt/v1',
+          actionId: 'action-own',
+          state: 'approval_required' as const,
+          resource: { kind: 'browser_tab', id: 'tab-own', generation: 1 },
+          createdAt: '2026-08-12T12:00:00.000Z',
+          taskId: 'task-own',
+          leaseId: 'lease-own',
+          leaseRevision: 2,
+        },
+        {
+          schema: 'psyche.control.receipt/v1',
+          actionId: 'action-other',
+          state: 'approval_required' as const,
+          resource: { kind: 'browser_tab', id: 'tab-other', generation: 1 },
+          createdAt: '2026-08-12T12:00:00.000Z',
+          taskId: 'task-other',
+          leaseId: 'lease-other',
+          leaseRevision: 1,
+        },
+        {
+          schema: 'psyche.control.receipt/v1',
+          actionId: 'legacy-action',
+          state: 'failed' as const,
+          resource: { kind: 'browser_tab', id: 'tab-legacy', generation: 1 },
+          createdAt: '2026-08-12T12:00:00.000Z',
+          code: 'effect_failed',
+        },
+      ],
+    } satisfies ControlSnapshot;
+    const server = createControlServerForTest({ runtime: stubRuntime(vi.fn(), scopedSnapshot) });
+    const operator: ControlPrincipal = {
+      id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'],
+    };
+
+    expect(server.snapshot(operator, { taskId: 'task-own' }).receipts.map((receipt) => receipt.actionId))
+      .toEqual(expect.arrayContaining(['action-own', 'action-other', 'legacy-action']));
+
+    const scoped = server.snapshot({ id: 'agent-own', kind: 'agent', capabilities: ['read'] }, { taskId: 'task-own' });
+    expect(scoped.resources.map((resource) => resource.id).sort()).toEqual(['pane-own', 'tab-own']);
+    expect(scoped.capabilityLeases.map((lease) => lease.id)).toEqual(['lease-own']);
+    expect(scoped.leaseRequests.map((request) => request.id)).toEqual(['request-own-pane']);
+    expect(scoped.approvals.map((approval) => approval.actionId)).toEqual(['action-own']);
+    expect(scoped.receipts).toEqual([expect.objectContaining({
+      actionId: 'action-own',
+      state: 'approval_required',
+    })]);
+    expect(scoped.receipts[0]).not.toHaveProperty('taskId');
+    expect(scoped.receipts[0]).not.toHaveProperty('leaseId');
+    expect(scoped.receipts[0]).not.toHaveProperty('leaseRevision');
+  });
+
   it('passes the authenticated principal into state.get snapshot redaction', async () => {
     const root = await tempProject();
     const endpoint = path.join(root, 'control.sock');
@@ -343,6 +532,83 @@ describe('control server authorization', () => {
         receipts: [],
       });
       expect(JSON.stringify(snapshot)).not.toContain('secret');
+    } finally {
+      await Promise.allSettled(cleanups.map(async (close) => close()));
+    }
+  });
+
+  it('returns only persisted own-task authority and receipts when an agent supplies task scope', async () => {
+    const root = await tempProject();
+    const endpoint = path.join(root, 'control.sock');
+    const harness = await createTaskScopedControlHarness({ projectRoot: root, endpoint });
+    const cleanups: Array<() => Promise<void>> = [() => harness.server.close()];
+
+    try {
+      const operator = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: await harness.credentials.operatorToken(),
+        clientName: 'operator-task-scope',
+      });
+      cleanups.unshift(() => operator.close());
+      const agent = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: await harness.credentials.agentToken(),
+        clientName: 'agent-task-scope',
+      });
+      cleanups.unshift(() => agent.close());
+
+      const operatorSnapshot = await operator.getState();
+      expect(Object.values(operatorSnapshot.leases).map((lease) => lease.paneId))
+        .toContain(harness.laneOnlyPane.id);
+      expect(operatorSnapshot.approvals.map((approval) => approval.actionId))
+        .toEqual(expect.arrayContaining([harness.ownApprovalActionId, harness.otherApprovalActionId]));
+      expect(operatorSnapshot.receipts.map((receipt) => receipt.actionId))
+        .toEqual(expect.arrayContaining([harness.ownApprovalActionId, harness.otherApprovalActionId]));
+
+      await expect(agent.getState()).resolves.toMatchObject({
+        commands: {},
+        leases: {},
+        resources: [],
+        capabilityLeases: [],
+        leaseRequests: [],
+        approvals: [],
+        receipts: [],
+      });
+
+      const scoped = await agent.getState({ taskId: harness.ownTaskId });
+      expect(scoped.commands).toEqual({});
+      expect(scoped.leases).toEqual({});
+      expect(scoped.resources.map((resource) => resource.id).sort())
+        .toEqual([harness.ownPane.id, harness.ownTab.id].sort());
+      expect(scoped.resources.map((resource) => resource.id)).not.toContain(harness.laneOnlyPane.id);
+      expect(scoped.resources.map((resource) => resource.id)).not.toContain(harness.otherPane.id);
+      expect(scoped.resources.map((resource) => resource.id)).not.toContain(harness.otherTab.id);
+      expect(scoped.capabilityLeases).toHaveLength(1);
+      expect(scoped.capabilityLeases[0]).toMatchObject({
+        id: harness.ownTabLease.id,
+        requestId: harness.ownTabRequestId,
+        taskId: harness.ownTaskId,
+      });
+      expect(scoped.leaseRequests).toHaveLength(1);
+      expect(scoped.leaseRequests[0]).toMatchObject({
+        id: harness.ownPaneRequestId,
+        taskId: harness.ownTaskId,
+      });
+      expect(scoped.approvals).toHaveLength(1);
+      expect(scoped.approvals[0]).toMatchObject({
+        actionId: harness.ownApprovalActionId,
+        leaseId: harness.ownTabLease.id,
+        leaseRevision: harness.ownTabLease.revision,
+      });
+      expect(scoped.receipts).toEqual([expect.objectContaining({
+        actionId: harness.ownApprovalActionId,
+        state: 'approval_required',
+      })]);
+      expect(scoped.receipts[0]).not.toHaveProperty('taskId');
+      expect(scoped.receipts[0]).not.toHaveProperty('leaseId');
+      expect(scoped.receipts[0]).not.toHaveProperty('leaseRevision');
     } finally {
       await Promise.allSettled(cleanups.map(async (close) => close()));
     }
