@@ -192,6 +192,35 @@ describe('ControlClient over the socket transport', () => {
     await expect(client.readEvents(0)).resolves.toMatchObject({ nextSequence: 1, gap: false });
   });
 
+  it('projects exact recent receipt paths only to operators across agent reconnects', async () => {
+    const recentReceipt = {
+      commandId: 'cmd-private', actionKind: 'browser.action' as const, outcome: 'succeeded' as const,
+      timestamp: '2026-08-14T12:00:00.000Z', agentId: 'agent-1', taskId: 'task-1',
+      projectRoot: '/repo-private', worktreeRoot: '/worktree-private',
+      resource: { kind: 'browser_tab' as const, id: 'tab-1', generation: 1 },
+      redacted: true as const, result: 'result_unavailable' as const,
+    };
+    const harness = await startHarness({ snapshot: () => ({
+      ownerEpoch: 7, sequence: 2, commands: {}, leases: {}, receipts: [recentReceipt],
+    }) });
+    const operator = await ControlClient.connect({ projectRoot: harness.projectRoot, endpoint: harness.endpoint,
+      token: harness.operatorToken, clientName: 'operator' });
+    cleanups.push(() => operator.close());
+    expect(await operator.getState()).toMatchObject({ receipts: [recentReceipt] });
+
+    for (const clientName of ['agent-first', 'agent-reconnected']) {
+      const agent = await ControlClient.connect({ projectRoot: harness.projectRoot, endpoint: harness.endpoint,
+        token: harness.agentToken, clientName });
+      const state = await agent.getState();
+      expect(state).not.toHaveProperty('receipts');
+      const serialized = JSON.stringify(state);
+      for (const secret of ['/repo-private', '/worktree-private', 'screenshot', 'secret', 'value', 'https://private.test']) {
+        expect(serialized).not.toContain(secret);
+      }
+      await agent.close();
+    }
+  });
+
   it('builds typed lease and approval helper commands while the server stamps actor and epoch', async () => {
     const harness = await startHarness();
     const client = await ControlClient.connect({

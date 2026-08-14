@@ -141,8 +141,10 @@
     if (document.hidden || document.visibilityState === "hidden") {
       saveWorkspaceNow();
       stopCovenPolling();
+      if (typeof stopAgentControlPolling === "function") stopAgentControlPolling("hidden");
     } else {
       startCovenPolling();
+      if (typeof startAgentControlPolling === "function" && activeProject()) startAgentControlPolling();
       if (typeof refreshStatusController === "function") refreshStatusController();
     }
     syncPaneMetricsVisibility();
@@ -183,6 +185,32 @@
   function activeWorkspaceRoot(project) {
     var worktree = selectedWorktree(project);
     return worktree ? worktree.path : (project && project.root);
+  }
+  function scheduleAgentControlRefresh() {
+    if (typeof setTimeout !== "function") return;
+    setTimeout(function () {
+      if (typeof refreshAgentControlState === "function") refreshAgentControlState();
+    }, 0);
+  }
+  function selectAgentControlWorktree(project, worktreePath, replacementWorktrees) {
+    if (!project) return false;
+    function effectiveRoot(worktrees, selectedPath) {
+      var available = (Array.isArray(worktrees) ? worktrees : []).filter(function (worktree) {
+        return worktree && !worktree.missing && !worktree.prunable && !worktree.bare;
+      });
+      var selected = available.find(function (worktree) { return worktree.path === selectedPath; }) ||
+        available.find(function (worktree) { return worktree.is_main; }) || available[0];
+      return selected ? selected.path : project.root;
+    }
+    var previousEffectiveRoot = effectiveRoot(project.worktrees, project.selectedWorktreePath);
+    var nextEffectiveRoot = effectiveRoot(replacementWorktrees || project.worktrees, worktreePath);
+    var changed = previousEffectiveRoot !== nextEffectiveRoot;
+    var active = changed && state.activeProjectId === project.id;
+    if (active && typeof invalidateAgentControlContext === "function") invalidateAgentControlContext();
+    if (replacementWorktrees) project.worktrees = replacementWorktrees;
+    project.selectedWorktreePath = worktreePath;
+    if (active) scheduleAgentControlRefresh();
+    return changed;
   }
   function nextPaneId(prefix) {
     paneCounter += 1;
@@ -245,7 +273,8 @@
     return null;
   }
   function activatePaneLayoutFocus(project, worktreePath) {
-    project.selectedWorktreePath = worktreePath;
+    if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, worktreePath);
+    else project.selectedWorktreePath = worktreePath;
     var layout = paneLayoutFor(project.id, worktreePath);
     var leaf = layout && PsychePanes.findLeafById(layout.root, layout.focusedLeafId);
     var thread = leaf && findThread(leaf.threadId);
@@ -262,11 +291,13 @@
     if (!project || !(await showTerminalView())) return false;
     var previousWorktreePath = project.selectedWorktreePath;
     var projectChanged = project.id !== state.activeProjectId;
-    project.selectedWorktreePath = worktreePath;
+    if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, worktreePath);
+    else project.selectedWorktreePath = worktreePath;
     if (projectChanged) {
       var projectOptions = Object.assign({}, options || {}, { refreshStatus: false });
       if (!(await setActiveProject(project.id, projectOptions))) {
-        project.selectedWorktreePath = previousWorktreePath;
+        if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, previousWorktreePath);
+        else project.selectedWorktreePath = previousWorktreePath;
         return false;
       }
     } else {
@@ -547,10 +578,11 @@
       }
     }
     if (state.env && state.env.native_workspace_v2 === false) {
-      project.worktrees = mergeWorktreePresentationState(project, [{
+      var nativeWorktrees = mergeWorktreePresentationState(project, [{
         path: project.root, branch: null, is_main: true, dirty: false, missing: false,
       }]);
-      project.selectedWorktreePath = project.root;
+      if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, project.root, nativeWorktrees);
+      else { project.worktrees = nativeWorktrees; project.selectedWorktreePath = project.root; }
       invalidateChangedDiffScope();
       refreshSidebar();
       if (typeof refreshStatusController === "function") refreshStatusController();
@@ -558,9 +590,14 @@
       return Promise.resolve(project.worktrees);
     }
     return invoke("git_worktrees", { root: project.root }).then(function (worktrees) {
-      project.worktrees = mergeWorktreePresentationState(project, worktrees);
-      var selected = selectedWorktree(project);
-      project.selectedWorktreePath = selected ? selected.path : project.root;
+      var mergedWorktrees = mergeWorktreePresentationState(project, worktrees);
+      var selected = selectedWorktree(Object.assign({}, project, { worktrees: mergedWorktrees }));
+      if (typeof selectAgentControlWorktree === "function") {
+        selectAgentControlWorktree(project, selected ? selected.path : project.root, mergedWorktrees);
+      } else {
+        project.worktrees = mergedWorktrees;
+        project.selectedWorktreePath = selected ? selected.path : project.root;
+      }
       invalidateChangedDiffScope();
       refreshSidebar();
       saveWorkspaceSoon();
@@ -568,10 +605,11 @@
       refreshCovenSessions();
       return project.worktrees;
     }).catch(function () {
-      project.worktrees = mergeWorktreePresentationState(project, [{
+      var fallbackWorktrees = mergeWorktreePresentationState(project, [{
         path: project.root, branch: null, is_main: true, dirty: false, missing: false,
       }]);
-      project.selectedWorktreePath = project.root;
+      if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, project.root, fallbackWorktrees);
+      else { project.worktrees = fallbackWorktrees; project.selectedWorktreePath = project.root; }
       invalidateChangedDiffScope();
       refreshSidebar();
       if (typeof refreshStatusController === "function") refreshStatusController();
@@ -596,9 +634,11 @@
     var refreshStatus = !options || options.refreshStatus !== false;
     if (state.activeProjectId === id) return true;
     if (!(await showTerminalView())) return false;
-    state.activeProjectId = id;
     var project = findProject(id);
     if (!project) return false;
+    if (typeof invalidateAgentControlContext === "function") invalidateAgentControlContext();
+    state.activeProjectId = id;
+    if (typeof scheduleAgentControlRefresh === "function") scheduleAgentControlRefresh();
     clearPassiveCovenPaneFocus();
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
@@ -3486,21 +3526,23 @@
     if (!thread) return false;
     if (!(await showTerminalView())) return false;
     var project = findProject(thread.projectId);
-    var scopeChanged = state.activeProjectId !== thread.projectId ||
+    var projectChanged = state.activeProjectId !== thread.projectId;
+    var scopeChanged = projectChanged ||
       !project || activeWorkspaceRoot(project) !== thread.worktreePath;
+    if (projectChanged && typeof invalidateAgentControlContext === "function") invalidateAgentControlContext();
     markActiveSurface(thread.kind === "web" ? "browser" : "terminal");
     state.activeThreadId = id;
-    // Make the thread's project the active one so the sidebar/tabs
-    // stay in sync if the user clicked into a different project's thread.
-    if (thread.projectId && state.activeProjectId !== thread.projectId) {
-      state.activeProjectId = thread.projectId;
-    }
     if (project) {
       if (thread.kind !== "coven-chat" && thread.kind !== "coven-attach") {
         project.lastActiveThreadId = id;
       }
-      project.selectedWorktreePath = thread.worktreePath;
+      if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, thread.worktreePath);
+      else project.selectedWorktreePath = thread.worktreePath;
     }
+    // Make the thread's project active only after its worktree context has
+    // invalidated old authority and selected the exact new workspace.
+    if (thread.projectId && state.activeProjectId !== thread.projectId) state.activeProjectId = thread.projectId;
+    if (projectChanged && typeof scheduleAgentControlRefresh === "function") scheduleAgentControlRefresh();
     var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
     var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
     if (layout && leaf) layout.focusedLeafId = leaf.id;
@@ -3811,7 +3853,10 @@
       project.lastActiveThreadId = nextThreadId || null;
       if (nextThreadId) {
         var nextThread = findThread(nextThreadId);
-        if (nextThread) project.selectedWorktreePath = nextThread.worktreePath;
+        if (nextThread) {
+          if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, nextThread.worktreePath);
+          else project.selectedWorktreePath = nextThread.worktreePath;
+        }
       }
     }
     return true;
@@ -6262,12 +6307,16 @@
         failedCloses.length + " failed (" + failedCloses.map(function (result) { return result.threadId; }).join(", ") + "); project retained", "error");
       return false;
     }
+    if (typeof invalidateAgentControlContext === "function") invalidateAgentControlContext();
     var providerStopError = null;
     if (typeof invoke === "function") {
       try { await invoke("control_provider_stop", { projectRoot: project.root }); }
       catch (error) { providerStopError = error; }
     }
-    if (typeof browserControlProviders !== "undefined") delete browserControlProviders[project.root];
+    if (typeof browserControlProviders !== "undefined") {
+      if (typeof resetBrowserControlProvider === "function") resetBrowserControlProvider(project.root);
+      else delete browserControlProviders[project.root];
+    }
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
@@ -6280,6 +6329,7 @@
     }
     // Remove the project from state.
     state.projects = state.projects.filter(function (p) { return p.id !== id; });
+    if (typeof invalidateAgentControlContext === "function") invalidateAgentControlContext();
     startCovenPolling();
     if (state.activeProjectId === id) {
       var next = state.projects[0] || null;
@@ -6290,6 +6340,7 @@
         await setActiveProject(next.id);
       } else {
         state.activeThreadId = null;
+        if (typeof stopAgentControlPolling === "function") stopAgentControlPolling("teardown");
         renderPaneWorkspace();
         setStatus("no project — click + to open one", "");
       }
@@ -7855,6 +7906,13 @@
   }
   var browserControlProviders = {};
   var browserControlReplayNeeded = {};
+  function resetBrowserControlProvider(projectRoot) {
+    delete browserControlProviders[projectRoot];
+    var project = activeProject();
+    if (project && project.root === projectRoot && typeof invalidateAgentControlContext === "function") {
+      invalidateAgentControlContext();
+    }
+  }
   function ensureBrowserControlProvider(projectRoot) {
     if (!browserControlProviders[projectRoot]) {
       browserControlReplayNeeded[projectRoot] = true;
@@ -7862,7 +7920,11 @@
         .then(function (provider) {
           return provider;
         })
-        .catch(function (error) { delete browserControlProviders[projectRoot]; throw error; });
+        .catch(function (error) {
+          if (typeof resetBrowserControlProvider === "function") resetBrowserControlProvider(projectRoot);
+          else delete browserControlProviders[projectRoot];
+          throw error;
+        });
     }
     return browserControlProviders[projectRoot];
   }
@@ -7894,7 +7956,8 @@
           resource.providerId = provider.providerId;
           return invoke("control_provider_upsert", { projectRoot: pair.project.root, resource: resource });
         }).catch(function (error) {
-          delete browserControlProviders[pair.project.root];
+          if (typeof resetBrowserControlProvider === "function") resetBrowserControlProvider(pair.project.root);
+          else delete browserControlProviders[pair.project.root];
           if (retry) return upsert(false);
           throw error;
         });
@@ -7912,7 +7975,8 @@
         }
         return { status: "published", generation: canonical.generation };
       }, function (error) {
-        delete browserControlProviders[pair.project.root];
+        if (typeof resetBrowserControlProvider === "function") resetBrowserControlProvider(pair.project.root);
+        else delete browserControlProviders[pair.project.root];
         lifecycle.controlGeneration = 0;
         lifecycle.controlLabel = null;
         setTimeout(function () {
@@ -7932,7 +7996,8 @@
         .catch(async function (error) {
           var message = String(error).trim().replace(/^Error:\s*/, "");
           if (message === "browser resource is not registered") return { removed: true };
-          delete browserControlProviders[project.root];
+          if (typeof resetBrowserControlProvider === "function") resetBrowserControlProvider(project.root);
+          else delete browserControlProviders[project.root];
           if (retry) {
             await ensureBrowserControlProvider(project.root);
             await replayBrowserResources(project.root);
@@ -8595,6 +8660,7 @@
   if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { Promise.resolve(syncBrowserBounds()).catch(function () {}); }); ro.observe(preview); ro.observe(detail); }
   window.addEventListener("beforeunload", function () {
     saveWorkspaceNow();
+    if (typeof stopAgentControlPolling === "function") stopAgentControlPolling("unload");
     if (statusController) statusController.stop();
   });
   document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -9016,6 +9082,7 @@
 
   // `?` is only a shortcut when nothing text-like has focus.
   document.addEventListener("keydown", async function (event) {
+    if (event.defaultPrevented) return;
     var tag = (event.target && event.target.tagName ? event.target.tagName : "").toLowerCase();
     var typing = tag === "input" || tag === "textarea" || tag === "select" ||
       (event.target && event.target.isContentEditable);
@@ -9045,6 +9112,234 @@
     if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key === "?") { toggleHelp(); event.preventDefault(); }
   });
+
+  // ---- Agent control: daemon state projection + typed operator commands ----
+  var agentControlOverlayEl = document.getElementById("agent-control-overlay");
+  var agentControlDrawerEl = document.getElementById("agent-control-drawer");
+  var agentControlContentEl = document.getElementById("agent-control-content");
+  var agentControlToggleEl = document.getElementById("agent-control-toggle");
+  var agentControlCloseEl = document.getElementById("agent-control-close");
+  var agentControlCountEl = document.getElementById("agent-control-count");
+  var browserAgentControlBadgesEl = document.getElementById("browser-agent-control-badges");
+  var agentControlModel = window.PsycheControl.normalizeAgentControlState({}, { operator: true });
+  var agentControlProjectRoot = null;
+  var agentControlContextSerial = 0;
+  var agentControlPoller = null;
+
+  function agentControlContextToken(root, ownerEpoch) {
+    var project = activeProject();
+    return [agentControlContextSerial, root || "", project ? activeWorkspaceRoot(project) : "",
+      Number.isSafeInteger(ownerEpoch) ? ownerEpoch : "none"].join(":");
+  }
+
+  function invalidateAgentControlContext() {
+    agentControlContextSerial += 1;
+    agentControlProjectRoot = null;
+    agentControlModel = window.PsycheControl.normalizeAgentControlState({}, {
+      operator: true, contextToken: agentControlContextToken(null, null),
+    });
+    if (agentControlContentEl) renderAgentControl();
+    if (!activeProject() && agentControlOverlayEl && !agentControlOverlayEl.hidden) setAgentControlOpen(false);
+  }
+
+  function operatorOutcomeError(response) {
+    if (response && response.type === "error" && typeof response.code === "string" &&
+        typeof response.message === "string") return response.code + ": " + response.message;
+    var outcome = response && response.outcome;
+    if (outcome && outcome.status !== "succeeded") {
+      if (typeof outcome.message === "string") return outcome.message;
+      if (typeof outcome.code === "string") return outcome.code;
+      return "Operator command failed";
+    }
+    return null;
+  }
+
+  async function submitAgentControlOperator(kind, payload) {
+    var project = activeProject();
+    if (!project || project.root !== agentControlProjectRoot) throw new Error("Agent control project changed");
+    var response = await invoke("control_operator_submit", {
+      projectRoot: project.root,
+      command: { kind: kind, payload: payload },
+    });
+    var failure = operatorOutcomeError(response);
+    if (failure) throw new Error(failure);
+    await refreshAgentControlState();
+    return response;
+  }
+
+  var agentControlDrawer = window.PsycheControl.createAgentControlDrawer({
+    root: agentControlContentEl,
+    dialog: agentControlDrawerEl,
+    closeButton: agentControlCloseEl,
+    opener: agentControlToggleEl,
+    getContextToken: function () { return agentControlModel.contextToken; },
+    onClose: function () { setAgentControlOpen(false); },
+    onGrant: function (payload) { return submitAgentControlOperator("lease.grant", payload); },
+    onDeny: function (payload) { return submitAgentControlOperator("approval.resolve", {
+      approvalId: payload.approvalId, payloadDigest: payload.payloadDigest, decision: "deny",
+    }); },
+    onApprove: function (payload) { return submitAgentControlOperator("approval.resolve", {
+      approvalId: payload.approvalId, payloadDigest: payload.payloadDigest, decision: "approve",
+    }); },
+    onRevoke: function (payload) { return submitAgentControlOperator("lease.revoke", {
+      leaseId: payload.leaseId,
+    }); },
+  });
+
+  function renderAgentControlBadgeList(host, badges) {
+    if (!host) return;
+    host.replaceChildren();
+    badges.forEach(function (badge) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "agent-control-badge";
+      button.textContent = badge.agent + " · " + badge.task;
+      button.setAttribute("aria-label", window.PsycheControl.badgeAccessibleName(badge));
+      button.title = badge.capabilities.join(" · ") + " · expires " + badge.expiresAt;
+      button.dataset.leaseId = badge.leaseId;
+      button.dataset.leaseRevision = String(badge.revision);
+      button.dataset.resourceId = badge.id;
+      button.dataset.resourceGeneration = String(badge.generation);
+      button.addEventListener("click", function (event) { event.stopPropagation(); setAgentControlOpen(true); });
+      host.appendChild(button);
+    });
+    host.hidden = badges.length === 0;
+  }
+
+  function renderAgentControlBadges() {
+    var project = activeProject();
+    state.threads.forEach(function (thread) {
+      if (!thread.pane) return;
+      var badgeEl = thread.agentControlBadges;
+      if (!badgeEl) {
+        badgeEl = document.createElement("span");
+        badgeEl.className = "agent-control-badges";
+        badgeEl.hidden = true;
+        var label = thread.pane.querySelector(".terminal-pane-label");
+        if (label) label.appendChild(badgeEl);
+        thread.agentControlBadges = badgeEl;
+      }
+      var inScope = project && thread.projectId === project.id && thread.worktreePath === activeWorkspaceRoot(project);
+      var resource = inScope && agentControlModel.currentResourceFor
+        ? agentControlModel.currentResourceFor("pane", thread.id) : null;
+      renderAgentControlBadgeList(badgeEl, resource ? agentControlModel.resourceBadgesFor(resource) : []);
+    });
+    var tab = currentBrowserTab(project);
+    var browserBadge = null;
+    if (tab) {
+      var lifecycle = browserTabLifecycle(tab);
+      browserBadge = window.PsycheControl.resourceBadgeFor(agentControlModel, {
+        kind: "browser_tab", id: tab.id, generation: lifecycle.controlGeneration,
+      });
+    }
+    renderAgentControlBadgeList(browserAgentControlBadgesEl, browserBadge ?
+      agentControlModel.resourceBadgesFor({ kind: "browser_tab", id: tab.id,
+        generation: browserTabLifecycle(tab).controlGeneration }) : []);
+  }
+
+  function renderAgentControl() {
+    agentControlDrawer.render(agentControlModel);
+    var count = agentControlModel.pendingCount;
+    agentControlCountEl.hidden = count === 0;
+    agentControlCountEl.textContent = String(count);
+    agentControlToggleEl.setAttribute("aria-label", count
+      ? "Agent control, " + count + " pending"
+      : "Agent control, no pending requests");
+    renderAgentControlBadges();
+  }
+
+  function captureAgentControlContext() {
+    var project = activeProject();
+    var root = project && project.root;
+    if (!root) return null;
+    var worktreeRoot = activeWorkspaceRoot(project);
+    if (agentControlProjectRoot !== root) {
+      agentControlProjectRoot = root;
+      agentControlModel = window.PsycheControl.normalizeAgentControlState({}, {
+        operator: false, projectRoot: root, worktreeRoot: worktreeRoot,
+        contextToken: agentControlContextToken(root, null),
+      });
+      renderAgentControl();
+    }
+    return {
+      serial: agentControlContextSerial, projectRoot: root, worktreeRoot: worktreeRoot,
+      ownerEpoch: agentControlModel.ownerEpoch,
+      contextToken: agentControlModel.contextToken || agentControlContextToken(root, agentControlModel.ownerEpoch),
+    };
+  }
+
+  function agentControlContextMatches(context) {
+    var project = activeProject();
+    return !!project && context.serial === agentControlContextSerial && project.root === context.projectRoot
+      && activeWorkspaceRoot(project) === context.worktreeRoot;
+  }
+
+  agentControlPoller = window.PsycheControl.createAgentControlPoller({
+    captureContext: captureAgentControlContext,
+    contextMatches: agentControlContextMatches,
+    load: async function (context) {
+      await ensureBrowserControlProvider(context.projectRoot);
+      return invoke("control_state", { projectRoot: context.projectRoot });
+    },
+    accept: function (response, context) {
+      var snapshot = response && response.snapshot || response || {};
+      agentControlModel = window.PsycheControl.normalizeAgentControlState(response, {
+        operator: true, projectRoot: context.projectRoot, worktreeRoot: context.worktreeRoot,
+        contextToken: agentControlContextToken(context.projectRoot, snapshot.ownerEpoch),
+      });
+      renderAgentControl();
+    },
+    fail: function (context) {
+      var snapshot = Number.isSafeInteger(context.ownerEpoch) ? { ownerEpoch: context.ownerEpoch } : {};
+      agentControlModel = window.PsycheControl.normalizeAgentControlState(snapshot, {
+        operator: false, projectRoot: context.projectRoot, worktreeRoot: context.worktreeRoot,
+        contextToken: context.contextToken,
+        fetchError: "Agent control state is temporarily unavailable",
+      });
+      renderAgentControl();
+    },
+    clear: function (reason) {
+      var project = activeProject();
+      var root = project && project.root;
+      var worktreeRoot = project ? activeWorkspaceRoot(project) : "";
+      var ownerEpoch = agentControlModel.ownerEpoch;
+      agentControlModel = window.PsycheControl.normalizeAgentControlState(
+        Number.isSafeInteger(ownerEpoch) ? { ownerEpoch: ownerEpoch } : {}, {
+          operator: false, projectRoot: root || "", worktreeRoot: worktreeRoot,
+          contextToken: agentControlModel.contextToken || agentControlContextToken(root, ownerEpoch),
+          fetchError: reason === "hidden" ? "Agent control paused while the window is hidden" : "",
+        });
+      renderAgentControl();
+    },
+  });
+
+  function refreshAgentControlState() {
+    return agentControlPoller ? agentControlPoller.refresh() : Promise.resolve();
+  }
+
+  function setAgentControlOpen(open) {
+    agentControlOverlayEl.hidden = !open;
+    agentControlToggleEl.setAttribute("aria-expanded", String(open));
+    if (open) {
+      agentControlDrawer.open();
+      refreshAgentControlState();
+    } else {
+      agentControlDrawer.close();
+      agentControlToggleEl.focus();
+    }
+  }
+
+  agentControlToggleEl.addEventListener("click", function () { setAgentControlOpen(true); });
+  agentControlCloseEl.addEventListener("click", function () { setAgentControlOpen(false); });
+  agentControlOverlayEl.addEventListener("pointerdown", function (event) {
+    if (event.target === agentControlOverlayEl) setAgentControlOpen(false);
+  });
+  function startAgentControlPolling() {
+    if (agentControlPoller) agentControlPoller.start();
+  }
+  function stopAgentControlPolling(reason) {
+    if (agentControlPoller) agentControlPoller.stop(reason || "stopped");
+  }
 
   // ============================================================
   // 11b. Right-pane panels: files, diffs, git
@@ -9699,8 +9994,13 @@
       return target;
     }
     var previousSelectedWorktreePath = project.selectedWorktreePath;
+    var migratedWorktreePath = remapPath(project.selectedWorktreePath);
+    if (typeof state !== "undefined" && state.activeProjectId === project.id &&
+        migratedWorktreePath !== project.selectedWorktreePath &&
+        typeof invalidateAgentControlContext === "function") invalidateAgentControlContext();
     project.root = canonicalRoot;
-    project.selectedWorktreePath = remapPath(project.selectedWorktreePath);
+    if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, migratedWorktreePath);
+    else project.selectedWorktreePath = migratedWorktreePath;
     project.worktrees = (project.worktrees || []).map(function (worktree) {
       if (!worktree) return worktree;
       return Object.assign({}, worktree, { path: remapPath(worktree.path) });
@@ -9769,7 +10069,8 @@
     });
     if (preferIncoming) {
       target.collapsed = incoming.collapsed;
-      target.selectedWorktreePath = incoming.selectedWorktreePath;
+      if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(target, incoming.selectedWorktreePath);
+      else target.selectedWorktreePath = incoming.selectedWorktreePath;
       target.name = incoming.name;
     }
     return target;
@@ -9834,6 +10135,7 @@
     syncProjectBrowser();
     saveWorkspaceSoon();
     startCovenPolling();
+    startAgentControlPolling();
     if (typeof refreshStatusController === "function") refreshStatusController();
     return project;
   }
@@ -10160,6 +10462,7 @@
     }
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
     startCovenPolling();
+    startAgentControlPolling();
     if (paneMetricsPollTimer) clearInterval(paneMetricsPollTimer);
     paneMetricsPollTimer = setInterval(refreshVisiblePaneMetrics, 15000);
     refreshVisiblePaneMetrics();

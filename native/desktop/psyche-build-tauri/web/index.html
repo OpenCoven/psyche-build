@@ -28,6 +28,14 @@
         <span class="titlebar-sep" aria-hidden="true"></span>
         <span class="status-pill" id="shell-status" hidden>starting…</span>
         <button
+          id="agent-control-toggle"
+          class="chrome-btn agent-control-toggle"
+          type="button"
+          aria-haspopup="dialog"
+          aria-expanded="false"
+          aria-controls="agent-control-drawer"
+        >Agent control <span id="agent-control-count" class="agent-control-count" hidden></span></button>
+        <button
           id="help-toggle"
           class="chrome-btn help-btn"
           type="button"
@@ -304,6 +312,7 @@
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
             <input id="url" type="url" placeholder="example.com or localhost:5173 — Enter to load" />
+            <span class="agent-control-badges" id="browser-agent-control-badges" hidden></span>
             <button id="open-surprise" class="icon-btn ghost-btn" title="Open surprise in new tab" aria-label="Open surprise in new tab">
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
                 <rect x="2.25" y="2.25" width="11.5" height="11.5" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.35"/>
@@ -491,6 +500,26 @@
             tabindex="0"
             aria-label="Coding agents"
           ></div>
+        </section>
+      </div>
+
+      <div class="agent-control-overlay" id="agent-control-overlay" hidden>
+        <section
+          class="agent-control-drawer"
+          id="agent-control-drawer"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="agent-control-title"
+        >
+          <header class="agent-control-head">
+            <div>
+              <h2 id="agent-control-title">Agent control</h2>
+              <p>Leases and one-time approvals for this project.</p>
+            </div>
+            <button id="agent-control-close" type="button" aria-label="Close Agent control">×</button>
+          </header>
+          <p class="agent-control-limitation">Application-defined effects behind a generic click cannot be perfectly predicted.</p>
+          <div id="agent-control-content" class="agent-control-scroll"></div>
         </section>
       </div>
     </div>

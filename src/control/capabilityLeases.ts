@@ -43,6 +43,14 @@ export interface CapabilityLease {
   readonly expiresAt: string;
 }
 
+export interface CapabilityLeaseHistoryEntry extends CapabilityLease {
+  readonly status: 'expired' | 'revoked';
+  readonly endedAt: string;
+}
+
+export const CAPABILITY_LEASE_HISTORY_LIMIT = 100;
+export const CAPABILITY_LEASE_HISTORY_TTL_MS = 24 * 60 * 60_000;
+
 export interface CapabilityLeaseGrant {
   readonly requestId: string;
   readonly actorId: string;
@@ -65,18 +73,25 @@ export interface CapabilityLeaseAssertion {
 export class CapabilityLeaseStore {
   private readonly leases = new Map<string, CapabilityLease>();
   private readonly leaseIdsByRequest = new Map<string, string>();
+  private readonly lifecycleHistory: CapabilityLeaseHistoryEntry[] = [];
+  private readonly historyLimit: number;
+  private readonly historyTtlMs: number;
 
   constructor(
     private readonly clock: () => Date = () => new Date(),
     private readonly ownerEpoch: number,
-  ) {}
+    options: { historyLimit?: number; historyTtlMs?: number } = {},
+  ) {
+    this.historyLimit = options.historyLimit ?? CAPABILITY_LEASE_HISTORY_LIMIT;
+    this.historyTtlMs = options.historyTtlMs ?? CAPABILITY_LEASE_HISTORY_TTL_MS;
+  }
 
   grant(input: CapabilityLeaseGrant): CapabilityLease {
     const previousId = this.leaseIdsByRequest.get(input.requestId);
     const now = this.clock();
     let previous = previousId ? this.leases.get(previousId) : undefined;
     if (previous && Date.parse(previous.expiresAt) <= now.getTime()) {
-      this.invalidate(previous.id);
+      this.invalidate(previous.id, 'expired');
       previous = undefined;
     }
     if (previous) this.assertRenewalIdentity(previous, input);
@@ -108,7 +123,7 @@ export class CapabilityLeaseStore {
       throw codedError('lease_revision_mismatch', 'capability lease revision mismatch');
     }
     if (Date.parse(lease.expiresAt) <= this.clock().getTime()) {
-      this.invalidate(lease.id);
+      this.invalidate(lease.id, 'expired');
       throw codedError('lease_expired', 'capability lease expired');
     }
     const authorized = lease.actorId === input.actorId
@@ -124,17 +139,17 @@ export class CapabilityLeaseStore {
   snapshot(): CapabilityLease[] {
     const now = this.clock().getTime();
     for (const lease of this.leases.values()) {
-      if (Date.parse(lease.expiresAt) <= now) this.invalidate(lease.id);
+      if (Date.parse(lease.expiresAt) <= now) this.invalidate(lease.id, 'expired');
     }
     return [...this.leases.values()];
   }
 
   release(leaseId: string): CapabilityLease | undefined {
-    return this.invalidate(leaseId);
+    return this.invalidate(leaseId, 'revoked');
   }
 
   revoke(leaseId: string): CapabilityLease | undefined {
-    return this.invalidate(leaseId);
+    return this.invalidate(leaseId, 'revoked');
   }
 
   revokeTarget(target: LeaseTarget): CapabilityLease[] {
@@ -142,7 +157,7 @@ export class CapabilityLeaseStore {
     for (const lease of this.leases.values()) {
       if (lease.grants.some((grant) => targetsEqual(grant.target, target))) {
         revoked.push(lease);
-        this.invalidate(lease.id);
+        this.invalidate(lease.id, 'revoked');
       }
     }
     return revoked;
@@ -150,16 +165,38 @@ export class CapabilityLeaseStore {
 
   revokeAll(): CapabilityLease[] {
     const revoked = this.snapshot();
-    for (const lease of revoked) this.invalidate(lease.id);
+    for (const lease of revoked) this.invalidate(lease.id, 'revoked');
     return revoked;
   }
 
-  private invalidate(leaseId: string): CapabilityLease | undefined {
+  history(): readonly CapabilityLeaseHistoryEntry[] {
+    this.pruneHistory();
+    return Object.freeze([...this.lifecycleHistory]);
+  }
+
+  private invalidate(
+    leaseId: string,
+    status: CapabilityLeaseHistoryEntry['status'],
+  ): CapabilityLease | undefined {
     const lease = this.leases.get(leaseId);
     if (!lease) return undefined;
     this.leases.delete(leaseId);
     this.leaseIdsByRequest.delete(lease.requestId);
+    this.lifecycleHistory.push(Object.freeze({
+      ...lease,
+      status,
+      endedAt: this.clock().toISOString(),
+    }));
+    this.pruneHistory();
     return lease;
+  }
+
+  private pruneHistory(): void {
+    const cutoff = this.clock().getTime() - this.historyTtlMs;
+    while (this.lifecycleHistory.length > 0 && (
+      this.lifecycleHistory.length > this.historyLimit
+      || Date.parse(this.lifecycleHistory[0].endedAt) < cutoff
+    )) this.lifecycleHistory.shift();
   }
 
   private assertRenewalIdentity(previous: CapabilityLease, input: CapabilityLeaseGrant): void {

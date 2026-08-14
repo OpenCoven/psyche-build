@@ -197,8 +197,11 @@ export class ControlAuthority {
     return this.runtime.submit(command);
   }
 
-  snapshot(): ControlSnapshot {
-    return this.runtime.snapshot();
+  snapshotFor(principal: ControlPrincipal): ControlSnapshot {
+    const snapshot = this.runtime.snapshot();
+    if (principal.kind === 'operator') return snapshot;
+    const { receipts: _operatorRecentReceipts, ...projected } = snapshot;
+    return projected;
   }
 
   readEvents(afterSequence: number, limit?: number): {
@@ -507,7 +510,7 @@ export class ControlServer {
           version: 1,
           type: 'state.result',
           requestId: request.requestId,
-          snapshot: this.authority.snapshot(),
+          snapshot: this.authority.snapshotFor(principal),
         });
         return;
       case 'events.read': {

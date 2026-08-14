@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
@@ -107,6 +107,68 @@ class FakeEventTarget {
 }
 
 describe('Tauri physical terminal panes', () => {
+  it('invalidates agent control before a same-project worktree change and schedules the new context', () => {
+    const state = { activeProjectId: 'project-a' };
+    const project = { id: 'project-a', root: '/project', selectedWorktreePath: '/worktree-a',
+      worktrees: [{ path: '/worktree-a' }, { path: '/worktree-b' }] };
+    const events: string[] = [];
+    const selectAgentControlWorktree = compileFunction<(candidate: typeof project, root: string) => boolean>(
+      functionSource('selectAgentControlWorktree'), {
+        state,
+        invalidateAgentControlContext: () => events.push(`invalidate:${project.selectedWorktreePath}`),
+        scheduleAgentControlRefresh: () => events.push(`refresh:${project.selectedWorktreePath}`),
+      },
+    );
+
+    expect(selectAgentControlWorktree(project, '/worktree-b')).toBe(true);
+    expect(project.selectedWorktreePath).toBe('/worktree-b');
+    expect(events).toEqual(['invalidate:/worktree-a', 'refresh:/worktree-b']);
+  });
+
+  it('invalidates before refreshProjectWorktrees falls back to a different active worktree', async () => {
+    const state = { activeProjectId: 'project-a', env: { native_workspace_v2: true } };
+    const project = { id: 'project-a', root: '/project', selectedWorktreePath: '/worktree-a',
+      worktrees: [{ path: '/worktree-a' }] };
+    const events: string[] = [];
+    const selectAgentControlWorktree = compileFunction(functionSource('selectAgentControlWorktree'), {
+      state,
+      invalidateAgentControlContext: () => events.push(`invalidate:${project.selectedWorktreePath}`),
+      scheduleAgentControlRefresh: () => events.push(`refresh:${project.selectedWorktreePath}`),
+    });
+    const refreshProjectWorktrees = compileFunction<(candidate: typeof project) => Promise<unknown[]>>(
+      functionSource('refreshProjectWorktrees'), {
+        state,
+        activeWorkspaceRoot: (candidate: typeof project) => candidate.selectedWorktreePath,
+        mergeWorktreePresentationState: (_candidate: unknown, worktrees: unknown[]) => worktrees,
+        selectedWorktree: (candidate: typeof project) => candidate.worktrees[0],
+        selectAgentControlWorktree,
+        invoke: vi.fn().mockRejectedValue(new Error('worktree refresh failed')),
+        suspendGitRequests: vi.fn(), refreshSidebar: vi.fn(), refreshCovenSessions: vi.fn(),
+        saveWorkspaceSoon: vi.fn(), refreshStatusController: vi.fn(),
+      },
+    );
+
+    await refreshProjectWorktrees(project);
+    expect(project.selectedWorktreePath).toBe('/project');
+    expect(events).toEqual(['invalidate:/worktree-a', 'refresh:/project']);
+  });
+  it('invalidates only when replacement worktrees change the effective active root', () => {
+    const state = { activeProjectId: 'project-a' };
+    const project = { id: 'project-a', root: '/project', selectedWorktreePath: '/wanted',
+      worktrees: [{ path: '/fallback', is_main: true }] };
+    const events: string[] = [];
+    const select = compileFunction<(candidate: typeof project, root: string, worktrees: unknown[]) => boolean>(
+      functionSource('selectAgentControlWorktree'), { state,
+        invalidateAgentControlContext: () => events.push('invalidate'),
+        scheduleAgentControlRefresh: () => events.push('refresh') });
+    expect(select(project, '/wanted', [{ path: '/wanted' }])).toBe(true);
+    expect(events).toEqual(['invalidate', 'refresh']);
+    events.length = 0;
+    expect(select(project, '/wanted', [{ path: '/wanted' }, { path: '/other', is_main: true }])).toBe(false);
+    expect(events).toEqual([]);
+    expect(select(project, '/wanted', [{ path: '/other', is_main: true }])).toBe(true);
+    expect(events).toEqual(['invalidate', 'refresh']);
+  });
   it('makes pane dividers accessible and resizable by pointer and keyboard', () => {
     const windowTarget = new FakeEventTarget();
     const divider = new FakeEventTarget();

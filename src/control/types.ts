@@ -1,6 +1,7 @@
 import type { OrchestrationTaskRequest } from '../orchestration/types.js';
 import type {
   CapabilityLease,
+  CapabilityLeaseHistoryEntry,
   LeaseTarget,
   SurfaceCapability,
 } from './capabilityLeases.js';
@@ -149,6 +150,20 @@ export interface ActionReceipt {
   code?: string;
   message?: string;
   value?: BrowserActionPostcondition | BrowserActionDurableSummary | PaneActionPostcondition;
+}
+
+export interface RecentReceiptSummary {
+  readonly commandId: string;
+  readonly actionKind: ControlCommand['kind'];
+  readonly outcome: ActionReceipt['state'];
+  readonly timestamp: string;
+  readonly agentId: string;
+  readonly taskId: string;
+  readonly projectRoot: string;
+  readonly worktreeRoot: string;
+  readonly resource: LeaseTarget;
+  readonly redacted: true;
+  readonly result: 'result_unavailable';
 }
 
 interface AgentSurfaceAuthorization {
@@ -386,7 +401,8 @@ export interface ControlSnapshot {
   }>;
   resources?: readonly ResourceState[];
   capabilityLeases?: readonly CapabilityLease[];
+  leaseHistory?: readonly CapabilityLeaseHistoryEntry[];
   leaseRequests?: readonly LeaseRequestState[];
   approvals?: readonly Approval[];
-  receipts?: readonly ActionReceipt[];
+  receipts?: readonly RecentReceiptSummary[];
 }

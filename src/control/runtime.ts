@@ -27,6 +27,7 @@ import type {
   PaneObservationResult,
   PaneActionPostcondition,
   BrowserActionDurableSummary,
+  RecentReceiptSummary,
 } from './types.js';
 
 export type Payload<K extends ControlCommand['kind']> = Extract<ControlCommand, { kind: K }>['payload'];
@@ -186,6 +187,12 @@ export class ControlRuntime {
   private readonly leaseRequests = new Map<string, LeaseRequestState>();
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly receipts: ActionReceipt[] = [];
+  private readonly recentReceipts: RecentReceiptSummary[] = [];
+  private readonly receiptScopes = new Map<string, {
+    projectRoot: string;
+    worktreeRoot: string;
+    resource: LeaseTarget;
+  }>();
   private readonly actionStatuses = new Map<string, ActionReceipt>();
   private readonly terminalReceiptOverrides = new Map<string, ActionReceipt>();
   private readonly promptDispatcher: PromptDispatcher;
@@ -314,6 +321,8 @@ export class ControlRuntime {
   snapshot(): ControlSnapshot {
     const events = this.journal.read(0);
     const sequence = events.length > 0 ? events[events.length - 1].sequence : 0;
+    const approvals = this.approvals.snapshot();
+    this.reconcilePendingApprovalState(approvals);
     const commands: Record<string, CommandRecord> = {};
     for (const [id, record] of this.commandRecords) {
       if (record.outcome) {
@@ -338,18 +347,22 @@ export class ControlRuntime {
           target: redactTarget(grant.target),
         })),
       })),
+      leaseHistory: this.capabilityLeases.history().filter((lease) => lease.ownerEpoch === this.ownerEpoch).map((lease) => ({
+        ...lease,
+        grants: lease.grants.map((grant) => ({
+          ...grant,
+          target: redactTarget(grant.target),
+        })),
+      })),
       leaseRequests: [...this.leaseRequests.values()].map((request) => ({
         ...request,
         grants: request.grants.map((grant) => ({ ...grant, target: redactTarget(grant.target) })),
       })),
-      approvals: this.approvals.snapshot().slice(-MAX_STATUS_INDEX).map((approval) => ({
+      approvals: approvals.slice(-MAX_STATUS_INDEX).map((approval) => ({
         ...approval,
         resource: redactTarget(approval.resource),
       })),
-      receipts: this.receipts.map(({ value: _value, ...receipt }) => ({
-        ...receipt,
-        resource: redactTarget(receipt.resource),
-      })),
+      receipts: Object.freeze([...this.recentReceipts]),
     };
   }
 
@@ -607,6 +620,7 @@ export class ControlRuntime {
         break;
     }
     this.assertCapabilityLease(command, target, classification.capability);
+    this.captureReceiptScope(command, target);
     return { target, classification, ...(browserBinding ? { browserBinding } : {}) };
   }
 
@@ -910,6 +924,7 @@ export class ControlRuntime {
     ) throw codedError('capability_denied', 'agent may only release its exact capability lease');
     this.capabilityLeases.release(lease.id);
     this.approvals.revokeForLease(lease.id);
+    this.reconcilePendingApprovalState(this.approvals.snapshot());
     return succeededOutcome(undefined);
   }
 
@@ -919,6 +934,7 @@ export class ControlRuntime {
     if (command.actor.kind !== 'human') return operatorRejected('only an operator may revoke capability leases');
     const revoked = this.capabilityLeases.revoke(command.payload.leaseId);
     this.approvals.revokeForLease(command.payload.leaseId);
+    this.reconcilePendingApprovalState(this.approvals.snapshot());
     return succeededOutcome({ revoked: Boolean(revoked) });
   }
 
@@ -926,6 +942,7 @@ export class ControlRuntime {
     command: Extract<ControlCommand, { kind: 'approval.resolve' }>,
   ): Promise<CommandOutcome> {
     if (command.actor.kind !== 'human') return operatorRejected('only an operator may resolve approvals');
+    this.reconcilePendingApprovalState(this.approvals.snapshot());
     const pending = this.pendingApprovals.get(command.payload.approvalId);
     if (!pending) throw codedError('approval_missing', 'approval is missing');
     const resolved = command.payload.decision === 'approve'
@@ -1089,6 +1106,21 @@ export class ControlRuntime {
     for (const lease of this.capabilityLeases.revokeTarget(target)) {
       this.approvals.revokeForLease(lease.id);
     }
+    this.reconcilePendingApprovalState(this.approvals.snapshot());
+  }
+
+  private reconcilePendingApprovalState(approvals: readonly Approval[]): void {
+    const byId = new Map(approvals.map((approval) => [approval.id, approval]));
+    for (const [approvalId, pending] of this.pendingApprovals) {
+      const approval = byId.get(approvalId);
+      if (approval && (approval.status === 'pending' || approval.status === 'approved')) continue;
+      const state: ActionReceipt['state'] = approval?.status === 'denied' || approval?.status === 'revoked'
+        ? 'denied' : 'expired';
+      this.recordReceipt(pending.command, pending.approval.resource, state,
+        state === 'denied' ? 'approval_denied' : 'approval_expired');
+      this.pendingApprovals.delete(approvalId);
+      this.receiptScopes.delete(pending.command.id);
+    }
   }
 
   private recordReceipt(
@@ -1113,6 +1145,7 @@ export class ControlRuntime {
     this.receipts.push(receipt);
     this.actionStatuses.set(command.id, receipt);
     while (this.receipts.length > MAX_RECEIPTS) this.receipts.shift();
+    this.recordRecentReceipt(command, receipt);
     return receipt;
   }
 
@@ -1130,6 +1163,58 @@ export class ControlRuntime {
     if (existing >= 0) this.receipts.splice(existing, 1);
     this.receipts.push(receipt);
     while (this.receipts.length > MAX_RECEIPTS) this.receipts.shift();
+    this.recordRecentReceipt(command, receipt);
+  }
+
+  private captureReceiptScope(command: ControlCommand, resource: LeaseTarget): void {
+    if (command.ownerEpoch !== this.ownerEpoch) return;
+    let projectRoot: string;
+    let worktreeRoot: string;
+    if (resource.kind === 'project') {
+      if (resource.id !== command.projectRoot) return;
+      projectRoot = command.projectRoot;
+      worktreeRoot = command.projectRoot;
+    } else {
+      const surface = this.surfaces.get(resource.id);
+      if (!surface || surface.kind !== resource.kind || surface.generation !== resource.generation
+          || surface.projectRoot !== command.projectRoot) return;
+      projectRoot = surface.projectRoot;
+      worktreeRoot = surface.worktreeRoot;
+    }
+    if (projectRoot.length === 0 || projectRoot.length > 4096 || worktreeRoot.length === 0 || worktreeRoot.length > 4096) return;
+    this.receiptScopes.set(command.id, Object.freeze({
+      projectRoot, worktreeRoot, resource: immutableCopy(resource),
+    }));
+  }
+
+  private recordRecentReceipt(command: ControlCommand, receipt: ActionReceipt): void {
+    const terminal = !['queued', 'running', 'approval_required'].includes(receipt.state);
+    if (!this.receiptScopes.has(command.id)) this.captureReceiptScope(command, receipt.resource);
+    const scope = this.receiptScopes.get(command.id);
+    if (!scope || command.id.length === 0 || command.id.length > 512 || command.actor.id.length > 512) {
+      if (terminal) this.receiptScopes.delete(command.id);
+      return;
+    }
+    const payload = command.payload as { taskId?: unknown };
+    const taskId = typeof payload.taskId === 'string' && payload.taskId.length <= 512 ? payload.taskId : '';
+    const summary: RecentReceiptSummary = Object.freeze({
+      commandId: command.id,
+      actionKind: command.kind,
+      outcome: receipt.state,
+      timestamp: receipt.completedAt ?? receipt.createdAt,
+      agentId: command.actor.kind === 'psyche' ? command.actor.id : '',
+      taskId,
+      projectRoot: scope.projectRoot,
+      worktreeRoot: scope.worktreeRoot,
+      resource: immutableCopy(scope.resource),
+      redacted: true,
+      result: 'result_unavailable',
+    });
+    const previous = this.recentReceipts.findIndex(({ commandId }) => commandId === command.id);
+    if (previous >= 0) this.recentReceipts.splice(previous, 1);
+    this.recentReceipts.push(summary);
+    while (this.recentReceipts.length > MAX_RECEIPTS) this.recentReceipts.shift();
+    if (terminal) this.receiptScopes.delete(command.id);
   }
 
   private terminalizeAgentAction(

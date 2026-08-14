@@ -1165,16 +1165,50 @@ describe('ControlRuntime', () => {
       payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
     }));
     await vi.waitFor(() => expect(runtime.actionStatus('cmd-click')).toMatchObject({ state: 'queued' }));
-    expect(runtime.snapshot().receipts?.find(({ actionId }) => actionId === 'cmd-click'))
-      .toMatchObject({ state: 'queued' });
+    expect(runtime.snapshot().receipts?.find(({ commandId }) => commandId === 'cmd-click'))
+      .toMatchObject({ outcome: 'queued' });
     releaseQueue();
     await vi.waitFor(() => expect(runtime.actionStatus('cmd-click')).toMatchObject({ state: 'running' }));
-    expect(runtime.snapshot().receipts?.find(({ actionId }) => actionId === 'cmd-click'))
-      .toMatchObject({ state: 'running' });
+    expect(runtime.snapshot().receipts?.find(({ commandId }) => commandId === 'cmd-click'))
+      .toMatchObject({ outcome: 'running' });
     releaseEffect();
     await resolving;
     expect(runtime.actionStatus('cmd-click')).toMatchObject({ state: 'succeeded' });
-    expect(runtime.snapshot().receipts?.filter(({ actionId }) => actionId === 'cmd-click')).toHaveLength(1);
+    expect(runtime.snapshot().receipts?.filter(({ commandId }) => commandId === 'cmd-click')).toHaveLength(1);
+  });
+
+  it('expires passive approvals on snapshot and promptly releases pending command scope', async () => {
+    let currentTime = new Date('2026-08-12T12:00:00.000Z');
+    const deps = agentSurfaceHarness();
+    deps.risk.submit = true;
+    deps.approvals = new ApprovalStore(() => currentTime, () => 'approval-expiring');
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    await runtime.submit(browserAction(deps.lease.id));
+    const approval = deps.approvals.snapshot()[0]!;
+    const internals = runtime as unknown as {
+      pendingApprovals: Map<string, unknown>;
+      receiptScopes: Map<string, unknown>;
+    };
+    expect(runtime.actionStatus('cmd-click')).toMatchObject({ state: 'approval_required' });
+    expect(internals.pendingApprovals.size).toBe(1);
+    expect(internals.receiptScopes.size).toBe(1);
+
+    currentTime = new Date(Date.parse(approval.expiresAt) + 1);
+    expect(runtime.snapshot().approvals).toEqual([expect.objectContaining({ id: approval.id, status: 'expired' })]);
+    expect(runtime.actionStatus('cmd-click')).toMatchObject({ state: 'expired' });
+    expect(runtime.snapshot().receipts).toEqual([expect.objectContaining({ commandId: 'cmd-click', outcome: 'expired' })]);
+    expect(internals.pendingApprovals.size).toBe(0);
+    expect(internals.receiptScopes.size).toBe(0);
+
+    await expect(runtime.submit(command({
+      id: 'resolve-expired', idempotencyKey: 'resolve-expired', kind: 'approval.resolve',
+      actor: { id: 'operator-1', kind: 'human' }, ownerEpoch: 7,
+      payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
+    }))).resolves.toMatchObject({ status: 'failed', code: 'approval_missing' });
+    await runtime.submit(browserAction(deps.lease.id));
+    expect(internals.pendingApprovals.size).toBe(0);
+    expect(internals.receiptScopes.size).toBe(0);
+    expect(deps.approvals.snapshot()).toEqual([expect.objectContaining({ status: 'expired' })]);
   });
 
   it('fails approval resumption when trusted canonical risk changes', async () => {
@@ -1677,9 +1711,9 @@ describe('ControlRuntime', () => {
   });
 
   it.each([
-    ['generation', { generation: 99 }, 'resource_replaced'],
-    ['lease revision', { leaseRevision: 99 }, 'lease_revision_mismatch'],
-  ])('creates exactly one redacted receipt and terminal event for %s revalidation failure', async (_label, payloadOverride, code) => {
+    ['generation', { generation: 99 }, 'resource_replaced', 0],
+    ['lease revision', { leaseRevision: 99 }, 'lease_revision_mismatch', 1],
+  ])('creates exactly one redacted receipt and terminal event for %s revalidation failure', async (_label, payloadOverride, code, recentCount) => {
     const deps = agentSurfaceHarness();
     const journal = createMemoryJournal();
     const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
@@ -1687,7 +1721,7 @@ describe('ControlRuntime', () => {
       payload: { ...browserAction(deps.lease.id).payload, ...payloadOverride },
     }));
     expect(runtime.actionStatus('cmd-click')).toMatchObject({ state: 'failed', code });
-    expect(runtime.snapshot().receipts?.filter(({ actionId }) => actionId === 'cmd-click')).toHaveLength(1);
+    expect(runtime.snapshot().receipts?.filter(({ commandId }) => commandId === 'cmd-click')).toHaveLength(recentCount);
     expect(runtime.events().filter((event) => (
       event.payload.commandId === 'cmd-click' && event.kind.startsWith('command.') && event.kind !== 'command.requested'
     ))).toHaveLength(1);
@@ -1704,6 +1738,7 @@ describe('ControlRuntime', () => {
     }));
     expect(runtime.actionStatus('cmd-click')).toMatchObject({ state: 'failed', code: 'snapshot_stale' });
     expect(runtime.actionStatus('cmd-owner')).toMatchObject({ state: 'denied', code: 'owner_restarted' });
+    expect(runtime.snapshot().receipts?.map(({ commandId }) => commandId)).toEqual(['cmd-click']);
     expect(JSON.stringify(runtime.events())).not.toContain('secret page text');
   });
 
@@ -1765,15 +1800,56 @@ describe('ControlRuntime', () => {
       resources: [{ id: 'tab-1', kind: 'browser_tab', generation: 1 }],
       capabilityLeases: [expect.objectContaining({ id: deps.lease.id })],
       leaseRequests: [], approvals: [],
-      receipts: [expect.objectContaining({ actionId: 'cmd-click', state: 'succeeded' })],
+      receipts: [expect.objectContaining({ commandId: 'cmd-click', actionKind: 'browser.action',
+        agentId: 'agent-1', taskId: 'task-1', outcome: 'succeeded', redacted: true,
+        resource: { id: 'tab-1', kind: 'browser_tab', generation: 1 } })],
     });
-    for (const secret of ['https://example.test', 'Refresh', 'snapshot-1', '"elementRef":"e17"', '/repo']) {
+    const receipt = runtime.snapshot().receipts?.[0];
+    if (!receipt) throw new Error('expected redacted receipt');
+    expect(receipt).not.toHaveProperty('value');
+    expect(receipt).not.toHaveProperty('code');
+    expect(receipt).not.toHaveProperty('message');
+    expect(JSON.stringify(runtime.snapshot().receipts)).not.toMatch(/url|title|screenshot|elementRef|script|secret|message|code|value/);
+    for (const secret of ['https://example.test', 'Refresh', 'snapshot-1', '"elementRef":"e17"']) {
       expect(serialized).not.toContain(secret);
     }
     const journal = JSON.stringify(runtime.events());
     for (const secret of ['https://example.test', 'Refresh', 'snapshot-1', '"elementRef":"e17"', '/repo']) {
       expect(journal).not.toContain(secret);
     }
+  });
+
+  it('retains immutable exact receipt provenance after more than 1000 later command records are evicted', async () => {
+    const deps = agentSurfaceHarness();
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps,
+    });
+    await runtime.submit(browserAction(deps.lease.id));
+    for (let index = 0; index < 1_005; index += 1) {
+      await runtime.submit(command({
+        id: `later-${index}`, idempotencyKey: `later-idem-${index}`,
+        kind: 'pane.takeover', actor: { id: 'operator-1', kind: 'human' }, ownerEpoch: 7,
+        payload: { paneId: `missing-${index}` },
+      }));
+    }
+    expect(runtime.snapshot().commands).not.toHaveProperty('cmd-click');
+    expect(runtime.snapshot().receipts).toEqual([expect.objectContaining({
+      commandId: 'cmd-click', actionKind: 'browser.action', outcome: 'succeeded',
+      agentId: 'agent-1', taskId: 'task-1', projectRoot: '/repo', worktreeRoot: '/repo',
+      resource: { kind: 'browser_tab', id: 'tab-1', generation: 1 },
+      redacted: true, result: 'result_unavailable',
+    })]);
+  });
+
+  it('does not expose prior-owner receipt summaries after journal replay', async () => {
+    const deps = agentSurfaceHarness();
+    const journal = createMemoryJournal();
+    const first = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+    await first.submit(browserAction(deps.lease.id));
+    expect(first.snapshot().receipts).toHaveLength(1);
+    const restarted = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal,
+      surfaces: deps.surfaces, capabilityLeases: deps.capabilityLeases, approvals: deps.approvals });
+    expect(restarted.snapshot().receipts).toEqual([]);
   });
 });
 

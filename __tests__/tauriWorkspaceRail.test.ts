@@ -71,7 +71,8 @@ describe('Tauri project/worktree/pane rail', () => {
   it('refreshes worktrees without replacing local presentation state', () => {
     expect(mainJs).toMatch(/function\s+refreshProjectWorktrees\(project\)/);
     expect(mainJs).toMatch(/invoke\("git_worktrees",\s*\{\s*root:\s*project\.root\s*\}\)/);
-    expect(mainJs).toMatch(/project\.worktrees\s*=\s*mergeWorktreePresentationState\(/);
+    expect(mainJs).toMatch(/var mergedWorktrees\s*=\s*mergeWorktreePresentationState\(/);
+    expect(mainJs).toMatch(/selectAgentControlWorktree\(project,[\s\S]*mergedWorktrees\)/);
   });
 
   it('ships workspace v2 enabled with an environment rollback switch', () => {

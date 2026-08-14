@@ -208,6 +208,7 @@ describe('Tauri Coven launch project scope', () => {
         loadAgentSkills: () => { calls.push('loadAgentSkills'); },
         saveWorkspaceNow: () => { calls.push('saveWorkspaceNow'); },
         startCovenPolling: () => { calls.push('startCovenPolling'); },
+        startAgentControlPolling: () => { calls.push('startAgentControlPolling'); },
         paneMetricsPollTimer: 0,
         clearInterval: () => { calls.push('clearInterval'); },
         setInterval: (_callback: () => void, ms: number) => {
@@ -287,6 +288,7 @@ describe('Tauri Coven launch project scope', () => {
       'loadAgentSkills',
       'saveWorkspaceNow',
       'startCovenPolling',
+      'startAgentControlPolling',
       'setInterval:15000',
       'refreshVisiblePaneMetrics',
     ]);
@@ -350,6 +352,7 @@ describe('Tauri Coven launch project scope', () => {
         loadAgentSkills: () => { calls.push('loadAgentSkills'); },
         saveWorkspaceNow: () => { calls.push('saveWorkspaceNow'); },
         startCovenPolling: () => { calls.push('startCovenPolling'); },
+        startAgentControlPolling: () => { calls.push('startAgentControlPolling'); },
         paneMetricsPollTimer: 0,
         clearInterval: () => { calls.push('clearInterval'); },
         setInterval: (_callback: () => void, ms: number) => {
@@ -383,6 +386,7 @@ describe('Tauri Coven launch project scope', () => {
       'loadAgentSkills',
       'saveWorkspaceNow',
       'startCovenPolling',
+      'startAgentControlPolling',
       'setInterval:15000',
       'refreshVisiblePaneMetrics',
     ]);

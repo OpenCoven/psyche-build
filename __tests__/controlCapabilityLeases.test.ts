@@ -463,6 +463,32 @@ describe('CapabilityLeaseStore', () => {
     expect(store.snapshot()).toEqual([]);
   });
 
+  it('retains bounded non-authoritative expired and revoked lifecycle history', () => {
+    let now = Date.parse(nowIso);
+    const store = new CapabilityLeaseStore(() => new Date(now), 7, { historyLimit: 2, historyTtlMs: 120_000 });
+    const expired = grantPane(store, 'expired-history');
+    now += 60_000;
+    expect(store.snapshot()).toEqual([]);
+    const revoked = grantPane(store, 'revoked-history');
+    store.revoke(revoked.id);
+    const newest = grantPane(store, 'newest-history');
+    store.release(newest.id);
+
+    expect(store.history()).toEqual([
+      expect.objectContaining({ id: revoked.id, status: 'revoked', actorId: 'agent-1', taskId: 'task-1' }),
+      expect.objectContaining({ id: newest.id, status: 'revoked', actorId: 'agent-1', taskId: 'task-1' }),
+    ]);
+    expect(store.history()).not.toContainEqual(expect.objectContaining({ id: expired.id }));
+    expect(store.snapshot()).toEqual([]);
+    expect(() => store.assert({
+      leaseId: newest.id, revision: newest.revision, ownerEpoch: 7,
+      actorId: newest.actorId, taskId: newest.taskId,
+      target: newest.grants[0].target, capability: newest.grants[0].capabilities[0],
+    })).toThrowError(expect.objectContaining({ code: 'lease_missing' }));
+    now += 120_001;
+    expect(store.history()).toEqual([]);
+  });
+
   it('matches every canonical surface capability in the shared provider contract', () => {
     const fixture = JSON.parse(readFileSync(new URL(
       '../protocol-fixtures/control-v1/provider-contract.json', import.meta.url), 'utf8')) as {
