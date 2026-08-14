@@ -155,6 +155,11 @@ type PaneFocusThread = {
   pane: { id: string } | null;
   host: { contains: (node: unknown) => boolean } | null;
   term: { blur: () => void; focus: () => void; dispose?: () => void } | null;
+  terminalController?: {
+    blur: () => void;
+    focus: () => void;
+    dispose?: () => void;
+  } | null;
   internalFocusReportTokens?: FocusReportToken[];
 };
 
@@ -211,6 +216,14 @@ function createPaneFocusHarness(
   activeThreadId: string,
   activeElement: unknown = null,
 ) {
+  threads.forEach((thread) => {
+    if (thread.terminalController) return;
+    thread.terminalController = {
+      blur: () => thread.term?.blur(),
+      focus: () => thread.term?.focus(),
+      dispose: () => thread.term?.dispose?.(),
+    };
+  });
   const tokens = compileFocusTokenRuntime();
   const queued: Array<() => void> = [];
   const documentRef = { activeElement };
@@ -295,7 +308,7 @@ function createPaneFocusHarness(
     renderGitSurface: () => false,
     refreshSidebar: () => undefined,
     requestAnimationFrame,
-    scheduleVisiblePaneFit: () => undefined,
+    scheduleTerminalPaneFits: () => undefined,
     isLiveThread,
     terminalHost,
     syncBrowserBounds: () => undefined,
@@ -323,9 +336,8 @@ describe('Tauri physical terminal panes', () => {
     expect(mainJs).not.toContain('ptyClient');
   });
 
-  it('bounds and serializes PTY input while coalescing resize delivery', () => {
+  it('bounds and serializes PTY input while delegating resize ownership', () => {
     const send = functionSource('sendToThread');
-    const resize = functionSource('scheduleThreadPtyResize');
     const mount = functionSource('mountTerminal');
 
     expect(mainJs).toContain('var MAX_PENDING_PTY_INPUT_BYTES = 1024 * 1024;');
@@ -334,9 +346,8 @@ describe('Tauri physical terminal panes', () => {
     expect(send).toContain('pendingWrites >= MAX_PENDING_PTY_INPUT_WRITES');
     expect(send).toContain('var previous = queue.inputTail;');
     expect(send).toContain('queue.inputTail = result.then');
-    expect(resize).toContain('queue.pendingResize = { cols: size.cols, rows: size.rows };');
-    expect(resize).toContain('if (queue.resizeFlight) return queue.resizeFlight;');
-    expect(mount).toContain('scheduleThreadPtyResize(thread, size);');
+    expect(mainJs).not.toContain('function scheduleThreadPtyResize(');
+    expect(mount).toContain('PsycheRuntime.createTerminalPaneController({');
     expect(mount).not.toContain('invoke("pty_resize"');
   });
 
@@ -562,92 +573,24 @@ describe('Tauri physical terminal panes', () => {
     expect(replacementDivider.focusCalls).toBe(1);
   });
 
-  it('coalesces visible pane fitting to one animation frame and fits every leaf', () => {
-    expect(mainJs).toMatch(/var visiblePaneFitFrame = 0;/);
+  it('delegates visible pane fitting to each keyed controller', () => {
+    expect(mainJs).not.toMatch(/var visiblePaneFitFrame = 0;/);
     expect(mainJs).not.toMatch(/fitActiveTerm/);
-    const queued: Array<() => void> = [];
-    const terminalHost = { hidden: false };
-    let layout: { root: Record<string, unknown> } | null = { root: { type: 'leaf' } };
     const fits: string[] = [];
-    const warnings: unknown[][] = [];
-    const paneFitFactory = Function(
-      'requestAnimationFrame',
-      'terminalHost',
-      'activePaneLayout',
-      'effectivePaneRoot',
-      'PsychePanes',
-      'measuredTerminalHost',
-      'PANE_MINIMUMS',
-      'findThread',
-      'console',
-      `"use strict";
-       var visiblePaneFitFrame = 0;
-       var fitVisiblePanes = ${functionSource('fitVisiblePanes')};
-       var scheduleVisiblePaneFit = ${functionSource('scheduleVisiblePaneFit')};
-       return { fitVisiblePanes, scheduleVisiblePaneFit };`,
-    ) as (
-      raf: (callback: () => void) => number,
-      host: typeof terminalHost,
-      activeLayout: () => typeof layout,
-      effectiveRoot: (value: typeof layout) => unknown,
-      panes: { layoutRects: () => { leaves: Array<{ threadId: string }> } },
-      measure: () => Record<string, number>,
-      minimums: Record<string, number>,
-      find: (id: string) => { fit: { fit: () => void } },
-      logger: { warn: (...args: unknown[]) => void },
-    ) => { fitVisiblePanes: () => void; scheduleVisiblePaneFit: () => void };
-    const paneFit = paneFitFactory(
-      (callback) => { queued.push(callback); return queued.length; },
-      terminalHost,
-      () => layout,
-      (value) => value && value.root,
+    const scheduleTerminalPaneFits = compileFunction<() => void>(
+      functionSource('scheduleTerminalPaneFits'),
       {
-        layoutRects: () => ({
-          leaves: [
-            { threadId: 'thread-a' },
-            { threadId: 'thread-b' },
-            { threadId: 'thread-c' },
+        state: {
+          threads: [
+            { terminalController: { scheduleFit: () => fits.push('thread-a') } },
+            { terminalController: null },
+            { terminalController: { scheduleFit: () => fits.push('thread-c') } },
           ],
-        }),
-      },
-      () => ({ x: 0, y: 0, width: 800, height: 600 }),
-      { width: 320, height: 120, separator: 6 },
-      (id: string) => ({
-        fit: {
-          fit: () => {
-            fits.push(id);
-            if (id === 'thread-b') throw new Error('fit failed');
-          },
         },
-      }),
-      { warn: (...args: unknown[]) => warnings.push(args) },
+      },
     );
-    const scheduleVisiblePaneFit = paneFit.scheduleVisiblePaneFit;
-    scheduleVisiblePaneFit();
-    scheduleVisiblePaneFit();
-    expect(queued).toHaveLength(1);
-    queued.shift()?.();
-    expect(fits).toEqual(['thread-a', 'thread-b', 'thread-c']);
-    expect(warnings).toHaveLength(1);
-
-    terminalHost.hidden = true;
-    scheduleVisiblePaneFit();
-    expect(queued).toHaveLength(1);
-    queued.shift()?.();
-    expect(fits).toHaveLength(3);
-
-    terminalHost.hidden = false;
-    layout = null;
-    scheduleVisiblePaneFit();
-    expect(queued).toHaveLength(1);
-    queued.shift()?.();
-    expect(fits).toHaveLength(3);
-
-    layout = { root: { type: 'leaf' } };
-    scheduleVisiblePaneFit();
-    expect(queued).toHaveLength(1);
-    queued.shift()?.();
-    expect(fits).toHaveLength(6);
+    scheduleTerminalPaneFits();
+    expect(fits).toEqual(['thread-a', 'thread-c']);
   });
 
   it('keeps pane topology process-local and keys it by project and worktree', () => {
@@ -828,7 +771,7 @@ describe('Tauri physical terminal panes', () => {
   it('checks focus report tokens before writing xterm input to the PTY', () => {
     const mountTerminal = functionSource('mountTerminal');
     expect(mountTerminal).toMatch(
-      /term\.onData\(function \(data\) \{\s*routeTerminalData\(thread, data\);\s*\}\);/,
+      /onData: function \(data\) \{\s*routeTerminalData\(thread, data\);\s*\}/,
     );
   });
 
@@ -1035,6 +978,11 @@ describe('Tauri physical terminal panes', () => {
             ]);
             harness.documentRef.activeElement = targetElement;
           },
+        };
+        thread.terminalController = {
+          blur: () => thread.term?.blur(),
+          focus: () => thread.term?.focus(),
+          dispose: () => thread.term?.dispose?.(),
         };
         harness.attachedPanes.add(pane);
         harness.renderPaneWorkspace({ preserveTerminalFocus: false });
@@ -1385,9 +1333,9 @@ describe('Tauri physical terminal panes', () => {
 
     expect(closeThread(source.id)).toBe(true);
     expect(events).toEqual([
+      'dispose',
       'source-out:false',
       'detach',
-      'dispose',
     ]);
     expect(harness.state.activeThreadId).toBeNull();
     expect(harness.queued).toHaveLength(0);
@@ -1582,7 +1530,7 @@ describe('Tauri physical terminal panes', () => {
       requestAnimationFrame: (callback: () => void) => {
         queued.push(callback);
       },
-      scheduleVisiblePaneFit: () => undefined,
+      scheduleTerminalPaneFits: () => undefined,
       isLiveThread: () => true,
       terminalHost,
       syncBrowserBounds: () => undefined,
@@ -1869,7 +1817,7 @@ describe('Tauri physical terminal panes', () => {
     expect(functionSource('renderPaneNode')).toMatch(/createPaneDivider\(node, ratio\)/);
     expect(functionSource('renderPaneWorkspace')).toMatch(/PsychePanes\.layoutRects/);
     expect(functionSource('renderPaneWorkspace')).toMatch(/split\.ratio/);
-    expect(functionSource('renderPaneWorkspace')).toMatch(/scheduleVisiblePaneFit\(\)/);
+    expect(functionSource('renderPaneWorkspace')).toMatch(/scheduleTerminalPaneFits\(\)/);
     expect(stylesCss).not.toMatch(/\.term-instance\.active\s*\{\s*visibility:\s*visible/);
     expect(stylesCss).toMatch(/\.terminal-pane\.focused/);
     expect(stylesCss).toMatch(/\.terminal-pane-body/);
@@ -3014,7 +2962,7 @@ describe('Tauri physical terminal panes', () => {
       renderGitSurface: () => false,
       refreshSidebar: () => undefined,
       requestAnimationFrame: (callback: () => void) => callback(),
-      scheduleVisiblePaneFit: () => undefined,
+      scheduleTerminalPaneFits: () => undefined,
       isLiveThread: () => true,
       terminalHost: { contains: () => true },
       syncBrowserBounds: () => undefined,
@@ -3093,7 +3041,7 @@ describe('Tauri physical terminal panes', () => {
           action: () => unknown,
         ) => action(),
         requestAnimationFrame: (callback: () => void) => callback(),
-        scheduleVisiblePaneFit: () => undefined,
+        scheduleTerminalPaneFits: () => undefined,
         isLiveThread: () => true,
         terminalHost: { hidden: false, contains: () => true },
         syncBrowserBounds: () => undefined,

@@ -355,11 +355,11 @@ describe('Tauri desktop tab shortcuts', () => {
 
   it('delivers batched PTY output to the matching terminal thread', () => {
     expect(mainJs).toMatch(
-      /listen\("pty:data-batch",\s*function\s*\(event\)[\s\S]*?var\s+payload\s*=\s*event\.payload\s*\|\|\s*\{\};[\s\S]*?if\s*\(!payload\.threadId\s*\|\|\s*!payload\.bytes\)\s*return;[\s\S]*?var\s+thread\s*=\s*findThread\(payload\.threadId\);[\s\S]*?if\s*\(!isLiveThread\(thread\)\)\s*return;[\s\S]*?if\s*\(!ptyRuntime\.routePtyBatch\(payload\)\)\s*return;[\s\S]*?var\s+bytes\s*=\s*new\s+Uint8Array\(payload\.bytes\);/,
+      /listen\("pty:data-batch",\s*function\s*\(event\)[\s\S]*?var\s+payload\s*=\s*event\.payload\s*\|\|\s*\{\};[\s\S]*?if\s*\(!payload\.threadId\s*\|\|\s*!payload\.bytes\)\s*return;[\s\S]*?var\s+thread\s*=\s*findThread\(payload\.threadId\);[\s\S]*?if\s*\(!isLiveThread\(thread\)\)\s*return;[\s\S]*?if\s*\(!thread\.terminalController\s*\|\|\s*!thread\.terminalController\.receive\(payload\)\)\s*return;[\s\S]*?var\s+bytes\s*=\s*new\s+Uint8Array\(payload\.bytes\);/,
     );
     expect(mainJs).not.toMatch(/listen\("pty:data",/);
     expect(mainJs).toMatch(
-      /window\.PsycheRuntime[\s\S]*typeof window\.PsycheRuntime\.routePtyBatch !== "function"/,
+      /window\.PsycheRuntime[\s\S]*typeof window\.PsycheRuntime\.createTerminalPaneController !== "function"/,
     );
     expect(tauriLib).toMatch(
       /fn\s+pty_ack\(thread_id:\s*String,\s*sequence:\s*u64\)[\s\S]*?clone_live_pty_pump\(&thread_id\)\?[\s\S]*?pump\.acknowledge\(sequence\)/,

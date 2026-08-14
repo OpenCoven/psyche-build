@@ -75,6 +75,13 @@ const spawnPtyRuntimeDeps = {
       adoptRunningPty: () => Promise.resolve(false),
       markPtyStarted: () => Promise.resolve(false),
       stopPtyDelivery: () => undefined,
+      dimensions: () => ({
+        cols: (thread.term as { cols?: number } | null)?.cols ?? 120,
+        rows: (thread.term as { rows?: number } | null)?.rows ?? 40,
+      }),
+      write: (data: string | Uint8Array) => {
+        (thread.term as { write?: (value: string | Uint8Array) => void } | null)?.write?.(data);
+      },
       dispose: () => undefined,
     };
     thread.terminalController = controller;
@@ -1841,6 +1848,8 @@ describe('native Coven launch routing', () => {
 
     await expect(retryThread(thread.id)).resolves.toBe(true);
     expect(thread.stopRequested).toBe(false);
+    (thread as typeof thread & { terminalController: { dispose(): void } }).terminalController.dispose =
+      () => { calls.push('dispose'); };
     expect(closeThread(thread.id)).toBe(true);
     expect(closeThread(thread.id)).toBe(false);
     expect(calls.filter((call) => call === 'pty_stop')).toHaveLength(1);

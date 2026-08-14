@@ -290,7 +290,7 @@ describe('Tauri project/worktree/pane rail', () => {
   it('routes sidebar state changes and handlers through the shared toggle helper', () => {
     const syncSidebarToggleState = vi.fn();
     const closeNewPaneMenu = vi.fn();
-    const scheduleVisiblePaneFit = vi.fn();
+    const scheduleTerminalPaneFits = vi.fn();
     const syncBrowserBounds = vi.fn();
     const requestAnimationFrame = vi.fn((callback: (timestamp: number) => void) => {
       callback(0);
@@ -304,7 +304,7 @@ describe('Tauri project/worktree/pane rail', () => {
       syncSidebarToggleState,
       closeNewPaneMenu,
       requestAnimationFrame,
-      scheduleVisiblePaneFit,
+      scheduleTerminalPaneFits,
       syncBrowserBounds,
     });
 
@@ -318,7 +318,7 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(sidebarMiniEl.hidden).toBe(false);
     expect(syncSidebarToggleState).toHaveBeenLastCalledWith(true);
     expect(closeNewPaneMenu).toHaveBeenCalledTimes(1);
-    expect(scheduleVisiblePaneFit).toHaveBeenCalledTimes(2);
+    expect(scheduleTerminalPaneFits).toHaveBeenCalledTimes(2);
     expect(syncBrowserBounds).toHaveBeenCalledTimes(2);
     expect(mainJs).toContain('onRailClick("sidebar-collapse", function () { toggleSidebar(); });');
     expect(mainJs).toContain('onRailClick("sidebar-expand", function () { setSidebarOpen(true); });');

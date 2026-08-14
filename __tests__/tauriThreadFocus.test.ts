@@ -66,7 +66,7 @@ function focusDependencies(
     requestAnimationFrame,
     isLiveThread: (thread: unknown) => state.threads.includes(thread),
     terminalHost: { hidden: false, contains: () => true },
-    scheduleVisiblePaneFit: vi.fn(),
+    scheduleTerminalPaneFits: vi.fn(),
     syncBrowserBounds: vi.fn(),
     setProjectStatus: vi.fn(),
     statusLevel: () => 'ok',
@@ -86,7 +86,7 @@ describe('Tauri thread focus activation', () => {
       closing: false,
       closeStarted: false,
       pane: {},
-      term: { focus: vi.fn() },
+      terminalController: { focus: vi.fn() },
     };
     const state = {
       activeThreadId: 'thread-existing',
@@ -114,7 +114,7 @@ describe('Tauri thread focus activation', () => {
     expect(dependencies.markActiveSurface).not.toHaveBeenCalled();
     expect(dependencies.renderPaneWorkspace).not.toHaveBeenCalled();
     expect(frames).toHaveLength(0);
-    expect(thread.term.focus).not.toHaveBeenCalled();
+    expect(thread.terminalController.focus).not.toHaveBeenCalled();
   });
 
   it('can render and select a live thread without queueing terminal autofocus', async () => {
@@ -128,7 +128,7 @@ describe('Tauri thread focus activation', () => {
       closing: false,
       closeStarted: false,
       pane: {},
-      term: { focus: vi.fn() },
+      terminalController: { focus: vi.fn() },
     };
     const state = {
       activeThreadId: null,
@@ -151,8 +151,8 @@ describe('Tauri thread focus activation', () => {
     expect(frames).toHaveLength(1);
 
     frames.shift()!();
-    expect(thread.term.focus).not.toHaveBeenCalled();
-    expect(dependencies.scheduleVisiblePaneFit).toHaveBeenCalledTimes(1);
+    expect(thread.terminalController.focus).not.toHaveBeenCalled();
+    expect(dependencies.scheduleTerminalPaneFits).toHaveBeenCalledTimes(1);
     expect(dependencies.syncBrowserBounds).toHaveBeenCalledTimes(1);
   });
 
@@ -169,7 +169,7 @@ describe('Tauri thread focus activation', () => {
         closing: false,
         closeStarted: false,
         pane: {},
-        term: { focus: vi.fn() },
+        terminalController: { focus: vi.fn() },
       };
       const state = {
         activeThreadId: null,
@@ -205,7 +205,7 @@ describe('Tauri thread focus activation', () => {
       closing: false,
       closeStarted: false,
       pane: {},
-      term: { focus: vi.fn() },
+      terminalController: { focus: vi.fn() },
     };
     const state = {
       activeThreadId: null,
@@ -225,6 +225,6 @@ describe('Tauri thread focus activation', () => {
 
     await expect(focusThread(thread.id)).resolves.toBe(true);
     frames.shift()!();
-    expect(thread.term.focus).toHaveBeenCalledTimes(1);
+    expect(thread.terminalController.focus).toHaveBeenCalledTimes(1);
   });
 });

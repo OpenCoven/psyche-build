@@ -1,5 +1,5 @@
 // psyche — Tauri prototype workspace shell
-// One module, no bundler. Uses UMD globals (Terminal, FitAddon) and the
+// One module, no bundler. The runtime bundle owns xterm's UMD globals and the
 // global Tauri API surface exposed via `withGlobalTauri: true`.
 
 (function () {
@@ -50,15 +50,15 @@
     return;
   }
   if (!window.PsycheRuntime ||
-      typeof window.PsycheRuntime.createPtyClient !== "function" ||
-      typeof window.PsycheRuntime.routePtyBatch !== "function" ||
-      typeof window.PsycheRuntime.disposePtyClient !== "function") {
+      typeof window.PsycheRuntime.createTerminalPaneController !== "function" ||
+      typeof window.PsycheRuntime.FrameScheduler !== "function") {
     showBootError("PTY runtime bundle missing. Run `pnpm --dir native/desktop/psyche-build-tauri build:web`.");
     return;
   }
 
   var statusController = null;
   var ptyRuntime = window.PsycheRuntime;
+  var terminalFrameScheduler = new ptyRuntime.FrameScheduler(requestAnimationFrame);
   var invokeNative = window.__TAURI__.core.invoke;
   var listen = window.__TAURI__.event.listen;
   var opener = window.__TAURI__.opener || null;
@@ -101,7 +101,7 @@
   /**
    * threads = ordered list of { id, projectId, name, kind, command, args, env,
    *                             status: 'starting'|'running'|'exited',
-   *                             term, fit, host, lastBytes }
+   *                             term, terminalController, host, lastBytes }
    *   `pane` is the thread's framed pane in the canvas; `host` is the xterm
    *   container inside it. Placement lives in the per-worktree pane tree
    *   (`paneLayouts`), not on the thread.
@@ -142,7 +142,6 @@
   var covenPollTimer = null;
   var COVEN_POLL_MS = 5000;
   var paneCounter = 0;
-  var visiblePaneFitFrame = 0;
   var MAX_PENDING_PTY_INPUT_BYTES = 1024 * 1024;
   var MAX_PENDING_PTY_INPUT_WRITES = 256;
   var PANE_METRICS_POLL_MS = 15000;
@@ -945,6 +944,15 @@
   var isRestoringWorkspace = false;
   var saveWorkspaceTimer = 0;
 
+  function terminalTheme() {
+    return {
+      background: "rgba(0, 0, 0, 0)",
+      foreground: "#ece9f5",
+      cursor: "#a78bfa",
+      selectionBackground: "rgba(167,139,250,0.30)",
+    };
+  }
+
   function clampInt(value, fallback, min, max) {
     var n = parseInt(value, 10);
     if (!Number.isFinite(n)) return fallback;
@@ -1039,6 +1047,9 @@
     settings.theme = t;
     document.documentElement.setAttribute("data-theme", t);
     if (themeSelectEl && themeSelectEl.value !== t) themeSelectEl.value = t;
+    state.threads.forEach(function (thread) {
+      if (thread.terminalController) thread.terminalController.setTheme(terminalTheme());
+    });
     if (!opts || opts.persist !== false) saveSettings();
   }
   function applySolidBg(on, opts) {
@@ -1549,41 +1560,32 @@
   // 5. PTY event plumbing
   // ============================================================
 
-  function threadPtyVisible(thread) {
-    return !!thread &&
-      !thread.hidden &&
-      !document.hidden &&
-      terminalHost &&
-      terminalHost.isConnected &&
-      !terminalHost.hidden &&
-      thread.pane &&
-      thread.pane.isConnected;
+  function threadTerminalVisibility(thread) {
+    var snapshot = thread && thread.terminalController &&
+      thread.terminalController.rendererSnapshot
+        ? thread.terminalController.rendererSnapshot()
+        : null;
+    return {
+      documentVisible: !document.hidden,
+      paneVisible: !!thread && !thread.hidden && !!terminalHost &&
+        terminalHost.isConnected && !terminalHost.hidden && !!thread.pane &&
+        thread.pane.isConnected,
+      intersecting: snapshot ? snapshot.visibility.intersecting : true,
+    };
   }
 
-  function ensureThreadPtyController(thread, explicitTerm) {
+  function ensureThreadPtyController(thread) {
     if (!thread || thread.kind === "web") return null;
-    if (thread.terminalController) return thread.terminalController;
-    var term = explicitTerm || thread.term;
-    if (!term || typeof term.write !== "function") return null;
-    var controller = ptyRuntime.createPtyClient({
-      threadId: thread.id,
-      invoke: invoke,
-      visible: threadPtyVisible(thread),
-      write: function (bytes, callback) {
-        term.write(bytes, callback);
-      },
-    });
-    thread.terminalController = controller;
-    return controller;
+    return thread.terminalController || null;
   }
 
   function syncThreadPtyVisibility(thread) {
     if (!thread || !thread.terminalController ||
-        typeof thread.terminalController.setVisible !== "function") {
+        typeof thread.terminalController.setVisibility !== "function") {
       return Promise.resolve(false);
 
     }
-    return thread.terminalController.setVisible(threadPtyVisible(thread)).catch(function () {
+    return thread.terminalController.setVisibility(threadTerminalVisibility(thread)).catch(function () {
       return false;
     });
   }
@@ -1600,43 +1602,7 @@
       inputTail: Promise.resolve(),
       pendingInputBytes: 0,
       pendingInputWrites: 0,
-      pendingResize: null,
-      resizeFlight: null,
     };
-  }
-
-  function scheduleThreadPtyResize(thread, size) {
-    var queue = thread && thread.ptyIoQueue;
-    if (!queue || queue.closed) return Promise.resolve(false);
-    queue.pendingResize = { cols: size.cols, rows: size.rows };
-    if (queue.resizeFlight) return queue.resizeFlight;
-
-    function drainLatestResize() {
-      if (queue.closed || !queue.pendingResize) return Promise.resolve(false);
-      var next = queue.pendingResize;
-      queue.pendingResize = null;
-      return invoke("pty_resize", {
-        threadId: thread.id,
-        thread_id: thread.id,
-        cols: next.cols,
-        rows: next.rows,
-      }).then(function () {
-        return true;
-      }).catch(function () {
-        if (!queue.closed && !queue.pendingResize) {
-          queue.pendingResize = next;
-        }
-        return new Promise(function (resolve) { requestAnimationFrame(resolve); }).then(drainLatestResize);
-      }).then(function (result) {
-        return queue.pendingResize ? drainLatestResize() : result;
-      });
-    }
-
-    var flight = drainLatestResize().finally(function () {
-      if (queue.resizeFlight === flight) queue.resizeFlight = null;
-    });
-    queue.resizeFlight = flight;
-    return flight;
   }
 
   listen("pty:data-batch", function (event) {
@@ -1644,7 +1610,7 @@
     if (!payload.threadId || !payload.bytes) return;
     var thread = findThread(payload.threadId);
     if (!isLiveThread(thread)) return;
-    if (!ptyRuntime.routePtyBatch(payload)) return;
+    if (!thread.terminalController || !thread.terminalController.receive(payload)) return;
     var bytes = new Uint8Array(payload.bytes);
     thread.lastOutputAt = Date.now();
     if (typeof noteStatusPtyData === "function") noteStatusPtyData(payload.threadId, bytes);
@@ -1667,8 +1633,6 @@
       inputTail: Promise.resolve(),
       pendingInputBytes: 0,
       pendingInputWrites: 0,
-      pendingResize: null,
-      resizeFlight: null,
     };
     if (thread.startInFlight) {
       thread.exitDuringStart = true;
@@ -1686,8 +1650,8 @@
     // would send the user to a pane with nothing to say.
     clearThreadAttention(thread);
     syncThreadPaneMetadata(thread);
-    if (thread.term) {
-      thread.term.write("\r\n\x1b[2;90m[process exited]\x1b[0m\r\n");
+    if (thread.terminalController) {
+      thread.terminalController.write("\r\n\x1b[2;90m[process exited]\x1b[0m\r\n");
     }
     refreshSidebar();
     refreshTabs();
@@ -1976,26 +1940,6 @@
   }
 
   /**
-   * The last `lines` non-empty rows of what the terminal is actually showing.
-   * Read off the buffer rather than accumulated PTY bytes so redraws, cursor
-   * moves and cleared spinners are already resolved into what the user sees.
-   */
-  function terminalTail(term, lines) {
-    if (!term || !term.buffer || !term.buffer.active) return "";
-    var buffer = term.buffer.active;
-    var end = buffer.baseY + buffer.cursorY;
-    var out = [];
-    for (var row = end; row >= 0 && out.length < lines; row--) {
-      var line = buffer.getLine(row);
-      if (!line) continue;
-      var text = line.translateToString(true);
-      if (!text.trim() && out.length === 0) continue;
-      out.push(text);
-    }
-    return out.reverse().join("\n");
-  }
-
-  /**
    * Push a session's attention state onto every surface that shows it. Only the
    * rail is re-rendered wholesale; the pane and its minimap entry are touched
    * in place, because this runs on a timer and re-tiling the canvas under a
@@ -2057,8 +2001,8 @@
     var tracked = [];
     var needsFinalRender = false;
     state.threads.forEach(function (thread) {
-      if (!thread || !thread.term) return;
-      var tail = terminalTail(thread.term, ATTENTION_TAIL_LINES);
+      if (!thread || !thread.terminalController) return;
+      var tail = thread.terminalController.tail(ATTENTION_TAIL_LINES);
       thread.isWorking = PsycheSessions.sidebarTailIsWorking(tail);
       var attentionChanged = false;
       if (!threadWantsAttentionTracking(thread)) {
@@ -2190,7 +2134,6 @@
       status: "starting",
       spawning: true,
       term: null,
-      fit: null,
       host: null,
       pane: null,
       closing: false,
@@ -2205,8 +2148,6 @@
         inputTail: Promise.resolve(),
         pendingInputBytes: 0,
         pendingInputWrites: 0,
-        pendingResize: null,
-        resizeFlight: null,
       },
       metricsGeneration: 0,
       metrics: launch.launchKind === "coven-chat" && launch.covenSessionId
@@ -2227,12 +2168,10 @@
     focusThread(id, opts.focusTerminal === false ? { focusTerminal: false } : undefined);
     refreshSidebar();
     refreshTabs();
-    // Run fit() now so the PTY starts at the actual visible size, not at
-    // xterm.js's default 80x24. Otherwise psyche/Ink draw the first frame at
-    // the wrong size and leave artifacts.
+    // The controller's initial keyed frame fits before this later spawn frame,
+    // so the PTY starts at the visible xterm size instead of 80x24.
     requestAnimationFrame(function () {
       if (!isLiveThread(thread)) return;
-      try { if (thread.fit) thread.fit.fit(); } catch (_) {}
       spawnPty(thread);
     });
     return thread;
@@ -2328,6 +2267,9 @@
     syncThreadPaneMetadata(thread);
     refreshSidebar();
     refreshTabs();
+    var terminalSize = terminalController && typeof terminalController.dimensions === "function"
+      ? terminalController.dimensions()
+      : { cols: 120, rows: 40 };
     return invoke("pty_start", {
       options: {
         threadId: thread.id,
@@ -2341,8 +2283,8 @@
         coven_session_id: launch.covenSessionId,
         command: launch.command,
         args: launch.args,
-        cols: thread.term ? thread.term.cols : 120,
-        rows: thread.term ? thread.term.rows : 40,
+        cols: terminalSize.cols,
+        rows: terminalSize.rows,
         env: launch.env,
       },
     }).then(function () {
@@ -2451,8 +2393,8 @@
         thread.isWorking = false;
         thread.finishedAt = Date.now();
         thread.exitCode = null;
-        if (thread.term) {
-          thread.term.write("\r\n\x1b[31m[pty_start error]\x1b[0m " + msg + "\r\n");
+        if (thread.terminalController) {
+          thread.terminalController.write("\r\n\x1b[31m[pty_start error]\x1b[0m " + msg + "\r\n");
         }
         if (state.activeThreadId === thread.id) {
           setStatus(thread.name + " failed to start: " + msg, "error");
@@ -2576,20 +2518,28 @@
   }
 
   function registerTerminalLinkHandling(term, container) {
+    var linkRegistration = null;
     if (typeof term.registerLinkProvider === "function") {
-      term.registerLinkProvider({
+      linkRegistration = term.registerLinkProvider({
         provideLinks: function (y, callback) {
           callback(terminalLinksForLine(terminalLineText(term, y), y));
         },
       });
     }
-    container.addEventListener("contextmenu", function (event) {
+    function handleContextMenu(event) {
       var url = terminalUrlAtEvent(term, event);
       if (!url) return;
       event.preventDefault();
       event.stopPropagation();
       openTerminalLink(url, event);
-    }, true);
+    }
+    container.addEventListener("contextmenu", handleContextMenu, true);
+    return {
+      dispose: function () {
+        container.removeEventListener("contextmenu", handleContextMenu, true);
+        if (linkRegistration && linkRegistration.dispose) linkRegistration.dispose();
+      },
+    };
   }
 
   function stageBrowserSurface() {
@@ -3164,66 +3114,45 @@
     syncThreadPaneMetadata(thread);
     renderPaneWorkspace({ preserveTerminalFocus: false });
 
-    var term = new window.Terminal({
-      fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
-      fontSize: 13,
-      lineHeight: 1.18,
-      // Fully transparent canvas: the terminal's tint comes from
-      // .terminal-area's CSS background, which already tracks --bg-opacity.
-      // Driving it through the xterm theme instead left .xterm-viewport
-      // painted an opaque black that ignored the setting.
-      allowTransparency: true,
-      theme: {
-        background: "rgba(0, 0, 0, 0)",
-        foreground: "#ece9f5",
-        cursor: "#a78bfa",
-        selectionBackground: "rgba(167,139,250,0.30)",
+    var controller = PsycheRuntime.createTerminalPaneController({
+      paneId: thread.id,
+      threadId: thread.id,
+      container: container,
+      frameScheduler: terminalFrameScheduler,
+      invoke: invoke,
+      initialVisibility: threadTerminalVisibility(thread),
+      isSelected: function () { return state.activeThreadId === thread.id; },
+      terminalOptions: {
+        fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
+        fontSize: 13,
+        lineHeight: 1.18,
+        // Fully transparent canvas: the terminal's tint comes from
+        // .terminal-area's CSS background, which already tracks --bg-opacity.
+        allowTransparency: true,
+        theme: terminalTheme(),
+        cursorBlink: true,
+        convertEol: false,
+        allowProposedApi: true,
       },
-      cursorBlink: true,
-      convertEol: false,
-      allowProposedApi: true,
+      registerLinks: registerTerminalLinkHandling,
+      onData: function (data) {
+        routeTerminalData(thread, data);
+      },
+      onBell: function () {
+        if (!threadWantsAttentionTracking(thread)) return;
+        applyThreadAttention(thread, attentionTracker.bell(thread.id));
+      },
     });
-    var fit = window.FitAddon ? new window.FitAddon.FitAddon() : null;
-    if (fit) term.loadAddon(fit);
-    term.open(container);
-    registerTerminalLinkHandling(term, container);
+    thread.terminalController = controller;
+    // Temporary compatibility alias for legacy link/tail inspection callers.
+    thread.term = controller.compatibilityTerminal();
     container.addEventListener("pointerdown", function () {
       if (state.activeThreadId !== thread.id) {
         focusThread(thread.id);
       } else {
-        term.focus();
+        controller.focus();
       }
     });
-
-    // Premium upgrade: try the WebGL renderer for sharp text + truecolor.
-    // Fall back silently to the default canvas renderer if WebGL is
-    // unavailable (e.g. virtualised GPU).
-    try {
-      if (window.WebglAddon && window.WebglAddon.WebglAddon) {
-        var webgl = new window.WebglAddon.WebglAddon();
-        webgl.onContextLoss(function () { try { webgl.dispose(); } catch (_) {} });
-        term.loadAddon(webgl);
-      }
-    } catch (_) { /* canvas fallback is fine */ }
-
-    term.onData(function (data) {
-      routeTerminalData(thread, data);
-    });
-    // Agents ring the bell for exactly one reason -- they want the user back --
-    // so it is trusted immediately instead of waiting for the tail to settle.
-    if (typeof term.onBell === "function") {
-      term.onBell(function () {
-        if (!threadWantsAttentionTracking(thread)) return;
-        applyThreadAttention(thread, attentionTracker.bell(thread.id));
-      });
-    }
-    term.onResize(function (size) {
-      scheduleThreadPtyResize(thread, size);
-    });
-
-    thread.term = term;
-    thread.fit = fit;
-    ensureThreadPtyController(thread, term);
     syncThreadPtyVisibility(thread);
   }
 
@@ -3323,7 +3252,7 @@
     layout.root = nextRoot;
     layout.focusedLeafId = source.id;
     renderPaneWorkspace();
-    scheduleVisiblePaneFit();
+    scheduleTerminalPaneFits();
     return true;
   }
 
@@ -3885,7 +3814,7 @@
     if (!activeElement) return null;
     for (var i = 0; i < state.threads.length; i++) {
       var thread = state.threads[i];
-      if (thread.term && thread.host && thread.host.contains(activeElement)) {
+      if (thread.terminalController && thread.host && thread.host.contains(activeElement)) {
         return thread;
       }
     }
@@ -3898,7 +3827,7 @@
       if (
         !isLiveThread(thread) ||
         state.activeThreadId !== thread.id ||
-        !thread.term ||
+        !thread.terminalController ||
         !thread.pane ||
         terminalHost.hidden ||
         !terminalHost.contains(thread.pane)
@@ -3906,7 +3835,7 @@
         return;
       }
       withTerminalFocusReportToken(thread, "\x1b[I", "suppress", function () {
-        thread.term.focus();
+        thread.terminalController.focus();
       });
     });
   }
@@ -3960,13 +3889,13 @@
       (!options || options.preserveTerminalFocus !== false);
     var focusedThread = focusedTerminalThreadForRender();
     try {
-      if (focusedThread && focusedThread.term) {
+      if (focusedThread && focusedThread.terminalController) {
         withTerminalFocusReportToken(
           focusedThread,
           "\x1b[O",
           preserveTerminalFocus ? "suppress" : "allow",
           function () {
-            focusedThread.term.blur();
+            focusedThread.terminalController.blur();
           }
         );
       }
@@ -4019,7 +3948,7 @@
         filesPaneHasCanvasFocus() ? findOpenFile(state.activeFileId) : null
       );
       syncAllPtyVisibility();
-      scheduleVisiblePaneFit();
+      scheduleTerminalPaneFits();
       requestAnimationFrame(syncBrowserBounds);
     } finally {
       if (preserveTerminalFocus) restoreRenderedTerminalFocus(focusedThread);
@@ -4272,7 +4201,7 @@
         "\x1b[O",
         "allow",
         function () {
-          focusedSourceThread.term.blur();
+          focusedSourceThread.terminalController.blur();
         }
       );
     }
@@ -4304,15 +4233,15 @@
       if (!focusedThread || state.activeThreadId !== id) return;
       if (
         isLiveThread(focusedThread) &&
-        focusedThread.term &&
+        focusedThread.terminalController &&
         focusedThread.pane &&
         !terminalHost.hidden &&
         terminalHost.contains(focusedThread.pane)
       ) {
-        scheduleVisiblePaneFit();
+        scheduleTerminalPaneFits();
         if (!options || options.focusTerminal !== false) {
           withTerminalFocusReportToken(focusedThread, "\x1b[I", "allow", function () {
-            focusedThread.term.focus();
+            focusedThread.terminalController.focus();
           });
         }
       }
@@ -4370,11 +4299,11 @@
       : surface);
     if (!surface) return null;
     var thread = typeof findThread === "function" ? findThread(surface.id) : surface;
-    if (thread && thread.term) {
+    if (thread && thread.terminalController) {
       var focusedThread = focusedTerminalThreadForRender();
       if (focusedThread === thread) {
         withTerminalFocusReportToken(thread, "\x1b[O", "allow", function () {
-          thread.term.blur();
+          thread.terminalController.blur();
         });
       }
     }
@@ -4662,7 +4591,6 @@
     thread.closing = true;
     if (thread.ptyIoQueue) {
       thread.ptyIoQueue.closed = true;
-      thread.ptyIoQueue.pendingResize = null;
     }
     thread.metricsGeneration += 1;
     if (thread.metricsRefreshTimer) {
@@ -4673,19 +4601,17 @@
     if (thread.terminalController && thread.terminalController.dispose) {
       try { thread.terminalController.dispose(); } catch (_) {}
     }
-    thread.terminalController = null;
     // A set must never point at a thread that no longer exists, or scoping the
     // canvas to it would silently show fewer panes than it claims.
     forgetThreadInSets(id);
     var nextThreadId = detachThreadPane(thread);
+    thread.terminalController = null;
+    thread.term = null;
     if (nextThreadId && !findThread(nextThreadId)) {
       nextThreadId = canvasThreadIds()[0] || null;
     }
     if (thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
       stopThreadPty(thread);
-    }
-    if (thread.term && thread.term.dispose) {
-      try { thread.term.dispose(); } catch (_) {}
     }
     var closingProjectId = thread.projectId;
     state.threads = state.threads.filter(function (t) { return t.id !== id; });
@@ -4958,29 +4884,13 @@
     closeProjectAppearancePopover();
   });
 
-  function fitVisiblePanes() {
-    visiblePaneFitFrame = 0;
-    if (!terminalHost || terminalHost.hidden) return;
-    var layout = activePaneLayout();
-    if (!layout || !layout.root) return;
-    var projected = PsychePanes.layoutRects(
-      effectivePaneRoot(layout),
-      measuredTerminalHost(),
-      PANE_MINIMUMS
-    );
-    projected.leaves.forEach(function (leaf) {
-      var thread = findThread(leaf.threadId);
-      if (!thread || !thread.fit) return;
-      try { thread.fit.fit(); } catch (err) { console.warn("terminal pane fit failed", err); }
+  function scheduleTerminalPaneFits() {
+    state.threads.forEach(function (thread) {
+      if (thread.terminalController) thread.terminalController.scheduleFit();
     });
   }
-
-  function scheduleVisiblePaneFit() {
-    if (visiblePaneFitFrame) return;
-    visiblePaneFitFrame = requestAnimationFrame(fitVisiblePanes);
-  }
   window.addEventListener("resize", function () {
-    scheduleVisiblePaneFit();
+    scheduleTerminalPaneFits();
     syncBrowserBounds();
     // Whether the strip overflows is a function of width, not of its contents.
     syncTabStripOverflow();
@@ -7955,7 +7865,7 @@
     clearPassiveCovenPaneFocus();
     renderPaneMinimap(activePaneLayout(), null);
     refreshTabs();
-    requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
+    requestAnimationFrame(function () { scheduleTerminalPaneFits(); });
     return true;
   }
 
@@ -8801,8 +8711,8 @@
     if (queue.closed ||
         pendingBytes + encoded.length > MAX_PENDING_PTY_INPUT_BYTES ||
         pendingWrites >= MAX_PENDING_PTY_INPUT_WRITES) {
-      if (thread.term) {
-        thread.term.write("\r\n\x1b[31m[pty_write]\x1b[0m input queue is full\r\n");
+      if (thread.terminalController) {
+        thread.terminalController.write("\r\n\x1b[31m[pty_write]\x1b[0m input queue is full\r\n");
       }
       return Promise.resolve(false);
     }
@@ -8821,8 +8731,8 @@
         return true;
       });
     }).catch(function (err) {
-      if (thread.term) {
-        thread.term.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
+      if (thread.terminalController) {
+        thread.terminalController.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
       }
       return false;
     });
@@ -8835,7 +8745,7 @@
   }
   function writeToActive(text) {
     var thread = findThread(state.activeThreadId);
-    if (thread && thread.term) thread.term.write(text);
+    if (thread && thread.terminalController) thread.terminalController.write(text);
   }
 
   // -------- Palette --------
@@ -10596,7 +10506,7 @@
     syncSidebarToggleState(!open);
     if (!open) closeNewPaneMenu();
     requestAnimationFrame(function () {
-      scheduleVisiblePaneFit();
+      scheduleTerminalPaneFits();
       syncBrowserBounds();
     });
   }
@@ -10626,7 +10536,7 @@
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", up);
         sidebarResizeEl.classList.remove("dragging");
-        requestAnimationFrame(function () { scheduleVisiblePaneFit(); syncBrowserBounds(); });
+        requestAnimationFrame(function () { scheduleTerminalPaneFits(); syncBrowserBounds(); });
       }
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);
