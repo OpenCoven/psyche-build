@@ -8,6 +8,8 @@
 
 **Tech Stack:** TypeScript, Node.js Unix sockets, JSON line protocol, Vitest, MCP tools.
 
+**Coordination:** Local experimental branches `pr-130` and `codex/complete-task-bound-control-snapshot-auth-after-130` are reference material only. This clean two-PR design intentionally supersedes them: do not rebase onto or merge them, and exclude their unrelated runtime timeout/quarantine changes. Leave them untouched until final equivalence review and cleanup.
+
 ---
 
 ## File Map
@@ -56,7 +58,7 @@ Expected: `.worktrees/task-bound-control` is created on a new branch.
 - [ ] **Step 3: Bring the approved design and plans into the branch**
 
 ```bash
-git -C .worktrees/task-bound-control cherry-pick task-scoped-control-plan
+git -C .worktrees/task-bound-control cherry-pick 4a24bd84 d6ff8bf0
 git -C .worktrees/task-bound-control status --short --branch
 ```
 
