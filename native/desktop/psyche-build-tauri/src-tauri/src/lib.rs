@@ -110,6 +110,15 @@ fn ensure_trusted_browser_caller(label: &str) -> Result<(), String> {
     ))
 }
 
+fn ensure_trusted_pty_caller(label: &str) -> Result<(), String> {
+    if label == "main" {
+        return Ok(());
+    }
+    Err(format!(
+        "PTY authority is only available to trusted webview 'main'; rejected caller '{label}'"
+    ))
+}
+
 fn validate_browser_snapshot_dimensions(width: u32, height: u32) -> Result<(), String> {
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
@@ -2386,7 +2395,12 @@ impl From<TransportOutputPumpSnapshot> for PtyTransportSnapshot {
 }
 
 #[tauri::command]
-async fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
+async fn pty_start(
+    webview: tauri::Webview,
+    app: AppHandle,
+    options: StartOptions,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
     match tauri::async_runtime::spawn_blocking(move || pty_start_blocking(app, options)).await {
         Ok(result) => result,
         Err(error) => Err(format!("failed to join PTY start task: {error}")),
@@ -2563,7 +2577,12 @@ fn register_pty_client(
 }
 
 #[tauri::command]
-async fn pty_attach(app: AppHandle, options: PtyAttachOptions) -> Result<(), String> {
+async fn pty_attach(
+    webview: tauri::Webview,
+    app: AppHandle,
+    options: PtyAttachOptions,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
     match tauri::async_runtime::spawn_blocking(move || pty_attach_blocking(app, options)).await {
         Ok(result) => result,
         Err(error) => Err(format!("failed to join PTY attach task: {error}")),
@@ -2602,7 +2621,12 @@ fn pty_attach_blocking(app: AppHandle, options: PtyAttachOptions) -> Result<(), 
 }
 
 #[tauri::command]
-async fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
+async fn pty_write(
+    webview: tauri::Webview,
+    thread_id: String,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
     let (writer, operation_lane, operation_admission) = pty_write_operation(&thread_id)?;
     let operation_permit = operation_admission
         .try_acquire_owned()
@@ -2654,7 +2678,13 @@ fn pty_write_blocking(
 }
 
 #[tauri::command]
-async fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
+async fn pty_resize(
+    webview: tauri::Webview,
+    thread_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
     let Some((master, operation_lane, operation_admission)) = pty_resize_operation(&thread_id)
     else {
         return Ok(());
@@ -2721,7 +2751,8 @@ struct PtyStopResult {
 }
 
 #[tauri::command]
-fn pty_stop(thread_id: String) -> Result<PtyStopResult, String> {
+fn pty_stop(webview: tauri::Webview, thread_id: String) -> Result<PtyStopResult, String> {
+    ensure_trusted_pty_caller(webview.label())?;
     let action = {
         let mut registry = PTY_LIFECYCLES.lock();
         registry
@@ -2751,7 +2782,16 @@ fn pty_stop(thread_id: String) -> Result<PtyStopResult, String> {
 }
 
 #[tauri::command]
-fn pty_ack(thread_id: String, sequence: u64) -> Result<AckOutcome, String> {
+fn pty_ack(
+    webview: tauri::Webview,
+    thread_id: String,
+    sequence: u64,
+) -> Result<AckOutcome, String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    pty_ack_inner(thread_id, sequence)
+}
+
+fn pty_ack_inner(thread_id: String, sequence: u64) -> Result<AckOutcome, String> {
     let pump = clone_live_pty_pump(&thread_id)?;
     pump.acknowledge(sequence)
         .map(AckOutcome::from)
@@ -2759,7 +2799,16 @@ fn pty_ack(thread_id: String, sequence: u64) -> Result<AckOutcome, String> {
 }
 
 #[tauri::command]
-fn pty_set_visibility(thread_id: String, visible: bool) -> Result<(), String> {
+fn pty_set_visibility(
+    webview: tauri::Webview,
+    thread_id: String,
+    visible: bool,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    pty_set_visibility_inner(thread_id, visible)
+}
+
+fn pty_set_visibility_inner(thread_id: String, visible: bool) -> Result<(), String> {
     let pump = clone_live_pty_pump(&thread_id)?;
     pump.set_visibility(if visible {
         TransportPaneVisibility::Visible
@@ -2770,12 +2819,21 @@ fn pty_set_visibility(thread_id: String, visible: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pty_list() -> Vec<String> {
-    PTY_LIFECYCLES.lock().live_thread_ids()
+fn pty_list(webview: tauri::Webview) -> Result<Vec<String>, String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    Ok(PTY_LIFECYCLES.lock().live_thread_ids())
 }
 
 #[tauri::command]
-fn pty_transport_metrics(thread_id: Option<String>) -> Vec<PtyTransportSnapshot> {
+fn pty_transport_metrics(
+    webview: tauri::Webview,
+    thread_id: Option<String>,
+) -> Result<Vec<PtyTransportSnapshot>, String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    Ok(pty_transport_metrics_inner(thread_id))
+}
+
+fn pty_transport_metrics_inner(thread_id: Option<String>) -> Vec<PtyTransportSnapshot> {
     let pumps = match thread_id {
         Some(thread_id) => {
             if validate_pty_thread_id(&thread_id).is_err() {
@@ -5797,6 +5855,15 @@ mod pty_runtime_tests {
     }
 
     #[test]
+    fn pty_privileged_commands_reject_external_callers() {
+        assert_eq!(ensure_trusted_pty_caller("main"), Ok(()));
+        assert_eq!(
+            ensure_trusted_pty_caller("psyche-browser-untrusted").unwrap_err(),
+            "PTY authority is only available to trusted webview 'main'; rejected caller 'psyche-browser-untrusted'"
+        );
+    }
+
+    #[test]
     fn browser_snapshot_dimensions_are_bounded_before_capture() {
         assert!(validate_browser_snapshot_dimensions(800, 600).is_ok());
         assert!(validate_browser_snapshot_dimensions(0, 600).is_err());
@@ -6426,11 +6493,11 @@ mod pty_runtime_tests {
     #[test]
     fn pty_ack_reports_missing_invalid_duplicate_future_and_skipped_sequences() {
         assert_eq!(
-            pty_ack("missing-pane".to_string(), 1).unwrap_err(),
+            pty_ack_inner("missing-pane".to_string(), 1).unwrap_err(),
             "thread 'missing-pane' not found"
         );
         assert_eq!(
-            pty_ack("../unsafe".to_string(), 1).unwrap_err(),
+            pty_ack_inner("../unsafe".to_string(), 1).unwrap_err(),
             "thread id is unsafe"
         );
 
@@ -6448,7 +6515,7 @@ mod pty_runtime_tests {
         );
 
         assert!(matches!(
-            pty_ack("ack-pane".to_string(), 1).unwrap(),
+            pty_ack_inner("ack-pane".to_string(), 1).unwrap(),
             AckOutcome::Advanced {
                 sequence: 1,
                 bytes: 1,
@@ -6456,11 +6523,11 @@ mod pty_runtime_tests {
             } if latency_micros >= duration_to_micros(pty_transport::VISIBLE_CADENCE)
         ));
         assert_eq!(
-            pty_ack("ack-pane".to_string(), 1).unwrap(),
+            pty_ack_inner("ack-pane".to_string(), 1).unwrap(),
             AckOutcome::Duplicate { sequence: 1 }
         );
         assert!(matches!(
-            pty_ack("ack-pane".to_string(), 2).unwrap(),
+            pty_ack_inner("ack-pane".to_string(), 2).unwrap(),
             AckOutcome::Advanced {
                 sequence: 2,
                 bytes: 1,
@@ -6481,11 +6548,11 @@ mod pty_runtime_tests {
             Ok(pty_transport::EmitOutcome::Emitted { sequence: 2 })
         );
         assert_eq!(
-            pty_ack("ack-skipped-pane".to_string(), 2).unwrap_err(),
+            pty_ack_inner("ack-skipped-pane".to_string(), 2).unwrap_err(),
             "PTY batch acknowledgement 2 skipped expected sequence 1"
         );
         assert_eq!(
-            pty_ack("ack-skipped-pane".to_string(), 3).unwrap_err(),
+            pty_ack_inner("ack-skipped-pane".to_string(), 3).unwrap_err(),
             "PTY batch acknowledgement 3 is newer than emitted sequence 2"
         );
     }
@@ -6494,7 +6561,7 @@ mod pty_runtime_tests {
     #[test]
     fn pty_set_visibility_only_updates_metrics_on_actual_transitions() {
         assert_eq!(
-            pty_set_visibility("missing-visibility".to_string(), false).unwrap_err(),
+            pty_set_visibility_inner("missing-visibility".to_string(), false).unwrap_err(),
             "thread 'missing-visibility' not found"
         );
 
@@ -6502,31 +6569,31 @@ mod pty_runtime_tests {
         let visible_cadence = duration_to_micros(pty_transport::VISIBLE_CADENCE);
         let hidden_cadence = duration_to_micros(pty_transport::HIDDEN_CADENCE);
 
-        let initial = pty_transport_metrics(Some("visibility-pane".to_string()))
+        let initial = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
             .pop()
             .unwrap();
         assert_eq!(initial.visibility, PtyTransportVisibility::Visible);
         assert_eq!(initial.effective_cadence_micros, visible_cadence);
         assert_eq!(initial.metrics.visibility_transition_count, 0);
 
-        pty_set_visibility("visibility-pane".to_string(), true).unwrap();
-        let noop_visible = pty_transport_metrics(Some("visibility-pane".to_string()))
+        pty_set_visibility_inner("visibility-pane".to_string(), true).unwrap();
+        let noop_visible = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
             .pop()
             .unwrap();
         assert_eq!(noop_visible.visibility, PtyTransportVisibility::Visible);
         assert_eq!(noop_visible.effective_cadence_micros, visible_cadence);
         assert_eq!(noop_visible.metrics.visibility_transition_count, 0);
 
-        pty_set_visibility("visibility-pane".to_string(), false).unwrap();
-        let hidden = pty_transport_metrics(Some("visibility-pane".to_string()))
+        pty_set_visibility_inner("visibility-pane".to_string(), false).unwrap();
+        let hidden = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
             .pop()
             .unwrap();
         assert_eq!(hidden.visibility, PtyTransportVisibility::Hidden);
         assert_eq!(hidden.effective_cadence_micros, hidden_cadence);
         assert_eq!(hidden.metrics.visibility_transition_count, 1);
 
-        pty_set_visibility("visibility-pane".to_string(), false).unwrap();
-        let noop_hidden = pty_transport_metrics(Some("visibility-pane".to_string()))
+        pty_set_visibility_inner("visibility-pane".to_string(), false).unwrap();
+        let noop_hidden = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
             .pop()
             .unwrap();
         assert_eq!(noop_hidden.visibility, PtyTransportVisibility::Hidden);
@@ -6544,7 +6611,7 @@ mod pty_runtime_tests {
         let second = TestLivePtySession::register("metrics-b");
         first.pump.enqueue(b"secret-metadata".to_vec()).unwrap();
 
-        let mut filtered = pty_transport_metrics(Some("metrics-a".to_string()));
+        let mut filtered = pty_transport_metrics_inner(Some("metrics-a".to_string()));
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].thread_id, "metrics-a");
         assert_eq!(filtered[0].pending_bytes, b"secret-metadata".len());
@@ -6552,10 +6619,10 @@ mod pty_runtime_tests {
             filtered[0].metrics.state.bytes_accepted,
             b"secret-metadata".len() as u64
         );
-        assert!(pty_transport_metrics(Some("metrics-missing".to_string())).is_empty());
-        assert!(pty_transport_metrics(Some("../unsafe".to_string())).is_empty());
+        assert!(pty_transport_metrics_inner(Some("metrics-missing".to_string())).is_empty());
+        assert!(pty_transport_metrics_inner(Some("../unsafe".to_string())).is_empty());
 
-        let all = pty_transport_metrics(None);
+        let all = pty_transport_metrics_inner(None);
         let owned_from_all = all
             .into_iter()
             .filter(|snapshot| owned_ids.contains(&snapshot.thread_id.as_str()))
@@ -6580,10 +6647,10 @@ mod pty_runtime_tests {
         assert!(!serialized.to_string().contains("secret-metadata"));
 
         drop(second);
-        assert!(pty_transport_metrics(Some("metrics-b".to_string())).is_empty());
+        assert!(pty_transport_metrics_inner(Some("metrics-b".to_string())).is_empty());
         drop(first);
-        assert!(pty_transport_metrics(Some("metrics-a".to_string())).is_empty());
-        assert!(pty_transport_metrics(None)
+        assert!(pty_transport_metrics_inner(Some("metrics-a".to_string())).is_empty());
+        assert!(pty_transport_metrics_inner(None)
             .into_iter()
             .all(|snapshot| !owned_ids.contains(&snapshot.thread_id.as_str())));
     }
