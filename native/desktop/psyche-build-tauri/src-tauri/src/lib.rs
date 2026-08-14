@@ -5368,12 +5368,14 @@ fn git_log(root: String, limit: Option<u32>) -> Result<Vec<GitCommit>, String> {
 pub fn run() {
     env_logger::init();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder
         // Registers before Tauri creates any webview, including child browser
         // webviews, so WKWebView does not silently constrain visual updates to
-        // 60 Hz on macOS 13–15. The plugin is a no-op on other platforms and
-        // on macOS releases where WebKit has removed the cap.
-        .plugin(tauri_plugin_macos_fps::init())
+        // 60 Hz on macOS 13–15 and before setup/run lifecycle hooks execute.
+        .plugin(tauri_plugin_macos_fps::init());
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())

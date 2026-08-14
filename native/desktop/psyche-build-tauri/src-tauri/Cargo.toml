@@ -17,10 +17,6 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # tauri-build validates macOSPrivateApi against this entry even though Tauri cfg-gates it off non-macOS targets.
 tauri = { version = "2", features = ["macos-private-api", "unstable"] }
-# WKWebView limits requestAnimationFrame to 60 Hz on macOS 13–15 unless its
-# private high-refresh preference is explicitly enabled. Psyche Build is
-# distributed as notarized DMGs/Homebrew, not through the Mac App Store.
-tauri-plugin-macos-fps = "0.1.0"
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
@@ -42,6 +38,10 @@ getrandom = "0.2"
 portable-pty = { path = "vendor/portable-pty", version = "=0.8.1" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# WKWebView limits requestAnimationFrame to 60 Hz on macOS 13–15 unless its
+# private high-refresh preference is explicitly enabled. Psyche Build is
+# distributed as notarized DMGs/Homebrew, not through the Mac App Store.
+tauri-plugin-macos-fps = "0.1.0"
 window-vibrancy = "0.6"
 block2 = "0.6.2"
 objc2 = "0.6.4"

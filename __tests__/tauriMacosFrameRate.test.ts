@@ -13,9 +13,12 @@ const tauriConfig = JSON.parse(readFileSync(join(tauriRoot, 'tauri.conf.json'), 
 describe('macOS WKWebView frame pacing', () => {
   it('unlocks the native display refresh rate for every Tauri webview', () => {
     expect(cargoToml).toMatch(/^rust-version = "1\.85"$/m);
-    expect(cargoToml).toMatch(/^tauri-plugin-macos-fps = "0\.1\.0"$/m);
+    expect(cargoToml).toMatch(
+      /\[target\.'cfg\(target_os = "macos"\)'\.dependencies\][\s\S]*^tauri-plugin-macos-fps = "0\.1\.0"$/m,
+    );
     expect(tauriConfig.plugins?.['macos-fps']).toMatchObject({ enabled: true });
     expect(tauriLib).toContain('.plugin(tauri_plugin_macos_fps::init())');
+    expect(tauriLib).toContain('#[cfg(target_os = "macos")]');
   });
 
   it('registers high-refresh support before the app starts creating webviews', () => {
