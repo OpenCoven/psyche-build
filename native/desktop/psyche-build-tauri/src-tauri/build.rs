@@ -21,6 +21,7 @@ fn main() {
             "browser_destroy_many",
             "browser_reload",
             "browser_eval",
+            "browser_script",
             "browser_snapshot",
             "app_environment",
             "coven_sessions",

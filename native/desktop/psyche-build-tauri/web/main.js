@@ -9388,9 +9388,7 @@
     var operation = effect.operation || {};
     var request = operation.kind === "action"
       ? { type: "action", snapshotId: resolveBrowserAutomationSnapshotId(effect), action: operation.action }
-      : operation.kind === "script"
-        ? { type: "script", source: operation.source, args: operation.args }
-        : { type: "snapshot" };
+      : { type: "snapshot" };
     var requestJson = JSON.stringify(request);
     var receiptJson = JSON.stringify({ actionId: effect.actionId, tabId: effect.tabId, generation: effect.generation });
     return "window.__PSYCHE_AUTOMATION__.dispatchAndEmit(" + requestJson + "," + receiptJson + ");";
@@ -9630,6 +9628,15 @@
     }
     return { value: JSON.parse(encoded), resultBytes: value.resultBytes, durationMs: value.durationMs };
   }
+  function browserNativeScriptError(error) {
+    var message = String(error && error.message || error);
+    var allowed = ["backend_unavailable", "effect_unknown", "result_too_large", "serialization_failed",
+      "script_source_too_large", "target_unavailable", "automation_failed"];
+    var supplied = error && typeof error.code === "string" ? error.code : null;
+    var code = allowed.indexOf(supplied) !== -1 ? supplied
+      : allowed.find(function (candidate) { return message.indexOf(candidate) !== -1; }) || "automation_failed";
+    return Object.assign(new Error("browser script failed: " + code), { code: code, ambiguous: code === "effect_unknown" });
+  }
   function ambiguousBrowserLifecycle(message) {
     return Object.assign(new Error(message), { code: "effect_unknown", ambiguous: true });
   }
@@ -9752,21 +9759,33 @@
     var runInspect = async function () {
       if (!exactPairIsCurrent()) return completeReplaced();
       try {
-        var installed = await installBrowserAutomationForPair(pair);
-        if (!installed || !exactPairIsCurrent()) return completeReplaced();
-        var resultFlight = awaitBrowserAutomationResult(effect, effect.operation.kind === "script" ? 5000 : 15000);
-        try {
-          await invoke("browser_eval", {
-            label: browserLabelForTab(pair.project, pair.tab),
-            script: (browserTabLifecycle(pair.tab).automationSource || PsycheControl.browserAutomationSource()) + "\n" + browserAutomationDispatchScript(effect),
-            automationReceipt: { actionId: effect.actionId, tabId: effect.tabId, generation: effect.generation },
-          });
-        } catch (evalError) {
-          resultFlight.cancel(evalError);
-          await resultFlight.catch(function () {});
-          throw evalError;
+        var automationValue;
+        if (effect.operation.kind === "script") {
+          try {
+            automationValue = await invoke("browser_script", {
+              label: browserLabelForTab(pair.project, pair.tab),
+              request: { source: effect.operation.source, args: effect.operation.args === undefined ? null : effect.operation.args },
+            });
+          } catch (scriptError) {
+            throw browserNativeScriptError(scriptError);
+          }
+        } else {
+          var installed = await installBrowserAutomationForPair(pair);
+          if (!installed || !exactPairIsCurrent()) return completeReplaced();
+          var resultFlight = awaitBrowserAutomationResult(effect, 15000);
+          try {
+            await invoke("browser_eval", {
+              label: browserLabelForTab(pair.project, pair.tab),
+              script: (browserTabLifecycle(pair.tab).automationSource || PsycheControl.browserAutomationSource()) + "\n" + browserAutomationDispatchScript(effect),
+              automationReceipt: { actionId: effect.actionId, tabId: effect.tabId, generation: effect.generation },
+            });
+          } catch (evalError) {
+            resultFlight.cancel(evalError);
+            await resultFlight.catch(function () {});
+            throw evalError;
+          }
+          automationValue = await resultFlight;
         }
-        var automationValue = await resultFlight;
         var value = effect.operation.kind === "inspect"
           ? canonicalizeBrowserSemanticSnapshot(automationValue, pair, effect, Date.now())
           : effect.operation.kind === "script"

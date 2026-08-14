@@ -9,7 +9,9 @@
   actions, operator revocation, and no whole-desktop fallback.
 - Browser automation now uses bounded semantic snapshots and typed actions.
   Submit-capable actions bind captured form method/destination; approved scripts
-  are limited to 64 KiB source, five seconds, and 256 KiB JSON results.
+  are limited to 64 KiB source, five seconds, and 256 KiB JSON results. Each
+  approved script now runs in a fresh native WebKit content world so it cannot
+  poison the page automation realm or a later approved invocation.
 - Durable agent-control journal events and journaled receipts now contain
   allowlisted metadata only. Terminal output, semantic/page contents,
   screenshots, secret values, raw scripts, cookies, headers, absolute/full paths

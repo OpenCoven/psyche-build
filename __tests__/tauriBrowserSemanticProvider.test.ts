@@ -195,12 +195,11 @@ describe('Tauri semantic browser provider lifecycle', () => {
     }
   });
 
-  it('destroys and quarantines an unresponsive script child at five seconds and ignores late success', async () => {
+  it('destroys and quarantines a timed-out native script child at five seconds', async () => {
     vi.useFakeTimers();
     try {
       const calls: string[] = [];
       const completions: unknown[] = [];
-      const waiters = new Map<string, any>();
       const snapshots = new Map([['snapshot', { tabId: 'tab', generation: 1 }]]);
       const pair = { project: { root: '/project' }, browser: {}, worktreePath: '/project', tab: { id: 'tab' } };
       const lifecycle: any = {
@@ -218,24 +217,27 @@ describe('Tauri semantic browser provider lifecycle', () => {
         () => lifecycle, async () => { calls.push('invalidate-page'); return true; }, remove,
         snapshots, invalidateNavigation, invoke, () => 'project:tab:1',
       );
-      const awaitResult = Function(
-        'browserAutomationWaiters',
-        `return (${functionSource(main, 'awaitBrowserAutomationResult')});`,
-      )(waiters);
-      const dispatch = vi.fn(async () => ({}));
+      const dispatch = vi.fn(async (command: string) => {
+        if (command !== 'browser_script') return {};
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        throw Object.assign(new Error('effect_unknown'), { code: 'effect_unknown' });
+      });
+      const normalizeScriptError = Function(
+        `return (${functionSource(main, 'browserNativeScriptError')});`,
+      )();
       const handler = Function(
         'browserControlPairByTabId', 'browserTabLifecycle', 'completeBrowserProviderEffect',
         'browserProviderOperationPreflight', 'runBrowserLifecycleOperation', 'installBrowserAutomationForPair',
         'awaitBrowserAutomationResult', 'invoke', 'browserLabelForTab', 'PsycheControl',
         'browserAutomationDispatchScript', 'canonicalizeBrowserSemanticSnapshot', 'canonicalizeBrowserScriptResult',
-        'canonicalizeBrowserActionResult', 'quarantineBrowserAutomation',
+        'canonicalizeBrowserActionResult', 'quarantineBrowserAutomation', 'browserNativeScriptError',
         `return (${functionSource(main, 'handleBrowserProviderEffect')});`,
       )(
         () => pair, () => lifecycle,
         async (_project: unknown, result: unknown) => { completions.push(result); },
-        () => 'page', vi.fn(), async () => true, awaitResult,
+        () => 'page', vi.fn(), async () => true, vi.fn(),
         dispatch, () => 'project:tab:1', { browserAutomationSource: () => '' }, () => 'dispatch-script',
-        vi.fn(), (value: unknown) => value, vi.fn(), quarantine,
+        vi.fn(), (value: unknown) => value, vi.fn(), quarantine, normalizeScriptError,
       );
       const flight = handler({ payload: {
         actionId: 'hung-script', tabId: 'tab', projectRoot: '/project', generation: 1,
@@ -256,7 +258,6 @@ describe('Tauri semantic browser provider lifecycle', () => {
       expect(completions).toEqual([expect.objectContaining({
         actionId: 'hung-script', status: 'unknown', code: 'effect_unknown',
       })]);
-      expect(waiters.has('hung-script')).toBe(false);
     } finally {
       vi.useRealTimers();
     }
@@ -274,21 +275,26 @@ describe('Tauri semantic browser provider lifecycle', () => {
       lifecycle.nativeLabel = null;
       return true;
     });
-    const dispatch = vi.fn(async () => ({}));
+    const dispatch = vi.fn(async () => {
+      throw Object.assign(new Error('script-source-secret result-secret'), { code: 'effect_unknown', ambiguous: true });
+    });
+    const normalizeScriptError = Function(
+      `return (${functionSource(main, 'browserNativeScriptError')});`,
+    )();
     const handler = Function(
       'browserControlPairByTabId', 'browserTabLifecycle', 'completeBrowserProviderEffect',
       'browserProviderOperationPreflight', 'runBrowserLifecycleOperation', 'installBrowserAutomationForPair',
       'awaitBrowserAutomationResult', 'invoke', 'browserLabelForTab', 'PsycheControl',
       'browserAutomationDispatchScript', 'canonicalizeBrowserSemanticSnapshot', 'canonicalizeBrowserScriptResult',
-      'canonicalizeBrowserActionResult', 'quarantineBrowserAutomation',
+      'canonicalizeBrowserActionResult', 'quarantineBrowserAutomation', 'browserNativeScriptError',
       `return (${functionSource(main, 'handleBrowserProviderEffect')});`,
     )(
       () => pair, () => lifecycle,
       async (_project: unknown, result: unknown) => { completions.push(result); },
       () => 'page', vi.fn(), async () => true,
-      vi.fn(async () => { throw Object.assign(new Error('script-source-secret result-secret'), { code: 'effect_unknown', ambiguous: true }); }),
+      vi.fn(),
       dispatch, () => 'label', { browserAutomationSource: () => '' }, () => 'dispatch-script',
-      vi.fn(), vi.fn(), vi.fn(), quarantine,
+      vi.fn(), vi.fn(), vi.fn(), quarantine, normalizeScriptError,
     );
     await handler({ payload: {
       actionId: 'script-timeout', tabId: 'tab', projectRoot: '/project', generation: 1,

@@ -74,6 +74,11 @@ const MAX_BROWSER_SNAPSHOT_BYTES: usize =
     (MAX_PROVIDER_RESULT_BYTES - MAX_BROWSER_SNAPSHOT_JSON_OVERHEAD) / 4 * 3;
 const MAX_BROWSER_SNAPSHOT_DIMENSION: u32 = 8192;
 const MAX_BROWSER_SNAPSHOT_PIXELS: u64 = 16 * 1024 * 1024;
+const MAX_BROWSER_SCRIPT_SOURCE_BYTES: usize = 64 * 1024;
+const MAX_BROWSER_SCRIPT_RESULT_BYTES: usize = 256 * 1024;
+const BROWSER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
+const BROWSER_SCRIPT_CONTEXT_WORLD_NAME: &str = "com.opencoven.psyche.browser-script-context";
+static BROWSER_SCRIPT_WORLD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
 const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
@@ -3504,6 +3509,223 @@ fn browser_eval(
     Ok(())
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserScriptRequest {
+    source: String,
+    #[serde(default)]
+    args: serde_json::Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserScriptResponse {
+    value: serde_json::Value,
+    result_bytes: usize,
+    duration_ms: f64,
+}
+
+fn next_browser_script_execution_world_name() -> String {
+    format!(
+        "com.opencoven.psyche.browser-script-invocation-{}",
+        BROWSER_SCRIPT_WORLD_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn classify_browser_script_callback<T>(
+    callback_result: Result<T, String>,
+    expected_document_token: &str,
+    observed_document_token: Result<String, String>,
+) -> Result<T, String> {
+    match observed_document_token {
+        Ok(token) if token == expected_document_token => callback_result,
+        Ok(_) | Err(_) => Err("effect_unknown".to_string()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn evaluate_browser_script_in_world(
+    webview: &tauri::Webview,
+    script: String,
+    world_name: String,
+) -> Result<String, String> {
+    use block2::RcBlock;
+    use objc2::{runtime::AnyObject, ClassType, MainThreadMarker};
+    use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
+    use objc2_web_kit::{WKContentWorld, WKWebView};
+
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    webview
+        .with_webview(move |platform_webview| {
+            let sender = Mutex::new(Some(sender));
+            let completion = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+                let result = if !error.is_null() || value.is_null() {
+                    Err("automation_failed".to_string())
+                } else {
+                    let object = unsafe { &*(value as *const NSObject) };
+                    if !object.isKindOfClass(NSString::class()) {
+                        Err("serialization_failed".to_string())
+                    } else {
+                        Ok(unsafe { &*(value as *const AnyObject as *const NSString) }.to_string())
+                    }
+                };
+                if let Some(sender) = sender.lock().take() {
+                    let _ = sender.send(result);
+                }
+            });
+            let mtm = MainThreadMarker::new().expect("WKWebView callback runs on the main thread");
+            let world_name = NSString::from_str(&world_name);
+            let world = unsafe { WKContentWorld::worldWithName(&world_name, mtm) };
+            let source = NSString::from_str(&script);
+            let webview = unsafe { &*(platform_webview.inner() as *mut WKWebView) };
+            unsafe {
+                webview.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                    &source,
+                    None,
+                    &world,
+                    Some(&completion),
+                )
+            };
+        })
+        .map_err(|error| error.to_string())?;
+    tokio::time::timeout(BROWSER_SCRIPT_TIMEOUT, receiver)
+        .await
+        .map_err(|_| "effect_unknown".to_string())?
+        .map_err(|_| "effect_unknown".to_string())?
+}
+
+#[cfg(target_os = "macos")]
+async fn evaluate_browser_script_document_token(
+    webview: &tauri::Webview,
+) -> Result<String, String> {
+    let script = r#"(() => {
+      const key = '__PSYCHE_BROWSER_SCRIPT_DOCUMENT_CONTEXT__';
+      let state = globalThis[key];
+      if (!state || state.document !== document || state.root !== document.documentElement) {
+        state = Object.freeze({ document, root: document.documentElement,
+          token: crypto.randomUUID() });
+        Object.defineProperty(globalThis, key, { value: state, configurable: true });
+      }
+      return JSON.stringify({ documentToken: state.token });
+    })()"#;
+    let result_json = evaluate_browser_script_in_world(
+        webview,
+        script.to_string(),
+        BROWSER_SCRIPT_CONTEXT_WORLD_NAME.to_string(),
+    )
+    .await
+    .map_err(|_| "document_token_unavailable".to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(&result_json).map_err(|_| "document_token_unavailable".to_string())?;
+    value
+        .get("documentToken")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| "document_token_unavailable".to_string())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn browser_script(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+    request: BrowserScriptRequest,
+) -> Result<BrowserScriptResponse, String> {
+    ensure_trusted_browser_caller(webview.label())?;
+    if request.source.len() > MAX_BROWSER_SCRIPT_SOURCE_BYTES {
+        return Err("script_source_too_large".to_string());
+    }
+    let label = safe_browser_label(label);
+    let browser = app
+        .get_webview(&label)
+        .ok_or_else(|| "target_unavailable".to_string())?;
+    let before_url = browser
+        .url()
+        .map_err(|_| "target_unavailable".to_string())?;
+    let document_token = evaluate_browser_script_document_token(&browser)
+        .await
+        .map_err(|_| "effect_unknown".to_string())?;
+    let input = serde_json::to_string(&serde_json::json!({
+        "source": request.source,
+        "args": request.args,
+    }))
+    .map_err(|_| "serialization_failed".to_string())?;
+    let script = format!(
+        "{}({})",
+        include_str!("../../web/control/browser-script-runtime.js"),
+        input
+    );
+    let callback_result = evaluate_browser_script_in_world(
+        &browser,
+        script,
+        next_browser_script_execution_world_name(),
+    )
+    .await;
+    let after_url = browser.url().map_err(|_| "effect_unknown".to_string())?;
+    if after_url != before_url {
+        return Err("effect_unknown".to_string());
+    }
+    let observed_document_token = evaluate_browser_script_document_token(&browser).await;
+    let result_json = classify_browser_script_callback(
+        callback_result,
+        &document_token,
+        observed_document_token,
+    )?;
+    let envelope: serde_json::Value =
+        serde_json::from_str(&result_json).map_err(|_| "serialization_failed".to_string())?;
+    if envelope.get("ok") != Some(&serde_json::Value::Bool(true)) {
+        let code = envelope
+            .get("code")
+            .and_then(|value| value.as_str())
+            .filter(|code| {
+                matches!(
+                    *code,
+                    "automation_failed" | "result_too_large" | "serialization_failed"
+                )
+            })
+            .unwrap_or("automation_failed");
+        return Err(code.to_string());
+    }
+    let result_text = envelope
+        .get("json")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "serialization_failed".to_string())?;
+    let result_bytes = envelope
+        .get("byteCount")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| "serialization_failed".to_string())?;
+    let duration_ms = envelope
+        .get("durationMs")
+        .and_then(|value| value.as_f64())
+        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 5000.0)
+        .ok_or_else(|| "serialization_failed".to_string())?;
+    if result_bytes != result_text.len() || result_bytes > MAX_BROWSER_SCRIPT_RESULT_BYTES {
+        return Err("result_too_large".to_string());
+    }
+    let value =
+        serde_json::from_str(result_text).map_err(|_| "serialization_failed".to_string())?;
+    Ok(BrowserScriptResponse {
+        value,
+        result_bytes,
+        duration_ms,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn browser_script(
+    webview: tauri::Webview,
+    _app: AppHandle,
+    _label: Option<String>,
+    _request: BrowserScriptRequest,
+) -> Result<BrowserScriptResponse, String> {
+    ensure_trusted_browser_caller(webview.label())?;
+    Err("backend_unavailable".to_string())
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserSnapshot {
@@ -4965,6 +5187,7 @@ pub fn run() {
             browser_destroy_many,
             browser_reload,
             browser_eval,
+            browser_script,
             browser_snapshot,
             app_environment,
             coven_sessions,
@@ -5291,6 +5514,35 @@ mod browser_app_shortcut_tests {
         ));
         assert!(authorizations.consume("psyche-browser-project-1", &correlation));
         assert!(!authorizations.consume("psyche-browser-project-1", &correlation));
+    }
+
+    #[test]
+    fn browser_script_callback_is_stable_only_for_the_same_document() {
+        assert_eq!(
+            classify_browser_script_callback(
+                Err::<String, _>("automation_failed".to_string()),
+                "approved-token",
+                Ok("approved-token".to_string()),
+            ),
+            Err("automation_failed".to_string()),
+        );
+        assert_eq!(
+            classify_browser_script_callback(
+                Ok("old result"),
+                "approved-token",
+                Ok("replacement-token".to_string()),
+            ),
+            Err("effect_unknown".to_string()),
+        );
+    }
+
+    #[test]
+    fn browser_script_invocations_use_distinct_worlds() {
+        let first = next_browser_script_execution_world_name();
+        let second = next_browser_script_execution_world_name();
+        assert_ne!(first, second);
+        assert_ne!(first, BROWSER_SCRIPT_CONTEXT_WORLD_NAME);
+        assert_ne!(second, BROWSER_SCRIPT_CONTEXT_WORLD_NAME);
     }
 }
 

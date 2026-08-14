@@ -32,6 +32,7 @@
     "allow-browser-destroy-many",
     "allow-browser-reload",
     "allow-browser-eval",
+    "allow-browser-script",
     "allow-browser-snapshot",
     "allow-app-environment",
     "allow-coven-sessions",
