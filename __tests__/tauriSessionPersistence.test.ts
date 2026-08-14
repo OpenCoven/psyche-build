@@ -935,6 +935,12 @@ describe('Tauri workspace persistence model', () => {
     expect(functionSource('handleWindowCloseRequested')).toContain('await saveWorkspaceNow()');
   });
 
+  test('contains best-effort beforeunload save failures', () => {
+    expect(functionSource('handleWindowBeforeUnload')).toContain(
+      'saveWorkspaceNow().catch(function () {})',
+    );
+  });
+
   test.each([
     'commitPanePlacement',
     'updateActiveSplit',

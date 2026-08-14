@@ -10533,7 +10533,7 @@
   document.getElementById("open-external").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.url && tab.url !== "about:blank" && openUrl) openUrl(tab.url).catch(function () {}); });
   if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { syncBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }
   function handleWindowBeforeUnload(event) {
-    saveWorkspaceNow();
+    saveWorkspaceNow().catch(function () {});
     if (destroyingWindow || !state.openFiles.some(function (file) {
       return file.dirty || file.savePromise;
     })) return;
