@@ -2,7 +2,6 @@ import type {
   CommandOutcome,
   ControlCommandInput,
   ControlSnapshot,
-  ControlSnapshotScope,
 } from './types.js';
 import type { BrowserTabSurface } from './surfaces.js';
 import type { ProviderEffectResult, ProviderPush } from './browserProviderBroker.js';
@@ -30,7 +29,7 @@ export type ControlRequest =
       version: 1;
       type: 'state.get';
       requestId: string;
-    } & ControlSnapshotScope
+    }
   | {
       version: 1;
       type: 'events.read';
@@ -163,9 +162,6 @@ export function decodeControlRequest(raw: string): ControlRequest {
       break;
     }
     case 'state.get':
-      if ('taskId' in value && value.taskId !== undefined && !isBoundedString(value.taskId, 256)) {
-        throw new Error('invalid state.get request');
-      }
       break;
     case 'events.read':
       if (

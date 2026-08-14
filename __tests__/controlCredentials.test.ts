@@ -25,7 +25,6 @@ import { ControlServer, createControlServerForTest } from '../src/control/server
 import type { ControlServerRuntime } from '../src/control/server.js';
 import type { ControlCommandInput, ControlSnapshot } from '../src/control/types.js';
 import type { ControlPrincipal } from '../src/control/credentials.js';
-import { createTaskScopedControlHarness } from './helpers/taskScopedControlHarness.js';
 
 let tempRoots: string[] = [];
 
@@ -344,77 +343,6 @@ describe('control server authorization', () => {
         receipts: [],
       });
       expect(JSON.stringify(snapshot)).not.toContain('secret');
-    } finally {
-      await Promise.allSettled(cleanups.map(async (close) => close()));
-    }
-  });
-
-  it('returns only persisted own-task authority when an agent supplies task scope', async () => {
-    const root = await tempProject();
-    const endpoint = path.join(root, 'control.sock');
-    const harness = await createTaskScopedControlHarness({ projectRoot: root, endpoint });
-    const cleanups: Array<() => Promise<void>> = [() => harness.server.close()];
-
-    try {
-      const operator = await ControlClient.connect({
-        projectRoot: root,
-        endpoint,
-        token: await harness.credentials.operatorToken(),
-        clientName: 'operator-task-scope',
-      });
-      cleanups.unshift(() => operator.close());
-      const agent = await ControlClient.connect({
-        projectRoot: root,
-        endpoint,
-        token: await harness.credentials.agentToken(),
-        clientName: 'agent-task-scope',
-      });
-      cleanups.unshift(() => agent.close());
-
-      const operatorSnapshot = await operator.getState();
-      expect(Object.values(operatorSnapshot.leases).map((lease) => lease.paneId))
-        .toContain(harness.laneOnlyPane.id);
-      expect(operatorSnapshot.approvals.map((approval) => approval.actionId))
-        .toEqual(expect.arrayContaining([harness.ownApprovalActionId, harness.otherApprovalActionId]));
-      expect(operatorSnapshot.receipts.map((receipt) => receipt.actionId))
-        .toEqual(expect.arrayContaining([harness.ownApprovalActionId, harness.otherApprovalActionId]));
-
-      await expect(agent.getState()).resolves.toMatchObject({
-        commands: {},
-        leases: {},
-        resources: [],
-        capabilityLeases: [],
-        leaseRequests: [],
-        approvals: [],
-        receipts: [],
-      });
-
-      const scoped = await agent.getState({ taskId: harness.ownTaskId });
-      expect(scoped.commands).toEqual({});
-      expect(scoped.leases).toEqual({});
-      expect(scoped.resources.map((resource) => resource.id).sort())
-        .toEqual([harness.ownPane.id, harness.ownTab.id].sort());
-      expect(scoped.resources.map((resource) => resource.id)).not.toContain(harness.laneOnlyPane.id);
-      expect(scoped.resources.map((resource) => resource.id)).not.toContain(harness.otherPane.id);
-      expect(scoped.resources.map((resource) => resource.id)).not.toContain(harness.otherTab.id);
-      expect(scoped.capabilityLeases).toHaveLength(1);
-      expect(scoped.capabilityLeases[0]).toMatchObject({
-        id: harness.ownTabLease.id,
-        requestId: harness.ownTabRequestId,
-        taskId: harness.ownTaskId,
-      });
-      expect(scoped.leaseRequests).toHaveLength(1);
-      expect(scoped.leaseRequests[0]).toMatchObject({
-        id: harness.ownPaneRequestId,
-        taskId: harness.ownTaskId,
-      });
-      expect(scoped.approvals).toHaveLength(1);
-      expect(scoped.approvals[0]).toMatchObject({
-        actionId: harness.ownApprovalActionId,
-        leaseId: harness.ownTabLease.id,
-        leaseRevision: harness.ownTabLease.revision,
-      });
-      expect(scoped.receipts).toEqual([]);
     } finally {
       await Promise.allSettled(cleanups.map(async (close) => close()));
     }

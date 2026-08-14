@@ -123,24 +123,6 @@ describe('control protocol v1', () => {
     }
   });
 
-  it('decodes task-scoped state.get requests and rejects invalid task ids', () => {
-    expect(decodeControlRequest(JSON.stringify({
-      version: CONTROL_PROTOCOL_VERSION,
-      type: 'state.get',
-      requestId: 'req-1',
-      taskId: 'task-1',
-    }))).toMatchObject({ type: 'state.get', taskId: 'task-1' });
-
-    for (const taskId of ['', 17] as const) {
-      expect(() => decodeControlRequest(JSON.stringify({
-        version: CONTROL_PROTOCOL_VERSION,
-        type: 'state.get',
-        requestId: 'req-1',
-        taskId,
-      }))).toThrow('invalid state.get request');
-    }
-  });
-
   it('rejects events.read requests with a non-number afterSequence', () => {
     expect(() => decodeControlRequest(JSON.stringify({
       version: CONTROL_PROTOCOL_VERSION,

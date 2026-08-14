@@ -1,9 +1,5 @@
-import { mkdir, rm } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ControlClient } from '../src/control/client.js';
 import {
   TOOLS,
   closeMcpControlClients,
@@ -11,17 +7,10 @@ import {
   handleMcpRequest,
   setMcpDeps,
 } from '../src/mcp/server.js';
-import { createTaskScopedControlHarness } from './helpers/taskScopedControlHarness.js';
 
 const restores: Array<() => void> = [];
-const integrationCleanups: Array<() => Promise<void>> = [];
-let scratchRoots: string[] = [];
 afterEach(async () => {
   while (restores.length) restores.pop()!();
-  await Promise.allSettled(integrationCleanups.map(async (close) => close()));
-  integrationCleanups.length = 0;
-  await Promise.allSettled(scratchRoots.map((root) => rm(root, { recursive: true, force: true })));
-  scratchRoots = [];
   await closeMcpControlClients();
   vi.restoreAllMocks();
 });
@@ -47,13 +36,6 @@ function fakeClient(overrides: Record<string, unknown> = {}): any {
   };
 }
 
-async function scratchProject(): Promise<string> {
-  const root = path.join(process.cwd(), '.c', randomBytes(4).toString('hex'));
-  await mkdir(root, { recursive: true });
-  scratchRoots.push(root);
-  return root;
-}
-
 const lease = {
   task_id: 'task-1', lease_id: 'lease-1', lease_revision: 2,
 };
@@ -71,11 +53,6 @@ describe('agent surface MCP tools', () => {
       'psyche_browser_action', 'psyche_browser_script']) {
       const required = (TOOLS.find((tool) => tool.name === name)!.inputSchema.required ?? []) as string[];
       expect(required).toEqual(expect.arrayContaining(['task_id', 'lease_id', 'lease_revision']));
-    }
-
-    for (const name of ['psyche_control_list', 'psyche_control_action_status', 'psyche_list_panes']) {
-      const required = (TOOLS.find((tool) => tool.name === name)!.inputSchema.required ?? []) as string[];
-      expect(required).toEqual(expect.arrayContaining(['task_id']));
     }
   });
 
@@ -155,7 +132,7 @@ describe('agent surface MCP tools', () => {
     })) });
     inject({ controlClientForRoot: vi.fn(async () => client) });
 
-    const body = payload(await call('psyche_control_list', { project_root: '/repo', task_id: 'task-1' }));
+    const body = payload(await call('psyche_control_list', { project_root: '/repo' }));
     expect(body).not.toHaveProperty('leases');
     expect(body).not.toHaveProperty('lease_requests');
     expect(JSON.stringify(body)).not.toContain('lease-victim');
@@ -244,7 +221,7 @@ describe('agent surface MCP tools', () => {
     })) });
 
     expect(payload(await call('psyche_control_action_status', {
-      action_id: 'missing-action', task_id: 'task-1', project_root: '/repo',
+      action_id: 'missing-action', project_root: '/repo',
     }))).toEqual({ status: 'unknown', action_id: 'missing-action' });
   });
 
@@ -258,7 +235,7 @@ describe('agent surface MCP tools', () => {
       })),
     })) });
 
-    await call('psyche_control_list', { project_root: '/repo', task_id: 'task-1' });
+    await call('psyche_control_list', { project_root: '/repo' });
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -337,79 +314,6 @@ describe('agent surface MCP tools', () => {
   it('contains no direct mutation dependencies', () => {
     const source = readFileSync(new URL('../src/mcp/server.ts', import.meta.url), 'utf8');
     expect(source).not.toMatch(/spawnBridgePane|killBridgePane|TmuxControl|execFileSync/);
-  });
-
-  it('reads task-scoped runtime state through an agent-authenticated control client', async () => {
-    const projectRoot = await scratchProject();
-    const harness = await createTaskScopedControlHarness({
-      projectRoot,
-      endpoint: path.join(projectRoot, 's'),
-    });
-    integrationCleanups.push(() => harness.server.close());
-    const agentToken = await harness.credentials.agentToken();
-    inject({
-      controlClientForRoot: vi.fn((root) => ControlClient.connect({
-        projectRoot: root,
-        endpoint: harness.endpoint,
-        token: agentToken,
-        clientName: 'psyche-mcp-test',
-      })),
-    });
-
-    expect((await call('psyche_control_list', { project_root: projectRoot })).error.code).toBe(-32602);
-
-    const list = payload(await call('psyche_control_list', {
-      project_root: projectRoot,
-      task_id: harness.ownTaskId,
-    }));
-    expect(list.resources.map((resource: { id: string }) => resource.id).sort())
-      .toEqual([harness.ownPane.id, harness.ownTab.id].sort());
-    expect(list.resources.map((resource: { id: string }) => resource.id)).not.toContain(harness.laneOnlyPane.id);
-    expect(list.resources.map((resource: { id: string }) => resource.id)).not.toContain(harness.otherPane.id);
-    expect(list.resources.map((resource: { id: string }) => resource.id)).not.toContain(harness.otherTab.id);
-    expect(list.approvals).toEqual([expect.objectContaining({ actionId: harness.ownApprovalActionId })]);
-    expect(list).not.toHaveProperty('receipts');
-
-    const granted = payload(await call('psyche_control_lease', {
-      operation: 'status',
-      task_id: harness.ownTaskId,
-      request_id: harness.ownTabRequestId,
-      project_root: projectRoot,
-    }));
-    expect(granted.leases).toEqual([expect.objectContaining({
-      id: harness.ownTabLease.id,
-      requestId: harness.ownTabRequestId,
-      taskId: harness.ownTaskId,
-    })]);
-    expect(granted.requests).toEqual([]);
-
-    const pending = payload(await call('psyche_control_lease', {
-      operation: 'status',
-      task_id: harness.ownTaskId,
-      request_id: harness.ownPaneRequestId,
-      project_root: projectRoot,
-    }));
-    expect(pending.leases).toEqual([]);
-    expect(pending.requests).toEqual([expect.objectContaining({
-      id: harness.ownPaneRequestId,
-      taskId: harness.ownTaskId,
-    })]);
-
-    const panes = payload(await call('psyche_list_panes', {
-      project_root: projectRoot,
-      task_id: harness.ownTaskId,
-    }));
-    expect(panes).toMatchObject({
-      project_root: projectRoot,
-      count: 1,
-      panes: [expect.objectContaining({ id: harness.ownPane.id, generation: harness.ownPane.generation })],
-    });
-
-    expect(payload(await call('psyche_control_action_status', {
-      project_root: projectRoot,
-      task_id: harness.ownTaskId,
-      action_id: harness.ownApprovalActionId,
-    }))).toEqual({ status: 'unknown', action_id: harness.ownApprovalActionId });
   });
 });
 

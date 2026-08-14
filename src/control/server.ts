@@ -23,7 +23,6 @@ import type {
   ControlCommandInput,
   CommandOutcome,
   ControlSnapshot,
-  ControlSnapshotScope,
 } from './types.js';
 
 /** The minimal runtime surface the control server drives. */
@@ -200,13 +199,9 @@ export class ControlAuthority {
     return this.runtime.submit(command);
   }
 
-  snapshot(
-    principal: ControlPrincipal,
-    scope: ControlSnapshotScope = {},
-  ): ControlSnapshot {
+  snapshot(principal: ControlPrincipal): ControlSnapshot {
     const snapshot = this.runtime.snapshot();
     if (principal.kind === 'operator') return snapshot;
-    if (scope.taskId) return taskScopedSnapshot(snapshot, scope.taskId);
 
     // Surface metadata, command history, and authority records are
     // operator-only. In particular, capability leases are bearer-like:
@@ -247,73 +242,6 @@ export class ControlAuthority {
       },
     };
   }
-}
-
-/**
- * Task-scoped agent reads only trust durable snapshot relationships:
- * capability leases and pending lease requests carry `taskId` directly, and
- * active approvals still reference the exact lease id/revision that created
- * them. Receipts and legacy lane leases have no safe persisted task link, so
- * they remain redacted.
- */
-function taskScopedSnapshot(
-  snapshot: ControlSnapshot,
-  taskId: string,
-): ControlSnapshot {
-  const capabilityLeases = snapshot.capabilityLeases.filter((lease) => lease.taskId === taskId);
-  const leaseRequests = snapshot.leaseRequests.filter((request) => request.taskId === taskId);
-  const activeLeasesById = new Map(capabilityLeases.map((lease) => [lease.id, lease] as const));
-  const approvals = snapshot.approvals.filter((approval) => {
-    const lease = activeLeasesById.get(approval.leaseId);
-    return lease !== undefined
-      && lease.revision === approval.leaseRevision
-      && (approval.status === 'pending' || approval.status === 'approved');
-  });
-  return {
-    ...snapshot,
-    commands: {},
-    leases: {},
-    resources: collectScopedResources(snapshot.resources, capabilityLeases, leaseRequests),
-    capabilityLeases,
-    leaseRequests,
-    approvals,
-    receipts: [],
-  };
-}
-
-function collectScopedResources(
-  resources: ControlSnapshot['resources'],
-  capabilityLeases: ControlSnapshot['capabilityLeases'],
-  leaseRequests: ControlSnapshot['leaseRequests'],
-): readonly ControlSnapshot['resources'][number][] {
-  const resourcesByKey = new Map(resources.map((resource) => [resourceKey(resource), resource] as const));
-  const visibleKeys = new Set<string>();
-  for (const lease of capabilityLeases) {
-    for (const grant of lease.grants) addVisibleTarget(visibleKeys, resourcesByKey, grant.target);
-  }
-  for (const request of leaseRequests) {
-    for (const grant of request.grants) addVisibleTarget(visibleKeys, resourcesByKey, grant.target);
-  }
-  return resources.filter((resource) => visibleKeys.has(resourceKey(resource)));
-}
-
-function addVisibleTarget(
-  visibleKeys: Set<string>,
-  resourcesByKey: ReadonlyMap<string, ControlSnapshot['resources'][number]>,
-  target: { kind: string; id: string; generation?: number },
-): void {
-  const key = targetKey(target);
-  if (!key || !resourcesByKey.has(key)) return;
-  visibleKeys.add(key);
-}
-
-function targetKey(target: { kind: string; id: string; generation?: number }): string | undefined {
-  if (target.kind === 'project' || typeof target.generation !== 'number') return undefined;
-  return `${target.kind}\0${target.id}\0${target.generation}`;
-}
-
-function resourceKey(resource: ControlSnapshot['resources'][number]): string {
-  return `${resource.kind}\0${resource.id}\0${resource.generation}`;
 }
 
 /** Build an in-process authority for authorization unit tests. */
@@ -600,9 +528,7 @@ export class ControlServer {
           version: 1,
           type: 'state.result',
           requestId: request.requestId,
-          snapshot: this.authority.snapshot(principal, {
-            ...('taskId' in request ? { taskId: request.taskId } : {}),
-          }),
+          snapshot: this.authority.snapshot(principal),
         });
         return;
       case 'events.read': {

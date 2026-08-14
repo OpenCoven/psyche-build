@@ -233,31 +233,6 @@ describe('ControlClient over the socket transport', () => {
     expect(readEvents.mock.calls[0][0]).toBeGreaterThanOrEqual(49_000);
   });
 
-  it('does not scan global history for task-scoped action-status lookups', async () => {
-    const readEvents = vi.fn(() => ({
-      events: [{ sequence: 10, kind: 'command.succeeded', payload: { receipt: { actionId: 'missing' } } }],
-      nextSequence: 10,
-      gap: false,
-    }));
-    const harness = await startHarness({
-      snapshot: () => ({
-        ownerEpoch: 7, sequence: 10, commands: {}, leases: {}, resources: [],
-        capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
-      }),
-      readEvents,
-    });
-    const client = await ControlClient.connect({
-      projectRoot: harness.projectRoot,
-      endpoint: harness.endpoint,
-      token: harness.operatorToken,
-      clientName: 'scoped-status',
-    });
-    cleanups.push(() => client.close());
-
-    await expect(client.actionStatus('missing', { taskId: 'task-1' })).resolves.toBeUndefined();
-    expect(readEvents).not.toHaveBeenCalled();
-  });
-
   it('recovers a recent receipt from the bounded tail of a large journal', async () => {
     const receipt = {
       schema: 'psyche.control.receipt/v1' as const,
