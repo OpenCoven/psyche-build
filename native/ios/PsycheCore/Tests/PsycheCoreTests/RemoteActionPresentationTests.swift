@@ -206,8 +206,8 @@ final class RemoteActionPresentationTests: XCTestCase {
         }
     }
 
-    func testProgressHonorsDismissableAndNavigationIsAlwaysDismissable() throws {
-        XCTAssertFalse(try make(
+    func testProgressAndNavigationAreAlwaysDismissable() throws {
+        XCTAssertTrue(try make(
             result: makeResult(type: "progress", dismissable: false),
             sessionID: nil
         ).dismissable)

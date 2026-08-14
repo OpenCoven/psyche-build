@@ -35,9 +35,8 @@ Its public commands are:
   reduces the result.
 - `respond(_:)`, which sends a typed response for the current session and
   replaces the current presentation with the continuation result.
-- `dismiss()`, which closes only a terminal or explicitly dismissable
-  presentation. Interactive states cancel through `actions.respond` rather
-  than disappearing locally.
+- `dismiss()`, which closes non-interactive presentations. Interactive states
+  cancel through `actions.respond` rather than disappearing locally.
 
 The store exposes query helpers for whether a pane is busy and whether the
 current state can be dismissed. Launch-menu wiring is intentionally outside
@@ -80,7 +79,10 @@ Progress results render in the same sheet. They are non-interactive protocol
 results and do not invent a continuation session, so they end the remote
 session's busy state even though they may describe host work that continues
 outside the action protocol. Determinate progress uses the provided percentage;
-an absent percentage renders an indeterminate indicator.
+an absent percentage renders an indeterminate indicator. Progress is always
+dismissable even when the wire value is false because the protocol has no
+correlated continuation or update channel; honoring false would permanently
+lock the single-sheet store and block every later action.
 
 Success, info, and error results remain visible until the user dismisses them.
 Errors never auto-dismiss and never reuse success styling.
@@ -124,8 +126,8 @@ branches are shown as a direction, not as an unlabeled pair.
   using `inputMaxVisibleLines`.
 - **PR review:** Show source-to-target branch direction, editable summary,
   `aiFailed` warning, and the review file list before submission.
-- **Progress:** Render determinate or indeterminate progress and disable
-  response controls.
+- **Progress:** Render determinate or indeterminate progress with a dismiss
+  control, while keeping response controls disabled.
 - **Success, info, and error:** Show distinct accessible status treatment and
   a user-operated dismiss button.
 - **Navigation:** Show the host message and target pane metadata. Actual
@@ -164,6 +166,8 @@ Add focused reducer and command tests for:
 - Missing interactive session IDs.
 - Multi-step continuation replacement.
 - Busy-pane lifetime across chained interactions.
+- Progress remains dismissable when the host sends `dismissable: false`, clears
+  busy state, and permits a later start after dismissal.
 - Duplicate response suppression.
 - Terminal result and cancellation cleanup.
 - Unexpected responses, protocol errors, and transport failures.

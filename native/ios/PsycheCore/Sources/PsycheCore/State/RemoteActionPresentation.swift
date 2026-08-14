@@ -190,9 +190,7 @@ public struct RemoteActionPresentation: Sendable, Equatable, Identifiable {
         switch content {
         case .confirm, .choice, .input, .pullRequestReview:
             dismissable = false
-        case .progress:
-            dismissable = result.dismissable ?? true
-        case .terminal, .navigation:
+        case .progress, .terminal, .navigation:
             dismissable = true
         }
 

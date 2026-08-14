@@ -481,7 +481,7 @@ final class RemoteActionStoreTests: XCTestCase {
         XCTAssertTrue(store.isBusy(paneID))
     }
 
-    func testDismissRefusesNonDismissablePresentation() async {
+    func testHostNonDismissableProgressCanBeDismissedAndAllowsLaterStart() async {
         let requests = ActionControlRequests(responses: [
             .actionResult(actionResult(
                 requestID: "req-1",
@@ -489,14 +489,29 @@ final class RemoteActionStoreTests: XCTestCase {
                 type: "progress",
                 dismissable: false
             )),
+            .actionResult(actionResult(
+                requestID: "req-2",
+                sessionID: "session-2",
+                type: "confirm"
+            )),
         ])
         let store = RemoteActionStore(controlRequests: requests)
         await store.start(action: .runTest, onPane: paneID, in: workspace)
 
+        XCTAssertTrue(store.presentation?.dismissable == true)
+        XCTAssertFalse(store.isBusy(paneID))
+
         store.dismiss()
 
-        XCTAssertNotNil(store.presentation)
-        XCTAssertFalse(store.presentation?.dismissable == true)
+        XCTAssertNil(store.presentation)
+
+        await store.start(action: .close, onPane: "bridge-protocol", in: workspace)
+
+        let starts = await requests.starts
+        XCTAssertEqual(starts.map(\.paneID), [paneID, "bridge-protocol"])
+        XCTAssertEqual(store.presentation?.paneID, "bridge-protocol")
+        XCTAssertEqual(store.presentation?.sessionID, "session-2")
+        XCTAssertTrue(store.isBusy("bridge-protocol"))
     }
 
     func testDismissRefusesWhileSubmitting() async {

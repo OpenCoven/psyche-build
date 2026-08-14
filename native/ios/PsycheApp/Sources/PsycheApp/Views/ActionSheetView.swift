@@ -272,10 +272,8 @@ struct ActionSheetView: View {
                 )
             }
         case .progress:
-            if presentation.dismissable {
-                Section("Controls") {
-                    dismissButton("Dismiss")
-                }
+            Section("Controls") {
+                dismissButton("Dismiss")
             }
         case .terminal, .navigation:
             Section("Controls") {
