@@ -271,6 +271,9 @@ final class ControlMessagesTests: XCTestCase {
         let payloadObject = payload(from: object)
         let response = try XCTUnwrap(payloadObject["response"] as? [String: Any])
 
+        assertExactKeys(in: object, exactly: ["type", "payload"])
+        assertExactKeys(in: payloadObject, exactly: ["type", "requestId", "sessionId", "response"])
+        assertExactKeys(in: response, exactly: ["type"])
         XCTAssertEqual(payloadObject["type"] as? String, "actions.respond")
         XCTAssertEqual(payloadObject["requestId"] as? String, "confirm-request")
         XCTAssertEqual(payloadObject["sessionId"] as? String, "confirm-session")
@@ -290,6 +293,9 @@ final class ControlMessagesTests: XCTestCase {
         let payloadObject = payload(from: object)
         let response = try XCTUnwrap(payloadObject["response"] as? [String: Any])
 
+        assertExactKeys(in: object, exactly: ["type", "payload"])
+        assertExactKeys(in: payloadObject, exactly: ["type", "requestId", "sessionId", "response"])
+        assertExactKeys(in: response, exactly: ["type"])
         XCTAssertEqual(payloadObject["type"] as? String, "actions.respond")
         XCTAssertEqual(payloadObject["requestId"] as? String, "cancel-request")
         XCTAssertEqual(payloadObject["sessionId"] as? String, "cancel-session")
@@ -309,6 +315,9 @@ final class ControlMessagesTests: XCTestCase {
         let payloadObject = payload(from: object)
         let response = try XCTUnwrap(payloadObject["response"] as? [String: Any])
 
+        assertExactKeys(in: object, exactly: ["type", "payload"])
+        assertExactKeys(in: payloadObject, exactly: ["type", "requestId", "sessionId", "response"])
+        assertExactKeys(in: response, exactly: ["type", "optionId"])
         XCTAssertEqual(payloadObject["type"] as? String, "actions.respond")
         XCTAssertEqual(payloadObject["requestId"] as? String, "choice-request")
         XCTAssertEqual(payloadObject["sessionId"] as? String, "choice-session")
@@ -328,6 +337,9 @@ final class ControlMessagesTests: XCTestCase {
         let payloadObject = payload(from: object)
         let response = try XCTUnwrap(payloadObject["response"] as? [String: Any])
 
+        assertExactKeys(in: object, exactly: ["type", "payload"])
+        assertExactKeys(in: payloadObject, exactly: ["type", "requestId", "sessionId", "response"])
+        assertExactKeys(in: response, exactly: ["type", "value"])
         XCTAssertEqual(payloadObject["type"] as? String, "actions.respond")
         XCTAssertEqual(payloadObject["requestId"] as? String, "input-request")
         XCTAssertEqual(payloadObject["sessionId"] as? String, "input-session")
@@ -525,6 +537,15 @@ final class ControlMessagesTests: XCTestCase {
 
     private func payload(from object: [String: Any]) -> [String: Any] {
         (object["payload"] as? [String: Any]) ?? [:]
+    }
+
+    private func assertExactKeys(
+        in object: [String: Any],
+        exactly expectedKeys: [String],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(Set(object.keys), Set(expectedKeys), file: file, line: line)
     }
 
     private func controlPayloadType(in data: Data) -> String? {
