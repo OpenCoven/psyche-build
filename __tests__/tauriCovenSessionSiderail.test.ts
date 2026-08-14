@@ -39,6 +39,10 @@ const PsycheSessions = {
     repoRoot,
     'native/desktop/psyche-build-tauri/web/sessions/sidebar-model.mjs',
   )).href)),
+  ...(await import(pathToFileURL(join(
+    repoRoot,
+    'native/desktop/psyche-build-tauri/web/sessions/project-appearance.mjs',
+  )).href)),
 };
 
 function extractFunctionSource(source: string, name: string) {
@@ -67,6 +71,22 @@ function decodeHtml(value: string) {
 
 type Listener = (event: FakeEvent) => unknown;
 
+class FakeStyle {
+  private readonly properties = new Map<string, string>();
+
+  setProperty(name: string, value: string) {
+    this.properties.set(name, String(value));
+  }
+
+  getPropertyValue(name: string) {
+    return this.properties.get(name) ?? '';
+  }
+
+  removeProperty(name: string) {
+    this.properties.delete(name);
+  }
+}
+
 class FakeEvent {
   target: FakeElement;
   key: string;
@@ -93,6 +113,7 @@ class FakeElement {
   readonly attributes = new Map<string, string>();
   readonly listeners = new Map<string, Listener[]>();
   readonly innerHtmlAssignments: string[] = [];
+  readonly style = new FakeStyle();
   children: FakeElement[] = [];
   parentNode: FakeElement | null = null;
   className = '';
@@ -421,6 +442,7 @@ function createRenderer(options: {
   projects?: Project[];
   threads?: LocalThread[];
   sessions?: RemoteSession[];
+  projectAppearances?: Record<string, { accent?: string; glyph?: string }>;
   phase?: string;
   message?: string | null;
   stale?: boolean;
@@ -437,12 +459,25 @@ function createRenderer(options: {
   setPicking?: { key: string; picked: string[] } | null;
   selectedSessionKey?: string;
   typeFilter?: string;
+  localStorageWriteError?: unknown;
 } = {}) {
   const document = new FakeDocument();
   const sessionListEl = new FakeElement('div', document);
   const sessionSearchEl = new FakeElement('input', document);
   document.connectRoot(sessionListEl);
   document.connectRoot(sessionSearchEl);
+  const projectAppearancesKey = 'psyche.tauri.project-appearances.v1';
+  const storage = new Map<string, string>();
+  if (options.projectAppearances) {
+    storage.set(projectAppearancesKey, JSON.stringify(options.projectAppearances));
+  }
+  const localStorage = {
+    getItem: vi.fn((key: string) => storage.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string) => {
+      if (options.localStorageWriteError) throw options.localStorageWriteError;
+      storage.set(key, String(value));
+    }),
+  };
   sessionSearchEl.value = options.filter ?? '';
   const state = {
     env: { home: '/Users/val' },
@@ -507,6 +542,7 @@ function createRenderer(options: {
     sessionFilter: options.typeFilter ?? 'all',
     sidebarTab: 'sessions',
   };
+  let projectAppearances = { ...(options.projectAppearances ?? {}) };
   const saveSettings = vi.fn();
   const saveWorkspaceSoon = vi.fn();
   const setSessionTypeFilter = vi.fn();
@@ -519,8 +555,10 @@ function createRenderer(options: {
     'var armedSessionClose = null;',
     'var covenSessionCloseFlights = new Set();',
     'var covenSessionMutationGeneration = 0;',
+    'var PROJECT_APPEARANCES_KEY = "psyche.tauri.project-appearances.v1";',
     'var focusSets = seedFocusSets;',
     'var setPicking = seedSetPicking;',
+    'var projectAppearances = seedProjectAppearances;',
     'var sessionTreeFocusKey = "";',
     'var isRestoringWorkspace = false;',
     extractFunctionSource(mainJs, 'paneLayoutKey'),
@@ -562,9 +600,12 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'toggleSessionTreeDisclosure'),
     extractFunctionSource(mainJs, 'activateSessionTreeItem'),
     extractFunctionSource(mainJs, 'handleSessionTreeKeydown'),
+    extractFunctionSource(mainJs, 'restoreSessionTreeFocus'),
     extractFunctionSource(mainJs, 'threadIsToolPane'),
     extractFunctionSource(mainJs, 'sessionCloseLabel'),
     extractFunctionSource(mainJs, 'localSessionContextActions'),
+    extractFunctionSource(mainJs, 'saveProjectAppearances'),
+    extractFunctionSource(mainJs, 'applyProjectAppearance'),
     extractFunctionSource(mainJs, 'renderSessionList'),
   ];
   const harness = Function(
@@ -578,7 +619,8 @@ function createRenderer(options: {
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
     'saveWorkspaceSoon', 'activateProjectWorktree', 'setSessionTypeFilter',
-    'openSessionContextMenu', 'invoke', 'refreshCovenSessions',
+    'openSessionContextMenu', 'invoke', 'refreshCovenSessions', 'localStorage',
+    'seedProjectAppearances',
     `"use strict"; ${sources.join('\n')}; return {
       render: renderSessionList,
       setFilter: function (value) { sessionFilter = value; },
@@ -588,7 +630,10 @@ function createRenderer(options: {
       closeCovenSession: closeCovenSession,
       handleTreeKeydown: handleSessionTreeKeydown,
       toggleSetPick: toggleSetPick,
-      picked: function () { return setPicking ? setPicking.picked.slice() : null; }
+      picked: function () { return setPicking ? setPicking.picked.slice() : null; },
+      saveProjectAppearances: saveProjectAppearances,
+      applyProjectAppearance: applyProjectAppearance,
+      projectAppearances: function () { return projectAppearances; }
     };`,
   )(
     document,
@@ -648,6 +693,8 @@ function createRenderer(options: {
     openSessionContextMenu,
     invoke,
     refreshCovenSessions,
+    localStorage,
+    projectAppearances,
   ) as {
     render: () => void;
     setFilter: (value: string) => void;
@@ -660,6 +707,12 @@ function createRenderer(options: {
     handleTreeKeydown: (event: FakeEvent) => void;
     toggleSetPick: (threadId: string) => void;
     picked: () => string[] | null;
+    saveProjectAppearances: () => boolean;
+    applyProjectAppearance: (
+      project: Project | null | undefined,
+      patch: { accent?: string | null; glyph?: string | null } | null,
+    ) => boolean;
+    projectAppearances: () => Record<string, { accent?: string; glyph?: string }>;
     settings: typeof settings;
     saveSettings: typeof saveSettings;
     saveWorkspaceSoon: typeof saveWorkspaceSoon;
@@ -691,6 +744,7 @@ function createRenderer(options: {
     editLabelInline,
     openCovenSession,
     invoke,
+    localStorage,
     refreshCovenSessions,
     setStatus,
     canvasThreadIds,
@@ -781,6 +835,22 @@ describe('Tauri Coven session project rail', () => {
       .toContain('PSYCHE-BUILD');
     expect(renderer.sessionListEl.querySelector('.session-project-head')?.textContent)
       .toContain('5');
+    const projectHead = renderer.sessionListEl.querySelector('.session-project-head');
+    const projectGroup = renderer.sessionListEl.querySelector('.session-project');
+    const automaticAccentIds = new Set(PsycheSessions.PROJECT_ACCENTS.map(
+      (accent: { id: string }) => accent.id,
+    ));
+    expect(projectGroup?.classList.contains('is-current')).toBe(true);
+    expect(projectGroup?.dataset.projectAppearance).toBe('automatic');
+    expect(automaticAccentIds.has(projectGroup?.dataset.projectAccent ?? '')).toBe(true);
+    expect(projectHead?.style.getPropertyValue('--project-accent-rgb')).toBe(
+      PsycheSessions.PROJECT_ACCENTS.find(
+        (accent: { id: string; rgb: string }) => accent.id === projectGroup?.dataset.projectAccent,
+      )?.rgb,
+    );
+    expect(projectHead?.textContent).not.toContain('CURRENT');
+    expect(renderer.sessionListEl.querySelector('.session-current-badge')).toBeNull();
+    expect(renderer.sessionListEl.querySelector('.session-project-glyph')).toBeNull();
     expect(renderer.sessionListEl.querySelector('.session-branch-head')?.textContent)
       .toContain('feat/web-pane-attention');
     expect(renderer.sessionListEl.querySelector('.session-category-label')?.textContent)
@@ -829,6 +899,99 @@ describe('Tauri Coven session project rail', () => {
       .toBe('/repo/psyche-build');
     expect(renderer.document.created.flatMap((element) => element.innerHtmlAssignments))
       .toEqual([]);
+  });
+
+  it('renders customized project appearance datasets, accent, and glyph', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'psyche',
+        name: 'PSYCHE-BUILD',
+        root: '/repo/psyche-build',
+        collapsed: false,
+        selectedWorktreePath: '/repo/psyche-build',
+        worktrees: [{
+          path: '/repo/psyche-build',
+          branch: 'main',
+          is_main: true,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      projectAppearances: {
+        '/repo/psyche-build': { accent: 'violet', glyph: 'spark' },
+      },
+      threads: [{
+        id: 'shell',
+        projectId: 'psyche',
+        worktreePath: '/repo/psyche-build',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+      activeProjectId: 'psyche',
+    });
+
+    renderer.render();
+
+    const projectGroup = renderer.sessionListEl.querySelector('.session-project');
+    const projectHead = renderer.sessionListEl.querySelector('.session-project-head');
+    const glyph = renderer.sessionListEl.querySelector('.session-project-glyph');
+
+    expect(projectGroup?.dataset.projectAccent).toBe('violet');
+    expect(projectGroup?.dataset.projectAppearance).toBe('custom');
+    expect(projectHead?.style.getPropertyValue('--project-accent-rgb')).toBe('145 111 235');
+    expect(glyph?.textContent).toBe('✦');
+    expect(glyph?.getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('preserves in-memory project appearances and rerenders after save failures', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha',
+        name: 'Alpha',
+        root: '/alpha',
+        collapsed: false,
+        selectedWorktreePath: '/alpha',
+        worktrees: [{
+          path: '/alpha',
+          branch: 'main',
+          is_main: true,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'alpha',
+        worktreePath: '/alpha',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+      localStorageWriteError: new Error('disk full'),
+    });
+
+    renderer.render();
+    const project = renderer.sessionListEl.querySelector('.session-project');
+    project?.focus();
+
+    expect(renderer.applyProjectAppearance(renderer.state.projects[0], { accent: 'violet' })).toBe(true);
+
+    const rerenderedProject = renderer.sessionListEl.querySelector('.session-project');
+    const rerenderedHead = renderer.sessionListEl.querySelector('.session-project-head');
+
+    expect(renderer.setStatus).toHaveBeenCalledWith(
+      'project appearance save failed: Error: disk full',
+      'error',
+    );
+    expect(renderer.projectAppearances()).toEqual({
+      '/alpha': { accent: 'violet' },
+    });
+    expect(rerenderedProject?.dataset.projectAccent).toBe('violet');
+    expect(rerenderedHead?.style.getPropertyValue('--project-accent-rgb')).toBe('145 111 235');
+    expect(renderer.document.activeElement).toBe(rerenderedProject);
   });
 
   it('renders daemon-backed Coven sessions inside Agents with Coven metadata', () => {

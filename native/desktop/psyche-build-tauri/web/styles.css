@@ -4546,3 +4546,97 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   .call-bar { animation: none; }
   .call-dot, .call-wave i { animation: none; }
 }
+
+/* -------- Project header appearance bands --------
+   The project header is the project's visual anchor in the rail, so it gets a
+   full-width tint band while the branch and row affordances stay unchanged. */
+
+.session-project[data-project-appearance="automatic"] > .session-project-head {
+  --project-band-alpha: 0.10;
+  --project-band-border-alpha: 0.16;
+}
+
+.session-project[data-project-appearance="custom"] > .session-project-head {
+  --project-band-alpha: 0.16;
+  --project-band-border-alpha: 0.24;
+}
+
+.session-project > .session-project-head {
+  gap: 8px;
+  margin-bottom: 2px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid rgba(var(--project-accent-rgb), var(--project-band-border-alpha, 0.16));
+  border-radius: 10px;
+  background:
+    linear-gradient(
+      90deg,
+      rgba(var(--project-accent-rgb), var(--project-band-alpha, 0.10)) 0%,
+      rgba(var(--project-accent-rgb), 0.06) 56%,
+      rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.92)) 100%
+    ),
+    rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.96));
+  color: var(--text-soft);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 0 0 1px rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(16px) saturate(1.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+}
+
+.session-project > .session-project-head:hover {
+  border-color: rgba(var(--project-accent-rgb), 0.34);
+  background:
+    linear-gradient(
+      90deg,
+      rgba(var(--project-accent-rgb), 0.18) 0%,
+      rgba(var(--project-accent-rgb), 0.10) 56%,
+      rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.92)) 100%
+    ),
+    rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.98));
+  color: var(--text);
+  box-shadow:
+    inset 0 0 0 999px rgba(255, 255, 255, 0.02),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 8px 24px rgba(0, 0, 0, 0.16);
+}
+
+.session-project.is-current > .session-project-head {
+  --project-band-alpha: 0.22;
+  --project-band-border-alpha: 0.38;
+  color: var(--text);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 12px 32px rgba(0, 0, 0, 0.18);
+}
+
+.session-project:focus-visible > .session-project-head {
+  outline: none;
+  border-color: rgba(var(--project-accent-rgb), 0.56);
+  box-shadow:
+    0 0 0 3px rgba(var(--project-accent-rgb), 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.session-project-glyph {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  color: rgba(var(--project-accent-rgb), 0.92);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.session-project-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.session-project-head .session-project-count {
+  color: rgba(var(--project-accent-rgb), 0.84);
+}

@@ -910,8 +910,10 @@
   var MIN_BG_OPACITY = 0.3;
   var MAX_BG_OPACITY = 1;
   var SETTINGS_KEY = "psyche.tauri.settings.v1";
+  var PROJECT_APPEARANCES_KEY = "psyche.tauri.project-appearances.v1";
   var WORKSPACE_STATE_KEY = "psyche.tauri.workspace.v1";
   var settings = loadSettings();
+  var projectAppearances = loadProjectAppearances();
   var isRestoringWorkspace = false;
   var saveWorkspaceTimer = 0;
 
@@ -950,6 +952,15 @@
       };
     } catch (_) { return defaults; }
   }
+  function loadProjectAppearances() {
+    try {
+      return PsycheSessions.parseProjectAppearances(
+        localStorage.getItem(PROJECT_APPEARANCES_KEY)
+      );
+    } catch (_) {
+      return {};
+    }
+  }
   function saveSettings() {
     settings.maxProjects = clampInt(settings.maxProjects, 10, 1, HARD_MAX_PROJECTS);
     settings.maxBrowserTabsPerProject = clampInt(settings.maxBrowserTabsPerProject, 10, 1, HARD_MAX_BROWSER_TABS_PER_PROJECT);
@@ -960,6 +971,18 @@
     settings.sessionFilter = PsycheSessions.normalizeSidebarFilter(settings.sessionFilter);
     settings.selectedSessionKey = typeof settings.selectedSessionKey === "string" ? settings.selectedSessionKey.slice(0, 1024) : "";
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }
+  function saveProjectAppearances() {
+    try {
+      localStorage.setItem(
+        PROJECT_APPEARANCES_KEY,
+        JSON.stringify(projectAppearances)
+      );
+      return true;
+    } catch (error) {
+      setStatus("project appearance save failed: " + String(error), "error");
+      return false;
+    }
   }
 
   // ---- Background opacity ----
@@ -6149,11 +6172,15 @@
   }
 
   function createProjectGroup(projectModel, options) {
+    var appearance = options.appearance ||
+      PsycheSessions.resolveProjectAppearance(projectModel.project, projectAppearances);
     var group = document.createElement("section");
     group.className = "session-project session-group"
       + (options.current ? " is-current" : "");
     group.dataset.treeItem = "project";
     group.dataset.treeKey = projectModel.key;
+    group.dataset.projectAccent = appearance.accent.id;
+    group.dataset.projectAppearance = appearance.customized ? "custom" : "automatic";
     group.setAttribute("role", "treeitem");
     group.setAttribute("aria-level", "1");
     group.setAttribute("tabindex", options.tabindex);
@@ -6161,20 +6188,25 @@
 
     var head = document.createElement("div");
     head.className = "session-project-head session-group-head";
+    head.style.setProperty("--project-accent-rgb", appearance.accent.rgb);
     var disclosure = createDisclosure(
       projectModel.title,
       projectModel.expanded,
       projectModel.autoExpanded
     );
+    if (appearance.glyph) {
+      var glyph = document.createElement("span");
+      glyph.className = "session-project-glyph";
+      glyph.textContent = appearance.glyph.value;
+      glyph.setAttribute("aria-hidden", "true");
+      head.appendChild(disclosure);
+      head.appendChild(glyph);
+    } else {
+      head.appendChild(disclosure);
+    }
     var title = document.createElement("span");
     title.className = "session-project-name";
     appendHighlightedText(title, projectModel.title, projectModel.titleMatches);
-    if (options.current) {
-      var current = document.createElement("span");
-      current.className = "session-current-badge";
-      current.textContent = "CURRENT";
-      title.appendChild(current);
-    }
     var count = document.createElement("span");
     count.className = "session-project-count";
     count.textContent = String(projectModel.count);
@@ -6191,7 +6223,6 @@
       attention.textContent = "!" + projectModel.attentionCount;
       count.appendChild(attention);
     }
-    head.appendChild(disclosure);
     head.appendChild(title);
     head.appendChild(count);
     attachTooltip(
@@ -6472,7 +6503,11 @@
       });
       if (projectModel.visibleCount === 0) return;
       matched += projectModel.visibleCount;
-      projectModels.push({ project: project, model: projectModel });
+      projectModels.push({
+        project: project,
+        model: projectModel,
+        appearance: PsycheSessions.resolveProjectAppearance(project, projectAppearances),
+      });
     });
 
     if (needle || sessionTypeFilter !== "all") {
@@ -6509,7 +6544,9 @@
     projectModels.forEach(function (entry) {
       var project = entry.project;
       var projectModel = entry.model;
+      var appearance = entry.appearance;
       var projectParts = createProjectGroup(projectModel, {
+        appearance: appearance,
         current: project.id === state.activeProjectId,
         tabindex: "-1",
       });
@@ -6805,6 +6842,24 @@
       sessionTreeFocusKey = preferred.dataset.treeKey || "";
       if (shouldRestoreTreeFocus) preferred.focus();
     }
+  }
+
+  function applyProjectAppearance(project, patch) {
+    var key = PsycheSessions.normalizeProjectAppearanceKey(project && project.root);
+    if (!project || !key) return false;
+    projectAppearances = PsycheSessions.updateProjectAppearance(
+      projectAppearances,
+      key,
+      patch
+    );
+    var focusKey = sessionTreeFocusKey;
+    saveProjectAppearances();
+    renderSessionList();
+    if (focusKey) {
+      sessionTreeFocusKey = focusKey;
+      restoreSessionTreeFocus(focusKey);
+    }
+    return true;
   }
 
   if (bgOpacityInput) {
