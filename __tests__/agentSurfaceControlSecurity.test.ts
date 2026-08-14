@@ -262,6 +262,46 @@ describe('agent surface control adversarial boundaries', () => {
     }
   });
 
+  it('replays a completed durable receipt without inventing an invalid public receipt', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-agent-completed-retry-'));
+    try {
+      const absoluteProject = '/Users/val/Projects/customer-private-repo';
+      const firstJournal = await ControlJournal.open(root, 7);
+      const firstHandlers = handlers();
+      const first = await ControlRuntime.create({ ownerEpoch: 7, handlers: firstHandlers, journal: firstJournal });
+      const lease = first.capabilityLeases.grant({
+        requestId: 'completed-request', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator',
+        ttlMs: 60_000, grants: [{ target: { kind: 'project', id: absoluteProject },
+          capabilities: ['pane.create'] }],
+      });
+      const completed = command({
+        id: 'completed-create', idempotencyKey: 'completed-create', kind: 'pane.action',
+        projectRoot: absoluteProject, payload: {
+          taskId: 'task-1', leaseId: lease.id, leaseRevision: lease.revision,
+          projectId: absoluteProject, action: { kind: 'create', cwd: absoluteProject },
+        } as never,
+      });
+      await expect(first.submit(completed)).resolves.toMatchObject({
+        status: 'succeeded', value: { schema: 'psyche.control.receipt/v1', resource: { id: absoluteProject } },
+      });
+      expect(firstHandlers.actOnPane).toHaveBeenCalledOnce();
+      expect(JSON.stringify(firstJournal.read(0))).not.toContain(absoluteProject);
+
+      const replayHandler = vi.fn(async () => ({}));
+      const restartedHandlers = handlers();
+      restartedHandlers.actOnPane = replayHandler;
+      const reopened = await ControlJournal.open(root, 8);
+      const restarted = await ControlRuntime.create({ ownerEpoch: 8, handlers: restartedHandlers, journal: reopened });
+      const retry = await restarted.submit(command({ ...completed, id: 'completed-retry', ownerEpoch: 8 }));
+      expect(retry).toEqual({ status: 'succeeded' });
+      expect(retry).not.toHaveProperty('value');
+      expect(replayHandler).not.toHaveBeenCalled();
+      expect(JSON.stringify({ retry, events: reopened.read(0) })).not.toContain(absoluteProject);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('contains no whole-desktop or coordinate fallback in the provider authority path', () => {
     const paths = [
       '../src/control/browserProviderBroker.ts',

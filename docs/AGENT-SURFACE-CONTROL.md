@@ -78,14 +78,15 @@ SHA-256 and byte counts, never source.
 
 ## Evidence and failure semantics
 
-State, events, and stored receipts contain allowlisted metadata only. They do
-not persist terminal output, semantic/page contents, screenshots, typed/secret
-values, scripts, cookies, headers, absolute/full paths or unredacted path
-components, or backend error details. A redacted basename may be retained only
-for approval context, and a redacted target description may identify the
-requested effect. Pane reads,
-semantic trees, screenshots, and script return values are bounded response data,
-not journal payloads.
+Durable journal events and journaled receipts contain allowlisted metadata only.
+They do not persist terminal output, semantic/page contents, screenshots,
+typed/secret values, scripts, cookies, headers, absolute/full paths or
+unredacted path components, or backend error details. A redacted basename may
+be retained only for approval context, and a redacted target description may
+identify the requested effect. Live in-memory control state may retain exact
+operational resource IDs until owner restart. Pane reads, semantic trees,
+screenshots, and script return values are bounded response data, not journal
+payloads.
 
 Psyche Build never retries a mutation whose delivery may have occurred. A
 timeout, provider disconnect after dispatch, navigation during script

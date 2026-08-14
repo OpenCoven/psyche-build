@@ -512,9 +512,7 @@ describe('ControlRuntime', () => {
     });
     const recovered = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal,
       surfaces, capabilityLeases, approvals });
-    await expect(recovered.submit(original)).resolves.toMatchObject({
-      status: 'succeeded', value: { state: 'succeeded' },
-    });
+    await expect(recovered.submit(original)).resolves.toEqual({ status: 'succeeded' });
     expect(resolver).toHaveBeenCalledTimes(2);
     expect(handlers.actOnBrowser).toHaveBeenCalledTimes(1);
     expect(handlers.actOnBrowser).toHaveBeenCalledWith(expect.objectContaining({

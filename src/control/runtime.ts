@@ -1612,11 +1612,11 @@ function payloadForOutcome(outcome: CommandOutcome): Record<string, unknown> {
 }
 
 function outcomeFromEvent(event: RuntimeEvent): CommandOutcome {
-  const receipt = actionReceiptPayload(event);
+  const receipt = durableJournalReceiptPayload(event);
   switch (event.kind) {
     case 'command.succeeded':
       return receipt
-        ? { status: 'succeeded', value: receipt }
+        ? { status: 'succeeded' }
         : Object.prototype.hasOwnProperty.call(event.payload, 'value')
         ? { status: 'succeeded', value: event.payload.value }
         : { status: 'succeeded' };
@@ -1643,9 +1643,33 @@ function outcomeFromEvent(event: RuntimeEvent): CommandOutcome {
   }
 }
 
-function actionReceiptPayload(event: RuntimeEvent): ActionReceipt | undefined {
+type DurableJournalReceiptResult = Pick<AgentControlJournalReceipt, 'schema' | 'state' | 'code'>;
+
+function durableJournalReceiptPayload(event: RuntimeEvent): DurableJournalReceiptResult | undefined {
   const receipt = event.payload.receipt;
-  return isActionReceiptLike(receipt) ? receipt : undefined;
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return undefined;
+  const metadata = receipt as Record<string, unknown>;
+  if (
+    metadata.schema !== 'psyche.control.receipt/v1'
+    || !isActionReceiptState(metadata.state)
+    || (metadata.code !== undefined && typeof metadata.code !== 'string')
+  ) return undefined;
+  return {
+    schema: metadata.schema,
+    state: metadata.state,
+    ...(typeof metadata.code === 'string' ? { code: metadata.code } : {}),
+  };
+}
+
+function isActionReceiptState(value: unknown): value is AgentControlJournalReceipt['state'] {
+  return value === 'queued'
+    || value === 'running'
+    || value === 'approval_required'
+    || value === 'succeeded'
+    || value === 'failed'
+    || value === 'denied'
+    || value === 'expired'
+    || value === 'unknown';
 }
 
 function stringPayload(event: RuntimeEvent, key: string): string | undefined {
