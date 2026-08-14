@@ -63,7 +63,24 @@ function agentSurfaceHarness() {
       submit: risk.submit, formId: risk.submit ? (risk.formId ?? 'form-1') : null, secret: null,
     };
   });
-  return { surfaces, capabilityLeases, approvals, lease, risk, resolveBrowserSnapshot };
+  const scriptContext = { documentId: 'document-1', documentToken: 'token-1', navigationEpoch: 1,
+    navigationUrl: 'https://example.test' };
+  const resolveBrowserScriptContext = vi.fn(async (payload: any) => ({
+    tabId: payload.tabId, generation: payload.generation, ...scriptContext,
+  }));
+  return { surfaces, capabilityLeases, approvals, lease, risk, resolveBrowserSnapshot,
+    scriptContext, resolveBrowserScriptContext };
+}
+
+function browserScript(leaseId: string, overrides: Record<string, unknown> = {}) {
+  return command({
+    id: 'cmd-script', idempotencyKey: 'idem-script', kind: 'browser.script',
+    projectRoot: '/repo', actor: { id: 'agent-1', kind: 'psyche' }, ownerEpoch: 7,
+    createdAt: '2026-08-12T12:00:00.000Z',
+    payload: { taskId: 'task-1', leaseId, leaseRevision: 1,
+      tabId: 'tab-1', generation: 1, source: 'return args.answer', args: { answer: 42 } },
+    ...overrides,
+  }) as unknown as Extract<ControlCommand, { kind: 'browser.script' }>;
 }
 
 function paneObservationHarness() {
@@ -740,6 +757,82 @@ describe('ControlRuntime', () => {
       value: { kind: 'click', result: 'result_unavailable' },
     }));
     expect(JSON.stringify(runtime.actionStatus('legacy-browser'))).not.toContain('legacy-private');
+  });
+
+  it.each([
+    ['legacy', { sourceDigest: 'a'.repeat(64), sourceBytes: 1, resultBytes: 0,
+      durationMs: 1, outcome: 'failed', privateSource: 'legacy secret' }],
+    ['malformed', { sourceDigest: 'a'.repeat(64), sourceBytes: 1, argsBytes: 1,
+      resultBytes: 0, durationMs: 1, outcome: 'future' }],
+  ])('drops %s script summaries safely during replay', async (_label, value) => {
+    const journal = createMemoryJournal();
+    await journal.append('command.failed', {
+      commandId: `script-${_label}`, idempotencyKey: `script-${_label}`, status: 'failed',
+      code: 'script_execution_failed', receipt: {
+        schema: 'psyche.control.receipt/v1', actionId: `script-${_label}`, state: 'failed',
+        code: 'script_execution_failed', resource: { kind: 'browser_tab', id: 'tab-1', generation: 1 },
+        createdAt: '2026-08-12T12:00:00.000Z', completedAt: '2026-08-12T12:00:01.000Z', value,
+      },
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    expect(runtime.actionStatus(`script-${_label}`)).toMatchObject({ state: 'failed', code: 'script_execution_failed' });
+    expect(runtime.actionStatus(`script-${_label}`)).not.toHaveProperty('value');
+    expect(JSON.stringify(runtime.actionStatus(`script-${_label}`))).not.toContain('legacy secret');
+  });
+
+  it.each([
+    ['outcome', 'failed', 'script_execution_failed', { sourceDigest: 'a'.repeat(64), sourceBytes: 1,
+      argsBytes: 1, resultBytes: 0, durationMs: 1, outcome: 'succeeded' }],
+    ['failure-bytes', 'failed', 'script_execution_failed', { sourceDigest: 'a'.repeat(64), sourceBytes: 1,
+      argsBytes: 1, resultBytes: 1, durationMs: 1, outcome: 'failed' }],
+    ['timeout', 'failed', 'action_timeout', { sourceDigest: 'a'.repeat(64), sourceBytes: 1,
+      argsBytes: 1, resultBytes: 0, durationMs: 4_999, outcome: 'failed' }],
+    ['unknown-code', 'unknown', 'other_unknown', { sourceDigest: 'a'.repeat(64), sourceBytes: 1,
+      argsBytes: 1, resultBytes: 0, durationMs: 1, outcome: 'unknown' }],
+    ['missing-failed-code', 'failed', undefined, { sourceDigest: 'a'.repeat(64), sourceBytes: 1,
+      argsBytes: 1, resultBytes: 0, durationMs: 1, outcome: 'failed' }],
+    ['succeeded-code', 'succeeded', 'unexpected', { sourceDigest: 'a'.repeat(64), sourceBytes: 1,
+      argsBytes: 1, resultBytes: 1, durationMs: 1, outcome: 'succeeded' }],
+  ] as const)('drops contradictory %s script summaries during replay', async (label, state, code, value) => {
+    const journal = createMemoryJournal();
+    await journal.append('command.failed', { commandId: `contradictory-${label}`,
+      idempotencyKey: `contradictory-${label}`, status: 'failed', ...(code ? { code } : {}), receipt: {
+        schema: 'psyche.control.receipt/v1', actionId: `contradictory-${label}`, state, code,
+        resource: { kind: 'browser_tab', id: 'tab-1', generation: 1 },
+        createdAt: '2026-08-12T12:00:00.000Z', completedAt: '2026-08-12T12:00:01.000Z', value,
+      } });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    expect(runtime.actionStatus(`contradictory-${label}`)?.value).toBeUndefined();
+  });
+
+  it.each([
+    ['kind-state', 'command.failed', 'failed', 'script_execution_failed', 'cmd-kind-state', 'succeeded', undefined, 'succeeded'],
+    ['payload-status', 'command.failed', 'succeeded', 'script_execution_failed', 'cmd-payload-status', 'failed', 'script_execution_failed', 'failed'],
+    ['differing-code', 'command.failed', 'failed', 'script_execution_failed', 'cmd-differing-code', 'failed', 'action_timeout', 'failed'],
+    ['action-id', 'command.failed', 'failed', 'script_execution_failed', 'other-action', 'failed', 'script_execution_failed', 'failed'],
+    ['unknown-failed', 'command.unknown', 'unknown', 'effect_unknown', 'cmd-unknown-failed', 'failed', 'script_execution_failed', 'failed'],
+    ['succeeded-code', 'command.succeeded', 'succeeded', 'unexpected', 'cmd-succeeded-code', 'succeeded', 'unexpected', 'succeeded'],
+  ] as const)('does not let contradictory outer %s receipts override terminal replay', async (
+    label, kind, status, outerCode, receiptActionId, receiptState, receiptCode, summaryOutcome,
+  ) => {
+    const commandId = `cmd-${label}`;
+    const journal = createMemoryJournal();
+    await journal.append(kind, { commandId, idempotencyKey: commandId, status, code: outerCode,
+      receipt: { schema: 'psyche.control.receipt/v1', actionId: receiptActionId, state: receiptState,
+        ...(receiptCode ? { code: receiptCode } : {}),
+        resource: { kind: 'browser_tab', id: 'tab-1', generation: 1 },
+        createdAt: '2026-08-12T12:00:00.000Z', completedAt: '2026-08-12T12:00:01.000Z',
+        value: { sourceDigest: 'a'.repeat(64), sourceBytes: 1, argsBytes: 1,
+          resultBytes: summaryOutcome === 'succeeded' ? 1 : 0,
+          durationMs: receiptCode === 'action_timeout' ? 5_000 : 1, outcome: summaryOutcome },
+      } });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    expect(runtime.actionStatus(commandId)).toBeUndefined();
+    const replayed = (runtime as unknown as { outcomesByCommandId: Map<string, { status: string; code?: string }> })
+      .outcomesByCommandId.get(commandId);
+    expect(replayed).toMatchObject({ status: kind === 'command.succeeded' ? 'succeeded'
+      : kind === 'command.unknown' ? 'unknown' : 'failed',
+      ...(kind === 'command.succeeded' ? {} : { code: outerCode }) });
   });
 
   it('normalizes actual submit and screenshot provider postconditions into exact receipts', async () => {
@@ -1494,7 +1587,7 @@ describe('ControlRuntime', () => {
       approvals: new ApprovalStore(now),
       resolveBrowserSnapshot: deps.resolveBrowserSnapshot,
     });
-    expect(second.actionStatus('cmd-click')).toMatchObject({ state: 'unknown', code: 'owner_restarted' });
+    expect(second.actionStatus('cmd-click')).toMatchObject({ state: 'unknown', code: 'effect_unknown' });
     expect(second.approvals.snapshot()).toEqual([]);
     expect(handlers.actOnBrowser).not.toHaveBeenCalled();
     expect(second.events().filter((event) => (
@@ -1770,6 +1863,296 @@ describe('ControlRuntime', () => {
     await runtime.submit(action);
     expect(handlers.actOnBrowser).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(runtime.events())).not.toContain('sensitive backend detail');
+  });
+
+  it('rejects oversized UTF-8 browser script source before requesting approval', async () => {
+    const deps = agentSurfaceHarness();
+    const lease = deps.capabilityLeases.grant({
+      requestId: 'request-script', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1', ttlMs: 60_000,
+      grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.script'] }],
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    await expect(runtime.submit(browserScript(lease.id, {
+      payload: { ...browserScript(lease.id).payload, source: 'é'.repeat(32_769) },
+    }))).resolves.toMatchObject({ status: 'failed', code: 'script_source_too_large' });
+    expect(deps.approvals.snapshot()).toEqual([]);
+    expect(handlers.runBrowserScript).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['oversized', 'x'.repeat(256 * 1024)],
+    ['non-finite', Number.NaN],
+    ['non-plain', new Date('2026-08-12T12:00:00.000Z')],
+    ['undefined', undefined],
+  ])('rejects %s browser script arguments before approval or effect', async (_label, args) => {
+    const deps = agentSurfaceHarness();
+    const lease = deps.capabilityLeases.grant({
+      requestId: 'request-script', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1', ttlMs: 60_000,
+      grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.script'] }],
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    const script = browserScript(lease.id);
+    await expect(runtime.submit(browserScript(lease.id, {
+      payload: { ...script.payload, args },
+    }))).resolves.toMatchObject({ status: 'failed', code: expect.stringMatching(/^script_args_(invalid|too_large)$/) });
+    expect(deps.approvals.snapshot()).toEqual([]);
+    expect(deps.resolveBrowserScriptContext).not.toHaveBeenCalled();
+    expect(handlers.runBrowserScript).not.toHaveBeenCalled();
+  });
+
+  it('rejects cyclic and accessor browser script arguments without evaluating them', async () => {
+    const deps = agentSurfaceHarness();
+    const lease = deps.capabilityLeases.grant({
+      requestId: 'request-script', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1', ttlMs: 60_000,
+      grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.script'] }],
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    const cyclic: Record<string, unknown> = {}; cyclic.self = cyclic;
+    const getter = vi.fn(() => 'secret');
+    const accessor = {};
+    Object.defineProperty(accessor, 'secret', { enumerable: true, get: getter });
+    for (const args of [cyclic, accessor]) {
+      const script = browserScript(lease.id);
+      await expect(runtime.submit(browserScript(lease.id, {
+        id: `cmd-${args === cyclic ? 'cycle' : 'accessor'}`,
+        idempotencyKey: `idem-${args === cyclic ? 'cycle' : 'accessor'}`,
+        payload: { ...script.payload, args },
+      }))).resolves.toMatchObject({ status: 'failed', code: 'script_args_invalid' });
+    }
+    expect(getter).not.toHaveBeenCalled();
+    expect(deps.approvals.snapshot()).toEqual([]);
+    expect(handlers.runBrowserScript).not.toHaveBeenCalled();
+  });
+
+  it('consumes a one-shot script approval and returns only bounded live result metadata', async () => {
+    const deps = agentSurfaceHarness();
+    const lease = deps.capabilityLeases.grant({
+      requestId: 'request-script', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1', ttlMs: 60_000,
+      grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.script'] }],
+    });
+    handlers.runBrowserScript = vi.fn(async () => ({ value: { answer: 42 }, byteCount: 13, durationMs: 7 }));
+    const journal = createMemoryJournal();
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+    await runtime.submit(browserScript(lease.id));
+    const approval = deps.approvals.snapshot()[0]!;
+    const outcome = await runtime.submit(command({
+      id: 'resolve-script', idempotencyKey: 'resolve-script', kind: 'approval.resolve', ownerEpoch: 7,
+      actor: { id: 'operator-1', kind: 'human' },
+      payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
+    }));
+    expect(outcome).toMatchObject({ status: 'succeeded', value: { value: { answer: 42 }, byteCount: 13, durationMs: 7 } });
+    expect(runtime.actionStatus('cmd-script')).toMatchObject({ state: 'succeeded', value: {
+      sourceDigest: expect.stringMatching(/^[a-f0-9]{64}$/), sourceBytes: 18,
+      argsBytes: 13, resultBytes: 13, durationMs: 7, outcome: 'succeeded',
+    } });
+    expect(JSON.stringify(runtime.events())).not.toContain('return args.answer');
+    expect(JSON.stringify(runtime.events())).not.toContain('"answer":42');
+    const restarted = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+    expect(restarted.actionStatus('cmd-script')).toMatchObject({ state: 'succeeded', value: {
+      sourceDigest: expect.stringMatching(/^[a-f0-9]{64}$/), sourceBytes: 18,
+      argsBytes: 13, resultBytes: 13, durationMs: 7, outcome: 'succeeded',
+    } });
+    await expect(restarted.submit(browserScript(lease.id))).resolves.toMatchObject({
+      status: 'succeeded', value: { state: 'succeeded', value: { resultBytes: 13, outcome: 'succeeded' } },
+    });
+  });
+
+  it('requires a distinct approval for every browser script invocation', async () => {
+    const deps = agentSurfaceHarness(); let sequence = 0;
+    deps.approvals = new ApprovalStore(now, () => `approval-script-${++sequence}`);
+    const lease = deps.capabilityLeases.grant({
+      requestId: 'request-script', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1', ttlMs: 60_000,
+      grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.script'] }],
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+    await runtime.submit(browserScript(lease.id));
+    const first = deps.approvals.snapshot()[0]!;
+    await runtime.submit(command({
+      id: 'deny-script', idempotencyKey: 'deny-script', kind: 'approval.resolve', ownerEpoch: 7,
+      actor: { id: 'operator-1', kind: 'human' },
+      payload: { approvalId: first.id, payloadDigest: first.payloadDigest, decision: 'deny' },
+    }));
+    await runtime.submit(browserScript(lease.id, {
+      id: 'cmd-script-2', idempotencyKey: 'idem-script-2',
+    }));
+    expect(deps.approvals.snapshot()).toEqual([
+      expect.objectContaining({ id: 'approval-script-1', status: 'denied' }),
+      expect.objectContaining({ id: 'approval-script-2', status: 'pending' }),
+    ]);
+    expect(handlers.runBrowserScript).not.toHaveBeenCalled();
+  });
+
+  it('binds script approval to the exact preflight document token and revalidates before dispatch', async () => {
+    const deps = agentSurfaceHarness();
+    const lease = deps.capabilityLeases.grant({
+      requestId: 'request-script', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1', ttlMs: 60_000,
+      grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.script'] }],
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps } as any);
+    await runtime.submit(browserScript(lease.id));
+    const approval = deps.approvals.snapshot()[0]!;
+    deps.scriptContext.documentToken = 'token-2';
+    const outcome = await runtime.submit(command({
+      id: 'resolve-script-context', idempotencyKey: 'resolve-script-context', kind: 'approval.resolve', ownerEpoch: 7,
+      actor: { id: 'operator-1', kind: 'human' },
+      payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
+    }));
+    expect(outcome).toMatchObject({ status: 'failed', code: 'approval_identity_mismatch' });
+    expect(handlers.runBrowserScript).not.toHaveBeenCalled();
+    expect(deps.resolveBrowserScriptContext).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves the broker action_timeout without retry when an approved script exceeds five seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      const deps = agentSurfaceHarness();
+      const lease = deps.capabilityLeases.grant({
+        requestId: 'request-script', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1', ttlMs: 60_000,
+        grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.script'] }],
+      });
+      handlers.runBrowserScript = vi.fn(() => new Promise((_resolve, reject) => setTimeout(() => reject(Object.assign(
+        new Error('provider detail'), { code: 'action_timeout', ambiguous: true, noRetry: true, durationMs: 5_000 },
+      )), 5_000)));
+      const journal = createMemoryJournal();
+      const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+      await runtime.submit(browserScript(lease.id));
+      const approval = deps.approvals.snapshot()[0]!;
+      const pending = runtime.submit(command({
+        id: 'resolve-script', idempotencyKey: 'resolve-script', kind: 'approval.resolve', ownerEpoch: 7,
+        actor: { id: 'operator-1', kind: 'human' },
+        payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
+      }));
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(pending).resolves.toMatchObject({ status: 'failed', code: 'action_timeout' });
+      expect(runtime.actionStatus('cmd-script')).toMatchObject({ state: 'failed', code: 'action_timeout', value: {
+        sourceDigest: expect.stringMatching(/^[a-f0-9]{64}$/), sourceBytes: 18, argsBytes: 13,
+        resultBytes: 0, durationMs: 5_000, outcome: 'failed',
+      } });
+      const restarted = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+      expect(restarted.actionStatus('cmd-script')).toEqual(runtime.actionStatus('cmd-script'));
+      expect(JSON.stringify(runtime.events())).not.toMatch(/return args\.answer|"answer":42|token-1|example\.test/);
+      expect(handlers.runBrowserScript).toHaveBeenCalledTimes(1);
+      await runtime.submit(browserScript(lease.id));
+      expect(handlers.runBrowserScript).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([undefined, 4_999, 5_001])(
+    'canonicalizes defensive action_timeout duration %s before journal replay',
+    async (durationMs) => {
+      const deps = agentSurfaceHarness();
+      const lease = deps.capabilityLeases.grant({
+        requestId: 'request-script', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1', ttlMs: 60_000,
+        grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.script'] }],
+      });
+      handlers.runBrowserScript = vi.fn(async () => {
+        throw Object.assign(new Error('invalid provider timeout'), {
+          code: 'action_timeout', ambiguous: true, noRetry: true,
+          ...(durationMs === undefined ? {} : { durationMs }),
+        });
+      });
+      const journal = createMemoryJournal();
+      const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+      await runtime.submit(browserScript(lease.id));
+      const approval = deps.approvals.snapshot()[0]!;
+      await expect(runtime.submit(command({
+        id: 'resolve-script', idempotencyKey: 'resolve-script', kind: 'approval.resolve', ownerEpoch: 7,
+        actor: { id: 'operator-1', kind: 'human' },
+        payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
+      }))).resolves.toMatchObject({ status: 'failed', code: 'action_timeout' });
+      expect(runtime.actionStatus('cmd-script')).toMatchObject({ state: 'failed', code: 'action_timeout', value: {
+        resultBytes: 0, durationMs: 5_000, outcome: 'failed',
+      } });
+      const restarted = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+      expect(restarted.actionStatus('cmd-script')).toEqual(runtime.actionStatus('cmd-script'));
+    },
+  );
+
+  it('persists replacement-at-deadline script ambiguity as effect_unknown', async () => {
+    const deps = agentSurfaceHarness();
+    const lease = deps.capabilityLeases.grant({
+      requestId: 'request-script', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1', ttlMs: 60_000,
+      grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.script'] }],
+    });
+    handlers.runBrowserScript = vi.fn(async () => {
+      throw Object.assign(new Error('document replaced at deadline'), {
+        code: 'effect_unknown', ambiguous: true, noRetry: true, durationMs: 23,
+      });
+    });
+    const journal = createMemoryJournal();
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+    await runtime.submit(browserScript(lease.id));
+    const approval = deps.approvals.snapshot()[0]!;
+    await expect(runtime.submit(command({
+      id: 'resolve-script', idempotencyKey: 'resolve-script', kind: 'approval.resolve', ownerEpoch: 7,
+      actor: { id: 'operator-1', kind: 'human' },
+      payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
+    }))).resolves.toMatchObject({ status: 'unknown', code: 'effect_unknown' });
+    expect(runtime.actionStatus('cmd-script')).toMatchObject({ state: 'unknown', code: 'effect_unknown', value: {
+      sourceDigest: expect.stringMatching(/^[a-f0-9]{64}$/), sourceBytes: 18, argsBytes: 13,
+      resultBytes: 0, durationMs: 23, outcome: 'unknown',
+    } });
+    const restarted = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+    expect(restarted.actionStatus('cmd-script')).toEqual(runtime.actionStatus('cmd-script'));
+    expect(JSON.stringify(runtime.events())).not.toMatch(/return args\.answer|"answer":42|token-1|example\.test/);
+    expect(handlers.runBrowserScript).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists a redacted failed script summary across restart', async () => {
+    const deps = agentSurfaceHarness();
+    const lease = deps.capabilityLeases.grant({
+      requestId: 'request-script', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1', ttlMs: 60_000,
+      grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.script'] }],
+    });
+    handlers.runBrowserScript = vi.fn(async () => {
+      throw Object.assign(new Error('private failure detail'), { code: 'script_execution_failed', durationMs: 17 });
+    });
+    const journal = createMemoryJournal();
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+    await runtime.submit(browserScript(lease.id));
+    const approval = deps.approvals.snapshot()[0]!;
+    await expect(runtime.submit(command({
+      id: 'resolve-script', idempotencyKey: 'resolve-script', kind: 'approval.resolve', ownerEpoch: 7,
+      actor: { id: 'operator-1', kind: 'human' },
+      payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
+    }))).resolves.toMatchObject({ status: 'failed', code: 'script_execution_failed' });
+    expect(runtime.actionStatus('cmd-script')).toMatchObject({ state: 'failed', value: {
+      sourceDigest: expect.stringMatching(/^[a-f0-9]{64}$/), sourceBytes: 18, argsBytes: 13,
+      resultBytes: 0, durationMs: 17, outcome: 'failed',
+    } });
+    const restarted = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal, ...deps });
+    expect(restarted.actionStatus('cmd-script')).toEqual(runtime.actionStatus('cmd-script'));
+    expect(JSON.stringify(runtime.events())).not.toMatch(/private failure detail|return args\.answer|"answer":42|token-1/);
+  });
+
+  it('accepts authoritative native success metadata delivered after five seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      const deps = agentSurfaceHarness();
+      const lease = deps.capabilityLeases.grant({
+        requestId: 'request-script', actorId: 'agent-1', taskId: 'task-1', grantedBy: 'operator-1', ttlMs: 60_000,
+        grants: [{ target: { kind: 'browser_tab', id: 'tab-1', generation: 1 }, capabilities: ['browser.script'] }],
+      });
+      handlers.runBrowserScript = vi.fn(() => new Promise((resolve) => setTimeout(() => resolve({
+        value: 'late transport', byteCount: 16, durationMs: 4_999,
+      }), 5_100)));
+      const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal(), ...deps });
+      await runtime.submit(browserScript(lease.id));
+      const approval = deps.approvals.snapshot()[0]!;
+      const pending = runtime.submit(command({
+        id: 'resolve-script', idempotencyKey: 'resolve-script', kind: 'approval.resolve', ownerEpoch: 7,
+        actor: { id: 'operator-1', kind: 'human' },
+        payload: { approvalId: approval.id, payloadDigest: approval.payloadDigest, decision: 'approve' },
+      }));
+      await vi.advanceTimersByTimeAsync(5_100);
+      await expect(pending).resolves.toMatchObject({ status: 'succeeded', value: {
+        value: 'late transport', byteCount: 16, durationMs: 4_999,
+      } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('settles unknown without hanging when terminal persistence fails after effect', async () => {

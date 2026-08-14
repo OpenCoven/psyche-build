@@ -36,7 +36,7 @@ import { createHostControlPlane } from '../control/host.js';
 import { ControlServer } from '../control/server.js';
 import { createControlCredentialStore } from '../control/credentials.js';
 import { controlEndpointForProject } from '../control/endpoint.js';
-import { createBrowserSnapshotResolver, createDaemonControlHandlers } from './controlHandlers.js';
+import { createBrowserScriptContextResolver, createBrowserSnapshotResolver, createDaemonControlHandlers } from './controlHandlers.js';
 import { SurfaceRegistry } from '../control/surfaces.js';
 import { PaneObservationStore } from '../control/resources/paneObservation.js';
 import { PaneResourceController } from '../control/resources/panes.js';
@@ -163,6 +163,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       surfaces,
       browserProviders,
       resolveBrowserSnapshot: createBrowserSnapshotResolver(browserProviders),
+      resolveBrowserScriptContext: createBrowserScriptContextResolver(browserProviders),
     });
   } catch (error) {
     tmuxSupervisor.stop();

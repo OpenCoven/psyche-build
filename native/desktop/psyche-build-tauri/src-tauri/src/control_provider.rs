@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+use crate::BrowserOperation;
+use crate::{BrowserBindingState, BrowserScriptFlightState};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -58,7 +61,9 @@ struct PendingEffectCorrelation {
     action_id: String,
     tab_id: String,
     generation: u64,
+    document_token: Option<String>,
     canceled_at: Option<Instant>,
+    executing: bool,
 }
 
 impl ProviderConnection {
@@ -69,6 +74,23 @@ impl ProviderConnection {
         self.connected.store(false, Ordering::Release);
         self.task.abort();
     }
+}
+
+fn clear_removed_browser_effects(
+    pending_effects: &mut HashMap<String, PendingEffectCorrelation>,
+    tab_id: &str,
+    generation: u64,
+) -> Vec<String> {
+    let mut request_ids = pending_effects
+        .iter()
+        .filter(|(_, pending)| pending.tab_id == tab_id && pending.generation == generation)
+        .map(|(request_id, _)| request_id.clone())
+        .collect::<Vec<_>>();
+    request_ids.sort();
+    for request_id in &request_ids {
+        pending_effects.remove(request_id);
+    }
+    request_ids
 }
 
 #[derive(Debug, Serialize)]
@@ -150,12 +172,11 @@ pub enum SurfaceCapability {
     BrowserScript,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(
     tag = "status",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
+    rename_all_fields = "camelCase"
 )]
 pub enum ProviderEffectResult {
     Succeeded {
@@ -166,6 +187,37 @@ pub enum ProviderEffectResult {
         action_id: String,
         code: String,
         message: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_script_duration",
+            skip_serializing_if = "Option::is_none"
+        )]
+        duration_ms: Option<f64>,
+    },
+    TimedOutPending {
+        action_id: String,
+        #[serde(deserialize_with = "deserialize_action_timeout")]
+        code: String,
+        message: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_script_duration",
+            skip_serializing_if = "Option::is_none"
+        )]
+        duration_ms: Option<f64>,
+    },
+    UnknownPending {
+        action_id: String,
+        code: String,
+        message: String,
+        #[serde(deserialize_with = "deserialize_true")]
+        ambiguous: bool,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_script_duration",
+            skip_serializing_if = "Option::is_none"
+        )]
+        duration_ms: Option<f64>,
     },
     Unknown {
         action_id: String,
@@ -173,7 +225,166 @@ pub enum ProviderEffectResult {
         message: String,
         #[serde(deserialize_with = "deserialize_true")]
         ambiguous: bool,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_script_duration",
+            skip_serializing_if = "Option::is_none"
+        )]
+        duration_ms: Option<f64>,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum ProviderEffectResultWire {
+    Succeeded {
+        action_id: String,
+        value: Option<Value>,
+    },
+    Failed {
+        action_id: String,
+        code: String,
+        message: String,
+        #[serde(default, deserialize_with = "deserialize_optional_script_duration")]
+        duration_ms: Option<f64>,
+    },
+    TimedOutPending {
+        action_id: String,
+        #[serde(deserialize_with = "deserialize_action_timeout")]
+        code: String,
+        message: String,
+        #[serde(default, deserialize_with = "deserialize_optional_script_duration")]
+        duration_ms: Option<f64>,
+    },
+    UnknownPending {
+        action_id: String,
+        code: String,
+        message: String,
+        #[serde(deserialize_with = "deserialize_true")]
+        ambiguous: bool,
+        #[serde(default, deserialize_with = "deserialize_optional_script_duration")]
+        duration_ms: Option<f64>,
+    },
+    Unknown {
+        action_id: String,
+        code: String,
+        message: String,
+        #[serde(deserialize_with = "deserialize_true")]
+        ambiguous: bool,
+        #[serde(default, deserialize_with = "deserialize_optional_script_duration")]
+        duration_ms: Option<f64>,
+    },
+}
+
+impl TryFrom<ProviderEffectResultWire> for ProviderEffectResult {
+    type Error = String;
+
+    fn try_from(value: ProviderEffectResultWire) -> Result<Self, Self::Error> {
+        match value {
+            ProviderEffectResultWire::Succeeded { action_id, value } => {
+                Ok(Self::Succeeded { action_id, value })
+            }
+            ProviderEffectResultWire::Failed {
+                action_id,
+                code,
+                message,
+                duration_ms,
+            } => {
+                if code.is_empty() || code == "effect_unknown" {
+                    return Err("failed provider result code is invalid".to_string());
+                }
+                if code == "action_timeout" && duration_ms != Some(5_000.0) {
+                    return Err("action_timeout durationMs must be exactly 5000".to_string());
+                }
+                Ok(Self::Failed {
+                    action_id,
+                    code,
+                    message,
+                    duration_ms,
+                })
+            }
+            ProviderEffectResultWire::TimedOutPending {
+                action_id,
+                code,
+                message,
+                duration_ms,
+            } => {
+                if duration_ms != Some(5_000.0) {
+                    return Err("action_timeout durationMs must be exactly 5000".to_string());
+                }
+                Ok(Self::TimedOutPending {
+                    action_id,
+                    code,
+                    message,
+                    duration_ms,
+                })
+            }
+            ProviderEffectResultWire::UnknownPending {
+                action_id,
+                code,
+                message,
+                ambiguous,
+                duration_ms,
+            } => {
+                if code != "effect_unknown" {
+                    return Err(
+                        "unknown pending provider result code must be effect_unknown".to_string(),
+                    );
+                }
+                Ok(Self::UnknownPending {
+                    action_id,
+                    code,
+                    message,
+                    ambiguous,
+                    duration_ms,
+                })
+            }
+            ProviderEffectResultWire::Unknown {
+                action_id,
+                code,
+                message,
+                ambiguous,
+                duration_ms,
+            } => {
+                if code != "effect_unknown" {
+                    return Err("unknown provider result code must be effect_unknown".to_string());
+                }
+                Ok(Self::Unknown {
+                    action_id,
+                    code,
+                    message,
+                    ambiguous,
+                    duration_ms,
+                })
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderEffectResult {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ProviderEffectResultWire::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+fn deserialize_optional_script_duration<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error> {
+    let value = Option::<f64>::deserialize(deserializer)?;
+    if value.is_none_or(|duration| duration.is_finite() && (0.0..=5_000.0).contains(&duration)) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "durationMs must be between zero and 5000",
+        ))
+    }
 }
 
 impl ProviderEffectResult {
@@ -181,8 +392,30 @@ impl ProviderEffectResult {
         match self {
             Self::Succeeded { action_id, .. }
             | Self::Failed { action_id, .. }
+            | Self::TimedOutPending { action_id, .. }
+            | Self::UnknownPending { action_id, .. }
             | Self::Unknown { action_id, .. } => action_id,
         }
+    }
+
+    fn remains_pending(&self) -> bool {
+        matches!(
+            self,
+            Self::TimedOutPending { .. } | Self::UnknownPending { .. }
+        )
+    }
+}
+
+fn deserialize_action_timeout<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    if value == "action_timeout" {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "timed_out_pending code must be action_timeout",
+        ))
     }
 }
 
@@ -440,6 +673,10 @@ fn reserve_pending_effect(
         .get("generation")
         .and_then(Value::as_u64)
         .ok_or_else(|| "invalid provider effect request".to_string())?;
+    let document_token = frame
+        .pointer("/operation/expectedContext/documentToken")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     if pending.len() >= MAX_PENDING_EFFECTS {
         return Err("provider_busy".to_string());
     }
@@ -452,10 +689,202 @@ fn reserve_pending_effect(
             action_id: action_id.to_string(),
             tab_id: tab_id.to_string(),
             generation,
+            document_token,
             canceled_at: None,
+            executing: false,
         },
     );
     Ok(())
+}
+
+pub(crate) async fn publish_provider_effect_started(
+    state: &ControlProviderState,
+    project_root: String,
+    request_id: String,
+    action_id: String,
+    tab_id: String,
+    generation: u64,
+    invocation_id: String,
+    document_token: String,
+) -> Result<(), String> {
+    let (provider_key, connection_nonce, receiver) = {
+        let (provider_key, connection) = provider(state, &project_root)?;
+        let pending = connection.pending_effects.lock();
+        let correlation = pending
+            .get(&request_id)
+            .ok_or_else(|| "provider effect request correlation failed".to_string())?;
+        if correlation.action_id != action_id
+            || correlation.tab_id != tab_id
+            || correlation.generation != generation
+            || invocation_id != request_id
+            || correlation.document_token.as_deref() != Some(document_token.as_str())
+            || correlation.canceled_at.is_some()
+            || correlation.executing
+        {
+            return Err("provider effect start correlation failed".to_string());
+        }
+        drop(pending);
+        let (sender, receiver) = oneshot::channel();
+        reserve_pending_response(
+            &mut connection.pending_responses.lock(),
+            request_id.clone(),
+            sender,
+            MAX_PENDING_RESPONSES,
+        )?;
+        if let Err(error) = queue_json(
+            &connection.writer,
+            &json!({
+                "version": 1, "type": "provider.effect.started", "requestId": request_id,
+                "actionId": action_id, "tabId": tab_id, "generation": generation,
+                "invocationId": invocation_id, "documentToken": document_token,
+            }),
+            MAX_CONTROL_FRAME_BYTES,
+        ) {
+            cancel_pending_response(&mut connection.pending_responses.lock(), &request_id);
+            return Err(error);
+        }
+        (provider_key, connection.connection_nonce, receiver)
+    };
+    let response = await_provider_response(
+        state,
+        &project_root,
+        &request_id,
+        receiver,
+        "provider connection closed before effect start acknowledgement",
+        "provider effect start acknowledgement timed out",
+    )
+    .await?;
+    if response.get("type").and_then(Value::as_str) != Some("ack") {
+        return Err(response_error(
+            &response,
+            "provider effect start was rejected",
+        ));
+    }
+    apply_if_connection_nonce(
+        &mut state.providers.lock(),
+        &provider_key,
+        connection_nonce,
+        |connection| connection.connection_nonce,
+        |connection| {
+            if connection.connected.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err("control provider connection is closed".to_string())
+            }
+        },
+    )?
+}
+
+fn provider_effect_executing_frame(
+    request_id: &str,
+    action_id: &str,
+    tab_id: &str,
+    generation: u64,
+    document_token: &str,
+) -> Value {
+    json!({
+        "version": 1, "type": "provider.effect.executing", "requestId": request_id,
+        "actionId": action_id, "tabId": tab_id, "generation": generation,
+        "invocationId": request_id, "documentToken": document_token,
+    })
+}
+
+pub(crate) async fn publish_provider_effect_executing(
+    state: &ControlProviderState,
+    project_root: String,
+    request_id: String,
+    action_id: String,
+    tab_id: String,
+    generation: u64,
+    document_token: String,
+) -> Result<(), String> {
+    let (provider_key, connection_nonce, receiver) = {
+        let (provider_key, connection) = provider(state, &project_root)?;
+        {
+            let pending = connection.pending_effects.lock();
+            let correlation = pending
+                .get(&request_id)
+                .ok_or_else(|| "provider effect request correlation failed".to_string())?;
+            if correlation.action_id != action_id
+                || correlation.tab_id != tab_id
+                || correlation.generation != generation
+                || correlation.document_token.as_deref() != Some(document_token.as_str())
+                || correlation.canceled_at.is_some()
+                || correlation.executing
+            {
+                return Err("provider effect execution correlation failed".to_string());
+            }
+        }
+        let (sender, receiver) = oneshot::channel();
+        reserve_pending_response(
+            &mut connection.pending_responses.lock(),
+            request_id.clone(),
+            sender,
+            MAX_PENDING_RESPONSES,
+        )?;
+        let mut pending = connection.pending_effects.lock();
+        let Some(correlation) = pending.get_mut(&request_id) else {
+            drop(pending);
+            cancel_pending_response(&mut connection.pending_responses.lock(), &request_id);
+            return Err("provider effect request correlation failed".to_string());
+        };
+        if correlation.action_id != action_id
+            || correlation.tab_id != tab_id
+            || correlation.generation != generation
+            || correlation.document_token.as_deref() != Some(document_token.as_str())
+            || correlation.canceled_at.is_some()
+            || correlation.executing
+        {
+            drop(pending);
+            cancel_pending_response(&mut connection.pending_responses.lock(), &request_id);
+            return Err("provider effect execution correlation failed".to_string());
+        }
+        if let Err(error) = queue_json(
+            &connection.writer,
+            &provider_effect_executing_frame(
+                &request_id,
+                &action_id,
+                &tab_id,
+                generation,
+                &document_token,
+            ),
+            MAX_CONTROL_FRAME_BYTES,
+        ) {
+            drop(pending);
+            cancel_pending_response(&mut connection.pending_responses.lock(), &request_id);
+            return Err(error);
+        }
+        correlation.executing = true;
+        (provider_key, connection.connection_nonce, receiver)
+    };
+    let response = await_provider_response(
+        state,
+        &project_root,
+        &request_id,
+        receiver,
+        "provider connection closed before effect execution acknowledgement",
+        "provider effect execution acknowledgement timed out",
+    )
+    .await?;
+    if response.get("type").and_then(Value::as_str) != Some("ack") {
+        return Err(response_error(
+            &response,
+            "provider effect execution was rejected",
+        ));
+    }
+    apply_if_connection_nonce(
+        &mut state.providers.lock(),
+        &provider_key,
+        connection_nonce,
+        |connection| connection.connection_nonce,
+        |connection| {
+            if connection.connected.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err("control provider connection is closed".to_string())
+            }
+        },
+    )?
 }
 
 fn cancel_pending_effect(
@@ -493,7 +922,28 @@ fn complete_pending_effect(
         .ok_or_else(|| "unknown or stale provider effect request".to_string())
 }
 
-fn remove_if_nonce<V, F>(entries: &mut HashMap<String, V>, key: &str, nonce: u64, get_nonce: F)
+fn validate_pending_effect(
+    pending: &mut HashMap<String, PendingEffectCorrelation>,
+    request_id: &str,
+    action_id: &str,
+    now: Instant,
+) -> Result<PendingEffectCorrelation, String> {
+    prune_pending_effect_tombstones(pending, now);
+    let effect = pending
+        .get(request_id)
+        .ok_or_else(|| "unknown or stale provider effect request".to_string())?;
+    if effect.action_id != action_id {
+        return Err("provider effect action correlation failed".to_string());
+    }
+    Ok(effect.clone())
+}
+
+fn remove_if_nonce<V, F>(
+    entries: &mut HashMap<String, V>,
+    key: &str,
+    nonce: u64,
+    get_nonce: F,
+) -> bool
 where
     F: Fn(&V) -> u64,
 {
@@ -502,6 +952,9 @@ where
         .is_some_and(|entry| get_nonce(entry) == nonce)
     {
         entries.remove(key);
+        true
+    } else {
+        false
     }
 }
 
@@ -886,12 +1339,20 @@ async fn connect_provider(
         responses.lock().clear();
         live.store(false, Ordering::Release);
         writer_task.abort();
-        remove_if_nonce(
+        let removed_current = remove_if_nonce(
             &mut providers.lock(),
             &provider_key,
             task_connection_nonce,
             |connection| connection.connection_nonce,
         );
+        if removed_current {
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.emit(
+                    "control:provider-disconnected",
+                    json!({ "projectRoot": provider_key }),
+                );
+            }
+        }
     });
 
     Ok(ProviderConnection {
@@ -929,7 +1390,7 @@ pub async fn control_provider_start(
     );
     #[cfg(unix)]
     let connection = connect_provider(
-        app,
+        app.clone(),
         state.providers.clone(),
         key.clone(),
         canonical_root,
@@ -1126,7 +1587,13 @@ pub async fn control_provider_remove(
                 &tab_id,
                 generation,
                 &response,
-            )
+            )?;
+            clear_removed_browser_effects(
+                &mut connection.pending_effects.lock(),
+                &tab_id,
+                generation,
+            );
+            Ok(())
         },
     )?
 }
@@ -1134,6 +1601,8 @@ pub async fn control_provider_remove(
 #[tauri::command]
 pub fn control_provider_complete(
     state: State<'_, ControlProviderState>,
+    bindings: State<'_, BrowserBindingState>,
+    script_flights: State<'_, BrowserScriptFlightState>,
     project_root: String,
     request_id: String,
     result: ProviderEffectResult,
@@ -1144,12 +1613,22 @@ pub fn control_provider_complete(
         "requestId": request_id, "result": result,
     });
     let encoded = encode_bounded(&frame, MAX_PROVIDER_RESULT_BYTES)?;
-    let correlation = complete_pending_effect(
-        &mut connection.pending_effects.lock(),
-        &request_id,
-        result.action_id(),
-        Instant::now(),
-    )?;
+    let remains_pending = result.remains_pending();
+    let correlation = if remains_pending {
+        validate_pending_effect(
+            &mut connection.pending_effects.lock(),
+            &request_id,
+            result.action_id(),
+            Instant::now(),
+        )?
+    } else {
+        complete_pending_effect(
+            &mut connection.pending_effects.lock(),
+            &request_id,
+            result.action_id(),
+            Instant::now(),
+        )?
+    };
     log::debug!(
         "completed browser provider effect for tab '{}' generation {}",
         correlation.tab_id,
@@ -1158,7 +1637,16 @@ pub fn control_provider_complete(
     connection
         .writer
         .send(encoded)
-        .map_err(|_| "control provider writer is closed".to_string())
+        .map_err(|_| "control provider writer is closed".to_string())?;
+    if !remains_pending {
+        script_flights.clear_matching_request(
+            &bindings,
+            &correlation.tab_id,
+            correlation.generation,
+            &request_id,
+        );
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1344,6 +1832,175 @@ mod tests {
             "status": "succeeded", "actionId": "a", "code": "impossible"
         }))
         .is_err());
+        assert!(serde_json::from_value::<ProviderEffectResult>(json!({
+            "status": "timed_out_pending", "actionId": "a", "code": "action_timeout",
+            "message": "deadline"
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<ProviderEffectResult>(json!({
+            "status": "timed_out_pending", "actionId": "a", "code": "action_timeout",
+            "message": "deadline", "durationMs": 5_000.0
+        }))
+        .is_ok());
+        assert!(serde_json::from_value::<ProviderEffectResult>(json!({
+            "status": "timed_out_pending", "actionId": "a", "code": "effect_unknown",
+            "message": "wrong"
+        }))
+        .is_err());
+        let unknown_pending = serde_json::from_value::<ProviderEffectResult>(json!({
+            "status": "unknown_pending", "actionId": "a", "code": "effect_unknown",
+            "message": "execution acknowledgement was lost", "ambiguous": true, "durationMs": 0.0
+        }))
+        .unwrap();
+        assert!(unknown_pending.remains_pending());
+        assert!(serde_json::from_value::<ProviderEffectResult>(json!({
+            "status": "unknown_pending", "actionId": "a", "code": "action_timeout",
+            "message": "wrong", "ambiguous": true, "durationMs": 0.0
+        }))
+        .is_err());
+        for result in [
+            json!({"status":"failed","actionId":"a","code":"action_timeout","message":"x"}),
+            json!({"status":"failed","actionId":"a","code":"action_timeout","message":"x","durationMs":4999}),
+            json!({"status":"failed","actionId":"a","code":"effect_unknown","message":"x","durationMs":1}),
+        ] {
+            assert!(serde_json::from_value::<ProviderEffectResult>(result).is_err());
+        }
+        for duration_ms in [0.0, 5_000.0] {
+            assert!(serde_json::from_value::<ProviderEffectResult>(json!({
+                "status":"failed","actionId":"a","code":"script_execution_failed",
+                "message":"x","durationMs":duration_ms
+            }))
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn executing_frame_is_exact_and_correlated() {
+        assert_eq!(
+            provider_effect_executing_frame("request", "action", "tab", 7, "token"),
+            json!({
+                "version": 1, "type": "provider.effect.executing", "requestId": "request",
+                "actionId": "action", "tabId": "tab", "generation": 7,
+                "invocationId": "request", "documentToken": "token",
+            })
+        );
+    }
+
+    #[test]
+    fn provider_reconnect_preserves_document_owned_script_flight() {
+        let bindings = BrowserBindingState::default();
+        let flights = BrowserScriptFlightState::default();
+        flights
+            .reserve(
+                &bindings,
+                "browser:tab-1".into(),
+                "old-token".into(),
+                7,
+                "old-invocation".into(),
+            )
+            .unwrap();
+        assert_eq!(
+            flights.reserve(
+                &bindings,
+                "browser:tab-1".into(),
+                "new-token".into(),
+                8,
+                "new-invocation".into(),
+            ),
+            Err("effect_in_flight".into())
+        );
+        assert!(flights.clear_matching_invocation(
+            &bindings,
+            "browser:tab-1",
+            "old-token",
+            7,
+            "old-invocation"
+        ));
+        flights
+            .reserve(
+                &bindings,
+                "browser:tab-1".into(),
+                "new-token".into(),
+                8,
+                "new-invocation".into(),
+            )
+            .unwrap();
+        assert!(!flights.clear_matching_invocation(
+            &bindings,
+            "browser:tab-1",
+            "old-token",
+            7,
+            "old-invocation"
+        ));
+        assert_eq!(
+            bindings
+                .operations
+                .lock()
+                .get("browser:tab-1")
+                .and_then(|operation| match operation {
+                    BrowserOperation::Script(flight) => {
+                        Some((flight.generation, flight.invocation_id.as_str()))
+                    }
+                    _ => None,
+                }),
+            Some((8, "new-invocation"))
+        );
+    }
+
+    #[test]
+    fn remote_resource_removal_preserves_document_owned_flight() {
+        let bindings = BrowserBindingState::default();
+        let flights = BrowserScriptFlightState::default();
+        flights
+            .reserve(
+                &bindings,
+                "browser:tab-1".into(),
+                "old-token".into(),
+                7,
+                "old-request".into(),
+            )
+            .unwrap();
+        let mut pending = HashMap::from([
+            (
+                "old-request".into(),
+                PendingEffectCorrelation {
+                    action_id: "old-action".into(),
+                    tab_id: "browser:tab-1".into(),
+                    generation: 7,
+                    document_token: Some("old-token".into()),
+                    canceled_at: Some(Instant::now()),
+                    executing: true,
+                },
+            ),
+            (
+                "unrelated-request".into(),
+                PendingEffectCorrelation {
+                    action_id: "other-action".into(),
+                    tab_id: "browser:tab-2".into(),
+                    generation: 3,
+                    document_token: None,
+                    canceled_at: None,
+                    executing: false,
+                },
+            ),
+        ]);
+        assert_eq!(
+            clear_removed_browser_effects(&mut pending, "browser:tab-1", 7),
+            vec!["old-request".to_string()]
+        );
+        assert!(!pending.contains_key("old-request"));
+        assert!(pending.contains_key("unrelated-request"));
+        assert_eq!(
+            bindings
+                .operations
+                .lock()
+                .get("browser:tab-1")
+                .and_then(|operation| match operation {
+                    BrowserOperation::Script(flight) => Some(flight.invocation_id.as_str()),
+                    _ => None,
+                }),
+            Some("old-request")
+        );
     }
 
     #[test]
@@ -1455,6 +2112,36 @@ mod tests {
             started + Duration::from_secs(3),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn timeout_notification_retains_correlation_until_actual_terminal_result() {
+        let started = tokio::time::Instant::now();
+        let mut pending = HashMap::new();
+        reserve_pending_effect(
+            &mut pending,
+            &json!({ "requestId": "request-1", "actionId": "action-1",
+                "tabId": "tab-1", "generation": 7 }),
+            started,
+        )
+        .unwrap();
+        let notification = validate_pending_effect(
+            &mut pending,
+            "request-1",
+            "action-1",
+            started + Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(notification.tab_id, "tab-1");
+        assert_eq!(pending.len(), 1);
+        complete_pending_effect(
+            &mut pending,
+            "request-1",
+            "action-1",
+            started + Duration::from_secs(6),
+        )
+        .unwrap();
+        assert!(pending.is_empty());
     }
 
     #[test]

@@ -109,6 +109,21 @@ export type BrowserActionDurableSummary = {
   result: 'result_unavailable';
 };
 
+export interface BrowserScriptResult {
+  readonly value: unknown;
+  readonly byteCount: number;
+  readonly durationMs: number;
+}
+
+export interface BrowserScriptDurableSummary {
+  readonly sourceDigest: string;
+  readonly sourceBytes: number;
+  readonly argsBytes: number;
+  readonly resultBytes: number;
+  readonly durationMs: number;
+  readonly outcome: 'succeeded' | 'failed' | 'unknown';
+}
+
 export type PaneActionPostcondition =
   | { paneId: string; generation: number; focused: boolean }
   | { paneId: string; generation: number; cols: number; rows: number };
@@ -149,7 +164,7 @@ export interface ActionReceipt {
   completedAt?: string;
   code?: string;
   message?: string;
-  value?: BrowserActionPostcondition | BrowserActionDurableSummary | PaneActionPostcondition;
+  value?: BrowserActionPostcondition | BrowserActionDurableSummary | BrowserScriptDurableSummary | PaneActionPostcondition;
 }
 
 export interface RecentReceiptSummary {

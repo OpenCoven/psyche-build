@@ -453,14 +453,20 @@ function tauriHandlerNames(source: string) {
 
 describe('Tauri native browser lifecycle', () => {
   it('documents the browser lifecycle source contract', () => {
-    const destroyBrowserWebview = rustFunctionSource(nativeLib, 'destroy_browser_webview');
+    const destroyBrowserWebview = rustFunctionSource(nativeLib, 'close_native_browser_webview');
     expect(destroyBrowserWebview).toMatch(
-      /^fn destroy_browser_webview\(app: &AppHandle, label: Option<String>\) -> Result<\(\), String> \{\n\s*let label = safe_browser_label\(label\);\n\s*if let Some\(webview\) = app\.get_webview\(&label\) \{\n\s*webview\.close\(\)\.map_err\(\|error\| error\.to_string\(\)\)\?;\n\s*\}\n\s*Ok\(\(\)\)\n\}$/s,
+      /^fn close_native_browser_webview\(app: &AppHandle, native_label: &str\) -> Result<bool, String>/,
     );
+    expect(destroyBrowserWebview).not.toContain('safe_browser_label');
+    expect(destroyBrowserWebview).toContain('app.get_webview(native_label)');
 
     const browserDestroy = rustFunctionSource(nativeLib, 'browser_destroy');
     expect(browserDestroy).toContain('require_main_webview(&caller)?');
-    expect(browserDestroy).toContain('bindings.bindings.lock().remove(&tab_id)');
+    expect(browserDestroy).toContain('destroy_native_browser_binding_after');
+    expect(browserDestroy).toContain('binding.label');
+    expect(browserDestroy).not.toContain('safe_browser_label');
+    expect(browserDestroy).toContain('raw_label: Option<String>');
+    expect(browserDestroy).toContain('validate_managed_renderer_browser_label');
 
     const browserDestroyMany = rustFunctionSource(nativeLib, 'browser_destroy_many');
     expect(nativeLib).toContain(
@@ -473,17 +479,12 @@ describe('Tauri native browser lifecycle', () => {
     expect(browserDestroyMany).toContain(') -> BrowserDestroyManyOutcome {');
     expect(browserDestroyMany).toContain('if require_main_webview(&caller).is_err() {');
     expect(browserDestroyMany).toContain('error: "permission_denied".to_string()');
-    expect(browserDestroyMany).toContain('for label in labels {');
-    expect(browserDestroyMany).toContain(
-      'match destroy_browser_webview(&app, Some(label.clone())) {',
-    );
-    expect(browserDestroyMany).toContain(
-      '.retain(|_, binding| binding.label != label)',
-    );
-    expect(browserDestroyMany).toContain('outcome.destroyed.push(label)');
-    expect(browserDestroyMany).toContain(
-      '.push(BrowserDestroyFailure { label, error })',
-    );
+    expect(browserDestroyMany).toContain('for raw_label in labels {');
+    expect(browserDestroyMany).toContain('validate_managed_renderer_browser_label(&raw_label)');
+    expect(browserDestroyMany).toContain('destroy_native_browser_binding_after');
+    expect(browserDestroyMany).toContain('&native_label');
+    expect(browserDestroyMany).toContain('outcome.destroyed.push(raw_label)');
+    expect(browserDestroyMany).toMatch(/BrowserDestroyFailure\s*\{\s*label:\s*raw_label,\s*error,/);
     expect(browserDestroyMany).not.toContain('?;');
 
     const handlers = tauriHandlerNames(nativeLib);
@@ -520,12 +521,12 @@ describe('Tauri native browser lifecycle', () => {
       'discardObsoleteBrowserNavigation',
     );
     expect(discardObsoleteNavigation).toContain(
-      'await invoke("browser_destroy", { tabId: context.tab.id })',
+      'await invoke("browser_destroy", { tabId: context.tab.id, rawLabel: context.label })',
     );
     expect(discardObsoleteNavigation).toContain('context.tab.created = false');
   });
 
-  it('destroys a browser view before removing its tab state', async () => {
+  it('confirms a dormant browser tab absence before removing its tab state', async () => {
     const calls: string[] = [];
     const project: IdentifiedBrowserProjectFixture = {
       id: 'project-a',
@@ -533,7 +534,7 @@ describe('Tauri native browser lifecycle', () => {
         '/workspace': {
           activeTabId: 'tab-a',
           tabs: [
-            { id: 'tab-a', created: true },
+            { id: 'tab-a', created: false },
             { id: 'tab-b', created: true },
           ],
         },
@@ -545,10 +546,10 @@ describe('Tauri native browser lifecycle', () => {
       ...browserLifecycleHarness(),
       activeProject: () => project,
       ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
-      invoke: async (command: string, args: { tabId: string }) => {
-        calls.push(`${command}:${args.tabId}:${project.browsersByWorktree['/workspace'].tabs.length}`);
+      invoke: async (command: string, args: { tabId: string; rawLabel: string }) => {
+        calls.push(`${command}:${args.tabId}:${args.rawLabel}:${project.browsersByWorktree['/workspace'].tabs.length}`);
       },
-      browserLabelForTab: (value: typeof project, tab: { id: string }) => `${value.id}:${tab.id}`,
+      browserLabelForTab: (value: typeof project, tab: { id: string }) => `${value.id}__${tab.id}`,
       setStatus: () => {},
       renderBrowserTabs: () => calls.push('render'),
       syncProjectBrowser: () => calls.push('sync'),
@@ -557,7 +558,7 @@ describe('Tauri native browser lifecycle', () => {
 
     await expect(closeBrowserTab(project, 'tab-a')).resolves.toBe(true);
     expect(calls).toEqual([
-      'browser_destroy:tab-a:2',
+      'browser_destroy:tab-a:project-a__tab-a:2',
       'render',
       'sync',
       'save',
@@ -2455,6 +2456,8 @@ describe('Tauri native browser lifecycle', () => {
       history: ['https://failed.example'],
       historyIndex: 0,
     };
+    Object.assign(lifecycle.browserTabLifecycle(tab), { controlGeneration: 7 });
+    Object.assign(lifecycle.browserTabLifecycle(failedTab), { controlGeneration: 11 });
     const browser = { activeTabId: tab.id, tabs: [tab, failedTab] };
     const nativeViews = new Set(['project-a:tab-a', 'project-a:tab-b']);
     const invoke = (
@@ -2535,6 +2538,9 @@ describe('Tauri native browser lifecycle', () => {
       syncProjectBrowser: () => calls.push('sync'),
       state: { activeThreadId: 'web-pane' },
       markActiveSurface: () => calls.push('surface'),
+      browserScriptTimeoutState: {
+        terminalTab: (tabId: string, generation: number) => calls.push(`terminal:${tabId}:${generation}`),
+      },
     });
 
     const navigation = navigateBrowser('https://new.example', { tabId: tab.id });
@@ -2571,6 +2577,7 @@ describe('Tauri native browser lifecycle', () => {
       'navigate:project-a:tab-a',
       'destroy:project-a:tab-a',
       'destroy-many:project-a:tab-a,project-a:tab-b',
+      'terminal:tab-a:7',
       'recover:project-a:tab-a',
       'sync',
       'save',
@@ -2720,6 +2727,7 @@ describe('Tauri native browser lifecycle', () => {
     const tabs = [
       { id: 'tab-a', created: true, loading: true },
       { id: 'tab-b', created: true, loading: false },
+      { id: 'tab-c', created: false, loading: false },
     ];
     const closeBrowserPane = compileFunction<
       (thread: BrowserPaneThreadFixture) => Promise<boolean>
@@ -2742,7 +2750,7 @@ describe('Tauri native browser lifecycle', () => {
 
     await expect(closeBrowserPane(thread)).resolves.toBe(true);
     expect(calls).toEqual([
-      'browser_destroy_many:project-a:tab-a,project-a:tab-b',
+      'browser_destroy_many:project-a:tab-a,project-a:tab-b,project-a:tab-c',
       'save',
       'stage',
       'close',
@@ -2751,6 +2759,7 @@ describe('Tauri native browser lifecycle', () => {
     expect(tabs).toEqual([
       { id: 'tab-a', created: false, loading: false },
       { id: 'tab-b', created: false, loading: false },
+      { id: 'tab-c', created: false, loading: false },
     ]);
   });
 

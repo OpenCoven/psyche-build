@@ -1,8 +1,9 @@
 import type { TmuxControl } from '../services/tmuxControl.js';
+import { randomUUID } from 'node:crypto';
 import { assertTmuxPaneId } from '../utils/tmuxTarget.js';
 import { decodeBase64Payload } from '../utils/base64.js';
 import { buildDesktopUseQuickInput, isDesktopUseQuickAction, type DesktopUseQuickAction } from '../utils/covenDesktopUse.js';
-import type { CanonicalBrowserSnapshotResolver, ControlHandlers } from '../control/runtime.js';
+import type { CanonicalBrowserScriptContextResolver, CanonicalBrowserSnapshotResolver, ControlHandlers } from '../control/runtime.js';
 import { validatePaneNamedKeys } from '../control/types.js';
 import type { PaneResourceController } from '../control/resources/panes.js';
 import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
@@ -88,6 +89,38 @@ export function createBrowserSnapshotResolver(
   };
 }
 
+export function createBrowserScriptContextResolver(
+  broker: BrowserProviderBroker,
+): CanonicalBrowserScriptContextResolver {
+  return async (payload) => {
+    const result = await broker.dispatch({
+      actionId: `script-context:${payload.tabId}:${payload.generation}:${randomUUID()}`,
+      tabId: payload.tabId,
+      generation: payload.generation,
+      operation: { kind: 'script_context' },
+    });
+    if (result.status !== 'succeeded') {
+      throw Object.assign(new Error(result.message), {
+        code: result.code,
+        ...(result.status === 'unknown' ? { ambiguous: true } : {}),
+      });
+    }
+    if (!result.value || typeof result.value !== 'object') {
+      throw Object.assign(new Error('browser script context is malformed'), { code: 'snapshot_stale' });
+    }
+    const value = result.value as Record<string, unknown>;
+    if (typeof value.documentId !== 'string' || !value.documentId
+        || typeof value.documentToken !== 'string' || !value.documentToken
+        || !Number.isSafeInteger(value.navigationEpoch) || (value.navigationEpoch as number) < 0
+        || typeof value.navigationUrl !== 'string' || !value.navigationUrl) {
+      throw Object.assign(new Error('browser script context is malformed'), { code: 'snapshot_stale' });
+    }
+    return { tabId: payload.tabId, generation: payload.generation,
+      documentId: value.documentId, documentToken: value.documentToken,
+      navigationEpoch: value.navigationEpoch as number, navigationUrl: value.navigationUrl };
+  };
+}
+
 /**
  * The concrete {@link ControlHandlers} that turn canonical control commands
  * into daemon effects.
@@ -122,6 +155,9 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
     throw Object.assign(new Error(result.message), {
       code: result.code,
       ...(result.status === 'unknown' ? { ambiguous: true } : {}),
+      ...('durationMs' in result && result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
+      ...(result.status === 'failed' && ['script_realm_limit', 'action_timeout'].includes(result.code)
+        ? { noRetry: true } : {}),
     });
   };
 
@@ -266,12 +302,15 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
           } } : {}) },
       }));
     },
-    async runBrowserScript(payload, actionId) {
+    async runBrowserScript(payload, actionId, context) {
       return effectValue(await browserProviders().dispatch({
         actionId,
         tabId: payload.tabId,
         generation: payload.generation,
-        operation: { kind: 'script', source: payload.source,
+        operation: { kind: 'script', source: payload.source, expectedContext: {
+          documentId: context.documentId, documentToken: context.documentToken,
+          navigationEpoch: context.navigationEpoch, navigationUrl: context.navigationUrl,
+        },
           ...(payload.args === undefined ? {} : { args: payload.args }) },
       }));
     },

@@ -1,6 +1,7 @@
 import { LaneLeaseStore } from './leases.js';
 import { PromptDispatcher } from './promptDispatch.js';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import { ApprovalStore, digestActionPayload, type Approval, type RedactedApprovalEffect } from './approvals.js';
 import { CapabilityLeaseStore, SURFACE_CAPABILITIES as CANONICAL_SURFACE_CAPABILITIES,
@@ -27,6 +28,8 @@ import type {
   PaneObservationResult,
   PaneActionPostcondition,
   BrowserActionDurableSummary,
+  BrowserScriptDurableSummary,
+  BrowserScriptResult,
   RecentReceiptSummary,
 } from './types.js';
 
@@ -55,11 +58,24 @@ export interface ControlHandlers {
   actOnPane(payload: Payload<'pane.action'>): Promise<unknown>;
   inspectBrowser(payload: Payload<'browser.inspect'>, actionId: string): Promise<unknown>;
   actOnBrowser(payload: Payload<'browser.action'>, actionId: string, binding?: CanonicalBrowserElementBinding): Promise<unknown>;
-  runBrowserScript(payload: Payload<'browser.script'>, actionId: string): Promise<unknown>;
+  runBrowserScript(payload: Payload<'browser.script'>, actionId: string, context: CanonicalBrowserScriptContext): Promise<unknown>;
 }
 
 export interface CanonicalBrowserSnapshotResolver {
   (payload: Payload<'browser.action'>): Promise<CanonicalBrowserElementBinding | undefined>;
+}
+
+export interface CanonicalBrowserScriptContextResolver {
+  (payload: Pick<Payload<'browser.script'>, 'tabId' | 'generation'>): Promise<CanonicalBrowserScriptContext>;
+}
+
+export interface CanonicalBrowserScriptContext {
+  readonly tabId: string;
+  readonly generation: number;
+  readonly documentId: string;
+  readonly documentToken: string;
+  readonly navigationEpoch: number;
+  readonly navigationUrl: string;
 }
 
 export interface CanonicalBrowserElementBinding {
@@ -95,6 +111,7 @@ export interface ControlRuntimeOptions {
   capabilityLeases?: CapabilityLeaseStore;
   approvals?: ApprovalStore;
   resolveBrowserSnapshot?: CanonicalBrowserSnapshotResolver;
+  resolveBrowserScriptContext?: CanonicalBrowserScriptContextResolver;
   canonicalizePath?: (candidate: string, mode?: 'existing' | 'prospective') => string | Promise<string>;
 }
 
@@ -126,12 +143,15 @@ interface PendingApproval {
   }>;
   readonly classification: PolicyClassification;
   readonly browserBinding?: CanonicalBrowserElementBinding;
+  readonly scriptContext?: CanonicalBrowserScriptContext;
+  readonly approvalPayload: unknown;
   readonly effect: RedactedApprovalEffect;
 }
 
 interface AgentSurfaceHandlerResult {
   readonly receipt: ActionReceipt;
   readonly livePaneObservation?: PaneObservationResult;
+  readonly liveBrowserScript?: BrowserScriptResult;
 }
 
 const TERMINAL_EVENT_KINDS = new Set([
@@ -208,6 +228,9 @@ export class ControlRuntime {
     private readonly resolveBrowserSnapshot: CanonicalBrowserSnapshotResolver = async () => {
       throw codedError('snapshot_stale', 'canonical browser snapshot is unavailable');
     },
+    private readonly resolveBrowserScriptContext: CanonicalBrowserScriptContextResolver = async () => {
+      throw codedError('snapshot_stale', 'canonical browser script context is unavailable');
+    },
     private readonly canonicalizePath: (
       candidate: string,
       mode?: 'existing' | 'prospective',
@@ -232,6 +255,7 @@ export class ControlRuntime {
     const runtime = new ControlRuntime(
       opts.ownerEpoch, opts.handlers, opts.journal,
       opts.surfaces, opts.capabilityLeases, opts.approvals, opts.resolveBrowserSnapshot,
+      opts.resolveBrowserScriptContext,
       opts.canonicalizePath,
     );
     runtime.reduceOutcomes(opts.journal.read(0));
@@ -517,6 +541,7 @@ export class ControlRuntime {
           throw codedError('capability_denied', 'observation cannot require approval');
         }
         const effect = approvalEffectFor(command);
+        const approvalPayload = approvalPayloadFor(command, prepared.scriptContext);
         const approval = this.approvals.request({
           actionId: command.id,
           ownerEpoch: command.ownerEpoch,
@@ -525,10 +550,12 @@ export class ControlRuntime {
           resource: prepared.target,
           capability: prepared.classification.capability,
           effect,
-          actionPayload: command.payload,
+          actionPayload: approvalPayload,
         });
         this.pendingApprovals.set(approval.id, { approval, command, classification: prepared.classification,
-          ...(prepared.browserBinding ? { browserBinding: freezeBrowserBinding(prepared.browserBinding) } : {}), effect });
+          ...(prepared.browserBinding ? { browserBinding: freezeBrowserBinding(prepared.browserBinding) } : {}), effect,
+          approvalPayload,
+          ...(prepared.scriptContext ? { scriptContext: Object.freeze({ ...prepared.scriptContext }) } : {}) });
         const receipt = this.recordReceipt(command, prepared.target, 'approval_required', 'approval_required');
         return this.appendTerminal(command, succeededOutcome(receipt));
       }
@@ -547,11 +574,13 @@ export class ControlRuntime {
     command: Extract<ControlCommand, {
       kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script';
     }>,
-  ): Promise<{ target: LeaseTarget; classification: PolicyClassification; browserBinding?: CanonicalBrowserElementBinding }> {
+  ): Promise<{ target: LeaseTarget; classification: PolicyClassification; browserBinding?: CanonicalBrowserElementBinding;
+    scriptContext?: CanonicalBrowserScriptContext }> {
     this.assertCurrentOwner(command.ownerEpoch);
     let target: LeaseTarget;
     let classification: PolicyClassification;
     let browserBinding: CanonicalBrowserElementBinding | undefined;
+    let scriptContext: CanonicalBrowserScriptContext | undefined;
     switch (command.kind) {
       case 'pane.observe':
         this.requireResource(command.payload.paneId, command.payload.generation, 'pane');
@@ -614,14 +643,23 @@ export class ControlRuntime {
         break;
       }
       case 'browser.script':
+        if (Buffer.byteLength(command.payload.source, 'utf8') > AGENT_CONTROL_LIMITS.scriptSourceBytes) {
+          throw codedError('script_source_too_large', 'browser script source exceeds the control limit');
+        }
         this.requireResource(command.payload.tabId, command.payload.generation, 'browser_tab');
         target = { kind: 'browser_tab', id: command.payload.tabId, generation: command.payload.generation };
         classification = classifyBrowserScript();
+        this.assertCapabilityLease(command, target, classification.capability);
+        scriptContext = validateBrowserScriptContext(
+          command.payload,
+          await this.resolveBrowserScriptContext({ tabId: command.payload.tabId, generation: command.payload.generation }),
+        );
         break;
     }
     this.assertCapabilityLease(command, target, classification.capability);
     this.captureReceiptScope(command, target);
-    return { target, classification, ...(browserBinding ? { browserBinding } : {}) };
+    return { target, classification, ...(browserBinding ? { browserBinding } : {}),
+      ...(scriptContext ? { scriptContext } : {}) };
   }
 
   private assertCapabilityLease(
@@ -668,6 +706,7 @@ export class ControlRuntime {
           this.recordReceipt(
             command, target, outcome.status === 'unknown' ? 'unknown' : 'failed',
             outcome.status === 'succeeded' ? undefined : outcome.code,
+            browserScriptSummaryFromError(error),
           );
         }
         const durableOutcome = await this.appendTerminal(command, outcome);
@@ -691,10 +730,13 @@ export class ControlRuntime {
     }>,
     target: LeaseTarget,
     browserBinding?: CanonicalBrowserElementBinding,
+    scriptContext?: CanonicalBrowserScriptContext,
   ): Promise<AgentSurfaceHandlerResult> {
     try {
       let livePaneObservation: PaneObservationResult | undefined;
+      let liveBrowserScript: BrowserScriptResult | undefined;
       let postcondition: PaneActionPostcondition | BrowserActionPostcondition | undefined;
+      let scriptSummary: BrowserScriptDurableSummary | undefined;
       switch (command.kind) {
         case 'pane.observe': {
           const result = await requireHandler(this.handlers.observePane, command.kind)(command.payload);
@@ -721,16 +763,40 @@ export class ControlRuntime {
             }
           }
           break;
-        case 'browser.script':
-          await requireHandler(this.handlers.runBrowserScript, command.kind)(command.payload, command.id);
+        case 'browser.script': {
+          if (!scriptContext) throw codedError('approval_identity_mismatch', 'browser script context is missing');
+          try {
+            const result = await requireHandler(this.handlers.runBrowserScript, command.kind)(
+              command.payload, command.id, scriptContext,
+            );
+            liveBrowserScript = normalizeBrowserScriptResult(result);
+            scriptSummary = browserScriptDurableSummary(
+              command, 'succeeded', liveBrowserScript.durationMs, liveBrowserScript.byteCount,
+            );
+          } catch (error) {
+            const failure = safeSurfaceFailure(error);
+            throw browserScriptSummaryError(error, browserScriptDurableSummary(
+              command,
+              failure.status === 'unknown' ? 'unknown' : 'failed',
+              browserScriptDurationFromError(error),
+              0,
+            ));
+          }
           break;
+        }
       }
       return {
-        receipt: this.recordReceipt(command, target, 'succeeded', undefined, postcondition),
+        receipt: this.recordReceipt(command, target, 'succeeded', undefined, scriptSummary ?? postcondition),
         ...(livePaneObservation ? { livePaneObservation } : {}),
+        ...(liveBrowserScript ? { liveBrowserScript } : {}),
       };
     } catch (error) {
-      if (isAmbiguous(error)) throw codedError('effect_unknown', 'surface effect outcome is unknown', true);
+      if (errorCode(error) === 'action_timeout') throw error;
+      if (isAmbiguous(error)) {
+        const unknown = codedError('effect_unknown', 'surface effect outcome is unknown', true);
+        const summary = browserScriptSummaryFromError(error);
+        throw summary ? browserScriptSummaryError(unknown, summary) : unknown;
+      }
       throw error;
     }
   }
@@ -962,6 +1028,7 @@ export class ControlRuntime {
       if (
         !sameClassification(current.classification, pending.classification)
         || !sameBrowserBinding(current.browserBinding, pending.browserBinding)
+        || !sameBrowserScriptContext(current.scriptContext, pending.scriptContext)
       ) throw codedError('approval_identity_mismatch', 'trusted action risk changed before approval consumption');
       this.approvals.consume({
         approvalId: resolved.id,
@@ -973,7 +1040,7 @@ export class ControlRuntime {
         resource: current.target,
         capability: current.classification.capability,
         effect: pending.approval.effect,
-        actionPayload: pending.command.payload,
+        actionPayload: pending.approvalPayload,
       });
     } catch (error) {
       const outcome = safeSurfaceFailure(error);
@@ -1000,12 +1067,16 @@ export class ControlRuntime {
         if (
           !sameClassification(revalidated.classification, pending.classification)
           || !sameBrowserBinding(revalidated.browserBinding, pending.browserBinding)
+          || !sameBrowserScriptContext(revalidated.scriptContext, pending.scriptContext)
         ) throw codedError('approval_identity_mismatch', 'trusted action risk changed before approved effect');
-        const { receipt } = await this.invokeAgentSurfaceHandler(
-          pending.command, current.target, pending.browserBinding,
+        const { receipt, liveBrowserScript } = await this.invokeAgentSurfaceHandler(
+          pending.command, current.target, pending.browserBinding, pending.scriptContext,
         );
         const outcome = outcomeForReceipt(receipt);
-        resolve(await this.appendTerminal(pending.command, outcome));
+        const durable = await this.appendTerminal(pending.command, outcome);
+        resolve(liveBrowserScript && durable.status === 'succeeded'
+          ? succeededOutcome(liveBrowserScript)
+          : durable);
       }).catch(async (error: unknown) => {
         const outcome = safeSurfaceFailure(error);
         this.recordReceipt(
@@ -1013,6 +1084,7 @@ export class ControlRuntime {
           current.target,
           outcome.status === 'unknown' ? 'unknown' : 'failed',
           outcome.status === 'succeeded' ? undefined : outcome.code,
+          browserScriptSummaryFromError(error),
         );
         resolve(await this.appendTerminal(pending.command, outcome));
       }).finally(() => {
@@ -1128,8 +1200,11 @@ export class ControlRuntime {
     resource: LeaseTarget,
     state: ActionReceipt['state'],
     code?: string,
-    value?: PaneActionPostcondition | BrowserActionPostcondition,
+    value?: PaneActionPostcondition | BrowserActionPostcondition | BrowserScriptDurableSummary,
   ): ActionReceipt {
+    const durableValue = value ?? (command.kind === 'browser.script' && (state === 'failed' || state === 'unknown')
+      ? browserScriptDurableSummary(command, state, 0, 0)
+      : undefined);
     const receipt: ActionReceipt = Object.freeze({
       schema: 'psyche.control.receipt/v1',
       actionId: command.id,
@@ -1138,7 +1213,7 @@ export class ControlRuntime {
       createdAt: command.createdAt,
       ...(state === 'approval_required' ? {} : { completedAt: new Date().toISOString() }),
       ...(code ? { code } : {}),
-      ...(value ? { value } : {}),
+      ...(durableValue ? { value: durableValue } : {}),
     });
     const previous = this.receipts.findIndex(({ actionId }) => actionId === command.id);
     if (previous >= 0) this.receipts.splice(previous, 1);
@@ -1242,7 +1317,7 @@ export class ControlRuntime {
       const receipt: ActionReceipt = Object.freeze({
         ...status,
         state: 'unknown',
-        code: 'owner_restarted',
+        code: 'effect_unknown',
         completedAt: new Date().toISOString(),
       });
       this.actionStatuses.set(actionId, receipt);
@@ -1253,10 +1328,10 @@ export class ControlRuntime {
       await this.journal.append('command.unknown', {
         commandId: actionId,
         ...(idempotencyKey ? { idempotencyKey } : {}),
-        status: 'unknown', code: 'owner_restarted', message: 'command outcome is unknown', receipt,
+        status: 'unknown', code: 'effect_unknown', message: 'command outcome is unknown', receipt,
       });
       const outcome: CommandOutcome = {
-        status: 'unknown', code: 'owner_restarted', message: 'command outcome is unknown',
+        status: 'unknown', code: 'effect_unknown', message: 'command outcome is unknown',
       };
       this.outcomesByCommandId.set(actionId, outcome);
       if (idempotencyKey) this.outcomesByIdempotencyKey.set(idempotencyKey, outcome);
@@ -1447,6 +1522,12 @@ export class ControlRuntime {
         if (actionIdempotencyKey) {
           this.outcomesByIdempotencyKey.set(actionIdempotencyKey, receiptOutcome);
         }
+      } else {
+        const orphanCandidate = approvalRequiredReceiptForReconciliation(event);
+        if (orphanCandidate) {
+          this.receipts.push(orphanCandidate);
+          this.actionStatuses.set(orphanCandidate.actionId, orphanCandidate);
+        }
       }
     }
     while (this.receipts.length > MAX_RECEIPTS) this.receipts.shift();
@@ -1617,9 +1698,11 @@ function receiptPayload(event: RuntimeEvent): ActionReceipt | undefined {
     || !resource
     || !isExactLeaseTarget(resource)
   ) return undefined;
+  if (!receiptMatchesTerminalEvent(event, receipt)) return undefined;
   const postcondition = resource.kind === 'pane'
     ? normalizeStoredPanePostcondition(resource.id, resource.generation, receipt.value)
-    : normalizeStoredBrowserActionSummary(receipt.value);
+    : normalizeStoredBrowserScriptSummary(receipt.value, receipt.state as ActionReceipt['state'], receipt.code)
+      ?? normalizeStoredBrowserActionSummary(receipt.value);
   return Object.freeze({
     schema: 'psyche.control.receipt/v1',
     actionId: receipt.actionId,
@@ -1630,6 +1713,55 @@ function receiptPayload(event: RuntimeEvent): ActionReceipt | undefined {
     ...(typeof receipt.code === 'string' ? { code: receipt.code } : {}),
     ...(postcondition ? { value: postcondition } : {}),
   });
+}
+
+function receiptMatchesTerminalEvent(event: RuntimeEvent, receipt: Partial<ActionReceipt>): boolean {
+  const commandId = stringPayload(event, 'commandId');
+  const payloadActionId = stringPayload(event, 'actionId');
+  if (!commandId || receipt.actionId !== commandId
+      || (payloadActionId !== undefined && payloadActionId !== receipt.actionId)) return false;
+  const receiptCode = typeof receipt.code === 'string' ? receipt.code : undefined;
+  switch (event.kind) {
+    case 'command.succeeded':
+      return event.payload.status === 'succeeded'
+        && !Object.prototype.hasOwnProperty.call(event.payload, 'code')
+        && receipt.state === 'succeeded'
+        && !Object.prototype.hasOwnProperty.call(receipt, 'code');
+    case 'command.failed': {
+      const eventCode = stringPayload(event, 'code');
+      return event.payload.status === 'failed'
+        && Boolean(eventCode && eventCode !== 'effect_unknown')
+        && receipt.state === 'failed' && receiptCode === eventCode;
+    }
+    case 'command.unknown':
+      return event.payload.status === 'unknown' && stringPayload(event, 'code') === 'effect_unknown'
+        && receipt.state === 'unknown' && receiptCode === 'effect_unknown';
+    case 'command.rejected': {
+      const eventCode = stringPayload(event, 'code');
+      return event.payload.status === 'rejected' && Boolean(eventCode)
+        && receipt.state === 'denied' && receiptCode === eventCode;
+    }
+    default:
+      return false;
+  }
+}
+
+function approvalRequiredReceiptForReconciliation(event: RuntimeEvent): ActionReceipt | undefined {
+  if (event.kind !== 'command.succeeded' || event.payload.status !== 'succeeded'
+      || Object.prototype.hasOwnProperty.call(event.payload, 'code')) return undefined;
+  const value = event.payload.receipt;
+  if (!isExactPlainDataObject(value, [
+    'schema', 'actionId', 'state', 'resource', 'createdAt', 'code',
+  ])) return undefined;
+  const receipt = value as Partial<ActionReceipt>;
+  const commandId = stringPayload(event, 'commandId');
+  if (!commandId || receipt.schema !== 'psyche.control.receipt/v1' || receipt.actionId !== commandId
+      || receipt.state !== 'approval_required' || receipt.code !== 'approval_required'
+      || Object.prototype.hasOwnProperty.call(receipt, 'value') || typeof receipt.createdAt !== 'string'
+      || !receipt.resource || !isExactLeaseTarget(receipt.resource)) return undefined;
+  return Object.freeze({ schema: 'psyche.control.receipt/v1', actionId: commandId,
+    state: 'approval_required', resource: immutableCopy(receipt.resource), createdAt: receipt.createdAt,
+    code: 'approval_required' });
 }
 
 const BROWSER_ACTION_RESULT_KINDS: ReadonlySet<BrowserSemanticAction['kind']> = new Set([
@@ -1649,6 +1781,41 @@ function normalizeStoredBrowserActionSummary(value: unknown): BrowserActionDurab
   }
   const legacy = normalizeBrowserActionPostcondition(undefined, value, false);
   return legacy ? Object.freeze({ kind: legacy.kind, result: 'result_unavailable' }) : undefined;
+}
+
+function normalizeStoredBrowserScriptSummary(
+  value: unknown, receiptState: ActionReceipt['state'], receiptCode?: string,
+): BrowserScriptDurableSummary | undefined {
+  if (!isExactPlainDataObject(value, [
+    'argsBytes', 'durationMs', 'outcome', 'resultBytes', 'sourceBytes', 'sourceDigest',
+  ])) return undefined;
+  const summary = value as Record<string, unknown>;
+  if (typeof summary.sourceDigest !== 'string' || !/^[a-f0-9]{64}$/.test(summary.sourceDigest)
+      || !isNonnegativeSafeInteger(summary.sourceBytes)
+      || summary.sourceBytes > AGENT_CONTROL_LIMITS.scriptSourceBytes
+      || !isNonnegativeSafeInteger(summary.argsBytes)
+      || summary.argsBytes > AGENT_CONTROL_LIMITS.scriptArgsBytes
+      || !isNonnegativeSafeInteger(summary.resultBytes)
+      || summary.resultBytes > AGENT_CONTROL_LIMITS.scriptResultBytes
+      || typeof summary.durationMs !== 'number' || !Number.isFinite(summary.durationMs)
+      || summary.durationMs < 0 || summary.durationMs > AGENT_CONTROL_LIMITS.scriptTimeoutMs
+      || !['succeeded', 'failed', 'unknown'].includes(String(summary.outcome))) return undefined;
+  if (summary.outcome !== receiptState
+      || (summary.outcome !== 'succeeded' && summary.resultBytes !== 0)
+      || (receiptState === 'succeeded' && receiptCode !== undefined)
+      || (receiptState === 'unknown' && receiptCode !== 'effect_unknown')
+      || (receiptState === 'failed' && (typeof receiptCode !== 'string'
+        || receiptCode.length === 0 || receiptCode === 'effect_unknown'))
+      || (receiptCode === 'action_timeout' && (summary.outcome !== 'failed'
+        || summary.durationMs !== AGENT_CONTROL_LIMITS.scriptTimeoutMs || summary.resultBytes !== 0))) return undefined;
+  return Object.freeze({
+    sourceDigest: summary.sourceDigest,
+    sourceBytes: summary.sourceBytes,
+    argsBytes: summary.argsBytes,
+    resultBytes: summary.resultBytes,
+    durationMs: summary.durationMs,
+    outcome: summary.outcome as BrowserScriptDurableSummary['outcome'],
+  });
 }
 
 function durableReceiptForJournal(receipt: ActionReceipt): ActionReceipt {
@@ -1758,6 +1925,24 @@ function approvalEffectFor(
   }
 }
 
+function approvalPayloadFor(
+  command: Extract<ControlCommand, { kind: 'pane.action' | 'browser.action' | 'browser.script' }>,
+  context?: CanonicalBrowserScriptContext,
+): unknown {
+  if (command.kind !== 'browser.script') return command.payload;
+  if (!context) throw codedError('approval_identity_mismatch', 'browser script context is missing');
+  return Object.freeze({
+    action: 'browser.script',
+    tabId: context.tabId,
+    generation: context.generation,
+    documentId: context.documentId,
+    documentToken: context.documentToken,
+    navigationEpoch: context.navigationEpoch,
+    sourceDigest: createHash('sha256').update(command.payload.source, 'utf8').digest('hex'),
+    argsDigest: digestActionPayload(command.payload.args ?? null),
+  });
+}
+
 function browserCapabilityForAction(kind: BrowserSemanticAction['kind']): SurfaceCapability {
   switch (kind) {
     case 'navigate':
@@ -1819,16 +2004,43 @@ function sameBrowserBinding(
     && left.secret === right.secret;
 }
 
+function validateBrowserScriptContext(
+  payload: Pick<Payload<'browser.script'>, 'tabId' | 'generation'>,
+  context: CanonicalBrowserScriptContext,
+): CanonicalBrowserScriptContext {
+  if (!context || context.tabId !== payload.tabId || context.generation !== payload.generation
+      || typeof context.documentId !== 'string' || context.documentId.length === 0
+      || typeof context.documentToken !== 'string' || context.documentToken.length === 0
+      || !Number.isSafeInteger(context.navigationEpoch) || context.navigationEpoch < 0
+      || typeof context.navigationUrl !== 'string' || context.navigationUrl.length === 0) {
+    throw codedError('snapshot_stale', 'browser script document context is stale or malformed');
+  }
+  return Object.freeze({ ...context });
+}
+
+function sameBrowserScriptContext(
+  left: CanonicalBrowserScriptContext | undefined,
+  right: CanonicalBrowserScriptContext | undefined,
+): boolean {
+  if (!left || !right) return left === right;
+  return left.tabId === right.tabId && left.generation === right.generation
+    && left.documentId === right.documentId && left.documentToken === right.documentToken
+    && left.navigationEpoch === right.navigationEpoch && left.navigationUrl === right.navigationUrl;
+}
+
 function sameClassification(left: PolicyClassification, right: PolicyClassification): boolean {
   return left.decision === right.decision && left.capability === right.capability;
 }
 
 function assertPreparedIdentity(
-  expected: { classification: PolicyClassification; browserBinding?: CanonicalBrowserElementBinding },
-  actual: { classification: PolicyClassification; browserBinding?: CanonicalBrowserElementBinding },
+  expected: { classification: PolicyClassification; browserBinding?: CanonicalBrowserElementBinding;
+    scriptContext?: CanonicalBrowserScriptContext },
+  actual: { classification: PolicyClassification; browserBinding?: CanonicalBrowserElementBinding;
+    scriptContext?: CanonicalBrowserScriptContext },
 ): void {
   if (!sameClassification(expected.classification, actual.classification)
-      || !sameBrowserBinding(expected.browserBinding, actual.browserBinding)) {
+      || !sameBrowserBinding(expected.browserBinding, actual.browserBinding)
+      || !sameBrowserScriptContext(expected.scriptContext, actual.scriptContext)) {
     throw codedError('approval_identity_mismatch', 'trusted action identity changed while queued');
   }
 }
@@ -1899,6 +2111,24 @@ function isExactLeaseTarget(target: LeaseTarget): boolean {
 }
 
 function validateCommandLeaseTargets(command: ControlCommand): void {
+  if (command.kind === 'browser.script') {
+    const args = Object.getOwnPropertyDescriptor(command.payload, 'args');
+    if (args) {
+      if (!('value' in args) || !isCanonicalJsonValue(args.value)) {
+        throw codedError('script_args_invalid', 'browser script arguments must be plain JSON');
+      }
+      let encoded: string;
+      try {
+        encoded = JSON.stringify(args.value);
+      } catch {
+        throw codedError('script_args_invalid', 'browser script arguments must be plain JSON');
+      }
+      if (Buffer.byteLength(encoded, 'utf8') > AGENT_CONTROL_LIMITS.scriptArgsBytes) {
+        throw codedError('script_args_too_large', 'browser script arguments exceed the control limit');
+      }
+    }
+    return;
+  }
   if (command.kind === 'provider.resource.upsert') {
     if (!isExactBrowserResource(command.payload.resource)) {
       throw codedError('capability_denied', 'provider resource is incomplete or malformed');
@@ -2047,6 +2277,9 @@ function safeSurfaceFailure(error: unknown): CommandOutcome {
   const code = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
     ? (error as { code: string }).code
     : 'command_failed';
+  if (code === 'action_timeout') {
+    return { status: 'failed', code, message: 'browser script exceeded the execution deadline' };
+  }
   if (code === 'effect_unknown' || isAmbiguous(error)) {
     return { status: 'unknown', code: 'effect_unknown', message: 'surface effect outcome is unknown' };
   }
@@ -2068,6 +2301,7 @@ function safeMessageForCode(code: string): string {
     approval_denied: 'approval denied',
     approval_digest_mismatch: 'approval digest mismatch',
     approval_identity_mismatch: 'approval identity mismatch',
+    script_realm_limit: 'browser script realm limit reached',
     command_not_implemented: 'surface command is not implemented',
   };
   return messages[code] ?? 'surface command failed';
@@ -2078,6 +2312,114 @@ function isAmbiguous(error: unknown): boolean {
     (error as { ambiguous?: unknown }).ambiguous === true
     || (error as { code?: unknown }).code === 'effect_unknown'
   ));
+}
+
+function errorCode(error: unknown): string | undefined {
+  return error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+    ? (error as { code: string }).code
+    : undefined;
+}
+
+function normalizeBrowserScriptResult(value: unknown): BrowserScriptResult {
+  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw codedError('script_serialization_failed', 'browser script result envelope is invalid');
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(value).some((key) => typeof key !== 'string')
+      || Object.values(descriptors).some((descriptor) => !descriptor.enumerable || !('value' in descriptor))) {
+    throw codedError('script_serialization_failed', 'browser script result envelope is invalid');
+  }
+  const candidate = value as { value?: unknown; byteCount?: unknown; durationMs?: unknown };
+  if (!isCanonicalJsonValue(descriptors.value?.value)) {
+    throw codedError('script_serialization_failed', 'browser script result is not plain JSON');
+  }
+  let json: string;
+  try {
+    json = JSON.stringify(descriptors.value.value);
+  } catch {
+    throw codedError('script_serialization_failed', 'browser script result is not serializable');
+  }
+  const byteCount = Buffer.byteLength(json, 'utf8');
+  if (byteCount > AGENT_CONTROL_LIMITS.scriptResultBytes) {
+    throw codedError('result_too_large', 'browser script result exceeds the control limit');
+  }
+  if (candidate.byteCount !== byteCount
+      || typeof candidate.durationMs !== 'number'
+      || !Number.isFinite(candidate.durationMs)
+      || candidate.durationMs < 0
+      || candidate.durationMs > AGENT_CONTROL_LIMITS.scriptTimeoutMs) {
+    throw codedError('script_serialization_failed', 'browser script result metadata is invalid');
+  }
+  return Object.freeze({ value: JSON.parse(json), byteCount, durationMs: candidate.durationMs });
+}
+
+function browserScriptDurableSummary(
+  command: Extract<ControlCommand, { kind: 'browser.script' }>,
+  outcome: BrowserScriptDurableSummary['outcome'],
+  durationMs: number,
+  resultBytes: number,
+): BrowserScriptDurableSummary {
+  const argsJson = JSON.stringify(command.payload.args ?? null);
+  return Object.freeze({
+    sourceDigest: createHash('sha256').update(command.payload.source, 'utf8').digest('hex'),
+    sourceBytes: Buffer.byteLength(command.payload.source, 'utf8'),
+    argsBytes: Buffer.byteLength(argsJson, 'utf8'),
+    resultBytes,
+    durationMs: Math.min(AGENT_CONTROL_LIMITS.scriptTimeoutMs, Math.max(0, durationMs)),
+    outcome,
+  });
+}
+
+function browserScriptSummaryError(error: unknown, summary: BrowserScriptDurableSummary): Error {
+  return Object.assign(new Error(error instanceof Error ? error.message : 'browser script failed'), {
+    ...(errorCode(error) ? { code: errorCode(error) } : {}),
+    ...(isAmbiguous(error) ? { ambiguous: true } : {}),
+    ...(error && typeof error === 'object' && (error as { noRetry?: unknown }).noRetry === true
+      ? { noRetry: true } : {}),
+    browserScriptSummary: summary,
+  });
+}
+
+function browserScriptDurationFromError(error: unknown): number {
+  if (errorCode(error) === 'action_timeout') return AGENT_CONTROL_LIMITS.scriptTimeoutMs;
+  if (!error || typeof error !== 'object') return 0;
+  const durationMs = (error as { durationMs?: unknown }).durationMs;
+  return typeof durationMs === 'number' && Number.isFinite(durationMs)
+    && durationMs >= 0 && durationMs <= AGENT_CONTROL_LIMITS.scriptTimeoutMs ? durationMs : 0;
+}
+
+function browserScriptSummaryFromError(error: unknown): BrowserScriptDurableSummary | undefined {
+  return error && typeof error === 'object'
+    ? (error as { browserScriptSummary?: BrowserScriptDurableSummary }).browserScriptSummary
+    : undefined;
+}
+
+function isCanonicalJsonValue(value: unknown, seen = new Set<object>()): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value !== 'object' || seen.has(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (Array.isArray(value) ? prototype !== Array.prototype : prototype !== Object.prototype) return false;
+  seen.add(value);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key !== 'string')) return false;
+  if (Array.isArray(value)) {
+    if (keys.some((key) => typeof key !== 'string'
+      || (key !== 'length' && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length)))) return false;
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (!descriptor?.enumerable || !('value' in descriptor) || !isCanonicalJsonValue(descriptor.value, seen)) return false;
+    }
+  } else {
+    for (const key of keys) {
+      if (typeof key !== 'string') return false;
+      const descriptor = descriptors[key];
+      if (!descriptor?.enumerable || !('value' in descriptor) || !isCanonicalJsonValue(descriptor.value, seen)) return false;
+    }
+  }
+  seen.delete(value);
+  return true;
 }
 
 function normalizePaneObservation(paneId: string, value: unknown): PaneObservationResult {

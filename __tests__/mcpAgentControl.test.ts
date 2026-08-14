@@ -64,6 +64,11 @@ describe('canonical MCP agent control', () => {
     expect(tool?.description).toContain('application-defined effects behind a generic click cannot be perfectly predicted');
   });
 
+  it('warns that every browser script invocation requires a new approval', () => {
+    const tool = TOOLS.find((candidate) => candidate.name === 'psyche_browser_script');
+    expect(tool?.description).toContain('Every invocation requires a new operator approval');
+  });
+
   it('rejects malformed target/action shapes before creating a control client', async () => {
     const controlClientForRoot = vi.fn();
     restores.push(setMcpDeps({ controlClientForRoot }));

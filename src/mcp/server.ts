@@ -681,7 +681,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'psyche_browser_script',
-    description: 'Submit an approval-gated browser script with bounded JSON-compatible arguments.',
+    description: 'Submit an approval-gated browser script with bounded JSON-compatible arguments. Every invocation requires a new operator approval.',
     inputSchema: {
       type: 'object',
       required: ['project_root', 'task_id', 'lease_id', 'lease_revision', 'tab_id', 'generation', 'source'],

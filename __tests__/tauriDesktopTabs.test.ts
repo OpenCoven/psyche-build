@@ -87,9 +87,8 @@ describe('Tauri desktop tab shortcuts', () => {
   it('keeps browser navigation single-shot for newly created webviews', () => {
     expect(tauriLib).toMatch(/fn\s+ensure_browser[\s\S]*?->\s*Result<bool,\s*String>/);
     expect(tauriLib).toMatch(/return\s+Ok\(false\);/);
-    expect(tauriLib).toMatch(/let\s+created\s*=\s*ensure_browser\(/);
-    expect(tauriLib).toMatch(/if\s+!created\s*\{[\s\S]*?webview\s*=\s*app[\s\S]*?webview\s*\.set_position\(LogicalPosition::new\(x,\s*y\)\)[\s\S]*?webview\s*\.set_size\(LogicalSize::new\(w\.max\(1\.0\),\s*h\.max\(1\.0\)\)\)/);
-    expect(tauriLib).toMatch(/if\s+!created\s*\{[\s\S]*?webview\.navigate\(parsed_url\)/);
+    expect(tauriLib).toMatch(/if\s+let\s+Some\(webview\)\s*=\s*app\.get_webview\(&label\)[\s\S]*?webview\s*\.set_position\(LogicalPosition::new\(x,\s*y\)\)[\s\S]*?webview\s*\.set_size\(LogicalSize::new\(w\.max\(1\.0\),\s*h\.max\(1\.0\)\)\)[\s\S]*?webview\.navigate\(parsed_url\)/);
+    expect(tauriLib).toMatch(/else\s*\{[\s\S]*?ensure_browser\(&app,\s*&label,\s*x,\s*y,\s*w,\s*h,\s*&canonical_url\)\?/);
   });
 
   it('reports PTY exit codes and keeps PATH augmentation behind the platform boundary', () => {

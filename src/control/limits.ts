@@ -9,6 +9,7 @@ export const AGENT_CONTROL_LIMITS = Object.freeze({
   snapshotTtlMs: 30_000,
   screenshotBytes: 4 * 1024 * 1024,
   scriptSourceBytes: 64 * 1024,
+  scriptArgsBytes: 256 * 1024,
   scriptResultBytes: 256 * 1024,
   actionTimeoutMs: 15_000,
   scriptTimeoutMs: 5_000,

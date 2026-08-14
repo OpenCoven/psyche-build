@@ -1,12 +1,79 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { normalizeBrowserActionPostcondition } from '../src/control/runtime.js';
 
 // @ts-expect-error Native web runtime is plain JavaScript by design.
-import { browserAutomationSource, dispatchBrowserAutomation, installBrowserAutomation } from '../native/desktop/psyche-build-tauri/web/control/browser-automation.mjs';
+import { browserAutomationSource, dispatchBrowserAutomation, installBrowserAutomation, serializeBrowserScriptResult } from '../native/desktop/psyche-build-tauri/web/control/browser-automation.mjs';
 // @ts-expect-error Native validation seam is plain JavaScript by design.
 import { validateBrowserSnapshot } from '../native/desktop/psyche-build-tauri/web/control/browser-snapshot-validation.mjs';
+
+const browserScriptRuntimeBody = readFileSync(join(process.cwd(),
+  'native/desktop/psyche-build-tauri/web/control/browser-script-runtime.js'), 'utf8');
+const nativeLib = readFileSync(join(process.cwd(),
+  'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
+
+it('publishes executing only after the main-thread WK submission handoff', () => {
+  const script = nativeLib.slice(nativeLib.indexOf('async fn browser_script('),
+    nativeLib.indexOf('#[cfg(not(target_os = "macos"))]', nativeLib.indexOf('async fn browser_script(')));
+  expect(script.indexOf('publish_provider_effect_started(')).toBeGreaterThan(0);
+  expect(script.indexOf('publish_provider_effect_started(')).toBeLessThan(script.indexOf('with_webview'));
+  expect(script.indexOf('with_webview')).toBeLessThan(script.indexOf('let native_started_at = Instant::now();'));
+  expect(script.indexOf('evaluateJavaScript_inFrame_inContentWorld_completionHandler'))
+    .toBeLessThan(script.indexOf('submission_sender.send'));
+  expect(script.indexOf('submission_sender.send')).toBeLessThan(script.indexOf('publish_provider_effect_executing('));
+  expect(script.indexOf('submission_receiver.await')).toBeLessThan(script.indexOf('publish_provider_effect_executing('));
+  expect(script.indexOf('publish_provider_effect_executing('))
+    .toBeLessThan(script.indexOf('tokio::time::timeout(remaining, receiver)'));
+  expect(script.indexOf('remaining_browser_script_duration(native_started_at.elapsed())')).toBeGreaterThan(0);
+  expect(script).not.toContain('browser:script-started');
+});
+
+it('retains the native script flight when executing acknowledgement fails after WK submission', () => {
+  const script = nativeLib.slice(nativeLib.indexOf('async fn browser_script('),
+    nativeLib.indexOf('#[cfg(not(target_os = "macos"))]', nativeLib.indexOf('async fn browser_script(')));
+  const failure = script.slice(script.indexOf('if publish_provider_effect_executing('),
+    script.indexOf('let remaining = remaining_browser_script_duration'));
+  expect(failure).toContain('browser_script_pending_unknown_response');
+  expect(failure.indexOf('browser:script-unknown-pending'))
+    .toBeLessThan(failure.search(/retain_browser_script_terminal\(\s*receiver/));
+  expect(failure).toMatch(/retain_browser_script_terminal\(\s*receiver/);
+  expect(failure).not.toContain('clear_matching_invocation');
+  expect(failure).not.toContain('provider_unavailable');
+  const callbackFailure = script.slice(script.indexOf('Ok(Err(_)) =>'), script.indexOf('Err(_) => {',
+    script.indexOf('Ok(Err(_)) =>')));
+  expect(callbackFailure).toContain('browser_script_pending_unknown_response');
+  expect(callbackFailure).not.toContain('clear_matching_invocation');
+});
+
+it('fences semantic browser actions against native same-tab operations before dispatch', () => {
+  const action = nativeLib.slice(nativeLib.indexOf('async fn browser_action('),
+    nativeLib.indexOf('struct BrowserScriptRequest'));
+  expect(action).toMatch(/require_main_webview[\s\S]*reserve_browser_semantic_effect[\s\S]*browser_binding/);
+});
+
+it('clears the native script flight for failures before WK submission', () => {
+  const script = nativeLib.slice(nativeLib.indexOf('async fn browser_script('),
+    nativeLib.indexOf('#[cfg(not(target_os = "macos"))]', nativeLib.indexOf('async fn browser_script(')));
+  const beforeSubmission = script.slice(script.indexOf('if publish_provider_effect_started('),
+    script.indexOf('let (native_started_at, receiver)'));
+  expect(beforeSubmission).toContain('clear_matching_invocation');
+  expect(beforeSubmission).toContain('provider_unavailable');
+});
+
+async function executeIsolatedBrowserScript(source: string, args: unknown = null) {
+  const result = await runInNewContext(`${browserScriptRuntimeBody}(${JSON.stringify({ source, args })})`, {
+    TextEncoder, performance,
+  });
+  return JSON.parse(result);
+}
+
+it('includes authoritative bounded duration in browser script failure envelopes', async () => {
+  await expect(executeIsolatedBrowserScript('throw new Error("private")')).resolves.toMatchObject({
+    ok: false, code: 'script_execution_failed', durationMs: expect.any(Number),
+  });
+});
 
 type Rect = { x: number; y: number; width: number; height: number };
 
@@ -129,6 +196,44 @@ function buildSemanticFixture() {
 }
 
 describe('bounded browser automation runtime', () => {
+  it('keeps same-invocation intrinsic poisoning from bypassing serialization or result bounds', async () => {
+    const poisoned = await executeIsolatedBrowserScript(`
+      globalThis.Function = () => () => 'forged';
+      JSON.stringify = () => '"forged"';
+      globalThis.TextEncoder = class { encode() { return { byteLength: 1 }; } };
+      Object.getPrototypeOf = () => null;
+      Reflect.apply = () => 'forged';
+      Number.isFinite = () => true;
+      Array.isArray = () => false;
+      return { answer: 42 };
+    `);
+    expect(poisoned).toMatchObject({ ok: true, json: '{"answer":42}', byteCount: 13 });
+    const oversized = await executeIsolatedBrowserScript(`
+      JSON.stringify = () => '"small"';
+      globalThis.TextEncoder = class { encode() { return { byteLength: 1 }; } };
+      return 'x'.repeat(300000);
+    `);
+    expect(oversized).toMatchObject({ ok: false, code: 'result_too_large', durationMs: expect.any(Number) });
+  });
+
+  it('uses a fresh execution realm so one invocation cannot poison the next', async () => {
+    await expect(executeIsolatedBrowserScript(`
+      globalThis.Function = null; JSON.stringify = null; globalThis.TextEncoder = null;
+      return 'first';
+    `)).resolves.toMatchObject({ ok: true, json: '"first"' });
+    await expect(executeIsolatedBrowserScript(`return { invocation: 'second' };`))
+      .resolves.toMatchObject({ ok: true, json: '{"invocation":"second"}' });
+  });
+
+  it('serializes script results as strict plain JSON with a 256 KiB UTF-8 bound', () => {
+    expect(serializeBrowserScriptResult({ ok: ['yes', 1] })).toEqual({ json: '{"ok":["yes",1]}', byteCount: 16 });
+    for (const value of [undefined, 1n, () => true, Number.POSITIVE_INFINITY, Object.create({ inherited: true })]) {
+      expect(() => serializeBrowserScriptResult(value)).toThrowError(expect.objectContaining({ code: 'script_serialization_failed' }));
+    }
+    const cycle: any = {}; cycle.self = cycle;
+    expect(() => serializeBrowserScriptResult(cycle)).toThrowError(expect.objectContaining({ code: 'script_serialization_failed' }));
+    expect(() => serializeBrowserScriptResult('x'.repeat(256 * 1024))).toThrowError(expect.objectContaining({ code: 'result_too_large' }));
+  });
   it('keeps installation idempotent and snapshot IDs unique across fixed-clock documents', () => {
     const firstDocument = buildSemanticFixture(); const globalObject = fixtureGlobal(firstDocument);
     const crypto = { randomUUID: (() => { let id = 0; return () => `session-${++id}`; })() };
@@ -715,5 +820,29 @@ describe('native browser snapshots', () => {
     expect(nativeLib).toContain('evaluateJavaScript_inFrame_inContentWorld_completionHandler');
     expect(nativeLib).toContain('com.opencoven.psyche.browser-inspection');
     expect(nativeLib).not.toMatch(/struct BrowserActionRequest[\s\S]{0,800}(source|script_source):/);
+  });
+  it('uses a main-only typed fixed browser-script command and a separate named isolated world', () => {
+    expect(nativeLib).toContain('fn browser_script');
+    expect(nativeLib).toContain('require_main_webview(&caller)');
+    expect(nativeLib).toContain('com.opencoven.psyche.browser-script');
+    expect(nativeLib).toContain('BROWSER_SCRIPT_TIMEOUT');
+    expect(nativeLib).toContain('MAX_BROWSER_SCRIPT_SOURCE_BYTES');
+    expect(nativeLib).toContain('MAX_BROWSER_SCRIPT_RESULT_BYTES');
+    expect(nativeLib).toContain('fn browser_script_context');
+    expect(nativeLib).toContain('__PSYCHE_BROWSER_SCRIPT_DOCUMENT_CONTEXT__');
+    expect(nativeLib).toContain('document_token');
+    expect(nativeLib).toContain('navigation_epoch');
+    expect(nativeLib).toContain('BrowserScriptFlightState');
+    expect(nativeLib).toContain('effect_in_flight');
+    expect(nativeLib).toContain('MAX_BROWSER_SCRIPT_REALM_SLOTS: usize = 32');
+    expect(nativeLib).toContain('browser-script-invocation-slot-{slot}');
+    expect(nativeLib).toContain('script_realm_limit');
+    expect(nativeLib).not.toContain('BROWSER_SCRIPT_WORLD_SEQUENCE');
+    const tokenProbe = nativeLib.slice(nativeLib.indexOf("const key = '__PSYCHE_BROWSER_SCRIPT_DOCUMENT_CONTEXT__'"),
+      nativeLib.indexOf("const key = '__PSYCHE_BROWSER_SCRIPT_DOCUMENT_CONTEXT__'") + 1_000);
+    expect(tokenProbe).toContain('native_token');
+    expect(tokenProbe).not.toContain('crypto.randomUUID');
+    expect(nativeLib).toContain('browser:script-terminal');
+    expect(nativeLib).not.toMatch(/struct BrowserScriptRequest[\s\S]{0,800}(evaluator|content_world|world_name|label):/);
   });
 });

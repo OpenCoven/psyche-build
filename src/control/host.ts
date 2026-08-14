@@ -2,7 +2,7 @@ import { ControlJournal } from './journal.js';
 import { acquireOwnerLock } from './ownerLock.js';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 import { ControlRuntime, type ControlHandlers, type RuntimeJournal } from './runtime.js';
-import type { CanonicalBrowserSnapshotResolver } from './runtime.js';
+import type { CanonicalBrowserScriptContextResolver, CanonicalBrowserSnapshotResolver } from './runtime.js';
 import { SurfaceRegistry } from './surfaces.js';
 import { CapabilityLeaseStore } from './capabilityLeases.js';
 import { ApprovalStore } from './approvals.js';
@@ -25,6 +25,7 @@ export interface HostControlPlaneOptions {
   capabilityLeases?: CapabilityLeaseStore;
   approvals?: ApprovalStore;
   resolveBrowserSnapshot?: CanonicalBrowserSnapshotResolver;
+  resolveBrowserScriptContext?: CanonicalBrowserScriptContextResolver;
   browserProviders?: BrowserProviderBroker;
   canonicalizePath?: (candidate: string, mode?: 'existing' | 'prospective') => string | Promise<string>;
 }
@@ -49,6 +50,7 @@ export async function createHostControlPlane(
       capabilityLeases: options.capabilityLeases ?? new CapabilityLeaseStore(undefined, lock.epoch),
       approvals: options.approvals ?? new ApprovalStore(),
       resolveBrowserSnapshot: options.resolveBrowserSnapshot,
+      resolveBrowserScriptContext: options.resolveBrowserScriptContext,
       canonicalizePath: options.canonicalizePath,
     });
 

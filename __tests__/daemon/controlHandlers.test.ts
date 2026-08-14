@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createBrowserSnapshotResolver, createDaemonControlHandlers } from '../../src/daemon/controlHandlers.js';
+import { createBrowserScriptContextResolver, createBrowserSnapshotResolver, createDaemonControlHandlers } from '../../src/daemon/controlHandlers.js';
 import { AgenticCapabilityRouter } from '../../src/orchestration/capabilityRouter.js';
 import { TmuxControl } from '../../src/services/tmuxControl.js';
 import { SurfaceRegistry } from '../../src/control/surfaces.js';
@@ -57,6 +57,50 @@ function paneHandlerHarness() {
 }
 
 describe('createDaemonControlHandlers agent pane surfaces', () => {
+  it('resolves a browser script context through a source-free provider preflight', async () => {
+    const dispatch = vi.fn(async () => ({ status: 'succeeded', value: {
+      documentId: 'document-1', documentToken: 'opaque-token', navigationEpoch: 4,
+      navigationUrl: 'https://example.test/path',
+    } }));
+    const resolve = createBrowserScriptContextResolver({ dispatch } as never);
+    await expect(resolve({ tabId: 'tab-1', generation: 3 })).resolves.toEqual({
+      tabId: 'tab-1', generation: 3, documentId: 'document-1', documentToken: 'opaque-token',
+      navigationEpoch: 4, navigationUrl: 'https://example.test/path',
+    });
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ tabId: 'tab-1', generation: 3,
+      operation: { kind: 'script_context' } }));
+  });
+
+  it('binds script dispatch to the exact approved context without adding raw context to results', async () => {
+    const dispatch = vi.fn(async () => ({ status: 'succeeded', value: { value: 1, byteCount: 1, durationMs: 2 } }));
+    const handlers = createDaemonControlHandlers({ tmux: new TmuxControl('psyche-test'),
+      projectRoot: '/tmp/psyche-test-root', sessionName: 'psyche-test',
+      capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }), browserProviders: { dispatch } as never });
+    const context = { tabId: 'tab-1', generation: 3, documentId: 'document-1',
+      documentToken: 'opaque-token', navigationEpoch: 4, navigationUrl: 'https://example.test/path' };
+    await handlers.runBrowserScript({ taskId: 'task', leaseId: 'lease', leaseRevision: 1,
+      tabId: 'tab-1', generation: 3, source: 'return 1' }, 'action-1', context);
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ operation: {
+      kind: 'script', source: 'return 1', expectedContext: {
+        documentId: 'document-1', documentToken: 'opaque-token', navigationEpoch: 4,
+        navigationUrl: 'https://example.test/path',
+      },
+    } }));
+  });
+
+  it('marks an exhausted browser-script realm pool as non-retryable', async () => {
+    const dispatch = vi.fn(async () => ({ status: 'failed', code: 'script_realm_limit',
+      message: 'browser script realm limit reached', durationMs: 17 }));
+    const handlers = createDaemonControlHandlers({ tmux: new TmuxControl('psyche-test'),
+      projectRoot: '/tmp/psyche-test-root', sessionName: 'psyche-test',
+      capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }), browserProviders: { dispatch } as never });
+    await expect(handlers.runBrowserScript({ taskId: 'task', leaseId: 'lease', leaseRevision: 1,
+      tabId: 'tab-1', generation: 3, source: 'return 1' }, 'action-1', {
+      tabId: 'tab-1', generation: 3, documentId: 'document-1', documentToken: 'opaque-token',
+      navigationEpoch: 4, navigationUrl: 'https://example.test/path',
+    })).rejects.toMatchObject({ code: 'script_realm_limit', noRetry: true, durationMs: 17 });
+  });
+
   it('resolves browser risk through the exact provider binding without caller semantic metadata', async () => {
     const dispatch = vi.fn(async () => ({ status: 'succeeded', value: {
       snapshotId: 'snapshot-1', ref: 'e7', actionKind: 'click', documentId: 'document-1',
@@ -120,7 +164,8 @@ describe('createDaemonControlHandlers agent pane surfaces', () => {
       () => handlers.runBrowserScript({
         taskId: 'task', leaseId: 'lease', leaseRevision: 1,
         tabId: 'tab', generation: 1, source: '1',
-      }, 'script-action'),
+      }, 'script-action', { tabId: 'tab', generation: 1, documentId: 'document-1',
+        documentToken: 'token-1', navigationEpoch: 1, navigationUrl: 'https://example.test' }),
     ];
     for (const call of calls) {
       await expect(call()).rejects.toMatchObject({ code: 'provider_unavailable' });

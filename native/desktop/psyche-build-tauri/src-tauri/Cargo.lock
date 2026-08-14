@@ -3182,6 +3182,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "unicode-normalization",
+ "uuid",
  "window-vibrancy",
 ]
 

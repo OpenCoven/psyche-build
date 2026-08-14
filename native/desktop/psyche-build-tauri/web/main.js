@@ -3657,6 +3657,7 @@
           : (Array.isArray(tab.history) ? tab.history.slice() : []),
         historyIndex: navigationSnapshot ? navigationSnapshot.historyIndex : tab.historyIndex,
         wasLive: tab.created,
+        controlGeneration: browserTabLifecycle(tab).controlGeneration,
       }];
     }));
     var liveTabs = Array.from(tabMetadataByLabel.values()).filter(function (tab) {
@@ -3668,6 +3669,15 @@
     var labels = browser.tabs.map(function (tab) {
       return browserLabelForTab(project, tab);
     });
+    function terminalizeConfirmedDestroyedBrowserScripts(destroyedLabels) {
+      if (typeof browserScriptTimeoutState === "undefined" || !browserScriptTimeoutState) return;
+      destroyedLabels.forEach(function (label) {
+        var savedTab = tabMetadataByLabel.get(label);
+        if (!savedTab) return;
+        browserScriptTimeoutState.terminalTab(savedTab.id, savedTab.controlGeneration,
+          { reason: "destroyed", message: "browser tab was destroyed after script timeout" });
+      });
+    }
     async function recoverAffectedLiveTabs(recoverLabels, skippedLabels) {
       var recreated = 0;
       var affectedLiveTabs = 0;
@@ -3804,6 +3814,7 @@
         failedLabels.add(label);
       }
     });
+    terminalizeConfirmedDestroyedBrowserScripts(destroyed);
     if (failures.length) {
       var recovery = await recoverAffectedLiveTabs(destroyed, failedLabels);
       var closeErrors = failures.map(function (failure) {
@@ -3820,6 +3831,9 @@
     }
     var wasActive = state.activeThreadId === thread.id;
     browser.tabs.forEach(function (tab) {
+      if (typeof browserScriptTimeoutState !== "undefined" && browserScriptTimeoutState) {
+        browserScriptTimeoutState.clearTab(tab.id);
+      }
       tab.created = false;
       tab.loading = false;
       var lifecycle = browserTabLifecycle(tab);
@@ -6309,6 +6323,9 @@
     }
     if (typeof invalidateAgentControlContext === "function") invalidateAgentControlContext();
     var providerStopError = null;
+    if (typeof browserScriptTimeoutState !== "undefined" && browserScriptTimeoutState) {
+      browserScriptTimeoutState.clearProject(project.root);
+    }
     if (typeof invoke === "function") {
       try { await invoke("control_provider_stop", { projectRoot: project.root }); }
       catch (error) { providerStopError = error; }
@@ -7802,7 +7819,7 @@
     lifecycle.liveUrl = null;
     lifecycle.viewLive = false;
     try {
-      await invoke("browser_destroy", { tabId: context.tab.id });
+      await invoke("browser_destroy", { tabId: context.tab.id, rawLabel: context.label });
     } catch (error) {
       setStatus("obsolete browser navigation cleanup failed for " + context.label + ": " + String(error), "error");
       return false;
@@ -7907,6 +7924,9 @@
   var browserControlProviders = {};
   var browserControlReplayNeeded = {};
   function resetBrowserControlProvider(projectRoot) {
+    if (typeof browserScriptTimeoutState !== "undefined" && browserScriptTimeoutState) {
+      browserScriptTimeoutState.clearProject(projectRoot);
+    }
     delete browserControlProviders[projectRoot];
     var project = activeProject();
     if (project && project.root === projectRoot && typeof invalidateAgentControlContext === "function") {
@@ -8155,19 +8175,248 @@
     lifecycle.navigationTail = pending.then(function () {}, function () {});
     return pending;
   }
+  async function queueBrowserProviderScript(pair, request) {
+    var operation = request.operation || {};
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var expected = operation.expectedContext || {};
+    var documentId = expected.documentId;
+    var label = lifecycle.nativeLabel;
+    var run = async function () {
+      if (!documentId || lifecycle.closing || lifecycle.controlGeneration !== request.generation ||
+          lifecycle.controlLabel !== label || lifecycle.nativeLabel !== label || lifecycle.documentId !== documentId) {
+        throw providerBrowserError("approval_identity_mismatch", "browser script document identity is stale");
+      }
+      var result = await invoke("browser_script", { request: { tabId: pair.tab.id,
+        projectRoot: pair.project.root, actionId: request.actionId,
+        generation: request.generation, invocationId: request.requestId,
+        documentId: documentId, documentToken: expected.documentToken,
+        navigationEpoch: expected.navigationEpoch, navigationUrl: expected.navigationUrl, source: operation.source,
+        args: operation.args === undefined ? null : operation.args } });
+      if (result && result.errorCode) {
+        var runtimeError = providerBrowserError(result.errorCode, result.errorCode);
+        runtimeError.durationMs = result.durationMs;
+        runtimeError.pending = result.pending === true;
+        throw runtimeError;
+      }
+      if (lifecycle.closing || lifecycle.controlGeneration !== request.generation ||
+          lifecycle.controlLabel !== label || lifecycle.nativeLabel !== label || lifecycle.documentId !== documentId) {
+        throw providerBrowserError("effect_unknown", "browser script effect outcome is unknown after document replacement");
+      }
+      return result;
+    };
+    var pending = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
+    lifecycle.navigationTail = pending.then(function () {}, function () {});
+    return pending;
+  }
+  async function queueBrowserProviderScriptContext(pair, request) {
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var documentId = lifecycle.documentId;
+    var label = lifecycle.nativeLabel;
+    var run = function () {
+      if (!documentId || lifecycle.closing || lifecycle.controlGeneration !== request.generation ||
+          lifecycle.controlLabel !== label || lifecycle.nativeLabel !== label || lifecycle.documentId !== documentId) {
+        throw providerBrowserError("snapshot_stale", "browser script document identity is stale");
+      }
+      return invoke("browser_script_context", { request: { tabId: pair.tab.id,
+        generation: request.generation, documentId: documentId } });
+    };
+    var pending = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
+    lifecycle.navigationTail = pending.then(function () {}, function () {});
+    return pending;
+  }
   var BROWSER_PROVIDER_FAILURE_CODES = new Set([
     "approval_identity_mismatch", "snapshot_stale", "element_missing", "element_disabled",
     "element_hidden", "invalid_action", "backend_unavailable", "invalid_snapshot",
     "unsupported_operation", "result_too_large", "effect_unknown", "action_failed",
+    "script_source_too_large", "script_args_invalid", "script_args_too_large",
+    "script_serialization_failed", "script_execution_failed", "script_realm_limit", "action_timeout",
+    "effect_in_flight", "unknown_pending",
   ]);
   function browserProviderFailureCode(error) {
     var candidate = error && typeof error.code === "string" ? error.code :
       String(error && error.message || error || "");
     return BROWSER_PROVIDER_FAILURE_CODES.has(candidate) ? candidate : "action_failed";
   }
+  var BROWSER_SCRIPT_TIMEOUT_STATE_LIMIT = 256;
+  var BROWSER_SCRIPT_TIMEOUT_STATE_TTL_MS = 60000;
+  function createBrowserScriptTimeoutState(options) {
+    var entries = new Map();
+    var limit = options.limit;
+    var ttlMs = options.ttlMs;
+    function key(identity) {
+      return JSON.stringify([identity.requestId, identity.invocationId, identity.tabId, identity.generation,
+        identity.documentToken]);
+    }
+    function exact(entry, identity) {
+      return entry && entry.requestId === identity.requestId && entry.invocationId === identity.invocationId &&
+        entry.tabId === identity.tabId && entry.generation === identity.generation &&
+        entry.documentToken === identity.documentToken;
+    }
+    function remove(identity) {
+      var identityKey = key(identity); var entry = entries.get(identityKey);
+      if (!exact(entry, identity)) return false;
+      entries.delete(identityKey); options.clearTimeout(entry.timeout); return true;
+    }
+    function complete(identity) {
+      var entry = entries.get(key(identity));
+      if (!exact(entry, identity) || entry.phase !== "running" || entry.terminal) return false;
+      return remove(identity);
+    }
+    function renew(entry) {
+      options.clearTimeout(entry.timeout);
+      entry.timeout = options.setTimeout(function () { remove(entry); }, ttlMs);
+    }
+    function flush(entry) {
+      if (entry.phase !== "acknowledged" || !entry.terminal) return false;
+      if (entry.ordinaryUnknown) return remove(entry);
+      entry.phase = "finishing";
+      var handler = entry.terminal.reason === "completed" && options.release ? options.release : options.finish;
+      Promise.resolve(handler(entry, entry.terminal)).then(function () { remove(entry); }, function () { remove(entry); });
+      return true;
+    }
+    function register(identity) {
+      var identityKey = key(identity);
+      if (entries.has(identityKey) || entries.size >= limit) return false;
+      var entry = Object.assign({}, identity, { phase: "running", terminal: null, timeout: null, startedAt: null });
+      entry.timeout = options.setTimeout(function () { remove(entry); }, ttlMs);
+      entries.set(identityKey, entry); return true;
+    }
+    function started(identity) {
+      var entry = entries.get(key(identity));
+      if (!exact(entry, identity) || entry.phase !== "running" || entry.startedAt !== null) return false;
+      entry.startedAt = options.now ? options.now() : Date.now(); return true;
+    }
+    function timedOut(identity) {
+      var entry = entries.get(key(identity));
+      if (!exact(entry, identity) || entry.phase !== "running" || entry.terminal) return false;
+      renew(entry);
+      entry.phase = "finalizing";
+      Promise.resolve().then(function () {
+        var current = entries.get(key(entry));
+        if (!exact(current, entry) || current.phase !== "finalizing") return;
+        if (current.terminal && current.terminal.reason !== "completed") {
+          current.phase = "acknowledged"; flush(current); return;
+        }
+        current.phase = "notifying";
+        return Promise.resolve(options.notify(current)).then(function () {
+          var acknowledged = entries.get(key(current));
+          if (!exact(acknowledged, current) || acknowledged.phase !== "notifying") return;
+          acknowledged.phase = "acknowledged"; flush(acknowledged);
+        }, function () { remove(current); });
+      });
+      return true;
+    }
+    function unknownPending(identity, durationMs) {
+      var entry = entries.get(key(identity));
+      if (!exact(entry, identity) || entry.phase !== "running") return false;
+      renew(entry);
+      entry.phase = "notifying";
+      Promise.resolve(options.unknown(entry, durationMs)).then(function () {
+        var acknowledged = entries.get(key(entry));
+        if (!exact(acknowledged, entry) || acknowledged.phase !== "notifying") return;
+        acknowledged.phase = "acknowledged"; flush(acknowledged);
+      }, function () {
+        var retained = entries.get(key(entry));
+        if (!exact(retained, entry) || retained.phase !== "notifying") return;
+        retained.phase = "acknowledged"; flush(retained);
+      });
+      return true;
+    }
+    function completeUnknown(identity, completion) {
+      var entry = entries.get(key(identity));
+      if (!exact(entry, identity) || entry.phase !== "running") return false;
+      renew(entry);
+      entry.phase = "confirming-unknown";
+      entry.ordinaryUnknown = true;
+      Promise.resolve(options.confirmUnknown(entry, completion)).then(function () {
+        var acknowledged = entries.get(key(entry));
+        if (!exact(acknowledged, entry) || acknowledged.phase !== "confirming-unknown") return;
+        acknowledged.phase = "acknowledged"; flush(acknowledged);
+      }, function () {
+        var retained = entries.get(key(entry));
+        if (!exact(retained, entry) || retained.phase !== "confirming-unknown") return;
+        retained.phase = "retained";
+      });
+      return true;
+    }
+    function terminal(identity, reason) {
+      var entry = entries.get(key(identity));
+      if (!exact(entry, identity) || entry.phase === "finishing") return false;
+      var terminalRecord = reason && typeof reason === "object" ? reason : { reason: reason };
+      var terminalReason = terminalRecord.reason;
+      if (terminalReason === "completed") {
+        if (!entry.terminal) entry.terminal = terminalRecord;
+        flush(entry);
+        return true;
+      }
+      if (terminalReason !== "document_replaced" && terminalReason !== "destroyed") return false;
+      if (typeof terminalRecord.durationMs !== "number") {
+        var now = options.now ? options.now() : Date.now();
+        terminalRecord.durationMs = entry.startedAt === null ? 0 : Math.min(5000, Math.max(0, now - entry.startedAt));
+      }
+      if (!entry.terminal) entry.terminal = terminalRecord;
+      flush(entry);
+      return true;
+    }
+    function terminalTab(tabId, generation, reason) {
+      var matched = false;
+      Array.from(entries.values()).forEach(function (entry) {
+        if (entry.tabId === tabId && entry.generation === generation) {
+          matched = true; terminal(entry, reason);
+        }
+      });
+      return matched;
+    }
+    function clearWhere(predicate) {
+      Array.from(entries.values()).forEach(function (entry) { if (predicate(entry)) remove(entry); });
+    }
+    return {
+      register: register, started: started, timedOut: timedOut, unknownPending: unknownPending,
+      completeUnknown: completeUnknown,
+      terminal: terminal, terminalTab: terminalTab,
+      complete: complete,
+      clearProject: function (projectRoot) { clearWhere(function (entry) { return entry.projectRoot === projectRoot; }); },
+      clearTab: function (tabId) { clearWhere(function (entry) { return entry.tabId === tabId; }); },
+      size: function () { return entries.size; },
+    };
+  }
+  var browserScriptTimeoutState = createBrowserScriptTimeoutState({
+    limit: BROWSER_SCRIPT_TIMEOUT_STATE_LIMIT, ttlMs: BROWSER_SCRIPT_TIMEOUT_STATE_TTL_MS,
+    setTimeout: setTimeout, clearTimeout: clearTimeout,
+    notify: function (entry) {
+      return invoke("control_provider_complete", { projectRoot: entry.projectRoot, requestId: entry.requestId,
+        result: { actionId: entry.actionId, status: "timed_out_pending", code: "action_timeout",
+          message: "browser script exceeded the execution deadline", durationMs: 5000 } });
+    },
+    unknown: function (entry, durationMs) {
+      return invoke("control_provider_complete", { projectRoot: entry.projectRoot, requestId: entry.requestId,
+        result: { actionId: entry.actionId, status: "unknown_pending", code: "effect_unknown",
+          message: "browser script outcome is unknown after native submission", ambiguous: true,
+          durationMs: typeof durationMs === "number" ? durationMs : 0 } });
+    },
+    confirmUnknown: function (entry, completion) {
+      return invoke("control_provider_complete", { projectRoot: entry.projectRoot, requestId: entry.requestId,
+        result: { actionId: entry.actionId, status: "unknown", code: "effect_unknown",
+          message: completion && completion.message || "browser script reached a confirmed unknown outcome",
+          ambiguous: true, durationMs: completion && typeof completion.durationMs === "number"
+            ? completion.durationMs : 5000 } });
+    },
+    release: function (entry) {
+      return invoke("control_provider_complete", { projectRoot: entry.projectRoot, requestId: entry.requestId,
+        result: { actionId: entry.actionId, status: "unknown", code: "effect_unknown",
+          message: "browser script completed after its deadline", ambiguous: true, durationMs: 5000 } });
+    },
+    finish: function (entry, terminal) {
+      return invoke("control_provider_complete", { projectRoot: entry.projectRoot, requestId: entry.requestId,
+        result: { actionId: entry.actionId, status: "unknown", code: "effect_unknown",
+          message: terminal.message || "browser script reached a late terminal boundary", ambiguous: true,
+          durationMs: typeof terminal.durationMs === "number" ? terminal.durationMs : 0 } });
+    },
+  });
   function handleBrowserProviderEffect(event) {
     var payload = event.payload || {}; var operation = payload.operation || {};
-    if (operation.kind !== "inspect" && operation.kind !== "action" && operation.kind !== "resolve") return false;
+    if (operation.kind !== "inspect" && operation.kind !== "action" && operation.kind !== "resolve" &&
+        operation.kind !== "script_context" && operation.kind !== "script") return false;
     var pair = state.projects.reduce(function (found, project) {
       if (found || project.root !== payload.projectRoot) return found; var roots = Object.keys(project.browsersByWorktree || {});
       for (var i = 0; i < roots.length; i++) { var browser = project.browsersByWorktree[roots[i]];
@@ -8177,7 +8426,8 @@
     }, null);
     if (!pair || pair.tab.id !== payload.tabId) {
       invoke("control_provider_complete", { projectRoot: payload.projectRoot, requestId: payload.requestId,
-        result: { actionId: payload.actionId, status: "failed", code: "provider_unavailable", message: "exact browser tab is unavailable" } }).catch(function () {});
+        result: { actionId: payload.actionId, status: "failed", code: "provider_unavailable",
+          message: "exact browser tab is unavailable", durationMs: 0 } }).catch(function () {});
       return false;
     }
     var lifecycle = browserTabLifecycle(pair.tab);
@@ -8185,14 +8435,29 @@
     // the provider-returned control generation is authoritative.
     if (lifecycle.controlGeneration !== payload.generation || lifecycle.controlLabel !== lifecycle.nativeLabel) {
       invoke("control_provider_complete", { projectRoot: payload.projectRoot, requestId: payload.requestId,
-        result: { actionId: payload.actionId, status: "failed", code: "snapshot_stale", message: "browser tab generation is stale" } }).catch(function () {});
+        result: { actionId: payload.actionId, status: "failed", code: "snapshot_stale",
+          message: "browser tab generation is stale", durationMs: 0 } }).catch(function () {});
+      return false;
+    }
+    var scriptIdentity = operation.kind === "script" ? {
+      projectRoot: pair.project.root, requestId: payload.requestId, actionId: payload.actionId,
+      invocationId: payload.requestId, tabId: payload.tabId, generation: payload.generation,
+      documentToken: operation.expectedContext && operation.expectedContext.documentToken,
+    } : null;
+    if (scriptIdentity && !browserScriptTimeoutState.register(scriptIdentity)) {
+      invoke("control_provider_complete", { projectRoot: pair.project.root, requestId: payload.requestId,
+        result: { actionId: payload.actionId, status: "failed", code: "effect_in_flight",
+          message: "browser script timeout state is unavailable", durationMs: 0 } }).catch(function () {});
       return false;
     }
     var effect = operation.kind === "inspect"
       ? queueBrowserInspection(pair, { requestId: payload.requestId, generation: payload.generation,
         label: lifecycle.nativeLabel, includeScreenshot: operation.includeScreenshot === true })
-      : operation.kind === "resolve" ? queueBrowserProviderResolve(pair, payload) : queueBrowserProviderAction(pair, payload);
+      : operation.kind === "resolve" ? queueBrowserProviderResolve(pair, payload)
+        : operation.kind === "script_context" ? queueBrowserProviderScriptContext(pair, payload)
+          : operation.kind === "script" ? queueBrowserProviderScript(pair, payload) : queueBrowserProviderAction(pair, payload);
     effect.then(function (value) {
+      if (scriptIdentity && !browserScriptTimeoutState.complete(scriptIdentity)) return;
       var completedSnapshot = value && value.snapshot ? value.snapshot : value;
       var completionLifecycle = browserTabLifecycle(pair.tab);
       if (operation.kind === "inspect" && (!completedSnapshot || completionLifecycle.closing || completionLifecycle.nativeLabel !== lifecycle.nativeLabel ||
@@ -8201,10 +8466,32 @@
       return invoke("control_provider_complete", { projectRoot: pair.project.root, requestId: payload.requestId,
         result: { actionId: payload.actionId, status: "succeeded", value: value } });
     }).catch(function (error) {
+      var code = browserProviderFailureCode(error);
+      if (operation.kind === "script" && code === "action_timeout" && error && error.pending === true) {
+        browserScriptTimeoutState.timedOut(scriptIdentity);
+        return;
+      }
+      if (operation.kind === "script" && code === "unknown_pending" && error && error.pending === true) {
+        browserScriptTimeoutState.unknownPending(scriptIdentity,
+          error && typeof error.durationMs === "number" ? error.durationMs : 0);
+        return;
+      }
+      if (operation.kind === "script" && code === "effect_unknown") {
+        browserScriptTimeoutState.completeUnknown(scriptIdentity, {
+          message: String(error),
+          durationMs: error && typeof error.durationMs === "number" ? error.durationMs : 5000,
+        });
+        return;
+      }
+      if (scriptIdentity && !browserScriptTimeoutState.complete(scriptIdentity)) return;
       invoke("control_provider_complete", { projectRoot: pair.project.root, requestId: payload.requestId,
-        result: { actionId: payload.actionId, status: "failed",
-          code: browserProviderFailureCode(error),
-          message: String(error) } }).catch(function () {});
+        result: code === "effect_unknown"
+          ? { actionId: payload.actionId, status: "unknown", code: "effect_unknown",
+              message: String(error), ambiguous: true,
+              durationMs: error && typeof error.durationMs === "number" ? error.durationMs : 5000 }
+          : { actionId: payload.actionId, status: "failed", code: code,
+              message: String(error), durationMs: error && typeof error.durationMs === "number" ? error.durationMs :
+                (code === "action_timeout" ? 5000 : 0) } }).catch(function () {});
     }); return true;
   }
   function handleBrowserPageLoad(event) {
@@ -8212,6 +8499,10 @@
     var pair = browserNativeEventContext(payload.label, payload.url);
     if (!pair) return false;
     if (payload.phase === "started") {
+      if (typeof browserScriptTimeoutState !== "undefined" && browserScriptTimeoutState) {
+        browserScriptTimeoutState.terminalTab(pair.tab.id, browserTabLifecycle(pair.tab).controlGeneration,
+          { reason: "document_replaced", message: "browser document was replaced after script timeout" });
+      }
       if (typeof queueBrowserAutomationInvalidation === "function") queueBrowserAutomationInvalidation(pair);
       pair.tab.loading = true;
     } else if (payload.phase === "finished") {
@@ -8248,7 +8539,30 @@
     return loaded;
   }
   listen("browser:page-load", handleBrowserPageLoad).catch(function () {});
+  listen("browser:script-terminal", function (event) {
+    var payload = event.payload || {};
+    return browserScriptTimeoutState.terminal({ requestId: payload.invocationId,
+      invocationId: payload.invocationId, tabId: payload.tabId, generation: payload.generation,
+      documentToken: payload.documentToken }, { reason: payload.terminalReason || "destroyed" });
+  }).catch(function () {});
+  listen("browser:script-start-accepted", function (event) {
+    var payload = event.payload || {};
+    return browserScriptTimeoutState.started({ requestId: payload.invocationId,
+      invocationId: payload.invocationId, tabId: payload.tabId, generation: payload.generation,
+      documentToken: payload.documentToken });
+  }).catch(function () {});
+  listen("browser:script-unknown-pending", function (event) {
+    var payload = event.payload || {};
+    return browserScriptTimeoutState.unknownPending({ requestId: payload.invocationId,
+      invocationId: payload.invocationId, tabId: payload.tabId, generation: payload.generation,
+      documentToken: payload.documentToken }, typeof payload.durationMs === "number" ? payload.durationMs : 0);
+  }).catch(function () {});
   listen("control:provider-effect-request", handleBrowserProviderEffect).catch(function () {});
+  listen("control:provider-disconnected", function (event) {
+    var payload = event.payload || {};
+    browserScriptTimeoutState.clearProject(payload.projectRoot);
+    resetBrowserControlProvider(payload.projectRoot);
+  }).catch(function () {});
   listen("browser:title", handleBrowserTitle).catch(function () {});
   listen("browser:focus", function (event) {
     markActiveSurface("browser");
@@ -8308,7 +8622,7 @@
     invalidateBrowserNavigation(tab);
     if (typeof invalidateBrowserAutomation === "function") await invalidateBrowserAutomation(tab);
     try {
-      await invoke("browser_destroy", { tabId: tab.id });
+      await invoke("browser_destroy", { tabId: tab.id, rawLabel: browserLabelForTab(project, tab) });
     } catch (error) {
       lifecycle.closing = false;
       lifecycle.documentId = lifecycle.nativeLabel + ":" + (++lifecycle.documentSequence) + ":" +
@@ -8320,7 +8634,14 @@
       setStatus("browser tab close failed: " + String(error), "error");
       return false;
     }
+    if (typeof browserScriptTimeoutState !== "undefined" && browserScriptTimeoutState) {
+      browserScriptTimeoutState.terminalTab(tab.id, lifecycle.controlGeneration,
+        { reason: "destroyed", message: "browser tab was destroyed after script timeout" });
+    }
     if (typeof removeBrowserResource === "function") await removeBrowserResource(project, tab);
+    if (typeof browserScriptTimeoutState !== "undefined" && browserScriptTimeoutState) {
+      browserScriptTimeoutState.clearTab(tab.id);
+    }
     idx = browser.tabs.findIndex(function (t) { return t === tab; });
     if (idx < 0) {
       lifecycle.closing = false;

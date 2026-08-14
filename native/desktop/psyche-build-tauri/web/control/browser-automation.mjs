@@ -6,6 +6,7 @@ const MAX_URL_BYTES = 2048;
 const MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024;
 const SNAPSHOT_METADATA_RESERVE_BYTES = 8 * 1024;
 const SNAPSHOT_TTL_MS = 30_000;
+const MAX_SCRIPT_RESULT_BYTES = 256 * 1024;
 const APPROVED_ROLES = ['button', 'link', 'textbox', 'checkbox', 'radio', 'switch', 'combobox', 'heading',
   'img', 'iframe', 'navigation', 'main', 'banner', 'contentinfo', 'complementary', 'list', 'listitem',
   'tab', 'tablist', 'menu', 'menuitem', 'dialog', 'alert', 'status', 'searchbox', 'spinbutton', 'slider'];
@@ -415,6 +416,43 @@ export function installBrowserAutomation(globalObject, options = {}) {
 
 export function dispatchBrowserAutomation(globalObject, request) {
   return installBrowserAutomation(globalObject).dispatch(request);
+}
+
+function canonicalScriptJson(value, seen = new Set()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value !== 'object' || seen.has(value)) return false;
+  const isArray = Array.isArray(value);
+  if (Object.getPrototypeOf(value) !== (isArray ? Array.prototype : Object.prototype)) return false;
+  seen.add(value);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key !== 'string')) return false;
+  if (isArray) {
+    if (keys.some((key) => key !== 'length' && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length))) return false;
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (!descriptor?.enumerable || !('value' in descriptor) || !canonicalScriptJson(descriptor.value, seen)) return false;
+    }
+  } else {
+    for (const key of keys) {
+      const descriptor = descriptors[key];
+      if (!descriptor.enumerable || !('value' in descriptor) || !canonicalScriptJson(descriptor.value, seen)) return false;
+    }
+  }
+  seen.delete(value); return true;
+}
+
+export function serializeBrowserScriptResult(value) {
+  if (!canonicalScriptJson(value)) throw codedError('script_serialization_failed', 'browser script result is not plain JSON');
+  let json;
+  try { json = JSON.stringify(value); } catch (_) {
+    throw codedError('script_serialization_failed', 'browser script result is not serializable');
+  }
+  if (typeof json !== 'string') throw codedError('script_serialization_failed', 'browser script result is not serializable');
+  const byteCount = new TextEncoder().encode(json).byteLength;
+  if (byteCount > MAX_SCRIPT_RESULT_BYTES) throw codedError('result_too_large', 'browser script result exceeds the control limit');
+  return { json, byteCount };
 }
 
 export function browserAutomationSource() {

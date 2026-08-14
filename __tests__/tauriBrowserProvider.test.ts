@@ -14,6 +14,9 @@ const cargo = readFileSync(
   new URL('../native/desktop/psyche-build-tauri/src-tauri/Cargo.toml', import.meta.url),
   'utf8',
 );
+const main = readFileSync(
+  new URL('../native/desktop/psyche-build-tauri/web/main.js', import.meta.url), 'utf8',
+);
 
 describe('desktop control browser provider transport', () => {
   it('derives the socket from canonical-root SHA-256 using the TypeScript 20-hex contract', () => {
@@ -68,6 +71,7 @@ describe('desktop control browser provider transport', () => {
     expect(provider).toContain('cancel_pending_response(');
     expect(provider).toContain('remove_if_nonce(');
     expect(provider).toContain('connection.connection_nonce');
+    expect(provider).not.toContain('clear_connection_script_flights');
   });
 
   it('exposes only typed provider and bounded operator commands', () => {
@@ -104,7 +108,17 @@ describe('desktop control browser provider transport', () => {
     expect(lib).toContain('navigation_epoch');
     const reload = lib.slice(lib.indexOf('fn browser_reload'), lib.indexOf('fn browser_reload') + 1_500);
     expect(reload).toContain('browser_binding');
-    expect(reload).toContain('navigation_epoch');
+    expect(reload).not.toContain('navigation_epoch =');
+    const confirmedNavigation = lib.slice(lib.indexOf('fn update_browser_binding_navigation'),
+      lib.indexOf('fn update_browser_binding_navigation') + 1_500);
+    expect(confirmedNavigation).toContain('script_flights');
+    const confirmedNavigationState = lib.slice(lib.indexOf('fn confirm_browser_navigation'),
+      lib.indexOf('fn confirm_browser_navigation') + 3_500);
+    expect(confirmedNavigationState).toContain('operations.remove(&tab_id)');
+    expect(main).toContain('status: "timed_out_pending"');
+    expect(main).toContain('browser:script-terminal');
+    expect(main).toContain('createBrowserScriptTimeoutState');
+    expect(main).toContain('current.phase = "acknowledged"');
     expect(lib).not.toMatch(/fn browser_eval\s*\(/);
   });
 
@@ -121,5 +135,15 @@ describe('desktop control browser provider transport', () => {
     expect(provider.match(/pending_effects\.lock\(\)\.clear\(\)/g)?.length).toBeGreaterThanOrEqual(2);
     expect(cargo).toMatch(/^sha2\s*=\s*"0\.10"/m);
     expect(cargo).toMatch(/^base64\s*=\s*"0\.22"/m);
+  });
+
+  it('does not treat provider resource removal or navigation dispatch as document termination', () => {
+    const remove = provider.slice(provider.indexOf('pub async fn control_provider_remove'),
+      provider.indexOf('pub fn control_provider_complete'));
+    expect(remove).not.toContain('script_flights');
+    expect(remove).not.toContain('clear_matching_request');
+    const navigate = lib.slice(lib.indexOf('fn browser_navigate'), lib.indexOf('fn browser_set_bounds'));
+    expect(navigate).not.toContain('script_flights');
+    expect(navigate).not.toContain('flights.lock().remove');
   });
 });

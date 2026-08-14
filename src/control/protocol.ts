@@ -8,6 +8,7 @@ import type {
 import { isPaneNamedKey } from './types.js';
 import type { BrowserTabSurface } from './surfaces.js';
 import { SURFACE_CAPABILITIES as CANONICAL_SURFACE_CAPABILITIES } from './capabilityLeases.js';
+import { AGENT_CONTROL_LIMITS } from './limits.js';
 
 export const CONTROL_PROTOCOL_VERSION = 1;
 
@@ -65,6 +66,26 @@ export type ControlRequest =
     }
   | {
       version: 1;
+      type: 'provider.effect.started';
+      requestId: string;
+      actionId: string;
+      tabId: string;
+      generation: number;
+      invocationId: string;
+      documentToken: string;
+    }
+  | {
+      version: 1;
+      type: 'provider.effect.executing';
+      requestId: string;
+      actionId: string;
+      tabId: string;
+      generation: number;
+      invocationId: string;
+      documentToken: string;
+    }
+  | {
+      version: 1;
       type: 'provider.effect.result';
       requestId: string;
       result: ProviderEffectResult;
@@ -76,12 +97,17 @@ export type BrowserProviderOperation =
   | { kind: 'action'; action: BrowserSemanticAction; snapshotId?: string; expectedRisk?: {
       documentId: string; submit: boolean | null; formId: string | null; secret: boolean | null;
     } }
-  | { kind: 'script'; source: string; args?: unknown };
+  | { kind: 'script_context' }
+  | { kind: 'script'; source: string; args?: unknown; expectedContext: {
+      documentId: string; documentToken: string; navigationEpoch: number; navigationUrl: string;
+    } };
 
 export type ProviderEffectResult =
   | { actionId: string; status: 'succeeded'; value?: unknown }
-  | { actionId: string; status: 'failed'; code: string; message: string }
-  | { actionId: string; status: 'unknown'; code: string; message: string; ambiguous: true };
+  | { actionId: string; status: 'failed'; code: string; message: string; durationMs?: number }
+  | { actionId: string; status: 'timed_out_pending'; code: 'action_timeout'; message: string; durationMs?: number }
+  | { actionId: string; status: 'unknown_pending'; code: 'effect_unknown'; message: string; ambiguous: true; durationMs?: number }
+  | { actionId: string; status: 'unknown'; code: string; message: string; ambiguous: true; durationMs?: number };
 
 export type ProviderPush =
   | {
@@ -257,6 +283,15 @@ export function decodeControlRequest(raw: string): ControlRequest {
         throw new Error('invalid provider.effect.result request');
       }
       break;
+    case 'provider.effect.started':
+    case 'provider.effect.executing':
+      if (!exactKeys(value, ['actionId', 'documentToken', 'generation', 'invocationId', 'requestId', 'tabId', 'type', 'version'])
+        || !isNonemptyString(value.actionId) || !isNonemptyString(value.tabId)
+        || !isAuthorityInteger(value.generation) || !isNonemptyString(value.invocationId)
+        || !isNonemptyString(value.documentToken)) {
+        throw new Error('invalid provider.effect.started request');
+      }
+      break;
     default:
       throw new Error('unsupported control request type');
   }
@@ -279,14 +314,24 @@ function validBrowserResource(value: unknown): value is BrowserTabSurface {
     && isAuthorityInteger(value.viewport.width) && isAuthorityInteger(value.viewport.height);
 }
 
-function validProviderEffectResult(value: unknown): value is ProviderEffectResult {
+export function validProviderEffectResult(value: unknown): value is ProviderEffectResult {
   if (!isPlainObject(value) || !isNonemptyString(value.actionId) || !isNonemptyString(value.status)) return false;
   if (value.status === 'succeeded') return exactKeys(value, ['actionId', 'status'], ['value']);
-  if (value.status === 'failed') return exactKeys(value, ['actionId', 'code', 'message', 'status'])
-    && isNonemptyString(value.code) && typeof value.message === 'string';
-  return value.status === 'unknown'
-    && exactKeys(value, ['actionId', 'ambiguous', 'code', 'message', 'status'])
-    && value.ambiguous === true && isNonemptyString(value.code) && typeof value.message === 'string';
+  const durationValid = value.durationMs === undefined
+    || (typeof value.durationMs === 'number' && Number.isFinite(value.durationMs) && value.durationMs >= 0 && value.durationMs <= 5_000);
+  if (value.status === 'failed') return exactKeys(value, ['actionId', 'code', 'message', 'status'], ['durationMs'])
+    && durationValid && isNonemptyString(value.code) && value.code !== 'effect_unknown'
+    && (value.code !== 'action_timeout' || value.durationMs === AGENT_CONTROL_LIMITS.scriptTimeoutMs)
+    && typeof value.message === 'string';
+  if (value.status === 'timed_out_pending') {
+    return exactKeys(value, ['actionId', 'code', 'message', 'status'], ['durationMs'])
+      && value.durationMs === AGENT_CONTROL_LIMITS.scriptTimeoutMs
+      && value.code === 'action_timeout' && typeof value.message === 'string';
+  }
+  return (value.status === 'unknown' || value.status === 'unknown_pending')
+    && exactKeys(value, ['actionId', 'ambiguous', 'code', 'message', 'status'], ['durationMs'])
+    && durationValid && value.ambiguous === true && value.code === 'effect_unknown'
+    && typeof value.message === 'string';
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -344,7 +389,10 @@ function validAgentControlPayload(kind: string, payload: Record<string, unknown>
     && !isNonemptyString(payload.tabId)
   ) return false;
   if (kind === 'browser.inspect' && 'includeScreenshot' in payload && typeof payload.includeScreenshot !== 'boolean') return false;
-  if (kind === 'browser.script' && typeof payload.source !== 'string') return false;
+  if (kind === 'browser.script') {
+    if (typeof payload.source !== 'string') return false;
+    if ('args' in payload && !validCanonicalScriptArgs(payload.args)) return false;
+  }
   if (kind === 'browser.action') {
     if (!isPlainObject(payload.action) || !validBrowserAction(payload.action)) return false;
     const element = BROWSER_ELEMENT_ACTIONS.has(String(payload.action.kind));
@@ -398,6 +446,42 @@ function validAgentControlPayload(kind: string, payload: Record<string, unknown>
       && isAuthorityInteger(payload.resource.viewport.height);
   }
   if (kind === 'provider.resource.remove') return isNonemptyString(payload.id);
+  return true;
+}
+
+function validCanonicalScriptArgs(value: unknown): boolean {
+  if (!isCanonicalJsonValue(value)) return false;
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8') <= AGENT_CONTROL_LIMITS.scriptArgsBytes;
+  } catch {
+    return false;
+  }
+}
+
+function isCanonicalJsonValue(value: unknown, seen = new Set<object>()): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value !== 'object' || seen.has(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (Array.isArray(value) ? prototype !== Array.prototype : prototype !== Object.prototype) return false;
+  seen.add(value);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key !== 'string')) return false;
+  if (Array.isArray(value)) {
+    if (keys.some((key) => typeof key !== 'string'
+      || (key !== 'length' && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length)))) return false;
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (!descriptor?.enumerable || !('value' in descriptor) || !isCanonicalJsonValue(descriptor.value, seen)) return false;
+    }
+  } else {
+    for (const key of keys) {
+      const descriptor = descriptors[String(key)];
+      if (!descriptor?.enumerable || !('value' in descriptor) || !isCanonicalJsonValue(descriptor.value, seen)) return false;
+    }
+  }
+  seen.delete(value);
   return true;
 }
 

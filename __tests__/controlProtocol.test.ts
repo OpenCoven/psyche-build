@@ -154,6 +154,18 @@ describe('control protocol v1', () => {
     }
   });
 
+  it('rejects browser script arguments over the canonical 256 KiB boundary', () => {
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'command.submit', requestId: 'req-script-args',
+      command: {
+        id: 'cmd-script-args', idempotencyKey: 'idem-script-args', kind: 'browser.script',
+        projectRoot: '/repo', createdAt: '2026-08-12T12:00:00.000Z',
+        payload: { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
+          tabId: 'tab-1', generation: 1, source: 'return args', args: 'x'.repeat(256 * 1024) },
+      },
+    }))).toThrow('invalid command.submit payload');
+  });
+
   it('rejects pane observation cursors that cannot be incremented safely', () => {
     expect(() => decodeControlRequest(JSON.stringify({
       version: 1, type: 'command.submit', requestId: 'req-observe-overflow',
@@ -238,11 +250,71 @@ describe('control protocol v1', () => {
       version: 1, type: 'provider.register', requestId: 'register-1', providerId: 'desktop-1',
     }))).toMatchObject({ type: 'provider.register', providerId: 'desktop-1' });
     expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.started', requestId: 'effect-1',
+      actionId: 'action-1', tabId: 'tab-1', generation: 2,
+      invocationId: 'effect-1', documentToken: 'token-1',
+    }))).toMatchObject({ type: 'provider.effect.started', requestId: 'effect-1' });
+    expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.executing', requestId: 'effect-1',
+      actionId: 'action-1', tabId: 'tab-1', generation: 2,
+      invocationId: 'effect-1', documentToken: 'token-1',
+    }))).toMatchObject({ type: 'provider.effect.executing', requestId: 'effect-1' });
+    expect(decodeControlRequest(JSON.stringify({
       version: 1, type: 'provider.effect.result', requestId: 'effect-1',
-      result: { actionId: 'action-1', status: 'succeeded', value: {} },
+      result: { actionId: 'action-1', status: 'failed', code: 'script_execution_failed',
+        message: 'failed', durationMs: 17 },
     }))).toMatchObject({ type: 'provider.effect.result', requestId: 'effect-1' });
     expect(() => decodeControlRequest(JSON.stringify({
       version: 1, type: 'provider.register', requestId: 'register-1', providerId: 'desktop-1', extra: true,
     }))).toThrow('invalid provider.register request');
+  });
+
+  it('accepts only the exact nonterminal script timeout notification shape', () => {
+    expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.result', requestId: 'effect-timeout',
+      result: { actionId: 'action-timeout', status: 'timed_out_pending',
+        code: 'action_timeout', message: 'browser script exceeded the execution deadline', durationMs: 5_000 },
+    }))).toMatchObject({ result: { status: 'timed_out_pending', code: 'action_timeout' } });
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.result', requestId: 'effect-timeout',
+      result: { actionId: 'action-timeout', status: 'timed_out_pending',
+        code: 'effect_unknown', message: 'wrong code' },
+    }))).toThrow('invalid provider.effect.result request');
+  });
+
+  it('accepts only the exact nonterminal post-submission ambiguity shape', () => {
+    expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.result', requestId: 'effect-unknown',
+      result: { actionId: 'action-unknown', status: 'unknown_pending',
+        code: 'effect_unknown', message: 'execution acknowledgement was lost', ambiguous: true, durationMs: 0 },
+    }))).toMatchObject({ result: { status: 'unknown_pending', code: 'effect_unknown', ambiguous: true } });
+    for (const result of [
+      { actionId: 'a', status: 'unknown_pending', code: 'effect_unknown', message: 'x', ambiguous: false, durationMs: 0 },
+      { actionId: 'a', status: 'unknown_pending', code: 'action_timeout', message: 'x', ambiguous: true, durationMs: 0 },
+      { actionId: 'a', status: 'unknown_pending', code: 'effect_unknown', message: 'x', ambiguous: true, durationMs: 5_001 },
+    ]) {
+      expect(() => decodeControlRequest(JSON.stringify({
+        version: 1, type: 'provider.effect.result', requestId: 'effect-invalid', result,
+      }))).toThrow('invalid provider.effect.result request');
+    }
+  });
+
+  it.each([
+    { actionId: 'a', status: 'failed', code: 'action_timeout', message: 'timeout' },
+    { actionId: 'a', status: 'failed', code: 'action_timeout', message: 'timeout', durationMs: 4_999 },
+    { actionId: 'a', status: 'timed_out_pending', code: 'action_timeout', message: 'timeout' },
+    { actionId: 'a', status: 'timed_out_pending', code: 'action_timeout', message: 'timeout', durationMs: 5_001 },
+    { actionId: 'a', status: 'failed', code: 'effect_unknown', message: 'unknown', durationMs: 1 },
+  ])('rejects semantically impossible provider result %#', (result) => {
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.result', requestId: 'effect-invalid', result,
+    }))).toThrow('invalid provider.effect.result request');
+  });
+
+  it.each([0, 5_000])('accepts non-timeout failed duration %s', (durationMs) => {
+    expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.result', requestId: 'effect-failed',
+      result: { actionId: 'a', status: 'failed', code: 'script_execution_failed', message: 'failed', durationMs },
+    }))).toMatchObject({ result: { status: 'failed', durationMs } });
   });
 });

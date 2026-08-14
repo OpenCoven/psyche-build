@@ -453,13 +453,16 @@ export class ControlServer {
     }
 
     if (session.getProvider() && request.type !== 'provider.resource.upsert'
-      && request.type !== 'provider.resource.remove' && request.type !== 'provider.effect.result') {
+      && request.type !== 'provider.resource.remove' && request.type !== 'provider.effect.started'
+      && request.type !== 'provider.effect.executing'
+      && request.type !== 'provider.effect.result') {
       write({ version: 1, type: 'error', requestId: request.requestId,
         code: 'provider_mode', message: 'provider sockets only accept provider frames' });
       return;
     }
     if (!session.getProvider() && request.type !== 'provider.register'
       && (request.type === 'provider.resource.upsert' || request.type === 'provider.resource.remove'
+        || request.type === 'provider.effect.started' || request.type === 'provider.effect.executing'
         || request.type === 'provider.effect.result')) {
       write({ version: 1, type: 'error', requestId: request.requestId,
         code: 'provider_registration_required', message: 'provider.register is required first' });
@@ -579,6 +582,22 @@ export class ControlServer {
       case 'provider.effect.result':
         try {
           session.getProvider()!.complete(request.requestId, request.result);
+          write({ version: 1, type: 'ack', requestId: request.requestId });
+        } catch (error) {
+          writeProviderError(write, request.requestId, error);
+        }
+        return;
+      case 'provider.effect.started':
+        try {
+          session.getProvider()!.started(request.requestId, request);
+          write({ version: 1, type: 'ack', requestId: request.requestId });
+        } catch (error) {
+          writeProviderError(write, request.requestId, error);
+        }
+        return;
+      case 'provider.effect.executing':
+        try {
+          session.getProvider()!.executing(request.requestId, request);
           write({ version: 1, type: 'ack', requestId: request.requestId });
         } catch (error) {
           writeProviderError(write, request.requestId, error);
