@@ -32,6 +32,7 @@ import type {
 
 const STABLE_SURFACE_EFFECT_CODES = new Set([
   'action_timeout',
+  'args_too_large',
   'automation_failed',
   'backend_unavailable',
   'element_missing',
@@ -39,12 +40,17 @@ const STABLE_SURFACE_EFFECT_CODES = new Set([
   'provider_unavailable',
   'resource_missing',
   'resource_replaced',
+  'mutation_not_allowed',
+  'mutation_plan_invalid',
+  'mutation_target_stale',
   'result_too_large',
   'script_source_too_large',
   'script_args_invalid',
   'script_args_too_large',
   'serialization_failed',
+  'snapshot_too_large',
   'snapshot_stale',
+  'target_unavailable',
 ]);
 
 export type Payload<K extends ControlCommand['kind']> = Extract<ControlCommand, { kind: K }>['payload'];

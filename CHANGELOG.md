@@ -12,6 +12,9 @@
   are limited to 64 KiB source, five seconds, and 256 KiB JSON results. Each
   approved script now runs in a fresh native WebKit content world so it cannot
   poison the page automation realm or a later approved invocation.
+- Revoked approved browser-script authority at invocation completion by moving
+  approved source into a one-shot Worker and applying only validated
+  synchronous DOM mutation plans.
 - Durable agent-control journal events and journaled receipts now contain
   allowlisted metadata only. Terminal output, semantic/page contents,
   screenshots, secret values, raw scripts, cookies, headers, absolute/full paths
