@@ -123,13 +123,10 @@ interface LeaseRequestRecord {
 interface SurfaceActionContext {
   command: Extract<ControlCommand, { kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script' }>;
   target: LeaseTarget;
-  ownership: TrustedActionOwnership;
   classification: PolicyClassification;
   effect?: RedactedApprovalEffect;
   executablePayloadDigest: string;
 }
-
-type TrustedActionOwnership = Required<Pick<ActionReceipt, 'taskId' | 'leaseId' | 'leaseRevision'>>;
 
 interface PaneQueueState {
   readonly target: LeaseTarget;
@@ -528,13 +525,13 @@ export class ControlRuntime {
             await this.journal.append(journalEvent.kind, journalEvent.payload);
             const receipt = this.makeReceipt(command, context.target, 'approval_required', {
               value: { approvalId: approval.id, payloadDigest: approval.payloadDigest },
-            }, context.ownership);
+            });
             this.rememberReceipt(receipt);
             return this.appendTerminal(command, succeededOutcome({
               ...receipt,
               approvalId: approval.id,
               payloadDigest: approval.payloadDigest,
-            }), receipt);
+            }));
           }
           const receipt = await this.enqueueSurfaceEffect(context);
           return this.appendTerminal(command, outcomeForReceipt(receipt), receipt);
@@ -639,7 +636,6 @@ export class ControlRuntime {
     return {
       command: preparedCommand,
       target,
-      ownership: trustedOwnershipForCommand(preparedCommand),
       classification,
       executablePayloadDigest: digestExecutablePayload(preparedCommand, canonicalSemantic),
       ...(effect ? { effect } : {}),
@@ -661,25 +657,14 @@ export class ControlRuntime {
         && isApprovalInvalidationError(error)
         && !this.passiveTerminalizations.has(command.payload.approvalId)
       ) {
-        await this.terminalizeValidationFailure(
-          context.command,
-          context.target,
-          'action_invalidated',
-          context.ownership,
-        );
+        await this.terminalizeValidationFailure(context.command, context.target, 'action_invalidated');
         this.pendingApprovals.delete(command.payload.approvalId);
       }
       throw error;
     }
     if (!context) throw codedRuntimeError('approval_missing', 'original approval command is unavailable');
     if (command.payload.decision === 'deny') {
-      const receipt = this.makeReceipt(
-        context.command,
-        context.target,
-        'denied',
-        { code: 'approval_denied' },
-        context.ownership,
-      );
+      const receipt = this.makeReceipt(context.command, context.target, 'denied', { code: 'approval_denied' });
       this.rememberReceipt(receipt);
       this.pendingApprovals.delete(approval.id);
       await this.appendTerminal(context.command, outcomeForReceipt(receipt), receipt);
@@ -714,24 +699,12 @@ export class ControlRuntime {
   private async enqueueSurfaceEffect(context: SurfaceActionContext): Promise<ActionReceipt> {
     const queue = this.queueForResource(context.target);
     if (queue.quarantined) {
-      const receipt = this.makeReceipt(
-        context.command,
-        context.target,
-        'unknown',
-        { code: 'effect_unknown' },
-        context.ownership,
-      );
+      const receipt = this.makeReceipt(context.command, context.target, 'unknown', { code: 'effect_unknown' });
       this.rememberReceipt(receipt);
       return receipt;
     }
     if (queue.pendingEffects >= AGENT_CONTROL_LIMITS.resourceQueueDepth) {
-      const receipt = this.makeReceipt(
-        context.command,
-        context.target,
-        'failed',
-        { code: 'queue_full' },
-        context.ownership,
-      );
+      const receipt = this.makeReceipt(context.command, context.target, 'failed', { code: 'queue_full' });
       this.rememberReceipt(receipt);
       return receipt;
     }
@@ -755,7 +728,7 @@ export class ControlRuntime {
           code: context.classification.decision === 'approval'
             ? 'action_invalidated'
             : 'action_validation_failed',
-        }, context.ownership);
+        });
         this.rememberReceipt(receipt);
         return receipt;
       }
@@ -779,29 +752,21 @@ export class ControlRuntime {
       } catch (error) {
         const ambiguous = Boolean(error && typeof error === 'object' && (error as { ambiguous?: unknown }).ambiguous);
         if (errorCodeIs(error, 'effect_timeout')) queue.quarantined = true;
-        const receipt = this.makeReceipt(
-          context.command,
-          context.target,
-          ambiguous ? 'unknown' : 'failed',
-          { code: ambiguous ? 'effect_unknown' : stableSurfaceEffectCode(error) },
-          context.ownership,
-        );
+        const receipt = this.makeReceipt(context.command, context.target, ambiguous ? 'unknown' : 'failed', {
+          code: ambiguous ? 'effect_unknown' : stableSurfaceEffectCode(error),
+        });
         this.rememberReceipt(receipt);
         return receipt;
       }
       let receipt: ActionReceipt;
       try {
         receipt = context.command.kind === 'browser.script'
-          ? this.makeScriptReceipt(context.command, context.target, value, context.ownership)
-          : this.makeReceipt(context.command, context.target, 'succeeded', { value }, context.ownership);
+          ? this.makeScriptReceipt(context.command, context.target, value)
+          : this.makeReceipt(context.command, context.target, 'succeeded', { value });
       } catch (error) {
-        receipt = this.makeReceipt(
-          context.command,
-          context.target,
-          'failed',
-          { code: stableSurfaceEffectCode(error) },
-          context.ownership,
-        );
+        receipt = this.makeReceipt(context.command, context.target, 'failed', {
+          code: stableSurfaceEffectCode(error),
+        });
       }
       this.rememberReceipt(receipt);
       return receipt;
@@ -1095,12 +1060,7 @@ export class ControlRuntime {
     for (const approval of approvals) {
       const context = this.pendingApprovals.get(approval.id);
       if (!context) continue;
-      await this.terminalizeValidationFailure(
-        context.command,
-        context.target,
-        'action_invalidated',
-        context.ownership,
-      );
+      await this.terminalizeValidationFailure(context.command, context.target, 'action_invalidated');
       this.pendingApprovals.delete(approval.id);
     }
   }
@@ -1118,7 +1078,6 @@ export class ControlRuntime {
         context.command,
         context.target,
         'approval_expired',
-        context.ownership,
       );
       this.passiveTerminalizations.set(approval.id, terminalization);
       void terminalization
@@ -1137,7 +1096,6 @@ export class ControlRuntime {
     state: ActionReceipt['state'],
     details: { code?: string; message?: string; value?: unknown; sourceDigest?: string;
       sourceBytes?: number; resultBytes?: number; durationMs?: number } = {},
-    ownership?: TrustedActionOwnership,
   ): ActionReceipt {
     return Object.freeze({
       schema: 'psyche.control.receipt/v1' as const,
@@ -1145,11 +1103,6 @@ export class ControlRuntime {
       state,
       resource: Object.freeze({ ...target }),
       createdAt: command.createdAt,
-      ...(ownership ? {
-        taskId: ownership.taskId,
-        leaseId: ownership.leaseId,
-        leaseRevision: ownership.leaseRevision,
-      } : {}),
       ...(state === 'approval_required' ? {} : { completedAt: new Date().toISOString() }),
       ...details,
     });
@@ -1159,7 +1112,6 @@ export class ControlRuntime {
     command: Extract<ControlCommand, { kind: 'browser.script' }>,
     target: LeaseTarget,
     result: unknown,
-    ownership: TrustedActionOwnership,
   ): ActionReceipt {
     let canonicalEnvelope: unknown;
     try {
@@ -1201,7 +1153,7 @@ export class ControlRuntime {
       sourceBytes: Buffer.byteLength(command.payload.source, 'utf8'),
       resultBytes: envelope.resultBytes as number,
       durationMs: envelope.durationMs as number,
-    }, ownership);
+    });
   }
 
   private rememberReceipt(receipt: ActionReceipt): void {
@@ -1219,9 +1171,8 @@ export class ControlRuntime {
     command: SurfaceActionContext['command'],
     target: LeaseTarget,
     code = 'action_validation_failed',
-    ownership?: TrustedActionOwnership,
   ): Promise<CommandOutcome> {
-    const receipt = this.makeReceipt(command, target, 'failed', { code }, ownership);
+    const receipt = this.makeReceipt(command, target, 'failed', { code });
     this.rememberReceipt(receipt);
     const outcome = outcomeForReceipt(receipt);
     return this.appendTerminal(command, outcome, receipt);
@@ -1513,14 +1464,6 @@ function targetForSurfaceAction(command: SurfaceActionContext['command']): Lease
   }
 }
 
-function trustedOwnershipForCommand(command: SurfaceActionContext['command']): TrustedActionOwnership {
-  return {
-    taskId: command.payload.taskId,
-    leaseId: command.payload.leaseId,
-    leaseRevision: command.payload.leaseRevision,
-  };
-}
-
 function isApprovalInvalidationError(error: unknown): boolean {
   const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
   return code === 'approval_denied'
@@ -1683,9 +1626,6 @@ function journalReceiptMetadata(receipt: ActionReceipt): AgentControlJournalRece
     state: receipt.state,
     resource: createAgentControlJournalResource(receipt.resource),
     createdAt: receipt.createdAt,
-    ...(receipt.taskId ? { taskId: receipt.taskId } : {}),
-    ...(receipt.leaseId ? { leaseId: receipt.leaseId } : {}),
-    ...(receipt.leaseRevision !== undefined ? { leaseRevision: receipt.leaseRevision } : {}),
     ...(receipt.completedAt ? { completedAt: receipt.completedAt } : {}),
     ...(receipt.code ? { code: receipt.code } : {}),
     ...(receipt.sourceDigest ? { sourceDigest: receipt.sourceDigest } : {}),
@@ -1781,9 +1721,6 @@ interface DurableJournalReceiptResult {
     readonly idDigest: string;
     readonly generation?: number;
   };
-  readonly taskId?: string;
-  readonly leaseId?: string;
-  readonly leaseRevision?: number;
   readonly code?: string;
 }
 
@@ -1795,10 +1732,6 @@ function durableJournalReceiptPayload(event: RuntimeEvent): DurableJournalReceip
   if (
     metadata.schema !== 'psyche.control.receipt/v1'
     || !isActionReceiptState(metadata.state)
-    || (metadata.taskId !== undefined && typeof metadata.taskId !== 'string')
-    || (metadata.leaseId !== undefined && typeof metadata.leaseId !== 'string')
-    || (metadata.leaseRevision !== undefined
-      && (!Number.isSafeInteger(metadata.leaseRevision) || (metadata.leaseRevision as number) < 1))
     || (metadata.code !== undefined && typeof metadata.code !== 'string')
     || !resource || typeof resource !== 'object' || Array.isArray(resource)
   ) return undefined;
@@ -1819,9 +1752,6 @@ function durableJournalReceiptPayload(event: RuntimeEvent): DurableJournalReceip
       idDigest: redactedResource.idDigest,
       ...(redactedResource.kind === 'project' ? {} : { generation: redactedResource.generation as number }),
     },
-    ...(typeof metadata.taskId === 'string' ? { taskId: metadata.taskId } : {}),
-    ...(typeof metadata.leaseId === 'string' ? { leaseId: metadata.leaseId } : {}),
-    ...(metadata.leaseRevision !== undefined ? { leaseRevision: metadata.leaseRevision as number } : {}),
     ...(typeof metadata.code === 'string' ? { code: metadata.code } : {}),
   };
 }

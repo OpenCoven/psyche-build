@@ -83,25 +83,6 @@ describe('control protocol v1', () => {
     }))).toThrow('invalid hello request');
   });
 
-  it('decodes and validates optional task scope on state.get requests', () => {
-    expect(decodeControlRequest(JSON.stringify({
-      version: CONTROL_PROTOCOL_VERSION,
-      type: 'state.get',
-      requestId: 'req-1',
-      taskId: 'task-1',
-    }))).toMatchObject({
-      type: 'state.get',
-      taskId: 'task-1',
-    });
-
-    expect(() => decodeControlRequest(JSON.stringify({
-      version: CONTROL_PROTOCOL_VERSION,
-      type: 'state.get',
-      requestId: 'req-1',
-      taskId: '',
-    }))).toThrow('invalid state.get request');
-  });
-
   it('rejects command.submit requests missing required command fields', () => {
     const command = {
       id: 'cmd-1',
@@ -158,12 +139,10 @@ describe('control protocol v1', () => {
       requestId: 'req-1',
       afterSequence: 0,
       limit: 100,
-      taskId: 'task-1',
     }))).toMatchObject({
       type: 'events.read',
       afterSequence: 0,
       limit: 100,
-      taskId: 'task-1',
     });
   });
 

@@ -243,33 +243,6 @@ describe('ControlRuntime', () => {
       actionId: 'missing-lease-action', state: 'failed', code: 'action_validation_failed',
     }));
   });
-
-  it('stores trusted task and lease ownership on authorized receipts and journal metadata', async () => {
-    const harness = await createBrowserActionHarness();
-    await requestReviewApproval(harness);
-
-    expect(harness.runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
-      actionId: 'approval-action',
-      state: 'approval_required',
-      taskId: 'task-review',
-      leaseId: harness.lease.id,
-      leaseRevision: harness.lease.revision,
-    }));
-    expect(harness.journal.read()).toContainEqual(expect.objectContaining({
-      kind: 'command.succeeded',
-      payload: expect.objectContaining({
-        commandId: 'approval-action',
-        idempotencyKey: 'approval-action',
-        receipt: expect.objectContaining({
-          actionId: 'approval-action',
-          taskId: 'task-review',
-          leaseId: harness.lease.id,
-          leaseRevision: harness.lease.revision,
-        }),
-      }),
-    }));
-  });
-
   it('revokes automation before accepting human input', async () => {
     const runtime = await ControlRuntime.create({
       ownerEpoch: 4,

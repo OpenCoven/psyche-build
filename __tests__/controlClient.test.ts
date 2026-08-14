@@ -13,7 +13,6 @@ interface Harness {
   endpoint: string;
   projectRoot: string;
   operatorToken: string;
-  agentToken: string;
   submit: ReturnType<typeof vi.fn>;
 }
 
@@ -69,7 +68,6 @@ async function startHarness(overrides: {
     endpoint,
     projectRoot,
     operatorToken: await credentials.operatorToken(),
-    agentToken: await credentials.agentToken(),
     submit: submit as unknown as ReturnType<typeof vi.fn>,
   };
 }
@@ -263,130 +261,6 @@ describe('ControlClient over the socket transport', () => {
     await expect(client.actionStatus(receipt.actionId)).resolves.toEqual(receipt);
     expect(readEvents).toHaveBeenCalledOnce();
     expect(readEvents.mock.calls[0][0]).toBe(49_000);
-  });
-
-  it('filters scoped journal fallback by trusted receipt ownership and keeps legacy visible to operators', async () => {
-    const scopedReceipt = {
-      schema: 'psyche.control.receipt/v1' as const,
-      actionId: 'owned-action',
-      state: 'failed' as const,
-      resource: { kind: 'browser_tab' as const, idDigest: 'a'.repeat(64), generation: 1 },
-      createdAt: '2026-08-12T12:00:00.000Z',
-      completedAt: '2026-08-12T12:00:01.000Z',
-      taskId: 'task-own',
-      leaseId: 'lease-own',
-      leaseRevision: 2,
-      code: 'effect_failed',
-    };
-    const otherReceipt = {
-      ...scopedReceipt,
-      actionId: 'other-action',
-      taskId: 'task-other',
-      leaseId: 'lease-other',
-    };
-    const legacyReceipt = {
-      schema: 'psyche.control.receipt/v1' as const,
-      actionId: 'legacy-action',
-      state: 'failed' as const,
-      resource: { kind: 'browser_tab' as const, idDigest: 'b'.repeat(64), generation: 1 },
-      createdAt: '2026-08-12T12:00:00.000Z',
-      completedAt: '2026-08-12T12:00:01.000Z',
-      code: 'effect_failed',
-    };
-    const readEvents = vi.fn(() => ({
-      events: [
-        { sequence: 1, kind: 'command.failed', payload: { receipt: otherReceipt } },
-        { sequence: 2, kind: 'command.failed', payload: { receipt: legacyReceipt } },
-        { sequence: 3, kind: 'command.failed', payload: { receipt: scopedReceipt } },
-      ],
-      nextSequence: 3,
-      gap: false,
-    }));
-    const harness = await startHarness({
-      snapshot: () => ({
-        ownerEpoch: 7, sequence: 3, commands: {}, leases: {}, resources: [],
-        capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
-      }),
-      readEvents,
-    });
-    const agent = await ControlClient.connect({
-      projectRoot: harness.projectRoot,
-      endpoint: harness.endpoint,
-      token: harness.agentToken,
-      clientName: 'scoped-agent',
-    });
-    const operator = await ControlClient.connect({
-      projectRoot: harness.projectRoot,
-      endpoint: harness.endpoint,
-      token: harness.operatorToken,
-      clientName: 'scoped-operator',
-    });
-    cleanups.push(() => agent.close(), () => operator.close());
-
-    await expect(agent.actionStatus('owned-action', { taskId: 'task-own' })).resolves.toMatchObject({
-      schema: 'psyche.control.receipt/v1',
-      actionId: 'owned-action',
-      state: 'failed',
-      code: 'effect_failed',
-    });
-    const scoped = await agent.actionStatus('owned-action', { taskId: 'task-own' });
-    expect(scoped).toBeDefined();
-    expect(scoped).not.toHaveProperty('taskId');
-    expect(scoped).not.toHaveProperty('leaseId');
-    expect(scoped).not.toHaveProperty('leaseRevision');
-    await expect(agent.actionStatus('other-action', { taskId: 'task-own' })).resolves.toBeUndefined();
-    await expect(agent.actionStatus('legacy-action', { taskId: 'task-own' })).resolves.toBeUndefined();
-    await expect(operator.actionStatus('legacy-action')).resolves.toEqual(legacyReceipt);
-  });
-
-  it('redacts raw event pages for agents and returns only scoped receipts with ownership removed', async () => {
-    const scopedReceipt = {
-      schema: 'psyche.control.receipt/v1' as const,
-      actionId: 'owned-event',
-      state: 'failed' as const,
-      resource: { kind: 'browser_tab' as const, idDigest: 'c'.repeat(64), generation: 1 },
-      createdAt: '2026-08-12T12:00:00.000Z',
-      completedAt: '2026-08-12T12:00:01.000Z',
-      taskId: 'task-own',
-      leaseId: 'lease-own',
-      leaseRevision: 2,
-      code: 'effect_failed',
-    };
-    const otherReceipt = {
-      ...scopedReceipt,
-      actionId: 'other-event',
-      taskId: 'task-other',
-      leaseId: 'lease-other',
-    };
-    const harness = await startHarness({
-      readEvents: () => ({
-        events: [
-          { sequence: 1, kind: 'command.failed', payload: { receipt: otherReceipt } },
-          { sequence: 2, kind: 'command.failed', payload: { receipt: scopedReceipt } },
-        ],
-        nextSequence: 2,
-        gap: false,
-      }),
-    });
-    const agent = await ControlClient.connect({
-      projectRoot: harness.projectRoot,
-      endpoint: harness.endpoint,
-      token: harness.agentToken,
-      clientName: 'scoped-reader',
-    });
-    cleanups.push(() => agent.close());
-
-    await expect(agent.readEvents(0)).resolves.toMatchObject({ events: [], nextSequence: 2, gap: false });
-    const scoped = await agent.readEvents(0, 10, { taskId: 'task-own' });
-    expect(scoped.events).toEqual([expect.objectContaining({
-      sequence: 2,
-      kind: 'command.failed',
-      payload: expect.objectContaining({
-        receipt: expect.objectContaining({ actionId: 'owned-event', state: 'failed' }),
-      }),
-    })]);
-    expect(JSON.stringify(scoped)).not.toContain('lease-own');
-    expect(JSON.stringify(scoped)).not.toContain('lease-other');
   });
 
   it.each([

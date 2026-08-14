@@ -22,9 +22,7 @@ import type {
   ControlCommand,
   ControlCommandInput,
   CommandOutcome,
-  ActionReceipt,
   ControlSnapshot,
-  ControlSnapshotScope,
 } from './types.js';
 
 /** The minimal runtime surface the control server drives. */
@@ -201,13 +199,9 @@ export class ControlAuthority {
     return this.runtime.submit(command);
   }
 
-  snapshot(
-    principal: ControlPrincipal,
-    scope: ControlSnapshotScope = {},
-  ): ControlSnapshot {
+  snapshot(principal: ControlPrincipal): ControlSnapshot {
     const snapshot = this.runtime.snapshot();
     if (principal.kind === 'operator') return snapshot;
-    if (scope.taskId) return taskScopedSnapshot(snapshot, scope.taskId);
 
     // Surface metadata, command history, and authority records are
     // operator-only. In particular, capability leases are bearer-like:
@@ -226,38 +220,12 @@ export class ControlAuthority {
     };
   }
 
-  readEvents(
-    principal: ControlPrincipal,
-    afterSequence: number,
-    limit?: number,
-    scope: ControlSnapshotScope = {},
-  ): {
+  readEvents(afterSequence: number, limit?: number): {
     events: unknown[];
     nextSequence: number;
     gap: boolean;
   } {
-    if (principal.kind === 'operator') return this.runtime.readEvents(afterSequence, limit);
-
-    if (!scope.taskId) {
-      const page = this.runtime.readEvents(afterSequence, limit);
-      return { events: [], nextSequence: page.nextSequence, gap: page.gap };
-    }
-
-    const page = this.runtime.readEvents(afterSequence);
-    const events: unknown[] = [];
-    let nextSequence = page.nextSequence;
-    for (const event of page.events) {
-      const scoped = taskScopedEvent(event, scope.taskId);
-      if (!scoped) continue;
-      events.push(scoped);
-      if (typeof limit === 'number' && events.length >= limit) {
-        nextSequence = typeof (event as { sequence?: unknown }).sequence === 'number'
-          ? (event as { sequence: number }).sequence
-          : nextSequence;
-        break;
-      }
-    }
-    return { events, nextSequence, gap: page.gap };
+    return this.runtime.readEvents(afterSequence, limit);
   }
 
   welcomeFor(principal: ControlPrincipal): Extract<ControlResponse, { type: 'welcome' }> {
@@ -274,125 +242,6 @@ export class ControlAuthority {
       },
     };
   }
-}
-
-/**
- * Task-scoped agent reads only trust durable task ownership already stamped by
- * the owner: capability leases and pending lease requests carry `taskId`
- * directly, active approvals still reference the exact visible lease
- * id/revision, and receipts must carry a full task/lease ownership tuple.
- * Legacy unowned receipts remain operator-only because ownership cannot be
- * proven for a scoped read.
- */
-function taskScopedSnapshot(
-  snapshot: ControlSnapshot,
-  taskId: string,
-): ControlSnapshot {
-  const capabilityLeases = snapshot.capabilityLeases.filter((lease) => lease.taskId === taskId);
-  const leaseRequests = snapshot.leaseRequests.filter((request) => request.taskId === taskId);
-  const activeLeasesById = new Map(capabilityLeases.map((lease) => [lease.id, lease] as const));
-  const approvals = snapshot.approvals.filter((approval) => {
-    const lease = activeLeasesById.get(approval.leaseId);
-    return lease !== undefined
-      && lease.revision === approval.leaseRevision
-      && (approval.status === 'pending' || approval.status === 'approved');
-  });
-  const receipts = snapshot.receipts
-    .filter((receipt) => hasTaskScopedOwnership(receipt, taskId))
-    .map(publicTaskScopedReceipt);
-  return {
-    ...snapshot,
-    commands: {},
-    leases: {},
-    resources: collectScopedResources(snapshot.resources, capabilityLeases, leaseRequests),
-    capabilityLeases,
-    leaseRequests,
-    approvals,
-    receipts,
-  };
-}
-
-function collectScopedResources(
-  resources: ControlSnapshot['resources'],
-  capabilityLeases: ControlSnapshot['capabilityLeases'],
-  leaseRequests: ControlSnapshot['leaseRequests'],
-): readonly ControlSnapshot['resources'][number][] {
-  const resourcesByKey = new Map(resources.map((resource) => [resourceKey(resource), resource] as const));
-  const visibleKeys = new Set<string>();
-  for (const lease of capabilityLeases) {
-    for (const grant of lease.grants) addVisibleTarget(visibleKeys, resourcesByKey, grant.target);
-  }
-  for (const request of leaseRequests) {
-    for (const grant of request.grants) addVisibleTarget(visibleKeys, resourcesByKey, grant.target);
-  }
-  return resources.filter((resource) => visibleKeys.has(resourceKey(resource)));
-}
-
-function addVisibleTarget(
-  visibleKeys: Set<string>,
-  resourcesByKey: ReadonlyMap<string, ControlSnapshot['resources'][number]>,
-  target: { kind: string; id: string; generation?: number },
-): void {
-  const key = targetKey(target);
-  if (!key || !resourcesByKey.has(key)) return;
-  visibleKeys.add(key);
-}
-
-function targetKey(target: { kind: string; id: string; generation?: number }): string | undefined {
-  if (target.kind === 'project' || typeof target.generation !== 'number') return undefined;
-  return `${target.kind}\0${target.id}\0${target.generation}`;
-}
-
-function resourceKey(resource: ControlSnapshot['resources'][number]): string {
-  return `${resource.kind}\0${resource.id}\0${resource.generation}`;
-}
-
-function hasTaskScopedOwnership(receipt: ActionReceipt, taskId: string): boolean {
-  return receipt.taskId === taskId
-    && typeof receipt.leaseId === 'string'
-    && receipt.leaseId.length > 0
-    && Number.isSafeInteger(receipt.leaseRevision)
-    && (receipt.leaseRevision as number) >= 1;
-}
-
-function publicTaskScopedReceipt(receipt: ActionReceipt): ActionReceipt {
-  const {
-    taskId: _taskId,
-    leaseId: _leaseId,
-    leaseRevision: _leaseRevision,
-    value: _value,
-    message: _message,
-    ...safeReceipt
-  } = receipt;
-  return Object.freeze(safeReceipt);
-}
-
-function taskScopedEvent(event: unknown, taskId: string): unknown | undefined {
-  if (!event || typeof event !== 'object' || Array.isArray(event)) return undefined;
-  const payload = (event as { payload?: unknown }).payload;
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
-  const receipt = taskScopedEventReceipt((payload as { receipt?: unknown }).receipt, taskId);
-  if (!receipt) return undefined;
-  return {
-    ...(event as Record<string, unknown>),
-    payload: {
-      ...(payload as Record<string, unknown>),
-      receipt,
-    },
-  };
-}
-
-function taskScopedEventReceipt(receipt: unknown, taskId: string): ActionReceipt | undefined {
-  if (
-    !receipt
-    || typeof receipt !== 'object'
-    || Array.isArray(receipt)
-    || (receipt as { schema?: unknown }).schema !== 'psyche.control.receipt/v1'
-    || typeof (receipt as { actionId?: unknown }).actionId !== 'string'
-  ) return undefined;
-  return hasTaskScopedOwnership(receipt as ActionReceipt, taskId)
-    ? publicTaskScopedReceipt(receipt as ActionReceipt)
-    : undefined;
 }
 
 /** Build an in-process authority for authorization unit tests. */
@@ -679,15 +528,11 @@ export class ControlServer {
           version: 1,
           type: 'state.result',
           requestId: request.requestId,
-          snapshot: this.authority.snapshot(principal, {
-            ...(request.taskId ? { taskId: request.taskId } : {}),
-          }),
+          snapshot: this.authority.snapshot(principal),
         });
         return;
       case 'events.read': {
-        const page = this.authority.readEvents(principal, request.afterSequence, request.limit, {
-          ...(request.taskId ? { taskId: request.taskId } : {}),
-        });
+        const page = this.authority.readEvents(request.afterSequence, request.limit);
         write({
           version: 1,
           type: 'events.result',

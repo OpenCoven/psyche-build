@@ -93,9 +93,6 @@ export interface ActionReceipt {
     | 'failed' | 'denied' | 'expired' | 'unknown';
   resource: LeaseTarget;
   createdAt: string;
-  taskId?: string;
-  leaseId?: string;
-  leaseRevision?: number;
   completedAt?: string;
   code?: string;
   message?: string;
@@ -304,10 +301,6 @@ export interface CommandRecord {
   command: ControlCommand;
   outcome: CommandOutcome;
   sequence: number;
-}
-
-export interface ControlSnapshotScope {
-  taskId?: string;
 }
 
 export interface ControlSnapshot {
