@@ -349,6 +349,11 @@ class FakeElement {
     if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
     if (selector === '[data-tree-item]') return Boolean(this.dataset.treeItem);
     if (/^[a-z]+$/i.test(selector)) return this.tagName === selector.toUpperCase();
+    const attributeSelector = /^([a-z]+)\[([^=\]]+)="([^"]*)"\]$/i.exec(selector);
+    if (attributeSelector) {
+      return this.tagName === attributeSelector[1].toUpperCase()
+        && this.getAttribute(attributeSelector[2]) === attributeSelector[3];
+    }
     return false;
   }
 
@@ -404,13 +409,25 @@ class FakeElement {
   querySelectorAll(selector: string): FakeElement[] {
     const classSelector = selector.startsWith('.') ? selector.slice(1) : null;
     const treeItemSelector = selector === '[data-tree-item]';
-    if (!classSelector && !treeItemSelector) {
+    const tagSelector = !classSelector && !treeItemSelector && /^[a-z]+$/i.test(selector)
+      ? selector.toUpperCase()
+      : null;
+    const attributeSelector = !classSelector && !treeItemSelector
+      ? /^([a-z]+)\[([^=\]]+)="([^"]*)"\]$/i.exec(selector)
+      : null;
+    if (!classSelector && !treeItemSelector && !tagSelector && !attributeSelector) {
       throw new Error(`unsupported selector ${selector}`);
     }
     const matches: FakeElement[] = [];
     const visit = (element: FakeElement) => {
       if (classSelector && element.classList.contains(classSelector)) matches.push(element);
       if (treeItemSelector && element.dataset.treeItem) matches.push(element);
+      if (tagSelector && element.tagName === tagSelector) matches.push(element);
+      if (attributeSelector &&
+          element.tagName === attributeSelector[1].toUpperCase() &&
+          element.getAttribute(attributeSelector[2]) === attributeSelector[3]) {
+        matches.push(element);
+      }
       element.children.forEach(visit);
     };
     this.children.forEach(visit);
@@ -419,9 +436,16 @@ class FakeElement {
 }
 
 class FakeDocument {
+  readonly body: FakeElement;
   readonly created: FakeElement[] = [];
   private readonly connectedRoots = new Set<FakeElement>();
+  private readonly listeners = new Map<string, Listener[]>();
   activeElement: FakeElement | null = null;
+
+  constructor() {
+    this.body = new FakeElement('body', this);
+    this.connectRoot(this.body);
+  }
 
   connectRoot(element: FakeElement) {
     this.connectedRoots.add(element);
@@ -435,6 +459,29 @@ class FakeDocument {
     const element = new FakeElement(tagName, this);
     this.created.push(element);
     return element;
+  }
+
+  addEventListener(name: string, listener: Listener) {
+    const listeners = this.listeners.get(name) ?? [];
+    listeners.push(listener);
+    this.listeners.set(name, listeners);
+  }
+
+  async emit(
+    name: string,
+    options: {
+      target?: FakeElement;
+      key?: string;
+      shiftKey?: boolean;
+      clientX?: number;
+      clientY?: number;
+    } = {},
+  ) {
+    const event = new FakeEvent(options.target ?? this.body, options.key, options);
+    for (const listener of this.listeners.get(name) ?? []) {
+      await listener(event);
+    }
+    return event;
   }
 }
 
@@ -701,7 +748,11 @@ function createRenderer(options: {
       saveProjectAppearances: saveProjectAppearances,
       applyProjectAppearance: applyProjectAppearance,
       projectAppearances: function () { return projectAppearances; },
-      sessionTreeFocusKey: function () { return sessionTreeFocusKey; }
+      sessionTreeFocusKey: function () { return sessionTreeFocusKey; },
+      setProjectAppearancePopover: function (popover, restoreKey) {
+        projectAppearancePopover = popover;
+        projectAppearancePopoverRestoreKey = restoreKey || "";
+      }
     };`,
   )(
     document,
@@ -782,6 +833,7 @@ function createRenderer(options: {
     ) => boolean;
     projectAppearances: () => Record<string, { accent?: string; glyph?: string }>;
     sessionTreeFocusKey: () => string;
+    setProjectAppearancePopover: (popover: FakeElement | null, restoreKey?: string) => void;
     settings: typeof settings;
     saveSettings: typeof saveSettings;
     saveWorkspaceSoon: typeof saveWorkspaceSoon;
@@ -817,6 +869,69 @@ function createRenderer(options: {
     refreshCovenSessions,
     setStatus,
     canvasThreadIds,
+    openProjectAppearancePopover,
+  };
+}
+
+function createSessionContextMenuHarness() {
+  const document = new FakeDocument();
+  const sessionListEl = new FakeElement('div', document);
+  document.connectRoot(sessionListEl);
+
+  const project = new FakeElement('div', document);
+  project.className = 'session-project';
+  project.dataset.treeItem = 'project';
+  project.dataset.projectId = 'psyche';
+  project.dataset.treeKey = 'project:psyche';
+  project.setAttribute('tabindex', '0');
+  sessionListEl.appendChild(project);
+
+  const openProjectAppearancePopover = vi.fn();
+  const windowValue = { innerWidth: 1280, innerHeight: 720 };
+  const projectValue = { id: 'psyche', name: 'PSYCHE-BUILD', root: '/repo/psyche-build' };
+  const harness = Function(
+    'document', 'window', 'sessionListEl', 'findProject', 'openProjectAppearancePopover',
+    `"use strict";
+    var sessionTreeFocusKey = "";
+    var projectAppearancePopover = null;
+    function closeProjectAppearancePopover() {}
+    var sessionContextMenu = null;
+    var sessionContextMenuRestoreKey = "";
+    ${extractFunctionSource(mainJs, 'visibleSessionTreeItems')}
+    ${extractFunctionSource(mainJs, 'focusSessionTreeItem')}
+    ${extractFunctionSource(mainJs, 'parentSessionTreeItem')}
+    ${extractFunctionSource(mainJs, 'firstChildSessionTreeItem')}
+    ${extractFunctionSource(mainJs, 'toggleSessionTreeDisclosure')}
+    ${extractFunctionSource(mainJs, 'activateSessionTreeItem')}
+    ${extractFunctionSource(mainJs, 'restoreSessionTreeFocus')}
+    ${extractFunctionSource(mainJs, 'projectAppearanceContextActions')}
+    ${extractFunctionSource(mainJs, 'closeSessionContextMenu')}
+    ${extractFunctionSource(mainJs, 'openSessionContextMenu')}
+    ${extractFunctionSource(mainJs, 'handleSessionTreeKeydown')}
+    return {
+      closeSessionContextMenu: closeSessionContextMenu,
+      handleTreeKeydown: handleSessionTreeKeydown,
+      sessionContextMenu: function () { return sessionContextMenu; },
+      sessionTreeFocusKey: function () { return sessionTreeFocusKey; }
+    };`,
+  )(
+    document,
+    windowValue,
+    sessionListEl,
+    (id: string) => (id === projectValue.id ? projectValue : null),
+    openProjectAppearancePopover,
+  ) as {
+    closeSessionContextMenu: (options?: { restoreFocus?: boolean }) => void;
+    handleTreeKeydown: (event: FakeEvent) => void;
+    sessionContextMenu: () => FakeElement | null;
+    sessionTreeFocusKey: () => string;
+  };
+
+  return {
+    ...harness,
+    document,
+    sessionListEl,
+    project,
     openProjectAppearancePopover,
   };
 }
@@ -1426,6 +1541,28 @@ describe('Tauri Coven session project rail', () => {
     });
   });
 
+  it('restores the project treeitem when a keyboard-opened context menu closes', () => {
+    const harness = createSessionContextMenuHarness();
+
+    harness.project.focus();
+    const contextMenu = new FakeEvent(harness.project, 'ContextMenu');
+    harness.handleTreeKeydown(contextMenu);
+
+    expect(contextMenu.defaultPrevented).toBe(true);
+    expect(contextMenu.propagationStopped).toBe(true);
+    expect(harness.sessionTreeFocusKey()).toBe(harness.project.dataset.treeKey);
+
+    const menu = harness.sessionContextMenu();
+    const firstItem = menu?.querySelector('button');
+    expect(firstItem).not.toBeNull();
+    expect(harness.document.activeElement).toBe(firstItem);
+
+    harness.closeSessionContextMenu();
+
+    expect(harness.document.activeElement).toBe(harness.project);
+    expect(harness.project.focused).toBe(true);
+  });
+
   it('activates focused branch treeitems on Enter and toggles them on Space', async () => {
     const renderer = createRenderer({
       projects: [{
@@ -1710,6 +1847,51 @@ describe('Tauri Coven session project rail', () => {
     expect(styles).toContain('.project-appearance-accent-grid {');
     expect(styles).toContain('.project-appearance-glyph-grid {');
     expect(styles).toContain('.project-appearance-choice[aria-pressed="true"]');
+  });
+
+  it('restores the project treeitem when rerender closes the project appearance popover', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'psyche',
+        name: 'PSYCHE-BUILD',
+        root: '/repo/psyche-build',
+        collapsed: false,
+        selectedWorktreePath: '/repo/psyche-build',
+        worktrees: [{
+          path: '/repo/psyche-build',
+          branch: 'main',
+          is_main: true,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'psyche',
+        worktreePath: '/repo/psyche-build',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+    });
+
+    renderer.render();
+    const project = renderer.sessionListEl.querySelector('.session-project');
+    expect(project).not.toBeNull();
+
+    const popover = new FakeElement('div', renderer.document);
+    const choice = new FakeElement('button', renderer.document);
+    popover.appendChild(choice);
+    renderer.document.body.appendChild(popover);
+    choice.focus();
+    renderer.setProjectAppearancePopover(popover, project?.dataset.treeKey);
+
+    renderer.render();
+
+    const rerenderedProject = renderer.sessionListEl.querySelector('.session-project');
+    expect(renderer.document.activeElement).toBe(rerenderedProject);
+    expect(rerenderedProject?.dataset.treeKey).toBe(project?.dataset.treeKey);
   });
 
   // Fixtures arrived with main's worktree-ownership tests further down, which

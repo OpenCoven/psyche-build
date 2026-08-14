@@ -4743,17 +4743,25 @@
   }
 
   var sessionContextMenu = null;
-  function closeSessionContextMenu() {
+  var sessionContextMenuRestoreKey = "";
+  function closeSessionContextMenu(options) {
+    var restoreFocus = !options || options.restoreFocus !== false;
+    var restoreKey = sessionContextMenuRestoreKey;
     if (sessionContextMenu && sessionContextMenu.parentNode) {
       sessionContextMenu.parentNode.removeChild(sessionContextMenu);
     }
     sessionContextMenu = null;
+    sessionContextMenuRestoreKey = "";
+    if (restoreFocus && restoreKey) {
+      sessionTreeFocusKey = restoreKey;
+      restoreSessionTreeFocus(restoreKey);
+    }
   }
   function openSessionContextMenu(event, actions, anchor) {
     event.preventDefault();
     event.stopPropagation();
     closeProjectAppearancePopover({ restoreFocus: false });
-    closeSessionContextMenu();
+    closeSessionContextMenu({ restoreFocus: false });
     var menu = document.createElement("div");
     menu.className = "session-context-menu";
     menu.setAttribute("role", "menu");
@@ -4782,13 +4790,16 @@
       item.setAttribute("role", "menuitem");
       item.textContent = action.label;
       item.addEventListener("click", function () {
-        closeSessionContextMenu();
+        closeSessionContextMenu({ restoreFocus: false });
         action.run();
       });
       menu.appendChild(item);
     });
     document.body.appendChild(menu);
     sessionContextMenu = menu;
+    sessionContextMenuRestoreKey = anchor && anchor.dataset
+      ? anchor.dataset.treeKey || ""
+      : "";
     var rect = menu.getBoundingClientRect();
     if (rect.right > window.innerWidth - 8) {
       menu.style.left = Math.max(8, window.innerWidth - rect.width - 8) + "px";
@@ -6472,6 +6483,9 @@
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
+    var popoverRestoreKey = projectAppearancePopoverRestoreKey;
+    var popoverOwnsFocus = projectAppearancePopover &&
+      projectAppearancePopover.contains(document.activeElement);
     closeProjectAppearancePopover({ restoreFocus: false });
     var now = Date.now();
     syncLocalSidebarStatusKeys(now);
@@ -6491,7 +6505,8 @@
     }
     var activeTreeKey = (document.activeElement && document.activeElement.dataset
       ? document.activeElement.dataset.treeKey
-      : "") || armedCloseTreeKey;
+      : "") || armedCloseTreeKey ||
+      (popoverOwnsFocus ? popoverRestoreKey : "");
     var shouldRestoreTreeFocus = Boolean(activeTreeKey);
     if (activeTreeKey) sessionTreeFocusKey = activeTreeKey;
     var focusedKey = sessionTreeFocusKey;
@@ -6953,7 +6968,7 @@
 
   function openProjectAppearancePopover(project, anchor) {
     if (!project || !anchor || typeof anchor.getBoundingClientRect !== "function") return null;
-    closeSessionContextMenu();
+    closeSessionContextMenu({ restoreFocus: false });
     closeProjectAppearancePopover({ restoreFocus: false });
 
     var appearance = PsycheSessions.resolveProjectAppearance(project, projectAppearances);
@@ -11396,7 +11411,7 @@
     if (!agentPickerOpen()) agentPickerPreviousFocus = document.activeElement;
     setHelpOpen(false);
     closeNewPaneMenu();
-    closeSessionContextMenu();
+    closeSessionContextMenu({ restoreFocus: false });
     agentPickerIndex = 0;
     renderAgentPicker();
     agentPickerOverlayEl.hidden = false;
