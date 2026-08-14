@@ -136,6 +136,41 @@ describe('RemoteActionSessions', () => {
     expect(next.result.relatedFiles).toEqual(['src/a.ts']);
   });
 
+  it('inherits related files across multiple continuation hops until the terminal result', async () => {
+    const sessions = new RemoteActionSessions({ ttlMs: 300_000 });
+    const first = sessions.start('device-1', {
+      type: 'confirm',
+      message: 'Continue?',
+      data: { files: ['src/a.ts'] },
+      onConfirm: async () => ({
+        type: 'input',
+        message: 'Next step',
+        onSubmit: async (value) => ({
+          type: 'choice',
+          message: `Ship "${value}"?`,
+          options: [{ id: 'ship', label: 'Ship it' }],
+          onSelect: async () => ({ type: 'success', message: 'shipped' }),
+        }),
+      }),
+    });
+
+    const second = await sessions.respond('device-1', first.sessionId!, {
+      kind: 'confirm', confirmed: true,
+    });
+    expect(second.result.relatedFiles).toEqual(['src/a.ts']);
+
+    const third = await sessions.respond('device-1', second.sessionId!, {
+      kind: 'input', value: 'release notes',
+    });
+    expect(third.result.relatedFiles).toEqual(['src/a.ts']);
+
+    await expect(sessions.respond('device-1', third.sessionId!, {
+      kind: 'choice', optionId: 'ship',
+    })).resolves.toEqual({
+      result: { type: 'success', message: 'shipped', relatedFiles: ['src/a.ts'] },
+    });
+  });
+
   it('uses explicit next-step files instead of inherited related files', async () => {
     const sessions = new RemoteActionSessions({ ttlMs: 300_000 });
     const first = sessions.start('device-1', {
