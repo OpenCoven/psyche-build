@@ -1,3 +1,37 @@
 fn main() {
-    tauri_build::build()
+    let attributes =
+        tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
+            "pty_start",
+            "pane_session_metrics",
+            "canonical_project_path",
+            "pty_write",
+            "pty_ack",
+            "pty_resize",
+            "pty_stop",
+            "pty_list",
+            "browser_app_shortcut",
+            "browser_navigate",
+            "browser_set_bounds",
+            "browser_hide",
+            "browser_hide_all_except",
+            "browser_destroy",
+            "browser_destroy_many",
+            "browser_reload",
+            "browser_eval",
+            "app_environment",
+            "coven_sessions",
+            "coven_session_kill",
+            "workspace_load",
+            "workspace_save",
+            "agent_skills",
+            "fs_list_dir",
+            "fs_read_text",
+            "fs_write_text",
+            "git_status",
+            "git_worktrees",
+            "git_diff",
+            "git_log",
+            "workspace_metrics",
+        ]));
+    tauri_build::try_build(attributes).expect("failed to run tauri build script");
 }

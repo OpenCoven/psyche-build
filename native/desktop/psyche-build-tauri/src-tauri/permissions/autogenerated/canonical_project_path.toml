@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-canonical-project-path"
+description = "Enables the canonical_project_path command without any pre-configured scope."
+commands.allow = ["canonical_project_path"]
+
+[[permission]]
+identifier = "deny-canonical-project-path"
+description = "Denies the canonical_project_path command without any pre-configured scope."
+commands.deny = ["canonical_project_path"]

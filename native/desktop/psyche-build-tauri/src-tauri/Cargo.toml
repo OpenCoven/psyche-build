@@ -29,6 +29,7 @@ sysinfo = "0.36.1"
 sha2 = "0.10"
 base64 = "0.22"
 unicode-normalization = "0.1"
+getrandom = "0.2"
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 portable-pty = { path = "vendor/portable-pty", version = "=0.8.1" }

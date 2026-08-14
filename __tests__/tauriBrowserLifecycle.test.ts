@@ -523,6 +523,7 @@ describe('Tauri native browser lifecycle', () => {
     const destroyBrowserWebview = rustFunctionSource(nativeLib, 'destroy_browser_webview');
     expect(destroyBrowserWebview).toContain('BROWSER_NAVIGATION_WAITERS.lock().remove(&label);');
     expect(destroyBrowserWebview).toContain('webview.close().map_err(|error| error.to_string())?;');
+    expect(destroyBrowserWebview).toContain('app.state::<BrowserShortcutAuthorizations>().remove(&label);');
 
     const browserDestroy = rustFunctionSource(nativeLib, 'browser_destroy');
     expect(browserDestroy).toMatch(
