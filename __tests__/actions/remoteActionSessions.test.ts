@@ -116,6 +116,78 @@ describe('RemoteActionSessions', () => {
     })).resolves.toEqual({ result: { type: 'success', message: 'ship it', data: expect.any(Object) } });
   });
 
+  it('inherits related files when the next interaction omits files', async () => {
+    const sessions = new RemoteActionSessions({ ttlMs: 300_000 });
+    const first = sessions.start('device-1', {
+      type: 'confirm',
+      message: 'Continue?',
+      data: { files: ['src/a.ts'] },
+      onConfirm: async () => ({
+        type: 'input',
+        message: 'Next step',
+        onSubmit: async (value) => ({ type: 'success', message: value }),
+      }),
+    });
+
+    const next = await sessions.respond('device-1', first.sessionId!, {
+      kind: 'confirm', confirmed: true,
+    });
+
+    expect(next.result.relatedFiles).toEqual(['src/a.ts']);
+  });
+
+  it('uses explicit next-step files instead of inherited related files', async () => {
+    const sessions = new RemoteActionSessions({ ttlMs: 300_000 });
+    const first = sessions.start('device-1', {
+      type: 'confirm',
+      message: 'Continue?',
+      data: { files: ['src/a.ts'] },
+      onConfirm: async () => ({
+        type: 'input',
+        message: 'Next step',
+        data: { files: ['src/b.ts'] },
+        onSubmit: async (value) => ({ type: 'success', message: value }),
+      }),
+    });
+
+    const next = await sessions.respond('device-1', first.sessionId!, {
+      kind: 'confirm', confirmed: true,
+    });
+
+    expect(next.result.relatedFiles).toEqual(['src/b.ts']);
+  });
+
+  it('uses onCancel and returns its continuation result', async () => {
+    const sessions = new RemoteActionSessions({ ttlMs: 300_000 });
+    const onCancel = vi.fn(async (): Promise<ActionResult> => ({
+      type: 'success', message: 'cancelled safely',
+    }));
+    const first = sessions.start('device-1', {
+      type: 'confirm',
+      message: 'Continue?',
+      onCancel,
+    });
+
+    await expect(sessions.respond('device-1', first.sessionId!, {
+      kind: 'cancel',
+    })).resolves.toEqual({
+      result: { type: 'success', message: 'cancelled safely' },
+    });
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an expected response when its callback is missing', async () => {
+    const sessions = new RemoteActionSessions({ ttlMs: 300_000 });
+    const first = sessions.start('device-1', {
+      type: 'confirm',
+      message: 'Continue?',
+    });
+
+    await expect(sessions.respond('device-1', first.sessionId!, {
+      kind: 'confirm', confirmed: true,
+    })).rejects.toMatchObject({ code: 'invalid_action_state' });
+  });
+
   it('keeps sessions device-scoped and clears only the requested owner', async () => {
     const sessions = new RemoteActionSessions({ ttlMs: 300_000 });
     const first = sessions.start('device-1', inputResult());
@@ -147,6 +219,15 @@ describe('RemoteActionSessions', () => {
       kind: 'input', value: 'late',
     })).rejects.toMatchObject({ code: 'action_session_not_found' });
     expect(() => sessions.start('device-1', inputResult())).not.toThrow();
+  });
+
+  it('enforces maxPending globally across owners', () => {
+    const sessions = new RemoteActionSessions({ ttlMs: 300_000, maxPending: 1 });
+    sessions.start('device-1', inputResult());
+
+    expect(() => sessions.start('device-2', inputResult())).toThrowError(
+      expect.objectContaining({ code: 'action_session_limit' }),
+    );
   });
 
   it('rejects responses that do not match the pending action', async () => {
