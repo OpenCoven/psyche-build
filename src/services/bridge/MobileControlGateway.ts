@@ -301,9 +301,11 @@ export class MobileControlGateway {
     return this.requireScope(
       requestId,
       (workspace) => workspace.projects.some((project) =>
-        project.projectPanes.some((pane) => pane.id === paneId)
+        project.projectPanes.some((pane) =>
+          pane.id === paneId && (pane.kind === 'agent' || pane.kind === 'terminal'))
         || project.worktrees.some((worktree) =>
-          worktree.panes.some((pane) => pane.id === paneId))),
+          worktree.panes.some((pane) =>
+            pane.id === paneId && (pane.kind === 'agent' || pane.kind === 'terminal')))),
       'pane is not published by this host',
     );
   }
