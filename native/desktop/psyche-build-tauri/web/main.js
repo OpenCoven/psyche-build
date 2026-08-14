@@ -175,6 +175,13 @@
   var agentControlUiLifecycle = null;
 
   function agentControlCommand(project, command) {
+    var currentProject = activeProject();
+    if (!project || !currentProject || currentProject.root !== project.root ||
+        agentControlProjectRoot !== project.root) {
+      var projectError = new Error("agent control project changed");
+      projectError.code = "control_project_changed";
+      return Promise.reject(projectError);
+    }
     return invoke("control_operator_submit", { projectRoot: project.root, command: command }).then(function (response) {
       var outcome = response && response.outcome;
       if (!outcome || outcome.status !== "succeeded") {
@@ -304,6 +311,15 @@
     agentControlProjectRoot = null;
     renderAgentControl();
     if (project) void refreshAgentControlState();
+  }
+
+  function assignActiveProjectId(id, options) {
+    if (state.activeProjectId === id) return false;
+    state.activeProjectId = id;
+    if (!options || options.resetAgentControl !== false) {
+      resetAgentControlProject(findProject(id));
+    }
+    return true;
   }
 
   function installAgentControlUi() {
@@ -816,10 +832,10 @@
     var refreshStatus = !options || options.refreshStatus !== false;
     if (state.activeProjectId === id) return true;
     if (!(await showTerminalView())) return false;
-    state.activeProjectId = id;
     var project = findProject(id);
     if (!project) return false;
-    if (typeof resetAgentControlProject === "function") resetAgentControlProject(project);
+    if (typeof assignActiveProjectId === "function") assignActiveProjectId(id);
+    else Object.assign(state, { activeProjectId: id });
     clearPassiveCovenPaneFocus();
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
@@ -3989,7 +4005,8 @@
     }
     var project = findProject(surface.projectId);
     if (project) {
-      state.activeProjectId = project.id;
+      if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
+      else Object.assign(state, { activeProjectId: project.id });
       project.selectedWorktreePath = surface.workspaceRoot;
     }
     state.activeThreadId = null;
@@ -4035,7 +4052,8 @@
     // Make the thread's project the active one so the sidebar/tabs
     // stay in sync if the user clicked into a different project's thread.
     if (thread.projectId && state.activeProjectId !== thread.projectId) {
-      state.activeProjectId = thread.projectId;
+      if (typeof assignActiveProjectId === "function") assignActiveProjectId(thread.projectId);
+      else Object.assign(state, { activeProjectId: thread.projectId });
     }
     if (project) {
       if (thread.kind !== "coven-chat" && thread.kind !== "coven-attach") {
@@ -6885,7 +6903,8 @@
       var next = state.projects[0] || null;
       // Force setActiveProject to do its restore work even though the id
       // matches — clear first.
-      state.activeProjectId = null;
+      if (typeof assignActiveProjectId === "function") assignActiveProjectId(null);
+      else Object.assign(state, { activeProjectId: null });
       if (next) {
         await setActiveProject(next.id);
       } else {
@@ -7344,7 +7363,8 @@
     if (!file) return false;
     var project = findProject(file.projectId);
     if (project) {
-      state.activeProjectId = project.id;
+      if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
+      else Object.assign(state, { activeProjectId: project.id });
       project.selectedWorktreePath = file.workspaceRoot;
     }
     var filesPane = project ? ensureFilesPane(project, file.workspaceRoot) : null;
@@ -7361,7 +7381,8 @@
     if (!file || !findOpenFile(file.id)) return false;
     var project = findProject(file.projectId);
     if (project) {
-      state.activeProjectId = project.id;
+      if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
+      else Object.assign(state, { activeProjectId: project.id });
       var workspaceRoot = file.workspaceRoot || project.root || activeWorkspaceRoot(project);
       project.selectedWorktreePath = workspaceRoot;
       var threads = state.threads.filter(function (thread) {
@@ -10877,7 +10898,8 @@
     var name = parts[parts.length - 1] || rootPath;
     var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], browsersByWorktree: {} };
     state.projects.push(project);
-    state.activeProjectId = project.id;
+    if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
+    else Object.assign(state, { activeProjectId: project.id });
     state.activeThreadId = null;
     renderPaneWorkspace();
     refreshSidebar();
@@ -11198,7 +11220,11 @@
         Math.min(settings.maxProjects, HARD_MAX_PROJECTS)
       );
       state.projects = restored.projects;
-      state.activeProjectId = restored.activeProjectId;
+      if (typeof assignActiveProjectId === "function") {
+        assignActiveProjectId(restored.activeProjectId, { resetAgentControl: false });
+      } else {
+        Object.assign(state, { activeProjectId: restored.activeProjectId });
+      }
       project = activeProject();
       isRestoringWorkspace = false;
       await Promise.all(state.projects.map(function (savedProject) {

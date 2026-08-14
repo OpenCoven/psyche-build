@@ -277,6 +277,31 @@ describe('agent control operator model', () => {
     expect(rendered).toEqual(['newer']);
   });
 
+  it('rejects a drawer action after its project is no longer active', async () => {
+    const main = await readFile('native/desktop/psyche-build-tauri/web/main.js', 'utf8');
+    const invoke = vi.fn(() => Promise.resolve({ outcome: { status: 'succeeded' } }));
+    const command = compileFunction<(project: { root: string }, command: object) => Promise<unknown>>(
+      extractFunction(main, 'agentControlCommand'),
+      {
+        activeProject: () => ({ root: '/project-b' }),
+        agentControlProjectRoot: '/project-b',
+        invoke,
+      },
+    );
+
+    await expect(command({ root: '/project-a' }, { type: 'lease_revoke' }))
+      .rejects.toMatchObject({ code: 'control_project_changed' });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('routes every active-project assignment through one invalidating setter', async () => {
+    const main = await readFile('native/desktop/psyche-build-tauri/web/main.js', 'utf8');
+    const assignments = main.match(/state\.activeProjectId\s*(?<![=!])=(?!=)/g) || [];
+
+    expect(assignments).toHaveLength(1);
+    expect(main).toMatch(/function assignActiveProjectId[\s\S]*resetAgentControlProject/);
+  });
+
   it('groups request, active, expired, and revoked authority with exact details', () => {
     const model = createAgentControlModel(snapshot(), { now: NOW, operator: true });
 
@@ -579,7 +604,7 @@ describe('agent control operator model', () => {
     expect(main).toContain('surfaceResourceIdentity(model, "pane", threadId)');
     expect(main).toContain('surfaceResourceIdentity(model, "browser_tab", tabNode.dataset.tabId)');
     expect(main).toContain('dataset.controlGeneration');
-    expect(main).toMatch(/async function setActiveProject[\s\S]*resetAgentControlProject\(project\)/);
+    expect(main).toMatch(/async function setActiveProject[\s\S]*assignActiveProjectId\(id\)/);
     expect(main).not.toMatch(/control_operator_submit[\s\S]{0,300}(spawnBridgePane|TmuxControl|execFileSync)/);
     expect(entry).toContain("from './agent-control-model.mjs'");
     expect(entry).toContain("from './agent-control-drawer.mjs'");
