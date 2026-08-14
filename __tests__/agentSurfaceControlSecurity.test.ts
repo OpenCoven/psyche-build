@@ -201,6 +201,25 @@ describe('agent surface control adversarial boundaries', () => {
     expect(recoverySurfaces).not.toMatch(/password|page script|cookie|Authorization|secret/);
   });
 
+  it('does not persist an absolute project path for a failed pane-create action', async () => {
+    const effects = handlers();
+    const eventJournal = journal();
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers: effects, journal: eventJournal });
+    const absoluteProject = '/Users/val/Projects/customer-secret-repo';
+    await expect(runtime.submit(command({
+      id: 'path-redaction', idempotencyKey: 'path-redaction', kind: 'pane.action',
+      projectRoot: absoluteProject, payload: {
+        taskId: 'task-1', leaseId: 'missing-lease', leaseRevision: 1,
+        projectId: absoluteProject, action: { kind: 'create', cwd: absoluteProject },
+      } as never,
+    }))).resolves.toMatchObject({ status: 'failed', code: 'action_validation_failed' });
+    const durable = JSON.stringify(eventJournal.read());
+    expect(durable).not.toContain(absoluteProject);
+    expect(durable).not.toContain('/Users/val');
+    expect(durable).toContain('idDigest');
+    expect(effects.actOnPane).not.toHaveBeenCalled();
+  });
+
   it('recovers a joint persisted restart without authority, resources, or effect replay', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'psyche-agent-restart-'));
     try {
@@ -208,6 +227,12 @@ describe('agent surface control adversarial boundaries', () => {
       await firstJournal.append('lease.granted', { leaseId: 'lease-active', actorId: 'agent-1', taskId: 'task-1' });
       await firstJournal.append('approval.requested', {
         commandId: 'approval-pending', approvalId: 'approval-1', payloadDigest: 'a'.repeat(64),
+      });
+      await firstJournal.append('command.requested', {
+        commandId: 'browser-dispatched', idempotencyKey: 'completed-old-key',
+      });
+      await firstJournal.append('command.succeeded', {
+        commandId: 'browser-dispatched', idempotencyKey: 'completed-old-key', status: 'succeeded',
       });
       await firstJournal.append('command.requested', {
         commandId: 'browser-dispatched', idempotencyKey: 'browser-dispatched', kind: 'browser.action', ownerEpoch: 7,
