@@ -314,15 +314,26 @@ export async function getProjectCovenSession(
   sessionId: string,
   client: CovenClient,
 ): Promise<CovenSessionSummary> {
-  const sessions = await listProjectCovenSessions(projectRoot, client);
-  const session = sessions.find((candidate) => candidate.id === sessionId);
+  const rootReal = await realpath(projectRoot);
+  const session = client.getSession
+    ? await client.getSession(sessionId)
+    : (await listProjectCovenSessions(projectRoot, client))
+      .find((candidate) => candidate.id === sessionId);
   if (!session) {
     throw bridgeError(
       'coven_session_not_found',
-      `Coven session ${sessionId} is not in this psyche project scope`,
+      `Coven session ${sessionId} is not in this daemon project scope`,
     );
   }
-  return session;
+
+  const sessionRoot = await realpath(session.projectRoot);
+  if (!isPathInsideOrEqual(rootReal, sessionRoot)) {
+    throw bridgeError(
+      'coven_session_not_found',
+      `Coven session ${sessionId} is not in this daemon project scope`,
+    );
+  }
+  return { ...session, projectRoot: sessionRoot };
 }
 
 export async function launchProjectCovenSession(
