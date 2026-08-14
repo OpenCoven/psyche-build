@@ -15,44 +15,103 @@ function element(document, tag, className, text) {
   return node;
 }
 
-function actionButton(document, label, action, onError) {
+const drawerStates = new WeakMap();
+const lifecycleByToggle = new WeakMap();
+
+function actionButton(document, label, actionKey, action, state, error, onStateChange) {
   const button = element(document, 'button', 'agent-control-action', label);
   button.type = 'button';
+  button.dataset.actionKey = actionKey;
+  button.setAttribute('aria-label', label);
   button.addEventListener('click', () => {
-    void runFocusedOperatorAction(button, action, onError).catch(() => {});
+    state.focusKey = actionKey;
+    void runFocusedOperatorAction(button, action, (message) => {
+      state.failures.set(actionKey, { action, label, message });
+      error.textContent = message;
+      error.hidden = false;
+    }).then(() => {
+      state.failures.delete(actionKey);
+      state.focusKey = null;
+      error.textContent = '';
+      error.hidden = true;
+      return onStateChange();
+    }).catch(() => {});
   });
   return button;
 }
 
-function renderLease(document, lease, callbacks, onError) {
+function appendAction(document, parent, label, actionKey, action, state, onStateChange) {
+  const failure = state.failures.get(actionKey);
+  const error = element(document, 'div', 'agent-control-error', failure?.message || '');
+  error.setAttribute('role', 'alert');
+  error.hidden = !failure;
+  parent.append(actionButton(document, label, actionKey, action, state, error, onStateChange));
+  parent.append(error);
+  if (failure) {
+    const dismiss = element(document, 'button', 'agent-control-action', 'Dismiss error');
+    dismiss.type = 'button';
+    dismiss.setAttribute('aria-label', `Dismiss error for ${label}`);
+    dismiss.addEventListener('click', () => {
+      state.failures.delete(actionKey);
+      state.focusKey = actionKey;
+      error.textContent = '';
+      error.hidden = true;
+      dismiss.hidden = true;
+      const target = parent.querySelector(`[data-action-key="${actionKey}"]`);
+      if (target && typeof target.focus === 'function') target.focus();
+    });
+    parent.append(dismiss);
+  }
+  return actionKey;
+}
+
+function resourceLabel(resource) {
+  const base = `${resource.kind === 'browser_tab' ? 'browser tab' : resource.kind} ${resource.id}`;
+  return Number.isSafeInteger(resource.generation) ? `${base} generation ${resource.generation}` : base;
+}
+
+function renderLease(document, lease, callbacks, state, renderedKeys) {
   const card = element(document, 'article', 'agent-control-card');
   card.dataset.leaseId = lease.leaseId;
   card.append(element(document, 'strong', '', `${lease.agentId} · ${lease.taskId}`));
   card.append(element(document, 'div', 'agent-control-meta', `expires ${lease.expiresAt}`));
   for (const resource of lease.resources) {
-    card.append(element(
+    const row = element(
       document,
       'div',
       'agent-control-resource',
       `${resource.kind}:${resource.id}@${resource.generation ?? '-'} · ${resource.capabilities.join(', ')}`,
-    ));
-  }
-  if (lease.canRevoke) {
-    card.append(actionButton(document, 'Revoke lease', () => callbacks.onRevoke(lease), onError));
+    );
+    if (lease.canRevoke) {
+      const target = { kind: resource.kind, id: resource.id };
+      if (Number.isSafeInteger(resource.generation)) target.generation = resource.generation;
+      const label = `Revoke ${resourceLabel(resource)}`;
+      const actionKey = `revoke:${lease.leaseId}:${lease.revision}:${resource.kind}:${resource.id}:${resource.generation ?? '-'}`;
+      renderedKeys.add(appendAction(
+        document,
+        row,
+        label,
+        actionKey,
+        () => callbacks.onRevoke({ leaseId: lease.leaseId, revision: lease.revision, resource: target }),
+        state,
+        callbacks.onStateChange,
+      ));
+    }
+    card.append(row);
   }
   return card;
 }
 
-function renderApproval(document, approval, callbacks, onError) {
+function renderApproval(document, approval, callbacks, state, renderedKeys) {
   const card = element(document, 'article', 'agent-control-card agent-control-approval');
   card.dataset.approvalId = approval.approvalId;
   card.append(element(document, 'strong', '', `${approval.effect.kind} · ${approval.capability}`));
   card.append(element(document, 'div', 'agent-control-meta', approval.effect.target));
   if (approval.canDeny) {
-    card.append(actionButton(document, 'Deny', () => callbacks.onDeny(approval), onError));
+    renderedKeys.add(appendAction(document, card, 'Deny', `deny:${approval.approvalId}`, () => callbacks.onDeny(approval), state, callbacks.onStateChange));
   }
   if (approval.canApprove) {
-    card.append(actionButton(document, 'Approve once', () => callbacks.onApprove(approval), onError));
+    renderedKeys.add(appendAction(document, card, 'Approve once', `approve:${approval.approvalId}`, () => callbacks.onApprove(approval), state, callbacks.onStateChange));
   }
   return card;
 }
@@ -64,31 +123,121 @@ export function renderAgentControlDrawer(container, model, callbacks = {}) {
     onDeny: callbacks.onDeny || (() => Promise.resolve()),
     onApprove: callbacks.onApprove || (() => Promise.resolve()),
     onRevoke: callbacks.onRevoke || (() => Promise.resolve()),
+    onStateChange: callbacks.onStateChange || (() => Promise.resolve()),
   };
+  const state = drawerStates.get(container) || { failures: new Map(), focusKey: null };
+  drawerStates.set(container, state);
+  const focusedKey = container.ownerDocument.activeElement?.dataset?.actionKey || state.focusKey;
   container.replaceChildren();
-  const error = element(document, 'div', 'agent-control-error');
-  error.setAttribute('role', 'alert');
-  error.hidden = true;
-  const onError = (message) => {
-    error.textContent = message;
-    error.hidden = false;
-  };
-  container.append(error);
+  const renderedKeys = new Set();
 
   for (const request of model.groups.requested) {
     const card = element(document, 'article', 'agent-control-card');
     card.dataset.requestId = request.requestId;
     card.append(element(document, 'strong', '', `${request.agentId} · ${request.taskId}`));
     if (request.canGrant) {
-      card.append(actionButton(document, 'Grant', () => normalizedCallbacks.onGrant(request), onError));
+      renderedKeys.add(appendAction(
+        document,
+        card,
+        `Grant request ${request.requestId}`,
+        `grant:${request.requestId}`,
+        () => normalizedCallbacks.onGrant(request),
+        state,
+        normalizedCallbacks.onStateChange,
+      ));
     }
     container.append(card);
   }
   for (const approval of model.approvals.filter((item) => item.status === 'pending')) {
-    container.append(renderApproval(document, approval, normalizedCallbacks, onError));
+    container.append(renderApproval(document, approval, normalizedCallbacks, state, renderedKeys));
   }
   for (const lease of model.groups.active) {
-    container.append(renderLease(document, lease, normalizedCallbacks, onError));
+    container.append(renderLease(document, lease, normalizedCallbacks, state, renderedKeys));
   }
-  return { error };
+  for (const [actionKey, failure] of state.failures) {
+    if (renderedKeys.has(actionKey)) continue;
+    const card = element(document, 'article', 'agent-control-card agent-control-failed');
+    card.dataset.failedActionKey = actionKey;
+    card.append(element(document, 'strong', '', failure.label));
+    appendAction(document, card, failure.label, actionKey, failure.action, state, normalizedCallbacks.onStateChange);
+    container.append(card);
+  }
+  if (focusedKey) {
+    const focusTarget = container.querySelector(`[data-action-key="${focusedKey}"]`);
+    if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
+  }
+  return { failures: state.failures };
+}
+
+export function trapAgentControlFocus(event, drawer) {
+  if (!event || event.key !== 'Tab' || !drawer) return false;
+  const focusable = [...drawer.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+    .filter((node) => !node.hidden);
+  if (focusable.length === 0) {
+    event.preventDefault();
+    if (typeof drawer.focus === 'function') drawer.focus();
+    return true;
+  }
+  const active = drawer.ownerDocument.activeElement;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && (active === first || !focusable.includes(active))) {
+    event.preventDefault();
+    last.focus();
+    return true;
+  }
+  if (!event.shiftKey && (active === last || !focusable.includes(active))) {
+    event.preventDefault();
+    first.focus();
+    return true;
+  }
+  return false;
+}
+
+export function installAgentControlUiLifecycle(options) {
+  const { toggle, overlay, close, refresh } = options;
+  if (!toggle || !overlay || !close || typeof refresh !== 'function') return null;
+  const installed = lifecycleByToggle.get(toggle);
+  if (installed) return installed;
+  const setIntervalFn = options.setInterval || globalThis.setInterval;
+  const clearIntervalFn = options.clearInterval || globalThis.clearInterval;
+  const hide = () => {
+    overlay.hidden = true;
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.focus();
+  };
+  const show = () => {
+    overlay.hidden = false;
+    toggle.setAttribute('aria-expanded', 'true');
+    void refresh().then(() => close.focus());
+  };
+  const onClose = () => hide();
+  const onOverlayClick = (event) => { if (event.target === overlay) hide(); };
+  const onKeydown = (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      hide();
+      return;
+    }
+    trapAgentControlFocus(event, overlay);
+  };
+  toggle.addEventListener('click', show);
+  close.addEventListener('click', onClose);
+  overlay.addEventListener('click', onOverlayClick);
+  overlay.addEventListener('keydown', onKeydown);
+  void refresh();
+  const timer = setIntervalFn(refresh, 2000);
+  const lifecycle = {
+    dispose() {
+      if (lifecycleByToggle.get(toggle) !== lifecycle) return;
+      clearIntervalFn(timer);
+      toggle.removeEventListener('click', show);
+      close.removeEventListener('click', onClose);
+      overlay.removeEventListener('click', onOverlayClick);
+      overlay.removeEventListener('keydown', onKeydown);
+      lifecycleByToggle.delete(toggle);
+    },
+  };
+  lifecycleByToggle.set(toggle, lifecycle);
+  return lifecycle;
 }

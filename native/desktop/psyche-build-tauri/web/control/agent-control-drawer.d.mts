@@ -8,4 +8,18 @@ export function renderAgentControlDrawer(
   container: any,
   model: any,
   callbacks?: Record<string, (...args: any[]) => Promise<unknown>>,
-): { error: any };
+): { failures: Map<string, unknown> };
+
+export function trapAgentControlFocus(
+  event: { key?: string; shiftKey?: boolean; preventDefault: () => void },
+  drawer: any,
+): boolean;
+
+export function installAgentControlUiLifecycle(options: {
+  toggle: any;
+  overlay: any;
+  close: any;
+  refresh: () => Promise<unknown>;
+  setInterval?: (callback: () => unknown, delay: number) => unknown;
+  clearInterval?: (timer: unknown) => void;
+}): { dispose: () => void } | null;

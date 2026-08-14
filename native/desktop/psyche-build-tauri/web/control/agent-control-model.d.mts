@@ -9,4 +9,10 @@ export function createAgentControlModel(
   options?: AgentControlModelOptions,
 ): any;
 
-export function resourceLeaseBadge(model: any, resource: Record<string, unknown>): any | null;
+export function resourceLeaseBadge(model: any, resource: Record<string, unknown> | null): any | null;
+
+export function surfaceResourceIdentity(
+  model: any,
+  kind: string,
+  id: string,
+): Record<string, unknown> | null;

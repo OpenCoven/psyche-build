@@ -170,7 +170,7 @@
   }
   var agentControlModel = null;
   var agentControlOwnerEpoch = null;
-  var agentControlPollTimer = null;
+  var agentControlUiLifecycle = null;
 
   function agentControlCommand(project, command) {
     return invoke("control_operator_submit", { projectRoot: project.root, command: command }).then(function (response) {
@@ -189,9 +189,10 @@
     if (!agentControlModel || !window.PsycheControl) return;
     document.querySelectorAll(".terminal-pane[data-thread-id]").forEach(function (pane) {
       var threadId = pane.dataset.threadId;
-      var badge = agentControlModel.badges.find(function (item) {
-        return item.kind === "pane" && item.id === threadId;
-      });
+      var resource = window.PsycheControl.surfaceResourceIdentity(agentControlModel, "pane", threadId);
+      if (resource) pane.dataset.controlGeneration = String(resource.generation);
+      else delete pane.dataset.controlGeneration;
+      var badge = window.PsycheControl.resourceLeaseBadge(agentControlModel, resource);
       var header = pane.querySelector(".terminal-pane-header");
       if (!badge || !header) return;
       var node = document.createElement("span");
@@ -203,9 +204,10 @@
       header.appendChild(node);
     });
     document.querySelectorAll(".browser-tab[data-tab-id]").forEach(function (tabNode) {
-      var badge = agentControlModel.badges.find(function (item) {
-        return item.kind === "browser_tab" && item.id === tabNode.dataset.tabId;
-      });
+      var resource = window.PsycheControl.surfaceResourceIdentity(agentControlModel, "browser_tab", tabNode.dataset.tabId);
+      if (resource) tabNode.dataset.controlGeneration = String(resource.generation);
+      else delete tabNode.dataset.controlGeneration;
+      var badge = window.PsycheControl.resourceLeaseBadge(agentControlModel, resource);
       if (!badge) return;
       var node = document.createElement("span");
       node.className = "agent-control-badge";
@@ -235,24 +237,24 @@
           grants: request.resources.map(function (resource) {
             return { target: { kind: resource.kind, id: resource.id, generation: resource.generation }, capabilities: resource.capabilities };
           }),
-        }).then(refreshAgentControlState);
+        });
       },
       onDeny: function (approval) {
         return agentControlCommand(project, {
           type: "approval_resolve", approvalId: approval.approvalId,
           payloadDigest: approval.payloadDigest, decision: "deny",
-        }).then(refreshAgentControlState);
+        });
       },
       onApprove: function (approval) {
         return agentControlCommand(project, {
           type: "approval_resolve", approvalId: approval.approvalId,
           payloadDigest: approval.payloadDigest, decision: "approve",
-        }).then(refreshAgentControlState);
+        });
       },
-      onRevoke: function (lease) {
-        return agentControlCommand(project, { type: "lease_revoke", leaseId: lease.leaseId })
-          .then(refreshAgentControlState);
+      onRevoke: function (target) {
+        return agentControlCommand(project, { type: "lease_revoke", leaseId: target.leaseId });
       },
+      onStateChange: refreshAgentControlState,
     });
   }
 
@@ -279,23 +281,19 @@
     var toggle = document.getElementById("agent-control-toggle");
     var overlay = document.getElementById("agent-control-overlay");
     var close = document.getElementById("agent-control-close");
-    if (!toggle || !overlay || !close) return;
-    var hide = function () {
-      overlay.hidden = true;
-      toggle.setAttribute("aria-expanded", "false");
-      toggle.focus();
-    };
-    toggle.addEventListener("click", function () {
-      overlay.hidden = false;
-      toggle.setAttribute("aria-expanded", "true");
-      void refreshAgentControlState().then(function () { close.focus(); });
+    if (!toggle || !overlay || !close || !window.PsycheControl) return null;
+    agentControlUiLifecycle = window.PsycheControl.installAgentControlUiLifecycle({
+      toggle: toggle,
+      overlay: overlay,
+      close: close,
+      refresh: refreshAgentControlState,
     });
-    close.addEventListener("click", hide);
-    overlay.addEventListener("click", function (event) { if (event.target === overlay) hide(); });
-    overlay.addEventListener("keydown", function (event) { if (event.key === "Escape") hide(); });
-    void refreshAgentControlState();
-    agentControlPollTimer = setInterval(refreshAgentControlState, 2000);
+    return agentControlUiLifecycle;
   }
+  window.addEventListener("beforeunload", function () {
+    if (agentControlUiLifecycle) agentControlUiLifecycle.dispose();
+    agentControlUiLifecycle = null;
+  });
   function mergeWorktreePresentationState(project, discovered) {
     var existing = Array.isArray(project.worktrees) ? project.worktrees : [];
     return (Array.isArray(discovered) ? discovered : []).map(function (worktree) {
@@ -11184,6 +11182,7 @@
     }
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
     startCovenPolling();
+    installAgentControlUi();
     if (paneMetricsPollTimer) clearInterval(paneMetricsPollTimer);
     paneMetricsPollTimer = setInterval(refreshVisiblePaneMetrics, 15000);
     refreshVisiblePaneMetrics();

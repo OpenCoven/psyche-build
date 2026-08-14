@@ -71,6 +71,10 @@ export function createAgentControlModel(snapshot, options = {}) {
     canDeny: operator && approval.status === 'pending',
   }));
   const requests = asArray(snapshot && snapshot.leaseRequests);
+  const resources = asArray(snapshot && snapshot.resources).flatMap((resource) => {
+    const target = copyTarget(resource);
+    return target && Number.isSafeInteger(target.generation) ? [target] : [];
+  });
   const badges = epochChanged ? [] : active.flatMap((lease) =>
     lease.resources.map((resource) => ({
       ...resource,
@@ -94,13 +98,19 @@ export function createAgentControlModel(snapshot, options = {}) {
     },
     approvals,
     badges,
+    resources,
   };
 }
 
 export function resourceLeaseBadge(model, resource) {
+  if (!resource) return null;
   return model.badges.find((badge) => (
     badge.kind === resource.kind
     && badge.id === resource.id
     && (badge.kind === 'project' || badge.generation === resource.generation)
   )) || null;
+}
+
+export function surfaceResourceIdentity(model, kind, id) {
+  return model.resources.find((resource) => resource.kind === kind && resource.id === id) || null;
 }
