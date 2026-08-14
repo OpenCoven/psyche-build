@@ -112,11 +112,12 @@ describe('agent control operator model', () => {
   });
 
   it('wires a persistent titlebar button, modal drawer, typed operator calls, and resource badges', async () => {
-    const [html, styles, main, entry] = await Promise.all([
+    const [html, styles, main, entry, drawer] = await Promise.all([
       readFile('native/desktop/psyche-build-tauri/web/index.html', 'utf8'),
       readFile('native/desktop/psyche-build-tauri/web/styles.css', 'utf8'),
       readFile('native/desktop/psyche-build-tauri/web/main.js', 'utf8'),
       readFile('native/desktop/psyche-build-tauri/web/control/control-entry.js', 'utf8'),
+      readFile('native/desktop/psyche-build-tauri/web/control/agent-control-drawer.mjs', 'utf8'),
     ]);
 
     expect(html).toContain('id="agent-control-toggle"');
@@ -127,5 +128,9 @@ describe('agent control operator model', () => {
     expect(main).not.toMatch(/control_operator_submit[\s\S]{0,300}(spawnBridgePane|TmuxControl|execFileSync)/);
     expect(entry).toContain("from './agent-control-model.mjs'");
     expect(entry).toContain("from './agent-control-drawer.mjs'");
+    expect(drawer).toContain('`requested TTL ${request.ttlMs} ms`');
+    expect(drawer).toContain('for (const resource of request.resources)');
+    expect(drawer).toContain('${resource.kind}:${resource.id}@${resource.generation');
+    expect(drawer).toContain('${resource.capabilities.join(\', \')}');
   });
 });

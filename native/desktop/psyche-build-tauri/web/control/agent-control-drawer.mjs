@@ -43,6 +43,25 @@ function renderLease(document, lease, callbacks, onError) {
   return card;
 }
 
+function renderRequest(document, request, callbacks, onError) {
+  const card = element(document, 'article', 'agent-control-card');
+  card.dataset.requestId = request.requestId;
+  card.append(element(document, 'strong', '', `${request.agentId} · ${request.taskId}`));
+  card.append(element(document, 'div', 'agent-control-meta', `requested TTL ${request.ttlMs} ms`));
+  for (const resource of request.resources) {
+    card.append(element(
+      document,
+      'div',
+      'agent-control-resource',
+      `${resource.kind}:${resource.id}@${resource.generation ?? '-'} · ${resource.capabilities.join(', ')}`,
+    ));
+  }
+  if (request.canGrant) {
+    card.append(actionButton(document, 'Grant', () => callbacks.onGrant(request), onError));
+  }
+  return card;
+}
+
 function renderApproval(document, approval, callbacks, onError) {
   const card = element(document, 'article', 'agent-control-card agent-control-approval');
   card.dataset.approvalId = approval.approvalId;
@@ -76,13 +95,7 @@ export function renderAgentControlDrawer(container, model, callbacks = {}) {
   container.append(error);
 
   for (const request of model.groups.requested) {
-    const card = element(document, 'article', 'agent-control-card');
-    card.dataset.requestId = request.requestId;
-    card.append(element(document, 'strong', '', `${request.agentId} · ${request.taskId}`));
-    if (request.canGrant) {
-      card.append(actionButton(document, 'Grant', () => normalizedCallbacks.onGrant(request), onError));
-    }
-    container.append(card);
+    container.append(renderRequest(document, request, normalizedCallbacks, onError));
   }
   for (const approval of model.approvals.filter((item) => item.status === 'pending')) {
     container.append(renderApproval(document, approval, normalizedCallbacks, onError));
