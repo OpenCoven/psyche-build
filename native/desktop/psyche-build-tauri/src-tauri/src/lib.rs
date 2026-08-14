@@ -4980,6 +4980,9 @@ fn fs_write_text(
 fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
     let out = std::process::Command::new("git")
         .current_dir(root)
+        // Repository-local fsmonitor configuration may name an executable.
+        // Inspection commands must never run code supplied by the workspace.
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .output()
         .map_err(|e| format!("git: {}", e))?;
@@ -5283,6 +5286,8 @@ fn git_diff(
         "--no-pager".into(),
         "diff".into(),
         "--no-color".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
         "--relative".into(),
     ];
     // Context lines, for expanding a hunk in place. Clamped rather than passed
@@ -8071,6 +8076,68 @@ mod workspace_panel_tests {
         assert!(validate_git_relative_path("../secret.txt").is_err());
         assert!(validate_git_relative_path("src/../../secret.txt").is_err());
         assert!(validate_git_relative_path("/tmp/secret.txt").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_status_does_not_execute_a_repository_fsmonitor() {
+        let tree = TempTree::new("git-fsmonitor");
+        let hook = tree.root.join("fsmonitor.sh");
+        let marker = tree.root.join("fsmonitor-ran");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\n", path_text(&marker)),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "core.fsmonitor", path_text(&hook)]);
+
+        git_status(path_text(&tree.root).to_string()).unwrap();
+
+        assert!(!marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_diff_does_not_execute_repository_diff_helpers() {
+        let tree = TempTree::new("git-external-diff");
+        let helper = tree.root.join("external-diff.sh");
+        let marker = tree.root.join("external-diff-ran");
+        std::fs::write(
+            &helper,
+            format!("#!/bin/sh\ntouch '{}'\n", path_text(&marker)),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["add", "tracked.txt"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Psyche Tests",
+                "commit",
+                "-qm",
+                "baseline",
+            ],
+        );
+        run_test_git(&tree.root, &["config", "diff.external", path_text(&helper)]);
+        std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
+
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("tracked.txt".to_string()),
+            Some(false),
+            None,
+        )
+        .unwrap();
+
+        assert!(diff.text.contains("+after"));
+        assert!(!marker.exists());
     }
 
     #[test]
