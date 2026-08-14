@@ -20,6 +20,7 @@ export { createTerminalPaneController } from './terminal-pane-controller';
 export type {
   FitAddonAdapter,
   FitAddonFactory,
+  RendererFallbackReason,
   RendererSnapshot,
   RendererState,
   TerminalAdapter,

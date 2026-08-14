@@ -8,6 +8,11 @@ import {
 } from './pty-client';
 
 export type RendererState = 'initializing' | 'webgl' | 'recovering' | 'fallback' | 'disposed';
+export type RendererFallbackReason =
+  | 'webgl_unavailable'
+  | 'webgl_setup_failed'
+  | 'webgl_recovery_failed'
+  | 'webgl_recovery_cooldown';
 
 export interface VisibilityState {
   documentVisible: boolean;
@@ -17,6 +22,7 @@ export interface VisibilityState {
 
 export interface RendererSnapshot {
   state: RendererState;
+  fallbackReason: RendererFallbackReason | null;
   visibility: VisibilityState;
   effectiveVisible: boolean;
   queuedWrites: number;
@@ -137,6 +143,7 @@ type QueuedWrite = {
 
 const HIDDEN_DRAIN_MS = 100;
 const MAX_SYNTHETIC_RETAINED_BYTES = 64 * 1024;
+const WEBGL_RECOVERY_COOLDOWN_MS = 30_000;
 const controllers = new Map<string, TerminalPaneController>();
 const syntheticEncoder = new TextEncoder();
 
@@ -248,6 +255,7 @@ export function createTerminalPaneController(
     : options.documentTarget;
   let visibility = options.initialVisibility ?? defaultVisibility(documentTarget);
   let rendererState: RendererState = 'initializing';
+  let rendererFallbackReason: RendererFallbackReason | null = null;
   let disposed = false;
   let fitPending = true;
   let writeInProgress = false;
@@ -264,6 +272,7 @@ export function createTerminalPaneController(
   const registrations: TerminalDisposable[] = [];
   const framePrefix = `terminal-pane:${options.paneId}:`;
   const renderKey = `${framePrefix}render`;
+  const webglRecoveryKey = `${framePrefix}webgl-recover`;
   const now = options.now ?? Date.now;
   const setTimer = options.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
   const clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer));
@@ -281,21 +290,113 @@ export function createTerminalPaneController(
 
   let webglAddon: WebglAddonAdapter | null = null;
   let webglContextLossRegistration: TerminalDisposable | null = null;
+  let lastSuccessfulRecoveryAt: number | null = null;
+
+  function releaseWebglAddon(): void {
+    const registration = webglContextLossRegistration;
+    const addon = webglAddon;
+    webglContextLossRegistration = null;
+    webglAddon = null;
+    disposeOnce(registration);
+    disposeOnce(addon);
+  }
+
+  function setRendererFallback(reason: RendererFallbackReason): void {
+    if (disposed) return;
+    rendererState = 'fallback';
+    rendererFallbackReason = reason;
+  }
+
+  function disposeWebglRecoveryAttempt(
+    addon: WebglAddonAdapter | null,
+    contextLossRegistration: TerminalDisposable | null,
+  ): void {
+    disposeOnce(contextLossRegistration);
+    disposeOnce(addon);
+  }
+
+  function recoverWebgl(): void {
+    if (disposed || rendererState !== 'recovering' || !canFit()) return;
+    let addon: WebglAddonAdapter | null = null;
+    let contextLossRegistration: TerminalDisposable | null = null;
+    try {
+      addon = (options.webglAddonFactory ?? defaultWebglAddonFactory)();
+      if (disposed) {
+        disposeWebglRecoveryAttempt(addon, contextLossRegistration);
+        return;
+      }
+      if (!addon) {
+        setRendererFallback('webgl_recovery_failed');
+        return;
+      }
+      const recoveredAddon = addon;
+      terminal.loadAddon(recoveredAddon);
+      if (disposed) {
+        disposeWebglRecoveryAttempt(recoveredAddon, contextLossRegistration);
+        return;
+      }
+      contextLossRegistration = recoveredAddon.onContextLoss?.(
+        () => handleWebglContextLoss(recoveredAddon),
+      ) ?? null;
+      if (disposed) {
+        disposeWebglRecoveryAttempt(recoveredAddon, contextLossRegistration);
+        return;
+      }
+      const recoveredAt = now();
+      if (disposed) {
+        disposeWebglRecoveryAttempt(recoveredAddon, contextLossRegistration);
+        return;
+      }
+      webglAddon = recoveredAddon;
+      webglContextLossRegistration = contextLossRegistration;
+      rendererState = 'webgl';
+      rendererFallbackReason = null;
+      lastSuccessfulRecoveryAt = recoveredAt;
+      fitPending = true;
+      scheduleVisibleDelivery();
+    } catch (error) {
+      disposeWebglRecoveryAttempt(addon, contextLossRegistration);
+      setRendererFallback('webgl_recovery_failed');
+      reportError(error, 'WebGL recovery');
+    }
+  }
+
+  function scheduleWebglRecovery(): void {
+    if (disposed || rendererState !== 'recovering' || !canFit()) return;
+    options.frameScheduler.schedule(webglRecoveryKey, recoverWebgl);
+  }
+
+  function handleWebglContextLoss(failedAddon: WebglAddonAdapter): void {
+    if (disposed || webglAddon !== failedAddon) return;
+    const recoveredInsideCooldown = lastSuccessfulRecoveryAt != null &&
+      now() - lastSuccessfulRecoveryAt < WEBGL_RECOVERY_COOLDOWN_MS;
+    if (disposed) return;
+    releaseWebglAddon();
+    if (disposed) return;
+    if (recoveredInsideCooldown) {
+      setRendererFallback('webgl_recovery_cooldown');
+      return;
+    }
+    rendererState = 'recovering';
+    rendererFallbackReason = null;
+    scheduleWebglRecovery();
+  }
+
   try {
     webglAddon = (options.webglAddonFactory ?? defaultWebglAddonFactory)();
     if (webglAddon) {
       terminal.loadAddon(webglAddon);
-      webglContextLossRegistration = webglAddon.onContextLoss?.(() => undefined) ?? null;
+      const initialAddon = webglAddon;
+      webglContextLossRegistration = initialAddon.onContextLoss?.(
+        () => handleWebglContextLoss(initialAddon),
+      ) ?? null;
       rendererState = 'webgl';
     } else {
-      rendererState = 'fallback';
+      setRendererFallback('webgl_unavailable');
     }
   } catch (error) {
-    disposeOnce(webglContextLossRegistration);
-    disposeOnce(webglAddon);
-    webglContextLossRegistration = null;
-    webglAddon = null;
-    rendererState = 'fallback';
+    releaseWebglAddon();
+    setRendererFallback('webgl_setup_failed');
     reportError(error, 'WebGL setup');
   }
 
@@ -493,8 +594,10 @@ export function createTerminalPaneController(
     } else if (visibleNow && !wasVisible) {
       clearHiddenTimer();
       fitPending = true;
+      scheduleWebglRecovery();
       scheduleVisibleDelivery();
     } else if (visibleNow) {
+      scheduleWebglRecovery();
       scheduleVisibleDelivery();
     }
     return ptyClient.setVisible(visibleNow);
@@ -503,7 +606,10 @@ export function createTerminalPaneController(
   const resizeObserver = (options.createResizeObserver ?? defaultResizeObserverFactory)(() => {
     if (disposed) return;
     fitPending = true;
-    if (isEffectivelyVisible(visibility)) scheduleVisibleDelivery();
+    if (isEffectivelyVisible(visibility)) {
+      scheduleWebglRecovery();
+      scheduleVisibleDelivery();
+    }
   });
   resizeObserver?.observe(options.container);
 
@@ -538,7 +644,10 @@ export function createTerminalPaneController(
     scheduleFit() {
       if (disposed) return;
       fitPending = true;
-      if (isEffectivelyVisible(visibility)) scheduleVisibleDelivery();
+      if (isEffectivelyVisible(visibility)) {
+        scheduleWebglRecovery();
+        scheduleVisibleDelivery();
+      }
     },
     focus() {
       if (disposed || (options.isSelected && !options.isSelected())) return;
@@ -570,6 +679,7 @@ export function createTerminalPaneController(
     rendererSnapshot() {
       return {
         state: rendererState,
+        fallbackReason: rendererFallbackReason,
         visibility: { ...visibility },
         effectiveVisible: isEffectivelyVisible(visibility),
         queuedWrites: ptyWrites.length + (syntheticWrite ? 1 : 0),
@@ -593,6 +703,7 @@ export function createTerminalPaneController(
       if (disposed) return;
       disposed = true;
       rendererState = 'disposed';
+      rendererFallbackReason = null;
       controllers.delete(options.paneId);
       options.frameScheduler.cancelPrefix(framePrefix);
       clearHiddenTimer();
@@ -606,8 +717,7 @@ export function createTerminalPaneController(
       intersectionObserver?.disconnect();
       documentTarget?.removeEventListener('visibilitychange', handleDocumentVisibility);
       for (const registration of registrations.splice(0)) disposeOnce(registration);
-      disposeOnce(webglContextLossRegistration);
-      disposeOnce(webglAddon);
+      releaseWebglAddon();
       disposeOnce(fitAddon);
       disposeOnce(terminal);
     },
