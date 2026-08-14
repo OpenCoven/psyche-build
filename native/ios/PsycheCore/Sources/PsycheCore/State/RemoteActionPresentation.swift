@@ -233,3 +233,21 @@ public struct RemoteActionPresentation: Sendable, Equatable, Identifiable {
         )
     }
 }
+
+extension RemoteActionPresentation {
+    func consumingSession() -> Self {
+        Self(
+            requestID: requestID,
+            paneID: paneID,
+            action: action,
+            title: title,
+            message: message,
+            sessionID: nil,
+            scope: scope,
+            relatedFiles: relatedFiles,
+            dismissable: dismissable,
+            content: content,
+            recoveryText: recoveryText
+        )
+    }
+}
