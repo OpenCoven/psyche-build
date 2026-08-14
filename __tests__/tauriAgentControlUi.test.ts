@@ -96,8 +96,21 @@ class FakeElement {
     this.listeners.get(type)?.delete(listener);
   }
   dispatch(type: string, init: Record<string, unknown> = {}) {
-    const event = { type, target: this, key: '', shiftKey: false, preventDefault: vi.fn(), ...init };
-    for (const listener of this.listeners.get(type) ?? []) listener(event);
+    const event = {
+      type, target: this, key: '', shiftKey: false,
+      preventDefault: vi.fn(), stopPropagation: vi.fn(), stopImmediatePropagation: vi.fn(),
+      immediatePropagationStopped: false,
+      ...init,
+    };
+    const stopImmediate = event.stopImmediatePropagation;
+    event.stopImmediatePropagation = vi.fn(() => {
+      event.immediatePropagationStopped = true;
+      stopImmediate();
+    });
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(event);
+      if (event.immediatePropagationStopped) break;
+    }
     return event;
   }
   focus() { this.ownerDocument.activeElement = this; }
@@ -145,6 +158,55 @@ describe('agent control operator model', () => {
     expect(model.groups.revoked).toMatchObject([{
       requestId: 'request-revoked', agentId: 'agent-r', taskId: 'task-revoked', canGrant: false,
     }]);
+  });
+
+  it('renders exact requested resources, capabilities, and expiry before granting the unchanged request', async () => {
+    const requested = snapshot();
+    const longCapability = `browser.${'x'.repeat(1_000)}`;
+    requested.leaseRequests[0].grants = [
+      {
+        target: { kind: 'pane', id: 'pane-2', generation: 5 },
+        capabilities: ['pane.observe', 'pane.input'],
+      },
+      {
+        target: { kind: 'browser_tab', id: 'tab-2', generation: 8 },
+        capabilities: ['browser.inspect', longCapability],
+      },
+    ];
+    const model = createAgentControlModel(requested, { now: NOW, operator: true });
+    expect(model.groups.requested[0]).toMatchObject({
+      ttlMs: 60_000,
+      expiresAt: '2026-08-13T00:56:00.000Z',
+      resources: [
+        { kind: 'pane', id: 'pane-2', generation: 5, capabilities: ['pane.observe', 'pane.input'] },
+        { kind: 'browser_tab', id: 'tab-2', generation: 8, capabilities: ['browser.inspect', longCapability] },
+      ],
+    });
+
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    const onGrant = vi.fn(() => Promise.resolve());
+    renderAgentControlDrawer(content, model, { onGrant });
+
+    expect(content.textContent).toContain('pane:pane-2@5 · pane.observe, pane.input');
+    expect(content.textContent).toContain('browser_tab:tab-2@8 · browser.inspect');
+    expect(content.textContent).toContain('60 seconds');
+    expect(content.textContent).toContain('2026-08-13T00:56:00.000Z');
+    expect(content.textContent).not.toContain('payload');
+    expect(content.textContent).not.toContain(longCapability);
+    const requestRows = content.children[0].children
+      .filter((child) => child.className === 'agent-control-resource');
+    expect(requestRows).toHaveLength(2);
+    expect(requestRows.every((row) => row.textContent.length <= 256)).toBe(true);
+    expect(requestRows[0].getAttribute('aria-label'))
+      .toBe('Requested pane pane-2 generation 5; capabilities pane.observe, pane.input');
+    expect(requestRows[1].getAttribute('aria-label'))
+      .toContain('Requested browser tab tab-2 generation 8; capabilities browser.inspect');
+
+    buttonByLabel(content, 'Grant request request-pending')!.dispatch('click');
+    await flushActions();
+    expect(onGrant).toHaveBeenCalledOnce();
+    expect(onGrant).toHaveBeenCalledWith(model.groups.requested[0]);
   });
 
   it('exposes only redacted approval details and operator actions', () => {
@@ -222,6 +284,38 @@ describe('agent control operator model', () => {
     expect(clearIntervalFn).toHaveBeenCalledWith(41);
     expect(toggle.listeners.get('click')?.size).toBe(0);
     expect(overlay.listeners.get('keydown')?.size).toBe(0);
+  });
+
+  it('focuses the modal synchronously and fully consumes Escape while refresh is stalled', () => {
+    const document = new FakeDocument();
+    const toggle = document.createElement('button');
+    const overlay = document.createElement('div');
+    const close = document.createElement('button');
+    overlay.append(close);
+    let resolveRefresh!: () => void;
+    const stalledRefresh = new Promise<void>((resolve) => { resolveRefresh = resolve; });
+    const lifecycle = installAgentControlUiLifecycle({
+      toggle,
+      overlay,
+      close,
+      refresh: () => stalledRefresh,
+      setInterval: () => 42,
+      clearInterval: vi.fn(),
+    });
+    const globalListener = vi.fn();
+    overlay.addEventListener('keydown', globalListener);
+
+    toggle.dispatch('click');
+    expect(document.activeElement).toBe(close);
+    const escape = overlay.dispatch('keydown', { key: 'Escape' });
+    expect(escape.preventDefault).toHaveBeenCalledOnce();
+    expect(escape.stopPropagation).toHaveBeenCalledOnce();
+    expect(escape.stopImmediatePropagation).toHaveBeenCalledOnce();
+    expect(globalListener).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(toggle);
+
+    lifecycle!.dispose();
+    resolveRefresh();
   });
 
   it('contains modal Tab and Shift+Tab focus while Escape restoration remains lifecycle-owned', () => {

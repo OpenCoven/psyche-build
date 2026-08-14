@@ -71,8 +71,71 @@ function appendAction(document, parent, label, actionKey, action, state, onState
 }
 
 function resourceLabel(resource) {
-  const base = `${resource.kind === 'browser_tab' ? 'browser tab' : resource.kind} ${resource.id}`;
+  const kind = resource.kind === 'browser_tab' ? 'browser tab' : boundedText(resource.kind, 32);
+  const base = `${kind} ${boundedText(resource.id, 96)}`;
   return Number.isSafeInteger(resource.generation) ? `${base} generation ${resource.generation}` : base;
+}
+
+function boundedText(value, limit) {
+  const text = String(value ?? '');
+  return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+function capabilityText(capabilities) {
+  const visible = capabilities.slice(0, 12).map((capability) => boundedText(capability, 64));
+  if (capabilities.length > visible.length) visible.push(`+${capabilities.length - visible.length} more`);
+  return visible.join(', ');
+}
+
+function renderRequestedAuthority(document, request, callbacks, state, renderedKeys) {
+  const card = element(document, 'article', 'agent-control-card');
+  card.dataset.requestId = request.requestId;
+  card.append(element(
+    document,
+    'strong',
+    '',
+    `${boundedText(request.agentId, 96)} · ${boundedText(request.taskId, 96)}`,
+  ));
+  const ttlSeconds = Number.isFinite(request.ttlMs)
+    ? Math.max(0, Math.ceil(request.ttlMs / 1_000))
+    : 0;
+  const timing = element(
+    document,
+    'div',
+    'agent-control-meta',
+    `requested for ${ttlSeconds} seconds · expires ${boundedText(request.expiresAt, 40)}`,
+  );
+  timing.setAttribute(
+    'aria-label',
+    `Requested authority duration ${ttlSeconds} seconds; expires ${boundedText(request.expiresAt, 40)}`,
+  );
+  card.append(timing);
+  for (const resource of request.resources) {
+    const capabilities = capabilityText(resource.capabilities);
+    const row = element(
+      document,
+      'div',
+      'agent-control-resource',
+      `${boundedText(resource.kind, 32)}:${boundedText(resource.id, 96)}@${resource.generation ?? '-'} · ${capabilities}`,
+    );
+    row.setAttribute(
+      'aria-label',
+      `Requested ${resourceLabel(resource)}; capabilities ${capabilities}`,
+    );
+    card.append(row);
+  }
+  if (request.canGrant) {
+    renderedKeys.add(appendAction(
+      document,
+      card,
+      `Grant request ${boundedText(request.requestId, 96)}`,
+      `grant:${request.requestId}`,
+      () => callbacks.onGrant(request),
+      state,
+      callbacks.onStateChange,
+    ));
+  }
+  return card;
 }
 
 function renderLease(document, lease, callbacks, state, renderedKeys) {
@@ -137,21 +200,13 @@ export function renderAgentControlDrawer(container, model, callbacks = {}) {
   const renderedKeys = new Set();
 
   for (const request of model.groups.requested) {
-    const card = element(document, 'article', 'agent-control-card');
-    card.dataset.requestId = request.requestId;
-    card.append(element(document, 'strong', '', `${request.agentId} · ${request.taskId}`));
-    if (request.canGrant) {
-      renderedKeys.add(appendAction(
-        document,
-        card,
-        `Grant request ${request.requestId}`,
-        `grant:${request.requestId}`,
-        () => normalizedCallbacks.onGrant(request),
-        state,
-        normalizedCallbacks.onStateChange,
-      ));
-    }
-    container.append(card);
+    container.append(renderRequestedAuthority(
+      document,
+      request,
+      normalizedCallbacks,
+      state,
+      renderedKeys,
+    ));
   }
   for (const approval of model.approvals.filter((item) => item.status === 'pending')) {
     container.append(renderApproval(document, approval, normalizedCallbacks, state, renderedKeys));
@@ -214,13 +269,18 @@ export function installAgentControlUiLifecycle(options) {
   const show = () => {
     overlay.hidden = false;
     toggle.setAttribute('aria-expanded', 'true');
-    void refresh().then(() => close.focus());
+    close.focus();
+    try {
+      void Promise.resolve(refresh()).catch(() => {});
+    } catch (_) {}
   };
   const onClose = () => hide();
   const onOverlayClick = (event) => { if (event.target === overlay) hide(); };
   const onKeydown = (event) => {
     if (event.key === 'Escape') {
       event.preventDefault();
+      if (typeof event.stopPropagation === 'function') event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
       hide();
       return;
     }
