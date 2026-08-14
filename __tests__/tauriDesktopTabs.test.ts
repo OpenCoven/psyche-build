@@ -257,9 +257,9 @@ describe('Tauri desktop tab shortcuts', () => {
       remote: {
         urls: ['http://*', 'https://*'],
       },
-      permissions: ['allow-browser-app-shortcut'],
+      permissions: ['allow-browser-app-shortcut', 'allow-browser-automation-result'],
     });
-    expect(browserShortcutCapability.permissions).toHaveLength(1);
+    expect(browserShortcutCapability.permissions).toHaveLength(2);
     expect(JSON.stringify(browserShortcutCapability)).not.toContain('core:event:allow-emit');
   });
 
@@ -346,14 +346,14 @@ describe('Tauri desktop tab shortcuts', () => {
 
   it('delivers batched PTY output to the matching terminal thread', () => {
     expect(mainJs).toMatch(
-      /listen\("pty:data-batch",\s*function\s*\(event\)[\s\S]*?var\s+threadId\s*=\s*payload\.threadId\s*\|\|\s*payload\.thread_id;[\s\S]*?findThread\(threadId\)[\s\S]*?thread\.term\.write\(bytes,\s*acknowledge\)/,
+      /listen\("pty:data-batch",\s*function\s*\(event\)[\s\S]*?var\s+payload\s*=\s*event\.payload\s*\|\|\s*\{\};[\s\S]*?if\s*\(!payload\.threadId\s*\|\|\s*!payload\.bytes\)\s*return;[\s\S]*?var\s+thread\s*=\s*findThread\(payload\.threadId\);[\s\S]*?if\s*\(!isLiveThread\(thread\)\)\s*return;[\s\S]*?if\s*\(!ptyRuntime\.routePtyBatch\(payload\)\)\s*return;[\s\S]*?var\s+bytes\s*=\s*new\s+Uint8Array\(payload\.bytes\);/,
     );
     expect(mainJs).not.toMatch(/listen\("pty:data",/);
     expect(mainJs).toMatch(
-      /function\s+acknowledgePtyBatch\(threadId,\s*sequence\)[\s\S]*?invoke\("pty_ack",\s*\{[\s\S]*?threadId:\s*threadId,[\s\S]*?sequence:\s*sequence/,
+      /window\.PsycheRuntime[\s\S]*typeof window\.PsycheRuntime\.routePtyBatch !== "function"/,
     );
     expect(tauriLib).toMatch(
-      /fn\s+pty_ack\(thread_id:\s*String,\s*sequence:\s*u64\)[\s\S]*?session\.pump\.clone\(\)[\s\S]*?pump\.acknowledge\(sequence\)/,
+      /fn\s+pty_ack\(thread_id:\s*String,\s*sequence:\s*u64\)[\s\S]*?clone_live_pty_pump\(&thread_id\)\?[\s\S]*?pump\.acknowledge\(sequence\)/,
     );
     expect(tauriLib).toMatch(/generate_handler!\[[\s\S]*?pty_ack,/);
   });

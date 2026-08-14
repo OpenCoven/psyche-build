@@ -288,6 +288,7 @@ describe('native Files pane lifecycle', () => {
       {
         state, fileFocus: { returnThreadId: 'thread-active' }, fileViewEl, filesPanes,
         filesPaneKey, focusCanvasSurface, syncPaneMetricsVisibility: () => undefined,
+        syncAllPtyVisibility: () => undefined,
         activePaneLayout: () => paneLayouts.get(filesPaneKey(project.id, project.selectedWorktreePath)),
         renderPaneMinimap: () => undefined,
       },

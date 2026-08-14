@@ -7,6 +7,7 @@ const main = readFileSync(new URL('web/main.js', root), 'utf8');
 const html = readFileSync(new URL('web/index.html', root), 'utf8');
 const packageJson = readFileSync(new URL('package.json', root), 'utf8');
 const lib = readFileSync(new URL('src-tauri/src/lib.rs', root), 'utf8');
+const tauriBuild = readFileSync(new URL('src-tauri/build.rs', root), 'utf8');
 
 function functionSource(source: string, name: string): string {
   const start = source.indexOf(`function ${name}(`);
@@ -429,27 +430,44 @@ describe('Tauri semantic browser provider lifecycle', () => {
     expect(JSON.stringify(project(selectEffect, { selected: true }))).not.toContain('missing-secret-value');
   });
 
-  it('uses only the initialization-captured automation receipt bridge', () => {
+  it('uses only the initialization-captured caller-bound automation receipt bridge', () => {
     const source = functionSource(main, 'browserAutomationDispatchScript');
     expect(source).toContain('__PSYCHE_AUTOMATION__.dispatchAndEmit');
     expect(source).not.toContain('__TAURI__');
     expect(source).not.toContain('.emit');
   });
 
+  it('registers a caller-bound native automation result command without generic event authority', () => {
+    expect(lib).toMatch(
+      /#\[tauri::command\]\s*fn browser_automation_result\(\s*webview:\s*tauri::Webview,\s*authorizations:\s*State<'_, BrowserAutomationAuthorizations>,\s*result:\s*BrowserAutomationResultPayload,\s*\)\s*->\s*Result<\(\),\s*String>/,
+    );
+    const commandStart = lib.indexOf('fn browser_automation_result(');
+    const commandEnd = lib.indexOf('\n}\n', commandStart);
+    const command = lib.slice(commandStart, commandEnd);
+    expect(command).toContain('webview.label()');
+    expect(command).toContain('authorizations.consume(webview.label(), &result.correlation())');
+    expect(command).toMatch(/\.emit_to\(\s*"main",\s*"browser:automation-result"/);
+    expect(command).not.toMatch(/\bevent:\s*String/);
+    expect(command).not.toMatch(/\blabel:\s*String/);
+    expect(tauriBuild).toContain('"browser_automation_result"');
+    expect(main).toMatch(/invoke\("browser_eval", \{[\s\S]*automationReceipt: \{ actionId: effect\.actionId, tabId: effect\.tabId, generation: effect\.generation \}/);
+    expect(lib).toContain('.manage(BrowserAutomationAuthorizations::default())');
+  });
+
   it('does not let a prepatched page emitter encode numeric data in an action receipt', async () => {
-    const originalEmit = vi.fn();
-    const forgedEmit = vi.fn();
-    const eventApi = { emit: originalEmit };
+    const originalInvoke = vi.fn();
+    const forgedInvoke = vi.fn();
+    const coreApi = { invoke: originalInvoke };
     const button: any = {
       tagName: 'BUTTON', children: [], textContent: 'Safe', parentElement: null, isConnected: true,
       attributes: {}, getAttribute: () => null, hasAttribute: () => false,
       getBoundingClientRect: () => ({ x: 0, y: 0, width: 10, height: 10, top: 0, left: 0, right: 10, bottom: 10 }),
-      click: vi.fn(() => { eventApi.emit = forgedEmit as typeof originalEmit; }), focus: vi.fn(), dispatchEvent: vi.fn(() => true),
+      click: vi.fn(() => { coreApi.invoke = forgedInvoke as typeof originalInvoke; }), focus: vi.fn(), dispatchEvent: vi.fn(() => true),
     };
     const body: any = { ...button, tagName: 'BODY', textContent: '', children: [button], click: vi.fn() };
     button.parentElement = body;
     const window: any = {
-      __TAURI__: { event: eventApi }, document: { body, documentElement: body },
+      __TAURI__: { core: coreApi }, document: { body, documentElement: body },
       innerWidth: 100, innerHeight: 100, location: { href: 'https://example.test/' },
       Date, URL, Event: class { constructor(public type: string) {} },
       getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
@@ -460,19 +478,21 @@ describe('Tauri semantic browser provider lifecycle', () => {
       'resolveBrowserAutomationSnapshotId',
       `return (${functionSource(main, 'browserAutomationDispatchScript')});`,
     )(() => snapshot.snapshotId);
-    eventApi.emit = vi.fn((_event: string, payload: unknown) => forgedEmit(8675309, payload));
+    coreApi.invoke = vi.fn((_command: string, payload: unknown) => forgedInvoke(8675309, payload));
     await Function('window', `return ${build({
       actionId: 'action', tabId: 'tab', generation: 1,
       operation: { kind: 'action', snapshotId: 'snap', action: { kind: 'click', elementRef: 'e1' } },
     })}`)(window);
-    expect(originalEmit).toHaveBeenCalledWith('browser:automation-result', expect.objectContaining({ value: { clicked: true } }));
-    expect(forgedEmit).not.toHaveBeenCalled();
-    expect(JSON.stringify(originalEmit.mock.calls)).not.toContain('8675309');
+    expect(originalInvoke).toHaveBeenCalledWith('browser_automation_result', {
+      result: expect.objectContaining({ value: { clicked: true } }),
+    });
+    expect(forgedInvoke).not.toHaveBeenCalled();
+    expect(JSON.stringify(originalInvoke.mock.calls)).not.toContain('8675309');
     expect(snapshot.nodes[0]).toMatchObject({ role: 'button' });
   });
 
   it('does not retry emission when the trusted result emitter rejects after a successful effect', async () => {
-    const emit = vi.fn(async () => { throw new Error('transport rejected'); });
+    const invoke = vi.fn(async () => { throw new Error('transport rejected'); });
     const click = vi.fn();
     const button: any = {
       tagName: 'BUTTON', children: [], textContent: 'Save', parentElement: null, isConnected: true,
@@ -483,7 +503,7 @@ describe('Tauri semantic browser provider lifecycle', () => {
     const body: any = { ...button, tagName: 'BODY', textContent: '', children: [button], click: vi.fn() };
     button.parentElement = body;
     const globalObject: any = {
-      __TAURI__: { event: { emit } }, document: { body, documentElement: body },
+      __TAURI__: { core: { invoke } }, document: { body, documentElement: body },
       innerWidth: 100, innerHeight: 100, location: { href: 'https://example.test/' },
       Date, URL, Event: class { constructor(public type: string) {} },
       getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
@@ -495,7 +515,9 @@ describe('Tauri semantic browser provider lifecycle', () => {
       { actionId: 'action', tabId: 'tab', generation: 1 },
     )).rejects.toThrow('transport rejected');
     expect(click).toHaveBeenCalledOnce();
-    expect(emit).toHaveBeenCalledOnce();
-    expect(emit).toHaveBeenCalledWith('browser:automation-result', expect.objectContaining({ value: { clicked: true } }));
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledWith('browser_automation_result', {
+      result: expect.objectContaining({ value: { clicked: true } }),
+    });
   });
 });

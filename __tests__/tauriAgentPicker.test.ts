@@ -386,6 +386,7 @@ describe('Tauri agent picker', () => {
       {
         routeAgentPickerModalKeydown: () => false,
         routeGitPaneShortcut: () => false,
+        routeFilesShortcut: () => false,
         handleExplicitFileSave: async () => undefined,
         createTerminalPane: async () => { throw new Error('terminal shortcut should not run'); },
         openAgentPicker: () => { calls.picker += 1; return true; },
@@ -451,6 +452,7 @@ describe('Tauri agent picker', () => {
       {
         routeAgentPickerModalKeydown: () => false,
         routeGitPaneShortcut: () => false,
+        routeFilesShortcut: () => false,
         handleExplicitFileSave: async () => undefined,
         createTerminalPane: async () => { throw new Error('terminal shortcut should not run'); },
         openAgentPicker: () => { openCalls += 1; return false; },
@@ -500,6 +502,7 @@ describe('Tauri agent picker', () => {
       {
         routeAgentPickerModalKeydown: () => false,
         routeGitPaneShortcut: () => false,
+        routeFilesShortcut: () => false,
         handleExplicitFileSave: async () => undefined,
         createTerminalPane: async () => { throw new Error('terminal shortcut should not run'); },
         openAgentPicker: () => { calls.picker += 1; return true; },

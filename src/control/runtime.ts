@@ -173,6 +173,7 @@ export class ControlRuntime {
   private readonly promptDispatcher: PromptDispatcher;
   private readonly resourceQueues = new Map<string, PaneQueueState>();
   private readonly leaseRequests = new Map<string, LeaseRequestRecord>();
+  private readonly leaseRequestTombstones = new Set<string>();
   private readonly pendingApprovals = new Map<string, SurfaceActionContext>();
   private readonly receipts = new Map<string, ActionReceipt>();
   private readonly passiveTerminalizations = new Map<string, Promise<unknown>>();
@@ -388,10 +389,11 @@ export class ControlRuntime {
       }
       switch (command.kind) {
         case 'lease.request': {
-          if (this.leaseRequests.has(command.id)) {
+          if (this.leaseRequests.has(command.id) || this.leaseRequestTombstones.has(command.id)
+            || this.capabilityLeases.snapshot().some((lease) => lease.requestId === command.id)) {
             throw codedRuntimeError('lease_request_conflict', 'lease request ID already exists');
           }
-          if (this.leaseRequests.size >= AGENT_CONTROL_LIMITS.leaseRequestRecords) {
+          if (this.leaseRequests.size >= AGENT_CONTROL_LIMITS.leaseRequestPending) {
             throw codedRuntimeError('lease_request_capacity', 'lease request capacity is exhausted');
           }
           this.assertLeaseRequestBounds(command);
@@ -411,6 +413,10 @@ export class ControlRuntime {
         case 'lease.grant': {
           const request = this.leaseRequests.get(command.payload.requestId);
           if (!request) {
+            if (this.leaseRequestTombstones.has(command.payload.requestId)
+              || this.capabilityLeases.snapshot().some((lease) => lease.requestId === command.payload.requestId)) {
+              throw codedRuntimeError('lease_request_consumed', 'lease request has already been resolved');
+            }
             throw codedRuntimeError('lease_request_missing', 'lease request does not exist');
           }
           if (request.ownerEpoch !== this.ownerEpoch || request.ownerEpoch !== command.ownerEpoch) {
@@ -428,7 +434,8 @@ export class ControlRuntime {
             grants: request.grants,
             grantedBy: command.actor.id,
           });
-          this.leaseRequests.set(request.id, Object.freeze({ ...request, status: 'granted' }));
+          this.leaseRequests.delete(request.id);
+          this.rememberLeaseRequestIdentity(request.id);
           return this.appendTerminal(command, succeededOutcome({ lease }));
         }
         case 'lease.release': {
@@ -439,16 +446,14 @@ export class ControlRuntime {
           }
           this.capabilityLeases.release(lease.id);
           await this.revokeApprovalsForLease(lease.id);
-          const request = this.leaseRequests.get(lease.requestId);
-          if (request) this.leaseRequests.set(request.id, Object.freeze({ ...request, status: 'released' }));
+          this.rememberLeaseRequestIdentity(lease.requestId);
           return this.appendTerminal(command, succeededOutcome());
         }
         case 'lease.revoke': {
           const lease = this.capabilityLeases.revoke(command.payload.leaseId);
           if (lease) {
             await this.revokeApprovalsForLease(lease.id);
-            const request = this.leaseRequests.get(lease.requestId);
-            if (request) this.leaseRequests.set(request.id, Object.freeze({ ...request, status: 'revoked' }));
+            this.rememberLeaseRequestIdentity(lease.requestId);
           }
           return this.appendTerminal(command, succeededOutcome());
         }
@@ -985,8 +990,17 @@ export class ControlRuntime {
   private async revokeTarget(target: LeaseTarget): Promise<void> {
     for (const lease of this.capabilityLeases.revokeTarget(target)) {
       await this.revokeApprovalsForLease(lease.id);
-      const request = this.leaseRequests.get(lease.requestId);
-      if (request) this.leaseRequests.set(request.id, Object.freeze({ ...request, status: 'revoked' }));
+      this.rememberLeaseRequestIdentity(lease.requestId);
+    }
+  }
+
+  private rememberLeaseRequestIdentity(requestId: string): void {
+    this.leaseRequestTombstones.delete(requestId);
+    this.leaseRequestTombstones.add(requestId);
+    while (this.leaseRequestTombstones.size > AGENT_CONTROL_LIMITS.leaseRequestRecords) {
+      const oldest = this.leaseRequestTombstones.values().next().value;
+      if (oldest === undefined) break;
+      this.leaseRequestTombstones.delete(oldest);
     }
   }
 

@@ -18,7 +18,7 @@ const TrustedWeakSet = WeakSet;
 const TrustedSet = Set;
 const TrustedPromise = Promise;
 const promiseResolve = TrustedPromise.resolve.bind(TrustedPromise);
-const promiseRace = TrustedPromise.race.bind(TrustedPromise);
+const trustedPromiseThen = TrustedPromise.prototype.then;
 const trustedSetTimeout = globalThis.setTimeout.bind(globalThis);
 const trustedClearTimeout = globalThis.clearTimeout.bind(globalThis);
 const textEncoder = new TextEncoder();
@@ -85,6 +85,7 @@ const INSTALLED = new TrustedWeakMap();
 
 const INTERACTIVE_TAGS = new TrustedSet(['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY', 'IFRAME']);
 const ALLOWED_ROLES = new TrustedSet(['button', 'link', 'textbox', 'checkbox', 'radio', 'combobox', 'option', 'frame', 'img', 'heading', 'status', 'dialog', 'menu', 'menuitem', 'tab', 'tabpanel', 'switch']);
+const AUTOMATION_ERROR_CODES = new TrustedSet(['action_cancelled', 'automation_failed', 'backend_unavailable', 'bad_request', 'effect_unknown', 'ref_missing', 'result_too_large', 'serialization_failed', 'snapshot_stale', 'target_changed', 'target_unavailable', 'unsupported_operation']);
 
 export function installBrowserAutomation(globalObject, options = {}) {
   if (!globalObject || (typeof globalObject !== 'object' && typeof globalObject !== 'function')) {
@@ -94,14 +95,23 @@ export function installBrowserAutomation(globalObject, options = {}) {
   if (existing) return existing;
 
   const now = typeof options.now === 'function' ? options.now : () => globalObject.Date?.now?.() ?? Date.now();
-  const eventApi = globalObject.__TAURI__?.event;
-  const trustedEmit = typeof eventApi?.emit === 'function' ? eventApi.emit.bind(eventApi) : null;
+  const coreApi = globalObject.__TAURI__?.core;
+  const trustedInvoke = typeof coreApi?.invoke === 'function' ? coreApi.invoke.bind(coreApi) : null;
   const readScriptIdentity = createScriptIdentityReader(globalObject);
   let sequence = 0;
   let current = null;
 
   function invalidate() {
     current = null;
+  }
+
+  async function dispatchScript(request) {
+    try {
+      return await runScript(request, globalObject, now, readScriptIdentity);
+    } catch (error) {
+      if (error?.invalidate === true) invalidate();
+      throw error;
+    }
   }
 
   function requireCurrent(request) {
@@ -151,10 +161,7 @@ export function installBrowserAutomation(globalObject, options = {}) {
       return boundedResult;
     }
     if (request.type === 'script') {
-      return runScript(request, globalObject, now, readScriptIdentity).catch((error) => {
-        if (error?.invalidate === true) invalidate();
-        throw error;
-      });
+      return dispatchScript(request);
     }
     if (request.type !== 'resolve') {
       throw automationError('unsupported_operation', 'unsupported_operation: automation operation is not allowed');
@@ -165,7 +172,7 @@ export function installBrowserAutomation(globalObject, options = {}) {
   }
 
   async function dispatchAndEmit(request, receipt) {
-    if (!trustedEmit || !receipt || typeof receipt.actionId !== 'string' || typeof receipt.tabId !== 'string' ||
+    if (!trustedInvoke || !receipt || typeof receipt.actionId !== 'string' || typeof receipt.tabId !== 'string' ||
         !Number.isSafeInteger(receipt.generation)) {
       throw automationError('backend_unavailable', 'backend_unavailable: trusted automation receipt bridge is unavailable');
     }
@@ -175,11 +182,10 @@ export function installBrowserAutomation(globalObject, options = {}) {
       const value = await dispatch(request);
       payload = { ...correlation, value };
     } catch (error) {
-      const allowed = new TrustedSet(['action_cancelled', 'automation_failed', 'backend_unavailable', 'bad_request', 'effect_unknown', 'ref_missing', 'result_too_large', 'serialization_failed', 'snapshot_stale', 'target_changed', 'target_unavailable', 'unsupported_operation']);
-      const code = allowed.has(error?.code) ? error.code : 'automation_failed';
+      const code = AUTOMATION_ERROR_CODES.has(error?.code) ? error.code : 'automation_failed';
       payload = { ...correlation, error: { code } };
     }
-    await trustedEmit('browser:automation-result', payload);
+    await trustedInvoke('browser_automation_result', { result: payload });
   }
 
   const api = { schema: 'psyche.browser.automation/v1', dispatch, dispatchAndEmit, invalidate };
@@ -212,7 +218,7 @@ export function browserAutomationSource() {
     const MAX_NAME_WORK=${MAX_NAME_WORK}; const MAX_NAME_TOTAL_BYTES=${MAX_NAME_TOTAL_BYTES};
     const TrustedError=globalObject.Error||Error; const TrustedFunction=globalObject.Function||Function;
     const TrustedMap=globalObject.Map||Map; const TrustedWeakMap=globalObject.WeakMap||WeakMap; const TrustedWeakSet=globalObject.WeakSet||WeakSet; const TrustedSet=globalObject.Set||Set;
-    const TrustedPromise=globalObject.Promise||Promise; const promiseResolve=TrustedPromise.resolve.bind(TrustedPromise); const promiseRace=TrustedPromise.race.bind(TrustedPromise);
+    const TrustedPromise=globalObject.Promise||Promise; const promiseResolve=TrustedPromise.resolve.bind(TrustedPromise); const trustedPromiseThen=TrustedPromise.prototype.then;
     const trustedSetTimeout=(globalObject.setTimeout||setTimeout).bind(globalObject); const trustedClearTimeout=(globalObject.clearTimeout||clearTimeout).bind(globalObject);
     const TrustedTextEncoder=globalObject.TextEncoder||TextEncoder; const textEncoder=new TrustedTextEncoder(); const encodeText=textEncoder.encode.bind(textEncoder);
     const TrustedArray=globalObject.Array||Array; const TrustedNumber=globalObject.Number||Number; const TrustedObject=globalObject.Object||Object; const TrustedJSON=globalObject.JSON||JSON; const TrustedMath=globalObject.Math||Math; const TrustedReflect=globalObject.Reflect||Reflect;
@@ -268,6 +274,7 @@ export function browserAutomationSource() {
     const SCRIPT_SOURCE_BYTES=${SCRIPT_SOURCE_BYTES}; const SCRIPT_RESULT_BYTES=${SCRIPT_RESULT_BYTES}; const SCRIPT_TIMEOUT_MS=${SCRIPT_TIMEOUT_MS};
     const INTERACTIVE_TAGS=new TrustedSet(${JSON.stringify([...INTERACTIVE_TAGS])});
     const ALLOWED_ROLES=new TrustedSet(${JSON.stringify([...ALLOWED_ROLES])});
+    const AUTOMATION_ERROR_CODES=new TrustedSet(${JSON.stringify([...AUTOMATION_ERROR_CODES])});
     ${automationError.toString()}
     ${readAttribute.toString()}
     ${hasAttribute.toString()}
@@ -303,6 +310,7 @@ export function browserAutomationSource() {
     ${assertJsonValue.toString()}
     ${createScriptIdentityReader.toString()}
     ${assertScriptIdentity.toString()}
+    ${runScriptWithTimeout.toString()}
     ${runScript.toString()}
     ${captureSnapshot.toString()}
     ${installBrowserAutomation.toString()}
@@ -325,7 +333,7 @@ function assertJsonValue(value, seen, depth = 0) {
     throw automationError('serialization_failed', 'serialization_failed: result contains a native object');
   }
   const entries = arrayIsArray(value) ? value : objectValues(value);
-  for (const item of entries) assertJsonValue(item, seen, depth + 1);
+  for (let index = 0; index < entries.length; index += 1) assertJsonValue(entries[index], seen, depth + 1);
   seen.delete(value);
 }
 
@@ -373,6 +381,38 @@ function assertScriptIdentity(readIdentity, expected) {
   }
 }
 
+function runScriptWithTimeout(run) {
+  return new TrustedPromise((resolve, reject) => {
+    let settled = false;
+    let timeoutId;
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      trustedClearTimeout(timeoutId);
+      callback(value);
+    };
+    timeoutId = trustedSetTimeout(() => {
+      const error = automationError('effect_unknown', 'effect_unknown: browser script exceeded five seconds and may still be running');
+      error.ambiguous = true;
+      settle(reject, error);
+    }, SCRIPT_TIMEOUT_MS);
+    let execution;
+    try { execution = run(); }
+    catch (error) { settle(reject, error); return; }
+    let normalized;
+    try { normalized = promiseResolve(execution); }
+    catch (error) { settle(reject, error); return; }
+    try {
+      reflectApply(trustedPromiseThen, normalized, [
+        (value) => settle(resolve, value),
+        (error) => settle(reject, error),
+      ]);
+    } catch (error) {
+      settle(reject, error);
+    }
+  });
+}
+
 async function runScript(request, globalObject, now, readIdentity) {
   if (typeof request.source !== 'string' || encodeText(request.source).length > SCRIPT_SOURCE_BYTES) {
     throw automationError('script_source_too_large', 'script_source_too_large: browser script source exceeds maximum');
@@ -381,21 +421,9 @@ async function runScript(request, globalObject, now, readIdentity) {
   try { identity = readIdentity(); }
   catch { throw automationError('backend_unavailable', 'backend_unavailable: browser document identity is unavailable'); }
   const startedAt = now();
-  let timeoutId;
-  const timeout = new TrustedPromise((_, reject) => {
-    timeoutId = trustedSetTimeout(() => {
-      const error = automationError('effect_unknown', 'effect_unknown: browser script exceeded five seconds and may still be running');
-      error.ambiguous = true;
-      reject(error);
-    }, SCRIPT_TIMEOUT_MS);
-  });
   let value;
-  try {
-    const execute = TrustedFunction('args', `"use strict"; return (async()=>{${request.source}\n})();`);
-    value = await promiseRace([promiseResolve().then(() => execute(request.args)), timeout]);
-  } finally {
-    trustedClearTimeout(timeoutId);
-  }
+  const execute = TrustedFunction('args', `"use strict"; return (async()=>{${request.source}\n})();`);
+  value = await runScriptWithTimeout(() => execute(request.args));
   assertScriptIdentity(readIdentity, identity);
   let serializedError;
   let hasSerializedError = false;

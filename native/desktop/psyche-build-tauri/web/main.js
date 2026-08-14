@@ -9181,6 +9181,7 @@
           await invoke("browser_eval", {
             label: browserLabelForTab(pair.project, pair.tab),
             script: (browserTabLifecycle(pair.tab).automationSource || PsycheControl.browserAutomationSource()) + "\n" + browserAutomationDispatchScript(effect),
+            automationReceipt: { actionId: effect.actionId, tabId: effect.tabId, generation: effect.generation },
           });
         } catch (evalError) {
           resultFlight.cancel(evalError);

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { createContext, runInContext } from 'node:vm';
 
 import {
   browserAutomationSource,
@@ -227,6 +228,69 @@ describe('bounded semantic browser automation', () => {
     catch (error) { oversized = error; }
     expect(exact).toMatchObject({ value: { answer: 42 }, resultBytes: 13 });
     expect(oversized).toMatchObject({ code: 'result_too_large' });
+  });
+
+  it('does not trust child Promise methods or Array iteration after document-start', async () => {
+    vi.useFakeTimers();
+    try {
+      const emitted: Array<{ event: string; payload: any }> = [];
+      const completed: string[] = [];
+      let executions = 0;
+      const root = {};
+      const context = createContext({
+        document: { body: root, documentElement: root },
+        location: { href: 'https://example.test/' },
+        URL, TextEncoder, setTimeout, clearTimeout,
+        __TAURI__: { core: { invoke: async (event: string, args: { result: unknown }) => { emitted.push({ event, payload: args.result }); } } },
+        increment: () => { executions += 1; },
+        completed: (label: string) => { completed.push(label); },
+      });
+      runInContext(browserAutomationSource(), context);
+      runInContext(`
+        globalThis.__PSYCHE_ORIGINAL_PROMISE__ = Promise;
+        Promise.prototype.then = function () { throw new Error('page then'); };
+        Promise.prototype.catch = function () { throw new Error('page catch'); };
+        Array.prototype[Symbol.iterator] = function () { throw new Error('page iterator'); };
+        globalThis.Promise = class { constructor() { throw new Error('page Promise'); } };
+      `, context);
+      runInContext(`
+        (async () => {
+          await __PSYCHE_AUTOMATION__.dispatchAndEmit(
+            { type: 'script', source: 'args.increment(); return { ok: true };', args: { increment } },
+            { actionId: 'success', tabId: 'tab', generation: 1 }
+          );
+          completed('success');
+        })();
+        (async () => {
+          await __PSYCHE_AUTOMATION__.dispatchAndEmit(
+            { type: 'script', source: 'throw new Error("script failure");' },
+            { actionId: 'error', tabId: 'tab', generation: 1 }
+          );
+          completed('error');
+        })();
+        (async () => {
+          await __PSYCHE_AUTOMATION__.dispatchAndEmit(
+            { type: 'script', source: 'await new __PSYCHE_ORIGINAL_PROMISE__(() => {});' },
+            { actionId: 'timeout', tabId: 'tab', generation: 1 }
+          );
+          completed('timeout');
+        })();
+      `, context);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(executions).toBe(1);
+      expect(completed.sort()).toEqual(['error', 'success', 'timeout']);
+      expect(emitted).toHaveLength(3);
+      expect(emitted.find(({ payload }) => payload.actionId === 'success')?.payload)
+        .toMatchObject({ value: { value: { ok: true } } });
+      expect(emitted.find(({ payload }) => payload.actionId === 'error')?.payload)
+        .toMatchObject({ error: { code: 'automation_failed' } });
+      expect(emitted.find(({ payload }) => payload.actionId === 'timeout')?.payload)
+        .toMatchObject({ error: { code: 'effect_unknown' } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([
