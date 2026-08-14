@@ -150,6 +150,22 @@ describe('native browser script authority', () => {
     expect(error.message).not.toContain('result-secret');
   });
 
+  it('maps mutation and snapshot failures to sanitized stable errors', () => {
+    const normalize = Function(`return (${functionSource(main, 'browserNativeScriptError')});`)();
+    for (const code of [
+      'args_too_large',
+      'snapshot_too_large',
+      'mutation_plan_invalid',
+      'mutation_target_stale',
+      'mutation_not_allowed',
+    ]) {
+      const error = normalize(Object.assign(new Error(`${code}: secret`), { code }));
+      expect(error).toMatchObject({ code, ambiguous: false });
+      expect(error.message).toBe(`browser script failed: ${code}`);
+      expect(error.message).not.toContain('secret');
+    }
+  });
+
   it('routes approved scripts through an invocation-scoped WKContentWorld', () => {
     expect(lib).toMatch(/async fn browser_script\(/);
     expect(lib).toContain('WKContentWorld::worldWithName');
