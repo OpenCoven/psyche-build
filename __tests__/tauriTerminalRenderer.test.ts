@@ -59,7 +59,10 @@ class FakeTerminal {
   }
 
   loadAddon(addon: unknown) {
-    if (addon instanceof FakeWebglAddon) this.lifecycleEvents?.push('webgl');
+    if (addon instanceof FakeWebglAddon) {
+      if (addon.loadError) throw addon.loadError;
+      this.lifecycleEvents?.push('webgl');
+    }
     this.loadedAddons.push(addon);
   }
 
@@ -107,10 +110,21 @@ class FakeFitAddon {
 class FakeWebglAddon {
   disposeCalls = 0;
   contextLossDisposals = 0;
+  private contextLossListener: (() => void) | null = null;
 
-  onContextLoss(_listener: () => void): Disposable {
-    return { dispose: () => { this.contextLossDisposals += 1; } };
+  constructor(readonly loadError: Error | null = null) {}
+
+  onContextLoss(listener: () => void): Disposable {
+    this.contextLossListener = listener;
+    return {
+      dispose: () => {
+        this.contextLossDisposals += 1;
+        if (this.contextLossListener === listener) this.contextLossListener = null;
+      },
+    };
   }
+
+  loseContext() { this.contextLossListener?.(); }
 
   dispose() { this.disposeCalls += 1; }
 }
@@ -157,6 +171,7 @@ function createHarness(
     ptyFactory?: TerminalPanePtyFactory;
     webglFactory?: () => FakeWebglAddon | null;
     reportError?: (error: unknown, operation: string) => void;
+    now?: () => number;
   } = {},
 ) {
   const frames = options.frames ?? frameQueue();
@@ -207,6 +222,7 @@ function createHarness(
     onData: () => undefined,
     onBell: () => undefined,
     reportError: options.reportError,
+    now: options.now,
   });
   controllers.push(controller);
   return { controller, element, terminals, fits, webgls, frames, scheduler, invoke, observerDisposals };
@@ -501,11 +517,279 @@ describe('TerminalPaneController lifecycle', () => {
     expect(success.terminals[0].loadedAddons).toEqual([success.fits[0], success.webgls[0]]);
     expect(lifecycleEvents).toEqual(['open', 'webgl']);
     expect(success.controller.rendererSnapshot().state).toBe('webgl');
+    expect(success.controller.rendererSnapshot().fallbackReason).toBeNull();
 
-    expect(() => createHarness('webgl-fallback', {
-      webglFactory: () => { throw new Error('GPU unavailable'); },
-    })).not.toThrow();
-    expect(controllers.at(-1)?.rendererSnapshot().state).toBe('fallback');
+    const failedAddon = new FakeWebglAddon(new Error('GPU load failed'));
+    const loadFailure = createHarness('webgl-load-failure', {
+      webglFactory: () => failedAddon,
+    });
+    expect(loadFailure.controller.rendererSnapshot()).toMatchObject({
+      state: 'fallback',
+      fallbackReason: 'webgl_setup_failed',
+    });
+    expect(failedAddon.disposeCalls).toBe(1);
+    expect(loadFailure.terminals[0].loadedAddons).toEqual([loadFailure.fits[0]]);
+
+    const unavailable = createHarness('webgl-unavailable', { webglFactory: () => null });
+    expect(unavailable.controller.rendererSnapshot()).toMatchObject({
+      state: 'fallback',
+      fallbackReason: 'webgl_unavailable',
+    });
+  });
+
+  it('recreates WebGL exactly once on a visible frame and schedules a fresh fit', () => {
+    const first = new FakeWebglAddon();
+    const recovered = new FakeWebglAddon();
+    const factory = vi.fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(recovered);
+    const harness = createHarness('webgl-recovery', { webglFactory: factory });
+    harness.frames.flush();
+    const fitsBeforeLoss = harness.fits[0].fitCalls;
+
+    first.loseContext();
+    expect(harness.controller.rendererSnapshot()).toMatchObject({
+      state: 'recovering',
+      fallbackReason: null,
+    });
+    expect(first.contextLossDisposals).toBe(1);
+    expect(first.disposeCalls).toBe(1);
+
+    harness.frames.flush(32);
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(harness.terminals[0].loadedAddons.at(-1)).toBe(recovered);
+    expect(harness.controller.rendererSnapshot()).toMatchObject({
+      state: 'webgl',
+      fallbackReason: null,
+    });
+    expect(harness.frames.queued).toHaveLength(1);
+    harness.frames.flush(48);
+    expect(harness.fits[0].fitCalls).toBe(fitsBeforeLoss + 1);
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(harness.terminals[0].disposeCalls).toBe(0);
+    expect(harness.fits[0].disposeCalls).toBe(0);
+  });
+
+  it('keeps disposed state when the recovery factory disposes the pane', () => {
+    const first = new FakeWebglAddon();
+    const replacement = new FakeWebglAddon();
+    let controller: TerminalPaneController | null = null;
+    let factoryCalls = 0;
+    const harness = createHarness('webgl-reentrant-dispose', {
+      webglFactory: () => {
+        factoryCalls += 1;
+        if (factoryCalls === 1) return first;
+        controller?.dispose();
+        return replacement;
+      },
+    });
+    controller = harness.controller;
+    harness.frames.flush();
+
+    first.loseContext();
+    harness.frames.flush(32);
+
+    expect(harness.controller.rendererSnapshot().state).toBe('disposed');
+    expect(replacement.disposeCalls).toBe(1);
+    expect(replacement.contextLossDisposals).toBe(0);
+    expect(harness.terminals[0].loadedAddons).not.toContain(replacement);
+    expect(harness.frames.queued).toHaveLength(0);
+  });
+
+  it.each([
+    ['null recreation', () => null],
+    ['factory throw', () => { throw new Error('recreate failed'); }],
+    ['load throw', () => new FakeWebglAddon(new Error('load failed'))],
+  ])('falls back without crashing after %s', (_label, recreate) => {
+    const first = new FakeWebglAddon();
+    let factoryCalls = 0;
+    const reportError = vi.fn();
+    const harness = createHarness(`webgl-failed-${_label}`, {
+      webglFactory: () => {
+        factoryCalls += 1;
+        return factoryCalls === 1 ? first : recreate();
+      },
+      reportError,
+    });
+    harness.frames.flush();
+
+    expect(() => first.loseContext()).not.toThrow();
+    expect(() => harness.frames.flush(32)).not.toThrow();
+
+    const snapshot = harness.controller.rendererSnapshot();
+    expect(snapshot.state).toBe('fallback');
+    expect(snapshot.fallbackReason).toBe('webgl_recovery_failed');
+    expect(snapshot.fallbackReason).toMatch(/^[a-z0-9_]{1,64}$/);
+    expect(factoryCalls).toBe(2);
+    expect(harness.terminals[0].disposeCalls).toBe(0);
+    expect(harness.fits[0].disposeCalls).toBe(0);
+  });
+
+  it('keeps a second loss inside the recovery cooldown on fallback without retrying', () => {
+    let timestamp = 1_000;
+    const first = new FakeWebglAddon();
+    const recovered = new FakeWebglAddon();
+    const factory = vi.fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(recovered);
+    const harness = createHarness('webgl-cooldown', {
+      webglFactory: factory,
+      now: () => timestamp,
+    });
+    harness.frames.flush();
+    first.loseContext();
+    harness.frames.flush(32);
+
+    timestamp += 29_999;
+    recovered.loseContext();
+
+    expect(harness.controller.rendererSnapshot()).toMatchObject({
+      state: 'fallback',
+      fallbackReason: 'webgl_recovery_cooldown',
+    });
+    expect(recovered.contextLossDisposals).toBe(1);
+    expect(recovered.disposeCalls).toBe(1);
+    harness.frames.flush(48);
+    expect(factory).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps disposed state when cooldown evaluation disposes the pane', () => {
+    let controller: TerminalPaneController | null = null;
+    let nowCalls = 0;
+    const harness = createHarness('webgl-cooldown-reentrant-dispose', {
+      now: () => {
+        nowCalls += 1;
+        if (nowCalls === 1) return 0;
+        controller?.dispose();
+        return 30_000;
+      },
+    });
+    controller = harness.controller;
+    harness.frames.flush();
+
+    harness.webgls[0].loseContext();
+    harness.frames.flush(32);
+    harness.frames.flush(48);
+    const recovered = harness.webgls[1];
+
+    recovered.loseContext();
+
+    expect(harness.controller.rendererSnapshot().state).toBe('disposed');
+    expect(recovered.contextLossDisposals).toBe(1);
+    expect(recovered.disposeCalls).toBe(1);
+    expect(harness.frames.queued).toHaveLength(0);
+  });
+
+  it('permits recovery at 30 seconds and resets cooldown on success', () => {
+    let timestamp = 10;
+    const addons = [new FakeWebglAddon(), new FakeWebglAddon(), new FakeWebglAddon()];
+    const factory = vi.fn(() => addons.shift() ?? null);
+    const harness = createHarness('webgl-cooldown-reset', {
+      webglFactory: factory,
+      now: () => timestamp,
+    });
+    harness.frames.flush();
+
+    const initial = harness.terminals[0].loadedAddons.at(-1) as FakeWebglAddon;
+    initial.loseContext();
+    harness.frames.flush(32);
+    const firstRecovery = harness.terminals[0].loadedAddons.at(-1) as FakeWebglAddon;
+
+    timestamp += 30_000;
+    firstRecovery.loseContext();
+    expect(harness.controller.rendererSnapshot().state).toBe('recovering');
+    harness.frames.flush(48);
+    expect(harness.controller.rendererSnapshot().state).toBe('webgl');
+    expect(factory).toHaveBeenCalledTimes(3);
+
+    timestamp += 29_999;
+    const secondRecovery = harness.terminals[0].loadedAddons.at(-1) as FakeWebglAddon;
+    secondRecovery.loseContext();
+    expect(harness.controller.rendererSnapshot()).toMatchObject({
+      state: 'fallback',
+      fallbackReason: 'webgl_recovery_cooldown',
+    });
+    expect(factory).toHaveBeenCalledTimes(3);
+  });
+
+  it('defers recovery until a hidden pane becomes visible and measurably sized', async () => {
+    const first = new FakeWebglAddon();
+    const recovered = new FakeWebglAddon();
+    const factory = vi.fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(recovered);
+    const harness = createHarness('webgl-hidden-recovery', {
+      visibility: { ...visible, paneVisible: false },
+      webglFactory: factory,
+    });
+
+    first.loseContext();
+    harness.frames.flush();
+    expect(harness.controller.rendererSnapshot().state).toBe('recovering');
+    expect(factory).toHaveBeenCalledTimes(1);
+
+    harness.element.clientWidth = 0;
+    await harness.controller.setVisibility(visible);
+    harness.frames.flush(32);
+    expect(harness.controller.rendererSnapshot().state).toBe('recovering');
+    expect(factory).toHaveBeenCalledTimes(1);
+
+    harness.element.clientWidth = 640;
+    harness.controller.scheduleFit();
+    harness.frames.flush(48);
+    expect(harness.controller.rendererSnapshot().state).toBe('webgl');
+    expect(factory).toHaveBeenCalledTimes(2);
+  });
+
+  it('isolates renderer recovery from other panes', () => {
+    const first = createHarness('webgl-isolation-a');
+    const second = createHarness('webgl-isolation-b');
+    first.frames.flush();
+    second.frames.flush();
+
+    first.webgls[0].loseContext();
+    first.frames.flush(32);
+
+    expect(first.controller.rendererSnapshot().state).toBe('webgl');
+    expect(first.webgls).toHaveLength(2);
+    expect(second.controller.rendererSnapshot().state).toBe('webgl');
+    expect(second.webgls).toHaveLength(1);
+    expect(second.webgls[0].disposeCalls).toBe(0);
+    expect(second.terminals[0].disposeCalls).toBe(0);
+  });
+
+  it('continues raw PTY delivery through renderer recovery', () => {
+    const ptyDispose = vi.fn();
+    const ptyStop = vi.fn();
+    const ptyFactory: TerminalPanePtyFactory = (options) => {
+      const client = createPtyClient(options);
+      return {
+        ...client,
+        receive: routePtyBatch,
+        stopPtyDelivery() {
+          ptyStop();
+          client.stopPtyDelivery();
+        },
+        dispose() {
+          ptyDispose();
+          client.dispose();
+        },
+      };
+    };
+    const harness = createHarness('webgl-raw-continuity', { ptyFactory });
+    harness.frames.flush();
+    harness.webgls[0].loseContext();
+
+    expect(harness.controller.receive(batch('webgl-raw-continuity', 1, [7, 8, 9]))).toBe(true);
+    harness.frames.flush(32);
+
+    expect(harness.controller.rendererSnapshot().state).toBe('webgl');
+    expect(harness.terminals[0].writes).toHaveLength(1);
+    expect(Array.from(harness.terminals[0].writes[0].data as Uint8Array)).toEqual([7, 8, 9]);
+    expect(harness.terminals[0].disposeCalls).toBe(0);
+    expect(harness.fits[0].disposeCalls).toBe(0);
+    expect(ptyStop).not.toHaveBeenCalled();
+    expect(ptyDispose).not.toHaveBeenCalled();
   });
 });
 
@@ -516,6 +800,10 @@ describe('Tauri terminal controller integration', () => {
   );
   const runtimeEntry = readFileSync(
     resolve(process.cwd(), 'native/desktop/psyche-build-tauri/web/runtime/runtime-entry.ts'),
+    'utf8',
+  );
+  const runtimeBundle = readFileSync(
+    resolve(process.cwd(), 'native/desktop/psyche-build-tauri/web/runtime.bundle.js'),
     'utf8',
   );
 
@@ -532,5 +820,10 @@ describe('Tauri terminal controller integration', () => {
     expect(mainSource).not.toContain('ptyRuntime.routePtyBatch(payload)');
     expect(mainSource).toContain('thread.terminalController.receive(payload)');
     expect(mainSource).toContain('thread.terminalController.setTheme(terminalTheme())');
+  });
+
+  it('ships the WebGL recovery and cooldown state machine in the runtime bundle', () => {
+    expect(runtimeBundle).toContain('webgl_recovery_failed');
+    expect(runtimeBundle).toContain('webgl_recovery_cooldown');
   });
 });
