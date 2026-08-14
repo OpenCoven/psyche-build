@@ -179,7 +179,7 @@ describe('native Files pane commands and dirty boundaries', () => {
               inactive,
             ],
           },
-          saveWorkspaceNow: vi.fn(),
+          saveWorkspaceNow: vi.fn().mockResolvedValue(true),
           statusController: { stop },
           destroyingWindow: false,
         },
@@ -199,7 +199,7 @@ describe('native Files pane commands and dirty boundaries', () => {
     };
     const event: CleanUnloadEventStub = { preventDefault: vi.fn(), returnValue: undefined };
     const stop = vi.fn();
-    const saveWorkspaceNow = vi.fn();
+    const saveWorkspaceNow = vi.fn().mockResolvedValue(true);
     const handler = compileFunction<(value: CleanUnloadEventStub) => boolean | undefined>(
       'handleWindowBeforeUnload',
       {

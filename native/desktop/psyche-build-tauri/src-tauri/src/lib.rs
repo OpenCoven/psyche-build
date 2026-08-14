@@ -41,6 +41,7 @@ use tauri::{
 mod control_provider;
 mod coven_sessions;
 mod metrics;
+mod native_sessions;
 mod native_workspace;
 mod pane_metrics;
 mod platform;
@@ -55,6 +56,10 @@ use control_provider::{
 use coven_sessions::is_safe_session_id;
 use coven_sessions::{coven_session_kill, coven_sessions};
 use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
+use native_sessions::{
+    native_session_capture, native_session_create, native_session_list, native_session_stop,
+    NativeLaunchKind, NativeSessionCreate,
+};
 use native_workspace::{workspace_load, workspace_save};
 use pane_metrics::PaneSessionMetrics;
 use pty_transport::{
@@ -1229,6 +1234,15 @@ pub struct StartOptions {
     pub rows: Option<u16>,
     /// Extra environment variables on top of the inherited environment.
     pub env: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PtyAttachOptions {
+    pub thread_id: String,
+    pub session_id: String,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
 }
 
 #[cfg(unix)]
@@ -2428,14 +2442,24 @@ fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<(), Strin
         cmd.env(key, value);
     }
 
+    resolved_cwd.configure_command_cwd(&mut cmd)?;
+    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    drop(resolved_cwd);
+    register_pty_client(app, thread_id, pending_start, pair, child)
+}
+
+fn register_pty_client(
+    app: AppHandle,
+    thread_id: String,
+    pending_start: PendingPtyStart,
+    pair: portable_pty::PtyPair,
+    mut child: Box<dyn Child + Send + Sync>,
+) -> Result<(), String> {
     let spawn_time_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    resolved_cwd.configure_command_cwd(&mut cmd)?;
-    let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let pid = child.process_id();
-    drop(resolved_cwd);
     let terminator = PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref())
         .map_err(|error| error.to_string())?;
     let mut spawn_guard = PtySpawnTerminationGuard::new(terminator.clone());
@@ -2536,6 +2560,45 @@ fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<(), Strin
     }
 
     Ok(())
+}
+
+#[tauri::command]
+async fn pty_attach(app: AppHandle, options: PtyAttachOptions) -> Result<(), String> {
+    match tauri::async_runtime::spawn_blocking(move || pty_attach_blocking(app, options)).await {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY attach task: {error}")),
+    }
+}
+
+fn pty_attach_blocking(app: AppHandle, options: PtyAttachOptions) -> Result<(), String> {
+    validate_pty_thread_id(&options.thread_id)?;
+    let attach_args = native_sessions::build_attach_args(
+        &native_sessions::native_socket_path()?,
+        &options.session_id,
+    )?;
+    let pending_start = PendingPtyStart::reserve(&options.thread_id)?;
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: options.rows.unwrap_or(40),
+            cols: options.cols.unwrap_or(120),
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| error.to_string())?;
+    let tmux = which_on_path("tmux")
+        .ok_or_else(|| "tmux is unavailable; install tmux and restart Psyche".to_string())?;
+    let mut command = CommandBuilder::new(tmux);
+    command.args(attach_args);
+    command.env("PATH", platform::augmented_path());
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env_remove("TMUX");
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| error.to_string())?;
+    register_pty_client(app, options.thread_id, pending_start, pair, child)
 }
 
 #[tauri::command]
@@ -3885,6 +3948,83 @@ fn app_environment() -> AppEnvironment {
     }
 }
 
+fn native_launch_command(request: &NativeSessionCreate) -> Result<(String, Vec<String>), String> {
+    #[cfg(not(unix))]
+    {
+        let _ = request;
+        return Err("durable native sessions require tmux on a Unix platform".to_string());
+    }
+
+    #[cfg(unix)]
+    {
+        let environment = app_environment();
+        let (executable, command_args) = match &request.launch_kind {
+            NativeLaunchKind::Shell => (environment.default_shell, environment.default_shell_args),
+            NativeLaunchKind::Psyche => (
+                environment
+                    .node_path
+                    .ok_or_else(|| "node is unavailable".to_string())?,
+                vec![environment
+                    .psyche_entry
+                    .ok_or_else(|| "Psyche entrypoint is unavailable".to_string())?],
+            ),
+            NativeLaunchKind::CovenChat => {
+                let id = request
+                    .coven_session_id
+                    .clone()
+                    .filter(|id| is_safe_session_id(id))
+                    .ok_or_else(|| "Coven session id is unsafe".to_string())?;
+                (
+                    environment
+                        .coven_path
+                        .ok_or_else(|| "Coven CLI is unavailable".to_string())?,
+                    vec!["code".to_string(), "--session-id".to_string(), id],
+                )
+            }
+            NativeLaunchKind::CovenAttach => {
+                let id = request
+                    .coven_session_id
+                    .clone()
+                    .filter(|id| is_safe_session_id(id))
+                    .ok_or_else(|| "Coven session id is unsafe".to_string())?;
+                (
+                    environment
+                        .coven_path
+                        .ok_or_else(|| "Coven CLI is unavailable".to_string())?,
+                    vec!["attach".to_string(), id],
+                )
+            }
+        };
+        let mut args = vec![
+            "-u".to_string(),
+            "TMUX".to_string(),
+            "-u".to_string(),
+            "npm_config_prefix".to_string(),
+            "-u".to_string(),
+            "NPM_CONFIG_PREFIX".to_string(),
+            "-u".to_string(),
+            "PREFIX".to_string(),
+            format!("PATH={}", platform::augmented_path().to_string_lossy()),
+            "TERM=xterm-256color".to_string(),
+            "COLORTERM=truecolor".to_string(),
+            "PSYCHE_TAURI=1".to_string(),
+            "PSYCHE_NATIVE_CONTAINER=1".to_string(),
+        ];
+        if matches!(request.launch_kind, NativeLaunchKind::CovenChat) {
+            args.push(format!("{COVEN_SESSION_SOURCE}={PSYCHE_SESSION_SOURCE}"));
+        }
+        if matches!(request.launch_kind, NativeLaunchKind::Psyche) {
+            let home = environment
+                .home
+                .ok_or_else(|| "home directory is unavailable".to_string())?;
+            args.push(format!("TMUX_TMPDIR={home}/.psyche/macos-app/nested-tmux"));
+        }
+        args.push(executable);
+        args.extend(command_args);
+        Ok(("/usr/bin/env".to_string(), args))
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Agent harness skills/plugins discovery.
 //
@@ -5168,6 +5308,7 @@ pub fn run() {
         .manage(BrowserAutomationAuthorizations::default())
         .invoke_handler(tauri::generate_handler![
             pty_start,
+            pty_attach,
             pane_session_metrics,
             canonical_project_path,
             pty_write,
@@ -5194,6 +5335,10 @@ pub fn run() {
             coven_session_kill,
             workspace_load,
             workspace_save,
+            native_session_create,
+            native_session_list,
+            native_session_stop,
+            native_session_capture,
             agent_skills,
             fs_list_dir,
             fs_read_text,

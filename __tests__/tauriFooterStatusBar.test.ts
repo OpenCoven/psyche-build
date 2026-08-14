@@ -856,7 +856,7 @@ describe('Tauri footer status bar shell', () => {
       /state\.env = env \|\| \{\};[\s\S]*statusController[\s\S]*statusController\.start\(\);/s
     );
     expect(mainJs).toMatch(
-      /function handleWindowBeforeUnload\(event\) \{[\s\S]*saveWorkspaceNow\(\);[\s\S]*window\.addEventListener\("beforeunload", handleWindowBeforeUnload\);/s
+      /function handleWindowBeforeUnload\(event\) \{[\s\S]*saveWorkspaceNow\(\)\.catch\(function \(\) \{\}\);[\s\S]*window\.addEventListener\("beforeunload", handleWindowBeforeUnload\);/s
     );
     expect(mainJs.match(/function handleWindowBeforeUnload\(event\)[\s\S]*?\n  \}/)?.[0])
       .not.toContain('statusController.stop()');

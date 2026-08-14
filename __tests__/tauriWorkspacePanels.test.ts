@@ -1215,7 +1215,7 @@ describe('Tauri workspace panels', () => {
     expect(stylesCss).not.toContain('@keyframes browser-pane-in');
   });
 
-  it('stages Git before every shared close path and preserves the Git close label', () => {
+  it('stages Git before every shared close path and preserves the Git close label', async () => {
     const calls: string[] = [];
     const attributes = new Map<string, string>();
     const thread = {
@@ -1246,6 +1246,7 @@ describe('Tauri workspace panels', () => {
       'detachThreadPane', 'stopThreadPty', 'state',
       'retainFileFocusAfterThreadRemoval', 'renderPaneWorkspace',
       'setProjectStatus', 'findProject', 'focusThread', 'refreshSidebar', 'refreshTabs',
+      'isPersistentThread', 'invoke', 'saveWorkspaceNow', 'setStatus',
       `"use strict"; return (${functionSource('closeThread')});`,
     )(
       () => thread,
@@ -1266,9 +1267,13 @@ describe('Tauri workspace panels', () => {
       () => undefined,
       () => undefined,
       () => undefined,
-    ) as (id: string) => boolean;
+      () => false,
+      async () => undefined,
+      async () => true,
+      () => undefined,
+    ) as (id: string) => Promise<boolean>;
 
-    expect(closeThread(thread.id)).toBe(true);
+    await expect(closeThread(thread.id)).resolves.toBe(true);
     expect(calls.slice(0, 3)).toEqual(['suspend', 'stage', 'detach']);
     expect(calls).not.toContain('stop');
 

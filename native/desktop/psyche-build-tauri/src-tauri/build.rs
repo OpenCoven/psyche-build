@@ -2,6 +2,7 @@ fn main() {
     let attributes =
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
             "pty_start",
+            "pty_attach",
             "pane_session_metrics",
             "canonical_project_path",
             "pty_write",
@@ -28,6 +29,10 @@ fn main() {
             "coven_session_kill",
             "workspace_load",
             "workspace_save",
+            "native_session_create",
+            "native_session_list",
+            "native_session_stop",
+            "native_session_capture",
             "agent_skills",
             "fs_list_dir",
             "fs_read_text",

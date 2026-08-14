@@ -1199,10 +1199,10 @@ describe('Tauri agent picker', () => {
 
   it('keeps shell, agent, browser, and Git launch hints distinct across menus, empty state, and help', () => {
     expect(indexHtml).toMatch(
-      /id="new-pane-term"[\s\S]*?Shell — login shell[\s\S]*?<span class="new-pane-key">⌘T<\/span>/,
+      /id="new-pane-term"[\s\S]*?Shell — login shell[\s\S]*?<span class="new-pane-key">⌃T<\/span>/,
     );
     expect(indexHtml).toMatch(
-      /id="new-pane-agent"[\s\S]*?Agent — choose CLI[\s\S]*?<span class="new-pane-key">⌘D<\/span>/,
+      /id="new-pane-agent"[\s\S]*?Agent — coven chat[\s\S]*?<span class="new-pane-key">⌃A<\/span>/,
     );
     expect(indexHtml).toMatch(
       /id="new-pane-web"[\s\S]*?Browser — web[\s\S]*?<span class="new-pane-key">Web \+<\/span>/,
@@ -1223,8 +1223,10 @@ describe('Tauri agent picker', () => {
     expect(emptyState).not.toContain('<span class="glyph">◍</span>Browser<span class="key">⌘⌥B</span>');
 
     expect(mainJs).toMatch(/\["New terminal pane", "⌘T"\]/);
+    expect(mainJs).toMatch(/\["New shell pane", "⌃T"\]/);
     expect(mainJs).toMatch(/\["Open the composer", "⌘F"\]/);
     expect(mainJs).toMatch(/\["Choose an agent", "⌘D"\]/);
+    expect(mainJs).toMatch(/\["New agent pane \(coven chat\)", "⌃A"\]/);
     expect(mainJs).toMatch(/\["New browser tab", "Web pane \+"\]/);
     expect(mainJs).toMatch(/\["Open or focus Git", "⌘G"\]/);
     expect(mainJs).not.toMatch(/\["Toggle the tools dock", "⌘⌥B"\]/);
@@ -1245,10 +1247,7 @@ describe('Tauri agent picker', () => {
       /onMenuClick\("new-pane-term", async function \(\) \{[\s\S]*?runNewShellCommand\(\)/,
     );
     expect(mainJs).toMatch(
-      /onMenuClick\("new-pane-agent", function \(\) \{[\s\S]*?openAgentPicker\(\);[\s\S]*?\}\);/,
-    );
-    expect(mainJs).not.toMatch(
-      /onMenuClick\("new-pane-agent", async function \(\) \{[\s\S]*?runNewThreadCommand\(\)/,
+      /onMenuClick\("new-pane-agent", async function \(\) \{[\s\S]*?runNewThreadCommand\(\)[\s\S]*?\}\);/,
     );
     expect(mainJs).toMatch(/onMenuClick\("new-pane-git", openGitPaneFromNewPaneMenu\)/);
     expect(functionSource('openGitPaneFromNewPaneMenu')).toContain('openOrFocusGitPane()');
