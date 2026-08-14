@@ -308,6 +308,23 @@ export async function listProjectCovenSessions(
   return scopedSessions;
 }
 
+/** Resolve a Coven session only after proving it belongs to this daemon's project. */
+export async function getProjectCovenSession(
+  projectRoot: string,
+  sessionId: string,
+  client: CovenClient,
+): Promise<CovenSessionSummary> {
+  const sessions = await listProjectCovenSessions(projectRoot, client);
+  const session = sessions.find((candidate) => candidate.id === sessionId);
+  if (!session) {
+    throw bridgeError(
+      'coven_session_not_found',
+      `Coven session ${sessionId} is not in this psyche project scope`,
+    );
+  }
+  return session;
+}
+
 export async function launchProjectCovenSession(
   projectRoot: string,
   request: Partial<CovenSessionLaunchRequest> | undefined,

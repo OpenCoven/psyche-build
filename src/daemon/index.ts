@@ -23,6 +23,7 @@ import {
   bridgeErrorMessage,
   buildScopedProject,
   capturePaneText,
+  getProjectCovenSession,
   listProjectCovenSessions,
   listScopedProjects,
   createCovenClient,
@@ -616,10 +617,8 @@ export class Connection {
       case 'coven.desktop.state': {
         try {
           const client = createCovenClient();
-          const [session, events] = await Promise.all([
-            client.getSession?.(msg.sessionId),
-            client.listEvents?.(msg.sessionId) ?? Promise.resolve([]),
-          ]);
+          const session = await getProjectCovenSession(this.deps.projectRoot, msg.sessionId, client);
+          const events = await (client.listEvents?.(msg.sessionId) ?? Promise.resolve([]));
           const state = buildDesktopUseStateFromEvents(msg.sessionId, msg.sessionId, events, session);
           this.send({ type: 'coven.desktop.state.result', requestId: msg.requestId, state });
         } catch (e) {
