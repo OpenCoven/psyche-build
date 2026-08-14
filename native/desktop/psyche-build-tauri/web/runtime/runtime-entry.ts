@@ -1,3 +1,11 @@
+export { FrameScheduler } from './frame-scheduler';
+export type {
+  FrameRequest,
+  FrameRequestCallback,
+  FrameSchedulerCallback,
+  FrameSchedulerErrorSink,
+  FrameSchedulerSnapshot,
+} from './frame-scheduler';
 export {
   createPtyClient,
   disposePtyClient,
