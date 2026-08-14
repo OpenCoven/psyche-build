@@ -28,6 +28,7 @@ async function startHarness(overrides: {
   ownerEpoch?: number;
   snapshot?: ControlServerRuntime['snapshot'];
   readEvents?: ControlServerRuntime['readEvents'];
+  operatorCommandPolicy?: 'disabled' | 'trusted-test-only';
 } = {}): Promise<Harness> {
   const projectRoot = await mkdtemp(path.join(tmpdir(), 'psyche-ctl-proj-'));
   tempRoots.push(projectRoot);
@@ -58,6 +59,7 @@ async function startHarness(overrides: {
     ownerEpoch: overrides.ownerEpoch ?? 7,
     runtime,
     credentials,
+    operatorCommandPolicy: overrides.operatorCommandPolicy ?? 'trusted-test-only',
   });
   cleanups.push(() => server.close());
 
@@ -89,6 +91,22 @@ function inputCommand(id: string): Parameters<ControlClient['submit']>[0] {
 }
 
 describe('ControlClient over the socket transport', () => {
+  it('disables bearer-token operator commands unless a native authority broker opts in', async () => {
+    const harness = await startHarness({ operatorCommandPolicy: 'disabled' });
+    const client = await ControlClient.connect({
+      projectRoot: harness.projectRoot,
+      endpoint: harness.endpoint,
+      token: harness.operatorToken,
+      clientName: 'untrusted-operator',
+    });
+    cleanups.push(() => client.close());
+
+    await expect(client.submit(inputCommand('disabled-operator'))).resolves.toMatchObject({
+      status: 'rejected', code: 'operator_authority_unavailable',
+    });
+    expect(harness.submit).not.toHaveBeenCalled();
+  });
+
   it('aborts and closes a socket that accepts but never sends welcome', async () => {
     const endpoint = socketPath();
     let markConnected!: () => void;
