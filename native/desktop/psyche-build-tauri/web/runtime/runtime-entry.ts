@@ -34,3 +34,19 @@ export type {
   WebglAddonAdapter,
   WebglAddonFactory,
 } from './terminal-pane-controller';
+export {
+  computeVirtualWindow,
+  computeVirtualGroup,
+  shouldVirtualize,
+  virtualizeItems,
+  VIRTUAL_LIST_OVERSCAN,
+  VIRTUAL_LIST_THRESHOLD,
+} from './virtual-list';
+export type {
+  VirtualItem,
+  VirtualGroup,
+  VirtualItemsOptions,
+  VirtualItemsResult,
+  VirtualWindow,
+  VirtualWindowOptions,
+} from './virtual-list';

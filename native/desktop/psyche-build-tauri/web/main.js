@@ -5254,6 +5254,65 @@
     return more;
   }
 
+  function createVirtualListSpacer(position, height) {
+    var spacer = document.createElement("div");
+    spacer.className = "virtual-list-spacer virtual-list-spacer-" + position;
+    spacer.style.height = Math.max(0, height || 0) + "px";
+    spacer.setAttribute("role", "presentation");
+    spacer.setAttribute("aria-hidden", "true");
+    return spacer;
+  }
+
+  function collectionRowHeight(element, property, fallback) {
+    if (!element || typeof getComputedStyle !== "function") return fallback;
+    var value = parseFloat(getComputedStyle(element).getPropertyValue(property));
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+  }
+
+  function sessionVirtualScrollTop(rowHeight) {
+    if (!sessionListEl || typeof sessionListEl.getBoundingClientRect !== "function") {
+      return sessionListEl ? sessionListEl.scrollTop : 0;
+    }
+    var listTop = sessionListEl.getBoundingClientRect().top;
+    var categories = sessionListEl.querySelectorAll("[data-virtual-row-start]");
+    for (var index = 0; index < categories.length; index++) {
+      var category = categories[index];
+      if (typeof category.getBoundingClientRect !== "function") continue;
+      var rect = category.getBoundingClientRect();
+      if (rect.bottom <= listTop) continue;
+      var start = Number(category.dataset.virtualRowStart) || 0;
+      var count = Number(category.dataset.virtualRowCount) || 0;
+      var labelHeight = category.firstElementChild
+        ? category.firstElementChild.offsetHeight || 0
+        : 0;
+      var withinRows = Math.max(0, listTop - rect.top - labelHeight);
+      return start * rowHeight + Math.min(count * rowHeight, withinRows);
+    }
+    return sessionListEl.scrollTop;
+  }
+
+  function sessionOuterScrollTopForRow(rowIndex, rowHeight) {
+    if (!sessionListEl || typeof sessionListEl.getBoundingClientRect !== "function") {
+      return rowIndex * rowHeight;
+    }
+    var listTop = sessionListEl.getBoundingClientRect().top;
+    var categories = sessionListEl.querySelectorAll("[data-virtual-row-start]");
+    for (var index = 0; index < categories.length; index++) {
+      var category = categories[index];
+      var start = Number(category.dataset.virtualRowStart) || 0;
+      var count = Number(category.dataset.virtualRowCount) || 0;
+      if (rowIndex < start || rowIndex >= start + count ||
+          typeof category.getBoundingClientRect !== "function") continue;
+      var categoryTop = sessionListEl.scrollTop +
+        category.getBoundingClientRect().top - listTop;
+      var labelHeight = category.firstElementChild
+        ? category.firstElementChild.offsetHeight || 0
+        : 0;
+      return Math.max(0, categoryTop + labelHeight + (rowIndex - start) * rowHeight);
+    }
+    return rowIndex * rowHeight;
+  }
+
   function refreshSidebar() {
     refreshTabs();
     renderSessionList();
@@ -5277,7 +5336,22 @@
   var sessionListEl = document.getElementById("session-list");
   var sidebarFilesEl = document.getElementById("sidebar-files");
   if (sessionListEl) {
-    sessionListEl.addEventListener("scroll", function () { syncSessionListScroll(); });
+    sessionListEl.__psycheVirtualRuntime = ptyRuntime;
+    sessionListEl.addEventListener("scroll", function () {
+      syncSessionListScroll();
+      if (!sessionListEl.__psycheVirtualState ||
+          !sessionListEl.__psycheVirtualState.virtualized) return;
+      var sessionScrollFocusKey = sessionListEl.contains(document.activeElement) &&
+        document.activeElement.dataset
+        ? document.activeElement.dataset.treeKey || ""
+        : "";
+      terminalFrameScheduler.schedule("collection:sessions", function () {
+        renderSessionList({
+          preserveFocus: false,
+          restoreFocusKey: sessionScrollFocusKey,
+        });
+      });
+    });
   }
   var sidebarTab = settings.sidebarTab;
 
@@ -6686,6 +6760,23 @@
     return true;
   }
 
+  function focusLogicalSessionTreeKey(key) {
+    var items = visibleSessionTreeItems();
+    var mounted = items.find(function (item) { return item.dataset.treeKey === key; });
+    if (mounted) return focusSessionTreeItem(mounted);
+    var virtualState = sessionListEl && sessionListEl.__psycheVirtualState;
+    var rowIndex = virtualState && virtualState.rowIndexes.get(key);
+    if (rowIndex === undefined || !sessionListEl) return false;
+    virtualState.focusKey = key;
+    sessionTreeFocusKey = key;
+    sessionListEl.scrollTop = sessionOuterScrollTopForRow(
+      rowIndex,
+      virtualState.rowHeight || 44
+    );
+    renderSessionList();
+    return true;
+  }
+
   function parentSessionTreeItem(item) {
     var parent = item && item.parentElement;
     while (parent && parent !== sessionListEl) {
@@ -6739,6 +6830,24 @@
     if (index === -1) return;
     sessionTreeFocusKey = item.dataset.treeKey || "";
 
+    var virtualState = sessionListEl && sessionListEl.__psycheVirtualState;
+    if (virtualState && virtualState.virtualized &&
+        (event.key === "ArrowDown" || event.key === "ArrowUp" ||
+          event.key === "Home" || event.key === "End")) {
+      var logicalIndex = virtualState.logicalKeys.indexOf(sessionTreeFocusKey);
+      if (logicalIndex !== -1) {
+        var logicalNext = logicalIndex;
+        if (event.key === "Home") logicalNext = 0;
+        else if (event.key === "End") logicalNext = virtualState.logicalKeys.length - 1;
+        else if (event.key === "ArrowDown") {
+          logicalNext = Math.min(virtualState.logicalKeys.length - 1, logicalIndex + 1);
+        } else logicalNext = Math.max(0, logicalIndex - 1);
+        event.preventDefault();
+        focusLogicalSessionTreeKey(virtualState.logicalKeys[logicalNext]);
+        return;
+      }
+    }
+
     if (item.dataset.treeItem === "project" &&
         (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey))) {
       var project = findProject(item.dataset.projectId);
@@ -6787,6 +6896,12 @@
       if (child) {
         event.preventDefault();
         focusSessionTreeItem(child);
+      } else if (virtualState && virtualState.childKeys) {
+        var logicalChildKey = virtualState.childKeys.get(item.dataset.treeKey || "");
+        if (logicalChildKey) {
+          event.preventDefault();
+          focusLogicalSessionTreeKey(logicalChildKey);
+        }
       }
       return;
     }
@@ -6812,7 +6927,7 @@
     return focusSessionTreeItem(target);
   }
 
-  function renderSessionList() {
+  function renderSessionList(options) {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
     var popoverRestoreKey = projectAppearancePopoverRestoreKey;
@@ -6835,13 +6950,24 @@
       }
       return false;
     }
-    var activeTreeKey = (document.activeElement && document.activeElement.dataset
+    var virtualState = sessionListEl.__psycheVirtualState || {
+      virtualized: false,
+      logicalKeys: [],
+      rowIndexes: new Map(),
+      childKeys: new Map(),
+      focusKey: "",
+    };
+    sessionListEl.__psycheVirtualState = virtualState;
+    var preserveFocus = !options || options.preserveFocus !== false;
+    var requestedRestoreKey = options && options.restoreFocusKey;
+    var activeTreeKey = virtualState.focusKey || (preserveFocus &&
+      document.activeElement && document.activeElement.dataset
       ? document.activeElement.dataset.treeKey
       : "") || armedCloseTreeKey ||
       (popoverOwnsFocus ? popoverRestoreKey : "");
-    var shouldRestoreTreeFocus = Boolean(activeTreeKey);
+    var shouldRestoreTreeFocus = Boolean(activeTreeKey || requestedRestoreKey);
     if (activeTreeKey) sessionTreeFocusKey = activeTreeKey;
-    var focusedKey = sessionTreeFocusKey;
+    var focusedKey = requestedRestoreKey || sessionTreeFocusKey;
     sessionListEl.setAttribute("role", "tree");
     sessionListEl.setAttribute(
       "aria-label",
@@ -6849,6 +6975,13 @@
     );
     if (setPicking) sessionListEl.setAttribute("aria-multiselectable", "true");
     else sessionListEl.removeAttribute("aria-multiselectable");
+    var virtualRuntime = sessionListEl.__psycheVirtualRuntime;
+    var sessionRowHeight = virtualRuntime
+      ? collectionRowHeight(sessionListEl, "--session-row-h", 44)
+      : 44;
+    var measuredSessionScrollTop = virtualRuntime
+      ? sessionVirtualScrollTop(sessionRowHeight)
+      : sessionListEl.scrollTop || 0;
     sessionListEl.replaceChildren();
 
     var currentSearchQuery = "";
@@ -6922,6 +7055,57 @@
       });
     });
 
+    var sessionRows = [];
+    virtualState.logicalKeys = [];
+    virtualState.rowIndexes = new Map();
+    virtualState.childKeys = new Map();
+    projectModels.forEach(function (entry) {
+      virtualState.logicalKeys.push(entry.model.key);
+      if (!entry.model.expanded) return;
+      if (entry.model.branches.length) {
+        virtualState.childKeys.set(entry.model.key, entry.model.branches[0].key);
+      }
+      entry.model.branches.forEach(function (branch) {
+        virtualState.logicalKeys.push(branch.key);
+        if (!branch.expanded) return;
+        var firstCategoryWithRows = branch.categories.find(function (category) {
+          return category.rows.length > 0;
+        });
+        if (firstCategoryWithRows) {
+          virtualState.childKeys.set(branch.key, firstCategoryWithRows.rows[0].key);
+        }
+        branch.categories.forEach(function (category) {
+          category.rows.forEach(function (row) {
+            virtualState.rowIndexes.set(row.key, sessionRows.length);
+            sessionRows.push(row);
+            virtualState.logicalKeys.push(row.key);
+          });
+        });
+      });
+    });
+    var sessionActiveIndex = sessionRows.findIndex(function (item) {
+      return activeTreeKey && item.key === activeTreeKey;
+    });
+    var sessionVirtualWindow = null;
+    var sessionVisibleKeys = null;
+    virtualState.rowHeight = sessionRowHeight;
+    virtualState.virtualized = Boolean(
+      virtualRuntime && virtualRuntime.shouldVirtualize(sessionRows.length)
+    );
+    if (virtualState.virtualized) {
+      sessionVirtualWindow = virtualRuntime.virtualizeItems(sessionRows, {
+        rowHeight: sessionRowHeight,
+        viewportHeight: sessionListEl.clientHeight,
+        scrollTop: measuredSessionScrollTop,
+        overscan: virtualRuntime.VIRTUAL_LIST_OVERSCAN,
+        activeIndex: sessionActiveIndex >= 0 ? sessionActiveIndex : undefined,
+        getKey: function (item) { return item.key; },
+      });
+      sessionVisibleKeys = new Set(sessionVirtualWindow.items.map(function (item) {
+        return item.key;
+      }));
+    }
+
     if (sessionTypeFilter !== "all") {
       var summary = document.createElement("div");
       summary.className = "session-result-summary";
@@ -6943,6 +7127,7 @@
       sessionListEl.appendChild(summary);
     }
 
+    var sessionRenderRowIndex = 0;
     projectModels.forEach(function (entry) {
       var project = entry.project;
       var projectModel = entry.model;
@@ -7045,7 +7230,30 @@
             categoryGroup.setAttribute("role", "none");
             categoryGroup.appendChild(createCategoryLabel(category));
 
+            var categoryStart = sessionRenderRowIndex;
+            var categoryEnd = categoryStart + category.rows.length;
+            sessionRenderRowIndex = categoryEnd;
+            categoryGroup.dataset.virtualRowStart = String(categoryStart);
+            categoryGroup.dataset.virtualRowCount = String(category.rows.length);
+            var categoryWindow = sessionVirtualWindow
+              ? virtualRuntime.computeVirtualGroup(
+                  categoryStart,
+                  category.rows.length,
+                  sessionVirtualWindow
+                )
+              : null;
+            if (sessionVirtualWindow) {
+              var categoryBeforeCount = categoryWindow.beforeCount;
+              if (categoryBeforeCount) {
+                categoryGroup.appendChild(createVirtualListSpacer(
+                  "before",
+                  categoryBeforeCount * sessionRowHeight
+                ));
+              }
+            }
+
             category.rows.forEach(function (rowModel) {
+              if (sessionVisibleKeys && !sessionVisibleKeys.has(rowModel.key)) return;
               var selected = rowModel.selectionKey === selectedKey;
               var rowParts = createSessionRow(rowModel, {
                 selected: selected,
@@ -7058,6 +7266,7 @@
                 sets: rowModel.source === "psyche" ? setsForThread(rowModel.value) : [],
               });
               var row = rowParts.row;
+              row.dataset.virtualKey = rowModel.key;
               var wrapper = rowParts.wrapper;
               if (rowModel.source === "coven") {
                 var attached = covenRowAttached(state, project.id, rowModel.id);
@@ -7204,6 +7413,15 @@
               row.appendChild(close);
               categoryGroup.appendChild(wrapper);
             });
+            if (sessionVirtualWindow) {
+              var categoryAfterCount = categoryWindow.afterCount;
+              if (categoryAfterCount) {
+                categoryGroup.appendChild(createVirtualListSpacer(
+                  "after",
+                  categoryAfterCount * sessionRowHeight
+                ));
+              }
+            }
             branchParts.children.appendChild(categoryGroup);
           });
           branchParts.group.appendChild(branchParts.children);
@@ -7236,7 +7454,10 @@
     var renderedItems = Array.prototype.slice.call(
       sessionListEl.querySelectorAll("[data-tree-item]")
     );
-    var preferred = renderedItems.find(function (item) {
+    var requestedFocusItem = renderedItems.find(function (item) {
+      return requestedRestoreKey && item.dataset.treeKey === requestedRestoreKey;
+    });
+    var preferred = requestedFocusItem || renderedItems.find(function (item) {
       return focusedKey && item.dataset.treeKey === focusedKey;
     }) || renderedItems.find(function (item) {
       return item.dataset.selectionKey === selectedKey;
@@ -7249,8 +7470,9 @@
     });
     if (preferred) {
       sessionTreeFocusKey = preferred.dataset.treeKey || "";
-      if (shouldRestoreTreeFocus) preferred.focus();
+      if (shouldRestoreTreeFocus && (!requestedRestoreKey || requestedFocusItem)) preferred.focus();
     }
+    virtualState.focusKey = "";
   }
 
   function applyProjectAppearance(project, patch) {
@@ -11185,6 +11407,8 @@
   var gitViewEl = document.getElementById("git-view");
   var gitBranchEl = document.getElementById("git-branch");
   var gitOpenRemoteBtn = document.getElementById("git-open-remote");
+  var renderedFileRows = [];
+  var fileVirtualFocusKey = "";
 
   // Directory paths the user has expanded, so a refresh keeps the tree open.
   var expandedDirs = Object.create(null);
@@ -11307,23 +11531,74 @@
     if (!project) { panelMessage(fileTreeEl, "No project open — ⌘O to add one."); return; }
     var workspaceRoot = activeWorkspaceRoot(project);
     if (filesCrumbEl) filesCrumbEl.textContent = shortenRoot(workspaceRoot);
-    fileTreeEl.innerHTML = "";
-    await appendDirInto(fileTreeEl, workspaceRoot, workspaceRoot, 0);
+    var fileRows = [];
+    await appendDirInto(fileRows, workspaceRoot, workspaceRoot, 0);
+    renderedFileRows = fileRows;
+    renderFileRows(fileRows);
     if (!fileTreeEl.firstChild) panelMessage(fileTreeEl, "Empty directory.");
   }
 
-  async function appendDirInto(container, root, dirPath, depth) {
+  async function appendDirInto(fileRows, root, dirPath, depth) {
     var entries;
     try {
       entries = await invoke("fs_list_dir", { root: root, path: dirPath });
     } catch (err) {
-      var e = document.createElement("div");
-      e.className = "panel-error";
-      e.textContent = String(err);
-      container.appendChild(e);
+      fileRows.push({ error: String(err), key: "error:" + dirPath, depth: depth });
       return;
     }
-    entries.forEach(function (entry) {
+    for (var entryIndex = 0; entryIndex < entries.length; entryIndex++) {
+      var entry = entries[entryIndex];
+      fileRows.push({ entry: entry, key: entry.path, depth: depth });
+      if (entry.is_dir && expandedDirs[entry.path]) {
+        await appendDirInto(fileRows, root, entry.path, depth + 1);
+      }
+    }
+  }
+
+  function renderFileRows(fileRows, options) {
+    if (!fileTreeEl) return;
+    var preserveFocus = !options || options.preserveFocus !== false;
+    var activeFileFocusKey = fileVirtualFocusKey || (preserveFocus &&
+      fileTreeEl.contains(document.activeElement) &&
+      document.activeElement.dataset
+      ? document.activeElement.dataset.virtualKey || ""
+      : "");
+    var restoreFileFocusKey = options && options.restoreFocusKey;
+    var focusedKey = restoreFileFocusKey || activeFileFocusKey;
+    var fileActiveIndex = fileRows.findIndex(function (item) {
+      return activeFileFocusKey && item.key === activeFileFocusKey;
+    });
+    var fileVirtualWindow = null;
+    var visibleRows = fileRows;
+    var fileRowHeight = collectionRowHeight(fileTreeEl, "--file-row-h", 26);
+    fileTreeEl.__psycheVirtualRowHeight = fileRowHeight;
+    if (ptyRuntime.shouldVirtualize(fileRows.length)) {
+      fileVirtualWindow = ptyRuntime.virtualizeItems(fileRows, {
+        rowHeight: fileRowHeight,
+        viewportHeight: fileTreeEl.clientHeight,
+        scrollTop: fileTreeEl.scrollTop,
+        overscan: ptyRuntime.VIRTUAL_LIST_OVERSCAN,
+        activeIndex: fileActiveIndex >= 0 ? fileActiveIndex : undefined,
+        getKey: function (item) { return item.entry ? item.entry.path : item.key; },
+      });
+      visibleRows = fileVirtualWindow.items.map(function (item) { return item.item; });
+    }
+    fileTreeEl.replaceChildren();
+    if (fileVirtualWindow) {
+      fileTreeEl.appendChild(createVirtualListSpacer("before", fileVirtualWindow.before));
+    }
+    visibleRows.forEach(function (fileRow) {
+      if (fileRow.error) {
+        var error = document.createElement("div");
+        error.className = "panel-error file-row-error";
+        error.textContent = fileRow.error;
+        error.dataset.virtualKey = fileRow.key;
+        error.tabIndex = 0;
+        fileTreeEl.appendChild(error);
+        return;
+      }
+      var entry = fileRow.entry;
+      var depth = fileRow.depth;
       var row = document.createElement("button");
       row.type = "button";
       var isOpen = !!expandedDirs[entry.path];
@@ -11334,6 +11609,7 @@
         '<span class="twisty">' + (entry.is_dir ? "▶" : "") + "</span>" +
         '<span class="file-name">' + escapeHtml(entry.name) + "</span>";
       row.title = entry.path;
+      row.dataset.virtualKey = entry.path;
       row.addEventListener("click", async function () {
         if (entry.is_dir) {
           if (expandedDirs[entry.path]) delete expandedDirs[entry.path];
@@ -11343,13 +11619,74 @@
           await openFileTab(entry.path, activeProject());
         }
       });
-      container.appendChild(row);
-      if (entry.is_dir && isOpen) {
-        // Children render inline under the row, indented one level.
-        var slot = document.createElement("div");
-        container.appendChild(slot);
-        appendDirInto(slot, root, entry.path, depth + 1);
-      }
+      fileTreeEl.appendChild(row);
+    });
+    if (fileVirtualWindow) {
+      fileTreeEl.appendChild(createVirtualListSpacer("after", fileVirtualWindow.after));
+    }
+    if (focusedKey) {
+      var replacement = Array.prototype.find.call(
+        fileTreeEl.querySelectorAll("[data-virtual-key]"),
+        function (item) { return item.dataset.virtualKey === focusedKey; }
+      );
+      if (replacement) replacement.focus();
+    }
+    fileVirtualFocusKey = "";
+  }
+
+  function focusLogicalFileRow(key) {
+    if (!fileTreeEl) return false;
+    var mounted = Array.prototype.find.call(
+      fileTreeEl.querySelectorAll("[data-virtual-key]"),
+      function (item) { return item.dataset.virtualKey === key; }
+    );
+    if (mounted) {
+      mounted.focus();
+      return true;
+    }
+    var index = renderedFileRows.findIndex(function (item) { return item.key === key; });
+    if (index === -1) return false;
+    var offset = index * (fileTreeEl.__psycheVirtualRowHeight || 26);
+    fileVirtualFocusKey = key;
+    fileTreeEl.scrollTop = offset;
+    renderFileRows(renderedFileRows);
+    return true;
+  }
+
+  function handleVirtualFileTreeKeydown(event) {
+    var item = event.target && event.target.dataset && event.target.dataset.virtualKey
+      ? event.target
+      : null;
+    if (!item || document.activeElement !== item) return;
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp" &&
+        event.key !== "Home" && event.key !== "End") return;
+    var index = renderedFileRows.findIndex(function (row) {
+      return row.key === item.dataset.virtualKey;
+    });
+    if (index === -1) return;
+    var next = index;
+    if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = renderedFileRows.length - 1;
+    else if (event.key === "ArrowDown") next = Math.min(renderedFileRows.length - 1, index + 1);
+    else next = Math.max(0, index - 1);
+    event.preventDefault();
+    focusLogicalFileRow(renderedFileRows[next].key);
+  }
+
+  if (fileTreeEl) {
+    fileTreeEl.addEventListener("keydown", handleVirtualFileTreeKeydown);
+    fileTreeEl.addEventListener("scroll", function () {
+      if (!ptyRuntime.shouldVirtualize(renderedFileRows.length)) return;
+      var fileScrollFocusKey = fileTreeEl.contains(document.activeElement) &&
+        document.activeElement.dataset
+        ? document.activeElement.dataset.virtualKey || ""
+        : "";
+      terminalFrameScheduler.schedule("collection:files", function () {
+        renderFileRows(renderedFileRows, {
+          preserveFocus: false,
+          restoreFocusKey: fileScrollFocusKey,
+        });
+      });
     });
   }
 
