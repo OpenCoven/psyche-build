@@ -104,7 +104,7 @@ describe('createDaemonControlHandlers updatePaneMeta', () => {
 
 function paneHandlerHarness() {
   const sendKeysHex = vi.fn(async () => {});
-  const killPane = vi.fn(async () => {});
+  const killPane = vi.fn(async (_paneId: string) => {});
   const executeCommand = vi.fn(async () => {});
   const executeCommandWithOutput = vi.fn(async (line: string) =>
     line.includes('pane_active') ? ['1'] : ['120 40']);
@@ -139,6 +139,7 @@ function paneHandlerHarness() {
     paneObservations: observations,
     surfaces,
     refreshPaneSurfaces,
+    closePane: async (_projectRoot, _paneId) => killPane('%3'),
   });
   return {
     handlers, observations, surfaces, sendKeysHex, killPane, executeCommand,

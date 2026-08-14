@@ -16,6 +16,7 @@ import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnaps
 import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
 import {
   spawnBridgePane,
+  killBridgePane,
   createCovenClient,
   launchProjectCovenSession,
   openProjectCovenSession,
@@ -48,6 +49,8 @@ export interface DaemonControlHandlerDeps {
   paneObservations?: PaneObservationStore;
   surfaces?: SurfaceRegistry;
   refreshPaneSurfaces?: () => Promise<readonly PaneSurface[]>;
+  /** Safe durable pane teardown; injectable for handler tests. */
+  closePane?: (projectRoot: string, paneId: string) => Promise<unknown>;
   browserProvider?: Pick<BrowserProviderBroker, 'dispatch'>;
   browserSemanticSnapshots?: BrowserSemanticSnapshotRegistry;
 }
@@ -78,6 +81,7 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
   const covenSpawnDeps = deps.covenSpawnDeps ?? defaultSpawnDeps;
   const paneObservations = deps.paneObservations ?? new PaneObservationStore();
   const surfaces = deps.surfaces ?? new SurfaceRegistry();
+  const closePane = deps.closePane ?? killBridgePane;
 
   return {
     async spawnPane(payload): Promise<BridgeSpawnResult> {
@@ -159,6 +163,9 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       ) {
         throw codedHandlerError('resource_missing', 'pane action target is missing');
       }
+      // Re-read the durable binding immediately before every effect. The refresh
+      // drops panes whose persisted tmux server generation is no longer current.
+      await deps.refreshPaneSurfaces?.();
       const pane = requirePaneSurface(surfaces, payload.paneId, payload.generation);
       const target = assertTmuxPaneId(pane.tmuxPaneId);
       const quotedTarget = quoteTmuxArgument(target);
@@ -199,7 +206,7 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
           return { paneId: payload.paneId, ...observed };
         }
         case 'close':
-          await deps.tmux.killPane(target);
+          await closePane(deps.projectRoot, payload.paneId);
           surfaces.remove(payload.paneId);
           paneObservations.clear(payload.paneId);
           return { paneId: payload.paneId, closed: true };

@@ -3,6 +3,12 @@ import path from 'node:path';
 import { execFileSync, execSync } from 'node:child_process';
 import type { PaneSummary } from './protocol.js';
 import { assertTmuxPaneId } from '../utils/tmuxTarget.js';
+import {
+  getCurrentTmuxServerIdentity,
+  isTmuxServerIdentity,
+  sameTmuxServerIdentity,
+  type TmuxServerIdentity,
+} from '../services/TmuxServerIdentity.js';
 
 /**
  * Read psyche's on-disk config for a project root and return a summary list.
@@ -38,6 +44,7 @@ export interface PaneSurfaceBinding {
 }
 
 export type PaneLivenessProbe = (tmuxPaneId: string) => boolean | Promise<boolean>;
+export type TmuxIdentityProbe = (tmuxPaneId: string) => TmuxServerIdentity | undefined;
 
 export function isTmuxPaneLive(
   tmuxPaneId: string,
@@ -56,13 +63,22 @@ export function isTmuxPaneLive(
 export async function listPaneSurfaceBindings(
   projectRoot: string,
   isPaneLive: PaneLivenessProbe = isTmuxPaneLive,
+  getTmuxIdentity: TmuxIdentityProbe = getCurrentTmuxServerIdentity,
 ): Promise<PaneSurfaceBinding[]> {
   const panes = await readPaneRecords(projectRoot);
   const bindings: PaneSurfaceBinding[] = [];
   for (const pane of panes) {
     const id = String(pane.id ?? pane.paneId ?? '');
     const tmuxPaneId = String(pane.paneId ?? '');
-    if (!id || !tmuxPaneId || !await isPaneLive(tmuxPaneId)) continue;
+    if (!id || !tmuxPaneId) continue;
+    const persistedIdentity = pane.tmuxServerIdentity;
+    const currentIdentity = getTmuxIdentity(tmuxPaneId);
+    if (
+      !isTmuxServerIdentity(persistedIdentity)
+      || !currentIdentity
+      || !sameTmuxServerIdentity(persistedIdentity, currentIdentity)
+      || !await isPaneLive(tmuxPaneId)
+    ) continue;
     bindings.push({
       id,
       tmuxPaneId,
