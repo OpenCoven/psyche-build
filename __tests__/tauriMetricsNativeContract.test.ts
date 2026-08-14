@@ -63,7 +63,7 @@ describe('Tauri workspace metrics native contract', () => {
       /#\[derive\(Clone,\s*Default\)\]\s*struct\s+MetricsState\s*\{[\s\S]*collector\s*:\s*Arc<Mutex<MetricsCollector>>[\s\S]*\}/,
     );
 
-    const ptyStart = functionBody(libSource, 'pty_start');
+    const ptyStart = functionBody(libSource, 'pty_start_blocking');
     expect(ptyStart).toMatch(
       /let\s+spawn_time_unix_secs\s*=\s*SystemTime::now\(\)[\s\S]*?duration_since\(UNIX_EPOCH\)[\s\S]*?as_secs\(\)\s*;/,
     );

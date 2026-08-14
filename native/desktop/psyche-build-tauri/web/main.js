@@ -132,6 +132,8 @@
   var COVEN_POLL_MS = 5000;
   var paneCounter = 0;
   var visiblePaneFitFrame = 0;
+  var MAX_PENDING_PTY_INPUT_BYTES = 1024 * 1024;
+  var MAX_PENDING_PTY_INPUT_WRITES = 256;
   var PANE_METRICS_POLL_MS = 15000;
   var paneMetricsPollTimer = 0;
   var paneFooterPopoverCleanup = null;
@@ -1519,7 +1521,6 @@
       },
     });
     thread.terminalController = controller;
-    thread.ptyClient = controller;
     return controller;
   }
 
@@ -1538,6 +1539,51 @@
     state.threads.forEach(function (thread) {
       syncThreadPtyVisibility(thread);
     });
+  }
+
+  function createThreadPtyIoQueue() {
+    return {
+      closed: false,
+      inputTail: Promise.resolve(),
+      pendingInputBytes: 0,
+      pendingInputWrites: 0,
+      pendingResize: null,
+      resizeFlight: null,
+    };
+  }
+
+  function scheduleThreadPtyResize(thread, size) {
+    var queue = thread && thread.ptyIoQueue;
+    if (!queue || queue.closed) return Promise.resolve(false);
+    queue.pendingResize = { cols: size.cols, rows: size.rows };
+    if (queue.resizeFlight) return queue.resizeFlight;
+
+    function drainLatestResize() {
+      if (queue.closed || !queue.pendingResize) return Promise.resolve(false);
+      var next = queue.pendingResize;
+      queue.pendingResize = null;
+      return invoke("pty_resize", {
+        threadId: thread.id,
+        thread_id: thread.id,
+        cols: next.cols,
+        rows: next.rows,
+      }).then(function () {
+        return true;
+      }).catch(function () {
+        if (!queue.closed && !queue.pendingResize) {
+          queue.pendingResize = next;
+        }
+        return new Promise(function (resolve) { requestAnimationFrame(resolve); }).then(drainLatestResize);
+      }).then(function (result) {
+        return queue.pendingResize ? drainLatestResize() : result;
+      });
+    }
+
+    var flight = drainLatestResize().finally(function () {
+      if (queue.resizeFlight === flight) queue.resizeFlight = null;
+    });
+    queue.resizeFlight = flight;
+    return flight;
   }
 
   listen("pty:data-batch", function (event) {
@@ -1562,6 +1608,15 @@
       thread.terminalController.markPtyExited();
     }
     thread.ptyStarted = false;
+    if (thread.ptyIoQueue) thread.ptyIoQueue.closed = true;
+    thread.ptyIoQueue = {
+      closed: false,
+      inputTail: Promise.resolve(),
+      pendingInputBytes: 0,
+      pendingInputWrites: 0,
+      pendingResize: null,
+      resizeFlight: null,
+    };
     if (thread.startInFlight) {
       thread.exitDuringStart = true;
     }
@@ -2092,7 +2147,14 @@
       stopRequested: false,
       ptyStarted: false,
       terminalController: null,
-      ptyClient: null,
+      ptyIoQueue: {
+        closed: false,
+        inputTail: Promise.resolve(),
+        pendingInputBytes: 0,
+        pendingInputWrites: 0,
+        pendingResize: null,
+        resizeFlight: null,
+      },
       metricsGeneration: 0,
       metrics: launch.launchKind === "coven-chat" && launch.covenSessionId
         ? loadingPaneMetrics(launch)
@@ -3103,12 +3165,7 @@
       });
     }
     term.onResize(function (size) {
-      invoke("pty_resize", {
-        threadId: thread.id,
-        thread_id: thread.id,
-        cols: size.cols,
-        rows: size.rows,
-      }).catch(function () {});
+      scheduleThreadPtyResize(thread, size);
     });
 
     thread.term = term;
@@ -4507,6 +4564,10 @@
     }
     thread.closeStarted = true;
     thread.closing = true;
+    if (thread.ptyIoQueue) {
+      thread.ptyIoQueue.closed = true;
+      thread.ptyIoQueue.pendingResize = null;
+    }
     thread.metricsGeneration += 1;
     if (thread.metricsRefreshTimer) {
       clearTimeout(thread.metricsRefreshTimer);
@@ -4517,7 +4578,6 @@
       try { thread.terminalController.dispose(); } catch (_) {}
     }
     thread.terminalController = null;
-    thread.ptyClient = null;
     // A set must never point at a thread that no longer exists, or scoping the
     // canvas to it would silently show fewer panes than it claims.
     forgetThreadInSets(id);
@@ -8329,20 +8389,48 @@
   }
   function sendToThread(thread, text) {
     if (!thread || thread.kind === "web") return Promise.resolve(false);
+    var queue = thread.ptyIoQueue;
+    if (!queue) {
+      queue = createThreadPtyIoQueue();
+      thread.ptyIoQueue = queue;
+    }
+    var encoded = new TextEncoder().encode(text);
+    var pendingBytes = queue.pendingInputBytes;
+    var pendingWrites = queue.pendingInputWrites;
+    if (queue.closed ||
+        pendingBytes + encoded.length > MAX_PENDING_PTY_INPUT_BYTES ||
+        pendingWrites >= MAX_PENDING_PTY_INPUT_WRITES) {
+      if (thread.term) {
+        thread.term.write("\r\n\x1b[31m[pty_write]\x1b[0m input queue is full\r\n");
+      }
+      return Promise.resolve(false);
+    }
+    var bytes = Array.from(encoded);
     noteThreadInput(thread, text);
-    var bytes = Array.from(new TextEncoder().encode(text));
-    return invoke("pty_write", {
-      threadId: thread.id,
-      thread_id: thread.id,
-      bytes: bytes,
-    }).then(function () {
-      return true;
+    queue.pendingInputBytes = pendingBytes + bytes.length;
+    queue.pendingInputWrites = pendingWrites + 1;
+    var previous = queue.inputTail;
+    var result = previous.then(function () {
+      if (queue.closed) return false;
+      return invoke("pty_write", {
+        threadId: thread.id,
+        thread_id: thread.id,
+        bytes: bytes,
+      }).then(function () {
+        return true;
+      });
     }).catch(function (err) {
       if (thread.term) {
         thread.term.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
       }
       return false;
     });
+    queue.inputTail = result.then(function (delivered) {
+      queue.pendingInputBytes = Math.max(0, queue.pendingInputBytes - bytes.length);
+      queue.pendingInputWrites = Math.max(0, queue.pendingInputWrites - 1);
+      return delivered;
+    });
+    return result;
   }
   function writeToActive(text) {
     var thread = findThread(state.activeThreadId);

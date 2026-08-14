@@ -122,6 +122,8 @@ fn validate_browser_snapshot_dimensions(width: u32, height: u32) -> Result<(), S
 struct PtySession {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    operation_lane: Arc<tokio::sync::Mutex<()>>,
+    operation_admission: Arc<tokio::sync::Semaphore>,
     pump: OutputPump,
     terminator: PtyProcessTerminator,
     reader_cancellation: PtyReaderCancellation,
@@ -2365,7 +2367,14 @@ impl From<TransportOutputPumpSnapshot> for PtyTransportSnapshot {
 }
 
 #[tauri::command]
-fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
+async fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
+    match tauri::async_runtime::spawn_blocking(move || pty_start_blocking(app, options)).await {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY start task: {error}")),
+    }
+}
+
+fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let thread_id = options.thread_id.clone();
     let (pending_start, resolved_cwd) = prepare_pty_start(&options)?;
     validate_coven_launch(&options)?;
@@ -2439,6 +2448,8 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let (session_token, install_outcome) = pending_start.install(PtySession {
         master: Arc::new(Mutex::new(pair.master)),
         writer: Arc::new(Mutex::new(writer)),
+        operation_lane: Arc::new(tokio::sync::Mutex::new(())),
+        operation_admission: Arc::new(tokio::sync::Semaphore::new(2)),
         pump: pump.clone(),
         terminator: terminator.clone(),
         reader_cancellation: reader_cancellation.clone(),
@@ -2523,16 +2534,51 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
-    let writer = {
-        let guard = PTY_LIFECYCLES.lock();
-        let session = guard
-            .live(&thread_id)
-            .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
-        let writer = Arc::clone(&session.writer);
-        drop(guard);
-        writer
-    };
+async fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
+    let (writer, operation_lane, operation_admission) = pty_write_operation(&thread_id)?;
+    let operation_permit = operation_admission
+        .try_acquire_owned()
+        .map_err(|_| format!("thread '{}' PTY operation queue is full", thread_id))?;
+    let operation_guard = operation_lane.lock_owned().await;
+    match tauri::async_runtime::spawn_blocking(move || {
+        pty_write_blocking(writer, bytes, operation_guard, operation_permit)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY write task: {error}")),
+    }
+}
+
+fn pty_write_operation(
+    thread_id: &str,
+) -> Result<
+    (
+        Arc<Mutex<Box<dyn Write + Send>>>,
+        Arc<tokio::sync::Mutex<()>>,
+        Arc<tokio::sync::Semaphore>,
+    ),
+    String,
+> {
+    let guard = PTY_LIFECYCLES.lock();
+    let session = guard
+        .live(thread_id)
+        .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
+    let operation = (
+        Arc::clone(&session.writer),
+        Arc::clone(&session.operation_lane),
+        Arc::clone(&session.operation_admission),
+    );
+    drop(guard);
+    Ok(operation)
+}
+
+fn pty_write_blocking(
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    bytes: Vec<u8>,
+    _operation_guard: tokio::sync::OwnedMutexGuard<()>,
+    _operation_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(), String> {
     let mut writer = writer.lock();
     writer.write_all(&bytes).map_err(|e| e.to_string())?;
     writer.flush().map_err(|e| e.to_string())?;
@@ -2540,26 +2586,60 @@ fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
-    let master = {
-        let guard = PTY_LIFECYCLES.lock();
-        let master = guard
-            .live(&thread_id)
-            .map(|session| Arc::clone(&session.master));
-        drop(guard);
-        master
+async fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
+    let Some((master, operation_lane, operation_admission)) = pty_resize_operation(&thread_id)
+    else {
+        return Ok(());
     };
-    if let Some(master) = master {
-        master
-            .lock()
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| e.to_string())?;
+    let operation_permit = operation_admission
+        .try_acquire_owned()
+        .map_err(|_| format!("thread '{}' PTY operation queue is full", thread_id))?;
+    let operation_guard = operation_lane.lock_owned().await;
+    match tauri::async_runtime::spawn_blocking(move || {
+        pty_resize_blocking(master, cols, rows, operation_guard, operation_permit)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY resize task: {error}")),
     }
+}
+
+fn pty_resize_operation(
+    thread_id: &str,
+) -> Option<(
+    Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    Arc<tokio::sync::Mutex<()>>,
+    Arc<tokio::sync::Semaphore>,
+)> {
+    let guard = PTY_LIFECYCLES.lock();
+    let operation = guard.live(thread_id).map(|session| {
+        (
+            Arc::clone(&session.master),
+            Arc::clone(&session.operation_lane),
+            Arc::clone(&session.operation_admission),
+        )
+    });
+    drop(guard);
+    operation
+}
+
+fn pty_resize_blocking(
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    cols: u16,
+    rows: u16,
+    _operation_guard: tokio::sync::OwnedMutexGuard<()>,
+    _operation_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(), String> {
+    master
+        .lock()
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -5218,6 +5298,7 @@ mod browser_app_shortcut_tests {
 mod pty_runtime_tests {
     #[cfg(unix)]
     use std::collections::VecDeque;
+    use std::future::Future;
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc};
@@ -5226,6 +5307,71 @@ mod pty_runtime_tests {
     use super::*;
     #[cfg(not(windows))]
     use portable_pty::ChildKiller;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pty_operation_lane_prevents_a_later_operation_from_overtaking() {
+        let lane = Arc::new(tokio::sync::Mutex::new(()));
+        let initial_guard = Arc::clone(&lane).lock_owned().await;
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let (first_waiting_tx, first_waiting_rx) = tokio::sync::oneshot::channel();
+        let first_lane = Arc::clone(&lane);
+        let first_order = Arc::clone(&order);
+        let first = tokio::spawn(async move {
+            let mut first_waiting_tx = Some(first_waiting_tx);
+            let lock = first_lane.lock_owned();
+            tokio::pin!(lock);
+            let _guard = std::future::poll_fn(|context| {
+                let result = lock.as_mut().poll(context);
+                if result.is_pending() {
+                    if let Some(waiting_tx) = first_waiting_tx.take() {
+                        let _ = waiting_tx.send(());
+                    }
+                }
+                result
+            })
+            .await;
+            first_order.lock().push(1);
+        });
+        first_waiting_rx.await.unwrap();
+
+        let (second_waiting_tx, second_waiting_rx) = tokio::sync::oneshot::channel();
+        let second_lane = Arc::clone(&lane);
+        let second_order = Arc::clone(&order);
+        let second = tokio::spawn(async move {
+            let mut second_waiting_tx = Some(second_waiting_tx);
+            let lock = second_lane.lock_owned();
+            tokio::pin!(lock);
+            let _guard = std::future::poll_fn(|context| {
+                let result = lock.as_mut().poll(context);
+                if result.is_pending() {
+                    if let Some(waiting_tx) = second_waiting_tx.take() {
+                        let _ = waiting_tx.send(());
+                    }
+                }
+                result
+            })
+            .await;
+            second_order.lock().push(2);
+        });
+        second_waiting_rx.await.unwrap();
+
+        drop(initial_guard);
+        first.await.unwrap();
+        second.await.unwrap();
+        assert_eq!(*order.lock(), vec![1, 2]);
+    }
+
+    #[test]
+    fn pty_operation_admission_is_bounded() {
+        let admission = Arc::new(tokio::sync::Semaphore::new(2));
+        let first = Arc::clone(&admission).try_acquire_owned().unwrap();
+        let second = Arc::clone(&admission).try_acquire_owned().unwrap();
+        assert!(Arc::clone(&admission).try_acquire_owned().is_err());
+        drop(first);
+        assert!(Arc::clone(&admission).try_acquire_owned().is_ok());
+        drop(second);
+    }
 
     #[test]
     fn browser_privileged_commands_reject_external_callers() {
@@ -5382,6 +5528,8 @@ mod pty_runtime_tests {
                 .install(PtySession {
                     master: Arc::new(Mutex::new(pair.master)),
                     writer: Arc::new(Mutex::new(writer)),
+                    operation_lane: Arc::new(tokio::sync::Mutex::new(())),
+                    operation_admission: Arc::new(tokio::sync::Semaphore::new(2)),
                     pump: pump.clone(),
                     terminator: PtyProcessTerminator::from_parts(
                         Box::new(RecordingChildKiller {

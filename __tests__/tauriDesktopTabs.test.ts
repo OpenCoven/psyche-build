@@ -333,7 +333,13 @@ describe('Tauri desktop tab shortcuts', () => {
     );
     expect(tauriLib).not.toMatch(/data_thread\.join\(\)/);
     expect(tauriLib).toMatch(
-      /let\s+writer\s*=\s*\{[\s\S]*?let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*?guard[\s\S]*?\.live\(&thread_id\)[\s\S]*?Arc::clone\(&session\.writer\)[\s\S]*?\};[\s\S]*?let\s+mut\s+writer\s*=\s*writer\.lock\(\);/
+      /async\s+fn\s+pty_write[\s\S]*?pty_write_operation\(&thread_id\)[\s\S]*?try_acquire_owned\(\)[\s\S]*?operation_lane\.lock_owned\(\)\.await[\s\S]*?spawn_blocking/
+    );
+    expect(tauriLib).toMatch(
+      /fn\s+pty_write_operation[\s\S]*?let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*?\.live\(thread_id\)[\s\S]*?Arc::clone\(&session\.writer\)[\s\S]*?Arc::clone\(&session\.operation_lane\)[\s\S]*?Arc::clone\(&session\.operation_admission\)[\s\S]*?drop\(guard\)/
+    );
+    expect(tauriLib).toMatch(
+      /fn\s+pty_write_blocking[\s\S]*?let\s+mut\s+writer\s*=\s*writer\.lock\(\);[\s\S]*?writer\.write_all\(&bytes\)[\s\S]*?writer\.flush\(\)/
     );
     expect(tauriLib).toMatch(
       /app_for_exit\.emit\([\s\S]*?"pty:exit"[\s\S]*?generation:\s*exit_token\.generation[\s\S]*?PTY_LIFECYCLES\.lock\(\)\.finish_exit\(&exit_token\)/

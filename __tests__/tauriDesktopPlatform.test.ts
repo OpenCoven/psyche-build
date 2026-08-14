@@ -205,7 +205,7 @@ describe('desktop Tauri layout', () => {
     const libSource = readFileSync(libSourcePath, 'utf8');
     const mainSource = readFileSync(mainSourcePath, 'utf8');
     const appEnvironment = bracedItem(libSource, 'fn app_environment');
-    const ptyStart = bracedItem(libSource, 'fn pty_start');
+    const ptyStart = bracedItem(libSource, 'fn pty_start_blocking');
     const spawnShellThread = bracedItem(mainSource, 'function spawnShellThread');
     const spawnPsycheThread = bracedItem(mainSource, 'function spawnPsycheThread');
 

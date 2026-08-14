@@ -62,8 +62,19 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
 ) {
-  const names = Object.keys(dependencies);
-  const values = Object.values(dependencies);
+  const resolvedDependencies = {
+    createThreadPtyIoQueue: () => ({
+      closed: false,
+      inputTail: Promise.resolve(),
+      pendingInputBytes: 0,
+      pendingInputWrites: 0,
+      pendingResize: null,
+      resizeFlight: null,
+    }),
+    ...dependencies,
+  };
+  const names = Object.keys(resolvedDependencies);
+  const values = Object.values(resolvedDependencies);
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
@@ -308,6 +319,73 @@ function createPaneFocusHarness(
 }
 
 describe('Tauri physical terminal panes', () => {
+  it('keeps one canonical terminal controller reference per pane', () => {
+    expect(mainJs).not.toContain('ptyClient');
+  });
+
+  it('bounds and serializes PTY input while coalescing resize delivery', () => {
+    const send = functionSource('sendToThread');
+    const resize = functionSource('scheduleThreadPtyResize');
+    const mount = functionSource('mountTerminal');
+
+    expect(mainJs).toContain('var MAX_PENDING_PTY_INPUT_BYTES = 1024 * 1024;');
+    expect(mainJs).toContain('var MAX_PENDING_PTY_INPUT_WRITES = 256;');
+    expect(send).toContain('pendingBytes + encoded.length > MAX_PENDING_PTY_INPUT_BYTES');
+    expect(send).toContain('pendingWrites >= MAX_PENDING_PTY_INPUT_WRITES');
+    expect(send).toContain('var previous = queue.inputTail;');
+    expect(send).toContain('queue.inputTail = result.then');
+    expect(resize).toContain('queue.pendingResize = { cols: size.cols, rows: size.rows };');
+    expect(resize).toContain('if (queue.resizeFlight) return queue.resizeFlight;');
+    expect(mount).toContain('scheduleThreadPtyResize(thread, size);');
+    expect(mount).not.toContain('invoke("pty_resize"');
+  });
+
+  it('quarantines queued input across PTY exit and restart', async () => {
+    const handleExit = functionSource('handlePtyExit');
+    expect(handleExit).toContain('thread.ptyIoQueue.closed = true;');
+    expect(handleExit).toContain('thread.ptyIoQueue = {');
+    const firstWrite = deferred<void>();
+    const calls: number[][] = [];
+    const createThreadPtyIoQueue = compileFunction<() => Record<string, unknown>>(
+      functionSource('createThreadPtyIoQueue'),
+      {},
+    );
+    const resetThreadPtyIoQueue = (thread: Record<string, unknown>) => {
+      (thread.ptyIoQueue as { closed: boolean }).closed = true;
+      thread.ptyIoQueue = createThreadPtyIoQueue();
+    };
+    const sendToThread = compileFunction<(
+      thread: Record<string, unknown>, text: string,
+    ) => Promise<boolean>>(functionSource('sendToThread'), {
+      createThreadPtyIoQueue,
+      MAX_PENDING_PTY_INPUT_BYTES: 1024 * 1024,
+      MAX_PENDING_PTY_INPUT_WRITES: 256,
+      noteThreadInput: () => undefined,
+      invoke: (_command: string, args: { bytes: number[] }) => {
+        calls.push(args.bytes);
+        return calls.length === 1 ? firstWrite.promise : Promise.resolve();
+      },
+    });
+    const thread = {
+      id: 'thread-a', kind: 'shell', term: null,
+      ptyIoQueue: createThreadPtyIoQueue(),
+    };
+
+    const oldFirst = sendToThread(thread, 'a');
+    const oldQueued = sendToThread(thread, 'b');
+    await Promise.resolve();
+    expect(calls).toEqual([[97]]);
+
+    resetThreadPtyIoQueue(thread);
+    await expect(sendToThread(thread, 'c')).resolves.toBe(true);
+    expect(calls).toEqual([[97], [99]]);
+
+    firstWrite.resolve();
+    await expect(oldFirst).resolves.toBe(true);
+    await expect(oldQueued).resolves.toBe(false);
+    expect(calls).toEqual([[97], [99]]);
+  });
+
   it('makes pane dividers accessible and resizable by pointer and keyboard', () => {
     const windowTarget = new FakeEventTarget();
     const divider = new FakeEventTarget();

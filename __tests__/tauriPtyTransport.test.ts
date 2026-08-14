@@ -16,6 +16,10 @@ const transportSource = readFileSync(
   resolve(process.cwd(), 'native/desktop/psyche-build-tauri/src-tauri/src/pty_transport.rs'),
   'utf8',
 );
+const frontendTransportSource = readFileSync(
+  resolve(process.cwd(), 'native/desktop/psyche-build-tauri/web/runtime/pty-client.ts'),
+  'utf8',
+);
 
 function commandSource(sourceText: string, name: string): string {
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -201,6 +205,7 @@ describe('Tauri PTY command threading contract', () => {
     const prepare = rustFunctionSource(source, 'prepare_pty_start');
     const install = implMethodSource(source, 'PendingPtyStart', 'install');
     const command = commandSource(source, 'pty_start');
+    const blocking = rustFunctionSource(source, 'pty_start_blocking');
 
     const reserve = prepare.indexOf('PendingPtyStart::reserve(&thread_id)?');
     const openCwd = prepare.indexOf('open_pty_cwd(project_root, cwd)?');
@@ -208,14 +213,15 @@ describe('Tauri PTY command threading contract', () => {
     expect(openCwd).toBeGreaterThan(reserve);
     expect(install).toContain('PTY_LIFECYCLES');
     expect(install).toContain('.install(&self.token, session)');
-    expect(command).toMatch(/#\[tauri::command\]\s*fn\s+pty_start\b/);
+    expect(command).toMatch(/#\[tauri::command\]\s*async\s+fn\s+pty_start\b/);
+    expect(command).toMatch(/tauri::async_runtime::spawn_blocking\s*\([\s\S]*pty_start_blocking\s*\(/);
 
-    const openPty = command.indexOf('.openpty(');
-    const spawnCommand = command.indexOf('.spawn_command(');
-    const prepareReader = command.indexOf('prepare_pty_reader(');
-    const takeWriter = command.indexOf('.take_writer()');
-    const installCall = command.indexOf('pending_start.install(PtySession');
-    const dataThread = command.indexOf('let data_thread = std::thread::spawn');
+    const openPty = blocking.indexOf('.openpty(');
+    const spawnCommand = blocking.indexOf('.spawn_command(');
+    const prepareReader = blocking.indexOf('prepare_pty_reader(');
+    const takeWriter = blocking.indexOf('.take_writer()');
+    const installCall = blocking.indexOf('pending_start.install(PtySession');
+    const dataThread = blocking.indexOf('let data_thread = std::thread::spawn');
 
     expect(openPty).toBeGreaterThan(-1);
     expect(spawnCommand).toBeGreaterThan(openPty);
@@ -223,33 +229,45 @@ describe('Tauri PTY command threading contract', () => {
     expect(takeWriter).toBeGreaterThan(prepareReader);
     expect(installCall).toBeGreaterThan(takeWriter);
     expect(dataThread).toBeGreaterThan(installCall);
-    expect(command).toMatch(
+    expect(blocking).toMatch(
       /let\s+data_thread\s*=\s*std::thread::spawn\s*\(\s*move\s*\|\|\s*\{[\s\S]*pump_pty_reader\s*\(/,
     );
   });
 
   test('writes through a pane-owned handle after releasing the lifecycle guard', () => {
     const command = commandSource(source, 'pty_write');
+    const operation = rustFunctionSource(source, 'pty_write_operation');
+    const blocking = rustFunctionSource(source, 'pty_write_blocking');
 
-    expect(command).toMatch(/#\[tauri::command\]\s*fn\s+pty_write\b/);
+    expect(command).toMatch(/#\[tauri::command\]\s*async\s+fn\s+pty_write\b/);
     expect(command).toMatch(
-      /let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*Arc::clone\(&session\.writer\)[\s\S]*drop\(guard\)[\s\S]*writer\.lock\(\)[\s\S]*write_all\(&bytes\)[\s\S]*flush\(\)/,
+      /pty_write_operation\(&thread_id\)[\s\S]*operation_admission[\s\S]*\.try_acquire_owned\(\)[\s\S]*operation_lane\.lock_owned\(\)\.await[\s\S]*tauri::async_runtime::spawn_blocking\s*\([\s\S]*pty_write_blocking\s*\(/,
     );
-    const guardEnd = command.indexOf('drop(guard);');
+    expect(operation).toMatch(
+      /let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*Arc::clone\(&session\.writer\)[\s\S]*Arc::clone\(&session\.operation_lane\)[\s\S]*drop\(guard\)/,
+    );
+    expect(blocking).toMatch(/writer\.lock\(\)[\s\S]*write_all\(&bytes\)[\s\S]*flush\(\)/);
+    const guardEnd = operation.indexOf('drop(guard);');
     expect(guardEnd).toBeGreaterThan(-1);
-    expect(command.slice(0, guardEnd)).not.toMatch(/writer\s*\.\s*lock\(\)|write_all\(&bytes\)|flush\(\)/);
+    expect(operation.slice(0, guardEnd)).not.toMatch(/writer\s*\.\s*lock\(\)|write_all\(&bytes\)|flush\(\)/);
   });
 
   test('resizes through a pane-owned handle after releasing the lifecycle guard', () => {
     const command = commandSource(source, 'pty_resize');
+    const operation = rustFunctionSource(source, 'pty_resize_operation');
+    const blocking = rustFunctionSource(source, 'pty_resize_blocking');
 
-    expect(command).toMatch(/#\[tauri::command\]\s*fn\s+pty_resize\b/);
+    expect(command).toMatch(/#\[tauri::command\]\s*async\s+fn\s+pty_resize\b/);
     expect(command).toMatch(
-      /let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*Arc::clone\(&session\.master\)[\s\S]*drop\(guard\)[\s\S]*master\s*\.\s*lock\(\)[\s\S]*\.resize\s*\(\s*PtySize/,
+      /pty_resize_operation\(&thread_id\)[\s\S]*operation_admission[\s\S]*\.try_acquire_owned\(\)[\s\S]*operation_lane\.lock_owned\(\)\.await[\s\S]*tauri::async_runtime::spawn_blocking\s*\([\s\S]*pty_resize_blocking\s*\(/,
     );
-    const guardEnd = command.indexOf('drop(guard);');
+    expect(operation).toMatch(
+      /let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*Arc::clone\(&session\.master\)[\s\S]*Arc::clone\(&session\.operation_lane\)[\s\S]*drop\(guard\)/,
+    );
+    expect(blocking).toMatch(/master\s*\.\s*lock\(\)[\s\S]*\.resize\s*\(\s*PtySize/);
+    const guardEnd = operation.indexOf('drop(guard);');
     expect(guardEnd).toBeGreaterThan(-1);
-    expect(command.slice(0, guardEnd)).not.toMatch(/master\s*\.\s*lock\(\)|\.resize\s*\(\s*PtySize/);
+    expect(operation.slice(0, guardEnd)).not.toMatch(/master\s*\.\s*lock\(\)|\.resize\s*\(\s*PtySize/);
   });
 });
 
@@ -342,6 +360,16 @@ afterEach(() => {
 });
 
 describe('typed frontend PTY batch consumer', () => {
+  test('normalizes batch bytes with one owned allocation', () => {
+    const normalize = frontendTransportSource.slice(
+      frontendTransportSource.indexOf('function normalizeBatchBytes'),
+      frontendTransportSource.indexOf('\n}', frontendTransportSource.indexOf('function normalizeBatchBytes')) + 2,
+    );
+
+    expect(normalize).toContain('Uint8Array.from(batch.bytes).subarray(0, count)');
+    expect(normalize).not.toContain('batch.bytes.slice(');
+  });
+
   test('accepts only the exact next sequence for the owning thread', async () => {
     const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
     const invoke = vi.fn(async () => undefined);
