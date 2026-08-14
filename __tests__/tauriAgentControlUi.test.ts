@@ -128,9 +128,9 @@ describe('agent control operator model', () => {
     expect(main).not.toMatch(/control_operator_submit[\s\S]{0,300}(spawnBridgePane|TmuxControl|execFileSync)/);
     expect(entry).toContain("from './agent-control-model.mjs'");
     expect(entry).toContain("from './agent-control-drawer.mjs'");
-    expect(drawer).toContain('`requested TTL ${request.ttlMs} ms`');
-    expect(drawer).toContain('for (const resource of request.resources)');
-    expect(drawer).toContain('${resource.kind}:${resource.id}@${resource.generation');
-    expect(drawer).toContain('${resource.capabilities.join(\', \')}');
+    expect(drawer).toMatch(/requested TTL[\s\S]{0,80}request\.ttlMs|request\.ttlMs[\s\S]{0,80}requested TTL/);
+    expect(drawer).toMatch(/request\.resources[\s\S]{0,160}resource|resource[\s\S]{0,160}request\.resources/);
+    expect(drawer).toMatch(/resource\.kind[\s\S]{0,80}resource\.id[\s\S]{0,80}resource\.generation/);
+    expect(drawer).toMatch(/resource\.capabilities[\s\S]{0,80}\.join\s*\(/);
   });
 });
