@@ -397,6 +397,133 @@ kbd {
 .session-context-item:focus-visible { background: var(--surface-2); color: var(--text); outline: none; }
 .session-context-item.danger { color: var(--error); }
 
+.project-appearance-popover {
+  position: fixed;
+  z-index: 10010;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(420px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
+  padding: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-1) 94%, transparent);
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(22px) saturate(1.25);
+  -webkit-backdrop-filter: blur(22px) saturate(1.25);
+}
+.project-appearance-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+.project-appearance-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.project-appearance-grid {
+  display: grid;
+  gap: 8px;
+}
+.project-appearance-accent-grid { grid-template-columns: repeat(8, minmax(0, 1fr)); }
+.project-appearance-glyph-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.project-appearance-choice {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text-soft);
+  transition:
+    border-color var(--transition-fast),
+    background var(--transition-fast),
+    box-shadow var(--transition-fast),
+    color var(--transition-fast);
+}
+.project-appearance-choice:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-3);
+  color: var(--text);
+}
+.project-appearance-choice:focus-visible {
+  outline: none;
+  border-color: var(--accent-line);
+  box-shadow: var(--focus-ring);
+}
+.project-appearance-choice[aria-pressed="true"] {
+  border-color: var(--accent-line);
+  box-shadow: var(--focus-ring);
+  color: var(--text);
+}
+.project-appearance-accent {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1 / 1;
+  padding: 0;
+  background: rgb(var(--project-accent-rgb) / 0.14);
+}
+.project-appearance-accent:focus-visible {
+  border-color: rgb(var(--project-accent-rgb) / 0.52);
+  box-shadow: 0 0 0 3px rgb(var(--project-accent-rgb) / 0.18);
+}
+.project-appearance-accent[aria-pressed="true"] {
+  border-color: rgb(var(--project-accent-rgb) / 0.5);
+  box-shadow: 0 0 0 3px rgb(var(--project-accent-rgb) / 0.22);
+}
+.project-appearance-accent-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: rgb(var(--project-accent-rgb) / 0.96);
+  box-shadow:
+    0 0 0 1px rgb(var(--project-accent-rgb) / 0.28),
+    0 6px 16px rgb(var(--project-accent-rgb) / 0.24);
+}
+.project-appearance-glyph {
+  min-height: 42px;
+  padding: 7px 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+.project-appearance-glyph-value {
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text);
+}
+.project-appearance-glyph-name {
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--muted);
+}
+.project-appearance-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+.project-appearance-spacer { flex: 1 1 auto; }
+.project-appearance-action {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-2);
+  color: var(--text-soft);
+  padding: 7px 12px;
+}
+.project-appearance-action:hover { border-color: var(--border-strong); background: var(--surface-3); color: var(--text); }
+.project-appearance-action:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.project-appearance-action.is-primary {
+  border-color: rgb(var(--rgb-accent) / 0.34);
+  background: rgb(var(--rgb-accent) / 0.18);
+  color: var(--text);
+}
+
 .session-worktree-group {
   margin: 1px 0 3px;
   border-radius: 8px;
@@ -992,10 +1119,12 @@ kbd {
   overflow: hidden;
   background: var(--workspace-surface);
   border-radius: var(--workspace-radius) 0 0 0;
-  /* Pane mins are relaxed so a narrow window can still hold the canvas beside
-     the Git dock. Browser surfaces now tile inside the canvas itself. */
+  /* Pane minimums are relaxed so a narrow window can still hold the canvas. */
   --terminal-min:   220px;
   --browser-min:    72px;
+  transition: grid-template-columns var(--transition-layout),
+              grid-template-rows    var(--transition-layout);
+  will-change: grid-template-columns, grid-template-rows;
 }
 .boot-error {
   color: #ff6b6b;
@@ -4523,4 +4652,98 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 @media (prefers-reduced-motion: reduce) {
   .call-bar { animation: none; }
   .call-dot, .call-wave i { animation: none; }
+}
+
+/* -------- Project header appearance bands --------
+   The project header is the project's visual anchor in the rail, so it gets a
+   full-width tint band while the branch and row affordances stay unchanged. */
+
+.session-project[data-project-appearance="automatic"] > .session-project-head {
+  --project-band-alpha: 0.10;
+  --project-band-border-alpha: 0.16;
+}
+
+.session-project[data-project-appearance="custom"] > .session-project-head {
+  --project-band-alpha: 0.16;
+  --project-band-border-alpha: 0.24;
+}
+
+.session-project > .session-project-head {
+  gap: 8px;
+  margin-bottom: 2px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid rgb(var(--project-accent-rgb) / var(--project-band-border-alpha, 0.16));
+  border-radius: 10px;
+  background:
+    linear-gradient(
+      90deg,
+      rgb(var(--project-accent-rgb) / var(--project-band-alpha, 0.10)) 0%,
+      rgb(var(--project-accent-rgb) / 0.06) 56%,
+      rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.92)) 100%
+    ),
+    rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.96));
+  color: var(--text-soft);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 0 0 1px rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(16px) saturate(1.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+}
+
+.session-project > .session-project-head:hover {
+  border-color: rgb(var(--project-accent-rgb) / 0.34);
+  background:
+    linear-gradient(
+      90deg,
+      rgb(var(--project-accent-rgb) / 0.18) 0%,
+      rgb(var(--project-accent-rgb) / 0.10) 56%,
+      rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.92)) 100%
+    ),
+    rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.98));
+  color: var(--text);
+  box-shadow:
+    inset 0 0 0 999px rgba(255, 255, 255, 0.02),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 8px 24px rgba(0, 0, 0, 0.16);
+}
+
+.session-project.is-current > .session-project-head {
+  --project-band-alpha: 0.22;
+  --project-band-border-alpha: 0.38;
+  color: var(--text);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 12px 32px rgba(0, 0, 0, 0.18);
+}
+
+.session-project:focus-visible > .session-project-head {
+  outline: none;
+  border-color: rgb(var(--project-accent-rgb) / 0.56);
+  box-shadow:
+    0 0 0 3px rgb(var(--project-accent-rgb) / 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.session-project-glyph {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  color: rgb(var(--project-accent-rgb) / 0.92);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.session-project-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.session-project-head .session-project-count {
+  color: rgb(var(--project-accent-rgb) / 0.84);
 }

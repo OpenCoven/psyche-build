@@ -39,6 +39,10 @@ const PsycheSessions = {
     repoRoot,
     'native/desktop/psyche-build-tauri/web/sessions/sidebar-model.mjs',
   )).href)),
+  ...(await import(pathToFileURL(join(
+    repoRoot,
+    'native/desktop/psyche-build-tauri/web/sessions/project-appearance.mjs',
+  )).href)),
 };
 
 function extractFunctionSource(source: string, name: string) {
@@ -67,15 +71,45 @@ function decodeHtml(value: string) {
 
 type Listener = (event: FakeEvent) => unknown;
 
+class FakeStyle {
+  private readonly properties = new Map<string, string>();
+  left = '';
+  top = '';
+  maxWidth = '';
+  maxHeight = '';
+
+  setProperty(name: string, value: string) {
+    this.properties.set(name, String(value));
+  }
+
+  getPropertyValue(name: string) {
+    return this.properties.get(name) ?? '';
+  }
+
+  removeProperty(name: string) {
+    this.properties.delete(name);
+  }
+}
+
 class FakeEvent {
   target: FakeElement;
   key: string;
+  shiftKey: boolean;
+  clientX: number;
+  clientY: number;
   propagationStopped = false;
   defaultPrevented = false;
 
-  constructor(target: FakeElement, key = '') {
+  constructor(
+    target: FakeElement,
+    key = '',
+    options: { shiftKey?: boolean; clientX?: number; clientY?: number } = {},
+  ) {
     this.target = target;
     this.key = key;
+    this.shiftKey = Boolean(options.shiftKey);
+    this.clientX = options.clientX ?? 0;
+    this.clientY = options.clientY ?? 0;
   }
 
   stopPropagation() {
@@ -93,6 +127,7 @@ class FakeElement {
   readonly attributes = new Map<string, string>();
   readonly listeners = new Map<string, Listener[]>();
   readonly innerHtmlAssignments: string[] = [];
+  readonly style = new FakeStyle();
   children: FakeElement[] = [];
   parentNode: FakeElement | null = null;
   className = '';
@@ -105,6 +140,14 @@ class FakeElement {
   focused = false;
   selected = false;
   hidden = false;
+  private rect = {
+    left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: 0,
+    height: 0,
+  };
   private ownText = '';
   private html = '';
 
@@ -305,6 +348,12 @@ class FakeElement {
   matches(selector: string) {
     if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
     if (selector === '[data-tree-item]') return Boolean(this.dataset.treeItem);
+    if (/^[a-z]+$/i.test(selector)) return this.tagName === selector.toUpperCase();
+    const attributeSelector = /^([a-z]+)\[([^=\]]+)="([^"]*)"\]$/i.exec(selector);
+    if (attributeSelector) {
+      return this.tagName === attributeSelector[1].toUpperCase()
+        && this.getAttribute(attributeSelector[2]) === attributeSelector[3];
+    }
     return false;
   }
 
@@ -321,8 +370,32 @@ class FakeElement {
     this.listeners.set(name, listeners);
   }
 
-  async emit(name: string, options: { target?: FakeElement; key?: string } = {}) {
-    const event = new FakeEvent(options.target ?? this, options.key);
+  setBoundingClientRect(rect: Partial<typeof this.rect>) {
+    this.rect = {
+      ...this.rect,
+      ...rect,
+    };
+    if (!('right' in rect)) this.rect.right = this.rect.left + this.rect.width;
+    if (!('bottom' in rect)) this.rect.bottom = this.rect.top + this.rect.height;
+    if (!('width' in rect)) this.rect.width = this.rect.right - this.rect.left;
+    if (!('height' in rect)) this.rect.height = this.rect.bottom - this.rect.top;
+  }
+
+  getBoundingClientRect() {
+    return { ...this.rect };
+  }
+
+  async emit(
+    name: string,
+    options: {
+      target?: FakeElement;
+      key?: string;
+      shiftKey?: boolean;
+      clientX?: number;
+      clientY?: number;
+    } = {},
+  ) {
+    const event = new FakeEvent(options.target ?? this, options.key, options);
     for (const listener of this.listeners.get(name) ?? []) {
       await listener(event);
     }
@@ -336,13 +409,25 @@ class FakeElement {
   querySelectorAll(selector: string): FakeElement[] {
     const classSelector = selector.startsWith('.') ? selector.slice(1) : null;
     const treeItemSelector = selector === '[data-tree-item]';
-    if (!classSelector && !treeItemSelector) {
+    const tagSelector = !classSelector && !treeItemSelector && /^[a-z]+$/i.test(selector)
+      ? selector.toUpperCase()
+      : null;
+    const attributeSelector = !classSelector && !treeItemSelector
+      ? /^([a-z]+)\[([^=\]]+)="([^"]*)"\]$/i.exec(selector)
+      : null;
+    if (!classSelector && !treeItemSelector && !tagSelector && !attributeSelector) {
       throw new Error(`unsupported selector ${selector}`);
     }
     const matches: FakeElement[] = [];
     const visit = (element: FakeElement) => {
       if (classSelector && element.classList.contains(classSelector)) matches.push(element);
       if (treeItemSelector && element.dataset.treeItem) matches.push(element);
+      if (tagSelector && element.tagName === tagSelector) matches.push(element);
+      if (attributeSelector &&
+          element.tagName === attributeSelector[1].toUpperCase() &&
+          element.getAttribute(attributeSelector[2]) === attributeSelector[3]) {
+        matches.push(element);
+      }
       element.children.forEach(visit);
     };
     this.children.forEach(visit);
@@ -351,9 +436,16 @@ class FakeElement {
 }
 
 class FakeDocument {
+  readonly body: FakeElement;
   readonly created: FakeElement[] = [];
   private readonly connectedRoots = new Set<FakeElement>();
+  private readonly listeners = new Map<string, Listener[]>();
   activeElement: FakeElement | null = null;
+
+  constructor() {
+    this.body = new FakeElement('body', this);
+    this.connectRoot(this.body);
+  }
 
   connectRoot(element: FakeElement) {
     this.connectedRoots.add(element);
@@ -367,6 +459,29 @@ class FakeDocument {
     const element = new FakeElement(tagName, this);
     this.created.push(element);
     return element;
+  }
+
+  addEventListener(name: string, listener: Listener) {
+    const listeners = this.listeners.get(name) ?? [];
+    listeners.push(listener);
+    this.listeners.set(name, listeners);
+  }
+
+  async emit(
+    name: string,
+    options: {
+      target?: FakeElement;
+      key?: string;
+      shiftKey?: boolean;
+      clientX?: number;
+      clientY?: number;
+    } = {},
+  ) {
+    const event = new FakeEvent(options.target ?? this.body, options.key, options);
+    for (const listener of this.listeners.get(name) ?? []) {
+      await listener(event);
+    }
+    return event;
   }
 
   querySelector() {
@@ -425,6 +540,7 @@ function createRenderer(options: {
   projects?: Project[];
   threads?: LocalThread[];
   sessions?: RemoteSession[];
+  projectAppearances?: Record<string, { accent?: string; glyph?: string }>;
   phase?: string;
   message?: string | null;
   stale?: boolean;
@@ -434,6 +550,7 @@ function createRenderer(options: {
   openCovenSession?: (project: Project, session: RemoteSession) => unknown;
   invoke?: (command: string, args: Record<string, unknown>) => Promise<unknown>;
   refreshCovenSessions?: (options?: { force?: boolean }) => Promise<unknown>;
+  openProjectAppearancePopover?: (project: Project, anchor: FakeElement) => unknown;
   realEdit?: boolean;
   canvasThreadIds?: string[];
   focusSets?: Array<{ id: string; index: number; name: string; key: string; threadIds: string[] }>;
@@ -441,6 +558,8 @@ function createRenderer(options: {
   setPicking?: { key: string; picked: string[] } | null;
   selectedSessionKey?: string;
   typeFilter?: string;
+  localStorageReadError?: unknown;
+  localStorageWriteError?: unknown;
 } = {}) {
   const document = new FakeDocument();
   const sessionListEl = new FakeElement('div', document);
@@ -448,6 +567,23 @@ function createRenderer(options: {
   document.connectRoot(sessionListEl);
   document.connectRoot(composerInputEl);
   composerInputEl.value = options.composerQuery ?? '';
+  const projectAppearancesKey = 'psyche.tauri.project-appearances.v1';
+  const storage = new Map<string, string>();
+  if (options.projectAppearances) {
+    storage.set(projectAppearancesKey, JSON.stringify(options.projectAppearances));
+  }
+  const localStorage = {
+    getItem: vi.fn((key: string) => {
+      if (options.localStorageReadError && key === projectAppearancesKey) {
+        throw options.localStorageReadError;
+      }
+      return storage.get(key) ?? null;
+    }),
+    setItem: vi.fn((key: string, value: string) => {
+      if (options.localStorageWriteError) throw options.localStorageWriteError;
+      storage.set(key, String(value));
+    }),
+  };
   const state = {
     env: { home: '/Users/val' },
     projects: options.projects ?? [{ id: 'alpha', name: 'Alpha', root: '/alpha' }],
@@ -515,6 +651,9 @@ function createRenderer(options: {
   const saveWorkspaceSoon = vi.fn();
   const setSessionTypeFilter = vi.fn();
   const openSessionContextMenu = vi.fn();
+  const openProjectAppearancePopover = vi.fn(
+    options.openProjectAppearancePopover ?? (() => undefined),
+  );
   const paneGlyphFor = (kind: string) =>
     kind === 'shell' ? '❯_' : kind === 'web' ? '◍' : '✳';
 
@@ -523,10 +662,16 @@ function createRenderer(options: {
     'var armedSessionClose = null;',
     'var covenSessionCloseFlights = new Set();',
     'var covenSessionMutationGeneration = 0;',
+    'var PROJECT_APPEARANCES_KEY = "psyche.tauri.project-appearances.v1";',
     'var focusSets = seedFocusSets;',
     'var setPicking = seedSetPicking;',
+    'var deferredStatusMessages = [];',
     'var sessionTreeFocusKey = "";',
     'var isRestoringWorkspace = false;',
+    extractFunctionSource(mainJs, 'queueDeferredStatus'),
+    extractFunctionSource(mainJs, 'flushDeferredStatusMessages'),
+    extractFunctionSource(mainJs, 'loadProjectAppearances'),
+    'var projectAppearances = loadProjectAppearances();',
     extractFunctionSource(mainJs, 'paneLayoutKey'),
     extractFunctionSource(mainJs, 'findFocusSet'),
     extractFunctionSource(mainJs, 'setsForThread'),
@@ -566,9 +711,16 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'toggleSessionTreeDisclosure'),
     extractFunctionSource(mainJs, 'activateSessionTreeItem'),
     extractFunctionSource(mainJs, 'handleSessionTreeKeydown'),
+    extractFunctionSource(mainJs, 'restoreSessionTreeFocus'),
     extractFunctionSource(mainJs, 'threadIsToolPane'),
     extractFunctionSource(mainJs, 'sessionCloseLabel'),
     extractFunctionSource(mainJs, 'localSessionContextActions'),
+    'var projectAppearancePopover = null;',
+    'var projectAppearancePopoverRestoreKey = "";',
+    extractFunctionSource(mainJs, 'closeProjectAppearancePopover'),
+    extractFunctionSource(mainJs, 'projectAppearanceContextActions'),
+    extractFunctionSource(mainJs, 'saveProjectAppearances'),
+    extractFunctionSource(mainJs, 'applyProjectAppearance'),
     extractFunctionSource(mainJs, 'renderSessionList'),
   ];
   const harness = Function(
@@ -582,16 +734,28 @@ function createRenderer(options: {
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
     'saveWorkspaceSoon', 'activateProjectWorktree', 'setSessionTypeFilter',
-    'openSessionContextMenu', 'invoke', 'refreshCovenSessions',
+    'openSessionContextMenu', 'openProjectAppearancePopover',
+    'invoke', 'refreshCovenSessions', 'localStorage',
     `"use strict"; ${sources.join('\n')}; return {
-      render: renderSessionList,
+      render: function () {
+        renderSessionList();
+        flushDeferredStatusMessages();
+      },
       setDiscovery: function (value) { covenDiscovery = value; },
       armSessionClose: armSessionClose,
       disarmSessionClose: disarmSessionClose,
       closeCovenSession: closeCovenSession,
       handleTreeKeydown: handleSessionTreeKeydown,
       toggleSetPick: toggleSetPick,
-      picked: function () { return setPicking ? setPicking.picked.slice() : null; }
+      picked: function () { return setPicking ? setPicking.picked.slice() : null; },
+      saveProjectAppearances: saveProjectAppearances,
+      applyProjectAppearance: applyProjectAppearance,
+      projectAppearances: function () { return projectAppearances; },
+      sessionTreeFocusKey: function () { return sessionTreeFocusKey; },
+      setProjectAppearancePopover: function (popover, restoreKey) {
+        projectAppearancePopover = popover;
+        projectAppearancePopoverRestoreKey = restoreKey || "";
+      }
     };`,
   )(
     document,
@@ -647,8 +811,10 @@ function createRenderer(options: {
     activateProjectWorktree,
     setSessionTypeFilter,
     openSessionContextMenu,
+    openProjectAppearancePopover,
     invoke,
     refreshCovenSessions,
+    localStorage,
   ) as {
     render: () => void;
     setDiscovery: (value: typeof discovery) => void;
@@ -660,6 +826,14 @@ function createRenderer(options: {
     handleTreeKeydown: (event: FakeEvent) => void;
     toggleSetPick: (threadId: string) => void;
     picked: () => string[] | null;
+    saveProjectAppearances: () => boolean;
+    applyProjectAppearance: (
+      project: Project | null | undefined,
+      patch: { accent?: string | null; glyph?: string | null } | null,
+    ) => boolean;
+    projectAppearances: () => Record<string, { accent?: string; glyph?: string }>;
+    sessionTreeFocusKey: () => string;
+    setProjectAppearancePopover: (popover: FakeElement | null, restoreKey?: string) => void;
     settings: typeof settings;
     saveSettings: typeof saveSettings;
     saveWorkspaceSoon: typeof saveWorkspaceSoon;
@@ -691,9 +865,74 @@ function createRenderer(options: {
     editLabelInline,
     openCovenSession,
     invoke,
+    localStorage,
     refreshCovenSessions,
     setStatus,
     canvasThreadIds,
+    openProjectAppearancePopover,
+  };
+}
+
+function createSessionContextMenuHarness() {
+  const document = new FakeDocument();
+  const sessionListEl = new FakeElement('div', document);
+  document.connectRoot(sessionListEl);
+
+  const project = new FakeElement('div', document);
+  project.className = 'session-project';
+  project.dataset.treeItem = 'project';
+  project.dataset.projectId = 'psyche';
+  project.dataset.treeKey = 'project:psyche';
+  project.setAttribute('tabindex', '0');
+  sessionListEl.appendChild(project);
+
+  const openProjectAppearancePopover = vi.fn();
+  const windowValue = { innerWidth: 1280, innerHeight: 720 };
+  const projectValue = { id: 'psyche', name: 'PSYCHE-BUILD', root: '/repo/psyche-build' };
+  const harness = Function(
+    'document', 'window', 'sessionListEl', 'findProject', 'openProjectAppearancePopover',
+    `"use strict";
+    var sessionTreeFocusKey = "";
+    var projectAppearancePopover = null;
+    function closeProjectAppearancePopover() {}
+    var sessionContextMenu = null;
+    var sessionContextMenuRestoreKey = "";
+    ${extractFunctionSource(mainJs, 'visibleSessionTreeItems')}
+    ${extractFunctionSource(mainJs, 'focusSessionTreeItem')}
+    ${extractFunctionSource(mainJs, 'parentSessionTreeItem')}
+    ${extractFunctionSource(mainJs, 'firstChildSessionTreeItem')}
+    ${extractFunctionSource(mainJs, 'toggleSessionTreeDisclosure')}
+    ${extractFunctionSource(mainJs, 'activateSessionTreeItem')}
+    ${extractFunctionSource(mainJs, 'restoreSessionTreeFocus')}
+    ${extractFunctionSource(mainJs, 'projectAppearanceContextActions')}
+    ${extractFunctionSource(mainJs, 'closeSessionContextMenu')}
+    ${extractFunctionSource(mainJs, 'openSessionContextMenu')}
+    ${extractFunctionSource(mainJs, 'handleSessionTreeKeydown')}
+    return {
+      closeSessionContextMenu: closeSessionContextMenu,
+      handleTreeKeydown: handleSessionTreeKeydown,
+      sessionContextMenu: function () { return sessionContextMenu; },
+      sessionTreeFocusKey: function () { return sessionTreeFocusKey; }
+    };`,
+  )(
+    document,
+    windowValue,
+    sessionListEl,
+    (id: string) => (id === projectValue.id ? projectValue : null),
+    openProjectAppearancePopover,
+  ) as {
+    closeSessionContextMenu: (options?: { restoreFocus?: boolean }) => void;
+    handleTreeKeydown: (event: FakeEvent) => void;
+    sessionContextMenu: () => FakeElement | null;
+    sessionTreeFocusKey: () => string;
+  };
+
+  return {
+    ...harness,
+    document,
+    sessionListEl,
+    project,
+    openProjectAppearancePopover,
   };
 }
 
@@ -781,6 +1020,22 @@ describe('Tauri Coven session project rail', () => {
       .toContain('PSYCHE-BUILD');
     expect(renderer.sessionListEl.querySelector('.session-project-head')?.textContent)
       .toContain('5');
+    const projectHead = renderer.sessionListEl.querySelector('.session-project-head');
+    const projectGroup = renderer.sessionListEl.querySelector('.session-project');
+    const automaticAccentIds = new Set(PsycheSessions.PROJECT_ACCENTS.map(
+      (accent: { id: string }) => accent.id,
+    ));
+    expect(projectGroup?.classList.contains('is-current')).toBe(true);
+    expect(projectGroup?.dataset.projectAppearance).toBe('automatic');
+    expect(automaticAccentIds.has(projectGroup?.dataset.projectAccent ?? '')).toBe(true);
+    expect(projectHead?.style.getPropertyValue('--project-accent-rgb')).toBe(
+      PsycheSessions.PROJECT_ACCENTS.find(
+        (accent: { id: string; rgb: string }) => accent.id === projectGroup?.dataset.projectAccent,
+      )?.rgb,
+    );
+    expect(projectHead?.textContent).not.toContain('CURRENT');
+    expect(renderer.sessionListEl.querySelector('.session-current-badge')).toBeNull();
+    expect(renderer.sessionListEl.querySelector('.session-project-glyph')).toBeNull();
     expect(renderer.sessionListEl.querySelector('.session-branch-head')?.textContent)
       .toContain('feat/web-pane-attention');
     expect(renderer.sessionListEl.querySelector('.session-category-label')?.textContent)
@@ -829,6 +1084,213 @@ describe('Tauri Coven session project rail', () => {
       .toBe('/repo/psyche-build');
     expect(renderer.document.created.flatMap((element) => element.innerHtmlAssignments))
       .toEqual([]);
+  });
+
+  it('renders customized project appearance datasets, accent, and glyph', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'psyche',
+        name: 'PSYCHE-BUILD',
+        root: '/repo/psyche-build',
+        collapsed: false,
+        selectedWorktreePath: '/repo/psyche-build',
+        worktrees: [{
+          path: '/repo/psyche-build',
+          branch: 'main',
+          is_main: true,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      projectAppearances: {
+        '/repo/psyche-build': { accent: 'violet', glyph: 'spark' },
+      },
+      threads: [{
+        id: 'shell',
+        projectId: 'psyche',
+        worktreePath: '/repo/psyche-build',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+      activeProjectId: 'psyche',
+    });
+
+    renderer.render();
+
+    const projectGroup = renderer.sessionListEl.querySelector('.session-project');
+    const projectHead = renderer.sessionListEl.querySelector('.session-project-head');
+    const glyph = renderer.sessionListEl.querySelector('.session-project-glyph');
+
+    expect(projectGroup?.dataset.projectAccent).toBe('violet');
+    expect(projectGroup?.dataset.projectAppearance).toBe('custom');
+    expect(projectHead?.style.getPropertyValue('--project-accent-rgb')).toBe('145 111 235');
+    expect(glyph?.textContent).toBe('✦');
+    expect(glyph?.getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('keeps project header accent styles on slash-alpha rgb syntax', () => {
+    const projectHeaderStyles = styles.match(
+      /\/\* -------- Project header appearance bands --------[\s\S]*?\.session-project-head \.session-project-count \{[\s\S]*?\n\}/,
+    )?.[0] ?? '';
+
+    expect(projectHeaderStyles).toContain(
+      'rgb(var(--project-accent-rgb) / var(--project-band-border-alpha, 0.16))',
+    );
+    expect(projectHeaderStyles.match(/rgb\(var\(--project-accent-rgb\)\s*\/\s*/g) ?? [])
+      .toHaveLength(10);
+    expect(projectHeaderStyles).not.toContain('rgba(var(--project-accent-rgb),');
+  });
+
+  it('renders projects and surfaces deferred appearance load failures', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha',
+        name: 'Alpha',
+        root: '/alpha',
+        collapsed: false,
+        selectedWorktreePath: '/alpha',
+        worktrees: [{
+          path: '/alpha',
+          branch: 'main',
+          is_main: true,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'alpha',
+        worktreePath: '/alpha',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+      activeProjectId: 'alpha',
+      localStorageReadError: new Error('storage unavailable'),
+    });
+
+    renderer.render();
+
+    const projectGroup = renderer.sessionListEl.querySelector('.session-project');
+    const projectHead = renderer.sessionListEl.querySelector('.session-project-head');
+
+    expect(projectGroup).not.toBeNull();
+    expect(projectGroup?.dataset.projectAppearance).toBe('automatic');
+    expect(projectHead?.textContent).toContain('Alpha');
+    expect(renderer.projectAppearances()).toEqual({});
+    expect(renderer.setStatus).toHaveBeenCalledWith(
+      'project appearance load failed: Error: storage unavailable',
+      'error',
+    );
+  });
+
+  it('preserves in-memory project appearances and rerenders after save failures', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha',
+        name: 'Alpha',
+        root: '/alpha',
+        collapsed: false,
+        selectedWorktreePath: '/alpha',
+        worktrees: [{
+          path: '/alpha',
+          branch: 'main',
+          is_main: true,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'alpha',
+        worktreePath: '/alpha',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+      localStorageWriteError: new Error('disk full'),
+    });
+
+    renderer.render();
+    const project = renderer.sessionListEl.querySelector('.session-project');
+    project?.focus();
+
+    expect(renderer.applyProjectAppearance(renderer.state.projects[0], { accent: 'violet' })).toBe(true);
+
+    const rerenderedProject = renderer.sessionListEl.querySelector('.session-project');
+    const rerenderedHead = renderer.sessionListEl.querySelector('.session-project-head');
+
+    expect(renderer.setStatus).toHaveBeenCalledWith(
+      'project appearance save failed: Error: disk full',
+      'error',
+    );
+    expect(renderer.projectAppearances()).toEqual({
+      '/alpha': { accent: 'violet' },
+    });
+    expect(rerenderedProject?.dataset.projectAccent).toBe('violet');
+    expect(rerenderedHead?.style.getPropertyValue('--project-accent-rgb')).toBe('145 111 235');
+    expect(renderer.document.activeElement).toBe(rerenderedProject);
+  });
+
+  it('opens a project header context menu with customize appearance anchored to the treeitem', async () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'psyche',
+        name: 'PSYCHE-BUILD',
+        root: '/repo/psyche-build',
+        collapsed: false,
+        selectedWorktreePath: '/repo/psyche-build',
+        worktrees: [{
+          path: '/repo/psyche-build',
+          branch: 'main',
+          is_main: true,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'psyche',
+        worktreePath: '/repo/psyche-build',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+    });
+
+    renderer.render();
+    const projectHead = renderer.sessionListEl.querySelector('.session-project-head');
+    const projectTreeitem = renderer.sessionListEl.querySelector('.session-project');
+    const sessionTreeitem = renderer.sessionListEl.querySelector('.session-row');
+
+    sessionTreeitem?.focus();
+    renderer.handleTreeKeydown(new FakeEvent(sessionTreeitem!, 'a'));
+    expect(renderer.sessionTreeFocusKey()).toBe(sessionTreeitem?.dataset.treeKey);
+
+    await projectHead?.emit('contextmenu', {
+      target: projectHead ?? undefined,
+      clientX: 160,
+      clientY: 48,
+    });
+
+    expect(projectTreeitem?.dataset.projectId).toBe('psyche');
+    expect(renderer.openSessionContextMenu).toHaveBeenCalledTimes(1);
+    const [, actions, anchor] = renderer.openSessionContextMenu.mock.calls[0];
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ label: 'Customize appearance' });
+    expect(anchor).toBe(projectTreeitem);
+    expect(renderer.sessionTreeFocusKey()).toBe(projectTreeitem?.dataset.treeKey);
+
+    actions[0].run();
+    expect(renderer.openProjectAppearancePopover).toHaveBeenCalledWith(
+      renderer.state.projects[0],
+      projectTreeitem,
+    );
   });
 
   it('renders daemon-backed Coven sessions inside Agents with Coven metadata', () => {
@@ -1021,6 +1483,84 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.setActiveProject).toHaveBeenCalledWith('psyche');
     expect(renderer.state.projects[0].collapsed).toBe(true);
     expect(renderer.saveWorkspaceSoon).toHaveBeenCalledOnce();
+  });
+
+  it('opens focused project treeitem context menus from keyboard shortcuts', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'psyche',
+        name: 'PSYCHE-BUILD',
+        root: '/repo/psyche-build',
+        collapsed: false,
+        selectedWorktreePath: '/repo/psyche-build',
+        worktrees: [{
+          path: '/repo/psyche-build',
+          branch: 'main',
+          is_main: true,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'psyche',
+        worktreePath: '/repo/psyche-build',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+    });
+
+    renderer.render();
+    const project = renderer.sessionListEl.querySelector('.session-project');
+    expect(project).not.toBeNull();
+
+    project?.focus();
+    const contextMenu = new FakeEvent(project!, 'ContextMenu');
+    renderer.handleTreeKeydown(contextMenu);
+
+    expect(contextMenu.defaultPrevented).toBe(true);
+    expect(contextMenu.propagationStopped).toBe(true);
+    expect(renderer.openSessionContextMenu).toHaveBeenCalledTimes(1);
+    expect(renderer.openSessionContextMenu.mock.calls[0][2]).toBe(project);
+    expect(renderer.openSessionContextMenu.mock.calls[0][1][0]).toMatchObject({
+      label: 'Customize appearance',
+    });
+
+    renderer.openSessionContextMenu.mockClear();
+    const shiftF10 = new FakeEvent(project!, 'F10', { shiftKey: true });
+    renderer.handleTreeKeydown(shiftF10);
+
+    expect(shiftF10.defaultPrevented).toBe(true);
+    expect(shiftF10.propagationStopped).toBe(true);
+    expect(renderer.openSessionContextMenu).toHaveBeenCalledTimes(1);
+    expect(renderer.openSessionContextMenu.mock.calls[0][2]).toBe(project);
+    expect(renderer.openSessionContextMenu.mock.calls[0][1][0]).toMatchObject({
+      label: 'Customize appearance',
+    });
+  });
+
+  it('restores the project treeitem when a keyboard-opened context menu closes', () => {
+    const harness = createSessionContextMenuHarness();
+
+    harness.project.focus();
+    const contextMenu = new FakeEvent(harness.project, 'ContextMenu');
+    harness.handleTreeKeydown(contextMenu);
+
+    expect(contextMenu.defaultPrevented).toBe(true);
+    expect(contextMenu.propagationStopped).toBe(true);
+    expect(harness.sessionTreeFocusKey()).toBe(harness.project.dataset.treeKey);
+
+    const menu = harness.sessionContextMenu();
+    const firstItem = menu?.querySelector('button');
+    expect(firstItem).not.toBeNull();
+    expect(harness.document.activeElement).toBe(firstItem);
+
+    harness.closeSessionContextMenu();
+
+    expect(harness.document.activeElement).toBe(harness.project);
+    expect(harness.project.focused).toBe(true);
   });
 
   it('activates focused branch treeitems on Enter and toggles them on Space', async () => {
@@ -1275,6 +1815,70 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.state.projects[0].collapsed).toBe(false);
     expect(renderer.state.projects[0].worktrees?.[0].collapsed).toBe(false);
     expect(renderer.saveWorkspaceSoon).not.toHaveBeenCalled();
+  });
+
+  it('ships a non-modal project appearance popover contract with fixed presets', () => {
+    const popoverSource = extractFunctionSource(mainJs, 'openProjectAppearancePopover');
+
+    expect(mainJs).toContain('function closeProjectAppearancePopover(');
+    expect(popoverSource).toContain('project-appearance-popover');
+    expect(popoverSource).toContain('setAttribute("role", "dialog")');
+    expect(popoverSource).toContain('project.name');
+    expect(popoverSource).toContain('PsycheSessions.PROJECT_ACCENTS.forEach');
+    expect(popoverSource).toContain('PsycheSessions.PROJECT_GLYPHS.forEach');
+    expect(popoverSource).toContain('aria-pressed');
+    expect(popoverSource).toContain('Reset to automatic');
+    expect(popoverSource).toContain('No glyph');
+    expect(popoverSource).not.toMatch(/type\s*=\s*["']color["']/);
+    expect(styles).toContain('.project-appearance-popover {');
+    expect(styles).toContain('.project-appearance-accent-grid {');
+    expect(styles).toContain('.project-appearance-glyph-grid {');
+    expect(styles).toContain('.project-appearance-choice[aria-pressed="true"]');
+  });
+
+  it('restores the project treeitem when rerender closes the project appearance popover', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'psyche',
+        name: 'PSYCHE-BUILD',
+        root: '/repo/psyche-build',
+        collapsed: false,
+        selectedWorktreePath: '/repo/psyche-build',
+        worktrees: [{
+          path: '/repo/psyche-build',
+          branch: 'main',
+          is_main: true,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'psyche',
+        worktreePath: '/repo/psyche-build',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+    });
+
+    renderer.render();
+    const project = renderer.sessionListEl.querySelector('.session-project');
+    expect(project).not.toBeNull();
+
+    const popover = new FakeElement('div', renderer.document);
+    const choice = new FakeElement('button', renderer.document);
+    popover.appendChild(choice);
+    renderer.document.body.appendChild(popover);
+    choice.focus();
+    renderer.setProjectAppearancePopover(popover, project?.dataset.treeKey);
+
+    renderer.render();
+
+    const rerenderedProject = renderer.sessionListEl.querySelector('.session-project');
+    expect(renderer.document.activeElement).toBe(rerenderedProject);
+    expect(rerenderedProject?.dataset.treeKey).toBe(project?.dataset.treeKey);
   });
 
   // Fixtures arrived with main's worktree-ownership tests further down, which

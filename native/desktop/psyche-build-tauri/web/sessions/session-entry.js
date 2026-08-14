@@ -33,3 +33,13 @@ export {
   SIDEBAR_ACTIVE_WINDOW_MS,
   SIDEBAR_FILTERS,
 } from './sidebar-model.mjs';
+export {
+  normalizeProjectAppearanceKey,
+  parseProjectAppearances,
+  PROJECT_ACCENTS,
+  PROJECT_GLYPHS,
+  resolveProjectAppearance,
+  sanitizeProjectAppearance,
+  stableProjectAppearanceHash,
+  updateProjectAppearance,
+} from './project-appearance.mjs';

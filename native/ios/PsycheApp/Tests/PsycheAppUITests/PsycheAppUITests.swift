@@ -90,7 +90,8 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(
             app.staticTexts.containing(
                 NSPredicate(format: "label CONTAINS[c] %@", "Waiting for review input")
-            ).firstMatch.waitForExistence(timeout: 10)
+            ).firstMatch.waitForExistence(timeout: 20),
+            "Fixture terminal output did not become accessible before the simulator timeout"
         )
     }
 

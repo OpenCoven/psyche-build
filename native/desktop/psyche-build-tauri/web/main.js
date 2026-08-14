@@ -152,6 +152,8 @@
   var paneFooterPopoverOwner = null;
   var paneFooterPopoverTrigger = null;
   var paneFooterPopoverThreadId = null;
+  var projectAppearancePopover = null;
+  var projectAppearancePopoverRestoreKey = "";
   var browserTabLifecycleStates = new WeakMap();
   var browserPaneLifecycleStates = new WeakMap();
   var browserControlProviders = new Map();
@@ -935,8 +937,11 @@
   var MIN_BG_OPACITY = 0.3;
   var MAX_BG_OPACITY = 1;
   var SETTINGS_KEY = "psyche.tauri.settings.v1";
+  var PROJECT_APPEARANCES_KEY = "psyche.tauri.project-appearances.v1";
   var WORKSPACE_STATE_KEY = "psyche.tauri.workspace.v1";
+  var deferredStatusMessages = [];
   var settings = loadSettings();
+  var projectAppearances = loadProjectAppearances();
   var isRestoringWorkspace = false;
   var saveWorkspaceTimer = 0;
 
@@ -949,6 +954,19 @@
     var n = parseFloat(value);
     if (!Number.isFinite(n)) return fallback;
     return Math.max(min, Math.min(max, n));
+  }
+  function queueDeferredStatus(text, level) {
+    deferredStatusMessages.push({
+      text: String(text),
+      level: typeof level === "string" ? level : "",
+    });
+  }
+  function flushDeferredStatusMessages() {
+    if (!deferredStatusMessages.length) return;
+    deferredStatusMessages.forEach(function (entry) {
+      setStatus(entry.text, entry.level);
+    });
+    deferredStatusMessages = [];
   }
   function loadSettings() {
     var defaults = {
@@ -975,6 +993,16 @@
       };
     } catch (_) { return defaults; }
   }
+  function loadProjectAppearances() {
+    try {
+      return PsycheSessions.parseProjectAppearances(
+        localStorage.getItem(PROJECT_APPEARANCES_KEY)
+      );
+    } catch (error) {
+      queueDeferredStatus("project appearance load failed: " + String(error), "error");
+      return {};
+    }
+  }
   function saveSettings() {
     settings.maxProjects = clampInt(settings.maxProjects, 10, 1, HARD_MAX_PROJECTS);
     settings.maxBrowserTabsPerProject = clampInt(settings.maxBrowserTabsPerProject, 10, 1, HARD_MAX_BROWSER_TABS_PER_PROJECT);
@@ -985,6 +1013,18 @@
     settings.sessionFilter = PsycheSessions.normalizeSidebarFilter(settings.sessionFilter);
     settings.selectedSessionKey = typeof settings.selectedSessionKey === "string" ? settings.selectedSessionKey.slice(0, 1024) : "";
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }
+  function saveProjectAppearances() {
+    try {
+      localStorage.setItem(
+        PROJECT_APPEARANCES_KEY,
+        JSON.stringify(projectAppearances)
+      );
+      return true;
+    } catch (error) {
+      setStatus("project appearance save failed: " + String(error), "error");
+      return false;
+    }
   }
 
   // ---- Background opacity ----
@@ -4820,22 +4860,56 @@
     return actions;
   }
 
+  function projectAppearanceContextActions(project, anchor) {
+    if (!project) return [];
+    return [{
+      label: "Customize appearance",
+      run: function () {
+        openProjectAppearancePopover(project, anchor);
+      },
+    }];
+  }
+
   var sessionContextMenu = null;
-  function closeSessionContextMenu() {
+  var sessionContextMenuRestoreKey = "";
+  function closeSessionContextMenu(options) {
+    var restoreFocus = !options || options.restoreFocus !== false;
+    var restoreKey = sessionContextMenuRestoreKey;
     if (sessionContextMenu && sessionContextMenu.parentNode) {
       sessionContextMenu.parentNode.removeChild(sessionContextMenu);
     }
     sessionContextMenu = null;
+    sessionContextMenuRestoreKey = "";
+    if (restoreFocus && restoreKey) {
+      sessionTreeFocusKey = restoreKey;
+      restoreSessionTreeFocus(restoreKey);
+    }
   }
-  function openSessionContextMenu(event, actions) {
+  function openSessionContextMenu(event, actions, anchor) {
     event.preventDefault();
     event.stopPropagation();
-    closeSessionContextMenu();
+    closeProjectAppearancePopover({ restoreFocus: false });
+    closeSessionContextMenu({ restoreFocus: false });
     var menu = document.createElement("div");
     menu.className = "session-context-menu";
     menu.setAttribute("role", "menu");
-    menu.style.left = Math.max(8, event.clientX) + "px";
-    menu.style.top = Math.max(8, event.clientY) + "px";
+    var menuAnchor = anchor || event.currentTarget || event.target || null;
+    var usePointerPosition = Number(event.clientX) > 0 && Number(event.clientY) > 0;
+    var anchorRect = !usePointerPosition &&
+      menuAnchor &&
+      typeof menuAnchor.getBoundingClientRect === "function"
+      ? menuAnchor.getBoundingClientRect()
+      : null;
+    menu.style.left = Math.max(8, usePointerPosition
+      ? event.clientX
+      : anchorRect
+        ? anchorRect.left
+        : 8) + "px";
+    menu.style.top = Math.max(8, usePointerPosition
+      ? event.clientY
+      : anchorRect
+        ? anchorRect.bottom + 6
+        : 8) + "px";
     actions.forEach(function (action) {
       if (!action) return;
       var item = document.createElement("button");
@@ -4844,13 +4918,16 @@
       item.setAttribute("role", "menuitem");
       item.textContent = action.label;
       item.addEventListener("click", function () {
-        closeSessionContextMenu();
+        closeSessionContextMenu({ restoreFocus: false });
         action.run();
       });
       menu.appendChild(item);
     });
     document.body.appendChild(menu);
     sessionContextMenu = menu;
+    sessionContextMenuRestoreKey = anchor && anchor.dataset
+      ? anchor.dataset.treeKey || ""
+      : "";
     var rect = menu.getBoundingClientRect();
     if (rect.right > window.innerWidth - 8) {
       menu.style.left = Math.max(8, window.innerWidth - rect.width - 8) + "px";
@@ -4868,6 +4945,17 @@
   });
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape") closeSessionContextMenu();
+  });
+  document.addEventListener("pointerdown", function (event) {
+    if (projectAppearancePopover && !projectAppearancePopover.contains(event.target)) {
+      closeProjectAppearancePopover();
+    }
+  });
+  document.addEventListener("keydown", function (event) {
+    if (!projectAppearancePopover || event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeProjectAppearancePopover();
   });
 
   function fitVisiblePanes() {
@@ -6327,11 +6415,16 @@
   }
 
   function createProjectGroup(projectModel, options) {
+    var appearance = options.appearance ||
+      PsycheSessions.resolveProjectAppearance(projectModel.project, projectAppearances);
     var group = document.createElement("section");
     group.className = "session-project session-group"
       + (options.current ? " is-current" : "");
     group.dataset.treeItem = "project";
     group.dataset.treeKey = projectModel.key;
+    group.dataset.projectId = projectModel.project.id;
+    group.dataset.projectAccent = appearance.accent.id;
+    group.dataset.projectAppearance = appearance.customized ? "custom" : "automatic";
     group.setAttribute("role", "treeitem");
     group.setAttribute("aria-level", "1");
     group.setAttribute("tabindex", options.tabindex);
@@ -6339,20 +6432,25 @@
 
     var head = document.createElement("div");
     head.className = "session-project-head session-group-head";
+    head.style.setProperty("--project-accent-rgb", appearance.accent.rgb);
     var disclosure = createDisclosure(
       projectModel.title,
       projectModel.expanded,
       projectModel.autoExpanded
     );
+    if (appearance.glyph) {
+      var glyph = document.createElement("span");
+      glyph.className = "session-project-glyph";
+      glyph.textContent = appearance.glyph.value;
+      glyph.setAttribute("aria-hidden", "true");
+      head.appendChild(disclosure);
+      head.appendChild(glyph);
+    } else {
+      head.appendChild(disclosure);
+    }
     var title = document.createElement("span");
     title.className = "session-project-name";
     appendHighlightedText(title, projectModel.title, projectModel.titleMatches);
-    if (options.current) {
-      var current = document.createElement("span");
-      current.className = "session-current-badge";
-      current.textContent = "CURRENT";
-      title.appendChild(current);
-    }
     var count = document.createElement("span");
     count.className = "session-project-count";
     count.textContent = String(projectModel.count);
@@ -6369,7 +6467,6 @@
       attention.textContent = "!" + projectModel.attentionCount;
       count.appendChild(attention);
     }
-    head.appendChild(disclosure);
     head.appendChild(title);
     head.appendChild(count);
     attachTooltip(
@@ -6488,6 +6585,16 @@
     if (index === -1) return;
     sessionTreeFocusKey = item.dataset.treeKey || "";
 
+    if (item.dataset.treeItem === "project" &&
+        (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey))) {
+      var project = findProject(item.dataset.projectId);
+      if (!project) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openSessionContextMenu(event, projectAppearanceContextActions(project, item), item);
+      return;
+    }
+
     if (event.key === "ArrowDown" || event.key === "ArrowUp" ||
         event.key === "Home" || event.key === "End") {
       var next = index;
@@ -6541,9 +6648,23 @@
     }
   }
 
+  function restoreSessionTreeFocus(key) {
+    var items = visibleSessionTreeItems();
+    var target = items.find(function (item) {
+      return key && item.dataset.treeKey === key;
+    }) || items.find(function (item) {
+      return item.getAttribute("tabindex") === "0";
+    }) || items[0];
+    return focusSessionTreeItem(target);
+  }
+
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
+    var popoverRestoreKey = projectAppearancePopoverRestoreKey;
+    var popoverOwnsFocus = projectAppearancePopover &&
+      projectAppearancePopover.contains(document.activeElement);
+    closeProjectAppearancePopover({ restoreFocus: false });
     var now = Date.now();
     syncLocalSidebarStatusKeys(now);
     // A re-render would strand an armed confirm on a row that no longer exists.
@@ -6562,7 +6683,8 @@
     }
     var activeTreeKey = (document.activeElement && document.activeElement.dataset
       ? document.activeElement.dataset.treeKey
-      : "") || armedCloseTreeKey;
+      : "") || armedCloseTreeKey ||
+      (popoverOwnsFocus ? popoverRestoreKey : "");
     var shouldRestoreTreeFocus = Boolean(activeTreeKey);
     if (activeTreeKey) sessionTreeFocusKey = activeTreeKey;
     var focusedKey = sessionTreeFocusKey;
@@ -6639,7 +6761,11 @@
       });
       if (projectModel.visibleCount === 0) return;
       matched += projectModel.visibleCount;
-      projectModels.push({ project: project, model: projectModel });
+      projectModels.push({
+        project: project,
+        model: projectModel,
+        appearance: PsycheSessions.resolveProjectAppearance(project, projectAppearances),
+      });
     });
 
     if (sessionTypeFilter !== "all") {
@@ -6666,7 +6792,9 @@
     projectModels.forEach(function (entry) {
       var project = entry.project;
       var projectModel = entry.model;
+      var appearance = entry.appearance;
       var projectParts = createProjectGroup(projectModel, {
+        appearance: appearance,
         current: project.id === state.activeProjectId,
         tabindex: "-1",
       });
@@ -6687,6 +6815,15 @@
             targetWithin(event, projectParts.disclosure)) return;
         clearFocusSet();
         setActiveProject(project.id);
+      });
+      projectParts.head.addEventListener("contextmenu", function (event) {
+        var focusKey = projectParts.group.dataset.treeKey || "";
+        if (focusKey) sessionTreeFocusKey = focusKey;
+        openSessionContextMenu(
+          event,
+          projectAppearanceContextActions(project, projectParts.group),
+          projectParts.group
+        );
       });
       if (projectModel.expanded) {
         projectModel.branches.forEach(function (branchModel) {
@@ -6960,6 +7097,203 @@
       sessionTreeFocusKey = preferred.dataset.treeKey || "";
       if (shouldRestoreTreeFocus) preferred.focus();
     }
+  }
+
+  function applyProjectAppearance(project, patch) {
+    var key = PsycheSessions.normalizeProjectAppearanceKey(project && project.root);
+    if (!project || !key) return false;
+    projectAppearances = PsycheSessions.updateProjectAppearance(
+      projectAppearances,
+      key,
+      patch
+    );
+    var focusKey = sessionTreeFocusKey;
+    saveProjectAppearances();
+    renderSessionList();
+    if (focusKey) {
+      sessionTreeFocusKey = focusKey;
+      restoreSessionTreeFocus(focusKey);
+    }
+    return true;
+  }
+
+  function closeProjectAppearancePopover(options) {
+    var restoreFocus = !options || options.restoreFocus !== false;
+    var restoreKey = projectAppearancePopoverRestoreKey;
+    if (projectAppearancePopover && projectAppearancePopover.parentNode) {
+      projectAppearancePopover.parentNode.removeChild(projectAppearancePopover);
+    }
+    projectAppearancePopover = null;
+    projectAppearancePopoverRestoreKey = "";
+    if (restoreFocus && restoreKey) {
+      sessionTreeFocusKey = restoreKey;
+      restoreSessionTreeFocus(restoreKey);
+    }
+  }
+
+  function openProjectAppearancePopover(project, anchor) {
+    if (!project || !anchor || typeof anchor.getBoundingClientRect !== "function") return null;
+    closeSessionContextMenu({ restoreFocus: false });
+    closeProjectAppearancePopover({ restoreFocus: false });
+
+    var appearance = PsycheSessions.resolveProjectAppearance(project, projectAppearances);
+    var stored = appearance.override || {};
+    var hasOwn = Object.prototype.hasOwnProperty;
+    var draftAccent = hasOwn.call(stored, "accent") ? stored.accent : null;
+    var draftGlyph = hasOwn.call(stored, "glyph") ? stored.glyph : null;
+
+    var popover = document.createElement("div");
+    popover.className = "project-appearance-popover";
+    popover.setAttribute("role", "dialog");
+    popover.setAttribute("aria-label", "Customize appearance for " + project.name);
+
+    var title = document.createElement("div");
+    title.className = "project-appearance-title";
+    title.textContent = project.name;
+    popover.appendChild(title);
+
+    var accentLabel = document.createElement("div");
+    accentLabel.className = "project-appearance-label";
+    popover.appendChild(accentLabel);
+
+    var accentGrid = document.createElement("div");
+    accentGrid.className = "project-appearance-grid project-appearance-accent-grid";
+    popover.appendChild(accentGrid);
+
+    var accentButtons = [];
+    PsycheSessions.PROJECT_ACCENTS.forEach(function (accent) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "project-appearance-choice project-appearance-accent";
+      button.setAttribute("aria-label", accent.label);
+      button.style.setProperty("--project-accent-rgb", accent.rgb);
+      var swatch = document.createElement("span");
+      swatch.className = "project-appearance-accent-swatch";
+      button.appendChild(swatch);
+      button.addEventListener("click", function () {
+        draftAccent = accent.id;
+        syncDraftState();
+      });
+      accentGrid.appendChild(button);
+      accentButtons.push({ id: accent.id, label: accent.label, button: button });
+    });
+
+    var glyphLabel = document.createElement("div");
+    glyphLabel.className = "project-appearance-label";
+    popover.appendChild(glyphLabel);
+
+    var glyphGrid = document.createElement("div");
+    glyphGrid.className = "project-appearance-grid project-appearance-glyph-grid";
+    popover.appendChild(glyphGrid);
+
+    var glyphButtons = [];
+    var noGlyphButton = document.createElement("button");
+    noGlyphButton.type = "button";
+    noGlyphButton.className = "project-appearance-choice project-appearance-glyph";
+    noGlyphButton.textContent = "No glyph";
+    noGlyphButton.addEventListener("click", function () {
+      draftGlyph = null;
+      syncDraftState();
+    });
+    glyphGrid.appendChild(noGlyphButton);
+    glyphButtons.push({ id: null, label: "No glyph", button: noGlyphButton });
+
+    PsycheSessions.PROJECT_GLYPHS.forEach(function (glyph) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "project-appearance-choice project-appearance-glyph";
+      button.setAttribute("aria-label", glyph.label);
+      var glyphValue = document.createElement("span");
+      glyphValue.className = "project-appearance-glyph-value";
+      glyphValue.textContent = glyph.value;
+      var glyphText = document.createElement("span");
+      glyphText.className = "project-appearance-glyph-name";
+      glyphText.textContent = glyph.label;
+      button.appendChild(glyphValue);
+      button.appendChild(glyphText);
+      button.addEventListener("click", function () {
+        draftGlyph = glyph.id;
+        syncDraftState();
+      });
+      glyphGrid.appendChild(button);
+      glyphButtons.push({ id: glyph.id, label: glyph.label, button: button });
+    });
+
+    var actions = document.createElement("div");
+    actions.className = "project-appearance-actions";
+    var reset = document.createElement("button");
+    reset.type = "button";
+    reset.className = "project-appearance-action";
+    reset.textContent = "Reset to automatic";
+    reset.addEventListener("click", function () {
+      closeProjectAppearancePopover({ restoreFocus: false });
+      applyProjectAppearance(project, null);
+    });
+    var spacer = document.createElement("span");
+    spacer.className = "project-appearance-spacer";
+    spacer.setAttribute("aria-hidden", "true");
+    var cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "project-appearance-action";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", function () {
+      closeProjectAppearancePopover();
+    });
+    var apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "project-appearance-action is-primary";
+    apply.textContent = "Apply";
+    apply.addEventListener("click", function () {
+      closeProjectAppearancePopover({ restoreFocus: false });
+      applyProjectAppearance(project, { accent: draftAccent, glyph: draftGlyph });
+    });
+    actions.appendChild(reset);
+    actions.appendChild(spacer);
+    actions.appendChild(cancel);
+    actions.appendChild(apply);
+    popover.appendChild(actions);
+
+    function syncDraftState() {
+      var accentMatch = PsycheSessions.PROJECT_ACCENTS.find(function (accent) {
+        return accent.id === draftAccent;
+      }) || appearance.accent;
+      accentLabel.textContent = draftAccent
+        ? "Accent · " + accentMatch.label
+        : "Accent · Automatic (" + appearance.accent.label + ")";
+      accentButtons.forEach(function (entry) {
+        entry.button.setAttribute("aria-pressed", entry.id === draftAccent ? "true" : "false");
+      });
+      var glyphMatch = PsycheSessions.PROJECT_GLYPHS.find(function (glyph) {
+        return glyph.id === draftGlyph;
+      });
+      glyphLabel.textContent = glyphMatch
+        ? "Glyph · " + glyphMatch.label
+        : "Glyph · No glyph";
+      glyphButtons.forEach(function (entry) {
+        entry.button.setAttribute("aria-pressed", entry.id === draftGlyph ? "true" : "false");
+      });
+    }
+
+    syncDraftState();
+    projectAppearancePopover = popover;
+    projectAppearancePopoverRestoreKey =
+      (anchor.dataset && anchor.dataset.treeKey) || sessionTreeFocusKey || "";
+    document.body.appendChild(popover);
+    popover.style.maxWidth = Math.max(0, Math.min(420, window.innerWidth - 16)) + "px";
+    var anchorRect = anchor.getBoundingClientRect();
+    var popoverRect = popover.getBoundingClientRect();
+    popover.style.left = Math.max(8, Math.min(
+      window.innerWidth - popoverRect.width - 8,
+      anchorRect.left
+    )) + "px";
+    popover.style.top = Math.max(8, Math.min(
+      window.innerHeight - popoverRect.height - 8,
+      anchorRect.bottom + 8
+    )) + "px";
+    var preferredFocus = popover.querySelector('button[aria-pressed="true"]') ||
+      popover.querySelector("button");
+    if (preferredFocus) preferredFocus.focus();
+    return popover;
   }
 
   if (bgOpacityInput) {
@@ -11459,7 +11793,7 @@
     if (!agentPickerOpen()) agentPickerPreviousFocus = document.activeElement;
     setHelpOpen(false);
     closeNewPaneMenu();
-    closeSessionContextMenu();
+    closeSessionContextMenu({ restoreFocus: false });
     agentPickerIndex = 0;
     renderAgentPicker();
     agentPickerOverlayEl.hidden = false;
@@ -11703,6 +12037,7 @@
     paneMetricsPollTimer = setInterval(refreshVisiblePaneMetrics, 15000);
     refreshVisiblePaneMetrics();
     if (typeof refreshStatusController === "function") refreshStatusController();
+    flushDeferredStatusMessages();
   }
 
   invoke("app_environment")

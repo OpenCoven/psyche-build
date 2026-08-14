@@ -338,6 +338,20 @@ public struct MobileActionOption: Codable, Sendable, Equatable, Identifiable {
     public let danger: Bool?
     public let isDefault: Bool?
 
+    public init(
+        id: String,
+        label: String,
+        description: String? = nil,
+        danger: Bool? = nil,
+        isDefault: Bool? = nil
+    ) {
+        self.id = id
+        self.label = label
+        self.description = description
+        self.danger = danger
+        self.isDefault = isDefault
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, label, description, danger
         case isDefault = "default"
@@ -350,6 +364,20 @@ public struct MobileActionReviewData: Codable, Sendable, Equatable {
     public let targetBranch: String
     public let files: [String]
     public let aiFailed: Bool?
+
+    public init(
+        repoPath: String,
+        sourceBranch: String,
+        targetBranch: String,
+        files: [String],
+        aiFailed: Bool? = nil
+    ) {
+        self.repoPath = repoPath
+        self.sourceBranch = sourceBranch
+        self.targetBranch = targetBranch
+        self.files = files
+        self.aiFailed = aiFailed
+    }
 }
 
 public struct MobileActionResult: Codable, Sendable, Equatable {
@@ -368,6 +396,40 @@ public struct MobileActionResult: Codable, Sendable, Equatable {
     public let data: [String: String]?
     public let relatedFiles: [String]?
     public let dismissable: Bool?
+
+    public init(
+        type: String,
+        message: String,
+        title: String? = nil,
+        confirmLabel: String? = nil,
+        cancelLabel: String? = nil,
+        options: [MobileActionOption]? = nil,
+        placeholder: String? = nil,
+        defaultValue: String? = nil,
+        inputMaxVisibleLines: Int? = nil,
+        progress: Double? = nil,
+        targetPaneID: String? = nil,
+        reviewData: MobileActionReviewData? = nil,
+        data: [String: String]? = nil,
+        relatedFiles: [String]? = nil,
+        dismissable: Bool? = nil
+    ) {
+        self.type = type
+        self.message = message
+        self.title = title
+        self.confirmLabel = confirmLabel
+        self.cancelLabel = cancelLabel
+        self.options = options
+        self.placeholder = placeholder
+        self.defaultValue = defaultValue
+        self.inputMaxVisibleLines = inputMaxVisibleLines
+        self.progress = progress
+        self.targetPaneID = targetPaneID
+        self.reviewData = reviewData
+        self.data = data
+        self.relatedFiles = relatedFiles
+        self.dismissable = dismissable
+    }
 
     enum CodingKeys: String, CodingKey {
         case type, message, title, confirmLabel, cancelLabel, options, placeholder, defaultValue
