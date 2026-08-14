@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { createContext, runInContext } from 'node:vm';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 const lib = readFileSync(new URL(
   '../native/desktop/psyche-build-tauri/src-tauri/src/lib.rs',
@@ -38,10 +38,8 @@ function workerRuntimeSource(): string {
 }
 
 async function runIsolated(source: string, args: unknown = null): Promise<Record<string, unknown>> {
-  const context = createContext({ TextEncoder, performance });
-  const encoded = JSON.stringify({ source, args });
-  const result = await runInContext(`${runtimeSource()}(${encoded})`, context) as string;
-  return JSON.parse(result) as Record<string, unknown>;
+  const workerEnvelope = await runWorker(source, args);
+  return (await runPageRuntime(workerEnvelope)).envelope;
 }
 
 async function runWorker(
@@ -68,6 +66,74 @@ async function runWorker(
   );
   expect(messages).toHaveLength(1);
   return messages[0] as Record<string, unknown>;
+}
+
+type FakeNode = {
+  id?: string;
+  tagName: string;
+  textContent: string;
+  attributes: Map<string, string>;
+  value?: string;
+  checked?: boolean;
+  disabled?: boolean;
+  readOnly?: boolean;
+  hidden?: boolean;
+  isConnected: boolean;
+  ownerDocument?: unknown;
+  children: FakeNode[];
+  focus: ReturnType<typeof vi.fn>;
+};
+
+function fakeElement(tagName: string, children: FakeNode[] = []): FakeNode {
+  return {
+    tagName,
+    textContent: '',
+    attributes: new Map(),
+    isConnected: true,
+    children,
+    focus: vi.fn(),
+  };
+}
+
+async function runPageRuntime(
+  workerMessage: unknown,
+  root = fakeElement('HTML'),
+): Promise<{ envelope: Record<string, unknown>; terminated: number }> {
+  let terminated = 0;
+  class FakeWorker {
+    onmessage: ((event: { data: unknown }) => void) | null = null;
+    onerror: (() => void) | null = null;
+    postMessage() {
+      queueMicrotask(() => this.onmessage?.({ data: workerMessage }));
+    }
+    terminate() { terminated += 1; }
+  }
+  const document = {
+    documentElement: root,
+    createTreeWalker: () => {
+      const queue = [root];
+      return { nextNode: () => queue.shift() ?? null };
+    },
+  };
+  const attachDocument = (node: FakeNode) => {
+    node.ownerDocument = document;
+    node.children.forEach(attachDocument);
+  };
+  attachDocument(root);
+  const context = createContext({
+    Blob: class { constructor(public parts: unknown[]) {} },
+    Worker: FakeWorker,
+    URL: { createObjectURL: () => 'blob:test', revokeObjectURL: vi.fn() },
+    NodeFilter: { SHOW_ELEMENT: 1 },
+    TextEncoder,
+    performance,
+    document,
+    setTimeout,
+    clearTimeout,
+  });
+  const input = JSON.stringify({ source: 'return null;', args: null, workerSource: 'trusted' });
+  const encoded = await runInContext(`${runtimeSource()}(${input})`, context) as string;
+  return { envelope: JSON.parse(encoded), terminated };
 }
 
 describe('native browser script authority', () => {
@@ -497,5 +563,58 @@ describe('native browser script authority', () => {
 
     expect(first).toEqual({ ok: true, value: { installed: true }, mutations: [] });
     expect(second).toEqual({ ok: true, value: { poisoned: false }, mutations: [] });
+  });
+
+  it('terminates the Worker before applying a valid synchronous mutation plan', async () => {
+    const input = fakeElement('INPUT');
+    input.value = 'before';
+    const root = fakeElement('HTML', [input]);
+    const { envelope, terminated } = await runPageRuntime({
+      ok: true,
+      value: { changed: true },
+      mutations: [{ kind: 'set_form_value', nodeId: 'n2', value: 'after' }],
+    }, root);
+
+    expect(terminated).toBe(1);
+    expect(input.value).toBe('after');
+    expect(envelope).toMatchObject({ ok: true, json: '{"changed":true}' });
+  });
+
+  it('rejects executable and stale mutation targets before applying anything', async () => {
+    const target = fakeElement('DIV');
+    target.textContent = 'before';
+    const root = fakeElement('HTML', [target]);
+
+    const executable = await runPageRuntime({
+      ok: true,
+      value: null,
+      mutations: [
+        { kind: 'set_text', nodeId: 'n2', value: 'changed' },
+        { kind: 'set_attribute', nodeId: 'n2', name: 'onclick', value: 'steal()' },
+      ],
+    }, root);
+    expect(executable.envelope).toEqual({ ok: false, code: 'mutation_not_allowed' });
+    expect(target.textContent).toBe('before');
+
+    target.isConnected = false;
+    const stale = await runPageRuntime({
+      ok: true,
+      value: null,
+      mutations: [{ kind: 'set_text', nodeId: 'n2', value: 'changed' }],
+    }, root);
+    expect(stale.envelope).toEqual({ ok: false, code: 'mutation_target_stale' });
+  });
+
+  it('rejects navigation, HTML, executable URL, style, and custom-element sinks', async () => {
+    for (const mutation of [
+      { kind: 'set_attribute', nodeId: 'n2', name: 'href', value: 'javascript:steal()' },
+      { kind: 'set_attribute', nodeId: 'n2', name: 'srcdoc', value: '<script>steal()</script>' },
+      { kind: 'set_attribute', nodeId: 'n2', name: 'style', value: 'background:url(https://evil)' },
+      { kind: 'set_property', nodeId: 'n2', name: 'innerHTML', value: '<script>steal()</script>' },
+    ]) {
+      const root = fakeElement('HTML', [fakeElement('DIV')]);
+      const result = await runPageRuntime({ ok: true, value: null, mutations: [mutation] }, root);
+      expect(result.envelope).toEqual({ ok: false, code: 'mutation_not_allowed' });
+    }
   });
 });
