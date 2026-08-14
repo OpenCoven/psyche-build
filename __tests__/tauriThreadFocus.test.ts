@@ -27,8 +27,9 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
 ) {
-  const names = Object.keys(dependencies);
-  const values = Object.values(dependencies);
+  const resolvedDependencies = { saveWorkspaceSoon: () => undefined, ...dependencies };
+  const names = Object.keys(resolvedDependencies);
+  const values = Object.values(resolvedDependencies);
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 

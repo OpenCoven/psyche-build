@@ -658,7 +658,7 @@ describe('desktop shell wiring', () => {
     const handlePtyExit = functionSource('handlePtyExit');
     expect(mainJs).toMatch(/onBell: function \(\)[\s\S]{0,200}attentionTracker\.bell\(thread\.id\)/);
     expect(handlePtyExit).toMatch(
-      /thread\.status = "exited";[\s\S]*thread\.isWorking = false;[\s\S]*clearThreadAttention\(thread\)/,
+      /thread\.status = persistentLive \? "failed" : "exited";[\s\S]*thread\.isWorking = false;[\s\S]*clearThreadAttention\(thread\)/,
     );
     expect(handlePtyExit).toContain('thread.terminalController.markPtyExited()');
   });

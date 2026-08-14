@@ -165,7 +165,7 @@
 
   function handleVisibilityChange() {
     if (document.hidden || document.visibilityState === "hidden") {
-      saveWorkspaceNow();
+      saveWorkspaceNow().catch(function () {});
       stopCovenPolling();
     } else {
       startCovenPolling();
@@ -593,6 +593,7 @@
   }
   function commitPanePlacement(placement) {
     paneLayouts.set(placement.key, placement.value);
+    saveWorkspaceSoon();
   }
   function covenDiscoveryScopes() {
     return state.projects.map(function (project) {
@@ -937,8 +938,8 @@
   var MAX_BG_OPACITY = 1;
   var SETTINGS_KEY = "psyche.tauri.settings.v1";
   var PROJECT_APPEARANCES_KEY = "psyche.tauri.project-appearances.v1";
-  var WORKSPACE_STATE_KEY = "psyche.tauri.workspace.v1";
   var deferredStatusMessages = [];
+  var LEGACY_WORKSPACE_STATE_KEY = "psyche.tauri.workspace.v1";
   var settings = loadSettings();
   var projectAppearances = loadProjectAppearances();
   var isRestoringWorkspace = false;
@@ -1082,28 +1083,64 @@
   function persistableProject(project) {
     return { id: project.id, name: project.name, root: project.root, collapsed: !!project.collapsed, selectedWorktreePath: project.selectedWorktreePath, worktreePresentation: (project.worktrees || []).map(function (worktree) { return { path: worktree.path, collapsed: !!worktree.collapsed }; }), browsersByWorktree: persistableBrowsers(project) };
   }
+  function persistableSession(thread) {
+    if (!thread || !thread.launch ||
+        ["shell", "psyche", "coven-chat", "coven-attach"].indexOf(thread.launch.launchKind) === -1) {
+      return null;
+    }
+    return {
+      id: thread.id,
+      projectId: thread.projectId,
+      worktreePath: thread.worktreePath,
+      name: thread.name,
+      kind: thread.kind,
+      launchKind: thread.launch.launchKind,
+      hidden: thread.hidden === true,
+      covenSessionId: thread.launch.covenSessionId || null,
+    };
+  }
+  function persistablePaneLayouts() {
+    var records = [];
+    paneLayouts.forEach(function (layout, key) {
+      var separator = key.indexOf("\u0000");
+      if (separator === -1 || !layout || !layout.root) return;
+      records.push({
+        projectId: key.slice(0, separator),
+        worktreePath: key.slice(separator + 1),
+        root: layout.root,
+        focusedLeafId: layout.focusedLeafId || null,
+      });
+    });
+    return records;
+  }
+  function buildPersistedWorkspace() {
+    return {
+      version: 3,
+      activeProjectId: state.activeProjectId || null,
+      activeThreadId: state.activeThreadId || null,
+      projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS),
+      sessions: state.threads.map(persistableSession).filter(Boolean),
+      paneLayouts: persistablePaneLayouts(),
+    };
+  }
   function workspaceModel() {
     return window.PsycheWorkspace || null;
-  }
-  function workspaceSnapshotV2() {
-    return { version: 2, activeProjectId: state.activeProjectId || null, projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS) };
   }
   var workspaceSaveQueue = Promise.resolve();
   function saveWorkspaceNow() {
     if (isRestoringWorkspace) return workspaceSaveQueue;
-    var snapshot = workspaceSnapshotV2();
-    try {
-      localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify(snapshot));
-    } catch (_) {}
-    // The native store is authoritative on load; localStorage above stays as a
-    // fallback for webviews where the command is unavailable.
     var model = workspaceModel();
-    if (!model) return workspaceSaveQueue;
-    var workspace = model.importWorkspaceV2(snapshot);
+    if (!model) return Promise.reject(new Error("workspace model is unavailable"));
+    var workspace = model.sanitizeWorkspaceV3(buildPersistedWorkspace());
+    if (!workspace) return Promise.reject(new Error("workspace state is invalid"));
+    workspaceSaveQueue = workspaceSaveQueue.catch(function () {});
     workspaceSaveQueue = workspaceSaveQueue.then(function () {
       return invoke("workspace_save", { workspace: workspace });
+    }).then(function () {
+      return true;
     }).catch(function (error) {
       setStatus("workspace save failed: " + String(error), "error");
+      throw error;
     });
     return workspaceSaveQueue;
   }
@@ -1112,22 +1149,31 @@
     if (saveWorkspaceTimer) cancelAnimationFrame(saveWorkspaceTimer);
     saveWorkspaceTimer = requestAnimationFrame(function () {
       saveWorkspaceTimer = 0;
-      saveWorkspaceNow();
+      saveWorkspaceNow().catch(function () {});
     });
   }
-  function readSavedWorkspace() {
-    try { var saved = JSON.parse(localStorage.getItem(WORKSPACE_STATE_KEY) || "null"); return saved && Array.isArray(saved.projects) ? saved : null; } catch (_) { return null; }
+  async function readSavedWorkspace() {
+    var model = workspaceModel();
+    if (!model) return null;
+    try {
+      var saved = await invoke("workspace_load");
+      if (saved) {
+        var sanitized = model.sanitizeWorkspaceV3(saved);
+        if (!sanitized) setStatus("workspace restore failed: invalid workspace v3", "error");
+        return sanitized;
+      }
+    } catch (error) {
+      setStatus("workspace restore failed: " + String(error), "error");
+      return null;
+    }
+    try {
+      var legacy = JSON.parse(localStorage.getItem(LEGACY_WORKSPACE_STATE_KEY) || "null");
+      return legacy && Array.isArray(legacy.projects) ? model.importWorkspaceV2(legacy) : null;
+    } catch (_) {
+      return null;
+    }
   }
   async function loadSavedWorkspace() {
-    var model = workspaceModel();
-    if (model) {
-      try {
-        var native = model.sanitizeWorkspaceV3(await invoke("workspace_load"));
-        if (native && native.projects.length) {
-          return { version: 2, activeProjectId: native.activeProjectId, projects: native.projects };
-        }
-      } catch (_) {}
-    }
     return readSavedWorkspace();
   }
   function sanitizeSavedProject(saved) {
@@ -1635,7 +1681,7 @@
     schedulePaneMetricsRefresh(thread, 1200);
   }).catch(function () {});
 
-  function handlePtyExit(payload) {
+  async function handlePtyExit(payload) {
     payload = payload || {};
     var thread = findThread(payload.thread_id);
     if (!thread || thread.closing || thread.closeStarted) return false;
@@ -1659,9 +1705,20 @@
     thread.spawning = false;
     thread.finishedAt = Date.now();
     thread.exitCode = payload.code == null ? null : payload.code;
-    thread.status = "exited";
+    var persistentLive = false;
+    if (isPersistentThread(thread)) {
+      try {
+        var liveSessionIds = await invoke("native_session_list");
+        persistentLive = Array.isArray(liveSessionIds) && liveSessionIds.indexOf(thread.id) !== -1;
+      } catch (error) {
+        console.warn("[native_session_list] failed after client exit: " + String(error));
+        persistentLive = true;
+      }
+    }
+    thread.persistentLive = persistentLive;
+    thread.status = persistentLive ? "failed" : "exited";
     thread.isWorking = false;
-    if (!stoppedByUser && payload.code != null && payload.code !== 0) {
+    if (!persistentLive && !stoppedByUser && payload.code != null && payload.code !== 0) {
       thread.status = "failed";
     }
     // An exited pane is not waiting on an answer, it is over. Leaving the badge
@@ -1669,7 +1726,9 @@
     clearThreadAttention(thread);
     syncThreadPaneMetadata(thread);
     if (thread.terminalController) {
-      thread.terminalController.write("\r\n\x1b[2;90m[process exited]\x1b[0m\r\n");
+      thread.terminalController.write(persistentLive
+        ? "\r\n\x1b[33m[session connection lost — retry to reattach]\x1b[0m\r\n"
+        : "\r\n\x1b[2;90m[process exited]\x1b[0m\r\n");
     }
     refreshSidebar();
     refreshTabs();
@@ -1677,11 +1736,14 @@
       setProjectStatus(findProject(thread.projectId), "warn");
     }
     if (typeof refreshStatusController === "function") refreshStatusController();
+    saveWorkspaceSoon();
     return true;
   }
 
   listen("pty:exit", function (event) {
-    handlePtyExit(event.payload || {});
+    handlePtyExit(event.payload || {}).catch(function (error) {
+      console.warn("[pty:exit] reconciliation failed: " + String(error));
+    });
   }).catch(function () {});
 
   function findThread(id) {
@@ -2096,6 +2158,21 @@
     return thread && thread.launch && thread.launch.covenSessionId || null;
   }
 
+  function isPersistentThread(thread) {
+    var launchKind = thread && thread.launch && thread.launch.launchKind;
+    return ["shell", "psyche", "coven-chat", "coven-attach"].indexOf(launchKind) !== -1;
+  }
+
+  function nativeSessionRequest(thread) {
+    return {
+      id: thread.id,
+      projectRoot: thread.launch.projectRoot,
+      cwd: thread.launch.cwd,
+      launchKind: thread.launch.launchKind,
+      covenSessionId: thread.launch.covenSessionId || null,
+    };
+  }
+
   // An exited pane is not an attachment you can focus, so it must not make a
   // row read as attached. main added that guard to isReusableCovenAttachment
   // alongside createCovenSessionRow; this branch replaced that render path with
@@ -2110,7 +2187,7 @@
     });
   }
 
-  function createThread(opts) {
+  async function createThread(opts) {
     var id = makeThreadId();
     var project = opts.project || activeProject();
     var sourceLaunch = opts.launch || {
@@ -2179,6 +2256,14 @@
       finishedAt: null,
       exitCode: null,
     };
+    if (isPersistentThread(thread)) {
+      try {
+        await invoke("native_session_create", { request: nativeSessionRequest(thread) });
+      } catch (error) {
+        setStatus(thread.name + " failed to start: " + String(error), "error");
+        return null;
+      }
+    }
     commitPanePlacement(placement);
     state.threads.push(thread);
     if (typeof noteStatusActivity === "function") noteStatusActivity();
@@ -2190,7 +2275,8 @@
     // so the PTY starts at the visible xterm size instead of 80x24.
     requestAnimationFrame(function () {
       if (!isLiveThread(thread)) return;
-      spawnPty(thread);
+      if (isPersistentThread(thread)) attachThreadClient(thread);
+      else spawnPty(thread);
     });
     return thread;
   }
@@ -2425,6 +2511,84 @@
     });
   }
 
+  function attachThreadClient(thread) {
+    if (!isLiveThread(thread) || thread.startInFlight || thread.closeStarted ||
+        thread.ptyStarted) {
+      return Promise.resolve(false);
+    }
+    var terminalController = ensureThreadPtyController(thread);
+    var ptyStartAttempt = terminalController &&
+      typeof terminalController.prepareForPtyStart === "function"
+        ? terminalController.prepareForPtyStart()
+        : null;
+    thread.lastOutputAt = 0;
+    thread.isWorking = false;
+    thread.sidebarStatusKey = "busy";
+    attentionTracker.forget(thread.id);
+    thread.needsAttention = false;
+    thread.attentionReason = null;
+    syncThreadAttentionChrome(thread);
+    thread.stopRequested = false;
+    thread.exitDuringStart = false;
+    thread.startInFlight = true;
+    thread.status = "starting";
+    thread.spawning = true;
+    thread.startedAt = Date.now();
+    thread.finishedAt = null;
+    thread.exitCode = null;
+    syncThreadPaneMetadata(thread);
+    refreshSidebar();
+    refreshTabs();
+    return invoke("pty_attach", {
+      options: {
+        threadId: thread.id,
+        sessionId: thread.id,
+        cols: thread.term ? thread.term.cols : 120,
+        rows: thread.term ? thread.term.rows : 40,
+      },
+    }).then(function () {
+      thread.startInFlight = false;
+      if (!isLiveThread(thread)) return stopThreadPty(thread).then(function () { return false; });
+      if (thread.exitDuringStart) {
+        thread.exitDuringStart = false;
+        thread.spawning = false;
+        return false;
+      }
+      thread.ptyStarted = true;
+      thread.status = "running";
+      thread.spawning = false;
+      if (terminalController && typeof terminalController.markPtyStarted === "function") {
+        terminalController.markPtyStarted(ptyStartAttempt).catch(function () {});
+      }
+      syncThreadPaneMetadata(thread);
+      refreshSidebar();
+      refreshTabs();
+      if (state.activeThreadId === thread.id) setProjectStatus(findProject(thread.projectId), "ok");
+      return true;
+    }).catch(function (error) {
+      thread.startInFlight = false;
+      if (terminalController &&
+          typeof terminalController.restoreAfterFailedPtyStart === "function") {
+        terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+      }
+      if (!isLiveThread(thread)) return false;
+      thread.ptyStarted = false;
+      thread.spawning = false;
+      thread.status = "failed";
+      thread.isWorking = false;
+      thread.finishedAt = Date.now();
+      thread.exitCode = null;
+      if (thread.term) {
+        thread.term.write("\r\n\x1b[31m[attach error]\x1b[0m " + String(error) + "\r\n");
+      }
+      syncThreadPaneMetadata(thread);
+      refreshSidebar();
+      refreshTabs();
+      saveWorkspaceSoon();
+      return false;
+    });
+  }
+
   async function retryThread(id) {
     var thread = findThread(id);
     if (!thread || thread.startInFlight || thread.closeStarted) return false;
@@ -2443,7 +2607,15 @@
       }
     }
     if (typeof noteStatusActivity === "function") noteStatusActivity();
-    return spawnPty(thread);
+    if (!isPersistentThread(thread)) return spawnPty(thread);
+    if (thread.persistentLive) return attachThreadClient(thread);
+    try {
+      await invoke("native_session_create", { request: nativeSessionRequest(thread) });
+    } catch (error) {
+      setStatus(thread.name + " failed to restart: " + String(error), "error");
+      return false;
+    }
+    return attachThreadClient(thread);
   }
 
   var TERMINAL_URL_RE = /\b((?:https?:\/\/|localhost(?::\d+)?|(?:127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?:[^\s<>"'`]*)?)/ig;
@@ -3271,6 +3443,7 @@
     layout.focusedLeafId = source.id;
     renderPaneWorkspace();
     scheduleTerminalPaneFits();
+    saveWorkspaceSoon();
     return true;
   }
 
@@ -3475,6 +3648,7 @@
     else layout.root = nextRoot;
     renderPaneWorkspace();
     if (restoreFocus) focusPaneDivider(splitId);
+    saveWorkspaceSoon();
     return true;
   }
 
@@ -4271,6 +4445,7 @@
         typeof refreshStatusController === "function") {
       refreshStatusController();
     }
+    saveWorkspaceSoon();
     return true;
   }
 
@@ -4351,6 +4526,7 @@
     var removed = PsychePanes.removeLeaf(layout.root, leaf.id);
     if (!removed.root) {
       paneLayouts.delete(key);
+      saveWorkspaceSoon();
       return null;
     }
     layout.root = removed.root;
@@ -4358,6 +4534,7 @@
       layout.focusedLeafId = removed.nextLeafId;
     }
     paneLayouts.set(key, layout);
+    saveWorkspaceSoon();
     var nextLeaf = PsychePanes.findLeafById(removed.root, removed.nextLeafId);
     return nextLeaf ? nextLeaf.threadId : null;
   }
@@ -4562,7 +4739,7 @@
     });
     saveWorkspaceSoon();
     stageBrowserSurface();
-    var closed = closeThread(thread.id);
+    var closed = await closeThread(thread.id);
     if (closed && wasActive) markActiveSurface("terminal");
     return closed;
     } finally {
@@ -4594,7 +4771,7 @@
     return true;
   }
 
-  function closeThread(id, options) {
+  async function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread || thread.closeStarted) return false;
     var wasActive = state.activeThreadId === id;
@@ -4607,6 +4784,16 @@
     }
     thread.closeStarted = true;
     thread.closing = true;
+    if (isPersistentThread(thread)) {
+      try {
+        await invoke("native_session_stop", { id: thread.id });
+      } catch (error) {
+        thread.closeStarted = false;
+        thread.closing = false;
+        setStatus("failed to stop " + thread.name + ": " + String(error), "error");
+        return false;
+      }
+    }
     if (thread.ptyIoQueue) {
       thread.ptyIoQueue.closed = true;
     }
@@ -4629,7 +4816,7 @@
       nextThreadId = canvasThreadIds()[0] || null;
     }
     if (thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
-      stopThreadPty(thread);
+      await stopThreadPty(thread);
     }
     var closingProjectId = thread.projectId;
     state.threads = state.threads.filter(function (t) { return t.id !== id; });
@@ -4658,6 +4845,7 @@
     }
     refreshSidebar();
     refreshTabs();
+    await saveWorkspaceNow();
     return true;
   }
 
@@ -4695,6 +4883,7 @@
     if (thread.kind === "git") stageGitSurface();
     refreshSidebar();
     refreshTabs();
+    saveWorkspaceSoon();
     return true;
   }
 
@@ -4725,6 +4914,7 @@
     if (thread.kind === "git") revealGitPane(thread);
     if (thread.kind === "git") renderGitSurface();
     refreshSidebar();
+    saveWorkspaceSoon();
     return true;
   }
 
@@ -7334,12 +7524,13 @@
       .filter(function (t) { return t.projectId === id; })
       .map(function (t) { return t.id; });
     var preserveTerminalFocus = state.activeProjectId !== id;
-    threadIds.forEach(function (tid) {
-      closeThread(tid, {
+    var closeResults = await Promise.all(threadIds.map(function (tid) {
+      return closeThread(tid, {
         focus: false,
         preserveTerminalFocus: preserveTerminalFocus,
       });
-    });
+    }));
+    if (closeResults.some(function (closed) { return closed === false; })) return false;
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
@@ -10360,7 +10551,7 @@
   document.getElementById("open-external").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.url && tab.url !== "about:blank" && openUrl) openUrl(tab.url).catch(function () {}); });
   if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { syncBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }
   function handleWindowBeforeUnload(event) {
-    saveWorkspaceNow();
+    saveWorkspaceNow().catch(function () {});
     if (destroyingWindow || !state.openFiles.some(function (file) {
       return file.dirty || file.savePromise;
     })) return;
@@ -10452,6 +10643,18 @@
   }
 
   async function routeGlobalShortcut(e) {
+    if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      if (e.code === "KeyT") {
+        e.preventDefault();
+        await runNewShellCommand();
+        return;
+      }
+      if (e.code === "KeyA") {
+        e.preventDefault();
+        await runNewThreadCommand();
+        return;
+      }
+    }
     if (routeAgentPickerModalKeydown(e)) return;
     if (routeGitPaneShortcut(e)) return;
     var meta = e.metaKey || e.ctrlKey;
@@ -10687,8 +10890,9 @@
     var thread = await createTerminalPane();
     if (thread) toast("Terminal pane opened");
   });
-  onMenuClick("new-pane-agent", function () {
-    openAgentPicker();
+  onMenuClick("new-pane-agent", async function () {
+    var thread = await runNewThreadCommand();
+    if (thread) toast("Coven chat opened");
   });
   onMenuClick("new-pane-web", async function () {
     await openBlankBrowserTab();
@@ -10798,7 +11002,9 @@
     ["Toggle the sessions sidebar", "⌘B"],
     ["Focus a pane on the canvas", "⌃1–9"],
     ["Resize a pane split", "drag the divider"],
+    ["New shell pane", "⌃T"],
     ["New terminal pane", "⌘T"],
+    ["New agent pane (coven chat)", "⌃A"],
     ["Choose an agent", "⌘D"],
     ["New browser tab", "Web pane +"],
     ["Open or focus Git", "⌘G"],
@@ -11627,6 +11833,123 @@
     return { projects: projects, activeProjectId: activeProjectId };
   }
 
+  function restoredSessionLaunch(descriptor, project) {
+    var launchKind = descriptor.launchKind;
+    return {
+      command: null,
+      args: [],
+      env: {},
+      projectRoot: project.root,
+      cwd: descriptor.worktreePath,
+      launchKind: launchKind,
+      covenSessionId: descriptor.covenSessionId || null,
+      metricsProvider: launchKind === "coven-chat" || launchKind === "coven-attach"
+        ? "coven"
+        : null,
+    };
+  }
+
+  function restoredSessionThread(descriptor, project) {
+    var launch = restoredSessionLaunch(descriptor, project);
+    return {
+      id: descriptor.id,
+      projectId: project.id,
+      worktreePath: descriptor.worktreePath,
+      name: descriptor.name || descriptor.launchKind,
+      kind: descriptor.kind || descriptor.launchKind,
+      launch: launch,
+      hidden: descriptor.hidden === true,
+      status: descriptor.status,
+      persistentLive: descriptor.persistentLive === true,
+      spawning: descriptor.persistentLive === true,
+      term: null,
+      fit: null,
+      host: null,
+      pane: null,
+      closing: false,
+      closeStarted: false,
+      startInFlight: false,
+      exitDuringStart: false,
+      stopRequested: false,
+      ptyStarted: false,
+      terminalController: null,
+      ptyIoQueue: createThreadPtyIoQueue(),
+      metricsGeneration: 0,
+      metrics: launch.metricsProvider ? loadingPaneMetrics(launch) : null,
+      metricsRefreshTimer: 0,
+      lastOutputAt: 0,
+      isWorking: false,
+      sidebarStatusKey: descriptor.persistentLive ? "busy" : "done",
+      startedAt: Date.now(),
+      finishedAt: descriptor.persistentLive ? null : Date.now(),
+      exitCode: null,
+    };
+  }
+
+  function restorePersistedPaneLayouts(savedLayouts, restoredIds) {
+    paneLayouts.clear();
+    (savedLayouts || []).forEach(function (record) {
+      if (!record || !record.root) return;
+      var project = findProject(record.projectId);
+      if (!project) return;
+      var threadIds = PsychePanes.leafIds(record.root).map(function (leafId) {
+        var leaf = PsychePanes.findLeafById(record.root, leafId);
+        return leaf && leaf.threadId;
+      }).filter(Boolean);
+      if (!threadIds.length || threadIds.some(function (id) { return !restoredIds.has(id); })) return;
+      paneLayouts.set(paneLayoutKey(project.id, record.worktreePath), {
+        root: record.root,
+        focusedLeafId: record.focusedLeafId || null,
+      });
+    });
+  }
+
+  function ensureRestoredSessionPlacements(threads) {
+    threads.forEach(function (thread) {
+      if (thread.hidden) return;
+      var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
+      if (layout && PsychePanes.findLeafByThreadId(layout.root, thread.id)) return;
+      var placement = preparePanePlacement(thread.id, thread.projectId, thread.worktreePath);
+      if (placement) commitPanePlacement(placement);
+      else thread.hidden = true;
+    });
+  }
+
+  async function restorePersistedSessions(saved, liveSessionIds) {
+    if (!saved || !window.PsycheWorkspace) return { sessions: [], unknownLiveIds: [] };
+    var reconciled = PsycheWorkspace.reconcileSessions(saved.sessions || [], liveSessionIds || []);
+    var restored = reconciled.sessions.map(function (descriptor) {
+      var project = findProject(descriptor.projectId);
+      return project ? restoredSessionThread(descriptor, project) : null;
+    }).filter(Boolean);
+    state.threads = restored;
+    var restoredIds = new Set(restored.map(function (thread) { return thread.id; }));
+    restorePersistedPaneLayouts(saved.paneLayouts, restoredIds);
+    ensureRestoredSessionPlacements(restored);
+    restored.forEach(function (thread) { mountTerminal(thread); });
+    for (var i = 0; i < restored.length; i += 1) {
+      var thread = restored[i];
+      if (!thread.ptyStarted && thread.status === "running") {
+        try {
+          var capture = await invoke("native_session_capture", { id: thread.id });
+          if (thread.term && capture && capture.length) thread.term.write(new Uint8Array(capture));
+        } catch (error) {
+          console.warn("[native_session_capture] failed for " + thread.id + ": " + String(error));
+        }
+        attachThreadClient(thread);
+      }
+    }
+    var active = saved.activeThreadId && findThread(saved.activeThreadId);
+    state.activeThreadId = active && !active.hidden ? active.id : null;
+    state.projects.forEach(function (project) {
+      var projectThread = state.threads.find(function (thread) {
+        return thread.projectId === project.id && !thread.hidden;
+      });
+      project.lastActiveThreadId = projectThread ? projectThread.id : null;
+    });
+    return reconciled;
+  }
+
   async function addProject(rootPath) {
     if (!rootPath) return null;
     rootPath = await canonicalProjectPath(rootPath);
@@ -11895,6 +12218,7 @@
       kind: "shell",
       command: state.env.default_shell,
       args: state.env.default_shell_args,
+      launchKind: "shell",
       projectRoot: project && project.root,
       cwd: worktree && worktree.path,
       worktreePath: worktree && worktree.path,
@@ -11918,6 +12242,7 @@
       kind: "psyche",
       command: state.env.node_path,
       args: [state.env.psyche_entry],
+      launchKind: "psyche",
       projectRoot: project && project.root,
       cwd: worktree && worktree.path,
       worktreePath: worktree && worktree.path,
@@ -11954,31 +12279,43 @@
     var saved = await loadSavedWorkspace();
     var bootRoot = state.env.repo_root || state.env.home || "/";
     var project = null;
-    if (saved && saved.projects.length) {
-      isRestoringWorkspace = true;
-      var restored = await restoreSavedProjects(
-        saved.projects,
-        saved.activeProjectId,
-        Math.min(settings.maxProjects, HARD_MAX_PROJECTS)
-      );
-      state.projects = restored.projects;
-      if (typeof assignActiveProjectId === "function") {
-        assignActiveProjectId(restored.activeProjectId, { resetAgentControl: false });
-      } else {
-        Object.assign(state, { activeProjectId: restored.activeProjectId });
+    isRestoringWorkspace = true;
+    try {
+      if (saved && saved.projects.length) {
+        var restored = await restoreSavedProjects(
+          saved.projects,
+          saved.activeProjectId,
+          Math.min(settings.maxProjects, HARD_MAX_PROJECTS)
+        );
+        state.projects = restored.projects;
+        if (typeof assignActiveProjectId === "function") {
+          assignActiveProjectId(restored.activeProjectId, { resetAgentControl: false });
+        } else {
+          Object.assign(state, { activeProjectId: restored.activeProjectId });
+        }
+        project = activeProject();
+        await Promise.all(state.projects.map(function (savedProject) {
+          return refreshProjectWorktrees(savedProject);
+        }));
       }
-      project = activeProject();
+      var liveSessionIds = [];
+      try {
+        liveSessionIds = await invoke("native_session_list");
+      } catch (error) {
+        setStatus("native session discovery failed: " + String(error), "error");
+      }
+      if (saved) await restorePersistedSessions(saved, liveSessionIds);
+    } finally {
       isRestoringWorkspace = false;
-      await Promise.all(state.projects.map(function (savedProject) {
-        return refreshProjectWorktrees(savedProject);
-      }));
     }
     if (!project) project = await addProject(bootRoot);
     if (project) {
       var activeTab = currentBrowserTab(project);
       if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
     }
-    refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
+    renderPaneWorkspace({ preserveTerminalFocus: false });
+    refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills();
+    await saveWorkspaceNow();
     startCovenPolling();
     installAgentControlUi();
     if (paneMetricsPollTimer) clearInterval(paneMetricsPollTimer);

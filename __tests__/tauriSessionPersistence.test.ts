@@ -24,6 +24,21 @@ function countOccurrences(source: string, needle: string) {
   return source.split(needle).length - 1;
 }
 
+function functionSource(name: string) {
+  const asyncStart = mainSource.indexOf(`async function ${name}(`);
+  const syncStart = mainSource.indexOf(`function ${name}(`);
+  const start = asyncStart === -1 ? syncStart : asyncStart;
+  if (start === -1) throw new Error(`missing function ${name}`);
+  const bodyStart = mainSource.indexOf('{', start);
+  let depth = 0;
+  for (let index = bodyStart; index < mainSource.length; index += 1) {
+    if (mainSource[index] === '{') depth += 1;
+    if (mainSource[index] === '}') depth -= 1;
+    if (depth === 0) return mainSource.slice(start, index + 1);
+  }
+  throw new Error(`unterminated function ${name}`);
+}
+
 describe('Tauri workspace persistence model', () => {
   test('imports v2 state without inventing sessions or layouts', () => {
     expect(
@@ -162,6 +177,22 @@ describe('Tauri workspace persistence model', () => {
         covenSessionId: 'space id',
       }),
     ).toBeNull();
+  });
+
+  test('preserves safe Coven chat identifiers needed for explicit retry', () => {
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'chat-1',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        kind: 'coven-chat',
+        launchKind: 'coven-chat',
+        covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+      }),
+    ).toMatchObject({
+      launchKind: 'coven-chat',
+      covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+    });
   });
 
   test('collapses malformed, unknown, and duplicate pane leaves', () => {
@@ -887,5 +918,110 @@ describe('Tauri workspace persistence model', () => {
     );
     expect(mainSource).toContain('return workspaceSaveQueue;');
     expect(mainSource).toContain('await saveWorkspaceNow();');
+  });
+
+  test('serializes sessions and pane layouts into workspace v3', () => {
+    expect(functionSource('persistableSession')).not.toMatch(/term|host|pane|fit/);
+    expect(functionSource('persistablePaneLayouts')).toContain('paneLayouts.forEach');
+    expect(functionSource('buildPersistedWorkspace')).toContain('version: 3');
+    expect(functionSource('buildPersistedWorkspace')).toContain('sessions:');
+    expect(functionSource('buildPersistedWorkspace')).toContain('paneLayouts:');
+  });
+
+  test('loads and saves the complete native workspace document', () => {
+    expect(functionSource('saveWorkspaceNow')).toContain('invoke("workspace_save"');
+    expect(functionSource('readSavedWorkspace')).toContain('invoke("workspace_load"');
+    expect(functionSource('readSavedWorkspace')).toContain('sanitizeWorkspaceV3');
+    expect(functionSource('handleWindowCloseRequested')).toContain('await saveWorkspaceNow()');
+  });
+
+  test('contains best-effort beforeunload save failures', () => {
+    expect(functionSource('handleWindowBeforeUnload')).toContain(
+      'saveWorkspaceNow().catch(function () {})',
+    );
+  });
+
+  test.each([
+    'commitPanePlacement',
+    'updateActiveSplit',
+    'movePaneTo',
+    'focusThread',
+    'detachThreadPane',
+    'hideThread',
+    'reopenThread',
+    'renameThread',
+  ])('saves after durable pane mutation in %s', (name) => {
+    expect(functionSource(name)).toContain('saveWorkspaceSoon()');
+  });
+
+  test('creates the durable session before mutating webview thread state', () => {
+    const create = functionSource('createThread');
+    expect(create).toContain('invoke("native_session_create"');
+    expect(create.indexOf('invoke("native_session_create"')).toBeLessThan(
+      create.indexOf('state.threads.push(thread)'),
+    );
+    expect(create).toContain('attachThreadClient(thread)');
+  });
+
+  test('attaches disposable PTYs with the Rust sessionId contract', () => {
+    const attach = functionSource('attachThreadClient');
+    expect(attach).toContain('invoke("pty_attach"');
+    expect(attach).toContain('sessionId: thread.id');
+    expect(attach).not.toContain('nativeSessionId');
+  });
+
+  test('explicit close stops the durable session before removing its descriptor', () => {
+    const close = functionSource('closeThread');
+    expect(close).toContain('invoke("native_session_stop"');
+    expect(close.indexOf('invoke("native_session_stop"')).toBeLessThan(
+      close.indexOf('state.threads = state.threads.filter'),
+    );
+    expect(close).toContain('await saveWorkspaceNow()');
+  });
+
+  test('explicit retry recreates and attaches an exited durable session', () => {
+    const retry = functionSource('retryThread');
+    expect(retry).toContain('invoke("native_session_create"');
+    expect(retry).toContain('attachThreadClient(thread)');
+  });
+
+  test('distinguishes a dropped client from a stopped durable session', () => {
+    const exit = functionSource('handlePtyExit');
+    expect(exit).toContain('invoke("native_session_list")');
+    expect(exit).toContain('thread.status = persistentLive ? "failed" : "exited"');
+  });
+
+  test('loads workspace before discovery and restores live sessions without recreating them', () => {
+    const boot = functionSource('boot');
+    expect(boot).toContain('await readSavedWorkspace()');
+    expect(boot).toContain('invoke("native_session_list")');
+    expect(boot).toContain('restorePersistedSessions');
+    const restore = functionSource('restorePersistedSessions');
+    expect(restore).toContain('PsycheWorkspace.reconcileSessions');
+    expect(restore).toContain('invoke("native_session_capture"');
+    expect(restore).toContain('attachThreadClient(thread)');
+    expect(restore).not.toContain('native_session_create');
+  });
+
+  test('reserves Control-T for shells and Control-A for Coven agents', () => {
+    const shortcuts = functionSource('routeGlobalShortcut');
+    expect(shortcuts).toMatch(
+      /e\.ctrlKey && !e\.metaKey[\s\S]*e\.code === "KeyT"[\s\S]*runNewShellCommand/,
+    );
+    expect(shortcuts).toMatch(
+      /e\.ctrlKey && !e\.metaKey[\s\S]*e\.code === "KeyA"[\s\S]*runNewThreadCommand/,
+    );
+    expect(shortcuts).toMatch(/var meta = e\.metaKey \|\| e\.ctrlKey/);
+  });
+
+  test('shows the Control shortcuts in the menu and help overlay', () => {
+    expect(indexHtml).toContain(
+      'Shell — login shell<span class="new-pane-key">⌃T</span>',
+    );
+    expect(indexHtml).toContain(
+      'Agent — coven chat<span class="new-pane-key">⌃A</span>',
+    );
+    expect(mainSource).toContain('["New shell pane", "⌃T"]');
+    expect(mainSource).toContain('["New agent pane (coven chat)", "⌃A"]');
   });
 });

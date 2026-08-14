@@ -39,8 +39,22 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
 ) {
-  const names = Object.keys(dependencies);
-  const values = Object.values(dependencies);
+  const persistentKinds = new Set(['shell', 'psyche', 'coven-chat', 'coven-attach']);
+  const resolvedDependencies = {
+    isPersistentThread: (thread: Record<string, any>) =>
+      persistentKinds.has(thread?.launch?.launchKind),
+    nativeSessionRequest: (thread: Record<string, any>) => ({ id: thread.id }),
+    invoke: async () => [],
+    attachThreadClient: dependencies.spawnPty || (() => Promise.resolve(true)),
+    saveWorkspaceNow: async () => true,
+    saveWorkspaceSoon: () => undefined,
+    readSavedWorkspace: dependencies.loadSavedWorkspace || (async () => null),
+    restorePersistedSessions: async () => ({ sessions: [], unknownLiveIds: [] }),
+    renderPaneWorkspace: () => undefined,
+    ...dependencies,
+  };
+  const names = Object.keys(resolvedDependencies);
+  const values = Object.values(resolvedDependencies);
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
@@ -90,6 +104,18 @@ const spawnPtyRuntimeDeps = {
 };
 
 describe('Tauri Coven launch project scope', () => {
+  it('owns durable sessions and attaches disposable PTYs to them', () => {
+    expect(libRs).toMatch(/mod native_sessions;/);
+    expect(libRs).toMatch(/native_session_create/);
+    expect(libRs).toMatch(/native_session_list/);
+    expect(libRs).toMatch(/native_session_stop/);
+    expect(libRs).toMatch(/native_session_capture/);
+    expect(libRs).toMatch(/struct PtyAttachOptions/);
+    expect(libRs).toMatch(/fn pty_attach\s*\(/);
+    expect(libRs).toMatch(/build_attach_args/);
+    expect(libRs).toMatch(/tauri::generate_handler!\s*\[[\s\S]*pty_attach\s*,/);
+  });
+
   it('registers the canonical project path command and requires validated PTY roots', () => {
     expect(libRs).toMatch(/fn canonical_project_path\s*\(\s*root\s*:\s*String\s*\)/);
     expect(libRs).toMatch(/tauri::generate_handler!\s*\[[\s\S]*canonical_project_path\s*,/);
@@ -893,7 +919,7 @@ describe('native Coven launch routing', () => {
       env: { TOKEN: 'before' }, projectRoot: '/repo', cwd: '/repo/wt',
       launchKind: 'coven-chat', covenSessionId: COVEN_SESSION_ID, metricsProvider: 'coven',
     };
-    const createThread = compileFunction<(opts: Record<string, any>) => Record<string, any>>(
+    const createThread = compileFunction<(opts: Record<string, any>) => Promise<Record<string, any>>>(
       functionSource('createThread'),
       {
         makeThreadId: () => 'thread-1',
@@ -916,7 +942,7 @@ describe('native Coven launch routing', () => {
         ),
       },
     );
-    const thread = createThread({
+    const thread = await createThread({
       project: { id: 'project' }, worktreePath: '/repo/wt', kind: 'coven-chat', launch,
     });
     launch.args.push('mutated');
@@ -987,14 +1013,14 @@ describe('native Coven launch routing', () => {
     expect((invoked[0].options as Record<string, unknown>)).not.toHaveProperty('metricsProvider');
   });
 
-  it('suppresses initial terminal focus only when thread creation requests it', () => {
+  it('suppresses initial terminal focus only when thread creation requests it', async () => {
     const state = { threads: [] as Array<Record<string, any>>, activeThreadId: null };
     const focusCalls: Array<{
       id: string;
       options?: { focusTerminal?: boolean };
     }> = [];
     let nextId = 0;
-    const createThread = compileFunction<(opts: Record<string, any>) => Record<string, any>>(
+    const createThread = compileFunction<(opts: Record<string, any>) => Promise<Record<string, any>>>(
       functionSource('createThread'),
       {
         makeThreadId: () => `thread-${nextId += 1}`,
@@ -1019,12 +1045,12 @@ describe('native Coven launch routing', () => {
       },
     );
 
-    createThread({
+    await createThread({
       worktreePath: '/repo',
       command: '/bin/zsh',
       focusTerminal: false,
     });
-    createThread({
+    await createThread({
       worktreePath: '/repo',
       command: '/bin/zsh',
     });
@@ -1035,8 +1061,8 @@ describe('native Coven launch routing', () => {
     ]);
   });
 
-  it('falls back to opts.metricsProvider when launch omits it and preserves launch precedence', () => {
-    const createThread = compileFunction<(opts: Record<string, any>) => Record<string, any>>(
+  it('falls back to opts.metricsProvider when launch omits it and preserves launch precedence', async () => {
+    const createThread = compileFunction<(opts: Record<string, any>) => Promise<Record<string, any>>>(
       functionSource('createThread'),
       {
         makeThreadId: () => 'thread-1',
@@ -1056,7 +1082,7 @@ describe('native Coven launch routing', () => {
       },
     );
 
-    const fallbackThread = createThread({
+    const fallbackThread = await createThread({
       project: { id: 'project' },
       worktreePath: '/repo/wt',
       metricsProvider: 'agent',
@@ -1072,7 +1098,7 @@ describe('native Coven launch routing', () => {
     });
     expect(fallbackThread.launch.metricsProvider).toBe('agent');
 
-    const explicitThread = createThread({
+    const explicitThread = await createThread({
       project: { id: 'project' },
       worktreePath: '/repo/wt',
       metricsProvider: 'agent',
@@ -1482,7 +1508,7 @@ describe('native Coven launch routing', () => {
         spawnPty,
       },
     );
-    const handlePtyExit = compileFunction<(payload: { thread_id: string }) => boolean>(
+    const handlePtyExit = compileFunction<(payload: { thread_id: string }) => Promise<boolean>>(
       functionSource('handlePtyExit'), {
         clearThreadAttention: () => undefined,
         findThread: () => thread,
@@ -1504,7 +1530,7 @@ describe('native Coven launch routing', () => {
     (thread as typeof thread & {
       terminalController: { markPtyExited: () => void };
     }).terminalController.markPtyExited = markPtyExited;
-    expect(handlePtyExit({ thread_id: thread.id })).toBe(true);
+    await expect(handlePtyExit({ thread_id: thread.id })).resolves.toBe(true);
     expect(markPtyExited).toHaveBeenCalledTimes(1);
     expect(thread.status).toBe('exited');
     expect(thread.startInFlight).toBe(false);
@@ -1830,7 +1856,7 @@ describe('native Coven launch routing', () => {
         spawnPty,
       },
     );
-    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+    const closeThread = compileFunction<(id: string) => Promise<boolean>>(functionSource('closeThread'), {
       forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
@@ -1850,14 +1876,14 @@ describe('native Coven launch routing', () => {
     expect(thread.stopRequested).toBe(false);
     (thread as typeof thread & { terminalController: { dispose(): void } }).terminalController.dispose =
       () => { calls.push('dispose'); };
-    expect(closeThread(thread.id)).toBe(true);
-    expect(closeThread(thread.id)).toBe(false);
+    await expect(closeThread(thread.id)).resolves.toBe(true);
+    await expect(closeThread(thread.id)).resolves.toBe(false);
     expect(calls.filter((call) => call === 'pty_stop')).toHaveLength(1);
     expect(calls.filter((call) => call === 'dispose')).toHaveLength(1);
     expect(state.threads).toEqual([]);
   });
 
-  it.each(['failed', 'exited'])('issues one guarded stop when closing a retained %s pane', (status) => {
+  it.each(['failed', 'exited'])('issues one guarded stop when closing a retained %s pane', async (status) => {
     const thread = {
       id: 'thread-1', projectId: 'project', worktreePath: '/repo', status,
       spawning: false, closing: false, closeStarted: false, startInFlight: false,
@@ -1865,7 +1891,7 @@ describe('native Coven launch routing', () => {
     };
     const state = { threads: [thread], activeThreadId: thread.id };
     let stopCalls = 0;
-    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+    const closeThread = compileFunction<(id: string) => Promise<boolean>>(functionSource('closeThread'), {
       forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
@@ -1881,7 +1907,7 @@ describe('native Coven launch routing', () => {
       focusThread: () => undefined,
     });
 
-    expect(closeThread(thread.id)).toBe(true);
+    await expect(closeThread(thread.id)).resolves.toBe(true);
     expect(stopCalls).toBe(1);
     expect(state.threads).toEqual([]);
   });
@@ -1942,7 +1968,7 @@ describe('native Coven launch routing', () => {
         setStatus: () => undefined,
       },
     );
-    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+    const closeThread = compileFunction<(id: string) => Promise<boolean>>(functionSource('closeThread'), {
       forgetThreadInSets: () => undefined,
       findThread: () => state.threads.find((value) => value.id === thread.id) || null,
       detachThreadPane: () => null,
@@ -1957,7 +1983,7 @@ describe('native Coven launch routing', () => {
       refreshTabs: () => undefined,
       focusThread: () => undefined,
     });
-    const handlePtyExit = compileFunction<(payload: { thread_id: string }) => boolean>(
+    const handlePtyExit = compileFunction<(payload: { thread_id: string }) => Promise<boolean>>(
       functionSource('handlePtyExit'), {
         clearThreadAttention: () => undefined,
         findThread: () => state.threads.find((value) => value.id === thread.id) || null,
@@ -1971,12 +1997,12 @@ describe('native Coven launch routing', () => {
     );
 
     const starting = spawnPty(thread);
-    expect(closeThread(thread.id)).toBe(true);
-    expect(closeThread(thread.id)).toBe(false);
+    await expect(closeThread(thread.id)).resolves.toBe(true);
+    await expect(closeThread(thread.id)).resolves.toBe(false);
     (resolveStart as unknown as () => void)();
     await expect(starting).resolves.toBe(false);
     expect(stopCalls).toBe(1);
-    expect(handlePtyExit({ thread_id: thread.id })).toBe(false);
+    await expect(handlePtyExit({ thread_id: thread.id })).resolves.toBe(false);
     expect(state.threads).toEqual([]);
   });
 
@@ -2025,7 +2051,7 @@ describe('native Coven launch routing', () => {
           spawnPty,
         },
       );
-      const handlePtyExit = compileFunction<(payload: { thread_id: string }) => boolean>(
+      const handlePtyExit = compileFunction<(payload: { thread_id: string }) => Promise<boolean>>(
         functionSource('handlePtyExit'), {
           clearThreadAttention: () => undefined,
           findThread: () => thread,
@@ -2040,7 +2066,7 @@ describe('native Coven launch routing', () => {
 
       const starting = spawnPty(thread);
       expect(thread.startInFlight).toBe(true);
-      expect(handlePtyExit({ thread_id: thread.id })).toBe(true);
+      await expect(handlePtyExit({ thread_id: thread.id })).resolves.toBe(true);
       expect(thread.status).toBe('exited');
       expect(thread.startInFlight).toBe(true);
       await expect(retryThread(thread.id)).resolves.toBe(false);

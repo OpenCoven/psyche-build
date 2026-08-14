@@ -75,8 +75,16 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
 ) {
-  const names = Object.keys(dependencies);
-  const values = Object.values(dependencies);
+  const resolvedDependencies = {
+    isPersistentThread: (thread: Record<string, any>) =>
+      ['shell', 'psyche', 'coven-chat', 'coven-attach'].includes(thread?.launch?.launchKind),
+    nativeSessionRequest: (thread: Record<string, any>) => ({ id: thread.id }),
+    invoke: async () => undefined,
+    attachThreadClient: () => Promise.resolve(true),
+    ...dependencies,
+  };
+  const names = Object.keys(resolvedDependencies);
+  const values = Object.values(resolvedDependencies);
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
@@ -695,7 +703,7 @@ describe('macOS Coven session lifecycle boundary', () => {
     );
     let nextThreadId = 0;
     let createCalls = 0;
-    const createThread = compileFunction<(options: Record<string, any>) => Record<string, any>>(
+    const createThread = compileFunction<(options: Record<string, any>) => Promise<Record<string, any>>>(
       functionSource(mainJs, 'createThread'),
       {
         makeThreadId: () => `thread-${nextThreadId += 1}`,
