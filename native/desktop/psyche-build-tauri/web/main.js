@@ -972,7 +972,8 @@
   function flushDeferredStatusMessages() {
     if (!deferredStatusMessages.length) return;
     deferredStatusMessages.forEach(function (entry) {
-      setStatus(entry.text, entry.level);
+      if (entry.level === "error") showStatusError(entry.text);
+      else setStatus(entry.text, entry.level);
     });
     deferredStatusMessages = [];
   }
@@ -1030,7 +1031,7 @@
       );
       return true;
     } catch (error) {
-      setStatus("project appearance save failed: " + String(error), "error");
+      showStatusError("project appearance save failed: " + String(error));
       return false;
     }
   }
@@ -1194,6 +1195,7 @@
   var sidebarResizeEl = document.getElementById("sidebar-resize");
   var newPaneMenuEl = document.getElementById("new-pane-menu");
   var newPaneMenuHeadEl = document.getElementById("new-pane-menu-head");
+  var statusAlertEl = document.getElementById("status-alert");
   var toastEl = document.getElementById("toast");
   var helpOverlayEl = document.getElementById("help-overlay");
   var agentPickerOverlayEl = document.getElementById("agent-picker-overlay");
@@ -1460,6 +1462,12 @@
       toastEl.textContent = "";
       toastTimer = 0;
     }, duration || 2600);
+  }
+
+  function showStatusError(message) {
+    var text = String(message);
+    if (statusAlertEl) statusAlertEl.textContent = text;
+    toast(text, 6000);
   }
 
   function showPanePlacementWarning(message) {
@@ -11932,6 +11940,7 @@
     state.env = env || {};
     await installTerminalImageDrop();
     if (typeof statusController !== "undefined" && statusController) statusController.start();
+    flushDeferredStatusMessages();
     var saved = await loadSavedWorkspace();
     var bootRoot = state.env.repo_root || state.env.home || "/";
     var project = null;
@@ -11966,7 +11975,6 @@
     paneMetricsPollTimer = setInterval(refreshVisiblePaneMetrics, 15000);
     refreshVisiblePaneMetrics();
     if (typeof refreshStatusController === "function") refreshStatusController();
-    flushDeferredStatusMessages();
   }
 
   invoke("app_environment")

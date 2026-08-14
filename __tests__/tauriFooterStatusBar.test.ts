@@ -127,6 +127,29 @@ function footerSection(source: string) {
 }
 
 describe('Tauri footer status bar shell', () => {
+  it('routes project appearance storage errors through the retained alert and visible toast', () => {
+    const showStatusError = functionSource(mainJs, 'showStatusError');
+    expect(showStatusError).toContain('statusAlertEl.textContent = text');
+    expect(showStatusError).toContain('toast(text, 6000)');
+    expect(showStatusError).not.toContain('statusEl');
+    expect(showStatusError).not.toContain('setStatus(');
+    expect(functionSource(mainJs, 'flushDeferredStatusMessages')).toContain(
+      'showStatusError(entry.text)',
+    );
+    expect(functionSource(mainJs, 'saveProjectAppearances')).toContain(
+      'showStatusError("project appearance save failed: " + String(error))',
+    );
+    expect(functionSource(mainJs, 'saveProjectAppearances')).not.toContain('setStatus(');
+
+    const boot = functionSource(mainJs, 'boot');
+    expect(boot.indexOf('statusController.start()')).toBeLessThan(
+      boot.indexOf('flushDeferredStatusMessages()'),
+    );
+    expect(boot.indexOf('flushDeferredStatusMessages()')).toBeLessThan(
+      boot.indexOf('loadSavedWorkspace()'),
+    );
+  });
+
   it('wraps the composer, detail panel, and status rail in one footer stack', () => {
     const order = [
       'id="footer-stack"',

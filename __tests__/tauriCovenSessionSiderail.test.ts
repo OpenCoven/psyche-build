@@ -632,6 +632,8 @@ function createRenderer(options: {
   const invoke = vi.fn(options.invoke ?? (() => Promise.resolve()));
   const refreshCovenSessions = vi.fn(options.refreshCovenSessions ?? (() => Promise.resolve()));
   const setStatus = vi.fn();
+  const statusAlertEl = new FakeElement('div', document);
+  const toastEl = new FakeElement('div', document);
   const onCanvasIds = options.canvasThreadIds ?? [];
   const canvasThreadIds = vi.fn(() => onCanvasIds);
   // Focus sets: the membership model is real (setsForThread / isPicked run from
@@ -666,8 +668,13 @@ function createRenderer(options: {
     'var focusSets = seedFocusSets;',
     'var setPicking = seedSetPicking;',
     'var deferredStatusMessages = [];',
+    'var statusAlertEl = seedStatusAlertEl;',
+    'var toastEl = seedToastEl;',
+    'var toastTimer = 0;',
     'var sessionTreeFocusKey = "";',
     'var isRestoringWorkspace = false;',
+    extractFunctionSource(mainJs, 'toast'),
+    extractFunctionSource(mainJs, 'showStatusError'),
     extractFunctionSource(mainJs, 'queueDeferredStatus'),
     extractFunctionSource(mainJs, 'flushDeferredStatusMessages'),
     extractFunctionSource(mainJs, 'loadProjectAppearances'),
@@ -729,13 +736,13 @@ function createRenderer(options: {
     'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread', 'closeBrowserPane',
     'requestThreadClose', 'hideThread', 'renameThread', 'editLabelInline',
     'openCovenSession', 'setStatus',
-    'canvasThreadIds', 'paneGlyphFor', 'setInterval', 'clearInterval',
+    'canvasThreadIds', 'paneGlyphFor', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout',
     'seedFocusSets', 'seedSetPicking', 'refreshSidebar', 'activeFocusSet',
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
     'saveWorkspaceSoon', 'activateProjectWorktree', 'setSessionTypeFilter',
     'openSessionContextMenu', 'openProjectAppearancePopover',
-    'invoke', 'refreshCovenSessions', 'localStorage',
+    'invoke', 'refreshCovenSessions', 'localStorage', 'seedStatusAlertEl', 'seedToastEl',
     `"use strict"; ${sources.join('\n')}; return {
       render: function () {
         renderSessionList();
@@ -794,6 +801,8 @@ function createRenderer(options: {
     paneGlyphFor,
     setInterval,
     clearInterval,
+    () => 1,
+    () => undefined,
     focusSets,
     options.setPicking ?? null,
     () => { harness.render(); },
@@ -815,6 +824,8 @@ function createRenderer(options: {
     invoke,
     refreshCovenSessions,
     localStorage,
+    statusAlertEl,
+    toastEl,
   ) as {
     render: () => void;
     setDiscovery: (value: typeof discovery) => void;
@@ -868,6 +879,8 @@ function createRenderer(options: {
     localStorage,
     refreshCovenSessions,
     setStatus,
+    statusAlertEl,
+    toastEl,
     canvasThreadIds,
     openProjectAppearancePopover,
   };
@@ -1181,10 +1194,14 @@ describe('Tauri Coven session project rail', () => {
     expect(projectGroup?.dataset.projectAppearance).toBe('automatic');
     expect(projectHead?.textContent).toContain('Alpha');
     expect(renderer.projectAppearances()).toEqual({});
-    expect(renderer.setStatus).toHaveBeenCalledWith(
+    expect(renderer.statusAlertEl.textContent).toBe(
       'project appearance load failed: Error: storage unavailable',
-      'error',
     );
+    expect(renderer.toastEl.textContent).toBe(
+      'project appearance load failed: Error: storage unavailable',
+    );
+    expect(renderer.toastEl.classList.contains('is-visible')).toBe(true);
+    expect(renderer.setStatus).not.toHaveBeenCalled();
   });
 
   it('preserves in-memory project appearances and rerenders after save failures', () => {
@@ -1224,10 +1241,14 @@ describe('Tauri Coven session project rail', () => {
     const rerenderedProject = renderer.sessionListEl.querySelector('.session-project');
     const rerenderedHead = renderer.sessionListEl.querySelector('.session-project-head');
 
-    expect(renderer.setStatus).toHaveBeenCalledWith(
+    expect(renderer.statusAlertEl.textContent).toBe(
       'project appearance save failed: Error: disk full',
-      'error',
     );
+    expect(renderer.toastEl.textContent).toBe(
+      'project appearance save failed: Error: disk full',
+    );
+    expect(renderer.toastEl.classList.contains('is-visible')).toBe(true);
+    expect(renderer.setStatus).not.toHaveBeenCalled();
     expect(renderer.projectAppearances()).toEqual({
       '/alpha': { accent: 'violet' },
     });
