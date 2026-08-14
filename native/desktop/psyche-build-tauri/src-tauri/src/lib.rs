@@ -80,10 +80,10 @@ const MAX_BROWSER_SNAPSHOT_BYTES: usize =
 const MAX_BROWSER_SNAPSHOT_DIMENSION: u32 = 8192;
 const MAX_BROWSER_SNAPSHOT_PIXELS: u64 = 16 * 1024 * 1024;
 const MAX_BROWSER_SCRIPT_SOURCE_BYTES: usize = 64 * 1024;
+const MAX_BROWSER_SCRIPT_ARGS_BYTES: usize = 256 * 1024;
 const MAX_BROWSER_SCRIPT_RESULT_BYTES: usize = 256 * 1024;
 const BROWSER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
 const BROWSER_SCRIPT_CONTEXT_WORLD_NAME: &str = "com.opencoven.psyche.browser-script-context";
-static BROWSER_SCRIPT_WORLD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
 const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
@@ -3588,11 +3588,8 @@ struct BrowserScriptResponse {
     duration_ms: f64,
 }
 
-fn next_browser_script_execution_world_name() -> String {
-    format!(
-        "com.opencoven.psyche.browser-script-invocation-{}",
-        BROWSER_SCRIPT_WORLD_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    )
+fn browser_script_execution_world_name() -> &'static str {
+    BROWSER_SCRIPT_CONTEXT_WORLD_NAME
 }
 
 fn classify_browser_script_callback<T>(
@@ -3700,6 +3697,11 @@ async fn browser_script(
     if request.source.len() > MAX_BROWSER_SCRIPT_SOURCE_BYTES {
         return Err("script_source_too_large".to_string());
     }
+    let argument_bytes =
+        serde_json::to_vec(&request.args).map_err(|_| "serialization_failed".to_string())?;
+    if argument_bytes.len() > MAX_BROWSER_SCRIPT_ARGS_BYTES {
+        return Err("args_too_large".to_string());
+    }
     let label = safe_browser_label(label);
     let browser = app
         .get_webview(&label)
@@ -3713,6 +3715,9 @@ async fn browser_script(
     let input = serde_json::to_string(&serde_json::json!({
         "source": request.source,
         "args": request.args,
+        "workerSource": include_str!("../../web/control/browser-script-worker-runtime.js"),
+        "expectedUrl": before_url.as_str(),
+        "expectedDocumentToken": document_token,
     }))
     .map_err(|_| "serialization_failed".to_string())?;
     let script = format!(
@@ -3723,7 +3728,7 @@ async fn browser_script(
     let callback_result = evaluate_browser_script_in_world(
         &browser,
         script,
-        next_browser_script_execution_world_name(),
+        browser_script_execution_world_name().to_string(),
     )
     .await;
     let after_url = browser.url().map_err(|_| "effect_unknown".to_string())?;
@@ -3745,7 +3750,14 @@ async fn browser_script(
             .filter(|code| {
                 matches!(
                     *code,
-                    "automation_failed" | "result_too_large" | "serialization_failed"
+                    "automation_failed"
+                        | "effect_unknown"
+                        | "result_too_large"
+                        | "serialization_failed"
+                        | "snapshot_too_large"
+                        | "mutation_plan_invalid"
+                        | "mutation_target_stale"
+                        | "mutation_not_allowed"
                 )
             })
             .unwrap_or("automation_failed");
@@ -5682,12 +5694,20 @@ mod browser_app_shortcut_tests {
     }
 
     #[test]
-    fn browser_script_invocations_use_distinct_worlds() {
-        let first = next_browser_script_execution_world_name();
-        let second = next_browser_script_execution_world_name();
-        assert_ne!(first, second);
-        assert_ne!(first, BROWSER_SCRIPT_CONTEXT_WORLD_NAME);
-        assert_ne!(second, BROWSER_SCRIPT_CONTEXT_WORLD_NAME);
+    fn browser_script_execution_uses_the_document_context_world() {
+        assert_eq!(
+            browser_script_execution_world_name(),
+            BROWSER_SCRIPT_CONTEXT_WORLD_NAME
+        );
+    }
+
+    #[test]
+    fn browser_script_worker_runtime_is_embedded_and_bounded() {
+        assert!(
+            include_str!("../../web/control/browser-script-worker-runtime.js")
+                .contains("installBrowserScriptWorkerRuntime")
+        );
+        assert_eq!(MAX_BROWSER_SCRIPT_ARGS_BYTES, 256 * 1024);
     }
 }
 

@@ -311,6 +311,49 @@ describe('Tauri semantic browser provider lifecycle', () => {
     expect(lifecycle).toMatchObject({ liveGeneration: 0, controlGeneration: 0, nativeLabel: null });
   });
 
+  it('quarantines only ambiguous browser script outcomes', async () => {
+    const completeBrowserProviderEffect = vi.fn(async (_project: unknown, _result: unknown) => true);
+    const quarantineBrowserAutomation = vi.fn(async () => true);
+    const pair = { project: { root: '/project' }, browser: {}, worktreePath: '/project', tab: {} };
+    const lifecycle = { liveGeneration: 1, controlGeneration: 1, pendingGeneration: 0, nativeLabel: 'native', navigationTail: null };
+    const failures = [
+      Object.assign(new Error('mutation_not_allowed: secret'), { code: 'mutation_not_allowed' }),
+      Object.assign(new Error('effect_unknown: secret'), { code: 'effect_unknown' }),
+    ];
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'browser_script') throw failures.shift();
+      return {};
+    });
+    const normalizeScriptError = Function(
+      `return (${functionSource(main, 'browserNativeScriptError')});`,
+    )();
+    const handler = Function(
+      'browserControlPairByTabId', 'browserTabLifecycle', 'completeBrowserProviderEffect',
+      'browserProviderOperationPreflight', 'runBrowserLifecycleOperation', 'installBrowserAutomationForPair',
+      'awaitBrowserAutomationResult', 'invoke', 'browserLabelForTab', 'PsycheControl',
+      'browserAutomationDispatchScript', 'canonicalizeBrowserSemanticSnapshot', 'canonicalizeBrowserScriptResult',
+      'canonicalizeBrowserActionResult', 'quarantineBrowserAutomation', 'browserNativeScriptError',
+      `return (${functionSource(main, 'handleBrowserProviderEffect')});`,
+    )(
+      () => pair, () => lifecycle, completeBrowserProviderEffect,
+      () => 'page', vi.fn(), async () => true, vi.fn(),
+      invoke, () => 'label', { browserAutomationSource: () => '' }, () => 'dispatch-script',
+      vi.fn(), vi.fn(), vi.fn(), quarantineBrowserAutomation, normalizeScriptError,
+    );
+
+    for (const actionId of ['deterministic', 'ambiguous']) {
+      await handler({ payload: {
+        actionId, tabId: 'tab', projectRoot: '/project', generation: 1,
+        operation: { kind: 'script', source: 'return null;' },
+      } });
+    }
+
+    expect(quarantineBrowserAutomation).toHaveBeenCalledTimes(1);
+    expect(completeBrowserProviderEffect).toHaveBeenCalledTimes(2);
+    expect(completeBrowserProviderEffect.mock.calls[0][1]).toMatchObject({ status: 'failed', code: 'mutation_not_allowed' });
+    expect(completeBrowserProviderEffect.mock.calls[1][1]).toMatchObject({ status: 'unknown', code: 'effect_unknown' });
+  });
+
   it.each([
     ['upload', { elementRef: 'e1', path: '/project/secret.txt' }],
     ['download', { elementRef: 'e1', destination: '/project/download.txt' }],

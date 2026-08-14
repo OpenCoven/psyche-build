@@ -9877,8 +9877,20 @@
   }
   function browserNativeScriptError(error) {
     var message = String(error && error.message || error);
-    var allowed = ["backend_unavailable", "effect_unknown", "result_too_large", "serialization_failed",
-      "script_source_too_large", "target_unavailable", "automation_failed"];
+    var allowed = [
+      "args_too_large",
+      "backend_unavailable",
+      "effect_unknown",
+      "mutation_not_allowed",
+      "mutation_plan_invalid",
+      "mutation_target_stale",
+      "result_too_large",
+      "script_source_too_large",
+      "serialization_failed",
+      "snapshot_too_large",
+      "target_unavailable",
+      "automation_failed",
+    ];
     var supplied = error && typeof error.code === "string" ? error.code : null;
     var code = allowed.indexOf(supplied) !== -1 ? supplied
       : allowed.find(function (candidate) { return message.indexOf(candidate) !== -1; }) || "automation_failed";
