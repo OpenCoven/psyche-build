@@ -16,6 +16,7 @@ public final class RemoteActionStore: ObservableObject {
     @Published public private(set) var isSubmitting = false
 
     private let controlRequests: (any ControlRequesting)?
+    private var operationToken: UUID?
 
     public init(controlRequests: (any ControlRequesting)? = nil) {
         self.controlRequests = controlRequests
@@ -30,6 +31,21 @@ public final class RemoteActionStore: ObservableObject {
         onPane paneID: String,
         in workspace: WorkspaceSnapshot
     ) async {
+        guard operationToken == nil,
+              presentation == nil,
+              !isSubmitting
+        else {
+            return
+        }
+
+        let token = UUID()
+        operationToken = token
+        defer {
+            if operationToken == token {
+                operationToken = nil
+            }
+        }
+
         guard containsPane(paneID, in: workspace) else {
             fail(
                 paneID: paneID,
@@ -77,7 +93,8 @@ public final class RemoteActionStore: ObservableObject {
         _ response: MobileActionResponse,
         recoveryText: String? = nil
     ) async {
-        guard !isSubmitting,
+        guard operationToken == nil,
+              !isSubmitting,
               let current = presentation,
               current.isInteractive,
               let sessionID = current.sessionID,
@@ -86,10 +103,17 @@ public final class RemoteActionStore: ObservableObject {
             return
         }
 
+        let token = UUID()
+        operationToken = token
         isSubmitting = true
         presentation = current.consumingSession()
         let requestID = await controlRequests.nextRequestID()
-        defer { isSubmitting = false }
+        defer {
+            if operationToken == token {
+                operationToken = nil
+            }
+            isSubmitting = false
+        }
 
         do {
             let result = try await controlRequests.send(.respondToAction(

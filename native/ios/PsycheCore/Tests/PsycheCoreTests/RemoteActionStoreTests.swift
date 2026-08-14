@@ -118,6 +118,158 @@ final class RemoteActionStoreTests: XCTestCase {
         XCTAssertFalse(store.isSubmitting)
     }
 
+    func testSecondStartWhileFirstIsBlockedSendsNothingAndPreservesFirstWorkflow() async {
+        let gate = ActionStartGate()
+        let requests = ActionControlRequests(
+            responses: [
+                .actionResult(actionResult(
+                    requestID: "req-2",
+                    sessionID: nil,
+                    type: "success"
+                )),
+            ],
+            startGate: gate
+        )
+        let store = RemoteActionStore(controlRequests: requests)
+        let workspace = workspace
+        let paneID = paneID
+
+        async let first: Void = store.start(action: .merge, onPane: paneID, in: workspace)
+        await gate.waitUntilBlocked()
+        await store.start(action: .close, onPane: "bridge-protocol", in: workspace)
+
+        let blockedStarts = await requests.starts
+        XCTAssertEqual(blockedStarts.count, 1)
+        XCTAssertEqual(blockedStarts.first?.paneID, paneID)
+        XCTAssertTrue(store.isBusy(paneID))
+        XCTAssertFalse(store.isBusy("bridge-protocol"))
+
+        await gate.release(with: .actionResult(actionResult(
+            requestID: "req-1",
+            sessionID: "session-1",
+            type: "confirm"
+        )))
+        await first
+
+        XCTAssertEqual(store.presentation?.paneID, paneID)
+        XCTAssertEqual(store.presentation?.sessionID, "session-1")
+        XCTAssertTrue(store.isBusy(paneID))
+        XCTAssertFalse(store.isBusy("bridge-protocol"))
+    }
+
+    func testStartWhileInteractivePresentationIsVisiblePreservesCurrentSession() async {
+        let requests = ActionControlRequests(responses: [
+            .actionResult(actionResult(
+                requestID: "req-1",
+                sessionID: "session-1",
+                type: "confirm"
+            )),
+            .actionResult(actionResult(
+                requestID: "req-2",
+                sessionID: nil,
+                type: "success"
+            )),
+        ])
+        let store = RemoteActionStore(controlRequests: requests)
+        await store.start(action: .merge, onPane: paneID, in: workspace)
+        let originalPresentation = store.presentation
+
+        await store.start(action: .close, onPane: "bridge-protocol", in: workspace)
+
+        let starts = await requests.starts
+        XCTAssertEqual(starts.count, 1)
+        XCTAssertEqual(store.presentation, originalPresentation)
+        XCTAssertTrue(store.isBusy(paneID))
+        XCTAssertFalse(store.isBusy("bridge-protocol"))
+    }
+
+    func testStartWhileResponseIsBlockedCannotReplaceOrCorruptContinuation() async {
+        let gate = ActionResponseGate()
+        let requests = ActionControlRequests(
+            responses: [
+                .actionResult(actionResult(
+                    requestID: "req-1",
+                    sessionID: "session-1",
+                    type: "confirm"
+                )),
+                .actionResult(actionResult(
+                    requestID: "req-3",
+                    sessionID: "illicit-session",
+                    type: "confirm"
+                )),
+            ],
+            responseGate: gate
+        )
+        let store = RemoteActionStore(controlRequests: requests)
+        await store.start(action: .merge, onPane: paneID, in: workspace)
+
+        async let response: Void = store.respond(.confirm)
+        await gate.waitUntilBlocked()
+        let submittingPresentation = store.presentation
+        await store.start(action: .close, onPane: "bridge-protocol", in: workspace)
+
+        let startsWhileBlocked = await requests.starts
+        XCTAssertEqual(startsWhileBlocked.count, 1)
+        XCTAssertEqual(store.presentation, submittingPresentation)
+        XCTAssertTrue(store.isSubmitting)
+        XCTAssertFalse(store.isBusy("bridge-protocol"))
+
+        await gate.release(with: .actionResult(actionResult(
+            requestID: "req-2",
+            sessionID: "session-2",
+            type: "input"
+        )))
+        await response
+
+        XCTAssertEqual(store.presentation?.paneID, paneID)
+        XCTAssertEqual(store.presentation?.sessionID, "session-2")
+        XCTAssertEqual(
+            store.presentation?.content,
+            .input(RemoteActionInput(
+                placeholder: "Type a response",
+                defaultValue: "Draft",
+                maxVisibleLines: 5
+            ))
+        )
+        XCTAssertTrue(store.isBusy(paneID))
+        XCTAssertFalse(store.isBusy("bridge-protocol"))
+        XCTAssertFalse(store.isSubmitting)
+    }
+
+    func testStartAfterDismissingTerminalPresentationIsAccepted() async {
+        let requests = ActionControlRequests(responses: [
+            .actionResult(actionResult(
+                requestID: "req-1",
+                sessionID: nil,
+                type: "success"
+            )),
+            .actionResult(actionResult(
+                requestID: "req-2",
+                sessionID: "session-2",
+                type: "confirm"
+            )),
+        ])
+        let store = RemoteActionStore(controlRequests: requests)
+        await store.start(action: .merge, onPane: paneID, in: workspace)
+        let terminalPresentation = store.presentation
+
+        await store.start(action: .close, onPane: "bridge-protocol", in: workspace)
+
+        let startsBeforeDismiss = await requests.starts
+        XCTAssertEqual(startsBeforeDismiss.count, 1)
+        XCTAssertEqual(store.presentation, terminalPresentation)
+
+        store.dismiss()
+
+        await store.start(action: .close, onPane: "bridge-protocol", in: workspace)
+
+        let starts = await requests.starts
+        XCTAssertEqual(starts.map(\.paneID), [paneID, "bridge-protocol"])
+        XCTAssertEqual(store.presentation?.paneID, "bridge-protocol")
+        XCTAssertEqual(store.presentation?.sessionID, "session-2")
+        XCTAssertTrue(store.isBusy("bridge-protocol"))
+    }
+
     func testUnknownPaneFailsBeforeAnySend() async {
         let requests = ActionControlRequests()
         let store = RemoteActionStore(controlRequests: requests)
@@ -444,13 +596,16 @@ private actor ActionControlRequests: ControlRequesting {
     private var responses: [MobileControlResponse]
     private var failure: (any Error)?
     private var nextID = 0
+    private let startGate: ActionStartGate?
     private let responseGate: ActionResponseGate?
 
     init(
         responses: [MobileControlResponse] = [],
+        startGate: ActionStartGate? = nil,
         responseGate: ActionResponseGate? = nil
     ) {
         self.responses = responses
+        self.startGate = startGate
         self.responseGate = responseGate
     }
 
@@ -467,6 +622,11 @@ private actor ActionControlRequests: ControlRequesting {
         sentCount += 1
         if case let .startAction(start) = request {
             starts.append(start)
+            if let startGate,
+               let response = await startGate.blockFirst()
+            {
+                return response
+            }
         }
         if case let .respondToAction(response) = request {
             responds.append(response)
@@ -479,6 +639,38 @@ private actor ActionControlRequests: ControlRequesting {
             throw failure
         }
         return responses.removeFirst()
+    }
+}
+
+private actor ActionStartGate {
+    private var hasBlocked = false
+    private var blockedContinuation: CheckedContinuation<Void, Never>?
+    private var responseContinuation: CheckedContinuation<MobileControlResponse, Never>?
+
+    func blockFirst() async -> MobileControlResponse? {
+        guard !hasBlocked else {
+            return nil
+        }
+        hasBlocked = true
+        blockedContinuation?.resume()
+        blockedContinuation = nil
+        return await withCheckedContinuation { continuation in
+            responseContinuation = continuation
+        }
+    }
+
+    func waitUntilBlocked() async {
+        if responseContinuation != nil {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            blockedContinuation = continuation
+        }
+    }
+
+    func release(with response: MobileControlResponse) {
+        responseContinuation?.resume(returning: response)
+        responseContinuation = nil
     }
 }
 
