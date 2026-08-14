@@ -301,6 +301,20 @@ describe('native browser script authority', () => {
     expect(envelope).toEqual({ ok: false, code: 'result_too_large' });
   });
 
+  it('rejects oversized results after approved source poisons typed-array byteLength', async () => {
+    const envelope = await runWorker(`
+      const bytes = new TextEncoder().encode("");
+      const typedArrayPrototype = Object.getPrototypeOf(Object.getPrototypeOf(bytes));
+      Object.defineProperty(typedArrayPrototype, "byteLength", {
+        configurable: true,
+        get() { return 0; },
+      });
+      return "x".repeat(262144);
+    `);
+
+    expect(envelope).toEqual({ ok: false, code: 'result_too_large' });
+  });
+
   it('does not share poisoned globals between Worker VM invocations', async () => {
     const first = await runWorker(`
       globalThis.__psycheWorkerPoison = true;

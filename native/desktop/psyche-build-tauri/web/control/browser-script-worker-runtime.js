@@ -36,6 +36,20 @@
   const $mapPrototype = $Map.prototype;
   const $textEncoderPrototype = $TextEncoder.prototype;
   const $encoder = new $TextEncoder();
+  const $typedArrayPrototype = $apply(
+    $getPrototypeOf,
+    $Object,
+    [$apply(
+      $getPrototypeOf,
+      $Object,
+      [$apply($textEncode, $encoder, [""])],
+    )],
+  );
+  const $typedArrayByteLength = $apply(
+    $getOwnPropertyDescriptor,
+    $Object,
+    [$typedArrayPrototype, "byteLength"],
+  ).get;
   const $mutationPlanInvalid = {};
   const MAX_DEPTH = 64;
   const MAX_MUTATIONS = 256;
@@ -266,7 +280,11 @@
       };
       const encoded = $apply($jsonStringify, $JSON, [envelope]);
       if (typeof encoded !== "string" ||
-          $apply($textEncode, $encoder, [encoded]).byteLength > MAX_RESULT_BYTES) {
+          $apply(
+            $typedArrayByteLength,
+            $apply($textEncode, $encoder, [encoded]),
+            [],
+          ) > MAX_RESULT_BYTES) {
         finish({ ok: false, code: "result_too_large" });
         return;
       }
