@@ -205,6 +205,7 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).toMatch(
       /fn\s+terminate_platform_process\(\s*process_tree:\s*&WindowsProcessTreeKiller[\s\S]*?process_tree\.terminate\(\)\?;[\s\S]*?PtyTerminationOutcome::ProcessTree/
     );
+
     const windowsStart = tauriLib.search(
       /#\[cfg\(windows\)\]\r?\nfn terminate_platform_process/,
     );

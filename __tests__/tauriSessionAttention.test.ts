@@ -275,7 +275,8 @@ describe('desktop shell wiring', () => {
 
   it('timestamps PTY output as soon as a live thread receives bytes', () => {
     expect(mainJs).toMatch(
-      /listen\("pty:data-batch", function \(event\) \{[\s\S]{0,420}var thread = findThread\(threadId\);[\s\S]{0,160}if \(!isLiveThread\(thread\)\)[\s\S]{0,120}thread\.lastOutputAt = Date\.now\(\);/,
+      /listen\("pty:data-batch", function \(event\) \{[\s\S]{0,260}var thread = findThread\(payload\.threadId\);[\s\S]{0,120}if \(!isLiveThread\(thread\)\) return;[\s\S]{0,160}routePtyBatch\(payload\)[\s\S]{0,120}thread\.lastOutputAt = Date\.now\(\);/,
+
     );
   });
 
@@ -645,7 +646,10 @@ describe('desktop shell wiring', () => {
   it('clears attention on the bell and on exit', () => {
     expect(mainJs).toMatch(/term\.onBell\(function \(\)[\s\S]{0,200}attentionTracker\.bell\(thread\.id\)/);
     expect(mainJs).toMatch(
-      /function handlePtyExit\(payload\)[\s\S]{0,500}thread\.status = "exited";[\s\S]{0,120}thread\.isWorking = false;[\s\S]{0,300}clearThreadAttention\(thread\)/,
+      /function handlePtyExit\(payload\)[\s\S]{0,750}thread\.status = "exited";[\s\S]{0,120}thread\.isWorking = false;[\s\S]{0,300}clearThreadAttention\(thread\)/,
+    );
+    expect(mainJs).toMatch(
+      /function handlePtyExit\(payload\)[\s\S]{0,450}thread\.terminalController\.markPtyExited\(\)/,
     );
   });
 

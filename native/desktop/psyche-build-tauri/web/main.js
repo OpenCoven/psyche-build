@@ -38,8 +38,16 @@
     );
     return;
   }
+  if (!window.PsycheRuntime ||
+      typeof window.PsycheRuntime.createPtyClient !== "function" ||
+      typeof window.PsycheRuntime.routePtyBatch !== "function" ||
+      typeof window.PsycheRuntime.disposePtyClient !== "function") {
+    showBootError("PTY runtime bundle missing. Run `pnpm --dir native/desktop/psyche-build-tauri build:web`.");
+    return;
+  }
 
   var statusController = null;
+  var ptyRuntime = window.PsycheRuntime;
   var invokeNative = window.__TAURI__.core.invoke;
   var listen = window.__TAURI__.event.listen;
   var opener = window.__TAURI__.opener || null;
@@ -150,6 +158,7 @@
       if (typeof refreshStatusController === "function") refreshStatusController();
     }
     syncPaneMetricsVisibility();
+    syncAllPtyVisibility();
   }
 
   /**
@@ -1473,35 +1482,61 @@
   // 5. PTY event plumbing
   // ============================================================
 
-  var pendingDataBuffers = new Map(); // threadId → buffered output + acknowledgement callbacks (pre-mount)
+  function threadPtyVisible(thread) {
+    return !!thread &&
+      !thread.hidden &&
+      !document.hidden &&
+      terminalHost &&
+      terminalHost.isConnected &&
+      !terminalHost.hidden &&
+      thread.pane &&
+      thread.pane.isConnected;
+  }
 
-  function acknowledgePtyBatch(threadId, sequence) {
-    return invoke("pty_ack", {
-      threadId: threadId,
-      thread_id: threadId,
-      sequence: sequence,
-    }).catch(function (error) {
-      console.warn("[pty_ack] failed for " + threadId + ": " + String(error));
+  function ensureThreadPtyController(thread, explicitTerm) {
+    if (!thread || thread.kind === "web") return null;
+    if (thread.terminalController) return thread.terminalController;
+    var term = explicitTerm || thread.term;
+    if (!term || typeof term.write !== "function") return null;
+    var controller = ptyRuntime.createPtyClient({
+      threadId: thread.id,
+      invoke: invoke,
+      visible: threadPtyVisible(thread),
+      write: function (bytes, callback) {
+        term.write(bytes, callback);
+      },
+    });
+    thread.terminalController = controller;
+    thread.ptyClient = controller;
+    return controller;
+  }
+
+  function syncThreadPtyVisibility(thread) {
+    if (!thread || !thread.terminalController ||
+        typeof thread.terminalController.setVisible !== "function") {
+      return Promise.resolve(false);
+
+    }
+    return thread.terminalController.setVisible(threadPtyVisible(thread)).catch(function () {
+      return false;
+    });
+  }
+
+  function syncAllPtyVisibility() {
+    state.threads.forEach(function (thread) {
+      syncThreadPtyVisibility(thread);
     });
   }
 
   listen("pty:data-batch", function (event) {
     var payload = event.payload || {};
-    var threadId = payload.threadId || payload.thread_id;
-    if (!threadId || !payload.bytes) return;
+    if (!payload.threadId || !payload.bytes) return;
+    var thread = findThread(payload.threadId);
+    if (!isLiveThread(thread)) return;
+    if (!ptyRuntime.routePtyBatch(payload)) return;
     var bytes = new Uint8Array(payload.bytes);
-    var acknowledge = function () { acknowledgePtyBatch(threadId, payload.sequence); };
-    var thread = findThread(threadId);
-    if (!isLiveThread(thread)) { acknowledge(); return; }
     thread.lastOutputAt = Date.now();
-    if (typeof noteStatusPtyData === "function") noteStatusPtyData(threadId, bytes);
-    if (thread.term) {
-      thread.term.write(bytes, acknowledge);
-    } else {
-      var arr = pendingDataBuffers.get(threadId) || [];
-      arr.push({ bytes: bytes, acknowledge: acknowledge });
-      pendingDataBuffers.set(threadId, arr);
-    }
+    if (typeof noteStatusPtyData === "function") noteStatusPtyData(payload.threadId, bytes);
     schedulePaneMetricsRefresh(thread, 1200);
   }).catch(function () {});
 
@@ -1510,6 +1545,10 @@
     var thread = findThread(payload.thread_id);
     if (!thread || thread.closing || thread.closeStarted) return false;
     var stoppedByUser = thread.stopRequested;
+    if (thread.terminalController &&
+        typeof thread.terminalController.markPtyExited === "function") {
+      thread.terminalController.markPtyExited();
+    }
     thread.ptyStarted = false;
     if (thread.startInFlight) {
       thread.exitDuringStart = true;
@@ -2040,6 +2079,8 @@
       exitDuringStart: false,
       stopRequested: false,
       ptyStarted: false,
+      terminalController: null,
+      ptyClient: null,
       metricsGeneration: 0,
       metrics: launch.launchKind === "coven-chat" && launch.covenSessionId
         ? loadingPaneMetrics(launch)
@@ -2137,6 +2178,11 @@
       return Promise.resolve(false);
     }
     var launch = thread.launch;
+    var terminalController = ensureThreadPtyController(thread);
+    var ptyStartAttempt = null;
+    if (terminalController && typeof terminalController.prepareForPtyStart === "function") {
+      ptyStartAttempt = terminalController.prepareForPtyStart();
+    }
     thread.lastOutputAt = 0;
     thread.isWorking = false;
     thread.sidebarStatusKey = "busy";
@@ -2175,7 +2221,10 @@
     }).then(function () {
       thread.startInFlight = false;
       if (!isLiveThread(thread)) {
-        pendingDataBuffers.delete(thread.id);
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         return stopThreadPty(thread).then(function () { return false; });
       }
       if (thread.exitDuringStart) {
@@ -2183,6 +2232,10 @@
         thread.ptyStarted = false;
         thread.spawning = false;
         thread.isWorking = false;
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         syncThreadPaneMetadata(thread);
         refreshSidebar();
         refreshTabs();
@@ -2191,6 +2244,10 @@
       thread.ptyStarted = true;
       thread.status = "running";
       thread.spawning = false;
+      if (thread.terminalController &&
+          typeof thread.terminalController.markPtyStarted === "function") {
+        thread.terminalController.markPtyStarted(ptyStartAttempt).catch(function () {});
+      }
       syncThreadPaneMetadata(thread);
       refreshSidebar();
       refreshTabs();
@@ -2198,20 +2255,15 @@
         setProjectStatus(findProject(thread.projectId), "ok");
       }
       if (launch.launchKind === "coven-chat") refreshCovenSessions();
-      // Flush any data that arrived before the xterm was mounted.
-      var pending = pendingDataBuffers.get(thread.id);
-      if (pending && thread.term) {
-        for (var i = 0; i < pending.length; i++) {
-          thread.term.write(pending[i].bytes, pending[i].acknowledge);
-        }
-        pendingDataBuffers.delete(thread.id);
-      }
       return true;
     }).catch(function (err) {
       thread.startInFlight = false;
       var msg = String(err);
       if (!isLiveThread(thread)) {
-        pendingDataBuffers.delete(thread.id);
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         if (msg.indexOf("already running") !== -1) {
           thread.ptyStarted = true;
           return stopThreadPty(thread).then(function () { return false; });
@@ -2223,6 +2275,10 @@
         thread.ptyStarted = false;
         thread.spawning = false;
         thread.isWorking = false;
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         syncThreadPaneMetadata(thread);
         refreshSidebar();
         refreshTabs();
@@ -2230,9 +2286,13 @@
       }
       thread.spawning = false;
       if (msg.indexOf("cleanup in progress") !== -1) {
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         thread.ptyStarted = false;
         if (thread.terminalController) thread.terminalController.stopPtyDelivery();
-        thread.ptyClient = null;
+
         thread.status = "exited";
         thread.finishedAt = Date.now();
         thread.exitCode = null;
@@ -2243,18 +2303,22 @@
         thread.ptyStarted = true;
         thread.status = "running";
         thread.stopRequested = false;
+        if (thread.terminalController &&
+            typeof thread.terminalController.adoptRunningPty === "function") {
+          thread.terminalController.adoptRunningPty(ptyStartAttempt).catch(function () {});
+        } else if (thread.terminalController &&
+            typeof thread.terminalController.markPtyStarted === "function") {
+          thread.terminalController.markPtyStarted(ptyStartAttempt).catch(function () {});
+        }
         if (state.activeThreadId === thread.id) {
           setProjectStatus(findProject(thread.projectId), "ok");
         }
         if (launch.launchKind === "coven-chat") refreshCovenSessions();
-        var pending = pendingDataBuffers.get(thread.id);
-        if (pending && thread.term) {
-          for (var i = 0; i < pending.length; i++) {
-            thread.term.write(pending[i].bytes, pending[i].acknowledge);
-          }
-          pendingDataBuffers.delete(thread.id);
-        }
       } else {
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         thread.ptyStarted = false;
         thread.status = "failed";
         thread.isWorking = false;
@@ -3037,6 +3101,8 @@
 
     thread.term = term;
     thread.fit = fit;
+    ensureThreadPtyController(thread, term);
+    syncThreadPtyVisibility(thread);
   }
 
   function applyPaneStatus(pane, status) {
@@ -3759,6 +3825,7 @@
           layout,
           filesPaneHasCanvasFocus() ? findOpenFile(state.activeFileId) : null
         );
+        syncAllPtyVisibility();
         return;
       }
       var root = effectivePaneRoot(layout);
@@ -3796,11 +3863,13 @@
         layout,
         filesPaneHasCanvasFocus() ? findOpenFile(state.activeFileId) : null
       );
+      syncAllPtyVisibility();
       scheduleVisiblePaneFit();
       requestAnimationFrame(syncBrowserBounds);
     } finally {
       if (preserveTerminalFocus) restoreRenderedTerminalFocus(focusedThread);
     }
+
   }
 
   /**
@@ -4432,7 +4501,11 @@
       thread.metricsRefreshTimer = 0;
     }
     if (typeof noteStatusActivity === "function") noteStatusActivity();
-    pendingDataBuffers.delete(id);
+    if (thread.terminalController && thread.terminalController.dispose) {
+      try { thread.terminalController.dispose(); } catch (_) {}
+    }
+    thread.terminalController = null;
+    thread.ptyClient = null;
     // A set must never point at a thread that no longer exists, or scoping the
     // canvas to it would silently show fewer panes than it claims.
     forgetThreadInSets(id);
@@ -7228,6 +7301,7 @@
       focusCanvasSurface(filesPane);
     }
     syncPaneMetricsVisibility();
+    syncAllPtyVisibility();
     renderPaneMinimap(activePaneLayout(), file);
     return true;
   }
@@ -7237,6 +7311,7 @@
     fileFocus.returnThreadId = null;
     fileViewEl.hidden = true;
     syncPaneMetricsVisibility();
+    syncAllPtyVisibility();
   }
 
   function clearPassiveCovenPaneFocus(layout) {
