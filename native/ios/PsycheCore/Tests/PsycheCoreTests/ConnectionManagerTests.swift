@@ -565,7 +565,7 @@ final class ConnectionManagerTests: XCTestCase {
         try await waitForPairRequest(on: fake)
         secureStore.blockNextRead()
         await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "late-token"))))
-        await secureStore.waitUntilReadBegins()
+        try await secureStore.waitUntilReadBegins()
         pairing.cancel()
         secureStore.releaseRead()
         let cancellation = await pairing.value
