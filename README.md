@@ -150,7 +150,7 @@ same authenticated authority, policy, approval, and receipt path as the UI.
 
 | Tool | Does |
 |---|---|
-| `psyche_control_list` | List bounded controllable pane/browser resources, generations, leases, requests, and approvals |
+| `psyche_control_list` | List bounded controllable pane/browser resources, generations, and approvals |
 | `psyche_control_lease` | Request, inspect, or release scoped authority; it cannot grant or approve authority |
 | `psyche_pane_observe` | Read bounded pane output and status through an exact leased generation |
 | `psyche_pane_action` | Perform one typed leased pane action and return its canonical receipt |
