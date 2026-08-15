@@ -1,6 +1,9 @@
 import type { PaneSpawnResult, StreamId } from '../../daemon/protocol.js';
 import { decodeBase64Payload } from '../../utils/base64.js';
-import type { ReadonlyWorkspaceSnapshot } from '../../workspace/snapshot.js';
+import {
+  hasPublishedTmuxBackedPane,
+  type ReadonlyWorkspaceSnapshot,
+} from '../../workspace/snapshot.js';
 import type {
   MobileControlRequest,
   MobileControlResponse,
@@ -300,13 +303,8 @@ export class MobileControlGateway {
   private requirePublishedPane(requestId: string, paneId: string): Promise<void> {
     return this.requireScope(
       requestId,
-      (workspace) => workspace.projects.some((project) =>
-        project.projectPanes.some((pane) =>
-          pane.id === paneId && (pane.kind === 'agent' || pane.kind === 'terminal'))
-        || project.worktrees.some((worktree) =>
-          worktree.panes.some((pane) =>
-            pane.id === paneId && (pane.kind === 'agent' || pane.kind === 'terminal')))),
-      'pane is not published by this host',
+      (workspace) => hasPublishedTmuxBackedPane(workspace, paneId),
+      'pane is not a tmux-backed published pane',
     );
   }
 

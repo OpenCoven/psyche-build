@@ -117,6 +117,7 @@ describe("BridgeDaemon terminal streams", () => {
     install(daemon, [session]);
     const workspace = (daemon as any).opts.workspaceProvider();
     workspace.projects[0].worktrees[1].panes[0].id = "%10";
+    workspace.projects[0].worktrees[1].panes[0].kind = "coven-session";
     (daemon as any).opts.workspaceProvider = () => workspace;
 
     const response = await control(daemon, session, {

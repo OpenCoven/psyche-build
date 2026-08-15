@@ -48,7 +48,10 @@ export interface MobilePaneExecutors {
 }
 import { decodeBase64Payload } from "../../utils/base64.js";
 import { LogService } from "../LogService.js";
-import type { ReadonlyWorkspaceSnapshot } from "../../workspace/snapshot.js";
+import {
+  hasPublishedTmuxBackedPane,
+  type ReadonlyWorkspaceSnapshot,
+} from "../../workspace/snapshot.js";
 
 export interface BridgeDaemonOptions {
   serverId?: string;
@@ -740,12 +743,7 @@ export class BridgeDaemon {
   /** Streams are scoped to real tmux-backed panes the workspace publishes. */
   private async isPublishedPane(paneId: string): Promise<boolean> {
     const { workspace } = await this.readWorkspaceSnapshot();
-    return workspace.projects.some((project) =>
-      project.projectPanes.some((pane) =>
-        pane.id === paneId && (pane.kind === 'agent' || pane.kind === 'terminal'))
-      || project.worktrees.some((worktree) =>
-        worktree.panes.some((pane) =>
-          pane.id === paneId && (pane.kind === 'agent' || pane.kind === 'terminal'))));
+    return hasPublishedTmuxBackedPane(workspace, paneId);
   }
 
   /**
