@@ -606,17 +606,26 @@ export function createFrameSampler() {
 
     // A cadence change within this sample should not turn the previous cadence
     // into a burst of dropped frames. Prefer a stable trailing run when one is
-    // available, otherwise use repeated short intervals from the whole sample.
+    // available. Otherwise, only use a dominant repeated cadence: infrequent
+    // multiples can be missed callbacks, but a competing cadence is not.
     const trailing = trailingCadenceIntervals();
-    const candidates = trailing.length >= MIN_CADENCE_INTERVALS ? trailing : frameIntervals;
-    const sorted = [...candidates].sort((left, right) => left - right);
+    if (trailing.length >= MIN_CADENCE_INTERVALS) {
+      return {
+        targetFrameMs: median(trailing),
+        measuredIntervals: trailing,
+      };
+    }
+
+    const sorted = [...frameIntervals].sort((left, right) => left - right);
     const candidate = median(sorted.slice(0, Math.max(1, Math.ceil(sorted.length / 4))));
-    const calibration = candidates.filter((interval) => approximatelyEqual(interval, candidate));
+    const calibration = frameIntervals.filter((interval) => approximatelyEqual(interval, candidate));
     if (calibration.length < MIN_CADENCE_INTERVALS) return null;
+    const competingIntervals = frameIntervals.length - calibration.length;
+    if (calibration.length <= competingIntervals * 2) return null;
 
     return {
       targetFrameMs: median(calibration),
-      measuredIntervals: candidates,
+      measuredIntervals: frameIntervals,
     };
   }
 
