@@ -360,8 +360,8 @@ whether the issue is real, omit it.
 
 Order findings by priority, then by file path and line.
 
-Unless the user explicitly requests another output contract, such as JSON or
-GitHub inline comments, use this default shape for every finding:
+Use this default output contract unless the user explicitly requests another,
+such as JSON or GitHub inline comments. For every finding:
 
 ```text
 [P1] Use a specific imperative title
@@ -381,12 +381,14 @@ After findings, include a short validation line only if useful:
 Validation: `pnpm vitest --run __tests__/example.test.ts` passed.
 ```
 
-If no issue meets the reporting bar, return:
+If no issue meets the reporting bar, the default contract returns:
 
 ```text
 No findings.
 ```
 
-You may then add one concise `Residual risk:` sentence only when a material
-surface could not be inspected or validated. Missing validation alone is not a
-finding.
+The default contract may then add one concise `Residual risk:` sentence only
+when a material surface could not be inspected or validated. If the user
+explicitly requests another output contract, format findings, the zero-findings
+result, and any residual-risk information within that contract instead. Missing
+validation alone is not a finding.
