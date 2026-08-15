@@ -7154,6 +7154,10 @@ mod workspace_panel_tests {
         path.to_str().expect("test paths must be UTF-8")
     }
 
+    fn shell_single_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
     #[cfg(unix)]
     fn write_test_executable(path: &Path, mode: u32) {
         std::fs::write(path, "#!/bin/sh\n").unwrap();
@@ -7173,18 +7177,25 @@ mod workspace_panel_tests {
     #[cfg(windows)]
     fn write_marker_executable(_path: &Path) {}
 
-    fn marker_command(path: &Path) -> String {
+    fn marker_command(helper: &Path, marker: &Path) -> String {
         #[cfg(unix)]
         {
-            path_text(path).to_string()
+            format!(
+                "PSYCHE_TEST_MARKER={} {}",
+                shell_single_quote(path_text(marker)),
+                shell_single_quote(path_text(helper))
+            )
         }
         #[cfg(windows)]
         {
-            let _ = path;
+            let _ = helper;
             // Git for Windows invokes configured helpers through its POSIX
             // shell. A shell command avoids Windows command-line quoting of
             // temporary paths while retaining the positive-control assertion.
-            "sh -c 'test -n \"$PSYCHE_TEST_MARKER\" && touch \"$PSYCHE_TEST_MARKER\"'".to_string()
+            format!(
+                "sh -c 'touch \"$1\"' sh {}",
+                shell_single_quote(path_text(marker))
+            )
         }
     }
 
@@ -8131,14 +8142,10 @@ mod workspace_panel_tests {
         run_test_git(&tree.root, &["init", "-q"]);
         run_test_git(
             &tree.root,
-            &["config", "core.fsmonitor", &marker_command(&hook)],
+            &["config", "core.fsmonitor", &marker_command(&hook, &marker)],
         );
 
-        run_test_git_with_env(
-            &tree.root,
-            &["status", "--porcelain"],
-            &[("PSYCHE_TEST_MARKER", path_text(&marker))],
-        );
+        run_test_git(&tree.root, &["status", "--porcelain"]);
         assert!(
             marker.exists(),
             "unhardened git status must execute fsmonitor"
@@ -8177,14 +8184,13 @@ mod workspace_panel_tests {
         );
         run_test_git(
             &tree.root,
-            &["config", "diff.external", &marker_command(&helper)],
+            &["config", "diff.external", &marker_command(&helper, &marker)],
         );
         std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
 
-        run_test_git_with_env(
+        run_test_git(
             &tree.root,
             &["diff", "--no-color", "--relative", "--", "tracked.txt"],
-            &[("PSYCHE_TEST_MARKER", path_text(&marker))],
         );
         assert!(
             marker.exists(),
