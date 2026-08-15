@@ -127,7 +127,8 @@ public final class RemoteActionStore: ObservableObject {
                 result,
                 expectedRequestID: requestID,
                 paneID: current.paneID,
-                action: current.action
+                action: current.action,
+                inheriting: current
             )
         } catch {
             fail(
@@ -156,7 +157,8 @@ private extension RemoteActionStore {
         _ response: MobileControlResponse,
         expectedRequestID: String,
         paneID: String,
-        action: PaneAction
+        action: PaneAction,
+        inheriting previous: RemoteActionPresentation? = nil
     ) throws {
         switch response {
         case .actionResult(let payload):
@@ -166,7 +168,8 @@ private extension RemoteActionStore {
             let next = try RemoteActionPresentation.make(
                 response: payload,
                 paneID: paneID,
-                action: action
+                action: action,
+                inheriting: previous
             )
             presentation = next
             if !next.isInteractive {
