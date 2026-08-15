@@ -2,7 +2,12 @@ import { mkdir, open, readFile, rename, truncate } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { ControlSnapshot } from './types.js';
-import type { ActionReceipt, CommandOutcome, ControlCommand } from './types.js';
+import type {
+  ActionReceipt,
+  CommandOutcome,
+  ControlCommand,
+  JournalActionReceipt,
+} from './types.js';
 import type { RedactedApprovalEffect } from './approvals.js';
 
 export type AgentControlJournalKind =
@@ -45,24 +50,18 @@ export function createAgentControlJournalResource(
 }
 
 export type AgentControlJournalReceipt = ForbiddenAgentControlJournalData & {
-  readonly schema: ActionReceipt['schema'];
+  readonly schema: JournalActionReceipt['schema'];
   readonly actionId: string;
-  readonly state: ActionReceipt['state'];
+  readonly state: JournalActionReceipt['state'];
   readonly resource: AgentControlJournalResource;
-  readonly createdAt: string;
-  readonly completedAt?: string;
-  readonly code?: string;
-  readonly sourceDigest?: string;
-  readonly sourceBytes?: number;
-  readonly resultBytes?: number;
-  readonly durationMs?: number;
-};
+} & Omit<JournalActionReceipt, 'resource'>;
 
 export type AgentControlJournalInput =
   | (ForbiddenAgentControlJournalData & { kind: 'command.requested'; commandId: string; idempotencyKey: string;
       commandKind: ControlCommand['kind']; ownerEpoch: number }
     )
   | (ForbiddenAgentControlJournalData & { kind: 'approval.requested'; commandId: string; approvalId: string; payloadDigest: string;
+      taskId?: string; actorId?: string; subjectId?: string; leaseId?: string; leaseRevision?: number;
       resource: AgentControlJournalResource; capability: string; effect: RedactedApprovalEffect })
   | (ForbiddenAgentControlJournalData & {
       kind: Exclude<AgentControlJournalKind, 'command.requested' | 'approval.requested'>;
@@ -88,7 +87,13 @@ export function agentControlJournalPayload(input: AgentControlJournalInput): {
     return {
       kind: input.kind,
       payload: { commandId: input.commandId, approvalId: input.approvalId,
-        payloadDigest: input.payloadDigest, resource: input.resource,
+        payloadDigest: input.payloadDigest,
+        ...(input.taskId ? { taskId: input.taskId } : {}),
+        ...(input.actorId ? { actorId: input.actorId } : {}),
+        ...(input.subjectId ? { subjectId: input.subjectId } : {}),
+        ...(input.leaseId ? { leaseId: input.leaseId } : {}),
+        ...(input.leaseRevision !== undefined ? { leaseRevision: input.leaseRevision } : {}),
+        resource: input.resource,
         capability: input.capability, effect: input.effect },
     };
   }
@@ -112,6 +117,10 @@ function journalReceipt(receipt: AgentControlJournalReceipt): AgentControlJourna
     state: receipt.state,
     resource: receipt.resource,
     createdAt: receipt.createdAt,
+    ...(receipt.taskId ? { taskId: receipt.taskId } : {}),
+    ...(receipt.actorId ? { actorId: receipt.actorId } : {}),
+    ...(receipt.leaseId ? { leaseId: receipt.leaseId } : {}),
+    ...(receipt.leaseRevision !== undefined ? { leaseRevision: receipt.leaseRevision } : {}),
     ...(receipt.completedAt ? { completedAt: receipt.completedAt } : {}),
     ...(receipt.code ? { code: receipt.code } : {}),
     ...(receipt.sourceDigest ? { sourceDigest: receipt.sourceDigest } : {}),

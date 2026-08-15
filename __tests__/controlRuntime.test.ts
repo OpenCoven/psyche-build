@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ControlRuntime, type ControlHandlers } from '../src/control/runtime.js';
 import { ApprovalStore } from '../src/control/approvals.js';
 import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
+import type { ControlTaskCredentialReference } from '../src/control/credentials.js';
 import { createCanonicalElementSemantics } from '../src/control/policy.js';
 import { SurfaceRegistry } from '../src/control/surfaces.js';
 import type { ControlCommand } from '../src/control/types.js';
@@ -89,35 +90,44 @@ async function createBrowserActionHarness(options: {
   resolver?: (input: { snapshotId: string; elementRef: string }) => ReturnType<typeof createCanonicalElementSemantics>;
   actOnBrowser?: ControlHandlers['actOnBrowser'];
   runBrowserScript?: ControlHandlers['runBrowserScript'];
+  actorId?: string;
+  taskId?: string;
+  clock?: () => Date;
+  leaseTtlMs?: number;
+  readActiveTaskCredential?: (taskId: string) => Promise<ControlTaskCredentialReference | null>;
 } = {}) {
   const journal = createMemoryJournal();
   const surfaces = new SurfaceRegistry();
+  const actorId = options.actorId ?? 'agent-review';
+  const taskId = options.taskId ?? 'task-review';
+  const clock = options.clock ?? (() => new Date('2026-08-12T12:00:00.000Z'));
   const tab = surfaces.upsertBrowserTab({
     id: 'tab-review', projectRoot: '/repo', worktreeRoot: '/repo', providerId: 'provider-review',
     webviewLabel: 'review', url: 'https://example.test', title: 'Example', loading: false,
     viewport: { width: 800, height: 600 },
   });
-  const capabilityLeases = new CapabilityLeaseStore(() => new Date('2026-08-12T12:00:00.000Z'), 7);
+  const capabilityLeases = new CapabilityLeaseStore(clock, 7);
   let approvalId = 0;
   const approvals = new ApprovalStore(
-    () => new Date('2026-08-12T12:00:00.000Z'),
+    clock,
     () => `approval-review-${++approvalId}`,
   );
   if (options.actOnBrowser) handlers.actOnBrowser = options.actOnBrowser;
   if (options.runBrowserScript) handlers.runBrowserScript = options.runBrowserScript;
   const runtime = await ControlRuntime.create({
     ownerEpoch: 7, handlers, journal, surfaces, capabilityLeases, approvals,
+    readActiveTaskCredential: options.readActiveTaskCredential,
     resolveBrowserElementSemantics: options.resolver
       ?? (() => createCanonicalElementSemantics({ role: 'button', submit: true })),
   });
   const grant = await submit(runtime, command({
     id: 'grant-review', idempotencyKey: 'grant-review', kind: 'lease.grant', ownerEpoch: 7,
-    payload: { requestId: 'request-review', actorId: 'agent-review', taskId: 'task-review', ttlMs: 60_000,
+    payload: { requestId: 'request-review', actorId, taskId, ttlMs: options.leaseTtlMs ?? 60_000,
       grants: [{ target: { kind: 'browser_tab', id: tab.id, generation: tab.generation },
         capabilities: ['browser.interact', 'browser.history', 'browser.script'] }] },
   }));
   const lease = (grant as { value: { lease: { id: string; revision: number } } }).value.lease;
-  return { runtime, journal, surfaces, capabilityLeases, approvals, tab, lease };
+  return { runtime, journal, surfaces, capabilityLeases, approvals, tab, lease, actorId, taskId };
 }
 
 function browserScriptCommand(
@@ -127,8 +137,8 @@ function browserScriptCommand(
 ) {
   return command({
     id, idempotencyKey: id, kind: 'browser.script', ownerEpoch: 7,
-    actor: { id: 'agent-review', kind: 'psyche' }, payload: {
-      taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+    actor: { id: harness.actorId, kind: 'psyche' }, payload: {
+      taskId: harness.taskId, leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
       tabId: harness.tab.id, generation: harness.tab.generation, source,
     },
   }) as unknown as Extract<ControlCommand, { kind: 'browser.script' }>;
@@ -137,8 +147,8 @@ function browserScriptCommand(
 async function requestReviewApproval(harness: Awaited<ReturnType<typeof createBrowserActionHarness>>) {
   const outcome = await submit(harness.runtime, command({
     id: 'approval-action', idempotencyKey: 'approval-action', kind: 'browser.action', ownerEpoch: 7,
-    actor: { id: 'agent-review', kind: 'psyche' }, payload: {
-      taskId: 'task-review', leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+    actor: { id: harness.actorId, kind: 'psyche' }, payload: {
+      taskId: harness.taskId, leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
       tabId: harness.tab.id, generation: harness.tab.generation, snapshotId: 'snapshot-review',
       action: { kind: 'submit', elementRef: 'element-review' },
     },
@@ -228,6 +238,93 @@ describe('ControlRuntime', () => {
     expect(JSON.stringify(terminal)).not.toContain('missing-secret-lease');
   });
 
+  it('stamps task-bound validation failures with exact subject ownership and omits unprovable lease metadata', async () => {
+    const subject: ControlTaskCredentialReference = {
+      taskBinding: { taskId: 'task-review', subjectId: 'subject-review' },
+      principalId: 'task-subject:subject-review',
+    };
+    const harness = await createBrowserActionHarness({
+      actorId: subject.principalId,
+      taskId: subject.taskBinding.taskId,
+      readActiveTaskCredential: async (taskId) => (
+        taskId === subject.taskBinding.taskId ? subject : null
+      ),
+    });
+    const renewed = harness.capabilityLeases.grant({
+      requestId: 'test-request:grant-review',
+      actorId: subject.principalId,
+      taskId: subject.taskBinding.taskId,
+      grantedBy: 'human-1',
+      ttlMs: 60_000,
+      grants: [{
+        target: { kind: 'browser_tab', id: harness.tab.id, generation: harness.tab.generation },
+        capabilities: ['browser.interact', 'browser.history', 'browser.script'],
+      }],
+    });
+
+    await expect(submit(harness.runtime, command({
+      id: 'stale-revision-action',
+      idempotencyKey: 'stale-revision-action',
+      kind: 'browser.action',
+      ownerEpoch: 7,
+      actor: { id: subject.principalId, kind: 'psyche' },
+      payload: {
+        taskId: subject.taskBinding.taskId,
+        leaseId: harness.lease.id,
+        leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id,
+        generation: harness.tab.generation,
+        action: { kind: 'reload' },
+      },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'failed', code: 'action_validation_failed' });
+    expect(harness.runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'stale-revision-action',
+      state: 'failed',
+      code: 'action_validation_failed',
+      taskId: subject.taskBinding.taskId,
+      actorId: subject.principalId,
+      leaseId: renewed.id,
+      leaseRevision: renewed.revision,
+    }));
+
+    await submit(harness.runtime, command({
+      id: 'replace-resource',
+      idempotencyKey: 'replace-resource',
+      kind: 'provider.resource.upsert',
+      ownerEpoch: 7,
+      actor: { id: 'human-1', kind: 'human' },
+      payload: { resource: { ...harness.tab, webviewLabel: 'replacement' } },
+    }) as ControlCommand);
+
+    await expect(submit(harness.runtime, command({
+      id: 'replaced-generation-action',
+      idempotencyKey: 'replaced-generation-action',
+      kind: 'browser.action',
+      ownerEpoch: 7,
+      actor: { id: subject.principalId, kind: 'psyche' },
+      payload: {
+        taskId: subject.taskBinding.taskId,
+        leaseId: renewed.id,
+        leaseRevision: renewed.revision,
+        tabId: harness.tab.id,
+        generation: harness.tab.generation,
+        action: { kind: 'reload' },
+      },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'failed', code: 'action_validation_failed' });
+    const replacedReceipt = harness.runtime.snapshot().receipts.find((receipt) => (
+      receipt.actionId === 'replaced-generation-action'
+    ));
+    expect(replacedReceipt).toMatchObject({
+      actionId: 'replaced-generation-action',
+      state: 'failed',
+      code: 'action_validation_failed',
+      taskId: subject.taskBinding.taskId,
+      actorId: subject.principalId,
+    });
+    expect(replacedReceipt).not.toHaveProperty('leaseId');
+    expect(replacedReceipt).not.toHaveProperty('leaseRevision');
+  });
+
   it('stores a terminal receipt when an existing resource has no matching lease', async () => {
     const surfaces = new SurfaceRegistry();
     const tab = surfaces.upsertBrowserTab({ id: 'unleased-tab', projectRoot: '/repo', worktreeRoot: '/repo',
@@ -243,6 +340,334 @@ describe('ControlRuntime', () => {
       actionId: 'missing-lease-action', state: 'failed', code: 'action_validation_failed',
     }));
   });
+
+  it('stores trusted task and lease ownership on authorized receipts and journal metadata', async () => {
+    const harness = await createBrowserActionHarness();
+    await requestReviewApproval(harness);
+
+    expect(harness.runtime.snapshot().approvals).toEqual([expect.objectContaining({
+      actionId: 'approval-action',
+      taskId: 'task-review',
+      actorId: 'agent-review',
+      leaseId: harness.lease.id,
+      leaseRevision: harness.lease.revision,
+    })]);
+    expect(harness.runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'approval-action',
+      state: 'approval_required',
+      taskId: 'task-review',
+      actorId: 'agent-review',
+      leaseId: harness.lease.id,
+      leaseRevision: harness.lease.revision,
+    }));
+    expect(harness.journal.read()).toContainEqual(expect.objectContaining({
+      kind: 'approval.requested',
+      payload: expect.objectContaining({
+        commandId: 'approval-action',
+        taskId: 'task-review',
+        actorId: 'agent-review',
+        leaseId: harness.lease.id,
+        leaseRevision: harness.lease.revision,
+      }),
+    }));
+    expect(harness.journal.read()).toContainEqual(expect.objectContaining({
+      kind: 'command.succeeded',
+      payload: expect.objectContaining({
+        commandId: 'approval-action',
+        idempotencyKey: 'approval-action',
+        receipt: expect.objectContaining({
+          actionId: 'approval-action',
+          taskId: 'task-review',
+          leaseId: harness.lease.id,
+          leaseRevision: harness.lease.revision,
+        }),
+      }),
+    }));
+  });
+
+  it('invalidates stale task-subject leases and approvals and lets the replacement subject obtain fresh authority', async () => {
+    const originalSubject: ControlTaskCredentialReference = {
+      taskBinding: { taskId: 'task-review', subjectId: 'subject-one' },
+      principalId: 'task-subject:subject-one',
+    };
+    let activeSubject: ControlTaskCredentialReference | null = originalSubject;
+    const harness = await createBrowserActionHarness({
+      actorId: originalSubject.principalId,
+      taskId: originalSubject.taskBinding.taskId,
+      readActiveTaskCredential: async (taskId) => (
+        taskId === originalSubject.taskBinding.taskId ? activeSubject : null
+      ),
+    });
+    const approval = await requestReviewApproval(harness);
+
+    const replacementSubject: ControlTaskCredentialReference = {
+      taskBinding: { taskId: 'task-review', subjectId: 'subject-two' },
+      principalId: 'task-subject:subject-two',
+    };
+    activeSubject = replacementSubject;
+
+    await expect(submit(harness.runtime, command({
+      id: 'resolve-stale-subject',
+      idempotencyKey: 'resolve-stale-subject',
+      kind: 'approval.resolve',
+      ownerEpoch: 7,
+      payload: {
+        approvalId: approval.approvalId,
+        payloadDigest: approval.payloadDigest,
+        decision: 'approve',
+      },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'failed', code: 'task_subject_inactive' });
+    expect(harness.runtime.snapshot().approvals).toEqual([expect.objectContaining({
+      id: approval.approvalId,
+      actionId: 'approval-action',
+      status: 'revoked',
+    })]);
+    expect(harness.runtime.snapshot().capabilityLeases).toEqual([]);
+    expect(harness.runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'approval-action',
+      state: 'failed',
+      code: 'action_invalidated',
+    }));
+
+    await expect(submit(harness.runtime, command({
+      id: 'stale-request',
+      idempotencyKey: 'stale-request',
+      kind: 'lease.request',
+      ownerEpoch: 7,
+      actor: { id: originalSubject.principalId, kind: 'psyche' },
+      payload: {
+        taskId: originalSubject.taskBinding.taskId,
+        ttlMs: 60_000,
+        grants: [{
+          target: { kind: 'browser_tab', id: harness.tab.id, generation: harness.tab.generation },
+          capabilities: ['browser.interact'],
+        }],
+      },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'failed', code: 'task_subject_inactive' });
+
+    const replacementRequestId = 'replacement-request';
+    await expect(submit(harness.runtime, command({
+      id: replacementRequestId,
+      idempotencyKey: replacementRequestId,
+      kind: 'lease.request',
+      ownerEpoch: 7,
+      actor: { id: replacementSubject.principalId, kind: 'psyche' },
+      payload: {
+        taskId: replacementSubject.taskBinding.taskId,
+        ttlMs: 60_000,
+        grants: [{
+          target: { kind: 'browser_tab', id: harness.tab.id, generation: harness.tab.generation },
+          capabilities: ['browser.history'],
+        }],
+      },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'succeeded', value: { requestId: replacementRequestId } });
+
+    const granted = await submit(harness.runtime, command({
+      id: 'replacement-grant',
+      idempotencyKey: 'replacement-grant',
+      kind: 'lease.grant',
+      ownerEpoch: 7,
+      payload: { requestId: replacementRequestId },
+    }) as ControlCommand);
+    expect(granted).toMatchObject({ status: 'succeeded' });
+    const replacementLease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
+
+    await expect(submit(harness.runtime, command({
+      id: 'replacement-action',
+      idempotencyKey: 'replacement-action',
+      kind: 'browser.action',
+      ownerEpoch: 7,
+      actor: { id: replacementSubject.principalId, kind: 'psyche' },
+      payload: {
+        taskId: replacementSubject.taskBinding.taskId,
+        leaseId: replacementLease.id,
+        leaseRevision: replacementLease.revision,
+        tabId: harness.tab.id,
+        generation: harness.tab.generation,
+        action: { kind: 'reload' },
+      },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'succeeded' });
+  });
+
+  it('invalidates an expired approval during snapshot prune and keeps the terminal receipt stable after subject rotation', async () => {
+    let now = new Date('2026-08-12T12:00:00.000Z');
+    const originalSubject: ControlTaskCredentialReference = {
+      taskBinding: { taskId: 'task-review', subjectId: 'subject-one' },
+      principalId: 'task-subject:subject-one',
+    };
+    let activeSubject: ControlTaskCredentialReference | null = originalSubject;
+    const harness = await createBrowserActionHarness({
+      actorId: originalSubject.principalId,
+      taskId: originalSubject.taskBinding.taskId,
+      clock: () => now,
+      leaseTtlMs: 60_000,
+      readActiveTaskCredential: async (taskId) => (
+        taskId === originalSubject.taskBinding.taskId ? activeSubject : null
+      ),
+    });
+    const approval = await requestReviewApproval(harness);
+
+    now = new Date('2026-08-12T12:01:01.000Z');
+    const pruned = harness.runtime.snapshot();
+    expect(pruned.capabilityLeases).toEqual([]);
+    expect(pruned.approvals).toEqual([expect.objectContaining({
+      id: approval.approvalId,
+      actionId: 'approval-action',
+      status: 'revoked',
+      taskId: originalSubject.taskBinding.taskId,
+      actorId: originalSubject.principalId,
+      leaseId: harness.lease.id,
+      leaseRevision: harness.lease.revision,
+    })]);
+    expect(pruned.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'approval-action',
+      state: 'failed',
+      code: 'action_invalidated',
+      taskId: originalSubject.taskBinding.taskId,
+      actorId: originalSubject.principalId,
+      leaseId: harness.lease.id,
+      leaseRevision: harness.lease.revision,
+    }));
+    expect(pruned.receipts).not.toContainEqual(expect.objectContaining({
+      actionId: 'approval-action',
+      state: 'approval_required',
+    }));
+    await vi.waitFor(() => expect(harness.journal.read()).toContainEqual(expect.objectContaining({
+      kind: 'command.failed',
+      payload: expect.objectContaining({
+        commandId: 'approval-action',
+        idempotencyKey: 'approval-action',
+        receipt: expect.objectContaining({
+          actionId: 'approval-action',
+          code: 'action_invalidated',
+          taskId: originalSubject.taskBinding.taskId,
+          actorId: originalSubject.principalId,
+          leaseId: harness.lease.id,
+          leaseRevision: harness.lease.revision,
+        }),
+      }),
+    })));
+    const invalidationsAfterPrune = harness.journal.read().filter((event) => (
+      event.kind === 'command.failed'
+      && (event.payload.receipt as { actionId?: string; code?: string } | undefined)?.actionId === 'approval-action'
+      && (event.payload.receipt as { actionId?: string; code?: string } | undefined)?.code === 'action_invalidated'
+    ));
+    expect(invalidationsAfterPrune).toHaveLength(1);
+
+    activeSubject = {
+      taskBinding: { taskId: 'task-review', subjectId: 'subject-two' },
+      principalId: 'task-subject:subject-two',
+    };
+    await expect(submit(harness.runtime, command({
+      id: 'post-expiry-stale-request',
+      idempotencyKey: 'post-expiry-stale-request',
+      kind: 'lease.request',
+      ownerEpoch: 7,
+      actor: { id: originalSubject.principalId, kind: 'psyche' },
+      payload: {
+        taskId: originalSubject.taskBinding.taskId,
+        ttlMs: 60_000,
+        grants: [{
+          target: { kind: 'browser_tab', id: harness.tab.id, generation: harness.tab.generation },
+          capabilities: ['browser.inspect'],
+        }],
+      },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'failed', code: 'task_subject_inactive' });
+
+    expect(harness.runtime.snapshot().approvals).toEqual([expect.objectContaining({
+      id: approval.approvalId,
+      status: 'revoked',
+    })]);
+    expect(harness.runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'approval-action',
+      state: 'failed',
+      code: 'action_invalidated',
+    }));
+    const journalCountAfterRotation = harness.journal.read().length;
+    const invalidationsAfterRotation = harness.journal.read().filter((event) => (
+      event.kind === 'command.failed'
+      && (event.payload.receipt as { actionId?: string; code?: string } | undefined)?.actionId === 'approval-action'
+      && (event.payload.receipt as { actionId?: string; code?: string } | undefined)?.code === 'action_invalidated'
+    ));
+    expect(invalidationsAfterRotation).toHaveLength(1);
+    const repeatedCleanup = harness.runtime.snapshot();
+    expect(repeatedCleanup.receipts).not.toContainEqual(expect.objectContaining({
+      actionId: 'approval-action',
+      state: 'approval_required',
+    }));
+    expect(harness.journal.read()).toHaveLength(journalCountAfterRotation);
+    expect(handlers.actOnBrowser).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates approval invalidation when resolve races expiry cleanup', async () => {
+    let now = new Date('2026-08-12T12:00:00.000Z');
+    const subject: ControlTaskCredentialReference = {
+      taskBinding: { taskId: 'task-review', subjectId: 'subject-one' },
+      principalId: 'task-subject:subject-one',
+    };
+    let gateResolveChecks = false;
+    let credentialReads = 0;
+    let releaseCredential!: () => void;
+    const credentialGate = new Promise<ControlTaskCredentialReference | null>((resolve) => {
+      releaseCredential = () => resolve(subject);
+    });
+    const harness = await createBrowserActionHarness({
+      actorId: subject.principalId,
+      taskId: subject.taskBinding.taskId,
+      clock: () => now,
+      leaseTtlMs: 60_000,
+      readActiveTaskCredential: async (taskId) => {
+        if (taskId !== subject.taskBinding.taskId) return null;
+        if (!gateResolveChecks) return subject;
+        credentialReads += 1;
+        return credentialGate;
+      },
+    });
+    const approval = await requestReviewApproval(harness);
+
+    gateResolveChecks = true;
+    const resolvePromise = submit(harness.runtime, command({
+      id: 'resolve-expiry-race',
+      idempotencyKey: 'resolve-expiry-race',
+      kind: 'approval.resolve',
+      ownerEpoch: 7,
+      payload: {
+        approvalId: approval.approvalId,
+        payloadDigest: approval.payloadDigest,
+        decision: 'approve',
+      },
+    }) as ControlCommand);
+    await vi.waitFor(() => expect(credentialReads).toBeGreaterThan(0));
+
+    now = new Date('2026-08-12T12:01:01.000Z');
+    expect(harness.runtime.snapshot().capabilityLeases).toEqual([]);
+
+    releaseCredential();
+    await expect(resolvePromise).resolves.toMatchObject({ status: 'failed' });
+    await vi.waitFor(() => {
+      const invalidations = harness.journal.read().filter((event) => (
+        event.kind === 'command.failed'
+        && (event.payload.receipt as { actionId?: string; code?: string } | undefined)?.actionId === 'approval-action'
+        && (event.payload.receipt as { actionId?: string; code?: string } | undefined)?.code === 'action_invalidated'
+      ));
+      expect(invalidations).toHaveLength(1);
+    });
+    expect(harness.runtime.snapshot().approvals).toEqual([expect.objectContaining({
+      id: approval.approvalId,
+      status: 'revoked',
+    })]);
+    expect(harness.runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'approval-action',
+      state: 'failed',
+      code: 'action_invalidated',
+    }));
+    expect(harness.runtime.snapshot().receipts).not.toContainEqual(expect.objectContaining({
+      actionId: 'approval-action',
+      state: 'approval_required',
+    }));
+    expect(handlers.actOnBrowser).not.toHaveBeenCalled();
+  });
+
   it('revokes automation before accepting human input', async () => {
     const runtime = await ControlRuntime.create({
       ownerEpoch: 4,
@@ -1633,5 +2058,71 @@ describe('ControlRuntime', () => {
         payloadDigest: approval.payloadDigest, decision: 'approve' } })))
       .resolves.toMatchObject({ status: 'failed', code: 'approval_denied' });
     expect(handlers.actOnBrowser).not.toHaveBeenCalled();
+  });
+
+  it('invalidates restart-pending approval receipts once and rehydrates the terminal status', async () => {
+    const harness = await createBrowserActionHarness();
+    await requestReviewApproval(harness);
+
+    const restarted = await ControlRuntime.create({
+      ownerEpoch: 8,
+      handlers,
+      journal: harness.journal,
+      surfaces: harness.surfaces,
+      capabilityLeases: harness.capabilityLeases,
+      approvals: harness.approvals,
+    });
+
+    expect(restarted.snapshot()).toMatchObject({
+      capabilityLeases: [],
+      approvals: [expect.objectContaining({
+        actionId: 'approval-action',
+        status: 'revoked',
+      })],
+      receipts: [expect.objectContaining({
+        actionId: 'approval-action',
+        state: 'failed',
+        code: 'action_invalidated',
+        taskId: 'task-review',
+        leaseId: harness.lease.id,
+        leaseRevision: harness.lease.revision,
+      })],
+    });
+    expect(restarted.snapshot().receipts).not.toContainEqual(expect.objectContaining({
+      actionId: 'approval-action',
+      state: 'approval_required',
+    }));
+    await expect(restarted.submit(command({
+      id: 'approval-action-retry',
+      idempotencyKey: 'approval-action',
+      kind: 'browser.action',
+      ownerEpoch: 8,
+      actor: { id: 'agent-review', kind: 'psyche' },
+      payload: {
+        taskId: 'task-review',
+        leaseId: harness.lease.id,
+        leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id,
+        generation: harness.tab.generation,
+        snapshotId: 'snapshot-review',
+        action: { kind: 'submit', elementRef: 'element-review' },
+      },
+    }))).resolves.toMatchObject({ status: 'failed', code: 'action_invalidated' });
+
+    const invalidations = harness.journal.read().filter((event) => (
+      event.kind === 'command.failed'
+      && (event.payload.receipt as { actionId?: string; code?: string } | undefined)?.actionId === 'approval-action'
+      && (event.payload.receipt as { actionId?: string; code?: string } | undefined)?.code === 'action_invalidated'
+    ));
+    expect(invalidations).toHaveLength(1);
+
+    const eventsAfterFirstRestart = harness.journal.read().length;
+    const restartedAgain = await ControlRuntime.create({ ownerEpoch: 9, handlers, journal: harness.journal });
+    expect(harness.journal.read()).toHaveLength(eventsAfterFirstRestart);
+    expect(restartedAgain.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: 'approval-action',
+      state: 'failed',
+      code: 'action_invalidated',
+    }));
   });
 });

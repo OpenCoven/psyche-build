@@ -12,6 +12,8 @@ import { AGENT_CONTROL_LIMITS } from '../src/control/limits.js';
 const baseRequest = (): ApprovalRequest => ({
   actionId: 'action-1',
   ownerEpoch: 7,
+  taskId: 'task-1',
+  actorId: 'agent-1',
   leaseId: 'lease-1',
   leaseRevision: 2,
   resource: { kind: 'browser_tab', id: 'tab-1', generation: 3 },
@@ -28,6 +30,9 @@ const assertionFor = (
   payloadDigest: approval.payloadDigest,
   actionId: approval.actionId,
   ownerEpoch: approval.ownerEpoch,
+  taskId: approval.taskId!,
+  actorId: approval.actorId!,
+  ...(approval.subjectId ? { subjectId: approval.subjectId } : {}),
   leaseId: approval.leaseId,
   leaseRevision: approval.leaseRevision,
   resource: approval.resource,
@@ -49,6 +54,8 @@ function assertConsumeRequiresCompleteIntent(
     payloadDigest: approval.payloadDigest,
     actionId: approval.actionId,
     ownerEpoch: approval.ownerEpoch,
+    taskId: approval.taskId!,
+    actorId: approval.actorId!,
     leaseId: approval.leaseId,
     leaseRevision: approval.leaseRevision,
     resource: approval.resource,
@@ -64,6 +71,8 @@ type RequiredConsumeField =
   | 'payloadDigest'
   | 'actionId'
   | 'ownerEpoch'
+  | 'taskId'
+  | 'actorId'
   | 'leaseId'
   | 'leaseRevision'
   | 'resource'
@@ -77,6 +86,8 @@ const requiredConsumeFields: { readonly [K in RequiredConsumeField]: OmissionIsR
   payloadDigest: true,
   actionId: true,
   ownerEpoch: true,
+  taskId: true,
+  actorId: true,
   leaseId: true,
   leaseRevision: true,
   resource: true,
@@ -93,7 +104,7 @@ describe('ApprovalStore', () => {
 
     expect(pending.payloadDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(pending.payloadDigest).toBe(
-      '2e738149fbe162c5ac8b14a39ccce67c402c6238634a29476a2923b4320c7fa3',
+      'fdf56ea09685ef1255c61e601043e88e35f636ea46a64f294848570a1254f408',
     );
     expect(store.request(baseRequest()).payloadDigest).toBe(pending.payloadDigest);
     expect(store.approve(pending.id, 'operator', pending.payloadDigest).status).toBe('approved');
@@ -144,6 +155,8 @@ describe('ApprovalStore', () => {
   it.each([
     ['action id', { actionId: 'action-2' }],
     ['owner epoch', { ownerEpoch: 8 }],
+    ['task id', { taskId: 'task-2' }],
+    ['actor id', { actorId: 'agent-2' }],
     ['lease id', { leaseId: 'lease-2' }],
     ['lease revision', { leaseRevision: 3 }],
     ['resource id', { resource: { kind: 'browser_tab', id: 'tab-2', generation: 3 } }],
@@ -161,6 +174,8 @@ describe('ApprovalStore', () => {
 
   it.each([
     ['owner epoch', { ownerEpoch: 8 }],
+    ['task id', { taskId: 'task-2' }],
+    ['actor id', { actorId: 'agent-2' }],
     ['lease id', { leaseId: 'lease-2' }],
     ['lease revision', { leaseRevision: 3 }],
     ['resource generation', { resource: { kind: 'browser_tab', id: 'tab-1', generation: 4 } }],
@@ -180,6 +195,8 @@ describe('ApprovalStore', () => {
     'payloadDigest',
     'actionId',
     'ownerEpoch',
+    'taskId',
+    'actorId',
     'leaseId',
     'leaseRevision',
     'resource',

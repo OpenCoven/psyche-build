@@ -15,6 +15,7 @@ export interface EnsureHostOptions {
   token: string;
   clientName: string;
   entryPath: string;
+  taskBinding?: ControlClientOptions['taskBinding'];
   connect?: ConnectControl;
   spawn?: SpawnOwner;
   canonicalize?: typeof canonicalizeProjectRoot;
@@ -57,6 +58,7 @@ export async function ensureCanonicalHostControlPlane(
     endpoint: controlEndpointForProject(canonicalRoot),
     token: options.token,
     clientName: options.clientName,
+    ...(options.taskBinding === undefined ? {} : { taskBinding: options.taskBinding }),
   };
   const deadline = now() + OWNER_START_TIMEOUT_MS;
 

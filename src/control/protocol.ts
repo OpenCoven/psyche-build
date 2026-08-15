@@ -29,6 +29,7 @@ export type ControlRequest =
       version: 1;
       type: 'state.get';
       requestId: string;
+      taskId?: string;
     }
   | {
       version: 1;
@@ -36,6 +37,7 @@ export type ControlRequest =
       requestId: string;
       afterSequence: number;
       limit?: number;
+      taskId?: string;
     }
   | ProviderRequest;
 
@@ -72,6 +74,10 @@ export type ControlResponse =
         id: string;
         kind: 'operator' | 'agent' | 'compatibility';
         capabilities: readonly string[];
+      };
+      taskBinding?: {
+        taskId: string;
+        subjectId: string;
       };
     }
   | { version: 1; type: 'ack'; requestId: string; resource?: BrowserTabSurface }
@@ -162,6 +168,9 @@ export function decodeControlRequest(raw: string): ControlRequest {
       break;
     }
     case 'state.get':
+      if ('taskId' in value && !isBoundedString(value.taskId)) {
+        throw new Error('invalid state.get request');
+      }
       break;
     case 'events.read':
       if (
@@ -169,6 +178,7 @@ export function decodeControlRequest(raw: string): ControlRequest {
         || !Number.isInteger(value.afterSequence)
         || value.afterSequence < 0
         || ('limit' in value && typeof value.limit !== 'number')
+        || ('taskId' in value && !isBoundedString(value.taskId))
       ) {
         throw new Error('invalid events.read request');
       }
