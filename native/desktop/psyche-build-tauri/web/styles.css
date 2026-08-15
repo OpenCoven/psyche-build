@@ -68,7 +68,7 @@
   --set-4: #bef264;
 
   /* Geometry */
-  --titlebar-h: 40px;
+  --titlebar-h: 44px;
   --titlebar-pad-l: 78px;   /* leaves room for traffic lights */
   --rail-w: 44px;
   --sidebar-w: 276px;
@@ -975,6 +975,9 @@ kbd {
 .app[data-sidebar="collapsed"] .titlebar {
   grid-template-columns: var(--mini-rail-w) minmax(0, 1fr);
 }
+.app[data-sidebar="collapsed"] .titlebar-workspace {
+  padding-left: calc(var(--titlebar-pad-l) - var(--mini-rail-w) + 10px);
+}
 .titlebar-sidebar,
 .titlebar-workspace {
   min-width: 0;
@@ -992,6 +995,10 @@ kbd {
 }
 .titlebar-workspace {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 0 10px;
   background: var(--workspace-surface);
 }
 .traffic-gutter {
@@ -1013,21 +1020,21 @@ kbd {
 .titlebar-brand-icon {
   position: relative;
   display: grid;
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
   place-items: center;
   overflow: hidden;
-  border-radius: 5px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  border-radius: 7px;
+  background: #050505;
   pointer-events: none;
 }
 .titlebar-brand-fallback { color: var(--text); font-size: 10px; font-weight: 800; }
 .titlebar-brand-mark {
   position: absolute;
-  inset: 0;
+  inset: 3px;
   width: 18px;
   height: 18px;
-  object-fit: cover;
+  object-fit: contain;
 }
 .titlebar-brand-name {
   overflow: hidden;
@@ -1036,10 +1043,11 @@ kbd {
   pointer-events: none;
 }
 .titlebar-sidebar-toggle {
-  position: absolute;
+  position: relative;
+  flex: none;
   z-index: 4;
-  left: 0;
-  top: 50%;
+  left: auto;
+  top: auto;
   display: grid;
   width: 30px;
   height: 30px;
@@ -1048,13 +1056,14 @@ kbd {
   border-radius: 9px;
   background: var(--workspace-surface);
   color: var(--muted);
-  transform: translate(-50%, -50%);
+  transform: none;
   -webkit-app-region: no-drag;
 }
 .app[data-sidebar="collapsed"] .titlebar-sidebar-toggle {
-  left: calc(var(--titlebar-pad-l) - var(--mini-rail-w));
-  transform: translateY(-50%);
+  left: auto;
+  transform: none;
 }
+.app[data-sidebar="collapsed"] .titlebar-brand { display: none; }
 .titlebar-sidebar-toggle:hover,
 .titlebar-sidebar-toggle:focus-visible {
   color: var(--text);
@@ -3734,9 +3743,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   opacity: 0;
 }
 /* -------- Thin modern browser tabs + full-width drag polish -------- */
-:root {
-  --titlebar-h: 42px;
-}
 .titlebar {
   align-items: center;
   min-height: var(--titlebar-h);
@@ -3745,6 +3751,10 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   width: 30px;
   height: 28px;
   border-radius: 8px;
+}
+.chrome-btn.agent-control-toggle {
+  width: auto;
+  padding-inline: 9px;
 }
 
 .browser-bar {
