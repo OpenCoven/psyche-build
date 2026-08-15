@@ -17,21 +17,23 @@ function handlersWithCovenClient(
   projectRoot = '/tmp/psyche-test-root',
   sessionIds = ['sess-1'],
 ) {
+  const sessions = sessionIds.map((id) => ({
+    id,
+    projectRoot,
+    harness: 'codex' as const,
+    title: id,
+    status: 'running' as const,
+    createdAt: '2026-04-27T10:00:00Z',
+    updatedAt: '2026-04-27T10:01:00Z',
+  }));
   return createDaemonControlHandlers({
     tmux: new TmuxControl('psyche-test'),
     projectRoot,
     sessionName: 'psyche-test',
     capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
     createCovenClient: () => ({
-      listSessions: async () => sessionIds.map((id) => ({
-        id,
-        projectRoot,
-        harness: 'codex',
-        title: id,
-        status: 'running',
-        createdAt: '2026-04-27T10:00:00Z',
-        updatedAt: '2026-04-27T10:01:00Z',
-      })),
+      listSessions: async () => sessions,
+      getSession: async (id: string) => sessions.find((session) => session.id === id) ?? null,
       sendInput,
     }),
   });
@@ -68,10 +70,10 @@ describe('createDaemonControlHandlers runCovenDesktopAction', () => {
         sessionName: 'psyche-test',
         capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
         createCovenClient: () => ({
-          listSessions: async () => [{
+          getSession: async (_id: string) => ({
             id: 'sess-1', projectRoot: outside, harness: 'codex', title: 'Outside', status: 'running',
             createdAt: '2026-04-27T10:00:00Z', updatedAt: '2026-04-27T10:01:00Z',
-          }],
+          }),
           sendInput,
         }),
       });
