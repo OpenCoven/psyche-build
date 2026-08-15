@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Review code changes in the Psyche Build repository for high-confidence, actionable defects. Use this skill whenever the user asks to review a working tree, staged changes, a commit, branch, pull request, patch, regression, or implementation for correctness and risk—even if they do not explicitly say "code review." It is read-only and repository-specific across TypeScript/Node, React/Vue/Ink, Tauri Rust and web bundles, Swift/iOS, protocols, generated files, packaging, CI, and release surfaces. Do not use it for an explicit vulnerability or exploit hunt; use the dedicated security-review workflow for that request.
+description: Review code changes in the Psyche Build repository for high-confidence, actionable defects. Use this skill whenever the user asks to review a working tree, staged changes, a commit, commit range, branch, pull request, patch, regression, or implementation for correctness and risk—even if they do not explicitly say "code review." It is read-only and repository-specific across TypeScript/Node, React/Vue/Ink, Tauri Rust and web bundles, Swift/iOS, protocols, generated files, packaging, CI, and release surfaces. Do not use it for an explicit vulnerability or exploit hunt; use the dedicated security-review workflow for that request.
 compatibility: Requires repository read access and Git. GitHub PR reviews may use gh. Optional validation uses pnpm, Cargo, Xcode, tmux, and platform toolchains already documented by the repository.
 ---
 
