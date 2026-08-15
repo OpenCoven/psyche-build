@@ -1,7 +1,15 @@
 import { connect, type Socket } from 'node:net';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 import { controlEndpointForProject } from './endpoint.js';
-import { encodeControlMessage, type ControlRequest, type ControlResponse } from './protocol.js';
+import {
+  decodeControlWelcome,
+  encodeControlMessage,
+  type ControlRequest,
+  type ControlResponse,
+  type LeaseStatusResultData,
+  type TaskResourcesResultData,
+} from './protocol.js';
+import type { ControlTaskBinding } from './credentials.js';
 import type {
   ActionReceipt,
   ControlCommandInput,
@@ -19,6 +27,7 @@ export interface ControlClientOptions {
   projectRoot: string;
   token: string;
   clientName: string;
+  taskBinding?: ControlTaskBinding;
   endpoint?: string;
   signal?: AbortSignal;
 }
@@ -26,6 +35,16 @@ export interface ControlClientOptions {
 interface PendingRequest {
   resolve: (response: ControlResponse) => void;
   reject: (error: Error) => void;
+}
+
+export class ControlResponseError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ControlResponseError';
+  }
 }
 
 /**
@@ -48,6 +67,7 @@ export class ControlClient {
     readonly projectRoot: string,
     readonly ownerEpoch: number,
     readonly principal: ControlClientPrincipal,
+    readonly taskBinding: ControlTaskBinding | undefined,
   ) {}
 
   static async connect(options: ControlClientOptions): Promise<ControlClient> {
@@ -94,23 +114,46 @@ export class ControlClient {
           const newline = buffer.indexOf('\n');
           if (newline < 0) return;
           const line = buffer.slice(0, newline);
-          let message: ControlResponse;
+          let parsed: unknown;
           try {
-            message = JSON.parse(line) as ControlResponse;
+            parsed = JSON.parse(line);
           } catch {
             rejectAndClose(new Error('invalid welcome frame'));
             return;
           }
-          if (message.type === 'error') {
-            rejectAndClose(new Error(`${message.code}: ${message.message}`));
+          if (
+            isPlainObject(parsed)
+            && parsed.type === 'error'
+            && typeof parsed.code === 'string'
+            && typeof parsed.message === 'string'
+          ) {
+            rejectAndClose(new Error(`${parsed.code}: ${parsed.message}`));
             return;
           }
-          if (message.type !== 'welcome') {
-            rejectAndClose(new Error(`expected welcome, received ${message.type}`));
+          if (
+            isPlainObject(parsed)
+            && typeof parsed.type === 'string'
+            && parsed.type !== 'welcome'
+          ) {
+            rejectAndClose(new Error(`expected welcome, received ${parsed.type}`));
+            return;
+          }
+          let message: Extract<ControlResponse, { type: 'welcome' }>;
+          try {
+            message = decodeControlWelcome(line);
+          } catch {
+            rejectAndClose(new Error('invalid welcome frame'));
             return;
           }
           if (message.projectRoot !== canonicalRoot) {
             rejectAndClose(new Error('welcome project root does not match the requested project'));
+            return;
+          }
+          if (
+            options.taskBinding?.taskId !== undefined
+            && message.taskBinding?.taskId !== options.taskBinding.taskId
+          ) {
+            rejectAndClose(new Error('welcome task binding does not match the requested task'));
             return;
           }
           cleanup();
@@ -141,7 +184,13 @@ export class ControlClient {
       },
     );
 
-    const client = new ControlClient(socket, canonicalRoot, welcome.ownerEpoch, welcome.principal);
+    const client = new ControlClient(
+      socket,
+      canonicalRoot,
+      welcome.ownerEpoch,
+      welcome.principal,
+      welcome.taskBinding,
+    );
     client.attach();
     return client;
   }
@@ -166,6 +215,44 @@ export class ControlClient {
     }).then((response) => {
       if (response.type === 'state.result') return response.snapshot;
       throw responseError(response, 'state.get');
+    });
+  }
+
+  taskResources(): Promise<TaskResourcesResultData> {
+    return this.request({
+      version: 1,
+      type: 'task.resources.get',
+      requestId: this.allocateRequestId(),
+    }).then((response) => {
+      if (response.type === 'task.resources.result') {
+        return {
+          ownerEpoch: response.ownerEpoch,
+          sequence: response.sequence,
+          resources: response.resources,
+        };
+      }
+      throw responseError(response, 'task.resources.get');
+    });
+  }
+
+  leaseStatus(
+    leaseRequestId: string,
+    leaseId?: string,
+  ): Promise<LeaseStatusResultData> {
+    return this.request({
+      version: 1,
+      type: 'lease.status.get',
+      requestId: this.allocateRequestId(),
+      leaseRequestId,
+      ...(leaseId === undefined ? {} : { leaseId }),
+    }).then((response) => {
+      if (response.type === 'lease.status.result') {
+        return {
+          requests: response.requests,
+          leases: response.leases,
+        };
+      }
+      throw responseError(response, 'lease.status.get');
     });
   }
 
@@ -315,8 +402,14 @@ export class ControlClient {
 }
 
 function responseError(response: ControlResponse, context: string): Error {
-  if (response.type === 'error') return new Error(`${response.code}: ${response.message}`);
+  if (response.type === 'error') {
+    return new ControlResponseError(response.code, `${response.code}: ${response.message}`);
+  }
   return new Error(`unexpected ${response.type} response to ${context}`);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isActionReceipt(value: unknown): value is ActionReceipt {

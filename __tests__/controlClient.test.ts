@@ -2,11 +2,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { createServer } from 'node:net';
+import { createServer, type Socket } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ControlServer, type ControlServerRuntime } from '../src/control/server.js';
 import { createControlCredentialStore } from '../src/control/credentials.js';
-import { ControlClient } from '../src/control/client.js';
+import { ControlClient, ControlResponseError } from '../src/control/client.js';
 
 interface Harness {
   server: ControlServer;
@@ -21,6 +21,144 @@ let tempRoots: string[] = [];
 
 function socketPath(): string {
   return path.join(tmpdir(), `psyche-ctl-${randomBytes(6).toString('hex')}.sock`);
+}
+
+function welcomeFrame(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: 1,
+    type: 'welcome',
+    requestId: 'welcome',
+    projectRoot: '/canonical/project',
+    ownerEpoch: 7,
+    principal: {
+      id: 'agent',
+      kind: 'agent',
+      capabilities: ['read', 'mutate'],
+    },
+    ...overrides,
+  };
+}
+
+async function startWelcomeFrameServer(frame: Record<string, unknown>): Promise<{
+  endpoint: string;
+  closed: Promise<void>;
+}> {
+  const endpoint = socketPath();
+  let acceptedSocket: Socket | undefined;
+  let markClosed!: () => void;
+  const closed = new Promise<void>((resolve) => { markClosed = resolve; });
+  const server = createServer((socket) => {
+    acceptedSocket = socket;
+    socket.once('close', () => markClosed());
+    socket.once('data', () => {
+      socket.write(`${JSON.stringify(frame)}\n`);
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(endpoint, resolve);
+  });
+  cleanups.push(async () => {
+    acceptedSocket?.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  return { endpoint, closed };
+}
+
+async function startErrorResponseServer(code: string, message: string): Promise<string> {
+  const endpoint = socketPath();
+  let acceptedSocket: Socket | undefined;
+  const server = createServer((socket) => {
+    acceptedSocket = socket;
+    let buffer = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      let newline = buffer.indexOf('\n');
+      while (newline >= 0) {
+        const request = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf('\n');
+        if (request.type === 'hello') {
+          socket.write(`${JSON.stringify(welcomeFrame())}\n`);
+        } else {
+          socket.write(`${JSON.stringify({
+            version: 1,
+            type: 'error',
+            requestId: request.requestId,
+            code,
+            message,
+          })}\n`);
+        }
+      }
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(endpoint, resolve);
+  });
+  cleanups.push(async () => {
+    acceptedSocket?.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  return endpoint;
+}
+
+async function startDedicatedReadServer(): Promise<{
+  endpoint: string;
+  requests: Record<string, unknown>[];
+}> {
+  const endpoint = socketPath();
+  const requests: Record<string, unknown>[] = [];
+  let acceptedSocket: Socket | undefined;
+  const server = createServer((socket) => {
+    acceptedSocket = socket;
+    let buffer = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      let newline = buffer.indexOf('\n');
+      while (newline >= 0) {
+        const request = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf('\n');
+        if (request.type === 'hello') {
+          socket.write(`${JSON.stringify(welcomeFrame({
+            taskBinding: { taskId: 'task-alpha' },
+          }))}\n`);
+          continue;
+        }
+        requests.push(request);
+        if (request.type === 'task.resources.get') {
+          socket.write(`${JSON.stringify({
+            version: 1,
+            type: 'task.resources.result',
+            requestId: request.requestId,
+            ownerEpoch: 7,
+            sequence: 11,
+            resources: [],
+          })}\n`);
+        } else if (request.type === 'lease.status.get') {
+          socket.write(`${JSON.stringify({
+            version: 1,
+            type: 'lease.status.result',
+            requestId: request.requestId,
+            requests: [],
+            leases: [],
+          })}\n`);
+        }
+      }
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(endpoint, resolve);
+  });
+  cleanups.push(async () => {
+    acceptedSocket?.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  return { endpoint, requests };
 }
 
 async function startHarness(overrides: {
@@ -138,6 +276,43 @@ describe('ControlClient over the socket transport', () => {
     await closed;
   });
 
+  it('rejects and closes a welcome bound to a different task', async () => {
+    const server = await startWelcomeFrameServer(welcomeFrame({
+      taskBinding: { taskId: 'task-alpha' },
+    }));
+
+    await expect(ControlClient.connectCanonical({
+      projectRoot: '/canonical/project',
+      endpoint: server.endpoint,
+      token: 'task-alpha-token',
+      clientName: 'task-beta-client',
+      taskBinding: { taskId: 'task-beta' },
+    })).rejects.toThrow('welcome task binding does not match the requested task');
+    await server.closed;
+  });
+
+  it.each([
+    ['version', { version: 2 }],
+    ['requestId', { requestId: 'not-welcome' }],
+    ['projectRoot', { projectRoot: '' }],
+    ['principal', {
+      principal: { id: 'agent', kind: 'unknown', capabilities: ['read', 'mutate'] },
+    }],
+    ['ownerEpoch', { ownerEpoch: 0 }],
+    ['taskBinding', { taskBinding: { taskId: 'task-alpha', injected: true } }],
+    ['oversized taskBinding', { taskBinding: { taskId: 't'.repeat(257) } }],
+  ])('rejects and closes a malformed welcome %s', async (_field, overrides) => {
+    const server = await startWelcomeFrameServer(welcomeFrame(overrides));
+
+    await expect(ControlClient.connectCanonical({
+      projectRoot: '/canonical/project',
+      endpoint: server.endpoint,
+      token: 'task-alpha-token',
+      clientName: 'malformed-welcome-client',
+    })).rejects.toThrow('invalid welcome frame');
+    await server.closed;
+  });
+
   it('learns the owner epoch and principal from welcome', async () => {
     const harness = await startHarness();
     const client = await ControlClient.connect({
@@ -184,6 +359,97 @@ describe('ControlClient over the socket transport', () => {
 
     await expect(client.getState()).resolves.toMatchObject({ ownerEpoch: 7, sequence: 2 });
     await expect(client.readEvents(0)).resolves.toMatchObject({ nextSequence: 1, gap: false });
+  });
+
+  it('sends dedicated reads without a caller-supplied task ID', async () => {
+    const server = await startDedicatedReadServer();
+    const client = await ControlClient.connectCanonical({
+      projectRoot: '/canonical/project',
+      endpoint: server.endpoint,
+      token: 'task-alpha-token',
+      clientName: 'task-alpha',
+      taskBinding: { taskId: 'task-alpha' },
+    });
+    cleanups.push(() => client.close());
+
+    await expect(client.taskResources()).resolves.toEqual({
+      ownerEpoch: 7,
+      sequence: 11,
+      resources: [],
+    });
+    await expect(client.leaseStatus('request-alpha')).resolves.toEqual({
+      requests: [],
+      leases: [],
+    });
+    await expect(client.leaseStatus('request-alpha', 'lease-alpha')).resolves.toEqual({
+      requests: [],
+      leases: [],
+    });
+    expect(server.requests).toEqual([
+      {
+        version: 1,
+        type: 'task.resources.get',
+        requestId: 'req-1',
+      },
+      {
+        version: 1,
+        type: 'lease.status.get',
+        requestId: 'req-2',
+        leaseRequestId: 'request-alpha',
+      },
+      {
+        version: 1,
+        type: 'lease.status.get',
+        requestId: 'req-3',
+        leaseRequestId: 'request-alpha',
+        leaseId: 'lease-alpha',
+      },
+    ]);
+  });
+
+  it.each([
+    ['operator_required', 'only an operator may perform this request'],
+    ['task_binding_required', 'task-bound control credential required'],
+    ['task_binding_mismatch', 'command task does not match authenticated task'],
+  ])('preserves the %s response code on client errors', async (code, message) => {
+    const endpoint = await startErrorResponseServer(code, message);
+    const client = await ControlClient.connectCanonical({
+      projectRoot: '/canonical/project',
+      endpoint,
+      token: 'token',
+      clientName: 'coded-error-client',
+    });
+    cleanups.push(() => client.close());
+
+    const request = client.getState();
+    await expect(request).rejects.toBeInstanceOf(ControlResponseError);
+    await expect(request).rejects.toMatchObject({
+      code,
+      message: `${code}: ${message}`,
+    });
+  });
+
+  it('preserves structured errors from dedicated reads', async () => {
+    const endpoint = await startErrorResponseServer(
+      'task_binding_required',
+      'task-bound control credential required',
+    );
+    const client = await ControlClient.connectCanonical({
+      projectRoot: '/canonical/project',
+      endpoint,
+      token: 'shared-token',
+      clientName: 'shared-agent',
+    });
+    cleanups.push(() => client.close());
+
+    await expect(client.taskResources()).rejects.toMatchObject({
+      code: 'task_binding_required',
+      message: 'task_binding_required: task-bound control credential required',
+    });
+    await expect(client.leaseStatus('request-alpha')).rejects.toMatchObject({
+      code: 'task_binding_required',
+      message: 'task_binding_required: task-bound control credential required',
+    });
   });
 
   it('constructs lease, approval, and action-status helper envelopes', async () => {

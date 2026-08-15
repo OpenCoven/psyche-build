@@ -1,8 +1,10 @@
 import { createServer, type Server, type Socket } from 'node:net';
+import { createHash } from 'node:crypto';
 import { chmod, mkdir, rm } from 'node:fs/promises';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 import { controlEndpointParent } from './endpoint.js';
 import {
+  type AuthenticatedControlIdentity,
   type ControlCredentialStore,
   type ControlPrincipal,
 } from './credentials.js';
@@ -10,12 +12,16 @@ import {
   decodeControlRequest,
   encodeControlMessage,
   type ControlResponse,
+  type LeaseStatusResultData,
+  type TaskResourcesResultData,
 } from './protocol.js';
 import type {
   BrowserProviderBroker,
   BrowserProviderRegistration,
   ProviderPush,
 } from './browserProviderBroker.js';
+import type { CapabilityLease, LeaseTarget } from './capabilityLeases.js';
+import type { SurfaceResource } from './surfaces.js';
 import type {
   ControlActor,
   ControlActorKind,
@@ -23,7 +29,10 @@ import type {
   ControlCommandInput,
   CommandOutcome,
   ControlSnapshot,
+  LeaseGrant,
 } from './types.js';
+
+type LeaseRequest = ControlSnapshot['leaseRequests'][number];
 
 /** The minimal runtime surface the control server drives. */
 export interface ControlServerRuntime {
@@ -51,6 +60,7 @@ export interface ControlServerOptions {
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 const MAX_QUEUED_FRAMES = 128;
 const MAX_QUEUED_BYTES = 8 * 1024 * 1024;
+const INTERNAL_IDEMPOTENCY_PREFIX = 'psyche-control-idempotency-v1';
 
 /** Every command kind the runtime knows how to execute. */
 const KNOWN_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
@@ -105,6 +115,182 @@ function actorForPrincipal(principal: ControlPrincipal, clientId?: string): Cont
     kind: actorKindForPrincipal(principal.kind),
     ...(clientId ? { clientId } : {}),
   };
+}
+
+type ControlAuthorityIdentity = AuthenticatedControlIdentity | ControlPrincipal;
+
+function normalizeControlIdentity(identity: ControlAuthorityIdentity): AuthenticatedControlIdentity {
+  if ('principal' in identity) return identity;
+  return { ...identity, principal: identity };
+}
+
+function runtimeIdempotencyKey(
+  identity: AuthenticatedControlIdentity,
+  canonicalProjectRoot: string,
+  callerKey: string,
+): string {
+  if (identity.principal.kind === 'operator') return callerKey;
+
+  const scope = identity.taskBinding === undefined
+    ? ['principal', canonicalProjectRoot, identity.principal.kind, identity.principal.id]
+    : ['task', canonicalProjectRoot, identity.taskBinding.taskId];
+  const hash = createHash('sha256');
+  for (const component of [
+    INTERNAL_IDEMPOTENCY_PREFIX,
+    ...scope,
+    'caller',
+    callerKey,
+  ]) {
+    const bytes = Buffer.from(component, 'utf8');
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32BE(bytes.length);
+    hash.update(length);
+    hash.update(bytes);
+  }
+  return `${INTERNAL_IDEMPOTENCY_PREFIX}:${hash.digest('hex')}`;
+}
+
+const TASK_SENSITIVE_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
+  'orchestration.execute',
+  'lease.request',
+  'lease.release',
+  'pane.observe',
+  'pane.action',
+  'browser.inspect',
+  'browser.action',
+  'browser.script',
+]);
+
+function requestedTaskId(input: ControlCommandInput): string | undefined {
+  if (!TASK_SENSITIVE_COMMAND_KINDS.has(input.kind)) return undefined;
+  const payload: unknown = input.payload;
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined;
+  const taskId = (payload as Record<string, unknown>).taskId;
+  return typeof taskId === 'string' ? taskId : undefined;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requireTaskBinding(
+  identity: AuthenticatedControlIdentity,
+  taskId: string | undefined,
+): CommandOutcome | undefined {
+  if (identity.principal.kind === 'operator') return undefined;
+  const authenticatedTaskId = identity.taskBinding?.taskId;
+  if (!authenticatedTaskId) {
+    return {
+      status: 'rejected',
+      code: 'task_binding_required',
+      message: 'task-bound control credential required',
+    };
+  }
+  if (taskId !== authenticatedTaskId) {
+    return {
+      status: 'rejected',
+      code: 'task_binding_mismatch',
+      message: 'command task does not match authenticated task',
+    };
+  }
+  return undefined;
+}
+
+function taskIdForDedicatedRead(identity: AuthenticatedControlIdentity): string {
+  const taskId = identity.taskBinding?.taskId;
+  if (!taskId) {
+    throw Object.assign(new Error('task-bound control credential required'), {
+      code: 'task_binding_required',
+    });
+  }
+  return taskId;
+}
+
+function targetKey(target: LeaseTarget): string | undefined {
+  if (target.kind === 'project') return undefined;
+  return JSON.stringify([target.kind, target.id, target.generation]);
+}
+
+function resourceKey(resource: SurfaceResource): string {
+  return JSON.stringify([resource.kind, resource.id, resource.generation]);
+}
+
+function cloneTarget(target: LeaseTarget): LeaseTarget {
+  return target.kind === 'project'
+    ? Object.freeze({ kind: 'project', id: target.id })
+    : Object.freeze({
+      kind: target.kind,
+      id: target.id,
+      generation: target.generation,
+    });
+}
+
+function cloneGrants(grants: readonly LeaseGrant[]): readonly LeaseGrant[] {
+  return Object.freeze(grants.map((grant) => Object.freeze({
+    target: cloneTarget(grant.target),
+    capabilities: Object.freeze([...grant.capabilities]),
+  })));
+}
+
+function cloneLeaseRequest(request: LeaseRequest): LeaseRequest {
+  return Object.freeze({
+    id: request.id,
+    ownerEpoch: request.ownerEpoch,
+    actorId: request.actorId,
+    taskId: request.taskId,
+    status: request.status,
+    createdAt: request.createdAt,
+    ttlMs: request.ttlMs,
+    grants: cloneGrants(request.grants),
+  });
+}
+
+function cloneCapabilityLease(lease: CapabilityLease): CapabilityLease {
+  return Object.freeze({
+    id: lease.id,
+    requestId: lease.requestId,
+    revision: lease.revision,
+    ownerEpoch: lease.ownerEpoch,
+    actorId: lease.actorId,
+    taskId: lease.taskId,
+    grantedBy: lease.grantedBy,
+    grants: cloneGrants(lease.grants),
+    createdAt: lease.createdAt,
+    expiresAt: lease.expiresAt,
+  });
+}
+
+function cloneSurfaceResource(resource: SurfaceResource): SurfaceResource {
+  if (resource.kind === 'pane') {
+    return Object.freeze({
+      id: resource.id,
+      kind: resource.kind,
+      generation: resource.generation,
+      projectRoot: resource.projectRoot,
+      worktreeRoot: resource.worktreeRoot,
+      tmuxPaneId: resource.tmuxPaneId,
+      ...(resource.title === undefined ? {} : { title: resource.title }),
+      ...(resource.agent === undefined ? {} : { agent: resource.agent }),
+      writable: resource.writable,
+      outputSequence: resource.outputSequence,
+    });
+  }
+  return Object.freeze({
+    id: resource.id,
+    kind: resource.kind,
+    generation: resource.generation,
+    projectRoot: resource.projectRoot,
+    worktreeRoot: resource.worktreeRoot,
+    providerId: resource.providerId,
+    webviewLabel: resource.webviewLabel,
+    url: resource.url,
+    title: resource.title,
+    loading: resource.loading,
+    viewport: Object.freeze({
+      width: resource.viewport.width,
+      height: resource.viewport.height,
+    }),
+  });
 }
 
 /**
@@ -183,15 +369,63 @@ export class ControlAuthority {
   ) {}
 
   async submitAs(
-    principal: ControlPrincipal,
+    identity: ControlAuthorityIdentity,
     input: ControlCommandInput,
     clientId?: string,
   ): Promise<CommandOutcome> {
+    const authenticated = normalizeControlIdentity(identity);
+    const { principal } = authenticated;
+    if (TASK_SENSITIVE_COMMAND_KINDS.has(input.kind)) {
+      const bindingRejection = requireTaskBinding(authenticated, requestedTaskId(input));
+      if (bindingRejection) return bindingRejection;
+    }
     const rejection = authorizeCommand(principal, input.kind);
     if (rejection) return rejection;
 
+    let trustedInput: ControlCommandInput = input;
+    if (input.kind === 'orchestration.execute') {
+      const nestedRequest: unknown = input.payload.request;
+      const trustedTaskId = principal.kind === 'operator'
+        ? input.payload.taskId
+        : authenticated.taskBinding?.taskId;
+      if (
+        typeof trustedTaskId !== 'string'
+        || !isPlainObject(nestedRequest)
+        || nestedRequest.taskId !== trustedTaskId
+      ) {
+        return {
+          status: 'rejected',
+          code: 'task_binding_mismatch',
+          message: 'orchestration task does not match authenticated task',
+        };
+      }
+      if (nestedRequest.projectRoot !== this.canonicalProjectRoot) {
+        return {
+          status: 'rejected',
+          code: 'project_mismatch',
+          message: 'orchestration project root does not match this owner',
+        };
+      }
+      trustedInput = {
+        ...input,
+        payload: {
+          ...input.payload,
+          request: {
+            ...input.payload.request,
+            taskId: trustedTaskId,
+            projectRoot: this.canonicalProjectRoot,
+          },
+        },
+      };
+    }
+
     const command = {
-      ...input,
+      ...trustedInput,
+      idempotencyKey: runtimeIdempotencyKey(
+        authenticated,
+        this.canonicalProjectRoot,
+        trustedInput.idempotencyKey,
+      ),
       projectRoot: this.canonicalProjectRoot,
       actor: actorForPrincipal(principal, clientId),
       ownerEpoch: this.ownerEpoch,
@@ -199,7 +433,67 @@ export class ControlAuthority {
     return this.runtime.submit(command);
   }
 
-  snapshot(principal: ControlPrincipal): ControlSnapshot {
+  taskResources(identity: AuthenticatedControlIdentity): TaskResourcesResultData {
+    const taskId = taskIdForDedicatedRead(identity);
+    const snapshot = this.runtime.snapshot();
+    const authorizedTargets = new Set<string>();
+
+    for (const lease of snapshot.capabilityLeases) {
+      if (
+        lease.ownerEpoch !== this.ownerEpoch
+        || lease.taskId !== taskId
+      ) continue;
+      for (const grant of lease.grants) {
+        const key = targetKey(grant.target);
+        if (key) authorizedTargets.add(key);
+      }
+    }
+
+    const emitted = new Set<string>();
+    const resources: SurfaceResource[] = [];
+    for (const resource of snapshot.resources) {
+      const key = resourceKey(resource);
+      if (!authorizedTargets.has(key) || emitted.has(key)) continue;
+      emitted.add(key);
+      resources.push(cloneSurfaceResource(resource));
+    }
+    return Object.freeze({
+      ownerEpoch: this.ownerEpoch,
+      sequence: snapshot.sequence,
+      resources: Object.freeze(resources),
+    });
+  }
+
+  leaseStatus(
+    identity: AuthenticatedControlIdentity,
+    leaseRequestId: string,
+    leaseId?: string,
+  ): LeaseStatusResultData {
+    const taskId = taskIdForDedicatedRead(identity);
+    const snapshot = this.runtime.snapshot();
+    const requests = snapshot.leaseRequests
+      .filter((request) => (
+        request.ownerEpoch === this.ownerEpoch
+        && request.taskId === taskId
+        && request.id === leaseRequestId
+      ))
+      .map(cloneLeaseRequest);
+    const leases = snapshot.capabilityLeases
+      .filter((lease) => (
+        lease.ownerEpoch === this.ownerEpoch
+        && lease.taskId === taskId
+        && lease.requestId === leaseRequestId
+        && (leaseId === undefined || lease.id === leaseId)
+      ))
+      .map(cloneCapabilityLease);
+    return Object.freeze({
+      requests: Object.freeze(requests),
+      leases: Object.freeze(leases),
+    });
+  }
+
+  snapshot(identity: ControlAuthorityIdentity): ControlSnapshot {
+    const { principal } = normalizeControlIdentity(identity);
     const snapshot = this.runtime.snapshot();
     if (principal.kind === 'operator') return snapshot;
 
@@ -224,11 +518,40 @@ export class ControlAuthority {
     events: unknown[];
     nextSequence: number;
     gap: boolean;
+  };
+  readEvents(identity: ControlAuthorityIdentity, afterSequence: number, limit?: number): {
+    events: unknown[];
+    nextSequence: number;
+    gap: boolean;
+  };
+  readEvents(
+    identityOrAfterSequence: ControlAuthorityIdentity | number,
+    afterSequenceOrLimit?: number,
+    limit?: number,
+  ): {
+    events: unknown[];
+    nextSequence: number;
+    gap: boolean;
   } {
+    if (typeof identityOrAfterSequence === 'number') {
+      return this.runtime.readEvents(identityOrAfterSequence, afterSequenceOrLimit);
+    }
+    if (afterSequenceOrLimit === undefined) {
+      throw new TypeError('afterSequence is required');
+    }
+    const { principal } = normalizeControlIdentity(identityOrAfterSequence);
+    if (principal.kind !== 'operator') {
+      throw Object.assign(new Error('raw control events require operator authority'), {
+        code: 'operator_required',
+      });
+    }
+    const afterSequence = afterSequenceOrLimit;
     return this.runtime.readEvents(afterSequence, limit);
   }
 
-  welcomeFor(principal: ControlPrincipal): Extract<ControlResponse, { type: 'welcome' }> {
+  welcomeFor(identity: ControlAuthorityIdentity): Extract<ControlResponse, { type: 'welcome' }> {
+    const authenticated = normalizeControlIdentity(identity);
+    const { principal } = authenticated;
     return {
       version: 1,
       type: 'welcome',
@@ -240,6 +563,9 @@ export class ControlAuthority {
         kind: principal.kind,
         capabilities: principal.capabilities,
       },
+      ...(authenticated.taskBinding === undefined
+        ? {}
+        : { taskBinding: authenticated.taskBinding }),
     };
   }
 }
@@ -331,7 +657,7 @@ export class ControlServer {
   }
 
   private handleConnection(socket: Socket): void {
-    let principal: ControlPrincipal | null = null;
+    let identity: AuthenticatedControlIdentity | null = null;
     let clientId: string | undefined;
     let provider: BrowserProviderRegistration | null = null;
     let buffer = '';
@@ -377,9 +703,9 @@ export class ControlServer {
           return;
         }
         tail = tail.then(() => this.handleLine(line, write, fail, {
-          getPrincipal: () => principal,
-          setPrincipal: (value, id) => {
-            principal = value;
+          getIdentity: () => identity,
+          setIdentity: (value, id) => {
+            identity = value;
             clientId = id;
           },
           getClientId: () => clientId,
@@ -400,8 +726,8 @@ export class ControlServer {
     write: (message: ControlResponse | ProviderPush) => void,
     fail: (code: string, message: string, requestId?: string) => void,
     session: {
-      getPrincipal: () => ControlPrincipal | null;
-      setPrincipal: (principal: ControlPrincipal, clientId?: string) => void;
+      getIdentity: () => AuthenticatedControlIdentity | null;
+      setIdentity: (identity: AuthenticatedControlIdentity, clientId?: string) => void;
       getClientId: () => string | undefined;
       getProvider: () => BrowserProviderRegistration | null;
       setProvider: (provider: BrowserProviderRegistration) => void;
@@ -415,8 +741,8 @@ export class ControlServer {
       return;
     }
 
-    const principal = session.getPrincipal();
-    if (!principal) {
+    const identity = session.getIdentity();
+    if (!identity) {
       if (request.type !== 'hello') {
         fail('unauthorized', 'hello required', request.requestId);
         return;
@@ -437,10 +763,11 @@ export class ControlServer {
         fail('project_mismatch', 'project root does not match this owner', request.requestId);
         return;
       }
-      session.setPrincipal(authenticated, request.clientName);
+      session.setIdentity(authenticated, request.clientName);
       write(this.authority.welcomeFor(authenticated));
       return;
     }
+    const { principal } = identity;
 
     await this.broker?.ready();
     const provider = session.getProvider();
@@ -510,7 +837,7 @@ export class ControlServer {
           return;
         }
         const outcome = await this.authority.submitAs(
-          principal,
+          identity,
           request.command,
           session.getClientId(),
         );
@@ -528,11 +855,59 @@ export class ControlServer {
           version: 1,
           type: 'state.result',
           requestId: request.requestId,
-          snapshot: this.authority.snapshot(principal),
+          snapshot: this.authority.snapshot(identity),
         });
         return;
+      case 'task.resources.get':
+        try {
+          write({
+            version: 1,
+            type: 'task.resources.result',
+            requestId: request.requestId,
+            ...this.authority.taskResources(identity),
+          });
+        } catch (error) {
+          writeCodedError(
+            write,
+            request.requestId,
+            error,
+            'task_resources_failed',
+            'failed to read task resources',
+          );
+        }
+        return;
+      case 'lease.status.get':
+        try {
+          write({
+            version: 1,
+            type: 'lease.status.result',
+            requestId: request.requestId,
+            ...this.authority.leaseStatus(identity, request.leaseRequestId, request.leaseId),
+          });
+        } catch (error) {
+          writeCodedError(
+            write,
+            request.requestId,
+            error,
+            'lease_status_failed',
+            'failed to read lease status',
+          );
+        }
+        return;
       case 'events.read': {
-        const page = this.authority.readEvents(request.afterSequence, request.limit);
+        let page: ReturnType<ControlAuthority['readEvents']>;
+        try {
+          page = this.authority.readEvents(identity, request.afterSequence, request.limit);
+        } catch (error) {
+          writeCodedError(
+            write,
+            request.requestId,
+            error,
+            'events_read_failed',
+            'failed to read control events',
+          );
+          return;
+        }
         write({
           version: 1,
           type: 'events.result',
@@ -607,15 +982,25 @@ function writeProviderError(
   requestId: string,
   error: unknown,
 ): void {
+  writeCodedError(write, requestId, error, 'provider_error', 'browser provider error');
+}
+
+function writeCodedError(
+  write: (message: ControlResponse | ProviderPush) => void,
+  requestId: string,
+  error: unknown,
+  fallbackCode: string,
+  fallbackMessage: string,
+): void {
   const code = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
     ? (error as { code: string }).code
-    : 'provider_error';
+    : fallbackCode;
   write({
     version: 1,
     type: 'error',
     requestId,
     code,
-    message: error instanceof Error ? error.message : 'browser provider error',
+    message: error instanceof Error ? error.message : fallbackMessage,
   });
 }
 

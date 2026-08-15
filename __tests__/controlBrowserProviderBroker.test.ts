@@ -86,11 +86,22 @@ describe('BrowserProviderBroker', () => {
   it('returns the canonical resource in the provider upsert acknowledgement', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'psyche-control-provider-'));
     const endpoint = path.join(root, 'control.sock');
-    const credentials = {
-      authenticate: (token: string) => token === 'operator-token'
-        ? { id: 'operator', kind: 'operator', capabilities: ['*'] }
+    const credentials: ControlCredentialStore = {
+      authenticate: async (token) => token === 'operator-token'
+        ? {
+            id: 'operator',
+            kind: 'operator',
+            capabilities: ['read', 'mutate', 'delegate'],
+            principal: {
+              id: 'operator',
+              kind: 'operator',
+              capabilities: ['read', 'mutate', 'delegate'],
+            },
+          }
         : null,
-    } as unknown as ControlCredentialStore;
+      operatorToken: async () => 'operator-token',
+      agentToken: async () => 'agent-token',
+    };
     const broker = new BrowserProviderBroker({
       upsertResource: async (_providerId, resource) => ({ ...resource, generation: 9 }),
     });
@@ -335,9 +346,27 @@ async function startProviderServer(): Promise<{
   const broker = new BrowserProviderBroker();
   const credentials: ControlCredentialStore = {
     authenticate: async (token) => token === 'operator-token'
-      ? { id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] }
+      ? {
+          id: 'operator',
+          kind: 'operator',
+          capabilities: ['read', 'mutate', 'delegate'],
+          principal: {
+            id: 'operator',
+            kind: 'operator',
+            capabilities: ['read', 'mutate', 'delegate'],
+          },
+        }
       : token === 'agent-token'
-        ? { id: 'agent', kind: 'agent', capabilities: ['read', 'mutate'] }
+        ? {
+            id: 'agent',
+            kind: 'agent',
+            capabilities: ['read', 'mutate'],
+            principal: {
+              id: 'agent',
+              kind: 'agent',
+              capabilities: ['read', 'mutate'],
+            },
+          }
         : null,
     operatorToken: async () => 'operator-token',
     agentToken: async () => 'agent-token',
@@ -365,7 +394,16 @@ describe('ControlServer provider mode', () => {
     const endpoint = `/tmp/psyche-pd-${process.pid}-${Date.now()}.sock`;
     const credentials: ControlCredentialStore = {
       authenticate: async (token) => token === 'operator-token'
-        ? { id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] }
+        ? {
+            id: 'operator',
+            kind: 'operator',
+            capabilities: ['read', 'mutate', 'delegate'],
+            principal: {
+              id: 'operator',
+              kind: 'operator',
+              capabilities: ['read', 'mutate', 'delegate'],
+            },
+          }
         : null,
       operatorToken: async () => 'operator-token', agentToken: async () => 'agent-token',
     };
@@ -436,7 +474,16 @@ describe('ControlServer provider mode', () => {
     const broker = new BrowserProviderBroker();
     const credentials: ControlCredentialStore = {
       authenticate: async (token) => token === 'operator-token'
-        ? { id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] }
+        ? {
+            id: 'operator',
+            kind: 'operator',
+            capabilities: ['read', 'mutate', 'delegate'],
+            principal: {
+              id: 'operator',
+              kind: 'operator',
+              capabilities: ['read', 'mutate', 'delegate'],
+            },
+          }
         : null,
       operatorToken: async () => 'operator-token', agentToken: async () => 'agent-token',
     };

@@ -1,13 +1,14 @@
 /** psyche MCP server (newline-delimited JSON-RPC 2.0 over stdio). */
 
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
-import { ControlClient } from '../control/client.js';
+import { ControlClient, ControlResponseError } from '../control/client.js';
 import {
   createControlCredentialStoreForCanonicalRoot,
   type ControlCredentialStore,
+  type ControlTaskBinding,
 } from '../control/credentials.js';
 import {
   ensureCanonicalHostControlPlane,
@@ -16,12 +17,20 @@ import {
 } from '../control/hostProcess.js';
 import { canonicalizeProjectRoot } from '../control/projectIdentity.js';
 import { controlEndpointForProject } from '../control/endpoint.js';
+import {
+  MAX_CONTROL_TASK_ID_LENGTH,
+  normalizeControlTaskId,
+} from '../control/taskIdentity.js';
 import type {
   ActionReceipt,
   CommandOutcome,
   ControlCommandInput,
   ControlSnapshot,
 } from '../control/types.js';
+import type {
+  LeaseStatusResultData,
+  TaskResourcesResultData,
+} from '../control/protocol.js';
 import type { CapabilityLeaseGrantItem } from '../control/capabilityLeases.js';
 import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
 import { canonicalizeBoundedJson } from '../control/boundedJson.js';
@@ -52,6 +61,56 @@ const ERR_INVALID_REQUEST = -32600;
 const ERR_METHOD_NOT_FOUND = -32601;
 const ERR_INVALID_PARAMS = -32602;
 const ERR_INTERNAL = -32603;
+/** Stable JSON-RPC server error for a control-plane domain response. */
+export const MCP_CONTROL_ERROR_CODE = -32001;
+const UNBOUND_MCP_TASK_ID = 'unbound-mcp-client';
+
+export interface McpTaskBinding {
+  taskId: string;
+  token: string;
+  canonicalProjectRoot: string;
+}
+
+export interface McpRunOptions {
+  taskBinding?: McpTaskBinding;
+}
+
+export async function parseMcpArgs(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+  launchCwd: string = process.cwd(),
+  canonicalize: typeof canonicalizeProjectRoot = canonicalizeProjectRoot,
+): Promise<McpRunOptions> {
+  let cliTaskId: string | undefined;
+  let hasCliTaskId = false;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== '--task-id') continue;
+    const value = args[index + 1];
+    if (value === undefined) throw new TypeError('--task-id requires a value');
+    hasCliTaskId = true;
+    cliTaskId = value;
+    index += 1;
+  }
+
+  const hasEnvTaskId = Object.hasOwn(env, 'PSYCHE_CONTROL_TASK_ID');
+  const hasEnvToken = Object.hasOwn(env, 'PSYCHE_CONTROL_TASK_TOKEN');
+  if (!hasCliTaskId && !hasEnvTaskId && !hasEnvToken) return {};
+
+  const credential = validateMcpTaskCredential({
+    taskId: hasCliTaskId ? cliTaskId : env.PSYCHE_CONTROL_TASK_ID,
+    token: env.PSYCHE_CONTROL_TASK_TOKEN,
+  });
+  if (credential === undefined) return {};
+  const canonicalProjectRoot = await canonicalize(
+    env.PSYCHE_PROJECT_ROOT ?? launchCwd,
+  );
+  return {
+    taskBinding: {
+      ...credential,
+      canonicalProjectRoot,
+    },
+  };
+}
 
 function writeResponse(response: JsonRpcResponse): void {
   process.stdout.write(`${JSON.stringify(response)}\n`);
@@ -70,13 +129,17 @@ export interface ToolDef {
 
 export interface McpControlClient {
   readonly projectRoot?: string;
+  readonly taskBinding?: ControlTaskBinding;
   submit(command: ControlCommandInput): Promise<CommandOutcome>;
   getState(): Promise<ControlSnapshot>;
-  actionStatus(actionId: string): Promise<ActionReceipt | undefined>;
+  taskResources(): Promise<TaskResourcesResultData>;
+  leaseStatus(leaseRequestId: string, leaseId?: string): Promise<LeaseStatusResultData>;
   close(): Promise<void>;
 }
 
 export interface McpDeps {
+  taskProjectRoot?: string;
+  canonicalizeProjectRoot: typeof canonicalizeProjectRoot;
   controlClientForRoot(projectRoot: string): Promise<McpControlClient>;
   listRitualsForRoot(projectRoot: string): Promise<{
     builtin: readonly unknown[];
@@ -108,11 +171,13 @@ export interface McpControlClientBootstrapOptions {
   now?: EnsureHostOptions['now'];
   sleep?: EnsureHostOptions['sleep'];
   entryPath?: string;
+  taskBinding?: McpTaskBinding;
 }
 
 interface SharedControlClient {
   key: string;
   canonicalRoot: string;
+  taskBinding?: ControlTaskBinding;
   refs: number;
   promise: Promise<ControlClient>;
   closePromise?: Promise<void>;
@@ -125,19 +190,39 @@ export async function createMcpControlClientForRoot(
   projectRoot: string,
   options: McpControlClientBootstrapOptions = {},
 ): Promise<McpControlClient> {
-  const canonicalRoot = await (options.canonicalize ?? canonicalizeProjectRoot)(projectRoot);
-  const key = `${canonicalRoot}\0${controlEndpointForProject(canonicalRoot)}`;
+  const authenticatedBinding = validateMcpTaskBinding(options.taskBinding);
+  const canonicalRoot = await canonicalizeMcpProjectRoot(
+    projectRoot,
+    authenticatedBinding?.canonicalProjectRoot,
+    options.canonicalize ?? canonicalizeProjectRoot,
+  );
+  const endpoint = controlEndpointForProject(canonicalRoot);
+  const taskBinding = authenticatedBinding === undefined
+    ? undefined
+    : { taskId: authenticatedBinding.taskId };
+  const key = JSON.stringify([
+    canonicalRoot,
+    endpoint,
+    authenticatedBinding === undefined
+      ? ['unbound']
+      : [
+        'task',
+        authenticatedBinding.canonicalProjectRoot,
+        authenticatedBinding.taskId,
+        tokenFingerprint(authenticatedBinding.token),
+      ],
+  ]);
   let shared = sharedControlClients.get(key);
   if (!shared) {
     let startup = controlStartupFlights.get(key);
     if (!startup) {
-      startup = startMcpControlClient(canonicalRoot, options);
+      startup = startMcpControlClient(canonicalRoot, options, authenticatedBinding);
       controlStartupFlights.set(key, startup);
       void startup.finally(() => {
         if (controlStartupFlights.get(key) === startup) controlStartupFlights.delete(key);
       }).catch(() => undefined);
     }
-    shared = { key, canonicalRoot, refs: 0, promise: startup };
+    shared = { key, canonicalRoot, taskBinding, refs: 0, promise: startup };
     sharedControlClients.set(key, shared);
     void startup.catch(() => {
       if (sharedControlClients.get(key) === shared) sharedControlClients.delete(key);
@@ -156,18 +241,86 @@ export async function createMcpControlClientForRoot(
 async function startMcpControlClient(
   canonicalRoot: string,
   options: McpControlClientBootstrapOptions,
+  binding: McpTaskBinding | undefined,
 ): Promise<ControlClient> {
-  const credentials = await (
-    options.credentialStoreForCanonicalRoot ?? createControlCredentialStoreForCanonicalRoot
-  )({ canonicalProjectRoot: canonicalRoot });
-  const token = await credentials.agentToken();
+  let token: string;
+  if (binding === undefined) {
+    const credentials = await (
+      options.credentialStoreForCanonicalRoot ?? createControlCredentialStoreForCanonicalRoot
+    )({ canonicalProjectRoot: canonicalRoot });
+    token = await credentials.agentToken();
+  } else {
+    token = binding.token;
+  }
   return ensureCanonicalHostControlPlane(canonicalRoot, {
     token, clientName: 'psyche-mcp', entryPath: options.entryPath ?? entryPath,
+    ...(binding === undefined ? {} : { taskBinding: { taskId: binding.taskId } }),
     ...(options.connect === undefined ? {} : { connect: options.connect }),
     ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
   });
+}
+
+export function validateMcpTaskBinding(binding: {
+  taskId?: unknown;
+  token?: unknown;
+  canonicalProjectRoot?: unknown;
+} | undefined): McpTaskBinding | undefined {
+  const credential = validateMcpTaskCredential(binding);
+  if (credential === undefined) return undefined;
+  if (
+    typeof binding?.canonicalProjectRoot !== 'string'
+    || binding.canonicalProjectRoot.length === 0
+  ) {
+    throw new TypeError('task-bound MCP requires a canonical launch project root');
+  }
+  return {
+    ...credential,
+    canonicalProjectRoot: binding.canonicalProjectRoot,
+  };
+}
+
+function validateMcpTaskCredential(binding: {
+  taskId?: unknown;
+  token?: unknown;
+} | undefined): Pick<McpTaskBinding, 'taskId' | 'token'> | undefined {
+  if (binding === undefined) return undefined;
+  const taskId = normalizeControlTaskId(binding.taskId);
+  if (taskId === undefined) {
+    throw new TypeError(
+      `MCP task ID must be non-blank and at most ${MAX_CONTROL_TASK_ID_LENGTH} characters`,
+    );
+  }
+  if (typeof binding.token !== 'string' || binding.token.trim().length === 0) {
+    throw new TypeError('task-bound MCP requires a task token');
+  }
+  if (binding.token !== binding.token.trim()) {
+    throw new TypeError('task-bound MCP task token must not contain surrounding whitespace');
+  }
+  return { taskId, token: binding.token };
+}
+
+function tokenFingerprint(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
+}
+
+async function canonicalizeMcpProjectRoot(
+  projectRoot: string,
+  taskProjectRoot: string | undefined,
+  canonicalize: typeof canonicalizeProjectRoot,
+): Promise<string> {
+  const canonicalRoot = await canonicalize(projectRoot);
+  if (
+    taskProjectRoot !== undefined
+    && canonicalRoot !== taskProjectRoot
+  ) {
+    throw new ControlResponseError(
+      'task_project_mismatch',
+      'task_project_mismatch: requested project does not match task launch project',
+    );
+  }
+  return canonicalRoot;
 }
 
 function borrowedControlClient(shared: SharedControlClient): McpControlClient {
@@ -176,15 +329,21 @@ function borrowedControlClient(shared: SharedControlClient): McpControlClient {
     try {
       return await operation(await shared.promise);
     } catch (error) {
-      await invalidateSharedControlClient(shared);
+      if (!(error instanceof ControlResponseError)) {
+        await invalidateSharedControlClient(shared);
+      }
       throw error;
     }
   };
   return {
     projectRoot: shared.canonicalRoot,
+    taskBinding: shared.taskBinding,
     submit: (command) => use((client) => client.submit(command)),
     getState: () => use((client) => client.getState()),
-    actionStatus: (actionId) => use((client) => client.actionStatus(actionId)),
+    taskResources: () => use((client) => client.taskResources()),
+    leaseStatus: (requestId, leaseId) => (
+      use((client) => client.leaseStatus(requestId, leaseId))
+    ),
     async close() {
       if (released) return;
       released = true;
@@ -215,6 +374,7 @@ export async function closeMcpControlClients(): Promise<void> {
 }
 
 export const defaultMcpDeps: McpDeps = {
+  canonicalizeProjectRoot,
   controlClientForRoot: createMcpControlClientForRoot,
   async listRitualsForRoot(projectRoot) {
     return {
@@ -236,10 +396,17 @@ export function setMcpDeps(next: Partial<McpDeps>): () => void {
   return () => { deps = previous; };
 }
 
-function resolveProjectRoot(args: Record<string, unknown>): string {
+async function resolveProjectRoot(args: Record<string, unknown>): Promise<string> {
   const raw = args.project_root ?? args.projectRoot;
-  if (typeof raw === 'string' && raw.trim()) return raw;
-  return process.env.PSYCHE_PROJECT_ROOT ?? process.cwd();
+  const requestedRoot = typeof raw === 'string' && raw.trim()
+    ? raw
+    : process.env.PSYCHE_PROJECT_ROOT ?? process.cwd();
+  if (deps.taskProjectRoot === undefined) return requestedRoot;
+  return canonicalizeMcpProjectRoot(
+    requestedRoot,
+    deps.taskProjectRoot,
+    deps.canonicalizeProjectRoot,
+  );
 }
 
 function invalid(message: string): never {
@@ -258,18 +425,42 @@ function requiredPositiveInteger(args: Record<string, unknown>, key: string): nu
   return value as number;
 }
 
-function leaseAuthorization(args: Record<string, unknown>): {
+function suppliedTaskId(args: Record<string, unknown>): string | undefined {
+  if (!Object.hasOwn(args, 'task_id')) return undefined;
+  const taskId = normalizeControlTaskId(args.task_id);
+  if (taskId === undefined) {
+    invalid(`requires non-blank \`task_id\` of at most ${MAX_CONTROL_TASK_ID_LENGTH} characters`);
+  }
+  return taskId;
+}
+
+function taskIdForClient(
+  client: McpControlClient,
+  args: Record<string, unknown>,
+): string {
+  const supplied = suppliedTaskId(args);
+  const authenticated = client.taskBinding?.taskId;
+  if (authenticated !== undefined && supplied !== undefined && supplied !== authenticated) {
+    invalid('supplied `task_id` does not match the authenticated task binding');
+  }
+  return authenticated ?? UNBOUND_MCP_TASK_ID;
+}
+
+function leaseAuthorization(
+  args: Record<string, unknown>,
+  client: McpControlClient,
+): {
   taskId: string;
   leaseId: string;
   leaseRevision: number;
 } | undefined {
+  const taskId = taskIdForClient(client, args);
   if (
-    typeof args.task_id !== 'string' || !args.task_id.trim()
-    || typeof args.lease_id !== 'string' || !args.lease_id.trim()
+    typeof args.lease_id !== 'string' || !args.lease_id.trim()
     || !Number.isSafeInteger(args.lease_revision) || (args.lease_revision as number) < 1
   ) return undefined;
   return {
-    taskId: args.task_id.trim(),
+    taskId,
     leaseId: args.lease_id.trim(),
     leaseRevision: args.lease_revision as number,
   };
@@ -279,7 +470,7 @@ function leaseMissing(): CommandOutcome {
   return {
     status: 'rejected',
     code: 'lease_missing',
-    message: 'task_id, lease_id, and lease_revision are required for this surface operation',
+    message: 'lease_id and lease_revision are required for this surface operation',
   };
 }
 
@@ -314,12 +505,20 @@ async function withControlClient<T>(
 async function submit(
   args: Record<string, unknown>,
   kind: ControlCommandInput['kind'],
-  payload: unknown,
+  payload: unknown | ((client: McpControlClient) => unknown | CommandOutcome),
 ): Promise<CommandOutcome> {
-  const requestedRoot = resolveProjectRoot(args);
-  return withControlClient(requestedRoot, (client) => (
-    client.submit(command(kind, client.projectRoot ?? requestedRoot, payload))
-  ));
+  const requestedRoot = await resolveProjectRoot(args);
+  return withControlClient(requestedRoot, async (client) => {
+    const resolved = typeof payload === 'function' ? payload(client) : payload;
+    if (isCommandOutcome(resolved)) return resolved;
+    return client.submit(command(kind, client.projectRoot ?? requestedRoot, resolved));
+  });
+}
+
+function isCommandOutcome(value: unknown): value is CommandOutcome {
+  return typeof value === 'object' && value !== null
+    && ['rejected', 'succeeded', 'failed', 'unknown']
+      .includes(String((value as { status?: unknown }).status));
 }
 
 function actionResult(outcome: CommandOutcome): ActionReceipt | CommandOutcome {
@@ -334,14 +533,14 @@ function actionResult(outcome: CommandOutcome): ActionReceipt | CommandOutcome {
 
 const projectRootProperty = {
   type: 'string',
-  description: 'Absolute project root. Defaults to PSYCHE_PROJECT_ROOT, then the current directory.',
+  description: 'Absolute project root. Defaults to PSYCHE_PROJECT_ROOT, then the current directory. Task-bound MCP accepts only the canonical launch project or its symlink aliases.',
 };
 const authorizationProperties = {
   task_id: { type: 'string' },
   lease_id: { type: 'string' },
   lease_revision: { type: 'integer', minimum: 1 },
 };
-const authorizationRequired = ['task_id', 'lease_id', 'lease_revision'];
+const authorizationRequired = ['lease_id', 'lease_revision'];
 
 export const TOOLS: ToolDef[] = [
   {
@@ -349,17 +548,17 @@ export const TOOLS: ToolDef[] = [
     description: 'List the bounded pane and browser resources and approvals owned by this project.',
     inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
     handler: async (args) => {
-      const requestedRoot = resolveProjectRoot(args);
+      const requestedRoot = await resolveProjectRoot(args);
       return withControlClient(requestedRoot, async (client) => {
         const projectRoot = client.projectRoot ?? requestedRoot;
-        const snapshot = await client.getState();
+        const scoped = await client.taskResources();
         return {
           project_root: projectRoot,
-          owner_epoch: snapshot.ownerEpoch,
-          sequence: snapshot.sequence,
-          resources: snapshot.resources,
-          approvals: snapshot.approvals,
-          receipts: snapshot.receipts,
+          owner_epoch: scoped.ownerEpoch,
+          sequence: scoped.sequence,
+          resources: scoped.resources,
+          approvals: [],
+          receipts: [],
         };
       });
     },
@@ -369,7 +568,7 @@ export const TOOLS: ToolDef[] = [
     description: 'Request, inspect, or release agent surface authority. This tool cannot grant, expand, or approve authority.',
     inputSchema: {
       type: 'object',
-      required: ['operation', 'task_id'],
+      required: ['operation'],
       properties: {
         operation: { type: 'string', enum: ['request', 'status', 'release'] },
         task_id: { type: 'string' },
@@ -383,26 +582,17 @@ export const TOOLS: ToolDef[] = [
     },
     handler: async (args) => {
       const operation = requiredString(args, 'operation');
-      const taskId = requiredString(args, 'task_id');
       if (!['request', 'status', 'release'].includes(operation)) {
         invalid('psyche_control_lease supports only request, status, and release');
       }
-      const projectRoot = resolveProjectRoot(args);
+      const projectRoot = await resolveProjectRoot(args);
       return withControlClient(projectRoot, async (client) => {
         const canonicalRoot = client.projectRoot ?? projectRoot;
+        const taskId = taskIdForClient(client, args);
         if (operation === 'status') {
           const requestId = requiredString(args, 'request_id');
-          const snapshot = await client.getState();
           const leaseId = typeof args.lease_id === 'string' ? args.lease_id : undefined;
-          return {
-            leases: snapshot.capabilityLeases.filter((lease) => (
-              lease.taskId === taskId && lease.requestId === requestId
-              && (!leaseId || lease.id === leaseId)
-            )),
-            requests: snapshot.leaseRequests.filter((request) => (
-              request.taskId === taskId && request.id === requestId
-            )),
-          };
+          return client.leaseStatus(requestId, leaseId);
         }
         if (operation === 'release') return client.submit(command('lease.release', canonicalRoot, {
           taskId,
@@ -430,13 +620,15 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: async (args) => {
-      const auth = leaseAuthorization(args);
-      if (!auth) return leaseMissing();
-      return actionResult(await submit(args, 'pane.observe', {
-        ...auth,
-        paneId: requiredString(args, 'pane_id'),
-        generation: requiredPositiveInteger(args, 'generation'),
-        ...(Number.isSafeInteger(args.after_sequence) ? { afterSequence: args.after_sequence as number } : {}),
+      return actionResult(await submit(args, 'pane.observe', (client: McpControlClient) => {
+        const auth = leaseAuthorization(args, client);
+        if (!auth) return leaseMissing();
+        return {
+          ...auth,
+          paneId: requiredString(args, 'pane_id'),
+          generation: requiredPositiveInteger(args, 'generation'),
+          ...(Number.isSafeInteger(args.after_sequence) ? { afterSequence: args.after_sequence as number } : {}),
+        };
       }));
     },
   },
@@ -453,19 +645,20 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: async (args) => {
-      const auth = leaseAuthorization(args);
-      if (!auth) return leaseMissing();
       if (!args.action || typeof args.action !== 'object' || Array.isArray(args.action)) invalid('requires `action`');
       const action = args.action as Record<string, unknown>;
-      const payload = action.kind === 'create'
-        ? { ...auth, projectId: requiredString(args, 'project_id'), action }
-        : {
-            ...auth,
-            paneId: requiredString(args, 'pane_id'),
-            generation: requiredPositiveInteger(args, 'generation'),
-            action,
-          };
-      return actionResult(await submit(args, 'pane.action', payload as never));
+      return actionResult(await submit(args, 'pane.action', (client: McpControlClient) => {
+        const auth = leaseAuthorization(args, client);
+        if (!auth) return leaseMissing();
+        return action.kind === 'create'
+          ? { ...auth, projectId: requiredString(args, 'project_id'), action }
+          : {
+              ...auth,
+              paneId: requiredString(args, 'pane_id'),
+              generation: requiredPositiveInteger(args, 'generation'),
+              action,
+            };
+      }));
     },
   },
   {
@@ -481,13 +674,15 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: async (args) => {
-      const auth = leaseAuthorization(args);
-      if (!auth) return leaseMissing();
-      return actionResult(await submit(args, 'browser.inspect', {
-        ...auth,
-        tabId: requiredString(args, 'tab_id'),
-        generation: requiredPositiveInteger(args, 'generation'),
-        ...(args.include_screenshot === true ? { includeScreenshot: true } : {}),
+      return actionResult(await submit(args, 'browser.inspect', (client: McpControlClient) => {
+        const auth = leaseAuthorization(args, client);
+        if (!auth) return leaseMissing();
+        return {
+          ...auth,
+          tabId: requiredString(args, 'tab_id'),
+          generation: requiredPositiveInteger(args, 'generation'),
+          ...(args.include_screenshot === true ? { includeScreenshot: true } : {}),
+        };
       }));
     },
   },
@@ -504,16 +699,18 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: async (args) => {
-      const auth = leaseAuthorization(args);
-      if (!auth) return leaseMissing();
       if (!args.action || typeof args.action !== 'object' || Array.isArray(args.action)) invalid('requires `action`');
-      return actionResult(await submit(args, 'browser.action', {
-        ...auth,
-        tabId: requiredString(args, 'tab_id'),
-        generation: requiredPositiveInteger(args, 'generation'),
-        ...(typeof args.snapshot_id === 'string' ? { snapshotId: args.snapshot_id } : {}),
-        action: args.action,
-      } as never));
+      return actionResult(await submit(args, 'browser.action', (client: McpControlClient) => {
+        const auth = leaseAuthorization(args, client);
+        if (!auth) return leaseMissing();
+        return {
+          ...auth,
+          tabId: requiredString(args, 'tab_id'),
+          generation: requiredPositiveInteger(args, 'generation'),
+          ...(typeof args.snapshot_id === 'string' ? { snapshotId: args.snapshot_id } : {}),
+          action: args.action,
+        };
+      }));
     },
   },
   {
@@ -529,8 +726,6 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: async (args) => {
-      const auth = leaseAuthorization(args);
-      if (!auth) return leaseMissing();
       let scriptArgs: unknown;
       if ('args' in args) {
         try {
@@ -542,27 +737,17 @@ export const TOOLS: ToolDef[] = [
           }).value;
         } catch { invalid('requires bounded plain JSON `args`'); }
       }
-      return actionResult(await submit(args, 'browser.script', {
-        ...auth,
-        tabId: requiredString(args, 'tab_id'),
-        generation: requiredPositiveInteger(args, 'generation'),
-        source: requiredString(args, 'source'),
-        ...('args' in args ? { args: scriptArgs } : {}),
+      return actionResult(await submit(args, 'browser.script', (client: McpControlClient) => {
+        const auth = leaseAuthorization(args, client);
+        if (!auth) return leaseMissing();
+        return {
+          ...auth,
+          tabId: requiredString(args, 'tab_id'),
+          generation: requiredPositiveInteger(args, 'generation'),
+          source: requiredString(args, 'source'),
+          ...('args' in args ? { args: scriptArgs } : {}),
+        };
       }));
-    },
-  },
-  {
-    name: 'psyche_control_action_status',
-    description: 'Read the latest canonical receipt for an action without retrying the action.',
-    inputSchema: {
-      type: 'object', required: ['action_id'],
-      properties: { action_id: { type: 'string' }, project_root: projectRootProperty },
-    },
-    handler: async (args) => {
-      const actionId = requiredString(args, 'action_id');
-      return withControlClient(resolveProjectRoot(args), async (client) => (
-        (await client.actionStatus(actionId)) ?? { status: 'unknown', action_id: actionId }
-      ));
     },
   },
   {
@@ -570,11 +755,11 @@ export const TOOLS: ToolDef[] = [
     description: 'Compatibility alias for listing pane resources through the project control owner.',
     inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
     handler: async (args) => {
-      const requestedRoot = resolveProjectRoot(args);
+      const requestedRoot = await resolveProjectRoot(args);
       return withControlClient(requestedRoot, async (client) => {
         const projectRoot = client.projectRoot ?? requestedRoot;
-        const snapshot = await client.getState();
-        const panes = snapshot.resources.filter((resource) => resource.kind === 'pane');
+        const scoped = await client.taskResources();
+        const panes = scoped.resources.filter((resource) => resource.kind === 'pane');
         return { project_root: projectRoot, count: panes.length, panes };
       });
     },
@@ -591,12 +776,12 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: async (args) => {
-      const auth = leaseAuthorization(args);
-      if (!auth) return leaseMissing();
       const prompt = requiredString(args, 'prompt');
       if (!Array.isArray(args.lanes) || args.lanes.length === 0) invalid('requires at least one lane');
-      const requestedRoot = resolveProjectRoot(args);
+      const requestedRoot = await resolveProjectRoot(args);
       return withControlClient(requestedRoot, (client) => {
+        const auth = leaseAuthorization(args, client);
+        if (!auth) return Promise.resolve(leaseMissing());
         const projectRoot = client.projectRoot ?? requestedRoot;
         const request: OrchestrationTaskRequest = {
           taskId: auth.taskId,
@@ -619,10 +804,10 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: async (args) => {
-      const auth = leaseAuthorization(args);
-      if (!auth) return leaseMissing();
-      const requestedRoot = resolveProjectRoot(args);
+      const requestedRoot = await resolveProjectRoot(args);
       return withControlClient(requestedRoot, async (client) => {
+        const auth = leaseAuthorization(args, client);
+        if (!auth) return leaseMissing();
         const projectRoot = client.projectRoot ?? requestedRoot;
         return actionResult(await client.submit(command('pane.action', projectRoot, {
           ...auth,
@@ -648,13 +833,15 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: async (args) => {
-      const auth = leaseAuthorization(args);
-      if (!auth) return leaseMissing();
-      return actionResult(await submit(args, 'pane.action', {
-        ...auth,
-        paneId: requiredString(args, 'pane_id'),
-        generation: requiredPositiveInteger(args, 'generation'),
-        action: { kind: 'close' },
+      return actionResult(await submit(args, 'pane.action', (client: McpControlClient) => {
+        const auth = leaseAuthorization(args, client);
+        if (!auth) return leaseMissing();
+        return {
+          ...auth,
+          paneId: requiredString(args, 'pane_id'),
+          generation: requiredPositiveInteger(args, 'generation'),
+          action: { kind: 'close' },
+        };
       }));
     },
   },
@@ -670,13 +857,15 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: async (args) => {
-      const auth = leaseAuthorization(args);
-      if (!auth) return leaseMissing();
-      return actionResult(await submit(args, 'pane.observe', {
-        ...auth,
-        paneId: requiredString(args, 'pane_id'),
-        generation: requiredPositiveInteger(args, 'generation'),
-        ...(Number.isSafeInteger(args.after_sequence) ? { afterSequence: args.after_sequence as number } : {}),
+      return actionResult(await submit(args, 'pane.observe', (client: McpControlClient) => {
+        const auth = leaseAuthorization(args, client);
+        if (!auth) return leaseMissing();
+        return {
+          ...auth,
+          paneId: requiredString(args, 'pane_id'),
+          generation: requiredPositiveInteger(args, 'generation'),
+          ...(Number.isSafeInteger(args.after_sequence) ? { afterSequence: args.after_sequence as number } : {}),
+        };
       }));
     },
   },
@@ -685,7 +874,7 @@ export const TOOLS: ToolDef[] = [
     description: 'List built-in and project rituals without mutating the host.',
     inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
     handler: async (args) => {
-      const projectRoot = resolveProjectRoot(args);
+      const projectRoot = await resolveProjectRoot(args);
       const rituals = await deps.listRitualsForRoot(projectRoot);
       return {
         project_root: projectRoot,
@@ -699,7 +888,7 @@ export const TOOLS: ToolDef[] = [
     description: 'List git worktrees for the project without mutating the host.',
     inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
     handler: async (args) => {
-      const projectRoot = resolveProjectRoot(args);
+      const projectRoot = await resolveProjectRoot(args);
       const worktrees = await deps.listWorktreesForRoot(projectRoot);
       return { project_root: projectRoot, count: worktrees.length, worktrees };
     },
@@ -746,8 +935,20 @@ export async function handleMcpRequest(req: JsonRpcRequest): Promise<JsonRpcResp
     }
     return { jsonrpc: '2.0', id, result };
   } catch (error) {
-    const code = (error as { code?: number }).code ?? ERR_INTERNAL;
     const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof ControlResponseError) {
+      return {
+        jsonrpc: '2.0',
+        id,
+        error: {
+          code: MCP_CONTROL_ERROR_CODE,
+          message,
+          data: { code: error.code },
+        },
+      };
+    }
+    const errorCode = (error as { code?: unknown }).code;
+    const code = typeof errorCode === 'number' ? errorCode : ERR_INTERNAL;
     return { jsonrpc: '2.0', id, error: { code, message } };
   }
 }
@@ -757,7 +958,18 @@ async function dispatch(request: JsonRpcRequest): Promise<void> {
   if (response) writeResponse(response);
 }
 
-export async function runMcpServer(): Promise<void> {
+export async function runMcpServer(
+  options?: McpRunOptions,
+): Promise<void> {
+  const resolvedOptions = options ?? await parseMcpArgs(process.argv.slice(3), process.env);
+  const restore = resolvedOptions.taskBinding === undefined
+    ? undefined
+    : setMcpDeps({
+        taskProjectRoot: resolvedOptions.taskBinding.canonicalProjectRoot,
+        controlClientForRoot: (projectRoot) => createMcpControlClientForRoot(projectRoot, {
+          taskBinding: resolvedOptions.taskBinding,
+        }),
+      });
   const lines = createInterface({ input: process.stdin, terminal: false });
   lines.on('line', (line) => {
     const trimmed = line.trim();
@@ -778,7 +990,11 @@ export async function runMcpServer(): Promise<void> {
   try {
     await new Promise<void>((resolve) => { lines.on('close', resolve); });
   } finally {
-    await closeMcpControlClients();
+    try {
+      await closeMcpControlClients();
+    } finally {
+      restore?.();
+    }
   }
 }
 
