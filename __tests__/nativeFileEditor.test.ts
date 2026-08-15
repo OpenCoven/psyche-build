@@ -7,8 +7,10 @@ describe('native file editor', () => {
   it('wraps long lines', () => {
     const state = createFileEditorState({ text: 'a'.repeat(10_000) });
 
-    expect(state.facet(EditorView.contentAttributes)).toMatchObject({
-      class: expect.stringContaining('cm-lineWrapping'),
-    });
+    expect(state.facet(EditorView.contentAttributes)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ class: expect.stringContaining('cm-lineWrapping') }),
+      ]),
+    );
   });
 });
