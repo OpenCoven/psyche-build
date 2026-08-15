@@ -38,6 +38,9 @@
     ]
   },
   "plugins": {
+    "macos-fps": {
+      "enabled": true
+    },
     "opener": {}
   }
 }
