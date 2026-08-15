@@ -288,6 +288,7 @@ export class ControlRuntime {
       leases: this.leases.snapshot(),
       resources: this.surfaces.list(),
       capabilityLeases,
+      leaseHistory: this.capabilityLeases.history(),
       leaseRequests: [...this.leaseRequests.values()].map((request) => ({
         ...request,
         grants: request.grants.map((grant) => ({
