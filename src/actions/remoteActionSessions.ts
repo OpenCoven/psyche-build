@@ -165,8 +165,8 @@ function inheritRemoteContext(next: ActionResult, previous: ActionResult): Actio
     ...next,
     data: {
       ...(inheritFiles ? { files: previousFiles } : {}),
-      ...nextData,
       ...context,
+      ...nextData,
     },
   };
 }

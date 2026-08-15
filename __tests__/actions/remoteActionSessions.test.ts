@@ -100,12 +100,12 @@ describe('RemoteActionSessions', () => {
     expect(next.sessionId).toBeDefined();
     expect(next.result.data).toMatchObject({
       host: 'mac.local',
-      projectId: '/repo',
+      projectId: '/forged',
       projectTitle: 'psyche-build',
-      worktreePath: '/repo/.worktrees/feature',
-      sourceBranch: 'feature',
-      targetBranch: 'main',
-      consequence: 'Merges into main',
+      worktreePath: '/forged/worktree',
+      sourceBranch: 'forged',
+      targetBranch: 'production',
+      consequence: 'Something else',
       step: 'commit-message',
     });
     await expect(sessions.respond('device-1', first.sessionId!, {
