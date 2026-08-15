@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { createServer } from 'node:net';
+import { createServer, type Socket } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ControlServer, type ControlServerRuntime } from '../src/control/server.js';
 import { createControlCredentialStore } from '../src/control/credentials.js';
@@ -135,6 +135,49 @@ describe('ControlClient over the socket transport', () => {
     controller.abort();
 
     await expect(pending).rejects.toMatchObject({ name: 'AbortError', code: 'ABORT_ERR' });
+    await closed;
+  });
+
+  it('rejects and closes a welcome bound to a different task', async () => {
+    const endpoint = socketPath();
+    let acceptedSocket: Socket | undefined;
+    let markClosed!: () => void;
+    const closed = new Promise<void>((resolve) => { markClosed = resolve; });
+    const server = createServer((socket) => {
+      acceptedSocket = socket;
+      socket.once('close', () => markClosed());
+      socket.once('data', () => {
+        socket.write(`${JSON.stringify({
+          version: 1,
+          type: 'welcome',
+          requestId: 'welcome',
+          projectRoot: '/canonical/project',
+          ownerEpoch: 7,
+          principal: {
+            id: 'agent',
+            kind: 'agent',
+            capabilities: ['read', 'mutate'],
+          },
+          taskBinding: { taskId: 'task-alpha' },
+        })}\n`);
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(endpoint, resolve);
+    });
+    cleanups.push(async () => {
+      acceptedSocket?.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+
+    await expect(ControlClient.connectCanonical({
+      projectRoot: '/canonical/project',
+      endpoint,
+      token: 'task-alpha-token',
+      clientName: 'task-beta-client',
+      taskBinding: { taskId: 'task-beta' },
+    })).rejects.toThrow('welcome task binding does not match the requested task');
     await closed;
   });
 

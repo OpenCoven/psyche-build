@@ -526,6 +526,49 @@ describe('control server authorization', () => {
     }
   });
 
+  it('returns only the credential-store authenticated task binding over a real socket', async () => {
+    const root = await tempProject();
+    const endpoint = path.join(root, 'control.sock');
+    const filePath = path.join(root, 'control-credentials.json');
+    const credentials = await createControlCredentialStore({ projectRoot: root, filePath });
+    const taskToken = await issueControlTaskToken({
+      projectRoot: root,
+      taskId: 'task-alpha',
+      filePath,
+    });
+    const server = await ControlServer.start({
+      endpoint,
+      projectRoot: root,
+      ownerEpoch: 1,
+      runtime: stubRuntime(vi.fn()),
+      credentials,
+    });
+    const cleanups: Array<() => Promise<void>> = [() => server.close()];
+
+    try {
+      const taskClient = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: taskToken,
+        clientName: 'task-alpha',
+        taskBinding: { taskId: 'task-alpha' },
+      });
+      cleanups.unshift(() => taskClient.close());
+      const sharedAgent = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: await credentials.agentToken(),
+        clientName: 'shared-agent',
+      });
+      cleanups.unshift(() => sharedAgent.close());
+
+      expect(taskClient.taskBinding).toEqual({ taskId: 'task-alpha' });
+      expect(sharedAgent.taskBinding).toBeUndefined();
+    } finally {
+      await Promise.allSettled(cleanups.map(async (close) => close()));
+    }
+  });
+
   it('rejects agent self-delegation and stamps operator identity', async () => {
     const submit = vi.fn(async (command) => ({ status: 'succeeded' as const, value: command.actor }));
     const server = createControlServerForTest({ runtime: stubRuntime(submit) });

@@ -2,6 +2,7 @@ import { connect, type Socket } from 'node:net';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 import { controlEndpointForProject } from './endpoint.js';
 import { encodeControlMessage, type ControlRequest, type ControlResponse } from './protocol.js';
+import type { ControlTaskBinding } from './credentials.js';
 import type {
   ActionReceipt,
   ControlCommandInput,
@@ -19,6 +20,7 @@ export interface ControlClientOptions {
   projectRoot: string;
   token: string;
   clientName: string;
+  taskBinding?: ControlTaskBinding;
   endpoint?: string;
   signal?: AbortSignal;
 }
@@ -48,6 +50,7 @@ export class ControlClient {
     readonly projectRoot: string,
     readonly ownerEpoch: number,
     readonly principal: ControlClientPrincipal,
+    readonly taskBinding: ControlTaskBinding | undefined,
   ) {}
 
   static async connect(options: ControlClientOptions): Promise<ControlClient> {
@@ -113,6 +116,13 @@ export class ControlClient {
             rejectAndClose(new Error('welcome project root does not match the requested project'));
             return;
           }
+          if (
+            options.taskBinding?.taskId !== undefined
+            && message.taskBinding?.taskId !== options.taskBinding.taskId
+          ) {
+            rejectAndClose(new Error('welcome task binding does not match the requested task'));
+            return;
+          }
           cleanup();
           resolve(message);
         };
@@ -141,7 +151,13 @@ export class ControlClient {
       },
     );
 
-    const client = new ControlClient(socket, canonicalRoot, welcome.ownerEpoch, welcome.principal);
+    const client = new ControlClient(
+      socket,
+      canonicalRoot,
+      welcome.ownerEpoch,
+      welcome.principal,
+      welcome.taskBinding,
+    );
     client.attach();
     return client;
   }

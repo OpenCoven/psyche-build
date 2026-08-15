@@ -3,6 +3,7 @@ import { chmod, mkdir, rm } from 'node:fs/promises';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 import { controlEndpointParent } from './endpoint.js';
 import {
+  type AuthenticatedControlIdentity,
   type ControlCredentialStore,
   type ControlPrincipal,
 } from './credentials.js';
@@ -107,6 +108,13 @@ function actorForPrincipal(principal: ControlPrincipal, clientId?: string): Cont
   };
 }
 
+type ControlAuthorityIdentity = AuthenticatedControlIdentity | ControlPrincipal;
+
+function normalizeControlIdentity(identity: ControlAuthorityIdentity): AuthenticatedControlIdentity {
+  if ('principal' in identity) return identity;
+  return { ...identity, principal: identity };
+}
+
 /**
  * Decide whether a principal may submit a command of the given kind.
  *
@@ -183,10 +191,11 @@ export class ControlAuthority {
   ) {}
 
   async submitAs(
-    principal: ControlPrincipal,
+    identity: ControlAuthorityIdentity,
     input: ControlCommandInput,
     clientId?: string,
   ): Promise<CommandOutcome> {
+    const { principal } = normalizeControlIdentity(identity);
     const rejection = authorizeCommand(principal, input.kind);
     if (rejection) return rejection;
 
@@ -199,7 +208,8 @@ export class ControlAuthority {
     return this.runtime.submit(command);
   }
 
-  snapshot(principal: ControlPrincipal): ControlSnapshot {
+  snapshot(identity: ControlAuthorityIdentity): ControlSnapshot {
+    const { principal } = normalizeControlIdentity(identity);
     const snapshot = this.runtime.snapshot();
     if (principal.kind === 'operator') return snapshot;
 
@@ -220,7 +230,11 @@ export class ControlAuthority {
     };
   }
 
-  readEvents(afterSequence: number, limit?: number): {
+  readEvents(
+    _identity: ControlAuthorityIdentity,
+    afterSequence: number,
+    limit?: number,
+  ): {
     events: unknown[];
     nextSequence: number;
     gap: boolean;
@@ -228,7 +242,9 @@ export class ControlAuthority {
     return this.runtime.readEvents(afterSequence, limit);
   }
 
-  welcomeFor(principal: ControlPrincipal): Extract<ControlResponse, { type: 'welcome' }> {
+  welcomeFor(identity: ControlAuthorityIdentity): Extract<ControlResponse, { type: 'welcome' }> {
+    const authenticated = normalizeControlIdentity(identity);
+    const { principal } = authenticated;
     return {
       version: 1,
       type: 'welcome',
@@ -240,6 +256,9 @@ export class ControlAuthority {
         kind: principal.kind,
         capabilities: principal.capabilities,
       },
+      ...(authenticated.taskBinding === undefined
+        ? {}
+        : { taskBinding: authenticated.taskBinding }),
     };
   }
 }
@@ -331,7 +350,7 @@ export class ControlServer {
   }
 
   private handleConnection(socket: Socket): void {
-    let principal: ControlPrincipal | null = null;
+    let identity: AuthenticatedControlIdentity | null = null;
     let clientId: string | undefined;
     let provider: BrowserProviderRegistration | null = null;
     let buffer = '';
@@ -377,9 +396,9 @@ export class ControlServer {
           return;
         }
         tail = tail.then(() => this.handleLine(line, write, fail, {
-          getPrincipal: () => principal,
-          setPrincipal: (value, id) => {
-            principal = value;
+          getIdentity: () => identity,
+          setIdentity: (value, id) => {
+            identity = value;
             clientId = id;
           },
           getClientId: () => clientId,
@@ -400,8 +419,8 @@ export class ControlServer {
     write: (message: ControlResponse | ProviderPush) => void,
     fail: (code: string, message: string, requestId?: string) => void,
     session: {
-      getPrincipal: () => ControlPrincipal | null;
-      setPrincipal: (principal: ControlPrincipal, clientId?: string) => void;
+      getIdentity: () => AuthenticatedControlIdentity | null;
+      setIdentity: (identity: AuthenticatedControlIdentity, clientId?: string) => void;
       getClientId: () => string | undefined;
       getProvider: () => BrowserProviderRegistration | null;
       setProvider: (provider: BrowserProviderRegistration) => void;
@@ -415,8 +434,8 @@ export class ControlServer {
       return;
     }
 
-    const principal = session.getPrincipal();
-    if (!principal) {
+    const identity = session.getIdentity();
+    if (!identity) {
       if (request.type !== 'hello') {
         fail('unauthorized', 'hello required', request.requestId);
         return;
@@ -437,10 +456,11 @@ export class ControlServer {
         fail('project_mismatch', 'project root does not match this owner', request.requestId);
         return;
       }
-      session.setPrincipal(authenticated, request.clientName);
+      session.setIdentity(authenticated, request.clientName);
       write(this.authority.welcomeFor(authenticated));
       return;
     }
+    const { principal } = identity;
 
     await this.broker?.ready();
     const provider = session.getProvider();
@@ -510,7 +530,7 @@ export class ControlServer {
           return;
         }
         const outcome = await this.authority.submitAs(
-          principal,
+          identity,
           request.command,
           session.getClientId(),
         );
@@ -528,11 +548,11 @@ export class ControlServer {
           version: 1,
           type: 'state.result',
           requestId: request.requestId,
-          snapshot: this.authority.snapshot(principal),
+          snapshot: this.authority.snapshot(identity),
         });
         return;
       case 'events.read': {
-        const page = this.authority.readEvents(request.afterSequence, request.limit);
+        const page = this.authority.readEvents(identity, request.afterSequence, request.limit);
         write({
           version: 1,
           type: 'events.result',

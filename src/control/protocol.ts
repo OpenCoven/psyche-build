@@ -7,6 +7,7 @@ import type { BrowserTabSurface } from './surfaces.js';
 import type { ProviderEffectResult, ProviderPush } from './browserProviderBroker.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
 import { canonicalizeBoundedJson } from './boundedJson.js';
+import type { ControlTaskBinding } from './credentials.js';
 
 export const CONTROL_PROTOCOL_VERSION = 1;
 
@@ -73,6 +74,7 @@ export type ControlResponse =
         kind: 'operator' | 'agent' | 'compatibility';
         capabilities: readonly string[];
       };
+      taskBinding?: ControlTaskBinding;
     }
   | { version: 1; type: 'ack'; requestId: string; resource?: BrowserTabSurface }
   | {

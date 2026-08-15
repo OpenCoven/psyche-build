@@ -4,6 +4,7 @@ import {
   CONTROL_PROTOCOL_VERSION,
   decodeControlRequest,
   encodeControlMessage,
+  type ControlResponse,
 } from '../src/control/protocol.js';
 
 describe('control protocol v1', () => {
@@ -38,6 +39,27 @@ describe('control protocol v1', () => {
       type: 'ack',
       requestId: 'req-1',
     })).toBe('{"requestId":"req-1","type":"ack","version":1}');
+  });
+
+  it('allows welcome responses to carry an authenticated task binding', () => {
+    const welcome: Extract<ControlResponse, { type: 'welcome' }> = {
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'welcome',
+      requestId: 'welcome',
+      projectRoot: '/repo',
+      ownerEpoch: 7,
+      principal: {
+        id: 'agent',
+        kind: 'agent',
+        capabilities: ['read', 'mutate'],
+      },
+      taskBinding: { taskId: 'task-alpha' },
+    };
+
+    expect(JSON.parse(encodeControlMessage(welcome))).toMatchObject({
+      type: 'welcome',
+      taskBinding: { taskId: 'task-alpha' },
+    });
   });
 
   it('encodes the checked-in result fixture with stable key ordering', () => {
