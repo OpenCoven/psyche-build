@@ -20,18 +20,18 @@ const textExtensions = new Set([
 const stalePathPattern = /native\/macos\/psyche-build-tauri|['"]native['"]\s*,\s*['"]macos['"]\s*,\s*['"]psyche-build-tauri['"]/;
 const originalBaseCsp = "default-src 'self'; img-src 'self' data: https: http:; style-src 'self'; script-src 'self'; frame-src https: http:; connect-src 'self' ipc: http://ipc.localhost https: http:";
 const pngSignature = Buffer.from('89504e470d0a1a0a', 'hex');
-const jpeg2000Signature = Buffer.from('0000000c6a5020200d0a870a', 'hex');
-const icoDibHeaderSizes = new Set([40]);
-const requiredModernIcnsChunkTypes = new Set([
-  'ic07',
-  'ic08',
-  'ic09',
-  'ic10',
-  'ic11',
-  'ic12',
-  'ic13',
-  'ic14',
-]);
+const pngChunkTypePattern = /^[A-Za-z]{4}$/;
+const requiredModernIcnsChunkDimensions: Record<string, number> = {
+  ic07: 128,
+  ic08: 256,
+  ic09: 512,
+  ic10: 1024,
+  ic11: 32,
+  ic12: 64,
+  ic13: 256,
+  ic14: 512,
+};
+const requiredModernIcnsChunkTypes = new Set(Object.keys(requiredModernIcnsChunkDimensions));
 
 function json(name: string) {
   return JSON.parse(readFileSync(join(desktop, 'src-tauri', name), 'utf8'));
@@ -39,27 +39,6 @@ function json(name: string) {
 
 function readText(path: string) {
   return readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
-}
-
-function hasLeadingSignature(payload: Buffer, signature: Buffer) {
-  return payload.length >= signature.length && payload.subarray(0, signature.length).equals(signature);
-}
-
-function icoPayloadEncoding(payload: Buffer) {
-  if (hasLeadingSignature(payload, pngSignature)) return 'png' as const;
-  if (payload.length < 4) return null;
-
-  const dibHeaderSize = payload.readUInt32LE(0);
-  if (!icoDibHeaderSizes.has(dibHeaderSize)) return null;
-  if (payload.length < dibHeaderSize) return null;
-
-  return 'dib' as const;
-}
-
-function icnsPayloadEncoding(payload: Buffer) {
-  if (hasLeadingSignature(payload, pngSignature)) return 'png' as const;
-  if (hasLeadingSignature(payload, jpeg2000Signature)) return 'jp2' as const;
-  return null;
 }
 
 function paethPredictor(left: number, up: number, upLeft: number) {
@@ -73,10 +52,9 @@ function paethPredictor(left: number, up: number, upLeft: number) {
   return upLeft;
 }
 
-function pngRgba(path: string) {
-  const png = readFileSync(path);
-  if (!hasLeadingSignature(png, pngSignature)) {
-    throw new Error(`Invalid PNG signature: ${path}`);
+function pngRgbaBuffer(png: Buffer, source: string) {
+  if (png.length < pngSignature.length || !png.subarray(0, pngSignature.length).equals(pngSignature)) {
+    throw new Error(`Invalid PNG signature: ${source}`);
   }
 
   let width = 0;
@@ -88,25 +66,30 @@ function pngRgba(path: string) {
   let interlaceMethod = 0;
   let sawIHDR = false;
   let sawIEND = false;
+  let sawIDAT = false;
+  let endedIDATSequence = false;
   let offset = 8;
   const idatChunks: Buffer[] = [];
 
   while (offset < png.length) {
     if (offset + 8 > png.length) {
-      throw new Error(`Truncated PNG chunk header: ${path}`);
+      throw new Error(`Truncated PNG chunk header: ${source}`);
     }
     const length = png.readUInt32BE(offset);
     const type = png.subarray(offset + 4, offset + 8).toString('ascii');
     const dataStart = offset + 8;
     const dataEnd = dataStart + length;
     const chunkEnd = dataEnd + 4;
+    if (!pngChunkTypePattern.test(type)) {
+      throw new Error(`Invalid PNG chunk type ${JSON.stringify(type)}: ${source}`);
+    }
     if (chunkEnd > png.length) {
-      throw new Error(`Out-of-bounds PNG chunk payload: ${path}`);
+      throw new Error(`Out-of-bounds PNG chunk payload: ${source}`);
     }
 
     if (type === 'IHDR') {
-      if (sawIHDR) throw new Error(`Duplicate IHDR chunk: ${path}`);
-      if (length !== 13) throw new Error(`Unexpected IHDR length: ${path}`);
+      if (sawIHDR) throw new Error(`Duplicate IHDR chunk: ${source}`);
+      if (length !== 13) throw new Error(`Unexpected IHDR length: ${source}`);
       sawIHDR = true;
       width = png.readUInt32BE(dataStart);
       height = png.readUInt32BE(dataStart + 4);
@@ -116,11 +99,15 @@ function pngRgba(path: string) {
       filterMethod = png[dataStart + 11];
       interlaceMethod = png[dataStart + 12];
     } else if (!sawIHDR) {
-      throw new Error(`PNG is missing a leading IHDR chunk: ${path}`);
+      throw new Error(`PNG is missing a leading IHDR chunk: ${source}`);
     } else if (type === 'IDAT') {
+      if (endedIDATSequence) throw new Error(`PNG has a non-contiguous IDAT sequence: ${source}`);
+      sawIDAT = true;
       idatChunks.push(png.subarray(dataStart, dataEnd));
+    } else if (type !== 'IEND' && sawIDAT) {
+      endedIDATSequence = true;
     } else if (type === 'IEND') {
-      if (length !== 0) throw new Error(`Unexpected IEND length: ${path}`);
+      if (length !== 0) throw new Error(`Unexpected IEND length: ${source}`);
       sawIEND = true;
       offset = chunkEnd;
       break;
@@ -129,26 +116,31 @@ function pngRgba(path: string) {
     offset = chunkEnd;
   }
 
-  if (!sawIHDR) throw new Error(`Missing IHDR chunk: ${path}`);
-  if (!sawIEND) throw new Error(`Missing IEND chunk: ${path}`);
-  if (offset !== png.length) throw new Error(`Unexpected trailing PNG data: ${path}`);
-  if (bitDepth !== 8) throw new Error(`Unsupported PNG bit depth ${bitDepth}: ${path}`);
-  if (colorType !== 6) throw new Error(`Unsupported PNG color type ${colorType}: ${path}`);
+  if (!sawIHDR) throw new Error(`Missing IHDR chunk: ${source}`);
+  if (!sawIEND) throw new Error(`Missing IEND chunk: ${source}`);
+  if (offset !== png.length) throw new Error(`Unexpected trailing PNG data: ${source}`);
+  if (bitDepth !== 8) throw new Error(`Unsupported PNG bit depth ${bitDepth}: ${source}`);
+  if (colorType !== 6) throw new Error(`Unsupported PNG color type ${colorType}: ${source}`);
   if (compressionMethod !== 0) {
-    throw new Error(`Unsupported PNG compression method ${compressionMethod}: ${path}`);
+    throw new Error(`Unsupported PNG compression method ${compressionMethod}: ${source}`);
   }
-  if (filterMethod !== 0) throw new Error(`Unsupported PNG filter method ${filterMethod}: ${path}`);
+  if (filterMethod !== 0) throw new Error(`Unsupported PNG filter method ${filterMethod}: ${source}`);
   if (interlaceMethod !== 0) {
-    throw new Error(`Unsupported PNG interlace method ${interlaceMethod}: ${path}`);
+    throw new Error(`Unsupported PNG interlace method ${interlaceMethod}: ${source}`);
   }
-  if (width === 0 || height === 0) throw new Error(`Invalid PNG dimensions: ${path}`);
-  if (idatChunks.length === 0) throw new Error(`Missing PNG IDAT data: ${path}`);
+  if (width === 0 || height === 0) throw new Error(`Invalid PNG dimensions: ${source}`);
+  if (idatChunks.length === 0) throw new Error(`Missing PNG IDAT data: ${source}`);
 
   const rowBytes = width * 4;
-  const scanlines = inflateSync(Buffer.concat(idatChunks));
+  let scanlines: Buffer;
+  try {
+    scanlines = inflateSync(Buffer.concat(idatChunks));
+  } catch {
+    throw new Error(`Invalid PNG IDAT stream: ${source}`);
+  }
   const expectedScanlineBytes = height * (rowBytes + 1);
   if (scanlines.length !== expectedScanlineBytes) {
-    throw new Error(`Unexpected PNG scanline size: ${path}`);
+    throw new Error(`Unexpected PNG scanline size: ${source}`);
   }
 
   const rgba = Buffer.alloc(rowBytes * height);
@@ -159,7 +151,7 @@ function pngRgba(path: string) {
     const rowStart = y * rowBytes;
 
     for (let x = 0; x < rowBytes; x += 1) {
-      const source = scanlines[scanlineOffset];
+      const sourceByte = scanlines[scanlineOffset];
       scanlineOffset += 1;
       const left = x >= 4 ? rgba[rowStart + x - 4] : 0;
       const up = y > 0 ? rgba[rowStart - rowBytes + x] : 0;
@@ -167,36 +159,46 @@ function pngRgba(path: string) {
 
       switch (filterType) {
         case 0:
-          rgba[rowStart + x] = source;
+          rgba[rowStart + x] = sourceByte;
           break;
         case 1:
-          rgba[rowStart + x] = (source + left) & 0xff;
+          rgba[rowStart + x] = (sourceByte + left) & 0xff;
           break;
         case 2:
-          rgba[rowStart + x] = (source + up) & 0xff;
+          rgba[rowStart + x] = (sourceByte + up) & 0xff;
           break;
         case 3:
-          rgba[rowStart + x] = (source + Math.floor((left + up) / 2)) & 0xff;
+          rgba[rowStart + x] = (sourceByte + Math.floor((left + up) / 2)) & 0xff;
           break;
         case 4:
-          rgba[rowStart + x] = (source + paethPredictor(left, up, upLeft)) & 0xff;
+          rgba[rowStart + x] = (sourceByte + paethPredictor(left, up, upLeft)) & 0xff;
           break;
         default:
-          throw new Error(`Unsupported PNG filter type ${filterType}: ${path}`);
+          throw new Error(`Unsupported PNG filter type ${filterType}: ${source}`);
       }
     }
   }
 
-  if (scanlineOffset !== scanlines.length) throw new Error(`Unexpected PNG row decoding state: ${path}`);
+  if (scanlineOffset !== scanlines.length) {
+    throw new Error(`Unexpected PNG row decoding state: ${source}`);
+  }
 
   const alphaAt = (x: number, y: number) => {
     if (x < 0 || x >= width || y < 0 || y >= height) {
-      throw new Error(`PNG coordinate out of range (${x}, ${y}): ${path}`);
+      throw new Error(`PNG coordinate out of range (${x}, ${y}): ${source}`);
     }
     return rgba[(y * width + x) * 4 + 3];
   };
 
   return { width, height, bitDepth, colorType, alphaAt };
+}
+
+function pngRgba(path: string) {
+  return pngRgbaBuffer(readFileSync(path), path);
+}
+
+function normalizeIcoDimension(rawDimension: number) {
+  return rawDimension || 256;
 }
 
 function icoEntries(path: string) {
@@ -213,10 +215,10 @@ function icoEntries(path: string) {
   if (tableEnd > ico.length) throw new Error(`Out-of-bounds ICO directory table: ${path}`);
 
   const widths: number[] = [];
-  const encodings: Array<'png' | 'dib'> = [];
   for (let index = 0; index < count; index += 1) {
     const entryOffset = 6 + index * 16;
-    const width = ico[entryOffset] || 256;
+    const width = normalizeIcoDimension(ico[entryOffset]);
+    const height = normalizeIcoDimension(ico[entryOffset + 1]);
     const payloadSize = ico.readUInt32LE(entryOffset + 8);
     const payloadOffset = ico.readUInt32LE(entryOffset + 12);
     const payloadEnd = payloadOffset + payloadSize;
@@ -225,14 +227,17 @@ function icoEntries(path: string) {
     if (payloadOffset < tableEnd) throw new Error(`ICO entry ${index} overlaps the directory: ${path}`);
     if (payloadEnd > ico.length) throw new Error(`ICO entry ${index} extends past EOF: ${path}`);
 
-    const encoding = icoPayloadEncoding(ico.subarray(payloadOffset, payloadEnd));
-    if (!encoding) throw new Error(`ICO entry ${index} has an unsupported payload encoding: ${path}`);
+    const png = pngRgbaBuffer(ico.subarray(payloadOffset, payloadEnd), `${path}#entry-${index}`);
+    if (png.width !== width || png.height !== height) {
+      throw new Error(
+        `ICO entry ${index} dimensions ${png.width}x${png.height} do not match directory ${width}x${height}: ${path}`,
+      );
+    }
 
     widths.push(width);
-    encodings.push(encoding);
   }
 
-  return { widths, encodings, payloadsValidated: true };
+  return { widths };
 }
 
 function icnsChunks(path: string) {
@@ -244,7 +249,6 @@ function icnsChunks(path: string) {
   if (declaredLength !== icns.length) throw new Error(`Mismatched ICNS length: ${path}`);
 
   const chunkTypes: string[] = [];
-  const encodingsByType: Partial<Record<string, 'png' | 'jp2'>> = {};
   let offset = 8;
   while (offset < icns.length) {
     if (offset + 8 > icns.length) throw new Error(`Truncated ICNS chunk header: ${path}`);
@@ -255,16 +259,20 @@ function icnsChunks(path: string) {
     if (chunkEnd > icns.length) throw new Error(`Out-of-bounds ICNS chunk ${type}: ${path}`);
 
     if (requiredModernIcnsChunkTypes.has(type)) {
-      const encoding = icnsPayloadEncoding(icns.subarray(offset + 8, chunkEnd));
-      if (!encoding) throw new Error(`ICNS chunk ${type} has an unsupported image signature: ${path}`);
-      encodingsByType[type] = encoding;
+      const expectedDimension = requiredModernIcnsChunkDimensions[type];
+      const png = pngRgbaBuffer(icns.subarray(offset + 8, chunkEnd), `${path}#${type}`);
+      if (png.width !== expectedDimension || png.height !== expectedDimension) {
+        throw new Error(
+          `ICNS chunk ${type} dimensions ${png.width}x${png.height} do not match expected ${expectedDimension}x${expectedDimension}: ${path}`,
+        );
+      }
     }
 
     chunkTypes.push(type);
     offset = chunkEnd;
   }
 
-  return { chunkTypes, encodingsByType };
+  return { chunkTypes };
 }
 
 function stalePathReferences(): string[] {
@@ -464,10 +472,8 @@ describe('desktop Tauri layout', () => {
       }
       expect(png.alphaAt(Math.floor(png.width / 2), Math.floor(png.height / 2))).toBe(255);
     }
-
     const ico = icoEntries(join(icons, 'icon.ico'));
     expect(ico.widths).toEqual(expect.arrayContaining([16, 24, 32, 48, 64, 256]));
-    expect(ico.payloadsValidated).toBe(true);
 
     const icns = icnsChunks(join(icons, 'icon.icns'));
     expect(icns.chunkTypes).toEqual(expect.arrayContaining([
@@ -480,16 +486,6 @@ describe('desktop Tauri layout', () => {
       'ic13',
       'ic14',
     ]));
-    expect(icns.encodingsByType).toEqual(expect.objectContaining({
-      ic07: 'png',
-      ic08: 'png',
-      ic09: 'png',
-      ic10: 'png',
-      ic11: 'png',
-      ic12: 'png',
-      ic13: 'png',
-      ic14: 'png',
-    }));
   });
 
   it('routes structured targets through the native platform launch descriptor', () => {
