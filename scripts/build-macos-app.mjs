@@ -23,6 +23,8 @@ const BUNDLE_RELATIVE_PATH =
   'native/desktop/psyche-build-tauri/src-tauri/target/release/bundle/macos';
 const PRODUCTION_TAURI_CONFIG_RELATIVE_PATH =
   'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json';
+const MACOS_TAURI_CONFIG_RELATIVE_PATH =
+  'native/desktop/psyche-build-tauri/src-tauri/tauri.macos.conf.json';
 
 const CHANNEL_CONFIG = {
   stable: {
@@ -115,13 +117,55 @@ export function channelConfig(channel) {
   return { ...config };
 }
 
-export function createDevTauriConfig(production) {
+export function createDevTauriConfig(production, macosOverlay = {}) {
   const devConfig = structuredClone(production);
-  const mainWindow = devConfig.app?.windows?.find((window) => window.label === 'main');
-
-  if (!mainWindow) {
+  const overlayConfig = structuredClone(macosOverlay);
+  const baseWindows = devConfig.app?.windows ?? [];
+  const overlayWindows = overlayConfig.app?.windows ?? [];
+  if (!baseWindows.some((window) => window?.label === 'main')) {
     throw new Error('Production Tauri config must contain an app.windows entry labeled "main"');
   }
+
+  const overlayWindowsByLabel = new Map();
+
+  for (const overlayWindow of overlayWindows) {
+    if (typeof overlayWindow?.label === 'string') {
+      overlayWindowsByLabel.set(overlayWindow.label, overlayWindow);
+    }
+  }
+
+  const mergedWindows = baseWindows.map((baseWindow) => {
+    if (typeof baseWindow?.label !== 'string') {
+      return baseWindow;
+    }
+
+    const patch = overlayWindowsByLabel.get(baseWindow.label);
+    return patch ? { ...baseWindow, ...patch } : baseWindow;
+  });
+  const baseWindowLabels = new Set(
+    baseWindows
+      .map((baseWindow) => baseWindow?.label)
+      .filter((label) => typeof label === 'string'),
+  );
+
+  for (const overlayWindow of overlayWindows) {
+    if (typeof overlayWindow?.label === 'string' && baseWindowLabels.has(overlayWindow.label)) {
+      continue;
+    }
+    mergedWindows.push(overlayWindow);
+  }
+
+  devConfig.app = {
+    ...devConfig.app,
+    ...(overlayConfig.app ?? {}),
+    windows: mergedWindows,
+  };
+  devConfig.bundle = {
+    ...devConfig.bundle,
+    ...(overlayConfig.bundle ?? {}),
+  };
+
+  const mainWindow = devConfig.app?.windows?.find((window) => window.label === 'main');
 
   const devIdentity = channelConfig('dev');
   devConfig.productName = devIdentity.productName;
@@ -352,13 +396,22 @@ export async function writeDevTauriConfig(sourceRoot, tempRoot) {
     absoluteSourceRoot,
     PRODUCTION_TAURI_CONFIG_RELATIVE_PATH,
   );
+  const macosOverlayPath = path.join(
+    absoluteSourceRoot,
+    MACOS_TAURI_CONFIG_RELATIVE_PATH,
+  );
   const configPath = path.join(absoluteTempRoot, 'tauri.dev.generated.json');
   const temporaryPath = path.join(
     absoluteTempRoot,
     `.tauri.dev.generated.${createRandomUUID()}.tmp`,
   );
-  const production = JSON.parse(await readFile(productionPath, 'utf8'));
-  const devConfig = createDevTauriConfig(production);
+  const [productionJson, macosOverlayJson] = await Promise.all([
+    readFile(productionPath, 'utf8'),
+    readFile(macosOverlayPath, 'utf8'),
+  ]);
+  const production = JSON.parse(productionJson);
+  const macosOverlay = JSON.parse(macosOverlayJson);
+  const devConfig = createDevTauriConfig(production, macosOverlay);
 
   await mkdir(absoluteTempRoot, { recursive: true });
 
