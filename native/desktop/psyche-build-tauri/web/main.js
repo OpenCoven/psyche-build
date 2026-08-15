@@ -169,10 +169,8 @@
     if (document.hidden || document.visibilityState === "hidden") {
       saveWorkspaceNow().catch(function () {});
       stopCovenPolling();
-      if (typeof stopAgentControlPolling === "function") stopAgentControlPolling("hidden");
     } else {
       startCovenPolling();
-      if (typeof startAgentControlPolling === "function" && activeProject()) startAgentControlPolling();
       if (typeof refreshStatusController === "function") refreshStatusController();
     }
     syncPaneMetricsVisibility();
@@ -398,32 +396,6 @@
     var worktree = selectedWorktree(project);
     return worktree ? worktree.path : (project && project.root);
   }
-  function scheduleAgentControlRefresh() {
-    if (typeof setTimeout !== "function") return;
-    setTimeout(function () {
-      if (typeof refreshAgentControlState === "function") refreshAgentControlState();
-    }, 0);
-  }
-  function selectAgentControlWorktree(project, worktreePath, replacementWorktrees) {
-    if (!project) return false;
-    function effectiveRoot(worktrees, selectedPath) {
-      var available = (Array.isArray(worktrees) ? worktrees : []).filter(function (worktree) {
-        return worktree && !worktree.missing && !worktree.prunable && !worktree.bare;
-      });
-      var selected = available.find(function (worktree) { return worktree.path === selectedPath; }) ||
-        available.find(function (worktree) { return worktree.is_main; }) || available[0];
-      return selected ? selected.path : project.root;
-    }
-    var previousEffectiveRoot = effectiveRoot(project.worktrees, project.selectedWorktreePath);
-    var nextEffectiveRoot = effectiveRoot(replacementWorktrees || project.worktrees, worktreePath);
-    var changed = previousEffectiveRoot !== nextEffectiveRoot;
-    var active = changed && state.activeProjectId === project.id;
-    if (active && typeof invalidateAgentControlContext === "function") invalidateAgentControlContext();
-    if (replacementWorktrees) project.worktrees = replacementWorktrees;
-    project.selectedWorktreePath = worktreePath;
-    if (active) scheduleAgentControlRefresh();
-    return changed;
-  }
   function nextPaneId(prefix) {
     paneCounter += 1;
     return prefix + "-" + paneCounter;
@@ -507,8 +479,7 @@
     return null;
   }
   function activatePaneLayoutFocus(project, worktreePath) {
-    if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, worktreePath);
-    else project.selectedWorktreePath = worktreePath;
+    project.selectedWorktreePath = worktreePath;
     var layout = paneLayoutFor(project.id, worktreePath);
     var leaf = layout && PsychePanes.findLeafById(layout.root, layout.focusedLeafId);
     var surface = leaf && (typeof canvasSurfaceById === "function"
@@ -531,12 +502,12 @@
     if (!project) return false;
     var previousWorktreePath = project.selectedWorktreePath;
     var projectChanged = project.id !== state.activeProjectId;
-<<OURS>>
+    if (!(await showTerminalView())) return false;
+    project.selectedWorktreePath = worktreePath;
     if (projectChanged) {
       var projectOptions = Object.assign({}, options || {}, { refreshStatus: false });
       if (!(await setActiveProject(project.id, projectOptions))) {
-        if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, previousWorktreePath);
-        else project.selectedWorktreePath = previousWorktreePath;
+        project.selectedWorktreePath = previousWorktreePath;
         return false;
       }
     } else {
@@ -850,11 +821,10 @@
       }
     }
     if (state.env && state.env.native_workspace_v2 === false) {
-      var nativeWorktrees = mergeWorktreePresentationState(project, [{
+      project.worktrees = mergeWorktreePresentationState(project, [{
         path: project.root, branch: null, is_main: true, dirty: false, missing: false,
       }]);
-      if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, project.root, nativeWorktrees);
-      else { project.worktrees = nativeWorktrees; project.selectedWorktreePath = project.root; }
+      project.selectedWorktreePath = project.root;
       invalidateChangedDiffScope();
       refreshSidebar();
       if (typeof refreshStatusController === "function") refreshStatusController();
@@ -862,14 +832,9 @@
       return Promise.resolve(project.worktrees);
     }
     return invoke("git_worktrees", { root: project.root }).then(function (worktrees) {
-      var mergedWorktrees = mergeWorktreePresentationState(project, worktrees);
-      var selected = selectedWorktree(Object.assign({}, project, { worktrees: mergedWorktrees }));
-      if (typeof selectAgentControlWorktree === "function") {
-        selectAgentControlWorktree(project, selected ? selected.path : project.root, mergedWorktrees);
-      } else {
-        project.worktrees = mergedWorktrees;
-        project.selectedWorktreePath = selected ? selected.path : project.root;
-      }
+      project.worktrees = mergeWorktreePresentationState(project, worktrees);
+      var selected = selectedWorktree(project);
+      project.selectedWorktreePath = selected ? selected.path : project.root;
       invalidateChangedDiffScope();
       refreshSidebar();
       saveWorkspaceSoon();
@@ -877,11 +842,10 @@
       refreshCovenSessions();
       return project.worktrees;
     }).catch(function () {
-      var fallbackWorktrees = mergeWorktreePresentationState(project, [{
+      project.worktrees = mergeWorktreePresentationState(project, [{
         path: project.root, branch: null, is_main: true, dirty: false, missing: false,
       }]);
-      if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, project.root, fallbackWorktrees);
-      else { project.worktrees = fallbackWorktrees; project.selectedWorktreePath = project.root; }
+      project.selectedWorktreePath = project.root;
       invalidateChangedDiffScope();
       refreshSidebar();
       if (typeof refreshStatusController === "function") refreshStatusController();
@@ -908,7 +872,8 @@
     if (!(await showTerminalView())) return false;
     var project = findProject(id);
     if (!project) return false;
-<<OURS>>
+    if (typeof assignActiveProjectId === "function") assignActiveProjectId(id);
+    else Object.assign(state, { activeProjectId: id });
     clearPassiveCovenPaneFocus();
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
@@ -4449,23 +4414,22 @@
       );
     }
     var project = findProject(thread.projectId);
-    var projectChanged = state.activeProjectId !== thread.projectId;
-    var scopeChanged = projectChanged ||
+    var scopeChanged = state.activeProjectId !== thread.projectId ||
       !project || activeWorkspaceRoot(project) !== thread.worktreePath;
-    if (projectChanged && typeof invalidateAgentControlContext === "function") invalidateAgentControlContext();
     markActiveSurface(thread.kind === "web" ? "browser" : "terminal");
     state.activeThreadId = id;
+    // Make the thread's project the active one so the sidebar/tabs
+    // stay in sync if the user clicked into a different project's thread.
+    if (thread.projectId && state.activeProjectId !== thread.projectId) {
+      if (typeof assignActiveProjectId === "function") assignActiveProjectId(thread.projectId);
+      else Object.assign(state, { activeProjectId: thread.projectId });
+    }
     if (project) {
       if (thread.kind !== "coven-chat" && thread.kind !== "coven-attach") {
         project.lastActiveThreadId = id;
       }
-      if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, thread.worktreePath);
-      else project.selectedWorktreePath = thread.worktreePath;
+      project.selectedWorktreePath = thread.worktreePath;
     }
-    // Make the thread's project active only after its worktree context has
-    // invalidated old authority and selected the exact new workspace.
-    if (thread.projectId && state.activeProjectId !== thread.projectId) state.activeProjectId = thread.projectId;
-    if (projectChanged && typeof scheduleAgentControlRefresh === "function") scheduleAgentControlRefresh();
     var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
     var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
     if (layout && leaf) layout.focusedLeafId = leaf.id;
@@ -4473,7 +4437,23 @@
     if (scopeChanged) renderGitSurface();
     refreshSidebar();
     requestAnimationFrame(function () {
-<<OURS>>
+      var focusedThread = resolveFocusableThread();
+      if (!focusedThread || state.activeThreadId !== id) return;
+      if (
+        isLiveThread(focusedThread) &&
+        focusedThread.terminalController &&
+        focusedThread.pane &&
+        !terminalHost.hidden &&
+        terminalHost.contains(focusedThread.pane)
+      ) {
+        scheduleTerminalPaneFits();
+        if (!options || options.focusTerminal !== false) {
+          withTerminalFocusReportToken(focusedThread, "\x1b[I", "allow", function () {
+            focusedThread.terminalController.focus();
+          });
+        }
+      }
+      scheduleBrowserBounds();
     });
 
     setProjectStatus(project, statusLevel(thread.status));
@@ -4598,7 +4578,6 @@
           : (Array.isArray(tab.history) ? tab.history.slice() : []),
         historyIndex: navigationSnapshot ? navigationSnapshot.historyIndex : tab.historyIndex,
         wasLive: tab.created,
-        controlGeneration: browserTabLifecycle(tab).controlGeneration,
       }];
     }));
     var liveTabs = Array.from(tabMetadataByLabel.values()).filter(function (tab) {
@@ -4610,15 +4589,6 @@
     var labels = browser.tabs.map(function (tab) {
       return browserLabelForTab(project, tab);
     });
-    function terminalizeConfirmedDestroyedBrowserScripts(destroyedLabels) {
-      if (typeof browserScriptTimeoutState === "undefined" || !browserScriptTimeoutState) return;
-      destroyedLabels.forEach(function (label) {
-        var savedTab = tabMetadataByLabel.get(label);
-        if (!savedTab) return;
-        browserScriptTimeoutState.terminalTab(savedTab.id, savedTab.controlGeneration,
-          { reason: "destroyed", message: "browser tab was destroyed after script timeout" });
-      });
-    }
     async function recoverAffectedLiveTabs(recoverLabels, skippedLabels) {
       var recreated = 0;
       var affectedLiveTabs = 0;
@@ -4652,8 +4622,6 @@
           var recoveryNavigationToken = "recovery:" + Date.now() + ":" + index;
           if (!tabLifecycle.automationSource) tabLifecycle.automationSource = PsycheControl.browserAutomationSource();
           await invoke("browser_navigate", {
-            tabId: currentTab.id,
-            generation: tabLifecycle.generation + 1,
             label: savedTab.label,
             url: savedTab.url,
             x: -10000,
@@ -4671,9 +4639,6 @@
           tabLifecycle.liveUrl = savedTab.url;
           tabLifecycle.liveNavigationToken = recoveryNavigationToken;
           tabLifecycle.viewLive = true;
-          tabLifecycle.nativeBounds = { x: -10000, y: -10000, w: 1, h: 1 };
-          if (typeof publishBrowserResource === "function") await publishBrowserResource({ project: project,
-            worktreePath: thread.worktreePath, browser: browser, tab: currentTab });
           recreated += 1;
         } catch (recoveryError) {
           currentTab.created = false;
@@ -4713,13 +4678,6 @@
     browser.tabs.forEach(function (tab) {
       invalidateBrowserNavigation(tab);
     });
-    if (typeof invalidateBrowserAutomation === "function") {
-      await Promise.all(browser.tabs.map(function (tab) { return invalidateBrowserAutomation(tab); }));
-    }
-    browser.tabs.forEach(function (tab) { browserTabLifecycle(tab).publicationSequence += 1; });
-    var publicationTails = browser.tabs.map(function (tab) { return browserTabLifecycle(tab).publicationTail; })
-      .filter(function (tail) { return !!tail; });
-    if (publicationTails.length) await Promise.all(publicationTails);
     var navigationTails = browser.tabs.map(function (tab) {
       return browserTabLifecycle(tab).navigationTail;
     }).filter(function (tail) {
@@ -4770,7 +4728,6 @@
         failedLabels.add(label);
       }
     });
-    terminalizeConfirmedDestroyedBrowserScripts(destroyed);
     if (failures.length) {
       var recovery = await recoverAffectedLiveTabs(destroyed, failedLabels);
       var closeErrors = failures.map(function (failure) {
@@ -4782,14 +4739,8 @@
       setStatus(recoveryStatus, "error");
       return false;
     }
-    if (typeof removeBrowserResource === "function") {
-      await Promise.all(browser.tabs.map(function (tab) { return removeBrowserResource(project, tab); }));
-    }
     var wasActive = state.activeThreadId === thread.id;
     browser.tabs.forEach(function (tab) {
-      if (typeof browserScriptTimeoutState !== "undefined" && browserScriptTimeoutState) {
-        browserScriptTimeoutState.clearTab(tab.id);
-      }
       tab.created = false;
       tab.loading = false;
       var lifecycle = browserTabLifecycle(tab);
@@ -4830,10 +4781,7 @@
       project.lastActiveThreadId = nextThreadId || null;
       if (nextThreadId) {
         var nextThread = findThread(nextThreadId);
-        if (nextThread) {
-          if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, nextThread.worktreePath);
-          else project.selectedWorktreePath = nextThread.worktreePath;
-        }
+        if (nextThread) project.selectedWorktreePath = nextThread.worktreePath;
       }
     }
     return true;
@@ -5188,8 +5136,8 @@
     });
   }
   window.addEventListener("resize", function () {
-    scheduleVisiblePaneFit();
-    Promise.resolve(syncBrowserBounds()).catch(function () {});
+    scheduleTerminalPaneFits();
+    scheduleBrowserBounds();
     // Whether the strip overflows is a function of width, not of its contents.
     scheduleTabMeasurements();
     scheduleSidebarLayout();
@@ -7835,7 +7783,14 @@
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
       .map(function (t) { return t.id; });
-<<OURS>>
+    var preserveTerminalFocus = state.activeProjectId !== id;
+    var closeResults = await Promise.all(threadIds.map(function (tid) {
+      return closeThread(tid, {
+        focus: false,
+        preserveTerminalFocus: preserveTerminalFocus,
+      });
+    }));
+    if (closeResults.some(function (closed) { return closed === false; })) return false;
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
@@ -7851,7 +7806,6 @@
     }
     // Remove the project from state.
     state.projects = state.projects.filter(function (p) { return p.id !== id; });
-    if (typeof invalidateAgentControlContext === "function") invalidateAgentControlContext();
     startCovenPolling();
     if (state.activeProjectId === id) {
       var next = state.projects[0] || null;
@@ -7863,7 +7817,7 @@
         await setActiveProject(next.id);
       } else {
         state.activeThreadId = null;
-<<OURS>>
+        renderPaneWorkspace({ preserveTerminalFocus: false });
         setStatus("no project — click + to open one", "");
       }
     }
@@ -7871,7 +7825,6 @@
     if (restoredTerminalView) syncPaneMetricsVisibility();
     syncProjectBrowser();
     saveWorkspaceSoon();
-    if (providerStopError) setStatus("project removed after control provider stop failed: " + String(providerStopError), "warn");
     if (typeof refreshStatusController === "function") refreshStatusController();
     return true;
   }
@@ -9661,7 +9614,10 @@
     return projectId + "__" + tabId;
   }
   function browserTabLifecycle(tab) {
-<<OURS>>
+    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
+    var lifecycle = browserTabLifecycleStates.get(tab);
+    if (!lifecycle) {
+      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
       browserTabLifecycleStates.set(tab, lifecycle);
     }
     return lifecycle;
@@ -9740,7 +9696,7 @@
     lifecycle.liveUrl = null;
     lifecycle.viewLive = false;
     try {
-      await invoke("browser_destroy", { tabId: context.tab.id, rawLabel: context.label });
+      await invoke("browser_destroy", { label: context.label });
     } catch (error) {
       setStatus("obsolete browser navigation cleanup failed for " + context.label + ": " + String(error), "error");
       return false;
@@ -10432,618 +10388,23 @@
     saveWorkspaceSoon();
     return true;
   }
-  function boundedBrowserResourceText(value, limit) {
-    var text = String(value || "");
-    if (typeof TextEncoder === "undefined" || new TextEncoder().encode(text).byteLength <= limit) return text.slice(0, limit);
-    var low = 0; var high = text.length;
-    while (low < high) {
-      var middle = Math.ceil((low + high) / 2);
-      if (new TextEncoder().encode(text.slice(0, middle)).byteLength <= limit) low = middle;
-      else high = middle - 1;
-    }
-    if (low > 0 && /[\uD800-\uDBFF]/.test(text[low - 1])) low -= 1;
-    return text.slice(0, low);
-  }
-  function browserResource(pair) {
-    if (!pair || !pair.project || !pair.tab) return null;
-    var lifecycle = browserTabLifecycle(pair.tab);
-    var bounds = lifecycle.nativeBounds || { w: 0, h: 0 };
-    return { id: pair.tab.id, kind: "browser_tab", generation: lifecycle.controlGeneration || 0,
-      projectRoot: pair.project.root, worktreeRoot: pair.worktreePath,
-      providerId: "", webviewLabel: lifecycle.nativeLabel,
-      url: boundedBrowserResourceText(pair.tab.url || "about:blank", 2048),
-      title: boundedBrowserResourceText(pair.tab.title || "New tab", 512),
-      loading: !!pair.tab.loading, viewport: { width: Math.max(0, Math.round(bounds.w)), height: Math.max(0, Math.round(bounds.h)) } };
-  }
-  var browserControlProviders = {};
-  var browserControlReplayNeeded = {};
-  function resetBrowserControlProvider(projectRoot) {
-    if (typeof browserScriptTimeoutState !== "undefined" && browserScriptTimeoutState) {
-      browserScriptTimeoutState.clearProject(projectRoot);
-    }
-    delete browserControlProviders[projectRoot];
-    var project = activeProject();
-    if (project && project.root === projectRoot && typeof invalidateAgentControlContext === "function") {
-      invalidateAgentControlContext();
-    }
-  }
-  function ensureBrowserControlProvider(projectRoot) {
-    if (!browserControlProviders[projectRoot]) {
-      browserControlReplayNeeded[projectRoot] = true;
-      browserControlProviders[projectRoot] = invoke("control_provider_start", { projectRoot: projectRoot })
-        .then(function (provider) {
-          return provider;
-        })
-        .catch(function (error) {
-          if (typeof resetBrowserControlProvider === "function") resetBrowserControlProvider(projectRoot);
-          else delete browserControlProviders[projectRoot];
-          throw error;
-        });
-    }
-    return browserControlProviders[projectRoot];
-  }
-  async function replayBrowserResources(projectRoot, excludeTab) {
-    var project = state.projects.find(function (candidate) { return candidate.root === projectRoot; });
-    if (!project) return false;
-    var pairs = [];
-    Object.keys(project.browsersByWorktree || {}).forEach(function (worktreePath) {
-      var browser = project.browsersByWorktree[worktreePath];
-      browser.tabs.forEach(function (tab) {
-        if (tab !== excludeTab && tab.created && browserTabLifecycle(tab).nativeLabel && !browserTabIsClosing(tab)) {
-          pairs.push({ project: project, worktreePath: worktreePath, browser: browser, tab: tab });
-        }
-      });
-    });
-    await Promise.all(pairs.map(function (pair) { return publishBrowserResource(pair); }));
-    return true;
-  }
-  function publishBrowserResource(pair) {
-    var resource = browserResource(pair); if (!resource || !resource.webviewLabel) return Promise.resolve({ status: "deferred" });
-    var lifecycle = browserTabLifecycle(pair.tab);
-    var publicationSequence = ++lifecycle.publicationSequence;
-    var label = resource.webviewLabel;
-    var run = function () {
-      if (lifecycle.closing || lifecycle.nativeLabel !== label) return { status: "deferred" };
-      if (publicationSequence !== lifecycle.publicationSequence) return { status: "superseded" };
-      var upsert = function (retry) {
-        return ensureBrowserControlProvider(pair.project.root).then(function (provider) {
-          resource.providerId = provider.providerId;
-          return invoke("control_provider_upsert", { projectRoot: pair.project.root, resource: resource });
-        }).catch(function (error) {
-          if (typeof resetBrowserControlProvider === "function") resetBrowserControlProvider(pair.project.root);
-          else delete browserControlProviders[pair.project.root];
-          if (retry) return upsert(false);
-          throw error;
-        });
-      };
-      return upsert(true).then(async function (canonical) {
-        if (lifecycle.closing || lifecycle.nativeLabel !== label) return { status: "deferred" };
-        if (publicationSequence !== lifecycle.publicationSequence) return { status: "superseded" };
-        if (!canonical || canonical.webviewLabel !== label) return { status: "deferred" };
-        await invoke("browser_bind_control_generation", { tabId: pair.tab.id, generation: canonical.generation });
-        lifecycle.controlGeneration = canonical.generation;
-        lifecycle.controlLabel = canonical.webviewLabel;
-        if (browserControlReplayNeeded[pair.project.root]) {
-          browserControlReplayNeeded[pair.project.root] = false;
-          await replayBrowserResources(pair.project.root, pair.tab);
-        }
-        return { status: "published", generation: canonical.generation };
-      }, function (error) {
-        if (typeof resetBrowserControlProvider === "function") resetBrowserControlProvider(pair.project.root);
-        else delete browserControlProviders[pair.project.root];
-        lifecycle.controlGeneration = 0;
-        lifecycle.controlLabel = null;
-        setTimeout(function () {
-          if (!lifecycle.closing && lifecycle.nativeLabel === label) publishBrowserResource(pair).catch(function () {});
-        }, 250);
-        return { status: "deferred", error: String(error) };
-      });
-    };
-    var publication = lifecycle.publicationTail ? lifecycle.publicationTail.then(run, run) : run();
-    lifecycle.publicationTail = publication.then(function () {}, function () {});
-    return publication;
-  }
-  function removeBrowserResource(project, tab) {
-    if (!project || !tab) return Promise.resolve(false);
-    var remove = function (retry) {
-      return invoke("control_provider_remove", { projectRoot: project.root, tabId: tab.id })
-        .catch(async function (error) {
-          var message = String(error).trim().replace(/^Error:\s*/, "");
-          if (message === "browser resource is not registered") return { removed: true };
-          if (typeof resetBrowserControlProvider === "function") resetBrowserControlProvider(project.root);
-          else delete browserControlProviders[project.root];
-          if (retry) {
-            await ensureBrowserControlProvider(project.root);
-            await replayBrowserResources(project.root);
-            return remove(false);
-          }
-          var lifecycle = browserTabLifecycle(tab);
-          lifecycle.controlGeneration = 0;
-          lifecycle.controlLabel = null;
-          return false;
-        });
-    };
-    return remove(true).then(function (result) { return result !== false; });
-  }
-  function invalidateBrowserAutomation(tab) {
-    var lifecycle = browserTabLifecycle(tab);
-    lifecycle.documentId = null;
-    lifecycle.documentSequence += 1;
-    if (!lifecycle.nativeLabel || !lifecycle.controlGeneration) return Promise.resolve(false);
-    return invoke("browser_action", { request: { tabId: tab.id, generation: lifecycle.controlGeneration,
-      snapshotId: "", expectedRisk: {}, action: { kind: "invalidate" } } }).then(function () { return true; });
-  }
-  function queueBrowserAutomationInvalidation(pair) {
-    var lifecycle = browserTabLifecycle(pair.tab);
-    lifecycle.invalidationGeneration += 1;
-    var run = function () { return invalidateBrowserAutomation(pair.tab); };
-    var invalidation = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
-    lifecycle.navigationTail = invalidation.then(function () {}, function () {});
-    return invalidation;
-  }
-  function installBrowserAutomationCompatibility(pair) {
-    var lifecycle = browserTabLifecycle(pair.tab);
-    if (!lifecycle.nativeLabel) return Promise.resolve(false);
-    return invoke("browser_install_automation", { tabId: pair.tab.id, generation: lifecycle.generation })
-      .then(function () { return true; }, function () { return false; });
-  }
-  function validatePendingBrowserInspection(pending) {
-    var lifecycle = browserTabLifecycle(pending.pair.tab);
-    if (lifecycle.closing || lifecycle.nativeLabel !== pending.label || lifecycle.controlLabel !== pending.label ||
-        lifecycle.controlGeneration !== pending.generation || lifecycle.documentId !== pending.documentId ||
-        !pending.documentId || (pending.snapshotId && !String(pending.snapshotId))) throw new Error("snapshot_stale");
-    return lifecycle;
-  }
-  async function queueBrowserInspection(pair, request) {
-    var lifecycle = browserTabLifecycle(pair.tab);
-    var run = async function () {
-      if (lifecycle.publicationTail) await lifecycle.publicationTail;
-      var pending = { pair: pair, label: request.label, generation: request.generation,
-        documentId: lifecycle.documentId, snapshotId: null };
-      validatePendingBrowserInspection(pending);
-      var inspected = await invoke("browser_inspect", { request: { tabId: pair.tab.id,
-        generation: request.generation, documentId: pending.documentId } });
-      var snapshot;
-      try { snapshot = JSON.parse(inspected.snapshotJson); } catch (_) { throw new Error("invalid_snapshot"); }
-      pending.snapshotId = snapshot.snapshotId;
-      validatePendingBrowserInspection(pending);
-      if (!request.includeScreenshot) return snapshot;
-      var screenshot = await invoke("browser_snapshot", { tabId: pair.tab.id, generation: request.generation });
-      if (screenshot.navigationEpoch !== inspected.navigationEpoch ||
-          screenshot.navigationUrl !== inspected.navigationUrl) throw new Error("snapshot_stale");
-      validatePendingBrowserInspection(pending);
-      return { snapshot: snapshot, screenshot: screenshot };
-    };
-    var inspection = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
-    lifecycle.navigationTail = inspection.then(function () {}, function () {});
-    return inspection;
-  }
-  function providerBrowserError(code, message) {
-    var error = new Error(message); error.code = code; return error;
-  }
-  async function queueBrowserProviderNavigation(pair, operation) {
-    var lifecycle = browserTabLifecycle(pair.tab);
-    var run = async function () {
-      if (lifecycle.closing || lifecycle.controlGeneration <= 0 ||
-          lifecycle.controlLabel !== lifecycle.nativeLabel) throw providerBrowserError("snapshot_stale", "browser tab is stale");
-      var url = operation.kind === "navigate" ? normaliseUrl(operation.url) : null;
-      var historyIndex = pair.tab.historyIndex;
-      if (operation.kind === "back") historyIndex -= 1;
-      if (operation.kind === "forward") historyIndex += 1;
-      if (operation.kind === "back" || operation.kind === "forward") url = pair.tab.history[historyIndex];
-      if (!url) throw providerBrowserError("invalid_action", "browser navigation target is unavailable");
-      var bounds = lifecycle.nativeBounds || { x: -10000, y: -10000, w: 1, h: 1 };
-      await invalidateBrowserAutomation(pair.tab);
-      await invoke("browser_navigate", { tabId: pair.tab.id, generation: lifecycle.controlGeneration,
-        label: browserLabelForTab(pair.project, pair.tab), url: url,
-        x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h });
-      pair.tab.created = true; pair.tab.loading = true; pair.tab.url = url; pair.tab.title = tabTitle(url);
-      lifecycle.liveUrl = url; lifecycle.eventUrl = null; lifecycle.documentId = null;
-      if (operation.kind === "back" || operation.kind === "forward") pair.tab.historyIndex = historyIndex;
-      else { pair.tab.history = pair.tab.history.slice(0, pair.tab.historyIndex + 1); pair.tab.history.push(url);
-        pair.tab.historyIndex = pair.tab.history.length - 1; }
-      saveWorkspaceSoon();
-      await publishBrowserResource(pair);
-      return { url: url, title: pair.tab.title };
-    };
-    var navigation = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
-    lifecycle.navigationTail = navigation.then(function () {}, function () {});
-    return navigation;
-  }
-  async function queueBrowserProviderAction(pair, request) {
-    var action = request.operation.action || {};
-    var lifecycle = browserTabLifecycle(pair.tab);
-    var invalidationGeneration = lifecycle.invalidationGeneration;
-    if (["upload", "download", "permission_response"].includes(action.kind)) {
-      throw providerBrowserError("backend_unavailable", action.kind + " native interception is unavailable");
-    }
-    var pane = findBrowserPane(pair.project.id, pair.worktreePath);
-    if (!pane || browserPaneIsClosing(pane)) throw providerBrowserError("provider_unavailable", "browser pane is unavailable");
-    if (action.kind === "reload") return queueBrowserReload(pair.project, pair.tab, pane).then(function (ok) {
-      if (!ok) throw providerBrowserError("backend_unavailable", "browser reload failed");
-      return { url: pair.tab.url || "", title: pair.tab.title || "" };
-    });
-    if (action.kind === "close") {
-      var closeRun = async function () {
-        if (!(await closeBrowserTab(pair.project, pair.tab.id, pair.worktreePath))) {
-          throw providerBrowserError("backend_unavailable", "browser close failed");
-        }
-        return { closed: true };
-      };
-      var closePending = lifecycle.navigationTail ? lifecycle.navigationTail.then(closeRun, closeRun) : closeRun();
-      lifecycle.navigationTail = closePending.then(function () {}, function () {});
-      return closePending;
-    }
-    if (["navigate", "back", "forward"].includes(action.kind)) return queueBrowserProviderNavigation(pair, action);
-    if (action.kind === "screenshot") return invoke("browser_snapshot", {
-      tabId: pair.tab.id, generation: request.generation,
-    });
-    var run = async function () {
-      if (!request.operation.snapshotId || lifecycle.closing ||
-          lifecycle.invalidationGeneration !== invalidationGeneration ||
-          lifecycle.controlGeneration !== request.generation || lifecycle.controlLabel !== lifecycle.nativeLabel) {
-        throw providerBrowserError("snapshot_stale", "browser action binding is stale");
-      }
-      var nativeAction = {};
-      Object.keys(action).forEach(function (key) { if (key !== "semantic") nativeAction[key] = action[key]; });
-      return invoke("browser_action", { request: { tabId: pair.tab.id, generation: request.generation,
-        snapshotId: request.operation.snapshotId, expectedRisk: request.operation.expectedRisk || {}, action: nativeAction } });
-    };
-    var pending = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
-    lifecycle.navigationTail = pending.then(function () {}, function () {});
-    return pending;
-  }
-  async function queueBrowserProviderResolve(pair, request) {
-    var operation = request.operation;
-    var lifecycle = browserTabLifecycle(pair.tab);
-    var run = function () {
-      if (!operation.snapshotId || !operation.elementRef || lifecycle.closing ||
-          lifecycle.controlGeneration !== request.generation || lifecycle.controlLabel !== lifecycle.nativeLabel) {
-        throw providerBrowserError("snapshot_stale", "browser element binding is stale");
-      }
-      return invoke("browser_action", { request: { tabId: pair.tab.id, generation: request.generation,
-        snapshotId: operation.snapshotId, action: { kind: "resolve", elementRef: operation.elementRef,
-          actionKind: operation.actionKind } } });
-    };
-    var pending = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
-    lifecycle.navigationTail = pending.then(function () {}, function () {});
-    return pending;
-  }
-  async function queueBrowserProviderScript(pair, request) {
-    var operation = request.operation || {};
-    var lifecycle = browserTabLifecycle(pair.tab);
-    var expected = operation.expectedContext || {};
-    var documentId = expected.documentId;
-    var label = lifecycle.nativeLabel;
-    var run = async function () {
-      if (!documentId || lifecycle.closing || lifecycle.controlGeneration !== request.generation ||
-          lifecycle.controlLabel !== label || lifecycle.nativeLabel !== label || lifecycle.documentId !== documentId) {
-        throw providerBrowserError("approval_identity_mismatch", "browser script document identity is stale");
-      }
-      var result = await invoke("browser_script", { request: { tabId: pair.tab.id,
-        projectRoot: pair.project.root, actionId: request.actionId,
-        generation: request.generation, invocationId: request.requestId,
-        documentId: documentId, documentToken: expected.documentToken,
-        navigationEpoch: expected.navigationEpoch, navigationUrl: expected.navigationUrl, source: operation.source,
-        args: operation.args === undefined ? null : operation.args } });
-      if (result && result.errorCode) {
-        var runtimeError = providerBrowserError(result.errorCode, result.errorCode);
-        runtimeError.durationMs = result.durationMs;
-        runtimeError.pending = result.pending === true;
-        throw runtimeError;
-      }
-      if (lifecycle.closing || lifecycle.controlGeneration !== request.generation ||
-          lifecycle.controlLabel !== label || lifecycle.nativeLabel !== label || lifecycle.documentId !== documentId) {
-        throw providerBrowserError("effect_unknown", "browser script effect outcome is unknown after document replacement");
-      }
-      return result;
-    };
-    var pending = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
-    lifecycle.navigationTail = pending.then(function () {}, function () {});
-    return pending;
-  }
-  async function queueBrowserProviderScriptContext(pair, request) {
-    var lifecycle = browserTabLifecycle(pair.tab);
-    var documentId = lifecycle.documentId;
-    var label = lifecycle.nativeLabel;
-    var run = function () {
-      if (!documentId || lifecycle.closing || lifecycle.controlGeneration !== request.generation ||
-          lifecycle.controlLabel !== label || lifecycle.nativeLabel !== label || lifecycle.documentId !== documentId) {
-        throw providerBrowserError("snapshot_stale", "browser script document identity is stale");
-      }
-      return invoke("browser_script_context", { request: { tabId: pair.tab.id,
-        generation: request.generation, documentId: documentId } });
-    };
-    var pending = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
-    lifecycle.navigationTail = pending.then(function () {}, function () {});
-    return pending;
-  }
-  var BROWSER_PROVIDER_FAILURE_CODES = new Set([
-    "approval_identity_mismatch", "snapshot_stale", "element_missing", "element_disabled",
-    "element_hidden", "invalid_action", "backend_unavailable", "invalid_snapshot",
-    "unsupported_operation", "result_too_large", "effect_unknown", "action_failed",
-    "script_source_too_large", "script_args_invalid", "script_args_too_large",
-    "script_serialization_failed", "script_execution_failed", "script_realm_limit", "action_timeout",
-    "effect_in_flight", "unknown_pending",
-  ]);
-  function browserProviderFailureCode(error) {
-    var candidate = error && typeof error.code === "string" ? error.code :
-      String(error && error.message || error || "");
-    return BROWSER_PROVIDER_FAILURE_CODES.has(candidate) ? candidate : "action_failed";
-  }
-  var BROWSER_SCRIPT_TIMEOUT_STATE_LIMIT = 256;
-  var BROWSER_SCRIPT_TIMEOUT_STATE_TTL_MS = 60000;
-  function createBrowserScriptTimeoutState(options) {
-    var entries = new Map();
-    var limit = options.limit;
-    var ttlMs = options.ttlMs;
-    function key(identity) {
-      return JSON.stringify([identity.requestId, identity.invocationId, identity.tabId, identity.generation,
-        identity.documentToken]);
-    }
-    function exact(entry, identity) {
-      return entry && entry.requestId === identity.requestId && entry.invocationId === identity.invocationId &&
-        entry.tabId === identity.tabId && entry.generation === identity.generation &&
-        entry.documentToken === identity.documentToken;
-    }
-    function remove(identity) {
-      var identityKey = key(identity); var entry = entries.get(identityKey);
-      if (!exact(entry, identity)) return false;
-      entries.delete(identityKey); options.clearTimeout(entry.timeout); return true;
-    }
-    function complete(identity) {
-      var entry = entries.get(key(identity));
-      if (!exact(entry, identity) || entry.phase !== "running" || entry.terminal) return false;
-      return remove(identity);
-    }
-    function renew(entry) {
-      options.clearTimeout(entry.timeout);
-      entry.timeout = options.setTimeout(function () { remove(entry); }, ttlMs);
-    }
-    function flush(entry) {
-      if (entry.phase !== "acknowledged" || !entry.terminal) return false;
-      if (entry.ordinaryUnknown) return remove(entry);
-      entry.phase = "finishing";
-      var handler = entry.terminal.reason === "completed" && options.release ? options.release : options.finish;
-      Promise.resolve(handler(entry, entry.terminal)).then(function () { remove(entry); }, function () { remove(entry); });
-      return true;
-    }
-    function register(identity) {
-      var identityKey = key(identity);
-      if (entries.has(identityKey) || entries.size >= limit) return false;
-      var entry = Object.assign({}, identity, { phase: "running", terminal: null, timeout: null, startedAt: null });
-      entry.timeout = options.setTimeout(function () { remove(entry); }, ttlMs);
-      entries.set(identityKey, entry); return true;
-    }
-    function started(identity) {
-      var entry = entries.get(key(identity));
-      if (!exact(entry, identity) || entry.phase !== "running" || entry.startedAt !== null) return false;
-      entry.startedAt = options.now ? options.now() : Date.now(); return true;
-    }
-    function timedOut(identity) {
-      var entry = entries.get(key(identity));
-      if (!exact(entry, identity) || entry.phase !== "running" || entry.terminal) return false;
-      renew(entry);
-      entry.phase = "finalizing";
-      Promise.resolve().then(function () {
-        var current = entries.get(key(entry));
-        if (!exact(current, entry) || current.phase !== "finalizing") return;
-        if (current.terminal && current.terminal.reason !== "completed") {
-          current.phase = "acknowledged"; flush(current); return;
-        }
-        current.phase = "notifying";
-        return Promise.resolve(options.notify(current)).then(function () {
-          var acknowledged = entries.get(key(current));
-          if (!exact(acknowledged, current) || acknowledged.phase !== "notifying") return;
-          acknowledged.phase = "acknowledged"; flush(acknowledged);
-        }, function () { remove(current); });
-      });
-      return true;
-    }
-    function unknownPending(identity, durationMs) {
-      var entry = entries.get(key(identity));
-      if (!exact(entry, identity) || entry.phase !== "running") return false;
-      renew(entry);
-      entry.phase = "notifying";
-      Promise.resolve(options.unknown(entry, durationMs)).then(function () {
-        var acknowledged = entries.get(key(entry));
-        if (!exact(acknowledged, entry) || acknowledged.phase !== "notifying") return;
-        acknowledged.phase = "acknowledged"; flush(acknowledged);
-      }, function () {
-        var retained = entries.get(key(entry));
-        if (!exact(retained, entry) || retained.phase !== "notifying") return;
-        retained.phase = "acknowledged"; flush(retained);
-      });
-      return true;
-    }
-    function completeUnknown(identity, completion) {
-      var entry = entries.get(key(identity));
-      if (!exact(entry, identity) || entry.phase !== "running") return false;
-      renew(entry);
-      entry.phase = "confirming-unknown";
-      entry.ordinaryUnknown = true;
-      Promise.resolve(options.confirmUnknown(entry, completion)).then(function () {
-        var acknowledged = entries.get(key(entry));
-        if (!exact(acknowledged, entry) || acknowledged.phase !== "confirming-unknown") return;
-        acknowledged.phase = "acknowledged"; flush(acknowledged);
-      }, function () {
-        var retained = entries.get(key(entry));
-        if (!exact(retained, entry) || retained.phase !== "confirming-unknown") return;
-        retained.phase = "retained";
-      });
-      return true;
-    }
-    function terminal(identity, reason) {
-      var entry = entries.get(key(identity));
-      if (!exact(entry, identity) || entry.phase === "finishing") return false;
-      var terminalRecord = reason && typeof reason === "object" ? reason : { reason: reason };
-      var terminalReason = terminalRecord.reason;
-      if (terminalReason === "completed") {
-        if (!entry.terminal) entry.terminal = terminalRecord;
-        flush(entry);
-        return true;
-      }
-      if (terminalReason !== "document_replaced" && terminalReason !== "destroyed") return false;
-      if (typeof terminalRecord.durationMs !== "number") {
-        var now = options.now ? options.now() : Date.now();
-        terminalRecord.durationMs = entry.startedAt === null ? 0 : Math.min(5000, Math.max(0, now - entry.startedAt));
-      }
-      if (!entry.terminal) entry.terminal = terminalRecord;
-      flush(entry);
-      return true;
-    }
-    function terminalTab(tabId, generation, reason) {
-      var matched = false;
-      Array.from(entries.values()).forEach(function (entry) {
-        if (entry.tabId === tabId && entry.generation === generation) {
-          matched = true; terminal(entry, reason);
-        }
-      });
-      return matched;
-    }
-    function clearWhere(predicate) {
-      Array.from(entries.values()).forEach(function (entry) { if (predicate(entry)) remove(entry); });
-    }
-    return {
-      register: register, started: started, timedOut: timedOut, unknownPending: unknownPending,
-      completeUnknown: completeUnknown,
-      terminal: terminal, terminalTab: terminalTab,
-      complete: complete,
-      clearProject: function (projectRoot) { clearWhere(function (entry) { return entry.projectRoot === projectRoot; }); },
-      clearTab: function (tabId) { clearWhere(function (entry) { return entry.tabId === tabId; }); },
-      size: function () { return entries.size; },
-    };
-  }
-  var browserScriptTimeoutState = createBrowserScriptTimeoutState({
-    limit: BROWSER_SCRIPT_TIMEOUT_STATE_LIMIT, ttlMs: BROWSER_SCRIPT_TIMEOUT_STATE_TTL_MS,
-    setTimeout: setTimeout, clearTimeout: clearTimeout,
-    notify: function (entry) {
-      return invoke("control_provider_complete", { projectRoot: entry.projectRoot, requestId: entry.requestId,
-        result: { actionId: entry.actionId, status: "timed_out_pending", code: "action_timeout",
-          message: "browser script exceeded the execution deadline", durationMs: 5000 } });
-    },
-    unknown: function (entry, durationMs) {
-      return invoke("control_provider_complete", { projectRoot: entry.projectRoot, requestId: entry.requestId,
-        result: { actionId: entry.actionId, status: "unknown_pending", code: "effect_unknown",
-          message: "browser script outcome is unknown after native submission", ambiguous: true,
-          durationMs: typeof durationMs === "number" ? durationMs : 0 } });
-    },
-    confirmUnknown: function (entry, completion) {
-      return invoke("control_provider_complete", { projectRoot: entry.projectRoot, requestId: entry.requestId,
-        result: { actionId: entry.actionId, status: "unknown", code: "effect_unknown",
-          message: completion && completion.message || "browser script reached a confirmed unknown outcome",
-          ambiguous: true, durationMs: completion && typeof completion.durationMs === "number"
-            ? completion.durationMs : 5000 } });
-    },
-    release: function (entry) {
-      return invoke("control_provider_complete", { projectRoot: entry.projectRoot, requestId: entry.requestId,
-        result: { actionId: entry.actionId, status: "unknown", code: "effect_unknown",
-          message: "browser script completed after its deadline", ambiguous: true, durationMs: 5000 } });
-    },
-    finish: function (entry, terminal) {
-      return invoke("control_provider_complete", { projectRoot: entry.projectRoot, requestId: entry.requestId,
-        result: { actionId: entry.actionId, status: "unknown", code: "effect_unknown",
-          message: terminal.message || "browser script reached a late terminal boundary", ambiguous: true,
-          durationMs: typeof terminal.durationMs === "number" ? terminal.durationMs : 0 } });
-    },
-  });
-  function handleBrowserProviderEffect(event) {
-    var payload = event.payload || {}; var operation = payload.operation || {};
-    if (operation.kind !== "inspect" && operation.kind !== "action" && operation.kind !== "resolve" &&
-        operation.kind !== "script_context" && operation.kind !== "script") return false;
-    var pair = state.projects.reduce(function (found, project) {
-      if (found || project.root !== payload.projectRoot) return found; var roots = Object.keys(project.browsersByWorktree || {});
-      for (var i = 0; i < roots.length; i++) { var browser = project.browsersByWorktree[roots[i]];
-        var tab = browser.tabs.find(function (candidate) { return candidate.id === payload.tabId; });
-        if (tab) return { project: project, worktreePath: roots[i], browser: browser, tab: tab }; }
-      return null;
-    }, null);
-    if (!pair || pair.tab.id !== payload.tabId) {
-      invoke("control_provider_complete", { projectRoot: payload.projectRoot, requestId: payload.requestId,
-        result: { actionId: payload.actionId, status: "failed", code: "provider_unavailable",
-          message: "exact browser tab is unavailable", durationMs: 0 } }).catch(function () {});
-      return false;
-    }
-    var lifecycle = browserTabLifecycle(pair.tab);
-    // lifecycle.generation !== payload.generation is intentionally not the trust boundary;
-    // the provider-returned control generation is authoritative.
-    if (lifecycle.controlGeneration !== payload.generation || lifecycle.controlLabel !== lifecycle.nativeLabel) {
-      invoke("control_provider_complete", { projectRoot: payload.projectRoot, requestId: payload.requestId,
-        result: { actionId: payload.actionId, status: "failed", code: "snapshot_stale",
-          message: "browser tab generation is stale", durationMs: 0 } }).catch(function () {});
-      return false;
-    }
-    var scriptIdentity = operation.kind === "script" ? {
-      projectRoot: pair.project.root, requestId: payload.requestId, actionId: payload.actionId,
-      invocationId: payload.requestId, tabId: payload.tabId, generation: payload.generation,
-      documentToken: operation.expectedContext && operation.expectedContext.documentToken,
-    } : null;
-    if (scriptIdentity && !browserScriptTimeoutState.register(scriptIdentity)) {
-      invoke("control_provider_complete", { projectRoot: pair.project.root, requestId: payload.requestId,
-        result: { actionId: payload.actionId, status: "failed", code: "effect_in_flight",
-          message: "browser script timeout state is unavailable", durationMs: 0 } }).catch(function () {});
-      return false;
-    }
-    var effect = operation.kind === "inspect"
-      ? queueBrowserInspection(pair, { requestId: payload.requestId, generation: payload.generation,
-        label: lifecycle.nativeLabel, includeScreenshot: operation.includeScreenshot === true })
-      : operation.kind === "resolve" ? queueBrowserProviderResolve(pair, payload)
-        : operation.kind === "script_context" ? queueBrowserProviderScriptContext(pair, payload)
-          : operation.kind === "script" ? queueBrowserProviderScript(pair, payload) : queueBrowserProviderAction(pair, payload);
-    effect.then(function (value) {
-      if (scriptIdentity && !browserScriptTimeoutState.complete(scriptIdentity)) return;
-      var completedSnapshot = value && value.snapshot ? value.snapshot : value;
-      var completionLifecycle = browserTabLifecycle(pair.tab);
-      if (operation.kind === "inspect" && (!completedSnapshot || completionLifecycle.closing || completionLifecycle.nativeLabel !== lifecycle.nativeLabel ||
-          completionLifecycle.controlLabel !== lifecycle.nativeLabel || completionLifecycle.controlGeneration !== payload.generation ||
-          completionLifecycle.documentId !== completedSnapshot.documentId)) throw new Error("snapshot_stale");
-      return invoke("control_provider_complete", { projectRoot: pair.project.root, requestId: payload.requestId,
-        result: { actionId: payload.actionId, status: "succeeded", value: value } });
-    }).catch(function (error) {
-      var code = browserProviderFailureCode(error);
-      if (operation.kind === "script" && code === "action_timeout" && error && error.pending === true) {
-        browserScriptTimeoutState.timedOut(scriptIdentity);
-        return;
-      }
-      if (operation.kind === "script" && code === "unknown_pending" && error && error.pending === true) {
-        browserScriptTimeoutState.unknownPending(scriptIdentity,
-          error && typeof error.durationMs === "number" ? error.durationMs : 0);
-        return;
-      }
-      if (operation.kind === "script" && code === "effect_unknown") {
-        browserScriptTimeoutState.completeUnknown(scriptIdentity, {
-          message: String(error),
-          durationMs: error && typeof error.durationMs === "number" ? error.durationMs : 5000,
-        });
-        return;
-      }
-      if (scriptIdentity && !browserScriptTimeoutState.complete(scriptIdentity)) return;
-      invoke("control_provider_complete", { projectRoot: pair.project.root, requestId: payload.requestId,
-        result: code === "effect_unknown"
-          ? { actionId: payload.actionId, status: "unknown", code: "effect_unknown",
-              message: String(error), ambiguous: true,
-              durationMs: error && typeof error.durationMs === "number" ? error.durationMs : 5000 }
-          : { actionId: payload.actionId, status: "failed", code: code,
-              message: String(error), durationMs: error && typeof error.durationMs === "number" ? error.durationMs :
-                (code === "action_timeout" ? 5000 : 0) } }).catch(function () {});
-    }); return true;
-  }
   function handleBrowserPageLoad(event) {
     var payload = event.payload || {};
     var pair = browserNativeEventContext(payload.label, payload.url, payload.navigationToken);
     if (!pair) return false;
     if (payload.phase === "started") {
-      if (typeof browserScriptTimeoutState !== "undefined" && browserScriptTimeoutState) {
-        browserScriptTimeoutState.terminalTab(pair.tab.id, browserTabLifecycle(pair.tab).controlGeneration,
-          { reason: "document_replaced", message: "browser document was replaced after script timeout" });
-      }
-      if (typeof queueBrowserAutomationInvalidation === "function") queueBrowserAutomationInvalidation(pair);
       pair.tab.loading = true;
       if (typeof publishBrowserControlResource === "function") {
         publishBrowserControlResource(pair).catch(function () {});
       }
     } else if (payload.phase === "finished") {
-<<OURS>>
+      var loaded = markBrowserTabLoaded(payload.label, payload.url, "", payload.navigationToken);
+      if (loaded && typeof installBrowserAutomationForPair === "function") {
+        installBrowserAutomationForPair(pair).catch(function () {});
+      }
+      if (loaded && typeof publishBrowserControlResource === "function") {
+        publishBrowserControlResource(pair).catch(function () {});
+      }
       return loaded;
     } else {
       return false;
@@ -11052,39 +10413,20 @@
         activeWorkspaceRoot(pair.project) === pair.worktreePath) {
       renderBrowserTabs(); updateBrowserControls();
     }
-    if (typeof publishBrowserResource === "function") publishBrowserResource(pair)
-      .catch(function (error) { setStatus("browser resource publish failed: " + String(error), "error"); });
     return true;
   }
   function handleBrowserTitle(event) {
     var payload = event.payload || {};
-<<OURS>>
+    var marked = markBrowserTabLoaded(payload.label, payload.url, payload.title, payload.navigationToken);
+    var pair = marked && typeof browserTabForNativeLabel === "function"
+      ? browserTabForNativeLabel(payload.label)
+      : null;
+    if (pair && typeof publishBrowserControlResource === "function") {
+      publishBrowserControlResource(pair).catch(function () {});
+    }
+    return marked;
   }
   listen("browser:page-load", handleBrowserPageLoad).catch(function () {});
-  listen("browser:script-terminal", function (event) {
-    var payload = event.payload || {};
-    return browserScriptTimeoutState.terminal({ requestId: payload.invocationId,
-      invocationId: payload.invocationId, tabId: payload.tabId, generation: payload.generation,
-      documentToken: payload.documentToken }, { reason: payload.terminalReason || "destroyed" });
-  }).catch(function () {});
-  listen("browser:script-start-accepted", function (event) {
-    var payload = event.payload || {};
-    return browserScriptTimeoutState.started({ requestId: payload.invocationId,
-      invocationId: payload.invocationId, tabId: payload.tabId, generation: payload.generation,
-      documentToken: payload.documentToken });
-  }).catch(function () {});
-  listen("browser:script-unknown-pending", function (event) {
-    var payload = event.payload || {};
-    return browserScriptTimeoutState.unknownPending({ requestId: payload.invocationId,
-      invocationId: payload.invocationId, tabId: payload.tabId, generation: payload.generation,
-      documentToken: payload.documentToken }, typeof payload.durationMs === "number" ? payload.durationMs : 0);
-  }).catch(function () {});
-  listen("control:provider-effect-request", handleBrowserProviderEffect).catch(function () {});
-  listen("control:provider-disconnected", function (event) {
-    var payload = event.payload || {};
-    browserScriptTimeoutState.clearProject(payload.projectRoot);
-    resetBrowserControlProvider(payload.projectRoot);
-  }).catch(function () {});
   listen("browser:title", handleBrowserTitle).catch(function () {});
   listen("browser:focus", function (event) {
     markActiveSurface("browser");
@@ -11092,7 +10434,7 @@
     var pair = browserTabForNativeLabel(payload.label);
     var pane = pair && findBrowserPane(pair.project.id, pair.worktreePath);
     if (pane && state.activeThreadId !== pane.id) focusThread(pane.id);
-    if (pair && typeof syncBrowserBounds === "function") syncBrowserBounds().catch(function () {});
+    if (pair) publishBrowserControlResource(pair).catch(function () {});
   }).catch(function () {});
   function ensureBrowserModel(project, workspaceRoot) {
     if (!project) return null;
@@ -11131,37 +10473,33 @@
     if (activate || !browser.activeTabId) { browser.activeTabId = tab.id; markActiveSurface("browser"); }
     renderBrowserTabs(); saveWorkspaceSoon(); return tab;
   }
-  async function closeBrowserTab(project, tabId, exactWorktreePath) {
+  async function closeBrowserTab(project, tabId) {
     project = project || activeProject();
-    var browser = ensureBrowserModel(project, exactWorktreePath); if (!browser) return false;
+    var browser = ensureBrowserModel(project); if (!browser) return false;
     var idx = browser.tabs.findIndex(function (t) { return t.id === tabId; }); if (idx < 0) return false;
     var tab = browser.tabs[idx];
     var lifecycle = browserTabLifecycle(tab);
     if (lifecycle.closing) return false;
     lifecycle.closing = true;
-<<OURS>>
+    var closingRoot = Object.keys(project.browsersByWorktree || {}).find(function (root) {
+      return project.browsersByWorktree[root] === browser;
+    }) || project.root;
+    var closingPair = { project: project, worktreePath: closingRoot, browser: browser, tab: tab };
+    if (lifecycle.nativeLabel) {
+      if (!(await invalidateBrowserAutomation(closingPair))) {
+        lifecycle.closing = false;
+        setStatus("browser automation invalidation failed", "error");
+        return false;
+      }
+      await removeBrowserControlResource(closingPair);
+    }
     invalidateBrowserNavigation(tab);
-    if (typeof invalidateBrowserAutomation === "function") await invalidateBrowserAutomation(tab);
     try {
-      await invoke("browser_destroy", { tabId: tab.id, rawLabel: browserLabelForTab(project, tab) });
+      await invoke("browser_destroy", { label: browserLabelForTab(project, tab) });
     } catch (error) {
       lifecycle.closing = false;
-      lifecycle.documentId = lifecycle.nativeLabel + ":" + (++lifecycle.documentSequence) + ":" +
-        (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "recovered");
-      if (typeof installBrowserAutomationCompatibility === "function") await installBrowserAutomationCompatibility({
-        project: project, worktreePath: activeWorkspaceRoot(project), browser: browser, tab: tab }).catch(function () {});
-      if (typeof publishBrowserResource === "function") await publishBrowserResource({ project: project,
-        worktreePath: activeWorkspaceRoot(project), browser: browser, tab: tab }).catch(function () {});
       setStatus("browser tab close failed: " + String(error), "error");
       return false;
-    }
-    if (typeof browserScriptTimeoutState !== "undefined" && browserScriptTimeoutState) {
-      browserScriptTimeoutState.terminalTab(tab.id, lifecycle.controlGeneration,
-        { reason: "destroyed", message: "browser tab was destroyed after script timeout" });
-    }
-    if (typeof removeBrowserResource === "function") await removeBrowserResource(project, tab);
-    if (typeof browserScriptTimeoutState !== "undefined" && browserScriptTimeoutState) {
-      browserScriptTimeoutState.clearTab(tab.id);
     }
     idx = browser.tabs.findIndex(function (t) { return t === tab; });
     if (idx < 0) {
@@ -11180,11 +10518,9 @@
     var worktreePath = activeWorkspaceRoot(project);
     var pane = project && findBrowserPane(project.id, worktreePath);
     if (!tab || browserTabIsClosing(tab) || browserPaneIsClosing(pane) ||
-        tab.created || !tab.url) return false;
+        tab.created || !tab.url || tab.url === "about:blank") return false;
     var navigated = await navigateBrowser(tab.url, { tabId: tab.id, preserveHistory: true });
     pane = project && findBrowserPane(project.id, worktreePath);
-    if (typeof publishBrowserResource === "function") await publishBrowserResource({ project: project,
-      worktreePath: worktreePath, browser: ensureBrowserModel(project, worktreePath), tab: tab });
     return navigated && !browserTabIsClosing(tab) && !browserPaneIsClosing(pane) &&
       tab.created === true;
   }
@@ -11197,12 +10533,7 @@
     if (!tab || browserTabIsClosing(tab) || browserPaneIsClosing(pane)) return false;
     markActiveSurface("browser");
     browser.activeTabId = tabId;
-    renderBrowserTabs();
-    if (tab.created && typeof syncBrowserBounds === "function") await syncBrowserBounds();
-    if (tab.created && typeof publishBrowserResource === "function") await publishBrowserResource({ project: project,
-      worktreePath: activeWorkspaceRoot(project), browser: browser, tab: tab });
-    if (!tab.created) syncProjectBrowser();
-    saveWorkspaceSoon();
+    renderBrowserTabs(); syncProjectBrowser(); saveWorkspaceSoon();
     if (!tab.created) await restoreDormantBrowserTab(project, tab);
     pane = findBrowserPane(project.id, activeWorkspaceRoot(project));
     return browser.tabs.indexOf(tab) !== -1 && !browserTabIsClosing(tab) &&
@@ -11226,7 +10557,6 @@
       renderBrowserTabs();
     }
     syncProjectBrowser();
-    if (tab && !tab.created) await restoreDormantBrowserTab(project, tab);
     if (!options.requireNew && !tab) {
       var activeTab = currentBrowserTab(project);
       if (activeTab && !activeTab.created) await restoreDormantBrowserTab(project, activeTab);
@@ -11297,7 +10627,12 @@
     if (rect.width <= 0 || rect.height <= 0) return null;
     return { x: rect.left, y: rect.top, w: rect.width, h: rect.height };
   }
-<<OURS>>
+  function syncProjectBrowser() { renderBrowserTabs(); scheduleBrowserBounds(); }
+  function syncBrowserBounds() {
+    var project = activeProject(); var tab = currentBrowserTab(project); var label = browserLabelForTab(project, tab); var b = visibleBrowserBounds();
+    if (!b || !tab || !tab.created) { invoke("browser_hide_all_except", { label: null }).catch(function () {}); return; }
+    invoke("browser_hide_all_except", { label: label }).catch(function () {});
+    invoke("browser_set_bounds", { label: label, x: b.x, y: b.y, w: b.w, h: b.h }).catch(function () {});
   }
   function scheduleBrowserBounds() {
     var project = activeProject();
@@ -11374,7 +10709,9 @@
       }
       if (lifecycle.invalidationGeneration !== invalidationGeneration || !requestIsCurrent()) return false;
       var generation = beginBrowserNavigation(tab);
-<<OURS>>
+      lifecycle.controlGeneration = 0;
+      var navigationToken = generation + ":" + (globalThis.crypto && globalThis.crypto.randomUUID ? globalThis.crypto.randomUUID() : Date.now() + ":" + Math.random());
+      if (!lifecycle.automationSource) lifecycle.automationSource = PsycheControl.browserAutomationSource();
       var label = browserLabelForTab(project, tab);
       var nativeLabel = nativeBrowserLabel(label);
       lifecycle.nativeLabel = nativeLabel;
@@ -11383,7 +10720,6 @@
       lifecycle.pendingNavigationToken = navigationToken;
       lifecycle.eventUrl = null;
       lifecycle.viewLive = true;
-      lifecycle.nativeBounds = { x: b.x, y: b.y, w: b.w, h: b.h };
       lifecycle.navigationSnapshot = {
         url: previousUrl,
         title: previousTitle,
@@ -11402,7 +10738,7 @@
       };
       tab.loading = true; tab.title = tabTitle(normalised); renderBrowserTabs(); updateBrowserControls();
       try {
-<<OURS>>
+        var nativeNavigation = await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h, navigationToken: navigationToken, automationSource: lifecycle.automationSource });
         if (!browserNavigationIsCurrent(context)) {
           await discardObsoleteBrowserNavigation(context);
           return false;
@@ -11430,7 +10766,15 @@
           tab.history.push(terminalUrl);
           tab.historyIndex = tab.history.length - 1;
         }
-<<OURS>>
+        if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
+        else scheduleBrowserBounds();
+        var automationInstalled = await Promise.resolve(
+          installBrowserAutomationForPair(navigationPair)
+        ).catch(function () { return false; });
+        if (!automationInstalled) {
+          await Promise.resolve(publishBrowserControlResource(navigationPair)).catch(function () { return false; });
+        }
+        saveWorkspaceSoon();
         return true;
       } catch (err) {
         if (!browserNavigationIsCurrent(context)) {
@@ -11468,7 +10812,8 @@
         tab.loading = false;
         tab.title = previousTitle;
         tab.url = previousUrl;
-<<OURS>>
+        if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
+        else scheduleBrowserBounds();
         writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
         return false;
       }
@@ -11487,26 +10832,25 @@
   urlInput.addEventListener("keydown", function (e) { if (e.key === "Enter") navigateBrowser(urlInput.value); });
   document.getElementById("reload").addEventListener("click", function () {
     var project = activeProject(); var tab = currentBrowserTab(project); var pane = project && findBrowserPane(project.id, activeWorkspaceRoot(project));
-    if (tab && tab.created && !browserTabIsClosing(tab) && !browserPaneIsClosing(pane)) queueBrowserReload(project, tab, pane);
+    if (tab && tab.created && !browserTabIsClosing(tab) && !browserPaneIsClosing(pane)) {
+      navigateBrowser(tab.url, { tabId: tab.id, replace: true, preserveHistory: true }).catch(function () {});
+    }
   });
-  async function queueBrowserReload(project, tab, pane) {
-    var lifecycle = browserTabLifecycle(tab);
-    var run = async function () {
-      if (browserTabIsClosing(tab) || browserPaneIsClosing(pane)) return false;
-      await invalidateBrowserAutomation(tab);
-      tab.loading = true; renderBrowserTabs(); updateBrowserControls();
-      await invoke("browser_reload", { tabId: tab.id, generation: lifecycle.controlGeneration });
-      return true;
-    };
-    var reload = lifecycle.navigationTail ? lifecycle.navigationTail.then(run, run) : run();
-    lifecycle.navigationTail = reload.then(function () {}, function () {});
-    return reload.catch(function () { return false; });
-  }
   document.getElementById("back").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex > 0) { var index = tab.historyIndex - 1; navigateBrowser(tab.history[index], { fromHistory: true, historyIndex: index }); } });
   document.getElementById("forward").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex < tab.history.length - 1) { var index = tab.historyIndex + 1; navigateBrowser(tab.history[index], { fromHistory: true, historyIndex: index }); } });
   document.getElementById("open-surprise").addEventListener("click", openDiceBrowserTab);
   document.getElementById("open-external").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.url && tab.url !== "about:blank" && openUrl) openUrl(tab.url).catch(function () {}); });
-<<OURS>>
+  if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { scheduleBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }
+  function handleWindowBeforeUnload(event) {
+    saveWorkspaceNow().catch(function () {});
+    if (destroyingWindow || !state.openFiles.some(function (file) {
+      return file.dirty || file.savePromise;
+    })) return;
+    event.preventDefault();
+    event.returnValue = true;
+    return true;
+  }
+  window.addEventListener("beforeunload", handleWindowBeforeUnload);
   document.addEventListener("visibilitychange", handleVisibilityChange);
 
   // ============================================================
@@ -11695,7 +11039,33 @@
     if (!appEl) return;
     pendingSidebarOpen = Boolean(open);
     if (!open) closeNewPaneMenu();
-<<OURS>>
+    scheduleSidebarLayout();
+  }
+  function scheduleSidebarWidth(width) {
+    pendingSidebarWidth = width;
+    scheduleSidebarLayout();
+  }
+  function scheduleSidebarLayout() {
+    terminalFrameScheduler.schedule("layout:sidebar", function () {
+      var layoutChanged = false;
+      if (pendingSidebarOpen !== null) {
+        var open = pendingSidebarOpen;
+        pendingSidebarOpen = null;
+        appEl.dataset.sidebar = open ? "open" : "collapsed";
+        if (sidebarMiniEl) sidebarMiniEl.hidden = open;
+        syncSidebarToggleState(!open);
+        layoutChanged = true;
+      }
+      if (pendingSidebarWidth !== null) {
+        document.documentElement.style.setProperty("--sidebar-w", pendingSidebarWidth + "px");
+        pendingSidebarWidth = null;
+        layoutChanged = true;
+      }
+      if (layoutChanged) {
+        scheduleTerminalPaneFits();
+        scheduleBrowserBounds();
+      }
+      syncSessionListScroll();
     });
   }
   function toggleSidebar() { setSidebarOpen(!sidebarOpen()); }
@@ -11724,7 +11094,7 @@
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", up);
         sidebarResizeEl.classList.remove("dragging");
-        requestAnimationFrame(function () { scheduleVisiblePaneFit(); Promise.resolve(syncBrowserBounds()).catch(function () {}); });
+        scheduleSidebarLayout();
       }
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);
@@ -11987,7 +11357,6 @@
 
   // `?` is only a shortcut when nothing text-like has focus.
   document.addEventListener("keydown", async function (event) {
-    if (event.defaultPrevented) return;
     var tag = (event.target && event.target.tagName ? event.target.tagName : "").toLowerCase();
     var typing = tag === "input" || tag === "textarea" || tag === "select" ||
       (event.target && event.target.isContentEditable);
@@ -12013,234 +11382,6 @@
     if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key === "?") { toggleHelp(); event.preventDefault(); }
   });
-
-  // ---- Agent control: daemon state projection + typed operator commands ----
-  var agentControlOverlayEl = document.getElementById("agent-control-overlay");
-  var agentControlDrawerEl = document.getElementById("agent-control-drawer");
-  var agentControlContentEl = document.getElementById("agent-control-content");
-  var agentControlToggleEl = document.getElementById("agent-control-toggle");
-  var agentControlCloseEl = document.getElementById("agent-control-close");
-  var agentControlCountEl = document.getElementById("agent-control-count");
-  var browserAgentControlBadgesEl = document.getElementById("browser-agent-control-badges");
-  var agentControlModel = window.PsycheControl.normalizeAgentControlState({}, { operator: true });
-  var agentControlProjectRoot = null;
-  var agentControlContextSerial = 0;
-  var agentControlPoller = null;
-
-  function agentControlContextToken(root, ownerEpoch) {
-    var project = activeProject();
-    return [agentControlContextSerial, root || "", project ? activeWorkspaceRoot(project) : "",
-      Number.isSafeInteger(ownerEpoch) ? ownerEpoch : "none"].join(":");
-  }
-
-  function invalidateAgentControlContext() {
-    agentControlContextSerial += 1;
-    agentControlProjectRoot = null;
-    agentControlModel = window.PsycheControl.normalizeAgentControlState({}, {
-      operator: true, contextToken: agentControlContextToken(null, null),
-    });
-    if (agentControlContentEl) renderAgentControl();
-    if (!activeProject() && agentControlOverlayEl && !agentControlOverlayEl.hidden) setAgentControlOpen(false);
-  }
-
-  function operatorOutcomeError(response) {
-    if (response && response.type === "error" && typeof response.code === "string" &&
-        typeof response.message === "string") return response.code + ": " + response.message;
-    var outcome = response && response.outcome;
-    if (outcome && outcome.status !== "succeeded") {
-      if (typeof outcome.message === "string") return outcome.message;
-      if (typeof outcome.code === "string") return outcome.code;
-      return "Operator command failed";
-    }
-    return null;
-  }
-
-  async function submitAgentControlOperator(kind, payload) {
-    var project = activeProject();
-    if (!project || project.root !== agentControlProjectRoot) throw new Error("Agent control project changed");
-    var response = await invoke("control_operator_submit", {
-      projectRoot: project.root,
-      command: { kind: kind, payload: payload },
-    });
-    var failure = operatorOutcomeError(response);
-    if (failure) throw new Error(failure);
-    await refreshAgentControlState();
-    return response;
-  }
-
-  var agentControlDrawer = window.PsycheControl.createAgentControlDrawer({
-    root: agentControlContentEl,
-    dialog: agentControlDrawerEl,
-    closeButton: agentControlCloseEl,
-    opener: agentControlToggleEl,
-    getContextToken: function () { return agentControlModel.contextToken; },
-    onClose: function () { setAgentControlOpen(false); },
-    onGrant: function (payload) { return submitAgentControlOperator("lease.grant", payload); },
-    onDeny: function (payload) { return submitAgentControlOperator("approval.resolve", {
-      approvalId: payload.approvalId, payloadDigest: payload.payloadDigest, decision: "deny",
-    }); },
-    onApprove: function (payload) { return submitAgentControlOperator("approval.resolve", {
-      approvalId: payload.approvalId, payloadDigest: payload.payloadDigest, decision: "approve",
-    }); },
-    onRevoke: function (payload) { return submitAgentControlOperator("lease.revoke", {
-      leaseId: payload.leaseId,
-    }); },
-  });
-
-  function renderAgentControlBadgeList(host, badges) {
-    if (!host) return;
-    host.replaceChildren();
-    badges.forEach(function (badge) {
-      var button = document.createElement("button");
-      button.type = "button";
-      button.className = "agent-control-badge";
-      button.textContent = badge.agent + " · " + badge.task;
-      button.setAttribute("aria-label", window.PsycheControl.badgeAccessibleName(badge));
-      button.title = badge.capabilities.join(" · ") + " · expires " + badge.expiresAt;
-      button.dataset.leaseId = badge.leaseId;
-      button.dataset.leaseRevision = String(badge.revision);
-      button.dataset.resourceId = badge.id;
-      button.dataset.resourceGeneration = String(badge.generation);
-      button.addEventListener("click", function (event) { event.stopPropagation(); setAgentControlOpen(true); });
-      host.appendChild(button);
-    });
-    host.hidden = badges.length === 0;
-  }
-
-  function renderAgentControlBadges() {
-    var project = activeProject();
-    state.threads.forEach(function (thread) {
-      if (!thread.pane) return;
-      var badgeEl = thread.agentControlBadges;
-      if (!badgeEl) {
-        badgeEl = document.createElement("span");
-        badgeEl.className = "agent-control-badges";
-        badgeEl.hidden = true;
-        var label = thread.pane.querySelector(".terminal-pane-label");
-        if (label) label.appendChild(badgeEl);
-        thread.agentControlBadges = badgeEl;
-      }
-      var inScope = project && thread.projectId === project.id && thread.worktreePath === activeWorkspaceRoot(project);
-      var resource = inScope && agentControlModel.currentResourceFor
-        ? agentControlModel.currentResourceFor("pane", thread.id) : null;
-      renderAgentControlBadgeList(badgeEl, resource ? agentControlModel.resourceBadgesFor(resource) : []);
-    });
-    var tab = currentBrowserTab(project);
-    var browserBadge = null;
-    if (tab) {
-      var lifecycle = browserTabLifecycle(tab);
-      browserBadge = window.PsycheControl.resourceBadgeFor(agentControlModel, {
-        kind: "browser_tab", id: tab.id, generation: lifecycle.controlGeneration,
-      });
-    }
-    renderAgentControlBadgeList(browserAgentControlBadgesEl, browserBadge ?
-      agentControlModel.resourceBadgesFor({ kind: "browser_tab", id: tab.id,
-        generation: browserTabLifecycle(tab).controlGeneration }) : []);
-  }
-
-  function renderAgentControl() {
-    agentControlDrawer.render(agentControlModel);
-    var count = agentControlModel.pendingCount;
-    agentControlCountEl.hidden = count === 0;
-    agentControlCountEl.textContent = String(count);
-    agentControlToggleEl.setAttribute("aria-label", count
-      ? "Agent control, " + count + " pending"
-      : "Agent control, no pending requests");
-    renderAgentControlBadges();
-  }
-
-  function captureAgentControlContext() {
-    var project = activeProject();
-    var root = project && project.root;
-    if (!root) return null;
-    var worktreeRoot = activeWorkspaceRoot(project);
-    if (agentControlProjectRoot !== root) {
-      agentControlProjectRoot = root;
-      agentControlModel = window.PsycheControl.normalizeAgentControlState({}, {
-        operator: false, projectRoot: root, worktreeRoot: worktreeRoot,
-        contextToken: agentControlContextToken(root, null),
-      });
-      renderAgentControl();
-    }
-    return {
-      serial: agentControlContextSerial, projectRoot: root, worktreeRoot: worktreeRoot,
-      ownerEpoch: agentControlModel.ownerEpoch,
-      contextToken: agentControlModel.contextToken || agentControlContextToken(root, agentControlModel.ownerEpoch),
-    };
-  }
-
-  function agentControlContextMatches(context) {
-    var project = activeProject();
-    return !!project && context.serial === agentControlContextSerial && project.root === context.projectRoot
-      && activeWorkspaceRoot(project) === context.worktreeRoot;
-  }
-
-  agentControlPoller = window.PsycheControl.createAgentControlPoller({
-    captureContext: captureAgentControlContext,
-    contextMatches: agentControlContextMatches,
-    load: async function (context) {
-      await ensureBrowserControlProvider(context.projectRoot);
-      return invoke("control_state", { projectRoot: context.projectRoot });
-    },
-    accept: function (response, context) {
-      var snapshot = response && response.snapshot || response || {};
-      agentControlModel = window.PsycheControl.normalizeAgentControlState(response, {
-        operator: true, projectRoot: context.projectRoot, worktreeRoot: context.worktreeRoot,
-        contextToken: agentControlContextToken(context.projectRoot, snapshot.ownerEpoch),
-      });
-      renderAgentControl();
-    },
-    fail: function (context) {
-      var snapshot = Number.isSafeInteger(context.ownerEpoch) ? { ownerEpoch: context.ownerEpoch } : {};
-      agentControlModel = window.PsycheControl.normalizeAgentControlState(snapshot, {
-        operator: false, projectRoot: context.projectRoot, worktreeRoot: context.worktreeRoot,
-        contextToken: context.contextToken,
-        fetchError: "Agent control state is temporarily unavailable",
-      });
-      renderAgentControl();
-    },
-    clear: function (reason) {
-      var project = activeProject();
-      var root = project && project.root;
-      var worktreeRoot = project ? activeWorkspaceRoot(project) : "";
-      var ownerEpoch = agentControlModel.ownerEpoch;
-      agentControlModel = window.PsycheControl.normalizeAgentControlState(
-        Number.isSafeInteger(ownerEpoch) ? { ownerEpoch: ownerEpoch } : {}, {
-          operator: false, projectRoot: root || "", worktreeRoot: worktreeRoot,
-          contextToken: agentControlModel.contextToken || agentControlContextToken(root, ownerEpoch),
-          fetchError: reason === "hidden" ? "Agent control paused while the window is hidden" : "",
-        });
-      renderAgentControl();
-    },
-  });
-
-  function refreshAgentControlState() {
-    return agentControlPoller ? agentControlPoller.refresh() : Promise.resolve();
-  }
-
-  function setAgentControlOpen(open) {
-    agentControlOverlayEl.hidden = !open;
-    agentControlToggleEl.setAttribute("aria-expanded", String(open));
-    if (open) {
-      agentControlDrawer.open();
-      refreshAgentControlState();
-    } else {
-      agentControlDrawer.close();
-      agentControlToggleEl.focus();
-    }
-  }
-
-  agentControlToggleEl.addEventListener("click", function () { setAgentControlOpen(true); });
-  agentControlCloseEl.addEventListener("click", function () { setAgentControlOpen(false); });
-  agentControlOverlayEl.addEventListener("pointerdown", function (event) {
-    if (event.target === agentControlOverlayEl) setAgentControlOpen(false);
-  });
-  function startAgentControlPolling() {
-    if (agentControlPoller) agentControlPoller.start();
-  }
-  function stopAgentControlPolling(reason) {
-    if (agentControlPoller) agentControlPoller.stop(reason || "stopped");
-  }
 
   // ============================================================
   // 11b. Right-pane panels: files, diffs, git
@@ -13010,13 +12151,8 @@
       return target;
     }
     var previousSelectedWorktreePath = project.selectedWorktreePath;
-    var migratedWorktreePath = remapPath(project.selectedWorktreePath);
-    if (typeof state !== "undefined" && state.activeProjectId === project.id &&
-        migratedWorktreePath !== project.selectedWorktreePath &&
-        typeof invalidateAgentControlContext === "function") invalidateAgentControlContext();
     project.root = canonicalRoot;
-    if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(project, migratedWorktreePath);
-    else project.selectedWorktreePath = migratedWorktreePath;
+    project.selectedWorktreePath = remapPath(project.selectedWorktreePath);
     project.worktrees = (project.worktrees || []).map(function (worktree) {
       if (!worktree) return worktree;
       return Object.assign({}, worktree, { path: remapPath(worktree.path) });
@@ -13085,8 +12221,7 @@
     });
     if (preferIncoming) {
       target.collapsed = incoming.collapsed;
-      if (typeof selectAgentControlWorktree === "function") selectAgentControlWorktree(target, incoming.selectedWorktreePath);
-      else target.selectedWorktreePath = incoming.selectedWorktreePath;
+      target.selectedWorktreePath = incoming.selectedWorktreePath;
       target.name = incoming.name;
     }
     return target;
@@ -13269,7 +12404,7 @@
     syncProjectBrowser();
     saveWorkspaceSoon();
     startCovenPolling();
-    startAgentControlPolling();
+    installAgentControlUi();
     if (typeof refreshStatusController === "function") refreshStatusController();
     return project;
   }
@@ -13615,7 +12750,7 @@
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills();
     await saveWorkspaceNow();
     startCovenPolling();
-    startAgentControlPolling();
+    installAgentControlUi();
     if (paneMetricsPollTimer) clearInterval(paneMetricsPollTimer);
     paneMetricsPollTimer = setInterval(refreshVisiblePaneMetrics, 15000);
     refreshVisiblePaneMetrics();

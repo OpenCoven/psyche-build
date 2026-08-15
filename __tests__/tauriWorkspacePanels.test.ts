@@ -171,7 +171,18 @@ describe('Tauri workspace panels', () => {
   });
 
   it('pins a repository-local Tauri 2 CLI for native builds', () => {
-<<OURS>>
+    expect(parseBuildWebSteps(tauriPackage.scripts['build:web'])).toEqual([
+      { entry: 'web/control/control-entry.js', outfile: 'web/control.bundle.js' },
+      { entry: 'web/editor/editor-entry.js', outfile: 'web/editor.bundle.js' },
+      { entry: 'web/sessions/session-entry.js', outfile: 'web/sessions.bundle.js' },
+      { entry: 'web/panes/pane-entry.js', outfile: 'web/panes.bundle.js' },
+      { entry: 'web/input/input-entry.js', outfile: 'web/input.bundle.js' },
+      { entry: 'web/diffs/diff-entry.js', outfile: 'web/diffs.bundle.js' },
+      { entry: 'web/status/status-entry.js', outfile: 'web/status.bundle.js' },
+      { entry: 'web/workspace/workspace-entry.js', outfile: 'web/workspace.bundle.js' },
+      { entry: 'web/runtime/runtime-entry.ts', outfile: 'web/runtime.bundle.js' },
+    ]);
+
     expect(tauriPackage.scripts.build).toBe('pnpm build:web && tauri build');
     expect(tauriPackage.scripts.dev).toBe('pnpm build:web && tauri dev');
     expect(tauriPackage.devDependencies['@tauri-apps/cli']).toMatch(/^2\./);
