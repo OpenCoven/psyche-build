@@ -76,6 +76,10 @@ function buildSetPaneTitleCommand(paneId: string, title: string): string {
   return `${buildSelectPaneCommand(paneId)} -T ${quoteShellArgument(title)}`;
 }
 
+function buildKillPaneCommand(paneId: string): string {
+  return `tmux kill-pane -t ${quoteShellArgument(paneId)}`;
+}
+
 function isPermanentError(error: unknown): boolean {
   const message = String(error).toLowerCase();
   return PERMANENT_ERRORS.some(pattern => message.includes(pattern));
@@ -964,7 +968,7 @@ export class TmuxService {
     try {
       await this.executeWithRetry(
         () => {
-          this.execute(`tmux kill-pane -t '${paneId}'`);
+          this.execute(buildKillPaneCommand(paneId));
         },
         RetryStrategy.NONE, // Destructive operation
         `killPane(${paneId})`
@@ -1490,7 +1494,7 @@ export class TmuxService {
    */
   killPaneSync(paneId: string): void {
     try {
-      this.execute(`tmux kill-pane -t '${paneId}'`);
+      this.execute(buildKillPaneCommand(paneId));
     } catch (error) {
       this.logger.warn(`Failed to kill pane ${paneId}`, 'TmuxService');
       throw error;

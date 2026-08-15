@@ -54,4 +54,24 @@ describe('TmuxService command construction', () => {
       expect.objectContaining({ encoding: 'utf-8', stdio: 'pipe' }),
     );
   });
+
+  it('shell-quotes pane IDs across async and sync pane kill APIs', async () => {
+    const paneId = "%1'; touch /tmp/id-injection; #";
+    const expectedCommand =
+      "tmux kill-pane -t '%1'\\''; touch /tmp/id-injection; #'";
+
+    await TmuxService.getInstance().killPane(paneId);
+    TmuxService.getInstance().killPaneSync(paneId);
+
+    expect(execSyncMock).toHaveBeenNthCalledWith(
+      1,
+      expectedCommand,
+      expect.objectContaining({ encoding: 'utf-8', stdio: 'pipe' }),
+    );
+    expect(execSyncMock).toHaveBeenNthCalledWith(
+      2,
+      expectedCommand,
+      expect.objectContaining({ encoding: 'utf-8', stdio: 'pipe' }),
+    );
+  });
 });
