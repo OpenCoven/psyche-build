@@ -257,6 +257,13 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(ruleBlock(styles, '.titlebar-brand-mark')).toMatch(/object-fit:\s*contain;/);
   });
 
+  it('keeps the agent control button intrinsically sized to its label', () => {
+    expect(ruleBlock(styles, '.chrome-btn.agent-control-toggle')).toMatch(/width:\s*auto;/);
+    expect(ruleBlock(styles, '.chrome-btn.agent-control-toggle')).toMatch(
+      /padding-inline:\s*9px;/,
+    );
+  });
+
   it('makes visible brand descendants non-interactive so direct clicks resolve to the drag-region shell', () => {
     const titlebar = titlebarHtml(indexHtml);
 
