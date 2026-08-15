@@ -538,6 +538,96 @@ describe('ControlClient over the socket transport', () => {
     await expect(operator.actionStatus('legacy-action')).resolves.toEqual(legacyReceipt);
   });
 
+  it('isolates task-bound browser action receipts when different tasks reuse the same caller key', async () => {
+    const projectRoot = await workspaceProjectRoot('psyche-ctl-idempotency-receipts');
+    const endpoint = path.join(process.cwd(), '.c', `ctl-${randomBytes(4).toString('hex')}.sock`);
+    const harness = await createTaskScopedControlHarness({ projectRoot, endpoint });
+    cleanups.push(() => harness.server.close());
+
+    const otherTabLease = harness.runtime.snapshot().capabilityLeases.find((lease) => (
+      lease.taskId === harness.otherTaskId
+      && lease.grants.some((grant) => (
+        grant.target.kind === 'browser_tab' && grant.target.id === harness.otherTab.id
+      ))
+    ));
+    expect(otherTabLease).toBeDefined();
+
+    const ownClient = await ControlClient.connect({
+      projectRoot,
+      endpoint,
+      token: harness.ownTaskToken,
+      clientName: 'own-idempotency-scope',
+      taskBinding: {
+        taskId: harness.ownTaskId,
+        subjectId: harness.ownSubjectId,
+      },
+    });
+    const otherClient = await ControlClient.connect({
+      projectRoot,
+      endpoint,
+      token: harness.otherTaskToken,
+      clientName: 'other-idempotency-scope',
+      taskBinding: {
+        taskId: harness.otherTaskId,
+        subjectId: harness.otherSubjectId,
+      },
+    });
+    cleanups.push(() => ownClient.close(), () => otherClient.close());
+
+    const sharedKey = 'shared-browser-action-key';
+    const createdAt = '2026-08-15T03:15:37.241Z';
+    const ownOutcome = await ownClient.submit({
+      id: 'own-shared-action',
+      idempotencyKey: sharedKey,
+      kind: 'browser.action',
+      projectRoot,
+      createdAt,
+      payload: {
+        taskId: harness.ownTaskId,
+        leaseId: harness.ownTabLease.id,
+        leaseRevision: harness.ownTabLease.revision,
+        tabId: harness.ownTab.id,
+        generation: harness.ownTab.generation,
+        snapshotId: 'snapshot-own',
+        action: { kind: 'submit', elementRef: 'submit-own' },
+      },
+    });
+    const otherOutcome = await otherClient.submit({
+      id: 'other-shared-action',
+      idempotencyKey: sharedKey,
+      kind: 'browser.action',
+      projectRoot,
+      createdAt,
+      payload: {
+        taskId: harness.otherTaskId,
+        leaseId: otherTabLease!.id,
+        leaseRevision: otherTabLease!.revision,
+        tabId: harness.otherTab.id,
+        generation: harness.otherTab.generation,
+        snapshotId: 'snapshot-other',
+        action: { kind: 'submit', elementRef: 'submit-other' },
+      },
+    });
+
+    expect(ownOutcome).toMatchObject({
+      status: 'succeeded',
+      value: { actionId: 'own-shared-action', state: 'approval_required' },
+    });
+    expect(otherOutcome).toMatchObject({
+      status: 'succeeded',
+      value: { actionId: 'other-shared-action', state: 'approval_required' },
+    });
+    await expect(ownClient.actionStatus('own-shared-action')).resolves.toMatchObject({
+      actionId: 'own-shared-action',
+      state: 'approval_required',
+    });
+    await expect(otherClient.actionStatus('other-shared-action')).resolves.toMatchObject({
+      actionId: 'other-shared-action',
+      state: 'approval_required',
+    });
+    await expect(otherClient.actionStatus('own-shared-action')).resolves.toBeUndefined();
+  });
+
   it('replaces restart-stale approval_required status for operators and the owning bound agent', async () => {
     const harness = await createRestartActionStatusHarness({
       projectRoot: await workspaceProjectRoot('psyche-ctl-restart-status'),

@@ -24,6 +24,10 @@ client rejects a mismatched welcome. Non-operator task scope comes only from
 that authenticated binding, never from a caller-supplied `task_id`. Task-bound
 MCP also pins `project_root` reads and commands to the canonical launch
 project, accepting only that root or one of its symlink aliases. The
+server also rewrites every non-operator idempotency key into a hashed internal
+namespace derived from the canonical project root plus the authenticated
+principal/task subject, so retries dedupe only inside that authenticated scope
+and a rotated subject cannot inherit another subject's result or receipt. The
 default model is one active subject per task: rotating a token invalidates the
 prior token immediately, the server revalidates already-open task-bound
 connections before every read and command, and the replacement subject does

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createServer, type Server, type Socket } from 'node:net';
 import { chmod, mkdir, rm } from 'node:fs/promises';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
@@ -55,6 +56,7 @@ export interface ControlServerOptions {
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 const MAX_QUEUED_FRAMES = 128;
 const MAX_QUEUED_BYTES = 8 * 1024 * 1024;
+const INTERNAL_IDEMPOTENCY_PREFIX = 'psyche-control-idempotency-v1';
 
 /** Every command kind the runtime knows how to execute. */
 const KNOWN_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
@@ -207,6 +209,11 @@ export class ControlAuthority {
 
     const command = {
       ...boundInput,
+      idempotencyKey: runtimeIdempotencyKey(
+        identity,
+        this.canonicalProjectRoot,
+        boundInput.idempotencyKey,
+      ),
       projectRoot: this.canonicalProjectRoot,
       actor: actorForPrincipal(principal, clientId),
       ownerEpoch: this.ownerEpoch,
@@ -309,6 +316,56 @@ function normalizeIdentity(
   return 'principal' in authenticated
     ? authenticated
     : { principal: authenticated };
+}
+
+function runtimeIdempotencyKey(
+  identity: AuthenticatedControlIdentity,
+  canonicalProjectRoot: string,
+  callerKey: string,
+): string {
+  if (identity.principal.kind === 'operator') return callerKey;
+  const hash = createHash('sha256');
+  for (const component of idempotencyNamespaceComponents(identity, canonicalProjectRoot, callerKey)) {
+    const bytes = Buffer.from(component, 'utf8');
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32BE(bytes.length);
+    hash.update(length);
+    hash.update(bytes);
+  }
+  return `${INTERNAL_IDEMPOTENCY_PREFIX}:${hash.digest('hex')}`;
+}
+
+function idempotencyNamespaceComponents(
+  identity: AuthenticatedControlIdentity,
+  canonicalProjectRoot: string,
+  callerKey: string,
+): readonly string[] {
+  const scope = [
+    INTERNAL_IDEMPOTENCY_PREFIX,
+    'project',
+    canonicalProjectRoot,
+    'principal-kind',
+    identity.principal.kind,
+  ];
+  return identity.taskBinding
+    ? [
+        ...scope,
+        'task',
+        identity.taskBinding.taskId,
+        'subject',
+        identity.taskBinding.subjectId,
+        'principal',
+        identity.principal.id,
+        'caller',
+        callerKey,
+      ]
+    : [
+        ...scope,
+        'principal',
+        identity.principal.id,
+        'caller',
+        callerKey,
+      ];
 }
 
 interface TaskScopedIdentity {
