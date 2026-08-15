@@ -1,26 +1,54 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ControlServer, type ControlServerRuntime } from '../src/control/server.js';
-import { createControlCredentialStore } from '../src/control/credentials.js';
+import {
+  createControlCredentialStore,
+  issueControlTaskCredential,
+  issueControlTaskToken,
+} from '../src/control/credentials.js';
 import { ControlClient } from '../src/control/client.js';
+import {
+  cleanupTestControlStatePaths,
+  createIsolatedTestControlStatePaths,
+  createWorktreeTestControlStatePaths,
+  type TestControlStatePaths,
+} from './helpers/controlCredentialPaths.js';
+import { createRestartActionStatusHarness } from './helpers/restartActionStatusHarness.js';
+import { createTaskScopedControlHarness } from './helpers/taskScopedControlHarness.js';
 
 interface Harness {
   server: ControlServer;
   endpoint: string;
   projectRoot: string;
   operatorToken: string;
+  agentToken: string;
   submit: ReturnType<typeof vi.fn>;
 }
 
 let cleanups: Array<() => Promise<void>> = [];
+let externalStateRoots: TestControlStatePaths[] = [];
 let tempRoots: string[] = [];
 
 function socketPath(): string {
   return path.join(tmpdir(), `psyche-ctl-${randomBytes(6).toString('hex')}.sock`);
+}
+
+function credentialsPath(projectRoot: string): string {
+  return path.join(projectRoot, 'creds.json');
+}
+
+function controlStateRoot(projectRoot: string): string {
+  return path.join(projectRoot, '.control-state');
+}
+
+async function workspaceProjectRoot(prefix: string): Promise<string> {
+  const fixture = await createWorktreeTestControlStatePaths(prefix);
+  externalStateRoots.push(fixture);
+  return fixture.projectRoot;
 }
 
 async function startHarness(overrides: {
@@ -30,7 +58,7 @@ async function startHarness(overrides: {
   readEvents?: ControlServerRuntime['readEvents'];
   operatorCommandPolicy?: 'disabled' | 'trusted-test-only';
 } = {}): Promise<Harness> {
-  const projectRoot = await mkdtemp(path.join(tmpdir(), 'psyche-ctl-proj-'));
+  const projectRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'psyche-ctl-proj-')));
   tempRoots.push(projectRoot);
 
   const submit = vi.fn(overrides.submit
@@ -50,7 +78,8 @@ async function startHarness(overrides: {
 
   const credentials = await createControlCredentialStore({
     projectRoot,
-    filePath: path.join(projectRoot, 'creds.json'),
+    filePath: credentialsPath(projectRoot),
+    stateRoot: controlStateRoot(projectRoot),
   });
   const endpoint = socketPath();
   const server = await ControlServer.start({
@@ -68,6 +97,7 @@ async function startHarness(overrides: {
     endpoint,
     projectRoot,
     operatorToken: await credentials.operatorToken(),
+    agentToken: await credentials.agentToken(),
     submit: submit as unknown as ReturnType<typeof vi.fn>,
   };
 }
@@ -75,6 +105,8 @@ async function startHarness(overrides: {
 afterEach(async () => {
   await Promise.all(cleanups.map((fn) => fn().catch(() => undefined)));
   cleanups = [];
+  await cleanupTestControlStatePaths(externalStateRoots);
+  externalStateRoots = [];
   await Promise.all(tempRoots.map((root) => rm(root, { recursive: true, force: true })));
   tempRoots = [];
 });
@@ -88,6 +120,133 @@ function inputCommand(id: string): Parameters<ControlClient['submit']>[0] {
     createdAt: new Date().toISOString(),
     payload: { paneId: '%1', cols: 80, rows: 24 },
   };
+}
+
+function taskScopedAgentCommands(input: {
+  projectRoot: string;
+  taskId: string;
+  leaseId: string;
+  leaseRevision: number;
+  paneId: string;
+  paneGeneration: number;
+  tabId: string;
+  tabGeneration: number;
+  prefix: string;
+}): Parameters<ControlClient['submit']>[0][] {
+  const createdAt = new Date().toISOString();
+  return [
+    {
+      id: `${input.prefix}-lease-request`,
+      idempotencyKey: `${input.prefix}-lease-request`,
+      kind: 'lease.request',
+      projectRoot: input.projectRoot,
+      createdAt,
+      payload: { taskId: input.taskId, ttlMs: 60_000, grants: [] },
+    },
+    {
+      id: `${input.prefix}-lease-release`,
+      idempotencyKey: `${input.prefix}-lease-release`,
+      kind: 'lease.release',
+      projectRoot: input.projectRoot,
+      createdAt,
+      payload: {
+        taskId: input.taskId,
+        leaseId: input.leaseId,
+        leaseRevision: input.leaseRevision,
+      },
+    },
+    {
+      id: `${input.prefix}-pane-observe`,
+      idempotencyKey: `${input.prefix}-pane-observe`,
+      kind: 'pane.observe',
+      projectRoot: input.projectRoot,
+      createdAt,
+      payload: {
+        taskId: input.taskId,
+        leaseId: input.leaseId,
+        leaseRevision: input.leaseRevision,
+        paneId: input.paneId,
+        generation: input.paneGeneration,
+      },
+    },
+    {
+      id: `${input.prefix}-pane-action`,
+      idempotencyKey: `${input.prefix}-pane-action`,
+      kind: 'pane.action',
+      projectRoot: input.projectRoot,
+      createdAt,
+      payload: {
+        taskId: input.taskId,
+        leaseId: input.leaseId,
+        leaseRevision: input.leaseRevision,
+        paneId: input.paneId,
+        generation: input.paneGeneration,
+        action: { kind: 'focus' },
+      },
+    },
+    {
+      id: `${input.prefix}-browser-inspect`,
+      idempotencyKey: `${input.prefix}-browser-inspect`,
+      kind: 'browser.inspect',
+      projectRoot: input.projectRoot,
+      createdAt,
+      payload: {
+        taskId: input.taskId,
+        leaseId: input.leaseId,
+        leaseRevision: input.leaseRevision,
+        tabId: input.tabId,
+        generation: input.tabGeneration,
+      },
+    },
+    {
+      id: `${input.prefix}-browser-action`,
+      idempotencyKey: `${input.prefix}-browser-action`,
+      kind: 'browser.action',
+      projectRoot: input.projectRoot,
+      createdAt,
+      payload: {
+        taskId: input.taskId,
+        leaseId: input.leaseId,
+        leaseRevision: input.leaseRevision,
+        tabId: input.tabId,
+        generation: input.tabGeneration,
+        action: { kind: 'reload' },
+      },
+    },
+    {
+      id: `${input.prefix}-browser-script`,
+      idempotencyKey: `${input.prefix}-browser-script`,
+      kind: 'browser.script',
+      projectRoot: input.projectRoot,
+      createdAt,
+      payload: {
+        taskId: input.taskId,
+        leaseId: input.leaseId,
+        leaseRevision: input.leaseRevision,
+        tabId: input.tabId,
+        generation: input.tabGeneration,
+        source: 'return 1;',
+      },
+    },
+    {
+      id: `${input.prefix}-orchestration`,
+      idempotencyKey: `${input.prefix}-orchestration`,
+      kind: 'orchestration.execute',
+      projectRoot: input.projectRoot,
+      createdAt,
+      payload: {
+        taskId: input.taskId,
+        leaseId: input.leaseId,
+        leaseRevision: input.leaseRevision,
+        request: {
+          taskId: input.taskId,
+          projectRoot: input.projectRoot,
+          prompt: 'test prompt',
+          lanes: [{ id: 'lane-1', mode: 'terminal' }],
+        },
+      },
+    },
+  ];
 }
 
 describe('ControlClient over the socket transport', () => {
@@ -151,6 +310,24 @@ describe('ControlClient over the socket transport', () => {
     expect(client.ownerEpoch).toBe(7);
     expect(client.principal).toMatchObject({ kind: 'operator' });
     expect(client.projectRoot).toContain(path.basename(harness.projectRoot));
+  });
+
+  it('fails closed when the welcome task binding does not match the requested task', async () => {
+    const harness = await startHarness();
+    const taskToken = await issueControlTaskToken({
+      projectRoot: harness.projectRoot,
+      filePath: credentialsPath(harness.projectRoot),
+      taskId: 'task-own',
+      stateRoot: controlStateRoot(harness.projectRoot),
+    });
+
+    await expect(ControlClient.connect({
+      projectRoot: harness.projectRoot,
+      endpoint: harness.endpoint,
+      token: taskToken,
+      clientName: 'mismatched-task-client',
+      taskBinding: { taskId: 'task-other' },
+    })).rejects.toThrow(/task binding/i);
   });
 
   it('submits a command and returns the runtime outcome with canonical project root', async () => {
@@ -237,7 +414,7 @@ describe('ControlClient over the socket transport', () => {
     const receipt = {
       schema: 'psyche.control.receipt/v1' as const,
       actionId: 'recent-large-journal', state: 'succeeded' as const,
-      resource: { kind: 'pane' as const, id: 'pane-1', generation: 1 },
+      resource: { kind: 'pane' as const, idDigest: 'd'.repeat(64), generation: 1 },
       createdAt: '2026-08-12T12:00:00.000Z', completedAt: '2026-08-12T12:00:01.000Z',
     };
     const readEvents = vi.fn((after: number) => ({
@@ -263,6 +440,405 @@ describe('ControlClient over the socket transport', () => {
     expect(readEvents.mock.calls[0][0]).toBe(49_000);
   });
 
+  it('filters task-bound journal fallback by trusted receipt ownership and keeps legacy visible to operators', async () => {
+    let scopedReceipt!: {
+      schema: 'psyche.control.receipt/v1';
+      actionId: string;
+      state: 'failed';
+      resource: { kind: 'browser_tab'; idDigest: string; generation: number };
+      createdAt: string;
+      completedAt: string;
+      taskId: string;
+      actorId: string;
+      leaseId: string;
+      leaseRevision: number;
+      code: string;
+    };
+    let otherReceipt!: typeof scopedReceipt;
+    const legacyReceipt = {
+      schema: 'psyche.control.receipt/v1' as const,
+      actionId: 'legacy-action',
+      state: 'failed' as const,
+      resource: { kind: 'browser_tab' as const, idDigest: 'b'.repeat(64), generation: 1 },
+      createdAt: '2026-08-12T12:00:00.000Z',
+      completedAt: '2026-08-12T12:00:01.000Z',
+      code: 'effect_failed',
+    };
+    const readEvents = vi.fn(() => ({
+      events: [
+        { sequence: 1, kind: 'command.failed', payload: { receipt: otherReceipt } },
+        { sequence: 2, kind: 'command.failed', payload: { receipt: legacyReceipt } },
+        { sequence: 3, kind: 'command.failed', payload: { receipt: scopedReceipt } },
+      ],
+      nextSequence: 3,
+      gap: false,
+    }));
+    const harness = await startHarness({
+      snapshot: () => ({
+        ownerEpoch: 7, sequence: 3, commands: {}, leases: {}, resources: [],
+        capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
+      }),
+      readEvents,
+    });
+    const issued = await issueControlTaskCredential({
+      projectRoot: harness.projectRoot,
+      filePath: credentialsPath(harness.projectRoot),
+      taskId: 'task-own',
+      stateRoot: controlStateRoot(harness.projectRoot),
+    });
+    scopedReceipt = {
+      schema: 'psyche.control.receipt/v1',
+      actionId: 'owned-action',
+      state: 'failed',
+      resource: { kind: 'browser_tab', idDigest: 'a'.repeat(64), generation: 1 },
+      createdAt: '2026-08-12T12:00:00.000Z',
+      completedAt: '2026-08-12T12:00:01.000Z',
+      taskId: 'task-own',
+      actorId: issued.principalId,
+      leaseId: 'lease-own',
+      leaseRevision: 2,
+      code: 'effect_failed',
+    };
+    otherReceipt = {
+      ...scopedReceipt,
+      actionId: 'other-action',
+      taskId: 'task-other',
+      actorId: 'task-subject:other-subject',
+      leaseId: 'lease-other',
+    };
+    const agent = await ControlClient.connect({
+      projectRoot: harness.projectRoot,
+      endpoint: harness.endpoint,
+      token: issued.token,
+      clientName: 'scoped-agent',
+      taskBinding: issued.taskBinding,
+    });
+    const operator = await ControlClient.connect({
+      projectRoot: harness.projectRoot,
+      endpoint: harness.endpoint,
+      token: harness.operatorToken,
+      clientName: 'scoped-operator',
+    });
+    cleanups.push(() => agent.close(), () => operator.close());
+
+    await expect(agent.actionStatus('owned-action', { taskId: 'task-other' })).resolves.toMatchObject({
+      schema: 'psyche.control.receipt/v1',
+      actionId: 'owned-action',
+      state: 'failed',
+      code: 'effect_failed',
+    });
+    const scoped = await agent.actionStatus('owned-action', { taskId: 'task-other' });
+    expect(scoped).toBeDefined();
+    expect(scoped).not.toHaveProperty('taskId');
+    expect(scoped).not.toHaveProperty('actorId');
+    expect(scoped).not.toHaveProperty('leaseId');
+    expect(scoped).not.toHaveProperty('leaseRevision');
+    await expect(agent.actionStatus('other-action', { taskId: 'task-other' })).resolves.toBeUndefined();
+    await expect(agent.actionStatus('legacy-action', { taskId: 'task-other' })).resolves.toBeUndefined();
+    await expect(operator.actionStatus('legacy-action')).resolves.toEqual(legacyReceipt);
+  });
+
+  it('isolates task-bound browser action receipts when different tasks reuse the same caller key', async () => {
+    const projectRoot = await workspaceProjectRoot('psyche-ctl-idempotency-receipts');
+    const endpoint = path.join(process.cwd(), '.c', `ctl-${randomBytes(4).toString('hex')}.sock`);
+    const harness = await createTaskScopedControlHarness({ projectRoot, endpoint });
+    cleanups.push(() => harness.server.close());
+
+    const otherTabLease = harness.runtime.snapshot().capabilityLeases.find((lease) => (
+      lease.taskId === harness.otherTaskId
+      && lease.grants.some((grant) => (
+        grant.target.kind === 'browser_tab' && grant.target.id === harness.otherTab.id
+      ))
+    ));
+    expect(otherTabLease).toBeDefined();
+
+    const ownClient = await ControlClient.connect({
+      projectRoot,
+      endpoint,
+      token: harness.ownTaskToken,
+      clientName: 'own-idempotency-scope',
+      taskBinding: {
+        taskId: harness.ownTaskId,
+        subjectId: harness.ownSubjectId,
+      },
+    });
+    const otherClient = await ControlClient.connect({
+      projectRoot,
+      endpoint,
+      token: harness.otherTaskToken,
+      clientName: 'other-idempotency-scope',
+      taskBinding: {
+        taskId: harness.otherTaskId,
+        subjectId: harness.otherSubjectId,
+      },
+    });
+    cleanups.push(() => ownClient.close(), () => otherClient.close());
+
+    const sharedKey = 'shared-browser-action-key';
+    const createdAt = '2026-08-15T03:15:37.241Z';
+    const ownOutcome = await ownClient.submit({
+      id: 'own-shared-action',
+      idempotencyKey: sharedKey,
+      kind: 'browser.action',
+      projectRoot,
+      createdAt,
+      payload: {
+        taskId: harness.ownTaskId,
+        leaseId: harness.ownTabLease.id,
+        leaseRevision: harness.ownTabLease.revision,
+        tabId: harness.ownTab.id,
+        generation: harness.ownTab.generation,
+        snapshotId: 'snapshot-own',
+        action: { kind: 'submit', elementRef: 'submit-own' },
+      },
+    });
+    const otherOutcome = await otherClient.submit({
+      id: 'other-shared-action',
+      idempotencyKey: sharedKey,
+      kind: 'browser.action',
+      projectRoot,
+      createdAt,
+      payload: {
+        taskId: harness.otherTaskId,
+        leaseId: otherTabLease!.id,
+        leaseRevision: otherTabLease!.revision,
+        tabId: harness.otherTab.id,
+        generation: harness.otherTab.generation,
+        snapshotId: 'snapshot-other',
+        action: { kind: 'submit', elementRef: 'submit-other' },
+      },
+    });
+
+    expect(ownOutcome).toMatchObject({
+      status: 'succeeded',
+      value: { actionId: 'own-shared-action', state: 'approval_required' },
+    });
+    expect(otherOutcome).toMatchObject({
+      status: 'succeeded',
+      value: { actionId: 'other-shared-action', state: 'approval_required' },
+    });
+    await expect(ownClient.actionStatus('own-shared-action')).resolves.toMatchObject({
+      actionId: 'own-shared-action',
+      state: 'approval_required',
+    });
+    await expect(otherClient.actionStatus('other-shared-action')).resolves.toMatchObject({
+      actionId: 'other-shared-action',
+      state: 'approval_required',
+    });
+    await expect(otherClient.actionStatus('own-shared-action')).resolves.toBeUndefined();
+  });
+
+  it('replaces restart-stale approval_required status for operators and the owning bound agent', async () => {
+    const harness = await createRestartActionStatusHarness({
+      projectRoot: await workspaceProjectRoot('psyche-ctl-restart-status'),
+    });
+    cleanups.push(() => harness.server.close());
+
+    expect(harness.runtime.snapshot().receipts).toContainEqual(expect.objectContaining({
+      actionId: harness.ownActionId,
+      state: 'failed',
+      code: 'action_invalidated',
+      taskId: harness.ownTaskId,
+    }));
+    expect(harness.runtime.snapshot().receipts).not.toContainEqual(expect.objectContaining({
+      actionId: harness.ownActionId,
+      state: 'approval_required',
+    }));
+
+    const operator = await ControlClient.connect({
+      projectRoot: harness.projectRoot,
+      endpoint: harness.endpoint,
+      token: harness.operatorToken,
+      clientName: 'restart-operator',
+    });
+    const ownAgent = await ControlClient.connect({
+      projectRoot: harness.projectRoot,
+      endpoint: harness.endpoint,
+      token: harness.ownTaskToken,
+      clientName: 'restart-own-agent',
+      taskBinding: { taskId: harness.ownTaskId },
+    });
+    const otherAgent = await ControlClient.connect({
+      projectRoot: harness.projectRoot,
+      endpoint: harness.endpoint,
+      token: harness.otherTaskToken,
+      clientName: 'restart-other-agent',
+      taskBinding: { taskId: harness.otherTaskId },
+    });
+    cleanups.push(() => operator.close(), () => ownAgent.close(), () => otherAgent.close());
+
+    await expect(operator.actionStatus(harness.ownActionId)).resolves.toMatchObject({
+      schema: 'psyche.control.receipt/v1',
+      actionId: harness.ownActionId,
+      state: 'failed',
+      code: 'action_invalidated',
+    });
+    const scoped = await ownAgent.actionStatus(harness.ownActionId);
+    expect(scoped).toMatchObject({
+      schema: 'psyche.control.receipt/v1',
+      actionId: harness.ownActionId,
+      state: 'failed',
+      code: 'action_invalidated',
+    });
+    expect(scoped).not.toHaveProperty('taskId');
+    expect(scoped).not.toHaveProperty('leaseId');
+    expect(scoped).not.toHaveProperty('leaseRevision');
+    await expect(otherAgent.actionStatus(harness.ownActionId)).resolves.toBeUndefined();
+    await expect(operator.actionStatus(harness.legacyActionId)).resolves.toMatchObject({
+      actionId: harness.legacyActionId,
+      state: 'failed',
+      code: 'action_invalidated',
+    });
+    await expect(ownAgent.actionStatus(harness.legacyActionId)).resolves.toBeUndefined();
+  });
+
+  it('redacts raw event pages for unbound agents and returns only bound-task receipts with ownership removed', async () => {
+    let scopedReceipt!: {
+      schema: 'psyche.control.receipt/v1';
+      actionId: string;
+      state: 'failed';
+      resource: { kind: 'browser_tab'; idDigest: string; generation: number };
+      createdAt: string;
+      completedAt: string;
+      taskId: string;
+      actorId: string;
+      leaseId: string;
+      leaseRevision: number;
+      code: string;
+    };
+    let otherReceipt!: typeof scopedReceipt;
+    const harness = await startHarness({
+      readEvents: () => ({
+        events: [
+          { sequence: 1, kind: 'command.failed', payload: { receipt: otherReceipt } },
+          { sequence: 2, kind: 'command.failed', payload: { receipt: scopedReceipt } },
+        ],
+        nextSequence: 2,
+        gap: false,
+      }),
+    });
+    const rawAgent = await ControlClient.connect({
+      projectRoot: harness.projectRoot,
+      endpoint: harness.endpoint,
+      token: harness.agentToken,
+      clientName: 'raw-scoped-reader',
+    });
+    const issued = await issueControlTaskCredential({
+      projectRoot: harness.projectRoot,
+      filePath: credentialsPath(harness.projectRoot),
+      taskId: 'task-own',
+      stateRoot: controlStateRoot(harness.projectRoot),
+    });
+    scopedReceipt = {
+      schema: 'psyche.control.receipt/v1',
+      actionId: 'owned-event',
+      state: 'failed',
+      resource: { kind: 'browser_tab', idDigest: 'c'.repeat(64), generation: 1 },
+      createdAt: '2026-08-12T12:00:00.000Z',
+      completedAt: '2026-08-12T12:00:01.000Z',
+      taskId: 'task-own',
+      actorId: issued.principalId,
+      leaseId: 'lease-own',
+      leaseRevision: 2,
+      code: 'effect_failed',
+    };
+    otherReceipt = {
+      ...scopedReceipt,
+      actionId: 'other-event',
+      taskId: 'task-other',
+      actorId: 'task-subject:other-subject',
+      leaseId: 'lease-other',
+    };
+    const boundAgent = await ControlClient.connect({
+      projectRoot: harness.projectRoot,
+      endpoint: harness.endpoint,
+      token: issued.token,
+      clientName: 'bound-scoped-reader',
+      taskBinding: issued.taskBinding,
+    });
+    cleanups.push(() => rawAgent.close(), () => boundAgent.close());
+
+    await expect(rawAgent.readEvents(0)).resolves.toMatchObject({ events: [], nextSequence: 2, gap: false });
+    const scoped = await boundAgent.readEvents(0, 10, { taskId: 'task-other' });
+    expect(scoped.events).toEqual([expect.objectContaining({
+      sequence: 2,
+      kind: 'command.failed',
+      payload: expect.objectContaining({
+        receipt: expect.objectContaining({ actionId: 'owned-event', state: 'failed' }),
+      }),
+    })]);
+    expect(JSON.stringify(scoped)).not.toContain(issued.principalId);
+    expect(JSON.stringify(scoped)).not.toContain('lease-own');
+    expect(JSON.stringify(scoped)).not.toContain('lease-other');
+  });
+
+  it('rejects task-sensitive control commands from an unbound shared agent token', async () => {
+    const fixture = await createIsolatedTestControlStatePaths('ctu');
+    externalStateRoots.push(fixture);
+    const root = fixture.projectRoot;
+    const endpoint = path.join(root, 'control.sock');
+    const harness = await createTaskScopedControlHarness({ projectRoot: root, endpoint });
+    cleanups.push(() => harness.server.close());
+    const client = await ControlClient.connect({
+      projectRoot: root,
+      endpoint,
+      token: await harness.credentials.agentToken(),
+      clientName: 'shared-agent',
+    });
+    cleanups.push(() => client.close());
+
+    for (const command of taskScopedAgentCommands({
+      projectRoot: root,
+      taskId: harness.ownTaskId,
+      leaseId: harness.ownTabLease.id,
+      leaseRevision: harness.ownTabLease.revision,
+      paneId: harness.ownPane.id,
+      paneGeneration: harness.ownPane.generation,
+      tabId: harness.ownTab.id,
+      tabGeneration: harness.ownTab.generation,
+      prefix: 'unbound',
+    })) {
+      await expect(client.submit(command)).resolves.toMatchObject({
+        status: 'rejected',
+        code: 'task_binding_required',
+      });
+    }
+  });
+
+  it('rejects conflicting task ids across task-sensitive control commands for a bound task token', async () => {
+    const fixture = await createIsolatedTestControlStatePaths('ctb');
+    externalStateRoots.push(fixture);
+    const root = fixture.projectRoot;
+    const endpoint = path.join(root, 'control.sock');
+    const harness = await createTaskScopedControlHarness({ projectRoot: root, endpoint });
+    cleanups.push(() => harness.server.close());
+    const client = await ControlClient.connect({
+      projectRoot: root,
+      endpoint,
+      token: harness.ownTaskToken,
+      clientName: 'bound-agent',
+      taskBinding: { taskId: harness.ownTaskId },
+    });
+    cleanups.push(() => client.close());
+
+    for (const command of taskScopedAgentCommands({
+      projectRoot: root,
+      taskId: harness.otherTaskId,
+      leaseId: harness.ownTabLease.id,
+      leaseRevision: harness.ownTabLease.revision,
+      paneId: harness.ownPane.id,
+      paneGeneration: harness.ownPane.generation,
+      tabId: harness.ownTab.id,
+      tabGeneration: harness.ownTab.generation,
+      prefix: 'conflict',
+    })) {
+      await expect(client.submit(command)).resolves.toMatchObject({
+        status: 'rejected',
+        code: 'task_binding_mismatch',
+      });
+    }
+  });
+
   it.each([
     ['failed', 'effect_failed'],
     ['unknown', 'effect_unknown'],
@@ -273,7 +849,7 @@ describe('ControlClient over the socket transport', () => {
     const receipt = {
       schema: 'psyche.control.receipt/v1' as const,
       actionId: `evicted-${code}`, state,
-      resource: { kind: 'browser_tab' as const, id: 'tab-1', generation: 1 },
+      resource: { kind: 'browser_tab' as const, idDigest: 'e'.repeat(64), generation: 1 },
       createdAt: '2026-08-12T12:00:00.000Z', completedAt: '2026-08-12T12:00:01.000Z',
       code,
     };
@@ -291,7 +867,7 @@ describe('ControlClient over the socket transport', () => {
 
   it('rejects a connection whose declared project root does not match the owner', async () => {
     const harness = await startHarness();
-    const otherRoot = await mkdtemp(path.join(tmpdir(), 'psyche-ctl-other-'));
+    const otherRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'psyche-ctl-other-')));
     tempRoots.push(otherRoot);
 
     await expect(ControlClient.connect({

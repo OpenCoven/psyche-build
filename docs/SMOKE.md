@@ -20,9 +20,10 @@ Requires `tmux` and `git`. It fails rather than skips when tmux is missing,
 since it is the only assertion the command makes.
 
 This complements `pnpm smoke:pack` rather than replacing it. `smoke:pack`
-verifies what the published tarball would contain; `pnpm smoke` verifies the
-built cockpit actually starts. A package can pack correctly and still fail to
-launch.
+forces a clean prepack build, checks the `npm pack` file list, installs a real
+tarball, and verifies the exported `psyche-build/control-task-tokens` subpath;
+`pnpm smoke` verifies the built cockpit actually starts. A package can pack
+correctly and still fail to launch.
 
 The manual checks below still cover the richer pane, ritual, merge, and
 optional Coven flows that the automated check deliberately leaves alone.
@@ -36,18 +37,21 @@ pnpm install --ignore-scripts
 pnpm run typecheck
 pnpm run test
 pnpm run build
+pnpm run smoke:pack
 node ./psyche doctor --json
-npm pack --dry-run --json
 ```
 
 Expected:
 
 - TypeScript and tests pass.
+- `pnpm smoke:pack` includes `dist/control-task-tokens.js` and
+  `dist/control-task-tokens.d.ts` in the real tarball, installs that tarball,
+  and imports `psyche-build/control-task-tokens`.
 - `doctor --json` reports tmux and git checks.
 - `doctor --json` reports `agent-cli-guidance` and `coven-guidance`.
 - `usable` is `true` when there are no blocking errors.
 - `healthy` may be `false` if only recommended setup warnings remain.
-- `npm pack --dry-run --json` includes the README and docs files intended for npm.
+- The packaged archive still includes the README and docs files intended for npm.
 
 ## Local desktop launch smoke
 
