@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chmod, link, lstat, mkdir, open, unlink } from 'node:fs/promises';
 import path from 'node:path';
@@ -13,8 +13,17 @@ export interface ControlPrincipal {
   capabilities: readonly ControlCapability[];
 }
 
+export interface ControlTaskBinding {
+  taskId: string;
+}
+
+export interface AuthenticatedControlIdentity extends ControlPrincipal {
+  principal: ControlPrincipal;
+  taskBinding?: ControlTaskBinding;
+}
+
 export interface ControlCredentialStore {
-  authenticate(token: string): Promise<ControlPrincipal | null>;
+  authenticate(token: string): Promise<AuthenticatedControlIdentity | null>;
   operatorToken(): Promise<string>;
   agentToken(): Promise<string>;
 }
@@ -74,13 +83,41 @@ export async function createControlCredentialStore(options: {
   filePath?: string;
 }): Promise<ControlCredentialStore> {
   const root = await canonicalizeProjectRoot(options.projectRoot);
-  const filePath = options.filePath === undefined
-    ? undefined
-    : path.join(root, path.relative(path.resolve(options.projectRoot), path.resolve(options.filePath)));
+  const filePath = resolvePublicCredentialPath(options.projectRoot, root, options.filePath);
   return createControlCredentialStoreForCanonicalRoot({
     canonicalProjectRoot: root,
     ...(filePath === undefined ? {} : { filePath }),
   });
+}
+
+export async function issueControlTaskToken(options: {
+  projectRoot: string;
+  taskId: string;
+  filePath?: string;
+}): Promise<string> {
+  const root = await canonicalizeProjectRoot(options.projectRoot);
+  const filePath = resolvePublicCredentialPath(options.projectRoot, root, options.filePath);
+  return issueControlTaskTokenForCanonicalRoot({
+    canonicalProjectRoot: root,
+    taskId: options.taskId,
+    ...(filePath === undefined ? {} : { filePath }),
+  });
+}
+
+export async function issueControlTaskTokenForCanonicalRoot(options: {
+  canonicalProjectRoot: string;
+  taskId: string;
+  filePath?: string;
+}): Promise<string> {
+  if (typeof options.taskId !== 'string' || options.taskId.trim().length === 0) {
+    throw new TypeError('taskId must not be blank');
+  }
+  const filePath = resolveCredentialPath(options.canonicalProjectRoot, options.filePath);
+  const token = randomBytes(32).toString('hex');
+  const bindingPath = taskBindingPath(filePath, token);
+  await ensureSafeCredentialParent(options.canonicalProjectRoot, bindingPath);
+  await writeTaskBinding(bindingPath, { taskId: options.taskId });
+  return token;
 }
 
 /** Trusted seam for an owner bootstrap that already canonicalized the root. */
@@ -90,9 +127,7 @@ export async function createControlCredentialStoreForCanonicalRoot(options: {
   creationOps?: CredentialCreationOps;
 }): Promise<ControlCredentialStore> {
   const root = options.canonicalProjectRoot;
-  const filePath = path.resolve(
-    options.filePath ?? path.join(root, '.psyche', 'runtime', 'control-credentials.json'),
-  );
+  const filePath = resolveCredentialPath(root, options.filePath);
   let cache: StoredCredentials | null = null;
 
   const load = async (): Promise<StoredCredentials> => {
@@ -110,16 +145,34 @@ export async function createControlCredentialStoreForCanonicalRoot(options: {
   };
 
   return {
-    async authenticate(token: string): Promise<ControlPrincipal | null> {
+    async authenticate(token: string): Promise<AuthenticatedControlIdentity | null> {
       if (!token) return null;
       const stored = await load();
-      if (constantTimeEquals(token, stored.operatorToken)) {
-        return { id: 'operator', kind: 'operator', capabilities: OPERATOR_CAPABILITIES };
+      const operatorMatches = constantTimeEquals(token, stored.operatorToken);
+      const agentMatches = constantTimeEquals(token, stored.agentToken);
+      if (operatorMatches) {
+        return authenticatedIdentity({
+          id: 'operator',
+          kind: 'operator',
+          capabilities: OPERATOR_CAPABILITIES,
+        });
       }
-      if (constantTimeEquals(token, stored.agentToken)) {
-        return { id: 'agent', kind: 'agent', capabilities: AGENT_CAPABILITIES };
+      if (agentMatches) {
+        return authenticatedIdentity({
+          id: 'agent',
+          kind: 'agent',
+          capabilities: AGENT_CAPABILITIES,
+        });
       }
-      return null;
+      const bindingPath = taskBindingPath(filePath, token);
+      await ensureSafeCredentialParent(root, bindingPath);
+      const taskBinding = await readStoredTaskBinding(bindingPath);
+      return taskBinding === undefined
+        ? null
+        : authenticatedIdentity(
+          { id: 'agent', kind: 'agent', capabilities: AGENT_CAPABILITIES },
+          taskBinding,
+        );
     },
     async operatorToken(): Promise<string> {
       return (await load()).operatorToken;
@@ -128,6 +181,38 @@ export async function createControlCredentialStoreForCanonicalRoot(options: {
       return (await load()).agentToken;
     },
   };
+}
+
+function authenticatedIdentity(
+  principal: ControlPrincipal,
+  taskBinding?: ControlTaskBinding,
+): AuthenticatedControlIdentity {
+  return {
+    ...principal,
+    principal,
+    ...(taskBinding === undefined ? {} : { taskBinding }),
+  };
+}
+
+function resolvePublicCredentialPath(
+  projectRoot: string,
+  canonicalRoot: string,
+  filePath: string | undefined,
+): string | undefined {
+  return filePath === undefined
+    ? undefined
+    : path.join(canonicalRoot, path.relative(path.resolve(projectRoot), path.resolve(filePath)));
+}
+
+function resolveCredentialPath(canonicalRoot: string, filePath: string | undefined): string {
+  return path.resolve(
+    filePath ?? path.join(canonicalRoot, '.psyche', 'runtime', 'control-credentials.json'),
+  );
+}
+
+function taskBindingPath(filePath: string, token: string): string {
+  const digest = createHash('sha256').update(token, 'utf8').digest('hex');
+  return path.join(path.dirname(filePath), 'control-task-bindings', `${digest}.json`);
 }
 
 async function loadOrCreateCredentials(
@@ -184,6 +269,44 @@ async function loadOrCreateCredentials(
   }
 }
 
+async function writeTaskBinding(
+  filePath: string,
+  binding: ControlTaskBinding,
+): Promise<void> {
+  const temporary = `${filePath}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
+  let handle: CredentialTemporaryHandle | undefined;
+  let primaryError: unknown;
+  try {
+    handle = await DEFAULT_CREATION_OPS.openTemporary(temporary);
+    await handle.writeFile(`${JSON.stringify(binding)}\n`, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await DEFAULT_CREATION_OPS.publish(temporary, filePath);
+  } catch (error) {
+    primaryError = error;
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw unsafeCredentialPath('task binding target already exists');
+    }
+    throw error;
+  } finally {
+    if (handle) {
+      try {
+        await handle.close();
+      } catch (closeError) {
+        if (primaryError === undefined) primaryError = closeError;
+      }
+    }
+    try {
+      await DEFAULT_CREATION_OPS.removeTemporary(temporary);
+    } catch (cleanupError) {
+      if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT' && primaryError === undefined) {
+        throw cleanupError;
+      }
+    }
+  }
+}
+
 async function readStoredCredentials(filePath: string): Promise<StoredCredentials | undefined> {
   let stats;
   try {
@@ -214,6 +337,37 @@ async function readStoredCredentials(filePath: string): Promise<StoredCredential
     throw unsafeCredentialPath('credential file is invalid');
   }
   return { operatorToken: parsed.operatorToken, agentToken: parsed.agentToken };
+}
+
+async function readStoredTaskBinding(filePath: string): Promise<ControlTaskBinding | undefined> {
+  let stats;
+  try {
+    stats = await lstat(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    throw unsafeCredentialPath('task binding path must be a regular file');
+  }
+  let parsed: Partial<ControlTaskBinding>;
+  const handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const openedStats = await handle.stat();
+    if (!openedStats.isFile()) {
+      throw unsafeCredentialPath('task binding path must be a regular file');
+    }
+    await handle.chmod(0o600);
+    parsed = JSON.parse(await handle.readFile('utf8')) as Partial<ControlTaskBinding>;
+  } catch {
+    throw unsafeCredentialPath('task binding file is invalid');
+  } finally {
+    await handle.close();
+  }
+  if (typeof parsed.taskId !== 'string' || parsed.taskId.trim().length === 0) {
+    throw unsafeCredentialPath('task binding file is invalid');
+  }
+  return { taskId: parsed.taskId };
 }
 
 async function ensureSafeCredentialParent(canonicalRoot: string, filePath: string): Promise<void> {

@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto';
 import {
   access,
   link,
   mkdtemp,
+  mkdir,
   open,
   readFile,
   readdir,
@@ -18,6 +20,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createControlCredentialStore,
   createControlCredentialStoreForCanonicalRoot,
+  issueControlTaskToken,
+  issueControlTaskTokenForCanonicalRoot,
   type CredentialCreationOps,
 } from '../src/control/credentials.js';
 import { ControlClient } from '../src/control/client.js';
@@ -32,6 +36,15 @@ async function tempProject(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), 'psyche-cred-'));
   tempRoots.push(root);
   return root;
+}
+
+function taskBindingDirectory(filePath: string): string {
+  return path.join(path.dirname(filePath), 'control-task-bindings');
+}
+
+function taskBindingFilePath(filePath: string, token: string): string {
+  const digest = createHash('sha256').update(token, 'utf8').digest('hex');
+  return path.join(taskBindingDirectory(filePath), `${digest}.json`);
 }
 
 afterEach(async () => {
@@ -102,6 +115,161 @@ function sensitiveSnapshot(): ControlSnapshot {
 }
 
 describe('control credential store', () => {
+  it('issues distinct tokens that authenticate as agents bound to their exact tasks', async () => {
+    const root = await tempProject();
+    const filePath = path.join(root, '.psyche', 'runtime', 'control-credentials.json');
+    const store = await createControlCredentialStore({ projectRoot: root, filePath });
+
+    const alpha = await issueControlTaskToken({
+      projectRoot: root,
+      taskId: 'task-alpha',
+      filePath,
+    });
+    const beta = await issueControlTaskToken({
+      projectRoot: root,
+      taskId: 'task-beta',
+      filePath,
+    });
+
+    expect(alpha).not.toBe(beta);
+    await expect(store.authenticate(alpha)).resolves.toMatchObject({
+      principal: { kind: 'agent' },
+      taskBinding: { taskId: 'task-alpha' },
+    });
+    await expect(store.authenticate(beta)).resolves.toMatchObject({
+      principal: { kind: 'agent' },
+      taskBinding: { taskId: 'task-beta' },
+    });
+  });
+
+  it.each(['', '   '])('rejects blank task IDs (%j)', async (taskId) => {
+    const root = await tempProject();
+
+    await expect(issueControlTaskToken({ projectRoot: root, taskId }))
+      .rejects.toThrow('taskId must not be blank');
+  });
+
+  it('stores task bindings in hashed 0600 files without exposing tokens in names', async () => {
+    const root = await tempProject();
+    const filePath = path.join(root, '.psyche', 'runtime', 'control-credentials.json');
+    const token = await issueControlTaskToken({
+      projectRoot: root,
+      taskId: 'task-alpha',
+      filePath,
+    });
+    const bindingPath = taskBindingFilePath(filePath, token);
+
+    expect(path.basename(bindingPath)).not.toContain(token);
+    expect(JSON.parse(await readFile(bindingPath, 'utf8'))).toEqual({ taskId: 'task-alpha' });
+    expect((await stat(bindingPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it('rejects a symlink in the task-binding parent path', async () => {
+    const root = await realpath(await tempProject());
+    const outside = await tempProject();
+    const filePath = path.join(root, '.psyche', 'runtime', 'control-credentials.json');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await symlink(outside, taskBindingDirectory(filePath));
+
+    await expect(issueControlTaskTokenForCanonicalRoot({
+      canonicalProjectRoot: root,
+      taskId: 'task-alpha',
+      filePath,
+    })).rejects.toMatchObject({ code: 'credential_path_unsafe' });
+  });
+
+  it('rejects a task-binding parent replaced with a symlink before authentication', async () => {
+    const root = await tempProject();
+    const outside = await tempProject();
+    const filePath = path.join(root, '.psyche', 'runtime', 'control-credentials.json');
+    const token = await issueControlTaskToken({
+      projectRoot: root,
+      taskId: 'task-alpha',
+      filePath,
+    });
+    const bindingPath = taskBindingFilePath(filePath, token);
+    await writeFile(
+      path.join(outside, path.basename(bindingPath)),
+      await readFile(bindingPath),
+      { mode: 0o600 },
+    );
+    await rm(taskBindingDirectory(filePath), { recursive: true });
+    await symlink(outside, taskBindingDirectory(filePath));
+    const store = await createControlCredentialStore({ projectRoot: root, filePath });
+
+    await expect(store.authenticate(token))
+      .rejects.toMatchObject({ code: 'credential_path_unsafe' });
+  });
+
+  it('rejects a symlink task-binding target during authentication', async () => {
+    const root = await tempProject();
+    const filePath = path.join(root, '.psyche', 'runtime', 'control-credentials.json');
+    const token = await issueControlTaskToken({
+      projectRoot: root,
+      taskId: 'task-alpha',
+      filePath,
+    });
+    const bindingPath = taskBindingFilePath(filePath, token);
+    const victim = path.join(root, 'victim-task-binding.json');
+    const victimContents = '{"taskId":"victim"}\n';
+    await writeFile(victim, victimContents, { mode: 0o600 });
+    await unlink(bindingPath);
+    await symlink(victim, bindingPath);
+    const store = await createControlCredentialStore({ projectRoot: root, filePath });
+
+    await expect(store.authenticate(token))
+      .rejects.toMatchObject({ code: 'credential_path_unsafe' });
+    expect(await readFile(victim, 'utf8')).toBe(victimContents);
+  });
+
+  it('rejects a malformed task-binding file instead of treating it as unknown', async () => {
+    const root = await tempProject();
+    const filePath = path.join(root, '.psyche', 'runtime', 'control-credentials.json');
+    const token = await issueControlTaskToken({
+      projectRoot: root,
+      taskId: 'task-alpha',
+      filePath,
+    });
+    await writeFile(taskBindingFilePath(filePath, token), '{}\n', { mode: 0o600 });
+    const store = await createControlCredentialStore({ projectRoot: root, filePath });
+
+    await expect(store.authenticate(token))
+      .rejects.toMatchObject({ code: 'credential_path_unsafe' });
+  });
+
+  it('concurrently issues unique complete task bindings that all authenticate', async () => {
+    const root = await realpath(await tempProject());
+    const filePath = path.join(root, '.psyche', 'runtime', 'control-credentials.json');
+    const taskIds = Array.from({ length: 64 }, (_, index) => `task-${index}`);
+    const tokens = await Promise.all(taskIds.map((taskId) => (
+      issueControlTaskTokenForCanonicalRoot({
+        canonicalProjectRoot: root,
+        taskId,
+        filePath,
+      })
+    )));
+
+    expect(new Set(tokens).size).toBe(tokens.length);
+    const store = await createControlCredentialStoreForCanonicalRoot({
+      canonicalProjectRoot: root,
+      filePath,
+    });
+    const identities = await Promise.all(tokens.map((token) => store.authenticate(token)));
+    expect(identities.map((identity) => identity?.taskBinding?.taskId)).toEqual(taskIds);
+
+    const bindingFiles = await readdir(taskBindingDirectory(filePath));
+    expect(bindingFiles).toHaveLength(tokens.length);
+    expect(bindingFiles.every((name) => /^[a-f0-9]{64}\.json$/.test(name))).toBe(true);
+    const persistedTaskIds = await Promise.all(bindingFiles.map(async (name) => {
+      const binding = JSON.parse(await readFile(
+        path.join(taskBindingDirectory(filePath), name),
+        'utf8',
+      )) as { taskId: string };
+      return binding.taskId;
+    }));
+    expect(new Set(persistedTaskIds)).toEqual(new Set(taskIds));
+  });
+
   it('mints operator and agent tokens that authenticate to their principals', async () => {
     const root = await tempProject();
     const filePath = path.join(root, 'control-credentials.json');
@@ -111,8 +279,18 @@ describe('control credential store', () => {
     const agentToken = await store.agentToken();
 
     expect(operatorToken).not.toEqual(agentToken);
-    await expect(store.authenticate(operatorToken)).resolves.toMatchObject({ kind: 'operator' });
-    await expect(store.authenticate(agentToken)).resolves.toMatchObject({ kind: 'agent' });
+    const operatorIdentity = await store.authenticate(operatorToken);
+    const agentIdentity = await store.authenticate(agentToken);
+    expect(operatorIdentity).toMatchObject({
+      kind: 'operator',
+      principal: { kind: 'operator' },
+    });
+    expect(operatorIdentity?.taskBinding).toBeUndefined();
+    expect(agentIdentity).toMatchObject({
+      kind: 'agent',
+      principal: { kind: 'agent' },
+    });
+    expect(agentIdentity?.taskBinding).toBeUndefined();
     await expect(store.authenticate('not-a-token')).resolves.toBeNull();
     await expect(store.authenticate('')).resolves.toBeNull();
   });
