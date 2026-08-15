@@ -3,19 +3,19 @@
   "private": true,
   "version": "0.0.1",
   "scripts": {
-    "build:web": "esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js && esbuild web/sessions/session-entry.js --bundle --minify --format=iife --global-name=PsycheSessions --outfile=web/sessions.bundle.js && esbuild web/panes/pane-entry.js --bundle --minify --format=iife --global-name=PsychePanes --outfile=web/panes.bundle.js && esbuild web/input/input-entry.js --bundle --minify --format=iife --global-name=PsycheTerminalInput --outfile=web/input.bundle.js && esbuild web/diffs/diff-entry.js --bundle --minify --format=iife --global-name=PsycheDiffs --outfile=web/diffs.bundle.js && esbuild web/status/status-entry.js --bundle --minify --format=iife --global-name=PsycheStatus --outfile=web/status.bundle.js && esbuild web/workspace/workspace-entry.js --bundle --minify --format=iife --global-name=PsycheWorkspace --outfile=web/workspace.bundle.js",
+    "build:web": "esbuild web/control/control-entry.js --bundle --minify --format=iife --global-name=PsycheControl --outfile=web/control.bundle.js && esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js && esbuild web/sessions/session-entry.js --bundle --minify --format=iife --global-name=PsycheSessions --outfile=web/sessions.bundle.js && esbuild web/panes/pane-entry.js --bundle --minify --format=iife --global-name=PsychePanes --outfile=web/panes.bundle.js && esbuild web/input/input-entry.js --bundle --minify --format=iife --global-name=PsycheTerminalInput --outfile=web/input.bundle.js && esbuild web/diffs/diff-entry.js --bundle --minify --format=iife --global-name=PsycheDiffs --outfile=web/diffs.bundle.js && esbuild web/status/status-entry.js --bundle --minify --format=iife --global-name=PsycheStatus --outfile=web/status.bundle.js && esbuild web/workspace/workspace-entry.js --bundle --minify --format=iife --global-name=PsycheWorkspace --outfile=web/workspace.bundle.js && esbuild web/runtime/runtime-entry.ts --bundle --minify --format=iife --global-name=PsycheRuntime --outfile=web/runtime.bundle.js",
+
     "build": "pnpm build:web && tauri build",
     "dev": "pnpm build:web && tauri dev",
     "serve:web": "vite web --host 127.0.0.1 --port 1420 --strictPort"
   },
   "dependencies": {
-    "@opencoven/psyche-vim-core": "workspace:*",
     "@codemirror/commands": "6.10.4",
     "@codemirror/lang-css": "6.3.1",
-    "@codemirror/lang-html": "6.4.11",
+    "@codemirror/lang-html": "6.4.12",
     "@codemirror/lang-javascript": "6.2.5",
     "@codemirror/lang-json": "6.0.2",
-    "@codemirror/lang-markdown": "6.5.1",
+    "@codemirror/lang-markdown": "6.5.2",
     "@codemirror/lang-python": "6.2.1",
     "@codemirror/lang-rust": "6.0.2",
     "@codemirror/lang-xml": "6.1.0",
@@ -23,14 +23,15 @@
     "@codemirror/language": "6.12.4",
     "@codemirror/legacy-modes": "6.5.3",
     "@codemirror/state": "6.7.1",
-    "@codemirror/view": "6.43.7",
+    "@codemirror/view": "6.43.8",
     "@lezer/highlight": "1.2.3",
+    "@opencoven/psyche-vim-core": "workspace:*",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
     "codemirror": "6.0.2"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4",
-    "esbuild": "0.28.1",
-    "vite": "6.4.3"
+    "esbuild": "0.28.2",
+    "vite": "8.2.1"
   }
 }

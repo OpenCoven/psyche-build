@@ -7,6 +7,8 @@ const root = process.cwd();
 const desktop = join(root, 'native/desktop/psyche-build-tauri');
 const ciWorkflowPath = join(root, '.github/workflows/ci.yml');
 const libSourcePath = join(desktop, 'src-tauri/src/lib.rs');
+const controlProviderSourcePath = join(desktop, 'src-tauri/src/control_provider.rs');
+const platformSourcePath = join(desktop, 'src-tauri/src/platform/mod.rs');
 const covenSessionsSourcePath = join(desktop, 'src-tauri/src/coven_sessions.rs');
 const mainSourcePath = join(desktop, 'web/main.js');
 const textExtensions = new Set([
@@ -197,7 +199,7 @@ describe('desktop Tauri layout', () => {
     expect(configs[0].build.beforeDevCommand).toBe('pnpm run serve:web');
     expect(desktopPackage.scripts['serve:web'])
       .toBe('vite web --host 127.0.0.1 --port 1420 --strictPort');
-    expect(desktopPackage.devDependencies.vite).toBe('6.4.3');
+    expect(desktopPackage.devDependencies.vite).toBe('8.2.1');
     expect(JSON.stringify(configs)).not.toMatch(/\bpython3?\b/);
   });
 
@@ -205,7 +207,7 @@ describe('desktop Tauri layout', () => {
     const libSource = readFileSync(libSourcePath, 'utf8');
     const mainSource = readFileSync(mainSourcePath, 'utf8');
     const appEnvironment = bracedItem(libSource, 'fn app_environment');
-    const ptyStart = bracedItem(libSource, 'fn pty_start');
+    const ptyStart = bracedItem(libSource, 'fn pty_start_blocking');
     const spawnShellThread = bracedItem(mainSource, 'function spawnShellThread');
     const spawnPsycheThread = bracedItem(mainSource, 'function spawnPsycheThread');
 
@@ -240,6 +242,22 @@ describe('desktop Tauri layout', () => {
 
     expect(appEnvironment).toContain('let home = platform::home_directory();');
     expect(appEnvironment).not.toMatch(/std::env::var\(["']HOME["']\)/);
+  });
+
+  it('routes control credentials through the shared platform home resolver', () => {
+    const controlProviderSource = readFileSync(controlProviderSourcePath, 'utf8');
+    const platformSource = readFileSync(platformSourcePath, 'utf8');
+    const controlCredentialsPath = bracedItem(controlProviderSource, 'fn control_credentials_path');
+
+    expect(controlCredentialsPath).toContain('platform::psyche_user_config_directory()');
+    expect(controlCredentialsPath).toContain('.join("control")');
+    expect(controlCredentialsPath).toContain('.join("projects")');
+    expect(controlCredentialsPath).toContain('project_identity_digest(identity)');
+    expect(controlCredentialsPath).toContain('.join("control-credentials.json")');
+    expect(controlCredentialsPath).not.toMatch(/std::env::var_os\(["']HOME["']\)/);
+    expect(platformSource).toContain('non_empty(user_profile).or_else(|| non_empty(home))');
+    expect(platformSource).toContain('.join(".config")');
+    expect(platformSource).toContain('.join("psyche")');
   });
 
   it('uses Windows PATHEXT when resolving extensionless executables', () => {

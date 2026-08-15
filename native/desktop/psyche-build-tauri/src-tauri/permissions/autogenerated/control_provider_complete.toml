@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-control-provider-complete"
+description = "Enables the control_provider_complete command without any pre-configured scope."
+commands.allow = ["control_provider_complete"]
+
+[[permission]]
+identifier = "deny-control-provider-complete"
+description = "Denies the control_provider_complete command without any pre-configured scope."
+commands.deny = ["control_provider_complete"]

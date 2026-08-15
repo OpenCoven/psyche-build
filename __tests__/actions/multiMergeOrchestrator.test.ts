@@ -31,9 +31,9 @@ vi.mock('../../src/utils/agentDetection.js', () => ({
   getInstalledAgents: vi.fn(async () => ['claude']),
 }));
 vi.mock('../../src/utils/settingsManager.js', () => ({
-  SettingsManager: vi.fn(() => ({
+  SettingsManager: vi.fn(function SettingsManager() { return {
     getSettings: () => ({ enabledAgents: ['claude'] }),
-  })),
+  }; }),
 }));
 vi.mock('../../src/utils/agentLaunch.js', () => ({
   getAgentDescription: vi.fn(() => 'Claude'),

@@ -413,7 +413,7 @@ export const MOBILE_CONTROL_FIXTURES = {
     payload: {
       type: 'actions.respond',
       requestId: 'action-response-1',
-      paneId: '%3',
+      sessionId: 'action-session-1',
       response: { type: 'confirm' },
     },
   },
@@ -502,6 +502,7 @@ export const MOBILE_CONTROL_FIXTURES = {
       paneId: '%3',
       path: 'src/index.ts',
       content: 'export {};\n',
+      truncated: true,
     },
   },
   filesDiffResult: {
