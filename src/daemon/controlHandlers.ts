@@ -22,6 +22,7 @@ import {
   launchProjectCovenSession,
   openProjectCovenSession,
   routeProjectCovenSessionCapability,
+  resolveConfiguredPaneId,
   updatePaneMeta,
   defaultSpawnDeps,
   type BridgeSpawnRequest,
@@ -83,6 +84,9 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
   const paneObservations = deps.paneObservations ?? new PaneObservationStore();
   const surfaces = deps.surfaces ?? new SurfaceRegistry();
   const closePane = deps.closePane ?? killBridgePane;
+  // Legacy commands do not carry a resource generation. Keep their durable
+  // config lookup so an authenticated client cannot target an arbitrary tmux pane.
+  const resolvePaneId = (paneId: string) => resolveConfiguredPaneId(deps.projectRoot, paneId);
 
   return {
     async spawnPane(payload): Promise<BridgeSpawnResult> {
@@ -104,19 +108,19 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       if (!bytes) {
         throw Object.assign(new Error('input must be base64'), { code: 'bad_base64' });
       }
-      await deps.tmux.sendKeysHex(payload.paneId, bytes);
+      await deps.tmux.sendKeysHex(await resolvePaneId(payload.paneId), bytes);
     },
 
     async resizePane(payload): Promise<void> {
-      deps.tmux.resizePane(payload.paneId, payload.cols, payload.rows);
+      deps.tmux.resizePane(await resolvePaneId(payload.paneId), payload.cols, payload.rows);
     },
 
     async focusPane(payload): Promise<void> {
-      deps.tmux.selectPane(payload.paneId);
+      deps.tmux.selectPane(await resolvePaneId(payload.paneId));
     },
 
     async killPane(payload): Promise<void> {
-      await deps.tmux.killPane(payload.paneId);
+      await deps.tmux.killPane(await resolvePaneId(payload.paneId));
     },
 
     executeOrchestration: notSupported('orchestration.execute'),
