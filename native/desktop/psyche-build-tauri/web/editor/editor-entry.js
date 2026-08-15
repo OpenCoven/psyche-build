@@ -152,6 +152,7 @@ export function createFileEditorState({
       basicSetup,
       syntaxHighlighting(workspaceHighlightStyle),
       workspaceEditorTheme,
+      EditorView.lineWrapping,
       extensionForLanguage(languageId),
       EditorView.editable.of(!readOnly),
       EditorState.readOnly.of(readOnly),
