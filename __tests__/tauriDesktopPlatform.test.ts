@@ -303,7 +303,7 @@ function icoEntries(path: string) {
   const tableEnd = 6 + count * 16;
   if (tableEnd > ico.length) throw new Error(`Out-of-bounds ICO directory table: ${path}`);
 
-  const widths: number[] = [];
+  const entries: Array<{ width: number; height: number }> = [];
   for (let index = 0; index < count; index += 1) {
     const entryOffset = 6 + index * 16;
     const width = normalizeIcoDimension(ico[entryOffset]);
@@ -323,10 +323,10 @@ function icoEntries(path: string) {
       );
     }
 
-    widths.push(width);
+    entries.push({ width, height });
   }
 
-  return { widths };
+  return { entries };
 }
 
 function icnsChunks(path: string) {
@@ -562,7 +562,14 @@ describe('desktop Tauri layout', () => {
       expect(png.alphaAt(Math.floor(png.width / 2), Math.floor(png.height / 2))).toBe(255);
     }
     const ico = icoEntries(join(icons, 'icon.ico'));
-    expect(ico.widths).toEqual(expect.arrayContaining([16, 24, 32, 48, 64, 256]));
+    expect(ico.entries).toEqual(expect.arrayContaining([
+      { width: 16, height: 16 },
+      { width: 24, height: 24 },
+      { width: 32, height: 32 },
+      { width: 48, height: 48 },
+      { width: 64, height: 64 },
+      { width: 256, height: 256 },
+    ]));
 
     const icns = icnsChunks(join(icons, 'icon.icns'));
     expect(icns.chunkTypes).toEqual(expect.arrayContaining([
