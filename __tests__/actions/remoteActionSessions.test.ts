@@ -83,6 +83,7 @@ describe('RemoteActionSessions', () => {
         type: 'input',
         message: 'Commit message',
         data: {
+          host: 'ios.local',
           projectId: '/forged',
           worktreePath: '/forged/worktree',
           sourceBranch: 'forged',
@@ -99,7 +100,7 @@ describe('RemoteActionSessions', () => {
     });
     expect(next.sessionId).toBeDefined();
     expect(next.result.data).toMatchObject({
-      host: 'mac.local',
+      host: 'ios.local',
       projectId: '/forged',
       projectTitle: 'psyche-build',
       worktreePath: '/forged/worktree',
