@@ -13,8 +13,9 @@ import { describe, expect, it } from 'vitest';
  * agent binary, calls no Coven, and touches no network — the focused suites
  * cover those. What is left is the one thing nothing else checks: that
  * `dist/index.js`, the entry point the packaged CLI actually uses, comes up at
- * all. `pnpm smoke:pack` verifies what the tarball would contain; a package can
- * pack correctly and still fail to launch.
+ * all. `pnpm smoke:pack` separately proves the packaged tarball installs and
+ * exports the public control-token subpath; a package can pack correctly and
+ * still fail to launch.
  */
 
 const CHECKOUT = process.cwd();

@@ -2,11 +2,15 @@ import { connect, type Socket } from 'node:net';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 import { controlEndpointForProject } from './endpoint.js';
 import { encodeControlMessage, type ControlRequest, type ControlResponse } from './protocol.js';
+import {
+  isActionStatusReceipt,
+} from './types.js';
 import type {
-  ActionReceipt,
+  ActionStatusReceipt,
   ControlCommandInput,
   CommandOutcome,
   ControlSnapshot,
+  ControlSnapshotScope,
 } from './types.js';
 
 export interface ControlClientPrincipal {
@@ -15,17 +19,33 @@ export interface ControlClientPrincipal {
   capabilities: readonly string[];
 }
 
+export interface ControlClientTaskBinding {
+  taskId: string;
+  subjectId?: string;
+}
+
 export interface ControlClientOptions {
   projectRoot: string;
   token: string;
   clientName: string;
   endpoint?: string;
   signal?: AbortSignal;
+  taskBinding?: ControlClientTaskBinding;
 }
 
 interface PendingRequest {
   resolve: (response: ControlResponse) => void;
   reject: (error: Error) => void;
+}
+
+export class ControlResponseError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ControlResponseError';
+  }
 }
 
 /**
@@ -48,6 +68,7 @@ export class ControlClient {
     readonly projectRoot: string,
     readonly ownerEpoch: number,
     readonly principal: ControlClientPrincipal,
+    readonly taskBinding?: ControlClientTaskBinding,
   ) {}
 
   static async connect(options: ControlClientOptions): Promise<ControlClient> {
@@ -113,6 +134,16 @@ export class ControlClient {
             rejectAndClose(new Error('welcome project root does not match the requested project'));
             return;
           }
+          if (options.taskBinding?.taskId !== undefined
+            && message.taskBinding?.taskId !== options.taskBinding.taskId) {
+            rejectAndClose(new Error('welcome task binding does not match the requested task'));
+            return;
+          }
+          if (options.taskBinding?.subjectId !== undefined
+            && message.taskBinding?.subjectId !== options.taskBinding.subjectId) {
+            rejectAndClose(new Error('welcome task subject does not match the requested binding'));
+            return;
+          }
           cleanup();
           resolve(message);
         };
@@ -141,7 +172,13 @@ export class ControlClient {
       },
     );
 
-    const client = new ControlClient(socket, canonicalRoot, welcome.ownerEpoch, welcome.principal);
+    const client = new ControlClient(
+      socket,
+      canonicalRoot,
+      welcome.ownerEpoch,
+      welcome.principal,
+      welcome.taskBinding,
+    );
     client.attach();
     return client;
   }
@@ -158,28 +195,32 @@ export class ControlClient {
     });
   }
 
-  getState(): Promise<ControlSnapshot> {
+  getState(scope: ControlSnapshotScope = {}): Promise<ControlSnapshot> {
+    const effectiveScope = this.effectiveScope(scope);
     return this.request({
       version: 1,
       type: 'state.get',
       requestId: this.allocateRequestId(),
+      ...(effectiveScope.taskId === undefined ? {} : { taskId: effectiveScope.taskId }),
     }).then((response) => {
       if (response.type === 'state.result') return response.snapshot;
       throw responseError(response, 'state.get');
     });
   }
 
-  readEvents(afterSequence: number, limit?: number): Promise<{
+  readEvents(afterSequence: number, limit?: number, scope: ControlSnapshotScope = {}): Promise<{
     events: unknown[];
     nextSequence: number;
     gap: boolean;
   }> {
+    const effectiveScope = this.effectiveScope(scope);
     return this.request({
       version: 1,
       type: 'events.read',
       requestId: this.allocateRequestId(),
       afterSequence,
       ...(limit === undefined ? {} : { limit }),
+      ...(effectiveScope.taskId === undefined ? {} : { taskId: effectiveScope.taskId }),
     }).then((response) => {
       if (response.type === 'events.result') {
         return { events: response.events, nextSequence: response.nextSequence, gap: response.gap };
@@ -200,25 +241,31 @@ export class ControlClient {
     return this.submit(command);
   }
 
-  async actionStatus(actionId: string): Promise<ActionReceipt | undefined> {
-    const snapshot = await this.getState();
+  async actionStatus(
+    actionId: string,
+    scope: ControlSnapshotScope = {},
+  ): Promise<ActionStatusReceipt | undefined> {
+    const effectiveScope = this.effectiveScope(scope);
+    const snapshot = await this.getState(effectiveScope);
     const recent = snapshot.receipts.find((receipt) => receipt.actionId === actionId);
     if (recent) return recent;
+    if (effectiveScope.taskId === undefined && this.principal.kind !== 'operator') return undefined;
     const pageLimit = 256;
     const historyLimit = 1_000;
     const maxPages = Math.ceil(historyLimit / pageLimit);
     let afterSequence = Math.max(0, snapshot.sequence - historyLimit);
-    let found: ActionReceipt | undefined;
+    let found: ActionStatusReceipt | undefined;
     for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
       const remaining = historyLimit - pageNumber * pageLimit;
       const limit = Math.min(pageLimit, remaining);
-      const page = await this.readEvents(afterSequence, limit);
+      const page = await this.readEvents(afterSequence, limit, effectiveScope);
       for (const event of page.events) {
         if (!event || typeof event !== 'object') continue;
         const payload = (event as { payload?: unknown }).payload;
         if (!payload || typeof payload !== 'object') continue;
         const receipt = (payload as { receipt?: unknown }).receipt;
-        if (isActionReceipt(receipt) && receipt.actionId === actionId) found = receipt;
+        const scoped = eventActionReceipt(receipt);
+        if (scoped && scoped.actionId === actionId) found = scoped;
       }
       if (page.events.length < limit || page.nextSequence <= afterSequence) return found;
       afterSequence = page.nextSequence;
@@ -312,15 +359,21 @@ export class ControlClient {
     this.nextRequestId += 1;
     return id;
   }
+
+  private effectiveScope(scope: ControlSnapshotScope = {}): ControlSnapshotScope {
+    if (this.principal.kind === 'operator') return scope;
+    if (this.taskBinding?.taskId) return { taskId: this.taskBinding.taskId };
+    return {};
+  }
 }
 
 function responseError(response: ControlResponse, context: string): Error {
-  if (response.type === 'error') return new Error(`${response.code}: ${response.message}`);
+  if (response.type === 'error') {
+    return new ControlResponseError(response.code, `${response.code}: ${response.message}`);
+  }
   return new Error(`unexpected ${response.type} response to ${context}`);
 }
 
-function isActionReceipt(value: unknown): value is ActionReceipt {
-  return Boolean(value && typeof value === 'object'
-    && (value as { schema?: unknown }).schema === 'psyche.control.receipt/v1'
-    && typeof (value as { actionId?: unknown }).actionId === 'string');
+function eventActionReceipt(value: unknown): ActionStatusReceipt | undefined {
+  return isActionStatusReceipt(value) ? value : undefined;
 }

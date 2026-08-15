@@ -5,6 +5,10 @@ const provider = readFileSync(new URL(
   '../native/desktop/psyche-build-tauri/src-tauri/src/control_provider.rs',
   import.meta.url,
 ), 'utf8');
+const platform = readFileSync(new URL(
+  '../native/desktop/psyche-build-tauri/src-tauri/src/platform/mod.rs',
+  import.meta.url,
+), 'utf8');
 const lib = readFileSync(new URL(
   '../native/desktop/psyche-build-tauri/src-tauri/src/lib.rs',
   import.meta.url,
@@ -22,6 +26,22 @@ const browserScriptPermission = readFileSync(new URL(
   import.meta.url,
 ), 'utf8');
 
+function bracedItem(source: string, marker: string, start = 0): string {
+  const itemStart = source.indexOf(marker, start);
+  expect(itemStart).toBeGreaterThanOrEqual(0);
+  const bodyStart = source.indexOf('{', itemStart);
+  expect(bodyStart).toBeGreaterThanOrEqual(0);
+
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}') depth -= 1;
+    if (depth === 0) return source.slice(itemStart, index + 1);
+  }
+
+  throw new Error(`Could not find the end of ${marker}`);
+}
+
 describe('Tauri browser control provider contract', () => {
   it('derives the endpoint from canonical-root SHA-256 first 20 hex characters', () => {
     expect(provider).toMatch(/canonicalize\(/);
@@ -33,14 +53,51 @@ describe('Tauri browser control provider contract', () => {
     expect(cargo).toContain('unicode-normalization');
   });
 
-  it('reads only the operator token from a 0600 credential file', () => {
-    expect(provider).toContain('control-credentials.json');
+  it('reads only the operator token from the shared control credentials path', () => {
+    const controlCredentialsPath = bracedItem(provider, 'fn control_credentials_path');
+    const homeDirectoryFor = bracedItem(platform, 'fn home_directory_for');
+    const configDirectoryFor = bracedItem(platform, 'fn psyche_user_config_directory_for');
+
+    expect(controlCredentialsPath).toContain('platform::psyche_user_config_directory()');
+    expect(controlCredentialsPath).toContain('.join("control")');
+    expect(controlCredentialsPath).toContain('.join("projects")');
+    expect(controlCredentialsPath).toContain('project_identity_digest(identity)');
+    expect(controlCredentialsPath).toContain('.join("control-credentials.json")');
+    expect(controlCredentialsPath).not.toMatch(/std::env::var_os\(["']HOME["']\)/);
+    expect(homeDirectoryFor).toContain('PlatformFamily::Unix => non_empty(home)');
+    expect(homeDirectoryFor).toContain('PlatformFamily::Windows => non_empty(user_profile).or_else(|| non_empty(home))');
+    expect(configDirectoryFor).toContain('home_directory_for(family, home, user_profile)');
+    expect(configDirectoryFor).toContain('.join(".config")');
+    expect(configDirectoryFor).toContain('.join("psyche")');
     expect(provider).toMatch(/permissions\(\)\.mode\(\) & 0o777 != 0o600/);
     expect(provider).toMatch(/struct StoredCredentials[\s\S]*operator_token: String/);
     expect(provider).not.toMatch(/agent_token\s*:/);
     expect(provider).toContain('O_NOFOLLOW');
     expect(provider).toMatch(/file\s*\.metadata\(\)/);
     expect(provider).toMatch(/\.take\(MAX_CREDENTIAL_BYTES/);
+  });
+
+  it('keeps the canonical project digest byte-for-byte identical across Rust and Node', () => {
+    const credentialPaths = readFileSync(new URL(
+      '../src/control/credentialPaths.ts',
+      import.meta.url,
+    ), 'utf8');
+    const controlCredentialsPath = bracedItem(provider, 'fn control_credentials_path');
+
+    expect(controlCredentialsPath).toContain('platform::psyche_user_config_directory()');
+    expect(controlCredentialsPath).toContain('.join("control")');
+    expect(controlCredentialsPath).toContain('.join("projects")');
+    expect(controlCredentialsPath).toContain('project_identity_digest(identity)');
+    expect(controlCredentialsPath).toContain('.join("control-credentials.json")');
+    expect(credentialPaths).toMatch(
+      /export function defaultControlStateRoot\(\): string \{\s*return path\.join\(psycheUserConfigDirectory\(\), CONTROL_STATE_DIRECTORY\);\s*\}/,
+    );
+    expect(credentialPaths).toMatch(
+      /export function controlProjectDigest\([\s\S]*createHash\('sha256'\)[\s\S]*\.update\(normalizeCanonicalProjectIdentity\(path\.resolve\(canonicalProjectRoot\), platform\), 'utf8'\)[\s\S]*\.digest\('hex'\)/,
+    );
+    expect(credentialPaths).toMatch(
+      /credentialFilePath:\s*path\.resolve\(\s*options\.filePath\s*\?\?\s*path\.join\(projectDirectory,\s*CONTROL_CREDENTIAL_FILE\),/s,
+    );
   });
 
   it('writes hello and provider registration before any resource frames', () => {

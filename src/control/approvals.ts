@@ -61,6 +61,9 @@ export function createRedactedApprovalEffect(
 export interface ApprovalRequest {
   readonly actionId: string;
   readonly ownerEpoch: number;
+  readonly taskId: string;
+  readonly actorId: string;
+  readonly subjectId?: string;
   readonly leaseId: string;
   readonly leaseRevision: number;
   readonly resource: LeaseTarget;
@@ -72,6 +75,9 @@ export interface ApprovalRequest {
 interface ApprovalIdentity {
   readonly actionId: string;
   readonly ownerEpoch: number;
+  readonly taskId: string;
+  readonly actorId: string;
+  readonly subjectId?: string;
   readonly leaseId: string;
   readonly leaseRevision: number;
   readonly resource: LeaseTarget;
@@ -85,6 +91,9 @@ export interface ApprovalConsumeAssertion {
   readonly payloadDigest: string;
   readonly actionId: string;
   readonly ownerEpoch: number;
+  readonly taskId: string;
+  readonly actorId: string;
+  readonly subjectId?: string;
   readonly leaseId: string;
   readonly leaseRevision: number;
   readonly resource: LeaseTarget;
@@ -111,6 +120,9 @@ export interface Approval {
   readonly status: ApprovalStatus;
   readonly actionId: string;
   readonly ownerEpoch: number;
+  readonly taskId?: string;
+  readonly actorId?: string;
+  readonly subjectId?: string;
   readonly leaseId: string;
   readonly leaseRevision: number;
   readonly resource: LeaseTarget;
@@ -233,6 +245,13 @@ export class ApprovalStore {
     return this.revokeWhere((approval) => approval.leaseId === leaseId, now);
   }
 
+  revokeForApprovalIds(approvalIds: readonly string[]): readonly Approval[] {
+    const ids = new Set(approvalIds.filter(isNonemptyString));
+    if (ids.size === 0) return Object.freeze([]);
+    const now = this.clock();
+    return this.revokeWhere((approval) => ids.has(approval.id), now);
+  }
+
   revokeAll(): readonly Approval[] {
     const now = this.clock();
     return this.revokeWhere(() => true, now);
@@ -321,14 +340,17 @@ export class ApprovalStore {
 }
 
 function copyIdentity(input: ApprovalRequest): ApprovalIdentity {
-  assertExactKeys(input, [
-    'actionId', 'ownerEpoch', 'leaseId', 'leaseRevision', 'resource', 'capability', 'effect',
-    'executablePayloadDigest',
-  ], 'approval request');
+  assertAllowedKeys(input, [
+    'actionId', 'ownerEpoch', 'taskId', 'actorId', 'leaseId', 'leaseRevision', 'resource',
+    'capability', 'effect', 'executablePayloadDigest',
+  ], ['subjectId'], 'approval request');
   assertIdentityFields(input);
   return {
     actionId: input.actionId,
     ownerEpoch: input.ownerEpoch,
+    taskId: input.taskId,
+    actorId: input.actorId,
+    ...(input.subjectId ? { subjectId: input.subjectId } : {}),
     leaseId: input.leaseId,
     leaseRevision: input.leaseRevision,
     resource: copyTarget(input.resource),
@@ -339,11 +361,10 @@ function copyIdentity(input: ApprovalRequest): ApprovalIdentity {
 }
 
 function copyAssertion(input: ApprovalConsumeAssertion): NormalizedApprovalConsumeAssertion {
-  assertExactKeys(input, [
-    'approvalId', 'payloadDigest', 'actionId', 'ownerEpoch', 'leaseId', 'leaseRevision',
-    'resource', 'capability', 'effect',
-    'executablePayloadDigest',
-  ], 'approval assertion');
+  assertAllowedKeys(input, [
+    'approvalId', 'payloadDigest', 'actionId', 'ownerEpoch', 'taskId', 'actorId',
+    'leaseId', 'leaseRevision', 'resource', 'capability', 'effect', 'executablePayloadDigest',
+  ], ['subjectId'], 'approval assertion');
   if (!isNonemptyString(input?.approvalId)) {
     throw codedError('approval_identity_mismatch', 'approval id is missing');
   }
@@ -356,6 +377,9 @@ function copyAssertion(input: ApprovalConsumeAssertion): NormalizedApprovalConsu
     payloadDigest: input.payloadDigest,
     actionId: input.actionId,
     ownerEpoch: input.ownerEpoch,
+    taskId: input.taskId,
+    actorId: input.actorId,
+    ...(input.subjectId ? { subjectId: input.subjectId } : {}),
     leaseId: input.leaseId,
     leaseRevision: input.leaseRevision,
     resource: copyTarget(input.resource),
@@ -373,8 +397,19 @@ const CAPABILITIES: ReadonlySet<SurfaceCapability> = new Set([
 ]);
 
 function assertIdentityFields(input: ApprovalIdentity | ApprovalRequest | ApprovalConsumeAssertion): void {
-  if (!isNonemptyString(input?.actionId) || !isNonemptyString(input?.leaseId)) {
-    throw codedError('approval_identity_mismatch', 'approval action and lease ids must be nonempty');
+  if (
+    !isNonemptyString(input?.actionId)
+    || !isNonemptyString(input?.taskId)
+    || !isNonemptyString(input?.actorId)
+    || !isNonemptyString(input?.leaseId)
+  ) {
+    throw codedError(
+      'approval_identity_mismatch',
+      'approval action, task, actor, and lease ids must be nonempty',
+    );
+  }
+  if (input.subjectId !== undefined && !isNonemptyString(input.subjectId)) {
+    throw codedError('approval_identity_mismatch', 'approval subject id must be nonempty when provided');
   }
   if (!isAuthorityInteger(input.ownerEpoch) || !isAuthorityInteger(input.leaseRevision)) {
     throw codedError('approval_identity_mismatch', 'approval authority revisions must be safe integers');
@@ -521,6 +556,9 @@ function digestIdentity(identity: ApprovalIdentity): string {
   const payload = {
     actionId: identity.actionId,
     ownerEpoch: identity.ownerEpoch,
+    taskId: identity.taskId,
+    actorId: identity.actorId,
+    ...(identity.subjectId ? { subjectId: identity.subjectId } : {}),
     leaseId: identity.leaseId,
     leaseRevision: identity.leaseRevision,
     resource,
@@ -572,6 +610,20 @@ function assertExactKeys(value: unknown, expected: readonly string[], label: str
   }
 }
 
+function assertAllowedKeys(
+  value: unknown,
+  required: readonly string[],
+  optional: readonly string[],
+  label: string,
+): void {
+  assertPlainDataObject(value, label);
+  const actual = Object.keys(value);
+  const allowed = new Set([...required, ...optional]);
+  if (actual.some((key) => !allowed.has(key)) || required.some((key) => !actual.includes(key))) {
+    throw codedError('approval_payload_invalid', `${label} contains unsupported fields`);
+  }
+}
+
 function isNonemptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
@@ -591,13 +643,23 @@ function assertDigest(approval: Approval, suppliedDigest: string): void {
 }
 
 function assertStoredDigest(approval: Approval): void {
-  if (digestIdentity(approval) !== approval.payloadDigest) {
+  if (!isNonemptyString(approval.taskId) || !isNonemptyString(approval.actorId)) {
+    throw codedError('approval_identity_mismatch', 'stored approval ownership is invalid');
+  }
+  if (approval.subjectId !== undefined && !isNonemptyString(approval.subjectId)) {
+    throw codedError('approval_identity_mismatch', 'stored approval subject is invalid');
+  }
+  const identity = approval as Approval & Required<Pick<Approval, 'taskId' | 'actorId'>>;
+  if (digestIdentity(identity as ApprovalIdentity) !== approval.payloadDigest) {
     throw codedError('approval_identity_mismatch', 'stored approval identity is invalid');
   }
 }
 
 function assertionMatches(approval: Approval, assertion: NormalizedApprovalConsumeAssertion): boolean {
   return approval.ownerEpoch === assertion.ownerEpoch
+    && approval.taskId === assertion.taskId
+    && approval.actorId === assertion.actorId
+    && approval.subjectId === assertion.subjectId
     && approval.leaseId === assertion.leaseId
     && approval.leaseRevision === assertion.leaseRevision
     && approval.capability === assertion.capability

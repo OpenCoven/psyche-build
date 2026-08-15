@@ -88,7 +88,7 @@ describe('BrowserProviderBroker', () => {
     const endpoint = path.join(root, 'control.sock');
     const credentials = {
       authenticate: (token: string) => token === 'operator-token'
-        ? { id: 'operator', kind: 'operator', capabilities: ['*'] }
+        ? { principal: { id: 'operator', kind: 'operator', capabilities: ['*'] } }
         : null,
     } as unknown as ControlCredentialStore;
     const broker = new BrowserProviderBroker({
@@ -335,9 +335,9 @@ async function startProviderServer(): Promise<{
   const broker = new BrowserProviderBroker();
   const credentials: ControlCredentialStore = {
     authenticate: async (token) => token === 'operator-token'
-      ? { id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] }
+      ? { principal: { id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] } }
       : token === 'agent-token'
-        ? { id: 'agent', kind: 'agent', capabilities: ['read', 'mutate'] }
+        ? { principal: { id: 'agent', kind: 'agent', capabilities: ['read', 'mutate'] } }
         : null,
     operatorToken: async () => 'operator-token',
     agentToken: async () => 'agent-token',
@@ -365,7 +365,7 @@ describe('ControlServer provider mode', () => {
     const endpoint = `/tmp/psyche-pd-${process.pid}-${Date.now()}.sock`;
     const credentials: ControlCredentialStore = {
       authenticate: async (token) => token === 'operator-token'
-        ? { id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] }
+        ? { principal: { id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] } }
         : null,
       operatorToken: async () => 'operator-token', agentToken: async () => 'agent-token',
     };
@@ -436,7 +436,7 @@ describe('ControlServer provider mode', () => {
     const broker = new BrowserProviderBroker();
     const credentials: ControlCredentialStore = {
       authenticate: async (token) => token === 'operator-token'
-        ? { id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] }
+        ? { principal: { id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] } }
         : null,
       operatorToken: async () => 'operator-token', agentToken: async () => 'agent-token',
     };

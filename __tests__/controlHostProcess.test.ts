@@ -26,6 +26,29 @@ describe('ensureHostControlPlane', () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it('passes an expected task binding through authenticated health checks', async () => {
+    const client = { getState: vi.fn() } as never;
+    const connect = vi.fn(async () => client);
+
+    await expect(ensureHostControlPlane({
+      projectRoot: '/canonical/project',
+      token: 'task-token',
+      clientName: 'mcp',
+      taskBinding: { taskId: 'task-own' },
+      entryPath: '/app/dist/index.js',
+      connect,
+      canonicalize: async () => '/canonical/project',
+    })).resolves.toBe(client);
+
+    expect(connect).toHaveBeenCalledWith(expect.objectContaining({
+      projectRoot: '/canonical/project',
+      token: 'task-token',
+      clientName: 'mcp',
+      taskBinding: { taskId: 'task-own' },
+      signal: expect.any(AbortSignal),
+    }));
+  });
+
   it('starts exactly one detached owner on connection absence and polls authenticated health', async () => {
     const client = { getState: vi.fn() } as never;
     const connect = vi.fn()

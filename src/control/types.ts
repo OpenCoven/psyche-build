@@ -85,23 +85,38 @@ export interface SemanticSnapshot {
   screenshot?: Readonly<{ pngBase64: string; width: number; height: number }>;
 }
 
-export interface ActionReceipt {
+export type ActionReceiptState =
+  | 'queued' | 'running' | 'approval_required' | 'succeeded'
+  | 'failed' | 'denied' | 'expired' | 'unknown';
+
+export type JournalActionReceiptResource =
+  | { kind: 'project'; idDigest: string }
+  | { kind: 'pane' | 'browser_tab'; idDigest: string; generation: number };
+
+export interface ActionReceiptBase<Resource> {
   schema: 'psyche.control.receipt/v1';
   actionId: string;
-  state:
-    | 'queued' | 'running' | 'approval_required' | 'succeeded'
-    | 'failed' | 'denied' | 'expired' | 'unknown';
-  resource: LeaseTarget;
+  state: ActionReceiptState;
+  resource: Resource;
   createdAt: string;
+  taskId?: string;
+  actorId?: string;
+  leaseId?: string;
+  leaseRevision?: number;
   completedAt?: string;
   code?: string;
-  message?: string;
-  value?: unknown;
   sourceDigest?: string;
   sourceBytes?: number;
   resultBytes?: number;
   durationMs?: number;
 }
+
+export type ActionReceipt = ActionReceiptBase<LeaseTarget> & {
+  message?: string;
+  value?: unknown;
+};
+export type JournalActionReceipt = ActionReceiptBase<JournalActionReceiptResource>;
+export type ActionStatusReceipt = ActionReceipt | JournalActionReceipt;
 
 interface AgentSurfaceAuthorization {
   taskId: string;
@@ -303,6 +318,10 @@ export interface CommandRecord {
   sequence: number;
 }
 
+export interface ControlSnapshotScope {
+  taskId?: string;
+}
+
 export interface ControlSnapshot {
   ownerEpoch: number;
   sequence: number;
@@ -328,5 +347,107 @@ export interface ControlSnapshot {
     grants: readonly LeaseGrant[];
   }[];
   approvals: readonly Approval[];
-  receipts: readonly ActionReceipt[];
+  receipts: readonly ActionStatusReceipt[];
+}
+
+function isActionReceiptBase<Resource>(
+  value: unknown,
+  resourceGuard: (resource: unknown) => resource is Resource,
+): value is ActionReceiptBase<Resource> {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && (value as { schema?: unknown }).schema === 'psyche.control.receipt/v1'
+    && typeof (value as { actionId?: unknown }).actionId === 'string'
+    && isActionReceiptState((value as { state?: unknown }).state)
+    && typeof (value as { createdAt?: unknown }).createdAt === 'string'
+    && resourceGuard((value as { resource?: unknown }).resource)
+    && optionalString((value as { taskId?: unknown }).taskId)
+    && optionalString((value as { actorId?: unknown }).actorId)
+    && optionalString((value as { leaseId?: unknown }).leaseId)
+    && optionalPositiveInteger((value as { leaseRevision?: unknown }).leaseRevision)
+    && optionalString((value as { completedAt?: unknown }).completedAt)
+    && optionalString((value as { code?: unknown }).code)
+    && optionalString((value as { sourceDigest?: unknown }).sourceDigest)
+    && optionalNonNegativeInteger((value as { sourceBytes?: unknown }).sourceBytes)
+    && optionalNonNegativeInteger((value as { resultBytes?: unknown }).resultBytes)
+    && optionalNonNegativeNumber((value as { durationMs?: unknown }).durationMs)
+  );
+}
+
+function optionalString(value: unknown): boolean {
+  return value === undefined || typeof value === 'string';
+}
+
+function optionalPositiveInteger(value: unknown): boolean {
+  return value === undefined || (Number.isSafeInteger(value) && (value as number) >= 1);
+}
+
+function optionalNonNegativeInteger(value: unknown): boolean {
+  return value === undefined || (Number.isSafeInteger(value) && (value as number) >= 0);
+}
+
+function optionalNonNegativeNumber(value: unknown): boolean {
+  return value === undefined || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
+}
+
+export function isActionReceiptState(value: unknown): value is ActionReceiptState {
+  return value === 'queued'
+    || value === 'running'
+    || value === 'approval_required'
+    || value === 'succeeded'
+    || value === 'failed'
+    || value === 'denied'
+    || value === 'expired'
+    || value === 'unknown';
+}
+
+export function isActionReceiptResource(value: unknown): value is ActionReceipt['resource'] {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && (
+      (value as { kind?: unknown }).kind === 'project'
+        ? typeof (value as { id?: unknown }).id === 'string'
+          && (value as { generation?: unknown }).generation === undefined
+        : ((value as { kind?: unknown }).kind === 'pane' || (value as { kind?: unknown }).kind === 'browser_tab')
+          && typeof (value as { id?: unknown }).id === 'string'
+          && Number.isSafeInteger((value as { generation?: unknown }).generation)
+          && ((value as { generation?: unknown }).generation as number) >= 1
+    )
+  );
+}
+
+export function isJournalActionReceiptResource(value: unknown): value is JournalActionReceipt['resource'] {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && typeof (value as { idDigest?: unknown }).idDigest === 'string'
+    && /^[a-f0-9]{64}$/.test((value as { idDigest: string }).idDigest)
+    && (
+      (value as { kind?: unknown }).kind === 'project'
+        ? (value as { generation?: unknown }).generation === undefined
+        : ((value as { kind?: unknown }).kind === 'pane' || (value as { kind?: unknown }).kind === 'browser_tab')
+          && Number.isSafeInteger((value as { generation?: unknown }).generation)
+          && ((value as { generation?: unknown }).generation as number) >= 1
+    )
+  );
+}
+
+export function isActionReceipt(value: unknown): value is ActionReceipt {
+  return isActionReceiptBase(value, isActionReceiptResource)
+    && optionalString((value as { message?: unknown }).message);
+}
+
+export function isJournalActionReceipt(value: unknown): value is JournalActionReceipt {
+  return isActionReceiptBase(value, isJournalActionReceiptResource)
+    && !Object.prototype.hasOwnProperty.call(value, 'message')
+    && !Object.prototype.hasOwnProperty.call(value, 'value');
+}
+
+export function isActionStatusReceipt(value: unknown): value is ActionStatusReceipt {
+  return isActionReceipt(value) || isJournalActionReceipt(value);
 }
