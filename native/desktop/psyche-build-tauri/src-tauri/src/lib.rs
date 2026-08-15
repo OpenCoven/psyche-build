@@ -7171,13 +7171,7 @@ mod workspace_panel_tests {
     }
 
     #[cfg(windows)]
-    fn write_marker_executable(path: &Path) {
-        std::fs::write(
-            path,
-            "@echo off\r\nif \"%PSYCHE_TEST_MARKER%\"==\"\" exit /b 1\r\ntype nul > \"%PSYCHE_TEST_MARKER%\"\r\n",
-        )
-        .unwrap();
-    }
+    fn write_marker_executable(_path: &Path) {}
 
     fn marker_command(path: &Path) -> String {
         #[cfg(unix)]
@@ -7186,11 +7180,11 @@ mod workspace_panel_tests {
         }
         #[cfg(windows)]
         {
+            let _ = path;
             // Git for Windows invokes configured helpers through its POSIX
-            // shell. Delegate explicitly to cmd so a batch helper is not
-            // interpreted as a shell script (and so the positive control is
-            // meaningful on the Windows runner).
-            format!("cmd.exe /D /C \"{}\"", path_text(path).replace('\\', "/"))
+            // shell. A shell command avoids Windows command-line quoting of
+            // temporary paths while retaining the positive-control assertion.
+            "sh -c 'test -n \"$PSYCHE_TEST_MARKER\" && touch \"$PSYCHE_TEST_MARKER\"'".to_string()
         }
     }
 
