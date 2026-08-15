@@ -3,26 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   CONTROL_PROTOCOL_VERSION,
   decodeControlRequest,
-  decodeControlWelcome,
   encodeControlMessage,
-  type ControlResponse,
 } from '../src/control/protocol.js';
-
-function welcomeFrame(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    version: CONTROL_PROTOCOL_VERSION,
-    type: 'welcome',
-    requestId: 'welcome',
-    projectRoot: '/repo',
-    ownerEpoch: 7,
-    principal: {
-      id: 'agent',
-      kind: 'agent',
-      capabilities: ['read', 'mutate'],
-    },
-    ...overrides,
-  };
-}
 
 describe('control protocol v1', () => {
   it('decodes the checked-in command fixture', () => {
@@ -57,64 +39,6 @@ describe('control protocol v1', () => {
       requestId: 'req-1',
     })).toBe('{"requestId":"req-1","type":"ack","version":1}');
   });
-
-  it('allows welcome responses to carry an authenticated task binding', () => {
-    const welcome: Extract<ControlResponse, { type: 'welcome' }> = {
-      version: CONTROL_PROTOCOL_VERSION,
-      type: 'welcome',
-      requestId: 'welcome',
-      projectRoot: '/repo',
-      ownerEpoch: 7,
-      principal: {
-        id: 'agent',
-        kind: 'agent',
-        capabilities: ['read', 'mutate'],
-      },
-      taskBinding: { taskId: 'task-alpha' },
-    };
-
-    expect(JSON.parse(encodeControlMessage(welcome))).toMatchObject({
-      type: 'welcome',
-      taskBinding: { taskId: 'task-alpha' },
-    });
-    expect(decodeControlWelcome(encodeControlMessage(welcome))).toEqual(welcome);
-  });
-
-  it('normalizes welcome task IDs up to the 256-character boundary', () => {
-    const taskId = 't'.repeat(256);
-
-    expect(decodeControlWelcome(JSON.stringify(welcomeFrame({
-      taskBinding: { taskId: `  ${taskId}  ` },
-    })))).toMatchObject({
-      taskBinding: { taskId },
-    });
-  });
-
-  it.each([
-    ['version', { version: 2 }],
-    ['requestId', { requestId: 'not-welcome' }],
-    ['projectRoot', { projectRoot: '   ' }],
-    ['principal', {
-      principal: { id: 'agent', kind: 'unknown', capabilities: ['read', 'mutate'] },
-    }],
-    ['principal capabilities', {
-      principal: { id: 'agent', kind: 'agent', capabilities: ['read', 'delegate'] },
-    }],
-    ['taskBinding blank taskId', { taskBinding: { taskId: '   ' } }],
-    ['taskBinding oversized taskId', { taskBinding: { taskId: 't'.repeat(257) } }],
-    ['taskBinding container', { taskBinding: { taskId: 'task-alpha', injected: true } }],
-  ])('rejects a welcome with malformed %s', (_field, overrides) => {
-    expect(() => decodeControlWelcome(JSON.stringify(welcomeFrame(overrides))))
-      .toThrow('invalid welcome frame');
-  });
-
-  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
-    'rejects malformed welcome owner epoch %s',
-    (ownerEpoch) => {
-      expect(() => decodeControlWelcome(JSON.stringify(welcomeFrame({ ownerEpoch }))))
-        .toThrow('invalid welcome frame');
-    },
-  );
 
   it('encodes the checked-in result fixture with stable key ordering', () => {
     const fixture = JSON.parse(readFileSync(
@@ -159,6 +83,25 @@ describe('control protocol v1', () => {
     }))).toThrow('invalid hello request');
   });
 
+  it('decodes and validates optional task scope on state.get requests', () => {
+    expect(decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'state.get',
+      requestId: 'req-1',
+      taskId: 'task-1',
+    }))).toMatchObject({
+      type: 'state.get',
+      taskId: 'task-1',
+    });
+
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'state.get',
+      requestId: 'req-1',
+      taskId: '',
+    }))).toThrow('invalid state.get request');
+  });
+
   it('rejects command.submit requests missing required command fields', () => {
     const command = {
       id: 'cmd-1',
@@ -199,33 +142,6 @@ describe('control protocol v1', () => {
     }
   });
 
-  it('normalizes 256-character request task IDs and rejects 257-character IDs', () => {
-    const command = {
-      id: 'cmd-1', idempotencyKey: 'idem-1', kind: 'browser.action', projectRoot: '/repo',
-      createdAt: '2026-08-12T12:00:00.000Z',
-      payload: {
-        taskId: `  ${'t'.repeat(256)}  `,
-        leaseId: 'lease-1',
-        leaseRevision: 1,
-        tabId: 'tab-1',
-        generation: 2,
-        action: { kind: 'reload' },
-      },
-    };
-
-    expect(decodeControlRequest(JSON.stringify({
-      version: 1, type: 'command.submit', requestId: 'req-1', command,
-    }))).toMatchObject({
-      command: { payload: { taskId: 't'.repeat(256) } },
-    });
-    expect(() => decodeControlRequest(JSON.stringify({
-      version: 1,
-      type: 'command.submit',
-      requestId: 'req-2',
-      command: { ...command, payload: { ...command.payload, taskId: 't'.repeat(257) } },
-    }))).toThrow('invalid surface authorization');
-  });
-
   it('rejects events.read requests with a non-number afterSequence', () => {
     expect(() => decodeControlRequest(JSON.stringify({
       version: CONTROL_PROTOCOL_VERSION,
@@ -242,89 +158,13 @@ describe('control protocol v1', () => {
       requestId: 'req-1',
       afterSequence: 0,
       limit: 100,
+      taskId: 'task-1',
     }))).toMatchObject({
       type: 'events.read',
       afterSequence: 0,
       limit: 100,
+      taskId: 'task-1',
     });
-  });
-
-  it('decodes dedicated task resource and lease-status reads without caller task scope', () => {
-    expect(decodeControlRequest(JSON.stringify({
-      version: CONTROL_PROTOCOL_VERSION,
-      type: 'task.resources.get',
-      requestId: 'resources-1',
-    }))).toEqual({
-      version: CONTROL_PROTOCOL_VERSION,
-      type: 'task.resources.get',
-      requestId: 'resources-1',
-    });
-    expect(decodeControlRequest(JSON.stringify({
-      version: CONTROL_PROTOCOL_VERSION,
-      type: 'lease.status.get',
-      requestId: 'lease-status-1',
-      leaseRequestId: 'request-alpha',
-    }))).toEqual({
-      version: CONTROL_PROTOCOL_VERSION,
-      type: 'lease.status.get',
-      requestId: 'lease-status-1',
-      leaseRequestId: 'request-alpha',
-    });
-    expect(decodeControlRequest(JSON.stringify({
-      version: CONTROL_PROTOCOL_VERSION,
-      type: 'lease.status.get',
-      requestId: 'lease-status-2',
-      leaseRequestId: 'request-alpha',
-      leaseId: 'lease-alpha',
-    }))).toEqual({
-      version: CONTROL_PROTOCOL_VERSION,
-      type: 'lease.status.get',
-      requestId: 'lease-status-2',
-      leaseRequestId: 'request-alpha',
-      leaseId: 'lease-alpha',
-    });
-  });
-
-  it.each([
-    ['task resource blank request ID', {
-      version: 1, type: 'task.resources.get', requestId: '   ',
-    }],
-    ['task resource oversized request ID', {
-      version: 1, type: 'task.resources.get', requestId: 'r'.repeat(257),
-    }],
-    ['task resource caller task scope', {
-      version: 1, type: 'task.resources.get', requestId: 'resources-1', taskId: 'task-alpha',
-    }],
-    ['lease status blank request ID', {
-      version: 1, type: 'lease.status.get', requestId: '', leaseRequestId: 'request-alpha',
-    }],
-    ['lease status oversized request ID', {
-      version: 1, type: 'lease.status.get',
-      requestId: 'r'.repeat(257), leaseRequestId: 'request-alpha',
-    }],
-    ['lease status blank lease request ID', {
-      version: 1, type: 'lease.status.get',
-      requestId: 'lease-status-1', leaseRequestId: '   ',
-    }],
-    ['lease status oversized lease request ID', {
-      version: 1, type: 'lease.status.get',
-      requestId: 'lease-status-1', leaseRequestId: 'r'.repeat(257),
-    }],
-    ['lease status blank lease ID', {
-      version: 1, type: 'lease.status.get',
-      requestId: 'lease-status-1', leaseRequestId: 'request-alpha', leaseId: ' ',
-    }],
-    ['lease status oversized lease ID', {
-      version: 1, type: 'lease.status.get',
-      requestId: 'lease-status-1', leaseRequestId: 'request-alpha',
-      leaseId: 'l'.repeat(257),
-    }],
-    ['lease status caller task scope', {
-      version: 1, type: 'lease.status.get',
-      requestId: 'lease-status-1', leaseRequestId: 'request-alpha', taskId: 'task-alpha',
-    }],
-  ])('rejects malformed dedicated read: %s', (_label, request) => {
-    expect(() => decodeControlRequest(JSON.stringify(request))).toThrow(/invalid .* request/);
   });
 
   it('rejects an unknown request type', () => {
