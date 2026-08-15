@@ -12416,6 +12416,9 @@
     state.threads = restored;
     var restoredIds = new Set(restored.map(function (thread) { return thread.id; }));
     restorePersistedFilesPanes(saved.filesPanes);
+    filesPanes.forEach(function (pane) {
+      if (pane && !pane.hidden) restoredIds.add(pane.id);
+    });
     restorePersistedPaneLayouts(saved.paneLayouts, restoredIds);
     ensureRestoredSessionPlacements(restored);
     restored.forEach(function (thread) { mountTerminal(thread); });

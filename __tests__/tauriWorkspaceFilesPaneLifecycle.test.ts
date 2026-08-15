@@ -73,6 +73,114 @@ describe('native Files pane lifecycle', () => {
     expect(placements).toHaveLength(2);
   });
 
+  it('restores layouts that include visible persisted Files panes', async () => {
+    const project = { id: 'project-a', lastActiveThreadId: null };
+    const state = { projects: [project], threads: [] as Record<string, any>[], activeThreadId: null as string | null };
+    const filesPanes = new Map<string, Record<string, unknown>>();
+    const paneLayouts = new Map<string, Record<string, unknown>>();
+    const restorePersistedFilesPanes = compileFunction<
+      (savedPanes: Array<Record<string, unknown>>) => void
+    >('restorePersistedFilesPanes', {
+      filesPanes,
+      findProject: () => project,
+      filesPaneKey: (projectId: string, root: string) => `${projectId}\0${root}`,
+    });
+    const restorePersistedPaneLayouts = compileFunction<
+      (savedLayouts: Array<Record<string, unknown>>, restoredIds: Set<string>) => void
+    >('restorePersistedPaneLayouts', {
+      paneLayouts,
+      findProject: () => project,
+      paneLayoutKey: (projectId: string, root: string) => `${projectId}\0${root}`,
+      PsychePanes: {
+        leafIds: () => ['leaf-thread', 'leaf-files'],
+        findLeafById: (_root: unknown, leafId: string) => (
+          leafId === 'leaf-thread'
+            ? { threadId: 'thread-a' }
+            : leafId === 'leaf-files'
+              ? { threadId: 'files-a' }
+              : null
+        ),
+      },
+    });
+    const restorePersistedSessions = compileFunction<
+      (saved: Record<string, any>, liveSessionIds: string[]) => Promise<Record<string, unknown>>
+    >('restorePersistedSessions', {
+      PsycheWorkspace: {
+        reconcileSessions: () => ({
+          sessions: [{
+            id: 'thread-a',
+            projectId: project.id,
+            worktreePath: '/repo',
+            hidden: false,
+            persistentLive: false,
+            status: 'exited',
+          }],
+          unknownLiveIds: [],
+        }),
+      },
+      window: {
+        PsycheWorkspace: {
+          reconcileSessions: () => ({
+            sessions: [{
+              id: 'thread-a',
+              projectId: project.id,
+              worktreePath: '/repo',
+              hidden: false,
+              persistentLive: false,
+              status: 'exited',
+            }],
+            unknownLiveIds: [],
+          }),
+        },
+      },
+      state,
+      findProject: () => project,
+      restoredSessionThread: (descriptor: Record<string, any>) => ({
+        id: descriptor.id,
+        projectId: descriptor.projectId,
+        worktreePath: descriptor.worktreePath,
+        hidden: descriptor.hidden,
+        ptyStarted: true,
+        status: 'exited',
+      }),
+      restorePersistedFilesPanes,
+      filesPanes,
+      restorePersistedPaneLayouts,
+      ensureRestoredSessionPlacements: () => undefined,
+      mountTerminal: () => undefined,
+      invoke: async () => [],
+      attachThreadClient: () => undefined,
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+    });
+
+    await restorePersistedSessions({
+      sessions: [],
+      filesPanes: [{ id: 'files-a', projectId: project.id, workspaceRoot: '/repo', hidden: false }],
+      paneLayouts: [{
+        projectId: project.id,
+        worktreePath: '/repo',
+        root: {
+          type: 'split',
+          id: 'split-a',
+          first: { type: 'leaf', id: 'leaf-thread', threadId: 'thread-a' },
+          second: { type: 'leaf', id: 'leaf-files', threadId: 'files-a' },
+        },
+        focusedLeafId: 'leaf-files',
+      }],
+      activeThreadId: null,
+    }, []);
+
+    expect(paneLayouts.get(`${project.id}\0/repo`)).toEqual({
+      root: {
+        type: 'split',
+        id: 'split-a',
+        first: { type: 'leaf', id: 'leaf-thread', threadId: 'thread-a' },
+        second: { type: 'leaf', id: 'leaf-files', threadId: 'files-a' },
+      },
+      focusedLeafId: 'leaf-files',
+    });
+  });
+
   it('scopes file tabs by both project and worktree', () => {
     const files = [
       { id: 'a', projectId: 'p', workspaceRoot: '/one' },
