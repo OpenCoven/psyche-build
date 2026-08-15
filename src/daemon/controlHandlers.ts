@@ -137,6 +137,10 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       return paneObservations.read(payload.paneId, { afterSequence: payload.afterSequence });
     },
     async actOnPane(payload) {
+      if (!deps.refreshPaneSurfaces) {
+        throw codedHandlerError('backend_unavailable', 'pane surface refresh is unavailable');
+      }
+      const refreshPaneSurfaces = deps.refreshPaneSurfaces;
       if (payload.action.kind === 'create') {
         if (payload.projectId !== deps.projectRoot) {
           throw codedHandlerError('resource_scope_mismatch', 'pane creation target is outside this project');
@@ -148,7 +152,7 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
           agent: payload.action.agent,
           branch: payload.action.branch,
         });
-        const refreshed = await deps.refreshPaneSurfaces?.();
+        const refreshed = await refreshPaneSurfaces();
         const created = refreshed?.find((surface) => surface.tmuxPaneId === result.id);
         if (!created) {
           throw codedHandlerError('resource_missing', 'created pane has no stable Psyche resource binding');
@@ -165,10 +169,7 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       }
       // Re-read the durable binding immediately before every effect. The refresh
       // drops panes whose persisted tmux server generation is no longer current.
-      if (!deps.refreshPaneSurfaces) {
-        throw codedHandlerError('backend_unavailable', 'pane surface refresh is unavailable');
-      }
-      await deps.refreshPaneSurfaces();
+      await refreshPaneSurfaces();
       const pane = requirePaneSurface(surfaces, payload.paneId, payload.generation);
       const target = assertTmuxPaneId(pane.tmuxPaneId);
       const quotedTarget = quoteTmuxArgument(target);
