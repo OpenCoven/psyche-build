@@ -7163,6 +7163,15 @@ mod workspace_panel_tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
+    #[cfg(windows)]
+    fn write_marker_executable(path: &Path) {
+        std::fs::write(
+            path,
+            "@echo off\r\nif \"%PSYCHE_TEST_MARKER%\"==\"\" exit /b 1\r\ntype nul > \"%PSYCHE_TEST_MARKER%\"\r\n",
+        )
+        .unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolves_the_first_executable_on_path_to_its_canonical_path() {
@@ -7738,9 +7747,10 @@ mod workspace_panel_tests {
         assert!(PendingPtyStart::reserve(&thread_id).is_ok());
     }
 
-    fn run_test_git(root: &Path, args: &[&str]) {
+    fn run_test_git_with_env(root: &Path, args: &[&str], env: &[(&str, &str)]) {
         let output = std::process::Command::new("git")
             .current_dir(root)
+            .envs(env.iter().copied())
             .args(args)
             .output()
             .expect("git must run in tests");
@@ -7750,6 +7760,10 @@ mod workspace_panel_tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn run_test_git(root: &Path, args: &[&str]) {
+        run_test_git_with_env(root, args, &[]);
     }
 
     #[test]
@@ -8088,26 +8102,23 @@ mod workspace_panel_tests {
         assert!(validate_git_relative_path("/tmp/secret.txt").is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn git_status_does_not_execute_a_repository_fsmonitor() {
         let tree = TempTree::new("git-fsmonitor");
-        let hook = tree.root.join("fsmonitor.sh");
+        let hook = if cfg!(windows) {
+            tree.root.join("fsmonitor.bat")
+        } else {
+            tree.root.join("fsmonitor.sh")
+        };
         let marker = tree.root.join("fsmonitor-ran");
         write_marker_executable(&hook);
         run_test_git(&tree.root, &["init", "-q"]);
         run_test_git(&tree.root, &["config", "core.fsmonitor", path_text(&hook)]);
 
-        let control = std::process::Command::new("git")
-            .current_dir(&tree.root)
-            .env("PSYCHE_TEST_MARKER", path_text(&marker))
-            .args(["status", "--porcelain"])
-            .output()
-            .expect("unhardened git status must run");
-        assert!(
-            control.status.success(),
-            "unhardened git status failed: {}",
-            String::from_utf8_lossy(&control.stderr),
+        run_test_git_with_env(
+            &tree.root,
+            &["status", "--porcelain"],
+            &[("PSYCHE_TEST_MARKER", path_text(&marker))],
         );
         assert!(
             marker.exists(),
@@ -8120,11 +8131,14 @@ mod workspace_panel_tests {
         assert!(!marker.exists());
     }
 
-    #[cfg(unix)]
     #[test]
     fn git_diff_does_not_execute_repository_diff_helpers() {
         let tree = TempTree::new("git-external-diff");
-        let helper = tree.root.join("external-diff.sh");
+        let helper = if cfg!(windows) {
+            tree.root.join("external-diff.bat")
+        } else {
+            tree.root.join("external-diff.sh")
+        };
         let marker = tree.root.join("external-diff-ran");
         write_marker_executable(&helper);
         std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
@@ -8145,16 +8159,10 @@ mod workspace_panel_tests {
         run_test_git(&tree.root, &["config", "diff.external", path_text(&helper)]);
         std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
 
-        let control = std::process::Command::new("git")
-            .current_dir(&tree.root)
-            .env("PSYCHE_TEST_MARKER", path_text(&marker))
-            .args(["diff", "--no-color", "--relative", "--", "tracked.txt"])
-            .output()
-            .expect("unhardened git diff must run");
-        assert!(
-            control.status.success(),
-            "unhardened git diff failed: {}",
-            String::from_utf8_lossy(&control.stderr),
+        run_test_git_with_env(
+            &tree.root,
+            &["diff", "--no-color", "--relative", "--", "tracked.txt"],
+            &[("PSYCHE_TEST_MARKER", path_text(&marker))],
         );
         assert!(
             marker.exists(),
