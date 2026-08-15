@@ -8,6 +8,7 @@ import {
   listPanes,
   capturePaneSync,
   type PaneLivenessProbe,
+  type TmuxIdentityProbe,
 } from './panes.js';
 import {
   PROTOCOL_VERSION,
@@ -98,8 +99,9 @@ export async function refreshPaneSurfaces(
   surfaces: SurfaceRegistry,
   observations: PaneObservationStore,
   isPaneLive?: PaneLivenessProbe,
+  getTmuxIdentity?: TmuxIdentityProbe,
 ): Promise<readonly PaneSurface[]> {
-  const panes = await listPaneSurfaceBindings(projectRoot, isPaneLive);
+  const panes = await listPaneSurfaceBindings(projectRoot, isPaneLive, getTmuxIdentity);
   const seen = new Set(panes.map((pane) => pane.id));
   for (const pane of panes) {
     const previous = surfaces.get(pane.id);
