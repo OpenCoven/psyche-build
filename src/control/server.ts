@@ -28,10 +28,7 @@ import type {
   ControlActorKind,
   ControlCommand,
   ControlCommandInput,
-__OURS__
 } from './types.js';
-import type { BrowserProviderBroker, BrowserProviderConnection } from './browserProviderBroker.js';
-import { CONTROL_WIRE_LIMITS } from './limits.js';
 
 /** The minimal runtime surface the control server drives. */
 export interface ControlServerRuntime {
@@ -42,7 +39,6 @@ export interface ControlServerRuntime {
     nextSequence: number;
     gap: boolean;
   };
-  actionStatus?(actionId: string): ActionReceipt | undefined;
 }
 
 export interface ControlServerOptions {
@@ -51,7 +47,16 @@ export interface ControlServerOptions {
   ownerEpoch: number;
   runtime: ControlServerRuntime;
   credentials: ControlCredentialStore;
-__OURS__
+  broker?: BrowserProviderBroker;
+  /** Gates bearer operator commands and provider registration; never enable outside isolated tests. */
+  operatorCommandPolicy?: 'disabled' | 'trusted-test-only';
+}
+
+/** Cap a single newline-delimited frame so a peer cannot exhaust host memory. */
+const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+const MAX_QUEUED_FRAMES = 128;
+const MAX_QUEUED_BYTES = 8 * 1024 * 1024;
+const INTERNAL_IDEMPOTENCY_PREFIX = 'psyche-control-idempotency-v1';
 
 /** Every command kind the runtime knows how to execute. */
 const KNOWN_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
@@ -87,33 +92,6 @@ const KNOWN_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
   'coven.session.open',
   'coven.desktop.action',
   'coven.capability.execute',
-  'lease.request',
-  'lease.grant',
-  'lease.release',
-  'lease.revoke',
-  'pane.observe',
-  'pane.action',
-  'browser.inspect',
-  'browser.action',
-  'browser.script',
-  'approval.resolve',
-  'provider.resource.upsert',
-  'provider.resource.remove',
-]);
-
-const AGENT_CONTROL_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
-  'lease.request', 'lease.grant', 'lease.release', 'lease.revoke',
-  'pane.observe', 'pane.action', 'browser.inspect', 'browser.action', 'browser.script',
-  'approval.resolve', 'provider.resource.upsert', 'provider.resource.remove',
-]);
-
-const OPERATOR_ONLY_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
-  'lease.grant', 'lease.revoke', 'approval.resolve',
-  'provider.resource.upsert', 'provider.resource.remove',
-]);
-const AGENT_ALLOWED_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
-  'lease.request', 'lease.release', 'pane.observe', 'pane.action',
-  'browser.inspect', 'browser.action', 'browser.script',
 ]);
 
 const AGENT_ALLOWED_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
@@ -157,7 +135,20 @@ export function authorizeCommand(
   principal: ControlPrincipal,
   kind: ControlCommand['kind'],
 ): CommandOutcome | null {
-__OURS__
+  if (principal.kind === 'compatibility' && AGENT_CONTROL_COMMAND_KINDS.has(kind)) {
+    return {
+      status: 'rejected', code: 'compatibility_not_authorized',
+      message: 'compatibility principals cannot use agent surface controls',
+    };
+  }
+  if (
+    (kind === 'lease.grant' || kind === 'lease.revoke' || kind === 'approval.resolve'
+      || kind === 'provider.resource.upsert' || kind === 'provider.resource.remove')
+    && principal.kind !== 'operator'
+  ) {
+    return {
+      status: 'rejected', code: 'operator_required',
+      message: 'only an operator principal may administer surface authority',
     };
   }
   if (kind === 'pane.delegate') {
@@ -230,7 +221,33 @@ export class ControlAuthority {
     return this.runtime.submit(command);
   }
 
-__OURS__
+  snapshot(
+    authenticated: ControlPrincipal | AuthenticatedControlIdentity,
+    scope: ControlSnapshotScope = {},
+  ): ControlSnapshot {
+    const identity = normalizeIdentity(authenticated);
+    const snapshot = this.runtime.snapshot();
+    const principal = identity.principal;
+    if (principal.kind === 'operator') return snapshot;
+    const taskScope = effectiveTaskScope(identity, scope);
+    if (taskScope) return taskScopedSnapshot(snapshot, taskScope);
+
+    // Surface metadata, command history, and authority records are
+    // operator-only. In particular, capability leases are bearer-like:
+    // exposing their IDs, revisions, task IDs, grants, or the command
+    // payloads that carry them would let another holder of the shared agent
+    // credential replay a lease that was issued for a different task.
+    return {
+      ...snapshot,
+      commands: {},
+      leases: {},
+      resources: [],
+      capabilityLeases: [],
+      leaseHistory: [],
+      leaseRequests: [],
+      approvals: [],
+      receipts: [],
+    };
   }
 
   readEvents(
@@ -270,7 +287,9 @@ __OURS__
     return { events, nextSequence, gap: page.gap };
   }
 
-__OURS__
+  welcomeFor(authenticated: ControlPrincipal | AuthenticatedControlIdentity): Extract<ControlResponse, { type: 'welcome' }> {
+    const identity = normalizeIdentity(authenticated);
+    const principal = identity.principal;
     return {
       version: 1,
       type: 'welcome',
@@ -464,6 +483,7 @@ function taskScopedSnapshot(
     leases: {},
     resources: collectScopedResources(snapshot.resources, capabilityLeases, leaseRequests),
     capabilityLeases,
+    leaseHistory: [],
     leaseRequests,
     approvals,
     receipts,
@@ -605,7 +625,8 @@ export class ControlServer {
     private readonly authority: ControlAuthority,
     private readonly credentials: ControlCredentialStore,
     private readonly canonicalRoot: string,
-__OURS__
+    private readonly operatorCommandPolicy: NonNullable<ControlServerOptions['operatorCommandPolicy']>,
+    private readonly broker?: BrowserProviderBroker,
   ) {}
 
   static async start(options: ControlServerOptions): Promise<ControlServer> {
@@ -623,7 +644,8 @@ __OURS__
       authority,
       options.credentials,
       canonicalRoot,
-__OURS__
+      options.operatorCommandPolicy ?? 'disabled',
+      options.broker,
     );
 
     server.on('connection', (socket) => {
@@ -661,24 +683,23 @@ __OURS__
   private handleConnection(socket: Socket): void {
     let identity: AuthenticatedControlIdentity | null = null;
     let clientId: string | undefined;
+    let token: string | undefined;
+    let provider: BrowserProviderRegistration | null = null;
+    let buffer = '';
+    let tail = Promise.resolve();
+    let queuedFrames = 0;
+    let queuedBytes = 0;
     let closing = false;
-__OURS__
+
+    const write = (message: ControlResponse | ProviderPush): void => {
+      if (!socket.destroyed) socket.write(`${encodeControlMessage(message)}\n`);
     };
 
     const fail = (code: string, message: string, requestId?: string): void => {
-      if (socket.destroyed || !socket.writable) return;
       closing = true;
-      identity = null;
-      clientId = undefined;
-      socket.end(`${encodeControlMessage({ version: 1, type: 'error', requestId, code, message })}\n`);
+      write({ version: 1, type: 'error', requestId, code, message });
+      socket.destroy();
     };
-
-    const disconnectProvider = (): void => {
-      provider?.disconnect();
-      provider = undefined;
-    };
-    socket.once('close', disconnectProvider);
-    socket.once('error', disconnectProvider);
 
     socket.setEncoding('utf8');
     socket.on('close', () => { void provider?.disconnect().catch(() => undefined); });
@@ -694,36 +715,48 @@ __OURS__
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
         newline = buffer.indexOf('\n');
-        if (Buffer.byteLength(line, 'utf8') > MAX_FRAME_BYTES) {
-          let requestId: string | undefined;
-          const match = line.slice(0, 1024).match(/"requestId"\s*:\s*"([^"\\]{1,256})"/);
-          if (match) requestId = match[1];
-          fail('frame_too_large', 'control frame exceeds maximum size', requestId);
+        if (line.trim().length === 0) continue;
+        if (closing) continue;
+        const frameBytes = Buffer.byteLength(line, 'utf8');
+        if (frameBytes > MAX_FRAME_BYTES) {
+          fail('frame_too_large', 'control frame exceeds maximum size');
           buffer = '';
           return;
         }
-        const frameBytes = Buffer.byteLength(line, 'utf8');
-        if (frameBytes > MAX_PROVIDER_RESULT_BYTES) {
-          try {
-            const envelope = JSON.parse(line) as { type?: unknown; requestId?: unknown };
-            if (envelope.type === 'provider.effect.result') {
-              fail('result_too_large', 'provider effect result exceeds maximum size',
-                typeof envelope.requestId === 'string' ? envelope.requestId : undefined);
-              buffer = '';
-              return;
-            }
-          } catch { /* bounded malformed JSON is handled by the normal decoder */ }
+        queuedFrames += 1;
+        queuedBytes += frameBytes;
+        if (queuedFrames > MAX_QUEUED_FRAMES || queuedBytes > MAX_QUEUED_BYTES) {
+          fail('backpressure', 'too many queued control frames');
+          buffer = '';
+          return;
         }
-        if (line.trim().length === 0) continue;
-        if (closing) continue;
-__OURS__
+        tail = tail.then(() => {
+          if (closing) return;
+          return this.handleLine(line, write, fail, {
+            getIdentity: () => identity,
+            getToken: () => token,
+            setIdentity: (value, id, authenticatedToken) => {
+              identity = value;
+              clientId = id;
+              token = authenticatedToken;
+            },
+            getClientId: () => clientId,
+            getProvider: () => provider,
+            setProvider: (value) => { provider = value; },
+          });
+        }).catch((error) => {
+          fail('internal', error instanceof Error ? error.message : 'internal error');
+        }).finally(() => {
+          queuedFrames -= 1;
+          queuedBytes -= frameBytes;
+        });
       }
     });
   }
 
   private async handleLine(
     line: string,
-__OURS__
+    write: (message: ControlResponse | ProviderPush) => void,
     fail: (code: string, message: string, requestId?: string) => void,
     session: {
       getIdentity: () => AuthenticatedControlIdentity | null;
@@ -734,19 +767,15 @@ __OURS__
         authenticatedToken?: string,
       ) => void;
       getClientId: () => string | undefined;
-__OURS__
+      getProvider: () => BrowserProviderRegistration | null;
+      setProvider: (provider: BrowserProviderRegistration) => void;
     },
   ): Promise<void> {
     let request: ReturnType<typeof decodeControlRequest>;
     try {
       request = decodeControlRequest(line);
     } catch (error) {
-      let requestId: string | undefined;
-      try {
-        const parsed = JSON.parse(line) as { requestId?: unknown };
-        if (typeof parsed.requestId === 'string') requestId = parsed.requestId;
-      } catch { /* invalid JSON has no trustworthy correlation */ }
-      fail('bad_request', error instanceof Error ? error.message : 'invalid request', requestId);
+      fail('bad_request', error instanceof Error ? error.message : 'invalid request');
       return;
     }
 
@@ -820,23 +849,6 @@ __OURS__
       return;
     }
 
-    if (session.getProvider() && request.type !== 'provider.resource.upsert'
-      && request.type !== 'provider.resource.remove' && request.type !== 'provider.effect.started'
-      && request.type !== 'provider.effect.executing'
-      && request.type !== 'provider.effect.result') {
-      write({ version: 1, type: 'error', requestId: request.requestId,
-        code: 'provider_mode', message: 'provider sockets only accept provider frames' });
-      return;
-    }
-    if (!session.getProvider() && request.type !== 'provider.register'
-      && (request.type === 'provider.resource.upsert' || request.type === 'provider.resource.remove'
-        || request.type === 'provider.effect.started' || request.type === 'provider.effect.executing'
-        || request.type === 'provider.effect.result')) {
-      write({ version: 1, type: 'error', requestId: request.requestId,
-        code: 'provider_registration_required', message: 'provider.register is required first' });
-      return;
-    }
-
     switch (request.type) {
       case 'hello':
         write({
@@ -895,7 +907,9 @@ __OURS__
           version: 1,
           type: 'state.result',
           requestId: request.requestId,
-__OURS__
+          snapshot: this.authority.snapshot(currentIdentity, {
+            ...(request.taskId ? { taskId: request.taskId } : {}),
+          }),
         });
         return;
       case 'events.read': {
@@ -912,13 +926,48 @@ __OURS__
         });
         return;
       }
-__OURS__
+      case 'provider.register': {
+        if (this.operatorCommandPolicy === 'disabled') {
+          write({
+            version: 1, type: 'error', requestId: request.requestId,
+            code: 'provider_authority_unavailable',
+            message: 'provider registration requires a native identity broker',
+          });
+          return;
+        }
+        if (principal.kind !== 'operator') {
+          write({
+            version: 1, type: 'error', requestId: request.requestId,
+            code: 'operator_required', message: 'only an operator may register a provider',
+          });
+          return;
+        }
+        if (!this.broker) {
+          write({
+            version: 1, type: 'error', requestId: request.requestId,
+            code: 'provider_unavailable', message: 'browser provider transport is unavailable',
+          });
+          return;
+        }
+        try {
+          session.setProvider(this.broker.register(request.providerId, write));
+          write({ version: 1, type: 'ack', requestId: request.requestId });
         } catch (error) {
           writeProviderError(write, request.requestId, error);
         }
         return;
       }
-__OURS__
+      case 'provider.resource.upsert':
+        try {
+          const resource = await provider!.upsert(request.resource);
+          write({ version: 1, type: 'ack', requestId: request.requestId, resource });
+        } catch (error) {
+          writeProviderError(write, request.requestId, error);
+        }
+        return;
+      case 'provider.resource.remove':
+        try {
+          await provider!.remove(request.id, request.generation);
           write({ version: 1, type: 'ack', requestId: request.requestId });
         } catch (error) {
           writeProviderError(write, request.requestId, error);
@@ -926,7 +975,7 @@ __OURS__
         return;
       case 'provider.effect.result':
         try {
-__OURS__
+          provider!.complete(request.result);
           write({ version: 1, type: 'ack', requestId: request.requestId });
         } catch (error) {
           writeProviderError(write, request.requestId, error);
@@ -995,17 +1044,6 @@ function writeProviderError(
     code,
     message: error instanceof Error ? error.message : 'browser provider error',
   });
-}
-
-function writeProviderError(
-  write: (message: ControlResponse) => boolean,
-  requestId: string,
-  error: unknown,
-): void {
-  const coded = error as { code?: unknown };
-  write({ version: 1, type: 'error', requestId,
-    code: typeof coded.code === 'string' ? coded.code : 'internal',
-    message: error instanceof Error ? error.message : 'provider frame failed' });
 }
 
 export { compatibilityPrincipal } from './credentials.js';

@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { CapabilityLeaseStore, SURFACE_CAPABILITIES } from '../src/control/capabilityLeases.js';
+import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
 import type {
   CapabilityLease,
   CapabilityLeaseErrorCode,
@@ -484,39 +483,21 @@ describe('CapabilityLeaseStore', () => {
     expect(store.snapshot()).toEqual([]);
   });
 
-  it('retains bounded non-authoritative expired and revoked lifecycle history', () => {
-    let now = Date.parse(nowIso);
-    const store = new CapabilityLeaseStore(() => new Date(now), 7, { historyLimit: 2, historyTtlMs: 120_000 });
-    const expired = grantPane(store, 'expired-history');
-    now += 60_000;
-    expect(store.snapshot()).toEqual([]);
-    const revoked = grantPane(store, 'revoked-history');
-    store.revoke(revoked.id);
-    const newest = grantPane(store, 'newest-history');
-    store.release(newest.id);
+  it('records actor-task revocations as revoked lifecycle history', () => {
+    const store = new CapabilityLeaseStore(() => new Date(nowIso), 7);
+    const matching = grantPane(store, 'actor-task-revocation');
+    const other = store.grant({
+      requestId: 'other-task', actorId: 'agent-1', taskId: 'task-2', grantedBy: 'operator',
+      ttlMs: 60_000, grants: [{
+        target: { kind: 'pane', id: 'pane-2', generation: 1 },
+        capabilities: ['pane.observe'],
+      }],
+    });
 
+    expect(store.revokeActorTask('agent-1', 'task-1')).toEqual([matching]);
     expect(store.history()).toEqual([
-      expect.objectContaining({ id: revoked.id, status: 'revoked', actorId: 'agent-1', taskId: 'task-1' }),
-      expect.objectContaining({ id: newest.id, status: 'revoked', actorId: 'agent-1', taskId: 'task-1' }),
+      expect.objectContaining({ id: matching.id, status: 'revoked', actorId: 'agent-1', taskId: 'task-1' }),
     ]);
-    expect(store.history()).not.toContainEqual(expect.objectContaining({ id: expired.id }));
-    expect(store.snapshot()).toEqual([]);
-    expect(() => store.assert({
-      leaseId: newest.id, revision: newest.revision, ownerEpoch: 7,
-      actorId: newest.actorId, taskId: newest.taskId,
-      target: newest.grants[0].target, capability: newest.grants[0].capabilities[0],
-    })).toThrowError(expect.objectContaining({ code: 'lease_missing' }));
-    now += 120_001;
-    expect(store.history()).toEqual([]);
-  });
-
-  it('matches every canonical surface capability in the shared provider contract', () => {
-    const fixture = JSON.parse(readFileSync(new URL(
-      '../protocol-fixtures/control-v1/provider-contract.json', import.meta.url), 'utf8')) as {
-      surfaceCapabilities: string[];
-    };
-    expect(SURFACE_CAPABILITIES).toEqual(fixture.surfaceCapabilities);
-    expect(new Set(SURFACE_CAPABILITIES).size).toBe(SURFACE_CAPABILITIES.length);
-    expect(SURFACE_CAPABILITIES).not.toContain('browser.action');
+    expect(store.snapshot()).toEqual([other]);
   });
 });

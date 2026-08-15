@@ -288,7 +288,10 @@ describe('Tauri desktop tab shortcuts', () => {
   it('keeps browser navigation single-shot for newly created webviews', () => {
     expect(tauriLib).toMatch(/fn\s+ensure_browser[\s\S]*?->\s*Result<bool,\s*String>/);
     expect(tauriLib).toMatch(/return\s+Ok\(false\);/);
-<<OURS>>
+    expect(tauriLib).toMatch(/let\s+created\s*=\s*ensure_browser\(/);
+    expect(tauriLib).toMatch(/webview\s*=\s*app[\s\S]*?if\s+!created\s*\{[\s\S]*?webview\s*\.set_position\(LogicalPosition::new\(x,\s*y\)\)[\s\S]*?webview\s*\.set_size\(LogicalSize::new\(w\.max\(1\.0\),\s*h\.max\(1\.0\)\)\)/);
+    const navigate = tauriLib.slice(tauriLib.indexOf('async fn browser_navigate('), tauriLib.indexOf('fn browser_set_bounds('));
+    expect(navigate.match(/start_browser_navigation\(/g)).toHaveLength(1);
   });
 
   it('reports PTY exit codes and keeps PATH augmentation behind the platform boundary', () => {

@@ -117,7 +117,6 @@ describe('committed web bundles', () => {
     // nothing to compare and would quietly pass.
     expect(steps.map((step) => step.outfile).sort()).toEqual([
       'web/control.bundle.js',
-      'web/control/browser-automation-runtime.js',
       'web/diffs.bundle.js',
       'web/editor.bundle.js',
       'web/input.bundle.js',

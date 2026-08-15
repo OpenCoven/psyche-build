@@ -135,7 +135,13 @@ When focus is inside a work pane, tmux receives your keys instead of Psyche Buil
 
 ## MCP server
 
-<<THEIRS>>
+`psyche mcp` exposes the project owner's leased pane and browser surface over
+MCP (stdio JSON-RPC). It connects to the project control socket and starts the
+detached owner when the socket is absent; mutations still pass through the
+same authenticated authority, policy, approval, and receipt path as the UI.
+For task-scoped agent use, start it with a trusted task binding so the control
+server can derive scope from authenticated context instead of caller-supplied
+`task_id`.
 
 ```json
 {
@@ -214,34 +220,39 @@ read or mutation from an already-open socket.
 
 | Tool | Does |
 |---|---|
-<<THEIRS>>
+| `psyche_control_list` | List bounded controllable pane/browser resources, generations, and active approvals for the bound task subject; unbound non-operators receive `task_binding_required` |
+| `psyche_control_lease` | Request, inspect, or release scoped authority for the bound task subject; bound clients may omit `task_id`, exact matches are accepted, and conflicts are rejected before any read or command; it cannot grant or approve authority |
+| `psyche_pane_observe` | Read bounded pane output and status through an exact leased generation |
+| `psyche_pane_action` | Perform one typed leased pane action and return its canonical receipt |
+| `psyche_browser_inspect` | Capture a bounded semantic snapshot of an exact leased tab generation |
+| `psyche_browser_action` | Perform one typed leased browser action and return its canonical receipt |
+| `psyche_browser_script` | Submit an approval-gated browser script through an exact leased tab generation |
+| `psyche_control_action_status` | Read the latest live receipt or redacted replay receipt for the bound task subject when durable ownership proves the action belongs to it |
+| `psyche_list_panes` | Compatibility alias that lists pane resources visible to the bound task subject |
+| `psyche_create_pane` | Compatibility alias for leased pane creation through the owner |
+| `psyche_execute_task` | Compatibility alias that submits orchestration through the owner |
+| `psyche_kill_pane` | Compatibility alias for approved pane close through the owner |
+| `psyche_get_pane_output` | Compatibility alias for bounded leased pane observation |
+| `psyche_list_rituals` | List built-in and project rituals |
+| `psyche_list_worktrees` | List git worktrees for the project |
 
-`psyche_execute_task` also remains advertised for client compatibility, but it
-returns `capability_denied` without effect until orchestration has its own
-lease-mediated canonical capability. It no longer launches lanes directly.
+Every task-scoped tool accepts an omitted `task_id` when the MCP process starts
+task-bound. Exact-bound `task_id` values are accepted, and conflicting values
+are rejected before any control read or command. Without a task binding,
+non-operator task-scoped reads and commands fail closed with
+`task_binding_required`, so non-operator caller-supplied `task_id` values
+remain compatibility-only and never authorize access on their own. When
+`psyche_control_action_status` falls back to a replayed journal receipt, the
+result keeps the redacted journal resource shape (`resource.idDigest`) instead
+of inventing a live resource id.
 
-The lease flow is `psyche_control_list` → `psyche_control_lease` with
-`operation: "request"` → operator grant → action/observation →
-`psyche_control_lease` with `operation: "release"`. Mutation calls require the
-returned `task_id`, `lease_id`, and `lease_revision`; MCP never accepts caller
-supplied actor, owner epoch, or authentication fields.
+See [Agent surface control](./docs/AGENT-SURFACE-CONTROL.md) for the complete
+lease, approval, generation, browser-provider, redaction, and recovery model.
 
-`psyche_create_pane` and `psyche_kill_pane` remain listed compatibility aliases,
-but they now translate to canonical `psyche_pane_action` commands and require
-the same lease metadata. Calls without it return `lease_missing` and have no
-effect. Creation uses the canonical project scope; closing an existing pane
-also requires its stable pane ID and generation.
-
-A prompt-less leased `psyche_create_pane` call translates to canonical pane
-creation. A legacy create call with a nonempty `prompt` returns
-`command_not_implemented` and creates no pane; prompts are never silently
-dropped.
-
-Agent control is limited to resources published by the owner. It is not a raw
-tmux, shell, DOM, selector, or filesystem escape surface. The desktop browser
-provider lands in a later slice. Browser calls may first return
-`resource_missing` or `lease_missing` until a tab resource and lease exist; if
-they reach the backend before Task 6, it returns `command_not_implemented`.
+`psyche_kill_pane` **does not delete the pane's worktree or branch.** It returns
+both so you can inspect or merge the work; removing them stays an explicit
+action in the TUI, because a worktree can hold the only copy of uncommitted
+changes.
 
 ## Coven and OpenCoven
 

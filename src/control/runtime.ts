@@ -2,7 +2,35 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { LaneLeaseStore } from './leases.js';
 import { PromptDispatcher } from './promptDispatch.js';
-__OURS__
+import { ApprovalStore, createRedactedApprovalEffect, type Approval, type RedactedApprovalEffect } from './approvals.js';
+import {
+  CapabilityLeaseStore,
+  type CapabilityLease,
+  type CapabilityLeaseAssertion,
+  type LeaseTarget,
+  type SurfaceCapability,
+} from './capabilityLeases.js';
+import type { ControlTaskCredentialReference } from './credentials.js';
+import {
+  classifyBrowserAction,
+  assertBrowserActionFields,
+  classifyBrowserScript,
+  classifyPaneAction,
+  type CanonicalElementSemantics,
+  type PolicyClassification,
+} from './policy.js';
+import { SurfaceRegistry } from './surfaces.js';
+import { AGENT_CONTROL_LIMITS } from './limits.js';
+import {
+  agentControlJournalPayload,
+  createAgentControlJournalResource,
+  type AgentControlJournalReceipt,
+} from './journal.js';
+import { canonicalizeBoundedJson } from './boundedJson.js';
+import { isActionReceipt, isJournalActionReceipt } from './types.js';
+import type {
+  ActionReceipt,
+  ActionStatusReceipt,
   CommandOutcome,
   CommandRecord,
   ControlCommand,
@@ -10,13 +38,6 @@ __OURS__
   JournalActionReceipt,
   LeaseGrant,
   PromptEnvelope,
-  LeaseRequestState,
-  PaneObservationResult,
-  PaneActionPostcondition,
-  BrowserActionDurableSummary,
-  BrowserScriptDurableSummary,
-  BrowserScriptResult,
-  RecentReceiptSummary,
 } from './types.js';
 
 const STABLE_SURFACE_EFFECT_CODES = new Set([
@@ -65,7 +86,9 @@ export interface ControlHandlers {
   executeCovenCapability(payload: Payload<'coven.capability.execute'>): Promise<unknown>;
   observePane(payload: Payload<'pane.observe'>): Promise<unknown>;
   actOnPane(payload: Payload<'pane.action'>): Promise<unknown>;
-__OURS__
+  inspectBrowser(payload: Payload<'browser.inspect'>): Promise<unknown>;
+  actOnBrowser(payload: Payload<'browser.action'>): Promise<unknown>;
+  runBrowserScript(payload: Payload<'browser.script'>): Promise<unknown>;
 }
 
 export interface RuntimeEvent {
@@ -81,20 +104,54 @@ export interface RuntimeJournal {
   recoverNonterminalCommands(): Promise<RuntimeEvent[]>;
 }
 
-export interface ControlRuntimeOptions {
+interface ControlRuntimeOptions {
   ownerEpoch: number;
   handlers: ControlHandlers;
   journal: RuntimeJournal;
   surfaces?: SurfaceRegistry;
   capabilityLeases?: CapabilityLeaseStore;
   approvals?: ApprovalStore;
-__OURS__
+  readActiveTaskCredential?: (taskId: string) => Promise<ControlTaskCredentialReference | null>;
+  resolveBrowserElementSemantics?: (input: {
+    tabId: string;
+    generation: number;
+    snapshotId: string;
+    elementRef: string;
+  }) => CanonicalElementSemantics | Promise<CanonicalElementSemantics>;
+}
+
+interface LeaseRequestRecord {
+  id: string;
+  ownerEpoch: number;
+  actorId: string;
+  taskId: string;
+  status: 'pending' | 'granted' | 'released' | 'revoked';
+  createdAt: string;
+  ttlMs: number;
+  grants: readonly LeaseGrant[];
+}
+
+interface SurfaceActionContext {
+  command: Extract<ControlCommand, { kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script' }>;
+  target: LeaseTarget;
+  ownership: TrustedActionOwnership;
+  classification: PolicyClassification;
+  effect?: RedactedApprovalEffect;
+  executablePayloadDigest: string;
+}
+
+type TrustedReceiptOwnership = Required<Pick<ActionReceipt, 'taskId' | 'actorId'>>
+  & Pick<ActionReceipt, 'leaseId' | 'leaseRevision'>;
+type TrustedActionOwnership = Required<Pick<ActionReceipt, 'taskId' | 'actorId' | 'leaseId' | 'leaseRevision'>>;
+type TaskSubjectAuthorityStatus = 'active' | 'inactive' | 'unavailable' | 'untracked';
+
+interface PaneQueueState {
+  readonly target: LeaseTarget;
   readonly items: Set<QueuedCommand>;
   pendingEffects: number;
   quarantined: boolean;
   tail: Promise<void>;
-  readonly blockers: Set<Promise<void>>;
-  activeEffects: number;
+  blocker?: Promise<void>;
 }
 
 interface QueuedCommand {
@@ -112,38 +169,11 @@ interface QueuedCommand {
   reject(error: unknown): void;
 }
 
-interface PendingApproval {
-  readonly approval: Approval;
-  readonly command: Extract<ControlCommand, {
-    kind: 'pane.action' | 'browser.action' | 'browser.script';
-  }>;
-  readonly classification: PolicyClassification;
-  readonly browserBinding?: CanonicalBrowserElementBinding;
-  readonly scriptContext?: CanonicalBrowserScriptContext;
-  readonly approvalPayload: unknown;
-  readonly effect: RedactedApprovalEffect;
-}
-
-interface AgentSurfaceHandlerResult {
-  readonly receipt: ActionReceipt;
-  readonly livePaneObservation?: PaneObservationResult;
-  readonly liveBrowserScript?: BrowserScriptResult;
-}
-
 const TERMINAL_EVENT_KINDS = new Set([
   'command.succeeded',
   'command.failed',
   'command.unknown',
   'command.rejected',
-]);
-const AGENT_CONTROL_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
-  'lease.request', 'lease.grant', 'lease.release', 'lease.revoke',
-  'pane.observe', 'pane.action', 'browser.inspect', 'browser.action', 'browser.script',
-  'approval.resolve', 'provider.resource.upsert', 'provider.resource.remove',
-]);
-const PSYCHE_ALLOWED_COMMANDS: ReadonlySet<ControlCommand['kind']> = new Set([
-  'lease.request', 'lease.release', 'pane.observe', 'pane.action',
-  'browser.inspect', 'browser.action', 'browser.script',
 ]);
 
 /**
@@ -155,9 +185,6 @@ const PSYCHE_ALLOWED_COMMANDS: ReadonlySet<ControlCommand['kind']> = new Set([
  * transactions; the durable record of what happened is the journal.
  */
 const MAX_COMMAND_RECORDS = 1000;
-const MAX_RECEIPTS = 100;
-const MAX_STATUS_INDEX = 100;
-const MAX_LEASE_REQUESTS = 1000;
 
 export class ControlRuntime {
   public readonly leases = new LaneLeaseStore();
@@ -167,25 +194,32 @@ export class ControlRuntime {
 
   private readonly outcomesByIdempotencyKey = new Map<string, CommandOutcome>();
   private readonly pendingByIdempotencyKey = new Map<string, Promise<CommandOutcome>>();
-  private readonly fingerprintsByIdempotencyKey = new Map<string, string>();
-  private readonly fingerprintsByCommandId = new Map<string, string>();
-  private readonly outcomesByCommandId = new Map<string, CommandOutcome>();
-  private readonly idempotencyKeysByCommandId = new Map<string, string>();
-  private readonly commandIdsByIdempotencyKey = new Map<string, string>();
-  private readonly pendingByCommandId = new Map<string, Promise<CommandOutcome>>();
   private readonly commandRecords = new Map<string, {
     command: ControlCommand;
     outcome?: CommandOutcome;
     sequence: number;
   }>();
   private readonly paneBarrierGenerations = new Map<string, number>();
-__OURS__
+  private readonly promptDispatcher: PromptDispatcher;
+  private readonly resourceQueues = new Map<string, PaneQueueState>();
+  private readonly leaseRequests = new Map<string, LeaseRequestRecord>();
+  private readonly leaseRequestTombstones = new Set<string>();
+  private readonly pendingApprovals = new Map<string, SurfaceActionContext>();
+  private readonly receipts = new Map<string, ActionStatusReceipt>();
+  private readonly approvalTerminalizations = new Map<string, Promise<void>>();
+  private readonly readActiveTaskCredential?: ControlRuntimeOptions['readActiveTaskCredential'];
 
   private constructor(
     private readonly ownerEpoch: number,
     private readonly handlers: ControlHandlers,
     private readonly journal: RuntimeJournal,
-__OURS__
+    options: ControlRuntimeOptions,
+  ) {
+    this.surfaces = options.surfaces ?? new SurfaceRegistry();
+    this.capabilityLeases = options.capabilityLeases ?? new CapabilityLeaseStore(undefined, ownerEpoch);
+    this.approvals = options.approvals ?? new ApprovalStore();
+    this.readActiveTaskCredential = options.readActiveTaskCredential;
+    this.resolveBrowserElementSemantics = options.resolveBrowserElementSemantics;
     this.promptDispatcher = new PromptDispatcher(async (envelope) => {
       const result = await this.handlers.sendPrompt(envelope);
       if (isReceiptResult(result)) return result;
@@ -195,44 +229,37 @@ __OURS__
 
   static async create(opts: ControlRuntimeOptions): Promise<ControlRuntime> {
     await opts.journal.recoverNonterminalCommands();
-__OURS__
+    const runtime = new ControlRuntime(opts.ownerEpoch, opts.handlers, opts.journal, opts);
+    await runtime.recoverRestartedApprovalReceipts();
+    const events = opts.journal.read(0);
+    runtime.reduceOutcomes(events);
+    runtime.rehydrateReceipts(events);
     return runtime;
   }
 
   private readonly resolveBrowserElementSemantics?: ControlRuntimeOptions['resolveBrowserElementSemantics'];
 
   submit(command: ControlCommand): Promise<CommandOutcome> {
-__OURS__
+    this.pruneInactiveResourceQueues();
+    const prior = this.outcomesByIdempotencyKey.get(command.idempotencyKey);
     if (prior) return Promise.resolve(prior);
 
-    const pending = this.pendingByIdempotencyKey.get(immutable.idempotencyKey);
+    const pending = this.pendingByIdempotencyKey.get(command.idempotencyKey);
     if (pending) return pending;
 
-__OURS__
+    if (this.pendingByIdempotencyKey.size >= AGENT_CONTROL_LIMITS.pendingCommands) {
+      return Promise.resolve(rejectedOutcome('runtime_busy', 'control runtime pending command capacity exceeded'));
+    }
+
+    const execution = this.submitFresh(command).finally(() => {
+      this.pendingByIdempotencyKey.delete(command.idempotencyKey);
     });
-    this.pendingByIdempotencyKey.set(immutable.idempotencyKey, execution);
-    this.pendingByCommandId.set(immutable.id, execution);
+    this.pendingByIdempotencyKey.set(command.idempotencyKey, execution);
     return execution;
   }
 
   events(): RuntimeEvent[] {
     return this.journal.read(0);
-  }
-
-  actionStatus(actionId: string): ActionReceipt | undefined {
-    const current = this.actionStatuses.get(actionId);
-    if (current) return current;
-    for (const event of [...this.journal.read(0)].reverse()) {
-      if (event.payload.commandId !== actionId) continue;
-      const receipt = receiptPayload(event);
-      if (receipt) return receipt;
-    }
-    return undefined;
-  }
-
-  /** Provider lifecycle seam: revoke leases and approvals for one exact generation. */
-  revokeSurfaceAuthority(target: LeaseTarget): void {
-    this.revokeTargetAuthority(target);
   }
 
   /**
@@ -248,17 +275,10 @@ __OURS__
     const approvals = this.refreshApprovalState(capabilityLeases);
     const events = this.journal.read(0);
     const sequence = events.length > 0 ? events[events.length - 1].sequence : 0;
-    const approvals = this.approvals.snapshot();
-    this.reconcilePendingApprovalState(approvals);
     const commands: Record<string, CommandRecord> = {};
     for (const [id, record] of this.commandRecords) {
       if (record.outcome) {
-        commands[id] = {
-          id: record.command.id,
-          kind: record.command.kind,
-          outcome: redactOutcome(record.outcome),
-          sequence: record.sequence,
-        };
+        commands[id] = { command: record.command, outcome: record.outcome, sequence: record.sequence };
       }
     }
     return {
@@ -266,7 +286,18 @@ __OURS__
       sequence,
       commands,
       leases: this.leases.snapshot(),
-__OURS__
+      resources: this.surfaces.list(),
+      capabilityLeases,
+      leaseHistory: this.capabilityLeases.history(),
+      leaseRequests: [...this.leaseRequests.values()].map((request) => ({
+        ...request,
+        grants: request.grants.map((grant) => ({
+          target: { ...grant.target },
+          capabilities: [...grant.capabilities],
+        })),
+      })),
+      approvals,
+      receipts: [...this.receipts.values()],
     };
   }
 
@@ -283,16 +314,36 @@ __OURS__
   }
 
   blockPaneQueue(paneId: string): () => void {
-__OURS__
+    return this.blockResourceQueue(this.resourceTargetForPane(paneId));
+  }
+
+  blockResourceQueue(target: LeaseTarget): () => void {
+    const key = resourceKey(target);
+    const queue = this.queueForResource(target);
+    let released = false;
+    let release!: () => void;
+    queue.blocker = new Promise<void>((resolve) => { release = resolve; });
+    return () => {
+      if (released) return;
+      released = true;
+      const current = queue.blocker;
+      const tail = queue.tail;
+      release();
+      if (queue.blocker === current) delete queue.blocker;
+      void tail.then(() => this.pruneResourceQueue(key, queue, tail));
     };
   }
 
   private submitFresh(command: ControlCommand): Promise<CommandOutcome> {
-__OURS__
+    if (
+      command.ownerEpoch < this.ownerEpoch
+      || (isSurfaceControlCommand(command) && command.ownerEpoch !== this.ownerEpoch)
+    ) return this.rejectStaleOwnerEpoch(command);
+
+    if (isSurfaceControlCommand(command)) return this.executeSurfaceControlCommand(command);
 
     if (command.kind === 'pane.delegate') return this.executeDelegate(command);
     if (command.kind === 'pane.takeover') return this.executeTakeover(command);
-    if (isAgentSurfaceEffect(command)) return this.executeAgentSurfaceEffect(command);
 
     const paneId = paneIdForCommand(command);
     if (paneId) {
@@ -302,13 +353,6 @@ __OURS__
     return this.executeImmediateCommand(command);
   }
 
-  private async rejectAgentMutation(command: ControlCommand): Promise<CommandOutcome> {
-    await this.appendRequested(command);
-    return this.appendTerminal(command, {
-      status: 'rejected', code: 'agent_mutation_denied', message: 'agent must use lease-mediated control commands',
-    });
-  }
-
   private async rejectStaleOwnerEpoch(command: ControlCommand): Promise<CommandOutcome> {
     await this.appendRequested(command);
     return this.appendTerminal(command, {
@@ -316,14 +360,6 @@ __OURS__
       code: 'stale_owner_epoch',
       message: `command owner epoch ${command.ownerEpoch} is stale; active epoch is ${this.ownerEpoch}`,
     });
-  }
-
-  private async rejectOwnerRestarted(command: ControlCommand): Promise<CommandOutcome> {
-    await this.appendRequested(command);
-    const outcome: CommandOutcome = {
-      status: 'rejected', code: 'owner_restarted', message: 'control owner restarted',
-    };
-    return this.terminalizeAgentAction(command, outcome, 'denied');
   }
 
   private async executeDelegate(command: Extract<ControlCommand, { kind: 'pane.delegate' }>): Promise<CommandOutcome> {
@@ -362,7 +398,10 @@ __OURS__
     await Promise.all(this.preemptQueuedAutomation(command.payload.paneId));
 
     const lease = this.leases.takeover(command.payload.paneId, command.actor.id);
-__OURS__
+    const surface = this.surfaces.get(command.payload.paneId);
+    if (surface?.kind === 'pane') {
+      await this.revokeTarget({ kind: 'pane', id: surface.id, generation: surface.generation });
+    }
     await this.journal.append('lease.takeover', {
       commandId: command.id,
       idempotencyKey: command.idempotencyKey,
@@ -370,288 +409,10 @@ __OURS__
       actorId: lease.actorId,
       revision: lease.revision,
     });
-    const outcome = await this.appendTerminal(command, {
+    return this.appendTerminal(command, {
       status: 'succeeded',
       value: { actorId: lease.actorId, revision: lease.revision },
     });
-    const queue = this.resourceQueues.get(command.payload.paneId);
-    if (!queue || queue.items.size === 0) {
-      this.paneBarrierGenerations.delete(command.payload.paneId);
-    }
-    return outcome;
-  }
-
-  private async executeAgentSurfaceEffect(
-    command: Extract<ControlCommand, {
-      kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script';
-    }>,
-  ): Promise<CommandOutcome> {
-    await this.appendRequested(command);
-    try {
-      const prepared = await this.prepareAgentSurfaceEffect(command);
-      if (prepared.classification.decision === 'approval') {
-        if (command.kind === 'pane.observe' || command.kind === 'browser.inspect') {
-          throw codedError('capability_denied', 'observation cannot require approval');
-        }
-        const effect = approvalEffectFor(command);
-        const approvalPayload = approvalPayloadFor(command, prepared.scriptContext);
-        const approval = this.approvals.request({
-          actionId: command.id,
-          ownerEpoch: command.ownerEpoch,
-          leaseId: command.payload.leaseId,
-          leaseRevision: command.payload.leaseRevision,
-          resource: prepared.target,
-          capability: prepared.classification.capability,
-          effect,
-          actionPayload: approvalPayload,
-        });
-        this.pendingApprovals.set(approval.id, { approval, command, classification: prepared.classification,
-          ...(prepared.browserBinding ? { browserBinding: freezeBrowserBinding(prepared.browserBinding) } : {}), effect,
-          approvalPayload,
-          ...(prepared.scriptContext ? { scriptContext: Object.freeze({ ...prepared.scriptContext }) } : {}) });
-        const receipt = this.recordReceipt(command, prepared.target, 'approval_required', 'approval_required');
-        return this.appendTerminal(command, succeededOutcome(receipt));
-      }
-      return this.enqueueAgentSurfaceEffect(command, prepared.target, async () => {
-        const current = await this.prepareAgentSurfaceEffect(command);
-        assertPreparedIdentity(prepared, current);
-        return this.invokeAgentSurfaceHandler(command, prepared.target, prepared.browserBinding);
-      });
-    } catch (error) {
-      const outcome = safeSurfaceFailure(error);
-      return this.terminalizeAgentAction(command, outcome);
-    }
-  }
-
-  private async prepareAgentSurfaceEffect(
-    command: Extract<ControlCommand, {
-      kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script';
-    }>,
-  ): Promise<{ target: LeaseTarget; classification: PolicyClassification; browserBinding?: CanonicalBrowserElementBinding;
-    scriptContext?: CanonicalBrowserScriptContext }> {
-    this.assertCurrentOwner(command.ownerEpoch);
-    let target: LeaseTarget;
-    let classification: PolicyClassification;
-    let browserBinding: CanonicalBrowserElementBinding | undefined;
-    let scriptContext: CanonicalBrowserScriptContext | undefined;
-    switch (command.kind) {
-      case 'pane.observe':
-        this.requireResource(command.payload.paneId, command.payload.generation, 'pane');
-        target = { kind: 'pane', id: command.payload.paneId, generation: command.payload.generation };
-        classification = { decision: 'allow', capability: 'pane.observe' };
-        break;
-      case 'pane.action':
-        classification = classifyPaneAction(command.payload.action);
-        if ('projectId' in command.payload) {
-          if (command.payload.projectId !== command.projectRoot) {
-            throw codedError('capability_denied', 'pane creation target is not the canonical project');
-          }
-          await this.assertContainedPath(
-            path.resolve(command.projectRoot, command.payload.action.cwd),
-            'prospective',
-            this.registeredRoots(command.projectRoot),
-          );
-          target = { kind: 'project', id: command.projectRoot };
-        } else {
-          this.requireResource(command.payload.paneId, command.payload.generation, 'pane');
-          target = { kind: 'pane', id: command.payload.paneId, generation: command.payload.generation };
-        }
-        break;
-      case 'browser.inspect':
-        this.requireResource(command.payload.tabId, command.payload.generation, 'browser_tab');
-        target = { kind: 'browser_tab', id: command.payload.tabId, generation: command.payload.generation };
-        classification = {
-          decision: 'allow',
-          capability: command.payload.includeScreenshot ? 'browser.screenshot' : 'browser.inspect',
-        };
-        break;
-      case 'browser.action': {
-        const resource = this.requireResource(command.payload.tabId, command.payload.generation, 'browser_tab');
-        target = { kind: 'browser_tab', id: command.payload.tabId, generation: command.payload.generation };
-        this.assertCapabilityLease(command, target, browserCapabilityForAction(command.payload.action.kind));
-        let risk;
-        if ('snapshotId' in command.payload) {
-          browserBinding = await this.resolveBrowserSnapshot(command.payload);
-          assertBrowserBinding(command.payload, browserBinding);
-          if (browserBinding?.actionKind === 'click') {
-            risk = this.browserPolicy.resolveFromCanonicalSnapshot({ actionKind: 'click', submit: browserBinding.submit === true });
-          } else if (browserBinding?.actionKind === 'type') {
-            risk = this.browserPolicy.resolveFromCanonicalSnapshot({ actionKind: 'type', secret: browserBinding.secret === true });
-          }
-        }
-        if (command.payload.action.kind === 'upload') {
-          await this.assertContainedPath(
-            path.resolve(resource.worktreeRoot, command.payload.action.path),
-            'existing',
-            [resource.projectRoot, resource.worktreeRoot],
-          );
-        } else if (command.payload.action.kind === 'download') {
-          await this.assertContainedPath(
-            path.resolve(resource.worktreeRoot, command.payload.action.destination),
-            'prospective',
-            [resource.projectRoot, resource.worktreeRoot],
-          );
-        }
-        classification = this.browserPolicy.classifyBrowserAction(command.payload.action, risk);
-        break;
-      }
-      case 'browser.script':
-        if (Buffer.byteLength(command.payload.source, 'utf8') > AGENT_CONTROL_LIMITS.scriptSourceBytes) {
-          throw codedError('script_source_too_large', 'browser script source exceeds the control limit');
-        }
-        this.requireResource(command.payload.tabId, command.payload.generation, 'browser_tab');
-        target = { kind: 'browser_tab', id: command.payload.tabId, generation: command.payload.generation };
-        classification = classifyBrowserScript();
-        this.assertCapabilityLease(command, target, classification.capability);
-        scriptContext = validateBrowserScriptContext(
-          command.payload,
-          await this.resolveBrowserScriptContext({ tabId: command.payload.tabId, generation: command.payload.generation }),
-        );
-        break;
-    }
-    this.assertCapabilityLease(command, target, classification.capability);
-    this.captureReceiptScope(command, target);
-    return { target, classification, ...(browserBinding ? { browserBinding } : {}),
-      ...(scriptContext ? { scriptContext } : {}) };
-  }
-
-  private assertCapabilityLease(
-    command: Extract<ControlCommand, {
-      kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script';
-    }>,
-    target: LeaseTarget,
-    capability: SurfaceCapability,
-  ): void {
-    this.capabilityLeases.assert({
-      leaseId: command.payload.leaseId,
-      revision: command.payload.leaseRevision,
-      ownerEpoch: command.ownerEpoch,
-      actorId: command.actor.id,
-      taskId: command.payload.taskId,
-      target,
-      capability,
-    });
-  }
-
-  private enqueueAgentSurfaceEffect(
-    command: Extract<ControlCommand, {
-      kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script';
-    }>,
-    target: LeaseTarget,
-    run: () => Promise<AgentSurfaceHandlerResult>,
-  ): Promise<CommandOutcome> {
-    const key = resourceKey(target);
-    const queue = this.queueForResource(key);
-    queue.activeEffects += 1;
-    this.setActionStatus(command, target, 'queued');
-    return new Promise<CommandOutcome>((resolve) => {
-      queue.tail = queue.tail.then(async () => {
-        await Promise.all([...queue.blockers]);
-        this.setActionStatus(command, target, 'running');
-        let outcome: CommandOutcome;
-        let livePaneObservation: PaneObservationResult | undefined;
-        try {
-          const result = await run();
-          outcome = succeededOutcome(result.receipt);
-          livePaneObservation = result.livePaneObservation;
-        } catch (error) {
-          outcome = safeSurfaceFailure(error);
-          this.recordReceipt(
-            command, target, outcome.status === 'unknown' ? 'unknown' : 'failed',
-            outcome.status === 'succeeded' ? undefined : outcome.code,
-            browserScriptSummaryFromError(error),
-          );
-        }
-        const durableOutcome = await this.appendTerminal(command, outcome);
-        resolve(
-          livePaneObservation && durableOutcome.status === 'succeeded'
-            ? succeededOutcome(livePaneObservation)
-            : durableOutcome,
-        );
-      }).catch(async (error: unknown) => {
-        resolve(await this.appendTerminal(command, safeSurfaceFailure(error)));
-      }).finally(() => {
-        queue.activeEffects -= 1;
-        this.cleanupResourceQueue(key, queue);
-      });
-    });
-  }
-
-  private async invokeAgentSurfaceHandler(
-    command: Extract<ControlCommand, {
-      kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script';
-    }>,
-    target: LeaseTarget,
-    browserBinding?: CanonicalBrowserElementBinding,
-    scriptContext?: CanonicalBrowserScriptContext,
-  ): Promise<AgentSurfaceHandlerResult> {
-    try {
-      let livePaneObservation: PaneObservationResult | undefined;
-      let liveBrowserScript: BrowserScriptResult | undefined;
-      let postcondition: PaneActionPostcondition | BrowserActionPostcondition | undefined;
-      let scriptSummary: BrowserScriptDurableSummary | undefined;
-      switch (command.kind) {
-        case 'pane.observe': {
-          const result = await requireHandler(this.handlers.observePane, command.kind)(command.payload);
-          livePaneObservation = normalizePaneObservation(command.payload.paneId, result);
-          break;
-        }
-        case 'pane.action': {
-          const result = await requireHandler(this.handlers.actOnPane, command.kind)(command.payload);
-          postcondition = normalizePaneActionPostcondition(command, result);
-          break;
-        }
-        case 'browser.inspect':
-          await requireHandler(this.handlers.inspectBrowser, command.kind)(command.payload, command.id);
-          break;
-        case 'browser.action':
-          {
-            const value = await requireHandler(this.handlers.actOnBrowser, command.kind)(
-              command.payload, command.id, browserBinding,
-            );
-            try {
-              postcondition = normalizeBrowserActionPostcondition(command.payload.action.kind, value);
-            } catch {
-              throw codedError('effect_unknown', 'browser effect returned invalid evidence', true);
-            }
-          }
-          break;
-        case 'browser.script': {
-          if (!scriptContext) throw codedError('approval_identity_mismatch', 'browser script context is missing');
-          try {
-            const result = await requireHandler(this.handlers.runBrowserScript, command.kind)(
-              command.payload, command.id, scriptContext,
-            );
-            liveBrowserScript = normalizeBrowserScriptResult(result);
-            scriptSummary = browserScriptDurableSummary(
-              command, 'succeeded', liveBrowserScript.durationMs, liveBrowserScript.byteCount,
-            );
-          } catch (error) {
-            const failure = safeSurfaceFailure(error);
-            throw browserScriptSummaryError(error, browserScriptDurableSummary(
-              command,
-              failure.status === 'unknown' ? 'unknown' : 'failed',
-              browserScriptDurationFromError(error),
-              0,
-            ));
-          }
-          break;
-        }
-      }
-      return {
-        receipt: this.recordReceipt(command, target, 'succeeded', undefined, scriptSummary ?? postcondition),
-        ...(livePaneObservation ? { livePaneObservation } : {}),
-        ...(liveBrowserScript ? { liveBrowserScript } : {}),
-      };
-    } catch (error) {
-      if (errorCode(error) === 'action_timeout') throw error;
-      if (isAmbiguous(error)) {
-        const unknown = codedError('effect_unknown', 'surface effect outcome is unknown', true);
-        const summary = browserScriptSummaryFromError(error);
-        throw summary ? browserScriptSummaryError(unknown, summary) : unknown;
-      }
-      throw error;
-    }
   }
 
   private async executeSurfaceControlCommand(
@@ -1098,7 +859,8 @@ __OURS__
     paneId: string,
     run: () => Promise<CommandOutcome>,
   ): Promise<CommandOutcome> {
-__OURS__
+    const queue = this.queueForPane(paneId);
+    const queueKey = resourceKey(this.resourceTargetForPane(paneId));
     const requested = this.appendRequested(command);
     const generation = this.paneBarrierGenerations.get(paneId) ?? 0;
 
@@ -1148,12 +910,8 @@ __OURS__
         }
       }
     } finally {
-__OURS__
+      const queue = this.resourceQueues.get(item.queueKey);
       queue?.items.delete(item);
-      if (queue) this.cleanupResourceQueue(item.paneId, queue);
-      if (!this.resourceQueues.has(item.paneId)) {
-        this.paneBarrierGenerations.delete(item.paneId);
-      }
     }
   }
 
@@ -1212,25 +970,20 @@ __OURS__
         case 'coven.capability.execute':
           return succeededOutcome(await this.handlers.executeCovenCapability(command.payload));
         case 'lease.request':
-          return this.requestCapabilityLease(command);
         case 'lease.grant':
-          return this.grantCapabilityLease(command);
         case 'lease.release':
-          return this.releaseCapabilityLease(command);
         case 'lease.revoke':
-          return this.revokeCapabilityLease(command);
-        case 'approval.resolve':
-          return await this.resolveApproval(command);
-        case 'provider.resource.upsert':
-          return await this.upsertResource(command);
-        case 'provider.resource.remove':
-          return this.removeResource(command);
         case 'pane.observe':
         case 'pane.action':
         case 'browser.inspect':
         case 'browser.action':
         case 'browser.script':
-          throw codedError('command_not_implemented', 'surface effect bypassed its transaction');
+        case 'approval.resolve':
+        case 'provider.resource.upsert':
+        case 'provider.resource.remove':
+          throw Object.assign(new Error('agent surface command is not implemented'), {
+            code: 'command_not_implemented',
+          });
         case 'pane.delegate':
         case 'pane.takeover':
           throw new Error(`lease command reached side-effect executor: ${command.kind}`);
@@ -1238,409 +991,6 @@ __OURS__
     } catch (error) {
       return failedOutcome(error);
     }
-  }
-
-  private requestCapabilityLease(
-    command: Extract<ControlCommand, { kind: 'lease.request' }>,
-  ): CommandOutcome {
-    if (command.actor.kind !== 'psyche') return operatorRejected('agents request capability leases');
-    validateGrants(command.payload.grants, command.projectRoot, this.surfaces, false);
-    if (this.leaseRequests.size >= MAX_LEASE_REQUESTS) {
-      throw codedError('capability_denied', 'too many pending lease requests');
-    }
-    const request: LeaseRequestState = Object.freeze({
-      id: command.id,
-      actorId: command.actor.id,
-      taskId: command.payload.taskId,
-      ttlMs: command.payload.ttlMs,
-      grants: immutableCopy(command.payload.grants),
-      createdAt: command.createdAt,
-      status: 'pending',
-    });
-    this.leaseRequests.set(request.id, request);
-    return succeededOutcome({ requestId: request.id });
-  }
-
-  private grantCapabilityLease(
-    command: Extract<ControlCommand, { kind: 'lease.grant' }>,
-  ): CommandOutcome {
-    if (command.actor.kind !== 'human') return operatorRejected('only an operator may grant capability leases');
-    validateGrants(command.payload.grants, command.projectRoot, this.surfaces, true);
-    const request = this.leaseRequests.get(command.payload.requestId);
-    if (!request || request.status !== 'pending' || (
-      request.actorId !== command.payload.actorId
-      || request.taskId !== command.payload.taskId
-      || request.ttlMs !== command.payload.ttlMs
-      || !sameGrants(request.grants, command.payload.grants)
-    )) throw codedError('capability_denied', 'lease grant does not match the canonical request');
-    const lease = this.capabilityLeases.grant({
-      ...command.payload,
-      grantedBy: command.actor.id,
-    });
-    this.leaseRequests.delete(request.id);
-    return succeededOutcome({ leaseId: lease.id, leaseRevision: lease.revision, expiresAt: lease.expiresAt });
-  }
-
-  private releaseCapabilityLease(
-    command: Extract<ControlCommand, { kind: 'lease.release' }>,
-  ): CommandOutcome {
-    const lease = this.capabilityLeases.snapshot().find(({ id }) => id === command.payload.leaseId);
-    if (!lease) throw codedError('lease_missing', 'capability lease is missing');
-    if (
-      command.actor.kind !== 'psyche'
-      || lease.actorId !== command.actor.id
-      || lease.taskId !== command.payload.taskId
-      || lease.revision !== command.payload.leaseRevision
-    ) throw codedError('capability_denied', 'agent may only release its exact capability lease');
-    this.capabilityLeases.release(lease.id);
-    this.approvals.revokeForLease(lease.id);
-    this.reconcilePendingApprovalState(this.approvals.snapshot());
-    return succeededOutcome(undefined);
-  }
-
-  private revokeCapabilityLease(
-    command: Extract<ControlCommand, { kind: 'lease.revoke' }>,
-  ): CommandOutcome {
-    if (command.actor.kind !== 'human') return operatorRejected('only an operator may revoke capability leases');
-    const revoked = this.capabilityLeases.revoke(command.payload.leaseId);
-    this.approvals.revokeForLease(command.payload.leaseId);
-    this.reconcilePendingApprovalState(this.approvals.snapshot());
-    return succeededOutcome({ revoked: Boolean(revoked) });
-  }
-
-  private async resolveApproval(
-    command: Extract<ControlCommand, { kind: 'approval.resolve' }>,
-  ): Promise<CommandOutcome> {
-    if (command.actor.kind !== 'human') return operatorRejected('only an operator may resolve approvals');
-    this.reconcilePendingApprovalState(this.approvals.snapshot());
-    const pending = this.pendingApprovals.get(command.payload.approvalId);
-    if (!pending) throw codedError('approval_missing', 'approval is missing');
-    const resolved = command.payload.decision === 'approve'
-      ? this.approvals.approve(pending.approval.id, command.actor.id, command.payload.payloadDigest)
-      : this.approvals.deny(pending.approval.id, command.actor.id, command.payload.payloadDigest);
-    if (resolved.status === 'denied') {
-      this.pendingApprovals.delete(resolved.id);
-      const receipt = this.recordReceipt(
-        pending.command, pending.approval.resource, 'denied', 'approval_denied',
-      );
-      await this.appendTerminal(pending.command, outcomeForReceipt(receipt));
-      return succeededOutcome(receipt);
-    }
-    let current: Awaited<ReturnType<ControlRuntime['prepareAgentSurfaceEffect']>>;
-    try {
-      current = await this.prepareAgentSurfaceEffect(pending.command);
-      if (
-        !sameClassification(current.classification, pending.classification)
-        || !sameBrowserBinding(current.browserBinding, pending.browserBinding)
-        || !sameBrowserScriptContext(current.scriptContext, pending.scriptContext)
-      ) throw codedError('approval_identity_mismatch', 'trusted action risk changed before approval consumption');
-      this.approvals.consume({
-        approvalId: resolved.id,
-        payloadDigest: command.payload.payloadDigest,
-        actionId: pending.command.id,
-        ownerEpoch: pending.command.ownerEpoch,
-        leaseId: pending.command.payload.leaseId,
-        leaseRevision: pending.command.payload.leaseRevision,
-        resource: current.target,
-        capability: current.classification.capability,
-        effect: pending.approval.effect,
-        actionPayload: pending.approvalPayload,
-      });
-    } catch (error) {
-      const outcome = safeSurfaceFailure(error);
-      const receipt = this.recordReceipt(
-        pending.command,
-        pending.approval.resource,
-        outcome.status === 'unknown' ? 'unknown' : 'failed',
-        outcome.status === 'succeeded' ? undefined : outcome.code,
-      );
-      await this.appendTerminal(pending.command, outcome);
-      this.pendingApprovals.delete(resolved.id);
-      return outcome;
-    }
-    this.pendingApprovals.delete(resolved.id);
-    this.setActionStatus(pending.command, current.target, 'queued');
-    return new Promise<CommandOutcome>((resolve) => {
-      const key = resourceKey(current.target);
-      const queue = this.queueForResource(key);
-      queue.activeEffects += 1;
-      queue.tail = queue.tail.then(async () => {
-        await Promise.all([...queue.blockers]);
-        this.setActionStatus(pending.command, current.target, 'running');
-        const revalidated = await this.prepareAgentSurfaceEffect(pending.command);
-        if (
-          !sameClassification(revalidated.classification, pending.classification)
-          || !sameBrowserBinding(revalidated.browserBinding, pending.browserBinding)
-          || !sameBrowserScriptContext(revalidated.scriptContext, pending.scriptContext)
-        ) throw codedError('approval_identity_mismatch', 'trusted action risk changed before approved effect');
-        const { receipt, liveBrowserScript } = await this.invokeAgentSurfaceHandler(
-          pending.command, current.target, pending.browserBinding, pending.scriptContext,
-        );
-        const outcome = outcomeForReceipt(receipt);
-        const durable = await this.appendTerminal(pending.command, outcome);
-        resolve(liveBrowserScript && durable.status === 'succeeded'
-          ? succeededOutcome(liveBrowserScript)
-          : durable);
-      }).catch(async (error: unknown) => {
-        const outcome = safeSurfaceFailure(error);
-        this.recordReceipt(
-          pending.command,
-          current.target,
-          outcome.status === 'unknown' ? 'unknown' : 'failed',
-          outcome.status === 'succeeded' ? undefined : outcome.code,
-          browserScriptSummaryFromError(error),
-        );
-        resolve(await this.appendTerminal(pending.command, outcome));
-      }).finally(() => {
-        queue.activeEffects -= 1;
-        this.cleanupResourceQueue(key, queue);
-      });
-    });
-  }
-
-  private async upsertResource(
-    command: Extract<ControlCommand, { kind: 'provider.resource.upsert' }>,
-  ): Promise<CommandOutcome> {
-    if (command.actor.kind === 'psyche') return operatorRejected('agents cannot publish provider resources');
-    const [canonicalRoot, resourceRoot, worktreeRoot] = await Promise.all([
-      this.canonicalizePath(command.projectRoot, 'prospective'),
-      this.canonicalizePath(command.payload.resource.projectRoot, 'prospective'),
-      this.canonicalizePath(command.payload.resource.worktreeRoot, 'prospective'),
-    ]);
-    if (resourceRoot !== canonicalRoot) {
-      throw codedError('capability_denied', 'provider resource belongs to another project');
-    }
-    const worktreeRelative = path.relative(canonicalRoot, worktreeRoot);
-    if (worktreeRelative === '..' || worktreeRelative.startsWith(`..${path.sep}`) || path.isAbsolute(worktreeRelative)) {
-      throw codedError('capability_denied', 'provider worktree escapes the canonical project');
-    }
-    const previous = this.surfaces.get(command.payload.resource.id);
-    const resource = this.surfaces.upsertBrowserTab(command.payload.resource);
-    if (previous && previous.generation !== resource.generation) {
-      this.revokeTargetAuthority(resourceTarget(previous));
-    }
-    return succeededOutcome({ id: resource.id, generation: resource.generation });
-  }
-
-  private removeResource(
-    command: Extract<ControlCommand, { kind: 'provider.resource.remove' }>,
-  ): CommandOutcome {
-    if (command.actor.kind === 'psyche') return operatorRejected('agents cannot remove provider resources');
-    const resource = this.surfaces.require(command.payload.id, command.payload.generation);
-    if (resource.kind !== 'browser_tab') {
-      throw codedError('command_not_implemented', 'pane provider removal is not implemented');
-    }
-    const removed = this.surfaces.removeByProvider(resource.providerId);
-    for (const item of removed) {
-      const target = resourceTarget(item);
-      this.revokeTargetAuthority(target);
-      this.resourceQueues.delete(resourceKey(target));
-    }
-    return succeededOutcome({ removed: removed.map(({ id, generation }) => ({ id, generation })) });
-  }
-
-  private requireResource(id: string, generation: number, kind: SurfaceResource['kind']): SurfaceResource {
-    const resource = this.surfaces.require(id, generation);
-    if (resource.kind !== kind) throw codedError('resource_replaced', 'surface resource kind was replaced');
-    return resource;
-  }
-
-  private registeredRoots(projectRoot: string): string[] {
-    return [
-      projectRoot,
-      ...this.surfaces.list()
-        .filter((resource) => resource.projectRoot === projectRoot)
-        .map((resource) => resource.worktreeRoot),
-    ];
-  }
-
-  private async assertContainedPath(
-    candidate: string,
-    mode: 'existing' | 'prospective',
-    roots: readonly string[],
-  ): Promise<void> {
-    let canonicalCandidate: string;
-    let canonicalRoots: string[];
-    try {
-      [canonicalCandidate, ...canonicalRoots] = await Promise.all([
-        this.canonicalizePath(candidate, mode),
-        ...roots.map((root) => this.canonicalizePath(root, 'prospective')),
-      ]);
-    } catch {
-      throw codedError('filesystem_target_unavailable', 'filesystem target could not be canonicalized');
-    }
-    if (!canonicalRoots.some((root) => isPathWithin(root, canonicalCandidate))) {
-      throw codedError('capability_denied', 'filesystem target escapes the canonical project');
-    }
-  }
-
-  private assertCurrentOwner(ownerEpoch: number): void {
-    if (ownerEpoch !== this.ownerEpoch) throw codedError('owner_restarted', 'control owner restarted');
-  }
-
-  private revokeTargetAuthority(target: LeaseTarget): void {
-    for (const lease of this.capabilityLeases.revokeTarget(target)) {
-      this.approvals.revokeForLease(lease.id);
-    }
-    this.reconcilePendingApprovalState(this.approvals.snapshot());
-  }
-
-  private reconcilePendingApprovalState(approvals: readonly Approval[]): void {
-    const byId = new Map(approvals.map((approval) => [approval.id, approval]));
-    for (const [approvalId, pending] of this.pendingApprovals) {
-      const approval = byId.get(approvalId);
-      if (approval && (approval.status === 'pending' || approval.status === 'approved')) continue;
-      const state: ActionReceipt['state'] = approval?.status === 'denied' || approval?.status === 'revoked'
-        ? 'denied' : 'expired';
-      this.recordReceipt(pending.command, pending.approval.resource, state,
-        state === 'denied' ? 'approval_denied' : 'approval_expired');
-      this.pendingApprovals.delete(approvalId);
-      this.receiptScopes.delete(pending.command.id);
-    }
-  }
-
-  private recordReceipt(
-    command: ControlCommand,
-    resource: LeaseTarget,
-    state: ActionReceipt['state'],
-    code?: string,
-    value?: PaneActionPostcondition | BrowserActionPostcondition | BrowserScriptDurableSummary,
-  ): ActionReceipt {
-    const durableValue = value ?? (command.kind === 'browser.script' && (state === 'failed' || state === 'unknown')
-      ? browserScriptDurableSummary(command, state, 0, 0)
-      : undefined);
-    const receipt: ActionReceipt = Object.freeze({
-      schema: 'psyche.control.receipt/v1',
-      actionId: command.id,
-      state,
-      resource: immutableCopy(resource),
-      createdAt: command.createdAt,
-      ...(state === 'approval_required' ? {} : { completedAt: new Date().toISOString() }),
-      ...(code ? { code } : {}),
-      ...(durableValue ? { value: durableValue } : {}),
-    });
-    const previous = this.receipts.findIndex(({ actionId }) => actionId === command.id);
-    if (previous >= 0) this.receipts.splice(previous, 1);
-    this.receipts.push(receipt);
-    this.actionStatuses.set(command.id, receipt);
-    while (this.receipts.length > MAX_RECEIPTS) this.receipts.shift();
-    this.recordRecentReceipt(command, receipt);
-    return receipt;
-  }
-
-  private setActionStatus(
-    command: ControlCommand,
-    resource: LeaseTarget,
-    state: 'queued' | 'running',
-  ): void {
-    const receipt: ActionReceipt = Object.freeze({
-      schema: 'psyche.control.receipt/v1', actionId: command.id, state,
-      resource: immutableCopy(resource), createdAt: command.createdAt,
-    });
-    this.actionStatuses.set(command.id, receipt);
-    const existing = this.receipts.findIndex(({ actionId }) => actionId === command.id);
-    if (existing >= 0) this.receipts.splice(existing, 1);
-    this.receipts.push(receipt);
-    while (this.receipts.length > MAX_RECEIPTS) this.receipts.shift();
-    this.recordRecentReceipt(command, receipt);
-  }
-
-  private captureReceiptScope(command: ControlCommand, resource: LeaseTarget): void {
-    if (command.ownerEpoch !== this.ownerEpoch) return;
-    let projectRoot: string;
-    let worktreeRoot: string;
-    if (resource.kind === 'project') {
-      if (resource.id !== command.projectRoot) return;
-      projectRoot = command.projectRoot;
-      worktreeRoot = command.projectRoot;
-    } else {
-      const surface = this.surfaces.get(resource.id);
-      if (!surface || surface.kind !== resource.kind || surface.generation !== resource.generation
-          || surface.projectRoot !== command.projectRoot) return;
-      projectRoot = surface.projectRoot;
-      worktreeRoot = surface.worktreeRoot;
-    }
-    if (projectRoot.length === 0 || projectRoot.length > 4096 || worktreeRoot.length === 0 || worktreeRoot.length > 4096) return;
-    this.receiptScopes.set(command.id, Object.freeze({
-      projectRoot, worktreeRoot, resource: immutableCopy(resource),
-    }));
-  }
-
-  private recordRecentReceipt(command: ControlCommand, receipt: ActionReceipt): void {
-    const terminal = !['queued', 'running', 'approval_required'].includes(receipt.state);
-    if (!this.receiptScopes.has(command.id)) this.captureReceiptScope(command, receipt.resource);
-    const scope = this.receiptScopes.get(command.id);
-    if (!scope || command.id.length === 0 || command.id.length > 512 || command.actor.id.length > 512) {
-      if (terminal) this.receiptScopes.delete(command.id);
-      return;
-    }
-    const payload = command.payload as { taskId?: unknown };
-    const taskId = typeof payload.taskId === 'string' && payload.taskId.length <= 512 ? payload.taskId : '';
-    const summary: RecentReceiptSummary = Object.freeze({
-      commandId: command.id,
-      actionKind: command.kind,
-      outcome: receipt.state,
-      timestamp: receipt.completedAt ?? receipt.createdAt,
-      agentId: command.actor.kind === 'psyche' ? command.actor.id : '',
-      taskId,
-      projectRoot: scope.projectRoot,
-      worktreeRoot: scope.worktreeRoot,
-      resource: immutableCopy(scope.resource),
-      redacted: true,
-      result: 'result_unavailable',
-    });
-    const previous = this.recentReceipts.findIndex(({ commandId }) => commandId === command.id);
-    if (previous >= 0) this.recentReceipts.splice(previous, 1);
-    this.recentReceipts.push(summary);
-    while (this.recentReceipts.length > MAX_RECEIPTS) this.recentReceipts.shift();
-    if (terminal) this.receiptScopes.delete(command.id);
-  }
-
-  private terminalizeAgentAction(
-    command: ControlCommand,
-    outcome: CommandOutcome,
-    forcedState?: 'denied',
-  ): Promise<CommandOutcome> {
-    const target = targetForCommand(command);
-    const state = forcedState
-      ?? (outcome.status === 'unknown' ? 'unknown' : outcome.status === 'rejected' ? 'denied' : 'failed');
-    this.recordReceipt(command, target, state, outcome.status === 'succeeded' ? undefined : outcome.code);
-    return this.appendTerminal(command, outcome);
-  }
-
-  private setCanonicalActionOutcome(command: ControlCommand, outcome: CommandOutcome): void {
-    this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
-    this.outcomesByCommandId.set(command.id, outcome);
-    const record = this.commandRecords.get(command.id);
-    if (record) record.outcome = outcome;
-  }
-
-  private async reconcileOrphanedApprovals(): Promise<void> {
-    for (const [actionId, status] of this.actionStatuses) {
-      if (status.state !== 'approval_required') continue;
-      const receipt: ActionReceipt = Object.freeze({
-        ...status,
-        state: 'unknown',
-        code: 'effect_unknown',
-        completedAt: new Date().toISOString(),
-      });
-      this.actionStatuses.set(actionId, receipt);
-      const existing = this.receipts.findIndex((candidate) => candidate.actionId === actionId);
-      if (existing >= 0) this.receipts.splice(existing, 1);
-      this.receipts.push(receipt);
-      const idempotencyKey = this.idempotencyKeysByCommandId.get(actionId);
-      await this.journal.append('command.unknown', {
-        commandId: actionId,
-        ...(idempotencyKey ? { idempotencyKey } : {}),
-        status: 'unknown', code: 'effect_unknown', message: 'command outcome is unknown', receipt,
-      });
-      const outcome: CommandOutcome = {
-        status: 'unknown', code: 'effect_unknown', message: 'command outcome is unknown',
-      };
-      this.outcomesByCommandId.set(actionId, outcome);
-      if (idempotencyKey) this.outcomesByIdempotencyKey.set(idempotencyKey, outcome);
-    }
-    while (this.receipts.length > MAX_RECEIPTS) this.receipts.shift();
   }
 
   private async executePrompt(command: Extract<ControlCommand, { kind: 'pane.prompt' }>): Promise<CommandOutcome> {
@@ -2092,60 +1442,44 @@ __OURS__
       idempotencyKey: command.idempotencyKey,
       kind: command.kind,
       ownerEpoch: command.ownerEpoch,
-      intentDigest: commandFingerprint(command),
     });
-__OURS__
+    if (!isSurfaceControlCommand(command)) {
+      this.retainCommandRecord(command.id, { command, sequence: event.sequence });
+    }
+    return event;
+  }
+
+  private async appendTerminal(
+    command: ControlCommand,
+    outcome: CommandOutcome,
+    receipt?: ActionReceipt,
+  ): Promise<CommandOutcome> {
+    if (isSurfaceControlCommand(command)) {
+      const built = agentControlJournalPayload({
+        kind: terminalKindForOutcome(outcome), commandId: command.id,
+        idempotencyKey: command.idempotencyKey,
+        status: outcome.status,
+        ...(outcome.status === 'succeeded' ? {} : { code: 'surface_command_failed' }),
+        ...(receipt ? { receipt: journalReceiptMetadata(receipt) } : {}),
+      });
+      await this.journal.append(built.kind, built.payload);
+      this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
+      return outcome;
+    }
+    const event = await this.journal.append(terminalKindForOutcome(outcome), {
+      commandId: command.id,
+      idempotencyKey: command.idempotencyKey,
+      ...payloadForOutcome(outcome),
+    });
+    this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
     const record = this.commandRecords.get(command.id);
     if (record) {
-      record.outcome = canonicalOutcome;
+      record.outcome = outcome;
       record.sequence = event.sequence;
-__OURS__
+    } else if (!isSurfaceControlCommand(command)) {
+      this.retainCommandRecord(command.id, { command, outcome, sequence: event.sequence });
     }
-    this.terminalReceiptOverrides.delete(command.id);
-    this.compactTerminalIndexes();
     return outcome;
-  }
-
-  private compactTerminalIndexes(): void {
-    while (this.outcomesByCommandId.size > MAX_STATUS_INDEX) {
-      const candidate = [...this.outcomesByCommandId].find(([commandId]) => {
-        const receipt = this.actionStatuses.get(commandId);
-        return !receipt || (receipt.state !== 'queued' && receipt.state !== 'running' && receipt.state !== 'approval_required');
-      });
-      if (!candidate) break;
-      const [commandId] = candidate;
-      const idempotencyKey = this.idempotencyKeysByCommandId.get(commandId);
-      this.actionStatuses.delete(commandId);
-      this.outcomesByCommandId.delete(commandId);
-      this.fingerprintsByCommandId.delete(commandId);
-      this.idempotencyKeysByCommandId.delete(commandId);
-      if (idempotencyKey) {
-        this.outcomesByIdempotencyKey.delete(idempotencyKey);
-        this.fingerprintsByIdempotencyKey.delete(idempotencyKey);
-        this.commandIdsByIdempotencyKey.delete(idempotencyKey);
-      }
-    }
-  }
-
-  private lookupPersistedCommand(command: ControlCommand, fingerprint: string): CommandOutcome | undefined {
-    if (this.outcomesByCommandId.has(command.id) || this.outcomesByIdempotencyKey.has(command.idempotencyKey)) return undefined;
-    const events = this.journal.read(0);
-    const requested = events.find((event) => event.kind === 'command.requested' && (
-      event.payload.commandId === command.id || event.payload.idempotencyKey === command.idempotencyKey
-    ));
-    if (!requested) return undefined;
-    if (
-      requested.payload.commandId !== command.id
-      || requested.payload.idempotencyKey !== command.idempotencyKey
-      || requested.payload.intentDigest !== fingerprint
-    ) return commandConflictOutcome();
-    const terminal = [...events].reverse().find((event) => (
-      TERMINAL_EVENT_KINDS.has(event.kind) && event.payload.commandId === command.id
-    ));
-    const receipt = terminal ? receiptPayload(terminal) : undefined;
-    return terminal ? (receipt?.actionId === command.id ? outcomeForReceipt(receipt) : outcomeFromEvent(terminal)) : {
-      status: 'unknown', code: 'effect_unknown', message: 'persisted command outcome is unresolved',
-    };
   }
 
   private retainCommandRecord(
@@ -2163,52 +1497,65 @@ __OURS__
 
   private reduceOutcomes(events: RuntimeEvent[]): void {
     for (const event of events) {
-      if (event.kind === 'command.requested') {
-        const commandId = stringPayload(event, 'commandId');
-        const idempotencyKey = stringPayload(event, 'idempotencyKey');
-        const intentDigest = stringPayload(event, 'intentDigest');
-        if (commandId && idempotencyKey && intentDigest) {
-          this.fingerprintsByCommandId.set(commandId, intentDigest);
-          this.fingerprintsByIdempotencyKey.set(idempotencyKey, intentDigest);
-          this.idempotencyKeysByCommandId.set(commandId, idempotencyKey);
-          this.commandIdsByIdempotencyKey.set(idempotencyKey, commandId);
-        }
-      }
       if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
       const idempotencyKey = stringPayload(event, 'idempotencyKey');
       if (!idempotencyKey) continue;
-      const outcome = outcomeFromEvent(event);
-      this.outcomesByIdempotencyKey.set(idempotencyKey, outcome);
-      const commandId = stringPayload(event, 'commandId');
-      if (commandId) this.outcomesByCommandId.set(commandId, outcome);
-      const receipt = receiptPayload(event);
-      if (receipt) {
-        this.receipts.push(receipt);
-        this.actionStatuses.set(receipt.actionId, receipt);
-        const receiptOutcome = outcomeForReceipt(receipt);
-        this.outcomesByCommandId.set(receipt.actionId, receiptOutcome);
-        const actionIdempotencyKey = this.idempotencyKeysByCommandId.get(receipt.actionId);
-        if (actionIdempotencyKey) {
-          this.outcomesByIdempotencyKey.set(actionIdempotencyKey, receiptOutcome);
-        }
-      } else {
-        const orphanCandidate = approvalRequiredReceiptForReconciliation(event);
-        if (orphanCandidate) {
-          this.receipts.push(orphanCandidate);
-          this.actionStatuses.set(orphanCandidate.actionId, orphanCandidate);
-        }
-      }
+      this.outcomesByIdempotencyKey.set(idempotencyKey, outcomeFromEvent(event));
     }
-    while (this.receipts.length > MAX_RECEIPTS) this.receipts.shift();
-    this.compactTerminalIndexes();
   }
 
-__OURS__
+  private rehydrateReceipts(events: readonly RuntimeEvent[]): void {
+    this.receipts.clear();
+    for (const record of latestDurableReceiptRecords(events)) {
+      this.rememberReceipt(record.receipt);
+    }
+  }
+
+  private queueForPane(paneId: string): PaneQueueState {
+    return this.queueForResource(this.resourceTargetForPane(paneId));
+  }
+
+  private queueForResource(target: LeaseTarget): PaneQueueState {
+    const key = resourceKey(target);
+    let queue = this.resourceQueues.get(key);
+    if (!queue) {
+      queue = {
+        target: Object.freeze({ ...target }), items: new Set<QueuedCommand>(), pendingEffects: 0,
+        quarantined: false, tail: Promise.resolve(),
+      };
+      this.resourceQueues.set(key, queue);
     }
     return queue;
   }
 
-__OURS__
+  private pruneInactiveResourceQueues(): void {
+    for (const [key, queue] of this.resourceQueues) {
+      if (!queue.quarantined || queue.items.size > 0 || queue.pendingEffects > 0 || queue.blocker !== undefined) {
+        continue;
+      }
+      if (queue.target.kind === 'project') continue;
+      const current = this.surfaces.get(queue.target.id);
+      if (!current || current.kind !== queue.target.kind || current.generation !== queue.target.generation) {
+        this.resourceQueues.delete(key);
+      }
+    }
+  }
+
+  private pruneResourceQueue(key: string, queue: PaneQueueState, tail: Promise<void>): void {
+    if (
+      this.resourceQueues.get(key) === queue
+      && queue.tail === tail
+      && queue.items.size === 0
+      && queue.pendingEffects === 0
+      && !queue.quarantined
+      && queue.blocker === undefined
+    ) {
+      this.resourceQueues.delete(key);
+    }
+  }
+
+  private waitForQueueBlocker(key: string): Promise<void> {
+    return this.resourceQueues.get(key)?.blocker ?? Promise.resolve();
   }
 
   private bumpPaneBarrier(paneId: string): void {
@@ -2216,7 +1563,7 @@ __OURS__
   }
 
   private preemptQueuedAutomation(paneId: string): Promise<CommandOutcome>[] {
-__OURS__
+    const queue = this.resourceQueues.get(resourceKey(this.resourceTargetForPane(paneId)));
     if (!queue) return [];
     const preemptions: Promise<CommandOutcome>[] = [];
     for (const item of queue.items) {
@@ -2697,18 +2044,11 @@ function terminalKindForOutcome(outcome: CommandOutcome):
   }
 }
 
-function payloadForOutcome(outcome: CommandOutcome, durableReceipt?: ActionReceipt): Record<string, unknown> {
+function payloadForOutcome(outcome: CommandOutcome): Record<string, unknown> {
   if (outcome.status === 'succeeded') {
-    return durableReceipt && 'value' in outcome && isActionReceipt(outcome.value)
-      ? { status: outcome.status, receipt: durableReceipt }
-      : { status: outcome.status };
+    return 'value' in outcome ? { status: outcome.status, value: outcome.value } : { status: outcome.status };
   }
-  const message = outcome.status === 'unknown'
-    ? 'command outcome is unknown'
-    : outcome.status === 'rejected'
-      ? 'command was rejected'
-      : 'command failed';
-  return { status: outcome.status, code: outcome.code, message };
+  return { status: outcome.status, code: outcome.code, message: outcome.message };
 }
 
 function outcomeFromEvent(event: RuntimeEvent): CommandOutcome {
@@ -2771,168 +2111,54 @@ function stringPayload(event: RuntimeEvent, key: string): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-function receiptPayload(event: RuntimeEvent): ActionReceipt | undefined {
-  const value = event.payload.receipt ?? event.payload.value;
-  if (!value || typeof value !== 'object') return undefined;
-  const receipt = value as Partial<ActionReceipt>;
-  const resource = receipt.resource;
-  if (
-    receipt.schema !== 'psyche.control.receipt/v1'
-    || typeof receipt.actionId !== 'string'
-    || !RECEIPT_STATES.has(receipt.state as ActionReceipt['state'])
-    || typeof receipt.createdAt !== 'string'
-    || !resource
-    || !isExactLeaseTarget(resource)
-  ) return undefined;
-  if (!receiptMatchesTerminalEvent(event, receipt)) return undefined;
-  const postcondition = resource.kind === 'pane'
-    ? normalizeStoredPanePostcondition(resource.id, resource.generation, receipt.value)
-    : normalizeStoredBrowserScriptSummary(receipt.value, receipt.state as ActionReceipt['state'], receipt.code)
-      ?? normalizeStoredBrowserActionSummary(receipt.value);
-  return Object.freeze({
-    schema: 'psyche.control.receipt/v1',
-    actionId: receipt.actionId,
-    state: receipt.state as ActionReceipt['state'],
-    resource: immutableCopy(resource),
-    createdAt: receipt.createdAt,
-    ...(typeof receipt.completedAt === 'string' ? { completedAt: receipt.completedAt } : {}),
-    ...(typeof receipt.code === 'string' ? { code: receipt.code } : {}),
-    ...(postcondition ? { value: postcondition } : {}),
-  });
-}
-
-function receiptMatchesTerminalEvent(event: RuntimeEvent, receipt: Partial<ActionReceipt>): boolean {
-  const commandId = stringPayload(event, 'commandId');
-  const payloadActionId = stringPayload(event, 'actionId');
-  if (!commandId || receipt.actionId !== commandId
-      || (payloadActionId !== undefined && payloadActionId !== receipt.actionId)) return false;
-  const receiptCode = typeof receipt.code === 'string' ? receipt.code : undefined;
-  switch (event.kind) {
-    case 'command.succeeded':
-      return event.payload.status === 'succeeded'
-        && !Object.prototype.hasOwnProperty.call(event.payload, 'code')
-        && receipt.state === 'succeeded'
-        && !Object.prototype.hasOwnProperty.call(receipt, 'code');
-    case 'command.failed': {
-      const eventCode = stringPayload(event, 'code');
-      return event.payload.status === 'failed'
-        && Boolean(eventCode && eventCode !== 'effect_unknown')
-        && receipt.state === 'failed' && receiptCode === eventCode;
-    }
-    case 'command.unknown':
-      return event.payload.status === 'unknown' && stringPayload(event, 'code') === 'effect_unknown'
-        && receipt.state === 'unknown' && receiptCode === 'effect_unknown';
-    case 'command.rejected': {
-      const eventCode = stringPayload(event, 'code');
-      return event.payload.status === 'rejected' && Boolean(eventCode)
-        && receipt.state === 'denied' && receiptCode === eventCode;
-    }
-    default:
-      return false;
-  }
-}
-
-function approvalRequiredReceiptForReconciliation(event: RuntimeEvent): ActionReceipt | undefined {
-  if (event.kind !== 'command.succeeded' || event.payload.status !== 'succeeded'
-      || Object.prototype.hasOwnProperty.call(event.payload, 'code')) return undefined;
-  const value = event.payload.receipt;
-  if (!isExactPlainDataObject(value, [
-    'schema', 'actionId', 'state', 'resource', 'createdAt', 'code',
-  ])) return undefined;
-  const receipt = value as Partial<ActionReceipt>;
-  const commandId = stringPayload(event, 'commandId');
-  if (!commandId || receipt.schema !== 'psyche.control.receipt/v1' || receipt.actionId !== commandId
-      || receipt.state !== 'approval_required' || receipt.code !== 'approval_required'
-      || Object.prototype.hasOwnProperty.call(receipt, 'value') || typeof receipt.createdAt !== 'string'
-      || !receipt.resource || !isExactLeaseTarget(receipt.resource)) return undefined;
-  return Object.freeze({ schema: 'psyche.control.receipt/v1', actionId: commandId,
-    state: 'approval_required', resource: immutableCopy(receipt.resource), createdAt: receipt.createdAt,
-    code: 'approval_required' });
-}
-
-const BROWSER_ACTION_RESULT_KINDS: ReadonlySet<BrowserSemanticAction['kind']> = new Set([
-  'focus', 'type', 'select', 'scroll', 'click', 'submit', 'upload', 'download',
-  'navigate', 'reload', 'back', 'forward', 'screenshot', 'close', 'permission_response',
-]);
-
-function normalizeStoredBrowserActionSummary(value: unknown): BrowserActionDurableSummary | undefined {
-  if (isExactPlainDataObject(value, ['kind', 'result'])) {
-    const summary = value as Record<string, unknown>;
-    if (typeof summary.kind === 'string'
-        && BROWSER_ACTION_RESULT_KINDS.has(summary.kind as BrowserSemanticAction['kind'])
-        && summary.result === 'result_unavailable') {
-      return Object.freeze({ kind: summary.kind as BrowserSemanticAction['kind'], result: 'result_unavailable' });
-    }
-    return undefined;
-  }
-  const legacy = normalizeBrowserActionPostcondition(undefined, value, false);
-  return legacy ? Object.freeze({ kind: legacy.kind, result: 'result_unavailable' }) : undefined;
-}
-
-function normalizeStoredBrowserScriptSummary(
-  value: unknown, receiptState: ActionReceipt['state'], receiptCode?: string,
-): BrowserScriptDurableSummary | undefined {
-  if (!isExactPlainDataObject(value, [
-    'argsBytes', 'durationMs', 'outcome', 'resultBytes', 'sourceBytes', 'sourceDigest',
-  ])) return undefined;
-  const summary = value as Record<string, unknown>;
-  if (typeof summary.sourceDigest !== 'string' || !/^[a-f0-9]{64}$/.test(summary.sourceDigest)
-      || !isNonnegativeSafeInteger(summary.sourceBytes)
-      || summary.sourceBytes > AGENT_CONTROL_LIMITS.scriptSourceBytes
-      || !isNonnegativeSafeInteger(summary.argsBytes)
-      || summary.argsBytes > AGENT_CONTROL_LIMITS.scriptArgsBytes
-      || !isNonnegativeSafeInteger(summary.resultBytes)
-      || summary.resultBytes > AGENT_CONTROL_LIMITS.scriptResultBytes
-      || typeof summary.durationMs !== 'number' || !Number.isFinite(summary.durationMs)
-      || summary.durationMs < 0 || summary.durationMs > AGENT_CONTROL_LIMITS.scriptTimeoutMs
-      || !['succeeded', 'failed', 'unknown'].includes(String(summary.outcome))) return undefined;
-  if (summary.outcome !== receiptState
-      || (summary.outcome !== 'succeeded' && summary.resultBytes !== 0)
-      || (receiptState === 'succeeded' && receiptCode !== undefined)
-      || (receiptState === 'unknown' && receiptCode !== 'effect_unknown')
-      || (receiptState === 'failed' && (typeof receiptCode !== 'string'
-        || receiptCode.length === 0 || receiptCode === 'effect_unknown'))
-      || (receiptCode === 'action_timeout' && (summary.outcome !== 'failed'
-        || summary.durationMs !== AGENT_CONTROL_LIMITS.scriptTimeoutMs || summary.resultBytes !== 0))) return undefined;
-  return Object.freeze({
-    sourceDigest: summary.sourceDigest,
-    sourceBytes: summary.sourceBytes,
-    argsBytes: summary.argsBytes,
-    resultBytes: summary.resultBytes,
-    durationMs: summary.durationMs,
-    outcome: summary.outcome as BrowserScriptDurableSummary['outcome'],
-  });
-}
-
-function durableReceiptForJournal(receipt: ActionReceipt): ActionReceipt {
-  if (receipt.resource.kind !== 'browser_tab' || !receipt.value || !('kind' in receipt.value)) return receipt;
-  return Object.freeze({ ...receipt, value: Object.freeze({
-    kind: receipt.value.kind, result: 'result_unavailable' as const,
-  }) });
-}
-
-const RECEIPT_STATES: ReadonlySet<ActionReceipt['state']> = new Set([
-  'queued', 'running', 'approval_required', 'succeeded',
-  'failed', 'denied', 'expired', 'unknown',
-]);
-
-function outcomeForReceipt(receipt: ActionReceipt): CommandOutcome {
-  switch (receipt.state) {
-    case 'unknown':
-      return { status: 'unknown', code: receipt.code ?? 'effect_unknown', message: 'surface effect outcome is unknown' };
-    case 'failed':
-    case 'expired':
-      return { status: 'failed', code: receipt.code ?? 'command_failed', message: 'surface command failed' };
-    case 'denied':
-      return { status: 'rejected', code: receipt.code ?? 'capability_denied', message: 'surface command denied' };
-    default:
-      return succeededOutcome(receipt);
-  }
-}
-
 function isReceiptResult(value: unknown): value is { receiptId?: string } {
   return typeof value === 'object' && value !== null &&
     (!('receiptId' in value) || typeof (value as { receiptId?: unknown }).receiptId === 'string');
 }
 
-__OURS__
+function latestDurableReceiptRecords(events: readonly RuntimeEvent[]): DurableReceiptRecord[] {
+  const latest = new Map<string, DurableReceiptRecord>();
+  for (const event of events) {
+    if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
+    const receipt = durableJournalReceiptPayload(event);
+    const commandId = stringPayload(event, 'commandId');
+    const idempotencyKey = stringPayload(event, 'idempotencyKey');
+    if (!receipt || !commandId || !idempotencyKey) continue;
+    latest.set(receipt.actionId, {
+      sequence: event.sequence,
+      commandId,
+      idempotencyKey,
+      receipt,
+    });
+  }
+  return [...latest.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
+function restartInvalidatedPayload(record: DurableReceiptRecord): Record<string, unknown> {
+  return {
+    commandId: record.commandId,
+    idempotencyKey: record.idempotencyKey,
+    status: 'failed',
+    receipt: {
+      schema: record.receipt.schema,
+      actionId: record.receipt.actionId,
+      state: 'failed',
+      resource: {
+        kind: record.receipt.resource.kind,
+        idDigest: record.receipt.resource.idDigest,
+        ...(record.receipt.resource.kind === 'project'
+          ? {}
+          : { generation: record.receipt.resource.generation }),
+      },
+      createdAt: record.receipt.createdAt,
+      ...(record.receipt.taskId ? { taskId: record.receipt.taskId } : {}),
+      ...(record.receipt.actorId ? { actorId: record.receipt.actorId } : {}),
+      ...(record.receipt.leaseId ? { leaseId: record.receipt.leaseId } : {}),
+      ...(record.receipt.leaseRevision !== undefined
+        ? { leaseRevision: record.receipt.leaseRevision }
+        : {}),
+      completedAt: new Date().toISOString(),
+      code: 'action_invalidated',
+    },
+  };
+}

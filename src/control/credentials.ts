@@ -1,5 +1,6 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { mkdir, readFile, chmod, link, open, unlink } from 'node:fs/promises';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { constants, type BigIntStats } from 'node:fs';
+import { access, chmod, link, lstat, mkdir, open, readdir, realpath, rename, rm, unlink, writeFile, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import {
   psycheUserConfigDirectory,
@@ -234,63 +235,85 @@ export async function createControlCredentialStore(options: {
   });
 }
 
-  let cache: StoredCredentials | null = null;
-  let loading: Promise<StoredCredentials> | null = null;
+/**
+ * Trusted launcher-only helper that rotates the single active task credential
+ * for a task and returns the replacement token.
+ */
+export async function issueControlTaskToken(options: {
+  projectRoot: string;
+  taskId: string;
+  filePath?: string;
+  /** Test-only override for the trusted per-user control state root. */
+  stateRoot?: string;
+}): Promise<string> {
+  return (await issueControlTaskCredential(options)).token;
+}
 
-  const loadOnce = async (): Promise<StoredCredentials> => {
-    if (cache) return cache;
-    try {
-      const parsed = JSON.parse(await readFile(filePath, 'utf8')) as Partial<StoredCredentials>;
-      if (typeof parsed.operatorToken === 'string' && typeof parsed.agentToken === 'string') {
-        // Best-effort re-assert 0600 in case an older version or external edit
-        // left the token file with looser permissions.
-        try {
-          await chmod(filePath, 0o600);
-        } catch {
-          // Non-fatal: on platforms without POSIX modes this is a no-op.
-        }
-        cache = { operatorToken: parsed.operatorToken, agentToken: parsed.agentToken };
-        return cache;
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-    const created: StoredCredentials = {
-      operatorToken: randomBytes(32).toString('hex'),
-      agentToken: randomBytes(32).toString('hex'),
-    };
-    const parent = path.dirname(filePath);
-    await mkdir(parent, { recursive: true, mode: 0o700 });
-    const temporary = `${filePath}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
-    const handle = await open(temporary, 'wx', 0o600);
-    try {
-      await handle.writeFile(`${JSON.stringify(created)}\n`, 'utf8');
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    try {
-      await link(temporary, filePath);
-      cache = created;
-      return created;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const parsed = JSON.parse(await readFile(filePath, 'utf8')) as Partial<StoredCredentials>;
-      if (typeof parsed.operatorToken !== 'string' || typeof parsed.agentToken !== 'string') {
-        throw new Error('invalid control credential file');
-      }
-      cache = { operatorToken: parsed.operatorToken, agentToken: parsed.agentToken };
-      return cache;
-    } finally {
-      await unlink(temporary).catch(() => undefined);
-    }
-  };
+/**
+ * Trusted launcher-only helper that rotates the single active task credential
+ * for a task and returns the new token plus its subject binding.
+ */
+export async function issueControlTaskCredential(options: {
+  projectRoot: string;
+  taskId: string;
+  filePath?: string;
+  previousSubjectId?: string;
+  /** Test-only override for the trusted per-user control state root. */
+  stateRoot?: string;
+}): Promise<IssuedControlTaskCredential> {
+  const root = await canonicalizeProjectRoot(options.projectRoot);
+  const filePath = options.filePath === undefined
+    ? undefined
+    : path.join(root, path.relative(path.resolve(options.projectRoot), path.resolve(options.filePath)));
+  return issueControlTaskCredentialForCanonicalRoot({
+    canonicalProjectRoot: root,
+    taskId: options.taskId,
+    ...(filePath === undefined ? {} : { filePath }),
+    ...(options.previousSubjectId === undefined ? {} : { previousSubjectId: options.previousSubjectId }),
+    ...(options.stateRoot === undefined ? {} : { stateRoot: options.stateRoot }),
+  });
+}
 
-  const load = async (): Promise<StoredCredentials> => {
-    if (cache) return cache;
-    loading ??= loadOnce().finally(() => { loading = null; });
-    return loading;
-  };
+/** Trusted launcher-only helper that revokes the active subject for a task. */
+export async function revokeControlTaskCredential(options: {
+  projectRoot: string;
+  taskId: string;
+  filePath?: string;
+  subjectId?: string;
+  /** Test-only override for the trusted per-user control state root. */
+  stateRoot?: string;
+}): Promise<RevokedControlTaskCredential | null> {
+  const root = await canonicalizeProjectRoot(options.projectRoot);
+  const filePath = options.filePath === undefined
+    ? undefined
+    : path.join(root, path.relative(path.resolve(options.projectRoot), path.resolve(options.filePath)));
+  return revokeControlTaskCredentialForCanonicalRoot({
+    canonicalProjectRoot: root,
+    taskId: options.taskId,
+    ...(filePath === undefined ? {} : { filePath }),
+    ...(options.subjectId === undefined ? {} : { subjectId: options.subjectId }),
+    ...(options.stateRoot === undefined ? {} : { stateRoot: options.stateRoot }),
+  });
+}
+
+/** Trusted seam for an owner bootstrap that already canonicalized the root. */
+export async function createControlCredentialStoreForCanonicalRoot(options: {
+  canonicalProjectRoot: string;
+  filePath?: string;
+  creationOps?: CredentialCreationOps;
+  /** Test-only override for the trusted per-user control state root. */
+  stateRoot?: string;
+}): Promise<ControlCredentialStore> {
+  const root = options.canonicalProjectRoot;
+  const paths = resolveControlCredentialPaths({
+    canonicalProjectRoot: root,
+    ...(options.filePath === undefined ? {} : { filePath: options.filePath }),
+    ...(options.stateRoot === undefined ? {} : { stateRoot: options.stateRoot }),
+  });
+  const creationOps = options.creationOps ?? DEFAULT_CREATION_OPS;
+  const load = async (): Promise<StoredCredentials> => (
+    loadOrCreateCredentials(root, paths, creationOps)
+  );
 
   return {
     async authenticate(token: string): Promise<AuthenticatedControlIdentity | null> {

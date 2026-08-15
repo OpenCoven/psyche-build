@@ -1,7 +1,12 @@
 import type { OrchestrationTaskRequest } from '../orchestration/types.js';
 import type {
   CapabilityLease,
-__MERGED_IMPORT_ORDER_WITH_OURS_CAPABILITY_HISTORY_AND_APPROVAL_TYPES__
+  CapabilityLeaseHistoryEntry,
+  LeaseTarget,
+  SurfaceCapability,
+} from './capabilityLeases.js';
+import type { BrowserTabSurface, SurfaceResource } from './surfaces.js';
+import type { Approval } from './approvals.js';
 
 export interface LeaseGrant {
   readonly target: LeaseTarget;
@@ -12,24 +17,6 @@ export type PaneNamedKey =
   | 'Enter' | 'Tab' | 'Escape' | 'Backspace'
   | 'Up' | 'Down' | 'Left' | 'Right'
   | 'C-c' | 'C-d';
-
-export const PANE_NAMED_KEYS: readonly PaneNamedKey[] = Object.freeze([
-  'Enter', 'Tab', 'Escape', 'Backspace', 'Up', 'Down', 'Left', 'Right', 'C-c', 'C-d',
-]);
-const PANE_NAMED_KEY_SET: ReadonlySet<string> = new Set(PANE_NAMED_KEYS);
-
-export function isPaneNamedKey(value: unknown): value is PaneNamedKey {
-  return typeof value === 'string' && PANE_NAMED_KEY_SET.has(value);
-}
-
-export function validatePaneNamedKeys(keys: readonly unknown[]): readonly PaneNamedKey[] {
-  if (!Array.isArray(keys) || keys.some((key) => !isPaneNamedKey(key))) {
-    throw Object.assign(new Error('pane keys must use the named-key allowlist'), {
-      code: 'invalid_pane_key',
-    });
-  }
-  return Object.freeze([...keys]) as readonly PaneNamedKey[];
-}
 
 export type ExistingPaneAction =
   | { kind: 'send_text'; text: string }
@@ -44,15 +31,6 @@ export type PaneCreateAction = {
 };
 
 export type PaneAction = ExistingPaneAction | PaneCreateAction;
-
-export interface PaneObservationResult {
-  readonly paneId: string;
-  readonly fromSequence: number;
-  readonly nextSequence: number;
-  readonly text: string;
-  readonly bytes: number;
-  readonly truncated: boolean;
-}
 
 export interface BrowserSemanticMetadata {
   role?: string;
@@ -81,47 +59,6 @@ export type BrowserSurfaceAction =
   | { kind: 'close' };
 
 export type BrowserSemanticAction = BrowserElementAction | BrowserSurfaceAction;
-
-export type BrowserActionPostcondition =
-  | { kind: 'focus'; focused: boolean }
-  | { kind: 'type'; secret: false; value: string }
-  | { kind: 'type'; secret: true; valuePresent: boolean }
-  | { kind: 'type'; secret: false; canceled: true }
-  | { kind: 'type'; secret: true; canceled: true; valuePresent: boolean }
-  | { kind: 'select'; values: readonly string[] }
-  | { kind: 'scroll'; scrollLeft: number; scrollTop: number }
-  | { kind: 'click'; clicked: true; submit: boolean; url: string; title: string }
-  | { kind: 'submit'; submitted: true; submit: boolean; url: string; title: string }
-  | { kind: 'navigate'; url: string; title: string }
-  | { kind: 'reload'; url: string; title: string }
-  | { kind: 'back'; url: string; title: string }
-  | { kind: 'forward'; url: string; title: string }
-  | { kind: 'screenshot'; pngBase64: string; width: number; height: number; navigationEpoch: number; navigationUrl: string }
-  | { kind: 'close'; closed: true };
-
-export type BrowserActionDurableSummary = {
-  kind: BrowserSemanticAction['kind'];
-  result: 'result_unavailable';
-};
-
-export interface BrowserScriptResult {
-  readonly value: unknown;
-  readonly byteCount: number;
-  readonly durationMs: number;
-}
-
-export interface BrowserScriptDurableSummary {
-  readonly sourceDigest: string;
-  readonly sourceBytes: number;
-  readonly argsBytes: number;
-  readonly resultBytes: number;
-  readonly durationMs: number;
-  readonly outcome: 'succeeded' | 'failed' | 'unknown';
-}
-
-export type PaneActionPostcondition =
-  | { paneId: string; generation: number; focused: boolean }
-  | { paneId: string; generation: number; cols: number; rows: number };
 
 export interface SemanticSnapshot {
   schema: 'psyche.browser.snapshot/v1';
@@ -177,7 +114,10 @@ export interface ActionReceiptBase<Resource> {
 
 export type ActionReceipt = ActionReceiptBase<LeaseTarget> & {
   message?: string;
-__MERGED_OURS_STRICT_ACTION_RECEIPT_VALUE_TYPES_PLUS_ACTION_STATUS_ALIASES__
+  value?: unknown;
+};
+export type JournalActionReceipt = ActionReceiptBase<JournalActionReceiptResource>;
+export type ActionStatusReceipt = ActionReceipt | JournalActionReceipt;
 
 interface AgentSurfaceAuthorization {
   taskId: string;
@@ -374,13 +314,13 @@ export type CommandOutcome =
   | { status: 'unknown'; code: string; message: string };
 
 export interface CommandRecord {
-  id: string;
-  kind: ControlCommand['kind'];
+  command: ControlCommand;
   outcome: CommandOutcome;
   sequence: number;
 }
 
-__MERGED_OURS_LEASE_REQUEST_RESOURCE_STATE_PLUS_CONTROL_SNAPSHOT_SCOPE_TYPE__
+export interface ControlSnapshotScope {
+  taskId?: string;
 }
 
 export interface ControlSnapshot {
@@ -395,5 +335,121 @@ export interface ControlSnapshot {
     revision: number;
     expiresAt: string;
   }>;
-__MERGED_OURS_SNAPSHOT_FIELDS_WITH_COMPAT_GUARD_EXPORTS_WHERE_NON_BREAKING__
+  resources: readonly SurfaceResource[];
+  capabilityLeases: readonly CapabilityLease[];
+  leaseHistory?: readonly CapabilityLeaseHistoryEntry[];
+  leaseRequests: readonly {
+    id: string;
+    ownerEpoch: number;
+    actorId: string;
+    taskId: string;
+    status: 'pending' | 'granted' | 'released' | 'revoked';
+    createdAt: string;
+    ttlMs: number;
+    grants: readonly LeaseGrant[];
+  }[];
+  approvals: readonly Approval[];
+  receipts: readonly ActionStatusReceipt[];
+}
+
+function isActionReceiptBase<Resource>(
+  value: unknown,
+  resourceGuard: (resource: unknown) => resource is Resource,
+): value is ActionReceiptBase<Resource> {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && (value as { schema?: unknown }).schema === 'psyche.control.receipt/v1'
+    && typeof (value as { actionId?: unknown }).actionId === 'string'
+    && isActionReceiptState((value as { state?: unknown }).state)
+    && typeof (value as { createdAt?: unknown }).createdAt === 'string'
+    && resourceGuard((value as { resource?: unknown }).resource)
+    && optionalString((value as { taskId?: unknown }).taskId)
+    && optionalString((value as { actorId?: unknown }).actorId)
+    && optionalString((value as { leaseId?: unknown }).leaseId)
+    && optionalPositiveInteger((value as { leaseRevision?: unknown }).leaseRevision)
+    && optionalString((value as { completedAt?: unknown }).completedAt)
+    && optionalString((value as { code?: unknown }).code)
+    && optionalString((value as { sourceDigest?: unknown }).sourceDigest)
+    && optionalNonNegativeInteger((value as { sourceBytes?: unknown }).sourceBytes)
+    && optionalNonNegativeInteger((value as { resultBytes?: unknown }).resultBytes)
+    && optionalNonNegativeNumber((value as { durationMs?: unknown }).durationMs)
+  );
+}
+
+function optionalString(value: unknown): boolean {
+  return value === undefined || typeof value === 'string';
+}
+
+function optionalPositiveInteger(value: unknown): boolean {
+  return value === undefined || (Number.isSafeInteger(value) && (value as number) >= 1);
+}
+
+function optionalNonNegativeInteger(value: unknown): boolean {
+  return value === undefined || (Number.isSafeInteger(value) && (value as number) >= 0);
+}
+
+function optionalNonNegativeNumber(value: unknown): boolean {
+  return value === undefined || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
+}
+
+export function isActionReceiptState(value: unknown): value is ActionReceiptState {
+  return value === 'queued'
+    || value === 'running'
+    || value === 'approval_required'
+    || value === 'succeeded'
+    || value === 'failed'
+    || value === 'denied'
+    || value === 'expired'
+    || value === 'unknown';
+}
+
+export function isActionReceiptResource(value: unknown): value is ActionReceipt['resource'] {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && (
+      (value as { kind?: unknown }).kind === 'project'
+        ? typeof (value as { id?: unknown }).id === 'string'
+          && (value as { generation?: unknown }).generation === undefined
+        : ((value as { kind?: unknown }).kind === 'pane' || (value as { kind?: unknown }).kind === 'browser_tab')
+          && typeof (value as { id?: unknown }).id === 'string'
+          && Number.isSafeInteger((value as { generation?: unknown }).generation)
+          && ((value as { generation?: unknown }).generation as number) >= 1
+    )
+  );
+}
+
+export function isJournalActionReceiptResource(value: unknown): value is JournalActionReceipt['resource'] {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && typeof (value as { idDigest?: unknown }).idDigest === 'string'
+    && /^[a-f0-9]{64}$/.test((value as { idDigest: string }).idDigest)
+    && (
+      (value as { kind?: unknown }).kind === 'project'
+        ? (value as { generation?: unknown }).generation === undefined
+        : ((value as { kind?: unknown }).kind === 'pane' || (value as { kind?: unknown }).kind === 'browser_tab')
+          && Number.isSafeInteger((value as { generation?: unknown }).generation)
+          && ((value as { generation?: unknown }).generation as number) >= 1
+    )
+  );
+}
+
+export function isActionReceipt(value: unknown): value is ActionReceipt {
+  return isActionReceiptBase(value, isActionReceiptResource)
+    && optionalString((value as { message?: unknown }).message);
+}
+
+export function isJournalActionReceipt(value: unknown): value is JournalActionReceipt {
+  return isActionReceiptBase(value, isJournalActionReceiptResource)
+    && !Object.prototype.hasOwnProperty.call(value, 'message')
+    && !Object.prototype.hasOwnProperty.call(value, 'value');
+}
+
+export function isActionStatusReceipt(value: unknown): value is ActionStatusReceipt {
+  return isActionReceipt(value) || isJournalActionReceipt(value);
 }

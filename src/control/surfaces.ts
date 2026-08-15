@@ -36,11 +36,6 @@ export class SurfaceRegistry {
 
   upsertPane(input: SurfaceInput<PaneSurface>): PaneSurface {
     const previous = this.resources.get(input.id);
-    if (previous && previous.kind !== 'pane') {
-      throw Object.assign(new Error(`surface resource ${input.id} belongs to another kind`), {
-        code: 'resource_collision',
-      });
-    }
     const generation = previous
       ? previous.generation + (previous.kind !== 'pane' || previous.tmuxPaneId !== input.tmuxPaneId ? 1 : 0)
       : (this.generations.get(input.id) ?? 0) + 1;
@@ -52,11 +47,6 @@ export class SurfaceRegistry {
 
   upsertBrowserTab(input: SurfaceInput<BrowserTabSurface>): BrowserTabSurface {
     const previous = this.resources.get(input.id);
-    if (previous && previous.kind !== 'browser_tab') {
-      throw Object.assign(new Error(`surface resource ${input.id} belongs to another kind`), {
-        code: 'resource_collision',
-      });
-    }
     const bindingChanged = previous?.kind !== 'browser_tab'
       || previous.providerId !== input.providerId
       || previous.webviewLabel !== input.webviewLabel;
@@ -93,7 +83,9 @@ export class SurfaceRegistry {
     return Object.freeze([...this.resources.values()]);
   }
 
-__MERGED_OURS_TYPED_REMOVE_METHODS_PLUS_GENERIC_REMOVE_FOR_COMPAT__
+  remove(id: string): SurfaceResource | undefined {
+    const resource = this.resources.get(id);
+    if (resource) this.resources.delete(id);
     return resource;
   }
 

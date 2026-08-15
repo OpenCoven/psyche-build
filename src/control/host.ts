@@ -1,18 +1,17 @@
 import { ControlJournal } from './journal.js';
 import { acquireOwnerLock } from './ownerLock.js';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
-import { ControlRuntime, type ControlHandlers, type RuntimeJournal } from './runtime.js';
-import type { CanonicalBrowserScriptContextResolver, CanonicalBrowserSnapshotResolver } from './runtime.js';
-import { SurfaceRegistry } from './surfaces.js';
-import { CapabilityLeaseStore } from './capabilityLeases.js';
-import { ApprovalStore } from './approvals.js';
+import { ControlRuntime, type ControlHandlers } from './runtime.js';
 import { bootstrapSession } from './resources/sessionBootstrap.js';
-import type { BrowserProviderBroker } from './browserProviderBroker.js';
+import { ApprovalStore } from './approvals.js';
+import { CapabilityLeaseStore } from './capabilityLeases.js';
+import type { ControlTaskCredentialReference } from './credentials.js';
+import { SurfaceRegistry } from './surfaces.js';
+import type { BrowserSemanticSnapshotRegistry } from './browserSemanticSnapshots.js';
 
 export interface HostControlPlane {
   epoch: number;
   runtime: ControlRuntime;
-  browserProviders?: BrowserProviderBroker;
   close(): Promise<void>;
 }
 
@@ -20,15 +19,10 @@ export interface HostControlPlaneOptions {
   handlers: ControlHandlers;
   surfaces?: SurfaceRegistry;
   ownerLock?: typeof acquireOwnerLock;
-  journalOpen?: (projectRoot: string, ownerEpoch: number) => Promise<RuntimeJournal>;
+  journalOpen?: typeof ControlJournal.open;
   bootstrap?: (projectRoot: string) => Promise<void>;
-  surfaces?: SurfaceRegistry;
-  capabilityLeases?: CapabilityLeaseStore;
-  approvals?: ApprovalStore;
-  resolveBrowserSnapshot?: CanonicalBrowserSnapshotResolver;
-  resolveBrowserScriptContext?: CanonicalBrowserScriptContextResolver;
-  browserProviders?: BrowserProviderBroker;
-  canonicalizePath?: (candidate: string, mode?: 'existing' | 'prospective') => string | Promise<string>;
+  browserSemanticSnapshots?: BrowserSemanticSnapshotRegistry;
+  readActiveTaskCredential?: (taskId: string) => Promise<ControlTaskCredentialReference | null>;
 }
 
 export async function createHostControlPlane(
@@ -48,17 +42,17 @@ export async function createHostControlPlane(
       handlers: options.handlers,
       journal,
       surfaces: options.surfaces ?? new SurfaceRegistry(),
-      capabilityLeases: options.capabilityLeases ?? new CapabilityLeaseStore(undefined, lock.epoch),
-      approvals: options.approvals ?? new ApprovalStore(),
-      resolveBrowserSnapshot: options.resolveBrowserSnapshot,
-      resolveBrowserScriptContext: options.resolveBrowserScriptContext,
-      canonicalizePath: options.canonicalizePath,
+      capabilityLeases: new CapabilityLeaseStore(undefined, lock.epoch),
+      approvals: new ApprovalStore(),
+      readActiveTaskCredential: options.readActiveTaskCredential,
+      resolveBrowserElementSemantics: options.browserSemanticSnapshots
+        ? (input) => options.browserSemanticSnapshots!.resolve(input)
+        : undefined,
     });
 
     return {
       epoch: lock.epoch,
       runtime,
-      browserProviders: options.browserProviders,
       close: async () => {
         await lock.release();
       },

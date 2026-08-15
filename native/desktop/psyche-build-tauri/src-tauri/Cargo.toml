@@ -32,7 +32,6 @@ sysinfo = "0.36.1"
 sha2 = "0.10"
 base64 = "0.22"
 unicode-normalization = "0.1"
-uuid = { version = "1", features = ["v4"] }
 getrandom = "0.2"
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
@@ -44,7 +43,12 @@ portable-pty = { path = "vendor/portable-pty", version = "=0.8.1" }
 # distributed as notarized DMGs/Homebrew, not through the Mac App Store.
 tauri-plugin-macos-fps = "0.1.0"
 window-vibrancy = "0.6"
-<<OURS>>
+block2 = "0.6.2"
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = ["NSBitmapImageRep", "NSImage", "NSImageRep"] }
+objc2-foundation = { version = "0.3.2", features = ["NSData", "NSDictionary", "NSError", "NSObject", "NSString", "NSURL", "NSURLRequest"] }
+objc2-web-kit = { version = "0.3.2", features = ["block2", "WKNavigation", "WKNavigationDelegate", "WKSnapshotConfiguration", "WKWebView"] }
+
 
 [dev-dependencies]
 tempfile = "3"

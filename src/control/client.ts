@@ -6,16 +6,12 @@ import {
   isActionStatusReceipt,
 } from './types.js';
 import type {
-  ActionReceipt,
-  ControlCommand,
+  ActionStatusReceipt,
   ControlCommandInput,
   CommandOutcome,
   ControlSnapshot,
   ControlSnapshotScope,
 } from './types.js';
-
-type InputFor<K extends ControlCommand['kind']> = Extract<ControlCommandInput, { kind: K }>;
-type HelperInput<K extends ControlCommand['kind']> = Omit<InputFor<K>, 'kind' | 'projectRoot'>;
 
 export interface ControlClientPrincipal {
   id: string;
@@ -34,6 +30,7 @@ export interface ControlClientOptions {
   clientName: string;
   endpoint?: string;
   signal?: AbortSignal;
+  taskBinding?: ControlClientTaskBinding;
 }
 
 interface PendingRequest {
@@ -93,28 +90,18 @@ export class ControlClient {
     const welcome = await new Promise<Extract<ControlResponse, { type: 'welcome' }>>(
       (resolve, reject) => {
         let buffer = '';
-        let settled = false;
-        const fail = (error: Error): void => {
-          if (settled) return;
-          settled = true;
+        const rejectAndClose = (error: Error): void => {
           cleanup();
           socket.destroy();
           reject(error);
         };
-        const succeed = (message: Extract<ControlResponse, { type: 'welcome' }>): void => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          resolve(message);
-        };
-        const onAbort = (): void => fail(Object.assign(new Error('control connection aborted'), {
-          name: 'AbortError', code: 'ABORT_ERR',
-        }));
         const onError = (error: Error): void => {
-          fail(error);
+          cleanup();
+          reject(error);
         };
         const onClose = (): void => {
-          fail(new Error('control connection closed before welcome'));
+          cleanup();
+          reject(new Error('control connection closed before welcome'));
         };
         const onAbort = (): void => {
           const error = Object.assign(new Error('control connection aborted'), {
@@ -132,22 +119,33 @@ export class ControlClient {
           try {
             message = JSON.parse(line) as ControlResponse;
           } catch {
-            fail(new Error('invalid welcome frame'));
+            rejectAndClose(new Error('invalid welcome frame'));
             return;
           }
           if (message.type === 'error') {
-            fail(new Error(`${message.code}: ${message.message}`));
+            rejectAndClose(new Error(`${message.code}: ${message.message}`));
             return;
           }
           if (message.type !== 'welcome') {
-            fail(new Error(`expected welcome, received ${message.type}`));
+            rejectAndClose(new Error(`expected welcome, received ${message.type}`));
             return;
           }
           if (message.projectRoot !== canonicalRoot) {
-            fail(new Error('welcome project root does not match the requested project'));
+            rejectAndClose(new Error('welcome project root does not match the requested project'));
             return;
           }
-          succeed(message);
+          if (options.taskBinding?.taskId !== undefined
+            && message.taskBinding?.taskId !== options.taskBinding.taskId) {
+            rejectAndClose(new Error('welcome task binding does not match the requested task'));
+            return;
+          }
+          if (options.taskBinding?.subjectId !== undefined
+            && message.taskBinding?.subjectId !== options.taskBinding.subjectId) {
+            rejectAndClose(new Error('welcome task subject does not match the requested binding'));
+            return;
+          }
+          cleanup();
+          resolve(message);
         };
         const cleanup = (): void => {
           socket.off('data', onData);
@@ -231,25 +229,48 @@ export class ControlClient {
     });
   }
 
-  requestLease(input: HelperInput<'lease.request'>): Promise<CommandOutcome> {
-    return this.submit({ ...input, kind: 'lease.request', projectRoot: this.projectRoot });
+  requestLease(command: Extract<ControlCommandInput, { kind: 'lease.request' }>): Promise<CommandOutcome> {
+    return this.submit(command);
   }
 
-  releaseLease(input: HelperInput<'lease.release'>): Promise<CommandOutcome> {
-    return this.submit({ ...input, kind: 'lease.release', projectRoot: this.projectRoot });
+  releaseLease(command: Extract<ControlCommandInput, { kind: 'lease.release' }>): Promise<CommandOutcome> {
+    return this.submit(command);
   }
 
-  resolveApproval(input: HelperInput<'approval.resolve'>): Promise<CommandOutcome> {
-    return this.submit({ ...input, kind: 'approval.resolve', projectRoot: this.projectRoot });
+  resolveApproval(command: Extract<ControlCommandInput, { kind: 'approval.resolve' }>): Promise<CommandOutcome> {
+    return this.submit(command);
   }
 
-  async actionStatus(actionId: string): Promise<ActionReceipt | undefined> {
-    return this.request({
-      version: 1, type: 'action.status', requestId: this.allocateRequestId(), actionId,
-    }).then((response) => {
-      if (response.type === 'action.status.result') return response.receipt;
-      throw responseError(response, 'action.status');
-    });
+  async actionStatus(
+    actionId: string,
+    scope: ControlSnapshotScope = {},
+  ): Promise<ActionStatusReceipt | undefined> {
+    const effectiveScope = this.effectiveScope(scope);
+    const snapshot = await this.getState(effectiveScope);
+    const recent = snapshot.receipts.find((receipt) => receipt.actionId === actionId);
+    if (recent) return recent;
+    if (effectiveScope.taskId === undefined && this.principal.kind !== 'operator') return undefined;
+    const pageLimit = 256;
+    const historyLimit = 1_000;
+    const maxPages = Math.ceil(historyLimit / pageLimit);
+    let afterSequence = Math.max(0, snapshot.sequence - historyLimit);
+    let found: ActionStatusReceipt | undefined;
+    for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
+      const remaining = historyLimit - pageNumber * pageLimit;
+      const limit = Math.min(pageLimit, remaining);
+      const page = await this.readEvents(afterSequence, limit, effectiveScope);
+      for (const event of page.events) {
+        if (!event || typeof event !== 'object') continue;
+        const payload = (event as { payload?: unknown }).payload;
+        if (!payload || typeof payload !== 'object') continue;
+        const receipt = (payload as { receipt?: unknown }).receipt;
+        const scoped = eventActionReceipt(receipt);
+        if (scoped && scoped.actionId === actionId) found = scoped;
+      }
+      if (page.events.length < limit || page.nextSequence <= afterSequence) return found;
+      afterSequence = page.nextSequence;
+    }
+    return found;
   }
 
   async close(): Promise<void> {

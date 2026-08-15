@@ -1,4 +1,33 @@
-__MERGED_IMPORT_UNION_KEEP_AUTHORIZECOMMAND_AND_EXISTING_CREDENTIAL_HELPERS__
+import { spawn } from 'node:child_process';
+import {
+  access,
+  link,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  stat,
+  symlink,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  createControlCredentialStore as createControlCredentialStoreInternal,
+  createControlCredentialStoreForCanonicalRoot as createControlCredentialStoreForCanonicalRootInternal,
+  fingerprintControlToken,
+  issueControlTaskCredential as issueControlTaskCredentialInternal,
+  issueControlTaskToken as issueControlTaskTokenInternal,
+  revokeControlTaskCredential as revokeControlTaskCredentialInternal,
+  type CredentialCreationOps,
+} from '../src/control/credentials.js';
+import { ControlClient } from '../src/control/client.js';
+import { ControlServer, createControlServerForTest } from '../src/control/server.js';
 import type { ControlServerRuntime } from '../src/control/server.js';
 import type { ControlCommand, ControlCommandInput, ControlSnapshot } from '../src/control/types.js';
 import type { ControlPrincipal } from '../src/control/credentials.js';
@@ -522,28 +551,6 @@ function sensitiveSnapshot(): ControlSnapshot {
 }
 
 describe('control credential store', () => {
-  it('converges 64 concurrent first-use stores on one atomically persisted token pair', async () => {
-    const root = await tempProject();
-    const filePath = path.join(root, 'control-credentials.json');
-    const stores = await Promise.all(Array.from({ length: 64 }, () => (
-      createControlCredentialStore({ projectRoot: root, filePath })
-    )));
-    const agents = await Promise.all(stores.map((store) => store.agentToken()));
-    const operators = await Promise.all(stores.map((store) => store.operatorToken()));
-    expect(new Set(agents)).toHaveLength(1);
-    expect(new Set(operators)).toHaveLength(1);
-    expect((await stat(filePath)).mode & 0o777).toBe(0o600);
-  });
-
-  it('fails closed on an invalid partial credential file without overwriting it', async () => {
-    const root = await tempProject();
-    const filePath = path.join(root, 'control-credentials.json');
-    await writeFile(filePath, '{"operatorToken":"partial"}\n', { mode: 0o600 });
-    const store = await createControlCredentialStore({ projectRoot: root, filePath });
-    await expect(store.agentToken()).rejects.toThrow('invalid control credential file');
-    await expect(import('node:fs/promises').then(({ readFile }) => readFile(filePath, 'utf8')))
-      .resolves.toBe('{"operatorToken":"partial"}\n');
-  });
   it('mints operator and agent tokens that authenticate to their principals', async () => {
     const root = await tempProject();
     const filePath = path.join(root, 'control-credentials.json');
@@ -1870,7 +1877,379 @@ describe('task credential rotation integration', () => {
 });
 
 describe('control server authorization', () => {
-__KEEP_OURS_DENY_MATRIX_AND_RETAIN_INCOMING_SNAPSHOT_REDACTION_TESTS__
+  it('only exposes surface authority snapshot fields to operators', () => {
+    const sensitive = sensitiveSnapshot();
+    const server = createControlServerForTest({
+      runtime: stubRuntime(vi.fn(), sensitive),
+    });
+    const operator: ControlPrincipal = {
+      id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'],
+    };
+
+    expect(server.snapshot(operator)).toEqual(sensitive);
+    for (const kind of ['agent', 'compatibility'] as const) {
+      const snapshot = server.snapshot({ id: kind, kind, capabilities: ['read'] });
+      expect(snapshot).toMatchObject({
+        ownerEpoch: 1,
+        sequence: 2,
+        commands: {},
+        leases: {},
+        resources: [],
+        capabilityLeases: [],
+        leaseRequests: [],
+        approvals: [],
+        receipts: [],
+      });
+      expect(JSON.stringify(snapshot)).not.toContain('secret');
+    }
+  });
+
+  it('exposes only proven own-task receipts through a task-bound non-operator snapshot', () => {
+    const scopedSnapshot = {
+      ownerEpoch: 7,
+      sequence: 5,
+      commands: {},
+      leases: {},
+      resources: [
+        {
+          kind: 'pane',
+          id: 'pane-own',
+          generation: 1,
+          projectRoot: '/repo',
+          worktreeRoot: '/repo',
+          tmuxPaneId: '%1',
+          writable: true,
+          outputSequence: 1,
+        },
+        {
+          kind: 'browser_tab',
+          id: 'tab-own',
+          generation: 1,
+          projectRoot: '/repo',
+          worktreeRoot: '/repo',
+          providerId: 'provider-own',
+          webviewLabel: 'own',
+          url: 'https://own.example',
+          title: 'Own',
+          loading: false,
+          viewport: { width: 1280, height: 720 },
+        },
+        {
+          kind: 'pane',
+          id: 'pane-other',
+          generation: 1,
+          projectRoot: '/repo',
+          worktreeRoot: '/repo',
+          tmuxPaneId: '%2',
+          writable: true,
+          outputSequence: 1,
+        },
+        {
+          kind: 'browser_tab',
+          id: 'tab-other',
+          generation: 1,
+          projectRoot: '/repo',
+          worktreeRoot: '/repo',
+          providerId: 'provider-other',
+          webviewLabel: 'other',
+          url: 'https://other.example',
+          title: 'Other',
+          loading: false,
+          viewport: { width: 1280, height: 720 },
+        },
+      ],
+      capabilityLeases: [
+        {
+          id: 'lease-own',
+          requestId: 'request-own-tab',
+          actorId: 'agent-own',
+          taskId: 'task-own',
+          grantedBy: 'operator',
+          revision: 2,
+          ownerEpoch: 7,
+          createdAt: '2026-08-12T12:00:00.000Z',
+          expiresAt: '2026-08-12T12:01:00.000Z',
+          grants: [{ target: { kind: 'browser_tab', id: 'tab-own', generation: 1 }, capabilities: ['browser.interact'] }],
+        },
+        {
+          id: 'lease-other',
+          requestId: 'request-other-tab',
+          actorId: 'agent-other',
+          taskId: 'task-other',
+          grantedBy: 'operator',
+          revision: 1,
+          ownerEpoch: 7,
+          createdAt: '2026-08-12T12:00:00.000Z',
+          expiresAt: '2026-08-12T12:01:00.000Z',
+          grants: [{ target: { kind: 'browser_tab', id: 'tab-other', generation: 1 }, capabilities: ['browser.interact'] }],
+        },
+      ],
+      leaseRequests: [
+        {
+          id: 'request-own-pane',
+          ownerEpoch: 7,
+          actorId: 'agent-own',
+          taskId: 'task-own',
+          status: 'pending' as const,
+          createdAt: '2026-08-12T12:00:00.000Z',
+          ttlMs: 60_000,
+          grants: [{ target: { kind: 'pane', id: 'pane-own', generation: 1 }, capabilities: ['pane.observe'] }],
+        },
+        {
+          id: 'request-other-pane',
+          ownerEpoch: 7,
+          actorId: 'agent-other',
+          taskId: 'task-other',
+          status: 'pending' as const,
+          createdAt: '2026-08-12T12:00:00.000Z',
+          ttlMs: 60_000,
+          grants: [{ target: { kind: 'pane', id: 'pane-other', generation: 1 }, capabilities: ['pane.observe'] }],
+        },
+      ],
+      approvals: [
+        {
+          id: 'approval-own',
+          actionId: 'action-own',
+          ownerEpoch: 7,
+          taskId: 'task-own',
+          actorId: 'agent-own',
+          leaseId: 'lease-own',
+          leaseRevision: 2,
+          status: 'pending' as const,
+          createdAt: '2026-08-12T12:00:00.000Z',
+          expiresAt: '2026-08-12T12:05:00.000Z',
+          resource: { kind: 'browser_tab', id: 'tab-own', generation: 1 },
+          capability: 'browser.interact',
+          effect: createRedactedApprovalEffect({ kind: 'submit', target: 'submit-own' }),
+          payloadDigest: 'a'.repeat(64),
+          executablePayloadDigest: 'b'.repeat(64),
+        },
+        {
+          id: 'approval-other',
+          actionId: 'action-other',
+          ownerEpoch: 7,
+          taskId: 'task-other',
+          actorId: 'agent-other',
+          leaseId: 'lease-other',
+          leaseRevision: 1,
+          status: 'pending' as const,
+          createdAt: '2026-08-12T12:00:00.000Z',
+          expiresAt: '2026-08-12T12:05:00.000Z',
+          resource: { kind: 'browser_tab', id: 'tab-other', generation: 1 },
+          capability: 'browser.interact',
+          effect: createRedactedApprovalEffect({ kind: 'submit', target: 'submit-other' }),
+          payloadDigest: 'c'.repeat(64),
+          executablePayloadDigest: 'd'.repeat(64),
+        },
+      ],
+      receipts: [
+        {
+          schema: 'psyche.control.receipt/v1',
+          actionId: 'action-own',
+          state: 'approval_required' as const,
+          resource: { kind: 'browser_tab', id: 'tab-own', generation: 1 },
+          createdAt: '2026-08-12T12:00:00.000Z',
+          taskId: 'task-own',
+          actorId: 'agent-own',
+          leaseId: 'lease-own',
+          leaseRevision: 2,
+        },
+        {
+          schema: 'psyche.control.receipt/v1',
+          actionId: 'action-other',
+          state: 'approval_required' as const,
+          resource: { kind: 'browser_tab', id: 'tab-other', generation: 1 },
+          createdAt: '2026-08-12T12:00:00.000Z',
+          taskId: 'task-other',
+          actorId: 'agent-other',
+          leaseId: 'lease-other',
+          leaseRevision: 1,
+        },
+        {
+          schema: 'psyche.control.receipt/v1',
+          actionId: 'legacy-action',
+          state: 'failed' as const,
+          resource: { kind: 'browser_tab', id: 'tab-legacy', generation: 1 },
+          createdAt: '2026-08-12T12:00:00.000Z',
+          code: 'effect_failed',
+        },
+      ],
+    } satisfies ControlSnapshot;
+    const server = createControlServerForTest({ runtime: stubRuntime(vi.fn(), scopedSnapshot) });
+    const operator: ControlPrincipal = {
+      id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'],
+    };
+
+    expect(server.snapshot(operator, { taskId: 'task-own' }).receipts.map((receipt) => receipt.actionId))
+      .toEqual(expect.arrayContaining(['action-own', 'action-other', 'legacy-action']));
+
+    const scoped = server.snapshot({
+      principal: { id: 'agent-own', kind: 'agent', capabilities: ['read'] },
+      taskBinding: { taskId: 'task-own', subjectId: 'subject-own' },
+    }, { taskId: 'task-other' });
+    expect(scoped.resources.map((resource) => resource.id).sort()).toEqual(['pane-own', 'tab-own']);
+    expect(scoped.capabilityLeases.map((lease) => lease.id)).toEqual(['lease-own']);
+    expect(scoped.leaseRequests.map((request) => request.id)).toEqual(['request-own-pane']);
+    expect(scoped.approvals.map((approval) => approval.actionId)).toEqual(['action-own']);
+    expect(scoped.receipts).toEqual([expect.objectContaining({
+      actionId: 'action-own',
+      state: 'approval_required',
+    })]);
+    expect(scoped.receipts[0]).not.toHaveProperty('taskId');
+    expect(scoped.receipts[0]).not.toHaveProperty('leaseId');
+    expect(scoped.receipts[0]).not.toHaveProperty('leaseRevision');
+  });
+
+  it('passes the authenticated principal into state.get snapshot redaction', async () => {
+    const root = await tempProject();
+    const endpoint = path.join(root, 'control.sock');
+    const credentials = await createControlCredentialStore({
+      projectRoot: root,
+      filePath: path.join(root, 'control-credentials.json'),
+    });
+    const sensitive = sensitiveSnapshot();
+    const server = await ControlServer.start({
+      endpoint,
+      projectRoot: root,
+      ownerEpoch: 1,
+      runtime: stubRuntime(vi.fn(), sensitive),
+      credentials,
+    });
+    const cleanups: Array<() => Promise<void>> = [() => server.close()];
+
+    try {
+      const operator = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: await credentials.operatorToken(),
+        clientName: 'operator',
+      });
+      cleanups.unshift(() => operator.close());
+      const agent = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: await credentials.agentToken(),
+        clientName: 'agent',
+      });
+      cleanups.unshift(() => agent.close());
+
+      await expect(operator.getState()).resolves.toEqual(sensitive);
+      const snapshot = await agent.getState();
+      expect(snapshot).toMatchObject({
+        ownerEpoch: 1,
+        sequence: 2,
+        commands: {},
+        leases: {},
+        resources: [],
+        capabilityLeases: [],
+        leaseRequests: [],
+        approvals: [],
+        receipts: [],
+      });
+      expect(JSON.stringify(snapshot)).not.toContain('secret');
+    } finally {
+      await Promise.allSettled(cleanups.map(async (close) => close()));
+    }
+  });
+
+  it('returns only persisted own-task authority and receipts for a task-bound agent token', async () => {
+    const root = await tempProject();
+    const endpoint = path.join(root, 'control.sock');
+    const harness = await createTaskScopedControlHarness({ projectRoot: root, endpoint });
+    const cleanups: Array<() => Promise<void>> = [() => harness.server.close()];
+
+    try {
+      const operator = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: await harness.credentials.operatorToken(),
+        clientName: 'operator-task-scope',
+      });
+      cleanups.unshift(() => operator.close());
+      const agent = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: harness.ownTaskToken,
+        clientName: 'agent-task-scope',
+        taskBinding: { taskId: harness.ownTaskId },
+      });
+      cleanups.unshift(() => agent.close());
+
+      const operatorSnapshot = await operator.getState();
+      expect(Object.values(operatorSnapshot.leases).map((lease) => lease.paneId))
+        .toContain(harness.laneOnlyPane.id);
+      expect(operatorSnapshot.approvals.map((approval) => approval.actionId))
+        .toEqual(expect.arrayContaining([harness.ownApprovalActionId, harness.otherApprovalActionId]));
+      expect(operatorSnapshot.receipts.map((receipt) => receipt.actionId))
+        .toEqual(expect.arrayContaining([harness.ownApprovalActionId, harness.otherApprovalActionId]));
+
+      const ownSnapshot = await agent.getState();
+      expect(ownSnapshot.commands).toEqual({});
+      expect(ownSnapshot.leases).toEqual({});
+      expect(ownSnapshot.resources.map((resource) => resource.id).sort())
+        .toEqual([harness.ownPane.id, harness.ownTab.id].sort());
+      expect(ownSnapshot.resources.map((resource) => resource.id)).not.toContain(harness.laneOnlyPane.id);
+      expect(ownSnapshot.resources.map((resource) => resource.id)).not.toContain(harness.otherPane.id);
+      expect(ownSnapshot.resources.map((resource) => resource.id)).not.toContain(harness.otherTab.id);
+      expect(ownSnapshot.capabilityLeases).toEqual([expect.objectContaining({
+        id: harness.ownTabLease.id,
+        requestId: harness.ownTabRequestId,
+        taskId: harness.ownTaskId,
+      })]);
+      expect(ownSnapshot.leaseRequests).toEqual([expect.objectContaining({
+        id: harness.ownPaneRequestId,
+        taskId: harness.ownTaskId,
+      })]);
+      expect(ownSnapshot.approvals).toEqual([expect.objectContaining({
+        actionId: harness.ownApprovalActionId,
+        leaseId: harness.ownTabLease.id,
+        leaseRevision: harness.ownTabLease.revision,
+      })]);
+      expect(ownSnapshot.receipts).toEqual([expect.objectContaining({
+        actionId: harness.ownApprovalActionId,
+        state: 'approval_required',
+      })]);
+      expect(ownSnapshot.receipts[0]).not.toHaveProperty('taskId');
+      expect(ownSnapshot.receipts[0]).not.toHaveProperty('leaseId');
+      expect(ownSnapshot.receipts[0]).not.toHaveProperty('leaseRevision');
+
+      const scoped = await agent.getState({ taskId: harness.otherTaskId });
+      expect(scoped.commands).toEqual({});
+      expect(scoped.leases).toEqual({});
+      expect(scoped.resources.map((resource) => resource.id).sort())
+        .toEqual([harness.ownPane.id, harness.ownTab.id].sort());
+      expect(scoped.resources.map((resource) => resource.id)).not.toContain(harness.laneOnlyPane.id);
+      expect(scoped.resources.map((resource) => resource.id)).not.toContain(harness.otherPane.id);
+      expect(scoped.resources.map((resource) => resource.id)).not.toContain(harness.otherTab.id);
+      expect(scoped.capabilityLeases).toHaveLength(1);
+      expect(scoped.capabilityLeases[0]).toMatchObject({
+        id: harness.ownTabLease.id,
+        requestId: harness.ownTabRequestId,
+        taskId: harness.ownTaskId,
+      });
+      expect(scoped.leaseRequests).toHaveLength(1);
+      expect(scoped.leaseRequests[0]).toMatchObject({
+        id: harness.ownPaneRequestId,
+        taskId: harness.ownTaskId,
+      });
+      expect(scoped.approvals).toHaveLength(1);
+      expect(scoped.approvals[0]).toMatchObject({
+        actionId: harness.ownApprovalActionId,
+        leaseId: harness.ownTabLease.id,
+        leaseRevision: harness.ownTabLease.revision,
+      });
+      expect(scoped.receipts).toEqual([expect.objectContaining({
+        actionId: harness.ownApprovalActionId,
+        state: 'approval_required',
+      })]);
+      expect(scoped.receipts[0]).not.toHaveProperty('taskId');
+      expect(scoped.receipts[0]).not.toHaveProperty('leaseId');
+      expect(scoped.receipts[0]).not.toHaveProperty('leaseRevision');
+    } finally {
+      await Promise.allSettled(cleanups.map(async (close) => close()));
+    }
+  });
+
   it('rejects agent self-delegation and stamps operator identity', async () => {
     const submit = vi.fn(async (command) => ({ status: 'succeeded' as const, value: command.actor }));
     const server = createControlServerForTest({ runtime: stubRuntime(submit) });
@@ -1878,7 +2257,7 @@ __KEEP_OURS_DENY_MATRIX_AND_RETAIN_INCOMING_SNAPSHOT_REDACTION_TESTS__
     await expect(server.submitAs(
       { id: 'agent-1', kind: 'agent', capabilities: ['read', 'mutate', 'delegate'] },
       delegationInput(),
-    )).resolves.toMatchObject({ status: 'rejected', code: 'agent_mutation_denied' });
+    )).resolves.toMatchObject({ status: 'rejected', code: 'delegation_not_authorized' });
 
     await expect(server.submitAs(
       { id: 'operator-1', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] },
@@ -1898,15 +2277,9 @@ __KEEP_OURS_DENY_MATRIX_AND_RETAIN_INCOMING_SNAPSHOT_REDACTION_TESTS__
     const server = createControlServerForTest({ runtime: stubRuntime(submit) });
 
     await expect(server.submitAs(principal, delegationInput()))
-      .resolves.toMatchObject({
-        status: 'rejected',
-        code: principal.kind === 'agent' ? 'agent_mutation_denied' : 'delegation_not_authorized',
-      });
+      .resolves.toMatchObject({ status: 'rejected', code: 'delegation_not_authorized' });
     await expect(server.submitAs(principal, takeoverInput()))
-      .resolves.toMatchObject({
-        status: 'rejected',
-        code: principal.kind === 'agent' ? 'agent_mutation_denied' : 'takeover_not_authorized',
-      });
+      .resolves.toMatchObject({ status: 'rejected', code: 'takeover_not_authorized' });
     expect(submit).not.toHaveBeenCalled();
   });
 

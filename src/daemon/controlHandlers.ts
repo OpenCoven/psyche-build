@@ -1,11 +1,19 @@
-__OURS__
+import { tmuxDimensionArg, type TmuxControl } from '../services/tmuxControl.js';
 import { decodeBase64Payload } from '../utils/base64.js';
 import { assertTmuxPaneId, quoteTmuxArgument } from '../utils/tmuxTarget.js';
 import { buildDesktopUseQuickInput, isDesktopUseQuickAction, type DesktopUseQuickAction } from '../utils/covenDesktopUse.js';
-__OURS__
+import type { ControlHandlers } from '../control/runtime.js';
+import { PaneObservationStore } from '../control/resources/paneObservation.js';
+import { SurfaceRegistry, type PaneSurface } from '../control/surfaces.js';
+import type { PaneNamedKey } from '../control/types.js';
+import type {
+  BrowserProviderBroker,
+  ProviderEffectResult,
+} from '../control/browserProviderBroker.js';
+import { randomUUID } from 'node:crypto';
+import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
+import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
 import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
-import type { BrowserProviderBroker } from '../control/browserProviderBroker.js';
-import type { ProviderEffectResult } from '../control/protocol.js';
 import {
   spawnBridgePane,
   createCovenClient,
@@ -25,8 +33,6 @@ import {
 
 export interface DaemonControlHandlerDeps {
   tmux: TmuxControl;
-  /** Shared stable pane projection used by both handlers and the host runtime. */
-  panes?: PaneResourceController;
   projectRoot: string;
   sessionName: string;
   /** Effect boundary for pane creation; defaults to the real bridge spawn. */
@@ -37,7 +43,6 @@ export interface DaemonControlHandlerDeps {
   ) => Promise<BridgeSpawnResult>;
   /** Router used to execute Coven session capabilities. */
   capabilityRouter: AgenticCapabilityRouter;
-  browserProviders?: BrowserProviderBroker;
   /** Coven client factory; defaults to the real bridge client. */
   createCovenClient?: () => CovenClient;
   /** Spawn deps used when opening a Coven session pane; defaults to the real bridge deps. */
@@ -54,75 +59,6 @@ function notSupported(kind: string): () => Promise<never> {
     new Error(`control command not supported by the daemon adapter: ${kind}`),
     { code: 'command_not_supported' },
   ));
-}
-
-export function createBrowserSnapshotResolver(
-  broker: BrowserProviderBroker,
-): CanonicalBrowserSnapshotResolver {
-  return async (payload) => {
-    if (typeof payload.snapshotId !== 'string' || !('elementRef' in payload.action)) return undefined;
-    const result = await broker.dispatch({
-      actionId: `resolve:${payload.tabId}:${payload.generation}:${payload.snapshotId}:${payload.action.elementRef}`,
-      tabId: payload.tabId,
-      generation: payload.generation,
-      operation: {
-        kind: 'resolve', snapshotId: payload.snapshotId, elementRef: payload.action.elementRef,
-        actionKind: payload.action.kind,
-      },
-    });
-    if (result.status !== 'succeeded') {
-      throw Object.assign(new Error(result.message), {
-        code: result.code,
-        ...(result.status === 'unknown' ? { ambiguous: true } : {}),
-      });
-    }
-    if (!result.value || typeof result.value !== 'object') return undefined;
-    const value = result.value as Record<string, unknown>;
-    if (typeof value.documentId !== 'string' || value.documentId.length === 0 ||
-      !('submit' in value) || !(typeof value.submit === 'boolean' || value.submit === null) ||
-      !('formId' in value) || !(typeof value.formId === 'string' || value.formId === null) ||
-      !('secret' in value) || !(typeof value.secret === 'boolean' || value.secret === null)) return undefined;
-    return {
-      tabId: payload.tabId, generation: payload.generation,
-      snapshotId: typeof value.snapshotId === 'string' ? value.snapshotId : '',
-      elementRef: typeof value.ref === 'string' ? value.ref : '',
-      actionKind: typeof value.actionKind === 'string' ? value.actionKind as never : payload.action.kind,
-      documentId: value.documentId,
-      submit: value.submit, formId: value.formId, secret: value.secret,
-    };
-  };
-}
-
-export function createBrowserScriptContextResolver(
-  broker: BrowserProviderBroker,
-): CanonicalBrowserScriptContextResolver {
-  return async (payload) => {
-    const result = await broker.dispatch({
-      actionId: `script-context:${payload.tabId}:${payload.generation}:${randomUUID()}`,
-      tabId: payload.tabId,
-      generation: payload.generation,
-      operation: { kind: 'script_context' },
-    });
-    if (result.status !== 'succeeded') {
-      throw Object.assign(new Error(result.message), {
-        code: result.code,
-        ...(result.status === 'unknown' ? { ambiguous: true } : {}),
-      });
-    }
-    if (!result.value || typeof result.value !== 'object') {
-      throw Object.assign(new Error('browser script context is malformed'), { code: 'snapshot_stale' });
-    }
-    const value = result.value as Record<string, unknown>;
-    if (typeof value.documentId !== 'string' || !value.documentId
-        || typeof value.documentToken !== 'string' || !value.documentToken
-        || !Number.isSafeInteger(value.navigationEpoch) || (value.navigationEpoch as number) < 0
-        || typeof value.navigationUrl !== 'string' || !value.navigationUrl) {
-      throw Object.assign(new Error('browser script context is malformed'), { code: 'snapshot_stale' });
-    }
-    return { tabId: payload.tabId, generation: payload.generation,
-      documentId: value.documentId, documentToken: value.documentToken,
-      navigationEpoch: value.navigationEpoch as number, navigationUrl: value.navigationUrl };
-  };
 }
 
 /**
@@ -142,7 +78,9 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
   const spawn = deps.spawnPane ?? spawnBridgePane;
   const covenClientFactory = deps.createCovenClient ?? createCovenClient;
   const covenSpawnDeps = deps.covenSpawnDeps ?? defaultSpawnDeps;
-__OURS__
+  const paneObservations = deps.paneObservations ?? new PaneObservationStore();
+  const surfaces = deps.surfaces ?? new SurfaceRegistry();
+  const resolvePaneId = (paneId: string) => resolveConfiguredPaneId(deps.projectRoot, paneId);
 
   return {
     async spawnPane(payload): Promise<BridgeSpawnResult> {
@@ -156,9 +94,7 @@ __OURS__
         startPointBranch: payload.startPointBranch,
         existingWorktree: payload.existingWorktree,
       };
-      const result = await spawn(deps.projectRoot, deps.sessionName, request);
-      await deps.panes?.refresh();
-      return result;
+      return spawn(deps.projectRoot, deps.sessionName, request);
     },
 
     async sendInput(payload): Promise<void> {
@@ -200,13 +136,112 @@ __OURS__
     },
     launchRitual: notSupported('ritual.launch'),
     async observePane(payload) {
-__OURS__
+      requirePaneSurface(surfaces, payload.paneId, payload.generation);
+      return paneObservations.read(payload.paneId, { afterSequence: payload.afterSequence });
+    },
+    async actOnPane(payload) {
+      if (payload.action.kind === 'create') {
+        if (payload.projectId !== deps.projectRoot) {
+          throw codedHandlerError('resource_scope_mismatch', 'pane creation target is outside this project');
+        }
+        const result = await spawn(deps.projectRoot, deps.sessionName, {
+          requestId: '',
           cwd: payload.action.cwd,
           title: payload.action.title,
           agent: payload.action.agent,
           branch: payload.action.branch,
         });
-__OURS__
+        const refreshed = await deps.refreshPaneSurfaces?.();
+        const created = refreshed?.find((surface) => surface.tmuxPaneId === result.id);
+        if (!created) {
+          throw codedHandlerError('resource_missing', 'created pane has no stable Psyche resource binding');
+        }
+        return { ...result, id: created.id, pane: { ...result.pane, id: created.id } };
+      }
+
+      if (
+        typeof payload.paneId !== 'string'
+        || typeof payload.generation !== 'number'
+        || !Number.isSafeInteger(payload.generation)
+      ) {
+        throw codedHandlerError('resource_missing', 'pane action target is missing');
+      }
+      const pane = requirePaneSurface(surfaces, payload.paneId, payload.generation);
+      const target = assertTmuxPaneId(pane.tmuxPaneId);
+      const quotedTarget = quoteTmuxArgument(target);
+      switch (payload.action.kind) {
+        case 'send_text':
+          await deps.tmux.sendKeysHex(target, Buffer.from(payload.action.text, 'utf8'));
+          return { paneId: payload.paneId, bytes: Buffer.byteLength(payload.action.text, 'utf8') };
+        case 'send_keys': {
+          if (payload.action.keys.length === 0) {
+            throw codedHandlerError('invalid_pane_key', 'at least one named key is required');
+          }
+          for (const key of payload.action.keys) assertNamedPaneKey(key);
+          await deps.tmux.executeCommand(
+            `send-keys -t ${quotedTarget} ${payload.action.keys.join(' ')}`,
+          );
+          return { paneId: payload.paneId, keys: payload.action.keys.length };
+        }
+        case 'interrupt': {
+          const key = payload.action.key ?? 'C-c';
+          assertNamedPaneKey(key);
+          await deps.tmux.executeCommand(`send-keys -t ${quotedTarget} ${key}`);
+          return { paneId: payload.paneId, interrupted: true, key };
+        }
+        case 'focus': {
+          const lines = await deps.tmux.executeCommandWithOutput(
+            `select-pane -t ${quotedTarget} \\; display-message -p -t ${quotedTarget} '#{pane_active}'`,
+          );
+          return { paneId: payload.paneId, focused: lines.at(-1)?.trim() === '1' };
+        }
+        case 'resize': {
+          const cols = tmuxDimensionArg(payload.action.cols, 'cols');
+          const rows = tmuxDimensionArg(payload.action.rows, 'rows');
+          const lines = await deps.tmux.executeCommandWithOutput(
+            `resize-pane -t ${quotedTarget} -x ${cols} -y ${rows} \\; `
+              + `display-message -p -t ${quotedTarget} '#{pane_width} #{pane_height}'`,
+          );
+          const observed = parsePaneDimensions(lines.at(-1));
+          return { paneId: payload.paneId, ...observed };
+        }
+        case 'close':
+          await deps.tmux.killPane(target);
+          surfaces.remove(payload.paneId);
+          paneObservations.clear(payload.paneId);
+          return { paneId: payload.paneId, closed: true };
+      }
+    },
+    inspectBrowser: deps.browserProvider
+      ? async (payload) => {
+        const value = providerValue(await deps.browserProvider!.dispatch({
+          actionId: randomUUID(), tabId: payload.tabId, generation: payload.generation,
+          operation: { kind: 'inspect', includeScreenshot: payload.includeScreenshot },
+          timeoutMs: AGENT_CONTROL_LIMITS.actionTimeoutMs,
+        }));
+        return deps.browserSemanticSnapshots
+          ? deps.browserSemanticSnapshots.store(value, payload.tabId, payload.generation)
+          : value;
+      }
+      : notSupported('browser.inspect'),
+    actOnBrowser: deps.browserProvider
+      ? async (payload) => providerValue(await deps.browserProvider!.dispatch({
+          actionId: randomUUID(), tabId: payload.tabId, generation: payload.generation,
+          operation: {
+            kind: 'action', action: payload.action,
+            ...('snapshotId' in payload && payload.snapshotId ? { snapshotId: payload.snapshotId } : {}),
+          },
+          timeoutMs: AGENT_CONTROL_LIMITS.actionTimeoutMs,
+        }))
+      : notSupported('browser.action'),
+    runBrowserScript: deps.browserProvider
+      ? async (payload) => providerValue(await deps.browserProvider!.dispatch({
+          actionId: randomUUID(), tabId: payload.tabId, generation: payload.generation,
+          operation: { kind: 'script', source: payload.source,
+            ...(payload.args === undefined ? {} : { args: payload.args }) },
+          timeoutMs: AGENT_CONTROL_LIMITS.scriptTimeoutMs,
+        }))
+      : notSupported('browser.script'),
 
     async launchCovenSession(payload) {
       return launchProjectCovenSession(
@@ -269,5 +304,40 @@ __OURS__
   };
 }
 
-__OURS__
+const PANE_NAMED_KEYS: ReadonlySet<PaneNamedKey> = new Set([
+  'Enter', 'Tab', 'Escape', 'Backspace', 'Up', 'Down', 'Left', 'Right', 'C-c', 'C-d',
+]);
+
+function assertNamedPaneKey(value: unknown): asserts value is PaneNamedKey {
+  if (typeof value !== 'string' || !PANE_NAMED_KEYS.has(value as PaneNamedKey)) {
+    throw codedHandlerError('invalid_pane_key', 'named pane key is not allowed');
+  }
+}
+
+function requirePaneSurface(surfaces: SurfaceRegistry, id: string, generation: number) {
+  const resource = surfaces.require(id, generation);
+  if (resource.kind !== 'pane') {
+    throw codedHandlerError('resource_missing', 'surface is not a pane');
+  }
+  return resource;
+}
+
+function parsePaneDimensions(line: string | undefined): { cols: number; rows: number } {
+  const match = /^(\d+)\s+(\d+)$/.exec(line?.trim() ?? '');
+  if (!match) throw codedHandlerError('backend_unavailable', 'tmux did not report pane dimensions');
+  return { cols: Number(match[1]), rows: Number(match[2]) };
+}
+
+function codedHandlerError(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
+}
+
+function providerValue(result: ProviderEffectResult): unknown {
+  if (result.status === 'succeeded') return result.value;
+  if (result.status === 'unknown') {
+    throw Object.assign(new Error(result.message ?? 'browser effect result is unknown'), {
+      code: 'effect_unknown', ambiguous: true,
+    });
+  }
+  throw codedHandlerError(result.code, result.message);
 }

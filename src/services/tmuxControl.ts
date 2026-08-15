@@ -2,7 +2,6 @@ import { spawn, type ChildProcessWithoutNullStreams, execSync } from 'node:child
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { validatePaneNamedKeys } from '../control/types.js';
 import {
   assertSingleTmuxCommandLine,
   assertTmuxPaneId,
@@ -38,7 +37,7 @@ export interface TmuxControlOptions {
 }
 
 interface AckWaiter {
-__OURS__
+  resolve: (lines: readonly string[]) => void;
   reject: (error: Error & { ambiguous?: boolean }) => void;
   readonly lines: string[];
   outputBytes: number;
@@ -65,7 +64,8 @@ export class TmuxControl extends EventEmitter {
    */
   private commandTail: Promise<void> = Promise.resolve();
   private readonly ackQueue: Array<AckWaiter | null> = [];
-__OURS__
+  private activeAck: AckWaiter | null | undefined;
+  private quarantineError: (Error & { ambiguous?: boolean; code?: string }) | null = null;
 
   /**
    * Attaching in control mode emits one unsolicited `%begin/%end` block for the
@@ -73,9 +73,6 @@ __OURS__
    * real command off the FIFO.
    */
   private attachAckConsumed = false;
-  private paneSetEmptyEmitted = false;
-  private processTerminationHandled = false;
-  private poisoned = false;
 
   constructor(
     public readonly sessionName: string,
@@ -88,44 +85,59 @@ __OURS__
     if (this.started) return;
     this.started = true;
     this.attachAckConsumed = false;
-__OURS__
+    this.quarantineError = null;
+    this.stdoutBuf = '';
 
-    const proc = this.options.spawnControl
+    this.proc = this.options.spawnControl
       ? this.options.spawnControl()
       : spawn('tmux', ['-C', 'attach-session', '-t', this.sessionName], {
           stdio: ['pipe', 'pipe', 'pipe'],
         });
-    this.proc = proc;
 
-__OURS__
+    const controlProc = this.proc;
+    controlProc.stdout.setEncoding('utf8');
+    controlProc.stdout.on('data', (chunk: string) => {
+      if (this.proc === controlProc) this.onStdout(chunk);
     });
 
-    proc.on('exit', (code) => this.onProcessTerminated(proc, code));
-    proc.on('close', (code) => this.onProcessTerminated(proc, code));
-  }
+    controlProc.stderr.on('data', (chunk: Buffer) => {
+      if (this.proc === controlProc) this.emit('stderr', chunk.toString('utf8'));
+    });
 
-  private onProcessTerminated(proc: ChildProcessWithoutNullStreams, code: number | null): void {
-    if (this.proc !== proc) return;
-    this.emitPaneSetEmpty();
-    if (this.processTerminationHandled) return;
-    this.processTerminationHandled = true;
-    this.rejectAllPending(
-      Object.assign(new Error('tmux command outcome is unknown'), { ambiguous: true }),
-    );
-    this.emit('exit', code);
-    this.proc = null;
-    this.started = false;
-  }
-
-  private emitPaneSetEmpty(): void {
-    if (this.paneSetEmptyEmitted) return;
-    this.paneSetEmptyEmitted = true;
-    this.emit('paneSetEmpty');
+    controlProc.on('exit', (code) => {
+      if (this.proc === controlProc) {
+        this.quarantine(
+          Object.assign(new Error('tmux command outcome is unknown'), { ambiguous: true }),
+          false,
+        );
+      }
+      this.emit('exit', code);
+    });
   }
 
   private rejectAllPending(error: Error & { ambiguous?: boolean }): void {
     const waiters = this.ackQueue.splice(0, this.ackQueue.length);
-__MERGED_OURS_PENDING_REJECTION_WITH_TIMER_CLEAR_IF_PRESENT__
+    for (const waiter of waiters) {
+      if (!waiter) continue;
+      if (waiter.timer) clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    this.activeAck = undefined;
+  }
+
+  private quarantine(
+    error: Error & { ambiguous?: boolean; code?: string },
+    terminate = true,
+  ): void {
+    if (!error.ambiguous) error.ambiguous = true;
+    this.quarantineError = error;
+    const proc = this.proc;
+    this.proc = null;
+    this.started = false;
+    this.rejectAllPending(error);
+    if (terminate && proc) {
+      try { proc.kill('SIGTERM'); } catch { /* already gone */ }
+    }
   }
 
   stop(): void {
@@ -161,82 +173,44 @@ __MERGED_OURS_PENDING_REJECTION_WITH_TIMER_CLEAR_IF_PRESENT__
    * have applied them.
    */
   executeCommand(line: string): Promise<void> {
-__MERGED_OURS_EXECUTE_QUERY_PATH_WITH_COMPAT_EXECUTE_COMMAND_WITH_OUTPUT_ALIAS__
+    return this.executeCommandWithOutput(line).then(() => undefined);
+  }
+
+  executeCommandWithOutput(line: string): Promise<readonly string[]> {
+    assertSingleTmuxCommandLine(line);
+    const run = () =>
+      new Promise<readonly string[]>((resolve, reject) => {
+        if (!this.proc) {
+          reject(this.quarantineError ?? new Error('tmux control mode not started'));
+          return;
+        }
+        const controlProc = this.proc;
+        const waiter: AckWaiter = {
+          resolve,
+          reject,
+          lines: [],
+          outputBytes: 0,
+          outputLines: 0,
+          outputTooLarge: false,
+        };
+        this.ackQueue.push(waiter);
+        waiter.timer = setTimeout(() => {
+          if (this.proc !== controlProc) return;
+          this.quarantine(Object.assign(new Error('tmux action acknowledgement timed out'), {
+            code: 'action_timeout',
+            ambiguous: true,
+          }));
+        }, this.options.actionTimeoutMs ?? AGENT_CONTROL_LIMITS.actionTimeoutMs);
+        waiter.timer.unref?.();
+        controlProc.stdin.write(`${line}\n`, (error) => {
+          if (!error) return;
+          if (this.proc !== controlProc) return;
+          this.quarantine(Object.assign(error, { ambiguous: true }));
+        });
       });
     const result = this.commandTail.then(run, run);
     this.commandTail = result.then(() => undefined, () => undefined);
     return result;
-  }
-
-  private poisonConnection(error: Error, proc: ChildProcessWithoutNullStreams): void {
-    if (this.poisoned || this.proc !== proc) return;
-    this.poisoned = true;
-    const ambiguous = Object.assign(error, { ambiguous: true as const });
-    this.rejectAllPending(ambiguous);
-    this.emitPaneSetEmpty();
-    if (!this.processTerminationHandled) {
-      this.processTerminationHandled = true;
-      this.emit('exit', null);
-    }
-    this.proc = null;
-    this.started = false;
-    try { proc?.kill('SIGTERM'); } catch { /* retired */ }
-  }
-
-  sendKeysHexAcknowledged(paneId: string, data: Buffer): Promise<void> {
-    const target = assertTmuxPaneId(paneId);
-    const hex = Array.from(data, (b) => b.toString(16).padStart(2, '0')).join(' ');
-    return this.executeCommand(
-      hex ? `send-keys -t ${quote(target)} -H ${hex}` : `send-keys -t ${quote(target)} -H`,
-    );
-  }
-
-  sendNamedKeysAcknowledged(paneId: string, keys: readonly string[]): Promise<void> {
-    const target = assertTmuxPaneId(paneId);
-    if (keys.length === 0) return Promise.resolve();
-    const validated = validatePaneNamedKeys(keys);
-    return this.executeCommand(`send-keys -t ${quote(target)} ${validated.join(' ')}`);
-  }
-
-  selectPaneAcknowledged(paneId: string): Promise<void> {
-    return this.executeCommand(`select-pane -t ${quote(assertTmuxPaneId(paneId))}`);
-  }
-
-  resizePaneAcknowledged(paneId: string, cols: unknown, rows: unknown): Promise<void> {
-    const target = assertTmuxPaneId(paneId);
-    return this.executeCommand(
-      `resize-pane -t ${quote(target)} -x ${tmuxDimensionArg(cols, 'cols')} -y ${tmuxDimensionArg(rows, 'rows')}`,
-    );
-  }
-
-  killPaneAcknowledged(paneId: string): Promise<void> {
-    return this.executeCommand(`kill-pane -t ${quote(assertTmuxPaneId(paneId))}`);
-  }
-
-  async queryPane(paneId: string): Promise<{
-    paneId: string; cols: number; rows: number; focused: boolean;
-  }> {
-    const target = assertTmuxPaneId(paneId);
-    const output = await this.executeQuery(
-      `display-message -p -t ${quote(target)} '#{pane_id}\t#{pane_width}\t#{pane_height}\t#{pane_active}'`,
-    );
-    const [observedId, cols, rows, active] = output.trim().split('\t');
-    if (observedId !== target || !/^\d+$/.test(cols ?? '') || !/^\d+$/.test(rows ?? '') || !/^[01]$/.test(active ?? '')) {
-      throw new Error('tmux pane query returned malformed state');
-    }
-    return Object.freeze({
-      paneId: observedId,
-      cols: Number(cols),
-      rows: Number(rows),
-      focused: active === '1',
-    });
-  }
-
-  async listPaneIds(): Promise<readonly string[]> {
-    const output = await this.executeQuery("list-panes -s -F '#{pane_id}'");
-    const ids = output.split('\n').map((line) => line.trim()).filter(Boolean);
-    for (const id of ids) assertTmuxPaneId(id);
-    return Object.freeze(ids);
   }
 
   /**
@@ -293,7 +267,22 @@ __MERGED_OURS_EXECUTE_QUERY_PATH_WITH_COMPAT_EXECUTE_COMMAND_WITH_OUTPUT_ALIAS__
   }
 
   private onLine(line: string): void {
-__MERGED_OURS_ACK_BLOCK_OUTPUT_COLLECTION_FOR_NON_PERCENT_LINES__
+    if (!line.startsWith('%')) {
+      if (this.activeAck) {
+        this.activeAck.outputLines += 1;
+        this.activeAck.outputBytes += Buffer.byteLength(line, 'utf8') + 1;
+        if (
+          this.activeAck.outputBytes <= TMUX_COMMAND_OUTPUT_BYTES
+          && this.activeAck.outputLines <= TMUX_COMMAND_OUTPUT_LINES
+        ) {
+          this.activeAck.lines.push(line);
+        } else {
+          this.activeAck.outputTooLarge = true;
+        }
+      }
+      return;
+    }
+
     // %output %<paneId> <octal-escaped-bytes>
     if (line.startsWith('%output ')) {
       const rest = line.slice('%output '.length);
@@ -307,24 +296,32 @@ __MERGED_OURS_ACK_BLOCK_OUTPUT_COLLECTION_FOR_NON_PERCENT_LINES__
     }
 
     if (line.startsWith('%exit')) {
-      this.emitPaneSetEmpty();
       this.emit('tmuxExit', line);
       return;
     }
 
     if (line.startsWith('%window-close') || line.startsWith('%unlinked-window-close')) {
       this.emit('windowClose', line);
-    }
-
-    if (PANE_SET_NOTIFICATIONS.some((prefix) => line.startsWith(prefix))) {
-      this.emit('paneSetChanged');
       return;
     }
 
     // Command acknowledgement blocks: %begin/%end/%error <time> <number> <flags>.
     // Every command produces exactly one block, delivered in send order, so the
     // front of ackQueue is the block being closed. %begin only opens the block.
-__OURS__
+    if (line.startsWith('%begin')) {
+      this.activeAck = this.attachAckConsumed ? this.ackQueue[0] : undefined;
+      return;
+    }
+    if (line.startsWith('%end') || line.startsWith('%error')) {
+      // The first acknowledgement block belongs to the implicit attach, not to
+      // a client command, so consume it without touching the queue.
+      if (!this.attachAckConsumed) {
+        this.attachAckConsumed = true;
+        this.activeAck = undefined;
+        return;
+      }
+      const waiter = this.ackQueue.shift();
+      this.activeAck = undefined;
       if (!waiter) return; // fire-and-forget block (null) or an unexpected extra
       if (waiter.timer) clearTimeout(waiter.timer);
       if (line.startsWith('%error')) {
@@ -334,24 +331,20 @@ __OURS__
           code: 'output_truncated',
         }));
       } else {
-__OURS__
+        waiter.resolve(waiter.lines);
       }
       return;
-    }
-    if (!this.activeIgnoredCommandNumber && this.activeCommandNumber) {
-      this.ackBlocks.get(this.activeCommandNumber)?.output.push(line);
-    }
-  }
-
-  private rememberCompletedAck(commandNumber: string): void {
-    this.completedAckNumbers.add(commandNumber);
-    while (this.completedAckNumbers.size > 1_024) {
-      this.completedAckNumbers.delete(this.completedAckNumbers.values().next().value!);
     }
   }
 }
 
-__MERGED_OURS_PARSE_ACK_AND_PANE_NOTIFICATION_CONSTANTS_PLUS_THEIRS_OUTPUT_LIMIT_CONSTS__
+const TMUX_COMMAND_OUTPUT_BYTES = 64 * 1024;
+const TMUX_COMMAND_OUTPUT_LINES = 4096;
+
+function hexBytes(data: Buffer): string {
+  return Array.from(data, (byte) => byte.toString(16).padStart(2, '0')).join(' ');
+}
+
 /**
  * Tmux control-mode encodes output bytes in the range \x00-\x1f and \x7f-\xff
  * as \ooo (backslash + 3 octal digits). A literal backslash becomes \\.

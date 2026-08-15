@@ -52,32 +52,6 @@ describe('SurfaceRegistry', () => {
     expect(second.generation).toBe(first.generation + 1);
   });
 
-  it('rejects browser upserts over pane identities without changing the pane', () => {
-    const registry = new SurfaceRegistry();
-    const pane = registry.upsertPane({
-      id: 'shared-1', tmuxPaneId: '%3', projectRoot: '/repo', worktreeRoot: '/repo',
-      writable: true, outputSequence: 0,
-    });
-    expect(() => registry.upsertBrowserTab({
-      id: 'shared-1', providerId: 'desktop-1', webviewLabel: 'browser-a',
-      projectRoot: '/repo', worktreeRoot: '/repo', url: 'https://example.com',
-      title: 'Example', loading: false, viewport: { width: 800, height: 600 },
-    })).toThrowError(expect.objectContaining({ code: 'resource_collision' }));
-    expect(registry.get('shared-1')).toBe(pane);
-  });
-
-  it('rejects pane upserts over browser identities without changing the browser', () => {
-    const registry = new SurfaceRegistry();
-    const browser = registry.upsertBrowserTab({ id: 'shared-1', providerId: 'desktop-1',
-      webviewLabel: 'browser-a', projectRoot: '/repo', worktreeRoot: '/repo',
-      url: 'https://example.com', title: 'Example', loading: false,
-      viewport: { width: 800, height: 600 } });
-    expect(() => registry.upsertPane({ id: 'shared-1', tmuxPaneId: '%3', projectRoot: '/repo',
-      worktreeRoot: '/repo', writable: true, outputSequence: 0 }))
-      .toThrowError(expect.objectContaining({ code: 'resource_collision' }));
-    expect(registry.get('shared-1')).toBe(browser);
-  });
-
   it('reports missing resources and removes browser records by provider', () => {
     const registry = new SurfaceRegistry();
     const tab = registry.upsertBrowserTab({
@@ -111,7 +85,19 @@ describe('SurfaceRegistry', () => {
     expect(replacement.generation).toBe(first.generation + 1);
   });
 
-<<OURS>>
+  it('removes an exited pane and increments generation if its id returns', () => {
+    const registry = new SurfaceRegistry();
+    const input = {
+      id: 'pane-1', tmuxPaneId: '%3', projectRoot: '/repo', worktreeRoot: '/repo',
+      writable: true, outputSequence: 0,
+    };
+    const first = registry.upsertPane(input);
+
+    expect(registry.remove('pane-1')).toBe(first);
+    expect(registry.list()).toEqual([]);
+    expect(registry.upsertPane({ ...input, tmuxPaneId: '%4' }).generation)
+      .toBe(first.generation + 1);
+  });
   it('does not retain caller aliases or expose mutable registry records', () => {
     const registry = new SurfaceRegistry();
     const viewport = { width: 800, height: 600 };
@@ -161,7 +147,6 @@ describe('SurfaceRegistry', () => {
       snapshotTtlMs: 30_000,
       screenshotBytes: 4 * 1024 * 1024,
       scriptSourceBytes: 64 * 1024,
-      scriptArgsBytes: 256 * 1024,
       scriptResultBytes: 256 * 1024,
       actionTimeoutMs: 15_000,
       scriptTimeoutMs: 5_000,

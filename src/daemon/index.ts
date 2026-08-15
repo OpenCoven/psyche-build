@@ -42,7 +42,9 @@ import { createHostControlPlane } from '../control/host.js';
 import { ControlServer } from '../control/server.js';
 import { createControlCredentialStore } from '../control/credentials.js';
 import { controlEndpointForProject } from '../control/endpoint.js';
-__OURS__
+import { createDaemonControlHandlers } from './controlHandlers.js';
+import { PaneObservationStore } from '../control/resources/paneObservation.js';
+import { SurfaceRegistry, type PaneSurface } from '../control/surfaces.js';
 import type { ControlActorKind, ControlCommand, CommandOutcome } from '../control/types.js';
 import {
   AgenticCapabilityRouter,
@@ -53,7 +55,9 @@ import {
 import { readDaemonWorkspaceSnapshot } from './workspace.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
 import type { BridgeSpawnRequest, BridgeSpawnResult } from './bridge.js';
-__OURS__
+import { PaneOutputFanout } from './paneOutputFanout.js';
+import { BrowserProviderBroker } from '../control/browserProviderBroker.js';
+import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
 
 export interface DaemonOptions {
   port: number;
@@ -200,6 +204,9 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
 
   const sessionName = tmuxSessionNameForRoot(projectRoot);
   const tmux = new TmuxControl(sessionName);
+  if (tmuxSessionExists(sessionName)) {
+    tmux.start();
+  }
   tmux.on('stderr', (msg) => {
     // eslint-disable-next-line no-console
     console.error(`[tmux-control] ${msg.trim()}`);
@@ -209,14 +216,130 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   // project owner fence before accepting any connection; a failed acquire must
   // fail startup loudly rather than fall back to unfenced mutation.
   const canonicalProjectRoot = await canonicalizeProjectRoot(projectRoot);
-__OURS__
+  const paneObservations = new PaneObservationStore();
+  const surfaces = new SurfaceRegistry();
+  await refreshPaneSurfaces(canonicalProjectRoot, surfaces, paneObservations);
+  const paneRefresh = new PaneSurfaceRefreshQueue(() => refreshPaneSurfaces(
+    canonicalProjectRoot,
+    surfaces,
+    paneObservations,
+  ));
+  const handlePaneLifecycleSignal = (): void => {
+    invalidatePaneSurfaces(surfaces, paneObservations);
+    void paneRefresh.run().catch((error) => {
+      // eslint-disable-next-line no-console
+      console.error(`[daemon] failed to refresh pane surfaces: ${String(error)}`);
+    });
+  };
+  const paneOutput = new PaneOutputFanout(tmux, (tmuxPaneId: string, data: Buffer) => {
+    const pane = surfaces.list().find(
+      (resource) => resource.kind === 'pane' && resource.tmuxPaneId === tmuxPaneId,
+    );
+    if (!pane || pane.kind !== 'pane') return;
+    const outputSequence = paneObservations.append(pane.id, data);
+    surfaces.upsertPane({ ...pane, outputSequence });
+  });
+  tmux.on('windowClose', () => {
+    handlePaneLifecycleSignal();
+  });
+  tmux.on('tmuxExit', () => {
+    invalidatePaneSurfaces(surfaces, paneObservations);
+  });
+  let providerRuntime: { submit(command: ControlCommand): Promise<CommandOutcome> } | undefined;
+  let providerOwnerEpoch = 0;
+  const submitProviderMutation = async (
+    kind: 'provider.resource.upsert' | 'provider.resource.remove',
+    payload: Extract<ControlCommand, { kind: typeof kind }>['payload'],
+  ): Promise<unknown> => {
+    if (!providerRuntime) throw Object.assign(new Error('control runtime is unavailable'), {
+      code: 'provider_unavailable',
+    });
+    const id = randomUUID();
+    const outcome = await providerRuntime.submit({
+      id,
+      idempotencyKey: `provider:${id}`,
+      kind,
+      projectRoot: canonicalProjectRoot,
+      actor: { id: 'desktop-provider', kind: 'human' },
+      ownerEpoch: providerOwnerEpoch,
+      createdAt: new Date().toISOString(),
+      payload,
+    } as ControlCommand);
+    if (outcome.status !== 'succeeded') {
+      throw Object.assign(new Error(outcome.message ?? 'provider resource mutation failed'), {
+        code: outcome.code ?? 'provider_error',
+      });
+    }
+    return outcome.value;
+  };
+  const browserSemanticSnapshots = new BrowserSemanticSnapshotRegistry();
+  const browserProvider = new BrowserProviderBroker({
+    upsertResource: async (_providerId, resource) => {
+      browserSemanticSnapshots.invalidateTab(resource.id, resource.generation);
+      const value = await submitProviderMutation('provider.resource.upsert', { resource });
+      return (value as { resource?: typeof resource } | undefined)?.resource;
+    },
+    removeResource: async (_providerId, id, generation) => {
+      browserSemanticSnapshots.invalidateTab(id);
+      await submitProviderMutation('provider.resource.remove', { id, generation });
+    },
+    removeProviderResources: async (providerId) => {
+      const resources = surfaces.list().filter(
+        (item) => item.kind === 'browser_tab' && item.providerId === providerId,
+      );
+      for (const resource of resources) {
+        browserSemanticSnapshots.invalidateTab(resource.id);
+        await submitProviderMutation('provider.resource.remove', {
+          id: resource.id, generation: resource.generation,
+        });
+      }
+    },
+  });
   const controlHandlers = createDaemonControlHandlers({
     tmux,
-    panes: paneResources,
     projectRoot: canonicalProjectRoot,
     sessionName,
     capabilityRouter,
-__OURS__
+    paneObservations,
+    surfaces,
+    refreshPaneSurfaces: () => paneRefresh.run(),
+    browserProvider,
+    browserSemanticSnapshots,
+  });
+  const controlCredentials = await createControlCredentialStore({
+    projectRoot: canonicalProjectRoot,
+  });
+  const host = await createHostControlPlane(canonicalProjectRoot, {
+    handlers: controlHandlers,
+    surfaces,
+    browserSemanticSnapshots,
+    readActiveTaskCredential: controlCredentials.currentTaskCredential,
+  });
+  providerRuntime = host.runtime;
+  providerOwnerEpoch = host.epoch;
+  let paneHooksInstalled = false;
+  process.on('SIGUSR2', handlePaneLifecycleSignal);
+  try {
+    if (tmuxSessionExists(sessionName)) {
+      installDaemonPaneLifecycleHooks(sessionName);
+      paneHooksInstalled = true;
+    }
+  } catch (error) {
+    process.off('SIGUSR2', handlePaneLifecycleSignal);
+    paneOutput.close();
+    await host.close().catch(() => undefined);
+    throw error;
+  }
+  const uninstallPaneHooks = (): void => {
+    if (!paneHooksInstalled) return;
+    paneHooksInstalled = false;
+    try {
+      uninstallDaemonPaneLifecycleHooks(sessionName);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error(`[daemon] failed to uninstall pane lifecycle hooks: ${String(error)}`);
+    }
+  };
 
   // Mount the canonical control socket alongside the v0 WebSocket. Both share
   // the one host runtime, so every mutation — from either transport — passes
@@ -232,7 +355,12 @@ __OURS__
       ownerEpoch: host.epoch,
       runtime: host.runtime,
       credentials: controlCredentials,
-__OURS__
+      broker: browserProvider,
+    });
+  } catch (error) {
+    process.off('SIGUSR2', handlePaneLifecycleSignal);
+    uninstallPaneHooks();
+    paneOutput.close();
     await host.close().catch(() => undefined);
     throw error;
   }
@@ -261,7 +389,7 @@ __OURS__
   // eslint-disable-next-line no-console
   console.log(`project root:  ${projectRoot}`);
   // eslint-disable-next-line no-console
-  console.log(`tmux session:  ${sessionName}${tmuxSupervisor.connected ? '' : ' (supervising)'}`);
+  console.log(`tmux session:  ${sessionName}${tmux['started'] ? '' : ' (not running — start psyche first)'}`);
   // eslint-disable-next-line no-console
   console.log(`token file:    ${tokenFilePath()}`);
   // eslint-disable-next-line no-console
@@ -281,7 +409,6 @@ __OURS__
       paneOutput,
       controlRuntime: host.runtime,
       ownerEpoch: host.epoch,
-      paneResources,
     });
     conn.bind();
   });
@@ -289,7 +416,10 @@ __OURS__
   const shutdown = (signal: string) => {
     // eslint-disable-next-line no-console
     console.log(`\npsyche daemon shutting down (${signal})`);
-__OURS__
+    process.off('SIGUSR2', handlePaneLifecycleSignal);
+    uninstallPaneHooks();
+    paneOutput.close();
+    tmux.stop();
     wss.close();
     // Close the control socket before releasing the owner fence. host.close()
     // frees the fence, so if it ran concurrently a successor daemon could win
@@ -324,8 +454,6 @@ export interface ConnectionDeps {
   controlRuntime: { submit(command: ControlCommand): Promise<CommandOutcome> };
   /** Current owner epoch, stamped onto every translated command. */
   ownerEpoch: number;
-  /** Shared pane projection; refreshes canonical resources on list/create seams. */
-  paneResources?: PaneResourceController;
   workspaceProvider?: () => Promise<WorkspaceSnapshot>;
 }
 
@@ -629,7 +757,6 @@ export class Connection {
         return;
       }
       case 'panes.list': {
-        await this.deps.paneResources?.refresh();
         const panes = await listPanes(this.deps.projectRoot);
         this.send({ type: 'panes.list.result', requestId: msg.requestId, panes });
         return;

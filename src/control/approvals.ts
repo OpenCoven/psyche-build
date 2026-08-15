@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { SURFACE_CAPABILITIES, type LeaseTarget, type SurfaceCapability } from './capabilityLeases.js';
+import type { LeaseTarget, SurfaceCapability } from './capabilityLeases.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
 
 export type ApprovalErrorCode =
@@ -144,12 +144,7 @@ export class ApprovalStore {
   constructor(
     private readonly clock: () => Date = () => new Date(),
     private readonly generateId: () => string = randomUUID,
-    private readonly terminalRetention = 1000,
-  ) {
-    if (!Number.isSafeInteger(terminalRetention) || terminalRetention < 0) {
-      throw new TypeError('terminal approval retention must be a nonnegative safe integer');
-    }
-  }
+  ) {}
 
   request(input: ApprovalRequest): Approval {
     const now = this.clock();
@@ -223,7 +218,7 @@ export class ApprovalStore {
       consumedAt: now.toISOString(),
     });
     this.approvals.set(approval.id, consumed);
-    this.compactTerminalApprovals();
+    this.pruneTerminal();
     return consumed;
   }
 
@@ -241,7 +236,7 @@ export class ApprovalStore {
         expired.push(replacement);
       }
     }
-    this.compactTerminalApprovals();
+    this.pruneTerminal();
     return Object.freeze(expired);
   }
 
@@ -296,7 +291,7 @@ export class ApprovalStore {
       resolvedAt: now.toISOString(),
     });
     this.approvals.set(id, resolved);
-    this.compactTerminalApprovals();
+    this.pruneTerminal();
     return resolved;
   }
 
@@ -325,19 +320,21 @@ export class ApprovalStore {
         revoked.push(replacement);
       }
     }
-    this.compactTerminalApprovals();
+    this.pruneTerminal();
     return Object.freeze(revoked);
   }
 
-  private compactTerminalApprovals(): void {
-    const terminal = [...this.approvals.values()].filter(({ status }) => (
-      status === 'consumed' || status === 'denied' || status === 'expired' || status === 'revoked'
-    ));
-    for (const approval of terminal.slice(0, Math.max(0, terminal.length - this.terminalRetention))) {
-      this.approvals.delete(approval.id);
-      if (this.approvalIdsByAction.get(approval.actionId) === approval.id) {
+  private pruneTerminal(): void {
+    let terminalCount = [...this.approvals.values()].filter(isTerminal).length;
+    if (terminalCount <= APPROVAL_TERMINAL_LIMIT) return;
+    for (const [id, approval] of this.approvals) {
+      if (!isTerminal(approval)) continue;
+      this.approvals.delete(id);
+      if (this.approvalIdsByAction.get(approval.actionId) === id) {
         this.approvalIdsByAction.delete(approval.actionId);
       }
+      terminalCount -= 1;
+      if (terminalCount <= APPROVAL_TERMINAL_LIMIT) return;
     }
   }
 }
@@ -392,7 +389,12 @@ function copyAssertion(input: ApprovalConsumeAssertion): NormalizedApprovalConsu
   };
 }
 
-const CAPABILITIES: ReadonlySet<SurfaceCapability> = new Set(SURFACE_CAPABILITIES);
+const CAPABILITIES: ReadonlySet<SurfaceCapability> = new Set([
+  'pane.observe', 'pane.input', 'pane.interrupt', 'pane.focus', 'pane.resize',
+  'pane.create', 'pane.close', 'browser.inspect', 'browser.screenshot',
+  'browser.navigate', 'browser.interact', 'browser.history', 'browser.close',
+  'browser.script',
+]);
 
 function assertIdentityFields(input: ApprovalIdentity | ApprovalRequest | ApprovalConsumeAssertion): void {
   if (
