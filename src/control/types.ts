@@ -177,10 +177,6 @@ export type ControlCommand =
     }>
   | CommandBase<'lease.grant', {
       requestId: string;
-      actorId: string;
-      taskId: string;
-      ttlMs: number;
-      grants: readonly LeaseGrant[];
     }>
   | CommandBase<'lease.release', {
       taskId: string;
@@ -323,6 +319,7 @@ export interface ControlSnapshot {
   capabilityLeases: readonly CapabilityLease[];
   leaseRequests: readonly {
     id: string;
+    ownerEpoch: number;
     actorId: string;
     taskId: string;
     status: 'pending' | 'granted' | 'released' | 'revoked';

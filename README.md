@@ -150,7 +150,7 @@ same authenticated authority, policy, approval, and receipt path as the UI.
 
 | Tool | Does |
 |---|---|
-| `psyche_control_list` | List bounded controllable pane/browser resources, generations, leases, requests, and approvals |
+| `psyche_control_list` | List bounded controllable pane/browser resources, generations, and approvals |
 | `psyche_control_lease` | Request, inspect, or release scoped authority; it cannot grant or approve authority |
 | `psyche_pane_observe` | Read bounded pane output and status through an exact leased generation |
 | `psyche_pane_action` | Perform one typed leased pane action and return its canonical receipt |
@@ -170,6 +170,9 @@ The compatibility mutation aliases require `task_id`, `lease_id`, and
 `lease_revision`; pane-specific aliases also require the current generation.
 Missing authority returns a structured `lease_missing` result without an
 effect.
+
+See [Agent surface control](./docs/AGENT-SURFACE-CONTROL.md) for the complete
+lease, approval, generation, browser-provider, redaction, and recovery model.
 
 `psyche_kill_pane` **does not delete the pane's worktree or branch.** It returns
 both so you can inspect or merge the work; removing them stays an explicit

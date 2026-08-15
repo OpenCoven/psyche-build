@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { FrameScheduler } from '../native/desktop/psyche-build-tauri/web/runtime/frame-scheduler';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
@@ -62,14 +63,46 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
 ) {
-  const names = Object.keys(dependencies);
-  const values = Object.values(dependencies);
+  const resolvedDependencies = {
+    createThreadPtyIoQueue: () => ({
+      closed: false,
+      inputTail: Promise.resolve(),
+      pendingInputBytes: 0,
+      pendingInputWrites: 0,
+      pendingResize: null,
+      resizeFlight: null,
+    }),
+    saveWorkspaceSoon: () => undefined,
+    saveWorkspaceNow: async () => true,
+    scheduleBrowserBounds: () => undefined,
+    isPersistentThread: (thread: Record<string, any>) =>
+      ['shell', 'psyche', 'coven-chat', 'coven-attach'].includes(thread?.launch?.launchKind),
+    nativeSessionRequest: (thread: Record<string, any>) => ({ id: thread.id }),
+    invoke: async () => [],
+    attachThreadClient: dependencies.spawnPty || (() => Promise.resolve(true)),
+    ...dependencies,
+  };
+  const names = Object.keys(resolvedDependencies);
+  const values = Object.values(resolvedDependencies);
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
 const spawnPtyRuntimeDeps = {
   attentionTracker: { forget: () => undefined },
   syncThreadAttentionChrome: () => undefined,
+  ensureThreadPtyController(thread: Record<string, unknown>) {
+    if (thread.terminalController) return thread.terminalController;
+    const controller = {
+      prepareForPtyStart: () => 1,
+      restoreAfterFailedPtyStart: () => undefined,
+      adoptRunningPty: () => Promise.resolve(false),
+      markPtyStarted: () => Promise.resolve(false),
+      stopPtyDelivery: () => undefined,
+      dispose: () => undefined,
+    };
+    thread.terminalController = controller;
+    return controller;
+  },
 };
 
 function deferred<T>() {
@@ -131,6 +164,11 @@ type PaneFocusThread = {
   pane: { id: string } | null;
   host: { contains: (node: unknown) => boolean } | null;
   term: { blur: () => void; focus: () => void; dispose?: () => void } | null;
+  terminalController?: {
+    blur: () => void;
+    focus: () => void;
+    dispose?: () => void;
+  } | null;
   internalFocusReportTokens?: FocusReportToken[];
 };
 
@@ -187,6 +225,14 @@ function createPaneFocusHarness(
   activeThreadId: string,
   activeElement: unknown = null,
 ) {
+  threads.forEach((thread) => {
+    if (thread.terminalController) return;
+    thread.terminalController = {
+      blur: () => thread.term?.blur(),
+      focus: () => thread.term?.focus(),
+      dispose: () => thread.term?.dispose?.(),
+    };
+  });
   const tokens = compileFocusTokenRuntime();
   const queued: Array<() => void> = [];
   const documentRef = { activeElement };
@@ -251,6 +297,7 @@ function createPaneFocusHarness(
     findOpenFile: () => null,
     state,
     restoreRenderedTerminalFocus,
+    syncAllPtyVisibility: () => undefined,
   });
   const focusThread = compileFunction<(
     id: string,
@@ -270,7 +317,7 @@ function createPaneFocusHarness(
     renderGitSurface: () => false,
     refreshSidebar: () => undefined,
     requestAnimationFrame,
-    scheduleVisiblePaneFit: () => undefined,
+    scheduleTerminalPaneFits: () => undefined,
     isLiveThread,
     terminalHost,
     syncBrowserBounds: () => undefined,
@@ -294,6 +341,71 @@ function createPaneFocusHarness(
 }
 
 describe('Tauri physical terminal panes', () => {
+  it('keeps one canonical terminal controller reference per pane', () => {
+    expect(mainJs).not.toContain('ptyClient');
+  });
+
+  it('bounds and serializes PTY input while delegating resize ownership', () => {
+    const send = functionSource('sendToThread');
+    const mount = functionSource('mountTerminal');
+
+    expect(mainJs).toContain('var MAX_PENDING_PTY_INPUT_BYTES = 1024 * 1024;');
+    expect(mainJs).toContain('var MAX_PENDING_PTY_INPUT_WRITES = 256;');
+    expect(send).toContain('pendingBytes + encoded.length > MAX_PENDING_PTY_INPUT_BYTES');
+    expect(send).toContain('pendingWrites >= MAX_PENDING_PTY_INPUT_WRITES');
+    expect(send).toContain('var previous = queue.inputTail;');
+    expect(send).toContain('queue.inputTail = result.then');
+    expect(mainJs).not.toContain('function scheduleThreadPtyResize(');
+    expect(mount).toContain('PsycheRuntime.createTerminalPaneController({');
+    expect(mount).not.toContain('invoke("pty_resize"');
+  });
+
+  it('quarantines queued input across PTY exit and restart', async () => {
+    const handleExit = functionSource('handlePtyExit');
+    expect(handleExit).toContain('thread.ptyIoQueue.closed = true;');
+    expect(handleExit).toContain('thread.ptyIoQueue = {');
+    const firstWrite = deferred<void>();
+    const calls: number[][] = [];
+    const createThreadPtyIoQueue = compileFunction<() => Record<string, unknown>>(
+      functionSource('createThreadPtyIoQueue'),
+      {},
+    );
+    const resetThreadPtyIoQueue = (thread: Record<string, unknown>) => {
+      (thread.ptyIoQueue as { closed: boolean }).closed = true;
+      thread.ptyIoQueue = createThreadPtyIoQueue();
+    };
+    const sendToThread = compileFunction<(
+      thread: Record<string, unknown>, text: string,
+    ) => Promise<boolean>>(functionSource('sendToThread'), {
+      createThreadPtyIoQueue,
+      MAX_PENDING_PTY_INPUT_BYTES: 1024 * 1024,
+      MAX_PENDING_PTY_INPUT_WRITES: 256,
+      noteThreadInput: () => undefined,
+      invoke: (_command: string, args: { bytes: number[] }) => {
+        calls.push(args.bytes);
+        return calls.length === 1 ? firstWrite.promise : Promise.resolve();
+      },
+    });
+    const thread = {
+      id: 'thread-a', kind: 'shell', term: null,
+      ptyIoQueue: createThreadPtyIoQueue(),
+    };
+
+    const oldFirst = sendToThread(thread, 'a');
+    const oldQueued = sendToThread(thread, 'b');
+    await Promise.resolve();
+    expect(calls).toEqual([[97]]);
+
+    resetThreadPtyIoQueue(thread);
+    await expect(sendToThread(thread, 'c')).resolves.toBe(true);
+    expect(calls).toEqual([[97], [99]]);
+
+    firstWrite.resolve();
+    await expect(oldFirst).resolves.toBe(true);
+    await expect(oldQueued).resolves.toBe(false);
+    expect(calls).toEqual([[97], [99]]);
+  });
+
   it('makes pane dividers accessible and resizable by pointer and keyboard', () => {
     const windowTarget = new FakeEventTarget();
     const divider = new FakeEventTarget();
@@ -360,6 +472,70 @@ describe('Tauri physical terminal panes', () => {
       ['split-a', 0.39],
     ]);
     expect(prevented).toBe(3);
+  });
+
+  it('accumulates repeated divider keys before one coalesced pane-tree frame', () => {
+    const leafA = PsychePanes.createLeaf('leaf-a', 'thread-a');
+    const leafB = PsychePanes.createLeaf('leaf-b', 'thread-b');
+    const layout = {
+      root: PsychePanes.insertBelow(leafA, 'leaf-a', leafB, 'split-a'),
+      focusedLeafId: 'leaf-a',
+    };
+    const frames: Array<(timestamp: number) => void> = [];
+    const scheduler = new FrameScheduler((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const renderPaneWorkspace = vi.fn();
+    const focusPaneDivider = vi.fn(() => true);
+    const saveWorkspaceSoon = vi.fn();
+    const schedulePaneTreeLayout = compileFunction<(
+      focusSplitId?: string | null,
+    ) => void>(functionSource('schedulePaneTreeLayout'), {
+      pendingPaneDividerFocusId: null,
+      terminalFrameScheduler: scheduler,
+      renderPaneWorkspace,
+      focusPaneDivider,
+      saveWorkspaceSoon,
+    });
+    const updateActiveSplit = compileFunction<(
+      splitId: string,
+      ratio: number,
+      expectedLayout?: typeof layout,
+      restoreFocus?: boolean,
+    ) => boolean>(functionSource('updateActiveSplit'), {
+      activePaneLayout: () => layout,
+      PsychePanes,
+      schedulePaneTreeLayout,
+    });
+    const divider = new FakeEventTarget();
+    const createPaneDivider = compileFunction<(
+      node: typeof layout.root,
+      ratio: number,
+    ) => FakeEventTarget>(functionSource('createPaneDivider'), {
+      document: { createElement: () => divider },
+      window: new FakeEventTarget(),
+      activePaneLayout: () => layout,
+      updateActiveSplit,
+    });
+    createPaneDivider(layout.root, layout.root.ratio);
+
+    divider.dispatch('keydown', {
+      key: 'ArrowDown', shiftKey: false, preventDefault: () => undefined,
+    });
+    divider.dispatch('keydown', {
+      key: 'ArrowDown', shiftKey: false, preventDefault: () => undefined,
+    });
+
+    expect(layout.root.ratio).toBeCloseTo(0.58);
+    expect(frames).toHaveLength(1);
+    expect(renderPaneWorkspace).not.toHaveBeenCalled();
+
+    frames.shift()!(16);
+    expect(renderPaneWorkspace).toHaveBeenCalledTimes(1);
+    expect(focusPaneDivider).toHaveBeenCalledOnce();
+    expect(focusPaneDivider).toHaveBeenCalledWith('split-a');
+    expect(saveWorkspaceSoon).toHaveBeenCalledTimes(1);
   });
 
   it('ignores pointer resizing when the split has no measurable height', () => {
@@ -455,8 +631,10 @@ describe('Tauri physical terminal panes', () => {
       {
         activePaneLayout: () => layout,
         PsychePanes,
-        renderPaneWorkspace: () => { renders += 1; },
-        focusPaneDivider,
+        schedulePaneTreeLayout: (splitId: string | null) => {
+          renders += 1;
+          if (splitId) focusPaneDivider(splitId);
+        },
       },
     );
     expect(updateActiveSplit('split-a', Number.NaN)).toBe(false);
@@ -470,92 +648,24 @@ describe('Tauri physical terminal panes', () => {
     expect(replacementDivider.focusCalls).toBe(1);
   });
 
-  it('coalesces visible pane fitting to one animation frame and fits every leaf', () => {
-    expect(mainJs).toMatch(/var visiblePaneFitFrame = 0;/);
+  it('delegates visible pane fitting to each keyed controller', () => {
+    expect(mainJs).not.toMatch(/var visiblePaneFitFrame = 0;/);
     expect(mainJs).not.toMatch(/fitActiveTerm/);
-    const queued: Array<() => void> = [];
-    const terminalHost = { hidden: false };
-    let layout: { root: Record<string, unknown> } | null = { root: { type: 'leaf' } };
     const fits: string[] = [];
-    const warnings: unknown[][] = [];
-    const paneFitFactory = Function(
-      'requestAnimationFrame',
-      'terminalHost',
-      'activePaneLayout',
-      'effectivePaneRoot',
-      'PsychePanes',
-      'measuredTerminalHost',
-      'PANE_MINIMUMS',
-      'findThread',
-      'console',
-      `"use strict";
-       var visiblePaneFitFrame = 0;
-       var fitVisiblePanes = ${functionSource('fitVisiblePanes')};
-       var scheduleVisiblePaneFit = ${functionSource('scheduleVisiblePaneFit')};
-       return { fitVisiblePanes, scheduleVisiblePaneFit };`,
-    ) as (
-      raf: (callback: () => void) => number,
-      host: typeof terminalHost,
-      activeLayout: () => typeof layout,
-      effectiveRoot: (value: typeof layout) => unknown,
-      panes: { layoutRects: () => { leaves: Array<{ threadId: string }> } },
-      measure: () => Record<string, number>,
-      minimums: Record<string, number>,
-      find: (id: string) => { fit: { fit: () => void } },
-      logger: { warn: (...args: unknown[]) => void },
-    ) => { fitVisiblePanes: () => void; scheduleVisiblePaneFit: () => void };
-    const paneFit = paneFitFactory(
-      (callback) => { queued.push(callback); return queued.length; },
-      terminalHost,
-      () => layout,
-      (value) => value && value.root,
+    const scheduleTerminalPaneFits = compileFunction<() => void>(
+      functionSource('scheduleTerminalPaneFits'),
       {
-        layoutRects: () => ({
-          leaves: [
-            { threadId: 'thread-a' },
-            { threadId: 'thread-b' },
-            { threadId: 'thread-c' },
+        state: {
+          threads: [
+            { terminalController: { scheduleFit: () => fits.push('thread-a') } },
+            { terminalController: null },
+            { terminalController: { scheduleFit: () => fits.push('thread-c') } },
           ],
-        }),
-      },
-      () => ({ x: 0, y: 0, width: 800, height: 600 }),
-      { width: 320, height: 120, separator: 6 },
-      (id: string) => ({
-        fit: {
-          fit: () => {
-            fits.push(id);
-            if (id === 'thread-b') throw new Error('fit failed');
-          },
         },
-      }),
-      { warn: (...args: unknown[]) => warnings.push(args) },
+      },
     );
-    const scheduleVisiblePaneFit = paneFit.scheduleVisiblePaneFit;
-    scheduleVisiblePaneFit();
-    scheduleVisiblePaneFit();
-    expect(queued).toHaveLength(1);
-    queued.shift()?.();
-    expect(fits).toEqual(['thread-a', 'thread-b', 'thread-c']);
-    expect(warnings).toHaveLength(1);
-
-    terminalHost.hidden = true;
-    scheduleVisiblePaneFit();
-    expect(queued).toHaveLength(1);
-    queued.shift()?.();
-    expect(fits).toHaveLength(3);
-
-    terminalHost.hidden = false;
-    layout = null;
-    scheduleVisiblePaneFit();
-    expect(queued).toHaveLength(1);
-    queued.shift()?.();
-    expect(fits).toHaveLength(3);
-
-    layout = { root: { type: 'leaf' } };
-    scheduleVisiblePaneFit();
-    expect(queued).toHaveLength(1);
-    queued.shift()?.();
-    expect(fits).toHaveLength(6);
+    scheduleTerminalPaneFits();
+    expect(fits).toEqual(['thread-a', 'thread-c']);
   });
 
   it('keeps pane topology process-local and keys it by project and worktree', () => {
@@ -624,7 +734,8 @@ describe('Tauri physical terminal panes', () => {
 
     const preserveOnly = [
       'movePaneTo',
-      'updateActiveSplit',
+      'schedulePaneTreeLayout',
+      'restoreSetScopePresentation',
       'cyclePaneSpan',
       'togglePaneMaximize',
       'exitPaneMaximize',
@@ -655,7 +766,7 @@ describe('Tauri physical terminal panes', () => {
     ]);
 
     const expectedCallCount =
-      transitionOnly.length + preserveOnly.length + 1 + 5 + 2 + 1;
+      transitionOnly.length + preserveOnly.length + 1 + 5 + 2 + 1 + 1;
     expect((mainJs.match(/renderPaneWorkspace\(/g) || []).length - 1).toBe(
       expectedCallCount,
     );
@@ -735,7 +846,7 @@ describe('Tauri physical terminal panes', () => {
   it('checks focus report tokens before writing xterm input to the PTY', () => {
     const mountTerminal = functionSource('mountTerminal');
     expect(mountTerminal).toMatch(
-      /term\.onData\(function \(data\) \{\s*routeTerminalData\(thread, data\);\s*\}\);/,
+      /onData: function \(data\) \{\s*routeTerminalData\(thread, data\);\s*\}/,
     );
   });
 
@@ -918,7 +1029,7 @@ describe('Tauri physical terminal panes', () => {
 
     const createThread = compileFunction<(
       options: Record<string, unknown>,
-    ) => PaneFocusThread | null>(functionSource('createThread'), {
+    ) => Promise<PaneFocusThread | null>>(functionSource('createThread'), {
       makeThreadId: () => 'thread-target',
       activeProject: () => harness.project,
       activeWorkspaceRoot: () => '/repo',
@@ -943,6 +1054,11 @@ describe('Tauri physical terminal panes', () => {
             harness.documentRef.activeElement = targetElement;
           },
         };
+        thread.terminalController = {
+          blur: () => thread.term?.blur(),
+          focus: () => thread.term?.focus(),
+          dispose: () => thread.term?.dispose?.(),
+        };
         harness.attachedPanes.add(pane);
         harness.renderPaneWorkspace({ preserveTerminalFocus: false });
       },
@@ -957,11 +1073,11 @@ describe('Tauri physical terminal panes', () => {
       spawnPty: () => undefined,
     });
 
-    expect(createThread({
+    await expect(createThread({
       project: harness.project,
       command: '/bin/zsh',
       name: 'New pane',
-    })).toBe(target);
+    })).resolves.toBe(target);
     await Promise.resolve();
     await Promise.resolve();
     while (harness.queued.length) harness.queued.shift()?.();
@@ -1213,7 +1329,7 @@ describe('Tauri physical terminal panes', () => {
     expect(target.internalFocusReportTokens).toBeUndefined();
   });
 
-  it('allows focus-out when closing the active pane without a successor', () => {
+  it('allows focus-out when closing the active pane without a successor', async () => {
     const sourceElement = { id: 'close-source' };
     const source: PaneFocusThread = {
       id: 'thread-close-source',
@@ -1261,7 +1377,7 @@ describe('Tauri physical terminal panes', () => {
       paneLayouts,
       PsychePanes,
     });
-    const closeThread = compileFunction<(id: string) => boolean>(
+    const closeThread = compileFunction<(id: string) => Promise<boolean>>(
       functionSource('closeThread'),
       {
         forgetThreadInSets: () => undefined,
@@ -1290,11 +1406,11 @@ describe('Tauri physical terminal panes', () => {
       },
     );
 
-    expect(closeThread(source.id)).toBe(true);
+    await expect(closeThread(source.id)).resolves.toBe(true);
     expect(events).toEqual([
+      'dispose',
       'source-out:false',
       'detach',
-      'dispose',
     ]);
     expect(harness.state.activeThreadId).toBeNull();
     expect(harness.queued).toHaveLength(0);
@@ -1489,7 +1605,7 @@ describe('Tauri physical terminal panes', () => {
       requestAnimationFrame: (callback: () => void) => {
         queued.push(callback);
       },
-      scheduleVisiblePaneFit: () => undefined,
+      scheduleTerminalPaneFits: () => undefined,
       isLiveThread: () => true,
       terminalHost,
       syncBrowserBounds: () => undefined,
@@ -1776,7 +1892,7 @@ describe('Tauri physical terminal panes', () => {
     expect(functionSource('renderPaneNode')).toMatch(/createPaneDivider\(node, ratio\)/);
     expect(functionSource('renderPaneWorkspace')).toMatch(/PsychePanes\.layoutRects/);
     expect(functionSource('renderPaneWorkspace')).toMatch(/split\.ratio/);
-    expect(functionSource('renderPaneWorkspace')).toMatch(/scheduleVisiblePaneFit\(\)/);
+    expect(functionSource('renderPaneWorkspace')).toMatch(/scheduleTerminalPaneFits\(\)/);
     expect(stylesCss).not.toMatch(/\.term-instance\.active\s*\{\s*visibility:\s*visible/);
     expect(stylesCss).toMatch(/\.terminal-pane\.focused/);
     expect(stylesCss).toMatch(/\.terminal-pane-body/);
@@ -1815,13 +1931,15 @@ describe('Tauri physical terminal panes', () => {
         expect(id).toBe('file-a');
         return activeFile;
       },
+      syncAllPtyVisibility: () => { calls.push('visibility'); },
       state: { activeFileId: 'file-a' },
       restoreRenderedTerminalFocus: () => undefined,
     });
 
     renderPaneWorkspace();
     expect(terminalHost.children).toEqual([]);
-    expect(calls).toEqual(['stage', 'stage-git', 'clear', 'empty', 'minimap']);
+    expect(calls).toEqual(['stage', 'stage-git', 'clear', 'empty', 'minimap', 'visibility']);
+
   });
 
   it('renders file tabs without depending on terminal thread visibility', () => {
@@ -2014,7 +2132,7 @@ describe('Tauri physical terminal panes', () => {
     expect(attributes.get('aria-label')).toBe('Stop and close Renamed');
 
     expect(functionSource('spawnPty')).toMatch(/thread\.status = "running";[\s\S]*syncThreadPaneMetadata\(thread\)/);
-    expect(functionSource('handlePtyExit')).toMatch(/thread\.status = "exited";[\s\S]*syncThreadPaneMetadata\(thread\)/);
+    expect(functionSource('handlePtyExit')).toMatch(/thread\.status = persistentLive \? "failed" : "exited";[\s\S]*syncThreadPaneMetadata\(thread\)/);
     expect(functionSource('spawnPty')).toMatch(/already running[\s\S]*thread\.ptyStarted = true/);
   });
 
@@ -2135,16 +2253,16 @@ describe('Tauri physical terminal panes', () => {
     expect(calls).toEqual(['status:warn:Select an available worktree before starting a terminal']);
   });
 
-  it('cancels a queued PTY start when the thread closes before animation frame', () => {
+  it('cancels a queued PTY start when the thread closes before animation frame', async () => {
     const project = { id: 'project', root: '/repo' };
     const state = { threads: [] as Array<Record<string, unknown>>, activeThreadId: null as string | null };
-    const pendingDataBuffers = new Map([['thread-a', [new Uint8Array([1])]]]);
     let frame: (() => void) | null = null;
     let starts = 0;
     let stops = 0;
+    let disposed = 0;
     const isLiveThread = (thread: Record<string, unknown>) =>
       state.threads.includes(thread) && thread.closing !== true;
-    const createThread = compileFunction<(options: Record<string, unknown>) => Record<string, unknown>>(
+    const createThread = compileFunction<(options: Record<string, unknown>) => Promise<Record<string, unknown>>>(
       functionSource('createThread'),
       {
         makeThreadId: () => 'thread-a',
@@ -2159,6 +2277,7 @@ describe('Tauri physical terminal panes', () => {
         mountTerminal: (thread: Record<string, unknown>) => {
           thread.fit = { fit: () => undefined };
           thread.term = { dispose: () => undefined };
+          thread.terminalController = { dispose: () => { disposed += 1; } };
         },
         focusThread: () => undefined,
         requestAnimationFrame: (callback: () => void) => { frame = callback; },
@@ -2166,14 +2285,12 @@ describe('Tauri physical terminal panes', () => {
         spawnPty: () => { starts += 1; },
       },
     );
-    const thread = createThread({ project, command: '/bin/zsh' });
-    pendingDataBuffers.set('thread-a', [new Uint8Array([1])]);
-    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+    const thread = await createThread({ project, command: '/bin/zsh' });
+    const closeThread = compileFunction<(id: string) => Promise<boolean>>(functionSource('closeThread'), {
       forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
       retainFileFocusAfterThreadRemoval: () => false,
-      pendingDataBuffers,
       stopThreadPty: () => { stops += 1; return Promise.resolve(true); },
       state,
       renderPaneWorkspace: () => undefined,
@@ -2183,19 +2300,20 @@ describe('Tauri physical terminal panes', () => {
       refreshTabs: () => undefined,
       focusThread: () => undefined,
     });
-    expect(closeThread('thread-a')).toBe(true);
+    await expect(closeThread('thread-a')).resolves.toBe(true);
     expect(frame).not.toBeNull();
     (frame as unknown as () => void)();
     expect(starts).toBe(0);
     expect(stops).toBe(1);
+    expect(disposed).toBe(1);
     expect(state.threads).toEqual([]);
     expect(thread.closing).toBe(true);
-    expect(pendingDataBuffers.has('thread-a')).toBe(false);
   });
 
   it('stops a remotely started PTY when close wins the in-flight start race', async () => {
     const start = deferred<void>();
     const project = { id: 'project' };
+    let controllerDisposals = 0;
     const thread = {
       id: 'thread-a', projectId: project.id, worktreePath: '/repo',
       launch: {
@@ -2205,9 +2323,16 @@ describe('Tauri physical terminal panes', () => {
       status: 'starting', spawning: true,
       closing: false, closeStarted: false, startInFlight: false,
       stopRequested: false, ptyStarted: false, term: null, fit: null,
+      terminalController: {
+        prepareForPtyStart: () => 1,
+        restoreAfterFailedPtyStart: () => undefined,
+        adoptRunningPty: () => Promise.resolve(false),
+        markPtyStarted: () => Promise.resolve(false),
+        stopPtyDelivery: () => undefined,
+        dispose: () => { controllerDisposals += 1; },
+      },
     };
     const state = { threads: [thread], activeThreadId: thread.id };
-    const pendingDataBuffers = new Map([[thread.id, [new Uint8Array([1])]]]);
     let stopCalls = 0;
     const invoke = (command: string) => {
       if (command === 'pty_start') return start.promise;
@@ -2225,7 +2350,6 @@ describe('Tauri physical terminal panes', () => {
         ...spawnPtyRuntimeDeps,
         invoke,
         isLiveThread,
-        pendingDataBuffers,
         syncThreadPaneMetadata: () => undefined,
         refreshSidebar: () => undefined,
         refreshTabs: () => undefined,
@@ -2238,12 +2362,11 @@ describe('Tauri physical terminal panes', () => {
     );
     const starting = spawnPty(thread);
     expect(thread.startInFlight).toBe(true);
-    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+    const closeThread = compileFunction<(id: string) => Promise<boolean>>(functionSource('closeThread'), {
       forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
       retainFileFocusAfterThreadRemoval: () => false,
-      pendingDataBuffers,
       stopThreadPty,
       state,
       renderPaneWorkspace: () => undefined,
@@ -2253,17 +2376,17 @@ describe('Tauri physical terminal panes', () => {
       refreshTabs: () => undefined,
       focusThread: () => undefined,
     });
-    expect(closeThread(thread.id)).toBe(true);
+    await expect(closeThread(thread.id)).resolves.toBe(true);
     start.resolve();
     await expect(starting).resolves.toBe(false);
     expect(stopCalls).toBe(1);
+    expect(controllerDisposals).toBe(1);
     expect(thread.status).toBe('starting');
     expect(thread.startInFlight).toBe(false);
     expect(state.threads).toEqual([]);
-    expect(pendingDataBuffers.has(thread.id)).toBe(false);
   });
 
-  it('retains file focus when closing the active underlying pane', () => {
+  it('retains file focus when closing the active underlying pane', async () => {
     const project = {
       id: 'project',
       lastActiveThreadId: 'thread-a',
@@ -2306,7 +2429,7 @@ describe('Tauri physical terminal panes', () => {
     });
     let renders = 0;
     let focused = 0;
-    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+    const closeThread = compileFunction<(id: string) => Promise<boolean>>(functionSource('closeThread'), {
       forgetThreadInSets: () => undefined,
       findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
       detachThreadPane: () => threadB.id,
@@ -2323,7 +2446,7 @@ describe('Tauri physical terminal panes', () => {
       focusThread: () => { focused += 1; },
     });
 
-    expect(closeThread(threadA.id)).toBe(true);
+    await expect(closeThread(threadA.id)).resolves.toBe(true);
     expect(focused).toBe(0);
     expect(state.activeFileId).toBe('file-a');
     expect(state.activeThreadId).toBe(threadB.id);
@@ -2394,7 +2517,7 @@ describe('Tauri physical terminal panes', () => {
     expect(renders).toBe(1);
   });
 
-  it('focuses the next live terminal when closing a terminal with a file still selected', () => {
+  it('focuses the next live terminal when closing a terminal with a file still selected', async () => {
     const project = { id: 'project', lastActiveThreadId: 'thread-a', selectedWorktreePath: '/repo' };
     const threadA = {
       id: 'thread-a', kind: 'shell', projectId: project.id, worktreePath: '/repo',
@@ -2421,7 +2544,7 @@ describe('Tauri physical terminal panes', () => {
       findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
     });
     const focused: string[] = [];
-    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+    const closeThread = compileFunction<(id: string) => Promise<boolean>>(functionSource('closeThread'), {
       forgetThreadInSets: () => undefined,
       findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
       detachThreadPane: () => 'files-pane',
@@ -2439,7 +2562,7 @@ describe('Tauri physical terminal panes', () => {
       focusThread: (id: string) => { focused.push(id); return true; },
     });
 
-    expect(closeThread(threadA.id)).toBe(true);
+    await expect(closeThread(threadA.id)).resolves.toBe(true);
     expect(focused).toEqual([threadB.id]);
     expect(state.activeThreadId).toBeNull();
   });
@@ -2485,7 +2608,7 @@ describe('Tauri physical terminal panes', () => {
     expect(state.activeThreadId).toBeNull();
   });
 
-  it('clears file-focus project metadata when there is no replacement pane', () => {
+  it('clears file-focus project metadata when there is no replacement pane', async () => {
     const project = {
       id: 'project',
       lastActiveThreadId: 'thread-a',
@@ -2516,7 +2639,7 @@ describe('Tauri physical terminal panes', () => {
       findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
       filesPaneHasCanvasFocus: () => true,
     });
-    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+    const closeThread = compileFunction<(id: string) => Promise<boolean>>(functionSource('closeThread'), {
       forgetThreadInSets: () => undefined,
       findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
       detachThreadPane: () => null,
@@ -2532,7 +2655,7 @@ describe('Tauri physical terminal panes', () => {
       focusThread: () => undefined,
     });
 
-    expect(closeThread(threadA.id)).toBe(true);
+    await expect(closeThread(threadA.id)).resolves.toBe(true);
     expect(state.activeThreadId).toBeNull();
     expect(fileFocus.returnThreadId).toBeNull();
     expect(project.lastActiveThreadId).toBeNull();
@@ -2884,6 +3007,9 @@ describe('Tauri physical terminal panes', () => {
       worktreePath: '/repo',
       status: 'running',
       pane: { id: 'pane-a' },
+      hidden: false,
+      closing: false,
+      closeStarted: false,
       term: { blur: () => undefined, focus: () => undefined },
     };
     let refreshes = 0;
@@ -2892,6 +3018,7 @@ describe('Tauri physical terminal panes', () => {
       options?: { refreshStatus?: boolean },
     ) => Promise<boolean>>(functionSource('focusThread'), {
       findThread: (id: string) => (id === thread.id ? thread : null),
+      isDormantThread: () => false,
       showTerminalView: async () => true,
       focusedTerminalThreadForRender: () => null,
       markActiveSurface: () => undefined,
@@ -2910,7 +3037,7 @@ describe('Tauri physical terminal panes', () => {
       renderGitSurface: () => false,
       refreshSidebar: () => undefined,
       requestAnimationFrame: (callback: () => void) => callback(),
-      scheduleVisiblePaneFit: () => undefined,
+      scheduleTerminalPaneFits: () => undefined,
       isLiveThread: () => true,
       terminalHost: { contains: () => true },
       syncBrowserBounds: () => undefined,
@@ -2989,7 +3116,7 @@ describe('Tauri physical terminal panes', () => {
           action: () => unknown,
         ) => action(),
         requestAnimationFrame: (callback: () => void) => callback(),
-        scheduleVisiblePaneFit: () => undefined,
+        scheduleTerminalPaneFits: () => undefined,
         isLiveThread: () => true,
         terminalHost: { hidden: false, contains: () => true },
         syncBrowserBounds: () => undefined,

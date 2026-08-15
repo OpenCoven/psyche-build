@@ -20,9 +20,10 @@ import {
   createControlCredentialStoreForCanonicalRoot,
   type CredentialCreationOps,
 } from '../src/control/credentials.js';
-import { createControlServerForTest } from '../src/control/server.js';
+import { ControlClient } from '../src/control/client.js';
+import { ControlServer, createControlServerForTest } from '../src/control/server.js';
 import type { ControlServerRuntime } from '../src/control/server.js';
-import type { ControlCommandInput } from '../src/control/types.js';
+import type { ControlCommandInput, ControlSnapshot } from '../src/control/types.js';
 import type { ControlPrincipal } from '../src/control/credentials.js';
 
 let tempRoots: string[] = [];
@@ -60,15 +61,44 @@ function takeoverInput(): ControlCommandInput {
   };
 }
 
-function stubRuntime(submit: ControlServerRuntime['submit']): ControlServerRuntime {
+function stubRuntime(
+  submit: ControlServerRuntime['submit'],
+  snapshot?: ControlSnapshot,
+): ControlServerRuntime {
   return {
     submit,
-  snapshot: () => ({
-    ownerEpoch: 1, sequence: 0, commands: {}, leases: {}, resources: [],
-    capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
-  }),
+    snapshot: () => snapshot ?? ({
+      ownerEpoch: 1, sequence: 0, commands: {}, leases: {}, resources: [],
+      capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
+    }),
     readEvents: () => ({ events: [], nextSequence: 0, gap: false }),
   };
+}
+
+function sensitiveSnapshot(): ControlSnapshot {
+  return {
+    ownerEpoch: 1,
+    sequence: 2,
+    commands: {
+      'command-1': {
+        command: { payload: { secret: 'command-secret' } },
+        outcome: { status: 'succeeded', value: { secret: 'outcome-secret' } },
+        sequence: 2,
+      },
+    },
+    leases: {
+      'pane-secret': {
+        paneId: 'pane-secret',
+        actorId: 'agent-secret',
+        taskId: 'task-secret',
+      },
+    },
+    resources: [{ id: 'tab-secret' }],
+    capabilityLeases: [{ id: 'lease-secret' }],
+    leaseRequests: [{ id: 'request-secret' }],
+    approvals: [{ id: 'approval-secret' }],
+    receipts: [{ id: 'receipt-secret' }],
+  } as unknown as ControlSnapshot;
 }
 
 describe('control credential store', () => {
@@ -239,6 +269,85 @@ describe('control credential store', () => {
 });
 
 describe('control server authorization', () => {
+  it('only exposes surface authority snapshot fields to operators', () => {
+    const sensitive = sensitiveSnapshot();
+    const server = createControlServerForTest({
+      runtime: stubRuntime(vi.fn(), sensitive),
+    });
+    const operator: ControlPrincipal = {
+      id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'],
+    };
+
+    expect(server.snapshot(operator)).toEqual(sensitive);
+    for (const kind of ['agent', 'compatibility'] as const) {
+      const snapshot = server.snapshot({ id: kind, kind, capabilities: ['read'] });
+      expect(snapshot).toMatchObject({
+        ownerEpoch: 1,
+        sequence: 2,
+        commands: {},
+        leases: {},
+        resources: [],
+        capabilityLeases: [],
+        leaseRequests: [],
+        approvals: [],
+        receipts: [],
+      });
+      expect(JSON.stringify(snapshot)).not.toContain('secret');
+    }
+  });
+
+  it('passes the authenticated principal into state.get snapshot redaction', async () => {
+    const root = await tempProject();
+    const endpoint = path.join(root, 'control.sock');
+    const credentials = await createControlCredentialStore({
+      projectRoot: root,
+      filePath: path.join(root, 'control-credentials.json'),
+    });
+    const sensitive = sensitiveSnapshot();
+    const server = await ControlServer.start({
+      endpoint,
+      projectRoot: root,
+      ownerEpoch: 1,
+      runtime: stubRuntime(vi.fn(), sensitive),
+      credentials,
+    });
+    const cleanups: Array<() => Promise<void>> = [() => server.close()];
+
+    try {
+      const operator = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: await credentials.operatorToken(),
+        clientName: 'operator',
+      });
+      cleanups.unshift(() => operator.close());
+      const agent = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: await credentials.agentToken(),
+        clientName: 'agent',
+      });
+      cleanups.unshift(() => agent.close());
+
+      await expect(operator.getState()).resolves.toEqual(sensitive);
+      const snapshot = await agent.getState();
+      expect(snapshot).toMatchObject({
+        ownerEpoch: 1,
+        sequence: 2,
+        commands: {},
+        leases: {},
+        resources: [],
+        capabilityLeases: [],
+        leaseRequests: [],
+        approvals: [],
+        receipts: [],
+      });
+      expect(JSON.stringify(snapshot)).not.toContain('secret');
+    } finally {
+      await Promise.allSettled(cleanups.map(async (close) => close()));
+    }
+  });
+
   it('rejects agent self-delegation and stamps operator identity', async () => {
     const submit = vi.fn(async (command) => ({ status: 'succeeded' as const, value: command.actor }));
     const server = createControlServerForTest({ runtime: stubRuntime(submit) });
@@ -288,7 +397,7 @@ describe('control server authorization', () => {
     const agent: ControlPrincipal = { id: 'agent-1', kind: 'agent', capabilities: ['read', 'mutate', 'delegate'] };
     const compatibility: ControlPrincipal = { id: 'compat-1', kind: 'compatibility', capabilities: ['read', 'mutate'] };
     const base = delegationInput();
-    const grant = { ...base, kind: 'lease.grant' as const, payload: { requestId: 'r', actorId: 'a', taskId: 't', ttlMs: 1, grants: [] } };
+    const grant = { ...base, kind: 'lease.grant' as const, payload: { requestId: 'r' } };
     const request = { ...base, kind: 'lease.request' as const, payload: { taskId: 't', ttlMs: 1, grants: [] } };
     await expect(server.submitAs(agent, grant)).resolves.toMatchObject({ status: 'rejected', code: 'operator_required' });
     await expect(server.submitAs(compatibility, request)).resolves.toMatchObject({ status: 'rejected', code: 'compatibility_not_authorized' });

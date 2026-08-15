@@ -96,6 +96,7 @@ describe('BrowserProviderBroker', () => {
     });
     const server = await ControlServer.start({
       endpoint, projectRoot: root, ownerEpoch: 1, broker, credentials,
+      operatorCommandPolicy: 'trusted-test-only',
       runtime: {
         submit: async () => ({ status: 'succeeded' }),
         snapshot: () => ({ ownerEpoch: 1, sequence: 0, commands: {}, leases: {} }),
@@ -347,6 +348,7 @@ async function startProviderServer(): Promise<{
     ownerEpoch: 1,
     broker,
     credentials,
+    operatorCommandPolicy: 'trusted-test-only',
     runtime: {
       submit: async () => ({ status: 'succeeded' }),
       snapshot: () => ({ ownerEpoch: 1, sequence: 0, commands: {}, leases: {} }),
@@ -358,6 +360,34 @@ async function startProviderServer(): Promise<{
 }
 
 describe('ControlServer provider mode', () => {
+  it('rejects bearer-token provider registration when no native authority broker opts in', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-provider-disabled-'));
+    const endpoint = `/tmp/psyche-pd-${process.pid}-${Date.now()}.sock`;
+    const credentials: ControlCredentialStore = {
+      authenticate: async (token) => token === 'operator-token'
+        ? { id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] }
+        : null,
+      operatorToken: async () => 'operator-token', agentToken: async () => 'agent-token',
+    };
+    const server = await ControlServer.start({
+      endpoint, projectRoot: root, ownerEpoch: 1, broker: new BrowserProviderBroker(), credentials,
+      runtime: {
+        submit: async () => ({ status: 'succeeded' }),
+        snapshot: () => ({ ownerEpoch: 1, sequence: 0, commands: {}, leases: {} }),
+        readEvents: () => ({ events: [], nextSequence: 0, gap: false }),
+      } as never,
+    });
+    cleanups.push(async () => { await server.close(); await rm(root, { recursive: true, force: true }); });
+    const peer = await connectLines(endpoint);
+    peer.send({
+      version: 1, type: 'hello', requestId: 'hello', token: 'operator-token',
+      clientName: 'desktop', projectRoot: root,
+    });
+    expect((await peer.next()).type).toBe('welcome');
+    peer.send({ version: 1, type: 'provider.register', requestId: 'register', providerId: 'desktop-1' });
+    expect(await peer.next()).toMatchObject({ type: 'error', code: 'provider_authority_unavailable' });
+  });
+
   it('requires an operator and rejects provider frames on ordinary sockets', async () => {
     const { endpoint, root } = await startProviderServer();
     const agent = await connectLines(endpoint);
@@ -412,6 +442,7 @@ describe('ControlServer provider mode', () => {
     };
     const server = await ControlServer.start({
       endpoint, projectRoot: root, ownerEpoch: 1, broker, credentials,
+      operatorCommandPolicy: 'trusted-test-only',
       runtime: {
         submit: async () => ({ status: 'succeeded' }),
         snapshot: () => ({ ownerEpoch: 1, sequence: 0, commands: {}, leases: {} }),

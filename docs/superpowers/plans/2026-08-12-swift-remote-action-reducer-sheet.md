@@ -623,9 +623,7 @@ public struct RemoteActionPresentation: Sendable, Equatable, Identifiable {
         switch content {
         case .confirm, .choice, .input, .pullRequestReview:
             dismissable = false
-        case .progress:
-            dismissable = result.dismissable ?? true
-        case .terminal, .navigation:
+        case .progress, .terminal, .navigation:
             dismissable = true
         }
 
@@ -654,6 +652,11 @@ private extension RemoteActionPresentation.Content {
     }
 }
 ```
+
+Progress is always dismissable even when the host sends `dismissable: false`.
+The protocol has no correlated progress continuation or update channel, so
+honoring false would permanently occupy the single-sheet store and block every
+later action.
 
 Also add a factory used by the store for failures:
 
@@ -1639,9 +1642,7 @@ private extension ActionSheetView {
                 }
                 .disabled(store.isSubmitting)
             case .progress:
-                if presentation.dismissable {
-                    Button("Dismiss") { store.dismiss() }
-                }
+                Button("Dismiss") { store.dismiss() }
             case .terminal, .navigation:
                 Button("Done") { store.dismiss() }
                     .disabled(!presentation.dismissable)

@@ -23,6 +23,8 @@ import type {
   ControlSnapshot,
 } from '../control/types.js';
 import type { CapabilityLeaseGrantItem } from '../control/capabilityLeases.js';
+import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
+import { canonicalizeBoundedJson } from '../control/boundedJson.js';
 import { getBuiltInRituals, listProjectRituals } from '../utils/rituals.js';
 import type { OrchestrationTaskRequest } from '../orchestration/types.js';
 
@@ -344,7 +346,7 @@ const authorizationRequired = ['task_id', 'lease_id', 'lease_revision'];
 export const TOOLS: ToolDef[] = [
   {
     name: 'psyche_control_list',
-    description: 'List the bounded pane and browser resources, leases, requests, and approvals owned by this project.',
+    description: 'List the bounded pane and browser resources and approvals owned by this project.',
     inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
     handler: async (args) => {
       const requestedRoot = resolveProjectRoot(args);
@@ -356,8 +358,6 @@ export const TOOLS: ToolDef[] = [
           owner_epoch: snapshot.ownerEpoch,
           sequence: snapshot.sequence,
           resources: snapshot.resources,
-          leases: snapshot.capabilityLeases,
-          lease_requests: snapshot.leaseRequests,
           approvals: snapshot.approvals,
           receipts: snapshot.receipts,
         };
@@ -391,15 +391,16 @@ export const TOOLS: ToolDef[] = [
       return withControlClient(projectRoot, async (client) => {
         const canonicalRoot = client.projectRoot ?? projectRoot;
         if (operation === 'status') {
+          const requestId = requiredString(args, 'request_id');
           const snapshot = await client.getState();
           const leaseId = typeof args.lease_id === 'string' ? args.lease_id : undefined;
-          const requestId = typeof args.request_id === 'string' ? args.request_id : undefined;
           return {
             leases: snapshot.capabilityLeases.filter((lease) => (
-              lease.taskId === taskId && (!leaseId || lease.id === leaseId)
+              lease.taskId === taskId && lease.requestId === requestId
+              && (!leaseId || lease.id === leaseId)
             )),
             requests: snapshot.leaseRequests.filter((request) => (
-              request.taskId === taskId && (!requestId || request.id === requestId)
+              request.taskId === taskId && request.id === requestId
             )),
           };
         }
@@ -530,12 +531,23 @@ export const TOOLS: ToolDef[] = [
     handler: async (args) => {
       const auth = leaseAuthorization(args);
       if (!auth) return leaseMissing();
+      let scriptArgs: unknown;
+      if ('args' in args) {
+        try {
+          scriptArgs = canonicalizeBoundedJson(args.args, {
+            maxBytes: AGENT_CONTROL_LIMITS.scriptResultBytes,
+            invalidCode: 'invalid_browser_script_arguments',
+            sizeCode: 'invalid_browser_script_arguments',
+            label: 'browser script arguments',
+          }).value;
+        } catch { invalid('requires bounded plain JSON `args`'); }
+      }
       return actionResult(await submit(args, 'browser.script', {
         ...auth,
         tabId: requiredString(args, 'tab_id'),
         generation: requiredPositiveInteger(args, 'generation'),
         source: requiredString(args, 'source'),
-        ...('args' in args ? { args: args.args } : {}),
+        ...('args' in args ? { args: scriptArgs } : {}),
       }));
     },
   },

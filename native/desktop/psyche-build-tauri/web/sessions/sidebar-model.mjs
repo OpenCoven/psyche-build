@@ -494,3 +494,29 @@ export function buildSidebarProjectModel(options) {
     branches,
   };
 }
+
+export function flattenSidebarSearchResults(projectModels = []) {
+  return projectModels.flatMap((projectModel) => (
+    projectModel.branches.flatMap((branchModel) => (
+      branchModel.categories.flatMap((category) => (
+        category.rows.map((row) => ({
+          key: row.key,
+          selectionKey: row.selectionKey,
+          source: row.source,
+          id: row.id,
+          projectId: projectStableIdentity(projectModel.project),
+          projectRoot: row.projectRoot,
+          worktreePath: row.worktreePath,
+          projectTitle: projectModel.title,
+          branchTitle: branchModel.title,
+          title: row.title,
+          meta: row.meta,
+          status: row.status,
+          kind: row.kind,
+          type: row.type,
+          value: row.value,
+        }))
+      ))
+    ))
+  ));
+}

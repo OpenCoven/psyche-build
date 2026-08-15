@@ -144,22 +144,6 @@ impl ProviderEffectResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LeaseTarget {
-    kind: String,
-    id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    generation: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LeaseGrant {
-    target: LeaseTarget,
-    capabilities: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -168,10 +152,6 @@ pub struct LeaseGrant {
 pub enum OperatorCommand {
     LeaseGrant {
         request_id: String,
-        actor_id: String,
-        task_id: String,
-        ttl_ms: u64,
-        grants: Vec<LeaseGrant>,
     },
     LeaseRevoke {
         lease_id: String,
@@ -955,16 +935,9 @@ pub async fn control_operator_submit(
     let root = canonical_root(&project_root)?;
     let request_id = next_request_id(&state);
     let (kind, payload) = match command {
-        OperatorCommand::LeaseGrant {
-            request_id,
-            actor_id,
-            task_id,
-            ttl_ms,
-            grants,
-        } => (
-            "lease.grant",
-            json!({ "requestId": request_id, "actorId": actor_id, "taskId": task_id, "ttlMs": ttl_ms, "grants": grants }),
-        ),
+        OperatorCommand::LeaseGrant { request_id } => {
+            ("lease.grant", json!({ "requestId": request_id }))
+        }
         OperatorCommand::LeaseRevoke { lease_id } => {
             ("lease.revoke", json!({ "leaseId": lease_id }))
         }

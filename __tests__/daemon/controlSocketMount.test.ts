@@ -102,6 +102,7 @@ async function startMountedDaemon(): Promise<{
     ownerEpoch: host.epoch,
     runtime: host.runtime,
     credentials,
+    operatorCommandPolicy: 'trusted-test-only',
   });
   cleanups.push(() => server.close());
 

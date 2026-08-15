@@ -134,7 +134,10 @@ final class BonjourHostDiscoveryTests: XCTestCase {
 
     func testDiscoveryPublishesOnlyParseableHostsAndStopsTheBrowser() async throws {
         let browser = FakeBonjourBrowser()
-        let discovery = BonjourHostDiscovery(browser: browser)
+        let resolver = FakeBonjourServiceResolver(endpoints: [
+            .init(name: "Good", domain: "local."): .init(host: "studio.local", port: 47_123)
+        ])
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
 
         let stream = await discovery.start()
         var iterator = stream.makeAsyncIterator()
@@ -148,10 +151,508 @@ final class BonjourHostDiscoveryTests: XCTestCase {
 
         let batch = await iterator.next()
         XCTAssertEqual(batch?.map(\.serverID), ["server-2"])
+        XCTAssertEqual(batch?.first?.endpoint.host, "studio.local")
+        XCTAssertEqual(batch?.first?.endpoint.port, 47_123)
         XCTAssertEqual(browser.startCount, 1)
 
         await discovery.stop()
         XCTAssertEqual(browser.stopCount, 1)
+    }
+
+    func testDiscoveryBuildsAConnectableEndpointFromTheResolvedService() async throws {
+        let browser = FakeBonjourBrowser()
+        let resolver = FakeBonjourServiceResolver(endpoints: [
+            .init(name: "Studio", domain: "local."): .init(host: "studio.local", port: 47_123)
+        ])
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
+
+        let stream = await discovery.start()
+        var iterator = stream.makeAsyncIterator()
+        browser.emit([
+            makeRecord(txt: ["serverId": "server-1", "fingerprint": fingerprint, "versions": "3"])
+        ])
+
+        let batch = await iterator.next()
+        let hosts = try XCTUnwrap(batch)
+        XCTAssertEqual(hosts.first?.endpoint.host, "studio.local")
+        XCTAssertEqual(hosts.first?.endpoint.port, 47_123)
+        XCTAssertEqual(hosts.first?.endpoint.certificateFingerprint, fingerprint)
+        let requests = await resolver.requests()
+        XCTAssertEqual(requests, [.init(name: "Studio", domain: "local.")])
+    }
+
+    func testDiscoveryDropsResolverFailuresAndInvalidLocatorsWithoutHidingAValidHost() async throws {
+        let browser = FakeBonjourBrowser()
+        let resolver = FakeBonjourServiceResolver(results: [
+            .init(name: "Timeout", domain: "local."): .failure(.timeout),
+            .init(name: "Failure", domain: "local."): .failure(.failed),
+            .init(name: "Whitespace", domain: "local."): .success(.init(host: " \n ", port: 47_123)),
+            .init(name: "Zero", domain: "local."): .success(.init(host: "zero.local", port: 0)),
+            .init(name: "Negative", domain: "local."): .success(.init(host: "negative.local", port: -1)),
+            .init(name: "OutOfRange", domain: "local."): .success(.init(host: "range.local", port: 65_536)),
+            .init(name: "Good", domain: "local."): .success(.init(host: "good.local", port: 47_123))
+        ])
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
+
+        let stream = await discovery.start()
+        var iterator = stream.makeAsyncIterator()
+        browser.emit([
+            makeRecord(name: "Malicious", txt: ["serverId": "malicious", "fingerprint": "bogus", "versions": "3"]),
+            makeRecord(name: "Timeout", txt: ["serverId": "timeout", "fingerprint": fingerprint, "versions": "3"]),
+            makeRecord(name: "Failure", txt: ["serverId": "failure", "fingerprint": fingerprint, "versions": "3"]),
+            makeRecord(name: "Whitespace", txt: ["serverId": "whitespace", "fingerprint": fingerprint, "versions": "3"]),
+            makeRecord(name: "Zero", txt: ["serverId": "zero", "fingerprint": fingerprint, "versions": "3"]),
+            makeRecord(name: "Negative", txt: ["serverId": "negative", "fingerprint": fingerprint, "versions": "3"]),
+            makeRecord(name: "OutOfRange", txt: ["serverId": "out-of-range", "fingerprint": fingerprint, "versions": "3"]),
+            makeRecord(name: "Good", txt: ["serverId": "good", "fingerprint": fingerprint, "versions": "3"])
+        ])
+
+        let batch = await iterator.next()
+        let hosts = try XCTUnwrap(batch)
+        XCTAssertEqual(hosts.map(\.serverID), ["good"])
+        XCTAssertEqual(hosts.first?.endpoint.host, "good.local")
+    }
+
+    func testDiscoveryDeduplicatesSuccessfulHostsByServerID() async throws {
+        let browser = FakeBonjourBrowser()
+        let resolver = FakeBonjourServiceResolver(endpoints: [
+            .init(name: "First", domain: "local."): .init(host: "first.local", port: 47_123),
+            .init(name: "Second", domain: "local."): .init(host: "second.local", port: 47_124)
+        ])
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
+
+        let stream = await discovery.start()
+        var iterator = stream.makeAsyncIterator()
+        browser.emit([
+            makeRecord(name: "First", txt: ["serverId": "server-1", "fingerprint": fingerprint, "versions": "3"]),
+            makeRecord(name: "Second", txt: ["serverId": "server-1", "fingerprint": fingerprint, "versions": "3"])
+        ])
+
+        let batch = await iterator.next()
+        let hosts = try XCTUnwrap(batch)
+        XCTAssertEqual(hosts.map(\.serverID), ["server-1"])
+        XCTAssertEqual(hosts.first?.endpoint.host, "first.local")
+        let requests = await resolver.requests()
+        XCTAssertEqual(requests, [.init(name: "First", domain: "local.")])
+    }
+
+    func testStoppingDiscoveryCancelsAnInFlightResolution() async {
+        let browser = FakeBonjourBrowser()
+        let resolver = CancelTrackingBonjourServiceResolver()
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
+
+        let stream = await discovery.start()
+        browser.emit([
+            makeRecord(txt: ["serverId": "server-1", "fingerprint": fingerprint, "versions": "3"])
+        ])
+
+        await resolver.waitUntilStarted()
+
+        await discovery.stop()
+
+        await resolver.waitUntilCancelled()
+        let cancellationCount = await resolver.cancellationCount
+        XCTAssertEqual(cancellationCount, 1)
+        withExtendedLifetime(stream) {}
+    }
+
+    func testStoppingDiscoveryFinishesWithoutPublishingACancelledBatch() async {
+        let blocked = BonjourServiceKey(name: "Blocked", domain: "local.")
+        let started = XCTestExpectation(description: "blocked resolution started")
+        let cancelled = XCTestExpectation(description: "blocked resolution cancelled")
+        let events = ResolverEventLog(started: [blocked: started], cancelled: [blocked: cancelled])
+        let browser = FakeBonjourBrowser()
+        let resolver = ControlledBonjourServiceResolver(
+            modes: [blocked: .blocked],
+            events: events
+        )
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
+        let stream = await discovery.start()
+        let recorder = StreamBatchRecorder()
+        let consumer = Task {
+            var iterator = stream.makeAsyncIterator()
+            recorder.record(await iterator.next())
+        }
+
+        browser.emit([
+            makeRecord(name: "Blocked", txt: ["serverId": "blocked", "fingerprint": fingerprint, "versions": "3"])
+        ])
+        await fulfillment(of: [started], timeout: 1)
+
+        await discovery.stop()
+
+        await fulfillment(of: [cancelled, recorder.received], timeout: 1)
+        XCTAssertNil(recorder.firstBatch)
+        XCTAssertEqual(events.cancellationCount(for: blocked), 1)
+        consumer.cancel()
+    }
+
+    func testStartingNewObservationFinishesSupersededStreamWithoutPublishingACancelledBatch() async {
+        let old = BonjourServiceKey(name: "Old", domain: "local.")
+        let fresh = BonjourServiceKey(name: "Fresh", domain: "local.")
+        let oldStarted = XCTestExpectation(description: "old resolution started")
+        let oldCancelled = XCTestExpectation(description: "old resolution cancelled")
+        let freshStarted = XCTestExpectation(description: "fresh resolution started")
+        let events = ResolverEventLog(
+            started: [old: oldStarted, fresh: freshStarted],
+            cancelled: [old: oldCancelled]
+        )
+        let browser = FakeBonjourBrowser()
+        let resolver = ControlledBonjourServiceResolver(
+            modes: [
+                old: .blocked,
+                fresh: .endpoint(.init(host: "fresh.local", port: 47_123))
+            ],
+            events: events
+        )
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
+        let oldStream = await discovery.start()
+        let oldRecorder = StreamBatchRecorder()
+        let oldConsumer = Task {
+            var iterator = oldStream.makeAsyncIterator()
+            oldRecorder.record(await iterator.next())
+        }
+
+        browser.emit([
+            makeRecord(name: "Old", txt: ["serverId": "old", "fingerprint": fingerprint, "versions": "3"])
+        ])
+        await fulfillment(of: [oldStarted], timeout: 1)
+
+        let freshStream = await discovery.start()
+        let freshRecorder = StreamBatchRecorder()
+        let freshConsumer = Task {
+            var iterator = freshStream.makeAsyncIterator()
+            freshRecorder.record(await iterator.next())
+        }
+        browser.emit([
+            makeRecord(name: "Fresh", txt: ["serverId": "fresh", "fingerprint": fingerprint, "versions": "3"])
+        ])
+
+        await fulfillment(of: [oldCancelled, oldRecorder.received, freshStarted, freshRecorder.received], timeout: 1)
+        XCTAssertNil(oldRecorder.firstBatch)
+        XCTAssertEqual(freshRecorder.firstBatch?.map(\.serverID), ["fresh"])
+        XCTAssertEqual(events.cancellationCount(for: old), 1)
+        XCTAssertEqual(browser.stopCount, 0)
+        await discovery.stop()
+        oldConsumer.cancel()
+        freshConsumer.cancel()
+    }
+
+    func testDiscoveryPublishesAValidHostWithoutWaitingForAPrecedingBlockedResolver() async {
+        let blocked = BonjourServiceKey(name: "Blocked", domain: "local.")
+        let good = BonjourServiceKey(name: "Good", domain: "local.")
+        let blockedStarted = XCTestExpectation(description: "blocked resolution started")
+        let goodStarted = XCTestExpectation(description: "good resolution started")
+        let events = ResolverEventLog(started: [blocked: blockedStarted, good: goodStarted])
+        let browser = FakeBonjourBrowser()
+        let resolver = ControlledBonjourServiceResolver(
+            modes: [
+                blocked: .blocked,
+                good: .endpoint(.init(host: "good.local", port: 47_123))
+            ],
+            events: events
+        )
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
+        let stream = await discovery.start()
+        let recorder = StreamBatchRecorder()
+        let consumer = Task {
+            var iterator = stream.makeAsyncIterator()
+            recorder.record(await iterator.next())
+        }
+
+        browser.emit([
+            makeRecord(name: "Blocked", txt: ["serverId": "blocked", "fingerprint": fingerprint, "versions": "3"]),
+            makeRecord(name: "Good", txt: ["serverId": "good", "fingerprint": fingerprint, "versions": "3"])
+        ])
+
+        await fulfillment(of: [blockedStarted, goodStarted, recorder.received], timeout: 1)
+        XCTAssertEqual(recorder.firstBatch?.map(\.serverID), ["good"])
+        await discovery.stop()
+        consumer.cancel()
+    }
+
+    func testSupersededBrowseBatchCancelsOldWorkAndPublishesOnlyTheLatestHosts() async {
+        let old = BonjourServiceKey(name: "Old", domain: "local.")
+        let fresh = BonjourServiceKey(name: "Fresh", domain: "local.")
+        let oldStarted = XCTestExpectation(description: "old resolution started")
+        let oldCancelled = XCTestExpectation(description: "old resolution cancelled")
+        let freshStarted = XCTestExpectation(description: "fresh resolution started")
+        let events = ResolverEventLog(
+            started: [old: oldStarted, fresh: freshStarted],
+            cancelled: [old: oldCancelled]
+        )
+        let browser = FakeBonjourBrowser()
+        let resolver = ControlledBonjourServiceResolver(
+            modes: [
+                old: .blocked,
+                fresh: .endpoint(.init(host: "fresh.local", port: 47_123))
+            ],
+            events: events
+        )
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
+        let stream = await discovery.start()
+        let recorder = StreamBatchRecorder()
+        let consumer = Task {
+            var iterator = stream.makeAsyncIterator()
+            recorder.record(await iterator.next())
+        }
+
+        browser.emit([
+            makeRecord(name: "Old", txt: ["serverId": "old", "fingerprint": fingerprint, "versions": "3"])
+        ])
+        await fulfillment(of: [oldStarted], timeout: 1)
+        browser.emit([
+            makeRecord(name: "Fresh", txt: ["serverId": "fresh", "fingerprint": fingerprint, "versions": "3"])
+        ])
+
+        await fulfillment(of: [oldCancelled, freshStarted, recorder.received], timeout: 1)
+        XCTAssertEqual(recorder.firstBatch?.map(\.serverID), ["fresh"])
+        XCTAssertEqual(events.cancellationCount(for: old), 1)
+        await discovery.stop()
+        consumer.cancel()
+    }
+
+    func testUnchangedRefreshKeepsResolvedHostsWhenLaterResolutionCompletesFirst() async {
+        let alpha = BonjourServiceKey(name: "Alpha", domain: "local.")
+        let beta = BonjourServiceKey(name: "Beta", domain: "local.")
+        let alphaRefreshReady = XCTestExpectation(description: "alpha refresh is ready")
+        let betaRefreshReady = XCTestExpectation(description: "beta refresh is ready")
+        let events = SequencedResolverEvents(blocked: [
+            alpha: alphaRefreshReady,
+            beta: betaRefreshReady
+        ])
+        let resolver = SequencedBonjourServiceResolver(
+            plans: [
+                alpha: [.endpoint(.init(host: "alpha.local", port: 47_123)), .blocked],
+                beta: [.endpoint(.init(host: "beta.local", port: 47_124)), .blocked]
+            ],
+            events: events
+        )
+        let browser = FakeBonjourBrowser()
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
+        let stream = await discovery.start()
+        let recorder = SnapshotBatchRecorder(expectedInitialIDs: ["alpha", "beta"])
+        let consumer = Task {
+            for await batch in stream {
+                recorder.record(batch)
+            }
+        }
+        let records = [
+            makeRecord(name: "Alpha", txt: ["serverId": "alpha", "fingerprint": fingerprint, "versions": "3"]),
+            makeRecord(name: "Beta", txt: ["serverId": "beta", "fingerprint": fingerprint, "versions": "3"])
+        ]
+
+        browser.emit(records)
+        await fulfillment(of: [recorder.initialFullView], timeout: 1)
+
+        recorder.beginRefresh()
+        browser.emit(records)
+        await fulfillment(of: [alphaRefreshReady, betaRefreshReady], timeout: 1)
+        await resolver.resume(beta, with: .init(host: "beta.local", port: 47_124))
+
+        await fulfillment(of: [recorder.refreshPublished], timeout: 1)
+        XCTAssertEqual(recorder.firstRefreshBatch?.map(\.serverID), ["alpha", "beta"])
+
+        await resolver.resume(alpha, with: .init(host: "alpha.local", port: 47_123))
+        await discovery.stop()
+        consumer.cancel()
+    }
+
+    func testRefreshRemovesServicesAbsentFromTheLatestSnapshotBeforeOtherResolutionsFinish() async {
+        let alpha = BonjourServiceKey(name: "Alpha", domain: "local.")
+        let beta = BonjourServiceKey(name: "Beta", domain: "local.")
+        let betaRefreshReady = XCTestExpectation(description: "beta refresh is ready")
+        let events = SequencedResolverEvents(blocked: [beta: betaRefreshReady])
+        let resolver = SequencedBonjourServiceResolver(
+            plans: [
+                alpha: [.endpoint(.init(host: "alpha.local", port: 47_123))],
+                beta: [.endpoint(.init(host: "beta.local", port: 47_124)), .blocked]
+            ],
+            events: events
+        )
+        let browser = FakeBonjourBrowser()
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
+        let stream = await discovery.start()
+        let recorder = SnapshotBatchRecorder(expectedInitialIDs: ["alpha", "beta"])
+        let consumer = Task {
+            for await batch in stream {
+                recorder.record(batch)
+            }
+        }
+
+        browser.emit([
+            makeRecord(name: "Alpha", txt: ["serverId": "alpha", "fingerprint": fingerprint, "versions": "3"]),
+            makeRecord(name: "Beta", txt: ["serverId": "beta", "fingerprint": fingerprint, "versions": "3"])
+        ])
+        await fulfillment(of: [recorder.initialFullView], timeout: 1)
+
+        recorder.beginRefresh()
+        browser.emit([
+            makeRecord(name: "Beta", txt: ["serverId": "beta", "fingerprint": fingerprint, "versions": "3"])
+        ])
+        await fulfillment(of: [betaRefreshReady, recorder.refreshPublished], timeout: 1)
+        XCTAssertEqual(recorder.firstRefreshBatch?.map(\.serverID), ["beta"])
+
+        await resolver.resume(beta, with: .init(host: "beta.local", port: 47_124))
+        await discovery.stop()
+        consumer.cancel()
+    }
+
+    func testConsumerTerminationStopsBrowserAndCancelsActiveResolution() async {
+        let blocked = BonjourServiceKey(name: "Blocked", domain: "local.")
+        let started = XCTestExpectation(description: "blocked resolution started")
+        let cancelled = XCTestExpectation(description: "blocked resolution cancelled")
+        let browserStopped = XCTestExpectation(description: "browser stopped after consumer termination")
+        let events = ResolverEventLog(started: [blocked: started], cancelled: [blocked: cancelled])
+        let browser = FakeBonjourBrowser(stopExpectation: browserStopped)
+        let resolver = ControlledBonjourServiceResolver(modes: [blocked: .blocked], events: events)
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
+        let stream = await discovery.start()
+        let consumer = Task {
+            var iterator = stream.makeAsyncIterator()
+            _ = await iterator.next()
+        }
+
+        browser.emit([
+            makeRecord(name: "Blocked", txt: ["serverId": "blocked", "fingerprint": fingerprint, "versions": "3"])
+        ])
+        await fulfillment(of: [started], timeout: 1)
+
+        consumer.cancel()
+
+        await fulfillment(of: [cancelled, browserStopped], timeout: 1)
+        XCTAssertEqual(browser.stopCount, 1)
+        XCTAssertEqual(events.cancellationCount(for: blocked), 1)
+    }
+
+    func testConsumerTerminationStopsBrowserExactlyOnceAfterObservationTaskQuiesces() async {
+        let blocked = BonjourServiceKey(name: "Blocked", domain: "local.")
+        let started = XCTestExpectation(description: "blocked resolution started")
+        let cancelled = XCTestExpectation(description: "blocked resolution cancelled")
+        let observationTerminated = XCTestExpectation(description: "consumer termination owned observation cleanup")
+        let observationReadyToFinish = XCTestExpectation(description: "cancelled observation task is ready to finish")
+        let observationFinished = XCTestExpectation(description: "cancelled observation task finished")
+        let events = ResolverEventLog(started: [blocked: started], cancelled: [blocked: cancelled])
+        let browser = FakeBonjourBrowser()
+        let resolver = ControlledBonjourServiceResolver(modes: [blocked: .blocked], events: events)
+        let lifecycle = DiscoveryLifecycleBoundary(
+            observationTerminated: observationTerminated,
+            observationReadyToFinish: observationReadyToFinish,
+            observationFinished: observationFinished
+        )
+        let discovery = BonjourHostDiscovery(
+            browser: browser,
+            resolver: resolver,
+            lifecycle: .init(didTerminateObservation: {
+                lifecycle.recordObservationTerminated()
+            }, beforeFinishObservation: {
+                await lifecycle.waitBeforeFinish()
+            }, didFinishObservation: {
+                lifecycle.recordObservationFinished()
+            })
+        )
+        let consumerReady = XCTestExpectation(description: "consumer owns the discovery stream")
+        let consumer = Task {
+            let stream = await discovery.start()
+            consumerReady.fulfill()
+            var iterator = stream.makeAsyncIterator()
+            _ = await iterator.next()
+        }
+
+        await fulfillment(of: [consumerReady], timeout: 1)
+        browser.emit([
+            makeRecord(name: "Blocked", txt: ["serverId": "blocked", "fingerprint": fingerprint, "versions": "3"])
+        ])
+        await fulfillment(of: [started], timeout: 1)
+
+        consumer.cancel()
+
+        await fulfillment(of: [cancelled, observationReadyToFinish, observationTerminated], timeout: 1)
+        lifecycle.allowFinish()
+        await fulfillment(of: [observationFinished], timeout: 1)
+        XCTAssertEqual(browser.stopCount, 1)
+    }
+
+    func testResolverCancellationBeforeContinuationRegistrationDoesNotStartOrRetainWork() async throws {
+        let boundary = ResolverRegistrationBoundary()
+        let lifecycle = NetServiceResolutionLifecycle(
+            beforeContinuationRegistration: {
+                boundary.arriveAndWait()
+            },
+            didCreateTimeoutTask: {
+                boundary.recordTimeoutTask()
+            },
+            didStartService: {
+                boundary.recordServiceStart()
+            }
+        )
+        let resolution = NetServiceResolution(
+            name: "Studio",
+            domain: "local.",
+            timeout: 60,
+            lifecycle: lifecycle
+        )
+        let task = Task {
+            try await resolution.resolve()
+        }
+
+        await fulfillment(of: [boundary.registrationReached], timeout: 1)
+        task.cancel()
+        boundary.allowRegistration()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        XCTAssertEqual(boundary.timeoutTaskCount, 0)
+        XCTAssertEqual(boundary.serviceStartCount, 0)
+        XCTAssertFalse(resolution.hasPendingResolution)
+    }
+
+    func testResolverCancellationAfterRegistrationBeforeTimerRetentionDoesNotRetainWork() async throws {
+        let boundary = ResolverPostRegistrationBoundary()
+        let lifecycle = NetServiceResolutionLifecycle(
+            afterContinuationRegistration: {
+                boundary.arriveAndWait()
+            },
+            didAttemptTimerRetention: {
+                boundary.timerRetentionAttempted.fulfill()
+            },
+            didCreateTimeoutTask: {
+                boundary.recordTimeoutTask()
+            },
+            didStartService: {
+                boundary.recordServiceStart()
+            }
+        )
+        let resolution = NetServiceResolution(
+            name: "Studio",
+            domain: "local.",
+            timeout: 60,
+            lifecycle: lifecycle
+        )
+        let task = Task {
+            try await resolution.resolve()
+        }
+
+        await fulfillment(of: [boundary.registrationReached], timeout: 1)
+        task.cancel()
+        boundary.allowTimerRetention()
+        await fulfillment(of: [boundary.timerRetentionAttempted], timeout: 1)
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        XCTAssertEqual(boundary.timeoutTaskCount, 0)
+        XCTAssertEqual(boundary.serviceStartCount, 0)
+        XCTAssertFalse(resolution.hasPendingResolution)
     }
 
     private func makeRecord(
@@ -163,11 +664,382 @@ final class BonjourHostDiscoveryTests: XCTestCase {
     }
 }
 
+private struct BonjourServiceKey: Hashable, Sendable {
+    let name: String
+    let domain: String
+}
+
+private enum FakeBonjourServiceResolverError: Error {
+    case timeout
+    case failed
+}
+
+private actor FakeBonjourServiceResolver: BonjourServiceResolving {
+    private let results: [BonjourServiceKey: Result<ResolvedBonjourEndpoint, FakeBonjourServiceResolverError>]
+    private var resolvedRequests: [BonjourServiceKey] = []
+
+    init(endpoints: [BonjourServiceKey: ResolvedBonjourEndpoint]) {
+        self.results = endpoints.mapValues(Result.success)
+    }
+
+    init(results: [BonjourServiceKey: Result<ResolvedBonjourEndpoint, FakeBonjourServiceResolverError>]) {
+        self.results = results
+    }
+
+    func resolve(name: String, domain: String) async throws -> ResolvedBonjourEndpoint {
+        let key = BonjourServiceKey(name: name, domain: domain)
+        resolvedRequests.append(key)
+        guard let result = results[key] else { throw FakeBonjourServiceResolverError.failed }
+        return try result.get()
+    }
+
+    func requests() -> [BonjourServiceKey] {
+        resolvedRequests
+    }
+}
+
+private actor CancelTrackingBonjourServiceResolver: BonjourServiceResolving {
+    private var startContinuation: CheckedContinuation<Void, Never>?
+    private var cancellationContinuation: CheckedContinuation<Void, Never>?
+    private var started = false
+    private var cancelled = 0
+
+    var cancellationCount: Int { cancelled }
+
+    func resolve(name: String, domain: String) async throws -> ResolvedBonjourEndpoint {
+        started = true
+        startContinuation?.resume()
+        startContinuation = nil
+        do {
+            try await Task.sleep(for: .seconds(60))
+            throw FakeBonjourServiceResolverError.failed
+        } catch is CancellationError {
+            cancelled += 1
+            cancellationContinuation?.resume()
+            cancellationContinuation = nil
+            throw CancellationError()
+        }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { startContinuation = $0 }
+    }
+
+    func waitUntilCancelled() async {
+        if cancelled > 0 { return }
+        await withCheckedContinuation { cancellationContinuation = $0 }
+    }
+}
+
+private enum ControlledBonjourServiceResolution: Sendable {
+    case blocked
+    case endpoint(ResolvedBonjourEndpoint)
+}
+
+private actor ControlledBonjourServiceResolver: BonjourServiceResolving {
+    private let modes: [BonjourServiceKey: ControlledBonjourServiceResolution]
+    private let events: ResolverEventLog
+
+    init(
+        modes: [BonjourServiceKey: ControlledBonjourServiceResolution],
+        events: ResolverEventLog
+    ) {
+        self.modes = modes
+        self.events = events
+    }
+
+    func resolve(name: String, domain: String) async throws -> ResolvedBonjourEndpoint {
+        let key = BonjourServiceKey(name: name, domain: domain)
+        events.recordStart(for: key)
+        switch modes[key] {
+        case .endpoint(let endpoint):
+            return endpoint
+        case .blocked:
+            do {
+                try await Task.sleep(for: .seconds(60))
+                throw FakeBonjourServiceResolverError.failed
+            } catch is CancellationError {
+                events.recordCancellation(for: key)
+                throw CancellationError()
+            }
+        case nil:
+            throw FakeBonjourServiceResolverError.failed
+        }
+    }
+}
+
+private final class ResolverEventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private let started: [BonjourServiceKey: XCTestExpectation]
+    private let cancelled: [BonjourServiceKey: XCTestExpectation]
+    private var startCounts: [BonjourServiceKey: Int] = [:]
+    private var cancellationCounts: [BonjourServiceKey: Int] = [:]
+
+    init(
+        started: [BonjourServiceKey: XCTestExpectation] = [:],
+        cancelled: [BonjourServiceKey: XCTestExpectation] = [:]
+    ) {
+        self.started = started
+        self.cancelled = cancelled
+    }
+
+    func recordStart(for key: BonjourServiceKey) {
+        let expectation = lock.withLock { () -> XCTestExpectation? in
+            startCounts[key, default: 0] += 1
+            return started[key]
+        }
+        expectation?.fulfill()
+    }
+
+    func recordCancellation(for key: BonjourServiceKey) {
+        let expectation = lock.withLock { () -> XCTestExpectation? in
+            cancellationCounts[key, default: 0] += 1
+            return cancelled[key]
+        }
+        expectation?.fulfill()
+    }
+
+    func cancellationCount(for key: BonjourServiceKey) -> Int {
+        lock.withLock { cancellationCounts[key, default: 0] }
+    }
+}
+
+private final class StreamBatchRecorder: @unchecked Sendable {
+    let received = XCTestExpectation(description: "stream produced its first result")
+    private let lock = NSLock()
+    private var storedFirstBatch: [DiscoveredHost]??
+
+    var firstBatch: [DiscoveredHost]? {
+        lock.withLock { storedFirstBatch ?? nil }
+    }
+
+    func record(_ batch: [DiscoveredHost]?) {
+        lock.withLock { storedFirstBatch = batch }
+        received.fulfill()
+    }
+}
+
+private enum SequencedBonjourServiceResolution: Sendable {
+    case blocked
+    case endpoint(ResolvedBonjourEndpoint)
+}
+
+private actor SequencedBonjourServiceResolver: BonjourServiceResolving {
+    private var plans: [BonjourServiceKey: [SequencedBonjourServiceResolution]]
+    private var continuations: [BonjourServiceKey: CheckedContinuation<ResolvedBonjourEndpoint, Error>] = [:]
+    private let events: SequencedResolverEvents
+
+    init(
+        plans: [BonjourServiceKey: [SequencedBonjourServiceResolution]],
+        events: SequencedResolverEvents
+    ) {
+        self.plans = plans
+        self.events = events
+    }
+
+    func resolve(name: String, domain: String) async throws -> ResolvedBonjourEndpoint {
+        let key = BonjourServiceKey(name: name, domain: domain)
+        guard var plan = plans[key], !plan.isEmpty else {
+            throw FakeBonjourServiceResolverError.failed
+        }
+        let next = plan.removeFirst()
+        plans[key] = plan
+
+        switch next {
+        case let .endpoint(endpoint):
+            return endpoint
+        case .blocked:
+            return try await withCheckedThrowingContinuation { continuation in
+                continuations[key] = continuation
+                events.recordBlocked(for: key)
+            }
+        }
+    }
+
+    func resume(_ key: BonjourServiceKey, with endpoint: ResolvedBonjourEndpoint) {
+        let continuation = continuations.removeValue(forKey: key)
+        continuation?.resume(returning: endpoint)
+    }
+}
+
+private final class SequencedResolverEvents: @unchecked Sendable {
+    private let blocked: [BonjourServiceKey: XCTestExpectation]
+
+    init(blocked: [BonjourServiceKey: XCTestExpectation]) {
+        self.blocked = blocked
+    }
+
+    func recordBlocked(for key: BonjourServiceKey) {
+        blocked[key]?.fulfill()
+    }
+}
+
+private final class SnapshotBatchRecorder: @unchecked Sendable {
+    let initialFullView = XCTestExpectation(description: "initial full host view published")
+    let refreshPublished = XCTestExpectation(description: "refresh host view published")
+    private let lock = NSLock()
+    private let expectedInitialIDs: [String]
+    private var didPublishInitial = false
+    private var awaitingRefresh = false
+    private var storedFirstRefreshBatch: [DiscoveredHost]?
+
+    init(expectedInitialIDs: [String]) {
+        self.expectedInitialIDs = expectedInitialIDs
+    }
+
+    var firstRefreshBatch: [DiscoveredHost]? {
+        lock.withLock { storedFirstRefreshBatch }
+    }
+
+    func beginRefresh() {
+        lock.withLock {
+            awaitingRefresh = true
+            storedFirstRefreshBatch = nil
+        }
+    }
+
+    func record(_ batch: [DiscoveredHost]) {
+        let fulfill = lock.withLock { () -> (Bool, Bool) in
+            let isInitial = !didPublishInitial && batch.map(\.serverID) == expectedInitialIDs
+            if isInitial {
+                didPublishInitial = true
+            }
+            let isRefresh = awaitingRefresh && storedFirstRefreshBatch == nil
+            if isRefresh {
+                storedFirstRefreshBatch = batch
+            }
+            return (isInitial, isRefresh)
+        }
+        if fulfill.0 {
+            initialFullView.fulfill()
+        }
+        if fulfill.1 {
+            refreshPublished.fulfill()
+        }
+    }
+}
+
+private final class DiscoveryLifecycleBoundary: @unchecked Sendable {
+    private let lock = NSLock()
+    private let observationTerminated: XCTestExpectation
+    private let observationReadyToFinish: XCTestExpectation
+    private let observationFinished: XCTestExpectation
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var didAllowFinish = false
+
+    init(
+        observationTerminated: XCTestExpectation,
+        observationReadyToFinish: XCTestExpectation,
+        observationFinished: XCTestExpectation
+    ) {
+        self.observationTerminated = observationTerminated
+        self.observationReadyToFinish = observationReadyToFinish
+        self.observationFinished = observationFinished
+    }
+
+    func recordObservationTerminated() {
+        observationTerminated.fulfill()
+    }
+
+    func waitBeforeFinish() async {
+        observationReadyToFinish.fulfill()
+        await withCheckedContinuation { continuation in
+            let shouldResume = lock.withLock { () -> Bool in
+                if didAllowFinish {
+                    return true
+                }
+                self.continuation = continuation
+                return false
+            }
+            if shouldResume {
+                continuation.resume()
+            }
+        }
+    }
+
+    func allowFinish() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            didAllowFinish = true
+            let continuation = self.continuation
+            self.continuation = nil
+            return continuation
+        }
+        continuation?.resume()
+    }
+
+    func recordObservationFinished() {
+        observationFinished.fulfill()
+    }
+}
+
+private final class ResolverRegistrationBoundary: @unchecked Sendable {
+    let registrationReached = XCTestExpectation(description: "resolver reached registration boundary")
+    private let lock = NSLock()
+    private let registrationGate = DispatchSemaphore(value: 0)
+    private var storedTimeoutTaskCount = 0
+    private var storedServiceStartCount = 0
+
+    var timeoutTaskCount: Int { lock.withLock { storedTimeoutTaskCount } }
+    var serviceStartCount: Int { lock.withLock { storedServiceStartCount } }
+
+    func arriveAndWait() {
+        registrationReached.fulfill()
+        registrationGate.wait()
+    }
+
+    func allowRegistration() {
+        registrationGate.signal()
+    }
+
+    func recordTimeoutTask() {
+        lock.withLock { storedTimeoutTaskCount += 1 }
+    }
+
+    func recordServiceStart() {
+        lock.withLock { storedServiceStartCount += 1 }
+    }
+}
+
+private final class ResolverPostRegistrationBoundary: @unchecked Sendable {
+    let registrationReached = XCTestExpectation(description: "resolver registered continuation")
+    let timerRetentionAttempted = XCTestExpectation(description: "resolver attempted timer retention")
+    private let lock = NSLock()
+    private let timerRetentionGate = DispatchSemaphore(value: 0)
+    private var storedTimeoutTaskCount = 0
+    private var storedServiceStartCount = 0
+
+    var timeoutTaskCount: Int { lock.withLock { storedTimeoutTaskCount } }
+    var serviceStartCount: Int { lock.withLock { storedServiceStartCount } }
+
+    func arriveAndWait() {
+        registrationReached.fulfill()
+        timerRetentionGate.wait()
+    }
+
+    func allowTimerRetention() {
+        timerRetentionGate.signal()
+    }
+
+    func recordTimeoutTask() {
+        lock.withLock { storedTimeoutTaskCount += 1 }
+    }
+
+    func recordServiceStart() {
+        lock.withLock { storedServiceStartCount += 1 }
+    }
+}
+
 private final class FakeBonjourBrowser: BonjourBrowsing, @unchecked Sendable {
     private let lock = NSLock()
+    private let stopExpectation: XCTestExpectation?
     private var continuation: AsyncStream<[BonjourServiceRecord]>.Continuation?
     private var storedStartCount = 0
     private var storedStopCount = 0
+
+    init(stopExpectation: XCTestExpectation? = nil) {
+        self.stopExpectation = stopExpectation
+    }
 
     var startCount: Int { lock.withLock { storedStartCount } }
     var stopCount: Int { lock.withLock { storedStopCount } }
@@ -184,6 +1056,7 @@ private final class FakeBonjourBrowser: BonjourBrowsing, @unchecked Sendable {
 
     func stop() {
         lock.withLock { storedStopCount += 1 }
+        stopExpectation?.fulfill()
         lock.withLock { continuation }?.finish()
     }
 

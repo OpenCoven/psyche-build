@@ -43,6 +43,8 @@ export interface ControlServerOptions {
   runtime: ControlServerRuntime;
   credentials: ControlCredentialStore;
   broker?: BrowserProviderBroker;
+  /** Gates bearer operator commands and provider registration; never enable outside isolated tests. */
+  operatorCommandPolicy?: 'disabled' | 'trusted-test-only';
 }
 
 /** Cap a single newline-delimited frame so a peer cannot exhaust host memory. */
@@ -197,8 +199,25 @@ export class ControlAuthority {
     return this.runtime.submit(command);
   }
 
-  snapshot(): ControlSnapshot {
-    return this.runtime.snapshot();
+  snapshot(principal: ControlPrincipal): ControlSnapshot {
+    const snapshot = this.runtime.snapshot();
+    if (principal.kind === 'operator') return snapshot;
+
+    // Surface metadata, command history, and authority records are
+    // operator-only. In particular, capability leases are bearer-like:
+    // exposing their IDs, revisions, task IDs, grants, or the command
+    // payloads that carry them would let another holder of the shared agent
+    // credential replay a lease that was issued for a different task.
+    return {
+      ...snapshot,
+      commands: {},
+      leases: {},
+      resources: [],
+      capabilityLeases: [],
+      leaseRequests: [],
+      approvals: [],
+      receipts: [],
+    };
   }
 
   readEvents(afterSequence: number, limit?: number): {
@@ -256,6 +275,7 @@ export class ControlServer {
     private readonly authority: ControlAuthority,
     private readonly credentials: ControlCredentialStore,
     private readonly canonicalRoot: string,
+    private readonly operatorCommandPolicy: NonNullable<ControlServerOptions['operatorCommandPolicy']>,
     private readonly broker?: BrowserProviderBroker,
   ) {}
 
@@ -274,6 +294,7 @@ export class ControlServer {
       authority,
       options.credentials,
       canonicalRoot,
+      options.operatorCommandPolicy ?? 'disabled',
       options.broker,
     );
 
@@ -474,6 +495,20 @@ export class ControlServer {
           });
           return;
         }
+        if (principal.kind === 'operator' && this.operatorCommandPolicy === 'disabled') {
+          write({
+            version: 1,
+            type: 'command.result',
+            requestId: request.requestId,
+            commandId: request.command.id,
+            outcome: {
+              status: 'rejected',
+              code: 'operator_authority_unavailable',
+              message: 'operator commands require a native user-presence approval broker',
+            },
+          });
+          return;
+        }
         const outcome = await this.authority.submitAs(
           principal,
           request.command,
@@ -493,7 +528,7 @@ export class ControlServer {
           version: 1,
           type: 'state.result',
           requestId: request.requestId,
-          snapshot: this.authority.snapshot(),
+          snapshot: this.authority.snapshot(principal),
         });
         return;
       case 'events.read': {
@@ -509,6 +544,14 @@ export class ControlServer {
         return;
       }
       case 'provider.register': {
+        if (this.operatorCommandPolicy === 'disabled') {
+          write({
+            version: 1, type: 'error', requestId: request.requestId,
+            code: 'provider_authority_unavailable',
+            message: 'provider registration requires a native identity broker',
+          });
+          return;
+        }
         if (principal.kind !== 'operator') {
           write({
             version: 1, type: 'error', requestId: request.requestId,

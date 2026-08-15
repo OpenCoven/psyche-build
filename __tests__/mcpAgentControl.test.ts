@@ -62,6 +62,17 @@ describe('agent surface MCP tools', () => {
     expect(description).toMatch(/cannot be perfectly predicted/i);
   });
 
+  it('rejects oversized browser script arguments before client submission', async () => {
+    const client = fakeClient();
+    inject({ controlClientForRoot: vi.fn(async () => client) });
+    const response = await call('psyche_browser_script', {
+      ...lease, project_root: '/repo', tab_id: 'tab-1', generation: 1,
+      source: 'return args;', args: { text: 'x'.repeat(256 * 1024 + 1) },
+    });
+    expect(response.error).toMatchObject({ code: -32602 });
+    expect(client.submit).not.toHaveBeenCalled();
+  });
+
   it('routes a pane action through the canonical client without forging actor or epoch', async () => {
     const receipt = {
       schema: 'psyche.control.receipt/v1', actionId: 'action-1', state: 'queued',
@@ -106,8 +117,39 @@ describe('agent surface MCP tools', () => {
     expect(client.submit).not.toHaveBeenCalled();
 
     expect(payload(await call('psyche_control_lease', {
-      operation: 'status', task_id: 'task-1', project_root: '/repo',
+      operation: 'status', task_id: 'task-1', request_id: 'request-1', project_root: '/repo',
     }))).toMatchObject({ leases: [], requests: [] });
+  });
+
+  it('does not disclose reusable lease credentials through the project listing', async () => {
+    const client = fakeClient({ getState: vi.fn(async () => ({
+      ownerEpoch: 1, sequence: 1, resources: [], approvals: [], receipts: [],
+      capabilityLeases: [{
+        id: 'lease-victim', requestId: 'request-victim', revision: 3,
+        actorId: 'agent', taskId: 'task-victim', grants: [],
+      }],
+      leaseRequests: [{ id: 'request-victim', taskId: 'task-victim' }],
+    })) });
+    inject({ controlClientForRoot: vi.fn(async () => client) });
+
+    const body = payload(await call('psyche_control_list', { project_root: '/repo' }));
+    expect(body).not.toHaveProperty('leases');
+    expect(body).not.toHaveProperty('lease_requests');
+    expect(JSON.stringify(body)).not.toContain('lease-victim');
+    expect(JSON.stringify(body)).not.toContain('request-victim');
+  });
+
+  it('requires the originating request id to inspect a task lease', async () => {
+    const client = fakeClient({ getState: vi.fn(async () => ({
+      capabilityLeases: [], leaseRequests: [], resources: [], approvals: [], receipts: [],
+    })) });
+    inject({ controlClientForRoot: vi.fn(async () => client) });
+
+    const response = await call('psyche_control_lease', {
+      operation: 'status', task_id: 'task-victim', project_root: '/repo',
+    });
+    expect(response.error.code).toBe(-32602);
+    expect(client.getState).not.toHaveBeenCalled();
   });
 
   it('returns a structured lease_missing result for unleased create and kill aliases', async () => {

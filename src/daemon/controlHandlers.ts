@@ -239,7 +239,7 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
           actionId: randomUUID(), tabId: payload.tabId, generation: payload.generation,
           operation: { kind: 'script', source: payload.source,
             ...(payload.args === undefined ? {} : { args: payload.args }) },
-          timeoutMs: AGENT_CONTROL_LIMITS.actionTimeoutMs,
+          timeoutMs: AGENT_CONTROL_LIMITS.scriptTimeoutMs,
         }))
       : notSupported('browser.script'),
 

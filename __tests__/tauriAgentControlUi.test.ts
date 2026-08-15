@@ -3,14 +3,25 @@ import { readFile } from 'node:fs/promises';
 import {
   createAgentControlModel,
   resourceLeaseBadge,
+  surfaceResourceIdentity,
 } from '../native/desktop/psyche-build-tauri/web/control/agent-control-model.mjs';
-import { runFocusedOperatorAction } from '../native/desktop/psyche-build-tauri/web/control/agent-control-drawer.mjs';
+import {
+  installAgentControlUiLifecycle,
+  renderAgentControlDrawer,
+  runFocusedOperatorAction,
+  trapAgentControlFocus,
+} from '../native/desktop/psyche-build-tauri/web/control/agent-control-drawer.mjs';
 
 const NOW = Date.parse('2026-08-13T01:00:00.000Z');
 
 function snapshot(ownerEpoch = 7) {
   return {
     ownerEpoch,
+    resources: [
+      { kind: 'pane', id: 'pane-1', generation: 3 },
+      { kind: 'pane', id: 'pane-2', generation: 5 },
+      { kind: 'browser_tab', id: 'tab-1', generation: 4 },
+    ],
     leaseRequests: [
       {
         id: 'request-pending', actorId: 'agent-a', taskId: 'task-pending', status: 'pending',
@@ -50,7 +61,259 @@ function snapshot(ownerEpoch = 7) {
   };
 }
 
+class FakeElement {
+  ownerDocument: FakeDocument;
+  tagName: string;
+  className = '';
+  private ownText = '';
+  hidden = false;
+  disabled = false;
+  type = '';
+  dataset: Record<string, string> = {};
+  children: FakeElement[] = [];
+  attributes = new Map<string, string>();
+  listeners = new Map<string, Set<(event: any) => void>>();
+
+  constructor(ownerDocument: FakeDocument, tagName = 'div') {
+    this.ownerDocument = ownerDocument;
+    this.tagName = tagName.toUpperCase();
+  }
+
+  get textContent() { return this.ownText + this.children.map((child) => child.textContent).join(''); }
+  set textContent(value: string) { this.ownText = String(value); this.children = []; }
+
+  append(...nodes: FakeElement[]) { this.children.push(...nodes); }
+  appendChild(node: FakeElement) { this.children.push(node); return node; }
+  replaceChildren(...nodes: FakeElement[]) { this.children = nodes; }
+  setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+  getAttribute(name: string) { return this.attributes.get(name) ?? null; }
+  addEventListener(type: string, listener: (event: any) => void) {
+    const listeners = this.listeners.get(type) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+  removeEventListener(type: string, listener: (event: any) => void) {
+    this.listeners.get(type)?.delete(listener);
+  }
+  dispatch(type: string, init: Record<string, unknown> = {}) {
+    const event = {
+      type, target: this, key: '', shiftKey: false,
+      preventDefault: vi.fn(), stopPropagation: vi.fn(), stopImmediatePropagation: vi.fn(),
+      immediatePropagationStopped: false,
+      ...init,
+    };
+    const stopImmediate = event.stopImmediatePropagation;
+    event.stopImmediatePropagation = vi.fn(() => {
+      event.immediatePropagationStopped = true;
+      stopImmediate();
+    });
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(event);
+      if (event.immediatePropagationStopped) break;
+    }
+    return event;
+  }
+  focus() { this.ownerDocument.activeElement = this; }
+  querySelectorAll(selector: string): FakeElement[] {
+    const descendants = this.children.flatMap((child) => [child, ...child.querySelectorAll(selector)]);
+    if (selector.includes('button')) return descendants.filter((child) => child.tagName === 'BUTTON' && !child.disabled && !child.hidden);
+    if (selector === '[data-action-key]') return descendants.filter((child) => Boolean(child.dataset.actionKey));
+    const actionKey = selector.match(/^\[data-action-key="(.+)"\]$/)?.[1];
+    return actionKey ? descendants.filter((child) => child.dataset.actionKey === actionKey) : [];
+  }
+  querySelector(selector: string) { return this.querySelectorAll(selector)[0] ?? null; }
+}
+
+class FakeDocument {
+  activeElement: FakeElement | null = null;
+  createElement(tag: string) { return new FakeElement(this, tag); }
+}
+
+function buttonByLabel(root: FakeElement, label: string) {
+  return root.querySelectorAll('button').find((button) => button.getAttribute('aria-label') === label);
+}
+
+async function flushActions() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+function extractFunction(source: string, name: string) {
+  const start = source.indexOf(`function ${name}(`);
+  if (start === -1) throw new Error(`missing function ${name}`);
+  const bodyStart = source.indexOf('{', start);
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}') depth -= 1;
+    if (depth === 0) return source.slice(start, index + 1);
+  }
+  throw new Error(`unterminated function ${name}`);
+}
+
+function compileFunction<T extends (...args: never[]) => unknown>(
+  source: string,
+  dependencies: Record<string, unknown>,
+) {
+  return Function(
+    ...Object.keys(dependencies),
+    `"use strict"; return (${source});`,
+  )(...Object.values(dependencies)) as T;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('agent control operator model', () => {
+  it('ignores a control-state response after the active project changes', async () => {
+    const main = await readFile('native/desktop/psyche-build-tauri/web/main.js', 'utf8');
+    let project = { root: '/project-a' };
+    const response = deferred<Record<string, unknown>>();
+    const rendered: string[] = [];
+    let latestModel: any = null;
+    const refresh = compileFunction<() => Promise<unknown>>(
+      extractFunction(main, 'refreshAgentControlState'),
+      {
+        activeProject: () => project,
+        window: { PsycheControl: {
+          createAgentControlModel: (snapshot: any) => {
+            latestModel = snapshot;
+            return snapshot;
+          },
+        } },
+        invoke: () => response.promise,
+        agentControlModel: null,
+        agentControlOwnerEpoch: null,
+        agentControlProjectRoot: null,
+        agentControlRefreshRequestId: 0,
+        agentControlRefreshFlight: null,
+        agentControlRefreshQueued: false,
+        renderAgentControl: () => { rendered.push(latestModel.id); },
+      },
+    );
+
+    const pending = refresh();
+    project = { root: '/project-b' };
+    response.resolve({ snapshot: { id: 'project-a', ownerEpoch: 1 } });
+
+    expect(await pending).toBeNull();
+    expect(rendered).toEqual([]);
+  });
+
+  it('coalesces overlapping control-state polls into one follow-up request', async () => {
+    const main = await readFile('native/desktop/psyche-build-tauri/web/main.js', 'utf8');
+    const olderResponse = deferred<Record<string, unknown>>();
+    const newerResponse = deferred<Record<string, unknown>>();
+    const responses = [olderResponse, newerResponse];
+    const rendered: string[] = [];
+    let latestModel: any = null;
+    const refresh = compileFunction<() => Promise<unknown>>(
+      extractFunction(main, 'refreshAgentControlState'),
+      {
+        activeProject: () => ({ root: '/project-a' }),
+        window: { PsycheControl: {
+          createAgentControlModel: (snapshot: any) => {
+            latestModel = snapshot;
+            return snapshot;
+          },
+        } },
+        invoke: () => responses.shift()!.promise,
+        agentControlModel: null,
+        agentControlOwnerEpoch: null,
+        agentControlProjectRoot: null,
+        agentControlRefreshRequestId: 0,
+        agentControlRefreshFlight: null,
+        agentControlRefreshQueued: false,
+        renderAgentControl: () => { rendered.push(latestModel.id); },
+      },
+    );
+
+    const older = refresh();
+    const newer = refresh();
+    expect(responses).toHaveLength(1);
+    olderResponse.resolve({ snapshot: { id: 'older', ownerEpoch: 1 } });
+    await older;
+    await newer;
+    await flushActions();
+    expect(responses).toHaveLength(0);
+    newerResponse.resolve({ snapshot: { id: 'newer', ownerEpoch: 1 } });
+    await flushActions();
+
+    expect(rendered).toEqual(['older', 'newer']);
+  });
+
+  it('does not let an older control-state rejection clear newer state', async () => {
+    const main = await readFile('native/desktop/psyche-build-tauri/web/main.js', 'utf8');
+    const olderResponse = deferred<Record<string, unknown>>();
+    const newerResponse = deferred<Record<string, unknown>>();
+    const responses = [olderResponse, newerResponse];
+    const rendered: string[] = [];
+    let latestModel: any = null;
+    const refresh = compileFunction<() => Promise<unknown>>(
+      extractFunction(main, 'refreshAgentControlState'),
+      {
+        activeProject: () => ({ root: '/project-a' }),
+        window: { PsycheControl: {
+          createAgentControlModel: (snapshot: any) => {
+            latestModel = snapshot;
+            return snapshot;
+          },
+        } },
+        invoke: () => responses.shift()!.promise,
+        agentControlModel: null,
+        agentControlOwnerEpoch: null,
+        agentControlProjectRoot: null,
+        agentControlRefreshRequestId: 0,
+        agentControlRefreshFlight: null,
+        agentControlRefreshQueued: false,
+        renderAgentControl: () => { rendered.push(latestModel?.id ?? 'cleared'); },
+      },
+    );
+
+    const older = refresh();
+    const newer = refresh();
+    olderResponse.reject(new Error('older request failed'));
+    expect(await older).toBeNull();
+    await newer;
+    await flushActions();
+    newerResponse.resolve({ snapshot: { id: 'newer', ownerEpoch: 1 } });
+    await flushActions();
+
+    expect(rendered).toEqual(['cleared', 'newer']);
+  });
+
+  it('rejects a drawer action after its project is no longer active', async () => {
+    const main = await readFile('native/desktop/psyche-build-tauri/web/main.js', 'utf8');
+    const invoke = vi.fn(() => Promise.resolve({ outcome: { status: 'succeeded' } }));
+    const command = compileFunction<(project: { root: string }, command: object) => Promise<unknown>>(
+      extractFunction(main, 'agentControlCommand'),
+      {
+        activeProject: () => ({ root: '/project-b' }),
+        agentControlProjectRoot: '/project-b',
+        invoke,
+      },
+    );
+
+    await expect(command({ root: '/project-a' }, { type: 'lease_revoke' }))
+      .rejects.toMatchObject({ code: 'control_project_changed' });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('routes every active-project assignment through one invalidating setter', async () => {
+    const main = await readFile('native/desktop/psyche-build-tauri/web/main.js', 'utf8');
+    const assignments = main.match(/state\.activeProjectId\s*(?<![=!])=(?!=)/g) || [];
+
+    expect(assignments).toHaveLength(1);
+    expect(main).toMatch(/function assignActiveProjectId[\s\S]*resetAgentControlProject/);
+  });
+
   it('groups request, active, expired, and revoked authority with exact details', () => {
     const model = createAgentControlModel(snapshot(), { now: NOW, operator: true });
 
@@ -72,14 +335,76 @@ describe('agent control operator model', () => {
     }]);
   });
 
+  it('renders exact requested resources and after-grant TTL without fabricating an absolute expiry', async () => {
+    const requested = snapshot();
+    requested.leaseRequests[0].createdAt = '2001-01-01T00:00:00.000Z';
+    const longCapability = `browser.${'x'.repeat(1_000)}`;
+    requested.leaseRequests[0].grants = [
+      {
+        target: { kind: 'pane', id: 'pane-2', generation: 5 },
+        capabilities: ['pane.observe', 'pane.input'],
+      },
+      {
+        target: { kind: 'browser_tab', id: 'tab-2', generation: 8 },
+        capabilities: ['browser.inspect', longCapability],
+      },
+    ];
+    const model = createAgentControlModel(requested, { now: NOW, operator: true });
+    expect(model.groups.requested[0]).toMatchObject({
+      ttlMs: 60_000,
+      resources: [
+        { kind: 'pane', id: 'pane-2', generation: 5, capabilities: ['pane.observe', 'pane.input'] },
+        { kind: 'browser_tab', id: 'tab-2', generation: 8, capabilities: ['browser.inspect', longCapability] },
+      ],
+    });
+    expect(model.groups.requested[0]).not.toHaveProperty('expiresAt');
+
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    const onGrant = vi.fn(() => Promise.resolve());
+    renderAgentControlDrawer(content, model, { onGrant });
+
+    expect(content.textContent).toContain('pane:pane-2@5 · pane.observe, pane.input');
+    expect(content.textContent).toContain('browser_tab:tab-2@8 · browser.inspect');
+    expect(content.textContent).toContain('Expires 60s after grant');
+    expect(content.textContent).not.toContain('2001-01-01');
+    expect(content.textContent).not.toContain('2001-01-01T00:01:00.000Z');
+    expect(content.textContent).toContain('expires 2026-08-13T01:10:00.000Z');
+    expect(content.textContent).not.toContain('payload');
+    expect(content.textContent).not.toContain(longCapability);
+    const requestRows = content.children[0].children
+      .filter((child) => child.className === 'agent-control-resource');
+    expect(requestRows).toHaveLength(2);
+    expect(requestRows.every((row) => row.textContent.length <= 256)).toBe(true);
+    expect(requestRows[0].getAttribute('aria-label'))
+      .toBe('Requested pane pane-2 generation 5; capabilities pane.observe, pane.input');
+    expect(requestRows[1].getAttribute('aria-label'))
+      .toContain('Requested browser tab tab-2 generation 8; capabilities browser.inspect');
+
+    buttonByLabel(content, 'Grant request request-pending')!.dispatch('click');
+    await flushActions();
+    expect(onGrant).toHaveBeenCalledOnce();
+    expect(onGrant).toHaveBeenCalledWith(model.groups.requested[0]);
+  });
+
   it('exposes only redacted approval details and operator actions', () => {
     const operator = createAgentControlModel(snapshot(), { now: NOW, operator: true });
     expect(operator.approvals).toEqual([expect.objectContaining({
       approvalId: 'approval-1', payloadDigest: 'digest-1', effect: {
         kind: 'close', target: 'pane:pane-1',
-      }, canApprove: true, canDeny: true,
+      }, agentId: 'agent-b', taskId: 'task-active',
+      resource: { kind: 'pane', id: 'pane-1', generation: 3 },
+      leaseCurrent: true, canRevokeLease: true, canApprove: true, canDeny: true,
     })]);
     expect(JSON.stringify(operator)).not.toContain('executablePayloadDigest');
+
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    renderAgentControlDrawer(content, operator);
+    expect(content.textContent).toContain('agent-b · task-active');
+    expect(content.textContent).toContain('pane pane-1 generation 3');
+    expect(content.textContent).toContain('expires 2026-08-13T01:03:00.000Z');
+    expect(buttonByLabel(content, 'Revoke entire lease for pane pane-1 generation 3')).toBeDefined();
 
     const agent = createAgentControlModel(snapshot(), { now: NOW, operator: false });
     expect(agent.approvals[0]).toMatchObject({ canApprove: false, canDeny: false });
@@ -98,6 +423,371 @@ describe('agent control operator model', () => {
       now: NOW, operator: true, previousOwnerEpoch: 7,
     });
     expect(restarted.badges).toEqual([]);
+  });
+
+  it('uses the trusted current resource generation when a pane or tab is replaced', () => {
+    const model = createAgentControlModel(snapshot(), { now: NOW, operator: true });
+    expect(surfaceResourceIdentity(model, 'pane', 'pane-1')).toEqual({
+      kind: 'pane', id: 'pane-1', generation: 3,
+    });
+    expect(resourceLeaseBadge(model, surfaceResourceIdentity(model, 'pane', 'pane-1'))).not.toBeNull();
+
+    const replaced = snapshot();
+    replaced.resources = [
+      { kind: 'pane', id: 'pane-1', generation: 4 },
+      { kind: 'browser_tab', id: 'tab-1', generation: 5 },
+    ];
+    const replacedModel = createAgentControlModel(replaced, { now: NOW, operator: true });
+    expect(resourceLeaseBadge(replacedModel, surfaceResourceIdentity(replacedModel, 'pane', 'pane-1'))).toBeNull();
+    expect(resourceLeaseBadge(replacedModel, surfaceResourceIdentity(replacedModel, 'browser_tab', 'tab-1'))).toBeNull();
+  });
+
+  it('installs once across restored boot and repeated add-project calls, with explicit cleanup', () => {
+    const document = new FakeDocument();
+    const toggle = document.createElement('button');
+    const overlay = document.createElement('div');
+    const close = document.createElement('button');
+    overlay.append(close);
+    const refresh = vi.fn(() => Promise.resolve());
+    const setIntervalFn = vi.fn(() => 41);
+    const clearIntervalFn = vi.fn();
+    const options = { toggle, overlay, close, refresh, setInterval: setIntervalFn, clearInterval: clearIntervalFn };
+
+    const restoredBoot = installAgentControlUiLifecycle(options);
+    const firstAddProject = installAgentControlUiLifecycle(options);
+    const secondAddProject = installAgentControlUiLifecycle(options);
+
+    expect(firstAddProject).toBe(restoredBoot);
+    expect(secondAddProject).toBe(restoredBoot);
+    expect(setIntervalFn).toHaveBeenCalledOnce();
+    expect(toggle.listeners.get('click')?.size).toBe(1);
+    expect(overlay.listeners.get('keydown')?.size).toBe(1);
+    toggle.dispatch('click');
+    expect(overlay.hidden).toBe(false);
+    const escape = overlay.dispatch('keydown', { key: 'Escape' });
+    expect(escape.preventDefault).toHaveBeenCalledOnce();
+    expect(overlay.hidden).toBe(true);
+    expect(document.activeElement).toBe(toggle);
+    restoredBoot!.dispose();
+    expect(clearIntervalFn).toHaveBeenCalledWith(41);
+    expect(toggle.listeners.get('click')?.size).toBe(0);
+    expect(overlay.listeners.get('keydown')?.size).toBe(0);
+  });
+
+  it('focuses the modal synchronously and fully consumes Escape while refresh is stalled', () => {
+    const document = new FakeDocument();
+    const toggle = document.createElement('button');
+    const overlay = document.createElement('div');
+    const close = document.createElement('button');
+    overlay.append(close);
+    let resolveRefresh!: () => void;
+    const stalledRefresh = new Promise<void>((resolve) => { resolveRefresh = resolve; });
+    const lifecycle = installAgentControlUiLifecycle({
+      toggle,
+      overlay,
+      close,
+      refresh: () => stalledRefresh,
+      setInterval: () => 42,
+      clearInterval: vi.fn(),
+    });
+    const globalListener = vi.fn();
+    overlay.addEventListener('keydown', globalListener);
+
+    toggle.dispatch('click');
+    expect(document.activeElement).toBe(close);
+    const escape = overlay.dispatch('keydown', { key: 'Escape' });
+    expect(escape.preventDefault).toHaveBeenCalledOnce();
+    expect(escape.stopPropagation).toHaveBeenCalledOnce();
+    expect(escape.stopImmediatePropagation).toHaveBeenCalledOnce();
+    expect(globalListener).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(toggle);
+
+    lifecycle!.dispose();
+    resolveRefresh();
+  });
+
+  it('contains modal Tab and Shift+Tab focus while Escape restoration remains lifecycle-owned', () => {
+    const document = new FakeDocument();
+    const drawer = document.createElement('div');
+    const first = document.createElement('button');
+    const middle = document.createElement('button');
+    const last = document.createElement('button');
+    drawer.append(first, middle, last);
+
+    last.focus();
+    const forward = { key: 'Tab', shiftKey: false, preventDefault: vi.fn() };
+    expect(trapAgentControlFocus(forward, drawer)).toBe(true);
+    expect(document.activeElement).toBe(first);
+    expect(forward.preventDefault).toHaveBeenCalledOnce();
+
+    first.focus();
+    const backward = { key: 'Tab', shiftKey: true, preventDefault: vi.fn() };
+    expect(trapAgentControlFocus(backward, drawer)).toBe(true);
+    expect(document.activeElement).toBe(last);
+
+    middle.focus();
+    const interior = { key: 'Tab', shiftKey: false, preventDefault: vi.fn() };
+    expect(trapAgentControlFocus(interior, drawer)).toBe(false);
+    expect(document.activeElement).toBe(middle);
+  });
+
+  it('keeps failed command card, error, and logical focus across a polling render', async () => {
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    const failure = vi.fn(() => Promise.reject(new Error('owner unavailable')));
+    const model = createAgentControlModel(snapshot(), { now: NOW, operator: true });
+
+    renderAgentControlDrawer(content, model, { onGrant: failure });
+    const grant = buttonByLabel(content, 'Grant request request-pending');
+    expect(grant).toBeDefined();
+    grant!.dispatch('click');
+    await flushActions();
+    expect(content.textContent).toContain('owner unavailable');
+    expect(document.activeElement).toBe(grant);
+
+    renderAgentControlDrawer(content, model, { onGrant: failure });
+    const restoredGrant = buttonByLabel(content, 'Grant request request-pending');
+    expect(restoredGrant).toBeDefined();
+    expect(document.activeElement).toBe(restoredGrant);
+    expect(content.children.some((card) => card.dataset.requestId === 'request-pending')).toBe(true);
+    expect(content.textContent).toContain('owner unavailable');
+
+    model.groups.requested = [];
+    renderAgentControlDrawer(content, model, { onGrant: failure });
+    expect(content.children.some((card) => card.dataset.failedActionKey === 'grant:request-pending')).toBe(true);
+    expect(document.activeElement?.dataset.actionKey).toBe('grant:request-pending');
+    buttonByLabel(content, 'Dismiss error for Grant request request-pending')!.dispatch('click');
+    renderAgentControlDrawer(content, model, { onGrant: failure });
+    expect(content.children.some((card) => card.dataset.failedActionKey === 'grant:request-pending')).toBe(false);
+  });
+
+  it('renders an immediate exact revoke control for every leased resource', async () => {
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    const onRevoke = vi.fn(() => Promise.resolve());
+    const model = createAgentControlModel(snapshot(), { now: NOW, operator: true });
+    model.groups.active[0].resources.push({
+      kind: 'browser_tab', id: 'tab-2', generation: 9, capabilities: ['browser.inspect'],
+    });
+    model.groups.active[0].resources.push({
+      kind: 'project', id: 'project-1', capabilities: ['project.observe'],
+    });
+
+    renderAgentControlDrawer(content, model, { onRevoke });
+    const paneRevoke = buttonByLabel(content, 'Revoke entire lease for pane pane-1 generation 3');
+    const tabRevoke = buttonByLabel(content, 'Revoke entire lease for browser tab tab-2 generation 9');
+    const projectRevoke = buttonByLabel(content, 'Revoke entire lease for project project-1');
+    expect(paneRevoke).toBeDefined();
+    expect(tabRevoke).toBeDefined();
+    expect(projectRevoke).toBeDefined();
+    tabRevoke!.dispatch('click');
+    paneRevoke!.dispatch('click');
+    projectRevoke!.dispatch('click');
+    await flushActions();
+    expect(onRevoke).toHaveBeenCalledOnce();
+    expect(onRevoke).toHaveBeenCalledWith({
+      leaseId: 'lease-active', revision: 2,
+      resource: { kind: 'browser_tab', id: 'tab-2', generation: 9 },
+    });
+  });
+
+  it('locks duplicate grants and competing approval decisions by action cohort', async () => {
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    const grantResult = deferred<void>();
+    const approvalResult = deferred<void>();
+    const onGrant = vi.fn(() => grantResult.promise);
+    const onApprove = vi.fn(() => approvalResult.promise);
+    const onDeny = vi.fn(() => approvalResult.promise);
+    const model = createAgentControlModel(snapshot(), { now: NOW, operator: true, projectRoot: '/repo' });
+
+    renderAgentControlDrawer(content, model, { onGrant, onApprove, onDeny });
+    const grant = buttonByLabel(content, 'Grant request request-pending')!;
+    const approve = buttonByLabel(content, 'Approve once')!;
+    const deny = buttonByLabel(content, 'Deny')!;
+    grant.dispatch('click');
+    grant.dispatch('click');
+    approve.dispatch('click');
+    deny.dispatch('click');
+
+    expect(onGrant).toHaveBeenCalledOnce();
+    expect(onApprove).toHaveBeenCalledOnce();
+    expect(onDeny).not.toHaveBeenCalled();
+    expect(grant.disabled).toBe(true);
+    expect(approve.disabled).toBe(true);
+    expect(deny.disabled).toBe(true);
+    grantResult.resolve();
+    approvalResult.resolve();
+    await flushActions();
+  });
+
+  it('drops stale failures and retry closures when project or owner context changes', async () => {
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    const failedGrant = deferred<void>();
+    const first = createAgentControlModel(snapshot(7), {
+      now: NOW, operator: true, projectRoot: '/repo-a',
+    });
+    renderAgentControlDrawer(content, first, { onGrant: () => failedGrant.promise });
+    const staleGrant = buttonByLabel(content, 'Grant request request-pending')!;
+    staleGrant.dispatch('click');
+
+    const restartedSnapshot = snapshot(8);
+    restartedSnapshot.leaseRequests = [];
+    const restarted = createAgentControlModel(restartedSnapshot, {
+      now: NOW, operator: true, projectRoot: '/repo-a', previousOwnerEpoch: 7,
+    });
+    renderAgentControlDrawer(content, restarted, { onGrant: vi.fn() });
+    failedGrant.reject(new Error('old owner unavailable'));
+    await flushActions();
+
+    expect(content.textContent).not.toContain('old owner unavailable');
+    expect(document.activeElement).not.toBe(staleGrant);
+    expect(content.children.some((card) => card.dataset.failedActionKey === 'grant:request-pending')).toBe(false);
+    expect(buttonByLabel(content, 'Grant request request-pending')).toBeUndefined();
+  });
+
+  it('bounds hostile control snapshots and reports every overflow', () => {
+    const huge = snapshot();
+    huge.capabilityLeases[0].actorId = 'lease-agent-'.repeat(100);
+    huge.capabilityLeases[0].taskId = 'lease-task-'.repeat(100);
+    huge.capabilityLeases[0].expiresAt = `2099-${'9'.repeat(1_000)}`;
+    huge.leaseRequests = Array.from({ length: 1_001 }, (_, index) => ({
+      id: `request-${index}-${'x'.repeat(1_000)}`,
+      actorId: 'a'.repeat(1_000), taskId: 't'.repeat(1_000), status: 'pending', ttlMs: 1,
+      createdAt: '2026-08-13T00:55:00.000Z',
+      grants: index === 0 ? Array.from({ length: 1_001 }, (__, resourceIndex) => ({
+        target: { kind: 'pane', id: `pane-${resourceIndex}`, generation: resourceIndex },
+        capabilities: resourceIndex === 0
+          ? Array.from({ length: 1_001 }, (___, capabilityIndex) => `cap-${capabilityIndex}`)
+          : ['pane.observe'],
+      })) : [],
+    }));
+    const model = createAgentControlModel(huge, { now: NOW, operator: true });
+    expect(model.groups.requested).toHaveLength(100);
+    expect(model.groups.requested[0].resources).toHaveLength(32);
+    expect(model.groups.requested[0].resources[0].capabilities).toHaveLength(12);
+
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    renderAgentControlDrawer(content, model);
+    expect(content.textContent).toContain('+901 more requested lease requests');
+    expect(content.textContent).toContain('+969 more resources');
+    expect(content.textContent).toContain('+989 more capabilities');
+    expect(content.textContent).not.toContain('x'.repeat(256));
+    expect(content.textContent).not.toContain('lease-agent-'.repeat(20));
+    expect(content.textContent).not.toContain('lease-task-'.repeat(20));
+    expect(content.textContent).not.toContain('9'.repeat(256));
+  });
+
+  it('never offers Grant when a request contains hidden overflow authority', () => {
+    const hidden = snapshot();
+    hidden.leaseRequests[0].grants = Array.from({ length: 33 }, (_, index) => ({
+      target: { kind: 'pane', id: `pane-${index}`, generation: index },
+      capabilities: ['pane.observe'],
+    }));
+    const model = createAgentControlModel(hidden, { now: NOW, operator: true });
+    expect(model.groups.requested[0]).toMatchObject({
+      canGrant: false, requiresNarrowerRequest: true, resourceOverflow: 1,
+    });
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    renderAgentControlDrawer(content, model);
+    expect(buttonByLabel(content, 'Grant request request-pending')).toBeUndefined();
+    expect(content.textContent).toContain('Request exceeds display limits; submit a narrower request');
+  });
+
+  it('projects actionable requests and approvals before terminal history', () => {
+    const crowded = snapshot();
+    const pendingRequest = crowded.leaseRequests[0];
+    crowded.leaseRequests = [
+      ...Array.from({ length: 101 }, (_, index) => ({
+        ...pendingRequest, id: `terminal-${index}`, status: 'granted',
+      })),
+      pendingRequest,
+    ];
+    const pendingApproval = crowded.approvals[0];
+    crowded.approvals = [
+      ...Array.from({ length: 101 }, (_, index) => ({
+        ...pendingApproval, id: `terminal-approval-${index}`, status: 'denied',
+      })),
+      pendingApproval,
+    ];
+    const model = createAgentControlModel(crowded, { now: NOW, operator: true });
+    expect(model.groups.requested[0].requestId).toBe('request-pending');
+    expect(model.approvals[0]).toMatchObject({ approvalId: 'approval-1', canApprove: true, canDeny: true });
+    expect(model.overflow).toMatchObject({ leaseRequests: 0, approvals: 0 });
+  });
+
+  it('authorizes a pending approval whose exact lease is beyond the rendered lease cap', () => {
+    const crowded = snapshot();
+    const matchingLease = crowded.capabilityLeases[0];
+    crowded.capabilityLeases = [
+      ...Array.from({ length: 101 }, (_, index) => ({
+        ...matchingLease, id: `unrelated-${index}`, requestId: `request-${index}`,
+      })),
+      matchingLease,
+    ];
+    const model = createAgentControlModel(crowded, { now: NOW, operator: true });
+    expect(model.groups.active).toHaveLength(100);
+    expect(model.approvals[0]).toMatchObject({
+      agentId: 'agent-b', taskId: 'task-active', leaseCurrent: true,
+      canApprove: true, canDeny: true, canRevokeLease: true,
+    });
+  });
+
+  it('disables approval actions when the lease belongs to another owner epoch', () => {
+    const restarted = snapshot(8);
+    restarted.capabilityLeases[0].ownerEpoch = 7;
+    const model = createAgentControlModel(restarted, { now: NOW, operator: true });
+    expect(model.approvals[0]).toMatchObject({
+      leaseCurrent: false, canApprove: false, canDeny: false, canRevokeLease: false,
+    });
+  });
+
+  it('disables approval actions when the approval belongs to another owner epoch', () => {
+    const restarted = snapshot(8);
+    restarted.approvals[0].ownerEpoch = 7;
+    const model = createAgentControlModel(restarted, { now: NOW, operator: true });
+    expect(model.approvals[0]).toMatchObject({
+      leaseCurrent: false, canApprove: false, canDeny: false, canRevokeLease: false,
+    });
+  });
+
+  it('reports only rendered pending request overflow with an exact label', () => {
+    const crowded = snapshot();
+    const template = crowded.leaseRequests[0];
+    crowded.leaseRequests = [
+      ...Array.from({ length: 101 }, (_, index) => ({
+        ...template, id: `pending-${index}`, status: 'pending',
+      })),
+      ...Array.from({ length: 102 }, (_, index) => ({
+        ...template, id: `revoked-${index}`, status: 'revoked',
+      })),
+    ];
+    const model = createAgentControlModel(crowded, { now: NOW, operator: true });
+    expect(model.overflow).toMatchObject({ leaseRequests: 1 });
+    expect(model.overflow).not.toHaveProperty('revokedLeaseRequests');
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    renderAgentControlDrawer(content, model);
+    expect(content.textContent).toContain('+1 more requested lease request');
+    expect(content.textContent).not.toContain('more revoked lease request');
+  });
+
+  it('unlocks an action and exposes a synchronous refresh failure', async () => {
+    const document = new FakeDocument();
+    const content = document.createElement('div');
+    const model = createAgentControlModel(snapshot(), { now: NOW, operator: true });
+    const onGrant = vi.fn(() => Promise.resolve());
+    renderAgentControlDrawer(content, model, {
+      onGrant,
+      onStateChange: () => { throw new Error('refresh failed synchronously'); },
+    });
+    const grant = buttonByLabel(content, 'Grant request request-pending')!;
+    grant.dispatch('click');
+    await vi.waitFor(() => expect(grant.disabled).toBe(false));
+    expect(content.textContent).toContain('refresh failed synchronously');
   });
 
   it('retains command focus and exposes the failure without removing its card', async () => {
@@ -124,6 +814,11 @@ describe('agent control operator model', () => {
     expect(styles).toContain('.agent-control-badge');
     expect(main).toContain('invoke("control_state"');
     expect(main).toContain('invoke("control_operator_submit"');
+    expect(main).toMatch(/async function boot[\s\S]*installAgentControlUi\(\)/);
+    expect(main).toContain('surfaceResourceIdentity(model, "pane", threadId)');
+    expect(main).toContain('surfaceResourceIdentity(model, "browser_tab", tabNode.dataset.tabId)');
+    expect(main).toContain('dataset.controlGeneration');
+    expect(main).toMatch(/async function setActiveProject[\s\S]*assignActiveProjectId\(id\)/);
     expect(main).not.toMatch(/control_operator_submit[\s\S]{0,300}(spawnBridgePane|TmuxControl|execFileSync)/);
     expect(entry).toContain("from './agent-control-model.mjs'");
     expect(entry).toContain("from './agent-control-drawer.mjs'");
