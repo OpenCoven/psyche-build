@@ -43,8 +43,16 @@ public struct RemoteActionScope: Sendable, Equatable {
         self.consequence = consequence
     }
 
-    static func make(data: [String: String]?) -> Self {
-        let data = data ?? [:]
+    static func make(data: [String: String]?, inheriting previous: Self? = nil) -> Self {
+        var mergedData = previous?.rows.reduce(into: [String: String]()) { result, row in
+            result[row.key] = row.value
+        } ?? [:]
+        if let consequence = previous?.consequence {
+            mergedData["consequence"] = consequence
+        }
+        if let data {
+            mergedData.merge(data) { _, latest in latest }
+        }
         let definitions = [
             ("host", "Host"),
             ("projectId", "Project ID"),
@@ -56,10 +64,10 @@ public struct RemoteActionScope: Sendable, Equatable {
 
         return Self(
             rows: definitions.compactMap { key, label in
-                guard let value = data[key], !value.isEmpty else { return nil }
+                guard let value = mergedData[key], !value.isEmpty else { return nil }
                 return RemoteActionScopeRow(key: key, label: label, value: value)
             },
-            consequence: data["consequence"].flatMap { $0.isEmpty ? nil : $0 }
+            consequence: mergedData["consequence"].flatMap { $0.isEmpty ? nil : $0 }
         )
     }
 }
@@ -129,7 +137,8 @@ public struct RemoteActionPresentation: Sendable, Equatable, Identifiable {
     public static func make(
         response: MobileActionsResultResponse,
         paneID: String,
-        action: PaneAction
+        action: PaneAction,
+        inheriting previous: RemoteActionPresentation? = nil
     ) throws -> Self {
         let result = response.result
         let sessionID = response.sessionID.flatMap { $0.isEmpty ? nil : $0 }
@@ -201,8 +210,8 @@ public struct RemoteActionPresentation: Sendable, Equatable, Identifiable {
             title: result.title ?? "Action",
             message: result.message,
             sessionID: sessionID,
-            scope: .make(data: result.data),
-            relatedFiles: result.relatedFiles ?? [],
+            scope: .make(data: result.data, inheriting: previous?.scope),
+            relatedFiles: result.relatedFiles ?? previous?.relatedFiles ?? [],
             dismissable: dismissable,
             content: content,
             recoveryText: nil

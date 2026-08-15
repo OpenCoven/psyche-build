@@ -83,6 +83,21 @@ export interface TauriConfig {
   [key: string]: unknown;
 }
 
+export interface TauriConfigOverlay {
+  productName?: string;
+  identifier?: string;
+  app?: {
+    windows?: TauriWindowConfig[];
+    [key: string]: unknown;
+  };
+  bundle?: {
+    icon?: string[];
+    macOS?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
 export type BuildCommand = [command: string, args: string[], cwd: string];
 
 export interface CommandOptions {
@@ -277,7 +292,10 @@ export interface RunCliDependencies {
 
 export function parseBuildArguments(argv: readonly string[]): ParsedBuildArguments;
 export function channelConfig(channel: BuildChannel): BuildChannelConfig;
-export function createDevTauriConfig(production: TauriConfig): TauriConfig;
+export function createDevTauriConfig(
+  production: TauriConfig,
+  macosOverlay?: TauriConfigOverlay,
+): TauriConfig;
 export function runCommand(
   command: string,
   args: readonly string[],

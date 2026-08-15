@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, writeFile, readFile, mkdir, realpath } from 'node:fs/promises';
+import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createDaemonControlHandlers } from '../../src/daemon/controlHandlers.js';
@@ -12,39 +12,28 @@ import { ControlRuntime } from '../../src/control/runtime.js';
 import { CapabilityLeaseStore } from '../../src/control/capabilityLeases.js';
 import { ApprovalStore } from '../../src/control/approvals.js';
 
-let tempRoots: string[] = [];
-
-async function tempDir(prefix: string): Promise<string> {
-  const root = await realpath(await mkdtemp(path.join(tmpdir(), prefix)));
-  tempRoots.push(root);
-  return root;
-}
-
-afterEach(async () => {
-  await Promise.all(tempRoots.map((root) => rm(root, { recursive: true, force: true })));
-  tempRoots = [];
-});
-
-async function handlersWithCovenClient(
+function handlersWithCovenClient(
   sendInput: (sessionId: string, input: string) => Promise<void>,
+  projectRoot = '/tmp/psyche-test-root',
+  sessionIds = ['sess-1'],
 ) {
-  const projectRoot = await tempDir('psyche-control-handler-coven-');
+  const sessions = sessionIds.map((id) => ({
+    id,
+    projectRoot,
+    harness: 'codex' as const,
+    title: id,
+    status: 'running' as const,
+    createdAt: '2026-04-27T10:00:00Z',
+    updatedAt: '2026-04-27T10:01:00Z',
+  }));
   return createDaemonControlHandlers({
     tmux: new TmuxControl('psyche-test'),
     projectRoot,
     sessionName: 'psyche-test',
     capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
     createCovenClient: () => ({
-      listSessions: async () => [],
-      getSession: async (sessionId) => ({
-        id: sessionId,
-        projectRoot,
-        harness: 'codex',
-        title: 'Test session',
-        status: 'running',
-        createdAt: '2026-08-12T00:00:00Z',
-        updatedAt: '2026-08-12T00:00:00Z',
-      }),
+      listSessions: async () => sessions,
+      getSession: async (id: string) => sessions.find((session) => session.id === id)!,
       sendInput,
     }),
   });
@@ -52,20 +41,95 @@ async function handlersWithCovenClient(
 
 describe('createDaemonControlHandlers runCovenDesktopAction', () => {
   it('sends a known desktop quick action to the coven client', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-desktop-handler-'));
     const sendInput = vi.fn(async (_sessionId: string, _input: string) => {});
-    const handlers = await handlersWithCovenClient(sendInput);
+    const handlers = handlersWithCovenClient(sendInput, root);
 
-    const result = await handlers.runCovenDesktopAction({ sessionId: 'sess-1', action: 'screenshot' });
+    try {
+      const result = await handlers.runCovenDesktopAction({ sessionId: 'sess-1', action: 'screenshot' });
 
-    expect(sendInput).toHaveBeenCalledTimes(1);
-    expect(sendInput.mock.calls[0][0]).toBe('sess-1');
-    expect(sendInput.mock.calls[0][1]).toContain('computer_use');
-    expect(result).toMatchObject({ sessionId: 'sess-1', action: 'screenshot', accepted: true });
+      expect(sendInput).toHaveBeenCalledTimes(1);
+      expect(sendInput.mock.calls[0][0]).toBe('sess-1');
+      expect(sendInput.mock.calls[0][1]).toContain('computer_use');
+      expect(result).toMatchObject({ sessionId: 'sess-1', action: 'screenshot', accepted: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not send desktop input to a session outside the project scope', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-desktop-root-'));
+    const outside = await mkdtemp(path.join(tmpdir(), 'psyche-desktop-outside-'));
+    const sendInput = vi.fn(async (_sessionId: string, _input: string) => {});
+
+    try {
+      // Build handlers for root while the client reports its session under outside.
+      const scopedHandlers = createDaemonControlHandlers({
+        tmux: new TmuxControl('psyche-test'),
+        projectRoot: root,
+        sessionName: 'psyche-test',
+        capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+        createCovenClient: () => ({
+          listSessions: async () => [],
+          getSession: async (_id: string) => ({
+            id: 'sess-1', projectRoot: outside, harness: 'codex', title: 'Outside', status: 'running',
+            createdAt: '2026-04-27T10:00:00Z', updatedAt: '2026-04-27T10:01:00Z',
+          }),
+          sendInput,
+        }),
+      });
+      await expect(scopedHandlers.runCovenDesktopAction({ sessionId: 'sess-1', action: 'approve' }))
+        .rejects.toMatchObject({ code: 'coven_session_not_found' });
+      expect(sendInput).not.toHaveBeenCalled();
+    } finally {
+      await Promise.all([root, outside].map((dir) => rm(dir, { recursive: true, force: true })));
+    }
+  });
+
+  it('uses the canonical session id returned after scope validation', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-desktop-canonical-'));
+    const sendInput = vi.fn(async (_sessionId: string, _input: string) => {});
+
+    try {
+      const handlers = createDaemonControlHandlers({
+        tmux: new TmuxControl('psyche-test'),
+        projectRoot: root,
+        sessionName: 'psyche-test',
+        capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+        createCovenClient: () => ({
+          listSessions: async () => [],
+          getSession: async () => ({
+            id: 'canonical-session',
+            projectRoot: root,
+            harness: 'codex',
+            title: 'Canonical',
+            status: 'running',
+            createdAt: '2026-04-27T10:00:00Z',
+            updatedAt: '2026-04-27T10:01:00Z',
+          }),
+          sendInput,
+        }),
+      });
+
+      const result = await handlers.runCovenDesktopAction({
+        sessionId: 'requested-session',
+        action: 'approve',
+      });
+
+      expect(sendInput).toHaveBeenCalledWith('canonical-session', expect.any(String));
+      expect(result).toMatchObject({
+        sessionId: 'canonical-session',
+        action: 'approve',
+        accepted: true,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('rejects an unknown desktop action instead of sending undefined input', async () => {
     const sendInput = vi.fn(async (_sessionId: string, _input: string) => {});
-    const handlers = await handlersWithCovenClient(sendInput);
+    const handlers = handlersWithCovenClient(sendInput);
 
     await expect(
       handlers.runCovenDesktopAction({ sessionId: 'sess-1', action: 'not-a-real-action' }),
@@ -130,7 +194,7 @@ describe('createDaemonControlHandlers updatePaneMeta', () => {
 
 function paneHandlerHarness() {
   const sendKeysHex = vi.fn(async () => {});
-  const killPane = vi.fn(async () => {});
+  const killPane = vi.fn(async (_paneId: string) => {});
   const executeCommand = vi.fn(async () => {});
   const executeCommandWithOutput = vi.fn(async (line: string) =>
     line.includes('pane_active') ? ['1'] : ['120 40']);
@@ -165,6 +229,7 @@ function paneHandlerHarness() {
     paneObservations: observations,
     surfaces,
     refreshPaneSurfaces,
+    closePane: async (_projectRoot, _paneId) => killPane('%3'),
   });
   return {
     handlers, observations, surfaces, sendKeysHex, killPane, executeCommand,
@@ -234,6 +299,22 @@ describe('createDaemonControlHandlers leased pane controls', () => {
       ["send-keys -t '%3' C-c"],
     ]);
     expect(executeCommandWithOutput).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects pane effects when refreshPaneSurfaces is unavailable', async () => {
+    const sendKeysHex = vi.fn(async () => {});
+    const handlers = createDaemonControlHandlers({
+      tmux: { sendKeysHex } as unknown as TmuxControl,
+      projectRoot: '/repo',
+      sessionName: 'psyche-test',
+      capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+      surfaces: new SurfaceRegistry(),
+    });
+
+    await expect(handlers.actOnPane({
+      ...paneAuthorization, action: { kind: 'send_text', text: 'hi' },
+    })).rejects.toMatchObject({ code: 'backend_unavailable' });
+    expect(sendKeysHex).not.toHaveBeenCalled();
   });
 
   it('creates through the canonical project scope', async () => {

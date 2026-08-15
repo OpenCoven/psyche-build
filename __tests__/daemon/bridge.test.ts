@@ -84,14 +84,25 @@ describe('daemon bridge project scope helpers', () => {
 });
 
 describe('daemon bridge Coven helpers', () => {
-  it('rejects direct lookup of a Coven session outside the current project root', async () => {
-    const root = await tempDir('psyche-bridge-coven-lookup-root-');
-    const outside = await tempDir('psyche-bridge-coven-lookup-outside-');
+  it('rejects unsafe session ids before direct lookup', async () => {
+    const root = await tempDir('psyche-bridge-coven-root-');
+    const getSession = vi.fn();
 
-    await expect(getProjectCovenSession(root, 'outside-session', {
+    await expect(getProjectCovenSession(root, 'outside;session', {
+      listSessions: async () => [],
+      getSession,
+    })).rejects.toMatchObject({ code: 'invalid_coven_session_id' });
+    expect(getSession).not.toHaveBeenCalled();
+  });
+
+  it('refuses to resolve a Coven session outside the current project scope', async () => {
+    const root = await tempDir('psyche-bridge-coven-root-');
+    const outside = await tempDir('psyche-bridge-coven-outside-');
+
+    await expect(getProjectCovenSession(root, 'outside', {
       listSessions: async () => [],
       getSession: async () => ({
-        id: 'outside-session',
+        id: 'outside',
         projectRoot: outside,
         harness: 'codex',
         title: 'Outside',
@@ -99,7 +110,27 @@ describe('daemon bridge Coven helpers', () => {
         createdAt: '2026-04-27T10:00:00Z',
         updatedAt: '2026-04-27T10:01:00Z',
       }),
-    })).rejects.toMatchObject({ code: 'coven_session_scope_violation' });
+    })).rejects.toMatchObject({ code: 'coven_session_not_found' });
+  });
+
+  it('resolves a scoped Coven session via direct lookup when supported', async () => {
+    const root = await tempDir('psyche-bridge-coven-root-');
+    const getSession = vi.fn(async () => ({
+      id: 'inside',
+      projectRoot: root,
+      harness: 'codex',
+      title: 'Inside',
+      status: 'running' as const,
+      createdAt: '2026-04-27T10:00:00Z',
+      updatedAt: '2026-04-27T10:01:00Z',
+    }));
+    const listSessions = vi.fn(async () => []);
+
+    const session = await getProjectCovenSession(root, 'inside', { getSession, listSessions });
+
+    expect(session.id).toBe('inside');
+    expect(getSession).toHaveBeenCalledWith('inside');
+    expect(listSessions).not.toHaveBeenCalled();
   });
 
   it('only displays Coven sessions inside the current project root', async () => {
@@ -594,7 +625,7 @@ describe('daemon bridge Coven helpers', () => {
       tmuxSessionExists: () => true,
       createTmuxPane: () => { throw new Error('should not create pane'); },
       sendTmuxCommand: () => { throw new Error('should not send command'); },
-    })).rejects.toThrow(/not in this psyche project scope/);
+    })).rejects.toThrow(/not in this current project scope/);
   });
 
   it('builds safe Coven attach commands only for safe ids', () => {
