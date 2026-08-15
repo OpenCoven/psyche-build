@@ -260,6 +260,94 @@ final class ControlMessagesTests: XCTestCase {
         XCTAssertEqual(response.response, .confirm)
     }
 
+    func testEncodesConfirmActionResponse() throws {
+        let object = try encodedJSONObject(of: MobileClientMessage.control(.respondToAction(
+            MobileActionRespondRequest(
+                requestID: "confirm-request",
+                sessionID: "confirm-session",
+                response: .confirm
+            )
+        )))
+        let payloadObject = payload(from: object)
+        let response = try XCTUnwrap(payloadObject["response"] as? [String: Any])
+
+        assertExactKeys(in: object, exactly: ["type", "payload"])
+        assertExactKeys(in: payloadObject, exactly: ["type", "requestId", "sessionId", "response"])
+        assertExactKeys(in: response, exactly: ["type"])
+        XCTAssertEqual(payloadObject["type"] as? String, "actions.respond")
+        XCTAssertEqual(payloadObject["requestId"] as? String, "confirm-request")
+        XCTAssertEqual(payloadObject["sessionId"] as? String, "confirm-session")
+        XCTAssertEqual(response["type"] as? String, "confirm")
+        XCTAssertNil(response["optionId"])
+        XCTAssertNil(response["value"])
+    }
+
+    func testEncodesCancelActionResponse() throws {
+        let object = try encodedJSONObject(of: MobileClientMessage.control(.respondToAction(
+            MobileActionRespondRequest(
+                requestID: "cancel-request",
+                sessionID: "cancel-session",
+                response: .cancel
+            )
+        )))
+        let payloadObject = payload(from: object)
+        let response = try XCTUnwrap(payloadObject["response"] as? [String: Any])
+
+        assertExactKeys(in: object, exactly: ["type", "payload"])
+        assertExactKeys(in: payloadObject, exactly: ["type", "requestId", "sessionId", "response"])
+        assertExactKeys(in: response, exactly: ["type"])
+        XCTAssertEqual(payloadObject["type"] as? String, "actions.respond")
+        XCTAssertEqual(payloadObject["requestId"] as? String, "cancel-request")
+        XCTAssertEqual(payloadObject["sessionId"] as? String, "cancel-session")
+        XCTAssertEqual(response["type"] as? String, "cancel")
+        XCTAssertNil(response["optionId"])
+        XCTAssertNil(response["value"])
+    }
+
+    func testEncodesChoiceActionResponse() throws {
+        let object = try encodedJSONObject(of: MobileClientMessage.control(.respondToAction(
+            MobileActionRespondRequest(
+                requestID: "choice-request",
+                sessionID: "choice-session",
+                response: .choice(optionID: "approve")
+            )
+        )))
+        let payloadObject = payload(from: object)
+        let response = try XCTUnwrap(payloadObject["response"] as? [String: Any])
+
+        assertExactKeys(in: object, exactly: ["type", "payload"])
+        assertExactKeys(in: payloadObject, exactly: ["type", "requestId", "sessionId", "response"])
+        assertExactKeys(in: response, exactly: ["type", "optionId"])
+        XCTAssertEqual(payloadObject["type"] as? String, "actions.respond")
+        XCTAssertEqual(payloadObject["requestId"] as? String, "choice-request")
+        XCTAssertEqual(payloadObject["sessionId"] as? String, "choice-session")
+        XCTAssertEqual(response["type"] as? String, "choice")
+        XCTAssertEqual(response["optionId"] as? String, "approve")
+        XCTAssertNil(response["value"])
+    }
+
+    func testEncodesInputActionResponse() throws {
+        let object = try encodedJSONObject(of: MobileClientMessage.control(.respondToAction(
+            MobileActionRespondRequest(
+                requestID: "input-request",
+                sessionID: "input-session",
+                response: .input(value: "Ready to submit")
+            )
+        )))
+        let payloadObject = payload(from: object)
+        let response = try XCTUnwrap(payloadObject["response"] as? [String: Any])
+
+        assertExactKeys(in: object, exactly: ["type", "payload"])
+        assertExactKeys(in: payloadObject, exactly: ["type", "requestId", "sessionId", "response"])
+        assertExactKeys(in: response, exactly: ["type", "value"])
+        XCTAssertEqual(payloadObject["type"] as? String, "actions.respond")
+        XCTAssertEqual(payloadObject["requestId"] as? String, "input-request")
+        XCTAssertEqual(payloadObject["sessionId"] as? String, "input-session")
+        XCTAssertEqual(response["type"] as? String, "input")
+        XCTAssertEqual(response["value"] as? String, "Ready to submit")
+        XCTAssertNil(response["optionId"])
+    }
+
     func testActionResultDecodesStringMetadata() throws {
         let message = try JSONDecoder().decode(MobileServerMessage.self, from: Data("""
         {
@@ -449,6 +537,15 @@ final class ControlMessagesTests: XCTestCase {
 
     private func payload(from object: [String: Any]) -> [String: Any] {
         (object["payload"] as? [String: Any]) ?? [:]
+    }
+
+    private func assertExactKeys(
+        in object: [String: Any],
+        exactly expectedKeys: [String],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(Set(object.keys), Set(expectedKeys), file: file, line: line)
     }
 
     private func controlPayloadType(in data: Data) -> String? {

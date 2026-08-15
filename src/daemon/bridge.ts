@@ -308,6 +308,37 @@ export async function listProjectCovenSessions(
   return scopedSessions;
 }
 
+/** Resolve a Coven session only after proving it belongs to this daemon's project. */
+export async function getProjectCovenSession(
+  projectRoot: string,
+  sessionId: string,
+  client: CovenClient,
+): Promise<CovenSessionSummary> {
+  if (!client.getSession) {
+    throw bridgeError(
+      'coven_session_lookup_unsupported',
+      'Coven client does not support fetching sessions',
+    );
+  }
+  const rootReal = await realpath(projectRoot);
+  const session = await client.getSession(sessionId);
+  if (!session) {
+    throw bridgeError(
+      'coven_session_not_found',
+      `Coven session ${sessionId} is not in this daemon project scope`,
+    );
+  }
+
+  const sessionRoot = await realpath(session.projectRoot);
+  if (!isPathInsideOrEqual(rootReal, sessionRoot)) {
+    throw bridgeError(
+      'coven_session_not_found',
+      `Coven session ${sessionId} is not in this daemon project scope`,
+    );
+  }
+  return { ...session, projectRoot: sessionRoot };
+}
+
 export async function launchProjectCovenSession(
   projectRoot: string,
   request: Partial<CovenSessionLaunchRequest> | undefined,
@@ -339,7 +370,7 @@ export async function launchProjectCovenSession(
   });
   const sessionRoot = await realpath(session.projectRoot);
   if (!isPathInsideOrEqual(scoped.projectRoot, sessionRoot)) {
-    throw bridgeError('coven_session_scope_violation', 'Coven launched a session outside this psyche project scope');
+    throw bridgeError('coven_session_scope_violation', 'Coven launched a session outside this current project scope');
   }
   return { ...session, projectRoot: sessionRoot };
 }
@@ -389,7 +420,7 @@ export async function routeProjectCovenSessionCapability(
   if (!isPathInsideOrEqual(rootReal, sessionRoot)) {
     throw bridgeError(
       'coven_session_scope_violation',
-      'Coven session is outside this psyche project scope',
+      'Coven session is outside this current project scope',
     );
   }
   if (!LIVE_CAPABILITY_SESSION_STATUSES.has(session.status)) {
@@ -443,7 +474,7 @@ export async function openProjectCovenSession(
   const scopedSessions = await listProjectCovenSessions(projectRoot, client);
   const session = scopedSessions.find((candidate) => candidate.id === sessionId);
   if (!session) {
-    throw bridgeError('coven_session_not_found', 'Coven session is not in this psyche project scope');
+    throw bridgeError('coven_session_not_found', 'Coven session is not in this current project scope');
   }
   if (!deps.tmuxSessionExists(sessionName)) {
     throw bridgeError('tmux_session_missing', 'psyche tmux session is not running; start psyche for this project first');

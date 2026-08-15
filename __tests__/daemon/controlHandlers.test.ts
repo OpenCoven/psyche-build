@@ -15,13 +15,28 @@ import { ApprovalStore } from '../../src/control/approvals.js';
 
 function handlersWithCovenClient(
   sendInput: (sessionId: string, input: string) => Promise<void>,
+  projectRoot = '/tmp/psyche-test-root',
+  sessionIds = ['sess-1'],
 ) {
+  const sessions = sessionIds.map((id) => ({
+    id,
+    projectRoot,
+    harness: 'codex' as const,
+    title: id,
+    status: 'running' as const,
+    createdAt: '2026-04-27T10:00:00Z',
+    updatedAt: '2026-04-27T10:01:00Z',
+  }));
   return createDaemonControlHandlers({
     tmux: new TmuxControl('psyche-test'),
-    projectRoot: '/tmp/psyche-test-root',
+    projectRoot,
     sessionName: 'psyche-test',
     capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
-    createCovenClient: () => ({ listSessions: async () => [], sendInput }),
+    createCovenClient: () => ({
+      listSessions: async () => sessions,
+      getSession: async (id: string) => sessions.find((session) => session.id === id) ?? null,
+      sendInput,
+    }),
   });
 }
 
@@ -316,15 +331,48 @@ describe('createDaemonControlHandlers agent pane surfaces', () => {
 
 describe('createDaemonControlHandlers runCovenDesktopAction', () => {
   it('sends a known desktop quick action to the coven client', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-desktop-handler-'));
     const sendInput = vi.fn(async (_sessionId: string, _input: string) => {});
-    const handlers = handlersWithCovenClient(sendInput);
+    const handlers = handlersWithCovenClient(sendInput, root);
 
-    const result = await handlers.runCovenDesktopAction({ sessionId: 'sess-1', action: 'screenshot' });
+    try {
+      const result = await handlers.runCovenDesktopAction({ sessionId: 'sess-1', action: 'screenshot' });
 
-    expect(sendInput).toHaveBeenCalledTimes(1);
-    expect(sendInput.mock.calls[0][0]).toBe('sess-1');
-    expect(sendInput.mock.calls[0][1]).toContain('computer_use');
-    expect(result).toMatchObject({ sessionId: 'sess-1', action: 'screenshot', accepted: true });
+      expect(sendInput).toHaveBeenCalledTimes(1);
+      expect(sendInput.mock.calls[0][0]).toBe('sess-1');
+      expect(sendInput.mock.calls[0][1]).toContain('computer_use');
+      expect(result).toMatchObject({ sessionId: 'sess-1', action: 'screenshot', accepted: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not send desktop input to a session outside the project scope', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-desktop-root-'));
+    const outside = await mkdtemp(path.join(tmpdir(), 'psyche-desktop-outside-'));
+    const sendInput = vi.fn(async (_sessionId: string, _input: string) => {});
+
+    try {
+      // Build handlers for root while the client reports its session under outside.
+      const scopedHandlers = createDaemonControlHandlers({
+        tmux: new TmuxControl('psyche-test'),
+        projectRoot: root,
+        sessionName: 'psyche-test',
+        capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+        createCovenClient: () => ({
+          getSession: async (_id: string) => ({
+            id: 'sess-1', projectRoot: outside, harness: 'codex', title: 'Outside', status: 'running',
+            createdAt: '2026-04-27T10:00:00Z', updatedAt: '2026-04-27T10:01:00Z',
+          }),
+          sendInput,
+        }),
+      });
+      await expect(scopedHandlers.runCovenDesktopAction({ sessionId: 'sess-1', action: 'approve' }))
+        .rejects.toMatchObject({ code: 'coven_session_not_found' });
+      expect(sendInput).not.toHaveBeenCalled();
+    } finally {
+      await Promise.all([root, outside].map((dir) => rm(dir, { recursive: true, force: true })));
+    }
   });
 
   it('rejects an unknown desktop action instead of sending undefined input', async () => {

@@ -154,14 +154,19 @@ function inheritRemoteContext(next: ActionResult, previous: ActionResult): Actio
   const context = Object.fromEntries(
     REMOTE_CONTEXT_KEYS.flatMap((key) => previousData[key] ? [[key, previousData[key]]] : []),
   );
-  if (Object.keys(context).length === 0) return next;
+  const nextData = next.data && typeof next.data === 'object'
+    ? next.data as Record<string, unknown>
+    : {};
+  const previousFiles = readRemoteFiles(previous.data);
+  const inheritFiles = previousFiles !== undefined
+    && !Object.prototype.hasOwnProperty.call(nextData, 'files');
+  if (Object.keys(context).length === 0 && !inheritFiles) return next;
   return {
     ...next,
     data: {
-      ...(next.data && typeof next.data === 'object'
-        ? next.data as Record<string, unknown>
-        : {}),
+      ...(inheritFiles ? { files: previousFiles } : {}),
       ...context,
+      ...nextData,
     },
   };
 }
