@@ -162,7 +162,7 @@ export function createDevTauriConfig(production, macosOverlay = {}) {
   };
   devConfig.bundle = {
     ...devConfig.bundle,
-    ...overlayConfig.bundle,
+    ...(overlayConfig.bundle ?? {}),
   };
 
   const mainWindow = devConfig.app?.windows?.find((window) => window.label === 'main');
