@@ -1,4 +1,5 @@
 import { createServer, type Server, type Socket } from 'node:net';
+import { createHash } from 'node:crypto';
 import { chmod, mkdir, rm } from 'node:fs/promises';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 import { controlEndpointParent } from './endpoint.js';
@@ -52,6 +53,7 @@ export interface ControlServerOptions {
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 const MAX_QUEUED_FRAMES = 128;
 const MAX_QUEUED_BYTES = 8 * 1024 * 1024;
+const INTERNAL_IDEMPOTENCY_PREFIX = 'psyche-control-idempotency-v1';
 
 /** Every command kind the runtime knows how to execute. */
 const KNOWN_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
@@ -113,6 +115,32 @@ type ControlAuthorityIdentity = AuthenticatedControlIdentity | ControlPrincipal;
 function normalizeControlIdentity(identity: ControlAuthorityIdentity): AuthenticatedControlIdentity {
   if ('principal' in identity) return identity;
   return { ...identity, principal: identity };
+}
+
+function runtimeIdempotencyKey(
+  identity: AuthenticatedControlIdentity,
+  canonicalProjectRoot: string,
+  callerKey: string,
+): string {
+  if (identity.principal.kind === 'operator') return callerKey;
+
+  const scope = identity.taskBinding === undefined
+    ? ['principal', canonicalProjectRoot, identity.principal.kind, identity.principal.id]
+    : ['task', canonicalProjectRoot, identity.taskBinding.taskId];
+  const hash = createHash('sha256');
+  for (const component of [
+    INTERNAL_IDEMPOTENCY_PREFIX,
+    ...scope,
+    'caller',
+    callerKey,
+  ]) {
+    const bytes = Buffer.from(component, 'utf8');
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32BE(bytes.length);
+    hash.update(length);
+    hash.update(bytes);
+  }
+  return `${INTERNAL_IDEMPOTENCY_PREFIX}:${hash.digest('hex')}`;
 }
 
 const TASK_SENSITIVE_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
@@ -289,6 +317,11 @@ export class ControlAuthority {
 
     const command = {
       ...trustedInput,
+      idempotencyKey: runtimeIdempotencyKey(
+        authenticated,
+        this.canonicalProjectRoot,
+        trustedInput.idempotencyKey,
+      ),
       projectRoot: this.canonicalProjectRoot,
       actor: actorForPrincipal(principal, clientId),
       ownerEpoch: this.ownerEpoch,

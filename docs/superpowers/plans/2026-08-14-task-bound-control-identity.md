@@ -6,6 +6,8 @@
 
 **Architecture:** Add task-bound credentials to the protected control credential store, verify the binding during the socket handshake, and derive task scope from authenticated identity. Add dedicated task-resource and lease-status protocol methods, then migrate MCP tools away from `state.get`.
 
+**Idempotency boundary:** Hash every non-operator caller key at the authenticated server boundary with a versioned, length-prefixed identity scope. Task credentials use the canonical project root and authenticated task ID; operator keys retain project-wide semantics.
+
 **Tech Stack:** TypeScript, Node.js Unix sockets, JSON line protocol, Vitest, MCP tools.
 
 **Coordination:** Local experimental branches `pr-130` and `codex/complete-task-bound-control-snapshot-auth-after-130` are reference material only. This clean two-PR design intentionally supersedes them: do not rebase onto or merge them, and exclude their unrelated runtime timeout/quarantine changes. Leave them untouched until final equivalence review and cleanup.
@@ -18,6 +20,7 @@
 - `src/control/protocol.ts`: task binding plus dedicated resource and lease-status request/response types.
 - `src/control/client.ts`: verify the welcome binding and expose scoped read methods.
 - `src/control/server.ts`: enforce binding on mutations and serve scoped reads.
+- `__tests__/controlServer.test.ts`: real-runtime task-scoped idempotency and replay coverage.
 - `src/control/hostProcess.ts`: carry expected task binding into `ControlClient`.
 - `src/mcp/server.ts`: parse task credentials and migrate MCP tools to dedicated reads.
 - `__tests__/controlCredentials.test.ts`: credential and authenticated socket coverage.
