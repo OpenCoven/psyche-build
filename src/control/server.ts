@@ -243,6 +243,7 @@ export class ControlAuthority {
       leases: {},
       resources: [],
       capabilityLeases: [],
+      leaseHistory: [],
       leaseRequests: [],
       approvals: [],
       receipts: [],
@@ -482,6 +483,7 @@ function taskScopedSnapshot(
     leases: {},
     resources: collectScopedResources(snapshot.resources, capabilityLeases, leaseRequests),
     capabilityLeases,
+    leaseHistory: [],
     leaseRequests,
     approvals,
     receipts,
@@ -687,12 +689,14 @@ export class ControlServer {
     let tail = Promise.resolve();
     let queuedFrames = 0;
     let queuedBytes = 0;
+    let closing = false;
 
     const write = (message: ControlResponse | ProviderPush): void => {
       if (!socket.destroyed) socket.write(`${encodeControlMessage(message)}\n`);
     };
 
     const fail = (code: string, message: string, requestId?: string): void => {
+      closing = true;
       write({ version: 1, type: 'error', requestId, code, message });
       socket.destroy();
     };
@@ -712,6 +716,7 @@ export class ControlServer {
         buffer = buffer.slice(newline + 1);
         newline = buffer.indexOf('\n');
         if (line.trim().length === 0) continue;
+        if (closing) continue;
         const frameBytes = Buffer.byteLength(line, 'utf8');
         if (frameBytes > MAX_FRAME_BYTES) {
           fail('frame_too_large', 'control frame exceeds maximum size');
@@ -725,18 +730,21 @@ export class ControlServer {
           buffer = '';
           return;
         }
-        tail = tail.then(() => this.handleLine(line, write, fail, {
-          getIdentity: () => identity,
-          getToken: () => token,
-          setIdentity: (value, id, authenticatedToken) => {
-            identity = value;
-            clientId = id;
-            token = authenticatedToken;
-          },
-          getClientId: () => clientId,
-          getProvider: () => provider,
-          setProvider: (value) => { provider = value; },
-        })).catch((error) => {
+        tail = tail.then(() => {
+          if (closing) return;
+          return this.handleLine(line, write, fail, {
+            getIdentity: () => identity,
+            getToken: () => token,
+            setIdentity: (value, id, authenticatedToken) => {
+              identity = value;
+              clientId = id;
+              token = authenticatedToken;
+            },
+            getClientId: () => clientId,
+            getProvider: () => provider,
+            setProvider: (value) => { provider = value; },
+          });
+        }).catch((error) => {
           fail('internal', error instanceof Error ? error.message : 'internal error');
         }).finally(() => {
           queuedFrames -= 1;

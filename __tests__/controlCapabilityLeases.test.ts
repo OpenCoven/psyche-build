@@ -482,4 +482,22 @@ describe('CapabilityLeaseStore', () => {
     expect(store.revokeAll()).toEqual([other]);
     expect(store.snapshot()).toEqual([]);
   });
+
+  it('records actor-task revocations as revoked lifecycle history', () => {
+    const store = new CapabilityLeaseStore(() => new Date(nowIso), 7);
+    const matching = grantPane(store, 'actor-task-revocation');
+    const other = store.grant({
+      requestId: 'other-task', actorId: 'agent-1', taskId: 'task-2', grantedBy: 'operator',
+      ttlMs: 60_000, grants: [{
+        target: { kind: 'pane', id: 'pane-2', generation: 1 },
+        capabilities: ['pane.observe'],
+      }],
+    });
+
+    expect(store.revokeActorTask('agent-1', 'task-1')).toEqual([matching]);
+    expect(store.history()).toEqual([
+      expect.objectContaining({ id: matching.id, status: 'revoked', actorId: 'agent-1', taskId: 'task-1' }),
+    ]);
+    expect(store.snapshot()).toEqual([other]);
+  });
 });
