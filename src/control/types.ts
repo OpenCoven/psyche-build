@@ -1,6 +1,7 @@
 import type { OrchestrationTaskRequest } from '../orchestration/types.js';
 import type {
   CapabilityLease,
+  CapabilityLeaseHistoryEntry,
   LeaseTarget,
   SurfaceCapability,
 } from './capabilityLeases.js';
@@ -336,6 +337,7 @@ export interface ControlSnapshot {
   }>;
   resources: readonly SurfaceResource[];
   capabilityLeases: readonly CapabilityLease[];
+  leaseHistory?: readonly CapabilityLeaseHistoryEntry[];
   leaseRequests: readonly {
     id: string;
     ownerEpoch: number;

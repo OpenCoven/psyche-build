@@ -336,6 +336,31 @@ describe('agent control operator model', () => {
     }]);
   });
 
+  it('shows terminal lease history without making it actionable', () => {
+    const state = {
+      ...snapshot(),
+      leaseHistory: [{
+        id: 'lease-history-revoked', requestId: 'request-history', revision: 1, ownerEpoch: 7,
+        actorId: 'agent-history', taskId: 'task-history', grantedBy: 'operator',
+        createdAt: '2026-08-13T00:00:00.000Z', expiresAt: '2026-08-13T01:10:00.000Z',
+        endedAt: '2026-08-13T00:58:00.000Z', status: 'revoked',
+        grants: [{
+          target: { kind: 'pane', id: 'pane-1', generation: 3 },
+          capabilities: ['pane.observe'],
+        }],
+      }],
+    };
+
+    const model = createAgentControlModel(state, { now: NOW, operator: true });
+    expect(model.groups.revoked).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        leaseId: 'lease-history-revoked',
+        status: 'revoked',
+        canRevoke: false,
+      }),
+    ]));
+  });
+
   it('renders exact requested resources and after-grant TTL without fabricating an absolute expiry', async () => {
     const requested = snapshot();
     requested.leaseRequests[0].createdAt = '2001-01-01T00:00:00.000Z';

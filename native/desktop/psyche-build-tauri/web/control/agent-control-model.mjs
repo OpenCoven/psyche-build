@@ -15,7 +15,7 @@ function copyTarget(target) {
   return result;
 }
 
-function leaseCard(lease, now, operator) {
+function leaseCard(lease, now, operator, historical = false) {
   const boundedGrants = boundedAgentControlList(lease.grants, AGENT_CONTROL_UI_LIMITS.resourcesPerCard);
   const resources = boundedGrants.items.flatMap((grant) => {
     const target = copyTarget(grant && grant.target);
@@ -30,7 +30,9 @@ function leaseCard(lease, now, operator) {
       capabilityOverflow: capabilities.overflow,
     }];
   });
-  const expired = Date.parse(String(lease.expiresAt || '')) <= now;
+  const status = historical && (lease.status === 'expired' || lease.status === 'revoked')
+    ? lease.status
+    : (Date.parse(String(lease.expiresAt || '')) <= now ? 'expired' : 'active');
   return {
     leaseId: String(lease.id || ''),
     requestId: String(lease.requestId || ''),
@@ -41,8 +43,10 @@ function leaseCard(lease, now, operator) {
     expiresAt: boundedAgentControlText(lease.expiresAt),
     resources,
     resourceOverflow: boundedGrants.overflow,
-    canRevoke: operator && !expired,
-    expired,
+    endedAt: historical ? boundedAgentControlText(lease.endedAt) : '',
+    status,
+    canRevoke: operator && status === 'active',
+    expired: status === 'expired',
   };
 }
 
@@ -89,10 +93,16 @@ export function createAgentControlModel(snapshot, options = {}) {
   );
   const leaseIndex = indexedLeases.items.map((lease) =>
     leaseCard(lease, now, operator));
-  const sortedLeases = [...leaseIndex].sort((left, right) => Number(left.expired) - Number(right.expired));
-  const boundedLeases = boundedAgentControlList(sortedLeases, AGENT_CONTROL_UI_LIMITS.cardsPerGroup);
+  const boundedLeases = boundedAgentControlList(leaseIndex, AGENT_CONTROL_UI_LIMITS.cardsPerGroup);
   const leases = boundedLeases.items;
-  const active = leases.filter((lease) => !lease.expired);
+  const active = leases.filter((lease) => lease.status === 'active');
+  const historicalLeases = boundedAgentControlList(
+    asArray(snapshot && snapshot.leaseHistory)
+      .filter((lease) => lease?.ownerEpoch === ownerEpoch
+        && (lease.status === 'expired' || lease.status === 'revoked'))
+      .map((lease) => leaseCard(lease, now, operator, true)),
+    AGENT_CONTROL_UI_LIMITS.cardsPerGroup,
+  );
   const leaseById = new Map(leaseIndex.map((lease) => [lease.leaseId, lease]));
   const allApprovals = asArray(snapshot && snapshot.approvals);
   const pendingApprovals = allApprovals.filter((approval) => approval?.status === 'pending');
@@ -172,8 +182,14 @@ export function createAgentControlModel(snapshot, options = {}) {
     groups: {
       requested: boundedRequests.items.map((request) => requestCard(request, operator)),
       active,
-      expired: leases.filter((lease) => lease.expired),
-      revoked: boundedRevokedRequests.items.map((request) => requestCard(request, operator)),
+      expired: [
+        ...leases.filter((lease) => lease.status === 'expired'),
+        ...historicalLeases.items.filter((lease) => lease.status === 'expired'),
+      ],
+      revoked: [
+        ...historicalLeases.items.filter((lease) => lease.status === 'revoked'),
+        ...boundedRevokedRequests.items.map((request) => requestCard(request, operator)),
+      ],
     },
     approvals,
     badges,
@@ -184,6 +200,7 @@ export function createAgentControlModel(snapshot, options = {}) {
         - AGENT_CONTROL_UI_LIMITS.cardsPerGroup),
       approvals: boundedApprovals.overflow,
       resources: boundedResources.overflow,
+      leaseHistory: historicalLeases.overflow,
     },
   };
 }

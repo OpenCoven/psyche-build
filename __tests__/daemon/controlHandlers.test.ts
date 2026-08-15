@@ -153,7 +153,7 @@ describe('createDaemonControlHandlers updatePaneMeta', () => {
 
 function paneHandlerHarness() {
   const sendKeysHex = vi.fn(async () => {});
-  const killPane = vi.fn(async () => {});
+  const killPane = vi.fn(async (_paneId: string) => {});
   const executeCommand = vi.fn(async () => {});
   const executeCommandWithOutput = vi.fn(async (line: string) =>
     line.includes('pane_active') ? ['1'] : ['120 40']);
@@ -188,6 +188,7 @@ function paneHandlerHarness() {
     paneObservations: observations,
     surfaces,
     refreshPaneSurfaces,
+    closePane: async (_projectRoot, _paneId) => killPane('%3'),
   });
   return {
     handlers, observations, surfaces, sendKeysHex, killPane, executeCommand,
@@ -257,6 +258,22 @@ describe('createDaemonControlHandlers leased pane controls', () => {
       ["send-keys -t '%3' C-c"],
     ]);
     expect(executeCommandWithOutput).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects pane effects when refreshPaneSurfaces is unavailable', async () => {
+    const sendKeysHex = vi.fn(async () => {});
+    const handlers = createDaemonControlHandlers({
+      tmux: { sendKeysHex } as unknown as TmuxControl,
+      projectRoot: '/repo',
+      sessionName: 'psyche-test',
+      capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+      surfaces: new SurfaceRegistry(),
+    });
+
+    await expect(handlers.actOnPane({
+      ...paneAuthorization, action: { kind: 'send_text', text: 'hi' },
+    })).rejects.toMatchObject({ code: 'backend_unavailable' });
+    expect(sendKeysHex).not.toHaveBeenCalled();
   });
 
   it('creates through the canonical project scope', async () => {
