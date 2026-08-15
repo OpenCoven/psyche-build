@@ -143,7 +143,7 @@
   var covenDiscoveryFlight = null;
   var covenPollTimer = null;
   var COVEN_POLL_MS = 5000;
-  var paneCounter = 0;
+  var paneCounter = 0n;
   var MAX_PENDING_PTY_INPUT_BYTES = 1024 * 1024;
   var MAX_PENDING_PTY_INPUT_WRITES = 256;
   var PANE_METRICS_POLL_MS = 15000;
@@ -397,17 +397,21 @@
     return worktree ? worktree.path : (project && project.root);
   }
   function nextPaneId(prefix) {
-    paneCounter += 1;
-    return prefix + "-" + paneCounter;
+    paneCounter += 1n;
+    return prefix + "-" + paneCounter.toString();
   }
   function paneIdSequence(id) {
     var match = /-(\d+)$/.exec(String(id || ""));
-    if (!match) return 0;
-    var sequence = Number(match[1]);
-    return Number.isSafeInteger(sequence) ? sequence : 0;
+    if (!match) return 0n;
+    try {
+      return BigInt(match[1]);
+    } catch {
+      return 0n;
+    }
   }
   function reservePaneId(id) {
-    paneCounter = Math.max(paneCounter, paneIdSequence(id));
+    var sequence = paneIdSequence(id);
+    if (sequence > paneCounter) paneCounter = sequence;
   }
   function reservePaneTreeIds(node) {
     if (!node) return;

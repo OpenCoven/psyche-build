@@ -45,9 +45,13 @@ function compileFunction<T extends (...args: never[]) => unknown>(
 
 describe('native Files pane lifecycle', () => {
   it('reserves restored generated ids before allocating new pane ids', () => {
-    const paneIdSequence = compileFunction<(id: string) => number>(
+    const paneIdSequence = compileFunction<(id: string) => bigint>(
       'paneIdSequence',
-      {},
+      { BigInt },
+    );
+    const nextPaneId = compileFunction<(prefix: string) => string>(
+      'nextPaneId',
+      { paneCounter: 9007199254740991n },
     );
     const restoredIds: string[] = [];
     const restoredTrees: unknown[] = [];
@@ -83,9 +87,11 @@ describe('native Files pane lifecycle', () => {
       { projectId: project.id, worktreePath: '/repo', root: tree, focusedLeafId: 'leaf-15' },
     ], new Set(['files-12']));
 
-    expect(paneIdSequence('files-12')).toBe(12);
-    expect(paneIdSequence('split-9007199254740992')).toBe(0);
-    expect(paneIdSequence('files-invalid')).toBe(0);
+    expect(paneIdSequence('files-12')).toBe(12n);
+    expect(paneIdSequence('split-9007199254740992')).toBe(9007199254740992n);
+    expect(paneIdSequence('files-invalid')).toBe(0n);
+    expect(nextPaneId('leaf')).toBe('leaf-9007199254740992');
+    expect(nextPaneId('leaf')).toBe('leaf-9007199254740993');
     expect(restoredIds).toEqual(['files-12']);
     expect(restoredTrees).toEqual([tree]);
   });
