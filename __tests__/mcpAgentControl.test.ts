@@ -2,12 +2,14 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   TOOLS,
+  MCP_CONTROL_ERROR_CODE,
   closeMcpControlClients,
   createMcpControlClientForRoot,
   handleMcpRequest,
   parseMcpArgs,
   setMcpDeps,
 } from '../src/mcp/server.js';
+import { ControlResponseError } from '../src/control/client.js';
 import {
   startTaskScopedControlHarness,
   type TaskScopedControlHarness,
@@ -391,19 +393,23 @@ describe('agent surface MCP tools', () => {
     expect(spawn).toHaveBeenCalledOnce();
     expect(connect).toHaveBeenCalledTimes(2);
     expect(options.credentialStoreForCanonicalRoot).toHaveBeenCalledOnce();
-    await Promise.all(borrowed.map((client) => client.close()));
+    await Promise.all(borrowed.slice(0, -1).map((client) => client.close()));
+    expect(underlying.close).not.toHaveBeenCalled();
+    await borrowed.at(-1)!.close();
     expect(underlying.close).toHaveBeenCalledOnce();
   });
 
-  it('partitions shared clients by task ID without using the raw token as identity', async () => {
+  it('partitions shared clients by task ID and token fingerprint', async () => {
     const canonicalize = vi.fn(async () => '/canonical/repo');
     const clients = [
+      fakeClient({ projectRoot: '/canonical/repo', taskBinding: { taskId: 'task-alpha' } }),
       fakeClient({ projectRoot: '/canonical/repo', taskBinding: { taskId: 'task-alpha' } }),
       fakeClient({ projectRoot: '/canonical/repo', taskBinding: { taskId: 'task-beta' } }),
     ];
     const connect = vi.fn()
       .mockResolvedValueOnce(clients[0])
-      .mockResolvedValueOnce(clients[1]);
+      .mockResolvedValueOnce(clients[1])
+      .mockResolvedValueOnce(clients[2]);
     const options = {
       canonicalize,
       credentialStoreForCanonicalRoot: vi.fn(),
@@ -419,24 +425,144 @@ describe('agent surface MCP tools', () => {
       ...options,
       taskBinding: { taskId: 'task-alpha', token: 'alpha-token-two' },
     });
+    const alphaOneAgain = await createMcpControlClientForRoot('/repo', {
+      ...options,
+      taskBinding: { taskId: 'task-alpha', token: 'alpha-token-one' },
+    });
     const beta = await createMcpControlClientForRoot('/repo', {
       ...options,
       taskBinding: { taskId: 'task-beta', token: 'beta-token' },
     });
 
-    expect(connect).toHaveBeenCalledTimes(2);
+    expect(connect).toHaveBeenCalledTimes(3);
     expect(connect.mock.calls.map(([options]) => options.taskBinding)).toEqual([
+      { taskId: 'task-alpha' },
       { taskId: 'task-alpha' },
       { taskId: 'task-beta' },
     ]);
     expect(options.credentialStoreForCanonicalRoot).not.toHaveBeenCalled();
     expect(alphaOne.taskBinding).toEqual({ taskId: 'task-alpha' });
     expect(alphaTwo.taskBinding).toEqual({ taskId: 'task-alpha' });
+    expect(alphaOneAgain.taskBinding).toEqual({ taskId: 'task-alpha' });
     expect(beta.taskBinding).toEqual({ taskId: 'task-beta' });
 
-    await Promise.all([alphaOne.close(), alphaTwo.close(), beta.close()]);
+    await alphaOne.close();
+    expect(clients[0].close).not.toHaveBeenCalled();
+    await Promise.all([alphaOneAgain.close(), alphaTwo.close(), beta.close()]);
     expect(clients[0].close).toHaveBeenCalledOnce();
     expect(clients[1].close).toHaveBeenCalledOnce();
+    expect(clients[2].close).toHaveBeenCalledOnce();
+  });
+
+  it('does not let a different token borrow authority for the same claimed task', async () => {
+    const alpha = fakeClient({
+      projectRoot: '/canonical/repo',
+      taskBinding: { taskId: 'task-alpha' },
+    });
+    const authenticationFailure = new Error('authentication_failed: invalid credentials');
+    const connect = vi.fn(async (options) => {
+      if (options.token === 'alpha-token') return alpha;
+      throw authenticationFailure;
+    });
+    const options = {
+      canonicalize: async () => '/canonical/repo',
+      credentialStoreForCanonicalRoot: vi.fn(),
+      connect,
+      entryPath: '/entry.js',
+    };
+
+    const borrowed = await createMcpControlClientForRoot('/repo', {
+      ...options,
+      taskBinding: { taskId: 'task-alpha', token: 'alpha-token' },
+    });
+    await expect(createMcpControlClientForRoot('/repo', {
+      ...options,
+      taskBinding: { taskId: 'task-alpha', token: 'beta-or-invalid-token' },
+    })).rejects.toBe(authenticationFailure);
+
+    expect(connect).toHaveBeenCalledTimes(2);
+    await borrowed.close();
+  });
+
+  it('keeps a shared connection alive when one borrower receives a control response error', async () => {
+    let resolveResources!: (value: {
+      ownerEpoch: number;
+      sequence: number;
+      resources: never[];
+    }) => void;
+    const pendingResources = new Promise<{
+      ownerEpoch: number;
+      sequence: number;
+      resources: never[];
+    }>((resolve) => { resolveResources = resolve; });
+    const underlying = fakeClient({
+      projectRoot: '/canonical/repo',
+      taskBinding: { taskId: 'task-alpha' },
+      getState: vi.fn(async () => {
+        throw new ControlResponseError(
+          'task_binding_required',
+          'task_binding_required: task-bound control credential required',
+        );
+      }),
+      taskResources: vi.fn(() => pendingResources),
+    });
+    const options = {
+      canonicalize: async () => '/canonical/repo',
+      connect: vi.fn(async () => underlying),
+      entryPath: '/entry.js',
+      taskBinding: { taskId: 'task-alpha', token: 'alpha-token' },
+    };
+    const [failingBorrower, activeBorrower] = await Promise.all([
+      createMcpControlClientForRoot('/repo', options),
+      createMcpControlClientForRoot('/repo', options),
+    ]);
+
+    const activeRequest = activeBorrower.taskResources();
+    await expect(failingBorrower.getState()).rejects.toMatchObject({
+      code: 'task_binding_required',
+    });
+    expect(underlying.close).not.toHaveBeenCalled();
+
+    resolveResources({ ownerEpoch: 1, sequence: 2, resources: [] });
+    await expect(activeRequest).resolves.toMatchObject({ sequence: 2 });
+    await failingBorrower.close();
+    expect(underlying.close).not.toHaveBeenCalled();
+    await activeBorrower.close();
+    expect(underlying.close).toHaveBeenCalledOnce();
+  });
+
+  it('invalidates and reconnects after a transport failure', async () => {
+    const transportFailure = new Error('control connection closed');
+    const failedClient = fakeClient({
+      projectRoot: '/canonical/repo',
+      taskBinding: { taskId: 'task-alpha' },
+      getState: vi.fn(async () => { throw transportFailure; }),
+    });
+    const recoveredClient = fakeClient({
+      projectRoot: '/canonical/repo',
+      taskBinding: { taskId: 'task-alpha' },
+      getState: vi.fn(async () => ({ ownerEpoch: 2 })),
+    });
+    const connect = vi.fn()
+      .mockResolvedValueOnce(failedClient)
+      .mockResolvedValueOnce(recoveredClient);
+    const options = {
+      canonicalize: async () => '/canonical/repo',
+      connect,
+      entryPath: '/entry.js',
+      taskBinding: { taskId: 'task-alpha', token: 'alpha-token' },
+    };
+
+    const failedBorrower = await createMcpControlClientForRoot('/repo', options);
+    await expect(failedBorrower.getState()).rejects.toBe(transportFailure);
+    expect(failedClient.close).toHaveBeenCalledOnce();
+
+    const recoveredBorrower = await createMcpControlClientForRoot('/repo', options);
+    await expect(recoveredBorrower.getState()).resolves.toMatchObject({ ownerEpoch: 2 });
+    expect(connect).toHaveBeenCalledTimes(2);
+
+    await Promise.all([failedBorrower.close(), recoveredBorrower.close()]);
+    expect(recoveredClient.close).toHaveBeenCalledOnce();
   });
 
   it('validates bootstrap task bindings before connecting without exposing the token', async () => {
@@ -633,7 +759,10 @@ describe('task-scoped MCP control integration', () => {
 
     expect((await call('psyche_control_list', {
       project_root: started.root,
-    })).error).toMatchObject({ code: 'task_binding_required' });
+    })).error).toMatchObject({
+      code: MCP_CONTROL_ERROR_CODE,
+      data: { code: 'task_binding_required' },
+    });
     expect(payload(await call('psyche_control_lease', {
       operation: 'request',
       ttl_ms: 60_000,

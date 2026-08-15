@@ -8,7 +8,7 @@ export type ConnectControl = (options: ControlClientOptions) => Promise<ControlC
 type SpawnOwner = (
   command: string,
   args: readonly string[],
-  options: { detached: true; stdio: 'ignore' },
+  options: { detached: true; stdio: 'ignore'; env: NodeJS.ProcessEnv },
 ) => Pick<ChildProcess, 'unref'>;
 
 export interface EnsureHostOptions {
@@ -72,7 +72,7 @@ export async function ensureCanonicalHostControlPlane(
   const child = spawnOwner(
     process.execPath,
     [options.entryPath, 'daemon', '--port', '0', '--project-root', canonicalRoot],
-    { detached: true, stdio: 'ignore' },
+    { detached: true, stdio: 'ignore', env: controlOwnerEnvironment() },
   );
   child.unref();
 
@@ -88,6 +88,13 @@ export async function ensureCanonicalHostControlPlane(
     await sleep(Math.min(delayMs, remaining));
     delayMs = Math.min(delayMs * 2, MAX_POLL_DELAY_MS);
   }
+}
+
+function controlOwnerEnvironment(): NodeJS.ProcessEnv {
+  const environment = { ...process.env };
+  delete environment.PSYCHE_CONTROL_TASK_TOKEN;
+  delete environment.PSYCHE_CONTROL_TASK_ID;
+  return environment;
 }
 
 async function connectBeforeDeadline(

@@ -6,7 +6,7 @@ import { createServer, type Socket } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ControlServer, type ControlServerRuntime } from '../src/control/server.js';
 import { createControlCredentialStore } from '../src/control/credentials.js';
-import { ControlClient } from '../src/control/client.js';
+import { ControlClient, ControlResponseError } from '../src/control/client.js';
 
 interface Harness {
   server: ControlServer;
@@ -421,7 +421,9 @@ describe('ControlClient over the socket transport', () => {
     });
     cleanups.push(() => client.close());
 
-    await expect(client.getState()).rejects.toMatchObject({
+    const request = client.getState();
+    await expect(request).rejects.toBeInstanceOf(ControlResponseError);
+    await expect(request).rejects.toMatchObject({
       code,
       message: `${code}: ${message}`,
     });

@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SERVER_NAME, TOOLS, handleMcpRequest, setMcpDeps } from '../src/mcp/server.js';
+import { ControlResponseError } from '../src/control/client.js';
+import {
+  MCP_CONTROL_ERROR_CODE,
+  SERVER_NAME,
+  TOOLS,
+  handleMcpRequest,
+  setMcpDeps,
+} from '../src/mcp/server.js';
 
 const restores: Array<() => void> = [];
 afterEach(() => {
@@ -83,6 +90,27 @@ describe('MCP tool registry', () => {
 });
 
 describe('MCP canonical delegation and read-only helpers', () => {
+  it.each([
+    'task_binding_required',
+    'task_binding_mismatch',
+    'resource_not_found',
+  ])('maps control response error %s to a numeric JSON-RPC server error', async (code) => {
+    const fake = client({
+      taskResources: vi.fn(async () => {
+        throw new ControlResponseError(code, `${code}: control request failed`);
+      }),
+    });
+    inject({ controlClientForRoot: vi.fn(async () => fake) });
+
+    await expect(call('psyche_list_panes', { project_root: '/repo' })).resolves.toMatchObject({
+      error: {
+        code: MCP_CONTROL_ERROR_CODE,
+        message: `${code}: control request failed`,
+        data: { code },
+      },
+    });
+  });
+
   it('lists panes from the control snapshot', async () => {
     const fake = client({ taskResources: vi.fn(async () => ({
       ownerEpoch: 1, sequence: 1,

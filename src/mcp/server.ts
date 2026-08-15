@@ -1,10 +1,10 @@
 /** psyche MCP server (newline-delimited JSON-RPC 2.0 over stdio). */
 
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
-import { ControlClient } from '../control/client.js';
+import { ControlClient, ControlResponseError } from '../control/client.js';
 import {
   createControlCredentialStoreForCanonicalRoot,
   type ControlCredentialStore,
@@ -61,6 +61,8 @@ const ERR_INVALID_REQUEST = -32600;
 const ERR_METHOD_NOT_FOUND = -32601;
 const ERR_INVALID_PARAMS = -32602;
 const ERR_INTERNAL = -32603;
+/** Stable JSON-RPC server error for a control-plane domain response. */
+export const MCP_CONTROL_ERROR_CODE = -32001;
 const UNBOUND_MCP_TASK_ID = 'unbound-mcp-client';
 
 export interface McpTaskBinding {
@@ -184,7 +186,13 @@ export async function createMcpControlClientForRoot(
   const key = JSON.stringify([
     canonicalRoot,
     endpoint,
-    taskBinding === undefined ? ['unbound'] : ['task', taskBinding.taskId],
+    authenticatedBinding === undefined
+      ? ['unbound']
+      : [
+        'task',
+        authenticatedBinding.taskId,
+        tokenFingerprint(authenticatedBinding.token),
+      ],
   ]);
   let shared = sharedControlClients.get(key);
   if (!shared) {
@@ -253,13 +261,19 @@ function validateMcpTaskBinding(binding: {
   return { taskId, token: binding.token };
 }
 
+function tokenFingerprint(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
+}
+
 function borrowedControlClient(shared: SharedControlClient): McpControlClient {
   let released = false;
   const use = async <T>(operation: (client: ControlClient) => Promise<T>): Promise<T> => {
     try {
       return await operation(await shared.promise);
     } catch (error) {
-      await invalidateSharedControlClient(shared);
+      if (!(error instanceof ControlResponseError)) {
+        await invalidateSharedControlClient(shared);
+      }
       throw error;
     }
   };
@@ -870,8 +884,20 @@ export async function handleMcpRequest(req: JsonRpcRequest): Promise<JsonRpcResp
     }
     return { jsonrpc: '2.0', id, result };
   } catch (error) {
-    const code = (error as { code?: number }).code ?? ERR_INTERNAL;
     const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof ControlResponseError) {
+      return {
+        jsonrpc: '2.0',
+        id,
+        error: {
+          code: MCP_CONTROL_ERROR_CODE,
+          message,
+          data: { code: error.code },
+        },
+      };
+    }
+    const errorCode = (error as { code?: unknown }).code;
+    const code = typeof errorCode === 'number' ? errorCode : ERR_INTERNAL;
     return { jsonrpc: '2.0', id, error: { code, message } };
   }
 }

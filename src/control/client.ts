@@ -37,7 +37,7 @@ interface PendingRequest {
   reject: (error: Error) => void;
 }
 
-class ControlResponseError extends Error {
+export class ControlResponseError extends Error {
   constructor(
     readonly code: string,
     message: string,

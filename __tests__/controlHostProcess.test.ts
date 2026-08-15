@@ -4,6 +4,7 @@ import { controlEndpointForProject } from '../src/control/endpoint.js';
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
 });
 
 function connectionError(code: string): NodeJS.ErrnoException {
@@ -27,13 +28,20 @@ describe('ensureHostControlPlane', () => {
   });
 
   it('starts exactly one detached owner on connection absence and polls authenticated health', async () => {
+    vi.stubEnv('PSYCHE_CONTROL_TASK_TOKEN', 'inherited-task-token');
+    vi.stubEnv('PSYCHE_CONTROL_TASK_ID', 'inherited-task-id');
+    vi.stubEnv('PSYCHE_ORDINARY_SETTING', 'preserved');
     const client = { getState: vi.fn() } as never;
     const connect = vi.fn()
       .mockRejectedValueOnce(connectionError('ENOENT'))
       .mockRejectedValueOnce(connectionError('ECONNREFUSED'))
       .mockResolvedValueOnce(client);
     const unref = vi.fn();
-    const spawn = vi.fn(() => ({ unref } as never));
+    const spawn = vi.fn((
+      _command: string,
+      _args: readonly string[],
+      _options: { detached: true; stdio: 'ignore'; env: NodeJS.ProcessEnv },
+    ) => ({ unref } as never));
     let now = 0;
     const sleep = vi.fn(async (delay: number) => { now += delay; });
 
@@ -47,8 +55,17 @@ describe('ensureHostControlPlane', () => {
     expect(spawn).toHaveBeenCalledWith(
       process.execPath,
       ['/app/dist/index.js', 'daemon', '--port', '0', '--project-root', '/canonical/project'],
-      { detached: true, stdio: 'ignore' },
+      {
+        detached: true,
+        stdio: 'ignore',
+        env: expect.objectContaining({
+          PSYCHE_ORDINARY_SETTING: 'preserved',
+        }),
+      },
     );
+    const spawnEnvironment = spawn.mock.calls[0][2].env;
+    expect(spawnEnvironment).not.toHaveProperty('PSYCHE_CONTROL_TASK_TOKEN');
+    expect(spawnEnvironment).not.toHaveProperty('PSYCHE_CONTROL_TASK_ID');
     expect(unref).toHaveBeenCalledOnce();
     expect(connect).toHaveBeenCalledTimes(3);
     expect(connect).toHaveBeenLastCalledWith({

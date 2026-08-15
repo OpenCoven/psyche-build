@@ -528,7 +528,7 @@ Read task ID from `--task-id` or `PSYCHE_CONTROL_TASK_ID`; read the token only f
 
 - [ ] **Step 3: Partition shared clients by task**
 
-Include canonical root, endpoint, and authenticated task ID in the shared-client key. Pass `taskBinding: { taskId }` with the task token to host bootstrap. Never reuse an unbound shared-agent client for a task-bound MCP process.
+Include canonical root, endpoint, authenticated task ID, and a SHA-256 fingerprint of the presented token in the shared-client and startup-flight keys. Never store the raw token in a key. Pass `taskBinding: { taskId }` with the task token to host bootstrap. Only the exact same token/task/root may share; never reuse an unbound shared-agent client or a differently credentialed task client for a task-bound MCP process.
 
 - [ ] **Step 4: Migrate MCP read tools**
 
