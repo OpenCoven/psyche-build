@@ -1,10 +1,12 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
+import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 
 const root = process.cwd();
 const desktop = join(root, 'native/desktop/psyche-build-tauri');
+const icons = join(desktop, 'src-tauri', 'icons');
 const ciWorkflowPath = join(root, '.github/workflows/ci.yml');
 const libSourcePath = join(desktop, 'src-tauri/src/lib.rs');
 const controlProviderSourcePath = join(desktop, 'src-tauri/src/control_provider.rs');
@@ -17,6 +19,20 @@ const textExtensions = new Set([
 ]);
 const stalePathPattern = /native\/macos\/psyche-build-tauri|['"]native['"]\s*,\s*['"]macos['"]\s*,\s*['"]psyche-build-tauri['"]/;
 const originalBaseCsp = "default-src 'self'; img-src 'self' data: https: http:; style-src 'self'; script-src 'self'; frame-src https: http:; connect-src 'self' ipc: http://ipc.localhost https: http:";
+const pngSignature = Buffer.from('89504e470d0a1a0a', 'hex');
+const pngChunkTypePattern = /^[A-Za-z]{4}$/;
+const supportedCriticalPngChunkTypes = new Set(['IHDR', 'IDAT', 'IEND']);
+const requiredModernIcnsChunkDimensions: Record<string, number> = {
+  ic07: 128,
+  ic08: 256,
+  ic09: 512,
+  ic10: 1024,
+  ic11: 32,
+  ic12: 64,
+  ic13: 256,
+  ic14: 512,
+};
+const requiredModernIcnsChunkTypes = new Set(Object.keys(requiredModernIcnsChunkDimensions));
 
 function json(name: string) {
   return JSON.parse(readFileSync(join(desktop, 'src-tauri', name), 'utf8'));
@@ -24,6 +40,328 @@ function json(name: string) {
 
 function readText(path: string) {
   return readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+}
+
+function paethPredictor(left: number, up: number, upLeft: number) {
+  const candidate = left + up - upLeft;
+  const leftDistance = Math.abs(candidate - left);
+  const upDistance = Math.abs(candidate - up);
+  const upLeftDistance = Math.abs(candidate - upLeft);
+
+  if (leftDistance <= upDistance && leftDistance <= upLeftDistance) return left;
+  if (upDistance <= upLeftDistance) return up;
+  return upLeft;
+}
+
+function pngChunkCrc32(...parts: readonly Buffer[]) {
+  let crc = 0xffffffff;
+
+  for (const part of parts) {
+    for (const byte of part) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit += 1) {
+        crc = (crc & 1) === 0 ? crc >>> 1 : (crc >>> 1) ^ 0xedb88320;
+      }
+    }
+  }
+
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function isCriticalPngChunkType(typeBytes: Buffer) {
+  return (typeBytes[0] & 0x20) === 0;
+}
+
+function isAsciiLetterByte(byte: number) {
+  return (byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a);
+}
+
+function formatPngChunkTypeBytes(typeBytes: Buffer) {
+  return [...typeBytes].map((byte) => `0x${byte.toString(16).padStart(2, '0')}`).join(' ');
+}
+
+function decodePngChunkType(typeBytes: Buffer, source: string) {
+  if (typeBytes.length !== 4 || ![...typeBytes].every(isAsciiLetterByte)) {
+    throw new Error(
+      `Invalid PNG chunk type bytes ${formatPngChunkTypeBytes(typeBytes)} (expected ASCII letters): ${source}`,
+    );
+  }
+
+  if ((typeBytes[2] & 0x20) !== 0) {
+    throw new Error(`Invalid PNG chunk type reserved bit for ${typeBytes.toString('ascii')}: ${source}`);
+  }
+
+  return typeBytes.toString('ascii');
+}
+
+function buildPngChunk(type: string, data = Buffer.alloc(0)) {
+  if (!pngChunkTypePattern.test(type)) {
+    throw new Error(`Invalid PNG chunk type ${JSON.stringify(type)}`);
+  }
+
+  const typeBytes = Buffer.from(type, 'ascii');
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBytes.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(pngChunkCrc32(typeBytes, data), 8 + data.length);
+  return chunk;
+}
+
+function pngChunkOffset(png: Buffer, type: string) {
+  let offset = pngSignature.length;
+
+  while (offset < png.length) {
+    if (offset + 8 > png.length) {
+      throw new Error(`Truncated PNG chunk header while locating ${type}`);
+    }
+
+    const length = png.readUInt32BE(offset);
+    const chunkEnd = offset + 12 + length;
+    if (chunkEnd > png.length) {
+      throw new Error(`Out-of-bounds PNG chunk while locating ${type}`);
+    }
+
+    if (decodePngChunkType(png.subarray(offset + 4, offset + 8), `while locating ${type}`) === type) {
+      return offset;
+    }
+
+    offset = chunkEnd;
+  }
+
+  throw new Error(`Missing PNG chunk ${type}`);
+}
+
+function pngRgbaBuffer(png: Buffer, source: string) {
+  if (png.length < pngSignature.length || !png.subarray(0, pngSignature.length).equals(pngSignature)) {
+    throw new Error(`Invalid PNG signature: ${source}`);
+  }
+
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  let compressionMethod = 0;
+  let filterMethod = 0;
+  let interlaceMethod = 0;
+  let sawIHDR = false;
+  let sawIEND = false;
+  let sawIDAT = false;
+  let endedIDATSequence = false;
+  let offset = 8;
+  const idatChunks: Buffer[] = [];
+
+  while (offset < png.length) {
+    if (offset + 8 > png.length) {
+      throw new Error(`Truncated PNG chunk header: ${source}`);
+    }
+    const length = png.readUInt32BE(offset);
+    const typeBytes = png.subarray(offset + 4, offset + 8);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    const chunkEnd = dataEnd + 4;
+    const type = decodePngChunkType(typeBytes, source);
+    if (chunkEnd > png.length) {
+      throw new Error(`Out-of-bounds PNG chunk payload: ${source}`);
+    }
+    const actualCrc = pngChunkCrc32(typeBytes, png.subarray(dataStart, dataEnd));
+    const storedCrc = png.readUInt32BE(dataEnd);
+    if (actualCrc !== storedCrc) {
+      throw new Error(`PNG chunk CRC mismatch for ${type}: ${source}`);
+    }
+    if (sawIEND) {
+      if (type === 'IEND') throw new Error(`Duplicate IEND chunk: ${source}`);
+      throw new Error(`Unexpected trailing PNG data after IEND: ${source}`);
+    }
+    if (isCriticalPngChunkType(typeBytes) && !supportedCriticalPngChunkTypes.has(type)) {
+      throw new Error(`Unsupported PNG critical chunk ${type}: ${source}`);
+    }
+
+    if (type === 'IHDR') {
+      if (sawIHDR) throw new Error(`Duplicate IHDR chunk: ${source}`);
+      if (length !== 13) throw new Error(`Unexpected IHDR length: ${source}`);
+      sawIHDR = true;
+      width = png.readUInt32BE(dataStart);
+      height = png.readUInt32BE(dataStart + 4);
+      bitDepth = png[dataStart + 8];
+      colorType = png[dataStart + 9];
+      compressionMethod = png[dataStart + 10];
+      filterMethod = png[dataStart + 11];
+      interlaceMethod = png[dataStart + 12];
+    } else if (!sawIHDR) {
+      throw new Error(`PNG is missing a leading IHDR chunk: ${source}`);
+    } else if (type === 'IDAT') {
+      if (endedIDATSequence) throw new Error(`PNG has a non-contiguous IDAT sequence: ${source}`);
+      sawIDAT = true;
+      idatChunks.push(png.subarray(dataStart, dataEnd));
+    } else if (type === 'IEND') {
+      if (!sawIDAT) throw new Error(`PNG IEND chunk must follow IDAT data: ${source}`);
+      if (length !== 0) throw new Error(`Unexpected IEND length: ${source}`);
+      sawIEND = true;
+    } else if (sawIDAT) {
+      endedIDATSequence = true;
+    }
+
+    offset = chunkEnd;
+  }
+
+  if (!sawIHDR) throw new Error(`Missing IHDR chunk: ${source}`);
+  if (!sawIEND) throw new Error(`Missing IEND chunk: ${source}`);
+  if (offset !== png.length) throw new Error(`Unexpected trailing PNG data after IEND: ${source}`);
+  if (bitDepth !== 8) throw new Error(`Unsupported PNG bit depth ${bitDepth}: ${source}`);
+  if (colorType !== 6) throw new Error(`Unsupported PNG color type ${colorType}: ${source}`);
+  if (compressionMethod !== 0) {
+    throw new Error(`Unsupported PNG compression method ${compressionMethod}: ${source}`);
+  }
+  if (filterMethod !== 0) throw new Error(`Unsupported PNG filter method ${filterMethod}: ${source}`);
+  if (interlaceMethod !== 0) {
+    throw new Error(`Unsupported PNG interlace method ${interlaceMethod}: ${source}`);
+  }
+  if (width === 0 || height === 0) throw new Error(`Invalid PNG dimensions: ${source}`);
+  if (idatChunks.length === 0) throw new Error(`Missing PNG IDAT data: ${source}`);
+
+  const rowBytes = width * 4;
+  let scanlines: Buffer;
+  try {
+    scanlines = inflateSync(Buffer.concat(idatChunks));
+  } catch {
+    throw new Error(`Invalid PNG IDAT stream: ${source}`);
+  }
+  const expectedScanlineBytes = height * (rowBytes + 1);
+  if (scanlines.length !== expectedScanlineBytes) {
+    throw new Error(`Unexpected PNG scanline size: ${source}`);
+  }
+
+  const rgba = Buffer.alloc(rowBytes * height);
+  let scanlineOffset = 0;
+  for (let y = 0; y < height; y += 1) {
+    const filterType = scanlines[scanlineOffset];
+    scanlineOffset += 1;
+    const rowStart = y * rowBytes;
+
+    for (let x = 0; x < rowBytes; x += 1) {
+      const sourceByte = scanlines[scanlineOffset];
+      scanlineOffset += 1;
+      const left = x >= 4 ? rgba[rowStart + x - 4] : 0;
+      const up = y > 0 ? rgba[rowStart - rowBytes + x] : 0;
+      const upLeft = y > 0 && x >= 4 ? rgba[rowStart - rowBytes + x - 4] : 0;
+
+      switch (filterType) {
+        case 0:
+          rgba[rowStart + x] = sourceByte;
+          break;
+        case 1:
+          rgba[rowStart + x] = (sourceByte + left) & 0xff;
+          break;
+        case 2:
+          rgba[rowStart + x] = (sourceByte + up) & 0xff;
+          break;
+        case 3:
+          rgba[rowStart + x] = (sourceByte + Math.floor((left + up) / 2)) & 0xff;
+          break;
+        case 4:
+          rgba[rowStart + x] = (sourceByte + paethPredictor(left, up, upLeft)) & 0xff;
+          break;
+        default:
+          throw new Error(`Unsupported PNG filter type ${filterType}: ${source}`);
+      }
+    }
+  }
+
+  if (scanlineOffset !== scanlines.length) {
+    throw new Error(`Unexpected PNG row decoding state: ${source}`);
+  }
+
+  const alphaAt = (x: number, y: number) => {
+    if (x < 0 || x >= width || y < 0 || y >= height) {
+      throw new Error(`PNG coordinate out of range (${x}, ${y}): ${source}`);
+    }
+    return rgba[(y * width + x) * 4 + 3];
+  };
+
+  return { width, height, bitDepth, colorType, alphaAt };
+}
+
+function pngRgba(path: string) {
+  return pngRgbaBuffer(readFileSync(path), path);
+}
+
+function normalizeIcoDimension(rawDimension: number) {
+  return rawDimension || 256;
+}
+
+function icoEntries(path: string) {
+  const ico = readFileSync(path);
+  if (ico.length < 6) throw new Error(`Truncated ICO header: ${path}`);
+
+  const reserved = ico.readUInt16LE(0);
+  const type = ico.readUInt16LE(2);
+  const count = ico.readUInt16LE(4);
+  if (reserved !== 0) throw new Error(`Invalid ICO reserved field: ${path}`);
+  if (type !== 1) throw new Error(`Invalid ICO type field: ${path}`);
+
+  const tableEnd = 6 + count * 16;
+  if (tableEnd > ico.length) throw new Error(`Out-of-bounds ICO directory table: ${path}`);
+
+  const entries: Array<{ width: number; height: number }> = [];
+  for (let index = 0; index < count; index += 1) {
+    const entryOffset = 6 + index * 16;
+    const width = normalizeIcoDimension(ico[entryOffset]);
+    const height = normalizeIcoDimension(ico[entryOffset + 1]);
+    const payloadSize = ico.readUInt32LE(entryOffset + 8);
+    const payloadOffset = ico.readUInt32LE(entryOffset + 12);
+    const payloadEnd = payloadOffset + payloadSize;
+
+    if (payloadSize === 0) throw new Error(`ICO entry ${index} has an empty payload: ${path}`);
+    if (payloadOffset < tableEnd) throw new Error(`ICO entry ${index} overlaps the directory: ${path}`);
+    if (payloadEnd > ico.length) throw new Error(`ICO entry ${index} extends past EOF: ${path}`);
+
+    const png = pngRgbaBuffer(ico.subarray(payloadOffset, payloadEnd), `${path}#entry-${index}`);
+    if (png.width !== width || png.height !== height) {
+      throw new Error(
+        `ICO entry ${index} dimensions ${png.width}x${png.height} do not match directory ${width}x${height}: ${path}`,
+      );
+    }
+
+    entries.push({ width, height });
+  }
+
+  return { entries };
+}
+
+function icnsChunks(path: string) {
+  const icns = readFileSync(path);
+  if (icns.length < 8) throw new Error(`Truncated ICNS header: ${path}`);
+  if (icns.subarray(0, 4).toString('ascii') !== 'icns') throw new Error(`Invalid ICNS magic: ${path}`);
+
+  const declaredLength = icns.readUInt32BE(4);
+  if (declaredLength !== icns.length) throw new Error(`Mismatched ICNS length: ${path}`);
+
+  const chunkTypes: string[] = [];
+  let offset = 8;
+  while (offset < icns.length) {
+    if (offset + 8 > icns.length) throw new Error(`Truncated ICNS chunk header: ${path}`);
+    const type = icns.subarray(offset, offset + 4).toString('ascii');
+    const size = icns.readUInt32BE(offset + 4);
+    const chunkEnd = offset + size;
+    if (size <= 8) throw new Error(`Invalid ICNS chunk length for ${type}: ${path}`);
+    if (chunkEnd > icns.length) throw new Error(`Out-of-bounds ICNS chunk ${type}: ${path}`);
+
+    if (requiredModernIcnsChunkTypes.has(type)) {
+      const expectedDimension = requiredModernIcnsChunkDimensions[type];
+      const png = pngRgbaBuffer(icns.subarray(offset + 8, chunkEnd), `${path}#${type}`);
+      if (png.width !== expectedDimension || png.height !== expectedDimension) {
+        throw new Error(
+          `ICNS chunk ${type} dimensions ${png.width}x${png.height} do not match expected ${expectedDimension}x${expectedDimension}: ${path}`,
+        );
+      }
+    }
+
+    chunkTypes.push(type);
+    offset = chunkEnd;
+  }
+
+  return { chunkTypes };
 }
 
 function stalePathReferences(): string[] {
@@ -201,6 +539,127 @@ describe('desktop Tauri layout', () => {
       .toBe('vite web --host 127.0.0.1 --port 1420 --strictPort');
     expect(desktopPackage.devDependencies.vite).toBe('8.2.1');
     expect(JSON.stringify(configs)).not.toMatch(/\bpython3?\b/);
+  });
+
+  it('ships valid committed desktop icon PNG, ICO, and ICNS containers', () => {
+    for (const [name, size] of [
+      ['icon.png', 1024],
+      ['32x32.png', 32],
+      ['64x64.png', 64],
+      ['128x128.png', 128],
+      ['128x128@2x.png', 256],
+    ] as const) {
+      const png = pngRgba(join(icons, name));
+      expect(png).toMatchObject({ width: size, height: size, bitDepth: 8, colorType: 6 });
+      for (const [x, y] of [
+        [0, 0],
+        [png.width - 1, 0],
+        [0, png.height - 1],
+        [png.width - 1, png.height - 1],
+      ] as const) {
+        expect(png.alphaAt(x, y)).toBe(0);
+      }
+      expect(png.alphaAt(Math.floor(png.width / 2), Math.floor(png.height / 2))).toBe(255);
+    }
+    const ico = icoEntries(join(icons, 'icon.ico'));
+    expect(ico.entries).toEqual(expect.arrayContaining([
+      { width: 16, height: 16 },
+      { width: 24, height: 24 },
+      { width: 32, height: 32 },
+      { width: 48, height: 48 },
+      { width: 64, height: 64 },
+      { width: 256, height: 256 },
+    ]));
+
+    const icns = icnsChunks(join(icons, 'icon.icns'));
+    expect(icns.chunkTypes).toEqual(expect.arrayContaining([
+      'ic07',
+      'ic08',
+      'ic09',
+      'ic10',
+      'ic11',
+      'ic12',
+      'ic13',
+      'ic14',
+    ]));
+  });
+
+  it('rejects PNG chunks with invalid CRCs', () => {
+    const validPng = readFileSync(join(icons, '32x32.png'));
+    const corruptedPng = Buffer.from(validPng);
+    const ihdrCrcOffset = pngChunkOffset(corruptedPng, 'IHDR') + 8 + 13;
+
+    corruptedPng[ihdrCrcOffset] ^= 0xff;
+
+    expect(() => pngRgbaBuffer(corruptedPng, 'corrupted-ihdr-crc')).toThrow(
+      /PNG chunk CRC mismatch for IHDR: corrupted-ihdr-crc/,
+    );
+  });
+
+  it('rejects unsupported critical PNG chunks even with valid CRCs', () => {
+    const validPng = readFileSync(join(icons, '32x32.png'));
+    const iendOffset = pngChunkOffset(validPng, 'IEND');
+    const unknownCriticalChunk = buildPngChunk('ABCD');
+    const mutatedPng = Buffer.concat([
+      validPng.subarray(0, iendOffset),
+      unknownCriticalChunk,
+      validPng.subarray(iendOffset),
+    ]);
+
+    expect(() => pngRgbaBuffer(mutatedPng, 'unsupported-critical-abcd')).toThrow(
+      /Unsupported PNG critical chunk ABCD: unsupported-critical-abcd/,
+    );
+  });
+
+  it('rejects PNG chunk types with non-ASCII bytes even when the CRC matches', () => {
+    const validPng = readFileSync(join(icons, '32x32.png'));
+    const mutatedPng = Buffer.from(validPng);
+    const ihdrOffset = pngChunkOffset(mutatedPng, 'IHDR');
+    const typeOffset = ihdrOffset + 4;
+    const dataStart = ihdrOffset + 8;
+    const dataEnd = dataStart + mutatedPng.readUInt32BE(ihdrOffset);
+
+    mutatedPng[typeOffset] = 0xc9;
+    mutatedPng.writeUInt32BE(
+      pngChunkCrc32(mutatedPng.subarray(typeOffset, typeOffset + 4), mutatedPng.subarray(dataStart, dataEnd)),
+      dataEnd,
+    );
+
+    expect(() => pngRgbaBuffer(mutatedPng, 'non-ascii-ihdr-type')).toThrow(
+      /Invalid PNG chunk type bytes 0xc9 0x48 0x44 0x52 \(expected ASCII letters\): non-ascii-ihdr-type/,
+    );
+  });
+
+  it('rejects unsupported PLTE chunks instead of treating them as valid critical structure', () => {
+    const validPng = readFileSync(join(icons, '32x32.png'));
+    const iendOffset = pngChunkOffset(validPng, 'IEND');
+    const mutatedPng = Buffer.concat([
+      validPng.subarray(0, iendOffset),
+      buildPngChunk('PLTE'),
+      validPng.subarray(iendOffset),
+    ]);
+
+    expect(() => pngRgbaBuffer(mutatedPng, 'unsupported-critical-plte')).toThrow(
+      /Unsupported PNG critical chunk PLTE: unsupported-critical-plte/,
+    );
+  });
+
+  it('rejects non-contiguous IDAT sequences', () => {
+    const validPng = readFileSync(join(icons, '32x32.png'));
+    const idatOffset = pngChunkOffset(validPng, 'IDAT');
+    const idatChunkEnd = idatOffset + 12 + validPng.readUInt32BE(idatOffset);
+    const iendOffset = pngChunkOffset(validPng, 'IEND');
+    const repeatedIdatChunk = validPng.subarray(idatOffset, idatChunkEnd);
+    const mutatedPng = Buffer.concat([
+      validPng.subarray(0, iendOffset),
+      buildPngChunk('tEXt'),
+      repeatedIdatChunk,
+      validPng.subarray(iendOffset),
+    ]);
+
+    expect(() => pngRgbaBuffer(mutatedPng, 'non-contiguous-idat')).toThrow(
+      /PNG has a non-contiguous IDAT sequence: non-contiguous-idat/,
+    );
   });
 
   it('routes structured targets through the native platform launch descriptor', () => {
