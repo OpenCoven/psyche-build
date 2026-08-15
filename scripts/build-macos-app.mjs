@@ -122,6 +122,10 @@ export function createDevTauriConfig(production, macosOverlay = {}) {
   const overlayConfig = structuredClone(macosOverlay);
   const baseWindows = devConfig.app?.windows ?? [];
   const overlayWindows = overlayConfig.app?.windows ?? [];
+  if (!baseWindows.some((window) => window?.label === 'main')) {
+    throw new Error('Production Tauri config must contain an app.windows entry labeled "main"');
+  }
+
   const overlayWindowsByLabel = new Map();
 
   for (const overlayWindow of overlayWindows) {
@@ -162,10 +166,6 @@ export function createDevTauriConfig(production, macosOverlay = {}) {
   };
 
   const mainWindow = devConfig.app?.windows?.find((window) => window.label === 'main');
-
-  if (!mainWindow) {
-    throw new Error('Production Tauri config must contain an app.windows entry labeled "main"');
-  }
 
   const devIdentity = channelConfig('dev');
   devConfig.productName = devIdentity.productName;

@@ -759,17 +759,12 @@ describe('macOS build channels', () => {
 
     it('fails when the production config has no main window', () => {
       const withoutMain = structuredClone(baseTauriConfig);
-      const overlayWithoutMain = structuredClone(macosTauriOverlay);
       withoutMain.app.windows[0] = {
         ...withoutMain.app.windows[0],
         label: 'secondary',
       };
-      overlayWithoutMain.app!.windows![0] = {
-        ...overlayWithoutMain.app!.windows![0],
-        label: 'secondary',
-      };
 
-      expect(() => createDevTauriConfig(withoutMain, overlayWithoutMain)).toThrow(
+      expect(() => createDevTauriConfig(withoutMain, macosTauriOverlay)).toThrow(
         'Production Tauri config must contain an app.windows entry labeled "main"',
       );
     });
