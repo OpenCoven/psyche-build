@@ -19,6 +19,19 @@ const textExtensions = new Set([
 ]);
 const stalePathPattern = /native\/macos\/psyche-build-tauri|['"]native['"]\s*,\s*['"]macos['"]\s*,\s*['"]psyche-build-tauri['"]/;
 const originalBaseCsp = "default-src 'self'; img-src 'self' data: https: http:; style-src 'self'; script-src 'self'; frame-src https: http:; connect-src 'self' ipc: http://ipc.localhost https: http:";
+const pngSignature = Buffer.from('89504e470d0a1a0a', 'hex');
+const jpeg2000Signature = Buffer.from('0000000c6a5020200d0a870a', 'hex');
+const icoDibHeaderSizes = new Set([40]);
+const requiredModernIcnsChunkTypes = new Set([
+  'ic07',
+  'ic08',
+  'ic09',
+  'ic10',
+  'ic11',
+  'ic12',
+  'ic13',
+  'ic14',
+]);
 
 function json(name: string) {
   return JSON.parse(readFileSync(join(desktop, 'src-tauri', name), 'utf8'));
@@ -26,6 +39,27 @@ function json(name: string) {
 
 function readText(path: string) {
   return readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+}
+
+function hasLeadingSignature(payload: Buffer, signature: Buffer) {
+  return payload.length >= signature.length && payload.subarray(0, signature.length).equals(signature);
+}
+
+function icoPayloadEncoding(payload: Buffer) {
+  if (hasLeadingSignature(payload, pngSignature)) return 'png' as const;
+  if (payload.length < 4) return null;
+
+  const dibHeaderSize = payload.readUInt32LE(0);
+  if (!icoDibHeaderSizes.has(dibHeaderSize)) return null;
+  if (payload.length < dibHeaderSize) return null;
+
+  return 'dib' as const;
+}
+
+function icnsPayloadEncoding(payload: Buffer) {
+  if (hasLeadingSignature(payload, pngSignature)) return 'png' as const;
+  if (hasLeadingSignature(payload, jpeg2000Signature)) return 'jp2' as const;
+  return null;
 }
 
 function paethPredictor(left: number, up: number, upLeft: number) {
@@ -41,7 +75,7 @@ function paethPredictor(left: number, up: number, upLeft: number) {
 
 function pngRgba(path: string) {
   const png = readFileSync(path);
-  if (png.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') {
+  if (!hasLeadingSignature(png, pngSignature)) {
     throw new Error(`Invalid PNG signature: ${path}`);
   }
 
@@ -179,6 +213,7 @@ function icoEntries(path: string) {
   if (tableEnd > ico.length) throw new Error(`Out-of-bounds ICO directory table: ${path}`);
 
   const widths: number[] = [];
+  const encodings: Array<'png' | 'dib'> = [];
   for (let index = 0; index < count; index += 1) {
     const entryOffset = 6 + index * 16;
     const width = ico[entryOffset] || 256;
@@ -189,10 +224,15 @@ function icoEntries(path: string) {
     if (payloadSize === 0) throw new Error(`ICO entry ${index} has an empty payload: ${path}`);
     if (payloadOffset < tableEnd) throw new Error(`ICO entry ${index} overlaps the directory: ${path}`);
     if (payloadEnd > ico.length) throw new Error(`ICO entry ${index} extends past EOF: ${path}`);
+
+    const encoding = icoPayloadEncoding(ico.subarray(payloadOffset, payloadEnd));
+    if (!encoding) throw new Error(`ICO entry ${index} has an unsupported payload encoding: ${path}`);
+
     widths.push(width);
+    encodings.push(encoding);
   }
 
-  return { widths, payloadsValidated: true };
+  return { widths, encodings, payloadsValidated: true };
 }
 
 function icnsChunks(path: string) {
@@ -204,19 +244,27 @@ function icnsChunks(path: string) {
   if (declaredLength !== icns.length) throw new Error(`Mismatched ICNS length: ${path}`);
 
   const chunkTypes: string[] = [];
+  const encodingsByType: Partial<Record<string, 'png' | 'jp2'>> = {};
   let offset = 8;
   while (offset < icns.length) {
     if (offset + 8 > icns.length) throw new Error(`Truncated ICNS chunk header: ${path}`);
     const type = icns.subarray(offset, offset + 4).toString('ascii');
     const size = icns.readUInt32BE(offset + 4);
     const chunkEnd = offset + size;
-    if (size < 8) throw new Error(`Invalid ICNS chunk length for ${type}: ${path}`);
+    if (size <= 8) throw new Error(`Invalid ICNS chunk length for ${type}: ${path}`);
     if (chunkEnd > icns.length) throw new Error(`Out-of-bounds ICNS chunk ${type}: ${path}`);
+
+    if (requiredModernIcnsChunkTypes.has(type)) {
+      const encoding = icnsPayloadEncoding(icns.subarray(offset + 8, chunkEnd));
+      if (!encoding) throw new Error(`ICNS chunk ${type} has an unsupported image signature: ${path}`);
+      encodingsByType[type] = encoding;
+    }
+
     chunkTypes.push(type);
     offset = chunkEnd;
   }
 
-  return { chunkTypes };
+  return { chunkTypes, encodingsByType };
 }
 
 function stalePathReferences(): string[] {
@@ -406,8 +454,15 @@ describe('desktop Tauri layout', () => {
     ] as const) {
       const png = pngRgba(join(icons, name));
       expect(png).toMatchObject({ width: size, height: size, bitDepth: 8, colorType: 6 });
-      expect(png.alphaAt(0, 0)).toBe(0);
-      expect(png.alphaAt(Math.floor(size / 2), Math.floor(size / 2))).toBe(255);
+      for (const [x, y] of [
+        [0, 0],
+        [png.width - 1, 0],
+        [0, png.height - 1],
+        [png.width - 1, png.height - 1],
+      ] as const) {
+        expect(png.alphaAt(x, y)).toBe(0);
+      }
+      expect(png.alphaAt(Math.floor(png.width / 2), Math.floor(png.height / 2))).toBe(255);
     }
 
     const ico = icoEntries(join(icons, 'icon.ico'));
@@ -425,6 +480,16 @@ describe('desktop Tauri layout', () => {
       'ic13',
       'ic14',
     ]));
+    expect(icns.encodingsByType).toEqual(expect.objectContaining({
+      ic07: 'png',
+      ic08: 'png',
+      ic09: 'png',
+      ic10: 'png',
+      ic11: 'png',
+      ic12: 'png',
+      ic13: 'png',
+      ic14: 'png',
+    }));
   });
 
   it('routes structured targets through the native platform launch descriptor', () => {
