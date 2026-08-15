@@ -11,11 +11,12 @@ export const DEFAULT_METRIC_ORDER = Object.freeze([
 const METRIC_IDS = new Set(DEFAULT_METRIC_ORDER);
 const LOCAL_AGENT_KINDS = new Set(['coven-chat', 'coven-attach']);
 const ACTIVE_AGENT_STATUSES = new Set(['running', 'waiting', 'blocked']);
-const IDEAL_FRAME_MS = 1000 / 60;
 const MAX_TREND_SAMPLES = 60;
 const DIAGNOSTIC_LIMIT = 16_384;
 const DIAGNOSTIC_TRUNCATION_MARKER = '...(truncated)';
 const DIAGNOSTIC_EXCLUSION = 'Excludes prompts, terminal contents, file contents, diffs, and browser contents.';
+const MIN_CADENCE_INTERVALS = 3;
+const CADENCE_TOLERANCE = 0.2;
 
 export const METRICS = Object.freeze({
   connection: Object.freeze({
@@ -568,42 +569,115 @@ export function createFrameSampler() {
   let frames = 0;
   let intervals = 0;
   let totalIntervalMs = 0;
-  let droppedFrames = 0;
+  let frameIntervals = [];
+
+  function approximatelyEqual(left, right) {
+    return Math.abs(left - right) <= right * CADENCE_TOLERANCE;
+  }
+
+  function trailingCadenceIntervals() {
+    const trailing = [];
+
+    for (let index = frameIntervals.length - 1; index >= 0; index -= 1) {
+      const interval = frameIntervals[index];
+      const baseline = trailing.length ? median(trailing) : interval;
+      if (!approximatelyEqual(interval, baseline)) break;
+      trailing.unshift(interval);
+    }
+
+    if (trailing.length < MIN_CADENCE_INTERVALS) return trailing;
+
+    // If the intervals before the gap share the same cadence as the trailing
+    // run, this is an interruption within an existing cadence rather than a
+    // genuine cadence transition. Return an empty array so the caller uses the
+    // full sample and counts the gap as a dropped frame.
+    const trailingStart = frameIntervals.length - trailing.length;
+    const trailingMedian = median(trailing);
+    const beforeGap = frameIntervals.slice(0, Math.max(0, trailingStart - 1));
+    if (beforeGap.some((interval) => approximatelyEqual(interval, trailingMedian))) {
+      return [];
+    }
+
+    return trailing;
+  }
+
+  function calibrateCadence() {
+    if (frameIntervals.length < MIN_CADENCE_INTERVALS) return null;
+
+    // A cadence change within this sample should not turn the previous cadence
+    // into a burst of dropped frames. Prefer a stable trailing run when one is
+    // available. Otherwise, only use a dominant repeated cadence: infrequent
+    // multiples can be missed callbacks, but a competing cadence is not.
+    const trailing = trailingCadenceIntervals();
+    if (trailing.length >= MIN_CADENCE_INTERVALS) {
+      return {
+        targetFrameMs: median(trailing),
+        measuredIntervals: trailing,
+      };
+    }
+
+    const sorted = [...frameIntervals].sort((left, right) => left - right);
+    const candidate = median(sorted.slice(0, Math.max(1, Math.ceil(sorted.length / 4))));
+    const calibration = frameIntervals.filter((interval) => approximatelyEqual(interval, candidate));
+    if (calibration.length < MIN_CADENCE_INTERVALS) return null;
+    const competingIntervals = frameIntervals.length - calibration.length;
+    if (calibration.length <= competingIntervals * 2) return null;
+
+    return {
+      targetFrameMs: median(calibration),
+      measuredIntervals: frameIntervals,
+    };
+  }
 
   return {
     frame(at) {
       const frameAt = finiteNumber(at);
       if (frameAt == null) return;
 
-      if (previousAt != null) {
-        const delta = Math.max(0, frameAt - previousAt);
-        totalIntervalMs += delta;
-        intervals += 1;
-        droppedFrames += Math.max(0, Math.round(delta / IDEAL_FRAME_MS) - 1);
+      if (previousAt == null) {
+        previousAt = frameAt;
+        frames += 1;
+        return;
       }
 
+      const delta = frameAt - previousAt;
+      if (delta <= 0) return;
+
+      totalIntervalMs += delta;
+      intervals += 1;
+      frameIntervals.push(delta);
       previousAt = frameAt;
       frames += 1;
     },
     flush(windowMs) {
       const duration = Math.max(1, finiteNumber(windowMs) ?? 0);
+      const cadence = calibrateCadence();
+      const targetFrameMs = cadence?.targetFrameMs ?? null;
+      const droppedFrames = targetFrameMs == null
+        ? null
+        : cadence.measuredIntervals.reduce(
+          (total, delta) => total + Math.max(0, Math.round(delta / targetFrameMs) - 1),
+          0,
+        );
       const sample = intervals > 0
         ? {
             fps: Math.round((frames * 1000) / duration),
             renderLatencyMs: totalIntervalMs / intervals,
             droppedFrames,
+            framePacingHz: targetFrameMs == null ? null : 1000 / targetFrameMs,
           }
         : {
             fps: null,
             renderLatencyMs: null,
             droppedFrames: null,
+            framePacingHz: null,
           };
 
       previousAt = null;
       frames = 0;
       intervals = 0;
       totalIntervalMs = 0;
-      droppedFrames = 0;
+      frameIntervals = [];
 
       return sample;
     },
@@ -681,6 +755,9 @@ export function formatLiveDiagnostics(input) {
   }
   if (Number.isFinite(metrics.fps)) {
     bodyLines.push(`FPS: ${Math.round(metrics.fps)}`);
+  }
+  if (Number.isFinite(metrics.framePacingHz)) {
+    bodyLines.push(`rAF cadence: ${Math.round(metrics.framePacingHz)} Hz`);
   }
   if (Number.isFinite(outputRate)) {
     bodyLines.push(`Output: ${Math.round(outputRate)} lines/s`);

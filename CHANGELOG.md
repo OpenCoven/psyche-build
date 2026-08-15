@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Performance
+
+- The direct-distributed macOS desktop app now opts its Tauri WKWebViews into
+  the display's native refresh rate. WebKit otherwise limits
+  `requestAnimationFrame` to about 60 Hz on macOS 13–15, even on ProMotion and
+  high-refresh external displays. The opt-in is deliberately confined to the
+  notarized DMG/Homebrew distribution and has no effect on other platforms.
+
 ### Security
 
 - Added project-scoped agent control for registered panes and browser tabs with
