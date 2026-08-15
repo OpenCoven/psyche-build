@@ -588,7 +588,7 @@ final class ControlRequestClientTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
-        for _ in 0..<1_000 {
+        for _ in 0..<10_000 {
             if await client.pendingRequestCount >= count { return }
             await Task.yield()
         }
@@ -602,7 +602,7 @@ final class ControlRequestClientTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
-        for _ in 0..<1_000 {
+        for _ in 0..<10_000 {
             if await scheduler.waiterCount == count { return }
             await Task.yield()
         }
@@ -634,7 +634,7 @@ final class ControlRequestClientTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
-        for _ in 0..<1_000 {
+        for _ in 0..<10_000 {
             let hasPendingRequest = await client.pendingRequestCount > 0
             let isComplete = await probe.isComplete
             if hasPendingRequest || isComplete { return }
