@@ -104,7 +104,6 @@ describe('daemon pane config helpers', () => {
   });
 
   it('projects stable Psyche ids separately from replaceable tmux bindings', async () => {
-<<<<<<< HEAD
     const identity = { pid: 42, processStartIdentity: 'start-42' };
     const root = await writeConfig({
       panes: [{
@@ -114,22 +113,11 @@ describe('daemon pane config helpers', () => {
     });
 
     await expect(listPaneSurfaceBindings(root, async () => true, () => identity)).resolves.toEqual([{
-=======
-    const root = await writeConfig({
-      panes: [{
-        id: 'psyche-2', paneId: '%3', worktreeDir: '/repo/worktree',
-        title: 'Agent', agent: 'codex',
-      }],
-    });
-
-    await expect(listPaneSurfaceBindings(root, async () => true)).resolves.toEqual([{
->>>>>>> origin/main
       id: 'psyche-2', tmuxPaneId: '%3', worktreeRoot: '/repo/worktree',
       title: 'Agent', agent: 'codex',
     }]);
   });
 
-<<<<<<< HEAD
   it('rejects a live tmux id when its persisted server generation is stale', async () => {
     const oldIdentity = { pid: 42, processStartIdentity: 'old-start' };
     const currentIdentity = { pid: 84, processStartIdentity: 'current-start' };
@@ -174,11 +162,6 @@ describe('daemon pane config helpers', () => {
     const identity = { pid: 42, processStartIdentity: 'start-42' };
     const root = await writeConfig({
       panes: [{ id: 'psyche-2', paneId: '%3', worktreeDir: '/repo/worktree', tmuxServerIdentity: identity }],
-=======
-  it('does not resurrect a stale exited pane record and increments on a confirmed rebind', async () => {
-    const root = await writeConfig({
-      panes: [{ id: 'psyche-2', paneId: '%3', worktreeDir: '/repo/worktree' }],
->>>>>>> origin/main
     });
     const surfaces = new SurfaceRegistry();
     const observations = new PaneObservationStore();
@@ -187,7 +170,6 @@ describe('daemon pane config helpers', () => {
       writable: true, outputSequence: 0,
     });
 
-<<<<<<< HEAD
     await refreshPaneSurfaces(root, surfaces, observations, async () => false, () => identity);
     expect(surfaces.get('psyche-2')).toBeUndefined();
 
@@ -197,29 +179,15 @@ describe('daemon pane config helpers', () => {
     await refreshPaneSurfaces(
       root, surfaces, observations, async (paneId) => paneId === '%4', () => identity,
     );
-=======
-    await refreshPaneSurfaces(root, surfaces, observations, async () => false);
-    expect(surfaces.get('psyche-2')).toBeUndefined();
-
-    await writeFile(path.join(root, '.psyche', 'psyche.config.json'), JSON.stringify({
-      panes: [{ id: 'psyche-2', paneId: '%4', worktreeDir: '/repo/worktree' }],
-    }));
-    await refreshPaneSurfaces(root, surfaces, observations, async (paneId) => paneId === '%4');
->>>>>>> origin/main
     expect(surfaces.get('psyche-2')).toMatchObject({
       tmuxPaneId: '%4', generation: first.generation + 1,
     });
   });
 
   it('serializes delayed refreshes so an older result cannot overwrite a newer rebind', async () => {
-<<<<<<< HEAD
     const identity = { pid: 42, processStartIdentity: 'start-42' };
     const root = await writeConfig({
       panes: [{ id: 'psyche-2', paneId: '%3', worktreeDir: '/repo/worktree', tmuxServerIdentity: identity }],
-=======
-    const root = await writeConfig({
-      panes: [{ id: 'psyche-2', paneId: '%3', worktreeDir: '/repo/worktree' }],
->>>>>>> origin/main
     });
     const surfaces = new SurfaceRegistry();
     const observations = new PaneObservationStore();
@@ -238,20 +206,13 @@ describe('daemon pane config helpers', () => {
         if (probeCalls === 1) await new Promise<void>((resolve) => { releaseFirst = resolve; });
         return paneId === '%4';
       },
-<<<<<<< HEAD
       () => identity,
-=======
->>>>>>> origin/main
     ));
 
     const first = queue.run();
     await vi.waitFor(() => expect(probeCalls).toBe(1));
     await writeFile(path.join(root, '.psyche', 'psyche.config.json'), JSON.stringify({
-<<<<<<< HEAD
       panes: [{ id: 'psyche-2', paneId: '%4', worktreeDir: '/repo/worktree', tmuxServerIdentity: identity }],
-=======
-      panes: [{ id: 'psyche-2', paneId: '%4', worktreeDir: '/repo/worktree' }],
->>>>>>> origin/main
     }));
     const second = queue.run();
     releaseFirst();

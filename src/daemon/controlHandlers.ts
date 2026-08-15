@@ -16,18 +16,11 @@ import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnaps
 import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
 import {
   spawnBridgePane,
-<<<<<<< HEAD
   killBridgePane,
-=======
->>>>>>> origin/main
   createCovenClient,
   launchProjectCovenSession,
   openProjectCovenSession,
   routeProjectCovenSessionCapability,
-<<<<<<< HEAD
-=======
-  resolveConfiguredPaneId,
->>>>>>> origin/main
   updatePaneMeta,
   defaultSpawnDeps,
   type BridgeSpawnRequest,
@@ -56,11 +49,8 @@ export interface DaemonControlHandlerDeps {
   paneObservations?: PaneObservationStore;
   surfaces?: SurfaceRegistry;
   refreshPaneSurfaces?: () => Promise<readonly PaneSurface[]>;
-<<<<<<< HEAD
   /** Safe durable pane teardown; injectable for handler tests. */
   closePane?: (projectRoot: string, paneId: string) => Promise<void>;
-=======
->>>>>>> origin/main
   browserProvider?: Pick<BrowserProviderBroker, 'dispatch'>;
   browserSemanticSnapshots?: BrowserSemanticSnapshotRegistry;
 }
@@ -91,11 +81,7 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
   const covenSpawnDeps = deps.covenSpawnDeps ?? defaultSpawnDeps;
   const paneObservations = deps.paneObservations ?? new PaneObservationStore();
   const surfaces = deps.surfaces ?? new SurfaceRegistry();
-<<<<<<< HEAD
   const closePane = deps.closePane ?? killBridgePane;
-=======
-  const resolvePaneId = (paneId: string) => resolveConfiguredPaneId(deps.projectRoot, paneId);
->>>>>>> origin/main
 
   return {
     async spawnPane(payload): Promise<BridgeSpawnResult> {
@@ -117,7 +103,6 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       if (!bytes) {
         throw Object.assign(new Error('input must be base64'), { code: 'bad_base64' });
       }
-<<<<<<< HEAD
       await deps.tmux.sendKeysHex(payload.paneId, bytes);
     },
 
@@ -131,25 +116,6 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
 
     async killPane(payload): Promise<void> {
       await deps.tmux.killPane(payload.paneId);
-=======
-      const tmuxPaneId = await resolvePaneId(payload.paneId);
-      await deps.tmux.sendKeysHex(tmuxPaneId, bytes);
-    },
-
-    async resizePane(payload): Promise<void> {
-      const tmuxPaneId = await resolvePaneId(payload.paneId);
-      deps.tmux.resizePane(tmuxPaneId, payload.cols, payload.rows);
-    },
-
-    async focusPane(payload): Promise<void> {
-      const tmuxPaneId = await resolvePaneId(payload.paneId);
-      deps.tmux.selectPane(tmuxPaneId);
-    },
-
-    async killPane(payload): Promise<void> {
-      const tmuxPaneId = await resolvePaneId(payload.paneId);
-      await deps.tmux.killPane(tmuxPaneId);
->>>>>>> origin/main
     },
 
     executeOrchestration: notSupported('orchestration.execute'),
@@ -171,13 +137,10 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       return paneObservations.read(payload.paneId, { afterSequence: payload.afterSequence });
     },
     async actOnPane(payload) {
-<<<<<<< HEAD
       if (!deps.refreshPaneSurfaces) {
         throw codedHandlerError('backend_unavailable', 'pane surface refresh is unavailable');
       }
       const refreshPaneSurfaces = deps.refreshPaneSurfaces;
-=======
->>>>>>> origin/main
       if (payload.action.kind === 'create') {
         if (payload.projectId !== deps.projectRoot) {
           throw codedHandlerError('resource_scope_mismatch', 'pane creation target is outside this project');
@@ -189,11 +152,7 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
           agent: payload.action.agent,
           branch: payload.action.branch,
         });
-<<<<<<< HEAD
         const refreshed = await refreshPaneSurfaces();
-=======
-        const refreshed = await deps.refreshPaneSurfaces?.();
->>>>>>> origin/main
         const created = refreshed?.find((surface) => surface.tmuxPaneId === result.id);
         if (!created) {
           throw codedHandlerError('resource_missing', 'created pane has no stable Psyche resource binding');
@@ -208,12 +167,9 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       ) {
         throw codedHandlerError('resource_missing', 'pane action target is missing');
       }
-<<<<<<< HEAD
       // Re-read the durable binding immediately before every effect. The refresh
       // drops panes whose persisted tmux server generation is no longer current.
       await refreshPaneSurfaces();
-=======
->>>>>>> origin/main
       const pane = requirePaneSurface(surfaces, payload.paneId, payload.generation);
       const target = assertTmuxPaneId(pane.tmuxPaneId);
       const quotedTarget = quoteTmuxArgument(target);
@@ -254,11 +210,7 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
           return { paneId: payload.paneId, ...observed };
         }
         case 'close':
-<<<<<<< HEAD
           await closePane(deps.projectRoot, payload.paneId);
-=======
-          await deps.tmux.killPane(target);
->>>>>>> origin/main
           surfaces.remove(payload.paneId);
           paneObservations.clear(payload.paneId);
           return { paneId: payload.paneId, closed: true };
