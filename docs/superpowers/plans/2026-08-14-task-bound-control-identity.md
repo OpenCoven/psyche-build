@@ -37,7 +37,6 @@
 **Files:**
 - Preserve: `docs/superpowers/specs/2026-08-14-task-scoped-control-reads-design.md`
 - Preserve: `docs/superpowers/plans/2026-08-14-task-bound-control-identity.md`
-- Preserve: `docs/superpowers/plans/2026-08-14-canonical-task-receipts.md`
 
 - [ ] **Step 1: Fetch and verify the base**
 
@@ -676,7 +675,9 @@ git diff origin/main...HEAD -- \
   src/control/server.ts src/control/hostProcess.ts src/mcp/server.ts
 ```
 
-Expected: no receipt lookup, event filtering, queue timeout, or runtime quarantine changes are present in PR A.
+Expected: no canonical action-status/receipt ownership, task-filtered raw-event
+API, queue timeout, or runtime quarantine changes are present in PR A. The
+operator-only raw-event gate is intentionally included.
 
 - [ ] **Step 5: Push and open the PR**
 

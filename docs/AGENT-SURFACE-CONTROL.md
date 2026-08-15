@@ -17,27 +17,56 @@ connections are provider-only after registration; an agent token cannot
 register or impersonate one. Native browser commands accept calls only from the
 trusted `main` webview.
 
+## Task-bound MCP identity
+
+A trusted launcher issues a project-local task credential with
+`issueControlTaskToken()` or, after it has already canonicalized the project
+root, `issueControlTaskTokenForCanonicalRoot()`. It passes the resulting token
+and the same task ID to `psyche mcp`:
+
+```text
+PSYCHE_CONTROL_TASK_ID=task-alpha
+PSYCHE_CONTROL_TASK_TOKEN=<redacted example>
+```
+
+These variables are a pair; the example token is intentionally not usable.
+Authentication binds the connection to the canonical project root and task.
+Caller-supplied `task_id` values are only consistency inputs and never establish
+authority. A mismatched value is rejected, while omitting it does not weaken the
+authenticated binding.
+
+The legacy shared-agent credential and in-process compatibility identities have
+no task scope. They cannot acquire one by supplying a task ID: task-sensitive
+reads and commands require a task-bound credential, and compatibility
+principals cannot use agent surface controls.
+
 ## MCP tools
 
-All mutation and observation tools use the canonical project root returned by
-the owner. `task_id`, `lease_id`, and `lease_revision` identify one exact grant.
-Pane and browser operations additionally require the current resource
-`generation`.
+All mutation and observation tools use the canonical project root and task
+binding authenticated by the owner. `lease_id` and `lease_revision` identify
+one exact grant. Pane and browser operations additionally require the current
+resource `generation`. If supplied, `task_id` must match the authenticated task
+but does not grant access.
 
 | Tool | Required arguments |
 |---|---|
 | `psyche_control_list` | none (`project_root` optional) |
-| `psyche_control_lease` | `operation`, `task_id`; requests also require `ttl_ms`, `grants`; release requires `lease_id`, `lease_revision` |
-| `psyche_pane_observe` | `task_id`, `lease_id`, `lease_revision`, `pane_id`, `generation` |
-| `psyche_pane_action` | `task_id`, `lease_id`, `lease_revision`, `action`; existing-pane actions require `pane_id`, `generation`, creation requires `project_id` |
-| `psyche_browser_inspect` | `task_id`, `lease_id`, `lease_revision`, `tab_id`, `generation` |
-| `psyche_browser_action` | `task_id`, `lease_id`, `lease_revision`, `tab_id`, `generation`, `action`; element actions additionally require `snapshot_id` and `action.elementRef` |
-| `psyche_browser_script` | `task_id`, `lease_id`, `lease_revision`, `tab_id`, `generation`, `source` |
+| `psyche_control_lease` | `operation`; requests also require `ttl_ms`, `grants`; status requires `request_id`; release requires `lease_id`, `lease_revision` |
+| `psyche_pane_observe` | `lease_id`, `lease_revision`, `pane_id`, `generation` |
+| `psyche_pane_action` | `lease_id`, `lease_revision`, `action`; existing-pane actions require `pane_id`, `generation`, creation requires `project_id` |
+| `psyche_browser_inspect` | `lease_id`, `lease_revision`, `tab_id`, `generation` |
+| `psyche_browser_action` | `lease_id`, `lease_revision`, `tab_id`, `generation`, `action`; element actions additionally require `snapshot_id` and `action.elementRef` |
+| `psyche_browser_script` | `lease_id`, `lease_revision`, `tab_id`, `generation`, `source` |
 | `psyche_control_action_status` | `action_id` |
 
 Compatibility aliases route through the same owner. Create, execute-task, kill,
 and pane-output operations require lease fields; missing authority returns
 `lease_missing` before an effect.
+
+`psyche_control_list` returns only resources covered by active, unexpired leases
+for the authenticated task and current owner epoch. Lease-status queries return
+only that task's matching request and leases, even if a caller knows another
+task's IDs.
 
 ## Lease lifecycle
 
@@ -116,6 +145,16 @@ Psyche Build never retries a mutation whose delivery may have occurred. A
 timeout, provider disconnect after dispatch, navigation during script
 evaluation, or owner recovery reports `effect_unknown`; inspect state before
 deciding what to do next.
+
+Raw journal events are operator-only; PR A pulls that handshake boundary
+forward so task credentials cannot inspect or filter the raw event stream.
+Canonical task-owned action status and runtime receipt ownership remain the PR B
+follow-up.
+
+When a control-domain failure crosses the MCP JSON-RPC boundary, the numeric
+JSON-RPC error code is `-32001` and the stable string domain code is carried in
+`error.data.code` (for example, `task_binding_required` or
+`operator_required`).
 
 There is deliberately no accessibility, coordinate, screenshot-click, shell,
 raw tmux command, XPath, selector, or whole-desktop fallback.

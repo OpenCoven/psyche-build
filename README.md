@@ -148,10 +148,25 @@ same authenticated authority, policy, approval, and receipt path as the UI.
 }
 ```
 
+Trusted task launchers bind an MCP process to one task by issuing a project-local
+token with `issueControlTaskToken()` (or
+`issueControlTaskTokenForCanonicalRoot()` when the project root is already
+canonical) and injecting both variables:
+
+```text
+PSYCHE_CONTROL_TASK_ID=task-alpha
+PSYCHE_CONTROL_TASK_TOKEN=<redacted example>
+```
+
+The authenticated token binding—not a caller-provided `task_id`—establishes
+task authority. The legacy shared-agent credential and compatibility
+identities have no task scope, so task-sensitive control calls fail closed
+instead of adopting a supplied task ID.
+
 | Tool | Does |
 |---|---|
-| `psyche_control_list` | List bounded controllable pane/browser resources, generations, and approvals |
-| `psyche_control_lease` | Request, inspect, or release scoped authority; it cannot grant or approve authority |
+| `psyche_control_list` | List bounded pane/browser resources covered by the authenticated task's active leases |
+| `psyche_control_lease` | Request, inspect, or release authenticated-task-scoped authority; it cannot grant or approve authority |
 | `psyche_pane_observe` | Read bounded pane output and status through an exact leased generation |
 | `psyche_pane_action` | Perform one typed leased pane action and return its canonical receipt |
 | `psyche_browser_inspect` | Capture a bounded semantic snapshot of an exact leased tab generation |
@@ -170,6 +185,12 @@ The compatibility mutation aliases require `task_id`, `lease_id`, and
 `lease_revision`; pane-specific aliases also require the current generation.
 Missing authority returns a structured `lease_missing` result without an
 effect.
+
+Lease-status reads are restricted to the authenticated task. Raw control events
+are operator-only; that boundary is included in PR A. Canonical task-owned
+action status and runtime receipt ownership remain PR B. Control-domain
+failures exposed as JSON-RPC errors use numeric code `-32001`, with the stable
+domain code (for example `task_binding_required`) in `error.data.code`.
 
 See [Agent surface control](./docs/AGENT-SURFACE-CONTROL.md) for the complete
 lease, approval, generation, browser-provider, redaction, and recovery model.
