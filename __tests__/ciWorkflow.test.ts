@@ -3,6 +3,8 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflowPath = path.resolve('.github/workflows/ci.yml');
+const releaseWorkflowPath = path.resolve('.github/workflows/release.yml');
+const packageJsonPath = path.resolve('package.json');
 
 function workflowSource(): string {
   try {
@@ -27,7 +29,9 @@ describe('pull request CI workflow contract', () => {
 
     expect(workflow).toContain('name: CI');
     expect(workflow).toMatch(/pull_request:\s*\n/);
-    expect(workflow).toMatch(/push:\s*\n\s+branches: \[main\]/);
+    expect(workflow).toMatch(
+      /push:\s*\n\s+branches: \[main, feat\/gpu-accelerated-ade\]/,
+    );
     expect(workflow).toContain('contents: read');
     expect(workflow).toContain('group: ci-${{ github.workflow }}-${{ github.ref }}');
     expect(workflow).toContain('cancel-in-progress: true');
@@ -45,10 +49,17 @@ describe('pull request CI workflow contract', () => {
 
   it('pins Node, pnpm, Rust, and every third-party action', () => {
     const workflow = workflowSource();
+    const releaseWorkflow = readFileSync(releaseWorkflowPath, 'utf8');
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as {
+      packageManager?: string;
+    };
     const checkoutCount = workflow.match(/uses: actions\/checkout@/g)?.length ?? 0;
 
     expect(workflow).toContain('node-version: 24');
-    expect(workflow).toContain('version: 10.14.0');
+    expect(packageJson.packageManager).toMatch(/^pnpm@\d+\.\d+\.\d+$/);
+    for (const source of [workflow, releaseWorkflow]) {
+      expect(source).not.toMatch(/pnpm\/action-setup@[^\n]+\n\s+with:\n\s+version:/);
+    }
     expect(workflow).toContain('toolchain: 1.95.0');
     expect(workflow).toContain('actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5');
     expect(workflow).toContain('pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1');

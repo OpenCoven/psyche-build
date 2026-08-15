@@ -875,7 +875,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledWith(
         expect.objectContaining({
           worktreePath: '/test/.psyche/worktrees/hook-owned',
-          reason: expect.stringContaining('changed from before-hook to after-hook'),
+          reason: expect.stringContaining('changed from main to after-hook'),
         }),
       );
     });

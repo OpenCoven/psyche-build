@@ -2,8 +2,34 @@
 
 ## Unreleased
 
+### Performance
+
+- The direct-distributed macOS desktop app now opts its Tauri WKWebViews into
+  the display's native refresh rate. WebKit otherwise limits
+  `requestAnimationFrame` to about 60 Hz on macOS 13–15, even on ProMotion and
+  high-refresh external displays. The opt-in is deliberately confined to the
+  notarized DMG/Homebrew distribution and has no effect on other platforms.
+
 ### Security
 
+- Added project-scoped agent control for registered panes and browser tabs with
+  exact resource generations, task-bound capability leases, approve-once risky
+  actions, operator revocation, and no whole-desktop fallback.
+- Browser automation now uses bounded semantic snapshots and typed actions.
+  Submit-capable actions bind captured form method/destination; approved scripts
+  are limited to 64 KiB source, five seconds, and 256 KiB JSON results. Each
+  approved script now runs in a fresh native WebKit content world so it cannot
+  poison the page automation realm or a later approved invocation.
+- Revoked approved browser-script authority at invocation completion by moving
+  approved source into a one-shot Worker and applying only validated
+  synchronous DOM mutation plans.
+- Durable agent-control journal events and journaled receipts now contain
+  allowlisted metadata only. Terminal output, semantic/page contents,
+  screenshots, secret values, raw scripts, cookies, headers, absolute/full paths
+  or unredacted path components, and provider error details are not persisted.
+  Approval context may retain only a redacted basename and redacted target
+  description. Live in-memory control state may retain exact operational
+  resource IDs until owner restart.
 - The bridge and daemon no longer accept a tmux pane id that is not a real
   pane id. Control mode is line-oriented, so a pane id containing a newline
   used to end the intended command and start another one — reaching

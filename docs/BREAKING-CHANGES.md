@@ -74,10 +74,14 @@ Migrate both at once:
 
 ```sh
 mv .comux-hooks .psyche-hooks
-grep -rl COMUX_ .psyche-hooks | xargs sed -i '' 's/COMUX_/PSYCHE_/g'
+grep -rl --null -- COMUX_ .psyche-hooks | xargs -0 sed -i '' -e 's/COMUX_/PSYCHE_/g'
 ```
 
-Drop the `''` after `-i` on GNU sed (Linux).
+On GNU sed (Linux), use this version instead:
+
+```sh
+grep -rl --null -- COMUX_ .psyche-hooks | xargs -0 -r sed -i -e 's/COMUX_/PSYCHE_/g' --
+```
 
 ### Hook environment variables
 

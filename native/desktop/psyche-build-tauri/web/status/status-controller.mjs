@@ -16,6 +16,11 @@ import {
   sparklinePath,
   summarizeWorkspace,
 } from './status-model.mjs';
+import {
+  VIRTUAL_LIST_OVERSCAN,
+  shouldVirtualize,
+  virtualizeItems,
+} from '../runtime/virtual-list.ts';
 
 const STORAGE_KEY = 'psyche.tauri.status.v1';
 const SPARKLINE_WIDTH = 72;
@@ -45,6 +50,7 @@ const PANEL_TITLES = Object.freeze({
   activity: 'Activity',
 });
 const TONE_RANK = Object.freeze({ neutral: 0, warn: 1, danger: 2 });
+const STATUS_DETAIL_ROW_HEIGHT = 68;
 
 function asObject(value) {
   return value && typeof value === 'object' ? value : {};
@@ -351,16 +357,48 @@ function createEmptyFrameSample() {
     fps: null,
     renderLatencyMs: null,
     droppedFrames: null,
+    framePacingHz: null,
   };
 }
 
 function diagnosticsShell(scope) {
+  // Diagnostics are a bounded text snapshot, not a row collection, so there is
+  // no diagnostics-list surface to virtualize.
   return {
     sampledAt: Date.now(),
     scope: scope === 'focused' ? 'focused' : 'workspace',
     metrics: {},
     services: [],
   };
+}
+
+function appendVirtualSpacer(body, doc, position, height) {
+  const spacer = doc.createElement('div');
+  spacer.className = `virtual-list-spacer virtual-list-spacer-${position}`;
+  spacer.setAttribute('aria-hidden', 'true');
+  spacer.setAttribute('role', 'presentation');
+  spacer.setAttribute('style', `height:${Math.max(0, height)}px`);
+  body.appendChild(spacer);
+}
+
+function renderVirtualStatusRows(viewport, body, doc, items, getKey, renderRow) {
+  resetNode(body);
+  if (!shouldVirtualize(items.length)) {
+    items.forEach((item, index) => {
+      body.appendChild(renderRow(item, getKey(item, index)));
+    });
+    return;
+  }
+  const window = virtualizeItems(items, {
+    rowHeight: STATUS_DETAIL_ROW_HEIGHT,
+    viewportHeight: viewport.clientHeight || STATUS_DETAIL_ROW_HEIGHT * 10,
+    scrollTop: viewport.scrollTop || 0,
+    overscan: VIRTUAL_LIST_OVERSCAN,
+    getKey,
+  });
+  appendVirtualSpacer(body, doc, 'before', window.before);
+  for (const item of window.items) body.appendChild(renderRow(item.item, item.key));
+  appendVirtualSpacer(body, doc, 'after', window.after);
 }
 
 function readPreferences(storage) {
@@ -755,6 +793,7 @@ function buildDiagnostics(sample, effectiveScope, trends) {
   metrics.fps = finiteNumber(sample.frame?.fps);
   metrics.renderLatencyMs = finiteNumber(sample.frame?.renderLatencyMs);
   metrics.droppedFrames = finiteNumber(sample.frame?.droppedFrames);
+  metrics.framePacingHz = finiteNumber(sample.frame?.framePacingHz);
   peaks.fps = peakValue(trends.fps);
   peaks.renderLatencyMs = peakValue(trends.renderLatencyMs);
   peaks.droppedFrames = peakValue(trends.droppedFrames);
@@ -885,31 +924,36 @@ function isStoppedNativeRequest(result) {
   return result?.cancelled === true && result.error === STOP_POLL_SENTINEL;
 }
 
-function renderAgents(body, doc, summary) {
-  resetNode(body);
+function renderAgents(viewport, body, doc, summary) {
   if (!summary.agents.length) {
+    resetNode(body);
     appendEmpty(body, doc, 'No active agents.');
     return;
   }
 
-  for (const agent of summary.agents) {
+  renderVirtualStatusRows(viewport, body, doc, summary.agents, (agent, index) => (
+    agent.id ?? agent.threadId ?? `${agent.name}:${index}`
+  ), (agent, key) => {
     const row = doc.createElement('div');
     row.className = 'status-agent-row';
+    row.dataset.virtualKey = String(key);
     row.append(
       appendTextCell(doc, 'status-row-name', agent.name),
       appendTextCell(doc, 'status-row-state', agent.status),
       appendTextCell(doc, 'status-row-runtime', formatRuntime(agent.runtimeMs)),
     );
     appendOptionalRowText(doc, row, 'status-row-meta', [agent.harness, agent.model].filter(Boolean).join(' · '));
-    appendOptionalRowText(doc, row, 'status-row-task', agent.currentTask ?? '');
-    appendOptionalRowText(doc, row, 'status-row-task', formatTokens(agent.tokens));
-    body.appendChild(row);
-  }
+    appendOptionalRowText(doc, row, 'status-row-task', [
+      agent.currentTask,
+      formatTokens(agent.tokens),
+    ].filter(Boolean).join(' · '));
+    return row;
+  });
 }
 
-function renderShells(body, doc, summary, nativeSnapshot, activity) {
-  resetNode(body);
+function renderShells(viewport, body, doc, summary, nativeSnapshot, activity) {
   if (!summary.shells.length) {
+    resetNode(body);
     appendEmpty(body, doc, 'No active shells.');
     return;
   }
@@ -917,7 +961,9 @@ function renderShells(body, doc, summary, nativeSnapshot, activity) {
   const processByThreadId = new Map((nativeSnapshot?.processes ?? []).map((row) => [row.threadId, row]));
   const activityByThreadId = new Map((activity?.threads ?? []).map((row) => [row.threadId, row]));
 
-  for (const shell of summary.shells) {
+  renderVirtualStatusRows(viewport, body, doc, summary.shells, (shell, index) => (
+    shell.threadId ?? `${shell.name}:${index}`
+  ), (shell, key) => {
     const process = processByThreadId.get(shell.threadId) ?? null;
     const rate = activityByThreadId.get(shell.threadId) ?? null;
     const cpuPercent = finiteNumber(process?.cpuPercent);
@@ -925,6 +971,7 @@ function renderShells(body, doc, summary, nativeSnapshot, activity) {
     const linesPerSecond = finiteNumber(rate?.linesPerSecond);
     const row = doc.createElement('div');
     row.className = 'status-shell-row';
+    row.dataset.virtualKey = String(key);
     row.append(
       appendTextCell(doc, 'status-row-name', shell.name),
       appendTextCell(
@@ -946,8 +993,8 @@ function renderShells(body, doc, summary, nativeSnapshot, activity) {
     if (linesPerSecond != null) {
       appendOptionalRowText(doc, row, 'status-row-task', formatRate(linesPerSecond, 'lines/s'));
     }
-    body.appendChild(row);
-  }
+    return row;
+  });
 }
 
 function renderTasks(body, doc, summary) {
@@ -1001,8 +1048,9 @@ function renderPerformance(body, doc, sample, trends) {
   const grid = doc.createElement('div');
   grid.className = 'status-performance-grid';
   let cellCount = 0;
-  const hasFrameSample = Number.isFinite(sample.frame?.fps)
-    && Number.isFinite(sample.frame?.renderLatencyMs)
+  const hasBasicFrameSample = Number.isFinite(sample.frame?.fps)
+    && Number.isFinite(sample.frame?.renderLatencyMs);
+  const hasCalibratedFrameSample = hasBasicFrameSample
     && Number.isFinite(sample.frame?.droppedFrames);
 
   if (sample.nativeSnapshot) {
@@ -1038,22 +1086,25 @@ function renderPerformance(body, doc, sample, trends) {
     cellCount += 1;
   }
 
-  if (hasFrameSample) {
+  if (hasBasicFrameSample) {
     grid.appendChild(performanceCell(
       doc,
       'Frame rate',
       `${Math.round(sample.frame.fps)} FPS`,
-      `${sample.frame.renderLatencyMs.toFixed(1)} ms`,
+      `${sample.frame.renderLatencyMs.toFixed(1)} ms${Number.isFinite(sample.frame.framePacingHz) ? ` · rAF cadence ${Math.round(sample.frame.framePacingHz)} Hz` : ''}`,
       trends.fps.values,
     ));
-    grid.appendChild(performanceCell(
-      doc,
-      'Dropped',
-      String(Math.round(sample.frame.droppedFrames)),
-      `Peak ${Math.round(peakValue(trends.droppedFrames) ?? sample.frame.droppedFrames)} / sample`,
-      trends.droppedFrames.values,
-    ));
-    cellCount += 2;
+    cellCount += 1;
+    if (hasCalibratedFrameSample) {
+      grid.appendChild(performanceCell(
+        doc,
+        'Dropped',
+        String(Math.round(sample.frame.droppedFrames)),
+        `Peak ${Math.round(peakValue(trends.droppedFrames) ?? sample.frame.droppedFrames)} / sample`,
+        trends.droppedFrames.values,
+      ));
+      cellCount += 1;
+    }
   }
 
   if (!cellCount) {
@@ -1425,6 +1476,7 @@ export function createStatusController(options = {}) {
   let timerId = null;
   let nativeHealthTimerId = null;
   let frameId = null;
+  let detailRenderFrameId = null;
   let pollInFlight = null;
   let refreshQueued = false;
   let nativePollGeneration = 0;
@@ -1896,9 +1948,9 @@ export function createStatusController(options = {}) {
     if (panelId == null) {
       resetNode(elements.detailBody);
     } else if (panelId === 'agents') {
-      renderAgents(elements.detailBody, doc, liveSample.summary);
+      renderAgents(elements.detail, elements.detailBody, doc, liveSample.summary);
     } else if (panelId === 'shells') {
-      renderShells(elements.detailBody, doc, liveSample.summary, liveSample.nativeSnapshot, liveSample.activity);
+      renderShells(elements.detail, elements.detailBody, doc, liveSample.summary, liveSample.nativeSnapshot, liveSample.activity);
     } else if (panelId === 'tasks') {
       renderTasks(elements.detailBody, doc, liveSample.summary);
     } else if (panelId === 'performance') {
@@ -2109,6 +2161,15 @@ export function createStatusController(options = {}) {
       closePanel();
       return;
     }
+  }
+
+  function handleDetailScroll() {
+    if (detailRenderFrameId != null ||
+        (activePanelId !== 'agents' && activePanelId !== 'shells')) return;
+    detailRenderFrameId = requestFrame(() => {
+      detailRenderFrameId = null;
+      if (lastSampleContext) renderView();
+    });
   }
 
   function handleMetricsClick(event) {
@@ -2330,6 +2391,7 @@ export function createStatusController(options = {}) {
     registerListener(elements.pin, 'click', handlePinClick);
     registerListener(elements.copy, 'click', handleCopyClick);
     registerListener(elements.close, 'click', handleCloseClick);
+    registerListener(elements.detail, 'scroll', handleDetailScroll);
     for (const button of scopeButtons) {
       registerListener(button, 'click', handleScopeClick);
     }
@@ -2364,6 +2426,10 @@ export function createStatusController(options = {}) {
       timerId = null;
     }
     stopFrameLoop();
+    if (detailRenderFrameId != null) {
+      cancelFrame(detailRenderFrameId);
+      detailRenderFrameId = null;
+    }
     drainCleanup();
     return controller;
   }

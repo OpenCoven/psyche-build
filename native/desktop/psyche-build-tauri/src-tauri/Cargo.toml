@@ -2,7 +2,10 @@
 name = "psyche-build-tauri"
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.77"
+# tauri-plugin-macos-fps, which removes WKWebView's 60 Hz cap for direct
+# macOS distribution, requires Rust 1.85. CI and release builds remain pinned
+# to Rust 1.95.0 in the repository toolchain file and workflows.
+rust-version = "1.85"
 
 [lib]
 name = "psyche_build_tauri_lib"
@@ -26,20 +29,26 @@ log = "0.4"
 env_logger = "0.11"
 libc = "0.2"
 sysinfo = "0.36.1"
+sha2 = "0.10"
+base64 = "0.22"
+unicode-normalization = "0.1"
+getrandom = "0.2"
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
-portable-pty = "0.8"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.59.0", features = [
-  "Win32_Foundation",
-  "Win32_Security",
-  "Win32_System_JobObjects",
-  "Win32_System_Threading",
-] }
+portable-pty = { path = "vendor/portable-pty", version = "=0.8.1" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# WKWebView limits requestAnimationFrame to 60 Hz on macOS 13–15 unless its
+# private high-refresh preference is explicitly enabled. Psyche Build is
+# distributed as notarized DMGs/Homebrew, not through the Mac App Store.
+tauri-plugin-macos-fps = "0.1.0"
 window-vibrancy = "0.6"
+block2 = "0.6.2"
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = ["NSBitmapImageRep", "NSImage", "NSImageRep"] }
+objc2-foundation = { version = "0.3.2", features = ["NSData", "NSDictionary", "NSError", "NSObject", "NSString", "NSURL", "NSURLRequest"] }
+objc2-web-kit = { version = "0.3.2", features = ["block2", "WKNavigation", "WKNavigationDelegate", "WKSnapshotConfiguration", "WKWebView"] }
+
 
 [dev-dependencies]
 tempfile = "3"

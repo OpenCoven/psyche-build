@@ -1,12 +1,67 @@
+import { createHash } from 'node:crypto';
+import path from 'node:path';
 import { LaneLeaseStore } from './leases.js';
 import { PromptDispatcher } from './promptDispatch.js';
+import { ApprovalStore, createRedactedApprovalEffect, type Approval, type RedactedApprovalEffect } from './approvals.js';
+import {
+  CapabilityLeaseStore,
+  type CapabilityLease,
+  type CapabilityLeaseAssertion,
+  type LeaseTarget,
+  type SurfaceCapability,
+} from './capabilityLeases.js';
+import type { ControlTaskCredentialReference } from './credentials.js';
+import {
+  classifyBrowserAction,
+  assertBrowserActionFields,
+  classifyBrowserScript,
+  classifyPaneAction,
+  type CanonicalElementSemantics,
+  type PolicyClassification,
+} from './policy.js';
+import { SurfaceRegistry } from './surfaces.js';
+import { AGENT_CONTROL_LIMITS } from './limits.js';
+import {
+  agentControlJournalPayload,
+  createAgentControlJournalResource,
+  type AgentControlJournalReceipt,
+} from './journal.js';
+import { canonicalizeBoundedJson } from './boundedJson.js';
+import { isActionReceipt, isJournalActionReceipt } from './types.js';
 import type {
+  ActionReceipt,
+  ActionStatusReceipt,
   CommandOutcome,
   CommandRecord,
   ControlCommand,
   ControlSnapshot,
+  JournalActionReceipt,
+  LeaseGrant,
   PromptEnvelope,
 } from './types.js';
+
+const STABLE_SURFACE_EFFECT_CODES = new Set([
+  'action_timeout',
+  'args_too_large',
+  'automation_failed',
+  'backend_unavailable',
+  'element_missing',
+  'provider_busy',
+  'provider_unavailable',
+  'resource_missing',
+  'resource_replaced',
+  'mutation_not_allowed',
+  'mutation_plan_invalid',
+  'mutation_target_stale',
+  'result_too_large',
+  'script_source_too_large',
+  'script_args_invalid',
+  'script_args_too_large',
+  'serialization_failed',
+  'snapshot_too_large',
+  'snapshot_stale',
+  'target_unavailable',
+]);
 
 export type Payload<K extends ControlCommand['kind']> = Extract<ControlCommand, { kind: K }>['payload'];
 
@@ -29,6 +84,11 @@ export interface ControlHandlers {
   openCovenSession(payload: Payload<'coven.session.open'>): Promise<unknown>;
   runCovenDesktopAction(payload: Payload<'coven.desktop.action'>): Promise<unknown>;
   executeCovenCapability(payload: Payload<'coven.capability.execute'>): Promise<unknown>;
+  observePane(payload: Payload<'pane.observe'>): Promise<unknown>;
+  actOnPane(payload: Payload<'pane.action'>): Promise<unknown>;
+  inspectBrowser(payload: Payload<'browser.inspect'>): Promise<unknown>;
+  actOnBrowser(payload: Payload<'browser.action'>): Promise<unknown>;
+  runBrowserScript(payload: Payload<'browser.script'>): Promise<unknown>;
 }
 
 export interface RuntimeEvent {
@@ -48,10 +108,48 @@ interface ControlRuntimeOptions {
   ownerEpoch: number;
   handlers: ControlHandlers;
   journal: RuntimeJournal;
+  surfaces?: SurfaceRegistry;
+  capabilityLeases?: CapabilityLeaseStore;
+  approvals?: ApprovalStore;
+  readActiveTaskCredential?: (taskId: string) => Promise<ControlTaskCredentialReference | null>;
+  resolveBrowserElementSemantics?: (input: {
+    tabId: string;
+    generation: number;
+    snapshotId: string;
+    elementRef: string;
+  }) => CanonicalElementSemantics | Promise<CanonicalElementSemantics>;
 }
 
+interface LeaseRequestRecord {
+  id: string;
+  ownerEpoch: number;
+  actorId: string;
+  taskId: string;
+  status: 'pending' | 'granted' | 'released' | 'revoked';
+  createdAt: string;
+  ttlMs: number;
+  grants: readonly LeaseGrant[];
+}
+
+interface SurfaceActionContext {
+  command: Extract<ControlCommand, { kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script' }>;
+  target: LeaseTarget;
+  ownership: TrustedActionOwnership;
+  classification: PolicyClassification;
+  effect?: RedactedApprovalEffect;
+  executablePayloadDigest: string;
+}
+
+type TrustedReceiptOwnership = Required<Pick<ActionReceipt, 'taskId' | 'actorId'>>
+  & Pick<ActionReceipt, 'leaseId' | 'leaseRevision'>;
+type TrustedActionOwnership = Required<Pick<ActionReceipt, 'taskId' | 'actorId' | 'leaseId' | 'leaseRevision'>>;
+type TaskSubjectAuthorityStatus = 'active' | 'inactive' | 'unavailable' | 'untracked';
+
 interface PaneQueueState {
+  readonly target: LeaseTarget;
   readonly items: Set<QueuedCommand>;
+  pendingEffects: number;
+  quarantined: boolean;
   tail: Promise<void>;
   blocker?: Promise<void>;
 }
@@ -62,6 +160,7 @@ interface QueuedCommand {
   readonly automation: boolean;
   readonly generation: number;
   readonly requested: Promise<RuntimeEvent>;
+  readonly queueKey: string;
   started: boolean;
   preempted: boolean;
   terminalized: boolean;
@@ -89,6 +188,9 @@ const MAX_COMMAND_RECORDS = 1000;
 
 export class ControlRuntime {
   public readonly leases = new LaneLeaseStore();
+  public readonly surfaces: SurfaceRegistry;
+  public readonly capabilityLeases: CapabilityLeaseStore;
+  public readonly approvals: ApprovalStore;
 
   private readonly outcomesByIdempotencyKey = new Map<string, CommandOutcome>();
   private readonly pendingByIdempotencyKey = new Map<string, Promise<CommandOutcome>>();
@@ -98,14 +200,26 @@ export class ControlRuntime {
     sequence: number;
   }>();
   private readonly paneBarrierGenerations = new Map<string, number>();
-  private readonly paneQueues = new Map<string, PaneQueueState>();
   private readonly promptDispatcher: PromptDispatcher;
+  private readonly resourceQueues = new Map<string, PaneQueueState>();
+  private readonly leaseRequests = new Map<string, LeaseRequestRecord>();
+  private readonly leaseRequestTombstones = new Set<string>();
+  private readonly pendingApprovals = new Map<string, SurfaceActionContext>();
+  private readonly receipts = new Map<string, ActionStatusReceipt>();
+  private readonly approvalTerminalizations = new Map<string, Promise<void>>();
+  private readonly readActiveTaskCredential?: ControlRuntimeOptions['readActiveTaskCredential'];
 
   private constructor(
     private readonly ownerEpoch: number,
     private readonly handlers: ControlHandlers,
     private readonly journal: RuntimeJournal,
+    options: ControlRuntimeOptions,
   ) {
+    this.surfaces = options.surfaces ?? new SurfaceRegistry();
+    this.capabilityLeases = options.capabilityLeases ?? new CapabilityLeaseStore(undefined, ownerEpoch);
+    this.approvals = options.approvals ?? new ApprovalStore();
+    this.readActiveTaskCredential = options.readActiveTaskCredential;
+    this.resolveBrowserElementSemantics = options.resolveBrowserElementSemantics;
     this.promptDispatcher = new PromptDispatcher(async (envelope) => {
       const result = await this.handlers.sendPrompt(envelope);
       if (isReceiptResult(result)) return result;
@@ -115,17 +229,27 @@ export class ControlRuntime {
 
   static async create(opts: ControlRuntimeOptions): Promise<ControlRuntime> {
     await opts.journal.recoverNonterminalCommands();
-    const runtime = new ControlRuntime(opts.ownerEpoch, opts.handlers, opts.journal);
-    runtime.reduceOutcomes(opts.journal.read(0));
+    const runtime = new ControlRuntime(opts.ownerEpoch, opts.handlers, opts.journal, opts);
+    await runtime.recoverRestartedApprovalReceipts();
+    const events = opts.journal.read(0);
+    runtime.reduceOutcomes(events);
+    runtime.rehydrateReceipts(events);
     return runtime;
   }
 
+  private readonly resolveBrowserElementSemantics?: ControlRuntimeOptions['resolveBrowserElementSemantics'];
+
   submit(command: ControlCommand): Promise<CommandOutcome> {
+    this.pruneInactiveResourceQueues();
     const prior = this.outcomesByIdempotencyKey.get(command.idempotencyKey);
     if (prior) return Promise.resolve(prior);
 
     const pending = this.pendingByIdempotencyKey.get(command.idempotencyKey);
     if (pending) return pending;
+
+    if (this.pendingByIdempotencyKey.size >= AGENT_CONTROL_LIMITS.pendingCommands) {
+      return Promise.resolve(rejectedOutcome('runtime_busy', 'control runtime pending command capacity exceeded'));
+    }
 
     const execution = this.submitFresh(command).finally(() => {
       this.pendingByIdempotencyKey.delete(command.idempotencyKey);
@@ -145,8 +269,10 @@ export class ControlRuntime {
    * became owner. After a restart the journal is replayed for outcome
    * deduplication, but the full command envelopes are not rehydrated, so the
    * map is scoped to the current owner epoch's activity.
-   */
+  */
   snapshot(): ControlSnapshot {
+    const capabilityLeases = this.capabilityLeases.snapshot();
+    const approvals = this.refreshApprovalState(capabilityLeases);
     const events = this.journal.read(0);
     const sequence = events.length > 0 ? events[events.length - 1].sequence : 0;
     const commands: Record<string, CommandRecord> = {};
@@ -160,6 +286,17 @@ export class ControlRuntime {
       sequence,
       commands,
       leases: this.leases.snapshot(),
+      resources: this.surfaces.list(),
+      capabilityLeases,
+      leaseRequests: [...this.leaseRequests.values()].map((request) => ({
+        ...request,
+        grants: request.grants.map((grant) => ({
+          target: { ...grant.target },
+          capabilities: [...grant.capabilities],
+        })),
+      })),
+      approvals,
+      receipts: [...this.receipts.values()],
     };
   }
 
@@ -176,23 +313,33 @@ export class ControlRuntime {
   }
 
   blockPaneQueue(paneId: string): () => void {
-    const queue = this.queueForPane(paneId);
+    return this.blockResourceQueue(this.resourceTargetForPane(paneId));
+  }
+
+  blockResourceQueue(target: LeaseTarget): () => void {
+    const key = resourceKey(target);
+    const queue = this.queueForResource(target);
     let released = false;
     let release!: () => void;
-    queue.blocker = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    queue.blocker = new Promise<void>((resolve) => { release = resolve; });
     return () => {
       if (released) return;
       released = true;
       const current = queue.blocker;
+      const tail = queue.tail;
       release();
       if (queue.blocker === current) delete queue.blocker;
+      void tail.then(() => this.pruneResourceQueue(key, queue, tail));
     };
   }
 
   private submitFresh(command: ControlCommand): Promise<CommandOutcome> {
-    if (command.ownerEpoch < this.ownerEpoch) return this.rejectStaleOwnerEpoch(command);
+    if (
+      command.ownerEpoch < this.ownerEpoch
+      || (isSurfaceControlCommand(command) && command.ownerEpoch !== this.ownerEpoch)
+    ) return this.rejectStaleOwnerEpoch(command);
+
+    if (isSurfaceControlCommand(command)) return this.executeSurfaceControlCommand(command);
 
     if (command.kind === 'pane.delegate') return this.executeDelegate(command);
     if (command.kind === 'pane.takeover') return this.executeTakeover(command);
@@ -250,6 +397,10 @@ export class ControlRuntime {
     await Promise.all(this.preemptQueuedAutomation(command.payload.paneId));
 
     const lease = this.leases.takeover(command.payload.paneId, command.actor.id);
+    const surface = this.surfaces.get(command.payload.paneId);
+    if (surface?.kind === 'pane') {
+      await this.revokeTarget({ kind: 'pane', id: surface.id, generation: surface.generation });
+    }
     await this.journal.append('lease.takeover', {
       commandId: command.id,
       idempotencyKey: command.idempotencyKey,
@@ -263,12 +414,452 @@ export class ControlRuntime {
     });
   }
 
+  private async executeSurfaceControlCommand(
+    command: Extract<ControlCommand, { kind:
+      | 'lease.request' | 'lease.grant' | 'lease.release' | 'lease.revoke'
+      | 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action'
+      | 'browser.script' | 'approval.resolve' | 'provider.resource.upsert'
+      | 'provider.resource.remove' }>,
+  ): Promise<CommandOutcome> {
+    await this.appendRequested(command);
+    const validationFailureOwnership = isSurfaceActionCommand(command)
+      ? this.trustedValidationFailureOwnership(command)
+      : undefined;
+    try {
+      if (requiresOperator(command.kind) && command.actor.kind !== 'human') {
+        return this.appendTerminal(command, rejectedOutcome('operator_required', 'command requires an operator'));
+      }
+      switch (command.kind) {
+        case 'lease.request': {
+          await this.assertTaskSubjectActive(command.payload.taskId, command.actor.id);
+          if (this.leaseRequests.has(command.id) || this.leaseRequestTombstones.has(command.id)
+            || this.capabilityLeases.snapshot().some((lease) => lease.requestId === command.id)) {
+            throw codedRuntimeError('lease_request_conflict', 'lease request ID already exists');
+          }
+          if (this.leaseRequests.size >= AGENT_CONTROL_LIMITS.leaseRequestPending) {
+            throw codedRuntimeError('lease_request_capacity', 'lease request capacity is exhausted');
+          }
+          this.assertLeaseRequestBounds(command);
+          const request: LeaseRequestRecord = Object.freeze({
+            id: command.id, ownerEpoch: command.ownerEpoch,
+            actorId: command.actor.id, taskId: command.payload.taskId,
+            status: 'pending', createdAt: command.createdAt,
+            ttlMs: command.payload.ttlMs,
+            grants: Object.freeze(command.payload.grants.map((grant) => Object.freeze({
+              target: Object.freeze({ ...grant.target }),
+              capabilities: Object.freeze([...grant.capabilities]),
+            }))),
+          });
+          this.leaseRequests.set(request.id, request);
+          return this.appendTerminal(command, succeededOutcome({ requestId: request.id }));
+        }
+        case 'lease.grant': {
+          const request = this.leaseRequests.get(command.payload.requestId);
+          if (!request) {
+            if (this.leaseRequestTombstones.has(command.payload.requestId)
+              || this.capabilityLeases.snapshot().some((lease) => lease.requestId === command.payload.requestId)) {
+              throw codedRuntimeError('lease_request_consumed', 'lease request has already been resolved');
+            }
+            throw codedRuntimeError('lease_request_missing', 'lease request does not exist');
+          }
+          if (request.ownerEpoch !== this.ownerEpoch || request.ownerEpoch !== command.ownerEpoch) {
+            throw codedRuntimeError('lease_request_stale', 'lease request belongs to another owner epoch');
+          }
+          if (request.status !== 'pending') {
+            throw codedRuntimeError('lease_request_consumed', 'lease request has already been resolved');
+          }
+          await this.assertTaskSubjectActive(request.taskId, request.actorId);
+          this.assertGrantTargets(request.grants, command.projectRoot);
+          const lease = this.capabilityLeases.grant({
+            requestId: request.id,
+            actorId: request.actorId,
+            taskId: request.taskId,
+            ttlMs: request.ttlMs,
+            grants: request.grants,
+            grantedBy: command.actor.id,
+          });
+          this.leaseRequests.delete(request.id);
+          this.rememberLeaseRequestIdentity(request.id);
+          return this.appendTerminal(command, succeededOutcome({ lease }));
+        }
+        case 'lease.release': {
+          const lease = this.capabilityLeases.snapshot().find((item) => item.id === command.payload.leaseId);
+          if (!lease || lease.actorId !== command.actor.id || lease.taskId !== command.payload.taskId
+            || lease.revision !== command.payload.leaseRevision) {
+            throw codedRuntimeError('capability_denied', 'only the owning task may release a capability lease');
+          }
+          await this.assertTaskSubjectActive(command.payload.taskId, command.actor.id);
+          this.capabilityLeases.release(lease.id);
+          await this.revokeApprovalsForLease(lease.id);
+          this.rememberLeaseRequestIdentity(lease.requestId);
+          return this.appendTerminal(command, succeededOutcome());
+        }
+        case 'lease.revoke': {
+          const lease = this.capabilityLeases.revoke(command.payload.leaseId);
+          if (lease) {
+            await this.revokeApprovalsForLease(lease.id);
+            this.rememberLeaseRequestIdentity(lease.requestId);
+          }
+          return this.appendTerminal(command, succeededOutcome());
+        }
+        case 'provider.resource.upsert': {
+          this.assertProviderResourceScope(command.payload.resource, command.projectRoot);
+          const previous = this.surfaces.get(command.payload.resource.id);
+          const resource = this.surfaces.upsertBrowserTab(command.payload.resource);
+          if (previous?.kind === 'browser_tab' && previous.generation !== resource.generation) {
+            await this.revokeTarget({
+              kind: 'browser_tab', id: previous.id, generation: previous.generation,
+            });
+          }
+          return this.appendTerminal(command, succeededOutcome({ resource }));
+        }
+        case 'provider.resource.remove': {
+          const current = this.surfaces.require(command.payload.id, command.payload.generation);
+          if (current.kind !== 'browser_tab') throw codedRuntimeError('resource_missing', 'browser resource is missing');
+          this.surfaces.remove(current.id);
+          await this.revokeTarget({ kind: 'browser_tab', id: current.id, generation: current.generation });
+          return this.appendTerminal(command, succeededOutcome());
+        }
+        case 'approval.resolve':
+          return await this.resolveApproval(command);
+        default: {
+          const context = await this.prepareSurfaceAction(command);
+          if (context.classification.decision === 'approval') {
+            if (!context.effect) throw codedRuntimeError('approval_payload_invalid', 'approval effect is missing');
+            this.refreshApprovalState();
+            const immutableContext = freezeContext(context);
+            const subjectId = taskSubjectId(command.payload.taskId, command.actor.id);
+            const approval = this.approvals.requestCurrent({
+              actionId: command.id,
+              ownerEpoch: command.ownerEpoch,
+              taskId: command.payload.taskId,
+              actorId: command.actor.id,
+              ...(subjectId ? { subjectId } : {}),
+              leaseId: command.payload.leaseId,
+              leaseRevision: command.payload.leaseRevision,
+              resource: context.target,
+              capability: context.classification.capability,
+              effect: context.effect,
+              executablePayloadDigest: context.executablePayloadDigest,
+            });
+            if (!this.pendingApprovals.has(approval.id)) {
+              this.pendingApprovals.set(approval.id, immutableContext);
+            }
+            const journalEvent = agentControlJournalPayload({ kind: 'approval.requested',
+              commandId: command.id,
+              approvalId: approval.id,
+              payloadDigest: approval.payloadDigest,
+              taskId: approval.taskId,
+              actorId: approval.actorId,
+              ...(approval.subjectId ? { subjectId: approval.subjectId } : {}),
+              leaseId: approval.leaseId,
+              leaseRevision: approval.leaseRevision,
+              resource: createAgentControlJournalResource(approval.resource),
+              capability: approval.capability,
+              effect: approval.effect,
+            });
+            await this.journal.append(journalEvent.kind, journalEvent.payload);
+            const receipt = this.makeReceipt(command, context.target, 'approval_required', {
+              value: { approvalId: approval.id, payloadDigest: approval.payloadDigest },
+            }, context.ownership);
+            this.rememberReceipt(receipt);
+            return this.appendTerminal(command, succeededOutcome({
+              ...receipt,
+              approvalId: approval.id,
+              payloadDigest: approval.payloadDigest,
+            }), receipt);
+          }
+          const receipt = await this.enqueueSurfaceEffect(context);
+          return this.appendTerminal(command, outcomeForReceipt(receipt), receipt);
+        }
+      }
+    } catch (error) {
+      if (errorCodeIs(error, 'approval_action_conflict')) {
+        return this.appendTerminal(command, failedOutcome(error));
+      }
+      if (isSurfaceActionCommand(command)) {
+        const code = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+          ? (error as { code: string }).code
+          : 'action_validation_failed';
+        return this.terminalizeValidationFailure(command, targetForSurfaceAction(command),
+          code === 'task_subject_inactive'
+            ? 'action_invalidated'
+            : code === 'task_credential_unavailable'
+              ? 'backend_unavailable'
+              : code === 'script_source_too_large' || code === 'script_args_invalid' || code === 'script_args_too_large'
+            ? code
+            : 'action_validation_failed', validationFailureOwnership);
+      }
+      return this.appendTerminal(command, failedOutcome(error));
+    }
+  }
+
+  private async prepareSurfaceAction(
+    command: SurfaceActionContext['command'],
+  ): Promise<SurfaceActionContext> {
+    this.assertCommandCurrent(command);
+    let preparedCommand = command;
+    let target: LeaseTarget;
+    let classification: PolicyClassification;
+    let effect: RedactedApprovalEffect | undefined;
+    let canonicalSemantic: CanonicalElementSemantics | undefined;
+    switch (command.kind) {
+      case 'pane.observe':
+        target = { kind: 'pane', id: command.payload.paneId, generation: command.payload.generation };
+        classification = { decision: 'allow', capability: 'pane.observe' };
+        break;
+      case 'pane.action':
+        if (command.payload.action.kind === 'create') {
+          if (!command.payload.projectId) throw codedRuntimeError('resource_missing', 'project target is missing');
+          target = { kind: 'project', id: command.payload.projectId };
+        } else {
+          if (!command.payload.paneId || command.payload.generation === undefined) {
+            throw codedRuntimeError('resource_missing', 'pane target is missing');
+          }
+          target = { kind: 'pane', id: command.payload.paneId, generation: command.payload.generation };
+        }
+        classification = classifyPaneAction(command.payload.action);
+        if (classification.decision === 'approval') {
+          effect = createRedactedApprovalEffect({ kind: 'close', target: target.id });
+        }
+        break;
+      case 'browser.inspect':
+        target = { kind: 'browser_tab', id: command.payload.tabId, generation: command.payload.generation };
+        classification = {
+          decision: 'allow',
+          capability: command.payload.includeScreenshot ? 'browser.screenshot' : 'browser.inspect',
+        };
+        break;
+      case 'browser.action': {
+        target = { kind: 'browser_tab', id: command.payload.tabId, generation: command.payload.generation };
+        const action = command.payload.action;
+        assertBrowserActionFields(action);
+        let semantic: CanonicalElementSemantics | undefined;
+        if ('elementRef' in action) {
+          if (!command.payload.snapshotId || !this.resolveBrowserElementSemantics) {
+            throw codedRuntimeError('snapshot_missing', 'runtime semantic snapshot lookup is unavailable');
+          }
+          semantic = await this.resolveBrowserElementSemantics({
+            tabId: command.payload.tabId,
+            generation: command.payload.generation,
+            snapshotId: command.payload.snapshotId,
+            elementRef: action.elementRef,
+          });
+        }
+        classification = classifyBrowserAction({ kind: action.kind, ...(semantic ? { semantic } : {}) });
+        effect = approvalEffectForBrowserAction(action, semantic);
+        canonicalSemantic = semantic;
+        break;
+      }
+      case 'browser.script':
+        if (Buffer.byteLength(command.payload.source, 'utf8') > AGENT_CONTROL_LIMITS.scriptSourceBytes) {
+          throw codedRuntimeError('script_source_too_large', 'browser script source exceeds maximum size');
+        }
+        target = { kind: 'browser_tab', id: command.payload.tabId, generation: command.payload.generation };
+        if (command.payload.args !== undefined) {
+          const canonicalArgs = canonicalizeBoundedJson(command.payload.args, {
+            maxBytes: AGENT_CONTROL_LIMITS.scriptResultBytes,
+            invalidCode: 'script_args_invalid',
+            sizeCode: 'script_args_too_large',
+            label: 'browser script arguments',
+          });
+          preparedCommand = {
+            ...command,
+            payload: { ...command.payload, args: canonicalArgs.value },
+          } as SurfaceActionContext['command'];
+        }
+        classification = classifyBrowserScript();
+        effect = createRedactedApprovalEffect({ kind: 'script', target: command.payload.source });
+        break;
+    }
+    await this.assertSurfaceAndLease(command, target, classification.capability);
+    return {
+      command: preparedCommand,
+      target,
+      ownership: trustedOwnershipForCommand(preparedCommand),
+      classification,
+      executablePayloadDigest: digestExecutablePayload(preparedCommand, canonicalSemantic),
+      ...(effect ? { effect } : {}),
+    };
+  }
+
+  private async resolveApproval(
+    command: Extract<ControlCommand, { kind: 'approval.resolve' }>,
+  ): Promise<CommandOutcome> {
+    const context = this.pendingApprovals.get(command.payload.approvalId);
+    if (context) {
+      await this.assertTaskSubjectActive(context.command.payload.taskId, context.command.actor.id);
+    }
+    let approval: Approval;
+    try {
+      approval = command.payload.decision === 'approve'
+        ? this.approvals.approve(command.payload.approvalId, command.actor.id, command.payload.payloadDigest)
+        : this.approvals.deny(command.payload.approvalId, command.actor.id, command.payload.payloadDigest);
+    } catch (error) {
+      if (
+        context
+        && isApprovalInvalidationError(error)
+      ) {
+        await this.finalizeApproval(
+          command.payload.approvalId,
+          errorCodeIs(error, 'approval_expired') ? 'approval_expired' : 'action_invalidated',
+          context,
+        );
+      }
+      throw error;
+    }
+    if (!context) throw codedRuntimeError('approval_missing', 'original approval command is unavailable');
+    if (command.payload.decision === 'deny') {
+      const receipt = this.makeReceipt(
+        context.command,
+        context.target,
+        'denied',
+        { code: 'approval_denied' },
+        context.ownership,
+      );
+      this.rememberReceipt(receipt);
+      this.pendingApprovals.delete(approval.id);
+      await this.appendTerminal(context.command, outcomeForReceipt(receipt), receipt);
+      return this.appendTerminal(command, succeededOutcome(receipt));
+    }
+    if (!context.effect) throw codedRuntimeError('approval_payload_invalid', 'approval effect is unavailable');
+    try {
+      await this.assertSurfaceAndLease(context.command, context.target, context.classification.capability);
+      const subjectId = taskSubjectId(context.command.payload.taskId, context.command.actor.id);
+      this.approvals.consume({
+        approvalId: approval.id,
+        payloadDigest: command.payload.payloadDigest,
+        actionId: context.command.id,
+        ownerEpoch: context.command.ownerEpoch,
+        taskId: context.command.payload.taskId,
+        actorId: context.command.actor.id,
+        ...(subjectId ? { subjectId } : {}),
+        leaseId: context.command.payload.leaseId,
+        leaseRevision: context.command.payload.leaseRevision,
+        resource: context.target,
+        capability: context.classification.capability,
+        effect: context.effect,
+        executablePayloadDigest: context.executablePayloadDigest,
+      });
+      this.pendingApprovals.delete(approval.id);
+      const receipt = await this.enqueueSurfaceEffect(context);
+      await this.appendTerminal(context.command, outcomeForReceipt(receipt), receipt);
+      return this.appendTerminal(command, outcomeForReceipt(receipt), receipt);
+    } catch (error) {
+      await this.revokeApprovalsForLease(approval.leaseId);
+      this.pendingApprovals.delete(approval.id);
+      throw error;
+    }
+  }
+
+  private async enqueueSurfaceEffect(context: SurfaceActionContext): Promise<ActionReceipt> {
+    const queue = this.queueForResource(context.target);
+    if (queue.quarantined) {
+      const receipt = this.makeReceipt(
+        context.command,
+        context.target,
+        'unknown',
+        { code: 'effect_unknown' },
+        context.ownership,
+      );
+      this.rememberReceipt(receipt);
+      return receipt;
+    }
+    if (queue.pendingEffects >= AGENT_CONTROL_LIMITS.resourceQueueDepth) {
+      const receipt = this.makeReceipt(
+        context.command,
+        context.target,
+        'failed',
+        { code: 'queue_full' },
+        context.ownership,
+      );
+      this.rememberReceipt(receipt);
+      return receipt;
+    }
+    queue.pendingEffects += 1;
+    const key = resourceKey(context.target);
+    const prior = queue.tail;
+    let release!: () => void;
+    queue.tail = new Promise<void>((resolve) => { release = resolve; });
+    const tail = queue.tail;
+    await prior;
+    try {
+      await (queue.blocker ?? Promise.resolve());
+      try {
+        this.assertCommandCurrent(context.command);
+        const current = await this.prepareSurfaceAction(context.command);
+        if (!contextsMatch(context, current)) {
+          throw codedRuntimeError('approval_identity_mismatch', 'action intent changed during revalidation');
+        }
+      } catch {
+        const receipt = this.makeReceipt(context.command, context.target, 'failed', {
+          code: context.classification.decision === 'approval'
+            ? 'action_invalidated'
+            : 'action_validation_failed',
+        }, context.ownership);
+        this.rememberReceipt(receipt);
+        return receipt;
+      }
+      let value: unknown;
+      try {
+        const effect = (() => {
+          switch (context.command.kind) {
+            case 'pane.observe': return this.handlers.observePane(context.command.payload);
+            case 'pane.action': return this.handlers.actOnPane(context.command.payload);
+            case 'browser.inspect': return this.handlers.inspectBrowser(context.command.payload);
+            case 'browser.action': return this.handlers.actOnBrowser(executableBrowserPayload(context.command.payload));
+            case 'browser.script': return this.handlers.runBrowserScript(context.command.payload);
+          }
+        })();
+        value = await withTimeout(
+          effect,
+          context.command.kind === 'browser.script'
+            ? AGENT_CONTROL_LIMITS.scriptTimeoutMs
+            : AGENT_CONTROL_LIMITS.actionTimeoutMs,
+        );
+      } catch (error) {
+        const ambiguous = Boolean(error && typeof error === 'object' && (error as { ambiguous?: unknown }).ambiguous);
+        if (errorCodeIs(error, 'effect_timeout')) queue.quarantined = true;
+        const receipt = this.makeReceipt(
+          context.command,
+          context.target,
+          ambiguous ? 'unknown' : 'failed',
+          { code: ambiguous ? 'effect_unknown' : stableSurfaceEffectCode(error) },
+          context.ownership,
+        );
+        this.rememberReceipt(receipt);
+        return receipt;
+      }
+      let receipt: ActionReceipt;
+      try {
+        receipt = context.command.kind === 'browser.script'
+          ? this.makeScriptReceipt(context.command, context.target, value, context.ownership)
+          : this.makeReceipt(context.command, context.target, 'succeeded', { value }, context.ownership);
+      } catch (error) {
+        receipt = this.makeReceipt(
+          context.command,
+          context.target,
+          'failed',
+          { code: stableSurfaceEffectCode(error) },
+          context.ownership,
+        );
+      }
+      this.rememberReceipt(receipt);
+      return receipt;
+    } finally {
+      queue.pendingEffects -= 1;
+      release();
+      void tail.then(() => this.pruneResourceQueue(key, queue, tail));
+    }
+  }
+
   private enqueuePaneCommand(
     command: ControlCommand,
     paneId: string,
     run: () => Promise<CommandOutcome>,
   ): Promise<CommandOutcome> {
     const queue = this.queueForPane(paneId);
+    const queueKey = resourceKey(this.resourceTargetForPane(paneId));
     const requested = this.appendRequested(command);
     const generation = this.paneBarrierGenerations.get(paneId) ?? 0;
 
@@ -279,6 +870,7 @@ export class ControlRuntime {
         automation: command.actor.kind === 'psyche',
         generation,
         requested,
+        queueKey,
         started: false,
         preempted: false,
         terminalized: false,
@@ -286,9 +878,11 @@ export class ControlRuntime {
         reject,
       };
       queue.items.add(item);
-      queue.tail = queue.tail
+      const tail = queue.tail
         .then(() => this.runQueuedItem(item, run))
         .catch((error: unknown) => item.reject(error));
+      queue.tail = tail;
+      void tail.then(() => this.pruneResourceQueue(queueKey, queue, tail));
     });
 
     return promise;
@@ -297,7 +891,7 @@ export class ControlRuntime {
   private async runQueuedItem(item: QueuedCommand, run: () => Promise<CommandOutcome>): Promise<void> {
     try {
       await item.requested;
-      await this.waitForPaneBlocker(item.paneId);
+      await this.waitForQueueBlocker(item.queueKey);
       if (item.terminalized) return;
       if (item.preempted || this.isStaleAutomationGeneration(item)) {
         await this.terminalizeQueuedItem(item, automationPreemptedOutcome());
@@ -315,7 +909,7 @@ export class ControlRuntime {
         }
       }
     } finally {
-      const queue = this.paneQueues.get(item.paneId);
+      const queue = this.resourceQueues.get(item.queueKey);
       queue?.items.delete(item);
     }
   }
@@ -354,6 +948,15 @@ export class ControlRuntime {
         case 'pane.meta.update':
           return succeededOutcome(await this.handlers.updatePaneMeta(command.payload));
         case 'orchestration.execute':
+          await this.assertCapabilityLease({
+            leaseId: command.payload.leaseId,
+            revision: command.payload.leaseRevision,
+            ownerEpoch: command.ownerEpoch,
+            actorId: command.actor.id,
+            taskId: command.payload.taskId,
+            target: { kind: 'project', id: command.projectRoot },
+            capability: 'pane.create',
+          });
           return succeededOutcome(await this.handlers.executeOrchestration(command.payload));
         case 'ritual.launch':
           return succeededOutcome(await this.handlers.launchRitual(command.payload));
@@ -365,6 +968,21 @@ export class ControlRuntime {
           return succeededOutcome(await this.handlers.runCovenDesktopAction(command.payload));
         case 'coven.capability.execute':
           return succeededOutcome(await this.handlers.executeCovenCapability(command.payload));
+        case 'lease.request':
+        case 'lease.grant':
+        case 'lease.release':
+        case 'lease.revoke':
+        case 'pane.observe':
+        case 'pane.action':
+        case 'browser.inspect':
+        case 'browser.action':
+        case 'browser.script':
+        case 'approval.resolve':
+        case 'provider.resource.upsert':
+        case 'provider.resource.remove':
+          throw Object.assign(new Error('agent surface command is not implemented'), {
+            code: 'command_not_implemented',
+          });
         case 'pane.delegate':
         case 'pane.takeover':
           throw new Error(`lease command reached side-effect executor: ${command.kind}`);
@@ -405,6 +1023,396 @@ export class ControlRuntime {
     this.leases.assertHuman(paneId, actor.id, leaseRevision);
   }
 
+  private assertGrantTargets(grants: readonly { target: LeaseTarget; capabilities: readonly SurfaceCapability[] }[], projectRoot: string): void {
+    for (const grant of grants) {
+      if (grant.target.kind === 'project') {
+        if (grant.target.id !== projectRoot || grant.capabilities.some((capability) => capability !== 'pane.create')) {
+          throw codedRuntimeError('capability_denied', 'project grants are limited to pane.create for this project');
+        }
+      } else {
+        const resource = this.surfaces.require(grant.target.id, grant.target.generation);
+        if (resource.kind !== grant.target.kind) {
+          throw codedRuntimeError('resource_missing', 'surface target kind does not match the registered resource');
+        }
+        if (resource.projectRoot !== projectRoot) {
+          throw codedRuntimeError('resource_scope_mismatch', 'surface belongs to another project');
+        }
+      }
+    }
+  }
+
+  private assertLeaseRequestBounds(command: Extract<ControlCommand, { kind: 'lease.request' }>): void {
+    const textValues = [
+      command.id,
+      command.actor.id,
+      command.payload.taskId,
+      ...command.payload.grants.flatMap((grant) => [grant.target.kind, grant.target.id]),
+    ];
+    const tooLarge = command.payload.grants.length > AGENT_CONTROL_LIMITS.leaseRequestGrants
+      || command.payload.grants.some((grant) => (
+        grant.capabilities.length > AGENT_CONTROL_LIMITS.leaseRequestCapabilitiesPerGrant
+        || grant.capabilities.some((capability) => (
+          Buffer.byteLength(capability, 'utf8') > AGENT_CONTROL_LIMITS.leaseRequestCapabilityBytes
+        ))
+      ))
+      || textValues.some((value) => (
+        Buffer.byteLength(value, 'utf8') > AGENT_CONTROL_LIMITS.leaseRequestTextBytes
+      ));
+    if (tooLarge) {
+      throw codedRuntimeError(
+        'lease_request_too_large',
+        'lease request exceeds the operator display limits',
+      );
+    }
+  }
+
+  private assertCommandCurrent(command: SurfaceActionContext['command']): void {
+    if (command.ownerEpoch !== this.ownerEpoch) {
+      throw codedRuntimeError('stale_owner_epoch', 'action belongs to another owner epoch');
+    }
+    if (command.expiresAt && Date.parse(command.expiresAt) <= Date.now()) {
+      throw codedRuntimeError('action_expired', 'action expired before execution');
+    }
+  }
+
+  private async assertSurfaceAndLease(
+    command: SurfaceActionContext['command'],
+    target: LeaseTarget,
+    capability: SurfaceCapability,
+  ): Promise<void> {
+    if (target.kind !== 'project') {
+      const resource = this.surfaces.require(target.id, target.generation);
+      if (resource.kind !== target.kind) {
+        throw codedRuntimeError('resource_missing', 'surface target kind does not match the registered resource');
+      }
+      if (resource.projectRoot !== command.projectRoot) {
+        throw codedRuntimeError('resource_scope_mismatch', 'surface belongs to another project');
+      }
+    } else if (target.id !== command.projectRoot) {
+      throw codedRuntimeError('resource_missing', 'project target does not match the command project');
+    }
+    await this.assertCapabilityLease({
+      leaseId: command.payload.leaseId,
+      revision: command.payload.leaseRevision,
+      ownerEpoch: command.ownerEpoch,
+      actorId: command.actor.id,
+      taskId: command.payload.taskId,
+      target,
+      capability,
+    });
+  }
+
+  private async assertCapabilityLease(assertion: CapabilityLeaseAssertion): Promise<void> {
+    await this.assertTaskSubjectActive(assertion.taskId, assertion.actorId);
+    this.capabilityLeases.assert(assertion);
+  }
+
+  private async assertTaskSubjectActive(taskId: string, actorId: string): Promise<void> {
+    const status = await this.readTaskSubjectStatus(taskId, actorId);
+    if (status === 'active' || status === 'untracked') return;
+    if (status === 'inactive') {
+      await this.invalidateTaskSubjectAuthority(taskId, actorId);
+      throw codedRuntimeError('task_subject_inactive', 'task subject is no longer active');
+    }
+    throw codedRuntimeError('task_credential_unavailable', 'task credential state is unavailable');
+  }
+
+  private async readTaskSubjectStatus(
+    taskId: string,
+    actorId: string,
+  ): Promise<TaskSubjectAuthorityStatus> {
+    if (!this.readActiveTaskCredential) return 'untracked';
+    const reference = taskSubjectCredentialReference(taskId, actorId);
+    if (!reference) return 'untracked';
+    let current: ControlTaskCredentialReference | null;
+    try {
+      current = await this.readActiveTaskCredential(taskId);
+    } catch {
+      return 'unavailable';
+    }
+    if (!current) return 'inactive';
+    return current.principalId === reference.principalId
+      && current.taskBinding.subjectId === reference.taskBinding.subjectId
+      ? 'active'
+      : 'inactive';
+  }
+
+  private async invalidateTaskSubjectAuthority(taskId: string, actorId: string): Promise<void> {
+    for (const request of [...this.leaseRequests.values()]) {
+      if (request.taskId !== taskId || request.actorId !== actorId) continue;
+      this.leaseRequests.delete(request.id);
+      this.rememberLeaseRequestIdentity(request.id);
+    }
+    await this.revokeApprovalsForTaskSubject(taskId, actorId);
+    for (const lease of this.capabilityLeases.revokeActorTask(actorId, taskId)) {
+      await this.revokeApprovalsForLease(lease.id);
+      this.rememberLeaseRequestIdentity(lease.requestId);
+    }
+  }
+
+  private async revokeTarget(target: LeaseTarget): Promise<void> {
+    for (const lease of this.capabilityLeases.revokeTarget(target)) {
+      await this.revokeApprovalsForLease(lease.id);
+      this.rememberLeaseRequestIdentity(lease.requestId);
+    }
+  }
+
+  private rememberLeaseRequestIdentity(requestId: string): void {
+    this.leaseRequestTombstones.delete(requestId);
+    this.leaseRequestTombstones.add(requestId);
+    while (this.leaseRequestTombstones.size > AGENT_CONTROL_LIMITS.leaseRequestRecords) {
+      const oldest = this.leaseRequestTombstones.values().next().value;
+      if (oldest === undefined) break;
+      this.leaseRequestTombstones.delete(oldest);
+    }
+  }
+
+  private assertProviderResourceScope(
+    resource: Extract<ControlCommand, { kind: 'provider.resource.upsert' }>['payload']['resource'],
+    projectRoot: string,
+  ): void {
+    if (path.resolve(resource.projectRoot) !== path.resolve(projectRoot)) {
+      throw codedRuntimeError('resource_scope_mismatch', 'provider resource project does not match owner');
+    }
+    const relative = path.relative(path.resolve(projectRoot), path.resolve(resource.worktreeRoot));
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw codedRuntimeError('resource_scope_mismatch', 'provider worktree is outside the project scope');
+    }
+  }
+
+  private approvalAlreadyTerminalized(actionId: string): boolean {
+    const receipt = this.receipts.get(actionId);
+    return receipt !== undefined && receipt.state !== 'approval_required';
+  }
+
+  private async finalizeApproval(
+    approvalId: string,
+    code: 'action_invalidated' | 'approval_expired',
+    fallbackContext?: SurfaceActionContext,
+  ): Promise<void> {
+    const existing = this.approvalTerminalizations.get(approvalId);
+    if (existing) {
+      await existing;
+      return;
+    }
+    const context = this.pendingApprovals.get(approvalId) ?? fallbackContext;
+    if (!context) return;
+    if (this.approvalAlreadyTerminalized(context.command.id)) {
+      this.pendingApprovals.delete(approvalId);
+      return;
+    }
+    let finalization!: Promise<void>;
+    finalization = (async () => {
+      try {
+        const activeContext = this.pendingApprovals.get(approvalId) ?? context;
+        if (this.approvalAlreadyTerminalized(activeContext.command.id)) return;
+        await this.terminalizeValidationFailure(
+          activeContext.command,
+          activeContext.target,
+          code,
+          activeContext.ownership,
+        );
+      } finally {
+        this.pendingApprovals.delete(approvalId);
+      }
+    })();
+    this.approvalTerminalizations.set(approvalId, finalization);
+    void finalization.finally(() => this.approvalTerminalizations.delete(approvalId));
+    await finalization;
+  }
+
+  private async finalizeApprovals(
+    approvals: readonly Approval[],
+    code: 'action_invalidated' | 'approval_expired',
+  ): Promise<void> {
+    await Promise.all(approvals.map((approval) => this.finalizeApproval(approval.id, code)));
+  }
+
+  private async revokeApprovalsForTaskSubject(taskId: string, actorId: string): Promise<void> {
+    const subjectId = taskSubjectId(taskId, actorId);
+    const ownedApprovalIds = this.approvals.peek()
+      .filter((approval) => isLiveApproval(approval)
+        && approvalMatchesTaskSubject(approval, taskId, actorId, subjectId))
+      .map((approval) => approval.id);
+    await this.finalizeApprovals(
+      this.approvals.revokeForApprovalIds(ownedApprovalIds),
+      'action_invalidated',
+    );
+  }
+
+  private async revokeApprovalsForLease(leaseId: string): Promise<void> {
+    this.refreshApprovalState();
+    await this.finalizeApprovals(this.approvals.revokeForLease(leaseId), 'action_invalidated');
+  }
+
+  private async recoverRestartedApprovalReceipts(): Promise<void> {
+    for (const record of latestDurableReceiptRecords(this.journal.read(0))) {
+      if (record.receipt.state !== 'approval_required') continue;
+      await this.journal.append('command.failed', restartInvalidatedPayload(record));
+    }
+    this.capabilityLeases.revokeAll();
+    this.approvals.revokeAll();
+  }
+
+  private refreshApprovalState(
+    activeLeases: readonly CapabilityLease[] = this.capabilityLeases.snapshot(),
+  ): readonly Approval[] {
+    for (const approval of this.approvals.expire()) {
+      void this.finalizeApproval(approval.id, 'approval_expired');
+    }
+    const activeLeasesById = new Map(activeLeases.map((lease) => [lease.id, lease] as const));
+    const staleApprovalIds = this.approvals.peek()
+      .filter((approval) => isLiveApproval(approval)
+        && !approvalLeaseCurrent(approval, activeLeasesById.get(approval.leaseId)))
+      .map((approval) => approval.id);
+    for (const approval of this.approvals.revokeForApprovalIds(staleApprovalIds)) {
+      void this.finalizeApproval(approval.id, 'action_invalidated');
+    }
+    const approvals = this.approvals.peek();
+    this.prunePendingApprovals(approvals);
+    return approvals;
+  }
+
+  private trustedValidationFailureOwnership(
+    command: SurfaceActionContext['command'],
+  ): TrustedReceiptOwnership | undefined {
+    const reference = taskSubjectCredentialReference(command.payload.taskId, command.actor.id);
+    if (!reference) return undefined;
+    const ownership: TrustedReceiptOwnership = {
+      taskId: reference.taskBinding.taskId,
+      actorId: reference.principalId,
+    };
+    const target = targetForSurfaceOwnership(command);
+    const capability = capabilityForSurfaceCommand(command);
+    if (!target || !capability) return ownership;
+    const lease = this.capabilityLeases.get(command.payload.leaseId);
+    if (
+      !lease
+      || lease.ownerEpoch !== this.ownerEpoch
+      || lease.actorId !== reference.principalId
+      || lease.taskId !== reference.taskBinding.taskId
+      || !lease.grants.some((grant) => (
+        leaseTargetsEqual(grant.target, target) && grant.capabilities.includes(capability)
+      ))
+    ) {
+      return ownership;
+    }
+    return {
+      ...ownership,
+      leaseId: lease.id,
+      leaseRevision: lease.revision,
+    };
+  }
+
+  private makeReceipt(
+    command: SurfaceActionContext['command'],
+    target: LeaseTarget,
+    state: ActionReceipt['state'],
+    details: { code?: string; message?: string; value?: unknown; sourceDigest?: string;
+      sourceBytes?: number; resultBytes?: number; durationMs?: number } = {},
+    ownership?: TrustedReceiptOwnership,
+  ): ActionReceipt {
+    return Object.freeze({
+      schema: 'psyche.control.receipt/v1' as const,
+      actionId: command.id,
+      state,
+      resource: Object.freeze({ ...target }),
+      createdAt: command.createdAt,
+      ...(ownership ? {
+        taskId: ownership.taskId,
+        actorId: ownership.actorId,
+        ...(ownership.leaseId ? { leaseId: ownership.leaseId } : {}),
+        ...(ownership.leaseRevision !== undefined ? { leaseRevision: ownership.leaseRevision } : {}),
+      } : {}),
+      ...(state === 'approval_required' ? {} : { completedAt: new Date().toISOString() }),
+      ...details,
+    });
+  }
+
+  private makeScriptReceipt(
+    command: Extract<ControlCommand, { kind: 'browser.script' }>,
+    target: LeaseTarget,
+    result: unknown,
+    ownership: TrustedActionOwnership,
+  ): ActionReceipt {
+    let canonicalEnvelope: unknown;
+    try {
+      canonicalEnvelope = canonicalizeBoundedJson(result, {
+        maxBytes: AGENT_CONTROL_LIMITS.scriptResultBytes + 1024,
+        invalidCode: 'serialization_failed',
+        sizeCode: 'result_too_large',
+        label: 'browser script result envelope',
+      }).value;
+    } catch (error) {
+      throw error;
+    }
+    if (!canonicalEnvelope || typeof canonicalEnvelope !== 'object' || Array.isArray(canonicalEnvelope)) {
+      throw codedRuntimeError('serialization_failed', 'browser script returned an invalid result envelope');
+    }
+    const keys = Object.keys(canonicalEnvelope);
+    if (keys.length !== 3 || !keys.includes('value') || !keys.includes('resultBytes') || !keys.includes('durationMs')) {
+      throw codedRuntimeError('serialization_failed', 'browser script returned an invalid result envelope');
+    }
+    const envelope = canonicalEnvelope as { value: unknown; resultBytes: unknown; durationMs: unknown };
+    if (!Number.isSafeInteger(envelope.resultBytes) || (envelope.resultBytes as number) < 0
+      || (envelope.resultBytes as number) > AGENT_CONTROL_LIMITS.scriptResultBytes
+      || !Number.isFinite(envelope.durationMs) || (envelope.durationMs as number) < 0
+      || (envelope.durationMs as number) > AGENT_CONTROL_LIMITS.scriptTimeoutMs) {
+      throw codedRuntimeError('serialization_failed', 'browser script returned invalid result metadata');
+    }
+    const canonicalValue = canonicalizeBoundedJson(envelope.value, {
+      maxBytes: AGENT_CONTROL_LIMITS.scriptResultBytes,
+      invalidCode: 'serialization_failed',
+      sizeCode: 'result_too_large',
+      label: 'browser script result',
+    });
+    if (canonicalValue.bytes !== envelope.resultBytes) {
+      throw codedRuntimeError('serialization_failed', 'browser script returned a mismatched result byte count');
+    }
+    return this.makeReceipt(command, target, 'succeeded', {
+      value: canonicalValue.value,
+      sourceDigest: createHash('sha256').update(command.payload.source, 'utf8').digest('hex'),
+      sourceBytes: Buffer.byteLength(command.payload.source, 'utf8'),
+      resultBytes: envelope.resultBytes as number,
+      durationMs: envelope.durationMs as number,
+    }, ownership);
+  }
+
+  private rememberReceipt(receipt: ActionStatusReceipt): void {
+    const redacted = redactReceipt(receipt);
+    this.receipts.delete(receipt.actionId);
+    this.receipts.set(receipt.actionId, redacted);
+    while (this.receipts.size > MAX_COMMAND_RECORDS) {
+      const oldest = this.receipts.keys().next().value;
+      if (oldest === undefined) break;
+      this.receipts.delete(oldest);
+    }
+  }
+
+  private async terminalizeValidationFailure(
+    command: SurfaceActionContext['command'],
+    target: LeaseTarget,
+    code = 'action_validation_failed',
+    ownership?: TrustedReceiptOwnership,
+  ): Promise<CommandOutcome> {
+    const receipt = this.makeReceipt(command, target, 'failed', { code }, ownership);
+    this.rememberReceipt(receipt);
+    const outcome = outcomeForReceipt(receipt);
+    return this.appendTerminal(command, outcome, receipt);
+  }
+
+  private prunePendingApprovals(approvals: readonly { id: string; status: string }[]): void {
+    const active = new Set(
+      approvals.filter((approval) => approval.status === 'pending' || approval.status === 'approved')
+        .map((approval) => approval.id),
+    );
+    for (const id of this.pendingApprovals.keys()) {
+      if (!active.has(id) && !this.approvalTerminalizations.has(id)) {
+        this.pendingApprovals.delete(id);
+      }
+    }
+  }
+
   private async terminalizeQueuedItem(item: QueuedCommand, outcome: CommandOutcome): Promise<CommandOutcome> {
     if (item.terminalized) return item.outcome ?? outcome;
     item.terminalized = true;
@@ -421,17 +1429,42 @@ export class ControlRuntime {
   }
 
   private async appendRequested(command: ControlCommand): Promise<RuntimeEvent> {
+    if (isSurfaceControlCommand(command)) {
+      const built = agentControlJournalPayload({ kind: 'command.requested',
+        commandId: command.id, idempotencyKey: command.idempotencyKey,
+        commandKind: command.kind, ownerEpoch: command.ownerEpoch });
+      const event = await this.journal.append(built.kind, built.payload);
+      return event;
+    }
     const event = await this.journal.append('command.requested', {
       commandId: command.id,
       idempotencyKey: command.idempotencyKey,
       kind: command.kind,
       ownerEpoch: command.ownerEpoch,
     });
-    this.retainCommandRecord(command.id, { command, sequence: event.sequence });
+    if (!isSurfaceControlCommand(command)) {
+      this.retainCommandRecord(command.id, { command, sequence: event.sequence });
+    }
     return event;
   }
 
-  private async appendTerminal(command: ControlCommand, outcome: CommandOutcome): Promise<CommandOutcome> {
+  private async appendTerminal(
+    command: ControlCommand,
+    outcome: CommandOutcome,
+    receipt?: ActionReceipt,
+  ): Promise<CommandOutcome> {
+    if (isSurfaceControlCommand(command)) {
+      const built = agentControlJournalPayload({
+        kind: terminalKindForOutcome(outcome), commandId: command.id,
+        idempotencyKey: command.idempotencyKey,
+        status: outcome.status,
+        ...(outcome.status === 'succeeded' ? {} : { code: 'surface_command_failed' }),
+        ...(receipt ? { receipt: journalReceiptMetadata(receipt) } : {}),
+      });
+      await this.journal.append(built.kind, built.payload);
+      this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
+      return outcome;
+    }
     const event = await this.journal.append(terminalKindForOutcome(outcome), {
       commandId: command.id,
       idempotencyKey: command.idempotencyKey,
@@ -442,7 +1475,7 @@ export class ControlRuntime {
     if (record) {
       record.outcome = outcome;
       record.sequence = event.sequence;
-    } else {
+    } else if (!isSurfaceControlCommand(command)) {
       this.retainCommandRecord(command.id, { command, outcome, sequence: event.sequence });
     }
     return outcome;
@@ -470,17 +1503,58 @@ export class ControlRuntime {
     }
   }
 
+  private rehydrateReceipts(events: readonly RuntimeEvent[]): void {
+    this.receipts.clear();
+    for (const record of latestDurableReceiptRecords(events)) {
+      this.rememberReceipt(record.receipt);
+    }
+  }
+
   private queueForPane(paneId: string): PaneQueueState {
-    let queue = this.paneQueues.get(paneId);
+    return this.queueForResource(this.resourceTargetForPane(paneId));
+  }
+
+  private queueForResource(target: LeaseTarget): PaneQueueState {
+    const key = resourceKey(target);
+    let queue = this.resourceQueues.get(key);
     if (!queue) {
-      queue = { items: new Set<QueuedCommand>(), tail: Promise.resolve() };
-      this.paneQueues.set(paneId, queue);
+      queue = {
+        target: Object.freeze({ ...target }), items: new Set<QueuedCommand>(), pendingEffects: 0,
+        quarantined: false, tail: Promise.resolve(),
+      };
+      this.resourceQueues.set(key, queue);
     }
     return queue;
   }
 
-  private waitForPaneBlocker(paneId: string): Promise<void> {
-    return this.paneQueues.get(paneId)?.blocker ?? Promise.resolve();
+  private pruneInactiveResourceQueues(): void {
+    for (const [key, queue] of this.resourceQueues) {
+      if (!queue.quarantined || queue.items.size > 0 || queue.pendingEffects > 0 || queue.blocker !== undefined) {
+        continue;
+      }
+      if (queue.target.kind === 'project') continue;
+      const current = this.surfaces.get(queue.target.id);
+      if (!current || current.kind !== queue.target.kind || current.generation !== queue.target.generation) {
+        this.resourceQueues.delete(key);
+      }
+    }
+  }
+
+  private pruneResourceQueue(key: string, queue: PaneQueueState, tail: Promise<void>): void {
+    if (
+      this.resourceQueues.get(key) === queue
+      && queue.tail === tail
+      && queue.items.size === 0
+      && queue.pendingEffects === 0
+      && !queue.quarantined
+      && queue.blocker === undefined
+    ) {
+      this.resourceQueues.delete(key);
+    }
+  }
+
+  private waitForQueueBlocker(key: string): Promise<void> {
+    return this.resourceQueues.get(key)?.blocker ?? Promise.resolve();
   }
 
   private bumpPaneBarrier(paneId: string): void {
@@ -488,7 +1562,7 @@ export class ControlRuntime {
   }
 
   private preemptQueuedAutomation(paneId: string): Promise<CommandOutcome>[] {
-    const queue = this.paneQueues.get(paneId);
+    const queue = this.resourceQueues.get(resourceKey(this.resourceTargetForPane(paneId)));
     if (!queue) return [];
     const preemptions: Promise<CommandOutcome>[] = [];
     for (const item of queue.items) {
@@ -502,6 +1576,37 @@ export class ControlRuntime {
   private isStaleAutomationGeneration(item: QueuedCommand): boolean {
     return item.automation && item.generation !== (this.paneBarrierGenerations.get(item.paneId) ?? 0);
   }
+
+  private resourceTargetForPane(paneId: string): LeaseTarget {
+    const surface = this.surfaces.get(paneId);
+    return surface?.kind === 'pane'
+      ? { kind: 'pane', id: paneId, generation: surface.generation }
+      : { kind: 'pane', id: paneId, generation: 0 };
+  }
+}
+
+async function withTimeout<T>(effect: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      reject(Object.assign(new Error('surface effect timed out'), {
+        ambiguous: true,
+        code: 'effect_timeout',
+      }));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([effect, expired]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+function stableSurfaceEffectCode(error: unknown): string {
+  const code = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+    ? (error as { code: string }).code
+    : '';
+  return STABLE_SURFACE_EFFECT_CODES.has(code) ? code : 'effect_failed';
 }
 
 function paneIdForCommand(command: ControlCommand): string | undefined {
@@ -523,8 +1628,385 @@ function paneIdForCommand(command: ControlCommand): string | undefined {
   }
 }
 
-function succeededOutcome(value: unknown): CommandOutcome {
+function succeededOutcome(value?: unknown): CommandOutcome {
   return value === undefined ? { status: 'succeeded' } : { status: 'succeeded', value };
+}
+
+function rejectedOutcome(code: string, message: string): CommandOutcome {
+  return { status: 'rejected', code, message };
+}
+
+function codedRuntimeError(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
+}
+
+function requiresOperator(kind: ControlCommand['kind']): boolean {
+  return kind === 'lease.grant'
+    || kind === 'lease.revoke'
+    || kind === 'approval.resolve'
+    || kind === 'provider.resource.upsert'
+    || kind === 'provider.resource.remove';
+}
+
+function isSurfaceControlCommand(command: ControlCommand): command is Extract<ControlCommand, { kind:
+  | 'lease.request' | 'lease.grant' | 'lease.release' | 'lease.revoke'
+  | 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action'
+  | 'browser.script' | 'approval.resolve' | 'provider.resource.upsert'
+  | 'provider.resource.remove' }> {
+  return command.kind === 'lease.request'
+    || command.kind === 'lease.grant'
+    || command.kind === 'lease.release'
+    || command.kind === 'lease.revoke'
+    || command.kind === 'pane.observe'
+    || command.kind === 'pane.action'
+    || command.kind === 'browser.inspect'
+    || command.kind === 'browser.action'
+    || command.kind === 'browser.script'
+    || command.kind === 'approval.resolve'
+    || command.kind === 'provider.resource.upsert'
+    || command.kind === 'provider.resource.remove';
+}
+
+function isSurfaceActionCommand(command: ControlCommand): command is SurfaceActionContext['command'] {
+  return command.kind === 'pane.observe'
+    || command.kind === 'pane.action'
+    || command.kind === 'browser.inspect'
+    || command.kind === 'browser.action'
+    || command.kind === 'browser.script';
+}
+
+function targetForSurfaceAction(command: SurfaceActionContext['command']): LeaseTarget {
+  switch (command.kind) {
+    case 'pane.observe':
+      return { kind: 'pane', id: command.payload.paneId, generation: command.payload.generation };
+    case 'pane.action':
+      return command.payload.action.kind === 'create'
+        ? { kind: 'project', id: command.payload.projectId ?? command.projectRoot }
+        : {
+            kind: 'pane',
+            id: command.payload.paneId ?? '[missing-pane]',
+            generation: command.payload.generation ?? 0,
+          };
+    case 'browser.inspect':
+    case 'browser.action':
+    case 'browser.script':
+      return { kind: 'browser_tab', id: command.payload.tabId, generation: command.payload.generation };
+  }
+}
+
+function targetForSurfaceOwnership(command: SurfaceActionContext['command']): LeaseTarget | undefined {
+  switch (command.kind) {
+    case 'pane.observe':
+      return { kind: 'pane', id: command.payload.paneId, generation: command.payload.generation };
+    case 'pane.action':
+      if (command.payload.action.kind === 'create') {
+        return { kind: 'project', id: command.projectRoot };
+      }
+      if (!command.payload.paneId || command.payload.generation === undefined) return undefined;
+      return {
+        kind: 'pane',
+        id: command.payload.paneId,
+        generation: command.payload.generation,
+      };
+    case 'browser.inspect':
+    case 'browser.action':
+    case 'browser.script':
+      return { kind: 'browser_tab', id: command.payload.tabId, generation: command.payload.generation };
+  }
+}
+
+function capabilityForSurfaceCommand(command: SurfaceActionContext['command']): SurfaceCapability | undefined {
+  switch (command.kind) {
+    case 'pane.observe':
+      return 'pane.observe';
+    case 'pane.action': {
+      const kind = command.payload.action?.kind;
+      switch (kind) {
+        case 'send_text':
+        case 'send_keys':
+          return 'pane.input';
+        case 'interrupt':
+          return 'pane.interrupt';
+        case 'focus':
+          return 'pane.focus';
+        case 'resize':
+          return 'pane.resize';
+        case 'create':
+          return 'pane.create';
+        case 'close':
+          return 'pane.close';
+        default:
+          return undefined;
+      }
+    }
+    case 'browser.inspect':
+      return command.payload.includeScreenshot ? 'browser.screenshot' : 'browser.inspect';
+    case 'browser.action': {
+      const action = command.payload.action as { kind?: unknown } | undefined;
+      switch (action?.kind) {
+        case 'click':
+        case 'type':
+        case 'select':
+        case 'submit':
+        case 'upload':
+        case 'download':
+        case 'scroll':
+        case 'focus':
+        case 'permission_response':
+          return 'browser.interact';
+        case 'navigate':
+          return 'browser.navigate';
+        case 'reload':
+        case 'back':
+        case 'forward':
+          return 'browser.history';
+        case 'screenshot':
+          return 'browser.screenshot';
+        case 'close':
+          return 'browser.close';
+        default:
+          return undefined;
+      }
+    }
+    case 'browser.script':
+      return 'browser.script';
+  }
+}
+
+function trustedOwnershipForCommand(command: SurfaceActionContext['command']): TrustedActionOwnership {
+  return {
+    taskId: command.payload.taskId,
+    actorId: command.actor.id,
+    leaseId: command.payload.leaseId,
+    leaseRevision: command.payload.leaseRevision,
+  };
+}
+
+function taskSubjectCredentialReference(
+  taskId: string,
+  actorId: string,
+): ControlTaskCredentialReference | undefined {
+  const prefix = 'task-subject:';
+  if (!actorId.startsWith(prefix)) return undefined;
+  const subjectId = actorId.slice(prefix.length).trim();
+  if (!subjectId) return undefined;
+  return {
+    taskBinding: { taskId, subjectId },
+    principalId: actorId,
+  };
+}
+
+function taskSubjectId(taskId: string, actorId: string): string | undefined {
+  return taskSubjectCredentialReference(taskId, actorId)?.taskBinding.subjectId;
+}
+
+function isLiveApproval(approval: Approval): boolean {
+  return approval.status === 'pending' || approval.status === 'approved';
+}
+
+function approvalMatchesTaskSubject(
+  approval: Approval,
+  taskId: string,
+  actorId: string,
+  subjectId?: string,
+): boolean {
+  return approval.taskId === taskId
+    && (approval.actorId === actorId || (subjectId !== undefined && approval.subjectId === subjectId));
+}
+
+function approvalLeaseCurrent(
+  approval: Approval,
+  lease: CapabilityLease | undefined,
+): boolean {
+  return lease !== undefined
+    && lease.ownerEpoch === approval.ownerEpoch
+    && lease.revision === approval.leaseRevision
+    && (typeof approval.actorId !== 'string' || lease.actorId === approval.actorId)
+    && (typeof approval.taskId !== 'string' || lease.taskId === approval.taskId);
+}
+
+function leaseTargetsEqual(left: LeaseTarget, right: LeaseTarget): boolean {
+  return left.kind === right.kind
+    && left.id === right.id
+    && (left.kind === 'project' || right.kind === 'project' || left.generation === right.generation);
+}
+
+function isApprovalInvalidationError(error: unknown): boolean {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
+  return code === 'approval_denied'
+    || code === 'approval_expired'
+    || code === 'approval_missing'
+    || code === 'approval_identity_mismatch';
+}
+
+function errorCodeIs(error: unknown, code: string): boolean {
+  return Boolean(error && typeof error === 'object' && (error as { code?: unknown }).code === code);
+}
+
+function resourceKey(target: LeaseTarget): string {
+  return target.kind === 'project'
+    ? `${target.kind}:${target.id}`
+    : `${target.kind}:${target.id}:${target.generation}`;
+}
+
+function approvalEffectForBrowserAction(
+  action: Extract<ControlCommand, { kind: 'browser.action' }>['payload']['action'],
+  semantic?: CanonicalElementSemantics,
+): RedactedApprovalEffect | undefined {
+  switch (action.kind) {
+    case 'click':
+      return semantic?.submit
+        ? createRedactedApprovalEffect({ kind: 'submit', target: action.elementRef })
+        : undefined;
+    case 'type':
+      return semantic?.secret
+        ? createRedactedApprovalEffect({ kind: 'secret_input', target: action.elementRef })
+        : undefined;
+    case 'submit':
+      return createRedactedApprovalEffect({ kind: 'submit', target: action.elementRef });
+    case 'upload':
+      return createRedactedApprovalEffect({ kind: 'upload', target: action.path });
+    case 'download':
+      return createRedactedApprovalEffect({ kind: 'download', target: action.destination });
+    case 'permission_response':
+      return createRedactedApprovalEffect({
+        kind: 'permission_response',
+        target: `${action.decision} ${action.permission} for ${action.origin}`,
+      });
+    case 'close':
+      return createRedactedApprovalEffect({ kind: 'close', target: 'browser tab' });
+    default:
+      return undefined;
+  }
+}
+
+function executableBrowserPayload(
+  payload: Extract<ControlCommand, { kind: 'browser.action' }>['payload'],
+): Extract<ControlCommand, { kind: 'browser.action' }>['payload'] {
+  const { semantic: _untrustedSemantic, ...action } = payload.action as (
+    typeof payload.action & { semantic?: unknown }
+  );
+  return { ...payload, action } as Extract<ControlCommand, { kind: 'browser.action' }>['payload'];
+}
+
+function digestExecutablePayload(
+  command: SurfaceActionContext['command'],
+  canonicalSemantic?: CanonicalElementSemantics,
+): string {
+  let payload: unknown = command.payload;
+  if (command.kind === 'browser.action') {
+    const { semantic: _clientSemantic, ...action } = command.payload.action as (
+      typeof command.payload.action & { semantic?: unknown }
+    );
+    payload = {
+      ...command.payload,
+      action: {
+        ...action,
+        ...(canonicalSemantic ? { semantic: canonicalSemantic } : {}),
+      },
+    };
+  }
+  return createHash('sha256').update(stableRuntimeJson(payload), 'utf8').digest('hex');
+}
+
+function stableRuntimeJson(value: unknown): string {
+  return JSON.stringify(sortRuntimeKeys(value));
+}
+
+function sortRuntimeKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortRuntimeKeys);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [
+        key,
+        sortRuntimeKeys((value as Record<string, unknown>)[key]),
+      ]),
+    );
+  }
+  return value;
+}
+
+function freezeContext(context: SurfaceActionContext): SurfaceActionContext {
+  const command = deepFreezeClone(context.command) as SurfaceActionContext['command'];
+  return Object.freeze({ ...context, command, target: Object.freeze({ ...context.target }) });
+}
+
+function deepFreezeClone<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((item) => deepFreezeClone(item))) as T;
+  }
+  if (value && typeof value === 'object') {
+    const copy = Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, deepFreezeClone(item)]),
+    );
+    return Object.freeze(copy) as T;
+  }
+  return value;
+}
+
+function outcomeForReceipt(receipt: ActionReceipt): CommandOutcome {
+  if (receipt.state === 'unknown') {
+    return { status: 'unknown', code: receipt.code ?? 'effect_unknown', message: receipt.message ?? 'effect outcome is unknown' };
+  }
+  if (receipt.state === 'failed' || receipt.state === 'expired' || receipt.state === 'denied') {
+    return {
+      status: 'failed',
+      code: receipt.code ?? `action_${receipt.state}`,
+      message: receipt.state === 'failed' ? 'surface effect failed' : `action ${receipt.state}`,
+    };
+  }
+  return succeededOutcome(receipt);
+}
+
+function contextsMatch(left: SurfaceActionContext, right: SurfaceActionContext): boolean {
+  return resourceKey(left.target) === resourceKey(right.target)
+    && left.classification.decision === right.classification.decision
+    && left.classification.capability === right.classification.capability
+    && left.executablePayloadDigest === right.executablePayloadDigest
+    && JSON.stringify(left.effect) === JSON.stringify(right.effect);
+}
+
+function redactedPayloadForOutcome(
+  outcome: CommandOutcome,
+  explicitReceipt?: ActionReceipt,
+): Record<string, unknown> {
+  const receipt = explicitReceipt
+    ?? (outcome.status === 'succeeded' && 'value' in outcome && isActionReceipt(outcome.value)
+      ? outcome.value
+      : undefined);
+  if (receipt) return { status: outcome.status, receipt: redactReceipt(receipt) };
+  return {
+    status: outcome.status,
+    ...(outcome.status === 'succeeded' ? {} : { code: 'surface_command_failed' }),
+  };
+}
+
+function redactReceipt<T extends ActionStatusReceipt>(receipt: T): T {
+  const { value: _sensitiveValue, message: _sensitiveMessage, ...safeReceipt } = receipt as T & {
+    value?: unknown;
+    message?: string;
+  };
+  return Object.freeze(safeReceipt) as T;
+}
+
+function journalReceiptMetadata(receipt: ActionReceipt): AgentControlJournalReceipt {
+  return Object.freeze({
+    schema: receipt.schema,
+    actionId: receipt.actionId,
+    state: receipt.state,
+    resource: createAgentControlJournalResource(receipt.resource),
+    createdAt: receipt.createdAt,
+    ...(receipt.taskId ? { taskId: receipt.taskId } : {}),
+    ...(receipt.actorId ? { actorId: receipt.actorId } : {}),
+    ...(receipt.leaseId ? { leaseId: receipt.leaseId } : {}),
+    ...(receipt.leaseRevision !== undefined ? { leaseRevision: receipt.leaseRevision } : {}),
+    ...(receipt.completedAt ? { completedAt: receipt.completedAt } : {}),
+    ...(receipt.code ? { code: receipt.code } : {}),
+    ...(receipt.sourceDigest ? { sourceDigest: receipt.sourceDigest } : {}),
+    ...(receipt.sourceBytes !== undefined ? { sourceBytes: receipt.sourceBytes } : {}),
+    ...(receipt.resultBytes !== undefined ? { resultBytes: receipt.resultBytes } : {}),
+    ...(receipt.durationMs !== undefined ? { durationMs: receipt.durationMs } : {}),
+  });
 }
 
 function failedOutcome(error: unknown): CommandOutcome {
@@ -547,7 +2029,8 @@ function automationPreemptedOutcome(): CommandOutcome {
   };
 }
 
-function terminalKindForOutcome(outcome: CommandOutcome): string {
+function terminalKindForOutcome(outcome: CommandOutcome):
+  'command.succeeded' | 'command.failed' | 'command.unknown' | 'command.rejected' {
   switch (outcome.status) {
     case 'succeeded':
       return 'command.succeeded';
@@ -568,32 +2051,58 @@ function payloadForOutcome(outcome: CommandOutcome): Record<string, unknown> {
 }
 
 function outcomeFromEvent(event: RuntimeEvent): CommandOutcome {
+  const receipt = durableJournalReceiptPayload(event);
   switch (event.kind) {
     case 'command.succeeded':
-      return Object.prototype.hasOwnProperty.call(event.payload, 'value')
+      return receipt
+        ? { status: 'succeeded' }
+        : Object.prototype.hasOwnProperty.call(event.payload, 'value')
         ? { status: 'succeeded', value: event.payload.value }
         : { status: 'succeeded' };
     case 'command.rejected':
       return {
         status: 'rejected',
-        code: stringPayload(event, 'code') ?? 'command_rejected',
-        message: stringPayload(event, 'message') ?? 'command was rejected',
+        code: receipt?.code ?? stringPayload(event, 'code') ?? 'command_rejected',
+        message: receipt ? 'surface action was rejected' : stringPayload(event, 'message') ?? 'command was rejected',
       };
     case 'command.failed':
       return {
         status: 'failed',
-        code: stringPayload(event, 'code') ?? 'command_failed',
-        message: stringPayload(event, 'message') ?? 'command failed',
+        code: receipt?.code ?? stringPayload(event, 'code') ?? 'command_failed',
+        message: receipt ? 'surface effect failed' : stringPayload(event, 'message') ?? 'command failed',
       };
     case 'command.unknown':
       return {
         status: 'unknown',
-        code: stringPayload(event, 'code') ?? stringPayload(event, 'reason') ?? 'command_unknown',
-        message: stringPayload(event, 'message') ?? 'command outcome is unknown',
+        code: receipt?.code ?? stringPayload(event, 'code') ?? stringPayload(event, 'reason') ?? 'command_unknown',
+        message: receipt ? 'surface effect outcome is unknown' : stringPayload(event, 'message') ?? 'command outcome is unknown',
       };
     default:
       throw new Error(`not a terminal command event: ${event.kind}`);
   }
+}
+
+interface DurableReceiptRecord {
+  readonly sequence: number;
+  readonly commandId: string;
+  readonly idempotencyKey: string;
+  readonly receipt: JournalActionReceipt;
+}
+
+function durableJournalReceiptPayload(event: RuntimeEvent): JournalActionReceipt | undefined {
+  const receipt = event.payload.receipt;
+  if (!isJournalActionReceipt(receipt)) return undefined;
+  const candidate = receipt;
+  const resource = candidate.resource;
+  if (!resource || typeof resource !== 'object' || Array.isArray(resource)) return undefined;
+  if (Object.prototype.hasOwnProperty.call(candidate, 'value')
+    || Object.prototype.hasOwnProperty.call(candidate, 'message')) {
+    return undefined;
+  }
+  return Object.freeze({
+    ...candidate,
+    resource: Object.freeze({ ...resource }),
+  });
 }
 
 function stringPayload(event: RuntimeEvent, key: string): string | undefined {
@@ -604,4 +2113,51 @@ function stringPayload(event: RuntimeEvent, key: string): string | undefined {
 function isReceiptResult(value: unknown): value is { receiptId?: string } {
   return typeof value === 'object' && value !== null &&
     (!('receiptId' in value) || typeof (value as { receiptId?: unknown }).receiptId === 'string');
+}
+
+function latestDurableReceiptRecords(events: readonly RuntimeEvent[]): DurableReceiptRecord[] {
+  const latest = new Map<string, DurableReceiptRecord>();
+  for (const event of events) {
+    if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
+    const receipt = durableJournalReceiptPayload(event);
+    const commandId = stringPayload(event, 'commandId');
+    const idempotencyKey = stringPayload(event, 'idempotencyKey');
+    if (!receipt || !commandId || !idempotencyKey) continue;
+    latest.set(receipt.actionId, {
+      sequence: event.sequence,
+      commandId,
+      idempotencyKey,
+      receipt,
+    });
+  }
+  return [...latest.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
+function restartInvalidatedPayload(record: DurableReceiptRecord): Record<string, unknown> {
+  return {
+    commandId: record.commandId,
+    idempotencyKey: record.idempotencyKey,
+    status: 'failed',
+    receipt: {
+      schema: record.receipt.schema,
+      actionId: record.receipt.actionId,
+      state: 'failed',
+      resource: {
+        kind: record.receipt.resource.kind,
+        idDigest: record.receipt.resource.idDigest,
+        ...(record.receipt.resource.kind === 'project'
+          ? {}
+          : { generation: record.receipt.resource.generation }),
+      },
+      createdAt: record.receipt.createdAt,
+      ...(record.receipt.taskId ? { taskId: record.receipt.taskId } : {}),
+      ...(record.receipt.actorId ? { actorId: record.receipt.actorId } : {}),
+      ...(record.receipt.leaseId ? { leaseId: record.receipt.leaseId } : {}),
+      ...(record.receipt.leaseRevision !== undefined
+        ? { leaseRevision: record.receipt.leaseRevision }
+        : {}),
+      completedAt: new Date().toISOString(),
+      code: 'action_invalidated',
+    },
+  };
 }

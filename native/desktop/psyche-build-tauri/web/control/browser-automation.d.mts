@@ -1,0 +1,22 @@
+export interface BrowserAutomationSnapshot {
+  schema: 'psyche.browser.snapshot/v1';
+  snapshotId: string;
+  url: string;
+  viewport: { width: number; height: number };
+  nodes: Array<Record<string, unknown> & { ref: string; role: string; name: string }>;
+  truncated: boolean;
+}
+
+export interface BrowserAutomationApi {
+  schema: 'psyche.browser.automation/v1';
+  dispatch(request: Record<string, unknown> & { type: string }): any;
+  dispatchAndEmit(
+    request: Record<string, unknown> & { type: string },
+    receipt: { actionId: string; tabId: string; generation: number },
+  ): Promise<void>;
+  invalidate(): void;
+}
+
+export function installBrowserAutomation(globalObject: object, options?: { now?: () => number }): BrowserAutomationApi;
+export function dispatchBrowserAutomation(globalObject: object, request: Record<string, unknown> & { type: string }): any;
+export function browserAutomationSource(): string;

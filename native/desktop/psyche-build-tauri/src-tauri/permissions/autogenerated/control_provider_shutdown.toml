@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-control-provider-shutdown"
+description = "Enables the control_provider_shutdown command without any pre-configured scope."
+commands.allow = ["control_provider_shutdown"]
+
+[[permission]]
+identifier = "deny-control-provider-shutdown"
+description = "Denies the control_provider_shutdown command without any pre-configured scope."
+commands.deny = ["control_provider_shutdown"]

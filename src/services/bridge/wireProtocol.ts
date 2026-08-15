@@ -271,7 +271,7 @@ export type MobileActionsStartRequest = {
 export type MobileActionsRespondRequest = {
   type: 'actions.respond';
   requestId: string;
-  paneId: string;
+  sessionId: string;
   response: MobileActionInteractionResponse;
 };
 
@@ -298,7 +298,7 @@ export interface SerializedMobileActionResult {
   progress?: number;
   targetPaneId?: string;
   reviewData?: MobileActionReviewData;
-  data?: string;
+  data?: Record<string, string>;
   relatedFiles?: string[];
   dismissable?: boolean;
 }
@@ -333,6 +333,7 @@ export type MobileFilesReadResult = {
   paneId: string;
   path: string;
   content: string;
+  truncated: boolean;
 };
 
 export type MobileFilesDiffResult = {
