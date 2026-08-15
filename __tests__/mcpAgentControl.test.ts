@@ -107,6 +107,14 @@ interface TaskBindingToolCase {
   assertNotCalled(client: any): void;
 }
 
+interface TaskScopedReadCase {
+  label: string;
+  name: string;
+  args: Record<string, unknown>;
+  createClient(): any;
+  assertNotCalled(client: any): void;
+}
+
 function stateCase(label: string, name: string, args: Record<string, unknown>): TaskBindingToolCase {
   return {
     label,
@@ -149,6 +157,31 @@ function actionStatusCase(label: string, name: string, args: Record<string, unkn
     },
     assertNotCalled: (client) => {
       expect(client.actionStatus).not.toHaveBeenCalled();
+    },
+  };
+}
+
+function taskScopedReadCase(label: string, name: string, args: Record<string, unknown>): TaskScopedReadCase {
+  return {
+    label,
+    name,
+    args,
+    createClient: () => fakeClient({
+      principal: { kind: 'agent' },
+      getState: vi.fn(async () => controlSnapshot()),
+      actionStatus: vi.fn(async () => ({
+        schema: 'psyche.control.receipt/v1',
+        actionId: 'action-1',
+        state: 'queued',
+        resource: { kind: 'pane', id: 'pane-1', generation: 1 },
+        createdAt: '2026-08-12T00:00:00.000Z',
+      })),
+      submit: vi.fn(),
+    }),
+    assertNotCalled: (client) => {
+      expect(client.getState).not.toHaveBeenCalled();
+      expect(client.actionStatus).not.toHaveBeenCalled();
+      expect(client.submit).not.toHaveBeenCalled();
     },
   };
 }
@@ -353,6 +386,28 @@ const boundTaskCases: readonly TaskBindingToolCase[] = [
     },
   }),
 ];
+
+const taskScopedReadCases: readonly TaskScopedReadCase[] = [
+  taskScopedReadCase('control list', 'psyche_control_list', {
+    project_root: '/repo',
+    task_id: boundTaskId,
+  }),
+  taskScopedReadCase('lease status', 'psyche_control_lease', {
+    operation: 'status',
+    project_root: '/repo',
+    task_id: boundTaskId,
+    request_id: 'request-1',
+  }),
+  taskScopedReadCase('pane list', 'psyche_list_panes', {
+    project_root: '/repo',
+    task_id: boundTaskId,
+  }),
+  taskScopedReadCase('action status', 'psyche_control_action_status', {
+    project_root: '/repo',
+    task_id: boundTaskId,
+    action_id: 'action-1',
+  }),
+] as const;
 
 const taskSensitiveMutationCases = [
   {
@@ -1369,65 +1424,20 @@ describe('agent surface MCP tools', () => {
     await recovered.close();
   });
 
-  it('returns only a redacted global view and rejects task-sensitive MCP mutations for an unbound agent client', async () => {
-    const projectRoot = await scratchProject();
-    const harness = await createTaskScopedControlHarness({
-      projectRoot,
-      endpoint: path.join(projectRoot, 's'),
-    });
-    integrationCleanups.push(() => harness.server.close());
-    const agentToken = await harness.credentials.agentToken();
-    inject({
-      controlClientForRoot: vi.fn(async (root) => ControlClient.connect({
-        projectRoot: root,
-        endpoint: harness.endpoint,
-        token: agentToken,
-        clientName: 'psyche-mcp-test',
-      })),
-    });
-
-    expect(payload(await call('psyche_control_list', {
-      project_root: projectRoot,
-      task_id: harness.otherTaskId,
-    }))).toMatchObject({
-      resources: [],
-      approvals: [],
-    });
-
-    expect(payload(await call('psyche_control_lease', {
-      operation: 'status',
-      task_id: harness.ownTaskId,
-      request_id: harness.ownTabRequestId,
-      project_root: projectRoot,
-    }))).toEqual({ leases: [], requests: [] });
-
-    expect(payload(await call('psyche_list_panes', {
-      project_root: projectRoot,
-      task_id: harness.ownTaskId,
-    }))).toEqual({
-      project_root: projectRoot,
-      count: 0,
-      panes: [],
-    });
-
-    expect(payload(await call('psyche_control_action_status', {
-      project_root: projectRoot,
-      task_id: harness.ownTaskId,
-      action_id: harness.ownApprovalActionId,
-    }))).toEqual({ status: 'unknown', action_id: harness.ownApprovalActionId });
-
-    expect(payload(await call('psyche_pane_action', {
-      project_root: projectRoot,
-      task_id: harness.ownTaskId,
-      lease_id: harness.ownTabLease.id,
-      lease_revision: harness.ownTabLease.revision,
-      pane_id: harness.ownPane.id,
-      generation: harness.ownPane.generation,
-      action: { kind: 'focus' },
-    }))).toMatchObject({
-      status: 'rejected',
-      code: 'task_binding_required',
-    });
+  it.each(taskScopedReadCases)('fails unbound non-operator $label closed before any control read', async (testCase) => {
+    const client = testCase.createClient();
+    const restore = setMcpDeps({ controlClientForRoot: vi.fn(async () => client) });
+    try {
+      const response = await call(testCase.name, testCase.args);
+      expect(response.error).toBeUndefined();
+      expect(payload(response)).toMatchObject({
+        status: 'rejected',
+        code: 'task_binding_required',
+      });
+      testCase.assertNotCalled(client);
+    } finally {
+      restore();
+    }
   });
 
   it('reads own-task runtime state through a task-bound control client and denies cross-task probes', async () => {

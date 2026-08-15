@@ -181,10 +181,10 @@ task/actor ownership and include lease id/revision whenever the runtime can
 still prove that lease context; when it cannot, the receipt stays visible only
 to that exact bound subject and never crosses task scope.
 Starting `psyche mcp` without a task binding is still
-allowed for operators and diagnostics, but non-operator reads are reduced to a
-fully redacted global view and task-sensitive commands fail closed with
-`task_binding_required`; for non-operator callers, a supplied `task_id` stays
-compatibility input, not proof of authority. The legacy shared agent token
+allowed for operators and diagnostics, but non-operator task-scoped reads and
+task-sensitive commands fail closed with `task_binding_required`; for
+non-operator callers, a supplied `task_id` stays compatibility input, not
+proof of authority. The legacy shared agent token
 stays unbound and cannot use task-sensitive commands. Embedded launchers mint
 and revoke task credentials through the public ESM subpath:
 
@@ -220,7 +220,7 @@ read or mutation from an already-open socket.
 
 | Tool | Does |
 |---|---|
-| `psyche_control_list` | List bounded controllable pane/browser resources, generations, and active approvals for the bound task subject; unbound non-operators see only a redacted global view |
+| `psyche_control_list` | List bounded controllable pane/browser resources, generations, and active approvals for the bound task subject; unbound non-operators receive `task_binding_required` |
 | `psyche_control_lease` | Request, inspect, or release scoped authority for the bound task subject; bound clients may omit `task_id`, exact matches are accepted, and conflicts are rejected before any read or command; it cannot grant or approve authority |
 | `psyche_pane_observe` | Read bounded pane output and status through an exact leased generation |
 | `psyche_pane_action` | Perform one typed leased pane action and return its canonical receipt |
@@ -239,7 +239,7 @@ read or mutation from an already-open socket.
 Every task-scoped tool accepts an omitted `task_id` when the MCP process starts
 task-bound. Exact-bound `task_id` values are accepted, and conflicting values
 are rejected before any control read or command. Without a task binding,
-non-operator reads stay redacted and task-sensitive commands fail closed with
+non-operator task-scoped reads and commands fail closed with
 `task_binding_required`, so non-operator caller-supplied `task_id` values
 remain compatibility-only and never authorize access on their own. When
 `psyche_control_action_status` falls back to a replayed journal receipt, the

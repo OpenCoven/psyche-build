@@ -80,8 +80,8 @@ the owner. All task-scoped MCP reads and mutations first resolve task identity
 against the authenticated client. When the client is task-bound, omitted
 `task_id` resolves to that binding, exact matches are accepted, and conflicting
 values fail `task_binding_mismatch` before any control read or command. An
-unbound non-operator cannot create authority by supplying `task_id`; reads stay
-redacted and task-sensitive mutations fail `task_binding_required`. Pane and
+unbound non-operator cannot create authority by supplying `task_id`; task-scoped
+reads and task-sensitive mutations fail `task_binding_required`. Pane and
 browser operations additionally require the current resource `generation`.
 
 | Tool | Required arguments |
@@ -104,13 +104,12 @@ Compatibility aliases route through the same owner and task-resolution helper.
 Create, execute-task, kill, and pane-output operations require lease fields;
 missing authority returns `lease_missing` before an effect.
 
-If `psyche mcp` starts without a task binding, non-operator `state.get`,
-`events.read`, `psyche_control_list`, `psyche_list_panes`, and
-`psyche_control_action_status` return only the fully redacted global view, and
-task-scoped status reads such as `psyche_control_lease` remain unavailable
-without trusted task context.
-Task-sensitive commands such as lease request/release, pane operations, browser
-operations, and orchestration fail closed with `task_binding_required`.
+If `psyche mcp` starts without a task binding, non-operator task-scoped MCP
+tools such as `psyche_control_list`, `psyche_control_lease status`,
+`psyche_list_panes`, and `psyche_control_action_status` fail closed with
+`task_binding_required` instead of returning a redacted view. Task-sensitive
+commands such as lease request/release, pane operations, browser operations,
+and orchestration fail closed with `task_binding_required`.
 Replayed `psyche_control_action_status` receipts preserve the journal's
 redacted resource digest instead of reconstructing a live resource id.
 Task-bound validation failures keep exact task/actor ownership even when the
@@ -195,10 +194,11 @@ approvals whose durable task/actor ownership matches that subject (with a
 lease id/revision fallback for legacy approvals), and receipts that carry a
 durable task/actor/lease ownership tuple stamped by the owner. Legacy receipts
 without that ownership proof stay operator-only, so unrelated or unattributed
-action IDs resolve to `unknown` for agent-scoped status checks. At the MCP boundary, conflicting read-time
-`task_id` values fail `task_binding_mismatch` before a read is sent; once
-authorized, scope stays pinned to the authenticated binding or falls back to
-the fully redacted global view when no such binding exists.
+action IDs resolve to `unknown` for agent-scoped status checks. At the MCP boundary, conflicting read-time `task_id` values fail
+`task_binding_mismatch` before a read is sent; once authorized, scope stays
+pinned to the authenticated binding. Without a task binding, task-scoped MCP
+reads fail closed with `task_binding_required` instead of returning a redacted
+view.
 
 Psyche Build never retries a mutation whose delivery may have occurred. A
 timeout, provider disconnect after dispatch, navigation during script

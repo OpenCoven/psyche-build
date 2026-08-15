@@ -605,7 +605,8 @@ function resolveTaskScopedAccess(
     return finalize(boundTaskId, requestedTaskId, options.requireLease === true, args);
   }
   const principalKind = client.principal?.kind ?? 'operator';
-  if (options.mode === 'mutation' && principalKind !== 'operator') return { outcome: taskBindingRequired() };
+  // Unbound non-operators never get a task-scoped fallback view.
+  if (principalKind !== 'operator') return { outcome: taskBindingRequired() };
   if (options.requireTaskId && !requestedTaskId) invalid('requires `task_id`');
   const taskId = principalKind === 'operator' ? requestedTaskId : undefined;
   return finalize(taskId, requestedTaskId, options.requireLease === true, args);
@@ -686,7 +687,7 @@ const projectRootProperty = {
 };
 const taskIdProperty = {
   type: 'string',
-  description: 'Optional compatibility field. Task-bound MCP clients resolve omitted values from the authenticated binding, accept exact matches, and reject conflicts before any read or command. An unbound non-operator caller cannot authorize access with `task_id` alone.',
+  description: 'Optional compatibility field. Task-bound MCP clients resolve omitted values from the authenticated binding, accept exact matches, and reject conflicts before any read or command. Unbound non-operator callers receive `task_binding_required` instead of authorizing access with `task_id` alone.',
 };
 const authorizationProperties = {
   task_id: taskIdProperty,
