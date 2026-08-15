@@ -114,7 +114,7 @@ describe('native Files pane view', () => {
       {
         document: { createElement: () => new FakeElement() },
         fileViewEl: fileView,
-        cyclePaneSpan: () => undefined,
+        createPaneHideButton: () => new FakeElement(),
         togglePaneMaximize: () => undefined,
         closeFilesPane: () => undefined,
         focusCanvasSurface: () => undefined,
@@ -153,11 +153,30 @@ describe('native Files pane view', () => {
     expect(source).toMatch(/tab\.tabIndex\s*=\s*isActive \? 0 : -1/);
   });
 
-  it('wires Files span, maximize, and delegated close controls', () => {
+  it('wires Files hide, maximize, and delegated close controls', () => {
     const source = extractFunctionSource('mountFilesPane');
-    expect(source).toMatch(/cyclePaneSpan\(filesPane\)/);
+    expect(source).toMatch(/createPaneHideButton\(filesPane\)/);
+    expect(source).not.toMatch(/cyclePaneSpan\(filesPane\)/);
     expect(source).toMatch(/togglePaneMaximize\(filesPane\)/);
     expect(source).toMatch(/closeFilesPane\(filesPane\)/);
+  });
+
+  it('hides Files non-destructively and restores it when a file is selected', () => {
+    const filesPaneFactory = extractFunctionSource('ensureFilesPane');
+    const hide = extractFunctionSource('hideFilesPane');
+    const restore = extractFunctionSource('reopenFilesPane');
+    const dispatch = extractFunctionSource('hideCanvasSurface');
+
+    expect(filesPaneFactory).toContain('hidden: false');
+    expect(filesPaneFactory).toContain('reopenFilesPane(existing)');
+    expect(hide).toContain('detachThreadPane(filesPane)');
+    expect(hide).toContain('filesPane.hidden = true');
+    expect(hide).not.toContain('removeFilesPaneNow(filesPane)');
+    expect(restore).toContain('prepareFilesPanePlacement(filesPane)');
+    expect(restore).toContain('filesPane.hidden = false');
+    expect(restore).toContain('commitPanePlacement(placement)');
+    expect(dispatch).toContain('hideFilesPane(surface)');
+    expect(dispatch).toContain('hideThread(surface.id)');
   });
 
   it('activates Files through the generic canvas focus seam without terminal focus', () => {

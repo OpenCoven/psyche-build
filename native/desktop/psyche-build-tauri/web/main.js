@@ -412,7 +412,10 @@
   function ensureFilesPane(project, workspaceRoot) {
     var key = filesPaneKey(project.id, workspaceRoot);
     var existing = filesPanes.get(key);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.hidden) reopenFilesPane(existing);
+      return existing;
+    }
     var filesPane = {
       id: nextPaneId("files"),
       kind: "files",
@@ -420,6 +423,7 @@
       workspaceRoot: workspaceRoot,
       activeFileId: null,
       previousFocusedSessionId: state.activeThreadId || null,
+      hidden: false,
       pane: null,
       host: null,
     };
@@ -2820,6 +2824,20 @@
     return flight.promise;
   }
 
+  function createPaneHideButton(surface) {
+    var hide = document.createElement("button");
+    hide.type = "button";
+    hide.className = "terminal-pane-hide";
+    hide.title = "Hide pane";
+    hide.setAttribute("aria-label", "Hide pane");
+    hide.textContent = "−";
+    hide.addEventListener("click", function (event) {
+      event.stopPropagation();
+      hideCanvasSurface(surface);
+    });
+    return hide;
+  }
+
   function mountToolPane(thread) {
     var pane = document.createElement("section");
     pane.className = "terminal-pane is-tool";
@@ -2840,13 +2858,7 @@
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var span = document.createElement("button");
-    span.type = "button";
-    span.className = "terminal-pane-span";
-    span.addEventListener("click", function (event) {
-      event.stopPropagation();
-      cyclePaneSpan(thread);
-    });
+    var hide = createPaneHideButton(thread);
     var maximize = document.createElement("button");
     maximize.type = "button";
     maximize.className = "terminal-pane-max";
@@ -2875,7 +2887,7 @@
     });
     header.appendChild(glyph);
     header.appendChild(label);
-    header.appendChild(span);
+    header.appendChild(hide);
     header.appendChild(maximize);
     header.appendChild(close);
     var body = document.createElement("div");
@@ -2891,7 +2903,7 @@
     thread.toolBody = body;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneSpan = span;
+    thread.paneHide = hide;
     thread.paneMax = maximize;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
@@ -2924,13 +2936,7 @@
     label.appendChild(title);
     label.appendChild(meta);
 
-    var span = document.createElement("button");
-    span.type = "button";
-    span.className = "terminal-pane-span";
-    span.addEventListener("click", function (event) {
-      event.stopPropagation();
-      cyclePaneSpan(filesPane);
-    });
+    var hide = createPaneHideButton(filesPane);
     var maximize = document.createElement("button");
     maximize.type = "button";
     maximize.className = "terminal-pane-max";
@@ -2951,7 +2957,7 @@
 
     header.appendChild(glyph);
     header.appendChild(label);
-    header.appendChild(span);
+    header.appendChild(hide);
     header.appendChild(maximize);
     header.appendChild(close);
     var body = document.createElement("div");
@@ -2970,7 +2976,7 @@
     filesPane.host = body;
     filesPane.paneTitle = title;
     filesPane.paneMeta = meta;
-    filesPane.paneSpan = span;
+    filesPane.paneHide = hide;
     filesPane.paneMax = maximize;
     filesPane.paneClose = close;
     return pane;
@@ -3061,13 +3067,7 @@
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var span = document.createElement("button");
-    span.type = "button";
-    span.className = "terminal-pane-span";
-    span.addEventListener("click", function (event) {
-      event.stopPropagation();
-      cyclePaneSpan(thread);
-    });
+    var hide = createPaneHideButton(thread);
     var maximize = document.createElement("button");
     maximize.type = "button";
     maximize.className = "terminal-pane-max";
@@ -3104,7 +3104,7 @@
     });
     header.appendChild(glyph);
     header.appendChild(label);
-    header.appendChild(span);
+    header.appendChild(hide);
     header.appendChild(maximize);
     header.appendChild(close);
     var body = document.createElement("div");
@@ -3123,7 +3123,7 @@
     thread.browserBody = body;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneSpan = span;
+    thread.paneHide = hide;
     thread.paneMax = maximize;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
@@ -3217,13 +3217,7 @@
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var span = document.createElement("button");
-    span.type = "button";
-    span.className = "terminal-pane-span";
-    span.addEventListener("click", function (event) {
-      event.stopPropagation();
-      cyclePaneSpan(thread);
-    });
+    var hide = createPaneHideButton(thread);
     var maximize = document.createElement("button");
     maximize.type = "button";
     maximize.className = "terminal-pane-max";
@@ -3257,7 +3251,7 @@
     header.appendChild(glyph);
     header.appendChild(label);
     header.appendChild(attention);
-    header.appendChild(span);
+    header.appendChild(hide);
     header.appendChild(maximize);
     header.appendChild(close);
     // Double-clicking the header is the mouse route into focus mode, mirroring
@@ -3300,7 +3294,7 @@
     thread.host = container;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneSpan = span;
+    thread.paneHide = hide;
     thread.paneMax = maximize;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
@@ -3981,23 +3975,6 @@
     return true;
   }
 
-  var SPAN_GLYPHS = { column: "▥", row: "▤" };
-  var SPAN_TITLES = {
-    tiled: "Span this pane — full column (⇥ full row, ⇥ tiled)",
-    column: "Spanning a full column — click for a full row",
-    row: "Spanning a full row — click to return to tiled",
-  };
-
-  function syncPaneSpanControl(thread, layout, leaf) {
-    if (!thread.paneSpan) return;
-    var spanned = Boolean(leaf) && layout.spanMode && layout.focusedLeafId === leaf.id;
-    var mode = spanned ? layout.spanMode : "tiled";
-    thread.paneSpan.textContent = spanned ? SPAN_GLYPHS[layout.spanMode] : "▦";
-    thread.paneSpan.title = SPAN_TITLES[mode];
-    thread.paneSpan.setAttribute("aria-label", SPAN_TITLES[mode]);
-    thread.paneSpan.setAttribute("aria-pressed", spanned ? "true" : "false");
-  }
-
   var MAX_ICON =
     '<svg viewBox="0 0 14 14" width="11" height="11" aria-hidden="true">' +
     '<path d="M5.5 2H2v3.5M8.5 12H12V8.5" fill="none" stroke="currentColor" ' +
@@ -4142,7 +4119,6 @@
         var focused = leaf.id === layout.focusedLeafId;
         surface.pane.classList.toggle("focused", focused);
         surface.pane.setAttribute("aria-current", focused ? "true" : "false");
-        syncPaneSpanControl(surface, layout, leaf);
         syncPaneMaxControl(surface, layout, leaf);
         var thread = findThread(surface.id);
         if (thread) {
@@ -4492,7 +4468,6 @@
       ? PsychePanes.findLeafByThreadId(layout.root, thread.id)
       : null;
     if (layout) {
-      syncPaneSpanControl(thread, layout, leaf);
       syncPaneMaxControl(thread, layout, leaf);
     }
     if (thread.paneClose) {
@@ -4901,6 +4876,53 @@
     refreshTabs();
     saveWorkspaceSoon();
     return true;
+  }
+
+  function hideFilesPane(filesPane) {
+    if (!filesPane || filesPane.hidden) return false;
+    var wasFocused = filesPaneHasCanvasFocus(filesPane);
+    var nextSurfaceId = detachThreadPane(filesPane);
+    filesPane.hidden = true;
+    if (wasFocused) state.activeThreadId = null;
+    var nextSurface = nextSurfaceId && canvasSurfaceById(nextSurfaceId);
+    if (nextSurface && nextSurface.kind === "files") {
+      focusCanvasSurface(nextSurface);
+    } else if (nextSurface) {
+      focusThread(nextSurface.id);
+    } else {
+      renderPaneWorkspace({ preserveTerminalFocus: false });
+    }
+    refreshSidebar();
+    refreshTabs();
+    saveWorkspaceSoon();
+    return true;
+  }
+
+  function reopenFilesPane(filesPane) {
+    if (!filesPane || !filesPane.hidden) return false;
+    var project = findProject(filesPane.projectId);
+    if (!project || state.activeProjectId !== project.id ||
+        activeWorkspaceRoot(project) !== filesPane.workspaceRoot) return false;
+    var placement = prepareFilesPanePlacement(filesPane);
+    if (!placement) {
+      setStatus("Not enough space to reopen the Files pane", "warn");
+      return false;
+    }
+    filesPane.hidden = false;
+    commitPanePlacement(placement);
+    renderPaneWorkspace({ preserveTerminalFocus: false });
+    focusCanvasSurface(filesPane);
+    refreshSidebar();
+    refreshTabs();
+    saveWorkspaceSoon();
+    return true;
+  }
+
+  function hideCanvasSurface(surface) {
+    surface = surface && canvasSurfaceById(surface.id);
+    if (!surface) return false;
+    if (surface.kind === "files") return hideFilesPane(surface);
+    return hideThread(surface.id);
   }
 
   function reopenThread(id) {

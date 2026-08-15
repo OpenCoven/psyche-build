@@ -721,6 +721,8 @@ describe('Tauri physical terminal panes', () => {
       'mountBrowserPane',
       'mountTerminal',
       'reopenThread',
+      'hideFilesPane',
+      'reopenFilesPane',
       'removeProject',
       'returnFromFileFocus',
       'revealFileForDecision',
@@ -3645,7 +3647,7 @@ describe('Tauri physical terminal panes', () => {
         /\.terminal-pane:is\(\.is-web,\s*\.is-tool\)\s+\.terminal-pane-header\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto;/s,
       );
       expect(functionSource('mountTerminal')).toMatch(
-        /header\.appendChild\(glyph\);[\s\S]*header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(span\);[\s\S]*header\.appendChild\(maximize\);[\s\S]*header\.appendChild\(close\)/,
+        /header\.appendChild\(glyph\);[\s\S]*header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(hide\);[\s\S]*header\.appendChild\(maximize\);[\s\S]*header\.appendChild\(close\)/,
       );
     });
 

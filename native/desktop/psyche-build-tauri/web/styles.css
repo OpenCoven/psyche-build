@@ -1546,9 +1546,9 @@ kbd {
   color: var(--muted);
 }
 
-/* Header controls: span cycle, maximise, close. Identical footprint so the
+/* Header controls: hide, maximise, close. Identical footprint so the
    three read as one group and the row never reflows as states change. */
-.terminal-pane-span,
+.terminal-pane-hide,
 .terminal-pane-max,
 .terminal-pane-close {
   flex: none;
@@ -1566,7 +1566,7 @@ kbd {
   transition: background var(--transition-fast), color var(--transition-fast);
 }
 .terminal-pane-close { font-size: 13px; }
-.terminal-pane-span:hover,
+.terminal-pane-hide:hover,
 .terminal-pane-max:hover,
 .terminal-pane-close:hover { background: var(--surface-3); color: var(--text); }
 
@@ -1577,24 +1577,24 @@ kbd {
    hover, on keyboard focus inside the pane, and permanently on the focused
    pane - the one you are actually driving. Opacity rather than display keeps
    the grid tracks reserved, so nothing reflows as they appear. */
-.terminal-pane-span,
+.terminal-pane-hide,
 .terminal-pane-max,
 .terminal-pane-close {
   opacity: 0;
   transition: opacity var(--transition-fast), background var(--transition-fast),
               color var(--transition-fast);
 }
-.terminal-pane:hover .terminal-pane-span,
+.terminal-pane:hover .terminal-pane-hide,
 .terminal-pane:hover .terminal-pane-max,
 .terminal-pane:hover .terminal-pane-close,
-.terminal-pane:focus-within .terminal-pane-span,
+.terminal-pane:focus-within .terminal-pane-hide,
 .terminal-pane:focus-within .terminal-pane-max,
 .terminal-pane:focus-within .terminal-pane-close,
-.terminal-pane.focused .terminal-pane-span,
+.terminal-pane.focused .terminal-pane-hide,
 .terminal-pane.focused .terminal-pane-max,
 .terminal-pane.focused .terminal-pane-close { opacity: 1; }
 /* Never let a keyboard user tab to something they cannot see. */
-.terminal-pane-span:focus-visible,
+.terminal-pane-hide:focus-visible,
 .terminal-pane-max:focus-visible,
 .terminal-pane-close:focus-visible {
   opacity: 1;
@@ -1614,12 +1614,10 @@ kbd {
   position: relative;
   z-index: 1;
 }
-.terminal-pane-span:focus-visible,
+.terminal-pane-hide:focus-visible,
 .terminal-pane-max:focus-visible,
 .terminal-pane-close:focus-visible { outline: none; box-shadow: var(--focus-ring); }
-/* An engaged span or maximise is a mode you are currently in, and violet is
-   how this app says "here". */
-.terminal-pane-span[aria-pressed="true"],
+/* A maximised pane is a mode the user is currently in, so violet says "here". */
 .terminal-pane-max[aria-pressed="true"] { color: var(--accent); }
 
 /* Pane tiers. Information drops in reverse order of usefulness: the meta line
