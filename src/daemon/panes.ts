@@ -44,7 +44,9 @@ export interface PaneSurfaceBinding {
 }
 
 export type PaneLivenessProbe = (tmuxPaneId: string) => boolean | Promise<boolean>;
-export type TmuxIdentityProbe = (tmuxPaneId: string) => TmuxServerIdentity | undefined;
+export type TmuxIdentityProbe = (
+  tmuxPaneId: string,
+) => TmuxServerIdentity | undefined | Promise<TmuxServerIdentity | undefined>;
 
 export function isTmuxPaneLive(
   tmuxPaneId: string,
