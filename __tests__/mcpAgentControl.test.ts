@@ -49,6 +49,10 @@ const lease = {
 };
 
 describe('MCP task binding bootstrap', () => {
+  it('keeps MCP unbound only when no binding input is present', () => {
+    expect(parseMcpArgs([], {})).toEqual({});
+  });
+
   it('parses task identity from CLI and token only from the environment', () => {
     expect(parseMcpArgs(['--task-id', 'task-alpha'], {
       PSYCHE_CONTROL_TASK_ID: 'task-env',
@@ -62,6 +66,41 @@ describe('MCP task binding bootstrap', () => {
     })).toEqual({
       taskBinding: { taskId: 'task-env', token: 'env-token' },
     });
+  });
+
+  it('rejects missing and explicitly blank CLI task IDs without falling back to the environment', () => {
+    expect(() => parseMcpArgs(['--task-id'], {
+      PSYCHE_CONTROL_TASK_ID: 'task-env',
+      PSYCHE_CONTROL_TASK_TOKEN: 'env-token',
+    })).toThrow(/requires a value/i);
+    expect(() => parseMcpArgs(['--task-id', ''], {})).toThrow(/task id/i);
+    expect(() => parseMcpArgs(['--task-id', '   '], {})).toThrow(/task id/i);
+  });
+
+  it('fails closed when either task-binding environment variable is explicitly blank', () => {
+    const secret = 'never-print-this-environment-token';
+    const environments: NodeJS.ProcessEnv[] = [
+      { PSYCHE_CONTROL_TASK_ID: '' },
+      { PSYCHE_CONTROL_TASK_ID: '   ' },
+      { PSYCHE_CONTROL_TASK_TOKEN: '' },
+      { PSYCHE_CONTROL_TASK_TOKEN: '   ' },
+      { PSYCHE_CONTROL_TASK_ID: '', PSYCHE_CONTROL_TASK_TOKEN: secret },
+      { PSYCHE_CONTROL_TASK_ID: 'task-alpha', PSYCHE_CONTROL_TASK_TOKEN: '' },
+      { PSYCHE_CONTROL_TASK_ID: 'task-alpha', PSYCHE_CONTROL_TASK_TOKEN: '   ' },
+      { PSYCHE_CONTROL_TASK_ID: '   ', PSYCHE_CONTROL_TASK_TOKEN: secret },
+      { PSYCHE_CONTROL_TASK_ID: '', PSYCHE_CONTROL_TASK_TOKEN: '' },
+      { PSYCHE_CONTROL_TASK_ID: '   ', PSYCHE_CONTROL_TASK_TOKEN: '   ' },
+    ];
+    for (const env of environments) {
+      let rejection: unknown;
+      try {
+        parseMcpArgs([], env);
+      } catch (error) {
+        rejection = error;
+      }
+      expect(rejection).toBeInstanceOf(TypeError);
+      expect(String(rejection)).not.toContain(secret);
+    }
   });
 
   it('requires both task identity values or neither without exposing the token', () => {
@@ -403,15 +442,21 @@ describe('agent surface MCP tools', () => {
   it('validates bootstrap task bindings before connecting without exposing the token', async () => {
     const token = 'bootstrap-token-must-stay-secret';
     const connect = vi.fn(async () => fakeClient({ projectRoot: '/canonical/repo' }));
-    const start = createMcpControlClientForRoot('/repo', {
+    const oversized = createMcpControlClientForRoot('/repo', {
       canonicalize: async () => '/canonical/repo',
       connect,
       entryPath: '/entry.js',
       taskBinding: { taskId: 'a'.repeat(257), token },
     });
 
-    await expect(start).rejects.toThrow(/256/);
-    await expect(start).rejects.not.toThrow(token);
+    await expect(oversized).rejects.toThrow(/256/);
+    await expect(oversized).rejects.not.toThrow(token);
+    await expect(createMcpControlClientForRoot('/repo', {
+      canonicalize: async () => '/canonical/repo',
+      connect,
+      entryPath: '/entry.js',
+      taskBinding: { taskId: 'task-alpha', token: '   ' },
+    })).rejects.toThrow(/task token/i);
     expect(connect).not.toHaveBeenCalled();
   });
 

@@ -77,33 +77,25 @@ export function parseMcpArgs(
   env: NodeJS.ProcessEnv = process.env,
 ): McpRunOptions {
   let cliTaskId: string | undefined;
+  let hasCliTaskId = false;
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] !== '--task-id') continue;
     const value = args[index + 1];
     if (value === undefined) throw new TypeError('--task-id requires a value');
+    hasCliTaskId = true;
     cliTaskId = value;
     index += 1;
   }
 
-  const rawTaskId = cliTaskId ?? env.PSYCHE_CONTROL_TASK_ID;
-  const token = env.PSYCHE_CONTROL_TASK_TOKEN;
-  const hasTaskId = typeof rawTaskId === 'string' && rawTaskId.trim().length > 0;
-  const hasToken = typeof token === 'string' && token.length > 0;
-  if (hasTaskId && !hasToken) {
-    throw new TypeError('task-bound MCP requires a task token in PSYCHE_CONTROL_TASK_TOKEN');
-  }
-  if (hasToken && !hasTaskId) {
-    throw new TypeError('task-bound MCP requires a task ID from --task-id or PSYCHE_CONTROL_TASK_ID');
-  }
-  if (!hasTaskId && !hasToken) return {};
+  const hasEnvTaskId = Object.hasOwn(env, 'PSYCHE_CONTROL_TASK_ID');
+  const hasEnvToken = Object.hasOwn(env, 'PSYCHE_CONTROL_TASK_TOKEN');
+  if (!hasCliTaskId && !hasEnvTaskId && !hasEnvToken) return {};
 
-  const taskId = normalizeControlTaskId(rawTaskId);
-  if (taskId === undefined) {
-    throw new TypeError(
-      `MCP task ID must be non-blank and at most ${MAX_CONTROL_TASK_ID_LENGTH} characters`,
-    );
-  }
-  return { taskBinding: { taskId, token: token! } };
+  const taskBinding = validateMcpTaskBinding({
+    taskId: hasCliTaskId ? cliTaskId : env.PSYCHE_CONTROL_TASK_ID,
+    token: env.PSYCHE_CONTROL_TASK_TOKEN,
+  });
+  return taskBinding === undefined ? {} : { taskBinding };
 }
 
 function writeResponse(response: JsonRpcResponse): void {
@@ -244,9 +236,10 @@ async function startMcpControlClient(
   });
 }
 
-function validateMcpTaskBinding(
-  binding: McpTaskBinding | undefined,
-): McpTaskBinding | undefined {
+function validateMcpTaskBinding(binding: {
+  taskId?: unknown;
+  token?: unknown;
+} | undefined): McpTaskBinding | undefined {
   if (binding === undefined) return undefined;
   const taskId = normalizeControlTaskId(binding.taskId);
   if (taskId === undefined) {
@@ -254,7 +247,7 @@ function validateMcpTaskBinding(
       `MCP task ID must be non-blank and at most ${MAX_CONTROL_TASK_ID_LENGTH} characters`,
     );
   }
-  if (typeof binding.token !== 'string' || binding.token.length === 0) {
+  if (typeof binding.token !== 'string' || binding.token.trim().length === 0) {
     throw new TypeError('task-bound MCP requires a task token');
   }
   return { taskId, token: binding.token };
