@@ -18,6 +18,7 @@ import {
   spawnBridgePane,
   killBridgePane,
   createCovenClient,
+  getProjectCovenSession,
   launchProjectCovenSession,
   openProjectCovenSession,
   routeProjectCovenSessionCapability,
@@ -279,6 +280,7 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       }
       const action: DesktopUseQuickAction = payload.action;
       const client = covenClientFactory();
+      await getProjectCovenSession(deps.projectRoot, payload.sessionId, client);
       await client.sendInput?.(payload.sessionId, buildDesktopUseQuickInput(action));
       return { sessionId: payload.sessionId, action, accepted: true };
     },
