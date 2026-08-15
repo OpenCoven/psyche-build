@@ -682,6 +682,14 @@ describe('tauri footer status model', () => {
     expect(sparseSample.renderLatencyMs).toBeCloseTo(1000 / 240, 6);
     expect(sparseSample.droppedFrames).toBeNull();
     expect(sparseSample.framePacingHz).toBeNull();
+
+    const invalidIntervals = createFrameSampler();
+    [0, 0, -1, 1000 / 240].forEach((time) => invalidIntervals.frame(time));
+    const validOnlySample = invalidIntervals.flush(1_000);
+    expect(validOnlySample.fps).toBe(2);
+    expect(validOnlySample.renderLatencyMs).toBeCloseTo(1000 / 240, 6);
+    expect(validOnlySample.droppedFrames).toBeNull();
+    expect(validOnlySample.framePacingHz).toBeNull();
   });
 
   test('does not mistake an alternating callback cadence for dropped frames', () => {

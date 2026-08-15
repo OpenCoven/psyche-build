@@ -634,18 +634,19 @@ export function createFrameSampler() {
       const frameAt = finiteNumber(at);
       if (frameAt == null) return;
 
-      if (previousAt != null) {
-        const delta = frameAt - previousAt;
-        if (delta > 0) {
-          totalIntervalMs += delta;
-          intervals += 1;
-          frameIntervals.push(delta);
-          previousAt = frameAt;
-        }
-      } else {
+      if (previousAt == null) {
         previousAt = frameAt;
+        frames += 1;
+        return;
       }
 
+      const delta = frameAt - previousAt;
+      if (delta <= 0) return;
+
+      totalIntervalMs += delta;
+      intervals += 1;
+      frameIntervals.push(delta);
+      previousAt = frameAt;
       frames += 1;
     },
     flush(windowMs) {
