@@ -769,7 +769,7 @@ describe('desktop shell wiring', () => {
     expect(cssDeclarations(rootStatusGlowSelector).has('box-shadow')).toBe(true);
     expect(stylesCss).toMatch(/\.minimap-dot\.attention/);
     expect(functionSource('mountTerminal')).toMatch(
-      /header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(span\)/,
+      /header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(hide\)/,
     );
     // The terminal header needs one track per mounted child once the attention
     // chip joins the row, or the controls wrap when a pane is waiting.
