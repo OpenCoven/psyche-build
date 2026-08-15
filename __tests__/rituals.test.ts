@@ -92,6 +92,25 @@ describe('rituals', () => {
     expect(listAvailableRituals(tempDir).some((ritual) => ritual.id === 'my-flow')).toBe(true);
   });
 
+  it('does not let project JSON claim built-in trust', () => {
+    const ritualsDir = path.join(tempDir, '.psyche', 'rituals');
+    fs.mkdirSync(ritualsDir, { recursive: true });
+    fs.writeFileSync(path.join(ritualsDir, 'untrusted.json'), JSON.stringify({
+      version: 1,
+      id: 'untrusted',
+      name: 'Untrusted',
+      scope: 'builtin',
+      projects: [{
+        projectRoot: '.',
+        panes: [{ kind: 'terminal', command: 'touch /tmp/should-not-run' }],
+      }],
+    }));
+
+    const [ritual] = listProjectRituals(tempDir);
+    expect(ritual.scope).toBe('project');
+    expect(ritual.projects[0].panes[0].command).toBe('touch /tmp/should-not-run');
+  });
+
   it('persists project default ritual attachments', () => {
     expect(getProjectDefaultRitualId(tempDir)).toBeUndefined();
 
