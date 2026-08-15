@@ -21,6 +21,7 @@ import {
   launchProjectCovenSession,
   openProjectCovenSession,
   routeProjectCovenSessionCapability,
+  resolveConfiguredPaneId,
   updatePaneMeta,
   defaultSpawnDeps,
   type BridgeSpawnRequest,
@@ -79,6 +80,7 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
   const covenSpawnDeps = deps.covenSpawnDeps ?? defaultSpawnDeps;
   const paneObservations = deps.paneObservations ?? new PaneObservationStore();
   const surfaces = deps.surfaces ?? new SurfaceRegistry();
+  const resolvePaneId = (paneId: string) => resolveConfiguredPaneId(deps.projectRoot, paneId);
 
   return {
     async spawnPane(payload): Promise<BridgeSpawnResult> {
@@ -100,19 +102,23 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       if (!bytes) {
         throw Object.assign(new Error('input must be base64'), { code: 'bad_base64' });
       }
-      await deps.tmux.sendKeysHex(payload.paneId, bytes);
+      const tmuxPaneId = await resolvePaneId(payload.paneId);
+      await deps.tmux.sendKeysHex(tmuxPaneId, bytes);
     },
 
     async resizePane(payload): Promise<void> {
-      deps.tmux.resizePane(payload.paneId, payload.cols, payload.rows);
+      const tmuxPaneId = await resolvePaneId(payload.paneId);
+      deps.tmux.resizePane(tmuxPaneId, payload.cols, payload.rows);
     },
 
     async focusPane(payload): Promise<void> {
-      deps.tmux.selectPane(payload.paneId);
+      const tmuxPaneId = await resolvePaneId(payload.paneId);
+      deps.tmux.selectPane(tmuxPaneId);
     },
 
     async killPane(payload): Promise<void> {
-      await deps.tmux.killPane(payload.paneId);
+      const tmuxPaneId = await resolvePaneId(payload.paneId);
+      await deps.tmux.killPane(tmuxPaneId);
     },
 
     executeOrchestration: notSupported('orchestration.execute'),
