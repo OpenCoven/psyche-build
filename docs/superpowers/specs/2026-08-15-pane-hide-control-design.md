@@ -8,7 +8,7 @@ Replace the leftmost pane-topbar span-cycle control with a Hide pane control for
 
 - The control uses a clear hide glyph, `title`, and `aria-label` of `Hide pane`.
 - Activating it removes only the selected surface from the visible canvas. It does not stop its process, close its tab, discard its Files selection, or destroy browser/Git state.
-- The existing pane switcher remains the restoration entry point. Restoring a hidden surface places it back into the active workspace and focuses it.
+- The existing pane switcher remains the restoration entry point for terminal, agent, browser, and Git surfaces. Selecting or opening a file in the Files sidebar restores a hidden Files pane, then focuses the selected file.
 - Maximize and close controls retain their current behavior and ordering after Hide.
 - The span-cycle action and its `▦` / full-width / full-height states are removed from pane topbars. No separate span-cycle affordance is added.
 
