@@ -58,7 +58,9 @@
 
   var statusController = null;
   var ptyRuntime = window.PsycheRuntime;
-  var terminalFrameScheduler = new ptyRuntime.FrameScheduler(requestAnimationFrame);
+  // FrameScheduler invokes this callback as a plain function. Bind it to the
+  // Window receiver because WebKit enforces the receiver for this Web API.
+  var terminalFrameScheduler = new ptyRuntime.FrameScheduler(window.requestAnimationFrame.bind(window));
   var invokeNative = window.__TAURI__.core.invoke;
   var listen = window.__TAURI__.event.listen;
   var opener = window.__TAURI__.opener || null;

@@ -165,6 +165,12 @@ describe('FrameScheduler', () => {
 });
 
 describe('desktop geometry scheduling contracts', () => {
+  it('binds requestAnimationFrame to Window before passing it to FrameScheduler', () => {
+    expect(mainJs).toContain(
+      'new ptyRuntime.FrameScheduler(window.requestAnimationFrame.bind(window))',
+    );
+  });
+
   it('coalesces pane-tree rendering and sidebar width mutation with layout keys', () => {
     expect(functionSource('schedulePaneTreeLayout')).toContain(
       'terminalFrameScheduler.schedule("layout:pane-tree"',
