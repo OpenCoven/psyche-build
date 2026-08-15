@@ -408,32 +408,25 @@ describe('agent surface MCP tools', () => {
     await symlink(launchRoot, aliasRoot, 'dir');
     const canonicalLaunchRoot = await canonicalizeProjectRoot(launchRoot);
     const token = 'tool-token-must-never-cross-the-wrong-socket';
-    const transferredBytes: string[] = [];
-    const connect = vi.fn(async (options) => {
-      transferredBytes.push(JSON.stringify(options));
-      return fakeClient({
-        projectRoot: canonicalLaunchRoot,
-        taskBinding: { taskId: 'task-alpha' },
-        taskResources: vi.fn(async () => ({
-          ownerEpoch: 1,
-          sequence: 2,
-          resources: [],
-        })),
-      });
-    });
-    const spawn = vi.fn(() => ({ unref: vi.fn() } as never));
+    const controlClientForRoot = vi.fn(async () => fakeClient({
+      projectRoot: canonicalLaunchRoot,
+      taskBinding: { taskId: 'task-alpha' },
+      taskResources: vi.fn(async () => ({
+        ownerEpoch: 1,
+        sequence: 2,
+        resources: [],
+      })),
+    }));
+    const canonicalize = vi.fn((root: string) => canonicalizeProjectRoot(root));
     const taskBinding = {
       taskId: 'task-alpha',
       token,
       canonicalProjectRoot: canonicalLaunchRoot,
     };
     inject({
-      controlClientForRoot: (projectRoot) => createMcpControlClientForRoot(projectRoot, {
-        taskBinding,
-        connect,
-        spawn,
-        entryPath: '/entry.js',
-      }),
+      taskProjectRoot: taskBinding.canonicalProjectRoot,
+      canonicalizeProjectRoot: canonicalize,
+      controlClientForRoot,
     });
 
     const mismatch = await call('psyche_control_list', { project_root: siblingRoot });
@@ -443,9 +436,7 @@ describe('agent surface MCP tools', () => {
       data: { code: 'task_project_mismatch' },
     });
     expect(JSON.stringify(mismatch)).not.toContain(token);
-    expect(connect).not.toHaveBeenCalled();
-    expect(spawn).not.toHaveBeenCalled();
-    expect(transferredBytes).toEqual([]);
+    expect(controlClientForRoot).not.toHaveBeenCalled();
 
     expect(payload(await call('psyche_control_list', {
       project_root: aliasRoot,
@@ -455,8 +446,57 @@ describe('agent surface MCP tools', () => {
       sequence: 2,
       resources: [],
     });
-    expect(connect).toHaveBeenCalledOnce();
-    expect(spawn).not.toHaveBeenCalled();
+    expect(controlClientForRoot).toHaveBeenCalledOnce();
+    expect(controlClientForRoot).toHaveBeenCalledWith(canonicalLaunchRoot);
+    expect(canonicalize).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    {
+      tool: 'psyche_list_rituals',
+      dependency: 'listRitualsForRoot',
+      result: { builtin: [{ id: 'start' }], project: [] },
+    },
+    {
+      tool: 'psyche_list_worktrees',
+      dependency: 'listWorktreesForRoot',
+      result: [{ path: '/canonical/launch', head: 'abc' }],
+    },
+  ] as const)('scopes $tool reads to the canonical task launch root', async ({
+    tool,
+    dependency,
+    result,
+  }) => {
+    const fixture = await mkdtemp(path.join(process.cwd(), '.mcp-task-read-'));
+    projectRootFixtures.push(fixture);
+    const launchRoot = path.join(fixture, 'launch');
+    const siblingRoot = path.join(fixture, 'sibling');
+    const aliasRoot = path.join(fixture, 'launch-alias');
+    await mkdir(launchRoot);
+    await mkdir(siblingRoot);
+    await symlink(launchRoot, aliasRoot, 'dir');
+    const canonicalLaunchRoot = await canonicalizeProjectRoot(launchRoot);
+    const readDependency = vi.fn(async () => result);
+    inject({
+      taskProjectRoot: canonicalLaunchRoot,
+      canonicalizeProjectRoot,
+      [dependency]: readDependency,
+    });
+
+    const mismatch = await call(tool, { project_root: siblingRoot });
+    expect(mismatch.error).toEqual({
+      code: MCP_CONTROL_ERROR_CODE,
+      message: 'task_project_mismatch: requested project does not match task launch project',
+      data: { code: 'task_project_mismatch' },
+    });
+    expect(readDependency).not.toHaveBeenCalled();
+
+    expect(payload(await call(tool, { project_root: aliasRoot }))).toMatchObject({
+      project_root: canonicalLaunchRoot,
+      count: 1,
+    });
+    expect(readDependency).toHaveBeenCalledOnce();
+    expect(readDependency).toHaveBeenCalledWith(canonicalLaunchRoot);
   });
 
   it('maps an unavailable action transaction to unknown', async () => {

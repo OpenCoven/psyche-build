@@ -139,6 +139,8 @@ export interface McpControlClient {
 }
 
 export interface McpDeps {
+  taskProjectRoot?: string;
+  canonicalizeProjectRoot: typeof canonicalizeProjectRoot;
   controlClientForRoot(projectRoot: string): Promise<McpControlClient>;
   listRitualsForRoot(projectRoot: string): Promise<{
     builtin: readonly unknown[];
@@ -190,16 +192,11 @@ export async function createMcpControlClientForRoot(
   options: McpControlClientBootstrapOptions = {},
 ): Promise<McpControlClient> {
   const authenticatedBinding = validateMcpTaskBinding(options.taskBinding);
-  const canonicalRoot = await (options.canonicalize ?? canonicalizeProjectRoot)(projectRoot);
-  if (
-    authenticatedBinding !== undefined
-    && canonicalRoot !== authenticatedBinding.canonicalProjectRoot
-  ) {
-    throw new ControlResponseError(
-      'task_project_mismatch',
-      'task_project_mismatch: requested project does not match task launch project',
-    );
-  }
+  const canonicalRoot = await canonicalizeMcpProjectRoot(
+    projectRoot,
+    authenticatedBinding?.canonicalProjectRoot,
+    options.canonicalize ?? canonicalizeProjectRoot,
+  );
   const endpoint = controlEndpointForProject(canonicalRoot);
   const taskBinding = authenticatedBinding === undefined
     ? undefined
@@ -306,6 +303,24 @@ function tokenFingerprint(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex');
 }
 
+async function canonicalizeMcpProjectRoot(
+  projectRoot: string,
+  taskProjectRoot: string | undefined,
+  canonicalize: typeof canonicalizeProjectRoot,
+): Promise<string> {
+  const canonicalRoot = await canonicalize(projectRoot);
+  if (
+    taskProjectRoot !== undefined
+    && canonicalRoot !== taskProjectRoot
+  ) {
+    throw new ControlResponseError(
+      'task_project_mismatch',
+      'task_project_mismatch: requested project does not match task launch project',
+    );
+  }
+  return canonicalRoot;
+}
+
 function borrowedControlClient(shared: SharedControlClient): McpControlClient {
   let released = false;
   const use = async <T>(operation: (client: ControlClient) => Promise<T>): Promise<T> => {
@@ -358,6 +373,7 @@ export async function closeMcpControlClients(): Promise<void> {
 }
 
 export const defaultMcpDeps: McpDeps = {
+  canonicalizeProjectRoot,
   controlClientForRoot: createMcpControlClientForRoot,
   async listRitualsForRoot(projectRoot) {
     return {
@@ -379,10 +395,17 @@ export function setMcpDeps(next: Partial<McpDeps>): () => void {
   return () => { deps = previous; };
 }
 
-function resolveProjectRoot(args: Record<string, unknown>): string {
+async function resolveProjectRoot(args: Record<string, unknown>): Promise<string> {
   const raw = args.project_root ?? args.projectRoot;
-  if (typeof raw === 'string' && raw.trim()) return raw;
-  return process.env.PSYCHE_PROJECT_ROOT ?? process.cwd();
+  const requestedRoot = typeof raw === 'string' && raw.trim()
+    ? raw
+    : process.env.PSYCHE_PROJECT_ROOT ?? process.cwd();
+  if (deps.taskProjectRoot === undefined) return requestedRoot;
+  return canonicalizeMcpProjectRoot(
+    requestedRoot,
+    deps.taskProjectRoot,
+    deps.canonicalizeProjectRoot,
+  );
 }
 
 function invalid(message: string): never {
@@ -483,7 +506,7 @@ async function submit(
   kind: ControlCommandInput['kind'],
   payload: unknown | ((client: McpControlClient) => unknown | CommandOutcome),
 ): Promise<CommandOutcome> {
-  const requestedRoot = resolveProjectRoot(args);
+  const requestedRoot = await resolveProjectRoot(args);
   return withControlClient(requestedRoot, async (client) => {
     const resolved = typeof payload === 'function' ? payload(client) : payload;
     if (isCommandOutcome(resolved)) return resolved;
@@ -524,7 +547,7 @@ export const TOOLS: ToolDef[] = [
     description: 'List the bounded pane and browser resources and approvals owned by this project.',
     inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
     handler: async (args) => {
-      const requestedRoot = resolveProjectRoot(args);
+      const requestedRoot = await resolveProjectRoot(args);
       return withControlClient(requestedRoot, async (client) => {
         const projectRoot = client.projectRoot ?? requestedRoot;
         const scoped = await client.taskResources();
@@ -561,7 +584,7 @@ export const TOOLS: ToolDef[] = [
       if (!['request', 'status', 'release'].includes(operation)) {
         invalid('psyche_control_lease supports only request, status, and release');
       }
-      const projectRoot = resolveProjectRoot(args);
+      const projectRoot = await resolveProjectRoot(args);
       return withControlClient(projectRoot, async (client) => {
         const canonicalRoot = client.projectRoot ?? projectRoot;
         const taskId = taskIdForClient(client, args);
@@ -735,7 +758,7 @@ export const TOOLS: ToolDef[] = [
     },
     handler: async (args) => {
       const actionId = requiredString(args, 'action_id');
-      return withControlClient(resolveProjectRoot(args), async (client) => (
+      return withControlClient(await resolveProjectRoot(args), async (client) => (
         (await client.actionStatus(actionId)) ?? { status: 'unknown', action_id: actionId }
       ));
     },
@@ -745,7 +768,7 @@ export const TOOLS: ToolDef[] = [
     description: 'Compatibility alias for listing pane resources through the project control owner.',
     inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
     handler: async (args) => {
-      const requestedRoot = resolveProjectRoot(args);
+      const requestedRoot = await resolveProjectRoot(args);
       return withControlClient(requestedRoot, async (client) => {
         const projectRoot = client.projectRoot ?? requestedRoot;
         const scoped = await client.taskResources();
@@ -768,7 +791,7 @@ export const TOOLS: ToolDef[] = [
     handler: async (args) => {
       const prompt = requiredString(args, 'prompt');
       if (!Array.isArray(args.lanes) || args.lanes.length === 0) invalid('requires at least one lane');
-      const requestedRoot = resolveProjectRoot(args);
+      const requestedRoot = await resolveProjectRoot(args);
       return withControlClient(requestedRoot, (client) => {
         const auth = leaseAuthorization(args, client);
         if (!auth) return Promise.resolve(leaseMissing());
@@ -794,7 +817,7 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: async (args) => {
-      const requestedRoot = resolveProjectRoot(args);
+      const requestedRoot = await resolveProjectRoot(args);
       return withControlClient(requestedRoot, async (client) => {
         const auth = leaseAuthorization(args, client);
         if (!auth) return leaseMissing();
@@ -864,7 +887,7 @@ export const TOOLS: ToolDef[] = [
     description: 'List built-in and project rituals without mutating the host.',
     inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
     handler: async (args) => {
-      const projectRoot = resolveProjectRoot(args);
+      const projectRoot = await resolveProjectRoot(args);
       const rituals = await deps.listRitualsForRoot(projectRoot);
       return {
         project_root: projectRoot,
@@ -878,7 +901,7 @@ export const TOOLS: ToolDef[] = [
     description: 'List git worktrees for the project without mutating the host.',
     inputSchema: { type: 'object', properties: { project_root: projectRootProperty } },
     handler: async (args) => {
-      const projectRoot = resolveProjectRoot(args);
+      const projectRoot = await resolveProjectRoot(args);
       const worktrees = await deps.listWorktreesForRoot(projectRoot);
       return { project_root: projectRoot, count: worktrees.length, worktrees };
     },
@@ -955,6 +978,7 @@ export async function runMcpServer(
   const restore = resolvedOptions.taskBinding === undefined
     ? undefined
     : setMcpDeps({
+        taskProjectRoot: resolvedOptions.taskBinding.canonicalProjectRoot,
         controlClientForRoot: (projectRoot) => createMcpControlClientForRoot(projectRoot, {
           taskBinding: resolvedOptions.taskBinding,
         }),

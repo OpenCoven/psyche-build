@@ -161,10 +161,11 @@ PSYCHE_CONTROL_TASK_TOKEN=<redacted example>
 
 When `PSYCHE_PROJECT_ROOT` is absent, the MCP launch working directory is the
 project root. Psyche canonicalizes that trusted launch root once and the task
-token is valid only for that canonical project. A tool may supply the same root
-through a symlink alias, but a different root fails locally with
-`task_project_mismatch` before any socket connection, owner spawn, or `hello`
-frame can expose the token.
+token is valid only for that canonical project. Every MCP tool validates its
+requested root before invoking control, filesystem, ritual, or Git readers. A
+tool may supply the same root through a symlink alias, but a different root
+fails locally with `task_project_mismatch` before any dependency call, socket
+connection, owner spawn, or `hello` frame can expose the token.
 
 The authenticated token binding—not a caller-provided `task_id`—establishes
 task authority. The legacy shared-agent credential and compatibility

@@ -35,9 +35,9 @@ These variables are a pair; the example token is intentionally not usable.
 At launch, Psyche canonicalizes the trusted project root and stores it in the
 MCP task binding. The token is valid only for that canonical launch project.
 Every tool-supplied root is canonicalized and compared before client creation,
-socket connection, owner spawn, or `hello`; a different project fails locally
-with `task_project_mismatch`. Symlink aliases resolving to the launch project
-remain valid.
+direct filesystem/ritual/Git reads, socket connection, owner spawn, or `hello`;
+a different project fails locally with `task_project_mismatch`. Symlink aliases
+resolving to the launch project remain valid.
 
 Authentication binds the connection to the canonical project root and task.
 Caller-supplied `task_id` values are only consistency inputs and never establish
