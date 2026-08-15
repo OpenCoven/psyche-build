@@ -3266,6 +3266,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
+ "tauri-plugin-macos-fps",
  "tauri-plugin-opener",
  "tempfile",
  "tokio",
@@ -4408,6 +4409,19 @@ dependencies = [
  "thiserror 2.0.18",
  "toml 0.9.12+spec-1.1.0",
  "url",
+]
+
+[[package]]
+name = "tauri-plugin-macos-fps"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11177f7c97f1322fbcb5d966ebb0378e411145d65f3f2a2f897d8389ebdba583"
+dependencies = [
+ "log",
+ "objc2",
+ "objc2-foundation",
+ "serde",
+ "tauri",
 ]
 
 [[package]]

@@ -34,7 +34,7 @@ function handlersWithCovenClient(
     capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
     createCovenClient: () => ({
       listSessions: async () => sessions,
-      getSession: async (id: string) => sessions.find((session) => session.id === id) ?? null,
+      getSession: async (id: string) => sessions.find((session) => session.id === id)!,
       sendInput,
     }),
   });
@@ -360,6 +360,7 @@ describe('createDaemonControlHandlers runCovenDesktopAction', () => {
         sessionName: 'psyche-test',
         capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
         createCovenClient: () => ({
+          listSessions: async () => [],
           getSession: async (_id: string) => ({
             id: 'sess-1', projectRoot: outside, harness: 'codex', title: 'Outside', status: 'running',
             createdAt: '2026-04-27T10:00:00Z', updatedAt: '2026-04-27T10:01:00Z',
