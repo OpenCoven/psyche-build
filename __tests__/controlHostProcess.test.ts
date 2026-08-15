@@ -39,6 +39,7 @@ describe('ensureHostControlPlane', () => {
 
     await expect(ensureHostControlPlane({
       projectRoot: '/project/link', token: 'secret-agent-token', clientName: 'mcp',
+      taskBinding: { taskId: 'task-alpha' },
       entryPath: '/app/dist/index.js', connect, spawn,
       canonicalize: async () => '/canonical/project', now: () => now, sleep,
     })).resolves.toBe(client);
@@ -53,8 +54,34 @@ describe('ensureHostControlPlane', () => {
     expect(connect).toHaveBeenLastCalledWith({
       projectRoot: '/canonical/project', token: 'secret-agent-token', clientName: 'mcp',
       endpoint: controlEndpointForProject('/canonical/project'),
+      taskBinding: { taskId: 'task-alpha' },
       signal: expect.any(AbortSignal),
     });
+  });
+
+  it('propagates task binding mismatch rejection without starting an owner', async () => {
+    const mismatch = new Error('welcome task binding does not match the requested task');
+    const connect = vi.fn(async (options) => {
+      expect(options).toMatchObject({
+        token: 'task-alpha-token',
+        taskBinding: { taskId: 'task-alpha' },
+      });
+      throw mismatch;
+    });
+    const spawn = vi.fn();
+
+    await expect(ensureHostControlPlane({
+      projectRoot: '/project',
+      token: 'task-alpha-token',
+      clientName: 'mcp',
+      taskBinding: { taskId: 'task-alpha' },
+      entryPath: '/entry.js',
+      connect,
+      spawn,
+      canonicalize: async (root) => root,
+    })).rejects.toBe(mismatch);
+    expect(connect).toHaveBeenCalledOnce();
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it('does not spawn or retry authentication and protocol failures', async () => {

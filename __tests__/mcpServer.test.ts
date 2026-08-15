@@ -28,6 +28,10 @@ function client(overrides: Record<string, unknown> = {}): any {
       ownerEpoch: 3, sequence: 9, commands: {}, leases: {},
       resources: [], capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
     })),
+    taskResources: vi.fn(async () => ({
+      ownerEpoch: 3, sequence: 9, resources: [],
+    })),
+    leaseStatus: vi.fn(async () => ({ requests: [], leases: [] })),
     actionStatus: vi.fn(),
     close: vi.fn(async () => undefined),
     ...overrides,
@@ -80,9 +84,8 @@ describe('MCP tool registry', () => {
 
 describe('MCP canonical delegation and read-only helpers', () => {
   it('lists panes from the control snapshot', async () => {
-    const fake = client({ getState: vi.fn(async () => ({
-      ownerEpoch: 1, sequence: 1, commands: {}, leases: {}, capabilityLeases: [],
-      leaseRequests: [], approvals: [], receipts: [],
+    const fake = client({ taskResources: vi.fn(async () => ({
+      ownerEpoch: 1, sequence: 1,
       resources: [
         { kind: 'pane', id: 'pane-1', generation: 2 },
         { kind: 'browser_tab', id: 'tab-1', generation: 1 },
@@ -113,7 +116,10 @@ describe('MCP canonical delegation and read-only helpers', () => {
       schema: 'psyche.control.receipt/v1', actionId: 'a', state: 'queued',
       resource: { kind: 'project', id: '/repo' }, createdAt: 'now',
     };
-    const fake = client({ submit: vi.fn(async () => ({ status: 'succeeded', value: receipt })) });
+    const fake = client({
+      taskBinding: { taskId: 'task' },
+      submit: vi.fn(async () => ({ status: 'succeeded', value: receipt })),
+    });
     inject({ controlClientForRoot: vi.fn(async () => fake), randomId: () => 'command-1' });
     const auth = { task_id: 'task', lease_id: 'lease', lease_revision: 1 };
 
@@ -138,7 +144,10 @@ describe('MCP canonical delegation and read-only helpers', () => {
   });
 
   it('requires and forwards project lease authority for task execution', async () => {
-    const fake = client({ submit: vi.fn(async () => ({ status: 'succeeded' })) });
+    const fake = client({
+      taskBinding: { taskId: 'task-1' },
+      submit: vi.fn(async () => ({ status: 'succeeded' })),
+    });
     inject({ controlClientForRoot: vi.fn(async () => fake), randomId: () => 'id-1' });
 
     expect(payload(await call('psyche_execute_task', {

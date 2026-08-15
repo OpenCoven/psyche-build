@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { ControlClient, type ControlClientOptions } from './client.js';
+import type { ControlTaskBinding } from './credentials.js';
 import { controlEndpointForProject } from './endpoint.js';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 
@@ -14,6 +15,7 @@ export interface EnsureHostOptions {
   projectRoot: string;
   token: string;
   clientName: string;
+  taskBinding?: ControlTaskBinding;
   entryPath: string;
   connect?: ConnectControl;
   spawn?: SpawnOwner;
@@ -57,6 +59,7 @@ export async function ensureCanonicalHostControlPlane(
     endpoint: controlEndpointForProject(canonicalRoot),
     token: options.token,
     clientName: options.clientName,
+    ...(options.taskBinding === undefined ? {} : { taskBinding: options.taskBinding }),
   };
   const deadline = now() + OWNER_START_TIMEOUT_MS;
 

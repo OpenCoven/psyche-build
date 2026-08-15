@@ -5,13 +5,20 @@ import {
   closeMcpControlClients,
   createMcpControlClientForRoot,
   handleMcpRequest,
+  parseMcpArgs,
   setMcpDeps,
 } from '../src/mcp/server.js';
+import {
+  startTaskScopedControlHarness,
+  type TaskScopedControlHarness,
+} from './helpers/taskScopedControlHarness.js';
 
 const restores: Array<() => void> = [];
+const harnesses: TaskScopedControlHarness[] = [];
 afterEach(async () => {
   while (restores.length) restores.pop()!();
   await closeMcpControlClients();
+  await Promise.allSettled(harnesses.splice(0).map((harness) => harness.close()));
   vi.restoreAllMocks();
 });
 
@@ -31,7 +38,8 @@ function payload(response: any): any {
 
 function fakeClient(overrides: Record<string, unknown> = {}): any {
   return {
-    submit: vi.fn(), getState: vi.fn(), actionStatus: vi.fn(), close: vi.fn(async () => undefined),
+    submit: vi.fn(), getState: vi.fn(), taskResources: vi.fn(), leaseStatus: vi.fn(),
+    actionStatus: vi.fn(), close: vi.fn(async () => undefined),
     ...overrides,
   };
 }
@@ -39,6 +47,52 @@ function fakeClient(overrides: Record<string, unknown> = {}): any {
 const lease = {
   task_id: 'task-1', lease_id: 'lease-1', lease_revision: 2,
 };
+
+describe('MCP task binding bootstrap', () => {
+  it('parses task identity from CLI and token only from the environment', () => {
+    expect(parseMcpArgs(['--task-id', 'task-alpha'], {
+      PSYCHE_CONTROL_TASK_ID: 'task-env',
+      PSYCHE_CONTROL_TASK_TOKEN: 'alpha-token',
+    })).toEqual({
+      taskBinding: { taskId: 'task-alpha', token: 'alpha-token' },
+    });
+    expect(parseMcpArgs([], {
+      PSYCHE_CONTROL_TASK_ID: 'task-env',
+      PSYCHE_CONTROL_TASK_TOKEN: 'env-token',
+    })).toEqual({
+      taskBinding: { taskId: 'task-env', token: 'env-token' },
+    });
+  });
+
+  it('requires both task identity values or neither without exposing the token', () => {
+    const token = 'never-print-this-task-token';
+    expect(() => parseMcpArgs(['--task-id', 'task-alpha'], {}))
+      .toThrow(/task token/i);
+    expect(() => parseMcpArgs([], { PSYCHE_CONTROL_TASK_TOKEN: token }))
+      .toThrow(/task id/i);
+    for (const args of [
+      () => parseMcpArgs(['--task-id', 'task-alpha'], {}),
+      () => parseMcpArgs([], { PSYCHE_CONTROL_TASK_TOKEN: token }),
+    ]) {
+      try {
+        args();
+      } catch (error) {
+        expect(String(error)).not.toContain(token);
+      }
+    }
+  });
+
+  it('accepts 256-character task IDs and rejects 257 characters', () => {
+    const token = 'task-token';
+    const accepted = 'a'.repeat(256);
+    expect(parseMcpArgs(['--task-id', accepted], {
+      PSYCHE_CONTROL_TASK_TOKEN: token,
+    })).toEqual({ taskBinding: { taskId: accepted, token } });
+    expect(() => parseMcpArgs(['--task-id', 'a'.repeat(257)], {
+      PSYCHE_CONTROL_TASK_TOKEN: token,
+    })).toThrow(/256/);
+  });
+});
 
 describe('agent surface MCP tools', () => {
   it('pins the eight typed control tools and required authorization fields', () => {
@@ -52,8 +106,11 @@ describe('agent surface MCP tools', () => {
     for (const name of ['psyche_pane_observe', 'psyche_pane_action', 'psyche_browser_inspect',
       'psyche_browser_action', 'psyche_browser_script']) {
       const required = (TOOLS.find((tool) => tool.name === name)!.inputSchema.required ?? []) as string[];
-      expect(required).toEqual(expect.arrayContaining(['task_id', 'lease_id', 'lease_revision']));
+      expect(required).toEqual(expect.arrayContaining(['lease_id', 'lease_revision']));
+      expect(required).not.toContain('task_id');
     }
+    expect(TOOLS.find((tool) => tool.name === 'psyche_control_lease')?.inputSchema.required)
+      .toEqual(['operation']);
   });
 
   it('documents the generic click risk boundary', () => {
@@ -79,6 +136,7 @@ describe('agent surface MCP tools', () => {
       resource: { kind: 'pane', id: 'pane-1', generation: 3 }, createdAt: '2026-08-12T00:00:00.000Z',
     };
     const client = fakeClient({
+      taskBinding: { taskId: 'task-1' },
       submit: vi.fn(async () => ({ status: 'succeeded', value: receipt })),
     });
     const controlClientForRoot = vi.fn(async () => client);
@@ -104,10 +162,43 @@ describe('agent surface MCP tools', () => {
     expect(command.ownerEpoch).toBeUndefined();
   });
 
+  it('derives mutation task identity from the bound client and rejects supplied mismatches', async () => {
+    const client = fakeClient({
+      taskBinding: { taskId: 'task-alpha' },
+      submit: vi.fn(async () => ({ status: 'succeeded' })),
+    });
+    inject({ controlClientForRoot: vi.fn(async () => client) });
+
+    await call('psyche_pane_action', {
+      project_root: '/repo',
+      lease_id: 'lease-alpha',
+      lease_revision: 1,
+      pane_id: 'pane-alpha',
+      generation: 1,
+      action: { kind: 'send_text', text: 'hello' },
+    });
+    expect(client.submit).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ taskId: 'task-alpha' }),
+    }));
+
+    client.submit.mockClear();
+    const response = await call('psyche_pane_action', {
+      project_root: '/repo',
+      task_id: 'task-beta',
+      lease_id: 'lease-alpha',
+      lease_revision: 1,
+      pane_id: 'pane-alpha',
+      generation: 1,
+      action: { kind: 'send_text', text: 'hello' },
+    });
+    expect(response.error).toMatchObject({ code: -32602 });
+    expect(client.submit).not.toHaveBeenCalled();
+  });
+
   it('supports request, status, and release but refuses grant and approval operations', async () => {
-    const client = fakeClient({ getState: vi.fn(async () => ({
-      capabilityLeases: [], leaseRequests: [], resources: [], approvals: [], receipts: [],
-    })) });
+    const client = fakeClient({
+      leaseStatus: vi.fn(async () => ({ leases: [], requests: [] })),
+    });
     inject({ controlClientForRoot: vi.fn(async () => client) });
 
     for (const operation of ['grant', 'approve']) {
@@ -122,13 +213,8 @@ describe('agent surface MCP tools', () => {
   });
 
   it('does not disclose reusable lease credentials through the project listing', async () => {
-    const client = fakeClient({ getState: vi.fn(async () => ({
+    const client = fakeClient({ taskResources: vi.fn(async () => ({
       ownerEpoch: 1, sequence: 1, resources: [], approvals: [], receipts: [],
-      capabilityLeases: [{
-        id: 'lease-victim', requestId: 'request-victim', revision: 3,
-        actorId: 'agent', taskId: 'task-victim', grants: [],
-      }],
-      leaseRequests: [{ id: 'request-victim', taskId: 'task-victim' }],
     })) });
     inject({ controlClientForRoot: vi.fn(async () => client) });
 
@@ -140,16 +226,16 @@ describe('agent surface MCP tools', () => {
   });
 
   it('requires the originating request id to inspect a task lease', async () => {
-    const client = fakeClient({ getState: vi.fn(async () => ({
-      capabilityLeases: [], leaseRequests: [], resources: [], approvals: [], receipts: [],
-    })) });
+    const client = fakeClient({
+      leaseStatus: vi.fn(async () => ({ leases: [], requests: [] })),
+    });
     inject({ controlClientForRoot: vi.fn(async () => client) });
 
     const response = await call('psyche_control_lease', {
       operation: 'status', task_id: 'task-victim', project_root: '/repo',
     });
     expect(response.error.code).toBe(-32602);
-    expect(client.getState).not.toHaveBeenCalled();
+    expect(client.leaseStatus).not.toHaveBeenCalled();
   });
 
   it('returns a structured lease_missing result for unleased create and kill aliases', async () => {
@@ -170,6 +256,7 @@ describe('agent surface MCP tools', () => {
   it('uses the connected client canonical root for alias pane creation scope', async () => {
     const client = fakeClient({
       projectRoot: '/canonical/repo',
+      taskBinding: { taskId: 'task-1' },
       submit: vi.fn(async () => ({ status: 'succeeded' })),
     });
     inject({ controlClientForRoot: vi.fn(async () => client) });
@@ -229,9 +316,8 @@ describe('agent surface MCP tools', () => {
     const close = vi.fn(async () => undefined);
     inject({ controlClientForRoot: vi.fn(async () => fakeClient({
       close,
-      getState: vi.fn(async () => ({
-        ownerEpoch: 1, sequence: 0, commands: {}, leases: {}, resources: [],
-        capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
+      taskResources: vi.fn(async () => ({
+        ownerEpoch: 1, sequence: 0, resources: [],
       })),
     })) });
 
@@ -268,6 +354,65 @@ describe('agent surface MCP tools', () => {
     expect(options.credentialStoreForCanonicalRoot).toHaveBeenCalledOnce();
     await Promise.all(borrowed.map((client) => client.close()));
     expect(underlying.close).toHaveBeenCalledOnce();
+  });
+
+  it('partitions shared clients by task ID without using the raw token as identity', async () => {
+    const canonicalize = vi.fn(async () => '/canonical/repo');
+    const clients = [
+      fakeClient({ projectRoot: '/canonical/repo', taskBinding: { taskId: 'task-alpha' } }),
+      fakeClient({ projectRoot: '/canonical/repo', taskBinding: { taskId: 'task-beta' } }),
+    ];
+    const connect = vi.fn()
+      .mockResolvedValueOnce(clients[0])
+      .mockResolvedValueOnce(clients[1]);
+    const options = {
+      canonicalize,
+      credentialStoreForCanonicalRoot: vi.fn(),
+      connect,
+      entryPath: '/entry.js',
+    };
+
+    const alphaOne = await createMcpControlClientForRoot('/repo', {
+      ...options,
+      taskBinding: { taskId: 'task-alpha', token: 'alpha-token-one' },
+    });
+    const alphaTwo = await createMcpControlClientForRoot('/repo', {
+      ...options,
+      taskBinding: { taskId: 'task-alpha', token: 'alpha-token-two' },
+    });
+    const beta = await createMcpControlClientForRoot('/repo', {
+      ...options,
+      taskBinding: { taskId: 'task-beta', token: 'beta-token' },
+    });
+
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(connect.mock.calls.map(([options]) => options.taskBinding)).toEqual([
+      { taskId: 'task-alpha' },
+      { taskId: 'task-beta' },
+    ]);
+    expect(options.credentialStoreForCanonicalRoot).not.toHaveBeenCalled();
+    expect(alphaOne.taskBinding).toEqual({ taskId: 'task-alpha' });
+    expect(alphaTwo.taskBinding).toEqual({ taskId: 'task-alpha' });
+    expect(beta.taskBinding).toEqual({ taskId: 'task-beta' });
+
+    await Promise.all([alphaOne.close(), alphaTwo.close(), beta.close()]);
+    expect(clients[0].close).toHaveBeenCalledOnce();
+    expect(clients[1].close).toHaveBeenCalledOnce();
+  });
+
+  it('validates bootstrap task bindings before connecting without exposing the token', async () => {
+    const token = 'bootstrap-token-must-stay-secret';
+    const connect = vi.fn(async () => fakeClient({ projectRoot: '/canonical/repo' }));
+    const start = createMcpControlClientForRoot('/repo', {
+      canonicalize: async () => '/canonical/repo',
+      connect,
+      entryPath: '/entry.js',
+      taskBinding: { taskId: 'a'.repeat(257), token },
+    });
+
+    await expect(start).rejects.toThrow(/256/);
+    await expect(start).rejects.not.toThrow(token);
+    expect(connect).not.toHaveBeenCalled();
   });
 
   it('server cleanup closes an outstanding shared control client', async () => {
@@ -314,6 +459,188 @@ describe('agent surface MCP tools', () => {
   it('contains no direct mutation dependencies', () => {
     const source = readFileSync(new URL('../src/mcp/server.ts', import.meta.url), 'utf8');
     expect(source).not.toMatch(/spawnBridgePane|killBridgePane|TmuxControl|execFileSync/);
+  });
+});
+
+describe('task-scoped MCP control integration', () => {
+  async function harness(): Promise<TaskScopedControlHarness> {
+    const started = await startTaskScopedControlHarness();
+    harnesses.push(started);
+    return started;
+  }
+
+  function bind(
+    started: TaskScopedControlHarness,
+    task: 'alpha' | 'beta' | 'unbound',
+  ): void {
+    inject({ controlClientForRoot: () => started.clientFor(task) });
+  }
+
+  it('hides pending targets and lists only active alpha-leased resources', async () => {
+    const started = await harness();
+    const alphaGrant = [{
+      target: {
+        kind: 'pane' as const,
+        id: started.resources.alpha.id,
+        generation: started.resources.alpha.generation,
+      },
+      capabilities: ['pane.observe' as const],
+    }];
+    const betaGrant = [{
+      target: {
+        kind: 'pane' as const,
+        id: started.resources.beta.id,
+        generation: started.resources.beta.generation,
+      },
+      capabilities: ['pane.observe' as const],
+    }];
+    await started.requestLease('alpha', 'request-alpha', alphaGrant);
+    await started.requestLease('beta', 'request-beta', betaGrant);
+    bind(started, 'alpha');
+
+    expect(payload(await call('psyche_control_list', {
+      project_root: started.root,
+    }))).toMatchObject({
+      resources: [],
+      approvals: [],
+      receipts: [],
+    });
+    expect(payload(await call('psyche_list_panes', {
+      project_root: started.root,
+    }))).toMatchObject({ count: 0, panes: [] });
+
+    await started.grantLease('request-alpha');
+    await started.grantLease('request-beta');
+
+    expect(payload(await call('psyche_control_list', {
+      project_root: started.root,
+    }))).toMatchObject({
+      resources: [expect.objectContaining({ id: started.resources.alpha.id })],
+      approvals: [],
+      receipts: [],
+    });
+    expect(payload(await call('psyche_list_panes', {
+      project_root: started.root,
+    }))).toMatchObject({
+      count: 1,
+      panes: [expect.objectContaining({ id: started.resources.alpha.id })],
+    });
+  });
+
+  it('keeps beta lease status invisible to alpha and rejects a supplied mismatch', async () => {
+    const started = await harness();
+    const alphaGrant = [{
+      target: {
+        kind: 'pane' as const,
+        id: started.resources.alpha.id,
+        generation: started.resources.alpha.generation,
+      },
+      capabilities: ['pane.observe' as const],
+    }];
+    const betaGrant = [{
+      target: {
+        kind: 'pane' as const,
+        id: started.resources.beta.id,
+        generation: started.resources.beta.generation,
+      },
+      capabilities: ['pane.observe' as const],
+    }];
+    await started.requestLease('alpha', 'request-alpha-status', alphaGrant);
+    await started.requestLease('beta', 'request-beta-status', betaGrant);
+    await started.requestLease('beta', 'request-beta-pending', betaGrant);
+    const alphaLease = await started.grantLease('request-alpha-status');
+    const betaLease = await started.grantLease('request-beta-status');
+    bind(started, 'alpha');
+
+    expect(payload(await call('psyche_control_lease', {
+      operation: 'status',
+      request_id: 'request-alpha-status',
+      lease_id: alphaLease.id,
+      project_root: started.root,
+    }))).toMatchObject({
+      requests: [],
+      leases: [expect.objectContaining({ id: alphaLease.id })],
+    });
+    expect(payload(await call('psyche_control_lease', {
+      operation: 'status',
+      request_id: 'request-beta-pending',
+      project_root: started.root,
+    }))).toEqual({ requests: [], leases: [] });
+    expect(payload(await call('psyche_control_lease', {
+      operation: 'status',
+      request_id: 'request-beta-status',
+      lease_id: betaLease.id,
+      project_root: started.root,
+    }))).toEqual({ requests: [], leases: [] });
+
+    const mismatch = await call('psyche_control_lease', {
+      operation: 'status',
+      task_id: 'task-beta',
+      request_id: 'request-alpha-status',
+      project_root: started.root,
+    });
+    expect(mismatch.error).toMatchObject({ code: -32602 });
+  });
+
+  it('surfaces task_binding_required for an unbound shared-agent client', async () => {
+    const started = await harness();
+    bind(started, 'unbound');
+
+    expect((await call('psyche_control_list', {
+      project_root: started.root,
+    })).error).toMatchObject({ code: 'task_binding_required' });
+    expect(payload(await call('psyche_control_lease', {
+      operation: 'request',
+      ttl_ms: 60_000,
+      grants: [{
+        target: {
+          kind: 'pane',
+          id: started.resources.alpha.id,
+          generation: started.resources.alpha.generation,
+        },
+        capabilities: ['pane.observe'],
+      }],
+      project_root: started.root,
+    }))).toMatchObject({
+      status: 'rejected',
+      code: 'task_binding_required',
+    });
+  });
+
+  it('allows alpha to request and release its own lease without task_id arguments', async () => {
+    const started = await harness();
+    bind(started, 'alpha');
+
+    const requested = payload(await call('psyche_control_lease', {
+      operation: 'request',
+      ttl_ms: 60_000,
+      grants: [{
+        target: {
+          kind: 'pane',
+          id: started.resources.alpha.id,
+          generation: started.resources.alpha.generation,
+        },
+        capabilities: ['pane.observe'],
+      }],
+      project_root: started.root,
+    }));
+    expect(requested).toMatchObject({
+      status: 'succeeded',
+      value: { requestId: expect.any(String) },
+    });
+    const granted = await started.grantLease(requested.value.requestId);
+
+    expect(payload(await call('psyche_control_lease', {
+      operation: 'release',
+      lease_id: granted.id,
+      lease_revision: granted.revision,
+      project_root: started.root,
+    }))).toMatchObject({ status: 'succeeded' });
+    expect(payload(await call('psyche_control_lease', {
+      operation: 'status',
+      request_id: requested.value.requestId,
+      project_root: started.root,
+    }))).toEqual({ requests: [], leases: [] });
   });
 });
 
