@@ -172,11 +172,11 @@ describe('mounted control socket end-to-end', () => {
       inputCommand('pane.resize', { paneId: '%999', cols: 100, rows: 40 }),
     );
 
-    expect(outcome).toMatchObject({ status: 'failed', errorCode: 'pane_not_found' });
+    expect(outcome).toMatchObject({ status: 'failed', code: 'pane_not_found' });
     expect(daemon.recordedResizes).toEqual([]);
   });
 
-  it('sendInput rejects an unregistered pane with pane_not_found', async () => {
+  it('sendInput rejects a request without a current pane lease', async () => {
     const daemon = await startMountedDaemon();
     const client = await ControlClient.connect({
       projectRoot: daemon.projectRoot,
@@ -190,7 +190,7 @@ describe('mounted control socket end-to-end', () => {
       inputCommand('pane.input', { paneId: '%999', dataBase64: Buffer.from('x').toString('base64') }),
     );
 
-    expect(outcome).toMatchObject({ status: 'failed', errorCode: 'pane_not_found' });
+    expect(outcome).toMatchObject({ status: 'failed', code: 'lease_revision_mismatch' });
     expect(daemon.recordedKeys).toEqual([]);
   });
 
@@ -208,7 +208,7 @@ describe('mounted control socket end-to-end', () => {
       inputCommand('pane.focus', { paneId: '%999' }),
     );
 
-    expect(outcome).toMatchObject({ status: 'failed', errorCode: 'pane_not_found' });
+    expect(outcome).toMatchObject({ status: 'failed', code: 'pane_not_found' });
     expect(daemon.recordedFocuses).toEqual([]);
   });
 
@@ -226,7 +226,7 @@ describe('mounted control socket end-to-end', () => {
       inputCommand('pane.kill', { paneId: '%999' }),
     );
 
-    expect(outcome).toMatchObject({ status: 'failed', errorCode: 'pane_not_found' });
+    expect(outcome).toMatchObject({ status: 'failed', code: 'pane_not_found' });
     expect(daemon.recordedKills).toEqual([]);
   });
 
