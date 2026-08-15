@@ -148,16 +148,39 @@ same authenticated authority, policy, approval, and receipt path as the UI.
 }
 ```
 
+Trusted task launchers bind an MCP process to one task by issuing a project-local
+token with `issueControlTaskToken()` (or
+`issueControlTaskTokenForCanonicalRoot()` when the project root is already
+canonical), setting the launch project, and injecting the task variables:
+
+```text
+PSYCHE_PROJECT_ROOT=/absolute/path/to/project
+PSYCHE_CONTROL_TASK_ID=task-alpha
+PSYCHE_CONTROL_TASK_TOKEN=<redacted example>
+```
+
+When `PSYCHE_PROJECT_ROOT` is absent, the MCP launch working directory is the
+project root. Psyche canonicalizes that trusted launch root once and the task
+token is valid only for that canonical project. Every MCP tool validates its
+requested root before invoking control, filesystem, ritual, or Git readers. A
+tool may supply the same root through a symlink alias, but a different root
+fails locally with `task_project_mismatch` before any dependency call, socket
+connection, owner spawn, or `hello` frame can expose the token.
+
+The authenticated token binding—not a caller-provided `task_id`—establishes
+task authority. The legacy shared-agent credential and compatibility
+identities have no task scope, so task-sensitive control calls fail closed
+instead of adopting a supplied task ID.
+
 | Tool | Does |
 |---|---|
-| `psyche_control_list` | List bounded controllable pane/browser resources, generations, and approvals |
-| `psyche_control_lease` | Request, inspect, or release scoped authority; it cannot grant or approve authority |
+| `psyche_control_list` | List bounded pane/browser resources covered by the authenticated task's active leases |
+| `psyche_control_lease` | Request, inspect, or release authenticated-task-scoped authority; it cannot grant or approve authority |
 | `psyche_pane_observe` | Read bounded pane output and status through an exact leased generation |
 | `psyche_pane_action` | Perform one typed leased pane action and return its canonical receipt |
 | `psyche_browser_inspect` | Capture a bounded semantic snapshot of an exact leased tab generation |
 | `psyche_browser_action` | Perform one typed leased browser action and return its canonical receipt |
 | `psyche_browser_script` | Submit an approval-gated browser script through an exact leased tab generation |
-| `psyche_control_action_status` | Read the latest canonical receipt without retrying; missing bounded history reports `unknown` |
 | `psyche_list_panes` | Compatibility alias that lists pane resources through the owner |
 | `psyche_create_pane` | Compatibility alias for leased pane creation through the owner |
 | `psyche_execute_task` | Compatibility alias that submits orchestration through the owner |
@@ -170,6 +193,14 @@ The compatibility mutation aliases require `task_id`, `lease_id`, and
 `lease_revision`; pane-specific aliases also require the current generation.
 Missing authority returns a structured `lease_missing` result without an
 effect.
+
+Lease-status reads are restricted to the authenticated task. Raw control events
+are operator-only; that boundary is included in PR A. PR A intentionally does
+not advertise the legacy psyche_control_action_status MCP tool because it
+depends on redacted snapshots and operator-only event history. PR B restores
+action status from canonical task-owned receipts. Control-domain failures
+exposed as JSON-RPC errors use numeric code `-32001`, with the stable domain
+code (for example `task_binding_required`) in `error.data.code`.
 
 See [Agent surface control](./docs/AGENT-SURFACE-CONTROL.md) for the complete
 lease, approval, generation, browser-provider, redaction, and recovery model.

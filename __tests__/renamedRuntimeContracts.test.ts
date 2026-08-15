@@ -106,7 +106,6 @@ describe('renamed runtime contracts', () => {
         'psyche_browser_action',
         'psyche_browser_inspect',
         'psyche_browser_script',
-        'psyche_control_action_status',
         'psyche_control_lease',
         'psyche_control_list',
         'psyche_create_pane',
