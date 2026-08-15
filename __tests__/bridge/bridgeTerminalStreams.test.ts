@@ -111,6 +111,25 @@ describe("BridgeDaemon terminal streams", () => {
     expect(session.controlStreams.size).toBe(0);
   });
 
+  it("refuses a tmux-looking id published only by a Coven session", async () => {
+    const { daemon } = createDaemon();
+    const session = createSession();
+    install(daemon, [session]);
+    const workspace = (daemon as any).opts.workspaceProvider();
+    workspace.projects[0].worktrees[1].panes[0].id = "%10";
+    workspace.projects[0].worktrees[1].panes[0].kind = "coven-session";
+    (daemon as any).opts.workspaceProvider = () => workspace;
+
+    const response = await control(daemon, session, {
+      type: "panes.attach",
+      requestId: "attach-coven",
+      id: "%10",
+    });
+
+    expect(response).toMatchObject({ type: "error", code: "unknown_pane" });
+    expect(session.controlStreams.size).toBe(0);
+  });
+
   it("refuses a pane id tmux would treat as command text", async () => {
     const { daemon } = createDaemon();
     const session = createSession();
