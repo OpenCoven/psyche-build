@@ -50,7 +50,7 @@ export interface DaemonControlHandlerDeps {
   surfaces?: SurfaceRegistry;
   refreshPaneSurfaces?: () => Promise<readonly PaneSurface[]>;
   /** Safe durable pane teardown; injectable for handler tests. */
-  closePane?: (projectRoot: string, paneId: string) => Promise<unknown>;
+  closePane?: (projectRoot: string, paneId: string) => Promise<void>;
   browserProvider?: Pick<BrowserProviderBroker, 'dispatch'>;
   browserSemanticSnapshots?: BrowserSemanticSnapshotRegistry;
 }
