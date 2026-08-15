@@ -7179,6 +7179,21 @@ mod workspace_panel_tests {
         .unwrap();
     }
 
+    fn marker_command(path: &Path) -> String {
+        #[cfg(unix)]
+        {
+            path_text(path).to_string()
+        }
+        #[cfg(windows)]
+        {
+            // Git for Windows invokes configured helpers through its POSIX
+            // shell. Delegate explicitly to cmd so a batch helper is not
+            // interpreted as a shell script (and so the positive control is
+            // meaningful on the Windows runner).
+            format!("cmd.exe /D /C \"{}\"", path_text(path).replace('\\', "/"))
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolves_the_first_executable_on_path_to_its_canonical_path() {
@@ -8120,7 +8135,10 @@ mod workspace_panel_tests {
         let marker = tree.root.join("fsmonitor-ran");
         write_marker_executable(&hook);
         run_test_git(&tree.root, &["init", "-q"]);
-        run_test_git(&tree.root, &["config", "core.fsmonitor", path_text(&hook)]);
+        run_test_git(
+            &tree.root,
+            &["config", "core.fsmonitor", &marker_command(&hook)],
+        );
 
         run_test_git_with_env(
             &tree.root,
@@ -8163,7 +8181,10 @@ mod workspace_panel_tests {
                 "baseline",
             ],
         );
-        run_test_git(&tree.root, &["config", "diff.external", path_text(&helper)]);
+        run_test_git(
+            &tree.root,
+            &["config", "diff.external", &marker_command(&helper)],
+        );
         std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
 
         run_test_git_with_env(
