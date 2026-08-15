@@ -1705,6 +1705,22 @@ describe('tauri status controller', () => {
     expect(classTexts(elements.detailBody, 'status-cell-value')).toContain('60 FPS');
     expect(classTexts(elements.detailBody, 'status-cell-value')).toContain('0');
     expect(elements.detailBody.textContent).toContain('rAF cadence 60 Hz');
+
+    // A sparse sample (fps and renderLatencyMs available, cadence not yet
+    // calibrated) must still show the Frame rate cell while omitting Dropped.
+    controller.render(buildSample({
+      nativeSnapshot,
+      frame: {
+        fps: 60,
+        renderLatencyMs: 16.7,
+        droppedFrames: null,
+        framePacingHz: null,
+      },
+    }));
+
+    expect(classTexts(elements.detailBody, 'status-cell-label')).toContain('Frame rate');
+    expect(classTexts(elements.detailBody, 'status-cell-label')).not.toContain('Dropped');
+    expect(classTexts(elements.detailBody, 'status-cell-value')).toContain('60 FPS');
   });
 
   it('renders Agent tools only for finite structured counts', () => {

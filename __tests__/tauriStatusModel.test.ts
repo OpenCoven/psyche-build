@@ -708,6 +708,15 @@ describe('tauri footer status model', () => {
     [0, fastFrameMs, fastFrameMs * 2, fastFrameMs * 6, fastFrameMs * 7, fastFrameMs * 8]
       .forEach((time) => delayed.frame(time));
     expect(delayed.flush(1_000).droppedFrames).toBe(3);
+
+    // A drop followed by three or more normal callbacks must still be counted.
+    // [normal, normal, drop, normal, normal, normal] — the trailing run of three
+    // must not mask the gap that precedes it.
+    const delayedWithLongTail = createFrameSampler();
+    [0, fastFrameMs, fastFrameMs * 2, fastFrameMs * 6,
+      fastFrameMs * 7, fastFrameMs * 8, fastFrameMs * 9]
+      .forEach((time) => delayedWithLongTail.frame(time));
+    expect(delayedWithLongTail.flush(1_000).droppedFrames).toBe(3);
   });
 
   test('records the measured rAF cadence in diagnostics without claiming a display mode', () => {

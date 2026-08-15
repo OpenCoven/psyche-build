@@ -585,6 +585,19 @@ export function createFrameSampler() {
       trailing.unshift(interval);
     }
 
+    if (trailing.length < MIN_CADENCE_INTERVALS) return trailing;
+
+    // If the intervals before the gap share the same cadence as the trailing
+    // run, this is an interruption within an existing cadence rather than a
+    // genuine cadence transition. Return an empty array so the caller uses the
+    // full sample and counts the gap as a dropped frame.
+    const trailingStart = frameIntervals.length - trailing.length;
+    const trailingMedian = median(trailing);
+    const beforeGap = frameIntervals.slice(0, Math.max(0, trailingStart - 1));
+    if (beforeGap.some((interval) => approximatelyEqual(interval, trailingMedian))) {
+      return [];
+    }
+
     return trailing;
   }
 
