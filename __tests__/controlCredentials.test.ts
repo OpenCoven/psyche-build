@@ -361,9 +361,17 @@ function scopedReadSnapshot(): ControlSnapshot {
             target: { kind: 'pane', id: 'pane-alpha', generation: 1 },
             capabilities: ['pane.observe'],
           },
+          {
+            target: { kind: 'pane', id: 'pane-alpha', generation: 1 },
+            capabilities: ['pane.focus'],
+          },
+          {
+            target: { kind: 'pane', id: 'pane-stale', generation: 1 },
+            capabilities: ['pane.observe'],
+          },
         ],
         createdAt: '2026-08-14T12:02:00.000Z',
-        expiresAt: '2026-08-14T13:02:00.000Z',
+        expiresAt: '2099-08-14T13:02:00.000Z',
       },
       {
         id: 'lease-beta',
@@ -378,7 +386,22 @@ function scopedReadSnapshot(): ControlSnapshot {
           capabilities: ['browser.inspect'],
         }],
         createdAt: '2026-08-14T12:03:00.000Z',
-        expiresAt: '2026-08-14T13:03:00.000Z',
+        expiresAt: '2099-08-14T13:03:00.000Z',
+      },
+      {
+        id: 'lease-alpha-expired',
+        requestId: 'request-alpha-expired',
+        revision: 1,
+        ownerEpoch: 7,
+        actorId: 'agent-shared',
+        taskId: 'task-alpha',
+        grantedBy: 'operator',
+        grants: [{
+          target: { kind: 'pane', id: 'pane-unreferenced', generation: 1 },
+          capabilities: ['pane.observe'],
+        }],
+        createdAt: '2000-01-01T00:00:00.000Z',
+        expiresAt: '2000-01-01T00:01:00.000Z',
       },
     ],
     approvals: [],
@@ -1129,7 +1152,6 @@ describe('control server authorization', () => {
       });
       await expect(beta.taskResources()).resolves.toMatchObject({
         resources: [
-          expect.objectContaining({ id: 'pane-beta', generation: 1 }),
           expect.objectContaining({ id: 'tab-beta', generation: 4 }),
         ],
       });

@@ -455,7 +455,7 @@ leaseStatus(
 ): LeaseStatusResultData;
 ```
 
-Use the authenticated task ID. Return empty arrays when the named request belongs to another task. Resolve resources only through that task's pending grants and active capability leases; never return all runtime resources.
+Use the authenticated task ID. Return empty arrays when the named request belongs to another task. Resolve resources only through that task's active, non-expired capability leases; pending requests remain inspectable through `leaseStatus()` but never authorize resource metadata. Never return all runtime resources.
 
 - [ ] **Step 5: Add client methods**
 

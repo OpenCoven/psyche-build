@@ -4,12 +4,14 @@ import path from 'node:path';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import type { AuthenticatedControlIdentity, ControlPrincipal } from '../src/control/credentials.js';
 import { ControlJournal } from '../src/control/journal.js';
+import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
 import {
   ControlRuntime,
   type ControlHandlers,
   type RuntimeJournal,
 } from '../src/control/runtime.js';
 import { createControlServerForTest } from '../src/control/server.js';
+import { SurfaceRegistry } from '../src/control/surfaces.js';
 import type { ControlCommandInput } from '../src/control/types.js';
 
 const TEST_ARTIFACTS_ROOT = path.join(process.cwd(), '.control-server-test-artifacts');
@@ -150,7 +152,7 @@ function wrapJournal(
   };
 }
 
-describe('control server idempotency scope', () => {
+describe('control server runtime integration', () => {
   it('keeps operator idempotency project-wide in runtime snapshots and the journal', async () => {
     const root = await testProject();
     const journal = await ControlJournal.open(root, 1);
@@ -290,6 +292,160 @@ describe('control server idempotency scope', () => {
     await expect(betaPromise).resolves.toEqual({
       status: 'succeeded',
       value: { requestId: 'command-b' },
+    });
+  });
+
+  describe('task resource authority', () => {
+    it('lists only exact resources authorized by active non-expired task leases', async () => {
+      const root = await testProject();
+      let now = new Date();
+      const surfaces = new SurfaceRegistry();
+      const capabilityLeases = new CapabilityLeaseStore(() => now, 1);
+      let beta = surfaces.upsertPane({
+        id: 'pane-beta',
+        projectRoot: root,
+        worktreeRoot: path.join(root, '.worktrees', 'beta'),
+        tmuxPaneId: '%2',
+        title: 'beta pane',
+        writable: true,
+        outputSequence: 7,
+      });
+      const runtime = await ControlRuntime.create({
+        ownerEpoch: 1,
+        handlers: handlers(),
+        journal: await ControlJournal.open(root, 1),
+        surfaces,
+        capabilityLeases,
+      });
+      const authority = createControlServerForTest({
+        runtime,
+        ownerEpoch: 1,
+        projectRoot: root,
+      });
+      const alpha = authenticatedTask('task-alpha');
+      const betaTask = authenticatedTask('task-beta');
+
+      const requestLease = async (
+        identity: AuthenticatedControlIdentity,
+        taskId: string,
+        requestId: string,
+        generation: number,
+        ttlMs = 60_000,
+        duplicate = false,
+      ) => authority.submitAs(identity, {
+        id: requestId,
+        idempotencyKey: requestId,
+        kind: 'lease.request',
+        projectRoot: root,
+        createdAt: now.toISOString(),
+        payload: {
+          taskId,
+          ttlMs,
+          grants: [
+            {
+              target: { kind: 'pane', id: beta.id, generation },
+              capabilities: ['pane.observe'],
+            },
+            ...(duplicate ? [{
+              target: { kind: 'pane' as const, id: beta.id, generation },
+              capabilities: ['pane.focus' as const],
+            }] : []),
+          ],
+        },
+      });
+      const grantLease = async (requestId: string) => {
+        const outcome = await authority.submitAs(operator, {
+          id: `grant-${requestId}`,
+          idempotencyKey: `grant-${requestId}`,
+          kind: 'lease.grant',
+          projectRoot: root,
+          createdAt: now.toISOString(),
+          payload: { requestId },
+        });
+        expect(outcome).toMatchObject({ status: 'succeeded' });
+        return (outcome as {
+          status: 'succeeded';
+          value: { lease: { id: string; revision: number } };
+        }).value.lease;
+      };
+
+      await requestLease(betaTask, 'task-beta', 'request-beta-owner', beta.generation);
+      await grantLease('request-beta-owner');
+      expect(authority.taskResources(betaTask).resources).toEqual([beta]);
+
+      await expect(requestLease(
+        alpha,
+        'task-alpha',
+        'request-release',
+        beta.generation,
+        60_000,
+        true,
+      ))
+        .resolves.toMatchObject({ status: 'succeeded' });
+      expect(authority.taskResources(alpha)).toMatchObject({
+        resources: [],
+      });
+      expect(authority.leaseStatus(alpha, 'request-release')).toMatchObject({
+        requests: [{
+          id: 'request-release',
+          grants: [
+            { target: { id: beta.id, generation: beta.generation } },
+            { target: { id: beta.id, generation: beta.generation } },
+          ],
+        }],
+        leases: [],
+      });
+
+      const releasedLease = await grantLease('request-release');
+      const grantedResources = authority.taskResources(alpha).resources;
+      expect(grantedResources).toEqual([beta]);
+      expect(grantedResources).toHaveLength(1);
+      await expect(authority.submitAs(alpha, {
+        id: 'release-resource',
+        idempotencyKey: 'release-resource',
+        kind: 'lease.release',
+        projectRoot: root,
+        createdAt: now.toISOString(),
+        payload: {
+          taskId: 'task-alpha',
+          leaseId: releasedLease.id,
+          leaseRevision: releasedLease.revision,
+        },
+      })).resolves.toMatchObject({ status: 'succeeded' });
+      expect(authority.taskResources(alpha).resources).toEqual([]);
+
+      await requestLease(alpha, 'task-alpha', 'request-old-generation', beta.generation);
+      await grantLease('request-old-generation');
+      expect(authority.taskResources(alpha).resources).toEqual([beta]);
+      beta = surfaces.upsertPane({
+        ...beta,
+        tmuxPaneId: '%3',
+      });
+      expect(beta.generation).toBe(2);
+      expect(authority.taskResources(alpha).resources).toEqual([]);
+
+      await requestLease(alpha, 'task-alpha', 'request-revoke', beta.generation);
+      const revokedLease = await grantLease('request-revoke');
+      expect(authority.taskResources(alpha).resources).toEqual([beta]);
+      await expect(authority.submitAs(operator, {
+        id: 'revoke-resource',
+        idempotencyKey: 'revoke-resource',
+        kind: 'lease.revoke',
+        projectRoot: root,
+        createdAt: now.toISOString(),
+        payload: { leaseId: revokedLease.id },
+      })).resolves.toMatchObject({ status: 'succeeded' });
+      expect(authority.taskResources(alpha).resources).toEqual([]);
+
+      await requestLease(alpha, 'task-alpha', 'request-expiry', beta.generation);
+      await grantLease('request-expiry');
+      expect(authority.taskResources(alpha).resources).toEqual([beta]);
+      now = new Date(now.getTime() + 60_001);
+      expect(authority.taskResources(alpha).resources).toEqual([]);
+      expect(authority.leaseStatus(alpha, 'request-expiry')).toEqual({
+        requests: [],
+        leases: [],
+      });
     });
   });
 
