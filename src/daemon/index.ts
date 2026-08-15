@@ -618,8 +618,8 @@ export class Connection {
         try {
           const client = createCovenClient();
           const session = await getProjectCovenSession(this.deps.projectRoot, msg.sessionId, client);
-          const events = await (client.listEvents?.(msg.sessionId) ?? Promise.resolve([]));
-          const state = buildDesktopUseStateFromEvents(msg.sessionId, msg.sessionId, events, session);
+          const events = await (client.listEvents?.(session.id) ?? Promise.resolve([]));
+          const state = buildDesktopUseStateFromEvents(session.id, session.id, events, session);
           this.send({ type: 'coven.desktop.state.result', requestId: msg.requestId, state });
         } catch (e) {
           this.send({ type: 'error', requestId: msg.requestId, code: bridgeErrorCode(e, 'coven_desktop_state_failed'), message: bridgeErrorMessage(e) });

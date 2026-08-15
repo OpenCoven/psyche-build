@@ -144,9 +144,9 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       }
       const action: DesktopUseQuickAction = payload.action;
       const client = covenClientFactory();
-      await getProjectCovenSession(deps.projectRoot, payload.sessionId, client);
-      await client.sendInput?.(payload.sessionId, buildDesktopUseQuickInput(action));
-      return { sessionId: payload.sessionId, action, accepted: true };
+      const session = await getProjectCovenSession(deps.projectRoot, payload.sessionId, client);
+      await client.sendInput?.(session.id, buildDesktopUseQuickInput(action));
+      return { sessionId: session.id, action, accepted: true };
     },
 
     async executeCovenCapability(payload) {

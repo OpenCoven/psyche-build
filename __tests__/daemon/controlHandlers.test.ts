@@ -1,15 +1,28 @@
-import { describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm, writeFile, readFile, mkdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createDaemonControlHandlers } from '../../src/daemon/controlHandlers.js';
 import { AgenticCapabilityRouter } from '../../src/orchestration/capabilityRouter.js';
 import { TmuxControl } from '../../src/services/tmuxControl.js';
 
-function handlersWithCovenClient(
+let tempRoots: string[] = [];
+
+async function tempDir(prefix: string): Promise<string> {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), prefix)));
+  tempRoots.push(root);
+  return root;
+}
+
+afterEach(async () => {
+  await Promise.all(tempRoots.map((root) => rm(root, { recursive: true, force: true })));
+  tempRoots = [];
+});
+
+async function handlersWithCovenClient(
   sendInput: (sessionId: string, input: string) => Promise<void>,
 ) {
-  const projectRoot = process.cwd();
+  const projectRoot = await tempDir('psyche-control-handler-coven-');
   return createDaemonControlHandlers({
     tmux: new TmuxControl('psyche-test'),
     projectRoot,
@@ -34,7 +47,7 @@ function handlersWithCovenClient(
 describe('createDaemonControlHandlers runCovenDesktopAction', () => {
   it('sends a known desktop quick action to the coven client', async () => {
     const sendInput = vi.fn(async (_sessionId: string, _input: string) => {});
-    const handlers = handlersWithCovenClient(sendInput);
+    const handlers = await handlersWithCovenClient(sendInput);
 
     const result = await handlers.runCovenDesktopAction({ sessionId: 'sess-1', action: 'screenshot' });
 
@@ -46,7 +59,7 @@ describe('createDaemonControlHandlers runCovenDesktopAction', () => {
 
   it('rejects an unknown desktop action instead of sending undefined input', async () => {
     const sendInput = vi.fn(async (_sessionId: string, _input: string) => {});
-    const handlers = handlersWithCovenClient(sendInput);
+    const handlers = await handlersWithCovenClient(sendInput);
 
     await expect(
       handlers.runCovenDesktopAction({ sessionId: 'sess-1', action: 'not-a-real-action' }),
