@@ -306,10 +306,14 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     browserProvider,
     browserSemanticSnapshots,
   });
+  const controlCredentials = await createControlCredentialStore({
+    projectRoot: canonicalProjectRoot,
+  });
   const host = await createHostControlPlane(canonicalProjectRoot, {
     handlers: controlHandlers,
     surfaces,
     browserSemanticSnapshots,
+    readActiveTaskCredential: controlCredentials.currentTaskCredential,
   });
   providerRuntime = host.runtime;
   providerOwnerEpoch = host.epoch;
@@ -345,9 +349,6 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   const controlEndpoint = controlEndpointForProject(canonicalProjectRoot);
   let controlServer: ControlServer;
   try {
-    const controlCredentials = await createControlCredentialStore({
-      projectRoot: canonicalProjectRoot,
-    });
     controlServer = await ControlServer.start({
       endpoint: controlEndpoint,
       projectRoot: canonicalProjectRoot,

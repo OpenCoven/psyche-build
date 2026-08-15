@@ -187,6 +187,15 @@ fn home_directory_for(
     }
 }
 
+fn psyche_user_config_directory_for(
+    family: PlatformFamily,
+    home: Option<OsString>,
+    user_profile: Option<OsString>,
+) -> Option<PathBuf> {
+    home_directory_for(family, home, user_profile)
+        .map(|home| PathBuf::from(home).join(".config").join("psyche"))
+}
+
 pub fn home_directory() -> Option<String> {
     #[cfg(unix)]
     let family = PlatformFamily::Unix;
@@ -199,6 +208,19 @@ pub fn home_directory() -> Option<String> {
         std::env::var_os("USERPROFILE"),
     )
     .and_then(|home| home.into_string().ok())
+}
+
+pub fn psyche_user_config_directory() -> Option<PathBuf> {
+    #[cfg(unix)]
+    let family = PlatformFamily::Unix;
+    #[cfg(target_os = "windows")]
+    let family = PlatformFamily::Windows;
+
+    psyche_user_config_directory_for(
+        family,
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+    )
 }
 
 pub fn augmented_path() -> OsString {
@@ -389,6 +411,44 @@ mod tests {
                 Some(OsString::from(r"C:\Users\tester")),
             ),
             Some(OsString::from(r"C:\Users\tester"))
+        );
+    }
+
+    #[test]
+    fn windows_home_prefers_userprofile_and_builds_the_shared_config_directory() {
+        let home = Some(OsString::from(r"C:\Users\fallback"));
+        let user_profile = Some(OsString::from(r"C:\Users\primary"));
+
+        assert_eq!(
+            home_directory_for(PlatformFamily::Windows, home.clone(), user_profile.clone(),),
+            user_profile.clone()
+        );
+        assert_eq!(
+            psyche_user_config_directory_for(PlatformFamily::Windows, home, user_profile),
+            Some(
+                PathBuf::from(r"C:\Users\primary")
+                    .join(".config")
+                    .join("psyche")
+            )
+        );
+    }
+
+    #[test]
+    fn unix_home_directory_ignores_userprofile_when_building_the_config_directory() {
+        let home = Some(OsString::from("/home/dev"));
+        let user_profile = Some(OsString::from("/ignored/profile"));
+
+        assert_eq!(
+            home_directory_for(PlatformFamily::Unix, home.clone(), user_profile),
+            home.clone()
+        );
+        assert_eq!(
+            psyche_user_config_directory_for(
+                PlatformFamily::Unix,
+                home,
+                Some(OsString::from("/ignored/profile")),
+            ),
+            Some(PathBuf::from("/home/dev").join(".config").join("psyche"))
         );
     }
 }

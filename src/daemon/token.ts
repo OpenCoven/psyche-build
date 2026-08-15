@@ -1,9 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import path from 'node:path';
+import { psycheUserConfigDirectory } from '../control/credentialPaths.js';
 
-const TOKEN_DIR = path.join(homedir(), '.config', 'psyche');
+const TOKEN_DIR = psycheUserConfigDirectory();
 const TOKEN_FILE = path.join(TOKEN_DIR, 'token');
 
 export async function readOrCreateToken(): Promise<string> {
