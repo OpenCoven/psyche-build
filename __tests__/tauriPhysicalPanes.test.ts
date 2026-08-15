@@ -670,7 +670,7 @@ describe('Tauri physical terminal panes', () => {
 
   it('keeps pane topology process-local and keys it by project and worktree', () => {
     expect(mainJs).toMatch(/var paneLayouts = new Map\(\);/);
-    expect(mainJs).toMatch(/var paneCounter = 0;/);
+    expect(mainJs).toMatch(/var paneCounter = 0n;/);
     expect(mainJs).toMatch(/var PANE_MINIMUMS = \{ width: 200, height: 137, separator: 6 \};/);
     expect(functionSource('paneLayoutKey')).toMatch(/projectId[\s\S]*worktreePath/);
     expect(functionSource('preparePanePlacement')).toMatch(/PsychePanes\.createLeaf/);
@@ -721,6 +721,8 @@ describe('Tauri physical terminal panes', () => {
       'mountBrowserPane',
       'mountTerminal',
       'reopenThread',
+      'hideFilesPane',
+      'reopenFilesPane',
       'removeProject',
       'returnFromFileFocus',
       'revealFileForDecision',
@@ -3645,7 +3647,7 @@ describe('Tauri physical terminal panes', () => {
         /\.terminal-pane:is\(\.is-web,\s*\.is-tool\)\s+\.terminal-pane-header\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto;/s,
       );
       expect(functionSource('mountTerminal')).toMatch(
-        /header\.appendChild\(glyph\);[\s\S]*header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(span\);[\s\S]*header\.appendChild\(maximize\);[\s\S]*header\.appendChild\(close\)/,
+        /header\.appendChild\(glyph\);[\s\S]*header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(hide\);[\s\S]*header\.appendChild\(maximize\);[\s\S]*header\.appendChild\(close\)/,
       );
     });
 

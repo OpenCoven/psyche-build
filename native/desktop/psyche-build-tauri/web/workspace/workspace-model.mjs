@@ -154,6 +154,7 @@ export function importWorkspaceV2(saved) {
     activeThreadId: null,
     projects: Array.isArray(saved?.projects) ? saved.projects.slice() : [],
     sessions: [],
+    filesPanes: [],
     paneLayouts: [],
   };
 }
@@ -281,14 +282,33 @@ function sanitizePaneLayout(
   };
 }
 
+function sanitizeFilesPaneDescriptor(saved, projectIds) {
+  if (!isObject(saved)) return null;
+
+  const id = safeId(saved.id);
+  const projectId = safeId(saved.projectId);
+  const workspaceRoot = safeString(saved.workspaceRoot);
+  if (!id || !projectId || !workspaceRoot || !projectIds.has(projectId)) return null;
+
+  return {
+    id,
+    projectId,
+    workspaceRoot,
+    hidden: saved.hidden === true,
+  };
+}
+
 export function sanitizeWorkspaceV3(saved) {
   if (!isObject(saved) || saved.version !== 3) return null;
 
   const projects = Array.isArray(saved.projects) ? saved.projects.slice() : [];
   const sessions = [];
+  const filesPanes = [];
   const knownThreadIds = new Set();
+  const knownFilesPaneIds = new Set();
   const projectIds = new Set();
   const sessionScopes = new Map();
+  const filesPaneScopes = new Map();
 
   for (const project of projects) {
     const projectId = safeId(project && project.id);
@@ -315,6 +335,24 @@ export function sanitizeWorkspaceV3(saved) {
     sessionScopes.set(scopeKey, scopedThreadIds);
   }
 
+  for (const descriptor of Array.isArray(saved.filesPanes) ? saved.filesPanes : []) {
+    const filesPane = sanitizeFilesPaneDescriptor(descriptor, projectIds);
+    if (
+      !filesPane ||
+      knownThreadIds.has(filesPane.id) ||
+      knownFilesPaneIds.has(filesPane.id)
+    ) {
+      continue;
+    }
+
+    const scopeKey = `${filesPane.projectId}\u0000${filesPane.workspaceRoot}`;
+    if (filesPaneScopes.has(scopeKey)) continue;
+
+    knownFilesPaneIds.add(filesPane.id);
+    filesPaneScopes.set(scopeKey, filesPane);
+    filesPanes.push(filesPane);
+  }
+
   const activeProjectId = safeId(saved.activeProjectId) && projectIds.has(safeId(saved.activeProjectId))
     ? safeId(saved.activeProjectId)
     : null;
@@ -335,10 +373,14 @@ export function sanitizeWorkspaceV3(saved) {
   for (const layout of layouts) {
     const layoutProjectId = safeId(layout && layout.projectId);
     const layoutWorktreePath = safeString(layout && layout.worktreePath);
-    const scopedThreadIds =
-      layoutProjectId && layoutWorktreePath
-        ? sessionScopes.get(`${layoutProjectId}\u0000${layoutWorktreePath}`) || new Set()
-        : new Set();
+    const scopeKey = layoutProjectId && layoutWorktreePath
+      ? `${layoutProjectId}\u0000${layoutWorktreePath}`
+      : null;
+    const scopedThreadIds = scopeKey
+      ? new Set(sessionScopes.get(scopeKey) || [])
+      : new Set();
+    const filesPane = scopeKey ? filesPaneScopes.get(scopeKey) : null;
+    if (filesPane && !filesPane.hidden) scopedThreadIds.add(filesPane.id);
     const sanitized = sanitizePaneLayout(
       layout,
       scopedThreadIds,
@@ -367,6 +409,7 @@ export function sanitizeWorkspaceV3(saved) {
     activeThreadId,
     projects,
     sessions,
+    filesPanes,
     paneLayouts,
   };
 }

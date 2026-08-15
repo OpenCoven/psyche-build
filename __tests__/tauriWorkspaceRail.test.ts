@@ -80,6 +80,22 @@ function createMockButton() {
 }
 
 describe('Tauri project/worktree/pane rail', () => {
+  it('uses an accessible Hide pane control in every canvas-pane header', () => {
+    expect(mainJs).toMatch(/function createPaneHideButton\(surface\)/);
+    const hideControl = functionSource(mainJs, 'createPaneHideButton');
+    expect(hideControl).toContain('terminal-pane-hide');
+    expect(hideControl).toContain('"Hide pane"');
+    expect(hideControl).toContain('hideCanvasSurface(surface)');
+
+    for (const name of ['mountToolPane', 'mountFilesPane', 'mountBrowserPane', 'mountTerminal']) {
+      const mount = functionSource(mainJs, name);
+      expect(mount).toContain('createPaneHideButton(');
+      expect(mount).not.toContain('cyclePaneSpan(');
+    }
+    expect(styles).toContain('.terminal-pane-hide');
+    expect(styles).not.toContain('.terminal-pane-span');
+  });
+
   it('ships the Dia-inspired two-zone native shell and pinned sidebar controls', () => {
     const titlebar = titlebarHtml(indexHtml);
     const sidebarHead = sidebarHeadHtml(indexHtml);

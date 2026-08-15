@@ -44,6 +44,58 @@ function compileFunction<T extends (...args: never[]) => unknown>(
 }
 
 describe('native Files pane lifecycle', () => {
+  it('reserves restored generated ids before allocating new pane ids', () => {
+    const paneIdSequence = compileFunction<(id: string) => bigint>(
+      'paneIdSequence',
+      { BigInt },
+    );
+    const nextPaneId = compileFunction<(prefix: string) => string>(
+      'nextPaneId',
+      { paneCounter: 9007199254740991n },
+    );
+    const restoredIds: string[] = [];
+    const restoredTrees: unknown[] = [];
+    const project = { id: 'project-a' };
+    const filesPanes = new Map<string, Record<string, unknown>>();
+    const paneLayouts = new Map<string, Record<string, unknown>>();
+    const restorePersistedFilesPanes = compileFunction<
+      (savedPanes: Array<Record<string, unknown>>) => void
+    >('restorePersistedFilesPanes', {
+      filesPanes,
+      findProject: () => project,
+      filesPaneKey: (projectId: string, root: string) => `${projectId}\0${root}`,
+      reservePaneId: (id: string) => { restoredIds.push(id); },
+    });
+    const restorePersistedPaneLayouts = compileFunction<
+      (savedLayouts: Array<Record<string, any>>, restoredIds: Set<string>) => void
+    >('restorePersistedPaneLayouts', {
+      paneLayouts,
+      findProject: () => project,
+      paneLayoutKey: (projectId: string, root: string) => `${projectId}\0${root}`,
+      reservePaneTreeIds: (root: unknown) => { restoredTrees.push(root); },
+      PsychePanes: {
+        leafIds: () => ['leaf-15'],
+        findLeafById: () => ({ threadId: 'files-12' }),
+      },
+    });
+    const tree = { type: 'leaf', id: 'leaf-15', threadId: 'files-12' };
+
+    restorePersistedFilesPanes([
+      { id: 'files-12', projectId: project.id, workspaceRoot: '/repo', hidden: false },
+    ]);
+    restorePersistedPaneLayouts([
+      { projectId: project.id, worktreePath: '/repo', root: tree, focusedLeafId: 'leaf-15' },
+    ], new Set(['files-12']));
+
+    expect(paneIdSequence('files-12')).toBe(12n);
+    expect(paneIdSequence('split-9007199254740992')).toBe(9007199254740992n);
+    expect(paneIdSequence('files-invalid')).toBe(0n);
+    expect(nextPaneId('leaf')).toBe('leaf-9007199254740992');
+    expect(nextPaneId('leaf')).toBe('leaf-9007199254740993');
+    expect(restoredIds).toEqual(['files-12']);
+    expect(restoredTrees).toEqual([tree]);
+  });
+
   it('creates one stable Files surface per worktree and commits its first placement', () => {
     const filesPanes = new Map<string, Record<string, unknown>>();
     const placements: unknown[] = [];
@@ -71,6 +123,136 @@ describe('native Files pane lifecycle', () => {
     expect(other).not.toBe(first);
     expect(filesPanes.size).toBe(2);
     expect(placements).toHaveLength(2);
+  });
+
+  it('restores layouts that include visible persisted Files panes', async () => {
+    const project = { id: 'project-a', lastActiveThreadId: null };
+    const state = { projects: [project], threads: [] as Record<string, any>[], activeThreadId: null as string | null };
+    const filesPanes = new Map<string, Record<string, unknown>>();
+    const paneLayouts = new Map<string, Record<string, unknown>>();
+    const restorePersistedFilesPanes = compileFunction<
+      (savedPanes: Array<Record<string, unknown>>) => void
+    >('restorePersistedFilesPanes', {
+      filesPanes,
+      findProject: () => project,
+      filesPaneKey: (projectId: string, root: string) => `${projectId}\0${root}`,
+      reservePaneId: () => undefined,
+    });
+    const restorePersistedPaneLayouts = compileFunction<
+      (savedLayouts: Array<Record<string, unknown>>, restoredIds: Set<string>) => void
+    >('restorePersistedPaneLayouts', {
+      paneLayouts,
+      findProject: () => project,
+      paneLayoutKey: (projectId: string, root: string) => `${projectId}\0${root}`,
+      reservePaneTreeIds: () => undefined,
+      PsychePanes: {
+        leafIds: () => ['leaf-thread', 'leaf-files'],
+        findLeafById: (_root: unknown, leafId: string) => (
+          leafId === 'leaf-thread'
+            ? { threadId: 'thread-a' }
+            : leafId === 'leaf-files'
+              ? { threadId: 'files-a' }
+              : null
+        ),
+      },
+    });
+    const restorePersistedSessions = compileFunction<
+      (saved: Record<string, any>, liveSessionIds: string[]) => Promise<Record<string, unknown>>
+    >('restorePersistedSessions', {
+      PsycheWorkspace: {
+        reconcileSessions: () => ({
+          sessions: [{
+            id: 'thread-a',
+            projectId: project.id,
+            worktreePath: '/repo',
+            hidden: false,
+            persistentLive: false,
+            status: 'exited',
+          }],
+          unknownLiveIds: [],
+        }),
+      },
+      window: {
+        PsycheWorkspace: {
+          reconcileSessions: () => ({
+            sessions: [{
+              id: 'thread-a',
+              projectId: project.id,
+              worktreePath: '/repo',
+              hidden: false,
+              persistentLive: false,
+              status: 'exited',
+            }],
+            unknownLiveIds: [],
+          }),
+        },
+      },
+      state,
+      findProject: () => project,
+      restoredSessionThread: (descriptor: Record<string, any>) => ({
+        id: descriptor.id,
+        projectId: descriptor.projectId,
+        worktreePath: descriptor.worktreePath,
+        hidden: descriptor.hidden,
+        ptyStarted: true,
+        status: 'exited',
+      }),
+      restorePersistedFilesPanes,
+      filesPanes,
+      restorePersistedPaneLayouts,
+      ensureRestoredSessionPlacements: () => undefined,
+      mountTerminal: () => undefined,
+      invoke: async () => [],
+      attachThreadClient: () => undefined,
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+    });
+
+    await restorePersistedSessions({
+      sessions: [],
+      filesPanes: [{ id: 'files-a', projectId: project.id, workspaceRoot: '/repo', hidden: false }],
+      paneLayouts: [{
+        projectId: project.id,
+        worktreePath: '/repo',
+        root: {
+          type: 'split',
+          id: 'split-a',
+          first: { type: 'leaf', id: 'leaf-thread', threadId: 'thread-a' },
+          second: { type: 'leaf', id: 'leaf-files', threadId: 'files-a' },
+        },
+        focusedLeafId: 'leaf-files',
+      }],
+      activeThreadId: null,
+    }, []);
+
+    expect(paneLayouts.get(`${project.id}\0/repo`)).toEqual({
+      root: {
+        type: 'split',
+        id: 'split-a',
+        first: { type: 'leaf', id: 'leaf-thread', threadId: 'thread-a' },
+        second: { type: 'leaf', id: 'leaf-files', threadId: 'files-a' },
+      },
+      focusedLeafId: 'leaf-files',
+    });
+  });
+
+  it('reopens a hidden Files pane when the active file is selected again', async () => {
+    const file = { id: 'file-a', projectId: 'project-a', workspaceRoot: '/repo' };
+    const project = { id: 'project-a' };
+    const calls: string[] = [];
+    const activateFileTab = compileFunction<(id: string) => Promise<boolean>>(
+      'activateFileTab',
+      {
+        findOpenFile: () => file,
+        state: { activeFileId: file.id },
+        findProject: () => project,
+        ensureFilesPane: () => { calls.push('ensure'); },
+        fileEditor: { focus: () => { calls.push('focus'); } },
+        activateFileTabNow: () => { calls.push('activate'); return true; },
+      },
+    );
+
+    await expect(activateFileTab(file.id)).resolves.toBe(true);
+    expect(calls).toEqual(['ensure', 'focus']);
   });
 
   it('scopes file tabs by both project and worktree', () => {

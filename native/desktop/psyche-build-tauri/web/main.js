@@ -143,7 +143,7 @@
   var covenDiscoveryFlight = null;
   var covenPollTimer = null;
   var COVEN_POLL_MS = 5000;
-  var paneCounter = 0;
+  var paneCounter = 0n;
   var MAX_PENDING_PTY_INPUT_BYTES = 1024 * 1024;
   var MAX_PENDING_PTY_INPUT_WRITES = 256;
   var PANE_METRICS_POLL_MS = 15000;
@@ -397,8 +397,29 @@
     return worktree ? worktree.path : (project && project.root);
   }
   function nextPaneId(prefix) {
-    paneCounter += 1;
-    return prefix + "-" + paneCounter;
+    paneCounter += 1n;
+    return prefix + "-" + paneCounter.toString();
+  }
+  function paneIdSequence(id) {
+    var match = /-(\d+)$/.exec(String(id || ""));
+    if (!match) return 0n;
+    try {
+      return BigInt(match[1]);
+    } catch {
+      return 0n;
+    }
+  }
+  function reservePaneId(id) {
+    var sequence = paneIdSequence(id);
+    if (sequence > paneCounter) paneCounter = sequence;
+  }
+  function reservePaneTreeIds(node) {
+    if (!node) return;
+    reservePaneId(node.id);
+    if (node.type === "split") {
+      reservePaneTreeIds(node.first);
+      reservePaneTreeIds(node.second);
+    }
   }
   function paneLayoutKey(projectId, worktreePath) {
     return String(projectId || "") + "\u0000" + String(worktreePath || "");
@@ -412,7 +433,10 @@
   function ensureFilesPane(project, workspaceRoot) {
     var key = filesPaneKey(project.id, workspaceRoot);
     var existing = filesPanes.get(key);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.hidden) reopenFilesPane(existing);
+      return existing;
+    }
     var filesPane = {
       id: nextPaneId("files"),
       kind: "files",
@@ -420,6 +444,7 @@
       workspaceRoot: workspaceRoot,
       activeFileId: null,
       previousFocusedSessionId: state.activeThreadId || null,
+      hidden: false,
       pane: null,
       host: null,
     };
@@ -1101,6 +1126,19 @@
       covenSessionId: thread.launch.covenSessionId || null,
     };
   }
+  function persistableFilesPanes() {
+    var records = [];
+    filesPanes.forEach(function (pane) {
+      if (!pane || !pane.id || !pane.projectId || !pane.workspaceRoot) return;
+      records.push({
+        id: pane.id,
+        projectId: pane.projectId,
+        workspaceRoot: pane.workspaceRoot,
+        hidden: pane.hidden === true,
+      });
+    });
+    return records;
+  }
   function persistablePaneLayouts() {
     var records = [];
     paneLayouts.forEach(function (layout, key) {
@@ -1122,6 +1160,7 @@
       activeThreadId: state.activeThreadId || null,
       projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS),
       sessions: state.threads.map(persistableSession).filter(Boolean),
+      filesPanes: persistableFilesPanes(),
       paneLayouts: persistablePaneLayouts(),
     };
   }
@@ -2820,6 +2859,20 @@
     return flight.promise;
   }
 
+  function createPaneHideButton(surface) {
+    var hide = document.createElement("button");
+    hide.type = "button";
+    hide.className = "terminal-pane-hide";
+    hide.title = "Hide pane";
+    hide.setAttribute("aria-label", "Hide pane");
+    hide.textContent = "−";
+    hide.addEventListener("click", function (event) {
+      event.stopPropagation();
+      hideCanvasSurface(surface);
+    });
+    return hide;
+  }
+
   function mountToolPane(thread) {
     var pane = document.createElement("section");
     pane.className = "terminal-pane is-tool";
@@ -2840,13 +2893,7 @@
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var span = document.createElement("button");
-    span.type = "button";
-    span.className = "terminal-pane-span";
-    span.addEventListener("click", function (event) {
-      event.stopPropagation();
-      cyclePaneSpan(thread);
-    });
+    var hide = createPaneHideButton(thread);
     var maximize = document.createElement("button");
     maximize.type = "button";
     maximize.className = "terminal-pane-max";
@@ -2875,7 +2922,7 @@
     });
     header.appendChild(glyph);
     header.appendChild(label);
-    header.appendChild(span);
+    header.appendChild(hide);
     header.appendChild(maximize);
     header.appendChild(close);
     var body = document.createElement("div");
@@ -2891,7 +2938,7 @@
     thread.toolBody = body;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneSpan = span;
+    thread.paneHide = hide;
     thread.paneMax = maximize;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
@@ -2924,13 +2971,7 @@
     label.appendChild(title);
     label.appendChild(meta);
 
-    var span = document.createElement("button");
-    span.type = "button";
-    span.className = "terminal-pane-span";
-    span.addEventListener("click", function (event) {
-      event.stopPropagation();
-      cyclePaneSpan(filesPane);
-    });
+    var hide = createPaneHideButton(filesPane);
     var maximize = document.createElement("button");
     maximize.type = "button";
     maximize.className = "terminal-pane-max";
@@ -2951,7 +2992,7 @@
 
     header.appendChild(glyph);
     header.appendChild(label);
-    header.appendChild(span);
+    header.appendChild(hide);
     header.appendChild(maximize);
     header.appendChild(close);
     var body = document.createElement("div");
@@ -2970,7 +3011,7 @@
     filesPane.host = body;
     filesPane.paneTitle = title;
     filesPane.paneMeta = meta;
-    filesPane.paneSpan = span;
+    filesPane.paneHide = hide;
     filesPane.paneMax = maximize;
     filesPane.paneClose = close;
     return pane;
@@ -3061,13 +3102,7 @@
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var span = document.createElement("button");
-    span.type = "button";
-    span.className = "terminal-pane-span";
-    span.addEventListener("click", function (event) {
-      event.stopPropagation();
-      cyclePaneSpan(thread);
-    });
+    var hide = createPaneHideButton(thread);
     var maximize = document.createElement("button");
     maximize.type = "button";
     maximize.className = "terminal-pane-max";
@@ -3104,7 +3139,7 @@
     });
     header.appendChild(glyph);
     header.appendChild(label);
-    header.appendChild(span);
+    header.appendChild(hide);
     header.appendChild(maximize);
     header.appendChild(close);
     var body = document.createElement("div");
@@ -3123,7 +3158,7 @@
     thread.browserBody = body;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneSpan = span;
+    thread.paneHide = hide;
     thread.paneMax = maximize;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
@@ -3217,13 +3252,7 @@
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var span = document.createElement("button");
-    span.type = "button";
-    span.className = "terminal-pane-span";
-    span.addEventListener("click", function (event) {
-      event.stopPropagation();
-      cyclePaneSpan(thread);
-    });
+    var hide = createPaneHideButton(thread);
     var maximize = document.createElement("button");
     maximize.type = "button";
     maximize.className = "terminal-pane-max";
@@ -3257,7 +3286,7 @@
     header.appendChild(glyph);
     header.appendChild(label);
     header.appendChild(attention);
-    header.appendChild(span);
+    header.appendChild(hide);
     header.appendChild(maximize);
     header.appendChild(close);
     // Double-clicking the header is the mouse route into focus mode, mirroring
@@ -3300,7 +3329,7 @@
     thread.host = container;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneSpan = span;
+    thread.paneHide = hide;
     thread.paneMax = maximize;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
@@ -3981,23 +4010,6 @@
     return true;
   }
 
-  var SPAN_GLYPHS = { column: "▥", row: "▤" };
-  var SPAN_TITLES = {
-    tiled: "Span this pane — full column (⇥ full row, ⇥ tiled)",
-    column: "Spanning a full column — click for a full row",
-    row: "Spanning a full row — click to return to tiled",
-  };
-
-  function syncPaneSpanControl(thread, layout, leaf) {
-    if (!thread.paneSpan) return;
-    var spanned = Boolean(leaf) && layout.spanMode && layout.focusedLeafId === leaf.id;
-    var mode = spanned ? layout.spanMode : "tiled";
-    thread.paneSpan.textContent = spanned ? SPAN_GLYPHS[layout.spanMode] : "▦";
-    thread.paneSpan.title = SPAN_TITLES[mode];
-    thread.paneSpan.setAttribute("aria-label", SPAN_TITLES[mode]);
-    thread.paneSpan.setAttribute("aria-pressed", spanned ? "true" : "false");
-  }
-
   var MAX_ICON =
     '<svg viewBox="0 0 14 14" width="11" height="11" aria-hidden="true">' +
     '<path d="M5.5 2H2v3.5M8.5 12H12V8.5" fill="none" stroke="currentColor" ' +
@@ -4142,7 +4154,6 @@
         var focused = leaf.id === layout.focusedLeafId;
         surface.pane.classList.toggle("focused", focused);
         surface.pane.setAttribute("aria-current", focused ? "true" : "false");
-        syncPaneSpanControl(surface, layout, leaf);
         syncPaneMaxControl(surface, layout, leaf);
         var thread = findThread(surface.id);
         if (thread) {
@@ -4492,7 +4503,6 @@
       ? PsychePanes.findLeafByThreadId(layout.root, thread.id)
       : null;
     if (layout) {
-      syncPaneSpanControl(thread, layout, leaf);
       syncPaneMaxControl(thread, layout, leaf);
     }
     if (thread.paneClose) {
@@ -4901,6 +4911,53 @@
     refreshTabs();
     saveWorkspaceSoon();
     return true;
+  }
+
+  function hideFilesPane(filesPane) {
+    if (!filesPane || filesPane.hidden) return false;
+    var wasFocused = filesPaneHasCanvasFocus(filesPane);
+    var nextSurfaceId = detachThreadPane(filesPane);
+    filesPane.hidden = true;
+    if (wasFocused) state.activeThreadId = null;
+    var nextSurface = nextSurfaceId && canvasSurfaceById(nextSurfaceId);
+    if (nextSurface && nextSurface.kind === "files") {
+      focusCanvasSurface(nextSurface);
+    } else if (nextSurface) {
+      focusThread(nextSurface.id);
+    } else {
+      renderPaneWorkspace({ preserveTerminalFocus: false });
+    }
+    refreshSidebar();
+    refreshTabs();
+    saveWorkspaceSoon();
+    return true;
+  }
+
+  function reopenFilesPane(filesPane) {
+    if (!filesPane || !filesPane.hidden) return false;
+    var project = findProject(filesPane.projectId);
+    if (!project || state.activeProjectId !== project.id ||
+        activeWorkspaceRoot(project) !== filesPane.workspaceRoot) return false;
+    var placement = prepareFilesPanePlacement(filesPane);
+    if (!placement) {
+      setStatus("Not enough space to reopen the Files pane", "warn");
+      return false;
+    }
+    filesPane.hidden = false;
+    commitPanePlacement(placement);
+    renderPaneWorkspace({ preserveTerminalFocus: false });
+    focusCanvasSurface(filesPane);
+    refreshSidebar();
+    refreshTabs();
+    saveWorkspaceSoon();
+    return true;
+  }
+
+  function hideCanvasSurface(surface) {
+    surface = surface && canvasSurfaceById(surface.id);
+    if (!surface) return false;
+    if (surface.kind === "files") return hideFilesPane(surface);
+    return hideThread(surface.id);
   }
 
   function reopenThread(id) {
@@ -8321,6 +8378,8 @@
     var file = findOpenFile(id);
     if (!file) return false;
     if (state.activeFileId === id) {
+      var project = findProject(file.projectId);
+      if (project) ensureFilesPane(project, file.workspaceRoot);
       fileEditor.focus();
       return true;
     }
@@ -12330,9 +12389,33 @@
         return leaf && leaf.threadId;
       }).filter(Boolean);
       if (!threadIds.length || threadIds.some(function (id) { return !restoredIds.has(id); })) return;
+      reservePaneTreeIds(record.root);
       paneLayouts.set(paneLayoutKey(project.id, record.worktreePath), {
         root: record.root,
         focusedLeafId: record.focusedLeafId || null,
+      });
+    });
+  }
+
+  function restorePersistedFilesPanes(savedPanes) {
+    filesPanes.clear();
+    (savedPanes || []).forEach(function (record) {
+      if (!record) return;
+      var project = findProject(record.projectId);
+      if (!project) return;
+      var key = filesPaneKey(project.id, record.workspaceRoot);
+      if (filesPanes.has(key)) return;
+      reservePaneId(record.id);
+      filesPanes.set(key, {
+        id: record.id,
+        kind: "files",
+        projectId: project.id,
+        workspaceRoot: record.workspaceRoot,
+        activeFileId: null,
+        previousFocusedSessionId: null,
+        hidden: record.hidden === true,
+        pane: null,
+        host: null,
       });
     });
   }
@@ -12357,6 +12440,10 @@
     }).filter(Boolean);
     state.threads = restored;
     var restoredIds = new Set(restored.map(function (thread) { return thread.id; }));
+    restorePersistedFilesPanes(saved.filesPanes);
+    filesPanes.forEach(function (pane) {
+      if (pane && !pane.hidden) restoredIds.add(pane.id);
+    });
     restorePersistedPaneLayouts(saved.paneLayouts, restoredIds);
     ensureRestoredSessionPlacements(restored);
     restored.forEach(function (thread) { mountTerminal(thread); });
