@@ -89,7 +89,7 @@ describe('daemon bridge Coven helpers', () => {
     const outside = await tempDir('psyche-bridge-coven-outside-');
 
     await expect(getProjectCovenSession(root, 'outside', {
-      listSessions: async () => [{
+      getSession: async () => ({
         id: 'outside',
         projectRoot: outside,
         harness: 'codex',
@@ -97,7 +97,7 @@ describe('daemon bridge Coven helpers', () => {
         status: 'running',
         createdAt: '2026-04-27T10:00:00Z',
         updatedAt: '2026-04-27T10:01:00Z',
-      }],
+      }),
     })).rejects.toMatchObject({ code: 'coven_session_not_found' });
   });
 
@@ -613,7 +613,7 @@ describe('daemon bridge Coven helpers', () => {
       tmuxSessionExists: () => true,
       createTmuxPane: () => { throw new Error('should not create pane'); },
       sendTmuxCommand: () => { throw new Error('should not send command'); },
-    })).rejects.toThrow(/not in this psyche project scope/);
+    })).rejects.toThrow(/not in this current project scope/);
   });
 
   it('builds safe Coven attach commands only for safe ids', () => {
