@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 const root = process.cwd();
 const desktop = join(root, 'native/desktop/psyche-build-tauri');
+const icons = join(desktop, 'src-tauri', 'icons');
 const ciWorkflowPath = join(root, '.github/workflows/ci.yml');
 const libSourcePath = join(desktop, 'src-tauri/src/lib.rs');
 const controlProviderSourcePath = join(desktop, 'src-tauri/src/control_provider.rs');
@@ -24,6 +25,16 @@ function json(name: string) {
 
 function readText(path: string) {
   return readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+}
+
+function pngMetadata(path: string) {
+  const png = readFileSync(path);
+  expect(png.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+  return {
+    width: png.readUInt32BE(16),
+    height: png.readUInt32BE(20),
+    colorType: png[25],
+  };
 }
 
 function stalePathReferences(): string[] {
@@ -201,6 +212,23 @@ describe('desktop Tauri layout', () => {
       .toBe('vite web --host 127.0.0.1 --port 1420 --strictPort');
     expect(desktopPackage.devDependencies.vite).toBe('8.2.1');
     expect(JSON.stringify(configs)).not.toMatch(/\bpython3?\b/);
+  });
+
+  it('ships the committed desktop icon family from a 1024px RGBA master icon', () => {
+    expect(pngMetadata(join(icons, 'icon.png'))).toEqual({
+      width: 1024,
+      height: 1024,
+      colorType: 6,
+    });
+    expect(pngMetadata(join(icons, '32x32.png'))).toMatchObject({ width: 32, height: 32 });
+    expect(pngMetadata(join(icons, '64x64.png'))).toMatchObject({ width: 64, height: 64 });
+    expect(pngMetadata(join(icons, '128x128.png'))).toMatchObject({ width: 128, height: 128 });
+    expect(pngMetadata(join(icons, '128x128@2x.png'))).toMatchObject({
+      width: 256,
+      height: 256,
+    });
+    expect(readFileSync(join(icons, 'icon.icns')).length).toBeGreaterThan(100000);
+    expect(readFileSync(join(icons, 'icon.ico')).length).toBeGreaterThan(10000);
   });
 
   it('routes structured targets through the native platform launch descriptor', () => {
