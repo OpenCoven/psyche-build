@@ -7,7 +7,11 @@ import type { BrowserTabSurface } from './surfaces.js';
 import type { ProviderEffectResult, ProviderPush } from './browserProviderBroker.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
 import { canonicalizeBoundedJson } from './boundedJson.js';
-import type { ControlTaskBinding } from './credentials.js';
+import type {
+  ControlCapability,
+  ControlPrincipalKind,
+  ControlTaskBinding,
+} from './credentials.js';
 
 export const CONTROL_PROTOCOL_VERSION = 1;
 
@@ -71,8 +75,8 @@ export type ControlResponse =
       ownerEpoch: number;
       principal: {
         id: string;
-        kind: 'operator' | 'agent' | 'compatibility';
-        capabilities: readonly string[];
+        kind: ControlPrincipalKind;
+        capabilities: readonly ControlCapability[];
       };
       taskBinding?: ControlTaskBinding;
     }
@@ -120,6 +124,91 @@ function stableStringify(value: unknown): string {
 
 export function encodeControlMessage(message: ControlRequest | ControlResponse | ProviderPush): string {
   return stableStringify(message);
+}
+
+const MAX_CONTROL_ID_LENGTH = 256;
+const MAX_PROJECT_ROOT_LENGTH = 4096;
+const CAPABILITIES_BY_KIND: Readonly<Record<
+ControlPrincipalKind,
+readonly ControlCapability[]
+>> = {
+  operator: ['read', 'mutate', 'delegate'],
+  agent: ['read', 'mutate'],
+  compatibility: ['read', 'mutate'],
+};
+
+export function decodeControlWelcome(
+  raw: string,
+): Extract<ControlResponse, { type: 'welcome' }> {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error('invalid welcome frame');
+  }
+  if (!isPlainObject(value)) throw new Error('invalid welcome frame');
+  const projectRoot = value.projectRoot;
+  const ownerEpoch = value.ownerEpoch;
+  if (
+    value.version !== CONTROL_PROTOCOL_VERSION
+    || value.type !== 'welcome'
+    || value.requestId !== 'welcome'
+    || !isValidProjectRoot(projectRoot)
+    || typeof ownerEpoch !== 'number'
+    || !Number.isSafeInteger(ownerEpoch)
+    || ownerEpoch < 1
+  ) {
+    throw new Error('invalid welcome frame');
+  }
+
+  const principal = value.principal;
+  if (
+    !isPlainObject(principal)
+    || Object.keys(principal).length !== 3
+    || !Object.hasOwn(principal, 'id')
+    || !Object.hasOwn(principal, 'kind')
+    || !Object.hasOwn(principal, 'capabilities')
+  ) {
+    throw new Error('invalid welcome frame');
+  }
+  const principalId = principal.id;
+  const principalKind = principal.kind;
+  const capabilities = principal.capabilities;
+  if (
+    !isBoundedNonBlankString(principalId, MAX_CONTROL_ID_LENGTH)
+    || !isControlPrincipalKind(principalKind)
+    || !hasExpectedCapabilities(principalKind, capabilities)
+  ) {
+    throw new Error('invalid welcome frame');
+  }
+
+  let taskBinding: ControlTaskBinding | undefined;
+  if (Object.hasOwn(value, 'taskBinding')) {
+    const binding = value.taskBinding;
+    if (
+      !isPlainObject(binding)
+      || Object.keys(binding).length !== 1
+      || !Object.hasOwn(binding, 'taskId')
+      || !isBoundedNonBlankString(binding.taskId, MAX_CONTROL_ID_LENGTH)
+    ) {
+      throw new Error('invalid welcome frame');
+    }
+    taskBinding = { taskId: binding.taskId };
+  }
+
+  return {
+    version: CONTROL_PROTOCOL_VERSION,
+    type: 'welcome',
+    requestId: 'welcome',
+    projectRoot,
+    ownerEpoch,
+    principal: {
+      id: principalId,
+      kind: principalKind,
+      capabilities: [...capabilities],
+    },
+    ...(taskBinding === undefined ? {} : { taskBinding }),
+  };
 }
 
 export function decodeControlRequest(raw: string): ControlRequest {
@@ -198,6 +287,34 @@ export function decodeControlRequest(raw: string): ControlRequest {
 
 function isBoundedString(value: unknown, max = 4096): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= max;
+}
+
+function isBoundedNonBlankString(value: unknown, max: number): value is string {
+  return typeof value === 'string'
+    && value.trim().length > 0
+    && value.length <= max;
+}
+
+function isValidProjectRoot(value: unknown): value is string {
+  return isBoundedNonBlankString(value, MAX_PROJECT_ROOT_LENGTH) && !value.includes('\0');
+}
+
+function isControlPrincipalKind(value: unknown): value is ControlPrincipalKind {
+  return value === 'operator' || value === 'agent' || value === 'compatibility';
+}
+
+function isControlCapability(value: unknown): value is ControlCapability {
+  return value === 'read' || value === 'mutate' || value === 'delegate';
+}
+
+function hasExpectedCapabilities(
+  kind: ControlPrincipalKind,
+  value: unknown,
+): value is ControlCapability[] {
+  if (!Array.isArray(value) || !value.every(isControlCapability)) return false;
+  const expected = CAPABILITIES_BY_KIND[kind];
+  return value.length === expected.length
+    && expected.every((capability) => value.includes(capability));
 }
 
 function isGeneration(value: unknown): value is number {

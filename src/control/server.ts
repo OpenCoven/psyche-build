@@ -115,6 +115,48 @@ function normalizeControlIdentity(identity: ControlAuthorityIdentity): Authentic
   return { ...identity, principal: identity };
 }
 
+const TASK_SENSITIVE_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
+  'orchestration.execute',
+  'lease.request',
+  'lease.release',
+  'pane.observe',
+  'pane.action',
+  'browser.inspect',
+  'browser.action',
+  'browser.script',
+]);
+
+function requestedTaskId(input: ControlCommandInput): string | undefined {
+  if (!TASK_SENSITIVE_COMMAND_KINDS.has(input.kind)) return undefined;
+  const payload: unknown = input.payload;
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined;
+  const taskId = (payload as Record<string, unknown>).taskId;
+  return typeof taskId === 'string' ? taskId : undefined;
+}
+
+function requireTaskBinding(
+  identity: AuthenticatedControlIdentity,
+  taskId: string | undefined,
+): CommandOutcome | undefined {
+  if (identity.principal.kind === 'operator') return undefined;
+  const authenticatedTaskId = identity.taskBinding?.taskId;
+  if (!authenticatedTaskId) {
+    return {
+      status: 'rejected',
+      code: 'task_binding_required',
+      message: 'task-bound control credential required',
+    };
+  }
+  if (taskId !== authenticatedTaskId) {
+    return {
+      status: 'rejected',
+      code: 'task_binding_mismatch',
+      message: 'command task does not match authenticated task',
+    };
+  }
+  return undefined;
+}
+
 /**
  * Decide whether a principal may submit a command of the given kind.
  *
@@ -195,7 +237,12 @@ export class ControlAuthority {
     input: ControlCommandInput,
     clientId?: string,
   ): Promise<CommandOutcome> {
-    const { principal } = normalizeControlIdentity(identity);
+    const authenticated = normalizeControlIdentity(identity);
+    const { principal } = authenticated;
+    if (TASK_SENSITIVE_COMMAND_KINDS.has(input.kind)) {
+      const bindingRejection = requireTaskBinding(authenticated, requestedTaskId(input));
+      if (bindingRejection) return bindingRejection;
+    }
     const rejection = authorizeCommand(principal, input.kind);
     if (rejection) return rejection;
 
@@ -230,15 +277,32 @@ export class ControlAuthority {
     };
   }
 
+  readEvents(afterSequence: number, limit?: number): {
+    events: unknown[];
+    nextSequence: number;
+    gap: boolean;
+  };
+  readEvents(identity: ControlAuthorityIdentity, afterSequence: number, limit?: number): {
+    events: unknown[];
+    nextSequence: number;
+    gap: boolean;
+  };
   readEvents(
-    _identity: ControlAuthorityIdentity,
-    afterSequence: number,
+    identityOrAfterSequence: ControlAuthorityIdentity | number,
+    afterSequenceOrLimit?: number,
     limit?: number,
   ): {
     events: unknown[];
     nextSequence: number;
     gap: boolean;
   } {
+    if (typeof identityOrAfterSequence === 'number') {
+      return this.runtime.readEvents(identityOrAfterSequence, afterSequenceOrLimit);
+    }
+    if (afterSequenceOrLimit === undefined) {
+      throw new TypeError('afterSequence is required');
+    }
+    const afterSequence = afterSequenceOrLimit;
     return this.runtime.readEvents(afterSequence, limit);
   }
 
@@ -552,6 +616,16 @@ export class ControlServer {
         });
         return;
       case 'events.read': {
+        if (principal.kind !== 'operator') {
+          write({
+            version: 1,
+            type: 'error',
+            requestId: request.requestId,
+            code: 'operator_required',
+            message: 'raw control events require operator authority',
+          });
+          return;
+        }
         const page = this.authority.readEvents(identity, request.afterSequence, request.limit);
         write({
           version: 1,

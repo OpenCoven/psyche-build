@@ -23,6 +23,48 @@ function socketPath(): string {
   return path.join(tmpdir(), `psyche-ctl-${randomBytes(6).toString('hex')}.sock`);
 }
 
+function welcomeFrame(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: 1,
+    type: 'welcome',
+    requestId: 'welcome',
+    projectRoot: '/canonical/project',
+    ownerEpoch: 7,
+    principal: {
+      id: 'agent',
+      kind: 'agent',
+      capabilities: ['read', 'mutate'],
+    },
+    ...overrides,
+  };
+}
+
+async function startWelcomeFrameServer(frame: Record<string, unknown>): Promise<{
+  endpoint: string;
+  closed: Promise<void>;
+}> {
+  const endpoint = socketPath();
+  let acceptedSocket: Socket | undefined;
+  let markClosed!: () => void;
+  const closed = new Promise<void>((resolve) => { markClosed = resolve; });
+  const server = createServer((socket) => {
+    acceptedSocket = socket;
+    socket.once('close', () => markClosed());
+    socket.once('data', () => {
+      socket.write(`${JSON.stringify(frame)}\n`);
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(endpoint, resolve);
+  });
+  cleanups.push(async () => {
+    acceptedSocket?.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  return { endpoint, closed };
+}
+
 async function startHarness(overrides: {
   submit?: ControlServerRuntime['submit'];
   ownerEpoch?: number;
@@ -139,46 +181,39 @@ describe('ControlClient over the socket transport', () => {
   });
 
   it('rejects and closes a welcome bound to a different task', async () => {
-    const endpoint = socketPath();
-    let acceptedSocket: Socket | undefined;
-    let markClosed!: () => void;
-    const closed = new Promise<void>((resolve) => { markClosed = resolve; });
-    const server = createServer((socket) => {
-      acceptedSocket = socket;
-      socket.once('close', () => markClosed());
-      socket.once('data', () => {
-        socket.write(`${JSON.stringify({
-          version: 1,
-          type: 'welcome',
-          requestId: 'welcome',
-          projectRoot: '/canonical/project',
-          ownerEpoch: 7,
-          principal: {
-            id: 'agent',
-            kind: 'agent',
-            capabilities: ['read', 'mutate'],
-          },
-          taskBinding: { taskId: 'task-alpha' },
-        })}\n`);
-      });
-    });
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(endpoint, resolve);
-    });
-    cleanups.push(async () => {
-      acceptedSocket?.destroy();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    });
+    const server = await startWelcomeFrameServer(welcomeFrame({
+      taskBinding: { taskId: 'task-alpha' },
+    }));
 
     await expect(ControlClient.connectCanonical({
       projectRoot: '/canonical/project',
-      endpoint,
+      endpoint: server.endpoint,
       token: 'task-alpha-token',
       clientName: 'task-beta-client',
       taskBinding: { taskId: 'task-beta' },
     })).rejects.toThrow('welcome task binding does not match the requested task');
-    await closed;
+    await server.closed;
+  });
+
+  it.each([
+    ['version', { version: 2 }],
+    ['requestId', { requestId: 'not-welcome' }],
+    ['projectRoot', { projectRoot: '' }],
+    ['principal', {
+      principal: { id: 'agent', kind: 'unknown', capabilities: ['read', 'mutate'] },
+    }],
+    ['ownerEpoch', { ownerEpoch: 0 }],
+    ['taskBinding', { taskBinding: { taskId: 'task-alpha', injected: true } }],
+  ])('rejects and closes a malformed welcome %s', async (_field, overrides) => {
+    const server = await startWelcomeFrameServer(welcomeFrame(overrides));
+
+    await expect(ControlClient.connectCanonical({
+      projectRoot: '/canonical/project',
+      endpoint: server.endpoint,
+      token: 'task-alpha-token',
+      clientName: 'malformed-welcome-client',
+    })).rejects.toThrow('invalid welcome frame');
+    await server.closed;
   });
 
   it('learns the owner epoch and principal from welcome', async () => {

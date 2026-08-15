@@ -3,9 +3,26 @@ import { describe, expect, it } from 'vitest';
 import {
   CONTROL_PROTOCOL_VERSION,
   decodeControlRequest,
+  decodeControlWelcome,
   encodeControlMessage,
   type ControlResponse,
 } from '../src/control/protocol.js';
+
+function welcomeFrame(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: CONTROL_PROTOCOL_VERSION,
+    type: 'welcome',
+    requestId: 'welcome',
+    projectRoot: '/repo',
+    ownerEpoch: 7,
+    principal: {
+      id: 'agent',
+      kind: 'agent',
+      capabilities: ['read', 'mutate'],
+    },
+    ...overrides,
+  };
+}
 
 describe('control protocol v1', () => {
   it('decodes the checked-in command fixture', () => {
@@ -60,7 +77,34 @@ describe('control protocol v1', () => {
       type: 'welcome',
       taskBinding: { taskId: 'task-alpha' },
     });
+    expect(decodeControlWelcome(encodeControlMessage(welcome))).toEqual(welcome);
   });
+
+  it.each([
+    ['version', { version: 2 }],
+    ['requestId', { requestId: 'not-welcome' }],
+    ['projectRoot', { projectRoot: '   ' }],
+    ['principal', {
+      principal: { id: 'agent', kind: 'unknown', capabilities: ['read', 'mutate'] },
+    }],
+    ['principal capabilities', {
+      principal: { id: 'agent', kind: 'agent', capabilities: ['read', 'delegate'] },
+    }],
+    ['taskBinding blank taskId', { taskBinding: { taskId: '   ' } }],
+    ['taskBinding oversized taskId', { taskBinding: { taskId: 't'.repeat(257) } }],
+    ['taskBinding container', { taskBinding: { taskId: 'task-alpha', injected: true } }],
+  ])('rejects a welcome with malformed %s', (_field, overrides) => {
+    expect(() => decodeControlWelcome(JSON.stringify(welcomeFrame(overrides))))
+      .toThrow('invalid welcome frame');
+  });
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects malformed welcome owner epoch %s',
+    (ownerEpoch) => {
+      expect(() => decodeControlWelcome(JSON.stringify(welcomeFrame({ ownerEpoch }))))
+        .toThrow('invalid welcome frame');
+    },
+  );
 
   it('encodes the checked-in result fixture with stable key ordering', () => {
     const fixture = JSON.parse(readFileSync(

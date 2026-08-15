@@ -22,6 +22,8 @@ import {
   createControlCredentialStoreForCanonicalRoot,
   issueControlTaskToken,
   issueControlTaskTokenForCanonicalRoot,
+  type AuthenticatedControlIdentity,
+  type ControlCredentialStore,
   type CredentialCreationOps,
 } from '../src/control/credentials.js';
 import { ControlClient } from '../src/control/client.js';
@@ -77,6 +79,9 @@ function takeoverInput(): ControlCommandInput {
 function stubRuntime(
   submit: ControlServerRuntime['submit'],
   snapshot?: ControlSnapshot,
+  readEvents: ControlServerRuntime['readEvents'] = () => ({
+    events: [], nextSequence: 0, gap: false,
+  }),
 ): ControlServerRuntime {
   return {
     submit,
@@ -84,8 +89,56 @@ function stubRuntime(
       ownerEpoch: 1, sequence: 0, commands: {}, leases: {}, resources: [],
       capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
     }),
-    readEvents: () => ({ events: [], nextSequence: 0, gap: false }),
+    readEvents,
   };
+}
+
+function authenticatedIdentity(
+  principal: ControlPrincipal,
+  taskId?: string,
+): AuthenticatedControlIdentity {
+  return {
+    ...principal,
+    principal,
+    ...(taskId === undefined ? {} : { taskBinding: { taskId } }),
+  };
+}
+
+function taskSensitiveInputs(taskId: string): ControlCommandInput[] {
+  const base = {
+    projectRoot: '/canonical/project',
+    createdAt: '2026-08-14T12:00:00.000Z',
+  };
+  return [
+    {
+      ...base,
+      id: 'lease-request',
+      idempotencyKey: 'lease-request',
+      kind: 'lease.request',
+      payload: { taskId, ttlMs: 60_000, grants: [] },
+    },
+    {
+      ...base,
+      id: 'lease-release',
+      idempotencyKey: 'lease-release',
+      kind: 'lease.release',
+      payload: { taskId, leaseId: 'lease-1', leaseRevision: 1 },
+    },
+    {
+      ...base,
+      id: 'pane-action',
+      idempotencyKey: 'pane-action',
+      kind: 'pane.action',
+      payload: {
+        taskId,
+        leaseId: 'lease-1',
+        leaseRevision: 1,
+        paneId: 'pane-1',
+        generation: 1,
+        action: { kind: 'focus' },
+      },
+    },
+  ];
 }
 
 function sensitiveSnapshot(): ControlSnapshot {
@@ -447,6 +500,24 @@ describe('control credential store', () => {
 });
 
 describe('control server authorization', () => {
+  it('preserves legacy direct readEvents(afterSequence, limit) calls', () => {
+    const readEvents = vi.fn((afterSequence: number, limit?: number) => ({
+      events: [{ afterSequence, limit }],
+      nextSequence: afterSequence + 1,
+      gap: false,
+    }));
+    const server = createControlServerForTest({
+      runtime: stubRuntime(vi.fn(), undefined, readEvents),
+    });
+
+    expect(server.readEvents(0, 10)).toEqual({
+      events: [{ afterSequence: 0, limit: 10 }],
+      nextSequence: 1,
+      gap: false,
+    });
+    expect(readEvents).toHaveBeenCalledWith(0, 10);
+  });
+
   it('only exposes surface authority snapshot fields to operators', () => {
     const sensitive = sensitiveSnapshot();
     const server = createControlServerForTest({
@@ -569,6 +640,120 @@ describe('control server authorization', () => {
     }
   });
 
+  it('allows only operators to read raw events over authenticated sockets', async () => {
+    const root = await tempProject();
+    const endpoint = path.join(root, 'control.sock');
+    const baseCredentials = await createControlCredentialStore({
+      projectRoot: root,
+      filePath: path.join(root, 'control-credentials.json'),
+    });
+    const compatibilityToken = 'compatibility-token';
+    const compatibilityPrincipal: ControlPrincipal = {
+      id: 'compatibility',
+      kind: 'compatibility',
+      capabilities: ['read', 'mutate'],
+    };
+    const credentials: ControlCredentialStore = {
+      authenticate: async (token) => (
+        token === compatibilityToken
+          ? authenticatedIdentity(compatibilityPrincipal)
+          : baseCredentials.authenticate(token)
+      ),
+      operatorToken: () => baseCredentials.operatorToken(),
+      agentToken: () => baseCredentials.agentToken(),
+    };
+    const readEvents = vi.fn((afterSequence: number, limit?: number) => ({
+      events: [{ sequence: afterSequence + 1 }],
+      nextSequence: afterSequence + 1,
+      gap: limit === 0,
+    }));
+    const server = await ControlServer.start({
+      endpoint,
+      projectRoot: root,
+      ownerEpoch: 1,
+      runtime: stubRuntime(vi.fn(), undefined, readEvents),
+      credentials,
+    });
+    const cleanups: Array<() => Promise<void>> = [() => server.close()];
+
+    try {
+      const operator = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: await credentials.operatorToken(),
+        clientName: 'operator',
+      });
+      cleanups.unshift(() => operator.close());
+      const agent = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: await credentials.agentToken(),
+        clientName: 'agent',
+      });
+      cleanups.unshift(() => agent.close());
+      const compatibility = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: compatibilityToken,
+        clientName: 'compatibility',
+      });
+      cleanups.unshift(() => compatibility.close());
+
+      await expect(agent.readEvents(0, 10)).rejects.toThrow('operator_required');
+      await expect(compatibility.readEvents(0, 10)).rejects.toThrow('operator_required');
+      await expect(operator.readEvents(0, 10)).resolves.toEqual({
+        events: [{ sequence: 1 }],
+        nextSequence: 1,
+        gap: false,
+      });
+      expect(readEvents).toHaveBeenCalledOnce();
+      expect(readEvents).toHaveBeenCalledWith(0, 10);
+    } finally {
+      await Promise.allSettled(cleanups.map(async (close) => close()));
+    }
+  });
+
+  it('requires authenticated task scope for task-sensitive non-operator commands', async () => {
+    const submit = vi.fn(async () => ({ status: 'succeeded' as const }));
+    const server = createControlServerForTest({ runtime: stubRuntime(submit) });
+    const agent: ControlPrincipal = {
+      id: 'agent-1',
+      kind: 'agent',
+      capabilities: ['read', 'mutate'],
+    };
+    const compatibility: ControlPrincipal = {
+      id: 'compat-1',
+      kind: 'compatibility',
+      capabilities: ['read', 'mutate'],
+    };
+    const alpha = authenticatedIdentity(agent, 'task-alpha');
+
+    for (const command of taskSensitiveInputs('task-beta')) {
+      await expect(server.submitAs(alpha, command)).resolves.toMatchObject({
+        status: 'rejected',
+        code: 'task_binding_mismatch',
+      });
+      await expect(server.submitAs(agent, command)).resolves.toMatchObject({
+        status: 'rejected',
+        code: 'task_binding_required',
+      });
+      await expect(server.submitAs(compatibility, command)).resolves.toMatchObject({
+        status: 'rejected',
+        code: 'task_binding_required',
+      });
+    }
+    for (const command of taskSensitiveInputs('task-alpha')) {
+      await expect(server.submitAs(alpha, command)).resolves.toMatchObject({
+        status: 'succeeded',
+      });
+    }
+    await expect(server.submitAs(
+      { id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] },
+      taskSensitiveInputs('task-beta')[0],
+    )).resolves.toMatchObject({ status: 'succeeded' });
+    expect(submit).toHaveBeenCalledTimes(4);
+  });
+
   it('rejects agent self-delegation and stamps operator identity', async () => {
     const submit = vi.fn(async (command) => ({ status: 'succeeded' as const, value: command.actor }));
     const server = createControlServerForTest({ runtime: stubRuntime(submit) });
@@ -621,8 +806,10 @@ describe('control server authorization', () => {
     const grant = { ...base, kind: 'lease.grant' as const, payload: { requestId: 'r' } };
     const request = { ...base, kind: 'lease.request' as const, payload: { taskId: 't', ttlMs: 1, grants: [] } };
     await expect(server.submitAs(agent, grant)).resolves.toMatchObject({ status: 'rejected', code: 'operator_required' });
-    await expect(server.submitAs(compatibility, request)).resolves.toMatchObject({ status: 'rejected', code: 'compatibility_not_authorized' });
-    await expect(server.submitAs(agent, request)).resolves.toMatchObject({ status: 'succeeded' });
+    await expect(server.submitAs(compatibility, request))
+      .resolves.toMatchObject({ status: 'rejected', code: 'task_binding_required' });
+    await expect(server.submitAs(authenticatedIdentity(agent, 't'), request))
+      .resolves.toMatchObject({ status: 'succeeded' });
     expect(submit).toHaveBeenCalledTimes(1);
   });
 

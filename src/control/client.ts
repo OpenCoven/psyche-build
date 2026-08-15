@@ -1,7 +1,12 @@
 import { connect, type Socket } from 'node:net';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 import { controlEndpointForProject } from './endpoint.js';
-import { encodeControlMessage, type ControlRequest, type ControlResponse } from './protocol.js';
+import {
+  decodeControlWelcome,
+  encodeControlMessage,
+  type ControlRequest,
+  type ControlResponse,
+} from './protocol.js';
 import type { ControlTaskBinding } from './credentials.js';
 import type {
   ActionReceipt,
@@ -97,19 +102,35 @@ export class ControlClient {
           const newline = buffer.indexOf('\n');
           if (newline < 0) return;
           const line = buffer.slice(0, newline);
-          let message: ControlResponse;
+          let parsed: unknown;
           try {
-            message = JSON.parse(line) as ControlResponse;
+            parsed = JSON.parse(line);
           } catch {
             rejectAndClose(new Error('invalid welcome frame'));
             return;
           }
-          if (message.type === 'error') {
-            rejectAndClose(new Error(`${message.code}: ${message.message}`));
+          if (
+            isPlainObject(parsed)
+            && parsed.type === 'error'
+            && typeof parsed.code === 'string'
+            && typeof parsed.message === 'string'
+          ) {
+            rejectAndClose(new Error(`${parsed.code}: ${parsed.message}`));
             return;
           }
-          if (message.type !== 'welcome') {
-            rejectAndClose(new Error(`expected welcome, received ${message.type}`));
+          if (
+            isPlainObject(parsed)
+            && typeof parsed.type === 'string'
+            && parsed.type !== 'welcome'
+          ) {
+            rejectAndClose(new Error(`expected welcome, received ${parsed.type}`));
+            return;
+          }
+          let message: Extract<ControlResponse, { type: 'welcome' }>;
+          try {
+            message = decodeControlWelcome(line);
+          } catch {
+            rejectAndClose(new Error('invalid welcome frame'));
             return;
           }
           if (message.projectRoot !== canonicalRoot) {
@@ -333,6 +354,10 @@ export class ControlClient {
 function responseError(response: ControlResponse, context: string): Error {
   if (response.type === 'error') return new Error(`${response.code}: ${response.message}`);
   return new Error(`unexpected ${response.type} response to ${context}`);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isActionReceipt(value: unknown): value is ActionReceipt {

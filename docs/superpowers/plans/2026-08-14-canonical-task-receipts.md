@@ -2,9 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give task-bound agents exact canonical action status while making raw event history operator-only and making non-operator snapshot redaction fail closed.
+**Goal:** Give task-bound agents exact canonical action status while preserving
+PR A's operator-only raw event boundary and making non-operator snapshot
+redaction fail closed.
 
-**Architecture:** Store receipt ownership separately from the public receipt, add a dedicated action-status request scoped by authenticated task identity, and remove the client's bounded journal fallback. Deny raw event reads to non-operators and construct redacted snapshots with an explicit typed allowlist.
+**Architecture:** Store receipt ownership separately from the public receipt,
+add a dedicated action-status request scoped by authenticated task identity,
+and remove the client's bounded journal fallback. Verify no non-operator raw
+event path remains and construct redacted snapshots with an explicit typed
+allowlist.
 
 **Tech Stack:** TypeScript, Node.js Unix sockets, JSON line protocol, Vitest, MCP tools.
 
@@ -272,16 +278,16 @@ git add src/control/protocol.ts src/control/client.ts src/control/server.ts \
 git commit -m "feat: add canonical task action status"
 ```
 
-### Task 4: Make Raw Events Operator-Only
+### Task 4: Verify Raw Events Remain Operator-Only
 
 **Files:**
 - Modify: `src/control/server.ts`
 - Test: `__tests__/controlCredentials.test.ts`
 - Test: `__tests__/controlClient.test.ts`
 
-- [ ] **Step 1: Write failing denial tests**
+- [ ] **Step 1: Verify complete denial coverage**
 
-Using real authenticated sockets, assert:
+Retain real authenticated socket coverage asserting:
 
 ```ts
 await expect(agentClient.readEvents(0)).rejects.toMatchObject({
@@ -295,7 +301,10 @@ await expect(operatorClient.readEvents(0)).resolves.toMatchObject({
 });
 ```
 
-- [ ] **Step 2: Run tests and verify failure**
+Also assert denied responses expose no events or cursor metadata and the
+runtime event reader is not called.
+
+- [ ] **Step 2: Run the inherited PR A tests**
 
 ```bash
 pnpm exec vitest --run \
@@ -303,11 +312,12 @@ pnpm exec vitest --run \
   __tests__/controlClient.test.ts
 ```
 
-Expected: FAIL because non-operators can still read raw journal pages.
+Expected: PASS because PR A pulled this handshake-boundary enforcement
+forward.
 
-- [ ] **Step 3: Enforce authorization before reading**
+- [ ] **Step 3: Remove any remaining non-operator path**
 
-In the `events.read` handler:
+Verify the `events.read` handler still rejects before reading:
 
 ```ts
 if (identity.principal.kind !== 'operator') {
@@ -322,7 +332,8 @@ if (identity.principal.kind !== 'operator') {
 }
 ```
 
-Do not return empty pages or cursor metadata to non-operators.
+Remove or guard any alternate raw-event route discovered during PR B. Do not
+return empty pages or cursor metadata to non-operators.
 
 - [ ] **Step 4: Run tests**
 
@@ -334,11 +345,11 @@ pnpm exec vitest --run \
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit only if a remaining path required cleanup**
 
 ```bash
 git add src/control/server.ts __tests__/controlCredentials.test.ts __tests__/controlClient.test.ts
-git commit -m "fix: restrict raw control events to operators"
+git commit -m "fix: close remaining raw event path"
 ```
 
 ### Task 5: Make Snapshot Redaction Fail Closed

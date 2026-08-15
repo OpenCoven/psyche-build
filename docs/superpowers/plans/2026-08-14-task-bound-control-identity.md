@@ -184,6 +184,10 @@ git commit -m "feat: add task-bound control credentials"
 - Test: `__tests__/controlClient.test.ts`
 - Test: `__tests__/controlCredentials.test.ts`
 
+Sequencing note: PR A also pulls operator-only socket `events.read` enforcement
+forward from PR B as handshake-boundary hardening, so authenticated task
+credentials never gain raw event access.
+
 - [ ] **Step 1: Write failing protocol and handshake tests**
 
 Add a welcome decoding assertion:
@@ -282,6 +286,9 @@ git commit -m "feat: bind control clients to authenticated tasks"
 **Files:**
 - Modify: `src/control/server.ts`
 - Test: `__tests__/controlCredentials.test.ts`
+
+This mutation guard ships with Task 3's operator-only event boundary rather
+than leaving an insecure intermediate state between PR A and PR B.
 
 - [ ] **Step 1: Write failing mutation authorization tests**
 
