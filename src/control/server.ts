@@ -269,7 +269,7 @@ export class ControlAuthority {
       return { events: [], nextSequence: page.nextSequence, gap: page.gap };
     }
 
-    const page = this.runtime.readEvents(afterSequence);
+    const page = this.runtime.readEvents(afterSequence, limit);
     const events: unknown[] = [];
     let nextSequence = page.nextSequence;
     for (const event of page.events) {
