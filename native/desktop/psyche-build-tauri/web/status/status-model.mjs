@@ -15,6 +15,8 @@ const MAX_TREND_SAMPLES = 60;
 const DIAGNOSTIC_LIMIT = 16_384;
 const DIAGNOSTIC_TRUNCATION_MARKER = '...(truncated)';
 const DIAGNOSTIC_EXCLUSION = 'Excludes prompts, terminal contents, file contents, diffs, and browser contents.';
+const MIN_CADENCE_INTERVALS = 3;
+const CADENCE_TOLERANCE = 0.2;
 
 export const METRICS = Object.freeze({
   connection: Object.freeze({
@@ -569,34 +571,68 @@ export function createFrameSampler() {
   let totalIntervalMs = 0;
   let frameIntervals = [];
 
+  function approximatelyEqual(left, right) {
+    return Math.abs(left - right) <= right * CADENCE_TOLERANCE;
+  }
+
+  function trailingCadenceIntervals() {
+    const trailing = [];
+
+    for (let index = frameIntervals.length - 1; index >= 0; index -= 1) {
+      const interval = frameIntervals[index];
+      const baseline = trailing.length ? median(trailing) : interval;
+      if (!approximatelyEqual(interval, baseline)) break;
+      trailing.unshift(interval);
+    }
+
+    return trailing;
+  }
+
+  function calibrateCadence() {
+    if (frameIntervals.length < MIN_CADENCE_INTERVALS) return null;
+
+    // A cadence change within this sample should not turn the previous cadence
+    // into a burst of dropped frames. Prefer a stable trailing run when one is
+    // available, otherwise use repeated short intervals from the whole sample.
+    const trailing = trailingCadenceIntervals();
+    const candidates = trailing.length >= MIN_CADENCE_INTERVALS ? trailing : frameIntervals;
+    const sorted = [...candidates].sort((left, right) => left - right);
+    const candidate = median(sorted.slice(0, Math.max(1, Math.ceil(sorted.length / 4))));
+    const calibration = candidates.filter((interval) => approximatelyEqual(interval, candidate));
+    if (calibration.length < MIN_CADENCE_INTERVALS) return null;
+
+    return {
+      targetFrameMs: median(calibration),
+      measuredIntervals: candidates,
+    };
+  }
+
   return {
     frame(at) {
       const frameAt = finiteNumber(at);
       if (frameAt == null) return;
 
       if (previousAt != null) {
-        const delta = Math.max(0, frameAt - previousAt);
-        totalIntervalMs += delta;
-        intervals += 1;
-        if (delta > 0) frameIntervals.push(delta);
+        const delta = frameAt - previousAt;
+        if (delta > 0) {
+          totalIntervalMs += delta;
+          intervals += 1;
+          frameIntervals.push(delta);
+          previousAt = frameAt;
+        }
+      } else {
+        previousAt = frameAt;
       }
 
-      previousAt = frameAt;
       frames += 1;
     },
     flush(windowMs) {
       const duration = Math.max(1, finiteNumber(windowMs) ?? 0);
-      // A WebView owns requestAnimationFrame cadence. Estimate it from the
-      // fastest quarter of the sample so missed presentation slots do not lower
-      // the target; this needs no platform-specific display API.
-      const sortedIntervals = [...frameIntervals].sort((left, right) => left - right);
-      const calibrationCount = Math.max(1, Math.ceil(sortedIntervals.length / 4));
-      const targetFrameMs = sortedIntervals.length
-        ? median(sortedIntervals.slice(0, calibrationCount))
-        : null;
+      const cadence = calibrateCadence();
+      const targetFrameMs = cadence?.targetFrameMs ?? null;
       const droppedFrames = targetFrameMs == null
         ? null
-        : frameIntervals.reduce(
+        : cadence.measuredIntervals.reduce(
           (total, delta) => total + Math.max(0, Math.round(delta / targetFrameMs) - 1),
           0,
         );

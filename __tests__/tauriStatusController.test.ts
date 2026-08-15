@@ -1704,7 +1704,7 @@ describe('tauri status controller', () => {
     expect(classTexts(elements.detailBody, 'status-cell-label')).toContain('Dropped');
     expect(classTexts(elements.detailBody, 'status-cell-value')).toContain('60 FPS');
     expect(classTexts(elements.detailBody, 'status-cell-value')).toContain('0');
-    expect(elements.detailBody.textContent).toContain('rAF 60 Hz');
+    expect(elements.detailBody.textContent).toContain('rAF cadence 60 Hz');
   });
 
   it('renders Agent tools only for finite structured counts', () => {

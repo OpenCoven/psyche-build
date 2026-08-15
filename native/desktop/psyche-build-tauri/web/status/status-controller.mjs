@@ -1090,7 +1090,7 @@ function renderPerformance(body, doc, sample, trends) {
       doc,
       'Frame rate',
       `${Math.round(sample.frame.fps)} FPS`,
-      `${sample.frame.renderLatencyMs.toFixed(1)} ms${Number.isFinite(sample.frame.framePacingHz) ? ` · rAF ${Math.round(sample.frame.framePacingHz)} Hz` : ''}`,
+      `${sample.frame.renderLatencyMs.toFixed(1)} ms${Number.isFinite(sample.frame.framePacingHz) ? ` · rAF cadence ${Math.round(sample.frame.framePacingHz)} Hz` : ''}`,
       trends.fps.values,
     ));
     grid.appendChild(performanceCell(

@@ -627,9 +627,9 @@ describe('tauri footer status model', () => {
     });
 
     const zeroDropSampler = createFrameSampler();
-    [0, 16.7, 33.4].forEach((time) => zeroDropSampler.frame(time));
+    [0, 16.7, 33.4, 50.1].forEach((time) => zeroDropSampler.frame(time));
     const zeroDropSample = zeroDropSampler.flush(1_000);
-    expect(zeroDropSample.fps).toBe(3);
+    expect(zeroDropSample.fps).toBe(4);
     expect(zeroDropSample.droppedFrames).toBe(0);
     expect(zeroDropSample.renderLatencyMs).toBeCloseTo(16.7, 1);
     expect(zeroDropSample.framePacingHz).toBeCloseTo(60, 0);
@@ -652,6 +652,62 @@ describe('tauri footer status model', () => {
     expect(sample.framePacingHz).toBeCloseTo(240, 0);
     expect(sample.renderLatencyMs).toBeCloseTo((frameMs * 6) / 5, 6);
     expect(sample.droppedFrames).toBe(1);
+  });
+
+  test.each([60, 120, 144, 240])('calibrates a stable %i Hz rAF cadence', (hz) => {
+    const sampler = createFrameSampler();
+    const frameMs = 1000 / hz;
+    [0, 1, 2, 3, 4].forEach((frame) => sampler.frame(frame * frameMs));
+
+    const sample = sampler.flush(1_000);
+
+    expect(sample.framePacingHz).toBeCloseTo(hz, 0);
+    expect(sample.droppedFrames).toBe(0);
+  });
+
+  test('leaves cadence and dropped frames unavailable for sparse or non-increasing timestamps', () => {
+    const sampler = createFrameSampler();
+    [Number.NaN, 0, 0, -1].forEach((time) => sampler.frame(time));
+
+    expect(sampler.flush(1_000)).toEqual({
+      fps: null,
+      renderLatencyMs: null,
+      droppedFrames: null,
+      framePacingHz: null,
+    });
+
+    [0, 1000 / 240].forEach((time) => sampler.frame(time));
+    const sparseSample = sampler.flush(1_000);
+    expect(sparseSample.fps).toBe(2);
+    expect(sparseSample.renderLatencyMs).toBeCloseTo(1000 / 240, 6);
+    expect(sparseSample.droppedFrames).toBeNull();
+    expect(sparseSample.framePacingHz).toBeNull();
+  });
+
+  test('counts delayed callbacks without carrying a prior cadence into a new one', () => {
+    const sampler = createFrameSampler();
+    const slowFrameMs = 1000 / 60;
+    const fastFrameMs = 1000 / 240;
+    [0, slowFrameMs, slowFrameMs * 2, slowFrameMs * 3,
+      slowFrameMs * 3 + fastFrameMs, slowFrameMs * 3 + fastFrameMs * 2,
+      slowFrameMs * 3 + fastFrameMs * 3].forEach((time) => sampler.frame(time));
+
+    const changedCadence = sampler.flush(1_000);
+    expect(changedCadence.framePacingHz).toBeCloseTo(240, 0);
+    expect(changedCadence.droppedFrames).toBe(0);
+
+    const slowerCadence = createFrameSampler();
+    [0, fastFrameMs, fastFrameMs * 2, fastFrameMs * 3,
+      fastFrameMs * 3 + slowFrameMs, fastFrameMs * 3 + slowFrameMs * 2,
+      fastFrameMs * 3 + slowFrameMs * 3].forEach((time) => slowerCadence.frame(time));
+    const slowedSample = slowerCadence.flush(1_000);
+    expect(slowedSample.framePacingHz).toBeCloseTo(60, 0);
+    expect(slowedSample.droppedFrames).toBe(0);
+
+    const delayed = createFrameSampler();
+    [0, fastFrameMs, fastFrameMs * 2, fastFrameMs * 6, fastFrameMs * 7, fastFrameMs * 8]
+      .forEach((time) => delayed.frame(time));
+    expect(delayed.flush(1_000).droppedFrames).toBe(3);
   });
 
   test('records the measured rAF cadence in diagnostics without claiming a display mode', () => {

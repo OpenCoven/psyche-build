@@ -12,15 +12,17 @@ is configured to 240 Hz.
 - **Windows:** Tauri uses WebView2 (Chromium). Psyche Build follows the active
   display and WebView policy. Set the display to its supported high-refresh mode
   in Windows, then verify the measured rAF cadence in Psyche Build.
-- **macOS:** Tauri uses WKWebView. A macOS native integration can request the
-  best available frame pacing, but the display, power policy, and WebKit still
-  make the final decision. A Swift or Objective-C display link can improve
-  native Apple rendering, but cannot force WebKit JavaScript callbacks above
-  the rate it provides.
-- **iOS:** The standalone Swift app follows Core Animation and device policy.
-  ProMotion is a system capability rather than a 240 Hz guarantee. If the app
-  adds a display-linked visual workload, use `preferredFrameRateRange` as a
-  hint and measure the result on-device.
+- **macOS:** Tauri's desktop UI uses WKWebView. Native macOS integration can
+  request high-refresh WebView handling (the complementary #121 covers that
+  WKWebView-specific work), but the display, power policy, and WebKit make the
+  final decision. A native Apple frame-rate preference or display link may
+  improve native rendering; it cannot force JavaScript `requestAnimationFrame`
+  callbacks above the cadence WebKit delivers.
+- **iOS:** The standalone Swift app uses Core Animation rather than the Tauri
+  desktop WebView stack. ProMotion is a system capability rather than a 240 Hz
+  guarantee. Swift's `preferredFrameRateRange` is a native rendering preference
+  to measure on-device; it would not force callbacks for any WKWebView
+  JavaScript content.
 - **Linux (including WSLg):** Tauri uses WebKitGTK. The compositor can be
   configured independently, but that does not force WebKitGTK's JavaScript
   animation cadence. WSLg documents 60 and 144 as supported monitor-refresh
