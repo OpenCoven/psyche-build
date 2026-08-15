@@ -251,23 +251,16 @@ that regenerate checked-in artifacts.
 ```bash
 pnpm vitest --run path/to/relevant.test.ts
 pnpm run typecheck:tests
-pnpm run typecheck
+pnpm --filter @opencoven/psyche-vim-core typecheck \
+  && pnpm exec tsc --noEmit \
+  && pnpm run typecheck:tests
 ```
 
-Use the focused test first. `pnpm run typecheck:tests` is sufficient for
-test-only TypeScript changes; broader source or contract changes generally
-need `pnpm run typecheck`.
-
-### Desktop web bundles
-
-```bash
-pnpm --dir native/desktop/psyche-build-tauri build:web
-```
-
-This regenerates checked-in bundles, so do not run it in a read-only review
-unless the worktree is clean for those files and regeneration is necessary to
-verify source/bundle parity. Prefer inspecting the build script and existing
-diff first.
+These checks may run in the active review worktree. Use the focused test first.
+`pnpm run typecheck:tests` is sufficient for test-only TypeScript changes;
+broader source or contract changes generally need the full non-generating
+source typecheck sequence. Do not use `pnpm run typecheck` during review
+because it regenerates tracked hook documentation.
 
 ### Desktop Rust
 
@@ -277,30 +270,38 @@ cargo test --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.tom
 cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
 ```
 
-Use a focused Cargo test filter when one covers the suspected path.
+Use a focused Cargo test filter when one covers the suspected path. Ignored
+build outputs created by Cargo are acceptable, but tracked source and generated
+files must remain unchanged.
 
-### iOS
+### Release consistency
 
 ```bash
-pnpm ios:project:check
+pnpm release:check -- vMAJOR.MINOR.PATCH
 ```
 
-This command regenerates the Xcode project before diffing it. Do not run it
-when that would alter unrelated dirty files. Run focused `xcodebuild test` only
-when the required pinned Xcode and simulator are available.
+This is an in-place, non-mutating consistency check when the reviewed release
+tag is known.
 
-### Startup, packaging, and release
+### Isolated or author/CI validation only
 
 ```bash
+pnpm --dir native/desktop/psyche-build-tauri build:web
+pnpm ios:project:check
 pnpm smoke
 npm pack --dry-run
 pnpm smoke:pack
-pnpm release:check
 ```
 
-Use `pnpm smoke` for startup, onboarding, or tmux session lifecycle changes.
-Use package checks for exports, included files, generated docs, or install
-behavior. Do not perform publication, tagging, protected-branch pushes, or
+Never run these commands in the active review worktree: they can regenerate or
+delete tracked artifacts. Recommend them to the author or CI, or run them only
+in an isolated disposable checkout where tracked changes can be discarded.
+Use `build:web` for desktop source/bundle parity,
+`pnpm ios:project:check` for generated Xcode project parity, `pnpm smoke` for
+startup or tmux lifecycle changes, and package checks for exports, included
+files, generated docs, or install behavior. Run focused `xcodebuild test` only
+in such an isolated checkout when the pinned Xcode and simulator are
+available. Do not perform publication, tagging, protected-branch pushes, or
 stable application replacement.
 
 Record which checks actually ran and their result. Never imply that an
@@ -359,7 +360,8 @@ whether the issue is real, omit it.
 
 Order findings by priority, then by file path and line.
 
-Use this exact shape for every finding:
+Unless the user explicitly requests another output contract, such as JSON or
+GitHub inline comments, use this default shape for every finding:
 
 ```text
 [P1] Use a specific imperative title
