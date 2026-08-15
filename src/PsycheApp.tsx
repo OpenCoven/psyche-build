@@ -39,7 +39,9 @@ import {
   type StatusUpdateEvent,
 } from "./services/StatusDetector.js"
 import {
+  executeAction,
   type ActionResult,
+  type PaneAction,
 } from "./actions/index.js"
 import { SettingsManager } from "./utils/settingsManager.js"
 import { useServices } from "./hooks/useServices.js"
@@ -379,6 +381,58 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     controlPaneId,
     useHooks
   )
+  const mobileActionStateRef = useRef({
+    panes,
+    savePanes,
+    removePaneFromConfig,
+    removePanesFromConfig,
+    removePaneIdentitiesFromConfig,
+    refreshPanes: loadPanes,
+  })
+  mobileActionStateRef.current = {
+    panes,
+    savePanes,
+    removePaneFromConfig,
+    removePanesFromConfig,
+    removePaneIdentitiesFromConfig,
+    refreshPanes: loadPanes,
+  }
+
+  // Register once per daemon instance. The executor reads mutable refs so a
+  // remote request always sees the latest panes and persistence callbacks
+  // without tearing down and recreating registration on every render.
+  useEffect(() => {
+    if (!bridgeDaemon) return
+    bridgeDaemon.setActionExecutor(async ({ paneId, actionId }: {
+      paneId: string
+      actionId: PaneAction
+    }) => {
+      const live = mobileActionStateRef.current
+      const pane = live.panes.find((candidate) => candidate.paneId === paneId)
+      if (!pane) return { type: "error", message: "Pane no longer exists" }
+      return executeAction(actionId, pane, {
+        panes: live.panes,
+        currentPaneId: paneId,
+        sessionName,
+        projectName,
+        savePanes: live.savePanes,
+        removePaneFromConfig: live.removePaneFromConfig,
+        removePanesFromConfig: live.removePanesFromConfig,
+        removePaneIdentitiesFromConfig: live.removePaneIdentitiesFromConfig,
+        refreshPanes: live.refreshPanes,
+        onPaneUpdate: (updatedPane) => {
+          setPanes((current) => current.map((candidate) =>
+            candidate.id === updatedPane.id ? updatedPane : candidate))
+        },
+        onPaneRemove: (removedPaneId) => {
+          setPanes((current) => current.filter((candidate) =>
+            candidate.paneId !== removedPaneId))
+        },
+      })
+    })
+    return () => bridgeDaemon.setActionExecutor(null)
+  }, [bridgeDaemon, projectName, sessionName, setPanes])
+
   const covenSessionsState = useCovenSessions(
     sessionProjectRoot,
     sidebarProjects,

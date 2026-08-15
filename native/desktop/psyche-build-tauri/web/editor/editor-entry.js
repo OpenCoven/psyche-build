@@ -21,9 +21,11 @@ export {
   createRequestGate,
   languageForPath,
   markFileSaved,
+  nextFileIdAfterClose,
   reconcileFileSave,
   shouldRenderFileSaveChrome,
   updateFileBuffer,
+  workspaceFiles,
 } from './workspace-model.mjs';
 
 function extensionForLanguage(id) {

@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import { LogService } from './LogService.js';
 import { execAsync } from '../utils/execAsync.js';
 import type { PanePosition, WindowDimensions } from '../types.js';
@@ -8,6 +8,7 @@ import {
   parseTmuxServerIdentity,
   type TmuxServerIdentity,
 } from './TmuxServerIdentity.js';
+import { assertTmuxPaneId } from '../utils/tmuxTarget.js';
 
 export type PaneListScope = 'window' | 'session';
 
@@ -656,18 +657,32 @@ export class TmuxService {
    * Resize a pane
    */
   async resizePane(paneId: string, dimensions: { width?: number; height?: number }): Promise<void> {
+    const target = assertTmuxPaneId(paneId);
+    const width = dimensions.width === undefined
+      ? undefined
+      : this.assertPositiveIntegerDimension(dimensions.width, 'width');
+    const height = dimensions.height === undefined
+      ? undefined
+      : this.assertPositiveIntegerDimension(dimensions.height, 'height');
     await this.executeWithRetry(
       () => {
-        if (dimensions.width !== undefined) {
-          this.execute(`tmux resize-pane -t '${paneId}' -x ${dimensions.width}`);
+        if (width !== undefined) {
+          this.execute(`tmux resize-pane -t '${target}' -x ${width}`);
         }
-        if (dimensions.height !== undefined) {
-          this.execute(`tmux resize-pane -t '${paneId}' -y ${dimensions.height}`);
+        if (height !== undefined) {
+          this.execute(`tmux resize-pane -t '${target}' -y ${height}`);
         }
       },
       RetryStrategy.FAST,
       `resizePane(${paneId})`
     );
+  }
+
+  private assertPositiveIntegerDimension(value: number, label: 'width' | 'height'): number {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`invalid ${label}: expected a positive integer`);
+    }
+    return value;
   }
 
   /**
@@ -689,7 +704,8 @@ export class TmuxService {
   async selectLayout(layoutString: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        this.execute(`tmux select-layout '${layoutString}'`);
+        const escapedLayoutString = layoutString.replace(/'/g, `'\\''`);
+        this.execute(`tmux select-layout '${escapedLayoutString}'`);
       },
       RetryStrategy.FAST,
       'selectLayout'

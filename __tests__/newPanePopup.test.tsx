@@ -18,7 +18,8 @@ async function type(stdin: { write: (value: string) => void }, value: string) {
 
 async function pressEscape(stdin: { write: (value: string) => void }) {
   stdin.write(ESC);
-  await sleep(10);
+  // Ink 7 buffers a lone escape briefly so it can distinguish chunked escape sequences.
+  await sleep(30);
 }
 
 const tempDirs: string[] = [];

@@ -12,8 +12,23 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "macos")]
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+#[cfg(target_os = "macos")]
+use objc2::{
+    runtime::{AnyObject, Imp, Sel},
+    sel,
+};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{
+    NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSImage,
+};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSDictionary, NSError, NSString, NSURLRequest, NSURL};
+#[cfg(target_os = "macos")]
+use objc2_web_kit::{WKNavigation, WKWebView};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -22,38 +37,53 @@ use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
 };
-#[cfg(windows)]
-use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE},
-    System::{
-        JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        },
-        Threading::{OpenProcess, TerminateProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
-    },
-};
 
+mod control_provider;
 mod coven_sessions;
 mod metrics;
+mod native_sessions;
 mod native_workspace;
 mod pane_metrics;
 mod platform;
 pub mod pty_transport;
 mod workspace_contract;
+use control_provider::{
+    control_operator_submit, control_provider_complete, control_provider_remove,
+    control_provider_shutdown, control_provider_start, control_provider_stop,
+    control_provider_upsert, control_state, ControlProviderState,
+};
+
 use coven_sessions::is_safe_session_id;
 use coven_sessions::{coven_session_kill, coven_sessions};
 use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
+use native_sessions::{
+    native_session_capture, native_session_create, native_session_list, native_session_stop,
+    NativeLaunchKind, NativeSessionCreate,
+};
 use native_workspace::{workspace_load, workspace_save};
 use pane_metrics::PaneSessionMetrics;
 use pty_transport::{
-    coordinate_exit_shutdown, CompletionOutcome, DrainOutcome, EnqueueError, ExitShutdownHooks,
-    ExitShutdownOutcome, FinalOutputPumpSnapshot, OutputPump, RecentOutputSnapshots,
-    TransportSessionKey, EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
+    coordinate_exit_shutdown, AckOutcome as TransportAckOutcome, CompletionOutcome, DrainOutcome,
+    EnqueueError, ExitShutdownHooks, ExitShutdownOutcome, FinalOutputPumpSnapshot, OutputPump,
+    OutputPumpMetrics as TransportOutputPumpMetrics,
+    OutputPumpSnapshot as TransportOutputPumpSnapshot, PaneVisibility as TransportPaneVisibility,
+    PumpMetrics as TransportPumpMetrics, RecentOutputSnapshots, TransportSessionKey,
+    EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
 };
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
+const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_PROVIDER_RESULT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_BROWSER_SNAPSHOT_JSON_OVERHEAD: usize = 64 * 1024;
+const MAX_BROWSER_SNAPSHOT_BYTES: usize =
+    (MAX_PROVIDER_RESULT_BYTES - MAX_BROWSER_SNAPSHOT_JSON_OVERHEAD) / 4 * 3;
+const MAX_BROWSER_SNAPSHOT_DIMENSION: u32 = 8192;
+const MAX_BROWSER_SNAPSHOT_PIXELS: u64 = 16 * 1024 * 1024;
+const MAX_BROWSER_SCRIPT_SOURCE_BYTES: usize = 64 * 1024;
+const MAX_BROWSER_SCRIPT_ARGS_BYTES: usize = 256 * 1024;
+const MAX_BROWSER_SCRIPT_RESULT_BYTES: usize = 256 * 1024;
+const BROWSER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
+const BROWSER_SCRIPT_CONTEXT_WORLD_NAME: &str = "com.opencoven.psyche.browser-script-context";
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
 const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
@@ -71,6 +101,39 @@ fn safe_browser_label(label: Option<String>) -> String {
     )
 }
 
+fn ensure_trusted_browser_caller(label: &str) -> Result<(), String> {
+    if label == "main" {
+        return Ok(());
+    }
+    Err(format!(
+        "browser automation authority is only available to trusted webview 'main'; rejected caller '{label}'"
+    ))
+}
+
+fn ensure_trusted_pty_caller(label: &str) -> Result<(), String> {
+    if label == "main" {
+        return Ok(());
+    }
+    Err(format!(
+        "PTY authority is only available to trusted webview 'main'; rejected caller '{label}'"
+    ))
+}
+
+fn validate_browser_snapshot_dimensions(width: u32, height: u32) -> Result<(), String> {
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| "browser snapshot dimensions overflow".to_string())?;
+    if width == 0
+        || height == 0
+        || width > MAX_BROWSER_SNAPSHOT_DIMENSION
+        || height > MAX_BROWSER_SNAPSHOT_DIMENSION
+        || pixels > MAX_BROWSER_SNAPSHOT_PIXELS
+    {
+        return Err("browser snapshot dimensions exceed maximum".to_string());
+    }
+    Ok(())
+}
+
 // ----------------------------------------------------------------------------
 // Multi-PTY backend
 // ----------------------------------------------------------------------------
@@ -78,6 +141,8 @@ fn safe_browser_label(label: Option<String>) -> String {
 struct PtySession {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    operation_lane: Arc<tokio::sync::Mutex<()>>,
+    operation_admission: Arc<tokio::sync::Semaphore>,
     pump: OutputPump,
     terminator: PtyProcessTerminator,
     reader_cancellation: PtyReaderCancellation,
@@ -364,303 +429,36 @@ static PTY_LIFECYCLES: Lazy<Mutex<PtyLifecycleRegistry<PtySession>>> =
 static RECENT_PTY_SNAPSHOTS: Lazy<Mutex<RecentOutputSnapshots>> =
     Lazy::new(|| Mutex::new(RecentOutputSnapshots::default()));
 
-#[cfg(any(test, windows))]
-const WINDOWS_REQUIRED_PROCESS_RIGHTS: u32 = 0x0101;
-#[cfg(any(test, windows))]
-const WINDOWS_JOB_KILL_ON_CLOSE_LIMIT: u32 = 0x2000;
-#[cfg(any(test, windows))]
-const WINDOWS_ERROR_ACCESS_DENIED: i32 = 5;
-
-#[cfg(any(test, windows))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WindowsJobAssignmentFailure {
-    ExternalJobRestriction,
-    Other,
-}
-
-#[cfg(any(test, windows))]
-fn classify_windows_job_assignment_error(error: &std::io::Error) -> WindowsJobAssignmentFailure {
-    if error.raw_os_error() == Some(WINDOWS_ERROR_ACCESS_DENIED) {
-        WindowsJobAssignmentFailure::ExternalJobRestriction
-    } else {
-        WindowsJobAssignmentFailure::Other
-    }
-}
-
 #[derive(Debug)]
 enum PtyProcessTerminatorSetupError {
     Message(String),
-    #[cfg(windows)]
-    WindowsExternalJobRestriction {
-        process_id: u32,
-        assignment_error: std::io::Error,
-        cleanup_error: Option<std::io::Error>,
-    },
-    #[cfg(windows)]
-    WindowsJobAssignmentFailed {
-        process_id: u32,
-        assignment_error: std::io::Error,
-        cleanup_error: Option<std::io::Error>,
-    },
 }
 
 impl std::fmt::Display for PtyProcessTerminatorSetupError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Message(message) => formatter.write_str(message),
-            #[cfg(windows)]
-            Self::WindowsExternalJobRestriction {
-                process_id,
-                assignment_error,
-                cleanup_error,
-            } => {
-                write!(
-                    formatter,
-                    "WindowsExternalJobRestriction: failed to assign PTY process {process_id} \
-                     to its owned Job Object: {assignment_error}"
-                )?;
-                match cleanup_error {
-                    Some(error) => write!(
-                        formatter,
-                        "; direct-child fallback also failed: {error}; descendant termination \
-                         is not proven"
-                    ),
-                    None => formatter.write_str(
-                        "; the direct child was terminated, but descendant termination is not proven",
-                    ),
-                }
-            }
-            #[cfg(windows)]
-            Self::WindowsJobAssignmentFailed {
-                process_id,
-                assignment_error,
-                cleanup_error,
-            } => {
-                write!(
-                    formatter,
-                    "failed to assign Windows PTY process {process_id} to its owned Job Object: \
-                     {assignment_error}"
-                )?;
-                match cleanup_error {
-                    Some(error) => {
-                        write!(formatter, "; direct-child fallback also failed: {error}")
-                    }
-                    None => formatter.write_str("; the direct child was terminated"),
-                }
-            }
         }
     }
 }
 
-#[cfg(any(test, windows))]
-fn check_windows_bool<LastError>(result: i32, last_error: LastError) -> std::io::Result<()>
-where
-    LastError: FnOnce() -> std::io::Error,
-{
-    if result != 0 {
-        Ok(())
-    } else {
-        Err(last_error())
-    }
+#[cfg(windows)]
+#[derive(Debug)]
+struct WindowsProcessTreeKiller {
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
 }
 
-#[cfg(any(test, windows))]
-struct OwnedTerminationResource<T, Close>
-where
-    Close: FnMut(T),
-{
-    resource: Option<T>,
-    close_resource: Close,
-}
-
-#[cfg(any(test, windows))]
-impl<T, Close> OwnedTerminationResource<T, Close>
-where
-    Close: FnMut(T),
-{
-    fn new(resource: T, close_resource: Close) -> Self {
+#[cfg(windows)]
+impl WindowsProcessTreeKiller {
+    fn new(killer: Box<dyn ChildKiller + Send + Sync>) -> Self {
         Self {
-            resource: Some(resource),
-            close_resource,
+            killer: Mutex::new(killer),
         }
-    }
-
-    #[cfg(windows)]
-    fn get(&self) -> Option<&T> {
-        self.resource.as_ref()
-    }
-
-    fn close(&mut self) {
-        if let Some(resource) = self.resource.take() {
-            (self.close_resource)(resource);
-        }
-    }
-}
-
-#[cfg(any(test, windows))]
-impl<T, Close: FnMut(T)> Drop for OwnedTerminationResource<T, Close> {
-    fn drop(&mut self) {
-        self.close();
-    }
-}
-
-#[cfg(windows)]
-fn close_windows_handle(handle: isize) {
-    let result = unsafe { CloseHandle(handle as HANDLE) };
-    if result == 0 {
-        log::warn!(
-            "failed to close retained PTY termination handle: {}",
-            std::io::Error::last_os_error()
-        );
-    }
-}
-
-#[cfg(windows)]
-struct OwnedWindowsProcessHandle {
-    handle: OwnedTerminationResource<isize, fn(isize)>,
-}
-
-#[cfg(windows)]
-impl OwnedWindowsProcessHandle {
-    fn open(process_id: u32) -> std::io::Result<Self> {
-        debug_assert_eq!(
-            WINDOWS_REQUIRED_PROCESS_RIGHTS,
-            PROCESS_SET_QUOTA | PROCESS_TERMINATE
-        );
-        let handle = unsafe { OpenProcess(WINDOWS_REQUIRED_PROCESS_RIGHTS, 0, process_id) };
-        if handle.is_null() {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(Self {
-            handle: OwnedTerminationResource::new(handle as isize, close_windows_handle),
-        })
-    }
-
-    fn raw_handle(&self) -> HANDLE {
-        *self
-            .handle
-            .get()
-            .expect("owned Windows process handle must remain open until drop") as HANDLE
     }
 
     fn terminate(&self) -> std::io::Result<()> {
-        let result = unsafe { TerminateProcess(self.raw_handle(), 1) };
-        check_windows_bool(result, std::io::Error::last_os_error)
+        self.killer.lock().kill()
     }
-}
-
-#[cfg(windows)]
-struct OwnedWindowsJobObject {
-    handle: OwnedTerminationResource<isize, fn(isize)>,
-}
-
-#[cfg(windows)]
-impl OwnedWindowsJobObject {
-    fn create() -> std::io::Result<Self> {
-        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if handle.is_null() {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(Self {
-            handle: OwnedTerminationResource::new(handle as isize, close_windows_handle),
-        })
-    }
-
-    fn raw_handle(&self) -> HANDLE {
-        *self
-            .handle
-            .get()
-            .expect("owned Windows Job Object handle must remain open until drop") as HANDLE
-    }
-
-    fn configure_kill_on_close(&self) -> std::io::Result<()> {
-        debug_assert_eq!(
-            WINDOWS_JOB_KILL_ON_CLOSE_LIMIT,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        );
-        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        let result = unsafe {
-            SetInformationJobObject(
-                self.raw_handle(),
-                JobObjectExtendedLimitInformation,
-                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                std::mem::size_of_val(&limits) as u32,
-            )
-        };
-        check_windows_bool(result, std::io::Error::last_os_error)
-    }
-
-    fn assign_process(&self, process: &OwnedWindowsProcessHandle) -> std::io::Result<()> {
-        let result = unsafe { AssignProcessToJobObject(self.raw_handle(), process.raw_handle()) };
-        check_windows_bool(result, std::io::Error::last_os_error)
-    }
-
-    fn terminate(&self) -> std::io::Result<()> {
-        let result = unsafe { TerminateJobObject(self.raw_handle(), 1) };
-        check_windows_bool(result, std::io::Error::last_os_error)
-    }
-}
-
-#[cfg(windows)]
-struct OwnedWindowsProcessTree {
-    job: OwnedWindowsJobObject,
-    process: OwnedWindowsProcessHandle,
-}
-
-#[cfg(windows)]
-impl OwnedWindowsProcessTree {
-    fn terminate(&self) -> std::io::Result<()> {
-        match self.job.terminate() {
-            Ok(()) => Ok(()),
-            Err(job_error) => {
-                let fallback = self.process.terminate();
-                Err(std::io::Error::new(
-                    job_error.kind(),
-                    match fallback {
-                        Ok(()) => format!(
-                            "{job_error}; the direct-child fallback was terminated, but \
-                             descendant termination is not proven"
-                        ),
-                        Err(fallback_error) => format!(
-                            "{job_error}; direct-child fallback also failed: {fallback_error}"
-                        ),
-                    },
-                ))
-            }
-        }
-    }
-}
-
-#[cfg(windows)]
-fn terminate_borrowed_windows_child(child: &dyn Child) -> std::io::Result<()> {
-    let handle = child.as_raw_handle().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "spawned PTY child did not expose a Windows process handle",
-        )
-    })?;
-    let result = unsafe { TerminateProcess(handle as HANDLE, 1) };
-    check_windows_bool(result, std::io::Error::last_os_error)
-}
-
-#[cfg(windows)]
-fn windows_setup_error(
-    operation: &str,
-    process_id: u32,
-    error: std::io::Error,
-    cleanup: std::io::Result<()>,
-) -> PtyProcessTerminatorSetupError {
-    PtyProcessTerminatorSetupError::Message(match cleanup {
-        Ok(()) => format!(
-            "failed to {operation} for Windows PTY process {process_id}: {error}; \
-             the direct child was terminated, but descendant termination is not proven"
-        ),
-        Err(cleanup_error) => format!(
-            "failed to {operation} for Windows PTY process {process_id}: {error}; \
-             direct-child fallback also failed: {cleanup_error}"
-        ),
-    })
 }
 
 #[cfg(unix)]
@@ -1057,7 +855,7 @@ struct PtyProcessTerminator {
     #[cfg(unix)]
     unix_platform: Option<Arc<dyn UnixTerminationPlatform>>,
     #[cfg(windows)]
-    process_tree: Arc<OwnedWindowsProcessTree>,
+    process_tree: Arc<WindowsProcessTreeKiller>,
     identity: PtyProcessIdentity,
 }
 
@@ -1069,68 +867,8 @@ impl PtyProcessTerminator {
         let child_pid = child.process_id();
         #[cfg(windows)]
         {
-            let process_id = child_pid.ok_or_else(|| {
-                PtyProcessTerminatorSetupError::Message(
-                    "spawned PTY child did not expose a Windows process id".to_string(),
-                )
-            })?;
-            let process = match OwnedWindowsProcessHandle::open(process_id) {
-                Ok(process) => process,
-                Err(open_error) => {
-                    let cleanup = terminate_borrowed_windows_child(child);
-                    return Err(PtyProcessTerminatorSetupError::Message(match cleanup {
-                        Ok(()) => format!(
-                            "failed to retain Windows PTY process handle for {process_id}: \
-                             {open_error}; the direct child was terminated, but descendant \
-                             termination is not proven"
-                        ),
-                        Err(cleanup_error) => format!(
-                            "failed to retain Windows PTY process handle for {process_id}: \
-                             {open_error}; direct spawned-child cleanup also failed: \
-                             {cleanup_error}"
-                        ),
-                    }));
-                }
-            };
-            let job = OwnedWindowsJobObject::create().map_err(|error| {
-                windows_setup_error(
-                    "create an owned Job Object",
-                    process_id,
-                    error,
-                    process.terminate(),
-                )
-            })?;
-            job.configure_kill_on_close().map_err(|error| {
-                windows_setup_error(
-                    "configure JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE",
-                    process_id,
-                    error,
-                    process.terminate(),
-                )
-            })?;
-            if let Err(assignment_error) = job.assign_process(&process) {
-                let cleanup_error = process.terminate().err();
-                return Err(
-                    match classify_windows_job_assignment_error(&assignment_error) {
-                        WindowsJobAssignmentFailure::ExternalJobRestriction => {
-                            PtyProcessTerminatorSetupError::WindowsExternalJobRestriction {
-                                process_id,
-                                assignment_error,
-                                cleanup_error,
-                            }
-                        }
-                        WindowsJobAssignmentFailure::Other => {
-                            PtyProcessTerminatorSetupError::WindowsJobAssignmentFailed {
-                                process_id,
-                                assignment_error,
-                                cleanup_error,
-                            }
-                        }
-                    },
-                );
-            }
             Ok(Self {
-                process_tree: Arc::new(OwnedWindowsProcessTree { job, process }),
+                process_tree: Arc::new(WindowsProcessTreeKiller::new(child.clone_killer())),
                 identity: PtyProcessIdentity { child_pid },
             })
         }
@@ -1441,7 +1179,7 @@ fn terminate_platform_process(
 
 #[cfg(windows)]
 fn terminate_platform_process(
-    process_tree: &OwnedWindowsProcessTree,
+    process_tree: &WindowsProcessTreeKiller,
     _identity: PtyProcessIdentity,
 ) -> std::io::Result<PtyTerminationOutcome> {
     process_tree.terminate()?;
@@ -1505,6 +1243,15 @@ pub struct StartOptions {
     pub rows: Option<u16>,
     /// Extra environment variables on top of the inherited environment.
     pub env: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PtyAttachOptions {
+    pub thread_id: String,
+    pub session_id: String,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
 }
 
 #[cfg(unix)]
@@ -1935,6 +1682,111 @@ pub struct BrowserPageLoadEvent {
     pub label: String,
     pub url: String,
     pub phase: String,
+    pub navigation_token: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BrowserNavigationResult {
+    terminal_url: String,
+}
+
+struct BrowserNavigationWaiter {
+    token: String,
+    navigation_identity: Option<usize>,
+    completion: Option<tokio::sync::oneshot::Sender<Result<BrowserNavigationResult, String>>>,
+}
+
+struct BrowserNavigationWaiterGuard {
+    label: String,
+    token: String,
+}
+
+impl Drop for BrowserNavigationWaiterGuard {
+    fn drop(&mut self) {
+        let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+        if waiters
+            .get(&self.label)
+            .is_some_and(|waiter| waiter.token == self.token)
+        {
+            waiters.remove(&self.label);
+        }
+    }
+}
+
+static BROWSER_NAVIGATION_WAITERS: Lazy<Mutex<HashMap<String, BrowserNavigationWaiter>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn complete_browser_navigation(navigation_identity: usize, terminal_url: &str) -> bool {
+    let completion = {
+        let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+        let label = waiters.iter().find_map(|(label, waiter)| {
+            (waiter.navigation_identity == Some(navigation_identity)).then(|| label.clone())
+        });
+        label.and_then(|label| {
+            waiters
+                .remove(&label)
+                .and_then(|mut waiter| waiter.completion.take())
+        })
+    };
+    if let Some(completion) = completion {
+        let result = if terminal_url.is_empty() {
+            Err("browser navigation terminal URL is unavailable".to_string())
+        } else {
+            Ok(BrowserNavigationResult {
+                terminal_url: terminal_url.to_string(),
+            })
+        };
+        let _ = completion.send(result);
+        return true;
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+static ORIGINAL_BROWSER_DID_FINISH_NAVIGATION: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(target_os = "macos")]
+static BROWSER_NAVIGATION_HOOK_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn browser_did_finish_navigation(
+    delegate: &AnyObject,
+    selector: Sel,
+    webview: &WKWebView,
+    navigation: &WKNavigation,
+) {
+    let original = ORIGINAL_BROWSER_DID_FINISH_NAVIGATION.load(Ordering::Acquire);
+    if original != 0 {
+        let original: unsafe extern "C-unwind" fn(&AnyObject, Sel, &WKWebView, &WKNavigation) =
+            unsafe { std::mem::transmute(original) };
+        unsafe { original(delegate, selector, webview, navigation) };
+    }
+    let navigation_identity = navigation as *const WKNavigation as usize;
+    let terminal_url = unsafe { webview.URL() }
+        .and_then(|url| url.absoluteString())
+        .map(|url| url.to_string())
+        .unwrap_or_default();
+    complete_browser_navigation(navigation_identity, &terminal_url);
+}
+
+#[cfg(target_os = "macos")]
+fn install_browser_navigation_identity_hook(delegate: &AnyObject) -> Result<(), String> {
+    let _install_guard = BROWSER_NAVIGATION_HOOK_LOCK.lock();
+    if ORIGINAL_BROWSER_DID_FINISH_NAVIGATION.load(Ordering::Acquire) != 0 {
+        return Ok(());
+    }
+    let class = delegate.class();
+    let method = class
+        .instance_method(sel!(webView:didFinishNavigation:))
+        .ok_or_else(|| "browser navigation delegate finish hook is unavailable".to_string())?;
+    let replacement: unsafe extern "C-unwind" fn(&AnyObject, Sel, &WKWebView, &WKNavigation) =
+        browser_did_finish_navigation;
+    let replacement: Imp = unsafe { std::mem::transmute(replacement) };
+    let original = method.implementation() as usize;
+    ORIGINAL_BROWSER_DID_FINISH_NAVIGATION.store(original, Ordering::Release);
+    unsafe { method.set_implementation(replacement) };
+    Ok(())
 }
 
 fn pump_pty_reader<R: Read>(mut reader: R, pump: OutputPump) -> Result<(), String> {
@@ -2358,8 +2210,204 @@ pub fn latest_pty_transport_snapshot(thread_id: &str) -> Option<FinalOutputPumpS
         .cloned()
 }
 
+fn validate_pty_thread_id(thread_id: &str) -> Result<(), String> {
+    if is_safe_session_id(thread_id) {
+        Ok(())
+    } else {
+        Err("thread id is unsafe".to_string())
+    }
+}
+
+fn clone_live_pty_pump(thread_id: &str) -> Result<OutputPump, String> {
+    validate_pty_thread_id(thread_id)?;
+    let guard = PTY_LIFECYCLES.lock();
+    guard
+        .live(thread_id)
+        .map(|session| session.pump.clone())
+        .ok_or_else(|| format!("thread '{}' not found", thread_id))
+}
+
+fn duration_to_micros(duration: std::time::Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum AckOutcome {
+    Advanced {
+        sequence: u64,
+        bytes: usize,
+        latency_micros: u64,
+    },
+    Duplicate {
+        sequence: u64,
+    },
+}
+
+impl From<TransportAckOutcome> for AckOutcome {
+    fn from(outcome: TransportAckOutcome) -> Self {
+        match outcome {
+            TransportAckOutcome::Advanced {
+                sequence,
+                bytes,
+                latency,
+                ..
+            } => Self::Advanced {
+                sequence,
+                bytes,
+                latency_micros: duration_to_micros(latency),
+            },
+            TransportAckOutcome::Duplicate { sequence } => Self::Duplicate { sequence },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum PtyTransportVisibility {
+    Visible,
+    Hidden,
+}
+
+impl From<TransportPaneVisibility> for PtyTransportVisibility {
+    fn from(visibility: TransportPaneVisibility) -> Self {
+        match visibility {
+            TransportPaneVisibility::Visible => Self::Visible,
+            TransportPaneVisibility::Hidden => Self::Hidden,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PtyTransportStateMetrics {
+    bytes_accepted: u64,
+    fragments_accepted: u64,
+    bytes_emitted: u64,
+    batches_emitted: u64,
+    bytes_acknowledged: u64,
+    batches_acknowledged: u64,
+    push_would_block_count: u64,
+    pending_bytes_high_water: usize,
+    pending_fragments_high_water: usize,
+    in_flight_batches_high_water: usize,
+    in_flight_bytes_high_water: usize,
+    total_ack_latency_micros: u64,
+    max_ack_latency_micros: u64,
+}
+
+impl From<TransportPumpMetrics> for PtyTransportStateMetrics {
+    fn from(metrics: TransportPumpMetrics) -> Self {
+        Self {
+            bytes_accepted: metrics.bytes_accepted,
+            fragments_accepted: metrics.fragments_accepted,
+            bytes_emitted: metrics.bytes_emitted,
+            batches_emitted: metrics.batches_emitted,
+            bytes_acknowledged: metrics.bytes_acknowledged,
+            batches_acknowledged: metrics.batches_acknowledged,
+            push_would_block_count: metrics.push_would_block_count,
+            pending_bytes_high_water: metrics.pending_bytes_high_water,
+            pending_fragments_high_water: metrics.pending_fragments_high_water,
+            in_flight_batches_high_water: metrics.in_flight_batches_high_water,
+            in_flight_bytes_high_water: metrics.in_flight_bytes_high_water,
+            total_ack_latency_micros: duration_to_micros(metrics.total_ack_latency),
+            max_ack_latency_micros: duration_to_micros(metrics.max_ack_latency),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PtyTransportMetrics {
+    state: PtyTransportStateMetrics,
+    blocked_reader_count: u64,
+    total_blocked_reader_duration_micros: u64,
+    max_blocked_reader_duration_micros: u64,
+    emit_failure_count: u64,
+    emit_retry_count: u64,
+    visibility_transition_count: u64,
+    drain_timeout_count: u64,
+    worker_error_count: u64,
+}
+
+impl From<TransportOutputPumpMetrics> for PtyTransportMetrics {
+    fn from(metrics: TransportOutputPumpMetrics) -> Self {
+        Self {
+            state: metrics.state.into(),
+            blocked_reader_count: metrics.blocked_reader_count,
+            total_blocked_reader_duration_micros: duration_to_micros(
+                metrics.total_blocked_reader_duration,
+            ),
+            max_blocked_reader_duration_micros: duration_to_micros(
+                metrics.max_blocked_reader_duration,
+            ),
+            emit_failure_count: metrics.emit_failure_count,
+            emit_retry_count: metrics.emit_retry_count,
+            visibility_transition_count: metrics.visibility_transition_count,
+            drain_timeout_count: metrics.drain_timeout_count,
+            worker_error_count: metrics.worker_error_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PtyTransportSnapshot {
+    thread_id: String,
+    pending_bytes: usize,
+    pending_fragments: usize,
+    queued_bytes: usize,
+    queue_depth: usize,
+    prepared: bool,
+    in_flight_batches: usize,
+    in_flight_bytes: usize,
+    last_acked_sequence: u64,
+    blocked_producers: usize,
+    visibility: PtyTransportVisibility,
+    effective_cadence_micros: u64,
+    draining: bool,
+    cancelled: bool,
+    worker_running: bool,
+    metrics: PtyTransportMetrics,
+}
+
+impl From<TransportOutputPumpSnapshot> for PtyTransportSnapshot {
+    fn from(snapshot: TransportOutputPumpSnapshot) -> Self {
+        Self {
+            thread_id: snapshot.thread_id,
+            pending_bytes: snapshot.pending_bytes,
+            pending_fragments: snapshot.pending_fragments,
+            queued_bytes: snapshot.queued_bytes,
+            queue_depth: snapshot.queue_depth,
+            prepared: snapshot.prepared,
+            in_flight_batches: snapshot.in_flight_batches,
+            in_flight_bytes: snapshot.in_flight_bytes,
+            last_acked_sequence: snapshot.last_acked_sequence,
+            blocked_producers: snapshot.blocked_producers,
+            visibility: snapshot.visibility.into(),
+            effective_cadence_micros: duration_to_micros(snapshot.effective_cadence),
+            draining: snapshot.draining,
+            cancelled: snapshot.cancelled,
+            worker_running: snapshot.worker_running,
+            metrics: snapshot.metrics.into(),
+        }
+    }
+}
+
 #[tauri::command]
-fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
+async fn pty_start(
+    webview: tauri::Webview,
+    app: AppHandle,
+    options: StartOptions,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    match tauri::async_runtime::spawn_blocking(move || pty_start_blocking(app, options)).await {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY start task: {error}")),
+    }
+}
+
+fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let thread_id = options.thread_id.clone();
     let (pending_start, resolved_cwd) = prepare_pty_start(&options)?;
     validate_coven_launch(&options)?;
@@ -2408,14 +2456,24 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
         cmd.env(key, value);
     }
 
+    resolved_cwd.configure_command_cwd(&mut cmd)?;
+    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    drop(resolved_cwd);
+    register_pty_client(app, thread_id, pending_start, pair, child)
+}
+
+fn register_pty_client(
+    app: AppHandle,
+    thread_id: String,
+    pending_start: PendingPtyStart,
+    pair: portable_pty::PtyPair,
+    mut child: Box<dyn Child + Send + Sync>,
+) -> Result<(), String> {
     let spawn_time_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    resolved_cwd.configure_command_cwd(&mut cmd)?;
-    let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let pid = child.process_id();
-    drop(resolved_cwd);
     let terminator = PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref())
         .map_err(|error| error.to_string())?;
     let mut spawn_guard = PtySpawnTerminationGuard::new(terminator.clone());
@@ -2433,6 +2491,8 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let (session_token, install_outcome) = pending_start.install(PtySession {
         master: Arc::new(Mutex::new(pair.master)),
         writer: Arc::new(Mutex::new(writer)),
+        operation_lane: Arc::new(tokio::sync::Mutex::new(())),
+        operation_admission: Arc::new(tokio::sync::Semaphore::new(2)),
         pump: pump.clone(),
         terminator: terminator.clone(),
         reader_cancellation: reader_cancellation.clone(),
@@ -2517,14 +2577,100 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
-    let writer = {
-        let guard = PTY_LIFECYCLES.lock();
-        let session = guard
-            .live(&thread_id)
-            .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
-        Arc::clone(&session.writer)
-    };
+async fn pty_attach(
+    webview: tauri::Webview,
+    app: AppHandle,
+    options: PtyAttachOptions,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    match tauri::async_runtime::spawn_blocking(move || pty_attach_blocking(app, options)).await {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY attach task: {error}")),
+    }
+}
+
+fn pty_attach_blocking(app: AppHandle, options: PtyAttachOptions) -> Result<(), String> {
+    validate_pty_thread_id(&options.thread_id)?;
+    let attach_args = native_sessions::build_attach_args(
+        &native_sessions::native_socket_path()?,
+        &options.session_id,
+    )?;
+    let pending_start = PendingPtyStart::reserve(&options.thread_id)?;
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: options.rows.unwrap_or(40),
+            cols: options.cols.unwrap_or(120),
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| error.to_string())?;
+    let tmux = which_on_path("tmux")
+        .ok_or_else(|| "tmux is unavailable; install tmux and restart Psyche".to_string())?;
+    let mut command = CommandBuilder::new(tmux);
+    command.args(attach_args);
+    command.env("PATH", platform::augmented_path());
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env_remove("TMUX");
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| error.to_string())?;
+    register_pty_client(app, options.thread_id, pending_start, pair, child)
+}
+
+#[tauri::command]
+async fn pty_write(
+    webview: tauri::Webview,
+    thread_id: String,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    let (writer, operation_lane, operation_admission) = pty_write_operation(&thread_id)?;
+    let operation_permit = operation_admission
+        .try_acquire_owned()
+        .map_err(|_| format!("thread '{}' PTY operation queue is full", thread_id))?;
+    let operation_guard = operation_lane.lock_owned().await;
+    match tauri::async_runtime::spawn_blocking(move || {
+        pty_write_blocking(writer, bytes, operation_guard, operation_permit)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY write task: {error}")),
+    }
+}
+
+fn pty_write_operation(
+    thread_id: &str,
+) -> Result<
+    (
+        Arc<Mutex<Box<dyn Write + Send>>>,
+        Arc<tokio::sync::Mutex<()>>,
+        Arc<tokio::sync::Semaphore>,
+    ),
+    String,
+> {
+    let guard = PTY_LIFECYCLES.lock();
+    let session = guard
+        .live(thread_id)
+        .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
+    let operation = (
+        Arc::clone(&session.writer),
+        Arc::clone(&session.operation_lane),
+        Arc::clone(&session.operation_admission),
+    );
+    drop(guard);
+    Ok(operation)
+}
+
+fn pty_write_blocking(
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    bytes: Vec<u8>,
+    _operation_guard: tokio::sync::OwnedMutexGuard<()>,
+    _operation_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(), String> {
     let mut writer = writer.lock();
     writer.write_all(&bytes).map_err(|e| e.to_string())?;
     writer.flush().map_err(|e| e.to_string())?;
@@ -2532,24 +2678,66 @@ fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
-    let master = {
-        let guard = PTY_LIFECYCLES.lock();
-        guard
-            .live(&thread_id)
-            .map(|session| Arc::clone(&session.master))
+async fn pty_resize(
+    webview: tauri::Webview,
+    thread_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    let Some((master, operation_lane, operation_admission)) = pty_resize_operation(&thread_id)
+    else {
+        return Ok(());
     };
-    if let Some(master) = master {
-        master
-            .lock()
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| e.to_string())?;
+    let operation_permit = operation_admission
+        .try_acquire_owned()
+        .map_err(|_| format!("thread '{}' PTY operation queue is full", thread_id))?;
+    let operation_guard = operation_lane.lock_owned().await;
+    match tauri::async_runtime::spawn_blocking(move || {
+        pty_resize_blocking(master, cols, rows, operation_guard, operation_permit)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY resize task: {error}")),
     }
+}
+
+fn pty_resize_operation(
+    thread_id: &str,
+) -> Option<(
+    Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    Arc<tokio::sync::Mutex<()>>,
+    Arc<tokio::sync::Semaphore>,
+)> {
+    let guard = PTY_LIFECYCLES.lock();
+    let operation = guard.live(thread_id).map(|session| {
+        (
+            Arc::clone(&session.master),
+            Arc::clone(&session.operation_lane),
+            Arc::clone(&session.operation_admission),
+        )
+    });
+    drop(guard);
+    operation
+}
+
+fn pty_resize_blocking(
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    cols: u16,
+    rows: u16,
+    _operation_guard: tokio::sync::OwnedMutexGuard<()>,
+    _operation_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(), String> {
+    master
+        .lock()
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -2563,7 +2751,8 @@ struct PtyStopResult {
 }
 
 #[tauri::command]
-fn pty_stop(thread_id: String) -> Result<PtyStopResult, String> {
+fn pty_stop(webview: tauri::Webview, thread_id: String) -> Result<PtyStopResult, String> {
+    ensure_trusted_pty_caller(webview.label())?;
     let action = {
         let mut registry = PTY_LIFECYCLES.lock();
         registry
@@ -2593,8 +2782,84 @@ fn pty_stop(thread_id: String) -> Result<PtyStopResult, String> {
 }
 
 #[tauri::command]
-fn pty_list() -> Vec<String> {
-    PTY_LIFECYCLES.lock().live_thread_ids()
+fn pty_ack(
+    webview: tauri::Webview,
+    thread_id: String,
+    sequence: u64,
+) -> Result<AckOutcome, String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    pty_ack_inner(thread_id, sequence)
+}
+
+fn pty_ack_inner(thread_id: String, sequence: u64) -> Result<AckOutcome, String> {
+    let pump = clone_live_pty_pump(&thread_id)?;
+    pump.acknowledge(sequence)
+        .map(AckOutcome::from)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pty_set_visibility(
+    webview: tauri::Webview,
+    thread_id: String,
+    visible: bool,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    pty_set_visibility_inner(thread_id, visible)
+}
+
+fn pty_set_visibility_inner(thread_id: String, visible: bool) -> Result<(), String> {
+    let pump = clone_live_pty_pump(&thread_id)?;
+    pump.set_visibility(if visible {
+        TransportPaneVisibility::Visible
+    } else {
+        TransportPaneVisibility::Hidden
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn pty_list(webview: tauri::Webview) -> Result<Vec<String>, String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    Ok(PTY_LIFECYCLES.lock().live_thread_ids())
+}
+
+#[tauri::command]
+fn pty_transport_metrics(
+    webview: tauri::Webview,
+    thread_id: Option<String>,
+) -> Result<Vec<PtyTransportSnapshot>, String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    Ok(pty_transport_metrics_inner(thread_id))
+}
+
+fn pty_transport_metrics_inner(thread_id: Option<String>) -> Vec<PtyTransportSnapshot> {
+    let pumps = match thread_id {
+        Some(thread_id) => {
+            if validate_pty_thread_id(&thread_id).is_err() {
+                return Vec::new();
+            }
+            let guard = PTY_LIFECYCLES.lock();
+            guard
+                .live(&thread_id)
+                .map(|session| vec![session.pump.clone()])
+                .unwrap_or_default()
+        }
+        None => {
+            let guard = PTY_LIFECYCLES.lock();
+            guard
+                .live_sessions()
+                .into_iter()
+                .map(|(_, session)| session.pump.clone())
+                .collect::<Vec<_>>()
+        }
+    };
+    let mut snapshots = pumps
+        .into_iter()
+        .map(|pump| PtyTransportSnapshot::from(pump.snapshot()))
+        .collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+    snapshots
 }
 
 #[tauri::command]
@@ -2630,6 +2895,353 @@ async fn workspace_metrics(
 // Embedded browser pane (Tauri child Webview)
 // ----------------------------------------------------------------------------
 
+#[derive(Clone, Serialize)]
+struct BrowserAppShortcutPayload {
+    label: String,
+    url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserAutomationResultError {
+    code: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserAutomationCorrelation {
+    action_id: String,
+    tab_id: String,
+    generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserAutomationSuccessResult {
+    action_id: String,
+    tab_id: String,
+    generation: u64,
+    value: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserAutomationFailureResult {
+    action_id: String,
+    tab_id: String,
+    generation: u64,
+    error: BrowserAutomationResultError,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+enum BrowserAutomationResultPayload {
+    Success(BrowserAutomationSuccessResult),
+    Failure(BrowserAutomationFailureResult),
+}
+
+#[derive(Default)]
+struct BrowserAutomationAuthorizations {
+    by_label: Mutex<HashMap<String, BrowserAutomationCorrelation>>,
+}
+
+impl BrowserAutomationAuthorizations {
+    fn install(&self, label: &str, correlation: BrowserAutomationCorrelation) {
+        self.by_label.lock().insert(label.to_string(), correlation);
+    }
+
+    fn consume(&self, label: &str, correlation: &BrowserAutomationCorrelation) -> bool {
+        let mut authorizations = self.by_label.lock();
+        if authorizations.get(label) != Some(correlation) {
+            return false;
+        }
+        authorizations.remove(label);
+        true
+    }
+
+    fn remove(&self, label: &str) -> bool {
+        self.by_label.lock().remove(label).is_some()
+    }
+}
+
+impl BrowserAutomationResultPayload {
+    fn correlation(&self) -> BrowserAutomationCorrelation {
+        match self {
+            Self::Success(result) => BrowserAutomationCorrelation {
+                action_id: result.action_id.clone(),
+                tab_id: result.tab_id.clone(),
+                generation: result.generation,
+            },
+            Self::Failure(result) => BrowserAutomationCorrelation {
+                action_id: result.action_id.clone(),
+                tab_id: result.tab_id.clone(),
+                generation: result.generation,
+            },
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let correlation = self.correlation();
+        if correlation.action_id.is_empty()
+            || correlation.action_id.len() > 128
+            || correlation.tab_id.is_empty()
+            || correlation.tab_id.len() > 128
+        {
+            return Err("browser automation result correlation is invalid".to_string());
+        }
+        if correlation.generation > 9_007_199_254_740_991 {
+            return Err("browser automation result generation is invalid".to_string());
+        }
+        if let Self::Failure(result) = self {
+            const ALLOWED_CODES: &[&str] = &[
+                "action_cancelled",
+                "automation_failed",
+                "backend_unavailable",
+                "bad_request",
+                "effect_unknown",
+                "ref_missing",
+                "result_too_large",
+                "serialization_failed",
+                "snapshot_stale",
+                "target_changed",
+                "target_unavailable",
+                "unsupported_operation",
+            ];
+            if !ALLOWED_CODES.contains(&result.error.code.as_str()) {
+                return Err("browser automation result error code is invalid".to_string());
+            }
+        }
+        let encoded = serde_json::to_vec(self).map_err(|error| error.to_string())?;
+        if encoded.len() > MAX_PROVIDER_RESULT_BYTES {
+            return Err("browser automation result is too large".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct BrowserShortcutAuthorization {
+    initial_secret: String,
+    current_secret: String,
+    last_accepted: Option<Instant>,
+}
+
+#[derive(Default)]
+struct BrowserShortcutAuthorizations {
+    by_label: Mutex<HashMap<String, BrowserShortcutAuthorization>>,
+}
+
+impl BrowserShortcutAuthorizations {
+    fn install(&self, label: &str, initial_secret: String) {
+        self.by_label.lock().insert(
+            label.to_string(),
+            BrowserShortcutAuthorization {
+                current_secret: initial_secret.clone(),
+                initial_secret,
+                last_accepted: None,
+            },
+        );
+    }
+
+    fn reset(&self, label: &str) -> bool {
+        let mut authorizations = self.by_label.lock();
+        let Some(authorization) = authorizations.get_mut(label) else {
+            return false;
+        };
+        authorization.current_secret = authorization.initial_secret.clone();
+        authorization.last_accepted = None;
+        true
+    }
+
+    fn remove(&self, label: &str) -> bool {
+        self.by_label.lock().remove(label).is_some()
+    }
+
+    fn authorize_and_rotate<GenerateSecret, Dispatch>(
+        &self,
+        label: &str,
+        supplied_secret: &str,
+        now: Instant,
+        generate_secret: GenerateSecret,
+        dispatch: Dispatch,
+    ) -> Result<String, String>
+    where
+        GenerateSecret: FnOnce() -> Result<String, String>,
+        Dispatch: FnOnce() -> Result<(), String>,
+    {
+        if !label.starts_with(BROWSER_LABEL_PREFIX) {
+            return Err(
+                "browser app shortcut caller is not an embedded browser webview".to_string(),
+            );
+        }
+
+        let mut authorizations = self.by_label.lock();
+        let authorization = authorizations
+            .get_mut(label)
+            .ok_or_else(|| "browser app shortcut authorization is missing".to_string())?;
+        if !browser_shortcut_secrets_match(&authorization.current_secret, supplied_secret) {
+            return Err("browser app shortcut secret is invalid".to_string());
+        }
+        if authorization.last_accepted.is_some_and(|last_accepted| {
+            now.saturating_duration_since(last_accepted) < MIN_BROWSER_SHORTCUT_INTERVAL
+        }) {
+            return Err("browser app shortcut rate limit exceeded".to_string());
+        }
+
+        let next_secret = generate_secret()?;
+        if next_secret.is_empty()
+            || browser_shortcut_secrets_match(&authorization.current_secret, &next_secret)
+        {
+            return Err("browser app shortcut secret rotation failed".to_string());
+        }
+        dispatch()?;
+        authorization.current_secret = next_secret.clone();
+        authorization.last_accepted = Some(now);
+        Ok(next_secret)
+    }
+}
+
+fn browser_shortcut_secrets_match(expected: &str, supplied: &str) -> bool {
+    expected.len() == supplied.len()
+        && expected
+            .bytes()
+            .zip(supplied.bytes())
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
+}
+
+fn random_browser_shortcut_secret() -> Result<String, String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| format!("failed to generate browser shortcut secret: {error}"))?;
+    let mut secret = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        secret.push(HEX[(byte >> 4) as usize] as char);
+        secret.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(secret)
+}
+
+fn browser_shortcut_initialization_script(initial_secret: &str) -> Result<String, String> {
+    let secret_json = serde_json::to_string(initial_secret).map_err(|error| error.to_string())?;
+    Ok(r#"(function(initialSecret) {
+          try {
+            if (window.top !== window) return;
+            var core = window.__TAURI__ && window.__TAURI__.core;
+            if (!core || typeof core.invoke !== "function") return;
+            var invoke = core.invoke;
+            var promiseThen = Promise.prototype.then;
+            var reflectApply = Reflect.apply;
+            var stringToLowerCase = String.prototype.toLowerCase;
+            var secret = initialSecret;
+            window.addEventListener("keydown", function(event) {
+              try {
+                if (event.isTrusted !== true || event.repeat) return;
+                var key = event.key ? reflectApply(stringToLowerCase, event.key, []) : "";
+                var primary = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
+                var shortcut = "";
+                if ((event.metaKey || event.ctrlKey) && key === "t") {
+                  shortcut = "terminal-pane";
+                } else if (primary && key === "d") {
+                  shortcut = "agent-pane";
+                } else if (primary && key === "f") {
+                  shortcut = "composer";
+                } else {
+                  return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                var pending = reflectApply(invoke, core, [
+                  "browser_app_shortcut",
+                  { shortcut: shortcut, url: location.href, secret: secret }
+                ]);
+                reflectApply(promiseThen, pending, [
+                  function(nextSecret) {
+                    if (typeof nextSecret === "string" && nextSecret) {
+                      secret = nextSecret;
+                    }
+                  },
+                  function() {}
+                ]);
+              } catch (_) {}
+            }, true);
+          } catch (_) {}
+        })(__PSYCHE_BROWSER_SHORTCUT_INITIAL_SECRET__);"#
+        .replace("__PSYCHE_BROWSER_SHORTCUT_INITIAL_SECRET__", &secret_json))
+}
+
+fn resolve_browser_app_shortcut(label: &str, shortcut: &str) -> Result<&'static str, String> {
+    if !label.starts_with(BROWSER_LABEL_PREFIX) {
+        return Err("browser app shortcut caller is not an embedded browser webview".to_string());
+    }
+
+    match shortcut {
+        "terminal-pane" => Ok("browser:shortcut-terminal-pane"),
+        "agent-pane" => Ok("browser:shortcut-agent-pane"),
+        "composer" => Ok("browser:shortcut-composer"),
+        _ => Err(format!("unknown browser app shortcut: {shortcut}")),
+    }
+}
+
+#[tauri::command]
+fn browser_app_shortcut(
+    webview: tauri::Webview,
+    authorizations: State<'_, BrowserShortcutAuthorizations>,
+    shortcut: String,
+    url: String,
+    secret: String,
+) -> Result<String, String> {
+    let event = resolve_browser_app_shortcut(webview.label(), &shortcut)?;
+    authorizations.authorize_and_rotate(
+        webview.label(),
+        &secret,
+        Instant::now(),
+        random_browser_shortcut_secret,
+        || {
+            let main = webview
+                .app_handle()
+                .get_webview("main")
+                .ok_or_else(|| "main webview missing".to_string())?;
+            main.set_focus().map_err(|error| error.to_string())?;
+            webview
+                .app_handle()
+                .emit_to(
+                    "main",
+                    event,
+                    BrowserAppShortcutPayload {
+                        label: webview.label().to_string(),
+                        url,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
+#[tauri::command]
+fn browser_automation_result(
+    webview: tauri::Webview,
+    authorizations: State<'_, BrowserAutomationAuthorizations>,
+    result: BrowserAutomationResultPayload,
+) -> Result<(), String> {
+    if !webview.label().starts_with(BROWSER_LABEL_PREFIX) {
+        return Err(
+            "browser automation result caller is not an embedded browser webview".to_string(),
+        );
+    }
+    result.validate()?;
+    if !authorizations.consume(webview.label(), &result.correlation()) {
+        return Err("browser automation result does not match a pending action".to_string());
+    }
+    webview
+        .app_handle()
+        .emit_to("main", "browser:automation-result", result)
+        .map_err(|error| error.to_string())
+}
+
 fn ensure_browser(
     app: &AppHandle,
     label: &str,
@@ -2638,6 +3250,7 @@ fn ensure_browser(
     w: f64,
     h: f64,
     url: &str,
+    automation_source: &str,
 ) -> Result<bool, String> {
     if app.webviews().keys().any(|existing| existing == label) {
         return Ok(false);
@@ -2648,20 +3261,39 @@ fn ensure_browser(
         .ok_or_else(|| "main window missing".to_string())?;
 
     let parsed_url = Url::parse(url).map_err(|e| e.to_string())?;
+    let initial_secret = random_browser_shortcut_secret()?;
+    let shortcut_script = browser_shortcut_initialization_script(&initial_secret)?;
+    app.state::<BrowserShortcutAuthorizations>()
+        .install(label, initial_secret.clone());
     let browser_label = label.to_string();
     let app_for_load = app.clone();
-    let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url)).on_page_load(
-        move |webview, payload| {
+    let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url))
+        .initialization_script(shortcut_script)
+        .initialization_script(automation_source)
+        .on_page_load(move |webview, payload| {
+            if matches!(payload.event(), PageLoadEvent::Started) {
+                app_for_load
+                    .state::<BrowserShortcutAuthorizations>()
+                    .reset(&browser_label);
+                app_for_load
+                    .state::<BrowserAutomationAuthorizations>()
+                    .remove(&browser_label);
+            }
             let phase = match payload.event() {
                 PageLoadEvent::Started => "started",
                 PageLoadEvent::Finished => "finished",
             };
+            // Wry's page-load callback omits WKNavigation identity. Controlled
+            // navigation therefore never attaches its token here; completion
+            // is resolved only by the exact native WKNavigation hook below.
+            let navigation_token = None;
             let _ = app_for_load.emit(
                 "browser:page-load",
                 BrowserPageLoadEvent {
                     label: browser_label.clone(),
                     url: payload.url().to_string(),
                     phase: phase.to_string(),
+                    navigation_token,
                 },
             );
             if matches!(payload.event(), PageLoadEvent::Finished) {
@@ -2676,17 +3308,8 @@ fn ensure_browser(
                         }};
                         var title = document.title || location.hostname || location.href;
                         emit("browser:title", {{ label: browserLabel, title: title, url: location.href }});
-                        if (!window.__PSYCHE_BROWSER_SHORTCUTS_INSTALLED__) {{
-                          window.__PSYCHE_BROWSER_SHORTCUTS_INSTALLED__ = true;
-                          window.addEventListener("keydown", function(event) {{
-                            try {{
-                              if ((event.metaKey || event.ctrlKey) && event.key && event.key.toLowerCase() === "t") {{
-                                event.preventDefault();
-                                event.stopPropagation();
-                                emit("browser:shortcut-terminal-pane", {{ label: browserLabel, url: location.href }});
-                              }}
-                            }} catch (_) {{}}
-                          }}, true);
+                        if (!window.__PSYCHE_BROWSER_FOCUS_INSTALLED__) {{
+                          window.__PSYCHE_BROWSER_FOCUS_INSTALLED__ = true;
                           window.addEventListener("pointerdown", function() {{
                             emit("browser:focus", {{ label: browserLabel, url: location.href }});
                           }}, true);
@@ -2700,15 +3323,16 @@ fn ensure_browser(
                 );
                 let _ = webview.eval(&script);
             }
-        },
-    );
+        });
 
-    main.add_child(
+    if let Err(error) = main.add_child(
         builder,
         LogicalPosition::new(x, y),
         LogicalSize::new(w.max(1.0), h.max(1.0)),
-    )
-    .map_err(|e| e.to_string())?;
+    ) {
+        app.state::<BrowserShortcutAuthorizations>().remove(label);
+        return Err(error.to_string());
+    }
 
     Ok(true)
 }
@@ -2723,8 +3347,68 @@ fn hide_webview(webview: &tauri::Webview) -> Result<(), String> {
     Ok(())
 }
 
+fn cleanup_created_browser_after_setup_failure(
+    created: bool,
+    close: impl FnOnce() -> Result<(), String>,
+) {
+    if created {
+        let _ = close();
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn start_browser_navigation(
+    webview: &tauri::Webview,
+    label: &str,
+    url: &str,
+) -> Result<(), String> {
+    let label = label.to_string();
+    let url = url.to_string();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    webview
+        .with_webview(move |platform_webview| unsafe {
+            let result = (|| {
+                let wk_webview = &*(platform_webview.inner().cast::<WKWebView>());
+                let delegate = wk_webview
+                    .navigationDelegate()
+                    .ok_or_else(|| "browser navigation delegate is unavailable".to_string())?;
+                let delegate_object = &*((&*delegate) as *const _ as *const AnyObject);
+                install_browser_navigation_identity_hook(delegate_object)?;
+                let url_string = NSString::from_str(&url);
+                let native_url = NSURL::URLWithString(&url_string)
+                    .ok_or_else(|| "browser navigation URL is invalid".to_string())?;
+                let request = NSURLRequest::requestWithURL(&native_url);
+                let navigation = wk_webview
+                    .loadRequest(&request)
+                    .ok_or_else(|| "browser navigation did not start".to_string())?;
+                let navigation_identity = (&*navigation) as *const WKNavigation as usize;
+                let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+                let waiter = waiters
+                    .get_mut(&label)
+                    .ok_or_else(|| "browser navigation waiter is missing".to_string())?;
+                waiter.navigation_identity = Some(navigation_identity);
+                Ok(())
+            })();
+            let _ = sender.send(result);
+        })
+        .map_err(|error| error.to_string())?;
+    receiver
+        .await
+        .map_err(|_| "browser navigation setup was cancelled".to_string())?
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn start_browser_navigation(
+    _webview: &tauri::Webview,
+    _label: &str,
+    _url: &str,
+) -> Result<(), String> {
+    Err("backend_unavailable: exact browser navigation identity is unsupported".to_string())
+}
+
 #[tauri::command]
-fn browser_navigate(
+async fn browser_navigate(
+    webview: tauri::Webview,
     app: AppHandle,
     label: Option<String>,
     url: String,
@@ -2732,27 +3416,72 @@ fn browser_navigate(
     y: f64,
     w: f64,
     h: f64,
-) -> Result<(), String> {
+    navigation_token: String,
+    automation_source: String,
+) -> Result<BrowserNavigationResult, String> {
+    ensure_trusted_browser_caller(webview.label())?;
+    if navigation_token.is_empty() || navigation_token.len() > 128 {
+        return Err("browser navigation token is invalid".to_string());
+    }
+    if automation_source.is_empty() || automation_source.len() > 1024 * 1024 {
+        return Err("browser automation initialization source is invalid".to_string());
+    }
     let label = safe_browser_label(label);
-    let created = ensure_browser(&app, &label, x, y, w, h, &url)?;
+    Url::parse(&url).map_err(|error| error.to_string())?;
+    let (completion, receiver) = tokio::sync::oneshot::channel();
+    {
+        let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+        if waiters.contains_key(&label) {
+            return Err("browser navigation is already in progress".to_string());
+        }
+        waiters.insert(
+            label.clone(),
+            BrowserNavigationWaiter {
+                token: navigation_token.clone(),
+                navigation_identity: None,
+                completion: Some(completion),
+            },
+        );
+    }
+    let _waiter_guard = BrowserNavigationWaiterGuard {
+        label: label.clone(),
+        token: navigation_token.clone(),
+    };
+    let created = ensure_browser(&app, &label, x, y, w, h, &url, &automation_source)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser webview missing".to_string())?;
     if !created {
-        let webview = app
-            .get_webview(&label)
-            .ok_or_else(|| "browser webview missing".to_string())?;
         webview
             .set_position(LogicalPosition::new(x, y))
             .map_err(|e| e.to_string())?;
         webview
             .set_size(LogicalSize::new(w.max(1.0), h.max(1.0)))
             .map_err(|e| e.to_string())?;
-        let parsed_url = Url::parse(&url).map_err(|e| e.to_string())?;
-        webview.navigate(parsed_url).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    if let Err(error) = start_browser_navigation(&webview, &label, &url).await {
+        cleanup_created_browser_after_setup_failure(created, || {
+            webview
+                .close()
+                .map_err(|close_error| close_error.to_string())
+        });
+        return Err(error);
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(30), receiver).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("browser navigation was cancelled".to_string()),
+        Err(_) => {
+            if let Some(webview) = app.get_webview(&label) {
+                let _ = webview.close();
+            }
+            Err("browser navigation timed out".to_string())
+        }
+    }
 }
 
 #[tauri::command]
 fn browser_set_bounds(
+    webview: tauri::Webview,
     app: AppHandle,
     label: Option<String>,
     x: f64,
@@ -2760,6 +3489,7 @@ fn browser_set_bounds(
     w: f64,
     h: f64,
 ) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
         webview
@@ -2773,7 +3503,12 @@ fn browser_set_bounds(
 }
 
 #[tauri::command]
-fn browser_hide(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_hide(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
         hide_webview(&webview)?;
@@ -2782,7 +3517,12 @@ fn browser_hide(app: AppHandle, label: Option<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn browser_hide_all_except(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_hide_all_except(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let keep = label.map(|raw| safe_browser_label(Some(raw)));
     for (existing_label, webview) in app.webviews() {
         if existing_label.starts_with(BROWSER_LABEL_PREFIX) && Some(existing_label.clone()) != keep
@@ -2795,14 +3535,23 @@ fn browser_hide_all_except(app: AppHandle, label: Option<String>) -> Result<(), 
 
 fn destroy_browser_webview(app: &AppHandle, label: Option<String>) -> Result<(), String> {
     let label = safe_browser_label(label);
+    BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
     if let Some(webview) = app.get_webview(&label) {
         webview.close().map_err(|error| error.to_string())?;
     }
+    app.state::<BrowserShortcutAuthorizations>().remove(&label);
+    app.state::<BrowserAutomationAuthorizations>()
+        .remove(&label);
     Ok(())
 }
 
 #[tauri::command]
-fn browser_destroy(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_destroy(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     destroy_browser_webview(&app, label)
 }
 
@@ -2821,7 +3570,12 @@ struct BrowserDestroyManyOutcome {
 }
 
 #[tauri::command]
-fn browser_destroy_many(app: AppHandle, labels: Vec<String>) -> BrowserDestroyManyOutcome {
+fn browser_destroy_many(
+    webview: tauri::Webview,
+    app: AppHandle,
+    labels: Vec<String>,
+) -> Result<BrowserDestroyManyOutcome, String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let mut outcome = BrowserDestroyManyOutcome {
         destroyed: Vec::new(),
         failures: Vec::new(),
@@ -2834,11 +3588,16 @@ fn browser_destroy_many(app: AppHandle, labels: Vec<String>) -> BrowserDestroyMa
                 .push(BrowserDestroyFailure { label, error }),
         }
     }
-    outcome
+    Ok(outcome)
 }
 
 #[tauri::command]
-fn browser_reload(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_reload(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
         webview.reload().map_err(|e| e.to_string())?;
@@ -2847,12 +3606,349 @@ fn browser_reload(app: AppHandle, label: Option<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn browser_eval(app: AppHandle, label: Option<String>, script: String) -> Result<(), String> {
+fn browser_eval(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+    script: String,
+    automation_receipt: Option<BrowserAutomationCorrelation>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
-        webview.eval(&script).map_err(|e| e.to_string())?;
+        if let Some(correlation) = automation_receipt {
+            let authorizations = app.state::<BrowserAutomationAuthorizations>();
+            authorizations.install(&label, correlation.clone());
+            if let Err(error) = webview.eval(&script) {
+                authorizations.consume(&label, &correlation);
+                return Err(error.to_string());
+            }
+        } else {
+            webview.eval(&script).map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserScriptRequest {
+    source: String,
+    #[serde(default)]
+    args: serde_json::Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserScriptResponse {
+    value: serde_json::Value,
+    result_bytes: usize,
+    duration_ms: f64,
+}
+
+fn browser_script_execution_world_name() -> &'static str {
+    BROWSER_SCRIPT_CONTEXT_WORLD_NAME
+}
+
+fn classify_browser_script_callback<T>(
+    callback_result: Result<T, String>,
+    expected_document_token: &str,
+    observed_document_token: Result<String, String>,
+) -> Result<T, String> {
+    match observed_document_token {
+        Ok(token) if token == expected_document_token => callback_result,
+        Ok(_) | Err(_) => Err("effect_unknown".to_string()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn evaluate_browser_script_in_world(
+    webview: &tauri::Webview,
+    script: String,
+    world_name: String,
+) -> Result<String, String> {
+    use block2::RcBlock;
+    use objc2::{runtime::AnyObject, ClassType, MainThreadMarker};
+    use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
+    use objc2_web_kit::{WKContentWorld, WKWebView};
+
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    webview
+        .with_webview(move |platform_webview| {
+            let sender = Mutex::new(Some(sender));
+            let completion = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+                let result = if !error.is_null() || value.is_null() {
+                    Err("automation_failed".to_string())
+                } else {
+                    let object = unsafe { &*(value as *const NSObject) };
+                    if !object.isKindOfClass(NSString::class()) {
+                        Err("serialization_failed".to_string())
+                    } else {
+                        Ok(unsafe { &*(value as *const AnyObject as *const NSString) }.to_string())
+                    }
+                };
+                if let Some(sender) = sender.lock().take() {
+                    let _ = sender.send(result);
+                }
+            });
+            let mtm = MainThreadMarker::new().expect("WKWebView callback runs on the main thread");
+            let world_name = NSString::from_str(&world_name);
+            let world = unsafe { WKContentWorld::worldWithName(&world_name, mtm) };
+            let source = NSString::from_str(&script);
+            let webview = unsafe { &*(platform_webview.inner() as *mut WKWebView) };
+            unsafe {
+                webview.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                    &source,
+                    None,
+                    &world,
+                    Some(&completion),
+                )
+            };
+        })
+        .map_err(|error| error.to_string())?;
+    tokio::time::timeout(BROWSER_SCRIPT_TIMEOUT, receiver)
+        .await
+        .map_err(|_| "effect_unknown".to_string())?
+        .map_err(|_| "effect_unknown".to_string())?
+}
+
+#[cfg(target_os = "macos")]
+async fn evaluate_browser_script_document_token(
+    webview: &tauri::Webview,
+) -> Result<String, String> {
+    let script = r#"(() => {
+      const key = '__PSYCHE_BROWSER_SCRIPT_DOCUMENT_CONTEXT__';
+      let state = globalThis[key];
+      if (!state || state.document !== document || state.root !== document.documentElement) {
+        state = Object.freeze({ document, root: document.documentElement,
+          token: crypto.randomUUID() });
+        Object.defineProperty(globalThis, key, { value: state, configurable: true });
+      }
+      return JSON.stringify({ documentToken: state.token });
+    })()"#;
+    let result_json = evaluate_browser_script_in_world(
+        webview,
+        script.to_string(),
+        BROWSER_SCRIPT_CONTEXT_WORLD_NAME.to_string(),
+    )
+    .await
+    .map_err(|_| "document_token_unavailable".to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(&result_json).map_err(|_| "document_token_unavailable".to_string())?;
+    value
+        .get("documentToken")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| "document_token_unavailable".to_string())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn browser_script(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+    request: BrowserScriptRequest,
+) -> Result<BrowserScriptResponse, String> {
+    ensure_trusted_browser_caller(webview.label())?;
+    if request.source.len() > MAX_BROWSER_SCRIPT_SOURCE_BYTES {
+        return Err("script_source_too_large".to_string());
+    }
+    let argument_bytes =
+        serde_json::to_vec(&request.args).map_err(|_| "serialization_failed".to_string())?;
+    if argument_bytes.len() > MAX_BROWSER_SCRIPT_ARGS_BYTES {
+        return Err("args_too_large".to_string());
+    }
+    let label = safe_browser_label(label);
+    let browser = app
+        .get_webview(&label)
+        .ok_or_else(|| "target_unavailable".to_string())?;
+    let before_url = browser
+        .url()
+        .map_err(|_| "target_unavailable".to_string())?;
+    let document_token = evaluate_browser_script_document_token(&browser)
+        .await
+        .map_err(|_| "effect_unknown".to_string())?;
+    let input = serde_json::to_string(&serde_json::json!({
+        "source": request.source,
+        "args": request.args,
+        "workerSource": include_str!("../../web/control/browser-script-worker-runtime.js"),
+        "expectedUrl": before_url.as_str(),
+        "expectedDocumentToken": document_token,
+    }))
+    .map_err(|_| "serialization_failed".to_string())?;
+    let script = format!(
+        "{}({})",
+        include_str!("../../web/control/browser-script-runtime.js"),
+        input
+    );
+    let callback_result = evaluate_browser_script_in_world(
+        &browser,
+        script,
+        browser_script_execution_world_name().to_string(),
+    )
+    .await;
+    let after_url = browser.url().map_err(|_| "effect_unknown".to_string())?;
+    if after_url != before_url {
+        return Err("effect_unknown".to_string());
+    }
+    let observed_document_token = evaluate_browser_script_document_token(&browser).await;
+    let result_json = classify_browser_script_callback(
+        callback_result,
+        &document_token,
+        observed_document_token,
+    )?;
+    let envelope: serde_json::Value =
+        serde_json::from_str(&result_json).map_err(|_| "serialization_failed".to_string())?;
+    if envelope.get("ok") != Some(&serde_json::Value::Bool(true)) {
+        let code = envelope
+            .get("code")
+            .and_then(|value| value.as_str())
+            .filter(|code| {
+                matches!(
+                    *code,
+                    "automation_failed"
+                        | "effect_unknown"
+                        | "result_too_large"
+                        | "serialization_failed"
+                        | "snapshot_too_large"
+                        | "mutation_plan_invalid"
+                        | "mutation_target_stale"
+                        | "mutation_not_allowed"
+                )
+            })
+            .unwrap_or("automation_failed");
+        return Err(code.to_string());
+    }
+    let result_text = envelope
+        .get("json")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "serialization_failed".to_string())?;
+    let result_bytes = envelope
+        .get("byteCount")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| "serialization_failed".to_string())?;
+    let duration_ms = envelope
+        .get("durationMs")
+        .and_then(|value| value.as_f64())
+        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 5000.0)
+        .ok_or_else(|| "serialization_failed".to_string())?;
+    if result_bytes != result_text.len() || result_bytes > MAX_BROWSER_SCRIPT_RESULT_BYTES {
+        return Err("result_too_large".to_string());
+    }
+    let value =
+        serde_json::from_str(result_text).map_err(|_| "serialization_failed".to_string())?;
+    Ok(BrowserScriptResponse {
+        value,
+        result_bytes,
+        duration_ms,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn browser_script(
+    webview: tauri::Webview,
+    _app: AppHandle,
+    _label: Option<String>,
+    _request: BrowserScriptRequest,
+) -> Result<BrowserScriptResponse, String> {
+    ensure_trusted_browser_caller(webview.label())?;
+    Err("backend_unavailable".to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserSnapshot {
+    png_base64: String,
+    width: u32,
+    height: u32,
+}
+
+/// Captures only an exact child browser webview. macOS uses that child's native
+/// WKWebView snapshot API; other platforms fail closed without desktop or
+/// coordinate capture.
+#[tauri::command]
+async fn browser_snapshot(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<BrowserSnapshot, String> {
+    ensure_trusted_browser_caller(webview.label())?;
+    let label = safe_browser_label(label);
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser webview missing".to_string())?;
+    let size = webview.size().map_err(|error| error.to_string())?;
+    validate_browser_snapshot_dimensions(size.width, size.height)?;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = webview;
+        return Err(
+            "backend_unavailable: browser snapshot is unsupported on this platform".to_string(),
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        webview
+            .with_webview(move |platform_webview| unsafe {
+                let wk_webview = &*(platform_webview.inner().cast::<WKWebView>());
+                let sender = std::sync::Mutex::new(Some(sender));
+                let completion =
+                    block2::RcBlock::new(move |image: *mut NSImage, _error: *mut NSError| {
+                        let result = (|| {
+                            let image = image
+                                .as_ref()
+                                .ok_or_else(|| "browser snapshot failed".to_string())?;
+                            let tiff = image
+                                .TIFFRepresentation()
+                                .ok_or_else(|| "browser snapshot encoding failed".to_string())?;
+                            let bitmap =
+                                NSBitmapImageRep::imageRepWithData(&tiff).ok_or_else(|| {
+                                    "browser snapshot bitmap is unavailable".to_string()
+                                })?;
+                            let width = u32::try_from(bitmap.pixelsWide())
+                                .map_err(|_| "browser snapshot width is invalid".to_string())?;
+                            let height = u32::try_from(bitmap.pixelsHigh())
+                                .map_err(|_| "browser snapshot height is invalid".to_string())?;
+                            validate_browser_snapshot_dimensions(width, height)?;
+                            let properties =
+                                NSDictionary::<NSBitmapImageRepPropertyKey, AnyObject>::new();
+                            let png = bitmap
+                                .representationUsingType_properties(
+                                    NSBitmapImageFileType::PNG,
+                                    &properties,
+                                )
+                                .ok_or_else(|| {
+                                    "browser snapshot PNG encoding failed".to_string()
+                                })?;
+                            let bytes = png.as_bytes_unchecked();
+                            if bytes.len() > MAX_BROWSER_SNAPSHOT_BYTES {
+                                return Err("browser snapshot exceeds maximum size".to_string());
+                            }
+                            Ok(BrowserSnapshot {
+                                png_base64: BASE64_STANDARD.encode(bytes),
+                                width,
+                                height,
+                            })
+                        })();
+                        if let Some(sender) =
+                            sender.lock().ok().and_then(|mut sender| sender.take())
+                        {
+                            let _ = sender.send(result);
+                        }
+                    });
+                wk_webview.takeSnapshotWithConfiguration_completionHandler(None, &completion);
+            })
+            .map_err(|error| error.to_string())?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), receiver)
+            .await
+            .map_err(|_| "browser snapshot timed out".to_string())?
+            .map_err(|_| "browser snapshot callback was dropped".to_string())?
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -2919,6 +4015,83 @@ fn app_environment() -> AppEnvironment {
         default_shell,
         default_shell_args,
         native_workspace_v2,
+    }
+}
+
+fn native_launch_command(request: &NativeSessionCreate) -> Result<(String, Vec<String>), String> {
+    #[cfg(not(unix))]
+    {
+        let _ = request;
+        return Err("durable native sessions require tmux on a Unix platform".to_string());
+    }
+
+    #[cfg(unix)]
+    {
+        let environment = app_environment();
+        let (executable, command_args) = match &request.launch_kind {
+            NativeLaunchKind::Shell => (environment.default_shell, environment.default_shell_args),
+            NativeLaunchKind::Psyche => (
+                environment
+                    .node_path
+                    .ok_or_else(|| "node is unavailable".to_string())?,
+                vec![environment
+                    .psyche_entry
+                    .ok_or_else(|| "Psyche entrypoint is unavailable".to_string())?],
+            ),
+            NativeLaunchKind::CovenChat => {
+                let id = request
+                    .coven_session_id
+                    .clone()
+                    .filter(|id| is_safe_session_id(id))
+                    .ok_or_else(|| "Coven session id is unsafe".to_string())?;
+                (
+                    environment
+                        .coven_path
+                        .ok_or_else(|| "Coven CLI is unavailable".to_string())?,
+                    vec!["code".to_string(), "--session-id".to_string(), id],
+                )
+            }
+            NativeLaunchKind::CovenAttach => {
+                let id = request
+                    .coven_session_id
+                    .clone()
+                    .filter(|id| is_safe_session_id(id))
+                    .ok_or_else(|| "Coven session id is unsafe".to_string())?;
+                (
+                    environment
+                        .coven_path
+                        .ok_or_else(|| "Coven CLI is unavailable".to_string())?,
+                    vec!["attach".to_string(), id],
+                )
+            }
+        };
+        let mut args = vec![
+            "-u".to_string(),
+            "TMUX".to_string(),
+            "-u".to_string(),
+            "npm_config_prefix".to_string(),
+            "-u".to_string(),
+            "NPM_CONFIG_PREFIX".to_string(),
+            "-u".to_string(),
+            "PREFIX".to_string(),
+            format!("PATH={}", platform::augmented_path().to_string_lossy()),
+            "TERM=xterm-256color".to_string(),
+            "COLORTERM=truecolor".to_string(),
+            "PSYCHE_TAURI=1".to_string(),
+            "PSYCHE_NATIVE_CONTAINER=1".to_string(),
+        ];
+        if matches!(request.launch_kind, NativeLaunchKind::CovenChat) {
+            args.push(format!("{COVEN_SESSION_SOURCE}={PSYCHE_SESSION_SOURCE}"));
+        }
+        if matches!(request.launch_kind, NativeLaunchKind::Psyche) {
+            let home = environment
+                .home
+                .ok_or_else(|| "home directory is unavailable".to_string())?;
+            args.push(format!("TMUX_TMPDIR={home}/.psyche/macos-app/nested-tmux"));
+        }
+        args.push(executable);
+        args.extend(command_args);
+        Ok(("/usr/bin/env".to_string(), args))
     }
 }
 
@@ -4200,14 +5373,23 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(MetricsState::default())
+        .manage(ControlProviderState::default())
+        .manage(BrowserShortcutAuthorizations::default())
+        .manage(BrowserAutomationAuthorizations::default())
         .invoke_handler(tauri::generate_handler![
             pty_start,
+            pty_attach,
             pane_session_metrics,
             canonical_project_path,
             pty_write,
             pty_resize,
+            pty_ack,
+            pty_set_visibility,
             pty_stop,
             pty_list,
+            pty_transport_metrics,
+            browser_app_shortcut,
+            browser_automation_result,
             browser_navigate,
             browser_set_bounds,
             browser_hide,
@@ -4216,11 +5398,17 @@ pub fn run() {
             browser_destroy_many,
             browser_reload,
             browser_eval,
+            browser_script,
+            browser_snapshot,
             app_environment,
             coven_sessions,
             coven_session_kill,
             workspace_load,
             workspace_save,
+            native_session_create,
+            native_session_list,
+            native_session_stop,
+            native_session_capture,
             agent_skills,
             fs_list_dir,
             fs_read_text,
@@ -4230,6 +5418,14 @@ pub fn run() {
             git_diff,
             git_log,
             workspace_metrics,
+            control_provider_start,
+            control_provider_stop,
+            control_provider_upsert,
+            control_provider_remove,
+            control_provider_complete,
+            control_provider_shutdown,
+            control_operator_submit,
+            control_state,
         ])
         .setup(|app| {
             if let Err(error) = platform::configure_window(app) {
@@ -4242,9 +5438,342 @@ pub fn run() {
 }
 
 #[cfg(test)]
+mod browser_app_shortcut_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    fn authorize(
+        authorizations: &BrowserShortcutAuthorizations,
+        label: &str,
+        secret: &str,
+        now: Instant,
+        next_secret: &str,
+        dispatched: &Cell<usize>,
+    ) -> Result<String, String> {
+        authorizations.authorize_and_rotate(
+            label,
+            secret,
+            now,
+            || Ok(next_secret.to_string()),
+            || {
+                dispatched.set(dispatched.get() + 1);
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn browser_app_shortcut_accepts_supported_mappings() {
+        let label = "psyche-browser-project-1";
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "terminal-pane").unwrap(),
+            "browser:shortcut-terminal-pane"
+        );
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "agent-pane").unwrap(),
+            "browser:shortcut-agent-pane"
+        );
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "composer").unwrap(),
+            "browser:shortcut-composer"
+        );
+    }
+
+    #[test]
+    fn browser_app_shortcut_rejects_untrusted_callers_and_unknown_actions() {
+        assert!(resolve_browser_app_shortcut("main", "terminal-pane").is_err());
+        assert!(resolve_browser_app_shortcut("psyche-browser-project-1", "new-tab").is_err());
+    }
+
+    #[test]
+    fn browser_app_shortcut_rejects_invalid_secrets_without_dispatching() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let dispatched = Cell::new(0);
+
+        assert!(authorize(
+            &authorizations,
+            label,
+            "wrong-secret",
+            Instant::now(),
+            "next-secret",
+            &dispatched,
+        )
+        .is_err());
+        assert_eq!(dispatched.get(), 0);
+    }
+
+    #[test]
+    fn browser_app_shortcut_rotates_only_after_successful_dispatch() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let now = Instant::now();
+
+        let failed = authorizations.authorize_and_rotate(
+            label,
+            "initial-secret",
+            now,
+            || Ok("unused-secret".to_string()),
+            || Err("dispatch failed".to_string()),
+        );
+        assert_eq!(failed.unwrap_err(), "dispatch failed");
+
+        let dispatched = Cell::new(0);
+        assert_eq!(
+            authorize(
+                &authorizations,
+                label,
+                "initial-secret",
+                now,
+                "rotated-secret",
+                &dispatched,
+            )
+            .unwrap(),
+            "rotated-secret"
+        );
+        assert_eq!(dispatched.get(), 1);
+        assert!(authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            now + MIN_BROWSER_SHORTCUT_INTERVAL,
+            "another-secret",
+            &dispatched,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn browser_app_shortcut_rate_limits_without_rotating() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let now = Instant::now();
+        let dispatched = Cell::new(0);
+
+        authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            now,
+            "second-secret",
+            &dispatched,
+        )
+        .unwrap();
+        assert!(authorize(
+            &authorizations,
+            label,
+            "second-secret",
+            now + MIN_BROWSER_SHORTCUT_INTERVAL - Duration::from_millis(1),
+            "too-fast-secret",
+            &dispatched,
+        )
+        .is_err());
+        assert_eq!(dispatched.get(), 1);
+        assert_eq!(
+            authorize(
+                &authorizations,
+                label,
+                "second-secret",
+                now + MIN_BROWSER_SHORTCUT_INTERVAL,
+                "third-secret",
+                &dispatched,
+            )
+            .unwrap(),
+            "third-secret"
+        );
+        assert_eq!(dispatched.get(), 2);
+    }
+
+    #[test]
+    fn browser_app_shortcut_navigation_reset_restores_initial_secret() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let now = Instant::now();
+        let dispatched = Cell::new(0);
+
+        authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            now,
+            "rotated-secret",
+            &dispatched,
+        )
+        .unwrap();
+        assert!(authorizations.reset(label));
+        assert_eq!(
+            authorize(
+                &authorizations,
+                label,
+                "initial-secret",
+                now,
+                "post-navigation-secret",
+                &dispatched,
+            )
+            .unwrap(),
+            "post-navigation-secret"
+        );
+        assert!(authorize(
+            &authorizations,
+            label,
+            "rotated-secret",
+            now + MIN_BROWSER_SHORTCUT_INTERVAL,
+            "unused-secret",
+            &dispatched,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn browser_app_shortcut_cleanup_removes_authorization() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        assert!(authorizations.remove(label));
+
+        let dispatched = Cell::new(0);
+        assert!(authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            Instant::now(),
+            "next-secret",
+            &dispatched,
+        )
+        .is_err());
+        assert_eq!(dispatched.get(), 0);
+    }
+
+    #[test]
+    fn browser_app_shortcut_secret_is_random_hex() {
+        let secret = random_browser_shortcut_secret().unwrap();
+        assert_eq!(secret.len(), 64);
+        assert!(secret.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn browser_automation_result_accepts_bounded_success_and_failure_payloads() {
+        let success: BrowserAutomationResultPayload = serde_json::from_value(serde_json::json!({
+            "actionId": "action-1",
+            "tabId": "tab-1",
+            "generation": 1,
+            "value": null
+        }))
+        .unwrap();
+        assert!(success.validate().is_ok());
+
+        let failure: BrowserAutomationResultPayload = serde_json::from_value(serde_json::json!({
+            "actionId": "action-1",
+            "tabId": "tab-1",
+            "generation": 1,
+            "error": { "code": "effect_unknown" }
+        }))
+        .unwrap();
+        assert!(failure.validate().is_ok());
+    }
+
+    #[test]
+    fn browser_automation_result_rejects_unbounded_or_ambiguous_payloads() {
+        let unknown_code: BrowserAutomationResultPayload =
+            serde_json::from_value(serde_json::json!({
+                "actionId": "action-1",
+                "tabId": "tab-1",
+                "generation": 1,
+                "error": { "code": "forged" }
+            }))
+            .unwrap();
+        assert!(unknown_code.validate().is_err());
+
+        assert!(
+            serde_json::from_value::<BrowserAutomationResultPayload>(serde_json::json!({
+                "actionId": "action-1",
+                "tabId": "tab-1",
+                "generation": 1,
+                "value": {},
+                "error": { "code": "automation_failed" }
+            }))
+            .is_err()
+        );
+
+        let oversized: BrowserAutomationResultPayload = serde_json::from_value(serde_json::json!({
+            "actionId": "action-1",
+            "tabId": "tab-1",
+            "generation": 1,
+            "value": "x".repeat(MAX_PROVIDER_RESULT_BYTES)
+        }))
+        .unwrap();
+        assert!(oversized.validate().is_err());
+    }
+
+    #[test]
+    fn browser_automation_result_consumes_only_the_exact_pending_correlation() {
+        let authorizations = BrowserAutomationAuthorizations::default();
+        let correlation = BrowserAutomationCorrelation {
+            action_id: "action-1".to_string(),
+            tab_id: "tab-1".to_string(),
+            generation: 7,
+        };
+        authorizations.install("psyche-browser-project-1", correlation.clone());
+        assert!(!authorizations.consume("psyche-browser-project-2", &correlation));
+        assert!(!authorizations.consume(
+            "psyche-browser-project-1",
+            &BrowserAutomationCorrelation {
+                generation: 8,
+                ..correlation.clone()
+            },
+        ));
+        assert!(authorizations.consume("psyche-browser-project-1", &correlation));
+        assert!(!authorizations.consume("psyche-browser-project-1", &correlation));
+    }
+
+    #[test]
+    fn browser_script_callback_is_stable_only_for_the_same_document() {
+        assert_eq!(
+            classify_browser_script_callback(
+                Err::<String, _>("automation_failed".to_string()),
+                "approved-token",
+                Ok("approved-token".to_string()),
+            ),
+            Err("automation_failed".to_string()),
+        );
+        assert_eq!(
+            classify_browser_script_callback(
+                Ok("old result"),
+                "approved-token",
+                Ok("replacement-token".to_string()),
+            ),
+            Err("effect_unknown".to_string()),
+        );
+    }
+
+    #[test]
+    fn browser_script_execution_uses_the_document_context_world() {
+        assert_eq!(
+            browser_script_execution_world_name(),
+            BROWSER_SCRIPT_CONTEXT_WORLD_NAME
+        );
+    }
+
+    #[test]
+    fn browser_script_worker_runtime_is_embedded_and_bounded() {
+        assert!(
+            include_str!("../../web/control/browser-script-worker-runtime.js")
+                .contains("installBrowserScriptWorkerRuntime")
+        );
+        assert_eq!(MAX_BROWSER_SCRIPT_ARGS_BYTES, 256 * 1024);
+    }
+}
+
+#[cfg(test)]
 mod pty_runtime_tests {
     #[cfg(unix)]
     use std::collections::VecDeque;
+    use std::future::Future;
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc};
@@ -4253,6 +5782,190 @@ mod pty_runtime_tests {
     use super::*;
     #[cfg(not(windows))]
     use portable_pty::ChildKiller;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pty_operation_lane_prevents_a_later_operation_from_overtaking() {
+        let lane = Arc::new(tokio::sync::Mutex::new(()));
+        let initial_guard = Arc::clone(&lane).lock_owned().await;
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let (first_waiting_tx, first_waiting_rx) = tokio::sync::oneshot::channel();
+        let first_lane = Arc::clone(&lane);
+        let first_order = Arc::clone(&order);
+        let first = tokio::spawn(async move {
+            let mut first_waiting_tx = Some(first_waiting_tx);
+            let lock = first_lane.lock_owned();
+            tokio::pin!(lock);
+            let _guard = std::future::poll_fn(|context| {
+                let result = lock.as_mut().poll(context);
+                if result.is_pending() {
+                    if let Some(waiting_tx) = first_waiting_tx.take() {
+                        let _ = waiting_tx.send(());
+                    }
+                }
+                result
+            })
+            .await;
+            first_order.lock().push(1);
+        });
+        first_waiting_rx.await.unwrap();
+
+        let (second_waiting_tx, second_waiting_rx) = tokio::sync::oneshot::channel();
+        let second_lane = Arc::clone(&lane);
+        let second_order = Arc::clone(&order);
+        let second = tokio::spawn(async move {
+            let mut second_waiting_tx = Some(second_waiting_tx);
+            let lock = second_lane.lock_owned();
+            tokio::pin!(lock);
+            let _guard = std::future::poll_fn(|context| {
+                let result = lock.as_mut().poll(context);
+                if result.is_pending() {
+                    if let Some(waiting_tx) = second_waiting_tx.take() {
+                        let _ = waiting_tx.send(());
+                    }
+                }
+                result
+            })
+            .await;
+            second_order.lock().push(2);
+        });
+        second_waiting_rx.await.unwrap();
+
+        drop(initial_guard);
+        first.await.unwrap();
+        second.await.unwrap();
+        assert_eq!(*order.lock(), vec![1, 2]);
+    }
+
+    #[test]
+    fn pty_operation_admission_is_bounded() {
+        let admission = Arc::new(tokio::sync::Semaphore::new(2));
+        let first = Arc::clone(&admission).try_acquire_owned().unwrap();
+        let second = Arc::clone(&admission).try_acquire_owned().unwrap();
+        assert!(Arc::clone(&admission).try_acquire_owned().is_err());
+        drop(first);
+        assert!(Arc::clone(&admission).try_acquire_owned().is_ok());
+        drop(second);
+    }
+
+    #[test]
+    fn browser_privileged_commands_reject_external_callers() {
+        assert_eq!(ensure_trusted_browser_caller("main"), Ok(()));
+        assert!(ensure_trusted_browser_caller("psyche-browser-untrusted").is_err());
+    }
+
+    #[test]
+    fn pty_privileged_commands_reject_external_callers() {
+        assert_eq!(ensure_trusted_pty_caller("main"), Ok(()));
+        assert_eq!(
+            ensure_trusted_pty_caller("psyche-browser-untrusted").unwrap_err(),
+            "PTY authority is only available to trusted webview 'main'; rejected caller 'psyche-browser-untrusted'"
+        );
+    }
+
+    #[test]
+    fn browser_snapshot_dimensions_are_bounded_before_capture() {
+        assert!(validate_browser_snapshot_dimensions(800, 600).is_ok());
+        assert!(validate_browser_snapshot_dimensions(0, 600).is_err());
+        assert!(validate_browser_snapshot_dimensions(8192, 8192).is_err());
+    }
+
+    fn browser_navigation_waiter(_url: &str) -> BrowserNavigationWaiter {
+        let (completion, _receiver) = tokio::sync::oneshot::channel();
+        BrowserNavigationWaiter {
+            token: "requested-token".to_string(),
+            navigation_identity: None,
+            completion: Some(completion),
+        }
+    }
+
+    #[test]
+    fn browser_navigation_waiters_correlate_only_exact_native_identity() {
+        let requested_label = "browser-native-identity-requested".to_string();
+        let unrelated_label = "browser-native-identity-unrelated".to_string();
+        let (requested_sender, mut requested_receiver) = tokio::sync::oneshot::channel();
+        let (unrelated_sender, mut unrelated_receiver) = tokio::sync::oneshot::channel();
+        BROWSER_NAVIGATION_WAITERS.lock().insert(
+            requested_label.clone(),
+            BrowserNavigationWaiter {
+                token: "requested".to_string(),
+                navigation_identity: Some(41),
+                completion: Some(requested_sender),
+            },
+        );
+        BROWSER_NAVIGATION_WAITERS.lock().insert(
+            unrelated_label.clone(),
+            BrowserNavigationWaiter {
+                token: "unrelated".to_string(),
+                navigation_identity: Some(42),
+                completion: Some(unrelated_sender),
+            },
+        );
+
+        assert!(!complete_browser_navigation(99, "https://user.example"));
+        assert!(requested_receiver.try_recv().is_err());
+        assert!(unrelated_receiver.try_recv().is_err());
+        assert!(complete_browser_navigation(41, "https://terminal.example"));
+        assert_eq!(
+            requested_receiver.try_recv().unwrap().unwrap().terminal_url,
+            "https://terminal.example"
+        );
+        assert!(unrelated_receiver.try_recv().is_err());
+        BROWSER_NAVIGATION_WAITERS.lock().remove(&unrelated_label);
+    }
+
+    #[test]
+    fn browser_navigation_waiter_guard_cleans_every_early_exit_without_removing_a_successor() {
+        for stage in ["ensure", "lookup", "bounds", "navigate", "timeout"] {
+            let label = format!("browser-waiter-guard-{stage}");
+            let token = format!("token-{stage}");
+            BROWSER_NAVIGATION_WAITERS.lock().insert(
+                label.clone(),
+                browser_navigation_waiter("https://example.test"),
+            );
+            BROWSER_NAVIGATION_WAITERS
+                .lock()
+                .get_mut(&label)
+                .unwrap()
+                .token = token.clone();
+            {
+                let _guard = BrowserNavigationWaiterGuard {
+                    label: label.clone(),
+                    token: token.clone(),
+                };
+            }
+            assert!(!BROWSER_NAVIGATION_WAITERS.lock().contains_key(&label));
+
+            BROWSER_NAVIGATION_WAITERS.lock().insert(
+                label.clone(),
+                browser_navigation_waiter("https://example.test"),
+            );
+            {
+                let _old_guard = BrowserNavigationWaiterGuard {
+                    label: label.clone(),
+                    token,
+                };
+            }
+            assert!(BROWSER_NAVIGATION_WAITERS.lock().contains_key(&label));
+            BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
+        }
+    }
+
+    #[test]
+    fn browser_navigation_setup_failure_closes_only_a_newly_created_view() {
+        let closes = AtomicUsize::new(0);
+        cleanup_created_browser_after_setup_failure(true, || {
+            closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+
+        cleanup_created_browser_after_setup_failure(false, || {
+            closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+    }
 
     #[cfg(not(windows))]
     #[derive(Debug)]
@@ -4271,6 +5984,64 @@ mod pty_runtime_tests {
             Box::new(Self {
                 calls: Arc::clone(&self.calls),
             })
+        }
+    }
+
+    #[cfg(not(windows))]
+    struct TestLivePtySession {
+        token: PtySessionToken,
+        pump: OutputPump,
+    }
+
+    #[cfg(not(windows))]
+    impl TestLivePtySession {
+        fn register(thread_id: &str) -> Self {
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 10,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            let writer = pair.master.take_writer().unwrap();
+            let (_, reader_cancellation) = prepare_pty_reader(pair.master.as_ref()).unwrap();
+            let pump = OutputPump::new(thread_id.to_string()).unwrap();
+            let pending = PendingPtyStart::reserve(thread_id).unwrap();
+            let (token, install_outcome) = pending
+                .install(PtySession {
+                    master: Arc::new(Mutex::new(pair.master)),
+                    writer: Arc::new(Mutex::new(writer)),
+                    operation_lane: Arc::new(tokio::sync::Mutex::new(())),
+                    operation_admission: Arc::new(tokio::sync::Semaphore::new(2)),
+                    pump: pump.clone(),
+                    terminator: PtyProcessTerminator::from_parts(
+                        Box::new(RecordingChildKiller {
+                            calls: Arc::new(AtomicUsize::new(0)),
+                        }),
+                        PtyProcessIdentity::direct_child(None),
+                    ),
+                    reader_cancellation,
+                    pid: Some(42),
+                    spawn_time_unix_secs: 99,
+                })
+                .unwrap();
+            assert!(matches!(install_outcome, InstallSessionOutcome::Running));
+            Self { token, pump }
+        }
+    }
+
+    #[cfg(not(windows))]
+    impl Drop for TestLivePtySession {
+        fn drop(&mut self) {
+            let action = {
+                let mut registry = PTY_LIFECYCLES.lock();
+                registry.stop(&self.token.thread_id)
+            };
+            if let Ok(StopSessionOutcome::Terminate { session, .. }) = action {
+                drop(session);
+            }
+            PTY_LIFECYCLES.lock().finish_exit(&self.token);
         }
     }
 
@@ -4419,6 +6190,23 @@ mod pty_runtime_tests {
                 "process group {process_group} remained observable after SIGKILL"
             );
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_no_output_fields(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    assert_no_output_fields(value);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for (key, value) in values {
+                    assert!(!matches!(key.as_str(), "bytes" | "data" | "payload"));
+                    assert_no_output_fields(value);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -4601,56 +6389,6 @@ mod pty_runtime_tests {
     }
 
     #[test]
-    fn windows_job_assignment_requests_only_required_process_access() {
-        assert_eq!(WINDOWS_REQUIRED_PROCESS_RIGHTS, 0x0101);
-    }
-
-    #[test]
-    fn windows_job_uses_kill_on_close_limit() {
-        assert_eq!(WINDOWS_JOB_KILL_ON_CLOSE_LIMIT, 0x2000);
-    }
-
-    #[test]
-    fn windows_access_denied_job_assignment_is_typed_as_external_restriction() {
-        assert_eq!(
-            classify_windows_job_assignment_error(&std::io::Error::from_raw_os_error(5)),
-            WindowsJobAssignmentFailure::ExternalJobRestriction
-        );
-    }
-
-    #[test]
-    fn windows_bool_interpretation_accepts_nonzero_without_reading_last_error() {
-        let result = check_windows_bool(1, || {
-            panic!("successful Win32 BOOL results must not read last-error state")
-        });
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn windows_bool_interpretation_rejects_zero_with_the_explicit_os_error() {
-        let error = check_windows_bool(0, || std::io::Error::from_raw_os_error(5)).unwrap_err();
-
-        assert_eq!(error.raw_os_error(), Some(5));
-    }
-
-    #[test]
-    fn owned_termination_resource_closes_exactly_once() {
-        let closes = Arc::new(AtomicUsize::new(0));
-        {
-            let closes_for_drop = Arc::clone(&closes);
-            let mut resource = OwnedTerminationResource::new(41usize, move |handle| {
-                assert_eq!(handle, 41);
-                closes_for_drop.fetch_add(1, Ordering::SeqCst);
-            });
-            resource.close();
-            resource.close();
-        }
-
-        assert_eq!(closes.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
     fn stop_during_start_is_recorded_and_installed_session_is_stopped() {
         let mut registry = PtyLifecycleRegistry::default();
         let start = registry.reserve("racing-start").unwrap();
@@ -4749,6 +6487,172 @@ mod pty_runtime_tests {
         assert!(cleanup.join().unwrap());
         let replacement = registry.lock().reserve("timed-out-pane").unwrap();
         assert_ne!(replacement.generation, old.generation);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pty_ack_reports_missing_invalid_duplicate_future_and_skipped_sequences() {
+        assert_eq!(
+            pty_ack_inner("missing-pane".to_string(), 1).unwrap_err(),
+            "thread 'missing-pane' not found"
+        );
+        assert_eq!(
+            pty_ack_inner("../unsafe".to_string(), 1).unwrap_err(),
+            "thread id is unsafe"
+        );
+
+        let session = TestLivePtySession::register("ack-pane");
+        session.pump.enqueue(vec![b'a']).unwrap();
+        assert_eq!(
+            session.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 1 })
+        );
+        session.pump.enqueue(vec![b'b']).unwrap();
+        std::thread::sleep(pty_transport::VISIBLE_CADENCE + Duration::from_millis(5));
+        assert_eq!(
+            session.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 2 })
+        );
+
+        assert!(matches!(
+            pty_ack_inner("ack-pane".to_string(), 1).unwrap(),
+            AckOutcome::Advanced {
+                sequence: 1,
+                bytes: 1,
+                latency_micros,
+            } if latency_micros >= duration_to_micros(pty_transport::VISIBLE_CADENCE)
+        ));
+        assert_eq!(
+            pty_ack_inner("ack-pane".to_string(), 1).unwrap(),
+            AckOutcome::Duplicate { sequence: 1 }
+        );
+        assert!(matches!(
+            pty_ack_inner("ack-pane".to_string(), 2).unwrap(),
+            AckOutcome::Advanced {
+                sequence: 2,
+                bytes: 1,
+                ..
+            }
+        ));
+
+        let skipped = TestLivePtySession::register("ack-skipped-pane");
+        skipped.pump.enqueue(vec![b'a']).unwrap();
+        assert_eq!(
+            skipped.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 1 })
+        );
+        skipped.pump.enqueue(vec![b'b']).unwrap();
+        std::thread::sleep(pty_transport::VISIBLE_CADENCE + Duration::from_millis(5));
+        assert_eq!(
+            skipped.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 2 })
+        );
+        assert_eq!(
+            pty_ack_inner("ack-skipped-pane".to_string(), 2).unwrap_err(),
+            "PTY batch acknowledgement 2 skipped expected sequence 1"
+        );
+        assert_eq!(
+            pty_ack_inner("ack-skipped-pane".to_string(), 3).unwrap_err(),
+            "PTY batch acknowledgement 3 is newer than emitted sequence 2"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pty_set_visibility_only_updates_metrics_on_actual_transitions() {
+        assert_eq!(
+            pty_set_visibility_inner("missing-visibility".to_string(), false).unwrap_err(),
+            "thread 'missing-visibility' not found"
+        );
+
+        let session = TestLivePtySession::register("visibility-pane");
+        let visible_cadence = duration_to_micros(pty_transport::VISIBLE_CADENCE);
+        let hidden_cadence = duration_to_micros(pty_transport::HIDDEN_CADENCE);
+
+        let initial = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(initial.visibility, PtyTransportVisibility::Visible);
+        assert_eq!(initial.effective_cadence_micros, visible_cadence);
+        assert_eq!(initial.metrics.visibility_transition_count, 0);
+
+        pty_set_visibility_inner("visibility-pane".to_string(), true).unwrap();
+        let noop_visible = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(noop_visible.visibility, PtyTransportVisibility::Visible);
+        assert_eq!(noop_visible.effective_cadence_micros, visible_cadence);
+        assert_eq!(noop_visible.metrics.visibility_transition_count, 0);
+
+        pty_set_visibility_inner("visibility-pane".to_string(), false).unwrap();
+        let hidden = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(hidden.visibility, PtyTransportVisibility::Hidden);
+        assert_eq!(hidden.effective_cadence_micros, hidden_cadence);
+        assert_eq!(hidden.metrics.visibility_transition_count, 1);
+
+        pty_set_visibility_inner("visibility-pane".to_string(), false).unwrap();
+        let noop_hidden = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(noop_hidden.visibility, PtyTransportVisibility::Hidden);
+        assert_eq!(noop_hidden.effective_cadence_micros, hidden_cadence);
+        assert_eq!(noop_hidden.metrics.visibility_transition_count, 1);
+
+        drop(session);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pty_transport_metrics_filters_live_sessions_and_serializes_metadata_only() {
+        let owned_ids = ["metrics-a", "metrics-b"];
+        let first = TestLivePtySession::register("metrics-a");
+        let second = TestLivePtySession::register("metrics-b");
+        first.pump.enqueue(b"secret-metadata".to_vec()).unwrap();
+
+        let mut filtered = pty_transport_metrics_inner(Some("metrics-a".to_string()));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].thread_id, "metrics-a");
+        assert_eq!(filtered[0].pending_bytes, b"secret-metadata".len());
+        assert_eq!(
+            filtered[0].metrics.state.bytes_accepted,
+            b"secret-metadata".len() as u64
+        );
+        assert!(pty_transport_metrics_inner(Some("metrics-missing".to_string())).is_empty());
+        assert!(pty_transport_metrics_inner(Some("../unsafe".to_string())).is_empty());
+
+        let all = pty_transport_metrics_inner(None);
+        let owned_from_all = all
+            .into_iter()
+            .filter(|snapshot| owned_ids.contains(&snapshot.thread_id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            owned_from_all
+                .iter()
+                .map(|snapshot| snapshot.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["metrics-a", "metrics-b"]
+        );
+        assert_eq!(
+            owned_from_all
+                .iter()
+                .find(|snapshot| snapshot.thread_id == "metrics-a")
+                .unwrap(),
+            &filtered[0]
+        );
+
+        let serialized = serde_json::to_value(filtered.pop().unwrap()).unwrap();
+        assert_no_output_fields(&serialized);
+        assert!(!serialized.to_string().contains("secret-metadata"));
+
+        drop(second);
+        assert!(pty_transport_metrics_inner(Some("metrics-b".to_string())).is_empty());
+        drop(first);
+        assert!(pty_transport_metrics_inner(Some("metrics-a".to_string())).is_empty());
+        assert!(pty_transport_metrics_inner(None)
+            .into_iter()
+            .all(|snapshot| !owned_ids.contains(&snapshot.thread_id.as_str())));
     }
 
     #[cfg(not(windows))]

@@ -83,6 +83,25 @@ describe('control protocol v1', () => {
     }))).toThrow('invalid hello request');
   });
 
+  it('decodes and validates optional task scope on state.get requests', () => {
+    expect(decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'state.get',
+      requestId: 'req-1',
+      taskId: 'task-1',
+    }))).toMatchObject({
+      type: 'state.get',
+      taskId: 'task-1',
+    });
+
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'state.get',
+      requestId: 'req-1',
+      taskId: '',
+    }))).toThrow('invalid state.get request');
+  });
+
   it('rejects command.submit requests missing required command fields', () => {
     const command = {
       id: 'cmd-1',
@@ -105,6 +124,24 @@ describe('control protocol v1', () => {
     }
   });
 
+  it('rejects surface actions missing common authorization fields or generation', () => {
+    const base = {
+      id: 'cmd-1', idempotencyKey: 'idem-1', kind: 'browser.action', projectRoot: '/repo',
+      createdAt: '2026-08-12T12:00:00.000Z',
+      payload: {
+        taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
+        tabId: 'tab-1', generation: 2, action: { kind: 'reload' },
+      },
+    };
+    for (const field of ['taskId', 'leaseId', 'leaseRevision', 'generation'] as const) {
+      const payload = { ...base.payload };
+      delete payload[field];
+      expect(() => decodeControlRequest(JSON.stringify({
+        version: 1, type: 'command.submit', requestId: 'req-1', command: { ...base, payload },
+      }))).toThrow('invalid surface authorization');
+    }
+  });
+
   it('rejects events.read requests with a non-number afterSequence', () => {
     expect(() => decodeControlRequest(JSON.stringify({
       version: CONTROL_PROTOCOL_VERSION,
@@ -121,10 +158,12 @@ describe('control protocol v1', () => {
       requestId: 'req-1',
       afterSequence: 0,
       limit: 100,
+      taskId: 'task-1',
     }))).toMatchObject({
       type: 'events.read',
       afterSequence: 0,
       limit: 100,
+      taskId: 'task-1',
     });
   });
 
@@ -134,5 +173,56 @@ describe('control protocol v1', () => {
       type: 'unknown',
       requestId: 'req-1',
     }))).toThrow('unsupported control request type');
+  });
+
+  it('decodes bounded typed provider frames', () => {
+    expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.register', requestId: 'register-1', providerId: 'desktop-1',
+    }))).toMatchObject({ type: 'provider.register', providerId: 'desktop-1' });
+    expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.result', requestId: 'effect-1',
+      result: { actionId: 'action-1', status: 'succeeded', value: { ok: true } },
+    }))).toMatchObject({ type: 'provider.effect.result', result: { actionId: 'action-1' } });
+  });
+
+  it('rejects malformed provider resources and effect results', () => {
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.resource.upsert', requestId: 'upsert-1',
+      resource: { id: 'tab-1', kind: 'browser_tab', generation: 1 },
+    }))).toThrow('invalid provider resource');
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.result', requestId: 'effect-1',
+      result: { actionId: 'action-1', status: 'invented' },
+    }))).toThrow('invalid provider effect result');
+    for (const result of [
+      { actionId: 'action-1', status: 'succeeded', value: null, injected: true },
+      { actionId: 'action-1', status: 'failed', code: 'failed', message: 'failed', value: 'secret' },
+      { actionId: 'action-1', status: 'unknown', code: 'effect_unknown', injected: true },
+    ]) {
+      expect(() => decodeControlRequest(JSON.stringify({
+        version: 1, type: 'provider.effect.result', requestId: 'effect-1', result,
+      }))).toThrow('invalid provider effect result');
+    }
+  });
+
+  it('bounds nested provider results and browser script arguments at the protocol boundary', () => {
+    let deep: Record<string, unknown> = { value: true };
+    for (let index = 0; index < 70; index += 1) deep = { child: deep };
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'provider.effect.result', requestId: 'effect-1',
+      result: { actionId: 'action-1', status: 'succeeded', value: deep },
+    }))).toThrow('invalid provider effect result');
+
+    const command = {
+      id: 'script-1', idempotencyKey: 'script-1', kind: 'browser.script', projectRoot: '/repo',
+      createdAt: '2026-08-12T12:00:00.000Z', payload: {
+        taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
+        tabId: 'tab-1', generation: 1, source: 'return args;',
+        args: { text: 'x'.repeat(256 * 1024 + 1) },
+      },
+    };
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1, type: 'command.submit', requestId: 'script-1', command,
+    }))).toThrow('invalid browser script arguments');
   });
 });

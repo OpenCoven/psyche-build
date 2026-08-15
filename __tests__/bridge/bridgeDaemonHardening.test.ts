@@ -42,7 +42,7 @@ class RecordingHub extends PaneStreamHub {
   readonly inputs: Array<{ paneId: string; data: Buffer }> = [];
   override start(): void {}
   override stop(): void {}
-  override sendInput(paneId: string, data: Buffer): void {
+  override async sendInput(paneId: string, data: Buffer): Promise<void> {
     this.inputs.push({ paneId, data });
   }
 }

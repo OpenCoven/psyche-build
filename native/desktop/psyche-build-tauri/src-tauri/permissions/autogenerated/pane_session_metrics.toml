@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pane-session-metrics"
+description = "Enables the pane_session_metrics command without any pre-configured scope."
+commands.allow = ["pane_session_metrics"]
+
+[[permission]]
+identifier = "deny-pane-session-metrics"
+description = "Denies the pane_session_metrics command without any pre-configured scope."
+commands.deny = ["pane_session_metrics"]

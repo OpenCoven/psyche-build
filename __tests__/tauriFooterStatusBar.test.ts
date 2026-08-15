@@ -127,6 +127,81 @@ function footerSection(source: string) {
 }
 
 describe('Tauri footer status bar shell', () => {
+  it('routes project appearance storage errors through one alert and a silent visible toast', () => {
+    const showStatusError = functionSource(mainJs, 'showStatusError');
+    expect(showStatusError).toContain('statusAlertEl.textContent = text');
+    expect(showStatusError).toContain('toast(text, 6000, { announce: false })');
+    expect(showStatusError).not.toContain('statusEl');
+    expect(showStatusError).not.toContain('setStatus(');
+    expect(functionSource(mainJs, 'flushDeferredStatusMessages')).toContain(
+      'showStatusError(entry.text)',
+    );
+    expect(functionSource(mainJs, 'saveProjectAppearances')).toContain(
+      'showStatusError("project appearance save failed: " + String(error))',
+    );
+    expect(functionSource(mainJs, 'saveProjectAppearances')).not.toContain('setStatus(');
+
+    const boot = functionSource(mainJs, 'boot');
+    expect(boot.indexOf('statusController.start()')).toBeLessThan(
+      boot.indexOf('flushDeferredStatusMessages()'),
+    );
+    expect(boot.indexOf('flushDeferredStatusMessages()')).toBeLessThan(
+      boot.indexOf('readSavedWorkspace()'),
+    );
+
+    const attributes = new Map([
+      ['role', 'status'],
+      ['aria-live', 'polite'],
+    ]);
+    const classes = new Set<string>();
+    const toastEl = {
+      textContent: '',
+      getAttribute: (name: string) => attributes.get(name) ?? null,
+      setAttribute: (name: string, value: string) => attributes.set(name, value),
+      removeAttribute: (name: string) => attributes.delete(name),
+      classList: {
+        add: (name: string) => classes.add(name),
+        remove: (name: string) => classes.delete(name),
+      },
+    };
+    const statusAlertEl = { textContent: '', role: 'alert' };
+    let runTimer: () => void = () => undefined;
+    let delay = 0;
+    const toast = Function(
+      'toastEl', 'setTimeout', 'clearTimeout',
+      `"use strict"; var toastTimer = 0; return (${functionSource(mainJs, 'toast')});`,
+    )(
+      toastEl,
+      (callback: () => void, milliseconds: number) => {
+        runTimer = callback;
+        delay = milliseconds;
+        return 1;
+      },
+      () => undefined,
+    ) as (message: string, duration?: number, options?: { announce?: boolean }) => void;
+    const reportError = Function(
+      'statusAlertEl', 'toast',
+      `"use strict"; return (${showStatusError});`,
+    )(statusAlertEl, toast) as (message: string) => void;
+
+    reportError('project appearance load failed');
+
+    expect(statusAlertEl.textContent).toBe('project appearance load failed');
+    expect(toastEl.textContent).toBe('project appearance load failed');
+    expect(classes.has('is-visible')).toBe(true);
+    expect(attributes.get('aria-hidden')).toBe('true');
+    expect(delay).toBe(6000);
+
+    toast('unrelated confirmation');
+    expect(attributes.get('aria-hidden')).toBeUndefined();
+    expect(attributes.get('role')).toBe('status');
+    expect(attributes.get('aria-live')).toBe('polite');
+
+    runTimer();
+    expect(classes.has('is-visible')).toBe(false);
+    expect(toastEl.textContent).toBe('');
+  });
+
   it('wraps the composer, detail panel, and status rail in one footer stack', () => {
     const order = [
       'id="footer-stack"',
@@ -201,6 +276,12 @@ describe('Tauri footer status bar shell', () => {
 
   it('defines the exact 26px footer rail CSS contract', () => {
     expect(stylesCss).toMatch(/--status-h:\s*26px;/);
+    expect(stylesCss).toMatch(
+      /\.titlebar\s*\{[^}]*grid-template-columns:\s*var\(--sidebar-w\)\s+minmax\(0,\s*1fr\);/s
+    );
+    expect(stylesCss).toMatch(
+      /\.app\[data-sidebar="collapsed"\]\s+\.titlebar\s*\{[^}]*grid-template-columns:\s*var\(--mini-rail-w\)\s+minmax\(0,\s*1fr\);/s
+    );
     expect(stylesCss).toMatch(
       /\.app\s*\{[^}]*grid-template-rows:\s*var\(--titlebar-h\)\s+minmax\(0,\s*1fr\)\s+auto;/s
     );
@@ -808,7 +889,8 @@ describe('Tauri footer status bar shell', () => {
     // it is strictly stronger; the assertion tracks the helper rather than the
     // literal it replaced.
     expect(mainJs).toMatch(
-      /listen\("pty:data"[\s\S]*var bytes = new Uint8Array\(payload\.bytes\);[\s\S]*if \(!isLiveThread\(thread\)\) return;[\s\S]*noteStatusPtyData\(payload\.thread_id,\s*bytes\);/s
+      /listen\("pty:data-batch"[\s\S]*if \(!isLiveThread\(thread\)\) return;[\s\S]*terminalController\.receive\(payload\)[\s\S]*var bytes = new Uint8Array\(payload\.bytes\);[\s\S]*noteStatusPtyData\(payload\.threadId,\s*bytes\);/s
+
     );
     expect(refreshCoven).toMatch(/performance\.now\(\)/);
     expect(refreshCoven).toMatch(
@@ -849,8 +931,10 @@ describe('Tauri footer status bar shell', () => {
       /state\.env = env \|\| \{\};[\s\S]*statusController[\s\S]*statusController\.start\(\);/s
     );
     expect(mainJs).toMatch(
-      /window\.addEventListener\("beforeunload", function \(\) \{[\s\S]*saveWorkspaceNow\(\);[\s\S]*if \(statusController\) statusController\.stop\(\);[\s\S]*\}\);/s
+      /function handleWindowBeforeUnload\(event\) \{[\s\S]*saveWorkspaceNow\(\)\.catch\(function \(\) \{\}\);[\s\S]*window\.addEventListener\("beforeunload", handleWindowBeforeUnload\);/s
     );
+    expect(mainJs.match(/function handleWindowBeforeUnload\(event\)[\s\S]*?\n  \}/)?.[0])
+      .not.toContain('statusController.stop()');
     expect(functionSource(mainJs, 'covenSessionsForProject')).toContain('covenSessionAssignments()');
     expect(functionSource(mainJs, 'covenSessionsForProject')).toContain('owned.get(project.id) || []');
     expect(functionSource(mainJs, 'covenSessionsForProject')).not.toContain('allSessionsByProject');
