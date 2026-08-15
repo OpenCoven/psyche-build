@@ -46,6 +46,7 @@ import type {
   CommandOptions,
   CommandResult,
   InstallOverrides,
+  TauriConfigOverlay,
   Runner,
   RunCliDependencies,
   RunMacosBuildDependencies,
@@ -94,7 +95,7 @@ type TauriConfig = {
   };
 };
 
-const macosTauriConfig = JSON.parse(
+const baseTauriConfig = JSON.parse(
   readFileSync(
     join(
       repositoryRoot,
@@ -103,6 +104,15 @@ const macosTauriConfig = JSON.parse(
     'utf8',
   ),
 ) as TauriConfig;
+const macosTauriOverlay = JSON.parse(
+  readFileSync(
+    join(
+      repositoryRoot,
+      'native/desktop/psyche-build-tauri/src-tauri/tauri.macos.conf.json',
+    ),
+    'utf8',
+  ),
+) as TauriConfigOverlay;
 
 let scratchSequence = 0;
 const scratchDirs: string[] = [];
@@ -599,9 +609,9 @@ describe('macOS build channels', () => {
   it('defines stable and dev app build scripts and preserves production identity', () => {
     expect(packageJson.scripts['app:stable']).toBe('node scripts/build-macos-app.mjs stable');
     expect(packageJson.scripts['app:dev']).toBe('node scripts/build-macos-app.mjs dev');
-    expect(macosTauriConfig.productName).toBe('Psyche Build');
-    expect(macosTauriConfig.identifier).toBe('dev.opencoven.psyche');
-    expect(macosTauriConfig.app.windows[0].title).toBe('Psyche Build');
+    expect(baseTauriConfig.productName).toBe('Psyche Build');
+    expect(baseTauriConfig.identifier).toBe('dev.opencoven.psyche');
+    expect(baseTauriConfig.app.windows[0].title).toBe('Psyche Build');
   });
 
   it('documents stable and dev local app workflows and their isolation boundary', () => {
@@ -694,44 +704,72 @@ describe('macOS build channels', () => {
 
   describe('createDevTauriConfig', () => {
     it('creates a full dev config without mutating production values', () => {
-      const production = structuredClone(macosTauriConfig);
-      const snapshot = structuredClone(macosTauriConfig);
+      const production = structuredClone(baseTauriConfig);
+      const overlay = structuredClone(macosTauriOverlay);
+      const productionSnapshot = structuredClone(baseTauriConfig);
+      const overlaySnapshot = structuredClone(macosTauriOverlay);
 
-      const dev = createDevTauriConfig(production);
+      const dev = createDevTauriConfig(production, overlay);
 
       expect(dev).toEqual({
-        ...snapshot,
+        ...productionSnapshot,
         productName: 'Psyche Build Dev',
         identifier: 'dev.opencoven.psyche.dev',
         app: {
-          ...snapshot.app,
-          windows: snapshot.app.windows.map((window) =>
-            window.label === 'main'
-              ? { ...window, title: 'Psyche Build Dev' }
-              : structuredClone(window),
-          ),
+          ...productionSnapshot.app,
+          ...overlaySnapshot.app,
+          windows: [
+            {
+              ...productionSnapshot.app.windows[0],
+              ...overlaySnapshot.app!.windows![0],
+              title: 'Psyche Build Dev',
+            },
+          ],
+        },
+        bundle: {
+          ...productionSnapshot.bundle,
+          ...overlaySnapshot.bundle,
         },
       });
       expect(dev.app.windows[0]).toMatchObject({
-        width: snapshot.app.windows[0].width,
-        height: snapshot.app.windows[0].height,
-        minWidth: snapshot.app.windows[0].minWidth,
-        transparent: snapshot.app.windows[0].transparent,
+        label: 'main',
+        title: 'Psyche Build Dev',
+        transparent: true,
+        titleBarStyle: 'Overlay',
+        hiddenTitle: true,
       });
-      expect(dev.build).toEqual(snapshot.build);
-      expect(dev.bundle).toEqual(snapshot.bundle);
-      expect(dev.app.security).toEqual(snapshot.app.security);
-      expect(production).toEqual(snapshot);
+      expect(dev).toMatchObject({
+        bundle: {
+          icon: [
+            'icons/32x32.png',
+            'icons/128x128.png',
+            'icons/128x128@2x.png',
+            'icons/icon.icns',
+          ],
+          macOS: {
+            minimumSystemVersion: '12.0',
+          },
+        },
+      });
+      expect(dev.build).toEqual(productionSnapshot.build);
+      expect(dev.app.security).toEqual(productionSnapshot.app.security);
+      expect(production).toEqual(productionSnapshot);
+      expect(overlay).toEqual(overlaySnapshot);
     });
 
     it('fails when the production config has no main window', () => {
-      const withoutMain = structuredClone(macosTauriConfig);
+      const withoutMain = structuredClone(baseTauriConfig);
+      const overlayWithoutMain = structuredClone(macosTauriOverlay);
       withoutMain.app.windows[0] = {
         ...withoutMain.app.windows[0],
         label: 'secondary',
       };
+      overlayWithoutMain.app!.windows![0] = {
+        ...overlayWithoutMain.app!.windows![0],
+        label: 'secondary',
+      };
 
-      expect(() => createDevTauriConfig(withoutMain)).toThrow(
+      expect(() => createDevTauriConfig(withoutMain, overlayWithoutMain)).toThrow(
         'Production Tauri config must contain an app.windows entry labeled "main"',
       );
     });
@@ -1104,7 +1142,7 @@ describe('macOS build channels', () => {
       expect(resolve(configPath)).toBe(configPath);
       expect(configPath.startsWith(`${tempRoot}/`)).toBe(true);
       expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual(
-        createDevTauriConfig(macosTauriConfig),
+        createDevTauriConfig(baseTauriConfig, macosTauriOverlay),
       );
       expect(statSync(configPath).mode & 0o777).toBe(0o600);
       expect(readdirSync(tempRoot)).toEqual([configPath.split('/').at(-1)]);
