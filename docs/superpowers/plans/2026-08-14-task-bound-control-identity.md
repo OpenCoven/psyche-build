@@ -4,9 +4,11 @@
 
 **Goal:** Restore agent resource and lease workflows with credentials bound to one canonical project and task, without restoring broad agent snapshots.
 
-**Architecture:** Add task-bound credentials to the protected control credential store, verify the binding during the socket handshake, and derive task scope from authenticated identity. Add dedicated task-resource and lease-status protocol methods, then migrate MCP tools away from `state.get`.
+**Architecture:** Add task-bound credentials to the protected control credential store, bind each MCP credential to the canonical `PSYCHE_PROJECT_ROOT` or launch working directory before accepting tool calls, verify the task binding during the socket handshake, and derive task scope from authenticated identity. Add dedicated task-resource and lease-status protocol methods, then migrate MCP tools away from `state.get`.
 
 **Idempotency boundary:** Hash every non-operator caller key at the authenticated server boundary with a versioned, length-prefixed identity scope. Task credentials use the canonical project root and authenticated task ID; operator keys retain project-wide semantics.
+
+**Launch-project boundary:** A task token is valid only for its canonical MCP launch project. Canonicalize every requested `project_root` and compare it to the stored launch root before endpoint derivation, client startup, socket connection, owner spawn, or `hello`; accept symlink aliases and fail different roots locally with `task_project_mismatch` without exposing the bearer token.
 
 **Tech Stack:** TypeScript, Node.js Unix sockets, JSON line protocol, Vitest, MCP tools.
 
@@ -22,7 +24,7 @@
 - `src/control/server.ts`: enforce binding on mutations and serve scoped reads.
 - `__tests__/controlServer.test.ts`: real-runtime task-scoped idempotency and replay coverage.
 - `src/control/hostProcess.ts`: carry expected task binding into `ControlClient`.
-- `src/mcp/server.ts`: parse task credentials and migrate MCP tools to dedicated reads.
+- `src/mcp/server.ts`: bind task credentials to the canonical launch project, reject mismatched tool roots before control-plane side effects, and migrate MCP tools to dedicated reads.
 - `__tests__/controlCredentials.test.ts`: credential and authenticated socket coverage.
 - `__tests__/controlProtocol.test.ts`: protocol validation.
 - `__tests__/controlClient.test.ts`: handshake and client method coverage.

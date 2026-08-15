@@ -151,12 +151,20 @@ same authenticated authority, policy, approval, and receipt path as the UI.
 Trusted task launchers bind an MCP process to one task by issuing a project-local
 token with `issueControlTaskToken()` (or
 `issueControlTaskTokenForCanonicalRoot()` when the project root is already
-canonical) and injecting both variables:
+canonical), setting the launch project, and injecting the task variables:
 
 ```text
+PSYCHE_PROJECT_ROOT=/absolute/path/to/project
 PSYCHE_CONTROL_TASK_ID=task-alpha
 PSYCHE_CONTROL_TASK_TOKEN=<redacted example>
 ```
+
+When `PSYCHE_PROJECT_ROOT` is absent, the MCP launch working directory is the
+project root. Psyche canonicalizes that trusted launch root once and the task
+token is valid only for that canonical project. A tool may supply the same root
+through a symlink alias, but a different root fails locally with
+`task_project_mismatch` before any socket connection, owner spawn, or `hello`
+frame can expose the token.
 
 The authenticated token binding—not a caller-provided `task_id`—establishes
 task authority. The legacy shared-agent credential and compatibility

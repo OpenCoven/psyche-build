@@ -68,16 +68,19 @@ const UNBOUND_MCP_TASK_ID = 'unbound-mcp-client';
 export interface McpTaskBinding {
   taskId: string;
   token: string;
+  canonicalProjectRoot: string;
 }
 
 export interface McpRunOptions {
   taskBinding?: McpTaskBinding;
 }
 
-export function parseMcpArgs(
+export async function parseMcpArgs(
   args: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
-): McpRunOptions {
+  launchCwd: string = process.cwd(),
+  canonicalize: typeof canonicalizeProjectRoot = canonicalizeProjectRoot,
+): Promise<McpRunOptions> {
   let cliTaskId: string | undefined;
   let hasCliTaskId = false;
   for (let index = 0; index < args.length; index += 1) {
@@ -93,11 +96,20 @@ export function parseMcpArgs(
   const hasEnvToken = Object.hasOwn(env, 'PSYCHE_CONTROL_TASK_TOKEN');
   if (!hasCliTaskId && !hasEnvTaskId && !hasEnvToken) return {};
 
-  const taskBinding = validateMcpTaskBinding({
+  const credential = validateMcpTaskCredential({
     taskId: hasCliTaskId ? cliTaskId : env.PSYCHE_CONTROL_TASK_ID,
     token: env.PSYCHE_CONTROL_TASK_TOKEN,
   });
-  return taskBinding === undefined ? {} : { taskBinding };
+  if (credential === undefined) return {};
+  const canonicalProjectRoot = await canonicalize(
+    env.PSYCHE_PROJECT_ROOT ?? launchCwd,
+  );
+  return {
+    taskBinding: {
+      ...credential,
+      canonicalProjectRoot,
+    },
+  };
 }
 
 function writeResponse(response: JsonRpcResponse): void {
@@ -179,6 +191,15 @@ export async function createMcpControlClientForRoot(
 ): Promise<McpControlClient> {
   const authenticatedBinding = validateMcpTaskBinding(options.taskBinding);
   const canonicalRoot = await (options.canonicalize ?? canonicalizeProjectRoot)(projectRoot);
+  if (
+    authenticatedBinding !== undefined
+    && canonicalRoot !== authenticatedBinding.canonicalProjectRoot
+  ) {
+    throw new ControlResponseError(
+      'task_project_mismatch',
+      'task_project_mismatch: requested project does not match task launch project',
+    );
+  }
   const endpoint = controlEndpointForProject(canonicalRoot);
   const taskBinding = authenticatedBinding === undefined
     ? undefined
@@ -190,6 +211,7 @@ export async function createMcpControlClientForRoot(
       ? ['unbound']
       : [
         'task',
+        authenticatedBinding.canonicalProjectRoot,
         authenticatedBinding.taskId,
         tokenFingerprint(authenticatedBinding.token),
       ],
@@ -247,7 +269,26 @@ async function startMcpControlClient(
 function validateMcpTaskBinding(binding: {
   taskId?: unknown;
   token?: unknown;
+  canonicalProjectRoot?: unknown;
 } | undefined): McpTaskBinding | undefined {
+  const credential = validateMcpTaskCredential(binding);
+  if (credential === undefined) return undefined;
+  if (
+    typeof binding?.canonicalProjectRoot !== 'string'
+    || binding.canonicalProjectRoot.length === 0
+  ) {
+    throw new TypeError('task-bound MCP requires a canonical launch project root');
+  }
+  return {
+    ...credential,
+    canonicalProjectRoot: binding.canonicalProjectRoot,
+  };
+}
+
+function validateMcpTaskCredential(binding: {
+  taskId?: unknown;
+  token?: unknown;
+} | undefined): Pick<McpTaskBinding, 'taskId' | 'token'> | undefined {
   if (binding === undefined) return undefined;
   const taskId = normalizeControlTaskId(binding.taskId);
   if (taskId === undefined) {
@@ -468,7 +509,7 @@ function actionResult(outcome: CommandOutcome): ActionReceipt | CommandOutcome {
 
 const projectRootProperty = {
   type: 'string',
-  description: 'Absolute project root. Defaults to PSYCHE_PROJECT_ROOT, then the current directory.',
+  description: 'Absolute project root. Defaults to PSYCHE_PROJECT_ROOT, then the current directory. Task-bound MCP accepts only the canonical launch project or its symlink aliases.',
 };
 const authorizationProperties = {
   task_id: { type: 'string' },
@@ -908,13 +949,14 @@ async function dispatch(request: JsonRpcRequest): Promise<void> {
 }
 
 export async function runMcpServer(
-  options: McpRunOptions = parseMcpArgs(process.argv.slice(3), process.env),
+  options?: McpRunOptions,
 ): Promise<void> {
-  const restore = options.taskBinding === undefined
+  const resolvedOptions = options ?? await parseMcpArgs(process.argv.slice(3), process.env);
+  const restore = resolvedOptions.taskBinding === undefined
     ? undefined
     : setMcpDeps({
         controlClientForRoot: (projectRoot) => createMcpControlClientForRoot(projectRoot, {
-          taskBinding: options.taskBinding,
+          taskBinding: resolvedOptions.taskBinding,
         }),
       });
   const lines = createInterface({ input: process.stdin, terminal: false });

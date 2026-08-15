@@ -55,10 +55,12 @@ export async function startTaskScopedControlHarness(): Promise<TaskScopedControl
     alpha: {
       taskId: 'task-alpha',
       token: await issueControlTaskToken({ projectRoot: root, taskId: 'task-alpha' }),
+      canonicalProjectRoot: root,
     },
     beta: {
       taskId: 'task-beta',
       token: await issueControlTaskToken({ projectRoot: root, taskId: 'task-beta' }),
+      canonicalProjectRoot: root,
     },
   } as const;
   const surfaces = new SurfaceRegistry();

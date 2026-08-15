@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   TOOLS,
@@ -10,6 +12,7 @@ import {
   setMcpDeps,
 } from '../src/mcp/server.js';
 import { ControlResponseError } from '../src/control/client.js';
+import { canonicalizeProjectRoot } from '../src/control/projectIdentity.js';
 import {
   startTaskScopedControlHarness,
   type TaskScopedControlHarness,
@@ -17,10 +20,14 @@ import {
 
 const restores: Array<() => void> = [];
 const harnesses: TaskScopedControlHarness[] = [];
+const projectRootFixtures: string[] = [];
 afterEach(async () => {
   while (restores.length) restores.pop()!();
   await closeMcpControlClients();
   await Promise.allSettled(harnesses.splice(0).map((harness) => harness.close()));
+  await Promise.all(projectRootFixtures.splice(0).map((root) => (
+    rm(root, { recursive: true, force: true })
+  )));
   vi.restoreAllMocks();
 });
 
@@ -51,35 +58,49 @@ const lease = {
 };
 
 describe('MCP task binding bootstrap', () => {
-  it('keeps MCP unbound only when no binding input is present', () => {
-    expect(parseMcpArgs([], {})).toEqual({});
+  it('keeps MCP unbound only when no binding input is present', async () => {
+    await expect(parseMcpArgs([], {})).resolves.toEqual({});
   });
 
-  it('parses task identity from CLI and token only from the environment', () => {
-    expect(parseMcpArgs(['--task-id', 'task-alpha'], {
+  it('binds task identity to the canonical environment root or launch cwd', async () => {
+    const canonicalize = vi.fn(async (root: string) => `/canonical${root}`);
+    await expect(parseMcpArgs(['--task-id', 'task-alpha'], {
       PSYCHE_CONTROL_TASK_ID: 'task-env',
       PSYCHE_CONTROL_TASK_TOKEN: 'alpha-token',
-    })).toEqual({
-      taskBinding: { taskId: 'task-alpha', token: 'alpha-token' },
+      PSYCHE_PROJECT_ROOT: '/environment/repo',
+    }, '/launch/cwd', canonicalize)).resolves.toEqual({
+      taskBinding: {
+        taskId: 'task-alpha',
+        token: 'alpha-token',
+        canonicalProjectRoot: '/canonical/environment/repo',
+      },
     });
-    expect(parseMcpArgs([], {
+    await expect(parseMcpArgs([], {
       PSYCHE_CONTROL_TASK_ID: 'task-env',
       PSYCHE_CONTROL_TASK_TOKEN: 'env-token',
-    })).toEqual({
-      taskBinding: { taskId: 'task-env', token: 'env-token' },
+    }, '/launch/cwd', canonicalize)).resolves.toEqual({
+      taskBinding: {
+        taskId: 'task-env',
+        token: 'env-token',
+        canonicalProjectRoot: '/canonical/launch/cwd',
+      },
     });
+    expect(canonicalize.mock.calls.map(([root]) => root)).toEqual([
+      '/environment/repo',
+      '/launch/cwd',
+    ]);
   });
 
-  it('rejects missing and explicitly blank CLI task IDs without falling back to the environment', () => {
-    expect(() => parseMcpArgs(['--task-id'], {
+  it('rejects missing and explicitly blank CLI task IDs without falling back to the environment', async () => {
+    await expect(parseMcpArgs(['--task-id'], {
       PSYCHE_CONTROL_TASK_ID: 'task-env',
       PSYCHE_CONTROL_TASK_TOKEN: 'env-token',
-    })).toThrow(/requires a value/i);
-    expect(() => parseMcpArgs(['--task-id', ''], {})).toThrow(/task id/i);
-    expect(() => parseMcpArgs(['--task-id', '   '], {})).toThrow(/task id/i);
+    })).rejects.toThrow(/requires a value/i);
+    await expect(parseMcpArgs(['--task-id', ''], {})).rejects.toThrow(/task id/i);
+    await expect(parseMcpArgs(['--task-id', '   '], {})).rejects.toThrow(/task id/i);
   });
 
-  it('fails closed when either task-binding environment variable is explicitly blank', () => {
+  it('fails closed when either task-binding environment variable is explicitly blank', async () => {
     const secret = 'never-print-this-environment-token';
     const environments: NodeJS.ProcessEnv[] = [
       { PSYCHE_CONTROL_TASK_ID: '' },
@@ -96,7 +117,7 @@ describe('MCP task binding bootstrap', () => {
     for (const env of environments) {
       let rejection: unknown;
       try {
-        parseMcpArgs([], env);
+        await parseMcpArgs([], env);
       } catch (error) {
         rejection = error;
       }
@@ -105,33 +126,35 @@ describe('MCP task binding bootstrap', () => {
     }
   });
 
-  it('requires both task identity values or neither without exposing the token', () => {
+  it('requires both task identity values or neither without exposing the token', async () => {
     const token = 'never-print-this-task-token';
-    expect(() => parseMcpArgs(['--task-id', 'task-alpha'], {}))
-      .toThrow(/task token/i);
-    expect(() => parseMcpArgs([], { PSYCHE_CONTROL_TASK_TOKEN: token }))
-      .toThrow(/task id/i);
+    await expect(parseMcpArgs(['--task-id', 'task-alpha'], {}))
+      .rejects.toThrow(/task token/i);
+    await expect(parseMcpArgs([], { PSYCHE_CONTROL_TASK_TOKEN: token }))
+      .rejects.toThrow(/task id/i);
     for (const args of [
       () => parseMcpArgs(['--task-id', 'task-alpha'], {}),
       () => parseMcpArgs([], { PSYCHE_CONTROL_TASK_TOKEN: token }),
     ]) {
       try {
-        args();
+        await args();
       } catch (error) {
         expect(String(error)).not.toContain(token);
       }
     }
   });
 
-  it('accepts 256-character task IDs and rejects 257 characters', () => {
+  it('accepts 256-character task IDs and rejects 257 characters', async () => {
     const token = 'task-token';
     const accepted = 'a'.repeat(256);
-    expect(parseMcpArgs(['--task-id', accepted], {
+    await expect(parseMcpArgs(['--task-id', accepted], {
       PSYCHE_CONTROL_TASK_TOKEN: token,
-    })).toEqual({ taskBinding: { taskId: accepted, token } });
-    expect(() => parseMcpArgs(['--task-id', 'a'.repeat(257)], {
+    }, '/launch/repo', async (root) => root)).resolves.toEqual({
+      taskBinding: { taskId: accepted, token, canonicalProjectRoot: '/launch/repo' },
+    });
+    await expect(parseMcpArgs(['--task-id', 'a'.repeat(257)], {
       PSYCHE_CONTROL_TASK_TOKEN: token,
-    })).toThrow(/256/);
+    })).rejects.toThrow(/256/);
   });
 });
 
@@ -343,6 +366,99 @@ describe('agent surface MCP tools', () => {
     await borrowed.close();
   });
 
+  it('rejects a task-bound root mismatch before connect, spawn, or token transfer', async () => {
+    const token = 'task-token-must-never-cross-the-wrong-socket';
+    const transferredBytes: string[] = [];
+    const connect = vi.fn(async (options) => {
+      transferredBytes.push(JSON.stringify(options));
+      return fakeClient({ projectRoot: '/canonical/sibling' });
+    });
+    const spawn = vi.fn(() => ({ unref: vi.fn() } as never));
+    const credentialStoreForCanonicalRoot = vi.fn();
+
+    const pending = createMcpControlClientForRoot('/requested/sibling', {
+      canonicalize: async () => '/canonical/sibling',
+      credentialStoreForCanonicalRoot,
+      connect,
+      spawn,
+      entryPath: '/entry.js',
+      taskBinding: {
+        taskId: 'task-alpha',
+        token,
+        canonicalProjectRoot: '/canonical/launch',
+      },
+    });
+
+    await expect(pending).rejects.toMatchObject({ code: 'task_project_mismatch' });
+    await expect(pending).rejects.not.toThrow(token);
+    expect(connect).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(credentialStoreForCanonicalRoot).not.toHaveBeenCalled();
+    expect(transferredBytes.join('')).not.toContain(token);
+  });
+
+  it('rejects a wrong MCP tool root locally and accepts a symlink of the launch root', async () => {
+    const fixture = await mkdtemp(path.join(process.cwd(), '.mcp-task-project-'));
+    projectRootFixtures.push(fixture);
+    const launchRoot = path.join(fixture, 'launch');
+    const siblingRoot = path.join(fixture, 'sibling');
+    const aliasRoot = path.join(fixture, 'launch-alias');
+    await mkdir(launchRoot);
+    await mkdir(siblingRoot);
+    await symlink(launchRoot, aliasRoot, 'dir');
+    const canonicalLaunchRoot = await canonicalizeProjectRoot(launchRoot);
+    const token = 'tool-token-must-never-cross-the-wrong-socket';
+    const transferredBytes: string[] = [];
+    const connect = vi.fn(async (options) => {
+      transferredBytes.push(JSON.stringify(options));
+      return fakeClient({
+        projectRoot: canonicalLaunchRoot,
+        taskBinding: { taskId: 'task-alpha' },
+        taskResources: vi.fn(async () => ({
+          ownerEpoch: 1,
+          sequence: 2,
+          resources: [],
+        })),
+      });
+    });
+    const spawn = vi.fn(() => ({ unref: vi.fn() } as never));
+    const taskBinding = {
+      taskId: 'task-alpha',
+      token,
+      canonicalProjectRoot: canonicalLaunchRoot,
+    };
+    inject({
+      controlClientForRoot: (projectRoot) => createMcpControlClientForRoot(projectRoot, {
+        taskBinding,
+        connect,
+        spawn,
+        entryPath: '/entry.js',
+      }),
+    });
+
+    const mismatch = await call('psyche_control_list', { project_root: siblingRoot });
+    expect(mismatch.error).toEqual({
+      code: MCP_CONTROL_ERROR_CODE,
+      message: 'task_project_mismatch: requested project does not match task launch project',
+      data: { code: 'task_project_mismatch' },
+    });
+    expect(JSON.stringify(mismatch)).not.toContain(token);
+    expect(connect).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(transferredBytes).toEqual([]);
+
+    expect(payload(await call('psyche_control_list', {
+      project_root: aliasRoot,
+    }))).toMatchObject({
+      project_root: canonicalLaunchRoot,
+      owner_epoch: 1,
+      sequence: 2,
+      resources: [],
+    });
+    expect(connect).toHaveBeenCalledOnce();
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   it('maps an unavailable action transaction to unknown', async () => {
     inject({ controlClientForRoot: vi.fn(async () => fakeClient({
       actionStatus: vi.fn(async () => undefined),
@@ -419,19 +535,35 @@ describe('agent surface MCP tools', () => {
 
     const alphaOne = await createMcpControlClientForRoot('/repo', {
       ...options,
-      taskBinding: { taskId: 'task-alpha', token: 'alpha-token-one' },
+      taskBinding: {
+        taskId: 'task-alpha',
+        token: 'alpha-token-one',
+        canonicalProjectRoot: '/canonical/repo',
+      },
     });
     const alphaTwo = await createMcpControlClientForRoot('/repo', {
       ...options,
-      taskBinding: { taskId: 'task-alpha', token: 'alpha-token-two' },
+      taskBinding: {
+        taskId: 'task-alpha',
+        token: 'alpha-token-two',
+        canonicalProjectRoot: '/canonical/repo',
+      },
     });
     const alphaOneAgain = await createMcpControlClientForRoot('/repo', {
       ...options,
-      taskBinding: { taskId: 'task-alpha', token: 'alpha-token-one' },
+      taskBinding: {
+        taskId: 'task-alpha',
+        token: 'alpha-token-one',
+        canonicalProjectRoot: '/canonical/repo',
+      },
     });
     const beta = await createMcpControlClientForRoot('/repo', {
       ...options,
-      taskBinding: { taskId: 'task-beta', token: 'beta-token' },
+      taskBinding: {
+        taskId: 'task-beta',
+        token: 'beta-token',
+        canonicalProjectRoot: '/canonical/repo',
+      },
     });
 
     expect(connect).toHaveBeenCalledTimes(3);
@@ -473,11 +605,19 @@ describe('agent surface MCP tools', () => {
 
     const borrowed = await createMcpControlClientForRoot('/repo', {
       ...options,
-      taskBinding: { taskId: 'task-alpha', token: 'alpha-token' },
+      taskBinding: {
+        taskId: 'task-alpha',
+        token: 'alpha-token',
+        canonicalProjectRoot: '/canonical/repo',
+      },
     });
     await expect(createMcpControlClientForRoot('/repo', {
       ...options,
-      taskBinding: { taskId: 'task-alpha', token: 'beta-or-invalid-token' },
+      taskBinding: {
+        taskId: 'task-alpha',
+        token: 'beta-or-invalid-token',
+        canonicalProjectRoot: '/canonical/repo',
+      },
     })).rejects.toBe(authenticationFailure);
 
     expect(connect).toHaveBeenCalledTimes(2);
@@ -510,7 +650,11 @@ describe('agent surface MCP tools', () => {
       canonicalize: async () => '/canonical/repo',
       connect: vi.fn(async () => underlying),
       entryPath: '/entry.js',
-      taskBinding: { taskId: 'task-alpha', token: 'alpha-token' },
+      taskBinding: {
+        taskId: 'task-alpha',
+        token: 'alpha-token',
+        canonicalProjectRoot: '/canonical/repo',
+      },
     };
     const [failingBorrower, activeBorrower] = await Promise.all([
       createMcpControlClientForRoot('/repo', options),
@@ -550,7 +694,11 @@ describe('agent surface MCP tools', () => {
       canonicalize: async () => '/canonical/repo',
       connect,
       entryPath: '/entry.js',
-      taskBinding: { taskId: 'task-alpha', token: 'alpha-token' },
+      taskBinding: {
+        taskId: 'task-alpha',
+        token: 'alpha-token',
+        canonicalProjectRoot: '/canonical/repo',
+      },
     };
 
     const failedBorrower = await createMcpControlClientForRoot('/repo', options);
@@ -572,7 +720,11 @@ describe('agent surface MCP tools', () => {
       canonicalize: async () => '/canonical/repo',
       connect,
       entryPath: '/entry.js',
-      taskBinding: { taskId: 'a'.repeat(257), token },
+      taskBinding: {
+        taskId: 'a'.repeat(257),
+        token,
+        canonicalProjectRoot: '/canonical/repo',
+      },
     });
 
     await expect(oversized).rejects.toThrow(/256/);
@@ -581,7 +733,11 @@ describe('agent surface MCP tools', () => {
       canonicalize: async () => '/canonical/repo',
       connect,
       entryPath: '/entry.js',
-      taskBinding: { taskId: 'task-alpha', token: '   ' },
+      taskBinding: {
+        taskId: 'task-alpha',
+        token: '   ',
+        canonicalProjectRoot: '/canonical/repo',
+      },
     })).rejects.toThrow(/task token/i);
     expect(connect).not.toHaveBeenCalled();
   });

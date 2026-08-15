@@ -22,14 +22,23 @@ trusted `main` webview.
 A trusted launcher issues a project-local task credential with
 `issueControlTaskToken()` or, after it has already canonicalized the project
 root, `issueControlTaskTokenForCanonicalRoot()`. It passes the resulting token
-and the same task ID to `psyche mcp`:
+and the same task ID to `psyche mcp`, with the trusted launch project in
+`PSYCHE_PROJECT_ROOT` or as the process working directory:
 
 ```text
+PSYCHE_PROJECT_ROOT=/absolute/path/to/project
 PSYCHE_CONTROL_TASK_ID=task-alpha
 PSYCHE_CONTROL_TASK_TOKEN=<redacted example>
 ```
 
 These variables are a pair; the example token is intentionally not usable.
+At launch, Psyche canonicalizes the trusted project root and stores it in the
+MCP task binding. The token is valid only for that canonical launch project.
+Every tool-supplied root is canonicalized and compared before client creation,
+socket connection, owner spawn, or `hello`; a different project fails locally
+with `task_project_mismatch`. Symlink aliases resolving to the launch project
+remain valid.
+
 Authentication binds the connection to the canonical project root and task.
 Caller-supplied `task_id` values are only consistency inputs and never establish
 authority. A mismatched value is rejected, while omitting it does not weaken the
@@ -163,6 +172,8 @@ raw tmux command, XPath, selector, or whole-desktop fallback.
 
 - `control_owner_unavailable`: verify the canonical project is accessible and
   run `psyche daemon --port 0 --project-root <root>` once to inspect startup.
+- `task_project_mismatch`: use the canonical MCP launch project or a symlink
+  alias resolving to it; a task token cannot be redirected to another project.
 - `provider_unavailable`: open the desktop project/browser surface and wait for
   its authenticated provider registration; do not fall back to desktop input.
 - `resource_replaced`: refresh `psyche_control_list`, request/grant authority for
