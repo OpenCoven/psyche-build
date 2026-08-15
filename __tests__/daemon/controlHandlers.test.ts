@@ -104,7 +104,11 @@ describe('createDaemonControlHandlers updatePaneMeta', () => {
 
 function paneHandlerHarness() {
   const sendKeysHex = vi.fn(async () => {});
+<<<<<<< HEAD
   const killPane = vi.fn(async (_paneId: string) => {});
+=======
+  const killPane = vi.fn(async () => {});
+>>>>>>> origin/main
   const executeCommand = vi.fn(async () => {});
   const executeCommandWithOutput = vi.fn(async (line: string) =>
     line.includes('pane_active') ? ['1'] : ['120 40']);
@@ -139,7 +143,10 @@ function paneHandlerHarness() {
     paneObservations: observations,
     surfaces,
     refreshPaneSurfaces,
+<<<<<<< HEAD
     closePane: async (_projectRoot, _paneId) => killPane('%3'),
+=======
+>>>>>>> origin/main
   });
   return {
     handlers, observations, surfaces, sendKeysHex, killPane, executeCommand,
@@ -211,6 +218,7 @@ describe('createDaemonControlHandlers leased pane controls', () => {
     expect(executeCommandWithOutput).toHaveBeenCalledTimes(2);
   });
 
+<<<<<<< HEAD
   it('rejects pane effects when refreshPaneSurfaces is unavailable', async () => {
     const sendKeysHex = vi.fn(async () => {});
     const handlers = createDaemonControlHandlers({
@@ -227,6 +235,8 @@ describe('createDaemonControlHandlers leased pane controls', () => {
     expect(sendKeysHex).not.toHaveBeenCalled();
   });
 
+=======
+>>>>>>> origin/main
   it('creates through the canonical project scope', async () => {
     const { handlers, surfaces, spawnPane, refreshPaneSurfaces } = paneHandlerHarness();
 

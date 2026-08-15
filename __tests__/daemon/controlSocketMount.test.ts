@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 import { mkdtemp, rm } from 'node:fs/promises';
+=======
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+>>>>>>> origin/main
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -39,11 +43,17 @@ async function startMountedDaemon(): Promise<{
   operatorToken: string;
   recordedKeys: string[];
   recordedResizes: Array<{ paneId: string; cols: number; rows: number }>;
+<<<<<<< HEAD
+=======
+  recordedFocuses: string[];
+  recordedKills: string[];
+>>>>>>> origin/main
   launched: Array<{ harness: string; prompt: string }>;
 }> {
   const projectRoot = await mkdtemp(path.join(tmpdir(), 'psyche-mount-proj-'));
   tempRoots.push(projectRoot);
   const canonicalRoot = await canonicalizeProjectRoot(projectRoot);
+<<<<<<< HEAD
 
   // Recording tmux: capture the effect-boundary calls so a mutation driven
   // through the mounted socket can be asserted to reach real tmux. The resize
@@ -51,6 +61,20 @@ async function startMountedDaemon(): Promise<{
   // with the sendKeysHex boundary.
   const recordedKeys: string[] = [];
   const recordedResizes: Array<{ paneId: string; cols: number; rows: number }> = [];
+=======
+  await mkdir(path.join(canonicalRoot, '.psyche'), { recursive: true });
+  await writeFile(
+    path.join(canonicalRoot, '.psyche', 'psyche.config.json'),
+    JSON.stringify({ panes: [{ id: 'psyche-1', paneId: '%1' }] }),
+  );
+
+  // Recording tmux: capture the effect-boundary calls so a mutation driven
+  // through the mounted socket can be asserted to reach real tmux.
+  const recordedKeys: string[] = [];
+  const recordedResizes: Array<{ paneId: string; cols: number; rows: number }> = [];
+  const recordedFocuses: string[] = [];
+  const recordedKills: string[] = [];
+>>>>>>> origin/main
   const tmux = new TmuxControl('psyche-mount-test');
   vi.spyOn(tmux, 'sendKeysHex').mockImplementation((_paneId: string, data: Buffer) => {
     recordedKeys.push(data.toString('hex'));
@@ -58,6 +82,15 @@ async function startMountedDaemon(): Promise<{
   vi.spyOn(tmux, 'resizePane').mockImplementation((paneId: string, cols: unknown, rows: unknown) => {
     recordedResizes.push({ paneId, cols: Number(cols), rows: Number(rows) });
   });
+<<<<<<< HEAD
+=======
+  vi.spyOn(tmux, 'selectPane').mockImplementation((paneId: string) => {
+    recordedFocuses.push(paneId);
+  });
+  vi.spyOn(tmux, 'killPane').mockImplementation((paneId: string) => {
+    recordedKills.push(paneId);
+  });
+>>>>>>> origin/main
 
   // Stub coven client: launchSession returns a summary scoped INSIDE the
   // project root (the bridge enforces scope via realpath).
@@ -112,6 +145,11 @@ async function startMountedDaemon(): Promise<{
     operatorToken: await credentials.operatorToken(),
     recordedKeys,
     recordedResizes,
+<<<<<<< HEAD
+=======
+    recordedFocuses,
+    recordedKills,
+>>>>>>> origin/main
     launched,
   };
 }
@@ -143,6 +181,81 @@ describe('mounted control socket end-to-end', () => {
     expect(daemon.recordedResizes).toEqual([{ paneId: '%1', cols: 100, rows: 40 }]);
   });
 
+<<<<<<< HEAD
+=======
+  it('refuses to mutate a pane outside the project registry', async () => {
+    const daemon = await startMountedDaemon();
+    const client = await ControlClient.connect({
+      projectRoot: daemon.projectRoot,
+      endpoint: daemon.endpoint,
+      token: daemon.operatorToken,
+      clientName: 'test-operator',
+    });
+    cleanups.push(() => client.close());
+
+    const outcome = await client.submit(
+      inputCommand('pane.resize', { paneId: '%999', cols: 100, rows: 40 }),
+    );
+
+    expect(outcome).toMatchObject({ status: 'failed', errorCode: 'pane_not_found' });
+    expect(daemon.recordedResizes).toEqual([]);
+  });
+
+  it('sendInput rejects an unregistered pane with pane_not_found', async () => {
+    const daemon = await startMountedDaemon();
+    const client = await ControlClient.connect({
+      projectRoot: daemon.projectRoot,
+      endpoint: daemon.endpoint,
+      token: daemon.operatorToken,
+      clientName: 'test-operator',
+    });
+    cleanups.push(() => client.close());
+
+    const outcome = await client.submit(
+      inputCommand('pane.input', { paneId: '%999', dataBase64: Buffer.from('x').toString('base64') }),
+    );
+
+    expect(outcome).toMatchObject({ status: 'failed', errorCode: 'pane_not_found' });
+    expect(daemon.recordedKeys).toEqual([]);
+  });
+
+  it('focusPane rejects an unregistered pane with pane_not_found', async () => {
+    const daemon = await startMountedDaemon();
+    const client = await ControlClient.connect({
+      projectRoot: daemon.projectRoot,
+      endpoint: daemon.endpoint,
+      token: daemon.operatorToken,
+      clientName: 'test-operator',
+    });
+    cleanups.push(() => client.close());
+
+    const outcome = await client.submit(
+      inputCommand('pane.focus', { paneId: '%999' }),
+    );
+
+    expect(outcome).toMatchObject({ status: 'failed', errorCode: 'pane_not_found' });
+    expect(daemon.recordedFocuses).toEqual([]);
+  });
+
+  it('killPane rejects an unregistered pane with pane_not_found', async () => {
+    const daemon = await startMountedDaemon();
+    const client = await ControlClient.connect({
+      projectRoot: daemon.projectRoot,
+      endpoint: daemon.endpoint,
+      token: daemon.operatorToken,
+      clientName: 'test-operator',
+    });
+    cleanups.push(() => client.close());
+
+    const outcome = await client.submit(
+      inputCommand('pane.kill', { paneId: '%999' }),
+    );
+
+    expect(outcome).toMatchObject({ status: 'failed', errorCode: 'pane_not_found' });
+    expect(daemon.recordedKills).toEqual([]);
+  });
+
+>>>>>>> origin/main
   it('drives a coven session launch and returns a typed summary', async () => {
     const daemon = await startMountedDaemon();
     const client = await ControlClient.connect({
