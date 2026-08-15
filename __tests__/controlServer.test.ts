@@ -1,18 +1,21 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { once } from 'node:events';
 import { mkdir, realpath, rm } from 'node:fs/promises';
+import { createConnection } from 'node:net';
 import path from 'node:path';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   AuthenticatedControlIdentity,
   ControlPrincipal,
 } from '../src/control/credentials.js';
+import { createControlCredentialStore } from '../src/control/credentials.js';
 import { ControlJournal } from '../src/control/journal.js';
 import {
   ControlRuntime,
   type ControlHandlers,
   type RuntimeJournal,
 } from '../src/control/runtime.js';
-import { createControlServerForTest } from '../src/control/server.js';
+import { ControlServer, createControlServerForTest } from '../src/control/server.js';
 import type { ControlCommandInput } from '../src/control/types.js';
 
 const TEST_ARTIFACTS_ROOT = path.join(process.cwd(), '.control-server-test-artifacts');
@@ -175,6 +178,78 @@ function wrapJournal(
 }
 
 describe('control server runtime integration', () => {
+  it('does not execute a frame queued after a terminal connection failure', async () => {
+    const root = await testProject();
+    const endpoint = `.control-server-${randomBytes(6).toString('hex')}.sock`;
+    const snapshot = vi.fn(() => ({
+      ownerEpoch: 1,
+      sequence: 0,
+      commands: {},
+      leases: {},
+      resources: [],
+      capabilityLeases: [],
+      leaseRequests: [],
+      approvals: [],
+      receipts: [],
+    }));
+    const credentials = await createControlCredentialStore({
+      projectRoot: root,
+      filePath: path.join(root, 'control-credentials.json'),
+      stateRoot: path.join(root, '.control-state'),
+    });
+    const server = await ControlServer.start({
+      endpoint,
+      projectRoot: root,
+      ownerEpoch: 1,
+      credentials,
+      operatorCommandPolicy: 'trusted-test-only',
+      runtime: {
+        submit: async () => ({ status: 'succeeded', value: undefined }),
+        snapshot,
+        readEvents: () => ({ events: [], nextSequence: 0, gap: false }),
+      },
+    });
+    const socket = createConnection(endpoint);
+    socket.setEncoding('utf8');
+    socket.on('error', () => undefined);
+    let responses = '';
+    const welcomed = new Promise<void>((resolve) => {
+      socket.on('data', (chunk: string) => {
+        responses += chunk;
+        if (responses.includes('"type":"welcome"')) resolve();
+      });
+    });
+
+    try {
+      await once(socket, 'connect');
+      socket.write(`${JSON.stringify({
+        version: 1,
+        type: 'hello',
+        requestId: 'hello',
+        token: await credentials.operatorToken(),
+        clientName: 'queued-frame-test',
+        projectRoot: root,
+      })}\n`);
+      await welcomed;
+
+      const closed = once(socket, 'close');
+      socket.write('{"version":1,"type":\n');
+      socket.write(`${JSON.stringify({
+        version: 1,
+        type: 'state.get',
+        requestId: 'must-not-run',
+      })}\n`);
+      await closed;
+
+      expect(responses).toContain('"code":"bad_request"');
+      expect(responses).not.toContain('"requestId":"must-not-run"');
+      expect(snapshot).not.toHaveBeenCalled();
+    } finally {
+      socket.destroy();
+      await server.close();
+    }
+  });
+
   it('keeps operator idempotency project-wide in runtime snapshots and the journal', async () => {
     const root = await testProject();
     const journal = await ControlJournal.open(root, 1);
