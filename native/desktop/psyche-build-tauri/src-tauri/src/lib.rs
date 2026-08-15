@@ -4980,6 +4980,9 @@ fn fs_write_text(
 fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
     let out = std::process::Command::new("git")
         .current_dir(root)
+        // Repository-local fsmonitor configuration may name an executable.
+        // Inspection commands must never run code supplied by the workspace.
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .output()
         .map_err(|e| format!("git: {}", e))?;
@@ -5283,6 +5286,8 @@ fn git_diff(
         "--no-pager".into(),
         "diff".into(),
         "--no-color".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
         "--relative".into(),
     ];
     // Context lines, for expanding a hunk in place. Clamped rather than passed
@@ -7156,6 +7161,34 @@ mod workspace_panel_tests {
     }
 
     #[cfg(unix)]
+    fn write_marker_executable(path: &Path) {
+        std::fs::write(
+            path,
+            "#!/bin/sh\n: \"${PSYCHE_TEST_MARKER:?missing marker}\"\ntouch \"$PSYCHE_TEST_MARKER\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn write_marker_executable(_path: &Path) {}
+
+    fn marker_command(path: &Path) -> String {
+        #[cfg(unix)]
+        {
+            path_text(path).to_string()
+        }
+        #[cfg(windows)]
+        {
+            let _ = path;
+            // Git for Windows invokes configured helpers through its POSIX
+            // shell. A shell command avoids Windows command-line quoting of
+            // temporary paths while retaining the positive-control assertion.
+            "sh -c 'test -n \"$PSYCHE_TEST_MARKER\" && touch \"$PSYCHE_TEST_MARKER\"'".to_string()
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn resolves_the_first_executable_on_path_to_its_canonical_path() {
         let tree = TempTree::new("coven-path-order");
@@ -7730,9 +7763,10 @@ mod workspace_panel_tests {
         assert!(PendingPtyStart::reserve(&thread_id).is_ok());
     }
 
-    fn run_test_git(root: &Path, args: &[&str]) {
+    fn run_test_git_with_env(root: &Path, args: &[&str], env: &[(&str, &str)]) {
         let output = std::process::Command::new("git")
             .current_dir(root)
+            .envs(env.iter().copied())
             .args(args)
             .output()
             .expect("git must run in tests");
@@ -7742,6 +7776,10 @@ mod workspace_panel_tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn run_test_git(root: &Path, args: &[&str]) {
+        run_test_git_with_env(root, args, &[]);
     }
 
     #[test]
@@ -8078,6 +8116,92 @@ mod workspace_panel_tests {
         assert!(validate_git_relative_path("../secret.txt").is_err());
         assert!(validate_git_relative_path("src/../../secret.txt").is_err());
         assert!(validate_git_relative_path("/tmp/secret.txt").is_err());
+    }
+
+    #[test]
+    fn git_status_does_not_execute_a_repository_fsmonitor() {
+        let tree = TempTree::new("git-fsmonitor");
+        let hook = if cfg!(windows) {
+            tree.root.join("fsmonitor.bat")
+        } else {
+            tree.root.join("fsmonitor.sh")
+        };
+        let marker = tree.root.join("fsmonitor-ran");
+        write_marker_executable(&hook);
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(
+            &tree.root,
+            &["config", "core.fsmonitor", &marker_command(&hook)],
+        );
+
+        run_test_git_with_env(
+            &tree.root,
+            &["status", "--porcelain"],
+            &[("PSYCHE_TEST_MARKER", path_text(&marker))],
+        );
+        assert!(
+            marker.exists(),
+            "unhardened git status must execute fsmonitor"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        git_status(path_text(&tree.root).to_string()).unwrap();
+
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn git_diff_does_not_execute_repository_diff_helpers() {
+        let tree = TempTree::new("git-external-diff");
+        let helper = if cfg!(windows) {
+            tree.root.join("external-diff.bat")
+        } else {
+            tree.root.join("external-diff.sh")
+        };
+        let marker = tree.root.join("external-diff-ran");
+        write_marker_executable(&helper);
+        std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["add", "tracked.txt"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Psyche Tests",
+                "commit",
+                "-qm",
+                "baseline",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &["config", "diff.external", &marker_command(&helper)],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
+
+        run_test_git_with_env(
+            &tree.root,
+            &["diff", "--no-color", "--relative", "--", "tracked.txt"],
+            &[("PSYCHE_TEST_MARKER", path_text(&marker))],
+        );
+        assert!(
+            marker.exists(),
+            "unhardened git diff must execute the configured helper"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("tracked.txt".to_string()),
+            Some(false),
+            None,
+        )
+        .unwrap();
+
+        assert!(diff.text.contains("+after"));
+        assert!(!marker.exists());
     }
 
     #[test]

@@ -324,9 +324,10 @@ export function normalizeRitual(value: unknown, fallbackScope: RitualScope = 'pr
   const id = typeof parsed.id === 'string' && parsed.id.trim()
     ? ritualIdFromName(parsed.id)
     : ritualIdFromName(name);
-  const scope = parsed.scope === 'builtin' || parsed.scope === 'project'
-    ? parsed.scope
-    : fallbackScope;
+  // The loader, not repository-controlled JSON, determines whether a ritual is
+  // trusted as built in. In particular, a project ritual must not be able to
+  // opt into the privileges reserved for bundled rituals by setting its scope.
+  const scope = fallbackScope;
   const projects = Array.isArray(parsed.projects)
     ? parsed.projects.map(normalizeProject).filter((project): project is RitualProjectDefinition => !!project)
     : [];

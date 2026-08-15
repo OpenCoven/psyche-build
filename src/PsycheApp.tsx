@@ -1136,7 +1136,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
   const createTerminalPaneForRitual = async (
     targetProjectRoot: string,
     existingPanes: PsychePane[],
-    ritualPane?: { name?: string; command?: string }
+    ritualPane?: { name?: string; command?: string },
+    allowCommand = false,
   ): Promise<PsychePane | null> => {
     try {
       setIsCreatingPane(true)
@@ -1172,7 +1173,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
               ? getPaneTmuxTitle(pane, targetProjectRoot, pane.projectName)
               : pane.slug,
           )
-          if (ritualPane?.command?.trim()) {
+          if (allowCommand && ritualPane?.command?.trim()) {
             await tmuxService.sendShellCommand(pane.paneId, ritualPane.command.trim())
             await tmuxService.sendTmuxKeys(pane.paneId, "Enter")
           }
@@ -1207,7 +1208,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
           const pane = await createTerminalPaneForRitual(
             targetProjectRoot,
             workingPanes,
-            ritualPane
+            ritualPane,
+            ritual.scope === "builtin",
           )
           if (pane) {
             workingPanes = [...workingPanes, pane]

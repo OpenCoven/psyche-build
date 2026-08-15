@@ -86,6 +86,47 @@ describe('createDaemonControlHandlers runCovenDesktopAction', () => {
     }
   });
 
+  it('uses the canonical session id returned after scope validation', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-desktop-canonical-'));
+    const sendInput = vi.fn(async (_sessionId: string, _input: string) => {});
+
+    try {
+      const handlers = createDaemonControlHandlers({
+        tmux: new TmuxControl('psyche-test'),
+        projectRoot: root,
+        sessionName: 'psyche-test',
+        capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+        createCovenClient: () => ({
+          listSessions: async () => [],
+          getSession: async () => ({
+            id: 'canonical-session',
+            projectRoot: root,
+            harness: 'codex',
+            title: 'Canonical',
+            status: 'running',
+            createdAt: '2026-04-27T10:00:00Z',
+            updatedAt: '2026-04-27T10:01:00Z',
+          }),
+          sendInput,
+        }),
+      });
+
+      const result = await handlers.runCovenDesktopAction({
+        sessionId: 'requested-session',
+        action: 'approve',
+      });
+
+      expect(sendInput).toHaveBeenCalledWith('canonical-session', expect.any(String));
+      expect(result).toMatchObject({
+        sessionId: 'canonical-session',
+        action: 'approve',
+        accepted: true,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects an unknown desktop action instead of sending undefined input', async () => {
     const sendInput = vi.fn(async (_sessionId: string, _input: string) => {});
     const handlers = handlersWithCovenClient(sendInput);

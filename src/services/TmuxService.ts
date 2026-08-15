@@ -64,6 +64,22 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function quoteShellArgument(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function buildSelectPaneCommand(paneId: string): string {
+  return `tmux select-pane -t ${quoteShellArgument(paneId)}`;
+}
+
+function buildSetPaneTitleCommand(paneId: string, title: string): string {
+  return `${buildSelectPaneCommand(paneId)} -T ${quoteShellArgument(title)}`;
+}
+
+function buildKillPaneCommand(paneId: string): string {
+  return `tmux kill-pane -t ${quoteShellArgument(paneId)}`;
+}
+
 function isPermanentError(error: unknown): boolean {
   const message = String(error).toLowerCase();
   return PERMANENT_ERRORS.some(pattern => message.includes(pattern));
@@ -714,7 +730,7 @@ export class TmuxService {
   async setPaneTitle(paneId: string, title: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        this.execute(`tmux select-pane -t '${paneId}' -T '${title}'`);
+        this.execute(buildSetPaneTitleCommand(paneId, title));
       },
       RetryStrategy.FAST,
       `setPaneTitle(${paneId})`
@@ -727,7 +743,7 @@ export class TmuxService {
   async selectPane(paneId: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        this.execute(`tmux select-pane -t '${paneId}'`);
+        this.execute(buildSelectPaneCommand(paneId));
       },
       RetryStrategy.FAST,
       `selectPane(${paneId})`
@@ -952,7 +968,7 @@ export class TmuxService {
     try {
       await this.executeWithRetry(
         () => {
-          this.execute(`tmux kill-pane -t '${paneId}'`);
+          this.execute(buildKillPaneCommand(paneId));
         },
         RetryStrategy.NONE, // Destructive operation
         `killPane(${paneId})`
@@ -1454,7 +1470,7 @@ export class TmuxService {
    */
   selectPaneSync(paneId: string): void {
     try {
-      this.execute(`tmux select-pane -t '${paneId}'`);
+      this.execute(buildSelectPaneCommand(paneId));
     } catch (error) {
       this.logger.warn(`Failed to select pane ${paneId}`, 'TmuxService');
       throw error;
@@ -1466,7 +1482,7 @@ export class TmuxService {
    */
   setPaneTitleSync(paneId: string, title: string): void {
     try {
-      this.execute(`tmux select-pane -t '${paneId}' -T '${title}'`);
+      this.execute(buildSetPaneTitleCommand(paneId, title));
     } catch (error) {
       this.logger.warn(`Failed to set pane title for ${paneId}`, 'TmuxService');
       throw error;
@@ -1478,7 +1494,7 @@ export class TmuxService {
    */
   killPaneSync(paneId: string): void {
     try {
-      this.execute(`tmux kill-pane -t '${paneId}'`);
+      this.execute(buildKillPaneCommand(paneId));
     } catch (error) {
       this.logger.warn(`Failed to kill pane ${paneId}`, 'TmuxService');
       throw error;

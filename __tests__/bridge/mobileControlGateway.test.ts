@@ -755,6 +755,34 @@ describe('MobileControlGateway pane mutations', () => {
     expect(killed).toEqual([]);
   });
 
+  it('refuses mutations for a tmux-looking id published only by a Coven session', async () => {
+    const covenWorkspace = structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace);
+    covenWorkspace.projects[0].worktrees[1].panes[0].id = '%10';
+    covenWorkspace.projects[0].worktrees[1].panes[0].kind = 'coven-session';
+    const killed: string[] = [];
+    const updated: string[] = [];
+    const gateway = mutationGateway({
+      workspaceSnapshot: () => ({ workspace: covenWorkspace, sequence: 1 }),
+      killPane: async (paneId: string) => { killed.push(paneId); },
+      updatePaneMeta: async (paneId: string) => { updated.push(paneId); },
+    });
+
+    await expect(gateway.handle(
+      { type: 'panes.kill', requestId: 'kill-coven', id: '%10' },
+      context(),
+    )).rejects.toMatchObject({
+      code: 'unknown_target',
+      message: 'pane is not a tmux-backed published pane',
+    });
+    await expect(gateway.handle(
+      { type: 'panes.meta', requestId: 'meta-coven', id: '%10', title: 'Renamed' },
+      context(),
+    )).rejects.toMatchObject({ code: 'unknown_target' });
+
+    expect(killed).toEqual([]);
+    expect(updated).toEqual([]);
+  });
+
   it('updates pane metadata and announces the change', async () => {
     const updates: Array<{ paneId: string; meta: unknown }> = [];
     const gateway = mutationGateway({

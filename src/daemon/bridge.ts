@@ -314,6 +314,9 @@ export async function getProjectCovenSession(
   sessionId: string,
   client: CovenClient,
 ): Promise<CovenSessionSummary> {
+  if (!isSafeCovenSessionId(sessionId)) {
+    throw bridgeError('invalid_coven_session_id', 'Coven session id contains unsupported characters');
+  }
   if (!client.getSession) {
     throw bridgeError(
       'coven_session_lookup_unsupported',
