@@ -1105,6 +1105,19 @@
       covenSessionId: thread.launch.covenSessionId || null,
     };
   }
+  function persistableFilesPanes() {
+    var records = [];
+    filesPanes.forEach(function (pane) {
+      if (!pane || !pane.id || !pane.projectId || !pane.workspaceRoot) return;
+      records.push({
+        id: pane.id,
+        projectId: pane.projectId,
+        workspaceRoot: pane.workspaceRoot,
+        hidden: pane.hidden === true,
+      });
+    });
+    return records;
+  }
   function persistablePaneLayouts() {
     var records = [];
     paneLayouts.forEach(function (layout, key) {
@@ -1126,6 +1139,7 @@
       activeThreadId: state.activeThreadId || null,
       projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS),
       sessions: state.threads.map(persistableSession).filter(Boolean),
+      filesPanes: persistableFilesPanes(),
       paneLayouts: persistablePaneLayouts(),
     };
   }
@@ -12359,6 +12373,28 @@
     });
   }
 
+  function restorePersistedFilesPanes(savedPanes) {
+    filesPanes.clear();
+    (savedPanes || []).forEach(function (record) {
+      if (!record) return;
+      var project = findProject(record.projectId);
+      if (!project) return;
+      var key = filesPaneKey(project.id, record.workspaceRoot);
+      if (filesPanes.has(key)) return;
+      filesPanes.set(key, {
+        id: record.id,
+        kind: "files",
+        projectId: project.id,
+        workspaceRoot: record.workspaceRoot,
+        activeFileId: null,
+        previousFocusedSessionId: null,
+        hidden: record.hidden === true,
+        pane: null,
+        host: null,
+      });
+    });
+  }
+
   function ensureRestoredSessionPlacements(threads) {
     threads.forEach(function (thread) {
       if (thread.hidden) return;
@@ -12379,6 +12415,7 @@
     }).filter(Boolean);
     state.threads = restored;
     var restoredIds = new Set(restored.map(function (thread) { return thread.id; }));
+    restorePersistedFilesPanes(saved.filesPanes);
     restorePersistedPaneLayouts(saved.paneLayouts, restoredIds);
     ensureRestoredSessionPlacements(restored);
     restored.forEach(function (thread) { mountTerminal(thread); });

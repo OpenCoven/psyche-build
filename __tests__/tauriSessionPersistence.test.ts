@@ -55,6 +55,7 @@ describe('Tauri workspace persistence model', () => {
       activeThreadId: null,
       projects: [{ id: 'project-a', root: '/repo' }],
       sessions: [],
+      filesPanes: [],
       paneLayouts: [],
     });
   });
@@ -381,6 +382,7 @@ describe('Tauri workspace persistence model', () => {
             hidden: false,
           },
         ],
+        filesPanes: [],
         paneLayouts: [
           {
             projectId: 'project-a',
@@ -431,12 +433,98 @@ describe('Tauri workspace persistence model', () => {
           hidden: false,
         },
       ],
+      filesPanes: [],
       paneLayouts: [
         {
           projectId: 'project-a',
           worktreePath: '/repo',
           root: { type: 'leaf', id: 'leaf-a', threadId: 'live-1' },
           focusedLeafId: 'leaf-a',
+        },
+      ],
+    });
+  });
+
+  test('keeps one Files pane per worktree and allows visible Files leaves in saved layouts', () => {
+    expect(
+      workspaceModel.sanitizeWorkspaceV3({
+        version: 3,
+        activeProjectId: 'project-a',
+        activeThreadId: 'thread-a',
+        projects: [{ id: 'project-a', root: '/repo' }],
+        sessions: [
+          {
+            id: 'thread-a',
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            kind: 'shell',
+            launchKind: 'shell',
+          },
+        ],
+        filesPanes: [
+          {
+            id: 'files-a',
+            projectId: 'project-a',
+            workspaceRoot: '/repo',
+            hidden: false,
+          },
+          {
+            id: 'files-b',
+            projectId: 'project-a',
+            workspaceRoot: '/repo',
+            hidden: true,
+          },
+        ],
+        paneLayouts: [
+          {
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            root: {
+              type: 'split',
+              id: 'split-a',
+              first: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' },
+              second: { type: 'leaf', id: 'leaf-b', threadId: 'files-a' },
+            },
+            focusedLeafId: 'leaf-b',
+          },
+        ],
+      }),
+    ).toEqual({
+      version: 3,
+      activeProjectId: 'project-a',
+      activeThreadId: 'thread-a',
+      projects: [{ id: 'project-a', root: '/repo' }],
+      sessions: [
+        {
+          id: 'thread-a',
+          projectId: 'project-a',
+          worktreePath: '/repo',
+          kind: 'shell',
+          launchKind: 'shell',
+          hidden: false,
+        },
+      ],
+      filesPanes: [
+        {
+          id: 'files-a',
+          projectId: 'project-a',
+          workspaceRoot: '/repo',
+          hidden: false,
+        },
+      ],
+      paneLayouts: [
+        {
+          projectId: 'project-a',
+          worktreePath: '/repo',
+          root: {
+            type: 'split',
+            id: 'split-a',
+            orientation: 'column',
+            ratio: 0.5,
+            first: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' },
+            second: { type: 'leaf', id: 'leaf-b', threadId: 'files-a' },
+          },
+          focusedLeafId: 'leaf-b',
         },
       ],
     });
@@ -530,6 +618,7 @@ describe('Tauri workspace persistence model', () => {
             hidden: false,
           },
         ],
+        filesPanes: [],
         paneLayouts: [
           {
             projectId: 'project-a',
@@ -589,6 +678,7 @@ describe('Tauri workspace persistence model', () => {
           hidden: false,
         },
       ],
+      filesPanes: [],
       paneLayouts: [
         {
           projectId: 'project-a',
@@ -632,6 +722,7 @@ describe('Tauri workspace persistence model', () => {
             hidden: false,
           },
         ],
+        filesPanes: [],
         paneLayouts: [
           {
             projectId: 'project-a',
@@ -682,6 +773,7 @@ describe('Tauri workspace persistence model', () => {
           hidden: false,
         },
       ],
+      filesPanes: [],
       paneLayouts: [
         {
           projectId: 'project-a',
@@ -742,6 +834,7 @@ describe('Tauri workspace persistence model', () => {
           hidden: false,
         },
       ],
+      filesPanes: [],
       paneLayouts: [],
     });
   });
@@ -806,6 +899,7 @@ describe('Tauri workspace persistence model', () => {
             hidden: false,
           },
         ],
+        filesPanes: [],
         paneLayouts: [
           {
             projectId: 'project-a',
@@ -864,6 +958,7 @@ describe('Tauri workspace persistence model', () => {
           hidden: false,
         },
       ],
+      filesPanes: [],
       paneLayouts: [
         {
           projectId: 'project-a',
@@ -920,11 +1015,13 @@ describe('Tauri workspace persistence model', () => {
     expect(mainSource).toContain('await saveWorkspaceNow();');
   });
 
-  test('serializes sessions and pane layouts into workspace v3', () => {
+  test('serializes sessions, Files panes, and pane layouts into workspace v3', () => {
     expect(functionSource('persistableSession')).not.toMatch(/term|host|pane|fit/);
+    expect(functionSource('persistableFilesPanes')).toContain('filesPanes.forEach');
     expect(functionSource('persistablePaneLayouts')).toContain('paneLayouts.forEach');
     expect(functionSource('buildPersistedWorkspace')).toContain('version: 3');
     expect(functionSource('buildPersistedWorkspace')).toContain('sessions:');
+    expect(functionSource('buildPersistedWorkspace')).toContain('filesPanes:');
     expect(functionSource('buildPersistedWorkspace')).toContain('paneLayouts:');
   });
 
