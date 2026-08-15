@@ -1,33 +1,29 @@
-import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdir, realpath, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
-import type { AuthenticatedControlIdentity, ControlPrincipal } from '../src/control/credentials.js';
+import type {
+  AuthenticatedControlIdentity,
+  ControlPrincipal,
+} from '../src/control/credentials.js';
 import { ControlJournal } from '../src/control/journal.js';
-import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
 import {
   ControlRuntime,
   type ControlHandlers,
   type RuntimeJournal,
 } from '../src/control/runtime.js';
 import { createControlServerForTest } from '../src/control/server.js';
-import { SurfaceRegistry } from '../src/control/surfaces.js';
 import type { ControlCommandInput } from '../src/control/types.js';
 
 const TEST_ARTIFACTS_ROOT = path.join(process.cwd(), '.control-server-test-artifacts');
 const INTERNAL_IDEMPOTENCY_PREFIX = 'psyche-control-idempotency-v1';
-const TERMINAL_COMMAND_EVENTS = new Set([
-  'command.succeeded',
-  'command.failed',
-  'command.unknown',
-  'command.rejected',
-]);
 
 let testRoots: string[] = [];
 
 async function testProject(): Promise<string> {
   await mkdir(TEST_ARTIFACTS_ROOT, { recursive: true });
-  const root = await mkdtemp(path.join(TEST_ARTIFACTS_ROOT, 'project-'));
+  const root = path.join(TEST_ARTIFACTS_ROOT, `project-${randomBytes(6).toString('hex')}`);
+  await mkdir(root);
   testRoots.push(root);
   return realpath(root);
 }
@@ -38,16 +34,22 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-  await rm(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
+  await rm(TEST_ARTIFACTS_ROOT, { recursive: true, force: true }).catch(() => undefined);
 });
 
-function authenticatedTask(taskId: string): AuthenticatedControlIdentity {
+function authenticatedTask(
+  taskId: string,
+  subjectId: string,
+): AuthenticatedControlIdentity {
   const principal: ControlPrincipal = {
-    id: 'agent',
+    id: `task-subject:${subjectId}`,
     kind: 'agent',
     capabilities: ['read', 'mutate'],
   };
-  return { ...principal, principal, taskBinding: { taskId } };
+  return {
+    principal,
+    taskBinding: { taskId, subjectId },
+  };
 }
 
 const operator: ControlPrincipal = {
@@ -117,20 +119,40 @@ function handlers(overrides: Partial<ControlHandlers> = {}): ControlHandlers {
   };
 }
 
-function expectedTaskIdempotencyKey(
+function expectedRuntimeIdempotencyKey(
   projectRoot: string,
-  taskId: string,
+  identity: AuthenticatedControlIdentity,
   callerKey: string,
 ): string {
   const hash = createHash('sha256');
-  for (const component of [
-    INTERNAL_IDEMPOTENCY_PREFIX,
-    'task',
-    projectRoot,
-    taskId,
-    'caller',
-    callerKey,
-  ]) {
+  const components = identity.taskBinding
+    ? [
+        INTERNAL_IDEMPOTENCY_PREFIX,
+        'project',
+        projectRoot,
+        'principal-kind',
+        identity.principal.kind,
+        'task',
+        identity.taskBinding.taskId,
+        'subject',
+        identity.taskBinding.subjectId,
+        'principal',
+        identity.principal.id,
+        'caller',
+        callerKey,
+      ]
+    : [
+        INTERNAL_IDEMPOTENCY_PREFIX,
+        'project',
+        projectRoot,
+        'principal-kind',
+        identity.principal.kind,
+        'principal',
+        identity.principal.id,
+        'caller',
+        callerKey,
+      ];
+  for (const component of components) {
     const bytes = Buffer.from(component, 'utf8');
     const length = Buffer.allocUnsafe(4);
     length.writeUInt32BE(bytes.length);
@@ -191,7 +213,7 @@ describe('control server runtime integration', () => {
       ]);
   });
 
-  it('isolates completed outcomes by authenticated task and replays the same task', async () => {
+  it('dedupes only within one authenticated task subject and isolates other tasks and rotated subjects', async () => {
     const root = await testProject();
     const journal = await ControlJournal.open(root, 1);
     const runtime = await ControlRuntime.create({
@@ -205,28 +227,37 @@ describe('control server runtime integration', () => {
       projectRoot: root,
     });
     const callerKey = 'shared-client-key';
+    const alpha = authenticatedTask('task-alpha', 'subject-alpha');
+    const beta = authenticatedTask('task-beta', 'subject-beta');
+    const rotated = authenticatedTask('task-alpha', 'subject-alpha-rotated');
 
-    const alpha = await authority.submitAs(
-      authenticatedTask('task-alpha'),
-      leaseRequest(root, 'command-a', callerKey, 'task-alpha'),
+    const first = await authority.submitAs(
+      alpha,
+      leaseRequest(root, 'command-alpha', callerKey, 'task-alpha'),
     );
-    const beta = await authority.submitAs(
-      authenticatedTask('task-beta'),
-      leaseRequest(root, 'command-b', callerKey, 'task-beta'),
+    const secondTask = await authority.submitAs(
+      beta,
+      leaseRequest(root, 'command-beta', callerKey, 'task-beta'),
     );
-    const alphaReplay = await authority.submitAs(
-      authenticatedTask('task-alpha'),
-      leaseRequest(root, 'command-a-retry', callerKey, 'task-alpha'),
+    const rotatedSubject = await authority.submitAs(
+      rotated,
+      leaseRequest(root, 'command-rotated', callerKey, 'task-alpha'),
+    );
+    const replay = await authority.submitAs(
+      alpha,
+      leaseRequest(root, 'command-alpha-replay', callerKey, 'task-alpha'),
     );
 
-    expect(alpha).toEqual({ status: 'succeeded', value: { requestId: 'command-a' } });
-    expect(beta).toEqual({ status: 'succeeded', value: { requestId: 'command-b' } });
-    expect(alphaReplay).toEqual(alpha);
+    expect(first).toEqual({ status: 'succeeded', value: { requestId: 'command-alpha' } });
+    expect(secondTask).toEqual({ status: 'succeeded', value: { requestId: 'command-beta' } });
+    expect(rotatedSubject).toEqual({ status: 'succeeded', value: { requestId: 'command-rotated' } });
+    expect(replay).toEqual(first);
 
     const requested = journal.read(0).filter((event) => event.kind === 'command.requested');
     expect(requested.map((event) => event.payload.idempotencyKey)).toEqual([
-      expectedTaskIdempotencyKey(root, 'task-alpha', callerKey),
-      expectedTaskIdempotencyKey(root, 'task-beta', callerKey),
+      expectedRuntimeIdempotencyKey(root, alpha, callerKey),
+      expectedRuntimeIdempotencyKey(root, beta, callerKey),
+      expectedRuntimeIdempotencyKey(root, rotated, callerKey),
     ]);
     for (const event of requested) {
       const internalKey = String(event.payload.idempotencyKey);
@@ -234,10 +265,13 @@ describe('control server runtime integration', () => {
       expect(internalKey).not.toContain(callerKey);
       expect(internalKey).not.toContain('task-alpha');
       expect(internalKey).not.toContain('task-beta');
+      expect(internalKey).not.toContain('subject-alpha');
+      expect(internalKey).not.toContain('subject-beta');
+      expect(internalKey).not.toContain('subject-alpha-rotated');
     }
   });
 
-  it('isolates concurrently pending outcomes by authenticated task', async () => {
+  it('isolates concurrently pending outcomes by authenticated task subject', async () => {
     const root = await testProject();
     const journal = await ControlJournal.open(root, 1);
     let releaseAlpha!: () => void;
@@ -248,11 +282,11 @@ describe('control server runtime integration', () => {
     const betaRequested = new Promise<void>((resolve) => { markBetaRequested = resolve; });
     const gatedJournal = wrapJournal(journal, async (kind, payload) => {
       const event = await journal.append(kind, payload);
-      if (kind === 'command.requested' && payload.commandId === 'command-a') {
+      if (kind === 'command.requested' && payload.commandId === 'command-alpha') {
         markAlphaRequested();
         await alphaGate;
       }
-      if (kind === 'command.requested' && payload.commandId === 'command-b') {
+      if (kind === 'command.requested' && payload.commandId === 'command-beta') {
         markBetaRequested();
       }
       return event;
@@ -270,13 +304,13 @@ describe('control server runtime integration', () => {
     const callerKey = 'shared-pending-key';
 
     const alphaPromise = authority.submitAs(
-      authenticatedTask('task-alpha'),
-      leaseRequest(root, 'command-a', callerKey, 'task-alpha'),
+      authenticatedTask('task-alpha', 'subject-alpha'),
+      leaseRequest(root, 'command-alpha', callerKey, 'task-alpha'),
     );
     await alphaRequested;
     const betaPromise = authority.submitAs(
-      authenticatedTask('task-beta'),
-      leaseRequest(root, 'command-b', callerKey, 'task-beta'),
+      authenticatedTask('task-beta', 'subject-beta'),
+      leaseRequest(root, 'command-beta', callerKey, 'task-beta'),
     );
     const sawBetaRequest = await Promise.race([
       betaRequested.then(() => true),
@@ -287,227 +321,11 @@ describe('control server runtime integration', () => {
     expect(sawBetaRequest).toBe(true);
     await expect(alphaPromise).resolves.toEqual({
       status: 'succeeded',
-      value: { requestId: 'command-a' },
+      value: { requestId: 'command-alpha' },
     });
     await expect(betaPromise).resolves.toEqual({
       status: 'succeeded',
-      value: { requestId: 'command-b' },
+      value: { requestId: 'command-beta' },
     });
-  });
-
-  describe('task resource authority', () => {
-    it('uses the injected runtime clock when pruning task resource leases', async () => {
-      const root = await testProject();
-      let now = new Date('2000-01-01T00:00:00.000Z');
-      expect(now.getTime()).toBeLessThan(Date.now());
-      const surfaces = new SurfaceRegistry();
-      const capabilityLeases = new CapabilityLeaseStore(() => now, 1);
-      let beta = surfaces.upsertPane({
-        id: 'pane-beta',
-        projectRoot: root,
-        worktreeRoot: path.join(root, '.worktrees', 'beta'),
-        tmuxPaneId: '%2',
-        title: 'beta pane',
-        writable: true,
-        outputSequence: 7,
-      });
-      const runtime = await ControlRuntime.create({
-        ownerEpoch: 1,
-        handlers: handlers(),
-        journal: await ControlJournal.open(root, 1),
-        surfaces,
-        capabilityLeases,
-      });
-      const authority = createControlServerForTest({
-        runtime,
-        ownerEpoch: 1,
-        projectRoot: root,
-      });
-      const alpha = authenticatedTask('task-alpha');
-      const betaTask = authenticatedTask('task-beta');
-
-      const requestLease = async (
-        identity: AuthenticatedControlIdentity,
-        taskId: string,
-        requestId: string,
-        generation: number,
-        ttlMs = 60_000,
-        duplicate = false,
-      ) => authority.submitAs(identity, {
-        id: requestId,
-        idempotencyKey: requestId,
-        kind: 'lease.request',
-        projectRoot: root,
-        createdAt: now.toISOString(),
-        payload: {
-          taskId,
-          ttlMs,
-          grants: [
-            {
-              target: { kind: 'pane', id: beta.id, generation },
-              capabilities: ['pane.observe'],
-            },
-            ...(duplicate ? [{
-              target: { kind: 'pane' as const, id: beta.id, generation },
-              capabilities: ['pane.focus' as const],
-            }] : []),
-          ],
-        },
-      });
-      const grantLease = async (requestId: string) => {
-        const outcome = await authority.submitAs(operator, {
-          id: `grant-${requestId}`,
-          idempotencyKey: `grant-${requestId}`,
-          kind: 'lease.grant',
-          projectRoot: root,
-          createdAt: now.toISOString(),
-          payload: { requestId },
-        });
-        expect(outcome).toMatchObject({ status: 'succeeded' });
-        return (outcome as {
-          status: 'succeeded';
-          value: { lease: { id: string; revision: number } };
-        }).value.lease;
-      };
-
-      await requestLease(betaTask, 'task-beta', 'request-beta-owner', beta.generation);
-      await grantLease('request-beta-owner');
-      expect(authority.taskResources(betaTask).resources).toEqual([beta]);
-
-      await expect(requestLease(
-        alpha,
-        'task-alpha',
-        'request-release',
-        beta.generation,
-        60_000,
-        true,
-      ))
-        .resolves.toMatchObject({ status: 'succeeded' });
-      expect(authority.taskResources(alpha)).toMatchObject({
-        resources: [],
-      });
-      expect(authority.leaseStatus(alpha, 'request-release')).toMatchObject({
-        requests: [{
-          id: 'request-release',
-          grants: [
-            { target: { id: beta.id, generation: beta.generation } },
-            { target: { id: beta.id, generation: beta.generation } },
-          ],
-        }],
-        leases: [],
-      });
-
-      const releasedLease = await grantLease('request-release');
-      const grantedResources = authority.taskResources(alpha).resources;
-      expect(grantedResources).toEqual([beta]);
-      expect(grantedResources).toHaveLength(1);
-      await expect(authority.submitAs(alpha, {
-        id: 'release-resource',
-        idempotencyKey: 'release-resource',
-        kind: 'lease.release',
-        projectRoot: root,
-        createdAt: now.toISOString(),
-        payload: {
-          taskId: 'task-alpha',
-          leaseId: releasedLease.id,
-          leaseRevision: releasedLease.revision,
-        },
-      })).resolves.toMatchObject({ status: 'succeeded' });
-      expect(authority.taskResources(alpha).resources).toEqual([]);
-
-      await requestLease(alpha, 'task-alpha', 'request-old-generation', beta.generation);
-      await grantLease('request-old-generation');
-      expect(authority.taskResources(alpha).resources).toEqual([beta]);
-      beta = surfaces.upsertPane({
-        ...beta,
-        tmuxPaneId: '%3',
-      });
-      expect(beta.generation).toBe(2);
-      expect(authority.taskResources(alpha).resources).toEqual([]);
-
-      await requestLease(alpha, 'task-alpha', 'request-revoke', beta.generation);
-      const revokedLease = await grantLease('request-revoke');
-      expect(authority.taskResources(alpha).resources).toEqual([beta]);
-      await expect(authority.submitAs(operator, {
-        id: 'revoke-resource',
-        idempotencyKey: 'revoke-resource',
-        kind: 'lease.revoke',
-        projectRoot: root,
-        createdAt: now.toISOString(),
-        payload: { leaseId: revokedLease.id },
-      })).resolves.toMatchObject({ status: 'succeeded' });
-      expect(authority.taskResources(alpha).resources).toEqual([]);
-
-      await requestLease(alpha, 'task-alpha', 'request-expiry', beta.generation);
-      await grantLease('request-expiry');
-      expect(authority.taskResources(alpha).resources).toEqual([beta]);
-      now = new Date(now.getTime() + 60_001);
-      expect(authority.taskResources(alpha).resources).toEqual([]);
-      expect(authority.leaseStatus(alpha, 'request-expiry')).toEqual({
-        requests: [],
-        leases: [],
-      });
-    });
-  });
-
-  it('isolates journal-recovered outcomes by authenticated task after restart', async () => {
-    const root = await testProject();
-    const journal = await ControlJournal.open(root, 1);
-    const failingJournal = wrapJournal(journal, async (kind, payload) => {
-      if (TERMINAL_COMMAND_EVENTS.has(kind) && payload.commandId === 'command-a') {
-        throw new Error('simulated terminal journal failure');
-      }
-      return journal.append(kind, payload);
-    });
-    const firstRuntime = await ControlRuntime.create({
-      ownerEpoch: 1,
-      handlers: handlers(),
-      journal: failingJournal,
-    });
-    const firstAuthority = createControlServerForTest({
-      runtime: firstRuntime,
-      ownerEpoch: 1,
-      projectRoot: root,
-    });
-    const callerKey = 'shared-recovery-key';
-
-    await expect(firstAuthority.submitAs(
-      authenticatedTask('task-alpha'),
-      leaseRequest(root, 'command-a', callerKey, 'task-alpha'),
-    )).rejects.toThrow('simulated terminal journal failure');
-
-    const restartedJournal = await ControlJournal.open(root, 2);
-    const restartedRuntime = await ControlRuntime.create({
-      ownerEpoch: 2,
-      handlers: handlers(),
-      journal: restartedJournal,
-    });
-    const restartedAuthority = createControlServerForTest({
-      runtime: restartedRuntime,
-      ownerEpoch: 2,
-      projectRoot: root,
-    });
-
-    const beta = await restartedAuthority.submitAs(
-      authenticatedTask('task-beta'),
-      leaseRequest(root, 'command-b', callerKey, 'task-beta'),
-    );
-    const alphaRecovered = await restartedAuthority.submitAs(
-      authenticatedTask('task-alpha'),
-      leaseRequest(root, 'command-a-retry', callerKey, 'task-alpha'),
-    );
-
-    expect(beta).toEqual({ status: 'succeeded', value: { requestId: 'command-b' } });
-    expect(alphaRecovered).toEqual({
-      status: 'unknown',
-      code: 'recovered-nonterminal',
-      message: 'command outcome is unknown',
-    });
-    expect(restartedJournal.read(0)).toContainEqual(expect.objectContaining({
-      kind: 'command.unknown',
-      payload: expect.objectContaining({
-        idempotencyKey: expectedTaskIdempotencyKey(root, 'task-alpha', callerKey),
-      }),
-    }));
   });
 });

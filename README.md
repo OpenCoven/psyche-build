@@ -139,49 +139,96 @@ When focus is inside a work pane, tmux receives your keys instead of Psyche Buil
 MCP (stdio JSON-RPC). It connects to the project control socket and starts the
 detached owner when the socket is absent; mutations still pass through the
 same authenticated authority, policy, approval, and receipt path as the UI.
+For task-scoped agent use, start it with a trusted task binding so the control
+server can derive scope from authenticated context instead of caller-supplied
+`task_id`.
 
 ```json
 {
   "mcp_servers": [
-    { "name": "psyche", "command": "psyche", "args": ["mcp"], "type": "stdio" }
+    {
+      "name": "psyche",
+      "command": "psyche",
+      "args": ["mcp", "--task-id", "task-123"],
+      "env": { "PSYCHE_CONTROL_TASK_TOKEN": "<task-bound-token>" },
+      "type": "stdio"
+    }
   ]
 }
 ```
 
-Trusted task launchers bind an MCP process to one task by issuing a project-local
-token with `issueControlTaskToken()` (or
-`issueControlTaskTokenForCanonicalRoot()` when the project root is already
-canonical), setting the launch project, and injecting the task variables:
+`--task-id <task-id>` or `PSYCHE_CONTROL_TASK_ID=<task-id>` must be paired with
+`PSYCHE_CONTROL_TASK_TOKEN=<task-bound-token>`. The server binds that token to
+one task subject during authentication, echoes the trusted `taskId` and
+`subjectId` in its welcome frame, and the client rejects a mismatched welcome.
+Task-bound MCP also pins `project_root` reads and commands to the canonical
+launch project, accepting only that root or one of its symlink aliases.
+Conflicting request `task_id` values are rejected with
+`task_binding_mismatch` before any task-scoped control read or command is
+sent. Task-bound clients may omit `task_id`, in which case the authenticated
+binding supplies it. Each task keeps exactly one active subject by default:
+rotating a token invalidates the prior token immediately, and the replacement
+subject does not inherit the revoked subject's leases, pending requests,
+approvals, or receipts. Already-open task-bound sockets are revalidated
+against the active subject before every read and command, and capability
+leases plus `approval.resolve` re-check that subject before use so stale
+authority fails closed immediately. Pending approvals also keep durable
+task/actor/subject plus lease/action ownership, so lease expiry/prune or
+subject rotation can rewrite `approval_required` into one terminal
+`action_invalidated` receipt without depending on a live lease map.
+Task-bound pre-execution validation failures likewise keep exact
+task/actor ownership and include lease id/revision whenever the runtime can
+still prove that lease context; when it cannot, the receipt stays visible only
+to that exact bound subject and never crosses task scope.
+Starting `psyche mcp` without a task binding is still
+allowed for operators and diagnostics, but non-operator task-scoped reads and
+task-sensitive commands fail closed with `task_binding_required`; for
+non-operator callers, a supplied `task_id` stays compatibility input, not
+proof of authority. The legacy shared agent token
+stays unbound and cannot use task-sensitive commands. Embedded launchers mint
+and revoke task credentials through the public ESM subpath:
 
-```text
-PSYCHE_PROJECT_ROOT=/absolute/path/to/project
-PSYCHE_CONTROL_TASK_ID=task-alpha
-PSYCHE_CONTROL_TASK_TOKEN=<redacted example>
+```ts
+import {
+  issueControlTaskCredential,
+  issueControlTaskToken,
+  issueControlTaskTokenForCanonicalRoot,
+  revokeControlTaskCredential,
+} from 'psyche-build/control-task-tokens';
 ```
 
-When `PSYCHE_PROJECT_ROOT` is absent, the MCP launch working directory is the
-project root. Psyche canonicalizes that trusted launch root once and the task
-token is valid only for that canonical project. Every MCP tool validates its
-requested root before invoking control, filesystem, ritual, or Git readers. A
-tool may supply the same root through a symlink alias, but a different root
-fails locally with `task_project_mismatch` before any dependency call, socket
-connection, owner spawn, or `hello` frame can expose the token.
-
-The authenticated token binding—not a caller-provided `task_id`—establishes
-task authority. The legacy shared-agent credential and compatibility
-identities have no task scope, so task-sensitive control calls fail closed
-instead of adopting a supplied task ID.
+These trusted-launcher helpers require operator/agent root secret material and
+must not be exposed to untrusted agents. By default, control credential state
+lives outside the repository under
+`~/.config/psyche/control/projects/<sha256(canonicalProjectRoot)>/`, with
+`control-credentials.json`, `task-credentials/<sha256(taskId)>.json`, and
+`task-credential-locks/<sha256(taskId)>.lock/` stored as user-only `0700`
+directories and `0600` files. Legacy in-project `.psyche` task credential
+directories, lock directories, and task-binding files are treated as untrusted
+input and are ignored rather than followed or migrated automatically.
+This protects against malicious repository contents or sibling project paths
+that try to precreate, symlink, hardlink, or rename credential state. It does
+not protect against already-arbitrary code execution as the same user, which
+can read process memory or the per-user state directory directly.
+`issueControlTaskCredential()` returns the replacement token plus
+`{ taskId, subjectId, principalId }` metadata for the new subject and reports
+the replaced subject when one existed. `issueControlTaskToken*()` are
+convenience wrappers for the one-active-token-per-task flow and return only the
+replacement token. `revokeControlTaskCredential()` removes the active subject
+for a task so the old token fails authentication on reconnect and on the next
+read or mutation from an already-open socket.
 
 | Tool | Does |
 |---|---|
-| `psyche_control_list` | List bounded pane/browser resources covered by the authenticated task's active leases |
-| `psyche_control_lease` | Request, inspect, or release authenticated-task-scoped authority; it cannot grant or approve authority |
+| `psyche_control_list` | List bounded controllable pane/browser resources, generations, and active approvals for the bound task subject; unbound non-operators receive `task_binding_required` |
+| `psyche_control_lease` | Request, inspect, or release scoped authority for the bound task subject; bound clients may omit `task_id`, exact matches are accepted, and conflicts are rejected before any read or command; it cannot grant or approve authority |
 | `psyche_pane_observe` | Read bounded pane output and status through an exact leased generation |
 | `psyche_pane_action` | Perform one typed leased pane action and return its canonical receipt |
 | `psyche_browser_inspect` | Capture a bounded semantic snapshot of an exact leased tab generation |
 | `psyche_browser_action` | Perform one typed leased browser action and return its canonical receipt |
 | `psyche_browser_script` | Submit an approval-gated browser script through an exact leased tab generation |
-| `psyche_list_panes` | Compatibility alias that lists pane resources through the owner |
+| `psyche_control_action_status` | Read the latest live receipt or redacted replay receipt for the bound task subject when durable ownership proves the action belongs to it |
+| `psyche_list_panes` | Compatibility alias that lists pane resources visible to the bound task subject |
 | `psyche_create_pane` | Compatibility alias for leased pane creation through the owner |
 | `psyche_execute_task` | Compatibility alias that submits orchestration through the owner |
 | `psyche_kill_pane` | Compatibility alias for approved pane close through the owner |
@@ -189,18 +236,15 @@ instead of adopting a supplied task ID.
 | `psyche_list_rituals` | List built-in and project rituals |
 | `psyche_list_worktrees` | List git worktrees for the project |
 
-The compatibility mutation aliases require `task_id`, `lease_id`, and
-`lease_revision`; pane-specific aliases also require the current generation.
-Missing authority returns a structured `lease_missing` result without an
-effect.
-
-Lease-status reads are restricted to the authenticated task. Raw control events
-are operator-only; that boundary is included in PR A. PR A intentionally does
-not advertise the legacy psyche_control_action_status MCP tool because it
-depends on redacted snapshots and operator-only event history. PR B restores
-action status from canonical task-owned receipts. Control-domain failures
-exposed as JSON-RPC errors use numeric code `-32001`, with the stable domain
-code (for example `task_binding_required`) in `error.data.code`.
+Every task-scoped tool accepts an omitted `task_id` when the MCP process starts
+task-bound. Exact-bound `task_id` values are accepted, and conflicting values
+are rejected before any control read or command. Without a task binding,
+non-operator task-scoped reads and commands fail closed with
+`task_binding_required`, so non-operator caller-supplied `task_id` values
+remain compatibility-only and never authorize access on their own. When
+`psyche_control_action_status` falls back to a replayed journal receipt, the
+result keeps the redacted journal resource shape (`resource.idDigest`) instead
+of inventing a live resource id.
 
 See [Agent surface control](./docs/AGENT-SURFACE-CONTROL.md) for the complete
 lease, approval, generation, browser-provider, redaction, and recovery model.

@@ -26,6 +26,8 @@ use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::platform;
+
 pub const MAX_PROVIDER_LINE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_PROVIDER_RESULT_BYTES: usize = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -304,13 +306,15 @@ fn normalize_canonical_identity(canonical: &Path) -> String {
     normalize_canonical_identity_for(platform, &canonical.to_string_lossy())
 }
 
+fn project_identity_digest(identity: &str) -> String {
+    format!("{:x}", Sha256::digest(identity.as_bytes()))
+}
+
 fn project_identity_hash(identity: &str) -> String {
-    let encoded = format!("{:x}", Sha256::digest(identity.as_bytes()));
-    encoded.chars().take(20).collect()
+    project_identity_digest(identity).chars().take(20).collect()
 }
 
 struct CanonicalProjectRoot {
-    path: PathBuf,
     identity: String,
 }
 
@@ -319,7 +323,7 @@ fn canonical_root(project_root: &str) -> Result<CanonicalProjectRoot, String> {
         .canonicalize()
         .map_err(|error| format!("invalid project root: {error}"))?;
     let identity = normalize_canonical_identity(&path);
-    Ok(CanonicalProjectRoot { path, identity })
+    Ok(CanonicalProjectRoot { identity })
 }
 
 fn endpoint_for_root(identity: &str) -> Result<PathBuf, String> {
@@ -339,8 +343,18 @@ fn endpoint_for_root(identity: &str) -> Result<PathBuf, String> {
     }
 }
 
-fn operator_token(root: &Path) -> Result<String, String> {
-    let path = root.join(".psyche/runtime/control-credentials.json");
+fn control_credentials_path(identity: &str) -> Result<PathBuf, String> {
+    let config_root = platform::psyche_user_config_directory()
+        .ok_or_else(|| "home directory is unavailable".to_string())?;
+    Ok(config_root
+        .join("control")
+        .join("projects")
+        .join(project_identity_digest(identity))
+        .join("control-credentials.json"))
+}
+
+fn operator_token(root: &CanonicalProjectRoot) -> Result<String, String> {
+    let path = control_credentials_path(&root.identity)?;
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -696,7 +710,7 @@ async fn standalone_control_request(
     root: &CanonicalProjectRoot,
     frame: OutboundFrame,
 ) -> Result<Value, String> {
-    let token = operator_token(&root.path)?;
+    let token = operator_token(&root)?;
     let endpoint = endpoint_for_root(&root.identity)?;
     let mut stream = connect_control(&endpoint).await?;
     write_frame(
@@ -764,7 +778,7 @@ pub async fn control_provider_start(
         }
     }
 
-    let token = operator_token(&root.path)?;
+    let token = operator_token(&root)?;
     let provider_id = format!("desktop-{}", project_identity_hash(&root_key));
     let mut attempts = 0_u8;
     let stream = loop {

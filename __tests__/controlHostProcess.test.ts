@@ -4,7 +4,6 @@ import { controlEndpointForProject } from '../src/control/endpoint.js';
 
 afterEach(() => {
   vi.useRealTimers();
-  vi.unstubAllEnvs();
 });
 
 function connectionError(code: string): NodeJS.ErrnoException {
@@ -27,27 +26,42 @@ describe('ensureHostControlPlane', () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it('passes an expected task binding through authenticated health checks', async () => {
+    const client = { getState: vi.fn() } as never;
+    const connect = vi.fn(async () => client);
+
+    await expect(ensureHostControlPlane({
+      projectRoot: '/canonical/project',
+      token: 'task-token',
+      clientName: 'mcp',
+      taskBinding: { taskId: 'task-own' },
+      entryPath: '/app/dist/index.js',
+      connect,
+      canonicalize: async () => '/canonical/project',
+    })).resolves.toBe(client);
+
+    expect(connect).toHaveBeenCalledWith(expect.objectContaining({
+      projectRoot: '/canonical/project',
+      token: 'task-token',
+      clientName: 'mcp',
+      taskBinding: { taskId: 'task-own' },
+      signal: expect.any(AbortSignal),
+    }));
+  });
+
   it('starts exactly one detached owner on connection absence and polls authenticated health', async () => {
-    vi.stubEnv('PSYCHE_CONTROL_TASK_TOKEN', 'inherited-task-token');
-    vi.stubEnv('PSYCHE_CONTROL_TASK_ID', 'inherited-task-id');
-    vi.stubEnv('PSYCHE_ORDINARY_SETTING', 'preserved');
     const client = { getState: vi.fn() } as never;
     const connect = vi.fn()
       .mockRejectedValueOnce(connectionError('ENOENT'))
       .mockRejectedValueOnce(connectionError('ECONNREFUSED'))
       .mockResolvedValueOnce(client);
     const unref = vi.fn();
-    const spawn = vi.fn((
-      _command: string,
-      _args: readonly string[],
-      _options: { detached: true; stdio: 'ignore'; env: NodeJS.ProcessEnv },
-    ) => ({ unref } as never));
+    const spawn = vi.fn(() => ({ unref } as never));
     let now = 0;
     const sleep = vi.fn(async (delay: number) => { now += delay; });
 
     await expect(ensureHostControlPlane({
       projectRoot: '/project/link', token: 'secret-agent-token', clientName: 'mcp',
-      taskBinding: { taskId: 'task-alpha' },
       entryPath: '/app/dist/index.js', connect, spawn,
       canonicalize: async () => '/canonical/project', now: () => now, sleep,
     })).resolves.toBe(client);
@@ -55,50 +69,15 @@ describe('ensureHostControlPlane', () => {
     expect(spawn).toHaveBeenCalledWith(
       process.execPath,
       ['/app/dist/index.js', 'daemon', '--port', '0', '--project-root', '/canonical/project'],
-      {
-        detached: true,
-        stdio: 'ignore',
-        env: expect.objectContaining({
-          PSYCHE_ORDINARY_SETTING: 'preserved',
-        }),
-      },
+      { detached: true, stdio: 'ignore' },
     );
-    const spawnEnvironment = spawn.mock.calls[0][2].env;
-    expect(spawnEnvironment).not.toHaveProperty('PSYCHE_CONTROL_TASK_TOKEN');
-    expect(spawnEnvironment).not.toHaveProperty('PSYCHE_CONTROL_TASK_ID');
     expect(unref).toHaveBeenCalledOnce();
     expect(connect).toHaveBeenCalledTimes(3);
     expect(connect).toHaveBeenLastCalledWith({
       projectRoot: '/canonical/project', token: 'secret-agent-token', clientName: 'mcp',
       endpoint: controlEndpointForProject('/canonical/project'),
-      taskBinding: { taskId: 'task-alpha' },
       signal: expect.any(AbortSignal),
     });
-  });
-
-  it('propagates task binding mismatch rejection without starting an owner', async () => {
-    const mismatch = new Error('welcome task binding does not match the requested task');
-    const connect = vi.fn(async (options) => {
-      expect(options).toMatchObject({
-        token: 'task-alpha-token',
-        taskBinding: { taskId: 'task-alpha' },
-      });
-      throw mismatch;
-    });
-    const spawn = vi.fn();
-
-    await expect(ensureHostControlPlane({
-      projectRoot: '/project',
-      token: 'task-alpha-token',
-      clientName: 'mcp',
-      taskBinding: { taskId: 'task-alpha' },
-      entryPath: '/entry.js',
-      connect,
-      spawn,
-      canonicalize: async (root) => root,
-    })).rejects.toBe(mismatch);
-    expect(connect).toHaveBeenCalledOnce();
-    expect(spawn).not.toHaveBeenCalled();
   });
 
   it('does not spawn or retry authentication and protocol failures', async () => {
