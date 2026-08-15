@@ -5,6 +5,7 @@ import { ControlRuntime, type ControlHandlers } from './runtime.js';
 import { bootstrapSession } from './resources/sessionBootstrap.js';
 import { ApprovalStore } from './approvals.js';
 import { CapabilityLeaseStore } from './capabilityLeases.js';
+import type { ControlTaskCredentialReference } from './credentials.js';
 import { SurfaceRegistry } from './surfaces.js';
 import type { BrowserSemanticSnapshotRegistry } from './browserSemanticSnapshots.js';
 
@@ -21,6 +22,7 @@ export interface HostControlPlaneOptions {
   journalOpen?: typeof ControlJournal.open;
   bootstrap?: (projectRoot: string) => Promise<void>;
   browserSemanticSnapshots?: BrowserSemanticSnapshotRegistry;
+  readActiveTaskCredential?: (taskId: string) => Promise<ControlTaskCredentialReference | null>;
 }
 
 export async function createHostControlPlane(
@@ -42,6 +44,7 @@ export async function createHostControlPlane(
       surfaces: options.surfaces ?? new SurfaceRegistry(),
       capabilityLeases: new CapabilityLeaseStore(undefined, lock.epoch),
       approvals: new ApprovalStore(),
+      readActiveTaskCredential: options.readActiveTaskCredential,
       resolveBrowserElementSemantics: options.browserSemanticSnapshots
         ? (input) => options.browserSemanticSnapshots!.resolve(input)
         : undefined,

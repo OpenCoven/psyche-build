@@ -52,6 +52,7 @@ function snapshot(ownerEpoch = 7) {
     ],
     approvals: [{
       id: 'approval-1', status: 'pending', actionId: 'action-1', ownerEpoch,
+      taskId: 'task-active', actorId: 'agent-b',
       leaseId: 'lease-active', leaseRevision: 2,
       resource: { kind: 'pane', id: 'pane-1', generation: 3 },
       capability: 'pane.close', effect: { kind: 'close', target: 'pane:pane-1' },

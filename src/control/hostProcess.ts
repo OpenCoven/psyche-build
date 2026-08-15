@@ -1,6 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { ControlClient, type ControlClientOptions } from './client.js';
-import type { ControlTaskBinding } from './credentials.js';
 import { controlEndpointForProject } from './endpoint.js';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 
@@ -8,15 +7,15 @@ export type ConnectControl = (options: ControlClientOptions) => Promise<ControlC
 type SpawnOwner = (
   command: string,
   args: readonly string[],
-  options: { detached: true; stdio: 'ignore'; env: NodeJS.ProcessEnv },
+  options: { detached: true; stdio: 'ignore' },
 ) => Pick<ChildProcess, 'unref'>;
 
 export interface EnsureHostOptions {
   projectRoot: string;
   token: string;
   clientName: string;
-  taskBinding?: ControlTaskBinding;
   entryPath: string;
+  taskBinding?: ControlClientOptions['taskBinding'];
   connect?: ConnectControl;
   spawn?: SpawnOwner;
   canonicalize?: typeof canonicalizeProjectRoot;
@@ -72,7 +71,7 @@ export async function ensureCanonicalHostControlPlane(
   const child = spawnOwner(
     process.execPath,
     [options.entryPath, 'daemon', '--port', '0', '--project-root', canonicalRoot],
-    { detached: true, stdio: 'ignore', env: controlOwnerEnvironment() },
+    { detached: true, stdio: 'ignore' },
   );
   child.unref();
 
@@ -88,13 +87,6 @@ export async function ensureCanonicalHostControlPlane(
     await sleep(Math.min(delayMs, remaining));
     delayMs = Math.min(delayMs * 2, MAX_POLL_DELAY_MS);
   }
-}
-
-function controlOwnerEnvironment(): NodeJS.ProcessEnv {
-  const environment = { ...process.env };
-  delete environment.PSYCHE_CONTROL_TASK_TOKEN;
-  delete environment.PSYCHE_CONTROL_TASK_ID;
-  return environment;
 }
 
 async function connectBeforeDeadline(

@@ -3,17 +3,10 @@ import type {
   ControlCommandInput,
   ControlSnapshot,
 } from './types.js';
-import type { BrowserTabSurface, SurfaceResource } from './surfaces.js';
-import type { CapabilityLease } from './capabilityLeases.js';
+import type { BrowserTabSurface } from './surfaces.js';
 import type { ProviderEffectResult, ProviderPush } from './browserProviderBroker.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
 import { canonicalizeBoundedJson } from './boundedJson.js';
-import type {
-  ControlCapability,
-  ControlPrincipalKind,
-  ControlTaskBinding,
-} from './credentials.js';
-import { normalizeControlTaskId } from './taskIdentity.js';
 
 export const CONTROL_PROTOCOL_VERSION = 1;
 
@@ -36,18 +29,7 @@ export type ControlRequest =
       version: 1;
       type: 'state.get';
       requestId: string;
-    }
-  | {
-      version: 1;
-      type: 'task.resources.get';
-      requestId: string;
-    }
-  | {
-      version: 1;
-      type: 'lease.status.get';
-      requestId: string;
-      leaseRequestId: string;
-      leaseId?: string;
+      taskId?: string;
     }
   | {
       version: 1;
@@ -55,6 +37,7 @@ export type ControlRequest =
       requestId: string;
       afterSequence: number;
       limit?: number;
+      taskId?: string;
     }
   | ProviderRequest;
 
@@ -80,33 +63,6 @@ export type ProviderRequest =
       result: ProviderEffectResult;
     };
 
-type TaskResourcesResult = {
-  version: 1;
-  type: 'task.resources.result';
-  requestId: string;
-  ownerEpoch: number;
-  sequence: number;
-  resources: readonly SurfaceResource[];
-};
-
-type LeaseStatusResult = {
-  version: 1;
-  type: 'lease.status.result';
-  requestId: string;
-  requests: ReadonlyArray<ControlSnapshot['leaseRequests'][number]>;
-  leases: readonly CapabilityLease[];
-};
-
-export type TaskResourcesResultData = Omit<
-  TaskResourcesResult,
-  'version' | 'type' | 'requestId'
->;
-
-export type LeaseStatusResultData = Omit<
-  LeaseStatusResult,
-  'version' | 'type' | 'requestId'
->;
-
 export type ControlResponse =
   | {
       version: 1;
@@ -116,10 +72,13 @@ export type ControlResponse =
       ownerEpoch: number;
       principal: {
         id: string;
-        kind: ControlPrincipalKind;
-        capabilities: readonly ControlCapability[];
+        kind: 'operator' | 'agent' | 'compatibility';
+        capabilities: readonly string[];
       };
-      taskBinding?: ControlTaskBinding;
+      taskBinding?: {
+        taskId: string;
+        subjectId: string;
+      };
     }
   | { version: 1; type: 'ack'; requestId: string; resource?: BrowserTabSurface }
   | {
@@ -135,8 +94,6 @@ export type ControlResponse =
       requestId: string;
       snapshot: ControlSnapshot;
     }
-  | TaskResourcesResult
-  | LeaseStatusResult
   | {
       version: 1;
       type: 'events.result';
@@ -167,92 +124,6 @@ function stableStringify(value: unknown): string {
 
 export function encodeControlMessage(message: ControlRequest | ControlResponse | ProviderPush): string {
   return stableStringify(message);
-}
-
-const MAX_CONTROL_ID_LENGTH = 256;
-const MAX_PROJECT_ROOT_LENGTH = 4096;
-const CAPABILITIES_BY_KIND: Readonly<Record<
-ControlPrincipalKind,
-readonly ControlCapability[]
->> = {
-  operator: ['read', 'mutate', 'delegate'],
-  agent: ['read', 'mutate'],
-  compatibility: ['read', 'mutate'],
-};
-
-export function decodeControlWelcome(
-  raw: string,
-): Extract<ControlResponse, { type: 'welcome' }> {
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    throw new Error('invalid welcome frame');
-  }
-  if (!isPlainObject(value)) throw new Error('invalid welcome frame');
-  const projectRoot = value.projectRoot;
-  const ownerEpoch = value.ownerEpoch;
-  if (
-    value.version !== CONTROL_PROTOCOL_VERSION
-    || value.type !== 'welcome'
-    || value.requestId !== 'welcome'
-    || !isValidProjectRoot(projectRoot)
-    || typeof ownerEpoch !== 'number'
-    || !Number.isSafeInteger(ownerEpoch)
-    || ownerEpoch < 1
-  ) {
-    throw new Error('invalid welcome frame');
-  }
-
-  const principal = value.principal;
-  if (
-    !isPlainObject(principal)
-    || Object.keys(principal).length !== 3
-    || !Object.hasOwn(principal, 'id')
-    || !Object.hasOwn(principal, 'kind')
-    || !Object.hasOwn(principal, 'capabilities')
-  ) {
-    throw new Error('invalid welcome frame');
-  }
-  const principalId = principal.id;
-  const principalKind = principal.kind;
-  const capabilities = principal.capabilities;
-  if (
-    !isBoundedNonBlankString(principalId, MAX_CONTROL_ID_LENGTH)
-    || !isControlPrincipalKind(principalKind)
-    || !hasExpectedCapabilities(principalKind, capabilities)
-  ) {
-    throw new Error('invalid welcome frame');
-  }
-
-  let taskBinding: ControlTaskBinding | undefined;
-  if (Object.hasOwn(value, 'taskBinding')) {
-    const binding = value.taskBinding;
-    if (
-      !isPlainObject(binding)
-      || Object.keys(binding).length !== 1
-      || !Object.hasOwn(binding, 'taskId')
-    ) {
-      throw new Error('invalid welcome frame');
-    }
-    const taskId = normalizeControlTaskId(binding.taskId);
-    if (taskId === undefined) throw new Error('invalid welcome frame');
-    taskBinding = { taskId };
-  }
-
-  return {
-    version: CONTROL_PROTOCOL_VERSION,
-    type: 'welcome',
-    requestId: 'welcome',
-    projectRoot,
-    ownerEpoch,
-    principal: {
-      id: principalId,
-      kind: principalKind,
-      capabilities: [...capabilities],
-    },
-    ...(taskBinding === undefined ? {} : { taskBinding }),
-  };
 }
 
 export function decodeControlRequest(raw: string): ControlRequest {
@@ -297,28 +168,8 @@ export function decodeControlRequest(raw: string): ControlRequest {
       break;
     }
     case 'state.get':
-      break;
-    case 'task.resources.get':
-      if (
-        !hasExactKeys(value, ['version', 'type', 'requestId'])
-        || !isBoundedNonBlankString(value.requestId, MAX_CONTROL_ID_LENGTH)
-      ) {
-        throw new Error('invalid task.resources.get request');
-      }
-      break;
-    case 'lease.status.get':
-      if (
-        !hasExactKeys(
-          value,
-          ['version', 'type', 'requestId', 'leaseRequestId'],
-          ['leaseId'],
-        )
-        || !isBoundedNonBlankString(value.requestId, MAX_CONTROL_ID_LENGTH)
-        || !isBoundedNonBlankString(value.leaseRequestId, MAX_CONTROL_ID_LENGTH)
-        || (Object.hasOwn(value, 'leaseId')
-          && !isBoundedNonBlankString(value.leaseId, MAX_CONTROL_ID_LENGTH))
-      ) {
-        throw new Error('invalid lease.status.get request');
+      if ('taskId' in value && !isBoundedString(value.taskId)) {
+        throw new Error('invalid state.get request');
       }
       break;
     case 'events.read':
@@ -327,6 +178,7 @@ export function decodeControlRequest(raw: string): ControlRequest {
         || !Number.isInteger(value.afterSequence)
         || value.afterSequence < 0
         || ('limit' in value && typeof value.limit !== 'number')
+        || ('taskId' in value && !isBoundedString(value.taskId))
       ) {
         throw new Error('invalid events.read request');
       }
@@ -354,34 +206,6 @@ export function decodeControlRequest(raw: string): ControlRequest {
 
 function isBoundedString(value: unknown, max = 4096): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= max;
-}
-
-function isBoundedNonBlankString(value: unknown, max: number): value is string {
-  return typeof value === 'string'
-    && value.trim().length > 0
-    && value.length <= max;
-}
-
-function isValidProjectRoot(value: unknown): value is string {
-  return isBoundedNonBlankString(value, MAX_PROJECT_ROOT_LENGTH) && !value.includes('\0');
-}
-
-function isControlPrincipalKind(value: unknown): value is ControlPrincipalKind {
-  return value === 'operator' || value === 'agent' || value === 'compatibility';
-}
-
-function isControlCapability(value: unknown): value is ControlCapability {
-  return value === 'read' || value === 'mutate' || value === 'delegate';
-}
-
-function hasExpectedCapabilities(
-  kind: ControlPrincipalKind,
-  value: unknown,
-): value is ControlCapability[] {
-  if (!Array.isArray(value) || !value.every(isControlCapability)) return false;
-  const expected = CAPABILITIES_BY_KIND[kind];
-  return value.length === expected.length
-    && expected.every((capability) => value.includes(capability));
 }
 
 function isGeneration(value: unknown): value is number {
@@ -443,27 +267,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function hasExactKeys(
-  value: Record<string, unknown>,
-  required: readonly string[],
-  optional: readonly string[] = [],
-): boolean {
-  const allowed = new Set([...required, ...optional]);
-  const keys = Object.keys(value);
-  return required.every((key) => Object.hasOwn(value, key))
-    && keys.every((key) => allowed.has(key));
-}
-
 function validateSurfaceAuthorization(kind: unknown, payload: Record<string, unknown>): void {
   const actionKinds = new Set([
     'pane.observe', 'pane.action', 'browser.inspect', 'browser.action', 'browser.script',
   ]);
-  if (kind === 'lease.request') {
-    const taskId = normalizeControlTaskId(payload.taskId);
-    if (taskId === undefined) throw new Error('invalid surface authorization');
-    payload.taskId = taskId;
-    return;
-  }
   if (kind === 'lease.release' || kind === 'orchestration.execute') {
     if (!hasTaskLeaseAuthorization(payload)) throw new Error('invalid surface authorization');
     return;
@@ -497,10 +304,8 @@ function validateSurfaceAuthorization(kind: unknown, payload: Record<string, unk
 }
 
 function hasTaskLeaseAuthorization(payload: Record<string, unknown>): boolean {
-  const taskId = normalizeControlTaskId(payload.taskId);
-  if (taskId === undefined) return false;
-  payload.taskId = taskId;
-  return typeof payload.leaseId === 'string' && payload.leaseId.length > 0
+  return typeof payload.taskId === 'string' && payload.taskId.length > 0
+    && typeof payload.leaseId === 'string' && payload.leaseId.length > 0
     && Number.isSafeInteger(payload.leaseRevision)
     && (payload.leaseRevision as number) >= 1;
 }

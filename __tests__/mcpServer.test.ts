@@ -35,10 +35,7 @@ function client(overrides: Record<string, unknown> = {}): any {
       ownerEpoch: 3, sequence: 9, commands: {}, leases: {},
       resources: [], capabilityLeases: [], leaseRequests: [], approvals: [], receipts: [],
     })),
-    taskResources: vi.fn(async () => ({
-      ownerEpoch: 3, sequence: 9, resources: [],
-    })),
-    leaseStatus: vi.fn(async () => ({ requests: [], leases: [] })),
+    actionStatus: vi.fn(),
     close: vi.fn(async () => undefined),
     ...overrides,
   };
@@ -56,6 +53,7 @@ describe('MCP tool registry', () => {
       'psyche_browser_action',
       'psyche_browser_inspect',
       'psyche_browser_script',
+      'psyche_control_action_status',
       'psyche_control_lease',
       'psyche_control_list',
       'psyche_create_pane',
@@ -68,16 +66,6 @@ describe('MCP tool registry', () => {
       'psyche_pane_action',
       'psyche_pane_observe',
     ]);
-  });
-
-  it('does not advertise or dispatch deferred task action status', async () => {
-    expect(TOOLS.some((tool) => tool.name === 'psyche_control_action_status')).toBe(false);
-    await expect(call('psyche_control_action_status', {
-      action_id: 'action-1',
-      project_root: '/repo',
-    })).resolves.toMatchObject({
-      error: { code: -32601, message: 'Unknown tool: psyche_control_action_status' },
-    });
   });
 
   it('documents exactly the tools it implements', async () => {
@@ -104,7 +92,7 @@ describe('MCP canonical delegation and read-only helpers', () => {
     'resource_not_found',
   ])('maps control response error %s to a numeric JSON-RPC server error', async (code) => {
     const fake = client({
-      taskResources: vi.fn(async () => {
+      getState: vi.fn(async () => {
         throw new ControlResponseError(code, `${code}: control request failed`);
       }),
     });
@@ -120,8 +108,9 @@ describe('MCP canonical delegation and read-only helpers', () => {
   });
 
   it('lists panes from the control snapshot', async () => {
-    const fake = client({ taskResources: vi.fn(async () => ({
-      ownerEpoch: 1, sequence: 1,
+    const fake = client({ getState: vi.fn(async () => ({
+      ownerEpoch: 1, sequence: 1, commands: {}, leases: {}, capabilityLeases: [],
+      leaseRequests: [], approvals: [], receipts: [],
       resources: [
         { kind: 'pane', id: 'pane-1', generation: 2 },
         { kind: 'browser_tab', id: 'tab-1', generation: 1 },
@@ -152,10 +141,7 @@ describe('MCP canonical delegation and read-only helpers', () => {
       schema: 'psyche.control.receipt/v1', actionId: 'a', state: 'queued',
       resource: { kind: 'project', id: '/repo' }, createdAt: 'now',
     };
-    const fake = client({
-      taskBinding: { taskId: 'task' },
-      submit: vi.fn(async () => ({ status: 'succeeded', value: receipt })),
-    });
+    const fake = client({ submit: vi.fn(async () => ({ status: 'succeeded', value: receipt })) });
     inject({ controlClientForRoot: vi.fn(async () => fake), randomId: () => 'command-1' });
     const auth = { task_id: 'task', lease_id: 'lease', lease_revision: 1 };
 
@@ -180,10 +166,7 @@ describe('MCP canonical delegation and read-only helpers', () => {
   });
 
   it('requires and forwards project lease authority for task execution', async () => {
-    const fake = client({
-      taskBinding: { taskId: 'task-1' },
-      submit: vi.fn(async () => ({ status: 'succeeded' })),
-    });
+    const fake = client({ submit: vi.fn(async () => ({ status: 'succeeded' })) });
     inject({ controlClientForRoot: vi.fn(async () => fake), randomId: () => 'id-1' });
 
     expect(payload(await call('psyche_execute_task', {
