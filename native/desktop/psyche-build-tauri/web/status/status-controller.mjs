@@ -357,6 +357,7 @@ function createEmptyFrameSample() {
     fps: null,
     renderLatencyMs: null,
     droppedFrames: null,
+    framePacingHz: null,
   };
 }
 
@@ -792,6 +793,7 @@ function buildDiagnostics(sample, effectiveScope, trends) {
   metrics.fps = finiteNumber(sample.frame?.fps);
   metrics.renderLatencyMs = finiteNumber(sample.frame?.renderLatencyMs);
   metrics.droppedFrames = finiteNumber(sample.frame?.droppedFrames);
+  metrics.framePacingHz = finiteNumber(sample.frame?.framePacingHz);
   peaks.fps = peakValue(trends.fps);
   peaks.renderLatencyMs = peakValue(trends.renderLatencyMs);
   peaks.droppedFrames = peakValue(trends.droppedFrames);
@@ -1046,8 +1048,9 @@ function renderPerformance(body, doc, sample, trends) {
   const grid = doc.createElement('div');
   grid.className = 'status-performance-grid';
   let cellCount = 0;
-  const hasFrameSample = Number.isFinite(sample.frame?.fps)
-    && Number.isFinite(sample.frame?.renderLatencyMs)
+  const hasBasicFrameSample = Number.isFinite(sample.frame?.fps)
+    && Number.isFinite(sample.frame?.renderLatencyMs);
+  const hasCalibratedFrameSample = hasBasicFrameSample
     && Number.isFinite(sample.frame?.droppedFrames);
 
   if (sample.nativeSnapshot) {
@@ -1083,22 +1086,25 @@ function renderPerformance(body, doc, sample, trends) {
     cellCount += 1;
   }
 
-  if (hasFrameSample) {
+  if (hasBasicFrameSample) {
     grid.appendChild(performanceCell(
       doc,
       'Frame rate',
       `${Math.round(sample.frame.fps)} FPS`,
-      `${sample.frame.renderLatencyMs.toFixed(1)} ms`,
+      `${sample.frame.renderLatencyMs.toFixed(1)} ms${Number.isFinite(sample.frame.framePacingHz) ? ` · rAF cadence ${Math.round(sample.frame.framePacingHz)} Hz` : ''}`,
       trends.fps.values,
     ));
-    grid.appendChild(performanceCell(
-      doc,
-      'Dropped',
-      String(Math.round(sample.frame.droppedFrames)),
-      `Peak ${Math.round(peakValue(trends.droppedFrames) ?? sample.frame.droppedFrames)} / sample`,
-      trends.droppedFrames.values,
-    ));
-    cellCount += 2;
+    cellCount += 1;
+    if (hasCalibratedFrameSample) {
+      grid.appendChild(performanceCell(
+        doc,
+        'Dropped',
+        String(Math.round(sample.frame.droppedFrames)),
+        `Peak ${Math.round(peakValue(trends.droppedFrames) ?? sample.frame.droppedFrames)} / sample`,
+        trends.droppedFrames.values,
+      ));
+      cellCount += 1;
+    }
   }
 
   if (!cellCount) {
