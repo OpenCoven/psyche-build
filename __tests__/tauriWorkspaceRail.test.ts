@@ -7,10 +7,7 @@ const indexHtml = readFileSync(join(root, 'native/desktop/psyche-build-tauri/web
 const mainJs = readFileSync(join(root, 'native/desktop/psyche-build-tauri/web/main.js'), 'utf8');
 const styles = readFileSync(join(root, 'native/desktop/psyche-build-tauri/web/styles.css'), 'utf8');
 const packagedTitlebarMark = readFileSync(
-  join(root, 'native/desktop/psyche-build-tauri/web/assets/psyche-mark.png'),
-);
-const sourceTitlebarMark = readFileSync(
-  join(root, 'native/desktop/psyche-build-tauri/src-tauri/icons/32x32.png'),
+  join(root, 'native/desktop/psyche-build-tauri/web/assets/opencoven-mark.png'),
 );
 const tauri = readFileSync(join(root, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
 const sessionModel = readFileSync(
@@ -96,7 +93,8 @@ describe('Tauri project/worktree/pane rail', () => {
     );
     expect(titlebar).toContain('class="titlebar-sidebar"');
     expect(titlebar).toContain('class="titlebar-workspace"');
-    expect(titlebar).toContain('src="./assets/psyche-mark.png"');
+    expect(titlebar).toContain('src="./assets/opencoven-mark.png"');
+    expect(titlebar).toContain('class="titlebar-brand-fallback">O</span>');
     expect(titlebar).toContain('id="titlebar-brand-mark"');
     expect(titlebar).toMatch(/id="titlebar-brand-mark"[^>]*alt=""/);
     expect(titlebar).toContain('class="titlebar-brand-name">Psyche</span>');
@@ -152,6 +150,11 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(indexHtml).toMatch(/aria-label="Sidebar sections"/);
     expect(indexHtml).toMatch(/data-sidebar-tab="sessions"/);
     expect(indexHtml).toMatch(/data-sidebar-tab="files"/);
+  });
+
+  it('ships a browser-loadable OpenCoven titlebar mark asset', () => {
+    expect(packagedTitlebarMark.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+    expect(packagedTitlebarMark.length).toBeGreaterThan(10000);
   });
 
   it('removes a failed decorative titlebar mark through CSP-safe boot wiring', () => {
@@ -222,10 +225,6 @@ describe('Tauri project/worktree/pane rail', () => {
     }
   });
 
-  it('ships a byte-identical browser-loadable Psyche titlebar icon asset', () => {
-    expect(packagedTitlebarMark.equals(sourceTitlebarMark)).toBe(true);
-  });
-
   it('marks both titlebar zones as drag regions while keeping the sidebar toggle clickable', () => {
     const titlebar = titlebarHtml(indexHtml);
     const sidebarShell = titlebar.match(/<div class="titlebar-sidebar"[\s\S]*?<\/div>/)?.[0] ?? '';
@@ -237,19 +236,25 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(ruleBlock(styles, '.titlebar-sidebar-toggle')).toMatch(/-webkit-app-region:\s*no-drag;/);
   });
 
-  it('keeps the open toggle on the sidebar boundary and clears the traffic-light gutter when collapsed', () => {
-    expect(ruleBlock(styles, '.titlebar-sidebar-toggle')).toMatch(/left:\s*0;/);
-    expect(ruleBlock(styles, '.titlebar-sidebar-toggle')).toMatch(
-      /transform:\s*translate\(-50%,\s*-50%\);/,
+  it('keeps the workspace flex-aligned and the sidebar toggle fully inside it', () => {
+    expect(styles).toMatch(
+      /\.titlebar-workspace\s*\{[\s\S]*?position:\s*relative;[\s\S]*?display:\s*flex;[\s\S]*?align-items:\s*center;[\s\S]*?padding:\s*0 12px 0 10px;/,
     );
-    expect(
-      ruleBlock(styles, '.app[data-sidebar="collapsed"] .titlebar-sidebar-toggle'),
-    ).toMatch(
-      /left:\s*calc\(var\(--titlebar-pad-l\)\s*-\s*var\(--mini-rail-w\)\);/,
+    expect(ruleBlock(styles, '.titlebar-sidebar-toggle')).toMatch(/position:\s*relative;/);
+    expect(ruleBlock(styles, '.titlebar-sidebar-toggle')).toMatch(/left:\s*auto;/);
+    expect(ruleBlock(styles, '.titlebar-sidebar-toggle')).toMatch(/top:\s*auto;/);
+    expect(ruleBlock(styles, '.titlebar-sidebar-toggle')).toMatch(/transform:\s*none;/);
+    expect(ruleBlock(styles, '.app[data-sidebar="collapsed"] .titlebar-workspace')).toMatch(
+      /padding-left:\s*calc\(var\(--titlebar-pad-l\)\s*-\s*var\(--mini-rail-w\)\s*\+\s*10px\);/,
     );
-    expect(
-      ruleBlock(styles, '.app[data-sidebar="collapsed"] .titlebar-sidebar-toggle'),
-    ).toMatch(/transform:\s*translateY\(-50%\);/);
+  });
+
+  it('uses the updated 44px titlebar height and 24px OpenCoven brand badge', () => {
+    expect(ruleBlock(styles, ':root')).toMatch(/--titlebar-h:\s*44px;/);
+    expect(ruleBlock(styles, '.titlebar-brand-icon')).toMatch(/width:\s*24px;/);
+    expect(ruleBlock(styles, '.titlebar-brand-icon')).toMatch(/height:\s*24px;/);
+    expect(ruleBlock(styles, '.titlebar-brand-icon')).toMatch(/background:\s*#050505;/);
+    expect(ruleBlock(styles, '.titlebar-brand-mark')).toMatch(/object-fit:\s*contain;/);
   });
 
   it('makes visible brand descendants non-interactive so direct clicks resolve to the drag-region shell', () => {
