@@ -4977,12 +4977,69 @@ fn fs_write_text(
     }
 }
 
-fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
+fn git_filter_driver_names(root: &str) -> Result<Vec<String>, String> {
     let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args([
+            "config",
+            "--null",
+            "--name-only",
+            "--get-regexp",
+            r"^filter\..*\.(clean|process)$",
+        ])
+        .output()
+        .map_err(|e| format!("git: {}", e))?;
+    if !out.status.success() {
+        if out.status.code() == Some(1) {
+            return Ok(Vec::new());
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("git config filter query failed with status {}", out.status)
+        } else {
+            format!("git config filter query failed: {}", stderr)
+        });
+    }
+
+    let mut drivers = Vec::new();
+    for key_bytes in out
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|key| !key.is_empty())
+    {
+        let key = std::str::from_utf8(key_bytes)
+            .map_err(|_| "git config filter query returned invalid UTF-8 keys".to_string())?;
+        let Some(driver) = key.strip_prefix("filter.").and_then(|rest| {
+            rest.strip_suffix(".clean")
+                .or_else(|| rest.strip_suffix(".process"))
+        }) else {
+            continue;
+        };
+        if !driver.is_empty() {
+            drivers.push(driver.to_string());
+        }
+    }
+    drivers.sort();
+    drivers.dedup();
+    Ok(drivers)
+}
+
+fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
+    let filter_drivers = git_filter_driver_names(root)?;
+    let mut command = std::process::Command::new("git");
+    command
         .current_dir(root)
         // Repository-local fsmonitor configuration may name an executable.
         // Inspection commands must never run code supplied by the workspace.
-        .args(["-c", "core.fsmonitor=false"])
+        .args(["-c", "core.fsmonitor=false"]);
+    for driver in filter_drivers {
+        command.arg("-c").arg(format!("filter.{driver}.clean="));
+        command.arg("-c").arg(format!("filter.{driver}.process="));
+        command
+            .arg("-c")
+            .arg(format!("filter.{driver}.required=false"));
+    }
+    let out = command
         .args(args)
         .output()
         .map_err(|e| format!("git: {}", e))?;
