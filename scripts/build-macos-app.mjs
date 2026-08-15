@@ -157,7 +157,7 @@ export function createDevTauriConfig(production, macosOverlay = {}) {
 
   devConfig.app = {
     ...devConfig.app,
-    ...overlayConfig.app,
+    ...(overlayConfig.app ?? {}),
     windows: mergedWindows,
   };
   devConfig.bundle = {
