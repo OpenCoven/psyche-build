@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
+import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 
 const root = process.cwd();
@@ -27,14 +28,195 @@ function readText(path: string) {
   return readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
 }
 
-function pngMetadata(path: string) {
+function paethPredictor(left: number, up: number, upLeft: number) {
+  const candidate = left + up - upLeft;
+  const leftDistance = Math.abs(candidate - left);
+  const upDistance = Math.abs(candidate - up);
+  const upLeftDistance = Math.abs(candidate - upLeft);
+
+  if (leftDistance <= upDistance && leftDistance <= upLeftDistance) return left;
+  if (upDistance <= upLeftDistance) return up;
+  return upLeft;
+}
+
+function pngRgba(path: string) {
   const png = readFileSync(path);
-  expect(png.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
-  return {
-    width: png.readUInt32BE(16),
-    height: png.readUInt32BE(20),
-    colorType: png[25],
+  if (png.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') {
+    throw new Error(`Invalid PNG signature: ${path}`);
+  }
+
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  let compressionMethod = 0;
+  let filterMethod = 0;
+  let interlaceMethod = 0;
+  let sawIHDR = false;
+  let sawIEND = false;
+  let offset = 8;
+  const idatChunks: Buffer[] = [];
+
+  while (offset < png.length) {
+    if (offset + 8 > png.length) {
+      throw new Error(`Truncated PNG chunk header: ${path}`);
+    }
+    const length = png.readUInt32BE(offset);
+    const type = png.subarray(offset + 4, offset + 8).toString('ascii');
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    const chunkEnd = dataEnd + 4;
+    if (chunkEnd > png.length) {
+      throw new Error(`Out-of-bounds PNG chunk payload: ${path}`);
+    }
+
+    if (type === 'IHDR') {
+      if (sawIHDR) throw new Error(`Duplicate IHDR chunk: ${path}`);
+      if (length !== 13) throw new Error(`Unexpected IHDR length: ${path}`);
+      sawIHDR = true;
+      width = png.readUInt32BE(dataStart);
+      height = png.readUInt32BE(dataStart + 4);
+      bitDepth = png[dataStart + 8];
+      colorType = png[dataStart + 9];
+      compressionMethod = png[dataStart + 10];
+      filterMethod = png[dataStart + 11];
+      interlaceMethod = png[dataStart + 12];
+    } else if (!sawIHDR) {
+      throw new Error(`PNG is missing a leading IHDR chunk: ${path}`);
+    } else if (type === 'IDAT') {
+      idatChunks.push(png.subarray(dataStart, dataEnd));
+    } else if (type === 'IEND') {
+      if (length !== 0) throw new Error(`Unexpected IEND length: ${path}`);
+      sawIEND = true;
+      offset = chunkEnd;
+      break;
+    }
+
+    offset = chunkEnd;
+  }
+
+  if (!sawIHDR) throw new Error(`Missing IHDR chunk: ${path}`);
+  if (!sawIEND) throw new Error(`Missing IEND chunk: ${path}`);
+  if (offset !== png.length) throw new Error(`Unexpected trailing PNG data: ${path}`);
+  if (bitDepth !== 8) throw new Error(`Unsupported PNG bit depth ${bitDepth}: ${path}`);
+  if (colorType !== 6) throw new Error(`Unsupported PNG color type ${colorType}: ${path}`);
+  if (compressionMethod !== 0) {
+    throw new Error(`Unsupported PNG compression method ${compressionMethod}: ${path}`);
+  }
+  if (filterMethod !== 0) throw new Error(`Unsupported PNG filter method ${filterMethod}: ${path}`);
+  if (interlaceMethod !== 0) {
+    throw new Error(`Unsupported PNG interlace method ${interlaceMethod}: ${path}`);
+  }
+  if (width === 0 || height === 0) throw new Error(`Invalid PNG dimensions: ${path}`);
+  if (idatChunks.length === 0) throw new Error(`Missing PNG IDAT data: ${path}`);
+
+  const rowBytes = width * 4;
+  const scanlines = inflateSync(Buffer.concat(idatChunks));
+  const expectedScanlineBytes = height * (rowBytes + 1);
+  if (scanlines.length !== expectedScanlineBytes) {
+    throw new Error(`Unexpected PNG scanline size: ${path}`);
+  }
+
+  const rgba = Buffer.alloc(rowBytes * height);
+  let scanlineOffset = 0;
+  for (let y = 0; y < height; y += 1) {
+    const filterType = scanlines[scanlineOffset];
+    scanlineOffset += 1;
+    const rowStart = y * rowBytes;
+
+    for (let x = 0; x < rowBytes; x += 1) {
+      const source = scanlines[scanlineOffset];
+      scanlineOffset += 1;
+      const left = x >= 4 ? rgba[rowStart + x - 4] : 0;
+      const up = y > 0 ? rgba[rowStart - rowBytes + x] : 0;
+      const upLeft = y > 0 && x >= 4 ? rgba[rowStart - rowBytes + x - 4] : 0;
+
+      switch (filterType) {
+        case 0:
+          rgba[rowStart + x] = source;
+          break;
+        case 1:
+          rgba[rowStart + x] = (source + left) & 0xff;
+          break;
+        case 2:
+          rgba[rowStart + x] = (source + up) & 0xff;
+          break;
+        case 3:
+          rgba[rowStart + x] = (source + Math.floor((left + up) / 2)) & 0xff;
+          break;
+        case 4:
+          rgba[rowStart + x] = (source + paethPredictor(left, up, upLeft)) & 0xff;
+          break;
+        default:
+          throw new Error(`Unsupported PNG filter type ${filterType}: ${path}`);
+      }
+    }
+  }
+
+  if (scanlineOffset !== scanlines.length) throw new Error(`Unexpected PNG row decoding state: ${path}`);
+
+  const alphaAt = (x: number, y: number) => {
+    if (x < 0 || x >= width || y < 0 || y >= height) {
+      throw new Error(`PNG coordinate out of range (${x}, ${y}): ${path}`);
+    }
+    return rgba[(y * width + x) * 4 + 3];
   };
+
+  return { width, height, bitDepth, colorType, alphaAt };
+}
+
+function icoEntries(path: string) {
+  const ico = readFileSync(path);
+  if (ico.length < 6) throw new Error(`Truncated ICO header: ${path}`);
+
+  const reserved = ico.readUInt16LE(0);
+  const type = ico.readUInt16LE(2);
+  const count = ico.readUInt16LE(4);
+  if (reserved !== 0) throw new Error(`Invalid ICO reserved field: ${path}`);
+  if (type !== 1) throw new Error(`Invalid ICO type field: ${path}`);
+
+  const tableEnd = 6 + count * 16;
+  if (tableEnd > ico.length) throw new Error(`Out-of-bounds ICO directory table: ${path}`);
+
+  const widths: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const entryOffset = 6 + index * 16;
+    const width = ico[entryOffset] || 256;
+    const payloadSize = ico.readUInt32LE(entryOffset + 8);
+    const payloadOffset = ico.readUInt32LE(entryOffset + 12);
+    const payloadEnd = payloadOffset + payloadSize;
+
+    if (payloadSize === 0) throw new Error(`ICO entry ${index} has an empty payload: ${path}`);
+    if (payloadOffset < tableEnd) throw new Error(`ICO entry ${index} overlaps the directory: ${path}`);
+    if (payloadEnd > ico.length) throw new Error(`ICO entry ${index} extends past EOF: ${path}`);
+    widths.push(width);
+  }
+
+  return { widths, payloadsValidated: true };
+}
+
+function icnsChunks(path: string) {
+  const icns = readFileSync(path);
+  if (icns.length < 8) throw new Error(`Truncated ICNS header: ${path}`);
+  if (icns.subarray(0, 4).toString('ascii') !== 'icns') throw new Error(`Invalid ICNS magic: ${path}`);
+
+  const declaredLength = icns.readUInt32BE(4);
+  if (declaredLength !== icns.length) throw new Error(`Mismatched ICNS length: ${path}`);
+
+  const chunkTypes: string[] = [];
+  let offset = 8;
+  while (offset < icns.length) {
+    if (offset + 8 > icns.length) throw new Error(`Truncated ICNS chunk header: ${path}`);
+    const type = icns.subarray(offset, offset + 4).toString('ascii');
+    const size = icns.readUInt32BE(offset + 4);
+    const chunkEnd = offset + size;
+    if (size < 8) throw new Error(`Invalid ICNS chunk length for ${type}: ${path}`);
+    if (chunkEnd > icns.length) throw new Error(`Out-of-bounds ICNS chunk ${type}: ${path}`);
+    chunkTypes.push(type);
+    offset = chunkEnd;
+  }
+
+  return { chunkTypes };
 }
 
 function stalePathReferences(): string[] {
@@ -214,21 +396,35 @@ describe('desktop Tauri layout', () => {
     expect(JSON.stringify(configs)).not.toMatch(/\bpython3?\b/);
   });
 
-  it('ships the committed desktop icon family from a 1024px RGBA master icon', () => {
-    expect(pngMetadata(join(icons, 'icon.png'))).toEqual({
-      width: 1024,
-      height: 1024,
-      colorType: 6,
-    });
-    expect(pngMetadata(join(icons, '32x32.png'))).toMatchObject({ width: 32, height: 32 });
-    expect(pngMetadata(join(icons, '64x64.png'))).toMatchObject({ width: 64, height: 64 });
-    expect(pngMetadata(join(icons, '128x128.png'))).toMatchObject({ width: 128, height: 128 });
-    expect(pngMetadata(join(icons, '128x128@2x.png'))).toMatchObject({
-      width: 256,
-      height: 256,
-    });
-    expect(readFileSync(join(icons, 'icon.icns')).length).toBeGreaterThan(100000);
-    expect(readFileSync(join(icons, 'icon.ico')).length).toBeGreaterThan(10000);
+  it('ships valid committed desktop icon PNG, ICO, and ICNS containers', () => {
+    for (const [name, size] of [
+      ['icon.png', 1024],
+      ['32x32.png', 32],
+      ['64x64.png', 64],
+      ['128x128.png', 128],
+      ['128x128@2x.png', 256],
+    ] as const) {
+      const png = pngRgba(join(icons, name));
+      expect(png).toMatchObject({ width: size, height: size, bitDepth: 8, colorType: 6 });
+      expect(png.alphaAt(0, 0)).toBe(0);
+      expect(png.alphaAt(Math.floor(size / 2), Math.floor(size / 2))).toBe(255);
+    }
+
+    const ico = icoEntries(join(icons, 'icon.ico'));
+    expect(ico.widths).toEqual(expect.arrayContaining([16, 24, 32, 48, 64, 256]));
+    expect(ico.payloadsValidated).toBe(true);
+
+    const icns = icnsChunks(join(icons, 'icon.icns'));
+    expect(icns.chunkTypes).toEqual(expect.arrayContaining([
+      'ic07',
+      'ic08',
+      'ic09',
+      'ic10',
+      'ic11',
+      'ic12',
+      'ic13',
+      'ic14',
+    ]));
   });
 
   it('routes structured targets through the native platform launch descriptor', () => {
