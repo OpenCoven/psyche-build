@@ -661,11 +661,13 @@ __OURS__
   private handleConnection(socket: Socket): void {
     let identity: AuthenticatedControlIdentity | null = null;
     let clientId: string | undefined;
+    let closing = false;
 __OURS__
     };
 
     const fail = (code: string, message: string, requestId?: string): void => {
       if (socket.destroyed || !socket.writable) return;
+      closing = true;
       socket.end(`${encodeControlMessage({ version: 1, type: 'error', requestId, code, message })}\n`);
     };
 
@@ -711,6 +713,7 @@ __OURS__
           } catch { /* bounded malformed JSON is handled by the normal decoder */ }
         }
         if (line.trim().length === 0) continue;
+        if (closing) continue;
 __OURS__
       }
     });
