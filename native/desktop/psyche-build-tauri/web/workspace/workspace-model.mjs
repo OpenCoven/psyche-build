@@ -305,6 +305,7 @@ export function sanitizeWorkspaceV3(saved) {
   const sessions = [];
   const filesPanes = [];
   const knownThreadIds = new Set();
+  const knownFilesPaneIds = new Set();
   const projectIds = new Set();
   const sessionScopes = new Map();
   const filesPaneScopes = new Map();
@@ -336,11 +337,18 @@ export function sanitizeWorkspaceV3(saved) {
 
   for (const descriptor of Array.isArray(saved.filesPanes) ? saved.filesPanes : []) {
     const filesPane = sanitizeFilesPaneDescriptor(descriptor, projectIds);
-    if (!filesPane || knownThreadIds.has(filesPane.id)) continue;
+    if (
+      !filesPane ||
+      knownThreadIds.has(filesPane.id) ||
+      knownFilesPaneIds.has(filesPane.id)
+    ) {
+      continue;
+    }
 
     const scopeKey = `${filesPane.projectId}\u0000${filesPane.workspaceRoot}`;
     if (filesPaneScopes.has(scopeKey)) continue;
 
+    knownFilesPaneIds.add(filesPane.id);
     filesPaneScopes.set(scopeKey, filesPane);
     filesPanes.push(filesPane);
   }

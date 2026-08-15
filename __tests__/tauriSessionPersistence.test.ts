@@ -530,6 +530,40 @@ describe('Tauri workspace persistence model', () => {
     });
   });
 
+  test('drops duplicate Files pane ids across different worktrees', () => {
+    const sanitized = workspaceModel.sanitizeWorkspaceV3({
+      version: 3,
+      activeProjectId: 'project-a',
+      activeThreadId: null,
+      projects: [{ id: 'project-a', root: '/repo' }],
+      sessions: [],
+      filesPanes: [
+        {
+          id: 'files-1',
+          projectId: 'project-a',
+          workspaceRoot: '/repo',
+          hidden: false,
+        },
+        {
+          id: 'files-1',
+          projectId: 'project-a',
+          workspaceRoot: '/repo/worktree',
+          hidden: false,
+        },
+      ],
+      paneLayouts: [],
+    });
+
+    expect(sanitized?.filesPanes).toEqual([
+      {
+        id: 'files-1',
+        projectId: 'project-a',
+        workspaceRoot: '/repo',
+        hidden: false,
+      },
+    ]);
+  });
+
   test('drops duplicate leaf ids across distinct sessions', () => {
     expect(
       workspaceModel.sanitizePaneTree(

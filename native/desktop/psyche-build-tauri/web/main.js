@@ -400,6 +400,23 @@
     paneCounter += 1;
     return prefix + "-" + paneCounter;
   }
+  function paneIdSequence(id) {
+    var match = /-(\d+)$/.exec(String(id || ""));
+    if (!match) return 0;
+    var sequence = Number(match[1]);
+    return Number.isSafeInteger(sequence) ? sequence : 0;
+  }
+  function reservePaneId(id) {
+    paneCounter = Math.max(paneCounter, paneIdSequence(id));
+  }
+  function reservePaneTreeIds(node) {
+    if (!node) return;
+    reservePaneId(node.id);
+    if (node.type === "split") {
+      reservePaneTreeIds(node.first);
+      reservePaneTreeIds(node.second);
+    }
+  }
   function paneLayoutKey(projectId, worktreePath) {
     return String(projectId || "") + "\u0000" + String(worktreePath || "");
   }
@@ -8357,6 +8374,8 @@
     var file = findOpenFile(id);
     if (!file) return false;
     if (state.activeFileId === id) {
+      var project = findProject(file.projectId);
+      if (project) ensureFilesPane(project, file.workspaceRoot);
       fileEditor.focus();
       return true;
     }
@@ -12366,6 +12385,7 @@
         return leaf && leaf.threadId;
       }).filter(Boolean);
       if (!threadIds.length || threadIds.some(function (id) { return !restoredIds.has(id); })) return;
+      reservePaneTreeIds(record.root);
       paneLayouts.set(paneLayoutKey(project.id, record.worktreePath), {
         root: record.root,
         focusedLeafId: record.focusedLeafId || null,
@@ -12381,6 +12401,7 @@
       if (!project) return;
       var key = filesPaneKey(project.id, record.workspaceRoot);
       if (filesPanes.has(key)) return;
+      reservePaneId(record.id);
       filesPanes.set(key, {
         id: record.id,
         kind: "files",
