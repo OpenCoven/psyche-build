@@ -262,7 +262,7 @@ async function startMcpControlClient(
   });
 }
 
-function validateMcpTaskBinding(binding: {
+export function validateMcpTaskBinding(binding: {
   taskId?: unknown;
   token?: unknown;
   canonicalProjectRoot?: unknown;
@@ -294,6 +294,9 @@ function validateMcpTaskCredential(binding: {
   }
   if (typeof binding.token !== 'string' || binding.token.trim().length === 0) {
     throw new TypeError('task-bound MCP requires a task token');
+  }
+  if (binding.token !== binding.token.trim()) {
+    throw new TypeError('task-bound MCP task token must not contain surrounding whitespace');
   }
   return { taskId, token: binding.token };
 }

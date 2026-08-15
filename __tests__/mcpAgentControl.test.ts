@@ -10,6 +10,7 @@ import {
   handleMcpRequest,
   parseMcpArgs,
   setMcpDeps,
+  validateMcpTaskBinding,
 } from '../src/mcp/server.js';
 import { ControlResponseError } from '../src/control/client.js';
 import { canonicalizeProjectRoot } from '../src/control/projectIdentity.js';
@@ -155,6 +156,42 @@ describe('MCP task binding bootstrap', () => {
     await expect(parseMcpArgs(['--task-id', 'a'.repeat(257)], {
       PSYCHE_CONTROL_TASK_TOKEN: token,
     })).rejects.toThrow(/256/);
+  });
+
+  it.each([
+    ' task-token',
+    'task-token ',
+    '\ttask-token\n',
+  ])('directly rejects a task token with surrounding whitespace', (token) => {
+    let rejection: unknown;
+    try {
+      validateMcpTaskBinding({
+        taskId: 'task-alpha',
+        token,
+        canonicalProjectRoot: '/canonical/repo',
+      });
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toBeInstanceOf(TypeError);
+    expect(String(rejection)).toMatch(/whitespace/i);
+    expect(String(rejection)).not.toContain(token);
+  });
+
+  it.each([
+    ' environment-token',
+    'environment-token ',
+    '\tenvironment-token\n',
+  ])('rejects environment task token whitespace before canonicalizing the launch root', async (token) => {
+    const canonicalize = vi.fn(async (root: string) => root);
+    const pending = parseMcpArgs([], {
+      PSYCHE_CONTROL_TASK_ID: 'task-alpha',
+      PSYCHE_CONTROL_TASK_TOKEN: token,
+    }, '/launch/repo', canonicalize);
+
+    await expect(pending).rejects.toThrow(/whitespace/i);
+    await expect(pending).rejects.not.toThrow(token);
+    expect(canonicalize).not.toHaveBeenCalled();
   });
 });
 
@@ -778,6 +815,24 @@ describe('agent surface MCP tools', () => {
         canonicalProjectRoot: '/canonical/repo',
       },
     })).rejects.toThrow(/task token/i);
+    for (const invalidToken of [
+      ` ${token}`,
+      `${token} `,
+      `\t${token}\n`,
+    ]) {
+      const pending = createMcpControlClientForRoot('/repo', {
+        canonicalize: async () => '/canonical/repo',
+        connect,
+        entryPath: '/entry.js',
+        taskBinding: {
+          taskId: 'task-alpha',
+          token: invalidToken,
+          canonicalProjectRoot: '/canonical/repo',
+        },
+      });
+      await expect(pending).rejects.toThrow(/whitespace/i);
+      await expect(pending).rejects.not.toThrow(invalidToken);
+    }
     expect(connect).not.toHaveBeenCalled();
   });
 

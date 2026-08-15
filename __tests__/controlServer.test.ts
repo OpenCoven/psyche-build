@@ -296,9 +296,10 @@ describe('control server runtime integration', () => {
   });
 
   describe('task resource authority', () => {
-    it('lists only exact resources authorized by active non-expired task leases', async () => {
+    it('uses the injected runtime clock when pruning task resource leases', async () => {
       const root = await testProject();
-      let now = new Date();
+      let now = new Date('2000-01-01T00:00:00.000Z');
+      expect(now.getTime()).toBeLessThan(Date.now());
       const surfaces = new SurfaceRegistry();
       const capabilityLeases = new CapabilityLeaseStore(() => now, 1);
       let beta = surfaces.upsertPane({

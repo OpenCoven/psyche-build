@@ -437,15 +437,11 @@ export class ControlAuthority {
     const taskId = taskIdForDedicatedRead(identity);
     const snapshot = this.runtime.snapshot();
     const authorizedTargets = new Set<string>();
-    const now = Date.now();
 
     for (const lease of snapshot.capabilityLeases) {
-      const expiresAt = Date.parse(lease.expiresAt);
       if (
         lease.ownerEpoch !== this.ownerEpoch
         || lease.taskId !== taskId
-        || !Number.isFinite(expiresAt)
-        || expiresAt <= now
       ) continue;
       for (const grant of lease.grants) {
         const key = targetKey(grant.target);
