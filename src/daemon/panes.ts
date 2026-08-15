@@ -74,7 +74,12 @@ export async function listPaneSurfaceBindings(
     const tmuxPaneId = String(pane.paneId ?? '');
     if (!id || !tmuxPaneId) continue;
     const persistedIdentity = pane.tmuxServerIdentity;
-    const currentIdentity = getTmuxIdentity(tmuxPaneId);
+    let currentIdentity: TmuxServerIdentity | undefined;
+    try {
+      currentIdentity = await getTmuxIdentity(tmuxPaneId);
+    } catch {
+      continue;
+    }
     if (
       !isTmuxServerIdentity(persistedIdentity)
       || !currentIdentity

@@ -165,7 +165,10 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       }
       // Re-read the durable binding immediately before every effect. The refresh
       // drops panes whose persisted tmux server generation is no longer current.
-      await deps.refreshPaneSurfaces?.();
+      if (!deps.refreshPaneSurfaces) {
+        throw codedHandlerError('backend_unavailable', 'pane surface refresh is unavailable');
+      }
+      await deps.refreshPaneSurfaces();
       const pane = requirePaneSurface(surfaces, payload.paneId, payload.generation);
       const target = assertTmuxPaneId(pane.tmuxPaneId);
       const quotedTarget = quoteTmuxArgument(target);

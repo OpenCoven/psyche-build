@@ -134,6 +134,30 @@ describe('daemon pane config helpers', () => {
     expect(isPaneLive).not.toHaveBeenCalled();
   });
 
+  it('awaits async tmux identity probes before matching persisted generation', async () => {
+    const identity = { pid: 42, processStartIdentity: 'start-42' };
+    const root = await writeConfig({
+      panes: [{ id: 'psyche-2', paneId: '%3', worktreeDir: '/repo/worktree', tmuxServerIdentity: identity }],
+    });
+
+    await expect(listPaneSurfaceBindings(root, async () => true, async () => identity)).resolves.toEqual([{
+      id: 'psyche-2', tmuxPaneId: '%3', worktreeRoot: '/repo/worktree',
+    }]);
+  });
+
+  it('treats tmux identity probe failures as non-matches', async () => {
+    const identity = { pid: 42, processStartIdentity: 'start-42' };
+    const root = await writeConfig({
+      panes: [{ id: 'psyche-2', paneId: '%3', worktreeDir: '/repo/worktree', tmuxServerIdentity: identity }],
+    });
+    const isPaneLive = vi.fn(async () => true);
+
+    await expect(listPaneSurfaceBindings(root, isPaneLive, async () => {
+      throw new Error('tmux failure');
+    })).resolves.toEqual([]);
+    expect(isPaneLive).not.toHaveBeenCalled();
+  });
+
   it('does not resurrect a stale exited pane record and increments on a confirmed rebind', async () => {
     const identity = { pid: 42, processStartIdentity: 'start-42' };
     const root = await writeConfig({

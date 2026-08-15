@@ -211,6 +211,22 @@ describe('createDaemonControlHandlers leased pane controls', () => {
     expect(executeCommandWithOutput).toHaveBeenCalledTimes(2);
   });
 
+  it('rejects pane effects when refreshPaneSurfaces is unavailable', async () => {
+    const sendKeysHex = vi.fn(async () => {});
+    const handlers = createDaemonControlHandlers({
+      tmux: { sendKeysHex } as unknown as TmuxControl,
+      projectRoot: '/repo',
+      sessionName: 'psyche-test',
+      capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+      surfaces: new SurfaceRegistry(),
+    });
+
+    await expect(handlers.actOnPane({
+      ...paneAuthorization, action: { kind: 'send_text', text: 'hi' },
+    })).rejects.toMatchObject({ code: 'backend_unavailable' });
+    expect(sendKeysHex).not.toHaveBeenCalled();
+  });
+
   it('creates through the canonical project scope', async () => {
     const { handlers, surfaces, spawnPane, refreshPaneSurfaces } = paneHandlerHarness();
 
