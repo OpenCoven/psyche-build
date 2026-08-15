@@ -8158,6 +8158,65 @@ mod workspace_panel_tests {
     }
 
     #[test]
+    fn git_status_does_not_execute_repository_clean_filter() {
+        let tree = TempTree::new("git-clean-filter");
+        let helper = if cfg!(windows) {
+            tree.root.join("clean-filter.bat")
+        } else {
+            tree.root.join("clean-filter.sh")
+        };
+        let marker = tree.root.join("clean-filter-ran");
+        write_marker_executable(&helper);
+        run_test_git(&tree.root, &["init", "-q"]);
+        std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
+        std::fs::write(
+            tree.root.join(".gitattributes"),
+            "tracked.txt filter=psyche-clean\n",
+        )
+        .unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt", ".gitattributes"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Psyche Tests",
+                "commit",
+                "-qm",
+                "baseline",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "filter.psyche-clean.clean",
+                &marker_command(&helper, &marker),
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &["config", "filter.psyche-clean.required", "true"],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
+
+        run_test_git(&tree.root, &["status", "--porcelain"]);
+        assert!(
+            marker.exists(),
+            "unhardened git status must execute the configured clean filter"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        git_status(path_text(&tree.root).to_string()).unwrap();
+
+        assert!(
+            !marker.exists(),
+            "hardened git_status must not execute repository clean filters"
+        );
+    }
+
+    #[test]
     fn git_diff_does_not_execute_repository_diff_helpers() {
         let tree = TempTree::new("git-external-diff");
         let helper = if cfg!(windows) {
@@ -8208,6 +8267,78 @@ mod workspace_panel_tests {
 
         assert!(diff.text.contains("+after"));
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn git_diff_does_not_execute_repository_process_filter() {
+        let tree = TempTree::new("git-process-filter");
+        let helper = if cfg!(windows) {
+            tree.root.join("process-filter.bat")
+        } else {
+            tree.root.join("process-filter.sh")
+        };
+        let marker = tree.root.join("process-filter-ran");
+        write_marker_executable(&helper);
+        run_test_git(&tree.root, &["init", "-q"]);
+        std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
+        std::fs::write(
+            tree.root.join(".gitattributes"),
+            "tracked.txt filter=psyche-process\n",
+        )
+        .unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt", ".gitattributes"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Psyche Tests",
+                "commit",
+                "-qm",
+                "baseline",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "filter.psyche-process.process",
+                &marker_command(&helper, &marker),
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &["config", "filter.psyche-process.required", "true"],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
+
+        let output = std::process::Command::new("git")
+            .current_dir(&tree.root)
+            .args(["diff", "--no-color", "--relative", "--", "tracked.txt"])
+            .output()
+            .expect("git diff must run in tests");
+        assert!(
+            marker.exists(),
+            "unhardened raw git diff must execute the configured process filter (status: {}, stderr: {})",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("tracked.txt".to_string()),
+            Some(false),
+            None,
+        )
+        .unwrap();
+
+        assert!(diff.text.contains("+after"));
+        assert!(
+            !marker.exists(),
+            "hardened git_diff must not execute repository process filters"
+        );
     }
 
     #[test]
