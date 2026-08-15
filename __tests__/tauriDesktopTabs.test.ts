@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const repoRoot = process.cwd();
@@ -8,7 +8,25 @@ const mainJs = readFileSync(
   'utf8',
 ).replace(/\r\n/g, '\n');
 const stylesCss = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'), 'utf8');
-const tauriLib = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
+const tauriLib = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'),
+  'utf8',
+).replace(/\r\n/g, '\n');
+const tauriBuild = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/build.rs'),
+  'utf8',
+);
+const defaultCapability = JSON.parse(readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/capabilities/default.json'),
+  'utf8',
+));
+const browserShortcutCapabilityPath = join(
+  repoRoot,
+  'native/desktop/psyche-build-tauri/src-tauri/capabilities/browser-app-shortcuts.json',
+);
+const browserShortcutCapability = existsSync(browserShortcutCapabilityPath)
+  ? JSON.parse(readFileSync(browserShortcutCapabilityPath, 'utf8'))
+  : null;
 const tauriCargo = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml'),
   'utf8'
@@ -28,6 +46,41 @@ const tauriConfig = JSON.parse(
 const forbiddenContextualTabFn = new RegExp(`function\\s+${'createContextual' + 'Tab'}\\(\\)`);
 const forbiddenBrowserNewTabShortcut = new RegExp(`${'browser:shortcut-' + 'new' + '-tab'}`);
 
+function browserShortcutInjectionSource() {
+  const start = tauriLib.indexOf('fn browser_shortcut_initialization_script(');
+  const end = tauriLib.indexOf('\n}\n', start);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  return tauriLib.slice(start, end + 2);
+}
+
+function registeredAppCommands() {
+  const match = tauriLib.match(
+    /tauri::generate_handler!\[(?<commands>[\s\S]*?)\]\)/,
+  );
+  expect(match?.groups?.commands).toBeTruthy();
+  return match!.groups!.commands
+    .split(',')
+    .map((command) => command.trim())
+    .filter(Boolean);
+}
+
+function manifestAppCommands() {
+  const match = tauriBuild.match(
+    /AppManifest::new\(\)\.commands\(\s*&\[(?<commands>[\s\S]*?)\]\s*\)/,
+  );
+  expect(match?.groups?.commands).toBeTruthy();
+  return Array.from(match!.groups!.commands.matchAll(/"([^"]+)"/g), ([, command]) => command);
+}
+
+function browserShortcutListenerBlock(name: string) {
+  const start = mainJs.indexOf(`listen("${name}", function () {`);
+  const end = mainJs.indexOf('}).catch(function () {});', start);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  return mainJs.slice(start, end + '}).catch(function () {});'.length);
+}
+
 describe('Tauri desktop tab shortcuts', () => {
   it('routes Command+T to terminal panes globally', () => {
     expect(mainJs).toMatch(/async function createTerminalPane\(\)/);
@@ -43,17 +96,14 @@ describe('Tauri desktop tab shortcuts', () => {
     );
   });
 
-  it('swaps the dirty dot for the close control in one non-reflowing slot', () => {
-    // Both controls live in the same fixed-width slot, so revealing one cannot
-    // shift the strip.
-    expect(mainJs).toMatch(/<span class="tab-end">/);
-    expect(stylesCss).toMatch(/\.tab-end \{[^}]*flex: 0 0 16px/);
+  it('overlays the dirty dot and close control without reflowing the file tab', () => {
+    expect(mainJs).toContain('item.className = "file-tab-item"');
+    expect(stylesCss).toMatch(/\.file-tab-item \{[^}]*position: relative;[^}]*flex: 0 0 auto;/);
+    expect(stylesCss).toMatch(/\.file-tab-item > \.tab \{[^}]*padding-right: 34px;/);
     expect(stylesCss).toMatch(/\.tab \.dot \{[^}]*position: absolute/);
-    expect(stylesCss).toMatch(/\.tab \.close \{[^}]*position: absolute/);
-    expect(stylesCss).toContain('.tab:hover .close { opacity: 1; }');
-    expect(stylesCss).toContain('.tab:hover .dot { opacity: 0; }');
-    // The active tab keeps its dot: that is the file whose unsaved state matters.
-    expect(stylesCss).not.toMatch(/\.tab\.active \.dot \{[^}]*opacity: 0/);
+    expect(stylesCss).toMatch(/\.file-tab-item > \.close \{[^}]*position: absolute/);
+    expect(stylesCss).toContain('.file-tab-item:hover > .close { opacity: 1; }');
+    expect(stylesCss).toContain('.file-tab-item:hover .dot { opacity: 0; }');
   });
 
   it('closes a file tab on middle click', () => {
@@ -67,28 +117,178 @@ describe('Tauri desktop tab shortcuts', () => {
       /function syncTabStripOverflow\(\)[\s\S]*scrollWidth > tabStripEl\.clientWidth \+ 1[\s\S]*toggle\("is-overflowing"/
     );
     expect(mainJs).toMatch(/function scrollActiveTabIntoView\(\)[\s\S]*scrollIntoView/);
-    // Refreshing the strip and resizing the window both re-measure.
-    expect(mainJs).toMatch(/syncTabStripOverflow\(\);\n    scrollActiveTabIntoView\(\);/);
+    // Refreshing the strip and resizing the window both re-measure on the
+    // shared keyed frame lane.
+    expect(mainJs).toContain('scheduleTabMeasurements(true);');
+    expect(mainJs).toContain('scheduleTabMeasurements();');
     expect(stylesCss).toMatch(/\.tab-strip\.is-overflowing \{[^}]*mask-image/);
     expect(stylesCss).not.toMatch(/\.tab-strip \{[^}]*[^.]mask-image/);
   });
 
-  it('lets embedded browser webviews request a terminal pane with Command+T', () => {
-    expect(tauriLib).toMatch(/browser:shortcut-terminal-pane/);
+  it('lets embedded browser webviews forward exact T/D/F app shortcuts', () => {
+    const injection = browserShortcutInjectionSource();
+    const invokeCapture = injection.indexOf('var invoke = core.invoke;');
+    const promiseCapture = injection.indexOf('var promiseThen = Promise.prototype.then;');
+    const lowercaseCapture = injection.indexOf(
+      'var stringToLowerCase = String.prototype.toLowerCase;',
+    );
+    const listener = injection.indexOf('window.addEventListener("keydown", function(event) {');
+    const trustedGuard = injection.indexOf('event.isTrusted !== true');
+    const repeatGuard = injection.indexOf('event.repeat');
+    const preventDefault = injection.indexOf('event.preventDefault();');
+    const invokeCall = injection.indexOf('"browser_app_shortcut"');
+
+    expect(invokeCapture).toBeGreaterThanOrEqual(0);
+    expect(promiseCapture).toBeGreaterThanOrEqual(0);
+    expect(lowercaseCapture).toBeGreaterThanOrEqual(0);
+    expect(invokeCapture).toBeLessThan(listener);
+    expect(promiseCapture).toBeLessThan(listener);
+    expect(lowercaseCapture).toBeLessThan(listener);
+    expect(trustedGuard).toBeGreaterThan(listener);
+    expect(repeatGuard).toBeGreaterThan(listener);
+    expect(trustedGuard).toBeLessThan(preventDefault);
+    expect(repeatGuard).toBeLessThan(preventDefault);
+    expect(preventDefault).toBeLessThan(invokeCall);
+    expect(injection).toContain('reflectApply(invoke, core, [');
+    expect(injection).toContain('shortcut = "terminal-pane"');
+    expect(injection).toContain('shortcut = "agent-pane"');
+    expect(injection).toContain('shortcut = "composer"');
+    expect(injection).toContain('url: location.href');
+    expect(injection).toContain('secret: secret');
+    expect(injection).toContain('reflectApply(promiseThen, pending, [');
+    expect(injection).toContain('secret = nextSecret;');
+    expect(injection).not.toMatch(/emit\("browser:shortcut-(terminal-pane|agent-pane|composer)"/);
+    expect(tauriLib).toMatch(
+      /emit\("browser:title", \{\{ label: browserLabel, title: title, url: location\.href \}\}\);/,
+    );
+    expect(tauriLib).toMatch(
+      /emit\("browser:focus", \{\{ label: browserLabel, url: location\.href \}\}\);/,
+    );
     expect(tauriLib).not.toMatch(forbiddenBrowserNewTabShortcut);
-    expect(tauriLib).toMatch(/event\.key\.toLowerCase\(\)\s*===\s*"t"/);
-    expect(tauriLib).toMatch(/function\(browserLabel\)/);
-    expect(tauriLib).not.toMatch(/label_json,\s*label_json/);
-    expect(mainJs).toMatch(
-      /listen\(\s*"browser:shortcut-terminal-pane",\s*function\s*\(\)\s*\{[\s\S]*createTerminalPane\(\);[\s\S]*\}\s*\)\.catch/
+    expect(injection).toContain(
+      'var key = event.key ? reflectApply(stringToLowerCase, event.key, []) : "";',
+    );
+    expect(injection).toContain('var primary = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;');
+    expect(injection).toContain('if ((event.metaKey || event.ctrlKey) && key === "t") {');
+    expect(injection).not.toContain('if (primary && key === "t") {');
+    expect(injection).toContain('else if (primary && key === "d") {');
+    expect(injection).toContain('else if (primary && key === "f") {');
+    expect(injection).not.toContain('key === "p"');
+    expect(injection).not.toContain('key === "k"');
+    expect(injection).toContain('function(initialSecret)');
+    expect(tauriLib).toMatch(/\.initialization_script\(shortcut_script\)/);
+    const ensureBrowserStart = tauriLib.indexOf('fn ensure_browser(');
+    const ensureBrowserEnd = tauriLib.indexOf('\n}\n', ensureBrowserStart);
+    const ensureBrowser = tauriLib.slice(ensureBrowserStart, ensureBrowserEnd);
+    expect(ensureBrowser).not.toContain('window.addEventListener("keydown"');
+    expect(browserShortcutListenerBlock("browser:shortcut-terminal-pane")).toContain('createTerminalPane();');
+    expect(browserShortcutListenerBlock("browser:shortcut-agent-pane")).toContain('openAgentPicker();');
+    const composerListener = browserShortcutListenerBlock("browser:shortcut-composer");
+    expect(composerListener).toContain('commandInput.focus();');
+    expect(composerListener).toContain('openPalette("/", true);');
+  });
+
+  it('registers a caller-bound allowlisted browser shortcut command', () => {
+    expect(tauriLib).toMatch(
+      /#\[tauri::command\]\s*fn browser_app_shortcut\(\s*webview:\s*tauri::Webview,\s*authorizations:\s*State<'_, BrowserShortcutAuthorizations>,\s*shortcut:\s*String,\s*url:\s*String,\s*secret:\s*String,\s*\)\s*->\s*Result<String,\s*String>/,
+    );
+    expect(tauriLib).toMatch(
+      /fn resolve_browser_app_shortcut\([^)]*label:\s*&str[^)]*shortcut:\s*&str[^)]*\)[\s\S]*label\.starts_with\(BROWSER_LABEL_PREFIX\)/,
+    );
+    expect(tauriLib).toMatch(/"terminal-pane"\s*=>\s*Ok\("browser:shortcut-terminal-pane"\)/);
+    expect(tauriLib).toMatch(/"agent-pane"\s*=>\s*Ok\("browser:shortcut-agent-pane"\)/);
+    expect(tauriLib).toMatch(/"composer"\s*=>\s*Ok\("browser:shortcut-composer"\)/);
+    expect(tauriLib).toMatch(/unknown browser app shortcut/);
+
+    const commandStart = tauriLib.indexOf('fn browser_app_shortcut(');
+    const commandEnd = tauriLib.indexOf('\n}\n', commandStart);
+    expect(commandStart).toBeGreaterThanOrEqual(0);
+    expect(commandEnd).toBeGreaterThan(commandStart);
+    const command = tauriLib.slice(commandStart, commandEnd);
+    expect(command).toContain('webview.label()');
+    expect(command).toContain('label: webview.label().to_string()');
+    expect(command).not.toMatch(/\blabel:\s*String/);
+    const authorizationIndex = command.indexOf('.authorize_and_rotate(');
+    const focusIndex = command.indexOf('.set_focus()');
+    const emitIndex = command.indexOf('.emit_to(');
+    expect(authorizationIndex).toBeGreaterThanOrEqual(0);
+    expect(focusIndex).toBeGreaterThanOrEqual(0);
+    expect(focusIndex).toBeGreaterThan(authorizationIndex);
+    expect(emitIndex).toBeGreaterThan(focusIndex);
+    expect(command).toMatch(/\.emit_to\(\s*"main"/);
+    expect(command).not.toMatch(/\.emit\(/);
+    expect(command).toContain('random_browser_shortcut_secret');
+
+    expect(tauriLib).toMatch(
+      /tauri::generate_handler!\[[\s\S]*browser_app_shortcut,[\s\S]*\]/,
+    );
+  });
+
+  it('keeps the explicit app manifest synchronized with every registered command', () => {
+    expect(tauriBuild).toContain('tauri_build::Attributes');
+    expect(manifestAppCommands()).toEqual(registeredAppCommands());
+  });
+
+  it('grants every generated app permission to main and only the shortcut to browsers', () => {
+    const generatedPermissions = registeredAppCommands().map(
+      (command) => `allow-${command.replaceAll('_', '-')}`,
+    );
+    const mainAppPermissions = defaultCapability.permissions.filter(
+      (permission: string) => !permission.includes(':'),
+    );
+    expect(defaultCapability).toMatchObject({
+      identifier: 'default',
+      windows: ['main'],
+      permissions: expect.arrayContaining([
+        'core:default',
+        'core:window:allow-start-dragging',
+        'clipboard-manager:allow-write-text',
+        'opener:allow-open-url',
+        'opener:allow-reveal-item-in-dir',
+        'opener:default',
+        'dialog:default',
+        'dialog:allow-open',
+      ]),
+    });
+    expect(mainAppPermissions).toEqual(generatedPermissions);
+
+    expect(browserShortcutCapability).not.toBeNull();
+    expect(browserShortcutCapability).toEqual({
+      $schema: '../gen/schemas/macOS-schema.json',
+      identifier: 'browser-app-shortcuts',
+      description: 'Allows embedded browser webviews to forward approved application shortcuts',
+      local: true,
+      webviews: ['psyche-browser-*'],
+      remote: {
+        urls: ['http://*', 'https://*'],
+      },
+      permissions: ['allow-browser-app-shortcut', 'allow-browser-automation-result'],
+    });
+    expect(browserShortcutCapability.permissions).toHaveLength(2);
+    expect(JSON.stringify(browserShortcutCapability)).not.toContain('core:event:allow-emit');
+  });
+
+  it('manages per-webview shortcut authorization across navigation and destruction', () => {
+    expect(tauriCargo).toMatch(/^getrandom\s*=\s*"0\.2"/m);
+    expect(tauriLib).toMatch(
+      /const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis\((?:75|80|90|100)\);/,
+    );
+    expect(tauriLib).toContain('.manage(BrowserShortcutAuthorizations::default())');
+    expect(tauriLib).toMatch(
+      /let initial_secret = random_browser_shortcut_secret\(\)\?;[\s\S]*\.install\(label, initial_secret\.clone\(\)\)/,
+    );
+    expect(tauriLib).toMatch(
+      /PageLoadEvent::Started[\s\S]*\.reset\(&browser_label\)/,
+    );
+    expect(tauriLib).toMatch(
+      /fn destroy_browser_webview[\s\S]*\.remove\(&label\)/,
     );
   });
 
   it('keeps browser navigation single-shot for newly created webviews', () => {
     expect(tauriLib).toMatch(/fn\s+ensure_browser[\s\S]*?->\s*Result<bool,\s*String>/);
     expect(tauriLib).toMatch(/return\s+Ok\(false\);/);
-    expect(tauriLib).toMatch(/if\s+let\s+Some\(webview\)\s*=\s*app\.get_webview\(&label\)[\s\S]*?webview\s*\.set_position\(LogicalPosition::new\(x,\s*y\)\)[\s\S]*?webview\s*\.set_size\(LogicalSize::new\(w\.max\(1\.0\),\s*h\.max\(1\.0\)\)\)[\s\S]*?webview\.navigate\(parsed_url\)/);
-    expect(tauriLib).toMatch(/else\s*\{[\s\S]*?ensure_browser\(&app,\s*&label,\s*x,\s*y,\s*w,\s*h,\s*&canonical_url\)\?/);
+<<OURS>>
   });
 
   it('reports PTY exit codes and keeps PATH augmentation behind the platform boundary', () => {
@@ -132,7 +332,13 @@ describe('Tauri desktop tab shortcuts', () => {
     );
     expect(tauriLib).not.toMatch(/data_thread\.join\(\)/);
     expect(tauriLib).toMatch(
-      /let\s+writer\s*=\s*\{[\s\S]*?let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*?guard[\s\S]*?\.live\(&thread_id\)[\s\S]*?Arc::clone\(&session\.writer\)[\s\S]*?\};[\s\S]*?let\s+mut\s+writer\s*=\s*writer\.lock\(\);/
+      /async\s+fn\s+pty_write[\s\S]*?pty_write_operation\(&thread_id\)[\s\S]*?try_acquire_owned\(\)[\s\S]*?operation_lane\.lock_owned\(\)\.await[\s\S]*?spawn_blocking/
+    );
+    expect(tauriLib).toMatch(
+      /fn\s+pty_write_operation[\s\S]*?let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*?\.live\(thread_id\)[\s\S]*?Arc::clone\(&session\.writer\)[\s\S]*?Arc::clone\(&session\.operation_lane\)[\s\S]*?Arc::clone\(&session\.operation_admission\)[\s\S]*?drop\(guard\)/
+    );
+    expect(tauriLib).toMatch(
+      /fn\s+pty_write_blocking[\s\S]*?let\s+mut\s+writer\s*=\s*writer\.lock\(\);[\s\S]*?writer\.write_all\(&bytes\)[\s\S]*?writer\.flush\(\)/
     );
     expect(tauriLib).toMatch(
       /app_for_exit\.emit\([\s\S]*?"pty:exit"[\s\S]*?generation:\s*exit_token\.generation[\s\S]*?PTY_LIFECYCLES\.lock\(\)\.finish_exit\(&exit_token\)/
@@ -148,14 +354,14 @@ describe('Tauri desktop tab shortcuts', () => {
 
   it('delivers batched PTY output to the matching terminal thread', () => {
     expect(mainJs).toMatch(
-      /listen\("pty:data-batch",\s*function\s*\(event\)[\s\S]*?var\s+threadId\s*=\s*payload\.threadId\s*\|\|\s*payload\.thread_id;[\s\S]*?findThread\(threadId\)[\s\S]*?thread\.term\.write\(bytes,\s*acknowledge\)/,
+      /listen\("pty:data-batch",\s*function\s*\(event\)[\s\S]*?var\s+payload\s*=\s*event\.payload\s*\|\|\s*\{\};[\s\S]*?if\s*\(!payload\.threadId\s*\|\|\s*!payload\.bytes\)\s*return;[\s\S]*?var\s+thread\s*=\s*findThread\(payload\.threadId\);[\s\S]*?if\s*\(!isLiveThread\(thread\)\)\s*return;[\s\S]*?if\s*\(!thread\.terminalController\s*\|\|\s*!thread\.terminalController\.receive\(payload\)\)\s*return;[\s\S]*?var\s+bytes\s*=\s*new\s+Uint8Array\(payload\.bytes\);/,
     );
     expect(mainJs).not.toMatch(/listen\("pty:data",/);
     expect(mainJs).toMatch(
-      /function\s+acknowledgePtyBatch\(threadId,\s*sequence\)[\s\S]*?invoke\("pty_ack",\s*\{[\s\S]*?threadId:\s*threadId,[\s\S]*?sequence:\s*sequence/,
+      /window\.PsycheRuntime[\s\S]*typeof window\.PsycheRuntime\.createTerminalPaneController !== "function"/,
     );
     expect(tauriLib).toMatch(
-      /fn\s+pty_ack\(thread_id:\s*String,\s*sequence:\s*u64\)[\s\S]*?session\.pump\.clone\(\)[\s\S]*?pump\.acknowledge\(sequence\)/,
+      /fn\s+pty_ack\([\s\S]*?webview:\s*tauri::Webview,[\s\S]*?ensure_trusted_pty_caller\(webview\.label\(\)\)\?;[\s\S]*?pty_ack_inner\(thread_id,\s*sequence\)[\s\S]*?fn\s+pty_ack_inner\(thread_id:\s*String,\s*sequence:\s*u64\)[\s\S]*?clone_live_pty_pump\(&thread_id\)\?[\s\S]*?pump\.acknowledge\(sequence\)/,
     );
     expect(tauriLib).toMatch(/generate_handler!\[[\s\S]*?pty_ack,/);
   });
@@ -206,6 +412,7 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).toMatch(
       /fn\s+terminate_platform_process\(\s*process_tree:\s*&WindowsProcessTreeKiller[\s\S]*?process_tree\.terminate\(\)\?;[\s\S]*?PtyTerminationOutcome::ProcessTree/
     );
+
     const windowsStart = tauriLib.search(
       /#\[cfg\(windows\)\]\r?\nfn terminate_platform_process/,
     );

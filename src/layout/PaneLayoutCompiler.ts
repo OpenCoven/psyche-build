@@ -1,4 +1,5 @@
 import type { PaneLayoutNode } from '../types.js';
+import { assertTmuxPaneId } from '../utils/tmuxTarget.js';
 
 export interface CompileSidebarPaneLayoutOptions {
   controlPaneId: string;
@@ -35,7 +36,7 @@ function renderNode(
       throw new Error(`missing tmux pane binding for ${node.paneId}`);
     }
 
-    return `${width}x${height},${x},${y},${paneId.replace(/^%/, '')}`;
+    return `${width}x${height},${x},${y},${assertTmuxPaneId(paneId).slice(1)}`;
   }
 
   if (node.direction === 'horizontal') {
@@ -54,7 +55,7 @@ function renderNode(
 }
 
 export function compileSidebarPaneLayout(options: CompileSidebarPaneLayoutOptions): string {
-  const sidebarPaneId = options.controlPaneId.replace(/^%/, '');
+  const sidebarPaneId = assertTmuxPaneId(options.controlPaneId, 'control pane id').slice(1);
 
   if (!options.root) {
     const body = `${options.windowWidth}x${options.windowHeight},0,0,${sidebarPaneId}`;

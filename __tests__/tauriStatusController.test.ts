@@ -176,6 +176,8 @@ class FakeElement extends FakeEventTarget {
   type = '';
   title = '';
   clientWidth = 0;
+  clientHeight = 0;
+  scrollTop = 0;
   offsetWidth = 0;
   rectWidth = 0;
   focusCalls = 0;
@@ -619,6 +621,66 @@ async function flushMicrotasks() {
 }
 
 describe('tauri status controller', () => {
+  it('virtualizes 201 agent and process-backed shell rows with spacers', () => {
+    const { controller, elements, frames } = createHarness({ hidden: true });
+    elements.detail.clientHeight = 520;
+    const agents = Array.from({ length: 201 }, (_, index) => ({
+      name: 'Agent',
+      status: 'running',
+      runtimeMs: 1_000,
+      harness: 'codex',
+      model: 'gpt-5',
+      currentTask: `Streaming task ${index}`,
+      tokens: { input: index + 1, output: index + 2 },
+    }));
+    const shells = Array.from({ length: 201 }, (_, index) => ({
+      threadId: `shell-${index}`,
+      name: `Shell ${index}`,
+      runtimeMs: 1_000,
+    }));
+    const sample = buildSample({
+      summary: {
+        agents,
+        shells,
+        tasks: [],
+        counts: { agents: 201, shells: 201, running: 402, waiting: 0, failed: 0 },
+      },
+      nativeSnapshot: buildNativeSnapshot({
+        processes: shells.map((shell, index) => ({
+          threadId: shell.threadId,
+          processName: 'zsh',
+          pid: index + 1,
+        })),
+      }),
+    });
+
+    controller.render(sample);
+    controller.toggleMetric('agents');
+    expect(elements.detailBody.querySelectorAll('.status-agent-row').length).toBeLessThan(201);
+    expect(elements.detailBody.querySelectorAll('.virtual-list-spacer')).toHaveLength(2);
+    const mountedAgentKeys = elements.detailBody.querySelectorAll('.status-agent-row')
+      .map((row) => row.dataset.virtualKey);
+    expect(new Set(mountedAgentKeys).size).toBe(mountedAgentKeys.length);
+
+    controller.start();
+    elements.detail.scrollTop = 6_800;
+    elements.detail.dispatch('scroll');
+    expect(frames.size).toBe(1);
+    const renderFrame = [...frames.values()][0];
+    frames.clear();
+    renderFrame?.(16);
+    expect(elements.detailBody.querySelector('[data-virtual-key="Agent:0"]')).toBeNull();
+    expect(elements.detailBody.querySelector('[data-virtual-key="Agent:100"]')).not.toBeNull();
+    expect(
+      elements.detailBody.querySelector('.virtual-list-spacer-before')?.attributes.get('style'),
+    ).toBe('height:6256px');
+
+    controller.toggleMetric('shells');
+    expect(elements.detailBody.querySelectorAll('.status-shell-row').length).toBeLessThan(201);
+    expect(elements.detailBody.querySelectorAll('.virtual-list-spacer')).toHaveLength(2);
+    controller.stop();
+  });
+
   it('keeps lifecycle-owned handlers, timers, observers, and frame callbacks idempotent across restart', () => {
     const { controller, doc, elements, frames, timers, resizeObserver } = createHarness();
 

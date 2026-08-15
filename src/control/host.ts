@@ -18,6 +18,7 @@ export interface HostControlPlane {
 
 export interface HostControlPlaneOptions {
   handlers: ControlHandlers;
+  surfaces?: SurfaceRegistry;
   ownerLock?: typeof acquireOwnerLock;
   journalOpen?: (projectRoot: string, ownerEpoch: number) => Promise<RuntimeJournal>;
   bootstrap?: (projectRoot: string) => Promise<void>;

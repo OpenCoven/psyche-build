@@ -2,11 +2,12 @@ import { normalizeKeyboardEvent } from './normalize.js';
 import { EDITOR_LIMITS } from './editor/limits.js';
 import { substituteText } from './editor/ex-executor.js';
 import { parseExCommand } from './editor/ex-parser.js';
-import { mapPosition, relocateMark } from './editor/marks.js';
+import { mapPosition, relocateMark, snapToGrapheme } from './editor/marks.js';
 import {
   createGraphemeNavigator,
   graphemeColumn,
   graphemeCount,
+  graphemes,
   lastLineStart,
   lineAt,
   lineEnd,
@@ -18,9 +19,6 @@ import {
   positionAtGraphemeColumn,
   previousGrapheme,
   vertical,
-  wordBackward,
-  wordEnd,
-  wordForward,
 } from './editor/motions.js';
 import { compilePattern, escapePattern } from './editor/patterns.js';
 import { objectRange } from './editor/ranges.js';
@@ -136,10 +134,15 @@ export function createEditorMachine(
   let searchState: EditorSearchState | undefined;
   let insertFirstEdit = true;
   let insertChange: EditorInput[] | undefined;
+  let insertSessionCount = 1;
+  let insertSessionText = '';
+  let insertSessionAppliedText = '';
+  let insertSessionKind: 'insert' | 'replace' | 'open' = 'insert';
   let lastChange: EditorInput[] | undefined;
   let lastVisualChange: VisualChange | undefined;
   let activeVisualChange: VisualChange | undefined;
-  let recording: { name: string; inputs: EditorInput[] } | undefined;
+  let recording: { name: string; inputs: EditorInput[]; bytes: number } | undefined;
+  let lastMacro: string | undefined;
   let macroDepth = 0;
   const macroBudget: ReplayBudget = { actions: 0 };
   let invocationGroup: { used: boolean } | undefined;
@@ -186,7 +189,10 @@ export function createEditorMachine(
     if (changes.length === 0) return true;
     if (invocationGroup) invocationGroup.used = true;
     const nextText = document.text();
-    for (const [name, position] of marks) marks.set(name, relocateMark(nextText, position, transaction.changes));
+    for (const [name, position] of marks) {
+      const affinity = name === '<' ? 'before' : 'after';
+      marks.set(name, snapToGrapheme(nextText, mapPosition(position, transaction.changes, affinity), affinity));
+    }
     const firstChange = transaction.changes[0];
     const lastChangeInTransaction = transaction.changes.at(-1);
     if (firstChange && lastChangeInTransaction) {
@@ -236,8 +242,8 @@ export function createEditorMachine(
     let selections: readonly EditorSelection[] = [{ anchor: bounded, head: bounded }];
     if (mode === 'visual-character') {
       selections = bounded >= visualAnchor
-        ? [{ anchor: visualAnchor, head: nextGrapheme(text, bounded) }]
-        : [{ anchor: nextGrapheme(text, visualAnchor), head: bounded }];
+        ? [{ anchor: visualAnchor, head: graphemeNavigator.next(text, bounded) }]
+        : [{ anchor: graphemeNavigator.next(text, visualAnchor), head: bounded }];
     }
     if (mode === 'visual-line') {
       const anchorStart = lineStart(text, visualAnchor);
@@ -303,6 +309,20 @@ export function createEditorMachine(
     return snapshot();
   }
 
+  const countLimitError = Symbol('count-limit');
+
+  function consumeCount(multiplier = 1): number {
+    const count = countBuffer ? Number(countBuffer) : 1;
+    countBuffer = '';
+    const composed = multiplier * count;
+    operatorCount = 1;
+    if (!Number.isSafeInteger(composed) || composed > EDITOR_LIMITS.count) {
+      resetPending();
+      throw countLimitError;
+    }
+    return composed;
+  }
+
   function enter(next: EditorMode): EditorResult {
     mode = next;
     resetPending();
@@ -329,10 +349,19 @@ export function createEditorMachine(
     if (entries > EDITOR_LIMITS.registerEntries || bytes > EDITOR_LIMITS.registerBytes) return false;
     registers.set(target, next);
     if ((target === '+' || target === '*') && options.clipboardRegisters) {
-      options.clipboard?.write(target, next);
+      try {
+        options.clipboard?.write(target, next);
+      } catch {
+        queuedActions.push({ type: 'status', level: 'error', message: `Clipboard register ${target} write failed` });
+      }
     }
     if (/^[a-z]$/u.test(target)) macros.set(target, [...next.text]);
     return true;
+  }
+
+  function setVisualSelectionMarks(selections: readonly EditorSelection[]): void {
+    marks.set('<', Math.min(...selections.flatMap((selection) => [selection.anchor, selection.head])));
+    marks.set('>', Math.max(...selections.flatMap((selection) => [selection.anchor, selection.head])));
   }
 
   function writeRegisters(operation: 'delete' | 'yank', text: string, linewise: boolean): void {
@@ -351,7 +380,13 @@ export function createEditorMachine(
     } else setRegister('-', text, false);
   }
 
-  function motion(key: string, shifted: boolean, count: number, argument?: string): number | undefined {
+  function motion(
+    key: string,
+    shifted: boolean,
+    count: number,
+    argument?: string,
+    explicitCount = false,
+  ): number | undefined {
     const text = document.text();
     const position = cursor();
     if (key === 'h' || key === 'l') {
@@ -365,23 +400,34 @@ export function createEditorMachine(
     }
     if (key === '$') {
       const end = lineEnd(text, position);
-      return end === lineStart(text, position) ? end : previousGrapheme(text, end);
+      return end === lineStart(text, position) ? end : graphemeNavigator.previous(text, end);
     }
-    if (key === 'w' || key === 'W') return wordForward(text, position, count, key === 'W' || shifted);
-    if (key === 'b' || key === 'B') return wordBackward(text, position, count, key === 'B' || shifted);
-    if (key === 'e' || key === 'E') return wordEnd(text, position, count, key === 'E' || shifted);
-    if (key === 'G') return countBuffer ? lineAt(text, count - 1) : lastLineStart(text);
-    if (key === 'gg') return countBuffer ? lineAt(text, count - 1) : 0;
+    if (key === 'w' || key === 'W') return graphemeNavigator.wordForward(
+      text, position, count, key === 'W' || shifted,
+    );
+    if (key === 'b' || key === 'B') return graphemeNavigator.wordBackward(
+      text, position, count, key === 'B' || shifted,
+    );
+    if (key === 'e' || key === 'E') return graphemeNavigator.wordEnd(
+      text, position, count, key === 'E' || shifted,
+    );
+    if (key === 'G') return explicitCount ? lineAt(text, count - 1) : lastLineStart(text);
+    if (key === 'gg') return explicitCount ? lineAt(text, count - 1) : 0;
     if ('fFtT'.includes(key)) {
-      if (!argument) return undefined;
-      let found = position;
-      for (let index = 0; index < count; index += 1) {
-        found = key === 'f' || key === 't'
-          ? text.indexOf(argument, found + 1)
-          : text.lastIndexOf(argument, found - 1);
-        if (found < 0 || found > lineEnd(text, position) || found < lineStart(text, position)) return undefined;
-      }
-      return key === 't' ? previousGrapheme(text, found) : key === 'T' ? nextGrapheme(text, found) : found;
+      const target = argument ? graphemes(argument) : [];
+      if (target.length !== 1 || target[0]?.value !== argument) return undefined;
+      const forward = key === 'f' || key === 't';
+      const candidates = graphemeNavigator.parts(text)
+        .filter((part) => part.index >= lineStart(text, position)
+          && part.index < lineEnd(text, position)
+          && (forward ? part.index > position : part.index < position)
+          && part.value === argument);
+      const match = forward ? candidates[count - 1] : candidates.at(-count);
+      if (!match) return undefined;
+      const found = match.index;
+      return key === 't'
+        ? graphemeNavigator.previous(text, found)
+        : key === 'T' ? graphemeNavigator.next(text, found) : found;
     }
     if (key === '}' || key === '{') {
       let result = position;
@@ -417,6 +463,19 @@ export function createEditorMachine(
       insertChange = changeInputs;
     }
     return snapshot([{ type: 'mode', mode }]);
+  }
+
+  function countedOperatorMotionInputs(
+    operation: 'd' | 'c' | 'y',
+    motionKey: string,
+    count: number,
+    argument?: EditorInput,
+  ): EditorInput[] {
+    return [
+      ...(count > 1 ? [...String(count)] : []),
+      operation,
+      ...(motionKey === 'gg' ? ['g', 'g'] : [motionKey, ...(argument === undefined ? [] : [argument])]),
+    ];
   }
 
   function visualChange(
@@ -513,8 +572,41 @@ export function createEditorMachine(
     }
     const inclusive = '$eEfFtT%'.includes(key);
     return target >= position
-      ? { from: position, to: inclusive ? nextGrapheme(text, target) : target, linewise: false }
-      : { from: target, to: inclusive ? nextGrapheme(text, position) : position, linewise: false };
+      ? { from: position, to: inclusive ? graphemeNavigator.next(text, target) : target, linewise: false }
+      : { from: target, to: inclusive ? graphemeNavigator.next(text, position) : position, linewise: false };
+  }
+
+  function rangeForTextObject(
+    object: string,
+    around: boolean,
+    count: number,
+  ): { range?: { from: number; to: number }; error?: string } {
+    const text = document.text();
+    let probe = cursor();
+    let combined: { from: number; to: number } | undefined;
+    for (let index = 0; index < count; index += 1) {
+      let range: { from: number; to: number } | undefined;
+      if (object === 't') {
+        try {
+          range = options.syntaxTagObject?.(text, probe, around);
+        } catch {
+          return { error: 'Tag text object provider failed' };
+        }
+        if (range && (!Number.isSafeInteger(range.from) || !Number.isSafeInteger(range.to)
+          || range.from < 0 || range.to < range.from || range.to > text.length
+          || !graphemeNavigator.isBoundary(text, range.from)
+          || !graphemeNavigator.isBoundary(text, range.to))) {
+          return { error: 'Invalid tag text object range' };
+        }
+      } else range = objectRange(text, probe, object, around);
+      if (!range) return { range: combined };
+      combined = combined
+        ? { from: Math.min(combined.from, range.from), to: Math.max(combined.to, range.to) }
+        : range;
+      probe = range.to;
+      if (probe >= text.length && index + 1 < count) return { range: combined };
+    }
+    return { range: combined };
   }
 
   function search(direction: 'forward' | 'backward', repetitions = 1): EditorResult {
@@ -536,34 +628,102 @@ export function createEditorMachine(
       || byteLength(commands.join('')) > EDITOR_LIMITS.exHistoryBytes) commands.shift();
   }
 
-  function selectedRegister(): EditorRegister | undefined {
+  function resolveProvider(
+    provider: string | (() => string | undefined) | undefined,
+    label: string,
+  ): string | undefined {
+    try {
+      return typeof provider === 'function' ? provider() : provider;
+    } catch {
+      queuedActions.push({ type: 'status', level: 'error', message: `${label} provider failed` });
+      return undefined;
+    }
+  }
+
+  function boundedProviderRegister(name: string, value: string | undefined): EditorRegister | undefined {
+    if (value === undefined) return undefined;
+    if (byteLength(value) > EDITOR_LIMITS.registerBytes) {
+      queuedActions.push({
+        type: 'status', level: 'error', message: `Register ${name} exceeds limit (${EDITOR_LIMITS.registerBytes} bytes)`,
+      });
+      return undefined;
+    }
+    return { text: value, linewise: false };
+  }
+
+  function queryProviderRegister(
+    provider: string | (() => string | undefined) | undefined,
+  ): EditorRegister | undefined {
+    try {
+      const value = typeof provider === 'function' ? provider() : provider;
+      if (value === undefined || byteLength(value) > EDITOR_LIMITS.registerBytes) return undefined;
+      return { text: value, linewise: false };
+    } catch {
+      return undefined;
+    }
+  }
+
+  function queryClipboardRegister(name: '+' | '*'): EditorRegister | undefined {
+    try {
+      const provided = options.clipboard?.read(name);
+      if (provided !== undefined) {
+        if (byteLength(provided) > EDITOR_LIMITS.registerBytes) return undefined;
+        return { text: provided, linewise: false };
+      }
+      const local = registers.get(name);
+      return local ? { ...local } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function selectedRegister(): { name: string; value: EditorRegister } | undefined {
     const name = activeRegister ?? '"';
     activeRegister = undefined;
     if ((name === '+' || name === '*') && options.clipboardRegisters) {
-      const value = options.clipboard?.read(name);
-      return value === undefined ? registers.get(name) : { text: value, linewise: false };
+      try {
+        const value = options.clipboard?.read(name);
+        const selected = value === undefined ? registers.get(name) : boundedProviderRegister(name, value);
+        return selected ? { name, value: selected } : undefined;
+      } catch {
+        queuedActions.push({ type: 'status', level: 'error', message: `Clipboard register ${name} read failed` });
+        return undefined;
+      }
     }
-    if (name === '=') return options.expressionResult === undefined
-      ? undefined : { text: options.expressionResult, linewise: false };
-    if (name === '%') return options.currentFilename === undefined
-      ? undefined : { text: options.currentFilename, linewise: false };
-    return registers.get(name.toLocaleLowerCase()) ?? registers.get(name);
+    if (name === '=') {
+      const value = resolveProvider(options.expressionResult, 'Expression result');
+      const selected = boundedProviderRegister(name, value);
+      return selected ? { name, value: selected } : undefined;
+    }
+    if (name === '%') {
+      const value = resolveProvider(options.currentFilename, 'Current filename');
+      const selected = boundedProviderRegister(name, value);
+      return selected ? { name, value: selected } : undefined;
+    }
+    const value = registers.get(name.toLocaleLowerCase()) ?? registers.get(name);
+    return value ? { name, value } : undefined;
   }
 
   function transformRange(
     range: { from: number; to: number },
     transform: (value: string) => string,
+    changeInputs?: EditorInput[],
   ): EditorResult {
     const value = document.text().slice(range.from, range.to);
     const insert = transform(value);
     if (!commit([{ ...range, insert }], [{ anchor: range.from, head: range.from }], 'new')) return snapshot();
     resetPending();
-    lastChange = undefined;
+    lastChange = changeInputs;
     lastVisualChange = undefined;
     return snapshot();
   }
 
-  function transformLines(from: number, to: number, direction: 'indent' | 'outdent'): EditorResult {
+  function transformLines(
+    from: number,
+    to: number,
+    direction: 'indent' | 'outdent',
+    changeInputs?: EditorInput[],
+  ): EditorResult {
     const text = document.text();
     const start = lineStart(text, from);
     const end = to >= text.length ? text.length : lineEnd(text, Math.max(start, to));
@@ -574,54 +734,110 @@ export function createEditorMachine(
       : line.startsWith(indent) ? line.slice(indent.length) : line.replace(/^\s/u, '')).join('\n');
     if (!commit([{ from: start, to: end, insert }], [{ anchor: start, head: start }], 'new')) return snapshot();
     resetPending();
+    lastChange = changeInputs;
+    lastVisualChange = undefined;
     return snapshot();
   }
 
   function paste(before: boolean): EditorResult {
-    const value = selectedRegister();
-    if (!value) return snapshot([{ type: 'status', level: 'error', message: 'Register is empty' }]);
+    const queuedBefore = queuedActions.length;
+    const selected = selectedRegister();
+    if (!selected) {
+      resetPending();
+      return queuedActions.length === queuedBefore
+        ? snapshot([{ type: 'status', level: 'error', message: 'Register is empty' }])
+        : snapshot();
+    }
+    const { name, value } = selected;
+    const count = consumeCount();
     const text = document.text();
     let position: number;
-    let insert = value.text;
+    let unit = value.text;
     if (value.linewise) {
       position = before ? lineStart(text, cursor()) : Math.min(text.length, lineEnd(text, cursor()) + 1);
-      if (!insert.endsWith('\n')) insert += '\n';
-    } else position = before ? cursor() : nextGrapheme(text, cursor());
+      if (!unit.endsWith('\n')) unit += '\n';
+    } else position = before ? cursor() : graphemeNavigator.next(text, cursor());
+    const pasteLimit = 10 * 1024 * 1024;
+    if (unit.length * count > pasteLimit) {
+      resetPending();
+      return snapshot([{ type: 'status', level: 'error', message: `Paste exceeds limit (${pasteLimit} chars)` }]);
+    }
+    const insert = unit.repeat(count);
     const head = position + Math.max(0, insert.length - (value.linewise ? 1 : 0));
     if (!apply(position, position, insert, head, 'new')) return snapshot();
-    lastChange = [before ? 'P' : 'p'];
+    lastChange = [
+      ...(count > 1 ? [...String(count)] : []),
+      ...(name === '"' ? [] : ['"', name]),
+      before ? 'P' : 'p',
+    ];
+    resetPending();
     return snapshot();
   }
 
-  function joinLines(): EditorResult {
+  async function formatRange(range: { from: number; to: number }, changeInputs: EditorInput[]): Promise<EditorResult> {
+    const action = await invoke('format', JSON.stringify(range));
+    resetPending();
+    if (action.type === 'command' && action.success) {
+      lastChange = changeInputs;
+      lastVisualChange = undefined;
+    }
+    return snapshot([action]);
+  }
+
+  function joinLines(count: number): EditorResult {
     const text = document.text();
-    const end = lineEnd(text, cursor());
-    if (end >= text.length) return snapshot([{ type: 'status', level: 'error', message: 'No next line to join' }]);
-    let from = end;
-    while (from > lineStart(text, cursor()) && /\s/u.test(text[from - 1]!)) from -= 1;
-    let to = end + 1;
-    while (to < text.length && /[\t ]/u.test(text[to]!)) to += 1;
-    if (!commit([{ from, to, insert: ' ' }], [{ anchor: from, head: from }], 'new')) return snapshot();
-    lastChange = ['J'];
+    const from = lineStart(text, cursor());
+    let to = lineEnd(text, from);
+    let joined = 1;
+    while (joined < Math.max(2, count) && to < text.length) {
+      to = lineEnd(text, to + 1);
+      joined += 1;
+    }
+    if (joined < 2) {
+      resetPending();
+      return snapshot([{ type: 'status', level: 'error', message: 'No next line to join' }]);
+    }
+    const original = text.slice(from, to);
+    const insert = original.replace(/[\t ]*\n[\t ]*/gu, ' ');
+    if (!commit([{ from, to, insert }], [{ anchor: from, head: from }], 'new')) return snapshot();
+    lastChange = [...(count > 1 ? [...String(count)] : []), 'J'];
+    resetPending();
     return snapshot();
   }
 
-  function changeNumber(delta: 1 | -1): EditorResult {
+  function changeNumber(delta: 1 | -1, count: number): EditorResult {
     const text = document.text();
     const tail = text.slice(cursor());
     const match = /[-+]?\d+/u.exec(tail);
-    if (!match) return snapshot([{ type: 'status', level: 'error', message: 'No number under cursor' }]);
+    if (!match) {
+      resetPending();
+      return snapshot([{ type: 'status', level: 'error', message: 'No number under cursor' }]);
+    }
     const from = cursor() + match.index;
     const original = match[0];
     const value = Number(original);
-    if (!Number.isSafeInteger(value)) return snapshot([{ type: 'status', level: 'error', message: 'Number is out of range' }]);
-    const nextValue = value + delta;
+    if (!Number.isSafeInteger(value)) {
+      resetPending();
+      return snapshot([{ type: 'status', level: 'error', message: 'Number is out of range' }]);
+    }
+    const nextValue = value + delta * count;
     const sign = nextValue < 0 ? '-' : original.startsWith('+') ? '+' : '';
     const digits = String(Math.abs(nextValue)).padStart(original.replace(/^[-+]/u, '').length, '0');
     const insert = `${sign}${digits}`;
     if (!commit([{ from, to: from + original.length, insert }], [{ anchor: from, head: from }], 'new')) return snapshot();
-    lastChange = [{ key: delta > 0 ? 'a' : 'x', ctrlKey: true }];
+    lastChange = [...(count > 1 ? [...String(count)] : []), { key: delta > 0 ? 'a' : 'x', ctrlKey: true }];
+    resetPending();
     return snapshot();
+  }
+
+  async function invokeCounted(
+    command: Parameters<EditorDocumentPort['command']>[0],
+    count: number,
+  ): Promise<EditorResult> {
+    const actions: EditorAction[] = [];
+    for (let index = 0; index < count; index += 1) actions.push(await invoke(command));
+    resetPending();
+    return snapshot(actions);
   }
 
   async function invoke(
@@ -867,26 +1083,106 @@ export function createEditorMachine(
     return snapshot();
   }
 
+  function recordMacroInput(input: EditorInput): EditorResult | undefined {
+    if (!recording) return undefined;
+    const size = byteLength(inputDisplay(input));
+    if (recording.bytes + size > EDITOR_LIMITS.registerBytes) {
+      recording = undefined;
+      return snapshot([{
+        type: 'status', level: 'error',
+        message: `Macro recording exceeds register limit (${EDITOR_LIMITS.registerBytes} bytes)`,
+      }]);
+    }
+    if (recording.inputs.length + 1 > EDITOR_LIMITS.macroActions) {
+      recording = undefined;
+      return snapshot([{ type: 'status', level: 'error', message: 'Macro recording limit reached (10000)' }]);
+    }
+    recording.inputs.push(input);
+    recording.bytes += size;
+    return undefined;
+  }
+
+  function beginInsertSession(
+    command: string,
+    repeatCount = 1,
+    recordedCount = repeatCount,
+    kind: 'insert' | 'replace' | 'open' = 'insert',
+  ): void {
+    insertChange = [...(recordedCount > 1 ? [...String(recordedCount)] : []), command];
+    insertSessionCount = repeatCount;
+    insertSessionText = '';
+    insertSessionAppliedText = '';
+    insertSessionKind = kind;
+  }
+
+  function finishCountedInsertSession(): boolean {
+    if (insertSessionCount <= 1) return true;
+    if (insertSessionKind === 'open') {
+      return !insertSessionText || insertAtSelections(insertSessionText);
+    }
+    const insert = `${insertSessionText.slice(insertSessionAppliedText.length)}${insertSessionText.repeat(insertSessionCount - 1)}`;
+    if (!insert) return true;
+    const position = cursor();
+    const to = insertSessionKind === 'replace'
+      ? advanceGraphemes(document.text(), position, graphemeCount(insert))
+      : position;
+    return apply(position, to, insert, position + insert.length, 'join');
+  }
+
+  function shouldApplyInsertInput(text: string): boolean {
+    insertSessionText += text;
+    if (insertSessionCount <= 1) return true;
+    if (insertSessionKind === 'open' || insertSessionAppliedText) return false;
+    insertSessionAppliedText = text;
+    return true;
+  }
+
   async function handleCommittedText(
     input: Extract<EditorInput, { kind: 'text' | 'paste' }>,
     replaying: boolean,
   ): Promise<EditorResult> {
     if (!input.text) return snapshot();
     if (recording && !replaying) {
-      recording.inputs.push(input);
-      if (recording.inputs.length > EDITOR_LIMITS.macroActions) {
-        recording = undefined;
-        return snapshot([{ type: 'status', level: 'error', message: 'Macro recording limit reached (10000)' }]);
-      }
+      const failure = recordMacroInput(input);
+      if (failure) return failure;
     }
     if (mode === 'command-line' || mode === 'search') return appendInputText(input.text);
+    if (mode === 'normal' && pending && 'fFtT'.includes(pending)) {
+      const motionKey = pending;
+      const explicitCount = Boolean(countBuffer);
+      const count = consumeCount();
+      const target = motion(motionKey, false, count, input.text, explicitCount);
+      resetPending();
+      if (target === undefined) {
+        return snapshot([{ type: 'status', level: 'error', message: `Motion ${motionKey} found no target` }]);
+      }
+      select(target);
+      return snapshot();
+    }
+    const operatorMotion = mode === 'normal' ? /^([dcy]):([fFtT])$/u.exec(pending) : undefined;
+    if (operatorMotion) {
+      const operation = operatorMotion[1] as 'd' | 'c' | 'y';
+      const motionKey = operatorMotion[2]!;
+      const explicitCount = Boolean(countBuffer) || operatorCount !== 1;
+      const total = consumeCount(operatorCount);
+      const target = motion(motionKey, false, total, input.text, explicitCount);
+      if (target === undefined) {
+        resetPending();
+        return snapshot([{ type: 'status', level: 'error', message: `Motion ${motionKey} found no target` }]);
+      }
+      const range = rangeForMotion(motionKey, target);
+      return operate(operation, range, range.linewise, countedOperatorMotionInputs(
+        operation, motionKey, total, input,
+      ));
+    }
     if (mode !== 'insert' && mode !== 'replace') return snapshot();
+    insertChange ??= [mode === 'replace' ? 'R' : 'i'];
+    insertChange.push(input);
+    if (!shouldApplyInsertInput(input.text)) return snapshot();
     if (mode === 'insert' && activeVisualChange?.mode === 'visual-block' && document.selections().length > 1) {
       if (!insertAtSelections(input.text)) return snapshot();
       insertFirstEdit = false;
       activeVisualChange.insert += input.text;
-      insertChange ??= ['i'];
-      insertChange.push(input);
       return snapshot();
     }
     const position = cursor();
@@ -898,12 +1194,10 @@ export function createEditorMachine(
     }
     insertFirstEdit = false;
     if (activeVisualChange) activeVisualChange.insert += input.text;
-    insertChange ??= [mode === 'replace' ? 'R' : 'i'];
-    insertChange.push(input);
     return snapshot();
   }
 
-  async function handle(input: EditorInput, replaying = false): Promise<EditorResult> {
+  async function handleUnchecked(input: EditorInput, replaying = false): Promise<EditorResult> {
     if (isCommittedText(input)) return handleCommittedText(input, replaying);
     const value = token(input);
     const key = displayToken(value);
@@ -912,15 +1206,18 @@ export function createEditorMachine(
       if (mode === 'normal' && key === 'q' && !pending) {
         const completed = recording;
         recording = undefined;
-        setRegister(completed.name, completed.inputs.map(inputDisplay).join(''));
+        const serialized = completed.inputs.map(inputDisplay).join('');
+        if (byteLength(serialized) > EDITOR_LIMITS.registerBytes || !setRegister(completed.name, serialized)) {
+          return snapshot([{
+            type: 'status', level: 'error',
+            message: `Macro recording exceeds register limit (${EDITOR_LIMITS.registerBytes} bytes)`,
+          }]);
+        }
         macros.set(completed.name, [...completed.inputs]);
         return snapshot([{ type: 'status', level: 'info', message: `Recorded macro ${completed.name}` }]);
       }
-      recording.inputs.push(input);
-      if (recording.inputs.length > EDITOR_LIMITS.macroActions) {
-        recording = undefined;
-        return snapshot([{ type: 'status', level: 'error', message: 'Macro recording limit reached (10000)' }]);
-      }
+      const failure = recordMacroInput(input);
+      if (failure) return failure;
     }
 
     if (value.key === 'Escape') {
@@ -929,8 +1226,11 @@ export function createEditorMachine(
         marks.set('<', Math.min(...selections.flatMap((selection) => [selection.anchor, selection.head])));
         marks.set('>', Math.max(...selections.flatMap((selection) => [selection.anchor, selection.head])));
       }
-      if ((mode === 'insert' || mode === 'replace') && activeVisualChange) {
-        lastVisualChange = activeVisualChange;
+      const completedVisualChange = activeVisualChange;
+      if ((mode === 'insert' || mode === 'replace') && !completedVisualChange
+        && !finishCountedInsertSession()) return snapshot();
+      if ((mode === 'insert' || mode === 'replace') && completedVisualChange) {
+        lastVisualChange = completedVisualChange;
         lastChange = undefined;
         activeVisualChange = undefined;
       } else if ((mode === 'insert' || mode === 'replace') && insertChange) {
@@ -939,15 +1239,23 @@ export function createEditorMachine(
       }
       if (mode === 'insert' || mode === 'replace') {
         marks.set('^', cursor());
-        const inserted = insertChange?.slice(1).map(inputDisplay).join('') ?? activeVisualChange?.insert ?? '';
+        const inserted = completedVisualChange?.insert ?? insertSessionText;
         if (inserted) setRegister('.', inserted);
+        if (inserted) select(graphemeNavigator.previous(document.text(), cursor()), false);
       }
       insertChange = undefined;
+      insertSessionCount = 1;
+      insertSessionText = '';
+      insertSessionAppliedText = '';
+      insertSessionKind = 'insert';
       return enter('normal');
     }
 
     if (mode === 'insert' || mode === 'replace') {
       if (value.ctrl || value.alt || value.meta || key.length !== 1) return snapshot();
+      insertChange ??= [mode === 'replace' ? 'R' : 'i'];
+      insertChange.push(input);
+      if (!shouldApplyInsertInput(key)) return snapshot();
       if (mode === 'insert' && activeVisualChange?.mode === 'visual-block' && document.selections().length > 1) {
         if (!insertAtSelections(key)) return snapshot();
         insertFirstEdit = false;
@@ -955,12 +1263,10 @@ export function createEditorMachine(
         return snapshot();
       }
       const position = cursor();
-      const to = mode === 'replace' ? nextGrapheme(document.text(), position) : position;
+      const to = mode === 'replace' ? graphemeNavigator.next(document.text(), position) : position;
       if (!apply(position, to, key, position + key.length, insertFirstEdit ? 'new' : 'join')) return snapshot();
       insertFirstEdit = false;
       if (activeVisualChange) activeVisualChange.insert += key;
-      insertChange ??= [mode === 'replace' ? 'R' : 'i'];
-      insertChange.push(input);
       return snapshot();
     }
 
@@ -1000,11 +1306,23 @@ export function createEditorMachine(
       return snapshot();
     }
 
-    if ((!pending || /^[dcy]$/u.test(pending))
+    const supportedControl = !pending && !value.alt && !value.meta && !value.shift
+      && value.ctrl && ['a', 'i', 'o', 'r', 'v', 'x'].includes(value.key);
+    if ((value.ctrl || value.alt || value.meta) && !supportedControl) {
+      const modifiers = [value.ctrl && 'Ctrl', value.alt && 'Alt', value.shift && 'Shift', value.meta && 'Meta']
+        .filter(Boolean).join('-');
+      resetPending();
+      return snapshot([{
+        type: 'status', level: 'error', message: `Unsupported modified key ${modifiers}-${value.key}`,
+      }]);
+    }
+
+    const acceptsCount = !pending || /^(?:[dcy]|[<>]|g[qUu~])$/u.test(pending);
+    if (acceptsCount
       && !value.ctrl && !value.alt && !value.meta && /^[1-9]$/u.test(value.key)) {
       return appendCount(value.key);
     }
-    if (!pending && countBuffer && value.key === '0') {
+    if (acceptsCount && countBuffer && value.key === '0') {
       return appendCount('0');
     }
 
@@ -1025,7 +1343,12 @@ export function createEditorMachine(
           return snapshot([{ type: 'status', level: 'error', message: `Global mark ${key} is unavailable` }]);
         }
         const reference = { buffer: options.bufferId, position: cursor() };
-        options.globalMarks.set(key, reference);
+        try {
+          options.globalMarks.set(key, reference);
+        } catch {
+          resetPending();
+          return snapshot([{ type: 'status', level: 'error', message: `Global mark ${key} provider failed` }]);
+        }
         return snapshot([{ type: 'mark.set-global', mark: key, reference }]);
       }
       marks.set(key, cursor());
@@ -1035,7 +1358,13 @@ export function createEditorMachine(
       const exact = pending === '`';
       pending = '';
       if (/^[A-Z]$/u.test(key)) {
-        const reference = options.globalMarks?.get(key);
+        let reference: EditorGlobalMarkReference | undefined;
+        try {
+          reference = options.globalMarks?.get(key);
+        } catch {
+          resetPending();
+          return snapshot([{ type: 'status', level: 'error', message: `Global mark ${key} provider failed` }]);
+        }
         if (!reference) {
           return snapshot([{ type: 'status', level: 'error', message: `Global mark ${key} is not set` }]);
         }
@@ -1049,40 +1378,68 @@ export function createEditorMachine(
     if (pending === 'q') {
       pending = '';
       if (!/^[A-Za-z]$/u.test(key)) return snapshot([{ type: 'status', level: 'error', message: 'Invalid macro register' }]);
-      recording = { name: key.toLowerCase(), inputs: [] };
+      const name = key.toLowerCase();
+      const append = /^[A-Z]$/u.test(key);
+      const existing = append
+        ? (macros.get(name) ?? (registers.get(name) ? [...registers.get(name)!.text] : []))
+        : [];
+      recording = {
+        name,
+        inputs: [...existing],
+        bytes: append ? byteLength(registers.get(name)?.text ?? existing.map(inputDisplay).join('')) : 0,
+      };
       return snapshot([{ type: 'status', level: 'info', message: `Recording macro ${key}` }]);
     }
     if (pending === '@') {
       pending = '';
-      const register = key.toLowerCase();
+      const register = key === '@' ? lastMacro : key.toLowerCase();
+      if (!register) {
+        resetPending();
+        return snapshot([{ type: 'status', level: 'error', message: 'No previous macro' }]);
+      }
       const macro = macros.get(register)
         ?? (registers.has(register) ? [...registers.get(register)!.text] : undefined);
-      if (!macro) return snapshot([{ type: 'status', level: 'error', message: `Macro ${key} is not set` }]);
-      const repetitions = countBuffer ? Number(countBuffer) : 1;
-      resetPending();
+      if (!macro) {
+        resetPending();
+        return snapshot([{ type: 'status', level: 'error', message: `Macro ${key} is not set` }]);
+      }
+      const repetitions = consumeCount();
+      lastMacro = register;
+      pending = '';
       return replay(macro, true, repetitions);
     }
     if ((pending === '>' || pending === '<') && key === pending) {
-      const count = countBuffer ? Number(countBuffer) : 1;
+      const count = consumeCount(operatorCount);
       const text = document.text();
       const from = lineStart(text, cursor());
       const last = lineAt(text, lineNumber(text, from) + count - 1);
-      return transformLines(from, lineEnd(text, last), pending === '>' ? 'indent' : 'outdent');
+      const operation = pending;
+      return transformLines(from, lineEnd(text, last), operation === '>' ? 'indent' : 'outdent', [
+        ...(count > 1 ? [...String(count)] : []), operation, operation,
+      ]);
     }
     if (pending === 'g' && (key === 'u' || key === 'U' || key === '~')) {
+      operatorCount = consumeCount();
       pending = `g${key}`;
       return snapshot();
     }
     if (pending === 'g' && key === 'q') {
+      operatorCount = consumeCount();
       pending = 'gq';
       return snapshot();
     }
     if (pending === 'gq' && key === 'q') {
-      resetPending();
-      return snapshot([await invoke('format')]);
+      const count = consumeCount(operatorCount);
+      const text = document.text();
+      const from = lineStart(text, cursor());
+      const last = lineAt(text, lineNumber(text, from) + count - 1);
+      const to = lineEnd(text, last);
+      return formatRange({ from, to }, [...(count > 1 ? [...String(count)] : []), 'g', 'q', 'q']);
     }
     if (/^g[uU~]$/u.test(pending)) {
-      const target = motion(key, value.shift, countBuffer ? Number(countBuffer) : 1);
+      const explicitCount = Boolean(countBuffer) || operatorCount !== 1;
+      const count = consumeCount(operatorCount);
+      const target = motion(key, value.shift, count, undefined, explicitCount);
       if (target === undefined) {
         resetPending();
         return snapshot([{ type: 'status', level: 'error', message: `Motion ${key} found no target` }]);
@@ -1094,7 +1451,9 @@ export function createEditorMachine(
         : operation === 'U'
           ? text.toLocaleUpperCase()
           : [...text].map((character) => character === character.toLocaleUpperCase()
-            ? character.toLocaleLowerCase() : character.toLocaleUpperCase()).join(''));
+            ? character.toLocaleLowerCase() : character.toLocaleUpperCase()).join(''), [
+        ...(count > 1 ? [...String(count)] : []), 'g', operation, key,
+      ]);
     }
 
     if (!pending) {
@@ -1121,9 +1480,14 @@ export function createEditorMachine(
         return snapshot();
       }
       if (key === '.') {
-        if (lastVisualChange) return repeatVisual(lastVisualChange);
+        const repetitions = consumeCount();
+        if (lastVisualChange) {
+          let result = snapshot();
+          for (let index = 0; index < repetitions; index += 1) result = repeatVisual(lastVisualChange);
+          return result;
+        }
         if (!lastChange) return snapshot([{ type: 'status', level: 'error', message: 'No change to repeat' }]);
-        return replay(lastChange, false);
+        return replay(lastChange, false, repetitions);
       }
       if (value.ctrl && value.key === 'o') {
         const target = backJumps.pop();
@@ -1139,22 +1503,28 @@ export function createEditorMachine(
         select(target, false);
         return snapshot();
       }
-      if (value.ctrl && (value.key === 'a' || value.key === 'x')) return changeNumber(value.key === 'a' ? 1 : -1);
-      if (value.ctrl && value.key === 'r') return snapshot([await invoke('redo')]);
-      if (key === 'u') return snapshot([await invoke('undo')]);
+      if (value.ctrl && (value.key === 'a' || value.key === 'x')) {
+        return changeNumber(value.key === 'a' ? 1 : -1, consumeCount());
+      }
+      if (value.ctrl && value.key === 'r') return invokeCounted('redo', consumeCount());
+      if (key === 'u') return invokeCounted('undo', consumeCount());
       if (key === 'n' || key === 'N') {
         const base = searchState?.direction ?? 'forward';
         const direction = key === 'n' ? base : (base === 'forward' ? 'backward' : 'forward');
-        const repetitions = countBuffer ? Number(countBuffer) : 1;
-        resetPending();
+        const repetitions = consumeCount();
+        pending = '';
         return search(direction, repetitions);
       }
       if (key === '*' || key === '#') {
         const word = wordAt(document.text(), cursor());
-        if (!word) return snapshot([{ type: 'status', level: 'error', message: 'No word under cursor' }]);
+        if (!word) {
+          resetPending();
+          return snapshot([{ type: 'status', level: 'error', message: 'No word under cursor' }]);
+        }
         const direction = key === '*' ? 'forward' : 'backward';
+        const repetitions = consumeCount();
         searchState = { pattern: escapePattern(word), direction, highlight: true, wholeWord: true };
-        const result = search(direction);
+        const result = search(direction, repetitions);
         return {
           ...result,
           search: result.search ? { ...result.search, pattern: word, wholeWord: true } : result.search,
@@ -1163,31 +1533,44 @@ export function createEditorMachine(
       }
       if (value.ctrl && value.key === 'v') return enter('visual-block');
       if (key === 'i' || key === 'R' || key === 'a' || key === 'A') {
-        if (key === 'a') select(nextGrapheme(document.text(), cursor()));
+        const count = consumeCount();
+        if (key === 'a') select(graphemeNavigator.next(document.text(), cursor()));
         if (key === 'A') select(lineEnd(document.text(), cursor()));
-        insertChange = [key];
+        beginInsertSession(key, count, count, key === 'R' ? 'replace' : 'insert');
         return enter(key === 'R' ? 'replace' : 'insert');
       }
       if (key === 'o' || key === 'O') {
+        const count = consumeCount();
         const position = key === 'o' ? lineEnd(document.text(), cursor()) : lineStart(document.text(), cursor());
-        if (!apply(position, position, '\n', key === 'o' ? position + 1 : position, 'new')) return snapshot();
-        insertChange = [key];
+        const insert = '\n'.repeat(count);
+        const first = key === 'o' ? position + 1 : position;
+        const selections = Array.from({ length: count }, (_, index) => ({
+          anchor: first + index,
+          head: first + index,
+        }));
+        if (!commit([{ from: position, to: position, insert }], selections, 'new')) return snapshot();
+        beginInsertSession(key, count, count, 'open');
         const result = enter('insert');
         insertFirstEdit = false;
         return result;
       }
       if (key === 's' || key === 'S') {
+        const count = consumeCount();
+        const text = document.text();
         const from = key === 'S' ? lineStart(document.text(), cursor()) : cursor();
-        const to = key === 'S' ? lineEnd(document.text(), cursor()) : nextGrapheme(document.text(), cursor());
+        const to = key === 'S'
+          ? lineEnd(text, lineAt(text, lineNumber(text, cursor()) + count - 1))
+          : advanceGraphemes(text, cursor(), count);
         if (!apply(from, to, '', from, 'new')) return snapshot();
-        insertChange = [key];
+        beginInsertSession(key, 1, count);
         const result = enter('insert');
         insertFirstEdit = false;
         return result;
       }
       if (key === 'p' || key === 'P') return paste(key === 'P');
-      if (key === 'J') return joinLines();
+      if (key === 'J') return joinLines(consumeCount());
       if (key === '>' || key === '<') {
+        operatorCount = consumeCount();
         pending = key;
         return snapshot();
       }
@@ -1200,6 +1583,7 @@ export function createEditorMachine(
       }
       if (mode.startsWith('visual-') && 'dcy'.includes(key)) {
         const selections = document.selections();
+        setVisualSelectionMarks(selections);
         const descriptor = visualChange(mode as VisualChange['mode'], selections, document.text());
         if (mode === 'visual-block') {
           const operation = key as 'd' | 'c' | 'y';
@@ -1253,8 +1637,7 @@ export function createEditorMachine(
         return result;
       }
       if ('dcy'.includes(key)) {
-        operatorCount = countBuffer ? Number(countBuffer) : 1;
-        countBuffer = '';
+        operatorCount = consumeCount();
         pending = key;
         return snapshot();
       }
@@ -1266,10 +1649,9 @@ export function createEditorMachine(
 
     if (pending && 'dcy'.includes(pending)) {
       const operation = pending as 'd' | 'c' | 'y';
-      const motionCount = countBuffer ? Number(countBuffer) : 1;
       if (key === operation) {
         const text = document.text();
-        const total = operatorCount * motionCount;
+        const total = consumeCount(operatorCount);
         const from = lineStart(text, cursor());
         const target = lineAt(text, lineNumber(text, cursor()) + total);
         const to = target === from ? text.length : target;
@@ -1285,8 +1667,9 @@ export function createEditorMachine(
         pending = `${operation}:${key}`;
         return snapshot();
       }
-      const total = operatorCount * motionCount;
-      const target = motion(key, value.shift, total);
+      const explicitCount = Boolean(countBuffer) || operatorCount !== 1;
+      const total = consumeCount(operatorCount);
+      const target = motion(key, value.shift, total, undefined, explicitCount);
       if (target === undefined) {
         resetPending();
         return snapshot([{ type: 'status', level: 'error', message: `Motion ${key} found no target` }]);
@@ -1296,26 +1679,59 @@ export function createEditorMachine(
         ...(total > 1 ? [...String(total)] : []), operation, key,
       ]);
     }
+    if (pending === '>' || pending === '<') {
+      const operation = pending;
+      const explicitCount = Boolean(countBuffer) || operatorCount !== 1;
+      const count = consumeCount(operatorCount);
+      const target = motion(key, value.shift, count, undefined, explicitCount);
+      if (target === undefined) {
+        resetPending();
+        return snapshot([{ type: 'status', level: 'error', message: `Motion ${key} found no target` }]);
+      }
+      const range = rangeForMotion(key, target);
+      return transformLines(range.from, Math.max(range.from, range.to - 1), operation === '>' ? 'indent' : 'outdent', [
+        ...(count > 1 ? [...String(count)] : []), operation, key,
+      ]);
+    }
+    if (pending === 'gq') {
+      const explicitCount = Boolean(countBuffer) || operatorCount !== 1;
+      const count = consumeCount(operatorCount);
+      const target = motion(key, value.shift, count, undefined, explicitCount);
+      if (target === undefined) {
+        resetPending();
+        return snapshot([{ type: 'status', level: 'error', message: `Motion ${key} found no target` }]);
+      }
+      const range = rangeForMotion(key, target);
+      return formatRange(range, [...(count > 1 ? [...String(count)] : []), 'g', 'q', key]);
+    }
     if (/^[dcy][ia]$/u.test(pending)) {
       const operation = pending[0] as 'd' | 'c' | 'y';
-      const range = key === 't'
-        ? options.syntaxTagObject?.(document.text(), cursor(), pending[1] === 'a')
-        : objectRange(document.text(), cursor(), key, pending[1] === 'a');
-      if (!range) {
+      const total = consumeCount(operatorCount);
+      const outcome = rangeForTextObject(key, pending[1] === 'a', total);
+      if (outcome.error) {
+        resetPending();
+        return snapshot([{ type: 'status', level: 'error', message: outcome.error }]);
+      }
+      if (!outcome.range) {
         resetPending();
         return snapshot([{ type: 'status', level: 'error', message: `Text object ${key} not found` }]);
       }
-      return operate(operation, range, false, [operation, pending[1]!, key]);
+      return operate(operation, outcome.range, false, [
+        ...(total > 1 ? [...String(total)] : []), operation, pending[1]!, key,
+      ]);
     }
     const operatorMotion = /^([dcy]):([gfFtT])$/u.exec(pending);
     if (operatorMotion) {
       const operation = operatorMotion[1] as 'd' | 'c' | 'y';
       const motionKey = operatorMotion[2] === 'g' ? (key === 'g' ? 'gg' : undefined) : operatorMotion[2]!;
+      const explicitCount = Boolean(countBuffer) || operatorCount !== 1;
+      const total = consumeCount(operatorCount);
       const target = motion(
         motionKey ?? '',
         value.shift,
-        operatorCount * (countBuffer ? Number(countBuffer) : 1),
+        total,
         'fFtT'.includes(operatorMotion[2]!) ? key : undefined,
+        explicitCount,
       );
       if (target === undefined) {
         resetPending();
@@ -1323,10 +1739,13 @@ export function createEditorMachine(
         return snapshot([{ type: 'status', level: 'error', message: `Motion ${label} found no target` }]);
       }
       const range = rangeForMotion(motionKey!, target);
-      return operate(operation, range, range.linewise, [operation, ...operatorMotion[2] === 'g' ? ['g', 'g'] : [operatorMotion[2]!, key]]);
+      return operate(operation, range, range.linewise, countedOperatorMotionInputs(
+        operation, motionKey!, total, operatorMotion[2] === 'g' ? undefined : key,
+      ));
     }
 
-    const count = countBuffer ? Number(countBuffer) : 1;
+    const explicitCount = Boolean(countBuffer);
+    const count = consumeCount();
     let motionKey = key;
     let argument: string | undefined;
     if (pending === 'g') {
@@ -1339,7 +1758,7 @@ export function createEditorMachine(
       motionKey = pending;
       argument = key;
     }
-    const target = motion(motionKey, value.shift, count, argument);
+    const target = motion(motionKey, value.shift, count, argument, explicitCount);
     resetPending();
     if (target === undefined) {
       const message = motionKey === '%' ? 'No matching delimiter' : `Motion ${motionKey} found no target`;
@@ -1349,21 +1768,31 @@ export function createEditorMachine(
     return snapshot();
   }
 
+  async function handle(input: EditorInput, replaying = false): Promise<EditorResult> {
+    try {
+      return await handleUnchecked(input, replaying);
+    } catch (error) {
+      if (error !== countLimitError) throw error;
+      return snapshot([{
+        type: 'status', level: 'error', message: `Count exceeds limit (${EDITOR_LIMITS.count})`,
+      }]);
+    }
+  }
+
   return {
     limits: EDITOR_LIMITS,
     handle,
     executeEx,
     snapshot: () => snapshot(),
     register: (name) => {
-      if (name === '=' && options.expressionResult !== undefined) {
-        return { text: options.expressionResult, linewise: false };
+      if (name === '=') {
+        return queryProviderRegister(options.expressionResult);
       }
-      if (name === '%' && options.currentFilename !== undefined) {
-        return { text: options.currentFilename, linewise: false };
+      if (name === '%') {
+        return queryProviderRegister(options.currentFilename);
       }
       if ((name === '+' || name === '*') && options.clipboardRegisters) {
-        const text = options.clipboard?.read(name);
-        if (text !== undefined) return { text, linewise: false };
+        return queryClipboardRegister(name);
       }
       const value = registers.get(name.toLocaleLowerCase()) ?? registers.get(name);
       return value ? { ...value } : undefined;

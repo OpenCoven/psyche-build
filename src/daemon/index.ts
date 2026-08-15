@@ -1,9 +1,14 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { readOrCreateToken, tokenFilePath } from './token.js';
-import { listPanes, capturePaneSync } from './panes.js';
+import {
+  listPaneSurfaceBindings,
+  listPanes,
+  capturePaneSync,
+  type PaneLivenessProbe,
+} from './panes.js';
 import {
   PROTOCOL_VERSION,
   type ClientRequest,
@@ -36,12 +41,7 @@ import { createHostControlPlane } from '../control/host.js';
 import { ControlServer } from '../control/server.js';
 import { createControlCredentialStore } from '../control/credentials.js';
 import { controlEndpointForProject } from '../control/endpoint.js';
-import { createBrowserScriptContextResolver, createBrowserSnapshotResolver, createDaemonControlHandlers } from './controlHandlers.js';
-import { SurfaceRegistry } from '../control/surfaces.js';
-import { PaneObservationStore } from '../control/resources/paneObservation.js';
-import { PaneResourceController } from '../control/resources/panes.js';
-import type { HostControlPlane } from '../control/host.js';
-import { TmuxControlSupervisor } from './tmuxControlSupervisor.js';
+__OURS__
 import type { ControlActorKind, ControlCommand, CommandOutcome } from '../control/types.js';
 import {
   AgenticCapabilityRouter,
@@ -52,7 +52,7 @@ import {
 import { readDaemonWorkspaceSnapshot } from './workspace.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
 import type { BridgeSpawnRequest, BridgeSpawnResult } from './bridge.js';
-import { BrowserProviderBroker } from '../control/browserProviderBroker.js';
+__OURS__
 
 export interface DaemonOptions {
   port: number;
@@ -86,10 +86,102 @@ export const AUTH_DEADLINE_MS = 10_000;
 export const MAX_STREAMS_PER_CONNECTION = 64;
 export const MAX_BATCH_LANES = 16;
 export const MAX_IDEMPOTENT_SPAWNS = 128;
+export const MAX_CONNECTION_BUFFERED_BYTES = 1024 * 1024;
+
+export async function refreshPaneSurfaces(
+  projectRoot: string,
+  surfaces: SurfaceRegistry,
+  observations: PaneObservationStore,
+  isPaneLive?: PaneLivenessProbe,
+): Promise<readonly PaneSurface[]> {
+  const panes = await listPaneSurfaceBindings(projectRoot, isPaneLive);
+  const seen = new Set(panes.map((pane) => pane.id));
+  for (const pane of panes) {
+    const previous = surfaces.get(pane.id);
+    surfaces.upsertPane({
+      id: pane.id,
+      tmuxPaneId: pane.tmuxPaneId,
+      projectRoot,
+      worktreeRoot: pane.worktreeRoot,
+      title: pane.title,
+      agent: pane.agent,
+      writable: true,
+      outputSequence: previous?.kind === 'pane' ? previous.outputSequence : 0,
+    });
+  }
+  for (const resource of surfaces.list()) {
+    if (resource.kind !== 'pane' || seen.has(resource.id)) continue;
+    surfaces.remove(resource.id);
+    observations.clear(resource.id);
+  }
+  return surfaces.list().filter((resource): resource is PaneSurface => resource.kind === 'pane');
+}
+
+export class PaneSurfaceRefreshQueue {
+  private tail: Promise<unknown> = Promise.resolve();
+
+  constructor(private readonly refresh: () => Promise<readonly PaneSurface[]>) {}
+
+  run(): Promise<readonly PaneSurface[]> {
+    const result = this.tail.then(this.refresh, this.refresh);
+    this.tail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+}
+
+function invalidatePaneSurfaces(
+  surfaces: SurfaceRegistry,
+  observations: PaneObservationStore,
+): void {
+  for (const resource of surfaces.list()) {
+    if (resource.kind !== 'pane') continue;
+    surfaces.remove(resource.id);
+    observations.clear(resource.id);
+  }
+}
+
+export function installDaemonPaneLifecycleHooks(
+  sessionName: string,
+  pid = process.pid,
+  run: typeof execFileSync = execFileSync,
+): void {
+  const notify = `run-shell "kill -USR2 ${pid} 2>/dev/null || true # psyche-daemon-control"`;
+  const installed: string[] = [];
+  try {
+    for (const hook of DAEMON_PANE_LIFECYCLE_HOOKS) {
+      const hookName = `${hook}[${DAEMON_PANE_HOOK_INDEX}]`;
+      run('tmux', ['set-hook', '-t', sessionName, hookName, notify], { stdio: 'ignore' });
+      installed.push(hookName);
+    }
+  } catch (error) {
+    for (const hookName of installed.reverse()) {
+      try {
+        run('tmux', ['set-hook', '-u', '-t', sessionName, hookName], { stdio: 'ignore' });
+      } catch {
+        // Preserve the installation failure; cleanup is best effort.
+      }
+    }
+    throw error;
+  }
+}
+
+export function uninstallDaemonPaneLifecycleHooks(
+  sessionName: string,
+  run: typeof execFileSync = execFileSync,
+): void {
+  for (const hook of DAEMON_PANE_LIFECYCLE_HOOKS) {
+    run('tmux', [
+      'set-hook', '-u', '-t', sessionName, `${hook}[${DAEMON_PANE_HOOK_INDEX}]`,
+    ], { stdio: 'ignore' });
+  }
+}
+
+const DAEMON_PANE_LIFECYCLE_HOOKS = ['pane-exited', 'after-split-window'] as const;
+const DAEMON_PANE_HOOK_INDEX = 987654321;
 
 export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void> {
   const projectRoot = opts.projectRoot ?? findGitRoot() ?? process.cwd();
-  const port = opts.port ?? DEFAULT_PORT;
+  const port = daemonPort(opts.port ?? DEFAULT_PORT);
   const serverVersion = opts.serverVersion ?? 'unknown';
   const capabilityRouter = new AgenticCapabilityRouter({
     strategies: [
@@ -116,59 +208,14 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   // project owner fence before accepting any connection; a failed acquire must
   // fail startup loudly rather than fall back to unfenced mutation.
   const canonicalProjectRoot = await canonicalizeProjectRoot(projectRoot);
-  const surfaces = new SurfaceRegistry();
-  const paneObservations = new PaneObservationStore();
-  let host!: HostControlPlane;
-  const browserProviders = new BrowserProviderBroker({
-    projectRoot: canonicalProjectRoot,
-    surfaces,
-    revokeSurfaceAuthority: (target) => host?.runtime.revokeSurfaceAuthority(target),
-  });
-  const paneResources = new PaneResourceController({
-    surfaces,
-    observations: paneObservations,
-    projectRoot: canonicalProjectRoot,
-    onRemove: (resource) => {
-      host?.runtime.revokeSurfaceAuthority({
-        kind: 'pane', id: resource.id, generation: resource.generation,
-      });
-    },
-  });
-  const tmuxSupervisor = new TmuxControlSupervisor({
-    control: tmux,
-    sessionExists: () => tmuxSessionExists(sessionName),
-    onConnect: async () => {
-      const unsubscribe = paneResources.subscribe(tmux);
-      try {
-        await paneResources.refresh();
-        return unsubscribe;
-      } catch (error) {
-        unsubscribe();
-        throw error;
-      }
-    },
-  });
-  tmuxSupervisor.start();
+__OURS__
   const controlHandlers = createDaemonControlHandlers({
     tmux,
     panes: paneResources,
     projectRoot: canonicalProjectRoot,
     sessionName,
     capabilityRouter,
-    browserProviders,
-  });
-  try {
-    host = await createHostControlPlane(canonicalProjectRoot, {
-      handlers: controlHandlers,
-      surfaces,
-      browserProviders,
-      resolveBrowserSnapshot: createBrowserSnapshotResolver(browserProviders),
-      resolveBrowserScriptContext: createBrowserScriptContextResolver(browserProviders),
-    });
-  } catch (error) {
-    tmuxSupervisor.stop();
-    throw error;
-  }
+__OURS__
 
   // Mount the canonical control socket alongside the v0 WebSocket. Both share
   // the one host runtime, so every mutation — from either transport — passes
@@ -178,19 +225,13 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   const controlEndpoint = controlEndpointForProject(canonicalProjectRoot);
   let controlServer: ControlServer;
   try {
-    const controlCredentials = await createControlCredentialStore({
-      projectRoot: canonicalProjectRoot,
-    });
     controlServer = await ControlServer.start({
       endpoint: controlEndpoint,
       projectRoot: canonicalProjectRoot,
       ownerEpoch: host.epoch,
       runtime: host.runtime,
       credentials: controlCredentials,
-      browserProviders: host.browserProviders,
-    });
-  } catch (error) {
-    tmuxSupervisor.stop();
+__OURS__
     await host.close().catch(() => undefined);
     throw error;
   }
@@ -236,6 +277,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       serverVersion,
       authedViaHeader,
       tmux,
+      paneOutput,
       controlRuntime: host.runtime,
       ownerEpoch: host.epoch,
       paneResources,
@@ -246,7 +288,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   const shutdown = (signal: string) => {
     // eslint-disable-next-line no-console
     console.log(`\npsyche daemon shutting down (${signal})`);
-    tmuxSupervisor.stop();
+__OURS__
     wss.close();
     // Close the control socket before releasing the owner fence. host.close()
     // frees the fence, so if it ran concurrently a successor daemon could win
@@ -269,6 +311,7 @@ export interface ConnectionDeps {
   serverVersion: string;
   authedViaHeader: boolean;
   tmux: TmuxControl;
+  paneOutput: Pick<PaneOutputFanout, 'subscribe'>;
   /**
    * The single authority for pane mutations.
    *
@@ -308,16 +351,9 @@ export class Connection {
     result: Promise<BridgeSpawnResult>;
   }>();
   private authTimer: NodeJS.Timeout | null = null;
-  /**
-   * One `output` listener per connection, not one per stream.
-   *
-   * TmuxControl is a shared EventEmitter. Registering a listener per attach
-   * meant a client with many panes open blew past Node's default listener
-   * cap — the "possible memory leak" warning — and every attach leaked a
-   * listener until the socket closed. Fanning out inside a single handler
-   * keeps the registration count at one and makes detach cleanup exact.
-   */
-  private outputHandler: ((paneId: string, data: Buffer) => void) | null = null;
+  /** Subscription to the daemon-level fan-out; never a direct tmux listener. */
+  private unsubscribeOutput: (() => void) | null = null;
+  private outputBackpressured = false;
 
   /** Stable identity for every command this connection translates. */
   private readonly actorId = randomUUID();
@@ -379,21 +415,20 @@ export class Connection {
 
   /** Attach the shared output listener once the first stream needs it. */
   private ensureOutputHandler(): void {
-    if (this.outputHandler) return;
+    if (this.unsubscribeOutput) return;
     const handler = (paneId: string, data: Buffer) => {
       for (const [streamId, stream] of this.activeStreams) {
         if (stream.paneId === paneId) this.sendBinary(streamId, data);
       }
     };
-    this.outputHandler = handler;
-    this.deps.tmux.on('output', handler);
+    this.unsubscribeOutput = this.deps.paneOutput.subscribe(handler);
   }
 
   /** Detach it again once the last stream goes away. */
   private releaseOutputHandler(): void {
-    if (!this.outputHandler || this.activeStreams.size > 0) return;
-    this.deps.tmux.off('output', this.outputHandler);
-    this.outputHandler = null;
+    if (!this.unsubscribeOutput || this.activeStreams.size > 0) return;
+    this.unsubscribeOutput();
+    this.unsubscribeOutput = null;
   }
 
   private send(msg: ServerResponse): void {
@@ -405,8 +440,18 @@ export class Connection {
   }
 
   private sendBinary(streamId: StreamId, payload: Buffer): void {
+    if (this.outputBackpressured) return;
+    const frame = encodeBinaryFrame(streamId, payload);
+    if (this.ws.bufferedAmount + frame.length > MAX_CONNECTION_BUFFERED_BYTES) {
+      this.outputBackpressured = true;
+      this.activeStreams.clear();
+      this.streamLease.clear();
+      this.releaseOutputHandler();
+      this.ws.close(4409, 'pane output backpressure');
+      return;
+    }
     try {
-      this.ws.send(encodeBinaryFrame(streamId, payload));
+      this.ws.send(frame);
     } catch {
       // ignore
     }
@@ -1143,8 +1188,7 @@ export function parseDaemonArgs(argv: string[]): Partial<DaemonOptions> {
     const a = argv[i];
     if (a === '--port' && argv[i + 1]) {
       const n = Number(argv[++i]);
-      if (!Number.isFinite(n)) throw new Error('--port requires a number');
-      opts.port = n;
+      opts.port = daemonPort(n);
     } else if (a === '--print-token') {
       opts.printToken = true;
     } else if (a === '--project-root' && argv[i + 1]) {
@@ -1152,4 +1196,11 @@ export function parseDaemonArgs(argv: string[]): Partial<DaemonOptions> {
     }
   }
   return opts;
+}
+
+function daemonPort(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 65_535) {
+    throw new Error('--port requires an integer from 0 through 65535');
+  }
+  return value;
 }

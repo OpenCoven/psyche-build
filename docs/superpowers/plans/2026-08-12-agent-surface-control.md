@@ -1337,14 +1337,14 @@ Run:
 
 ```bash
 pnpm --filter psyche-build-tauri build:web
-git diff --exit-code -- native/desktop/psyche-build-tauri/web/control.bundle.js
-rg -n "spawnBridgePane|killBridgePane|TmuxControl|execFileSync" src/mcp/server.ts
-rg -n "AXUIElement|CGEvent|cliclick|coordinate" src/control native/desktop/psyche-build-tauri/src-tauri/src/control_provider.rs native/desktop/psyche-build-tauri/web/control
+git diff --exit-code -- native/desktop/psyche-build-tauri/web/*.bundle.js
+! rg -n "spawnBridgePane|killBridgePane|TmuxControl|execFileSync" src/mcp/server.ts
+! rg -n "AXUIElement|CGEvent|cliclick|coordinate" src/control native/desktop/psyche-build-tauri/src-tauri/src/control_provider.rs native/desktop/psyche-build-tauri/web/control
 git diff --check
 ```
 
-Expected: bundle diff is empty; both forbidden source scans return no matches;
-`git diff --check` exits 0.
+Expected: all regenerated bundle diffs are empty; both negated forbidden source
+scans exit 0 because they find no matches; `git diff --check` exits 0.
 
 - [ ] **Step 3: Run the complete TypeScript verification surface**
 

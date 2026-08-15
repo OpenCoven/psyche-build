@@ -1,12 +1,7 @@
 import type { OrchestrationTaskRequest } from '../orchestration/types.js';
 import type {
   CapabilityLease,
-  CapabilityLeaseHistoryEntry,
-  LeaseTarget,
-  SurfaceCapability,
-} from './capabilityLeases.js';
-import type { Approval } from './approvals.js';
-import type { BrowserTabSurface, SurfaceResource } from './surfaces.js';
+__MERGED_IMPORT_ORDER_WITH_OURS_CAPABILITY_HISTORY_AND_APPROVAL_TYPES__
 
 export interface LeaseGrant {
   readonly target: LeaseTarget;
@@ -151,35 +146,38 @@ export interface SemanticSnapshot {
   truncated: boolean;
   opaqueFrames: number;
   expiresAt: string;
+  screenshot?: Readonly<{ pngBase64: string; width: number; height: number }>;
 }
 
-export interface ActionReceipt {
+export type ActionReceiptState =
+  | 'queued' | 'running' | 'approval_required' | 'succeeded'
+  | 'failed' | 'denied' | 'expired' | 'unknown';
+
+export type JournalActionReceiptResource =
+  | { kind: 'project'; idDigest: string }
+  | { kind: 'pane' | 'browser_tab'; idDigest: string; generation: number };
+
+export interface ActionReceiptBase<Resource> {
   schema: 'psyche.control.receipt/v1';
   actionId: string;
-  state:
-    | 'queued' | 'running' | 'approval_required' | 'succeeded'
-    | 'failed' | 'denied' | 'expired' | 'unknown';
-  resource: LeaseTarget;
+  state: ActionReceiptState;
+  resource: Resource;
   createdAt: string;
+  taskId?: string;
+  actorId?: string;
+  leaseId?: string;
+  leaseRevision?: number;
   completedAt?: string;
   code?: string;
-  message?: string;
-  value?: BrowserActionPostcondition | BrowserActionDurableSummary | BrowserScriptDurableSummary | PaneActionPostcondition;
+  sourceDigest?: string;
+  sourceBytes?: number;
+  resultBytes?: number;
+  durationMs?: number;
 }
 
-export interface RecentReceiptSummary {
-  readonly commandId: string;
-  readonly actionKind: ControlCommand['kind'];
-  readonly outcome: ActionReceipt['state'];
-  readonly timestamp: string;
-  readonly agentId: string;
-  readonly taskId: string;
-  readonly projectRoot: string;
-  readonly worktreeRoot: string;
-  readonly resource: LeaseTarget;
-  readonly redacted: true;
-  readonly result: 'result_unavailable';
-}
+export type ActionReceipt = ActionReceiptBase<LeaseTarget> & {
+  message?: string;
+__MERGED_OURS_STRICT_ACTION_RECEIPT_VALUE_TYPES_PLUS_ACTION_STATUS_ALIASES__
 
 interface AgentSurfaceAuthorization {
   taskId: string;
@@ -247,7 +245,7 @@ export interface PromptEnvelope {
 }
 
 export type ControlCommand =
-  | CommandBase<'orchestration.execute', { request: OrchestrationTaskRequest }>
+  | CommandBase<'orchestration.execute', AgentSurfaceAuthorization & { request: OrchestrationTaskRequest }>
   | CommandBase<'lease.request', {
       taskId: string;
       ttlMs: number;
@@ -255,10 +253,6 @@ export type ControlCommand =
     }>
   | CommandBase<'lease.grant', {
       requestId: string;
-      actorId: string;
-      taskId: string;
-      ttlMs: number;
-      grants: readonly LeaseGrant[];
     }>
   | CommandBase<'lease.release', {
       taskId: string;
@@ -386,20 +380,7 @@ export interface CommandRecord {
   sequence: number;
 }
 
-export interface LeaseRequestState {
-  id: string;
-  actorId: string;
-  taskId: string;
-  ttlMs: number;
-  grants: readonly LeaseGrant[];
-  createdAt: string;
-  status: 'pending' | 'granted';
-}
-
-export interface ResourceState {
-  id: string;
-  kind: SurfaceResource['kind'];
-  generation: number;
+__MERGED_OURS_LEASE_REQUEST_RESOURCE_STATE_PLUS_CONTROL_SNAPSHOT_SCOPE_TYPE__
 }
 
 export interface ControlSnapshot {
@@ -414,10 +395,5 @@ export interface ControlSnapshot {
     revision: number;
     expiresAt: string;
   }>;
-  resources?: readonly ResourceState[];
-  capabilityLeases?: readonly CapabilityLease[];
-  leaseHistory?: readonly CapabilityLeaseHistoryEntry[];
-  leaseRequests?: readonly LeaseRequestState[];
-  approvals?: readonly Approval[];
-  receipts?: readonly RecentReceiptSummary[];
+__MERGED_OURS_SNAPSHOT_FIELDS_WITH_COMPAT_GUARD_EXPORTS_WHERE_NON_BREAKING__
 }

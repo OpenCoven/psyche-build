@@ -83,6 +83,25 @@ describe('control protocol v1', () => {
     }))).toThrow('invalid hello request');
   });
 
+  it('decodes and validates optional task scope on state.get requests', () => {
+    expect(decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'state.get',
+      requestId: 'req-1',
+      taskId: 'task-1',
+    }))).toMatchObject({
+      type: 'state.get',
+      taskId: 'task-1',
+    });
+
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'state.get',
+      requestId: 'req-1',
+      taskId: '',
+    }))).toThrow('invalid state.get request');
+  });
+
   it('rejects command.submit requests missing required command fields', () => {
     const command = {
       id: 'cmd-1',
@@ -105,103 +124,7 @@ describe('control protocol v1', () => {
     }
   });
 
-  it('rejects agent surface commands with missing generations or unsafe authority revisions', () => {
-    const base = {
-      id: 'cmd-click', idempotencyKey: 'idem-click', kind: 'browser.action',
-      projectRoot: '/repo', createdAt: '2026-08-12T12:00:00.000Z',
-      payload: {
-        taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
-        tabId: 'tab-1', generation: 2, snapshotId: 'snapshot-1',
-        action: { kind: 'click', elementRef: 'e17' },
-      },
-    };
-    for (const payload of [
-      { ...base.payload, generation: undefined },
-      { ...base.payload, generation: -1 },
-      { ...base.payload, generation: Number.MAX_SAFE_INTEGER + 1 },
-      { ...base.payload, leaseRevision: Number.NaN },
-    ]) {
-      expect(() => decodeControlRequest(JSON.stringify({
-        version: 1, type: 'command.submit', requestId: 'req-agent',
-        command: { ...base, payload },
-      }))).toThrow('invalid command.submit payload');
-    }
-  });
-
-  it('accepts every version-one agent control command kind without changing the protocol version', () => {
-    const payloads = {
-      'lease.request': { taskId: 'task-1', ttlMs: 1000, grants: [] },
-      'lease.grant': { requestId: 'request-1', actorId: 'agent-1', taskId: 'task-1', ttlMs: 1000, grants: [] },
-      'lease.release': { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1 },
-      'lease.revoke': { leaseId: 'lease-1' },
-      'pane.observe': { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1, paneId: 'pane-1', generation: 1 },
-      'pane.action': { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1, paneId: 'pane-1', generation: 1, action: { kind: 'focus' } },
-      'browser.inspect': { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1, tabId: 'tab-1', generation: 1 },
-      'browser.action': { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1, tabId: 'tab-1', generation: 1, action: { kind: 'reload' } },
-      'browser.script': { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1, tabId: 'tab-1', generation: 1, source: '1' },
-      'approval.resolve': { approvalId: 'approval-1', payloadDigest: '0'.repeat(64), decision: 'deny' },
-      'provider.resource.remove': { id: 'tab-1', generation: 1 },
-    } as const;
-    for (const [kind, payload] of Object.entries(payloads)) {
-      expect(decodeControlRequest(JSON.stringify({
-        version: CONTROL_PROTOCOL_VERSION,
-        type: 'command.submit', requestId: `req-${kind}`,
-        command: {
-          id: `cmd-${kind}`, idempotencyKey: `idem-${kind}`, kind,
-          projectRoot: '/repo', createdAt: '2026-08-12T12:00:00.000Z', payload,
-        },
-      }))).toMatchObject({ version: 1, command: { kind } });
-    }
-  });
-
-  it('rejects browser script arguments over the canonical 256 KiB boundary', () => {
-    expect(() => decodeControlRequest(JSON.stringify({
-      version: 1, type: 'command.submit', requestId: 'req-script-args',
-      command: {
-        id: 'cmd-script-args', idempotencyKey: 'idem-script-args', kind: 'browser.script',
-        projectRoot: '/repo', createdAt: '2026-08-12T12:00:00.000Z',
-        payload: { taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
-          tabId: 'tab-1', generation: 1, source: 'return args', args: 'x'.repeat(256 * 1024) },
-      },
-    }))).toThrow('invalid command.submit payload');
-  });
-
-  it('rejects pane observation cursors that cannot be incremented safely', () => {
-    expect(() => decodeControlRequest(JSON.stringify({
-      version: 1, type: 'command.submit', requestId: 'req-observe-overflow',
-      command: {
-        id: 'cmd-observe-overflow', idempotencyKey: 'idem-observe-overflow', kind: 'pane.observe',
-        projectRoot: '/repo', createdAt: '2026-08-12T12:00:00.000Z',
-        payload: {
-          taskId: 'task-1', leaseId: 'lease-1', leaseRevision: 1,
-          paneId: 'pane-1', generation: 1, afterSequence: Number.MAX_SAFE_INTEGER,
-        },
-      },
-    }))).toThrow('invalid command.submit payload');
-  });
-
-  it.each([
-    [{ kind: 'future', id: 'x', generation: 1 }, 'unknown target kind'],
-    [{ kind: 'project', id: '/repo', generation: 1 }, 'project generation'],
-    [{ kind: 'pane', id: 'pane-1' }, 'missing pane generation'],
-    [{ kind: 'browser_tab', id: 'tab-1', generation: -1 }, 'negative generation'],
-    [{ kind: 'browser_tab', id: 'tab-1', generation: Number.MAX_SAFE_INTEGER + 1 }, 'unsafe generation'],
-    [{ kind: 'pane', id: 'pane-1', generation: 1, path: '/secret' }, 'extra pane path'],
-    [{ kind: 'project', id: '/repo', extra: true }, 'extra project key'],
-  ])('rejects malformed lease targets: %s (%s)', (target, _label) => {
-    expect(() => decodeControlRequest(JSON.stringify({
-      version: 1, type: 'command.submit', requestId: 'req-target',
-      command: {
-        id: 'cmd-target', idempotencyKey: 'idem-target', kind: 'lease.request',
-        projectRoot: '/repo', createdAt: '2026-08-12T12:00:00.000Z',
-        payload: {
-          taskId: 'task-1', ttlMs: 1000,
-          grants: [{ target, capabilities: ['browser.inspect'] }],
-        },
-      },
-    }))).toThrow('invalid command.submit payload');
-  });
-
+<<OURS>>
   it('rejects events.read requests with a non-number afterSequence', () => {
     expect(() => decodeControlRequest(JSON.stringify({
       version: CONTROL_PROTOCOL_VERSION,
@@ -230,10 +153,12 @@ describe('control protocol v1', () => {
       requestId: 'req-1',
       afterSequence: 0,
       limit: 100,
+      taskId: 'task-1',
     }))).toMatchObject({
       type: 'events.read',
       afterSequence: 0,
       limit: 100,
+      taskId: 'task-1',
     });
   });
 
@@ -250,71 +175,6 @@ describe('control protocol v1', () => {
       version: 1, type: 'provider.register', requestId: 'register-1', providerId: 'desktop-1',
     }))).toMatchObject({ type: 'provider.register', providerId: 'desktop-1' });
     expect(decodeControlRequest(JSON.stringify({
-      version: 1, type: 'provider.effect.started', requestId: 'effect-1',
-      actionId: 'action-1', tabId: 'tab-1', generation: 2,
-      invocationId: 'effect-1', documentToken: 'token-1',
-    }))).toMatchObject({ type: 'provider.effect.started', requestId: 'effect-1' });
-    expect(decodeControlRequest(JSON.stringify({
-      version: 1, type: 'provider.effect.executing', requestId: 'effect-1',
-      actionId: 'action-1', tabId: 'tab-1', generation: 2,
-      invocationId: 'effect-1', documentToken: 'token-1',
-    }))).toMatchObject({ type: 'provider.effect.executing', requestId: 'effect-1' });
-    expect(decodeControlRequest(JSON.stringify({
-      version: 1, type: 'provider.effect.result', requestId: 'effect-1',
-      result: { actionId: 'action-1', status: 'failed', code: 'script_execution_failed',
-        message: 'failed', durationMs: 17 },
-    }))).toMatchObject({ type: 'provider.effect.result', requestId: 'effect-1' });
-    expect(() => decodeControlRequest(JSON.stringify({
-      version: 1, type: 'provider.register', requestId: 'register-1', providerId: 'desktop-1', extra: true,
-    }))).toThrow('invalid provider.register request');
-  });
-
-  it('accepts only the exact nonterminal script timeout notification shape', () => {
-    expect(decodeControlRequest(JSON.stringify({
-      version: 1, type: 'provider.effect.result', requestId: 'effect-timeout',
-      result: { actionId: 'action-timeout', status: 'timed_out_pending',
-        code: 'action_timeout', message: 'browser script exceeded the execution deadline', durationMs: 5_000 },
-    }))).toMatchObject({ result: { status: 'timed_out_pending', code: 'action_timeout' } });
-    expect(() => decodeControlRequest(JSON.stringify({
-      version: 1, type: 'provider.effect.result', requestId: 'effect-timeout',
-      result: { actionId: 'action-timeout', status: 'timed_out_pending',
-        code: 'effect_unknown', message: 'wrong code' },
-    }))).toThrow('invalid provider.effect.result request');
-  });
-
-  it('accepts only the exact nonterminal post-submission ambiguity shape', () => {
-    expect(decodeControlRequest(JSON.stringify({
-      version: 1, type: 'provider.effect.result', requestId: 'effect-unknown',
-      result: { actionId: 'action-unknown', status: 'unknown_pending',
-        code: 'effect_unknown', message: 'execution acknowledgement was lost', ambiguous: true, durationMs: 0 },
-    }))).toMatchObject({ result: { status: 'unknown_pending', code: 'effect_unknown', ambiguous: true } });
-    for (const result of [
-      { actionId: 'a', status: 'unknown_pending', code: 'effect_unknown', message: 'x', ambiguous: false, durationMs: 0 },
-      { actionId: 'a', status: 'unknown_pending', code: 'action_timeout', message: 'x', ambiguous: true, durationMs: 0 },
-      { actionId: 'a', status: 'unknown_pending', code: 'effect_unknown', message: 'x', ambiguous: true, durationMs: 5_001 },
-    ]) {
-      expect(() => decodeControlRequest(JSON.stringify({
-        version: 1, type: 'provider.effect.result', requestId: 'effect-invalid', result,
-      }))).toThrow('invalid provider.effect.result request');
-    }
-  });
-
-  it.each([
-    { actionId: 'a', status: 'failed', code: 'action_timeout', message: 'timeout' },
-    { actionId: 'a', status: 'failed', code: 'action_timeout', message: 'timeout', durationMs: 4_999 },
-    { actionId: 'a', status: 'timed_out_pending', code: 'action_timeout', message: 'timeout' },
-    { actionId: 'a', status: 'timed_out_pending', code: 'action_timeout', message: 'timeout', durationMs: 5_001 },
-    { actionId: 'a', status: 'failed', code: 'effect_unknown', message: 'unknown', durationMs: 1 },
-  ])('rejects semantically impossible provider result %#', (result) => {
-    expect(() => decodeControlRequest(JSON.stringify({
-      version: 1, type: 'provider.effect.result', requestId: 'effect-invalid', result,
-    }))).toThrow('invalid provider.effect.result request');
-  });
-
-  it.each([0, 5_000])('accepts non-timeout failed duration %s', (durationMs) => {
-    expect(decodeControlRequest(JSON.stringify({
-      version: 1, type: 'provider.effect.result', requestId: 'effect-failed',
-      result: { actionId: 'a', status: 'failed', code: 'script_execution_failed', message: 'failed', durationMs },
-    }))).toMatchObject({ result: { status: 'failed', durationMs } });
+<<OURS>>
   });
 });

@@ -358,7 +358,7 @@ export class BridgeDaemon {
           s.send({ type: "error", payload: { code: "invalid_input", message: "data must be a base64 string" } });
           return;
         }
-        this.hub!.sendInput(m.payload.paneId, bytes);
+        await this.hub!.sendInput(m.payload.paneId, bytes);
         return;
       }
       case "listRituals": {
@@ -750,7 +750,7 @@ export class BridgeDaemon {
     data: Buffer,
   ): Promise<void> {
     const { stream } = this.controlStream(connectionId, streamId);
-    this.hub!.sendInput(stream.paneId, data);
+    await this.hub!.sendInput(stream.paneId, data);
   }
 
   private async resizePaneStream(

@@ -55,6 +55,20 @@ export function shouldRenderFileSaveChrome(activeFileId, savedFileId) {
   return activeFileId === savedFileId;
 }
 
+export function workspaceFiles(openFiles, projectId, workspaceRoot) {
+  return (Array.isArray(openFiles) ? openFiles : []).filter((file) =>
+    file.projectId === projectId && file.workspaceRoot === workspaceRoot
+  );
+}
+
+export function nextFileIdAfterClose(files, closingId) {
+  const ordered = Array.isArray(files) ? files : [];
+  const index = ordered.findIndex((file) => file.id === closingId);
+  if (index === -1) return ordered[0]?.id ?? null;
+  const remaining = ordered.filter((file) => file.id !== closingId);
+  return remaining[Math.min(index, remaining.length - 1)]?.id ?? null;
+}
+
 export function createRequestGate() {
   let current = 0;
 

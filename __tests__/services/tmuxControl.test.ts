@@ -21,29 +21,15 @@ function recordingControl() {
 }
 
 describe('TmuxControl pane commands', () => {
-  it('uses the single exported PaneNamedKey runtime policy', async () => {
-    expect(PANE_NAMED_KEYS).toEqual([
-      'Enter', 'Tab', 'Escape', 'Backspace', 'Up', 'Down', 'Left', 'Right', 'C-c', 'C-d',
-    ]);
-    expect(Object.isFrozen(PANE_NAMED_KEYS)).toBe(true);
-    expect(validatePaneNamedKeys(PANE_NAMED_KEYS)).toEqual(PANE_NAMED_KEYS);
-    expect(() => validatePaneNamedKeys(['Enter\nrun-shell id'])).toThrowError(
-      expect.objectContaining({ code: 'invalid_pane_key' }),
-    );
-  });
-  it('builds quoted commands for a real pane id', () => {
+<<OURS>>
     const { tmux, commands } = recordingControl();
 
     tmux.selectPane('%3');
-    tmux.killPane('%7');
     tmux.resizePane('%7', 100, 30);
-    tmux.sendKeysHex('%7', Buffer.from([0x61, 0x0d]));
 
     expect(commands).toEqual([
       "select-pane -t '%3'",
-      "kill-pane -t '%7'",
       "resize-pane -t '%7' -x 100 -y 30",
-      "send-keys -t '%7' -H 61 0d",
     ]);
   });
 
@@ -228,27 +214,17 @@ function createFakeControlProcess(options: { delayWriteCallbacks?: boolean } = {
   return {
     process: proc as ChildProcessWithoutNullStreams,
     commands: () => commands.slice(),
-    emitChunk(chunk: string) {
-      stdout.emit('data', chunk);
-    },
-    emitLine(line: string) {
-      emit(line);
-    },
-    failNextWrite(error = new Error('delayed write failure')) {
-      writeCallbacks.shift()?.(error);
-    },
-    completeNextWrite() {
-      writeCallbacks.shift()?.();
-    },
+<<OURS>>
     /** Emit the unsolicited acknowledgement block tmux sends for the attach. */
     attach() {
       const number = String(nextNumber++);
       emit(`%begin 0 ${number} 0`);
       emit(`%end 0 ${number} 0`);
     },
-    acknowledgeNext() {
+    acknowledgeNext(lines: readonly string[] = []) {
       const number = String(nextNumber++);
       emit(`%begin 0 ${number} 0`);
+      for (const line of lines) emit(line);
       emit(`%end 0 ${number} 0`);
     },
     acknowledgeNextWithOutput(...lines: string[]) {
@@ -275,166 +251,20 @@ function createFakeControlProcess(options: { delayWriteCallbacks?: boolean } = {
  * Start a TmuxControl backed by a fake control process, then emit the initial
  * attach acknowledgement block exactly as `tmux -C attach-session` does.
  */
-function startControl(options: { delayWriteCallbacks?: boolean } = {}) {
-  const fake = createFakeControlProcess(options);
-  const tmux = new TmuxControl('psyche-test', { spawnControl: () => fake.process });
+<<OURS>>
   tmux.start();
   fake.attach();
   return { fake, tmux };
 }
 
 describe('TmuxControl acknowledged submission', () => {
-  it('discards an unterminated stdout fragment when starting a new process generation', async () => {
-    const retired = createFakeControlProcess();
-    const current = createFakeControlProcess();
-    const processes = [retired.process, current.process];
-    const tmux = new TmuxControl('psyche-test', { spawnControl: () => processes.shift()! });
-    const output = vi.fn();
-    tmux.on('output', output);
-
-    tmux.start();
-    retired.attach();
-    retired.emitChunk('%output %3 retired-fragment');
-    retired.disconnect();
-
-    tmux.start();
-    current.attach();
-    expect(output).not.toHaveBeenCalled();
-    const pending = tmux.executeQuery('display-message -p current');
-    await tick();
-    current.acknowledgeNextWithOutput('current');
-    await expect(pending).resolves.toBe('current');
-  });
-
-  it('requires the %end command number to match its %begin block', async () => {
-    const { fake, tmux } = startControl();
-    let settled = false;
-    const pending = tmux.executeQuery('display-message -p ok').then((value) => {
-      settled = true;
-      return value;
-    });
-    await tick();
-    fake.emitLine('%begin 0 42 0');
-    fake.emitLine('ok');
-    fake.emitLine('%end 0 43 0');
-    await tick();
-    expect(settled).toBe(false);
-    fake.emitLine('%end 0 42 0');
-    await expect(pending).resolves.toBe('ok');
-  });
-
-  it('ignores duplicate and stale acknowledgement ends without settling the next command', async () => {
-    const { fake, tmux } = startControl();
-    const first = tmux.executeQuery('display-message -p first');
-    await tick();
-    fake.emitLine('%begin 0 50 0');
-    fake.emitLine('first');
-    fake.emitLine('%end 0 50 0');
-    await expect(first).resolves.toBe('first');
-    fake.emitLine('%end 0 50 0');
-
-    let secondSettled = false;
-    const second = tmux.executeQuery('display-message -p second').then((value) => {
-      secondSettled = true;
-      return value;
-    });
-    await tick();
-    fake.emitLine('%begin 0 50 0');
-    fake.emitLine('stale');
-    fake.emitLine('%end 0 50 0');
-    await tick();
-    expect(secondSettled).toBe(false);
-    fake.emitLine('%begin 0 51 0');
-    fake.emitLine('second');
-    fake.emitLine('%end 0 51 0');
-    await expect(second).resolves.toBe('second');
-  });
-
-  it('poisons the connection on a delayed ambiguous write failure and ignores stale acknowledgements', async () => {
-    const { fake, tmux } = startControl({ delayWriteCallbacks: true });
-    const pending = tmux.executeQuery('display-message -p first');
-    await tick();
-    expect(fake.commands()).toEqual(['display-message -p first']);
-    fake.failNextWrite();
-    await expect(pending).rejects.toMatchObject({ ambiguous: true });
-    fake.emitLine('%begin 0 70 0');
-    fake.emitLine('stale');
-    fake.emitLine('%end 0 70 0');
-    await expect(tmux.executeQuery('display-message -p next')).rejects.toThrow(/poisoned|not started/);
-    expect(fake.commands()).toEqual(['display-message -p first']);
-  });
-
-  it('lists authoritative pane ids over the existing control connection', async () => {
-    const { fake, tmux } = startControl();
-    const pending = tmux.listPaneIds();
-    await tick();
-    expect(fake.commands()).toEqual(["list-panes -s -F '#{pane_id}'"]);
-    fake.acknowledgeNextWithOutput('%3', '%9');
-    await expect(pending).resolves.toEqual(['%3', '%9']);
-  });
-
-  it('sends UTF-8 bytes once and waits for acknowledgement', async () => {
-    const { fake, tmux } = startControl();
-    const pending = tmux.sendKeysHexAcknowledged('%3', Buffer.from('hi 🧪'));
+<<OURS>>
     await tick();
     expect(fake.commands()).toEqual([
       "send-keys -t '%3' -H 68 69 20 f0 9f a7 aa",
     ]);
     fake.acknowledgeNext();
-    await expect(pending).resolves.toBeUndefined();
-  });
-
-  it('dispatches exactly one valid acknowledged no-op for empty text bytes', async () => {
-    const { fake, tmux } = startControl();
-    const pending = tmux.sendKeysHexAcknowledged('%3', Buffer.alloc(0));
-    await tick();
-    expect(fake.commands()).toEqual(["send-keys -t '%3' -H"]);
-    fake.acknowledgeNext();
-    await expect(pending).resolves.toBeUndefined();
-  });
-
-  it('returns output from the matching acknowledged query', async () => {
-    const { fake, tmux } = startControl();
-    const pending = tmux.executeQuery("display-message -p -t '%3' '#{pane_id} #{pane_width}'");
-    await tick();
-    fake.acknowledgeNextWithOutput('%3 120');
-    await expect(pending).resolves.toBe('%3 120');
-  });
-
-  it('correlates concurrent query output in command order', async () => {
-    const { fake, tmux } = startControl();
-    const first = tmux.executeQuery("display-message -p -t '%3' '#{pane_id}'");
-    const second = tmux.executeQuery("display-message -p -t '%7' '#{pane_id}'");
-    await tick();
-    expect(fake.commands()).toHaveLength(1);
-    fake.acknowledgeNextWithOutput('%3');
-    await expect(first).resolves.toBe('%3');
-    await tick();
-    expect(fake.commands()).toHaveLength(2);
-    fake.acknowledgeNextWithOutput('%7');
-    await expect(second).resolves.toBe('%7');
-  });
-
-  it('distinguishes unavailable-before-dispatch from ambiguous disconnect-after-dispatch', async () => {
-    const stopped = new TmuxControl('psyche-test');
-    await expect(stopped.executeQuery('display-message -p ok')).rejects.not.toMatchObject({ ambiguous: true });
-
-    const { fake, tmux } = startControl();
-    const pending = tmux.executeQuery('display-message -p ok');
-    await tick();
-    fake.closeWithoutExit();
-    await expect(pending).rejects.toMatchObject({ ambiguous: true });
-  });
-
-  it('rejects query output on tmux error without marking it ambiguous', async () => {
-    const { fake, tmux } = startControl();
-    const pending = tmux.executeQuery('display-message -p ok');
-    await tick();
-    fake.errorNext();
-    await expect(pending).rejects.toThrow(/tmux command failed/);
-    await pending.catch((error: unknown) => {
-      expect((error as { ambiguous?: boolean }).ambiguous).toBeUndefined();
-    });
+<<OURS>>
   });
 
   it('waits for tmux acknowledgement of text and Enter', async () => {

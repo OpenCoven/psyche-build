@@ -127,6 +127,26 @@ describe('Vim editor bounded safe search', () => {
     expect(document.ranges[0]?.head).toBe(0);
   });
 
+  it.each([
+    { name: 'astral letter backward', text: '𐐀one one', cursor: 6, input: '#', expected: 6 },
+    { name: 'astral letter forward', text: 'one 𐐀one', cursor: 0, input: '*', expected: 0 },
+    { name: 'emoji boundary forward', text: 'one😀one', cursor: 0, input: '*', expected: 5 },
+    { name: 'emoji boundary backward', text: 'one😀one', cursor: 5, input: '#', expected: 0 },
+    { name: 'combining word backward', text: 'e\u0301one one', cursor: 6, input: '#', expected: 6 },
+  ])('uses Unicode whole-word boundaries for $name', async ({ text, cursor, input, expected }) => {
+    const document = new SearchDocument(text, cursor);
+    const machine = createEditorMachine(document, { ignoreCase: true });
+    await machine.handle(input);
+    expect(document.ranges[0]?.head).toBe(expected);
+  });
+
+  it('preserves smart-case whole-word boundaries around astral letters', async () => {
+    const document = new SearchDocument('ONE 𐐀one one', 0);
+    const machine = createEditorMachine(document, { ignoreCase: true, smartCase: true });
+    await machine.handle('*');
+    expect(document.ranges[0]?.head).toBe(0);
+  });
+
   it('keeps every repeated-search cursor on a grapheme boundary', async () => {
     const text = '👩‍💻 e\u0301 👩‍💻 e\u0301';
     const document = new SearchDocument(text);

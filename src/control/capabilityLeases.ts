@@ -136,6 +136,10 @@ export class CapabilityLeaseStore {
     return lease;
   }
 
+  get(leaseId: string): CapabilityLease | undefined {
+    return this.leases.get(leaseId);
+  }
+
   snapshot(): CapabilityLease[] {
     const now = this.clock().getTime();
     for (const lease of this.leases.values()) {
@@ -158,6 +162,17 @@ export class CapabilityLeaseStore {
       if (lease.grants.some((grant) => targetsEqual(grant.target, target))) {
         revoked.push(lease);
         this.invalidate(lease.id, 'revoked');
+      }
+    }
+    return revoked;
+  }
+
+  revokeActorTask(actorId: string, taskId: string): CapabilityLease[] {
+    const revoked: CapabilityLease[] = [];
+    for (const lease of this.leases.values()) {
+      if (lease.actorId === actorId && lease.taskId === taskId) {
+        revoked.push(lease);
+        this.invalidate(lease.id);
       }
     }
     return revoked;

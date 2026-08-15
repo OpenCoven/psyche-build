@@ -31,6 +31,10 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
+    "./control-task-tokens": {
+      "import": "./dist/control-task-tokens.js",
+      "types": "./dist/control-task-tokens.d.ts"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -39,6 +43,7 @@
     "CHANGELOG.md",
     "README.md",
     "docs/README.md",
+    "docs/AGENT-SURFACE-CONTROL.md",
     "docs/BREAKING-CHANGES.md",
     "docs/BRIDGE-SECURITY.md",
     "docs/COVEN-DEMO-LOOP.md",
@@ -72,8 +77,8 @@
     "release:testflight": "node scripts/app-store-connect.mjs wait-and-localize",
     "test": "vitest --run",
     "smoke": "pnpm run build && vitest --run -c vitest.smoke.config.ts",
-    "prepublishOnly": "pnpm run build",
-    "smoke:pack": "npm pack --dry-run"
+    "prepack": "pnpm run build",
+    "smoke:pack": "node scripts/smoke-pack-install.js"
   },
   "bin": {
     "psyche": "psyche"

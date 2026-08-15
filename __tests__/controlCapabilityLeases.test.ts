@@ -9,6 +9,7 @@ import type {
 import { AGENT_CONTROL_LIMITS } from '../src/control/limits.js';
 import type {
   ActionReceipt,
+  ActionStatusReceipt,
   BrowserSemanticAction,
   ControlCommand,
   LeaseGrant,
@@ -20,6 +21,7 @@ const nowIso = '2026-08-12T12:00:00.000Z';
 
 type PublicControlContracts =
   | ActionReceipt
+  | ActionStatusReceipt
   | BrowserSemanticAction
   | LeaseGrant
   | PaneAction
@@ -49,6 +51,25 @@ void (null as PublicControlContracts | null);
 type PaneActionCommand = Extract<ControlCommand, { kind: 'pane.action' }>;
 type BrowserActionCommand = Extract<ControlCommand, { kind: 'browser.action' }>;
 type ProviderResourceUpsertCommand = Extract<ControlCommand, { kind: 'provider.resource.upsert' }>;
+
+function assertActionStatusTyping(): void {
+  const replay: ActionStatusReceipt = {
+    schema: 'psyche.control.receipt/v1',
+    actionId: 'replay-status',
+    state: 'failed',
+    resource: { kind: 'browser_tab', idDigest: 'a'.repeat(64), generation: 1 },
+    createdAt: nowIso,
+    code: 'action_invalidated',
+  };
+
+  if ('idDigest' in replay.resource) {
+    replay.resource.idDigest satisfies string;
+    // @ts-expect-error replay receipts do not expose a live resource id
+    replay.resource.id;
+  }
+}
+assertActionStatusTyping();
+
 function assertAgentActionTypes(): void {
   const acceptsPaneAction = (_command: PaneActionCommand): void => {};
   const acceptsBrowserAction = (_command: BrowserActionCommand): void => {};

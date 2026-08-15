@@ -49,8 +49,9 @@ historical set. During execution they remain readable from the recorded
 baseline with:
 
 ```bash
-git show "$(cat .git/psyche-doc-history-baseline)":docs/superpowers/plans/2026-08-12-documentation-history-cleanup.md
-git show "$(cat .git/psyche-doc-history-baseline)":docs/superpowers/specs/2026-08-12-documentation-history-cleanup-design.md
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+git show "$(cat "$BASELINE_FILE")":docs/superpowers/plans/2026-08-12-documentation-history-cleanup.md
+git show "$(cat "$BASELINE_FILE")":docs/superpowers/specs/2026-08-12-documentation-history-cleanup-design.md
 ```
 
 ## Atomicity rule
@@ -67,14 +68,15 @@ Checkpoint with tests and `git diff`; do not checkpoint with Git commits.
 - Read: `docs/BREAKING-CHANGES.md`
 - Read: `docs/PRODUCT-SPEC.md`
 - Read: `docs/RELEASE.md`
-- Create outside worktree: `.git/psyche-doc-history-baseline`
-- Create outside worktree: `.git/psyche-retired-doc-paths`
+- Create outside worktree: `$(git rev-parse --git-path psyche-doc-history-baseline)`
+- Create outside worktree: `$(git rev-parse --git-path psyche-retired-doc-paths)`
 
 - [ ] **Step 1: Require a clean implementation starting point**
 
 Run:
 
 ```bash
+set -euo pipefail
 test -z "$(git status --porcelain)"
 ```
 
@@ -86,8 +88,10 @@ changes into the archive baseline.
 Run:
 
 ```bash
-git rev-parse HEAD > .git/psyche-doc-history-baseline
-BASELINE="$(cat .git/psyche-doc-history-baseline)"
+set -euo pipefail
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+git rev-parse HEAD > "$BASELINE_FILE"
+BASELINE="$(cat "$BASELINE_FILE")"
 test "${#BASELINE}" -eq 40
 git cat-file -e "$BASELINE^{commit}"
 printf '%s\n' "$BASELINE"
@@ -100,7 +104,10 @@ Expected: one 40-character commit SHA.
 Run:
 
 ```bash
-BASELINE="$(cat .git/psyche-doc-history-baseline)"
+set -euo pipefail
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+RETIRED_PATHS_FILE="$(git rev-parse --git-path psyche-retired-doc-paths)"
+BASELINE="$(cat "$BASELINE_FILE")"
 {
   git ls-tree -r --name-only "$BASELINE" -- \
     docs/superpowers/plans \
@@ -109,14 +116,14 @@ BASELINE="$(cat .git/psyche-doc-history-baseline)"
     docs/BREAKING-CHANGES.md \
     docs/PRODUCT-SPEC.md \
     docs/RELEASE.md
-} | LC_ALL=C sort -u > .git/psyche-retired-doc-paths
+} | LC_ALL=C sort -u > "$RETIRED_PATHS_FILE"
 
-test -s .git/psyche-retired-doc-paths
+test -s "$RETIRED_PATHS_FILE"
 while IFS= read -r path; do
   git cat-file -e "$BASELINE:$path"
-done < .git/psyche-retired-doc-paths
+done < "$RETIRED_PATHS_FILE"
 
-wc -l .git/psyche-retired-doc-paths
+wc -l "$RETIRED_PATHS_FILE"
 ```
 
 Expected: every listed path exists at the baseline. The count includes every
@@ -127,12 +134,23 @@ plan, every design spec, and the three explicit retired manuals.
 Run:
 
 ```bash
-grep -Ev \
+set -euo pipefail
+RETIRED_PATHS_FILE="$(git rev-parse --git-path psyche-retired-doc-paths)"
+if grep -Ev \
   '^(docs/superpowers/(plans|specs)/.+\.md|docs/(BREAKING-CHANGES|PRODUCT-SPEC|RELEASE)\.md)$' \
-  .git/psyche-retired-doc-paths
+  "$RETIRED_PATHS_FILE"; then
+  exit 1
+else
+  status=$?
+  if [ "$status" -eq 1 ]; then
+    :
+  else
+    exit "$status"
+  fi
+fi
 ```
 
-Expected: no output and exit 1 from `grep`.
+Expected: exit 0 with no output.
 
 ### Task 2: Add the commit-history contract
 
@@ -250,10 +268,27 @@ describe('documentation history', () => {
 Run:
 
 ```bash
-pnpm exec vitest --run __tests__/documentationHistory.test.ts
+set -euo pipefail
+if output="$(pnpm exec vitest --run __tests__/documentationHistory.test.ts 2>&1)"; then
+  printf '%s\n' "$output"
+  printf '%s\n' 'Expected failure: __tests__/documentationHistory.test.ts passed before docs/HISTORY.md exists.' >&2
+  exit 1
+else
+  status=$?
+  if printf '%s\n' "$output" | grep -Eq '(ENOENT|no such file or directory).*docs/HISTORY\.md|docs/HISTORY\.md.*(ENOENT|no such file or directory)'; then
+    printf '%s\n' "$output"
+    printf '%s\n' "Expected failure confirmed: docs/HISTORY.md is missing (exit $status)." >&2
+    exit 0
+  fi
+  printf '%s\n' "$output"
+  printf '%s\n' "Unexpected Vitest failure: expected a docs/HISTORY.md ENOENT/missing-file error." >&2
+  exit 1
+fi
 ```
 
-Expected: FAIL because `docs/HISTORY.md` does not exist.
+Expected: the test output is preserved, and the command exits 0 only when the
+failure output proves `docs/HISTORY.md` is missing with an ENOENT/missing-file
+error. Any other Vitest failure prints an unexpected-failure message and exits 1.
 
 - [ ] **Step 3: Give CI the history required by the contract**
 
@@ -270,7 +305,9 @@ Keep `persist-credentials: false`.
 Run:
 
 ```bash
-test "$(git rev-parse HEAD)" = "$(cat .git/psyche-doc-history-baseline)"
+set -euo pipefail
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+test "$(git rev-parse HEAD)" = "$(cat "$BASELINE_FILE")"
 ```
 
 Expected: exit 0. The test remains intentionally red until the manifest and
@@ -280,8 +317,8 @@ retirements are complete.
 
 **Files:**
 - Create: `docs/HISTORY.md`
-- Read: `.git/psyche-doc-history-baseline`
-- Read: `.git/psyche-retired-doc-paths`
+- Read: `$(git rev-parse --git-path psyche-doc-history-baseline)`
+- Read: `$(git rev-parse --git-path psyche-retired-doc-paths)`
 
 - [ ] **Step 1: Generate immutable rows from Git instead of hand-copying SHAs**
 
@@ -293,8 +330,10 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 
 const repositoryUrl = 'https://github.com/OpenCoven/psyche-build';
-const baseline = readFileSync('.git/psyche-doc-history-baseline', 'utf8').trim();
-const paths = readFileSync('.git/psyche-retired-doc-paths', 'utf8')
+const baselineFile = execFileSync('git', ['rev-parse', '--git-path', 'psyche-doc-history-baseline'], { encoding: 'utf8' }).trim();
+const retiredPathsFile = execFileSync('git', ['rev-parse', '--git-path', 'psyche-retired-doc-paths'], { encoding: 'utf8' }).trim();
+const baseline = readFileSync(baselineFile, 'utf8').trim();
+const paths = readFileSync(retiredPathsFile, 'utf8')
   .split(/\r?\n/)
   .filter(Boolean);
 
@@ -399,18 +438,23 @@ NODE
 ```
 
 Expected: `docs/HISTORY.md` contains one row for every path in
-`.git/psyche-retired-doc-paths`, sorted by former path.
+`$(git rev-parse --git-path psyche-retired-doc-paths)`, sorted by former path.
 
 - [ ] **Step 2: Verify the manifest format before deleting anything**
 
 Run:
 
 ```bash
-BASELINE="$(cat .git/psyche-doc-history-baseline)"
+set -euo pipefail
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+RETIRED_PATHS_FILE="$(git rev-parse --git-path psyche-retired-doc-paths)"
+BASELINE="$(cat "$BASELINE_FILE")"
 grep -F "Archive baseline: \`$BASELINE\`" docs/HISTORY.md
-test "$(grep -c '^| .* | `docs/' docs/HISTORY.md)" -eq \
-  "$(wc -l < .git/psyche-retired-doc-paths | tr -d ' ')"
-grep -c 'https://github.com/OpenCoven/psyche-build/blob/' docs/HISTORY.md
+RETIRED_COUNT="$(wc -l < "$RETIRED_PATHS_FILE" | tr -d ' ')"
+URL_COUNT="$(grep -c 'https://github.com/OpenCoven/psyche-build/blob/' docs/HISTORY.md || true)"
+ROW_COUNT="$(grep -c '^| .* | `docs/' docs/HISTORY.md || true)"
+test "$ROW_COUNT" -eq "$RETIRED_COUNT"
+test "$URL_COUNT" -ge "$RETIRED_COUNT"
 ```
 
 Expected: the first command prints the baseline line; deleted-file row count
@@ -594,6 +638,7 @@ expect(packageJson.files).not.toContain('docs/RELEASE.md');
 Run:
 
 ```bash
+set -euo pipefail
 pnpm exec vitest --run __tests__/releaseVersion.test.ts
 pnpm exec vitest --run \
   __tests__/releaseDocs.test.ts \
@@ -715,9 +760,19 @@ valid paired-host record already exists.
 Run:
 
 ```bash
-rg -n -i \
+set -euo pipefail
+if rg -n -i \
   'available after.*v0\.0\.1|demo-first|docs/(BREAKING-CHANGES|PRODUCT-SPEC|RELEASE)\.md' \
-  README.md CONTRIBUTING.md docs/README.md docs/COVEN-DEMO-LOOP.md native/ios/README.md
+  README.md CONTRIBUTING.md docs/README.md docs/COVEN-DEMO-LOOP.md native/ios/README.md; then
+  exit 1
+else
+  status=$?
+  if [ "$status" -eq 1 ]; then
+    :
+  else
+    exit "$status"
+  fi
+fi
 ```
 
 Expected: no matches.
@@ -786,6 +841,7 @@ In `docs/src/content/troubleshooting.js`:
 Run:
 
 ```bash
+set -euo pipefail
 pnpm --dir docs build
 ```
 
@@ -806,9 +862,10 @@ references to the retired release copy.
 Run:
 
 ```bash
+set -euo pipefail
 while IFS= read -r path; do
   git rm -- "$path"
-done < .git/psyche-retired-doc-paths
+done < "$(git rev-parse --git-path psyche-retired-doc-paths)"
 ```
 
 Expected: Git stages deletion of every manifest path and nothing else.
@@ -818,10 +875,14 @@ Expected: Git stages deletion of every manifest path and nothing else.
 Run:
 
 ```bash
-BASELINE="$(cat .git/psyche-doc-history-baseline)"
+set -euo pipefail
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+RETIRED_PATHS_FILE="$(git rev-parse --git-path psyche-retired-doc-paths)"
+ACTUAL_RETIRED_PATHS_FILE="$(git rev-parse --git-path psyche-actual-retired-doc-paths)"
+BASELINE="$(cat "$BASELINE_FILE")"
 git diff --name-only --diff-filter=D "$BASELINE" -- | LC_ALL=C sort \
-  > .git/psyche-actual-retired-doc-paths
-diff -u .git/psyche-retired-doc-paths .git/psyche-actual-retired-doc-paths
+  > "$ACTUAL_RETIRED_PATHS_FILE"
+diff -u "$RETIRED_PATHS_FILE" "$ACTUAL_RETIRED_PATHS_FILE"
 ```
 
 Expected: no diff.
@@ -831,6 +892,7 @@ Expected: no diff.
 Run:
 
 ```bash
+set -euo pipefail
 pnpm exec vitest --run __tests__/documentationHistory.test.ts
 ```
 
@@ -847,6 +909,7 @@ blob resolves.
 Run:
 
 ```bash
+set -euo pipefail
 pnpm exec vitest --run \
   __tests__/documentationHistory.test.ts \
   __tests__/releaseDocs.test.ts \
@@ -860,10 +923,20 @@ Expected: all tests pass.
 Run:
 
 ```bash
-rg -n -i \
+set -euo pipefail
+if rg -n -i \
   'docs/(BREAKING-CHANGES|PRODUCT-SPEC|RELEASE)\.md|docs/superpowers/|available after.*v0\.0\.1|demo-first' \
   README.md CONTRIBUTING.md package.json docs/README.md docs/COVEN-DEMO-LOOP.md \
-  native/ios/README.md docs/src
+  native/ios/README.md docs/src; then
+  exit 1
+else
+  status=$?
+  if [ "$status" -eq 1 ]; then
+    :
+  else
+    exit "$status"
+  fi
+fi
 ```
 
 Expected: no matches.
@@ -873,6 +946,7 @@ Expected: no matches.
 Run:
 
 ```bash
+set -euo pipefail
 rg -n -i 'comux|v0\.0\.1|mobile pairing' CHANGELOG.md docs/HISTORY.md
 ```
 
@@ -884,6 +958,7 @@ index.
 Run:
 
 ```bash
+set -euo pipefail
 pnpm typecheck
 pnpm --dir docs build
 pnpm smoke:pack
@@ -897,15 +972,15 @@ Expected: every command passes.
 Run:
 
 ```bash
-npm pack --dry-run --json > /tmp/psyche-pack.json
-jq -e '
+set -euo pipefail
+npm pack --dry-run --json | jq -e '
   [.[0].files[].path] as $paths
   | ($paths | index("docs/HISTORY.md")) != null
   and ($paths | index("docs/RELEASING.md")) != null
   and ($paths | index("docs/RELEASE.md")) == null
   and ($paths | index("docs/BREAKING-CHANGES.md")) == null
   and ($paths | index("docs/PRODUCT-SPEC.md")) == null
-' /tmp/psyche-pack.json
+'
 ```
 
 Expected: `jq` returns `true`.
@@ -915,12 +990,26 @@ Expected: `jq` returns `true`.
 Run:
 
 ```bash
-BASELINE="$(cat .git/psyche-doc-history-baseline)"
-git diff --name-only "$BASELINE" -- | grep -Ev \
-  '^(\.github/workflows/ci\.yml|README\.md|CHANGELOG\.md|CONTRIBUTING\.md|package\.json|__tests__/(documentationHistory|releaseDocs|releaseVersion)\.test\.ts|docs/|native/ios/README\.md)$'
+set -euo pipefail
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+SCOPE_PATHS_FILE="$(git rev-parse --git-path psyche-doc-scope-paths)"
+BASELINE="$(cat "$BASELINE_FILE")"
+git diff --name-only "$BASELINE" -- > "$SCOPE_PATHS_FILE"
+if grep -Ev \
+  '^(\.github/workflows/ci\.yml|README\.md|CHANGELOG\.md|CONTRIBUTING\.md|package\.json|__tests__/(documentationHistory|releaseDocs|releaseVersion)\.test\.ts|docs/|native/ios/README\.md)$' \
+  "$SCOPE_PATHS_FILE"; then
+  exit 1
+else
+  status=$?
+  if [ "$status" -eq 1 ]; then
+    :
+  else
+    exit "$status"
+  fi
+fi
 ```
 
-Expected: no output and exit 1 from `grep`. Product source files remain
+Expected: exit 0 with no output. Product source files remain
 unchanged.
 
 ### Task 9: Create the atomic cleanup commit
@@ -933,7 +1022,9 @@ unchanged.
 Run:
 
 ```bash
-BASELINE="$(cat .git/psyche-doc-history-baseline)"
+set -euo pipefail
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+BASELINE="$(cat "$BASELINE_FILE")"
 git status --short
 git diff --stat "$BASELINE"
 git diff --summary "$BASELINE"
@@ -947,6 +1038,7 @@ edits, CI history checkout, and only the inventoried historical deletions.
 Run:
 
 ```bash
+set -euo pipefail
 git add -A
 git commit \
   -m "docs: replace stale documentation with commit history" \
@@ -960,7 +1052,9 @@ Expected: one cleanup commit.
 Run:
 
 ```bash
-test "$(git rev-parse HEAD^)" = "$(cat .git/psyche-doc-history-baseline)"
+set -euo pipefail
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+test "$(git rev-parse HEAD^)" = "$(cat "$BASELINE_FILE")"
 git status --short
 ```
 
@@ -971,6 +1065,7 @@ Expected: exit 0 and a clean worktree.
 Run:
 
 ```bash
+set -euo pipefail
 pnpm exec vitest --run __tests__/documentationHistory.test.ts
 ```
 

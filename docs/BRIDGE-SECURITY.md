@@ -39,6 +39,14 @@ validation belongs in the handler.
 Authentication is not authorization. An authenticated client of the loopback
 daemon is authorized for *one project root*, not for the machine.
 
+The loopback daemon also owns the agent surface-control protocol described in
+[Agent surface control](./AGENT-SURFACE-CONTROL.md). Agent tokens can request
+and use exact capability leases, but cannot grant, widen, renew, approve, or
+register a browser provider. Operator-provider sockets become provider-only
+after registration. Browser authority is limited to registered child WebViews;
+native lifecycle and automation commands reject every caller except the trusted
+main WebView.
+
 ## Rules
 
 ### 1. A pane id is command text. Validate its shape, do not just quote it

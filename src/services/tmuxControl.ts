@@ -8,15 +8,17 @@ import {
   assertTmuxPaneId,
   quoteTmuxArgument,
 } from '../utils/tmuxTarget.js';
+import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
 
 /**
  * Thin wrapper around `tmux -C attach-session` (tmux control mode).
  *
  * One subprocess per tmux session. Parses `%output`, `%exit`, and
- * `%window-close` events. Fire-and-forget ops (`command`, `sendKeysHex`,
- * `resizePane`, ...) write a command and move on. `executeCommand`/`sendPrompt`
- * instead correlate the `%begin/%end/%error` acknowledgement block so prompt
- * submission is integrity-checked and safe against replay on an ambiguous drop.
+ * `%window-close` events. Legacy UI ops (`command`, `resizePane`, ...) remain
+ * fire-and-forget. Effectful agent-facing seams (`sendKeysHex`, `killPane`,
+ * `executeCommand`, and `sendPrompt`) correlate the `%begin/%end/%error`
+ * acknowledgement block so dispatch is integrity-checked and safe against
+ * replay on an ambiguous drop.
  *
  * Originally lifted from meow/psyche-daemon-ws commit cda47c5 per
  * docs/superpowers/plans/2026-04-25-psyche-bridge-daemon.md, then copied a
@@ -32,11 +34,17 @@ export interface TmuxControlOptions {
    * submission can be exercised without a live tmux server.
    */
   spawnControl?: () => ChildProcessWithoutNullStreams;
+  actionTimeoutMs?: number;
 }
 
 interface AckWaiter {
-  resolve: (output: string) => void;
+__OURS__
   reject: (error: Error & { ambiguous?: boolean }) => void;
+  readonly lines: string[];
+  outputBytes: number;
+  outputLines: number;
+  outputTooLarge: boolean;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 export class TmuxControl extends EventEmitter {
@@ -57,12 +65,7 @@ export class TmuxControl extends EventEmitter {
    */
   private commandTail: Promise<void> = Promise.resolve();
   private readonly ackQueue: Array<AckWaiter | null> = [];
-  private readonly ackBlocks = new Map<string, { waiter: AckWaiter | null; output: string[] }>();
-  private activeCommandNumber: string | undefined;
-  private attachCommandNumber: string | undefined;
-  private readonly completedAckNumbers = new Set<string>();
-  private readonly ignoredAckBlocks = new Set<string>();
-  private activeIgnoredCommandNumber: string | undefined;
+__OURS__
 
   /**
    * Attaching in control mode emits one unsolicited `%begin/%end` block for the
@@ -85,16 +88,7 @@ export class TmuxControl extends EventEmitter {
     if (this.started) return;
     this.started = true;
     this.attachAckConsumed = false;
-    this.paneSetEmptyEmitted = false;
-    this.processTerminationHandled = false;
-    this.poisoned = false;
-    this.stdoutBuf = '';
-    this.ackBlocks.clear();
-    this.activeCommandNumber = undefined;
-    this.ignoredAckBlocks.clear();
-    this.activeIgnoredCommandNumber = undefined;
-    this.attachCommandNumber = undefined;
-    this.completedAckNumbers.clear();
+__OURS__
 
     const proc = this.options.spawnControl
       ? this.options.spawnControl()
@@ -103,13 +97,7 @@ export class TmuxControl extends EventEmitter {
         });
     this.proc = proc;
 
-    proc.stdout.setEncoding('utf8');
-    proc.stdout.on('data', (chunk: string) => {
-      if (this.proc === proc) this.onStdout(chunk);
-    });
-
-    proc.stderr.on('data', (chunk: Buffer) => {
-      if (this.proc === proc) this.emit('stderr', chunk.toString('utf8'));
+__OURS__
     });
 
     proc.on('exit', (code) => this.onProcessTerminated(proc, code));
@@ -137,10 +125,7 @@ export class TmuxControl extends EventEmitter {
 
   private rejectAllPending(error: Error & { ambiguous?: boolean }): void {
     const waiters = this.ackQueue.splice(0, this.ackQueue.length);
-    for (const waiter of waiters) waiter?.reject(error);
-    for (const { waiter } of this.ackBlocks.values()) waiter?.reject(error);
-    this.ackBlocks.clear();
-    this.activeCommandNumber = undefined;
+__MERGED_OURS_PENDING_REJECTION_WITH_TIMER_CLEAR_IF_PRESENT__
   }
 
   stop(): void {
@@ -176,29 +161,7 @@ export class TmuxControl extends EventEmitter {
    * have applied them.
    */
   executeCommand(line: string): Promise<void> {
-    return this.executeQuery(line).then(() => undefined);
-  }
-
-  /** Execute one command and return the lines inside its acknowledged block. */
-  executeQuery(line: string): Promise<string> {
-    assertSingleTmuxCommandLine(line);
-    const run = () =>
-      new Promise<string>((resolve, reject) => {
-        if (!this.proc || this.poisoned) {
-          reject(new Error(this.poisoned ? 'tmux control connection is poisoned' : 'tmux control mode not started'));
-          return;
-        }
-        const proc = this.proc;
-        const waiter: AckWaiter = { resolve, reject };
-        this.ackQueue.push(waiter);
-        try {
-          proc.stdin.write(`${line}\n`, (error) => {
-            if (!error || this.proc !== proc) return;
-            this.poisonConnection(error, proc);
-          });
-        } catch (error) {
-          this.poisonConnection(error instanceof Error ? error : new Error(String(error)), proc);
-        }
+__MERGED_OURS_EXECUTE_QUERY_PATH_WITH_COMPAT_EXECUTE_COMMAND_WITH_OUTPUT_ALIAS__
       });
     const result = this.commandTail.then(run, run);
     this.commandTail = result.then(() => undefined, () => undefined);
@@ -297,11 +260,10 @@ export class TmuxControl extends EventEmitter {
     }
   }
 
-  sendKeysHex(paneId: string, data: Buffer): void {
+  sendKeysHex(paneId: string, data: Buffer): void | Promise<void> {
     const target = assertTmuxPaneId(paneId);
-    if (data.length === 0) return;
-    const hex = Array.from(data, (b) => b.toString(16).padStart(2, '0')).join(' ');
-    this.command(`send-keys -t ${quote(target)} -H ${hex}`);
+    if (data.length === 0) return Promise.resolve();
+    return this.executeCommand(`send-keys -t ${quote(target)} -H ${hexBytes(data)}`);
   }
 
   resizePane(paneId: string, cols: unknown, rows: unknown): void {
@@ -315,8 +277,9 @@ export class TmuxControl extends EventEmitter {
     this.command(`select-pane -t ${quote(assertTmuxPaneId(paneId))}`);
   }
 
-  killPane(paneId: string): void {
-    this.command(`kill-pane -t ${quote(assertTmuxPaneId(paneId))}`);
+  killPane(paneId: string): void | Promise<void> {
+    const target = assertTmuxPaneId(paneId);
+    return this.executeCommand(`kill-pane -t ${quote(target)}`);
   }
 
   private onStdout(chunk: string): void {
@@ -330,6 +293,7 @@ export class TmuxControl extends EventEmitter {
   }
 
   private onLine(line: string): void {
+__MERGED_OURS_ACK_BLOCK_OUTPUT_COLLECTION_FOR_NON_PERCENT_LINES__
     // %output %<paneId> <octal-escaped-bytes>
     if (line.startsWith('%output ')) {
       const rest = line.slice('%output '.length);
@@ -360,48 +324,17 @@ export class TmuxControl extends EventEmitter {
     // Command acknowledgement blocks: %begin/%end/%error <time> <number> <flags>.
     // Every command produces exactly one block, delivered in send order, so the
     // front of ackQueue is the block being closed. %begin only opens the block.
-    const begin = parseAckLine(line, '%begin');
-    if (begin) {
-      if (this.completedAckNumbers.has(begin.commandNumber)) {
-        this.ignoredAckBlocks.add(begin.commandNumber);
-        this.activeIgnoredCommandNumber = begin.commandNumber;
-        return;
-      }
-      if (this.ackBlocks.has(begin.commandNumber)) return;
-      const waiter = this.attachAckConsumed ? (this.ackQueue.shift() ?? null) : null;
-      if (!this.attachAckConsumed) this.attachCommandNumber = begin.commandNumber;
-      this.ackBlocks.set(begin.commandNumber, { waiter, output: [] });
-      this.activeCommandNumber = begin.commandNumber;
-      return;
-    }
-    const end = parseAckLine(line, '%end') ?? parseAckLine(line, '%error');
-    if (end) {
-      if (this.ignoredAckBlocks.delete(end.commandNumber)) {
-        if (this.activeIgnoredCommandNumber === end.commandNumber) this.activeIgnoredCommandNumber = undefined;
-        return;
-      }
-      const block = this.ackBlocks.get(end.commandNumber);
-      if (!block) return;
-      // The first acknowledgement block belongs to the implicit attach, not to
-      // a client command, so consume it without touching the queue.
-      if (!this.attachAckConsumed && end.commandNumber === this.attachCommandNumber) {
-        this.attachAckConsumed = true;
-        this.ackBlocks.delete(end.commandNumber);
-        this.activeCommandNumber = undefined;
-        this.attachCommandNumber = undefined;
-        this.rememberCompletedAck(end.commandNumber);
-        return;
-      }
-      this.ackBlocks.delete(end.commandNumber);
-      this.rememberCompletedAck(end.commandNumber);
-      if (this.activeCommandNumber === end.commandNumber) this.activeCommandNumber = undefined;
-      const waiter = block.waiter;
-      const output = block.output.join('\n');
+__OURS__
       if (!waiter) return; // fire-and-forget block (null) or an unexpected extra
+      if (waiter.timer) clearTimeout(waiter.timer);
       if (line.startsWith('%error')) {
         waiter.reject(new Error(`tmux command failed: ${line}`));
+      } else if (waiter.outputTooLarge) {
+        waiter.reject(Object.assign(new Error('tmux command output exceeds limit'), {
+          code: 'output_truncated',
+        }));
       } else {
-        waiter.resolve(output);
+__OURS__
       }
       return;
     }
@@ -418,22 +351,7 @@ export class TmuxControl extends EventEmitter {
   }
 }
 
-function parseAckLine(line: string, kind: '%begin' | '%end' | '%error'):
-  { commandNumber: string } | undefined {
-  const match = new RegExp(`^${kind} \\d+ (\\d+) \\d+$`).exec(line);
-  return match ? { commandNumber: match[1] } : undefined;
-}
-
-const PANE_SET_NOTIFICATIONS = Object.freeze([
-  '%layout-change ',
-  '%window-pane-changed ',
-  '%window-add ',
-  '%window-close ',
-  '%unlinked-window-close ',
-  '%window-renamed ',
-  '%sessions-changed',
-]);
-
+__MERGED_OURS_PARSE_ACK_AND_PANE_NOTIFICATION_CONSTANTS_PLUS_THEIRS_OUTPUT_LIMIT_CONSTS__
 /**
  * Tmux control-mode encodes output bytes in the range \x00-\x1f and \x7f-\xff
  * as \ooo (backslash + 3 octal digits). A literal backslash becomes \\.

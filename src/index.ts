@@ -1621,9 +1621,10 @@ class Psyche {
   }
 
   if (process.argv[2] === 'mcp') {
-    // MCP is a project-scoped agent client. Its first tool call connects to
-    // the canonical control owner and starts this entrypoint in daemon mode
-    // only when the project-derived socket is absent.
+    // The stdio MCP process is only the canonical control client. It obtains a
+    // project-scoped agent credential and connects to (or starts) the detached
+    // project owner when the project-derived socket is absent; no pane mutation
+    // is performed in this process.
     const { runMcpServer } = await import('./mcp/server.js');
     await runMcpServer();
     return;

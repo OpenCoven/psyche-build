@@ -14,6 +14,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "macos")]
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+#[cfg(target_os = "macos")]
+use objc2::{
+    runtime::{AnyObject, Imp, Sel},
+    sel,
+};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{
+    NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSImage,
+};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSDictionary, NSError, NSString, NSURLRequest, NSURL};
+#[cfg(target_os = "macos")]
+use objc2_web_kit::{WKNavigation, WKWebView};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -26,6 +41,7 @@ use tauri::{
 mod control_provider;
 mod coven_sessions;
 mod metrics;
+mod native_sessions;
 mod native_workspace;
 mod pane_metrics;
 mod platform;
@@ -33,21 +49,38 @@ pub mod pty_transport;
 mod workspace_contract;
 use control_provider::{
     control_operator_submit, control_provider_complete, control_provider_remove,
-    control_provider_start, control_provider_stop, control_provider_upsert, control_state,
-    publish_provider_effect_executing, publish_provider_effect_started, ControlProviderState,
-};
+<<OURS>>
 use coven_sessions::is_safe_session_id;
 use coven_sessions::{coven_session_kill, coven_sessions};
 use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
+use native_sessions::{
+    native_session_capture, native_session_create, native_session_list, native_session_stop,
+    NativeLaunchKind, NativeSessionCreate,
+};
 use native_workspace::{workspace_load, workspace_save};
 use pane_metrics::PaneSessionMetrics;
 use pty_transport::{
-    coordinate_exit_shutdown, CompletionOutcome, DrainOutcome, EnqueueError, ExitShutdownHooks,
-    ExitShutdownOutcome, FinalOutputPumpSnapshot, OutputPump, RecentOutputSnapshots,
-    TransportSessionKey, EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
+    coordinate_exit_shutdown, AckOutcome as TransportAckOutcome, CompletionOutcome, DrainOutcome,
+    EnqueueError, ExitShutdownHooks, ExitShutdownOutcome, FinalOutputPumpSnapshot, OutputPump,
+    OutputPumpMetrics as TransportOutputPumpMetrics,
+    OutputPumpSnapshot as TransportOutputPumpSnapshot, PaneVisibility as TransportPaneVisibility,
+    PumpMetrics as TransportPumpMetrics, RecentOutputSnapshots, TransportSessionKey,
+    EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
 };
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
+const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_PROVIDER_RESULT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_BROWSER_SNAPSHOT_JSON_OVERHEAD: usize = 64 * 1024;
+const MAX_BROWSER_SNAPSHOT_BYTES: usize =
+    (MAX_PROVIDER_RESULT_BYTES - MAX_BROWSER_SNAPSHOT_JSON_OVERHEAD) / 4 * 3;
+const MAX_BROWSER_SNAPSHOT_DIMENSION: u32 = 8192;
+const MAX_BROWSER_SNAPSHOT_PIXELS: u64 = 16 * 1024 * 1024;
+const MAX_BROWSER_SCRIPT_SOURCE_BYTES: usize = 64 * 1024;
+const MAX_BROWSER_SCRIPT_ARGS_BYTES: usize = 256 * 1024;
+const MAX_BROWSER_SCRIPT_RESULT_BYTES: usize = 256 * 1024;
+const BROWSER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
+const BROWSER_SCRIPT_CONTEXT_WORLD_NAME: &str = "com.opencoven.psyche.browser-script-context";
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
 const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
@@ -692,10 +725,7 @@ fn safe_browser_label(label: Option<String>) -> String {
     )
 }
 
-fn parse_browser_navigation_url(raw_url: &str) -> Result<(Url, String), String> {
-    let parsed = Url::parse(raw_url).map_err(|error| error.to_string())?;
-    let canonical = parsed.as_str().to_string();
-    Ok((parsed, canonical))
+<<OURS>>
 }
 
 // ----------------------------------------------------------------------------
@@ -705,6 +735,8 @@ fn parse_browser_navigation_url(raw_url: &str) -> Result<(Url, String), String> 
 struct PtySession {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    operation_lane: Arc<tokio::sync::Mutex<()>>,
+    operation_admission: Arc<tokio::sync::Semaphore>,
     pump: OutputPump,
     terminator: PtyProcessTerminator,
     reader_cancellation: PtyReaderCancellation,
@@ -1807,6 +1839,15 @@ pub struct StartOptions {
     pub env: Option<HashMap<String, String>>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PtyAttachOptions {
+    pub thread_id: String,
+    pub session_id: String,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
+}
+
 #[cfg(unix)]
 #[derive(Debug)]
 struct OpenedPtyCwd {
@@ -2235,6 +2276,111 @@ pub struct BrowserPageLoadEvent {
     pub label: String,
     pub url: String,
     pub phase: String,
+    pub navigation_token: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BrowserNavigationResult {
+    terminal_url: String,
+}
+
+struct BrowserNavigationWaiter {
+    token: String,
+    navigation_identity: Option<usize>,
+    completion: Option<tokio::sync::oneshot::Sender<Result<BrowserNavigationResult, String>>>,
+}
+
+struct BrowserNavigationWaiterGuard {
+    label: String,
+    token: String,
+}
+
+impl Drop for BrowserNavigationWaiterGuard {
+    fn drop(&mut self) {
+        let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+        if waiters
+            .get(&self.label)
+            .is_some_and(|waiter| waiter.token == self.token)
+        {
+            waiters.remove(&self.label);
+        }
+    }
+}
+
+static BROWSER_NAVIGATION_WAITERS: Lazy<Mutex<HashMap<String, BrowserNavigationWaiter>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn complete_browser_navigation(navigation_identity: usize, terminal_url: &str) -> bool {
+    let completion = {
+        let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+        let label = waiters.iter().find_map(|(label, waiter)| {
+            (waiter.navigation_identity == Some(navigation_identity)).then(|| label.clone())
+        });
+        label.and_then(|label| {
+            waiters
+                .remove(&label)
+                .and_then(|mut waiter| waiter.completion.take())
+        })
+    };
+    if let Some(completion) = completion {
+        let result = if terminal_url.is_empty() {
+            Err("browser navigation terminal URL is unavailable".to_string())
+        } else {
+            Ok(BrowserNavigationResult {
+                terminal_url: terminal_url.to_string(),
+            })
+        };
+        let _ = completion.send(result);
+        return true;
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+static ORIGINAL_BROWSER_DID_FINISH_NAVIGATION: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(target_os = "macos")]
+static BROWSER_NAVIGATION_HOOK_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn browser_did_finish_navigation(
+    delegate: &AnyObject,
+    selector: Sel,
+    webview: &WKWebView,
+    navigation: &WKNavigation,
+) {
+    let original = ORIGINAL_BROWSER_DID_FINISH_NAVIGATION.load(Ordering::Acquire);
+    if original != 0 {
+        let original: unsafe extern "C-unwind" fn(&AnyObject, Sel, &WKWebView, &WKNavigation) =
+            unsafe { std::mem::transmute(original) };
+        unsafe { original(delegate, selector, webview, navigation) };
+    }
+    let navigation_identity = navigation as *const WKNavigation as usize;
+    let terminal_url = unsafe { webview.URL() }
+        .and_then(|url| url.absoluteString())
+        .map(|url| url.to_string())
+        .unwrap_or_default();
+    complete_browser_navigation(navigation_identity, &terminal_url);
+}
+
+#[cfg(target_os = "macos")]
+fn install_browser_navigation_identity_hook(delegate: &AnyObject) -> Result<(), String> {
+    let _install_guard = BROWSER_NAVIGATION_HOOK_LOCK.lock();
+    if ORIGINAL_BROWSER_DID_FINISH_NAVIGATION.load(Ordering::Acquire) != 0 {
+        return Ok(());
+    }
+    let class = delegate.class();
+    let method = class
+        .instance_method(sel!(webView:didFinishNavigation:))
+        .ok_or_else(|| "browser navigation delegate finish hook is unavailable".to_string())?;
+    let replacement: unsafe extern "C-unwind" fn(&AnyObject, Sel, &WKWebView, &WKNavigation) =
+        browser_did_finish_navigation;
+    let replacement: Imp = unsafe { std::mem::transmute(replacement) };
+    let original = method.implementation() as usize;
+    ORIGINAL_BROWSER_DID_FINISH_NAVIGATION.store(original, Ordering::Release);
+    unsafe { method.set_implementation(replacement) };
+    Ok(())
 }
 
 fn pump_pty_reader<R: Read>(mut reader: R, pump: OutputPump) -> Result<(), String> {
@@ -2658,8 +2804,204 @@ pub fn latest_pty_transport_snapshot(thread_id: &str) -> Option<FinalOutputPumpS
         .cloned()
 }
 
+fn validate_pty_thread_id(thread_id: &str) -> Result<(), String> {
+    if is_safe_session_id(thread_id) {
+        Ok(())
+    } else {
+        Err("thread id is unsafe".to_string())
+    }
+}
+
+fn clone_live_pty_pump(thread_id: &str) -> Result<OutputPump, String> {
+    validate_pty_thread_id(thread_id)?;
+    let guard = PTY_LIFECYCLES.lock();
+    guard
+        .live(thread_id)
+        .map(|session| session.pump.clone())
+        .ok_or_else(|| format!("thread '{}' not found", thread_id))
+}
+
+fn duration_to_micros(duration: std::time::Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum AckOutcome {
+    Advanced {
+        sequence: u64,
+        bytes: usize,
+        latency_micros: u64,
+    },
+    Duplicate {
+        sequence: u64,
+    },
+}
+
+impl From<TransportAckOutcome> for AckOutcome {
+    fn from(outcome: TransportAckOutcome) -> Self {
+        match outcome {
+            TransportAckOutcome::Advanced {
+                sequence,
+                bytes,
+                latency,
+                ..
+            } => Self::Advanced {
+                sequence,
+                bytes,
+                latency_micros: duration_to_micros(latency),
+            },
+            TransportAckOutcome::Duplicate { sequence } => Self::Duplicate { sequence },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum PtyTransportVisibility {
+    Visible,
+    Hidden,
+}
+
+impl From<TransportPaneVisibility> for PtyTransportVisibility {
+    fn from(visibility: TransportPaneVisibility) -> Self {
+        match visibility {
+            TransportPaneVisibility::Visible => Self::Visible,
+            TransportPaneVisibility::Hidden => Self::Hidden,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PtyTransportStateMetrics {
+    bytes_accepted: u64,
+    fragments_accepted: u64,
+    bytes_emitted: u64,
+    batches_emitted: u64,
+    bytes_acknowledged: u64,
+    batches_acknowledged: u64,
+    push_would_block_count: u64,
+    pending_bytes_high_water: usize,
+    pending_fragments_high_water: usize,
+    in_flight_batches_high_water: usize,
+    in_flight_bytes_high_water: usize,
+    total_ack_latency_micros: u64,
+    max_ack_latency_micros: u64,
+}
+
+impl From<TransportPumpMetrics> for PtyTransportStateMetrics {
+    fn from(metrics: TransportPumpMetrics) -> Self {
+        Self {
+            bytes_accepted: metrics.bytes_accepted,
+            fragments_accepted: metrics.fragments_accepted,
+            bytes_emitted: metrics.bytes_emitted,
+            batches_emitted: metrics.batches_emitted,
+            bytes_acknowledged: metrics.bytes_acknowledged,
+            batches_acknowledged: metrics.batches_acknowledged,
+            push_would_block_count: metrics.push_would_block_count,
+            pending_bytes_high_water: metrics.pending_bytes_high_water,
+            pending_fragments_high_water: metrics.pending_fragments_high_water,
+            in_flight_batches_high_water: metrics.in_flight_batches_high_water,
+            in_flight_bytes_high_water: metrics.in_flight_bytes_high_water,
+            total_ack_latency_micros: duration_to_micros(metrics.total_ack_latency),
+            max_ack_latency_micros: duration_to_micros(metrics.max_ack_latency),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PtyTransportMetrics {
+    state: PtyTransportStateMetrics,
+    blocked_reader_count: u64,
+    total_blocked_reader_duration_micros: u64,
+    max_blocked_reader_duration_micros: u64,
+    emit_failure_count: u64,
+    emit_retry_count: u64,
+    visibility_transition_count: u64,
+    drain_timeout_count: u64,
+    worker_error_count: u64,
+}
+
+impl From<TransportOutputPumpMetrics> for PtyTransportMetrics {
+    fn from(metrics: TransportOutputPumpMetrics) -> Self {
+        Self {
+            state: metrics.state.into(),
+            blocked_reader_count: metrics.blocked_reader_count,
+            total_blocked_reader_duration_micros: duration_to_micros(
+                metrics.total_blocked_reader_duration,
+            ),
+            max_blocked_reader_duration_micros: duration_to_micros(
+                metrics.max_blocked_reader_duration,
+            ),
+            emit_failure_count: metrics.emit_failure_count,
+            emit_retry_count: metrics.emit_retry_count,
+            visibility_transition_count: metrics.visibility_transition_count,
+            drain_timeout_count: metrics.drain_timeout_count,
+            worker_error_count: metrics.worker_error_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PtyTransportSnapshot {
+    thread_id: String,
+    pending_bytes: usize,
+    pending_fragments: usize,
+    queued_bytes: usize,
+    queue_depth: usize,
+    prepared: bool,
+    in_flight_batches: usize,
+    in_flight_bytes: usize,
+    last_acked_sequence: u64,
+    blocked_producers: usize,
+    visibility: PtyTransportVisibility,
+    effective_cadence_micros: u64,
+    draining: bool,
+    cancelled: bool,
+    worker_running: bool,
+    metrics: PtyTransportMetrics,
+}
+
+impl From<TransportOutputPumpSnapshot> for PtyTransportSnapshot {
+    fn from(snapshot: TransportOutputPumpSnapshot) -> Self {
+        Self {
+            thread_id: snapshot.thread_id,
+            pending_bytes: snapshot.pending_bytes,
+            pending_fragments: snapshot.pending_fragments,
+            queued_bytes: snapshot.queued_bytes,
+            queue_depth: snapshot.queue_depth,
+            prepared: snapshot.prepared,
+            in_flight_batches: snapshot.in_flight_batches,
+            in_flight_bytes: snapshot.in_flight_bytes,
+            last_acked_sequence: snapshot.last_acked_sequence,
+            blocked_producers: snapshot.blocked_producers,
+            visibility: snapshot.visibility.into(),
+            effective_cadence_micros: duration_to_micros(snapshot.effective_cadence),
+            draining: snapshot.draining,
+            cancelled: snapshot.cancelled,
+            worker_running: snapshot.worker_running,
+            metrics: snapshot.metrics.into(),
+        }
+    }
+}
+
 #[tauri::command]
-fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
+async fn pty_start(
+    webview: tauri::Webview,
+    app: AppHandle,
+    options: StartOptions,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    match tauri::async_runtime::spawn_blocking(move || pty_start_blocking(app, options)).await {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY start task: {error}")),
+    }
+}
+
+fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let thread_id = options.thread_id.clone();
     let (pending_start, resolved_cwd) = prepare_pty_start(&options)?;
     validate_coven_launch(&options)?;
@@ -2708,14 +3050,24 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
         cmd.env(key, value);
     }
 
+    resolved_cwd.configure_command_cwd(&mut cmd)?;
+    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    drop(resolved_cwd);
+    register_pty_client(app, thread_id, pending_start, pair, child)
+}
+
+fn register_pty_client(
+    app: AppHandle,
+    thread_id: String,
+    pending_start: PendingPtyStart,
+    pair: portable_pty::PtyPair,
+    mut child: Box<dyn Child + Send + Sync>,
+) -> Result<(), String> {
     let spawn_time_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    resolved_cwd.configure_command_cwd(&mut cmd)?;
-    let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let pid = child.process_id();
-    drop(resolved_cwd);
     let terminator = PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref())
         .map_err(|error| error.to_string())?;
     let mut spawn_guard = PtySpawnTerminationGuard::new(terminator.clone());
@@ -2733,6 +3085,8 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let (session_token, install_outcome) = pending_start.install(PtySession {
         master: Arc::new(Mutex::new(pair.master)),
         writer: Arc::new(Mutex::new(writer)),
+        operation_lane: Arc::new(tokio::sync::Mutex::new(())),
+        operation_admission: Arc::new(tokio::sync::Semaphore::new(2)),
         pump: pump.clone(),
         terminator: terminator.clone(),
         reader_cancellation: reader_cancellation.clone(),
@@ -2817,14 +3171,100 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
-    let writer = {
-        let guard = PTY_LIFECYCLES.lock();
-        let session = guard
-            .live(&thread_id)
-            .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
-        Arc::clone(&session.writer)
-    };
+async fn pty_attach(
+    webview: tauri::Webview,
+    app: AppHandle,
+    options: PtyAttachOptions,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    match tauri::async_runtime::spawn_blocking(move || pty_attach_blocking(app, options)).await {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY attach task: {error}")),
+    }
+}
+
+fn pty_attach_blocking(app: AppHandle, options: PtyAttachOptions) -> Result<(), String> {
+    validate_pty_thread_id(&options.thread_id)?;
+    let attach_args = native_sessions::build_attach_args(
+        &native_sessions::native_socket_path()?,
+        &options.session_id,
+    )?;
+    let pending_start = PendingPtyStart::reserve(&options.thread_id)?;
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: options.rows.unwrap_or(40),
+            cols: options.cols.unwrap_or(120),
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| error.to_string())?;
+    let tmux = which_on_path("tmux")
+        .ok_or_else(|| "tmux is unavailable; install tmux and restart Psyche".to_string())?;
+    let mut command = CommandBuilder::new(tmux);
+    command.args(attach_args);
+    command.env("PATH", platform::augmented_path());
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env_remove("TMUX");
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| error.to_string())?;
+    register_pty_client(app, options.thread_id, pending_start, pair, child)
+}
+
+#[tauri::command]
+async fn pty_write(
+    webview: tauri::Webview,
+    thread_id: String,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    let (writer, operation_lane, operation_admission) = pty_write_operation(&thread_id)?;
+    let operation_permit = operation_admission
+        .try_acquire_owned()
+        .map_err(|_| format!("thread '{}' PTY operation queue is full", thread_id))?;
+    let operation_guard = operation_lane.lock_owned().await;
+    match tauri::async_runtime::spawn_blocking(move || {
+        pty_write_blocking(writer, bytes, operation_guard, operation_permit)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY write task: {error}")),
+    }
+}
+
+fn pty_write_operation(
+    thread_id: &str,
+) -> Result<
+    (
+        Arc<Mutex<Box<dyn Write + Send>>>,
+        Arc<tokio::sync::Mutex<()>>,
+        Arc<tokio::sync::Semaphore>,
+    ),
+    String,
+> {
+    let guard = PTY_LIFECYCLES.lock();
+    let session = guard
+        .live(thread_id)
+        .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
+    let operation = (
+        Arc::clone(&session.writer),
+        Arc::clone(&session.operation_lane),
+        Arc::clone(&session.operation_admission),
+    );
+    drop(guard);
+    Ok(operation)
+}
+
+fn pty_write_blocking(
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    bytes: Vec<u8>,
+    _operation_guard: tokio::sync::OwnedMutexGuard<()>,
+    _operation_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(), String> {
     let mut writer = writer.lock();
     writer.write_all(&bytes).map_err(|e| e.to_string())?;
     writer.flush().map_err(|e| e.to_string())?;
@@ -2832,38 +3272,66 @@ fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pty_ack(thread_id: String, sequence: u64) -> Result<(), String> {
-    let pump = {
-        let guard = PTY_LIFECYCLES.lock();
-        let session = guard
-            .live(&thread_id)
-            .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
-        session.pump.clone()
+async fn pty_resize(
+    webview: tauri::Webview,
+    thread_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    let Some((master, operation_lane, operation_admission)) = pty_resize_operation(&thread_id)
+    else {
+        return Ok(());
     };
-    pump.acknowledge(sequence)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    let operation_permit = operation_admission
+        .try_acquire_owned()
+        .map_err(|_| format!("thread '{}' PTY operation queue is full", thread_id))?;
+    let operation_guard = operation_lane.lock_owned().await;
+    match tauri::async_runtime::spawn_blocking(move || {
+        pty_resize_blocking(master, cols, rows, operation_guard, operation_permit)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY resize task: {error}")),
+    }
 }
 
-#[tauri::command]
-fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
-    let master = {
-        let guard = PTY_LIFECYCLES.lock();
-        guard
-            .live(&thread_id)
-            .map(|session| Arc::clone(&session.master))
-    };
-    if let Some(master) = master {
-        master
-            .lock()
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| e.to_string())?;
-    }
+fn pty_resize_operation(
+    thread_id: &str,
+) -> Option<(
+    Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    Arc<tokio::sync::Mutex<()>>,
+    Arc<tokio::sync::Semaphore>,
+)> {
+    let guard = PTY_LIFECYCLES.lock();
+    let operation = guard.live(thread_id).map(|session| {
+        (
+            Arc::clone(&session.master),
+            Arc::clone(&session.operation_lane),
+            Arc::clone(&session.operation_admission),
+        )
+    });
+    drop(guard);
+    operation
+}
+
+fn pty_resize_blocking(
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    cols: u16,
+    rows: u16,
+    _operation_guard: tokio::sync::OwnedMutexGuard<()>,
+    _operation_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(), String> {
+    master
+        .lock()
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -2877,7 +3345,8 @@ struct PtyStopResult {
 }
 
 #[tauri::command]
-fn pty_stop(thread_id: String) -> Result<PtyStopResult, String> {
+fn pty_stop(webview: tauri::Webview, thread_id: String) -> Result<PtyStopResult, String> {
+    ensure_trusted_pty_caller(webview.label())?;
     let action = {
         let mut registry = PTY_LIFECYCLES.lock();
         registry
@@ -2907,8 +3376,84 @@ fn pty_stop(thread_id: String) -> Result<PtyStopResult, String> {
 }
 
 #[tauri::command]
-fn pty_list() -> Vec<String> {
-    PTY_LIFECYCLES.lock().live_thread_ids()
+fn pty_ack(
+    webview: tauri::Webview,
+    thread_id: String,
+    sequence: u64,
+) -> Result<AckOutcome, String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    pty_ack_inner(thread_id, sequence)
+}
+
+fn pty_ack_inner(thread_id: String, sequence: u64) -> Result<AckOutcome, String> {
+    let pump = clone_live_pty_pump(&thread_id)?;
+    pump.acknowledge(sequence)
+        .map(AckOutcome::from)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pty_set_visibility(
+    webview: tauri::Webview,
+    thread_id: String,
+    visible: bool,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    pty_set_visibility_inner(thread_id, visible)
+}
+
+fn pty_set_visibility_inner(thread_id: String, visible: bool) -> Result<(), String> {
+    let pump = clone_live_pty_pump(&thread_id)?;
+    pump.set_visibility(if visible {
+        TransportPaneVisibility::Visible
+    } else {
+        TransportPaneVisibility::Hidden
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn pty_list(webview: tauri::Webview) -> Result<Vec<String>, String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    Ok(PTY_LIFECYCLES.lock().live_thread_ids())
+}
+
+#[tauri::command]
+fn pty_transport_metrics(
+    webview: tauri::Webview,
+    thread_id: Option<String>,
+) -> Result<Vec<PtyTransportSnapshot>, String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    Ok(pty_transport_metrics_inner(thread_id))
+}
+
+fn pty_transport_metrics_inner(thread_id: Option<String>) -> Vec<PtyTransportSnapshot> {
+    let pumps = match thread_id {
+        Some(thread_id) => {
+            if validate_pty_thread_id(&thread_id).is_err() {
+                return Vec::new();
+            }
+            let guard = PTY_LIFECYCLES.lock();
+            guard
+                .live(&thread_id)
+                .map(|session| vec![session.pump.clone()])
+                .unwrap_or_default()
+        }
+        None => {
+            let guard = PTY_LIFECYCLES.lock();
+            guard
+                .live_sessions()
+                .into_iter()
+                .map(|(_, session)| session.pump.clone())
+                .collect::<Vec<_>>()
+        }
+    };
+    let mut snapshots = pumps
+        .into_iter()
+        .map(|pump| PtyTransportSnapshot::from(pump.snapshot()))
+        .collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+    snapshots
 }
 
 #[tauri::command]
@@ -2944,6 +3489,353 @@ async fn workspace_metrics(
 // Embedded browser pane (Tauri child Webview)
 // ----------------------------------------------------------------------------
 
+#[derive(Clone, Serialize)]
+struct BrowserAppShortcutPayload {
+    label: String,
+    url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserAutomationResultError {
+    code: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserAutomationCorrelation {
+    action_id: String,
+    tab_id: String,
+    generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserAutomationSuccessResult {
+    action_id: String,
+    tab_id: String,
+    generation: u64,
+    value: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserAutomationFailureResult {
+    action_id: String,
+    tab_id: String,
+    generation: u64,
+    error: BrowserAutomationResultError,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+enum BrowserAutomationResultPayload {
+    Success(BrowserAutomationSuccessResult),
+    Failure(BrowserAutomationFailureResult),
+}
+
+#[derive(Default)]
+struct BrowserAutomationAuthorizations {
+    by_label: Mutex<HashMap<String, BrowserAutomationCorrelation>>,
+}
+
+impl BrowserAutomationAuthorizations {
+    fn install(&self, label: &str, correlation: BrowserAutomationCorrelation) {
+        self.by_label.lock().insert(label.to_string(), correlation);
+    }
+
+    fn consume(&self, label: &str, correlation: &BrowserAutomationCorrelation) -> bool {
+        let mut authorizations = self.by_label.lock();
+        if authorizations.get(label) != Some(correlation) {
+            return false;
+        }
+        authorizations.remove(label);
+        true
+    }
+
+    fn remove(&self, label: &str) -> bool {
+        self.by_label.lock().remove(label).is_some()
+    }
+}
+
+impl BrowserAutomationResultPayload {
+    fn correlation(&self) -> BrowserAutomationCorrelation {
+        match self {
+            Self::Success(result) => BrowserAutomationCorrelation {
+                action_id: result.action_id.clone(),
+                tab_id: result.tab_id.clone(),
+                generation: result.generation,
+            },
+            Self::Failure(result) => BrowserAutomationCorrelation {
+                action_id: result.action_id.clone(),
+                tab_id: result.tab_id.clone(),
+                generation: result.generation,
+            },
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let correlation = self.correlation();
+        if correlation.action_id.is_empty()
+            || correlation.action_id.len() > 128
+            || correlation.tab_id.is_empty()
+            || correlation.tab_id.len() > 128
+        {
+            return Err("browser automation result correlation is invalid".to_string());
+        }
+        if correlation.generation > 9_007_199_254_740_991 {
+            return Err("browser automation result generation is invalid".to_string());
+        }
+        if let Self::Failure(result) = self {
+            const ALLOWED_CODES: &[&str] = &[
+                "action_cancelled",
+                "automation_failed",
+                "backend_unavailable",
+                "bad_request",
+                "effect_unknown",
+                "ref_missing",
+                "result_too_large",
+                "serialization_failed",
+                "snapshot_stale",
+                "target_changed",
+                "target_unavailable",
+                "unsupported_operation",
+            ];
+            if !ALLOWED_CODES.contains(&result.error.code.as_str()) {
+                return Err("browser automation result error code is invalid".to_string());
+            }
+        }
+        let encoded = serde_json::to_vec(self).map_err(|error| error.to_string())?;
+        if encoded.len() > MAX_PROVIDER_RESULT_BYTES {
+            return Err("browser automation result is too large".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct BrowserShortcutAuthorization {
+    initial_secret: String,
+    current_secret: String,
+    last_accepted: Option<Instant>,
+}
+
+#[derive(Default)]
+struct BrowserShortcutAuthorizations {
+    by_label: Mutex<HashMap<String, BrowserShortcutAuthorization>>,
+}
+
+impl BrowserShortcutAuthorizations {
+    fn install(&self, label: &str, initial_secret: String) {
+        self.by_label.lock().insert(
+            label.to_string(),
+            BrowserShortcutAuthorization {
+                current_secret: initial_secret.clone(),
+                initial_secret,
+                last_accepted: None,
+            },
+        );
+    }
+
+    fn reset(&self, label: &str) -> bool {
+        let mut authorizations = self.by_label.lock();
+        let Some(authorization) = authorizations.get_mut(label) else {
+            return false;
+        };
+        authorization.current_secret = authorization.initial_secret.clone();
+        authorization.last_accepted = None;
+        true
+    }
+
+    fn remove(&self, label: &str) -> bool {
+        self.by_label.lock().remove(label).is_some()
+    }
+
+    fn authorize_and_rotate<GenerateSecret, Dispatch>(
+        &self,
+        label: &str,
+        supplied_secret: &str,
+        now: Instant,
+        generate_secret: GenerateSecret,
+        dispatch: Dispatch,
+    ) -> Result<String, String>
+    where
+        GenerateSecret: FnOnce() -> Result<String, String>,
+        Dispatch: FnOnce() -> Result<(), String>,
+    {
+        if !label.starts_with(BROWSER_LABEL_PREFIX) {
+            return Err(
+                "browser app shortcut caller is not an embedded browser webview".to_string(),
+            );
+        }
+
+        let mut authorizations = self.by_label.lock();
+        let authorization = authorizations
+            .get_mut(label)
+            .ok_or_else(|| "browser app shortcut authorization is missing".to_string())?;
+        if !browser_shortcut_secrets_match(&authorization.current_secret, supplied_secret) {
+            return Err("browser app shortcut secret is invalid".to_string());
+        }
+        if authorization.last_accepted.is_some_and(|last_accepted| {
+            now.saturating_duration_since(last_accepted) < MIN_BROWSER_SHORTCUT_INTERVAL
+        }) {
+            return Err("browser app shortcut rate limit exceeded".to_string());
+        }
+
+        let next_secret = generate_secret()?;
+        if next_secret.is_empty()
+            || browser_shortcut_secrets_match(&authorization.current_secret, &next_secret)
+        {
+            return Err("browser app shortcut secret rotation failed".to_string());
+        }
+        dispatch()?;
+        authorization.current_secret = next_secret.clone();
+        authorization.last_accepted = Some(now);
+        Ok(next_secret)
+    }
+}
+
+fn browser_shortcut_secrets_match(expected: &str, supplied: &str) -> bool {
+    expected.len() == supplied.len()
+        && expected
+            .bytes()
+            .zip(supplied.bytes())
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
+}
+
+fn random_browser_shortcut_secret() -> Result<String, String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| format!("failed to generate browser shortcut secret: {error}"))?;
+    let mut secret = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        secret.push(HEX[(byte >> 4) as usize] as char);
+        secret.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(secret)
+}
+
+fn browser_shortcut_initialization_script(initial_secret: &str) -> Result<String, String> {
+    let secret_json = serde_json::to_string(initial_secret).map_err(|error| error.to_string())?;
+    Ok(r#"(function(initialSecret) {
+          try {
+            if (window.top !== window) return;
+            var core = window.__TAURI__ && window.__TAURI__.core;
+            if (!core || typeof core.invoke !== "function") return;
+            var invoke = core.invoke;
+            var promiseThen = Promise.prototype.then;
+            var reflectApply = Reflect.apply;
+            var stringToLowerCase = String.prototype.toLowerCase;
+            var secret = initialSecret;
+            window.addEventListener("keydown", function(event) {
+              try {
+                if (event.isTrusted !== true || event.repeat) return;
+                var key = event.key ? reflectApply(stringToLowerCase, event.key, []) : "";
+                var primary = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
+                var shortcut = "";
+                if ((event.metaKey || event.ctrlKey) && key === "t") {
+                  shortcut = "terminal-pane";
+                } else if (primary && key === "d") {
+                  shortcut = "agent-pane";
+                } else if (primary && key === "f") {
+                  shortcut = "composer";
+                } else {
+                  return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                var pending = reflectApply(invoke, core, [
+                  "browser_app_shortcut",
+                  { shortcut: shortcut, url: location.href, secret: secret }
+                ]);
+                reflectApply(promiseThen, pending, [
+                  function(nextSecret) {
+                    if (typeof nextSecret === "string" && nextSecret) {
+                      secret = nextSecret;
+                    }
+                  },
+                  function() {}
+                ]);
+              } catch (_) {}
+            }, true);
+          } catch (_) {}
+        })(__PSYCHE_BROWSER_SHORTCUT_INITIAL_SECRET__);"#
+        .replace("__PSYCHE_BROWSER_SHORTCUT_INITIAL_SECRET__", &secret_json))
+}
+
+fn resolve_browser_app_shortcut(label: &str, shortcut: &str) -> Result<&'static str, String> {
+    if !label.starts_with(BROWSER_LABEL_PREFIX) {
+        return Err("browser app shortcut caller is not an embedded browser webview".to_string());
+    }
+
+    match shortcut {
+        "terminal-pane" => Ok("browser:shortcut-terminal-pane"),
+        "agent-pane" => Ok("browser:shortcut-agent-pane"),
+        "composer" => Ok("browser:shortcut-composer"),
+        _ => Err(format!("unknown browser app shortcut: {shortcut}")),
+    }
+}
+
+#[tauri::command]
+fn browser_app_shortcut(
+    webview: tauri::Webview,
+    authorizations: State<'_, BrowserShortcutAuthorizations>,
+    shortcut: String,
+    url: String,
+    secret: String,
+) -> Result<String, String> {
+    let event = resolve_browser_app_shortcut(webview.label(), &shortcut)?;
+    authorizations.authorize_and_rotate(
+        webview.label(),
+        &secret,
+        Instant::now(),
+        random_browser_shortcut_secret,
+        || {
+            let main = webview
+                .app_handle()
+                .get_webview("main")
+                .ok_or_else(|| "main webview missing".to_string())?;
+            main.set_focus().map_err(|error| error.to_string())?;
+            webview
+                .app_handle()
+                .emit_to(
+                    "main",
+                    event,
+                    BrowserAppShortcutPayload {
+                        label: webview.label().to_string(),
+                        url,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
+#[tauri::command]
+fn browser_automation_result(
+    webview: tauri::Webview,
+    authorizations: State<'_, BrowserAutomationAuthorizations>,
+    result: BrowserAutomationResultPayload,
+) -> Result<(), String> {
+    if !webview.label().starts_with(BROWSER_LABEL_PREFIX) {
+        return Err(
+            "browser automation result caller is not an embedded browser webview".to_string(),
+        );
+    }
+    result.validate()?;
+    if !authorizations.consume(webview.label(), &result.correlation()) {
+        return Err("browser automation result does not match a pending action".to_string());
+    }
+    webview
+        .app_handle()
+        .emit_to("main", "browser:automation-result", result)
+        .map_err(|error| error.to_string())
+}
+
 fn ensure_browser(
     app: &AppHandle,
     label: &str,
@@ -2952,6 +3844,7 @@ fn ensure_browser(
     w: f64,
     h: f64,
     url: &str,
+    automation_source: &str,
 ) -> Result<bool, String> {
     if app.webviews().keys().any(|existing| existing == label) {
         return Ok(false);
@@ -2962,30 +3855,36 @@ fn ensure_browser(
         .ok_or_else(|| "main window missing".to_string())?;
 
     let parsed_url = Url::parse(url).map_err(|e| e.to_string())?;
+    let initial_secret = random_browser_shortcut_secret()?;
+    let shortcut_script = browser_shortcut_initialization_script(&initial_secret)?;
+    app.state::<BrowserShortcutAuthorizations>()
+        .install(label, initial_secret.clone());
     let browser_label = label.to_string();
     let app_for_load = app.clone();
-    let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url)).on_page_load(
-        move |webview, payload| {
+    let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url))
+        .initialization_script(shortcut_script)
+        .initialization_script(automation_source)
+        .on_page_load(move |webview, payload| {
+            if matches!(payload.event(), PageLoadEvent::Started) {
+                app_for_load
+                    .state::<BrowserShortcutAuthorizations>()
+                    .reset(&browser_label);
+                app_for_load
+                    .state::<BrowserAutomationAuthorizations>()
+                    .remove(&browser_label);
+            }
             let phase = match payload.event() {
                 PageLoadEvent::Started => "started",
                 PageLoadEvent::Finished => "finished",
             };
-            if matches!(payload.event(), PageLoadEvent::Started) {
-                if let Ok(current_url) = webview.url() {
-                    update_browser_binding_navigation(
-                        &app_for_load,
-                        &browser_label,
-                        payload.url().as_str(),
-                        current_url.as_str(),
-                    );
-                }
-            }
+<<OURS>>
             let _ = app_for_load.emit(
                 "browser:page-load",
                 BrowserPageLoadEvent {
                     label: browser_label.clone(),
                     url: payload.url().to_string(),
                     phase: phase.to_string(),
+                    navigation_token,
                 },
             );
             if matches!(payload.event(), PageLoadEvent::Finished) {
@@ -3000,17 +3899,8 @@ fn ensure_browser(
                         }};
                         var title = document.title || location.hostname || location.href;
                         emit("browser:title", {{ label: browserLabel, title: title, url: location.href }});
-                        if (!window.__PSYCHE_BROWSER_SHORTCUTS_INSTALLED__) {{
-                          window.__PSYCHE_BROWSER_SHORTCUTS_INSTALLED__ = true;
-                          window.addEventListener("keydown", function(event) {{
-                            try {{
-                              if ((event.metaKey || event.ctrlKey) && event.key && event.key.toLowerCase() === "t") {{
-                                event.preventDefault();
-                                event.stopPropagation();
-                                emit("browser:shortcut-terminal-pane", {{ label: browserLabel, url: location.href }});
-                              }}
-                            }} catch (_) {{}}
-                          }}, true);
+                        if (!window.__PSYCHE_BROWSER_FOCUS_INSTALLED__) {{
+                          window.__PSYCHE_BROWSER_FOCUS_INSTALLED__ = true;
                           window.addEventListener("pointerdown", function() {{
                             emit("browser:focus", {{ label: browserLabel, url: location.href }});
                           }}, true);
@@ -3024,15 +3914,16 @@ fn ensure_browser(
                 );
                 let _ = webview.eval(&script);
             }
-        },
-    );
+        });
 
-    main.add_child(
+    if let Err(error) = main.add_child(
         builder,
         LogicalPosition::new(x, y),
         LogicalSize::new(w.max(1.0), h.max(1.0)),
-    )
-    .map_err(|e| e.to_string())?;
+    ) {
+        app.state::<BrowserShortcutAuthorizations>().remove(label);
+        return Err(error.to_string());
+    }
 
     Ok(true)
 }
@@ -3047,8 +3938,68 @@ fn hide_webview(webview: &tauri::Webview) -> Result<(), String> {
     Ok(())
 }
 
+fn cleanup_created_browser_after_setup_failure(
+    created: bool,
+    close: impl FnOnce() -> Result<(), String>,
+) {
+    if created {
+        let _ = close();
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn start_browser_navigation(
+    webview: &tauri::Webview,
+    label: &str,
+    url: &str,
+) -> Result<(), String> {
+    let label = label.to_string();
+    let url = url.to_string();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    webview
+        .with_webview(move |platform_webview| unsafe {
+            let result = (|| {
+                let wk_webview = &*(platform_webview.inner().cast::<WKWebView>());
+                let delegate = wk_webview
+                    .navigationDelegate()
+                    .ok_or_else(|| "browser navigation delegate is unavailable".to_string())?;
+                let delegate_object = &*((&*delegate) as *const _ as *const AnyObject);
+                install_browser_navigation_identity_hook(delegate_object)?;
+                let url_string = NSString::from_str(&url);
+                let native_url = NSURL::URLWithString(&url_string)
+                    .ok_or_else(|| "browser navigation URL is invalid".to_string())?;
+                let request = NSURLRequest::requestWithURL(&native_url);
+                let navigation = wk_webview
+                    .loadRequest(&request)
+                    .ok_or_else(|| "browser navigation did not start".to_string())?;
+                let navigation_identity = (&*navigation) as *const WKNavigation as usize;
+                let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+                let waiter = waiters
+                    .get_mut(&label)
+                    .ok_or_else(|| "browser navigation waiter is missing".to_string())?;
+                waiter.navigation_identity = Some(navigation_identity);
+                Ok(())
+            })();
+            let _ = sender.send(result);
+        })
+        .map_err(|error| error.to_string())?;
+    receiver
+        .await
+        .map_err(|_| "browser navigation setup was cancelled".to_string())?
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn start_browser_navigation(
+    _webview: &tauri::Webview,
+    _label: &str,
+    _url: &str,
+) -> Result<(), String> {
+    Err("backend_unavailable: exact browser navigation identity is unsupported".to_string())
+}
+
 #[tauri::command]
-fn browser_navigate(
+async fn browser_navigate(
+    webview: tauri::Webview,
     app: AppHandle,
     caller: tauri::Webview,
     bindings: State<'_, BrowserBindingState>,
@@ -3060,44 +4011,12 @@ fn browser_navigate(
     y: f64,
     w: f64,
     h: f64,
-) -> Result<(), String> {
-    require_main_webview(&caller)?;
-    let label = safe_browser_label(label);
-    let navigation_epoch = bindings
-        .bindings
-        .lock()
-        .get(&tab_id)
-        .map_or(1, |binding| binding.navigation_epoch.saturating_add(1));
-    let (parsed_url, canonical_url) = parse_browser_navigation_url(&url)?;
-    let proposed = BrowserBinding {
-        label: label.clone(),
-        generation,
-        navigation_epoch,
-        navigation_url: canonical_url.clone(),
-        revision: 0,
-    };
-    let operation_tab_id = tab_id.clone();
-    commit_browser_navigation_after(&bindings, tab_id, proposed, || {
-        if let Some(webview) = app.get_webview(&label) {
-            webview
-                .set_position(LogicalPosition::new(x, y))
-                .map_err(|e| e.to_string())?;
-            webview
-                .set_size(LogicalSize::new(w.max(1.0), h.max(1.0)))
-                .map_err(|e| e.to_string())?;
-            mark_browser_binding_dispatched(&bindings, &operation_tab_id)?;
-            webview.navigate(parsed_url).map_err(|e| e.to_string())?;
-        } else {
-            mark_browser_binding_dispatched(&bindings, &operation_tab_id)?;
-            ensure_browser(&app, &label, x, y, w, h, &canonical_url)?;
-        }
-        Ok(())
-    })?;
-    Ok(())
+<<OURS>>
 }
 
 #[tauri::command]
 fn browser_set_bounds(
+    webview: tauri::Webview,
     app: AppHandle,
     label: Option<String>,
     x: f64,
@@ -3105,6 +4024,7 @@ fn browser_set_bounds(
     w: f64,
     h: f64,
 ) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
         webview
@@ -3118,7 +4038,12 @@ fn browser_set_bounds(
 }
 
 #[tauri::command]
-fn browser_hide(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_hide(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
         hide_webview(&webview)?;
@@ -3127,7 +4052,12 @@ fn browser_hide(app: AppHandle, label: Option<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn browser_hide_all_except(app: AppHandle, label: Option<String>) -> Result<(), String> {
+fn browser_hide_all_except(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    ensure_trusted_browser_caller(webview.label())?;
     let keep = label.map(|raw| safe_browser_label(Some(raw)));
     for (existing_label, webview) in app.webviews() {
         if existing_label.starts_with(BROWSER_LABEL_PREFIX) && Some(existing_label.clone()) != keep
@@ -3138,177 +4068,18 @@ fn browser_hide_all_except(app: AppHandle, label: Option<String>) -> Result<(), 
     Ok(())
 }
 
-fn close_native_browser_webview(app: &AppHandle, native_label: &str) -> Result<bool, String> {
-    if let Some(webview) = app.get_webview(native_label) {
+<<OURS>>
         webview.close().map_err(|error| error.to_string())?;
         Ok(true)
     } else {
         Ok(false)
     }
-}
-
-fn normalize_renderer_browser_label(raw_label: &str) -> String {
-    safe_browser_label(Some(raw_label.to_string()))
-}
-
-fn validate_managed_renderer_browser_label(raw_label: &str) -> Result<String, String> {
-    if raw_label.is_empty()
-        || raw_label.starts_with(BROWSER_LABEL_PREFIX)
-        || !raw_label.contains("__")
-        || raw_label.len() > 64
-        || !raw_label.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '-' || character == '_'
-        })
-    {
-        return Err("invalid managed browser label".to_string());
-    }
-    Ok(normalize_renderer_browser_label(raw_label))
-}
-
-fn destroy_native_browser_binding_after(
-    bindings: &BrowserBindingState,
-    script_flights: &BrowserScriptFlightState,
-    native_label: &str,
-    allow_managed_absence: bool,
-    operation: impl FnOnce() -> Result<bool, String>,
-) -> Result<Vec<String>, String> {
-    let tombstones = {
-        let mut operations = bindings.operations.lock();
-        let mut current_bindings = bindings.bindings.lock();
-        let mut tab_ids = current_bindings
-            .iter()
-            .filter(|(_, binding)| binding.label == native_label)
-            .map(|(tab_id, _)| tab_id.clone())
-            .collect::<Vec<_>>();
-        for (tab_id, operation) in operations.iter() {
-            let matches_label = match operation {
-                BrowserOperation::Binding(reservation) => {
-                    reservation.proposed.label == native_label
-                }
-                BrowserOperation::Destroying(tombstone) => {
-                    tombstone
-                        .binding
-                        .as_ref()
-                        .is_some_and(|binding| binding.label == native_label)
-                        || tombstone
-                            .reservation
-                            .as_ref()
-                            .is_some_and(|reservation| reservation.proposed.label == native_label)
-                }
-                BrowserOperation::Script(_) | BrowserOperation::Semantic(_) => current_bindings
-                    .get(tab_id)
-                    .is_some_and(|binding| binding.label == native_label),
-            };
-            if matches_label && !tab_ids.contains(tab_id) {
-                tab_ids.push(tab_id.clone());
-            }
-        }
-        if tab_ids.iter().any(|tab_id| {
-            matches!(
-                operations.get(tab_id),
-                Some(BrowserOperation::Destroying(_) | BrowserOperation::Semantic(_))
-            )
-        }) {
-            return Err("effect_in_flight".to_string());
-        }
-        tab_ids
-            .into_iter()
-            .map(|tab_id| {
-                let binding = current_bindings.remove(&tab_id);
-                let (reservation, script) = match operations.remove(&tab_id) {
-                    Some(BrowserOperation::Binding(reservation)) => (Some(reservation), None),
-                    Some(BrowserOperation::Script(script)) => (None, Some(script)),
-                    None => (None, None),
-                    Some(BrowserOperation::Destroying(_) | BrowserOperation::Semantic(_)) => {
-                        unreachable!()
-                    }
-                };
-                let tombstone = BrowserDestroyTombstone {
-                    revision: next_browser_binding_revision(),
-                    binding,
-                    reservation,
-                    script,
-                };
-                operations.insert(
-                    tab_id.clone(),
-                    BrowserOperation::Destroying(tombstone.clone()),
-                );
-                (tab_id, tombstone)
-            })
-            .collect::<Vec<_>>()
-    };
-    let restore = |tombstones: &[(String, BrowserDestroyTombstone)]| {
-        let mut operations = bindings.operations.lock();
-        let mut current_bindings = bindings.bindings.lock();
-        for (tab_id, tombstone) in tombstones {
-            if operations.get(tab_id) != Some(&BrowserOperation::Destroying(tombstone.clone())) {
-                continue;
-            }
-            operations.remove(tab_id);
-            if let Some(reservation) = &tombstone.reservation {
-                operations.insert(
-                    tab_id.clone(),
-                    BrowserOperation::Binding(reservation.clone()),
-                );
-            }
-            if let Some(script) = &tombstone.script {
-                operations.insert(tab_id.clone(), BrowserOperation::Script(script.clone()));
-            }
-            if let Some(binding) = &tombstone.binding {
-                current_bindings
-                    .entry(tab_id.clone())
-                    .or_insert_with(|| binding.clone());
-            }
-        }
-    };
-    let webview_existed = match operation() {
-        Ok(existed) => existed,
-        Err(error) => {
-            restore(&tombstones);
-            return Err(error);
-        }
-    };
-    if !webview_existed && tombstones.is_empty() && !allow_managed_absence {
-        restore(&tombstones);
-        return Err("browser webview and binding missing".to_string());
-    }
-    let mut removed = Vec::new();
-    let mut operations = bindings.operations.lock();
-    for (tab_id, tombstone) in tombstones {
-        if operations.get(&tab_id) == Some(&BrowserOperation::Destroying(tombstone)) {
-            operations.remove(&tab_id);
-            removed.push(tab_id);
-        }
-    }
-    script_flights.clear_realm_allocations(&removed);
-    Ok(removed)
+<<OURS>>
 }
 
 #[tauri::command]
 fn browser_destroy(
-    app: AppHandle,
-    caller: tauri::Webview,
-    bindings: State<'_, BrowserBindingState>,
-    script_flights: State<'_, BrowserScriptFlightState>,
-    tab_id: String,
-    raw_label: Option<String>,
-) -> Result<(), String> {
-    require_main_webview(&caller)?;
-    let binding = bindings.bindings.lock().get(&tab_id).cloned();
-    let (native_label, allow_managed_absence) = if let Some(binding) = binding {
-        (binding.label, false)
-    } else {
-        let raw_label = raw_label.ok_or_else(|| "browser binding missing".to_string())?;
-        (validate_managed_renderer_browser_label(&raw_label)?, true)
-    };
-    destroy_native_browser_binding_after(
-        &bindings,
-        &script_flights,
-        &native_label,
-        allow_managed_absence,
-        || close_native_browser_webview(&app, &native_label),
-    )?;
-    Ok(())
+<<OURS>>
 }
 
 #[derive(Serialize)]
@@ -3327,12 +4098,7 @@ struct BrowserDestroyManyOutcome {
 
 #[tauri::command]
 fn browser_destroy_many(
-    app: AppHandle,
-    caller: tauri::Webview,
-    bindings: State<'_, BrowserBindingState>,
-    script_flights: State<'_, BrowserScriptFlightState>,
-    labels: Vec<String>,
-) -> BrowserDestroyManyOutcome {
+<<OURS>>
     let mut outcome = BrowserDestroyManyOutcome {
         destroyed: Vec::new(),
         failures: Vec::new(),
@@ -3372,2461 +4138,12 @@ fn browser_destroy_many(
             }),
         }
     }
-    outcome
+    Ok(outcome)
 }
 
 #[tauri::command]
 fn browser_reload(
-    app: AppHandle,
-    caller: tauri::Webview,
-    bindings: State<'_, BrowserBindingState>,
-    tab_id: String,
-    generation: u64,
-) -> Result<(), String> {
-    require_main_webview(&caller)?;
-    let binding = browser_binding(&bindings, &tab_id, generation)?;
-    let webview = app
-        .get_webview(&binding.label)
-        .ok_or_else(|| "browser webview missing".to_string())?;
-    webview.reload().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-const MAX_BROWSER_SNAPSHOT_PNG_BYTES: usize = 4 * 1024 * 1024;
-const MAX_BROWSER_INSPECTION_BYTES: usize = 2 * 1024 * 1024;
-const BROWSER_INSPECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-const MAX_BROWSER_SCRIPT_SOURCE_BYTES: usize = 64 * 1024;
-const MAX_BROWSER_SCRIPT_ARGS_BYTES: usize = 256 * 1024;
-const MAX_BROWSER_SCRIPT_RESULT_BYTES: usize = 256 * 1024;
-const BROWSER_SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-const BROWSER_SCRIPT_DEADLINE_OBSERVATION_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(250);
-const BROWSER_SCRIPT_CONTEXT_WORLD_NAME: &str = "com.opencoven.psyche.browser-script-context";
-const MAX_BROWSER_SCRIPT_REALM_SLOTS: usize = 32;
-
-fn browser_script_execution_world_name(slot: usize) -> String {
-    format!("com.opencoven.psyche.browser-script-invocation-slot-{slot}")
-}
-
-#[cfg(test)]
-mod browser_snapshot_tests {
-    use super::*;
-
-    #[test]
-    fn rejected_script_callback_is_stable_only_when_the_document_token_is_unchanged() {
-        let callback = Err::<String, _>("script_execution_failed".to_string());
-        assert_eq!(
-            classify_browser_script_callback(
-                callback.clone(),
-                "approved-token",
-                Ok("approved-token".into())
-            ),
-            Err("script_execution_failed".to_string())
-        );
-        assert_eq!(
-            classify_browser_script_callback(
-                callback.clone(),
-                "approved-token",
-                Ok("replacement-token".into())
-            ),
-            Err("effect_unknown".to_string())
-        );
-        assert_eq!(
-            classify_browser_script_callback(
-                callback,
-                "approved-token",
-                Err("probe unavailable".into())
-            ),
-            Err("effect_unknown".to_string())
-        );
-        assert_eq!(
-            classify_browser_script_callback(
-                Ok("old result"),
-                "approved-token",
-                Ok("replacement-token".into())
-            ),
-            Err("effect_unknown".to_string())
-        );
-    }
-
-    #[test]
-    fn browser_script_preflight_requires_the_exact_approved_document() {
-        assert_eq!(
-            classify_browser_script_preflight_token("approved", Ok("approved".into())),
-            Ok(())
-        );
-        assert_eq!(
-            classify_browser_script_preflight_token("approved", Ok("replacement".into())),
-            Err("approval_identity_mismatch".into())
-        );
-        assert_eq!(
-            classify_browser_script_preflight_token("approved", Err("probe failed".into())),
-            Err("snapshot_stale".into())
-        );
-    }
-
-    #[test]
-    fn every_post_dispatch_identity_observation_failure_is_unknown() {
-        for error in [
-            "url unavailable",
-            "binding missing",
-            "tab replaced",
-            "webview destroyed",
-        ] {
-            assert_eq!(
-                post_dispatch_identity::<String>(Err(error.into())),
-                Err("effect_unknown".into())
-            );
-        }
-    }
-
-    #[test]
-    fn browser_script_args_are_bounded_at_256_kib() {
-        assert_eq!(
-            validate_browser_script_args(&serde_json::json!({"ok": true})),
-            Ok(())
-        );
-        assert_eq!(
-            validate_browser_script_args(&serde_json::Value::String("x".repeat(256 * 1024))),
-            Err("script_args_too_large".into())
-        );
-        assert!(serde_json::from_str::<BrowserScriptRequest>(
-            r#"{"tabId":"tab","generation":1,"documentId":"doc","documentToken":"token","navigationEpoch":1,"navigationUrl":"https://example.test","source":"1","args":1e400}"#
-        ).is_err());
-    }
-
-    #[test]
-    fn browser_script_callback_duration_over_five_seconds_is_a_timeout() {
-        assert!(!browser_script_runtime_exceeded_deadline(4_999.999));
-        assert!(browser_script_runtime_exceeded_deadline(5_000.0));
-        assert!(browser_script_runtime_exceeded_deadline(5_000.001));
-    }
-
-    #[test]
-    fn delivered_native_result_after_deadline_normalizes_to_exact_timeout() {
-        let response = browser_script_error_response("script_execution_failed", 5_001.0);
-        assert_eq!(response.error_code.as_deref(), Some("action_timeout"));
-        assert_eq!(response.duration_ms, 5_000.0);
-        assert_eq!(response.byte_count, 0);
-        assert!(!response.pending);
-    }
-
-    #[test]
-    fn same_url_token_replacement_at_deadline_stays_unknown() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let binding = BrowserBinding {
-            label: "psyche-browser-tab".into(),
-            generation: 1,
-            navigation_epoch: 1,
-            navigation_url: "https://example.test/".into(),
-            revision: 10,
-        };
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "document".into(),
-                1,
-                "invocation".into(),
-            )
-            .unwrap();
-        let code = finalize_browser_script_deadline(
-            &bindings,
-            &flights,
-            "tab",
-            "document",
-            1,
-            "invocation",
-            &binding,
-            Ok((binding.clone(), "replacement".into())),
-        );
-        let response = browser_script_error_response(&code, 5_000.0);
-        assert_eq!(response.error_code.as_deref(), Some("effect_unknown"));
-        assert_eq!(response.duration_ms, 5_000.0);
-        assert_eq!(response.byte_count, 0);
-    }
-
-    #[test]
-    fn unchanged_document_at_deadline_is_exact_timeout() {
-        let response = browser_script_error_response("action_timeout", 5_000.0);
-        assert_eq!(response.error_code.as_deref(), Some("action_timeout"));
-        assert_eq!(response.duration_ms, 5_000.0);
-        assert_eq!(response.byte_count, 0);
-    }
-
-    #[test]
-    fn post_submission_channel_failure_retains_the_exact_native_script_flight() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "document".into(),
-                1,
-                "invocation".into(),
-            )
-            .unwrap();
-        let response = browser_script_pending_unknown_response(17.0);
-        assert_eq!(response.error_code.as_deref(), Some("unknown_pending"));
-        assert_eq!(response.duration_ms, 17.0);
-        assert_eq!(response.byte_count, 0);
-        assert!(response.pending);
-        assert!(matches!(
-            bindings.operations.lock().get("tab"),
-            Some(BrowserOperation::Script(flight))
-                if flight.document_token == "document"
-                    && flight.generation == 1
-                    && flight.invocation_id == "invocation"
-        ));
-    }
-
-    #[tokio::test]
-    async fn buffered_callback_is_drained_and_clears_only_its_exact_native_script_flight() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "document".into(),
-                1,
-                "invocation".into(),
-            )
-            .unwrap();
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        sender.send(Ok("buffered".to_string())).unwrap();
-        assert!(
-            await_browser_script_terminal(
-                receiver,
-                bindings.operations.clone(),
-                "tab".into(),
-                "document".into(),
-                1,
-                "invocation".into(),
-            )
-            .await
-        );
-        assert!(!bindings.operations.lock().contains_key("tab"));
-    }
-
-    #[test]
-    fn semantic_browser_effects_are_fenced_by_exact_native_operations_per_tab() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        flights
-            .reserve(
-                &bindings,
-                "tab-a".into(),
-                "document".into(),
-                1,
-                "invocation".into(),
-            )
-            .unwrap();
-        assert_eq!(
-            reserve_browser_semantic_effect(&bindings, "tab-a", 1).map(drop),
-            Err("effect_in_flight".to_string())
-        );
-        assert_eq!(
-            reserve_browser_semantic_effect(&bindings, "tab-a", 2).map(drop),
-            Err("effect_in_flight".to_string())
-        );
-        let independent = reserve_browser_semantic_effect(&bindings, "tab-b", 1).unwrap();
-        drop(independent);
-        assert!(flights.clear_matching_invocation(&bindings, "tab-a", "document", 1, "invocation"));
-        let released = reserve_browser_semantic_effect(&bindings, "tab-a", 1).unwrap();
-        drop(released);
-        assert!(bindings.operations.lock().is_empty());
-    }
-
-    #[test]
-    fn main_thread_submission_delay_is_not_charged_to_script_budget() {
-        assert_eq!(
-            remaining_browser_script_duration(std::time::Duration::ZERO),
-            BROWSER_SCRIPT_TIMEOUT
-        );
-    }
-
-    #[test]
-    fn slow_executing_ack_reduces_remaining_native_budget() {
-        assert_eq!(
-            remaining_browser_script_duration(std::time::Duration::from_secs(2)),
-            std::time::Duration::from_secs(3)
-        );
-        assert_eq!(
-            remaining_browser_script_duration(std::time::Duration::from_secs(5)),
-            std::time::Duration::ZERO
-        );
-    }
-
-    #[test]
-    fn post_start_native_failures_preserve_exact_authoritative_duration() {
-        assert_eq!(
-            serde_json::to_value(browser_script_error_response(
-                "script_serialization_failed",
-                17.25,
-            ))
-            .unwrap(),
-            serde_json::json!({
-                "value": null, "byteCount": 0, "durationMs": 17.25,
-                "errorCode": "script_serialization_failed", "pending": false,
-            })
-        );
-    }
-
-    #[test]
-    fn old_callback_cannot_clear_a_re_reserved_same_generation_flight() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "token".into(),
-                4,
-                "old-invocation".into(),
-            )
-            .unwrap();
-        assert!(flights.clear_matching_invocation(&bindings, "tab", "token", 4, "old-invocation"));
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "token".into(),
-                4,
-                "new-invocation".into(),
-            )
-            .unwrap();
-        assert!(!flights.clear_matching_invocation(&bindings, "tab", "token", 4, "old-invocation"));
-        assert_eq!(
-            bindings
-                .operations
-                .lock()
-                .get("tab")
-                .and_then(|operation| match operation {
-                    BrowserOperation::Script(flight) => Some(flight.invocation_id.as_str()),
-                    _ => None,
-                }),
-            Some("new-invocation")
-        );
-    }
-
-    #[test]
-    fn confirmed_native_destroy_clears_flight_but_stale_callback_cannot_clear_replacement() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        bindings.bindings.lock().insert(
-            "tab".into(),
-            BrowserBinding {
-                label: "psyche-browser-tab".into(),
-                generation: 7,
-                navigation_epoch: 1,
-                navigation_url: "https://example.test/".into(),
-                revision: 1,
-            },
-        );
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "old-document".into(),
-                7,
-                "old-invocation".into(),
-            )
-            .unwrap();
-        flights
-            .observe_document("tab", "old-document", 7, 1, 1)
-            .unwrap();
-        flights.allocate_realm("tab", "old-document", 7, 1).unwrap();
-        let close_ran = std::cell::Cell::new(false);
-        assert_eq!(
-            destroy_native_browser_binding_after(
-                &bindings,
-                &flights,
-                "psyche-browser-tab",
-                false,
-                || {
-                    close_ran.set(true);
-                    assert_eq!(
-                        flights.reserve(
-                            &bindings,
-                            "tab".into(),
-                            "blocked".into(),
-                            8,
-                            "blocked".into()
-                        ),
-                        Err("effect_in_flight".into())
-                    );
-                    Ok(true)
-                },
-            ),
-            Ok(vec!["tab".to_string()])
-        );
-        assert!(close_ran.get());
-        assert!(!bindings.bindings.lock().contains_key("tab"));
-        assert!(!flights.realm_allocations.lock().contains_key("tab"));
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "new-document".into(),
-                8,
-                "new-invocation".into(),
-            )
-            .unwrap();
-        assert!(!flights.clear_matching_invocation(
-            &bindings,
-            "tab",
-            "old-document",
-            7,
-            "old-invocation"
-        ));
-        assert_eq!(
-            bindings
-                .operations
-                .lock()
-                .get("tab")
-                .and_then(|operation| match operation {
-                    BrowserOperation::Script(flight) => Some(flight.document_token.as_str()),
-                    _ => None,
-                }),
-            Some("new-document")
-        );
-    }
-
-    #[test]
-    fn native_label_destroy_is_transactional_and_absence_requires_a_matching_binding() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let native_label = "psyche-browser-raw-label";
-        bindings.bindings.lock().insert(
-            "tab".into(),
-            BrowserBinding {
-                label: native_label.into(),
-                generation: 7,
-                navigation_epoch: 1,
-                navigation_url: "https://example.test/".into(),
-                revision: 1,
-            },
-        );
-        assert_eq!(
-            destroy_native_browser_binding_after(&bindings, &flights, native_label, false, || {
-                Err("close failed".into())
-            }),
-            Err("close failed".into())
-        );
-        assert!(bindings.bindings.lock().contains_key("tab"));
-        assert_eq!(
-            destroy_native_browser_binding_after(&bindings, &flights, native_label, false, || {
-                Ok(false)
-            }),
-            Ok(vec!["tab".to_string()])
-        );
-        assert!(bindings.bindings.lock().is_empty());
-        assert_eq!(
-            destroy_native_browser_binding_after(&bindings, &flights, native_label, false, || {
-                Ok(false)
-            }),
-            Err("browser webview and binding missing".into())
-        );
-        assert_eq!(
-            validate_managed_renderer_browser_label("project-a__tab-a"),
-            Ok("psyche-browser-project-a__tab-a".into())
-        );
-        assert_eq!(
-            destroy_native_browser_binding_after(&bindings, &flights, native_label, true, || {
-                Ok(false)
-            }),
-            Ok(Vec::<String>::new())
-        );
-        assert!(validate_managed_renderer_browser_label("arbitrary").is_err());
-        assert!(
-            validate_managed_renderer_browser_label("psyche-browser-project-a__tab-a").is_err()
-        );
-    }
-
-    #[test]
-    fn failed_native_destroy_restores_exact_script_flight_and_binding() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let binding = BrowserBinding {
-            label: "psyche-browser-tab".into(),
-            generation: 7,
-            navigation_epoch: 1,
-            navigation_url: "https://example.test/".into(),
-            revision: next_browser_binding_revision(),
-        };
-        bindings
-            .bindings
-            .lock()
-            .insert("tab".into(), binding.clone());
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "document".into(),
-                7,
-                "invocation".into(),
-            )
-            .unwrap();
-        flights
-            .observe_document("tab", "document", 7, binding.revision, 1)
-            .unwrap();
-        flights
-            .allocate_realm("tab", "document", 7, binding.revision)
-            .unwrap();
-
-        assert_eq!(
-            destroy_native_browser_binding_after(
-                &bindings,
-                &flights,
-                "psyche-browser-tab",
-                false,
-                || Err("close failed".into())
-            ),
-            Err("close failed".into())
-        );
-        assert_eq!(bindings.bindings.lock().get("tab"), Some(&binding));
-        assert_eq!(
-            flights
-                .realm_allocations
-                .lock()
-                .get("tab")
-                .unwrap()
-                .next_slot,
-            1
-        );
-        assert!(matches!(
-            bindings.operations.lock().get("tab"),
-            Some(BrowserOperation::Script(BrowserScriptFlight {
-                document_token,
-                generation: 7,
-                invocation_id,
-            })) if document_token == "document" && invocation_id == "invocation"
-        ));
-        assert_eq!(
-            flights.reserve(&bindings, "tab".into(), "other".into(), 7, "other".into()),
-            Err("effect_in_flight".into())
-        );
-    }
-
-    #[test]
-    fn native_label_destroy_many_partial_success_is_exact_and_stale_callback_safe() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        for (tab_id, label) in [
-            ("tab-a", "psyche-browser-raw-a"),
-            ("tab-b", "psyche-browser-raw-b"),
-        ] {
-            bindings.bindings.lock().insert(
-                tab_id.into(),
-                BrowserBinding {
-                    label: label.into(),
-                    generation: 7,
-                    navigation_epoch: 1,
-                    navigation_url: "https://example.test/".into(),
-                    revision: 1,
-                },
-            );
-            flights
-                .reserve(
-                    &bindings,
-                    tab_id.into(),
-                    format!("doc-{tab_id}"),
-                    7,
-                    format!("invocation-{tab_id}"),
-                )
-                .unwrap();
-        }
-        assert_eq!(
-            destroy_native_browser_binding_after(
-                &bindings,
-                &flights,
-                "psyche-browser-raw-a",
-                false,
-                || Ok(true)
-            ),
-            Ok(vec!["tab-a".to_string()])
-        );
-        assert_eq!(
-            destroy_native_browser_binding_after(
-                &bindings,
-                &flights,
-                "psyche-browser-raw-b",
-                false,
-                || Err("close failed".into())
-            ),
-            Err("close failed".into())
-        );
-        assert!(!bindings.bindings.lock().contains_key("tab-a"));
-        assert!(bindings.bindings.lock().contains_key("tab-b"));
-        assert!(matches!(
-            bindings.operations.lock().get("tab-b"),
-            Some(BrowserOperation::Script(flight))
-                if flight.document_token == "doc-tab-b"
-                    && flight.invocation_id == "invocation-tab-b"
-        ));
-        flights
-            .reserve(&bindings, "tab-a".into(), "new-doc".into(), 8, "new".into())
-            .unwrap();
-        assert!(!flights.clear_matching_invocation(&bindings, "tab-a", "doc-a", 7, "old"));
-        assert_eq!(
-            bindings
-                .operations
-                .lock()
-                .get("tab-a")
-                .and_then(|operation| match operation {
-                    BrowserOperation::Script(flight) => Some(flight.document_token.as_str()),
-                    _ => None,
-                }),
-            Some("new-doc")
-        );
-    }
-
-    #[test]
-    fn native_destroy_cas_preserves_successor_binding_and_flight_installed_during_close() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let old_binding = BrowserBinding {
-            label: "psyche-browser-project__tab".into(),
-            generation: 7,
-            navigation_epoch: 3,
-            navigation_url: "https://old.example/".into(),
-            revision: 10,
-        };
-        let successor_binding = BrowserBinding {
-            generation: 8,
-            navigation_epoch: 1,
-            navigation_url: "https://new.example/".into(),
-            revision: 11,
-            ..old_binding.clone()
-        };
-        bindings.bindings.lock().insert("tab".into(), old_binding);
-        let removed = destroy_native_browser_binding_after(
-            &bindings,
-            &flights,
-            "psyche-browser-project__tab",
-            false,
-            || {
-                bindings
-                    .bindings
-                    .lock()
-                    .insert("tab".into(), successor_binding.clone());
-                bindings.operations.lock().insert(
-                    "tab".into(),
-                    BrowserOperation::Script(BrowserScriptFlight {
-                        document_token: "new-doc".into(),
-                        generation: 8,
-                        invocation_id: "new".into(),
-                    }),
-                );
-                Ok(true)
-            },
-        )
-        .unwrap();
-        assert!(removed.is_empty());
-        assert_eq!(
-            bindings.bindings.lock().get("tab"),
-            Some(&successor_binding)
-        );
-        assert!(!flights.clear_matching_invocation(&bindings, "tab", "old-doc", 7, "old"));
-        assert_eq!(
-            bindings
-                .operations
-                .lock()
-                .get("tab")
-                .and_then(|operation| match operation {
-                    BrowserOperation::Script(flight) => Some((
-                        flight.document_token.as_str(),
-                        flight.generation,
-                        flight.invocation_id.as_str()
-                    )),
-                    _ => None,
-                }),
-            Some(("new-doc", 8, "new"))
-        );
-    }
-
-    #[test]
-    fn native_destroy_many_cas_preserves_mid_close_successor_and_unrelated_tab() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        for (tab_id, label, revision) in [
-            ("tab-a", "psyche-browser-project__tab-a", 20),
-            ("tab-b", "psyche-browser-project__tab-b", 21),
-        ] {
-            bindings.bindings.lock().insert(
-                tab_id.into(),
-                BrowserBinding {
-                    label: label.into(),
-                    generation: 7,
-                    navigation_epoch: 1,
-                    navigation_url: "https://old.example/".into(),
-                    revision,
-                },
-            );
-        }
-        let successor = BrowserBinding {
-            label: "psyche-browser-project__tab-a".into(),
-            generation: 8,
-            navigation_epoch: 1,
-            navigation_url: "https://new.example/".into(),
-            revision: 22,
-        };
-        let removed = destroy_native_browser_binding_after(
-            &bindings,
-            &flights,
-            "psyche-browser-project__tab-a",
-            true,
-            || {
-                bindings
-                    .bindings
-                    .lock()
-                    .insert("tab-a".into(), successor.clone());
-                bindings.operations.lock().insert(
-                    "tab-a".into(),
-                    BrowserOperation::Script(BrowserScriptFlight {
-                        document_token: "tab-a-new-doc".into(),
-                        generation: 8,
-                        invocation_id: "new".into(),
-                    }),
-                );
-                Ok(true)
-            },
-        )
-        .unwrap();
-        assert!(removed.is_empty());
-        assert_eq!(bindings.bindings.lock().get("tab-a"), Some(&successor));
-        assert!(bindings.bindings.lock().contains_key("tab-b"));
-        assert_eq!(
-            bindings
-                .operations
-                .lock()
-                .get("tab-a")
-                .and_then(|operation| match operation {
-                    BrowserOperation::Script(flight) => Some(flight.invocation_id.as_str()),
-                    _ => None,
-                }),
-            Some("new")
-        );
-        let dormant_native = validate_managed_renderer_browser_label("project__tab-c").unwrap();
-        assert_eq!(
-            destroy_native_browser_binding_after(
-                &bindings,
-                &flights,
-                &dormant_native,
-                true,
-                || Ok(false)
-            ),
-            Ok(Vec::<String>::new())
-        );
-    }
-
-    #[test]
-    fn confirmed_reload_replacement_clears_flight_but_missing_confirmation_retains_it() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        bindings.bindings.lock().insert(
-            "tab".into(),
-            BrowserBinding {
-                label: "psyche-browser-http".into(),
-                generation: 2,
-                navigation_epoch: 4,
-                navigation_url: "http://192.168.1.20/".into(),
-                revision: 1,
-            },
-        );
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "native-token".into(),
-                2,
-                "invocation".into(),
-            )
-            .unwrap();
-        assert!(!confirm_browser_navigation(
-            &bindings,
-            &flights,
-            "psyche-browser-missing",
-            "http://192.168.1.20/next"
-        ));
-        assert_eq!(bindings.operations.lock().len(), 1);
-        assert!(confirm_browser_navigation(
-            &bindings,
-            &flights,
-            "psyche-browser-http",
-            "http://192.168.1.20/next"
-        ));
-        assert!(bindings.operations.lock().is_empty());
-        let binding = bindings.bindings.lock().get("tab").cloned().unwrap();
-        assert_eq!(binding.navigation_epoch, 5);
-        assert_eq!(binding.navigation_url, "http://192.168.1.20/next");
-    }
-
-    #[test]
-    fn browser_script_realm_pool_is_bounded_and_never_reuses_a_slot_per_document() {
-        let flights = BrowserScriptFlightState::default();
-        flights
-            .observe_document("tab", "document-a", 1, 10, 1)
-            .unwrap();
-        let worlds = (0..MAX_BROWSER_SCRIPT_REALM_SLOTS)
-            .map(|slot| {
-                let world = flights.allocate_realm("tab", "document-a", 1, 10).unwrap();
-                assert_eq!(world, browser_script_execution_world_name(slot));
-                assert_ne!(world, BROWSER_SCRIPT_CONTEXT_WORLD_NAME);
-                world
-            })
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(worlds.len(), MAX_BROWSER_SCRIPT_REALM_SLOTS);
-        assert_eq!(
-            flights.allocate_realm("tab", "document-a", 1, 10),
-            Err("script_realm_limit".into())
-        );
-        assert_eq!(flights.realm_allocations.lock().len(), 1);
-    }
-
-    #[test]
-    fn failed_or_timed_out_script_realm_slots_remain_consumed() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        flights
-            .observe_document("tab", "document", 1, 10, 1)
-            .unwrap();
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "document".into(),
-                1,
-                "failed".into(),
-            )
-            .unwrap();
-        assert_eq!(
-            flights.allocate_realm("tab", "document", 1, 10).unwrap(),
-            browser_script_execution_world_name(0)
-        );
-        assert!(flights.clear_matching_invocation(&bindings, "tab", "document", 1, "failed"));
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "document".into(),
-                1,
-                "timed-out".into(),
-            )
-            .unwrap();
-        assert_eq!(
-            flights.allocate_realm("tab", "document", 1, 10).unwrap(),
-            browser_script_execution_world_name(1)
-        );
-        assert_eq!(
-            flights
-                .realm_allocations
-                .lock()
-                .get("tab")
-                .unwrap()
-                .next_slot,
-            2
-        );
-    }
-
-    #[test]
-    fn exact_new_document_resets_realm_slots_but_stale_observation_cannot() {
-        let flights = BrowserScriptFlightState::default();
-        flights.observe_document("tab", "old", 1, 10, 1).unwrap();
-        for _ in 0..MAX_BROWSER_SCRIPT_REALM_SLOTS {
-            flights.allocate_realm("tab", "old", 1, 10).unwrap();
-        }
-        assert_eq!(
-            flights.allocate_realm("tab", "old", 1, 10),
-            Err("script_realm_limit".into())
-        );
-        flights.observe_document("tab", "new", 1, 10, 2).unwrap();
-        assert_eq!(
-            flights.allocate_realm("tab", "new", 1, 10).unwrap(),
-            browser_script_execution_world_name(0)
-        );
-        assert_eq!(
-            flights.observe_document("tab", "old", 1, 10, 1),
-            Err("snapshot_stale".into())
-        );
-        assert_eq!(
-            flights.allocate_realm("tab", "new", 1, 10).unwrap(),
-            browser_script_execution_world_name(1)
-        );
-    }
-
-    #[test]
-    fn concurrent_document_observations_commit_only_the_newest_exact_probe() {
-        let flights = BrowserScriptFlightState::default();
-        let old_probe = flights.begin_document_observation();
-        let new_probe = flights.begin_document_observation();
-        flights
-            .observe_document("tab", "new", 1, 10, new_probe)
-            .unwrap();
-        assert_eq!(
-            flights.observe_document("tab", "old", 1, 10, old_probe),
-            Err("snapshot_stale".into())
-        );
-        assert_eq!(
-            flights.allocate_realm("tab", "new", 1, 10).unwrap(),
-            browser_script_execution_world_name(0)
-        );
-    }
-
-    #[test]
-    fn unchanged_document_deadline_reports_timeout_and_retains_exact_flight() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let binding = BrowserBinding {
-            label: "psyche-browser-tab".into(),
-            generation: 1,
-            navigation_epoch: 1,
-            navigation_url: "https://example.test/".into(),
-            revision: 10,
-        };
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "document".into(),
-                1,
-                "invocation".into(),
-            )
-            .unwrap();
-        assert_eq!(
-            finalize_browser_script_deadline(
-                &bindings,
-                &flights,
-                "tab",
-                "document",
-                1,
-                "invocation",
-                &binding,
-                Ok((binding.clone(), "document".into())),
-            ),
-            "action_timeout"
-        );
-        assert!(matches!(
-            bindings.operations.lock().get("tab"),
-            Some(BrowserOperation::Script(_))
-        ));
-    }
-
-    #[test]
-    fn replacement_or_unavailable_deadline_reports_unknown_and_clears_old_flight() {
-        for observation in [
-            Ok((
-                BrowserBinding {
-                    label: "psyche-browser-tab".into(),
-                    generation: 1,
-                    navigation_epoch: 1,
-                    navigation_url: "https://example.test/".into(),
-                    revision: 10,
-                },
-                "replacement".into(),
-            )),
-            Err("document_token_unavailable".into()),
-        ] {
-            let bindings = BrowserBindingState::default();
-            let flights = BrowserScriptFlightState::default();
-            let dispatched = BrowserBinding {
-                label: "psyche-browser-tab".into(),
-                generation: 1,
-                navigation_epoch: 1,
-                navigation_url: "https://example.test/".into(),
-                revision: 10,
-            };
-            flights
-                .reserve(
-                    &bindings,
-                    "tab".into(),
-                    "document".into(),
-                    1,
-                    "invocation".into(),
-                )
-                .unwrap();
-            assert_eq!(
-                finalize_browser_script_deadline(
-                    &bindings,
-                    &flights,
-                    "tab",
-                    "document",
-                    1,
-                    "invocation",
-                    &dispatched,
-                    observation,
-                ),
-                "effect_unknown"
-            );
-            assert!(bindings.operations.lock().get("tab").is_none());
-        }
-    }
-
-    #[test]
-    fn browser_script_realm_slots_are_independent_per_tab_and_cleanup_is_bounded() {
-        let flights = BrowserScriptFlightState::default();
-        for tab_id in ["tab-a", "tab-b"] {
-            flights
-                .observe_document(tab_id, "document", 1, 10, 1)
-                .unwrap();
-            assert_eq!(
-                flights.allocate_realm(tab_id, "document", 1, 10).unwrap(),
-                browser_script_execution_world_name(0)
-            );
-        }
-        assert_eq!(flights.realm_allocations.lock().len(), 2);
-        flights.clear_realm_allocations(&["tab-a".into()]);
-        assert!(!flights.realm_allocations.lock().contains_key("tab-a"));
-        assert_eq!(
-            flights
-                .realm_allocations
-                .lock()
-                .get("tab-b")
-                .unwrap()
-                .next_slot,
-            1
-        );
-    }
-
-    #[test]
-    fn failed_or_unconfirmed_navigation_retains_a_timed_out_script_fence() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let previous = BrowserBinding {
-            label: "psyche-browser-existing".into(),
-            generation: 4,
-            navigation_epoch: 8,
-            navigation_url: "https://old.example/".into(),
-            revision: 1,
-        };
-        bindings
-            .bindings
-            .lock()
-            .insert("tab".into(), previous.clone());
-        bindings.operations.lock().insert(
-            "tab".into(),
-            BrowserOperation::Script(BrowserScriptFlight {
-                document_token: "approved-token".into(),
-                generation: 4,
-                invocation_id: "invocation".into(),
-            }),
-        );
-        let proposed = BrowserBinding {
-            navigation_epoch: 9,
-            navigation_url: "https://new.example/".into(),
-            revision: 2,
-            ..previous.clone()
-        };
-        let navigation_ran = std::cell::Cell::new(false);
-        assert_eq!(
-            commit_browser_navigation_after(&bindings, "tab".into(), proposed.clone(), || {
-                navigation_ran.set(true);
-                Err::<(), _>("navigation failed".into())
-            }),
-            Err("effect_in_flight".into())
-        );
-        assert!(!navigation_ran.get());
-        assert_eq!(bindings.bindings.lock().get("tab"), Some(&previous));
-        assert_eq!(
-            bindings
-                .operations
-                .lock()
-                .get("tab")
-                .and_then(|operation| match operation {
-                    BrowserOperation::Script(flight) => Some(flight.document_token.as_str()),
-                    _ => None,
-                }),
-            Some("approved-token")
-        );
-        assert!(flights.clear_matching_invocation(
-            &bindings,
-            "tab",
-            "approved-token",
-            4,
-            "invocation"
-        ));
-        commit_browser_navigation_after(&bindings, "tab".into(), proposed.clone(), || Ok(()))
-            .unwrap();
-        let committed = bindings.bindings.lock().get("tab").cloned().unwrap();
-        assert_eq!(committed.label, proposed.label);
-        assert_eq!(committed.generation, proposed.generation);
-        assert_eq!(committed.navigation_epoch, proposed.navigation_epoch);
-        assert_eq!(committed.navigation_url, proposed.navigation_url);
-        assert!(committed.revision > previous.revision);
-        assert!(bindings.operations.lock().is_empty());
-    }
-
-    #[test]
-    fn successful_navigation_dispatch_retains_flight_until_page_load_started() {
-        let bindings = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        bindings.bindings.lock().insert(
-            "tab".into(),
-            BrowserBinding {
-                label: "psyche-browser-existing".into(),
-                generation: 7,
-                navigation_epoch: 8,
-                navigation_url: "https://old.example/".into(),
-                revision: next_browser_binding_revision(),
-            },
-        );
-        let proposed = BrowserBinding {
-            label: "psyche-browser-existing".into(),
-            generation: 8,
-            navigation_epoch: 9,
-            navigation_url: "https://new.example/".into(),
-            revision: 1,
-        };
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "old-document".into(),
-                7,
-                "old-invocation".into(),
-            )
-            .unwrap();
-        assert_eq!(
-            commit_browser_navigation_after(&bindings, "tab".into(), proposed.clone(), || Ok(())),
-            Err("effect_in_flight".into())
-        );
-        assert_eq!(
-            flights.reserve(
-                &bindings,
-                "tab".into(),
-                "new-document".into(),
-                8,
-                "new-invocation".into()
-            ),
-            Err("effect_in_flight".into())
-        );
-        assert!(confirm_browser_navigation(
-            &bindings,
-            &flights,
-            "psyche-browser-existing",
-            "https://new.example/"
-        ));
-        flights
-            .reserve(
-                &bindings,
-                "tab".into(),
-                "new-document".into(),
-                8,
-                "new-invocation".into(),
-            )
-            .unwrap();
-        assert!(!flights.clear_matching_invocation(
-            &bindings,
-            "tab",
-            "old-document",
-            7,
-            "old-invocation"
-        ));
-        assert!(flights.clear_matching_invocation(
-            &bindings,
-            "tab",
-            "new-document",
-            8,
-            "new-invocation"
-        ));
-        commit_browser_navigation_after(&bindings, "tab".into(), proposed, || Ok(())).unwrap();
-    }
-
-    #[test]
-    fn browser_binding_commit_is_transactional_for_create_and_navigation_failures() {
-        let state = BrowserBindingState::default();
-        let previous = BrowserBinding {
-            label: "psyche-browser-existing".into(),
-            generation: 4,
-            navigation_epoch: 8,
-            navigation_url: "https://old.example/".into(),
-            revision: 1,
-        };
-        state
-            .bindings
-            .lock()
-            .insert("tab-existing".into(), previous.clone());
-        let proposed = BrowserBinding {
-            label: "psyche-browser-existing".into(),
-            generation: 5,
-            navigation_epoch: 9,
-            navigation_url: "https://new.example/".into(),
-            revision: 2,
-        };
-        for error in ["ensure failed", "navigate failed"] {
-            assert_eq!(
-                commit_browser_binding_after(
-                    &state,
-                    "tab-existing".into(),
-                    proposed.clone(),
-                    || { Err::<(), _>(error.into()) }
-                ),
-                Err(error.into())
-            );
-            assert_eq!(state.bindings.lock().get("tab-existing"), Some(&previous));
-        }
-        assert_eq!(
-            commit_browser_binding_after(&state, "tab-new".into(), proposed.clone(), || {
-                Err::<(), _>("invalid URL".into())
-            }),
-            Err("invalid URL".into())
-        );
-        assert!(!state.bindings.lock().contains_key("tab-new"));
-        commit_browser_binding_after(&state, "tab-existing".into(), proposed.clone(), || Ok(()))
-            .unwrap();
-        let committed = state.bindings.lock().get("tab-existing").cloned().unwrap();
-        assert_eq!(committed.label, proposed.label);
-        assert_eq!(committed.generation, proposed.generation);
-        assert_eq!(committed.navigation_epoch, proposed.navigation_epoch);
-        assert_eq!(committed.navigation_url, proposed.navigation_url);
-        assert!(committed.revision > previous.revision);
-        assert!(state.operations.lock().is_empty());
-    }
-
-    #[test]
-    fn overlapping_existing_binding_commit_is_rejected_without_losing_outer_publish() {
-        let state = BrowserBindingState::default();
-        let nested_effect_ran = std::cell::Cell::new(false);
-        let predecessor_revision = next_browser_binding_revision();
-        let predecessor = BrowserBinding {
-            label: "psyche-browser-old".into(),
-            generation: 1,
-            navigation_epoch: 1,
-            navigation_url: "https://old.example/".into(),
-            revision: predecessor_revision,
-        };
-        let proposed = BrowserBinding {
-            generation: 2,
-            navigation_url: "https://proposed.example/".into(),
-            revision: 0,
-            ..predecessor.clone()
-        };
-        let successor = BrowserBinding {
-            generation: 3,
-            navigation_url: "https://successor.example/".into(),
-            revision: 0,
-            ..predecessor.clone()
-        };
-        state.bindings.lock().insert("tab".into(), predecessor);
-        commit_browser_binding_after(&state, "tab".into(), proposed.clone(), || {
-            assert_eq!(
-                commit_browser_binding_after(&state, "tab".into(), successor, || {
-                    nested_effect_ran.set(true);
-                    Err::<(), String>("successor failed".into())
-                }),
-                Err("effect_in_flight".into())
-            );
-            Ok(())
-        })
-        .unwrap();
-        assert!(!nested_effect_ran.get());
-        let installed = state.bindings.lock().get("tab").cloned().unwrap();
-        assert_eq!(installed.generation, proposed.generation);
-        assert_eq!(installed.navigation_url, proposed.navigation_url);
-        assert!(installed.revision > predecessor_revision);
-        assert!(state.operations.lock().is_empty());
-    }
-
-    #[test]
-    fn binding_commit_failure_rolls_back_only_its_exact_reservation() {
-        let state = BrowserBindingState::default();
-        let predecessor_revision = next_browser_binding_revision();
-        let predecessor = BrowserBinding {
-            label: "psyche-browser-tab".into(),
-            generation: 1,
-            navigation_epoch: 1,
-            navigation_url: "https://old.example/".into(),
-            revision: predecessor_revision,
-        };
-        state
-            .bindings
-            .lock()
-            .insert("tab".into(), predecessor.clone());
-        let result = commit_browser_binding_after(
-            &state,
-            "tab".into(),
-            BrowserBinding {
-                generation: 2,
-                navigation_url: "https://failed.example/".into(),
-                revision: 0,
-                ..predecessor
-            },
-            || {
-                let successor = BrowserBinding {
-                    generation: 3,
-                    navigation_url: "https://successor.example/".into(),
-                    revision: next_browser_binding_revision(),
-                    ..state.bindings.lock().get("tab").cloned().unwrap()
-                };
-                state.bindings.lock().insert("tab".into(), successor);
-                Err::<(), String>("navigation failed".into())
-            },
-        );
-        assert_eq!(result, Err("navigation failed".into()));
-        let installed = state.bindings.lock().get("tab").cloned().unwrap();
-        assert_eq!(installed.generation, 3);
-        assert_eq!(installed.navigation_url, "https://successor.example/");
-        assert!(installed.revision > predecessor_revision);
-        assert!(state.operations.lock().is_empty());
-        let successor_revision = installed.revision;
-        commit_browser_binding_after(
-            &state,
-            "tab".into(),
-            BrowserBinding {
-                generation: 4,
-                revision: 0,
-                ..installed
-            },
-            || Ok(()),
-        )
-        .unwrap();
-        assert!(state.bindings.lock().get("tab").unwrap().revision > successor_revision);
-    }
-
-    #[test]
-    fn page_load_started_supersedes_old_binding_commit_without_revision_regression() {
-        let state = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let (_, canonical_url) = parse_browser_navigation_url("https://example.com").unwrap();
-        assert_eq!(canonical_url, "https://example.com/");
-        let predecessor_revision = next_browser_binding_revision();
-        let predecessor = BrowserBinding {
-            label: "psyche-browser-old".into(),
-            generation: 1,
-            navigation_epoch: 1,
-            navigation_url: "https://old.example/".into(),
-            revision: predecessor_revision,
-        };
-        state
-            .bindings
-            .lock()
-            .insert("tab".into(), predecessor.clone());
-        commit_browser_navigation_after(
-            &state,
-            "tab".into(),
-            BrowserBinding {
-                label: "psyche-browser-tab".into(),
-                generation: 2,
-                navigation_epoch: 2,
-                navigation_url: canonical_url.clone(),
-                revision: 0,
-                ..predecessor
-            },
-            || {
-                assert!(confirm_browser_navigation(
-                    &state,
-                    &flights,
-                    "psyche-browser-tab",
-                    &canonical_url
-                ));
-                assert!(matches!(
-                    state.operations.lock().get("tab"),
-                    Some(BrowserOperation::Binding(BrowserBindingReservation {
-                        phase: BrowserBindingPhase::Promoted,
-                        ..
-                    }))
-                ));
-                assert_eq!(
-                    flights.reserve(&state, "tab".into(), "blocked".into(), 2, "blocked".into()),
-                    Err("effect_in_flight".into())
-                );
-                assert!(!confirm_browser_navigation(
-                    &state,
-                    &flights,
-                    "psyche-browser-tab",
-                    "https://redirect-chain.example/"
-                ));
-                assert_eq!(
-                    state.bindings.lock().get("tab").unwrap().navigation_url,
-                    canonical_url
-                );
-                Ok(())
-            },
-        )
-        .unwrap();
-        let page_load_winner = state.bindings.lock().get("tab").cloned().unwrap();
-        assert_eq!(page_load_winner.generation, 2);
-        assert_eq!(page_load_winner.navigation_epoch, 2);
-        assert_eq!(page_load_winner.navigation_url, canonical_url);
-        assert!(page_load_winner.revision > predecessor_revision);
-        flights
-            .reserve(&state, "tab".into(), "new-doc".into(), 2, "new".into())
-            .unwrap();
-        assert_eq!(
-            state
-                .operations
-                .lock()
-                .get("tab")
-                .and_then(|operation| match operation {
-                    BrowserOperation::Script(flight) => Some(flight.invocation_id.as_str()),
-                    _ => None,
-                }),
-            Some("new")
-        );
-        assert!(flights.clear_matching_invocation(&state, "tab", "new-doc", 2, "new"));
-        let first_revision = page_load_winner.revision;
-        commit_browser_binding_after(
-            &state,
-            "tab".into(),
-            BrowserBinding {
-                generation: 3,
-                revision: 0,
-                ..page_load_winner
-            },
-            || Ok(()),
-        )
-        .unwrap();
-        assert!(state.bindings.lock().get("tab").unwrap().revision > first_revision);
-    }
-
-    #[test]
-    fn dispatched_redirect_promotes_observed_final_url_once() {
-        let state = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let predecessor = BrowserBinding {
-            label: "psyche-browser-tab".into(),
-            generation: 4,
-            navigation_epoch: 9,
-            navigation_url: "https://before.example/".into(),
-            revision: next_browser_binding_revision(),
-        };
-        let predecessor_revision = predecessor.revision;
-        state
-            .bindings
-            .lock()
-            .insert("tab".into(), predecessor.clone());
-        let proposed = BrowserBinding {
-            generation: 5,
-            navigation_epoch: 10,
-            navigation_url: "https://requested.example/".into(),
-            revision: 0,
-            ..predecessor
-        };
-
-        commit_browser_navigation_after(&state, "tab".into(), proposed.clone(), || {
-            mark_browser_binding_dispatched(&state, "tab")?;
-            assert!(confirm_browser_navigation(
-                &state,
-                &flights,
-                "psyche-browser-tab",
-                "https://final.example"
-            ));
-            let promoted = state.bindings.lock().get("tab").cloned().unwrap();
-            assert_eq!(promoted.generation, proposed.generation);
-            assert_eq!(promoted.navigation_epoch, proposed.navigation_epoch);
-            assert_eq!(promoted.navigation_url, "https://final.example/");
-            assert!(promoted.revision > predecessor_revision);
-            assert!(!confirm_browser_navigation(
-                &state,
-                &flights,
-                "psyche-browser-tab",
-                "https://later.example/"
-            ));
-            assert_eq!(state.bindings.lock().get("tab"), Some(&promoted));
-            Ok(())
-        })
-        .unwrap();
-
-        let installed = state.bindings.lock().get("tab").cloned().unwrap();
-        assert_eq!(installed.generation, 5);
-        assert_eq!(installed.navigation_epoch, 10);
-        assert_eq!(installed.navigation_url, "https://final.example/");
-        assert!(state.operations.lock().is_empty());
-    }
-
-    #[test]
-    fn divergent_page_load_before_dispatch_does_not_consume_reservation() {
-        let state = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let predecessor = BrowserBinding {
-            label: "psyche-browser-tab".into(),
-            generation: 1,
-            navigation_epoch: 1,
-            navigation_url: "https://predecessor.example/".into(),
-            revision: next_browser_binding_revision(),
-        };
-        let predecessor_snapshot = predecessor.clone();
-        state
-            .bindings
-            .lock()
-            .insert("tab".into(), predecessor.clone());
-        commit_browser_navigation_after(
-            &state,
-            "tab".into(),
-            BrowserBinding {
-                generation: 2,
-                navigation_epoch: 2,
-                navigation_url: "https://requested.example/".into(),
-                revision: 0,
-                ..predecessor
-            },
-            || {
-                assert!(!confirm_browser_navigation(
-                    &state,
-                    &flights,
-                    "psyche-browser-tab",
-                    "https://stale-predecessor.example/"
-                ));
-                assert_eq!(
-                    state.bindings.lock().get("tab"),
-                    Some(&predecessor_snapshot)
-                );
-                assert!(matches!(
-                    state.operations.lock().get("tab"),
-                    Some(BrowserOperation::Binding(BrowserBindingReservation {
-                        phase: BrowserBindingPhase::Reserved,
-                        ..
-                    }))
-                ));
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            state.bindings.lock().get("tab").unwrap().navigation_url,
-            "https://requested.example/"
-        );
-    }
-
-    #[test]
-    fn page_load_must_match_the_webviews_current_navigation_state() {
-        let state = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        state.bindings.lock().insert(
-            "tab".into(),
-            BrowserBinding {
-                label: "psyche-browser-tab".into(),
-                generation: 1,
-                navigation_epoch: 1,
-                navigation_url: "https://current.example/".into(),
-                revision: next_browser_binding_revision(),
-            },
-        );
-        assert!(!confirm_current_browser_navigation(
-            &state,
-            &flights,
-            "psyche-browser-tab",
-            "https://stale.example/",
-            "https://current.example/"
-        ));
-        assert_eq!(
-            state.bindings.lock().get("tab").unwrap().navigation_url,
-            "https://current.example/"
-        );
-    }
-
-    #[test]
-    fn page_load_does_not_consume_same_url_reservation_with_a_different_label() {
-        let state = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let predecessor = BrowserBinding {
-            label: "psyche-browser-current".into(),
-            generation: 1,
-            navigation_epoch: 1,
-            navigation_url: "https://old.example/".into(),
-            revision: next_browser_binding_revision(),
-        };
-        let reservation_revision = next_browser_binding_revision();
-        let reservation = BrowserBindingReservation {
-            revision: reservation_revision,
-            predecessor: Some(predecessor.clone()),
-            proposed: BrowserBinding {
-                label: "psyche-browser-other".into(),
-                generation: 2,
-                navigation_epoch: 2,
-                navigation_url: "https://same.example/".into(),
-                revision: reservation_revision,
-            },
-            phase: BrowserBindingPhase::Reserved,
-        };
-        state.bindings.lock().insert("tab".into(), predecessor);
-        state
-            .operations
-            .lock()
-            .insert("tab".into(), BrowserOperation::Binding(reservation.clone()));
-        assert!(confirm_browser_navigation(
-            &state,
-            &flights,
-            "psyche-browser-current",
-            "https://same.example/"
-        ));
-        assert_eq!(
-            state.operations.lock().get("tab"),
-            Some(&BrowserOperation::Binding(reservation))
-        );
-        let current = state.bindings.lock().get("tab").cloned().unwrap();
-        assert_eq!(current.label, "psyche-browser-current");
-        assert_eq!(current.generation, 1);
-        assert_eq!(current.navigation_url, "https://same.example/");
-    }
-
-    #[test]
-    fn stale_page_load_cannot_promote_over_successor_or_clear_its_flight() {
-        let state = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let predecessor = BrowserBinding {
-            label: "psyche-browser-tab".into(),
-            generation: 1,
-            navigation_epoch: 1,
-            navigation_url: "https://old.example/".into(),
-            revision: next_browser_binding_revision(),
-        };
-        let reservation_revision = next_browser_binding_revision();
-        let reservation = BrowserBindingReservation {
-            revision: reservation_revision,
-            predecessor: Some(predecessor.clone()),
-            proposed: BrowserBinding {
-                generation: 2,
-                navigation_epoch: 2,
-                navigation_url: "https://reserved.example/".into(),
-                revision: reservation_revision,
-                ..predecessor.clone()
-            },
-            phase: BrowserBindingPhase::Reserved,
-        };
-        let successor = BrowserBinding {
-            generation: 3,
-            navigation_epoch: 3,
-            navigation_url: "https://successor.example/".into(),
-            revision: next_browser_binding_revision(),
-            ..predecessor
-        };
-        state
-            .bindings
-            .lock()
-            .insert("tab".into(), successor.clone());
-        state
-            .operations
-            .lock()
-            .insert("tab".into(), BrowserOperation::Binding(reservation.clone()));
-        assert!(!confirm_browser_navigation(
-            &state,
-            &flights,
-            "psyche-browser-tab",
-            "https://reserved.example/"
-        ));
-        assert_eq!(state.bindings.lock().get("tab"), Some(&successor));
-        assert_eq!(
-            state.operations.lock().get("tab"),
-            Some(&BrowserOperation::Binding(reservation))
-        );
-    }
-
-    #[test]
-    fn overlapping_same_tab_binding_effect_is_rejected_without_losing_outer_publish() {
-        let state = BrowserBindingState::default();
-        let nested_effect_ran = std::cell::Cell::new(false);
-        let outer = BrowserBinding {
-            label: "psyche-browser-tab".into(),
-            generation: 1,
-            navigation_epoch: 1,
-            navigation_url: "https://outer.example/".into(),
-            revision: 0,
-        };
-        let nested = BrowserBinding {
-            generation: 2,
-            navigation_url: "https://nested.example/".into(),
-            ..outer.clone()
-        };
-        commit_browser_binding_after(&state, "tab".into(), outer.clone(), || {
-            assert_eq!(
-                commit_browser_binding_after(&state, "tab".into(), nested, || {
-                    nested_effect_ran.set(true);
-                    Err::<(), String>("nested failed".into())
-                }),
-                Err("effect_in_flight".into())
-            );
-            Ok(())
-        })
-        .unwrap();
-        assert!(!nested_effect_ran.get());
-        let installed = state.bindings.lock().get("tab").cloned().unwrap();
-        assert_eq!(installed.generation, outer.generation);
-        assert_eq!(installed.navigation_url, outer.navigation_url);
-        assert!(state.operations.lock().is_empty());
-    }
-
-    #[test]
-    fn destroy_invalidates_inflight_new_tab_reservation_and_preserves_successor() {
-        let state = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let old = BrowserBinding {
-            label: "psyche-browser-project__tab".into(),
-            generation: 1,
-            navigation_epoch: 1,
-            navigation_url: "https://old.example/".into(),
-            revision: 0,
-        };
-        let successor = BrowserBinding {
-            generation: 2,
-            navigation_url: "https://successor.example/".into(),
-            ..old.clone()
-        };
-        let successor_effect_ran = std::cell::Cell::new(false);
-        let nested_destroy_ran = std::cell::Cell::new(false);
-        let result = commit_browser_binding_after(&state, "tab".into(), old, || {
-            assert_eq!(
-                destroy_native_browser_binding_after(
-                    &state,
-                    &flights,
-                    "psyche-browser-project__tab",
-                    false,
-                    || {
-                        assert_eq!(
-                            flights
-                                .reserve(&state, "tab".into(), "doc".into(), 2, "script".into(),),
-                            Err("effect_in_flight".into())
-                        );
-                        assert_eq!(
-                            destroy_native_browser_binding_after(
-                                &state,
-                                &flights,
-                                "psyche-browser-project__tab",
-                                false,
-                                || {
-                                    nested_destroy_ran.set(true);
-                                    Ok(true)
-                                },
-                            ),
-                            Err("effect_in_flight".into())
-                        );
-                        assert_eq!(
-                            commit_browser_binding_after(
-                                &state,
-                                "tab".into(),
-                                successor.clone(),
-                                || {
-                                    successor_effect_ran.set(true);
-                                    Ok(())
-                                },
-                            ),
-                            Err("effect_in_flight".into())
-                        );
-                        Ok(true)
-                    }
-                ),
-                Ok(vec!["tab".to_string()])
-            );
-            Ok(())
-        });
-        assert_eq!(result, Err("resource_replaced".into()));
-        assert!(!successor_effect_ran.get());
-        assert!(!nested_destroy_ran.get());
-        assert!(!state.bindings.lock().contains_key("tab"));
-        assert!(state.operations.lock().is_empty());
-    }
-
-    #[test]
-    fn destroy_many_invalidates_inflight_new_tab_reservation() {
-        let state = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let proposed = BrowserBinding {
-            label: "psyche-browser-project__tab-many".into(),
-            generation: 1,
-            navigation_epoch: 1,
-            navigation_url: "https://example.test/".into(),
-            revision: 0,
-        };
-        let result = commit_browser_binding_after(&state, "tab-many".into(), proposed, || {
-            assert_eq!(
-                destroy_native_browser_binding_after(
-                    &state,
-                    &flights,
-                    "psyche-browser-project__tab-many",
-                    true,
-                    || Ok(true)
-                ),
-                Ok(vec!["tab-many".to_string()])
-            );
-            Ok(())
-        });
-        assert_eq!(result, Err("resource_replaced".into()));
-        assert!(!state.bindings.lock().contains_key("tab-many"));
-        assert!(state.operations.lock().is_empty());
-    }
-
-    #[test]
-    fn failed_destroy_restores_exact_binding_reservation_for_outer_publish() {
-        let state = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let proposed = BrowserBinding {
-            label: "psyche-browser-project__restore".into(),
-            generation: 1,
-            navigation_epoch: 1,
-            navigation_url: "https://example.test/".into(),
-            revision: 0,
-        };
-        commit_browser_binding_after(&state, "restore".into(), proposed.clone(), || {
-            assert_eq!(
-                destroy_native_browser_binding_after(
-                    &state,
-                    &flights,
-                    "psyche-browser-project__restore",
-                    true,
-                    || Err("close failed".into()),
-                ),
-                Err("close failed".into())
-            );
-            Ok(())
-        })
-        .unwrap();
-        let installed = state.bindings.lock().get("restore").cloned().unwrap();
-        assert_eq!(installed.label, proposed.label);
-        assert_eq!(installed.generation, proposed.generation);
-        assert_eq!(installed.navigation_epoch, proposed.navigation_epoch);
-        assert_eq!(installed.navigation_url, proposed.navigation_url);
-        assert!(state.operations.lock().is_empty());
-    }
-
-    #[test]
-    fn destroy_preserves_successor_reservation_installed_during_close() {
-        let state = BrowserBindingState::default();
-        let flights = BrowserScriptFlightState::default();
-        let old_revision = next_browser_binding_revision();
-        let old = BrowserBindingReservation {
-            revision: old_revision,
-            predecessor: None,
-            proposed: BrowserBinding {
-                label: "psyche-browser-project__tab".into(),
-                generation: 1,
-                navigation_epoch: 1,
-                navigation_url: "https://old.example/".into(),
-                revision: old_revision,
-            },
-            phase: BrowserBindingPhase::Reserved,
-        };
-        state
-            .operations
-            .lock()
-            .insert("tab".into(), BrowserOperation::Binding(old));
-        let successor_revision = next_browser_binding_revision();
-        let successor = BrowserBindingReservation {
-            revision: successor_revision,
-            predecessor: None,
-            proposed: BrowserBinding {
-                label: "psyche-browser-project__tab".into(),
-                generation: 2,
-                navigation_epoch: 1,
-                navigation_url: "https://successor.example/".into(),
-                revision: successor_revision,
-            },
-            phase: BrowserBindingPhase::Reserved,
-        };
-        assert_eq!(
-            destroy_native_browser_binding_after(
-                &state,
-                &flights,
-                "psyche-browser-project__tab",
-                true,
-                || {
-                    state
-                        .operations
-                        .lock()
-                        .insert("tab".into(), BrowserOperation::Binding(successor.clone()));
-                    Ok(true)
-                }
-            ),
-            Ok(Vec::<String>::new())
-        );
-        assert_eq!(
-            state.operations.lock().get("tab"),
-            Some(&BrowserOperation::Binding(successor))
-        );
-        assert!(!state.bindings.lock().contains_key("tab"));
-    }
-
-    #[test]
-    fn same_document_url_reconciliation_advances_epoch_once() {
-        let state = BrowserBindingState::default();
-        state.bindings.lock().insert(
-            "tab".into(),
-            BrowserBinding {
-                label: "psyche-browser-tab".into(),
-                generation: 7,
-                navigation_epoch: 3,
-                navigation_url: "https://example.test/page".into(),
-                revision: 1,
-            },
-        );
-        let changed = reconcile_browser_binding_live_url(
-            &state,
-            "tab",
-            7,
-            "https://example.test/page#section",
-        )
-        .unwrap();
-        assert_eq!(changed.navigation_epoch, 4);
-        assert_eq!(changed.navigation_url, "https://example.test/page#section");
-        let stable = reconcile_browser_binding_live_url(
-            &state,
-            "tab",
-            7,
-            "https://example.test/page#section",
-        )
-        .unwrap();
-        assert_eq!(stable.navigation_epoch, 4);
-    }
-
-    #[test]
-    fn long_multibyte_urls_are_bounded_without_losing_full_identity() {
-        let prefix = format!("https://example.test/{}", "é".repeat(1100));
-        let first = format!("{prefix}#first");
-        let second = format!("{prefix}#second");
-        let bounded = bounded_browser_url(&first);
-        assert!(bounded.len() <= 2048);
-        assert!(bounded.is_char_boundary(bounded.len()));
-        assert_eq!(bounded, bounded_browser_url(&second));
-
-        let state = BrowserBindingState::default();
-        state.bindings.lock().insert(
-            "tab".into(),
-            BrowserBinding {
-                label: "psyche-browser-tab".into(),
-                generation: 1,
-                navigation_epoch: 10,
-                navigation_url: first,
-                revision: 1,
-            },
-        );
-        let changed = reconcile_browser_binding_live_url(&state, "tab", 1, &second).unwrap();
-        assert_eq!(changed.navigation_epoch, 11);
-        assert_eq!(changed.navigation_url, second);
-    }
-
-    #[test]
-    fn browser_snapshot_raw_png_limit_is_four_mib() {
-        assert_eq!(MAX_BROWSER_SNAPSHOT_PNG_BYTES, 4_194_304);
-    }
-
-    #[test]
-    fn browser_inspection_result_limit_is_two_mib() {
-        assert_eq!(MAX_BROWSER_INSPECTION_BYTES, 2_097_152);
-    }
-
-    #[test]
-    fn remote_child_webview_is_not_trusted() {
-        assert_eq!(require_main_webview_label("main"), Ok(()));
-        assert_eq!(
-            require_main_webview_label("psyche-browser-forged"),
-            Err("permission_denied".into())
-        );
-    }
-
-    fn valid_snapshot() -> String {
-        serde_json::json!({
-            "schema":"psyche.browser.snapshot/v1", "snapshotId":"session:1", "documentId":"doc-1",
-            "tabId":"tab-1", "generation":7, "url":"https://example.test/", "title":"Example",
-            "loading":false, "capturedAt":1, "viewport":{"width":800,"height":600},
-            "nodes":[{"ref":"e1","depth":0,"role":"button","name":"Go","state":{},
-                "bounds":{"x":1,"y":2,"width":3,"height":4}}], "visited":1, "truncated":false
-        })
-        .to_string()
-    }
-
-    #[test]
-    fn native_snapshot_validation_rejects_wrong_identity_and_unknown_keys() {
-        let request = BrowserInspectRequest {
-            tab_id: "tab-1".into(),
-            generation: 7,
-            document_id: "doc-1".into(),
-        };
-        assert_eq!(
-            validate_browser_snapshot_json(
-                &valid_snapshot(),
-                &request,
-                Some("https://example.test/")
-            ),
-            Ok(())
-        );
-        assert_eq!(
-            validate_browser_snapshot_json(
-                &valid_snapshot(),
-                &request,
-                Some("https://example.test/#changed")
-            ),
-            Err("invalid_snapshot".into())
-        );
-        let mut forged: serde_json::Value = serde_json::from_str(&valid_snapshot()).unwrap();
-        forged["generation"] = 8.into();
-        assert_eq!(
-            validate_browser_snapshot_json(
-                &forged.to_string(),
-                &request,
-                Some("https://example.test/")
-            ),
-            Err("invalid_snapshot".into())
-        );
-        let mut unknown: serde_json::Value = serde_json::from_str(&valid_snapshot()).unwrap();
-        unknown["attacker"] = true.into();
-        assert_eq!(
-            validate_browser_snapshot_json(
-                &unknown.to_string(),
-                &request,
-                Some("https://example.test/")
-            ),
-            Err("invalid_snapshot".into())
-        );
-    }
-
-    #[test]
-    fn typed_invalidate_payload_does_not_require_a_snapshot_or_element_ref() {
-        let payload = browser_action_payload(&BrowserActionRequest {
-            tab_id: "tab-1".into(),
-            generation: 7,
-            snapshot_id: String::new(),
-            expected_risk: serde_json::json!({}),
-            action: BrowserDomAction::Invalidate,
-        })
-        .unwrap();
-        assert_eq!(payload, serde_json::json!({ "kind": "invalidate" }));
-    }
-
-    #[test]
-    fn browser_action_error_codes_are_allowlisted_at_the_native_boundary() {
-        assert_eq!(
-            stable_browser_action_error_code(Some("element_disabled")),
-            "element_disabled"
-        );
-        assert_eq!(
-            stable_browser_action_error_code(Some("snapshot_stale")),
-            "snapshot_stale"
-        );
-        assert_eq!(
-            stable_browser_action_error_code(Some("attacker_defined")),
-            "action_failed"
-        );
-        assert_eq!(
-            stable_browser_action_error_code(Some("effect_unknown")),
-            "effect_unknown"
-        );
-        assert_eq!(stable_browser_action_error_code(None), "action_failed");
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserSnapshot {
-    png_base64: String,
-    width: u32,
-    height: u32,
-    navigation_epoch: u64,
-    navigation_url: String,
-}
-
-#[cfg(target_os = "macos")]
-fn png_browser_snapshot(
-    image: *mut objc2_app_kit::NSImage,
-    navigation_epoch: u64,
-    navigation_url: String,
-) -> Result<BrowserSnapshot, String> {
-    use base64::Engine;
-    use objc2::{rc::Retained, AnyThread};
-    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
-    use objc2_foundation::NSDictionary;
-    use std::ptr::NonNull;
-
-    let image = unsafe { Retained::retain(image) }
-        .ok_or_else(|| "browser snapshot returned no image".to_string())?;
-    let tiff = image
-        .TIFFRepresentation()
-        .ok_or_else(|| "browser snapshot image has no bitmap representation".to_string())?;
-    let representation = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &tiff)
-        .ok_or_else(|| "browser snapshot bitmap encoding failed".to_string())?;
-    let png = unsafe {
-        representation
-            .representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
-    }
-    .ok_or_else(|| "browser snapshot PNG encoding failed".to_string())?;
-    let length = png.length();
-    if length > MAX_BROWSER_SNAPSHOT_PNG_BYTES {
-        return Err("result_too_large".to_string());
-    }
-    let mut bytes = vec![0_u8; length];
-    if length > 0 {
-        unsafe {
-            png.getBytes_length(
-                NonNull::new(bytes.as_mut_ptr().cast()).expect("PNG buffer is non-null"),
-                length,
-            )
-        };
-    }
-    Ok(BrowserSnapshot {
-        png_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-        width: representation.pixelsWide().max(0) as u32,
-        height: representation.pixelsHigh().max(0) as u32,
-        navigation_epoch,
-        navigation_url,
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[tauri::command]
-async fn browser_snapshot(
-    app: AppHandle,
-    caller: tauri::Webview,
-    bindings: State<'_, BrowserBindingState>,
-    tab_id: String,
-    generation: u64,
-) -> Result<BrowserSnapshot, String> {
-    use block2::RcBlock;
-    use objc2_app_kit::NSImage;
-    use objc2_foundation::NSError;
-    use objc2_web_kit::WKWebView;
-
-    require_main_webview(&caller)?;
-    let initial = browser_binding(&bindings, &tab_id, generation)?;
-    let label = initial.label.clone();
-    let webview = app
-        .get_webview(&label)
-        .ok_or_else(|| "browser webview missing".to_string())?;
-    let live_url = webview
-        .url()
-        .map_err(|error| error.to_string())?
-        .to_string();
-    let binding = reconcile_browser_binding_live_url(&bindings, &tab_id, generation, &live_url)?;
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    let callback_binding = binding.clone();
-    webview
-        .with_webview(move |platform_webview| {
-            let sender = Mutex::new(Some(sender));
-            let completion = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
-                let result = if !error.is_null() {
-                    Err("browser snapshot failed".to_string())
-                } else {
-                    png_browser_snapshot(
-                        image,
-                        callback_binding.navigation_epoch,
-                        bounded_browser_url(&callback_binding.navigation_url),
-                    )
-                };
-                if let Some(sender) = sender.lock().take() {
-                    let _ = sender.send(result);
-                }
-            });
-            let webview = unsafe { &*(platform_webview.inner() as *mut WKWebView) };
-            unsafe { webview.takeSnapshotWithConfiguration_completionHandler(None, &completion) };
-        })
-        .map_err(|error| error.to_string())?;
-    let snapshot = tokio::time::timeout(BROWSER_INSPECTION_TIMEOUT, receiver)
-        .await
-        .map_err(|_| "browser snapshot timed out".to_string())?
-        .map_err(|_| "browser snapshot callback closed".to_string())??;
-    let after_url = webview
-        .url()
-        .map_err(|error| error.to_string())?
-        .to_string();
-    let current = reconcile_browser_binding_live_url(&bindings, &tab_id, generation, &after_url)?;
-    if current.navigation_epoch != snapshot.navigation_epoch
-        || bounded_browser_url(&current.navigation_url) != snapshot.navigation_url
-    {
-        return Err("snapshot_stale".to_string());
-    }
-    Ok(snapshot)
-}
-
-#[cfg(not(target_os = "macos"))]
-#[tauri::command]
-async fn browser_snapshot(
-    _app: AppHandle,
-    caller: tauri::Webview,
-    _bindings: State<'_, BrowserBindingState>,
-    _tab_id: String,
-    _generation: u64,
-) -> Result<BrowserSnapshot, String> {
-    require_main_webview(&caller)?;
-    Err("backend_unavailable".to_string())
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserInspectRequest {
-    tab_id: String,
-    generation: u64,
-    document_id: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserInspectResponse {
-    snapshot_json: String,
-    navigation_epoch: u64,
-    navigation_url: String,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
-enum BrowserDomAction {
-    Invalidate,
-    Resolve {
-        element_ref: String,
-        action_kind: String,
-    },
-    Click {
-        element_ref: String,
-    },
-    Type {
-        element_ref: String,
-        text: String,
-        #[serde(default)]
-        append: bool,
-    },
-    Select {
-        element_ref: String,
-        values: Vec<String>,
-    },
-    Scroll {
-        element_ref: String,
-        #[serde(default)]
-        delta_x: f64,
-        #[serde(default)]
-        delta_y: f64,
-    },
-    Focus {
-        element_ref: String,
-    },
-    Submit {
-        element_ref: String,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserActionRequest {
-    tab_id: String,
-    generation: u64,
-    snapshot_id: String,
-    #[serde(default)]
-    expected_risk: serde_json::Value,
-    action: BrowserDomAction,
-}
-
-fn browser_action_payload(request: &BrowserActionRequest) -> Result<serde_json::Value, String> {
-    let mut action = serde_json::to_value(&request.action).map_err(|error| error.to_string())?;
-    if matches!(request.action, BrowserDomAction::Invalidate) {
-        return Ok(action);
-    }
-    let object = action
-        .as_object_mut()
-        .ok_or_else(|| "invalid_action".to_string())?;
-    let reference = object
-        .remove("elementRef")
-        .ok_or_else(|| "invalid_action".to_string())?;
-    object.insert("ref".to_string(), reference);
-    object.insert(
-        "snapshotId".to_string(),
-        serde_json::Value::String(request.snapshot_id.clone()),
-    );
-    if let Some(expected) = request.expected_risk.as_object() {
-        object.insert("expectedRisk".to_string(), expected.clone().into());
-    }
-    Ok(action)
-}
-
-fn stable_browser_action_error_code(code: Option<&str>) -> &'static str {
-    match code {
-        Some("approval_identity_mismatch") => "approval_identity_mismatch",
-        Some("snapshot_stale") => "snapshot_stale",
-        Some("element_missing") => "element_missing",
-        Some("element_disabled") => "element_disabled",
-        Some("element_hidden") => "element_hidden",
-        Some("invalid_action") => "invalid_action",
-        Some("backend_unavailable") => "backend_unavailable",
-        Some("invalid_snapshot") => "invalid_snapshot",
-        Some("unsupported_operation") => "unsupported_operation",
-        Some("result_too_large") => "result_too_large",
-        Some("effect_unknown") => "effect_unknown",
-        Some("action_failed") => "action_failed",
-        _ => "action_failed",
-    }
-}
-
-fn validate_browser_snapshot_json(
-    snapshot_json: &str,
-    request: &BrowserInspectRequest,
-    expected_url: Option<&str>,
-) -> Result<(), String> {
-    const TOP_KEYS: [&str; 13] = [
-        "schema",
-        "snapshotId",
-        "documentId",
-        "tabId",
-        "generation",
-        "url",
-        "title",
-        "loading",
-        "capturedAt",
-        "viewport",
-        "nodes",
-        "visited",
-        "truncated",
-    ];
-    const ROLES: [&str; 27] = [
-        "button",
-        "link",
-        "textbox",
-        "checkbox",
-        "radio",
-        "switch",
-        "combobox",
-        "heading",
-        "img",
-        "iframe",
-        "navigation",
-        "main",
-        "banner",
-        "contentinfo",
-        "complementary",
-        "list",
-        "listitem",
-        "tab",
-        "tablist",
-        "menu",
-        "menuitem",
-        "dialog",
-        "alert",
-        "status",
-        "searchbox",
-        "spinbutton",
-        "slider",
-    ];
-    if snapshot_json.len() > MAX_BROWSER_INSPECTION_BYTES {
-        return Err("result_too_large".to_string());
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(snapshot_json).map_err(|_| "invalid_snapshot".to_string())?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| "invalid_snapshot".to_string())?;
-    if object.len() != TOP_KEYS.len()
-        || !TOP_KEYS.iter().all(|key| object.contains_key(*key))
-        || object.get("schema").and_then(|v| v.as_str()) != Some("psyche.browser.snapshot/v1")
-        || object.get("tabId").and_then(|v| v.as_str()) != Some(request.tab_id.as_str())
-        || object.get("documentId").and_then(|v| v.as_str()) != Some(request.document_id.as_str())
-        || object.get("generation").and_then(|v| v.as_u64()) != Some(request.generation)
-        || expected_url.is_some_and(|url| object.get("url").and_then(|v| v.as_str()) != Some(url))
-    {
-        return Err("invalid_snapshot".to_string());
-    }
-    let bounded_string = |key: &str, limit: usize, empty: bool| {
-        object
-            .get(key)
-            .and_then(|v| v.as_str())
-            .filter(|value| value.len() <= limit && (empty || !value.is_empty()))
-            .is_some()
-    };
-    if !bounded_string("snapshotId", 256, false)
-        || !bounded_string("url", 2048, true)
-        || !bounded_string("title", 512, true)
-        || !object.get("loading").is_some_and(|v| v.is_boolean())
-        || !object
-            .get("capturedAt")
-            .and_then(|v| v.as_f64())
-            .is_some_and(|v| v.is_finite() && v >= 0.0)
-        || !object.get("truncated").is_some_and(|v| v.is_boolean())
-    {
-        return Err("invalid_snapshot".to_string());
-    }
-    let viewport = object
-        .get("viewport")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| "invalid_snapshot".to_string())?;
-    if viewport.len() != 2
-        || !["width", "height"].iter().all(|key| {
-            viewport
-                .get(*key)
-                .and_then(|v| v.as_f64())
-                .is_some_and(|number| number.is_finite() && (0.0..=10_000_000.0).contains(&number))
-        })
-    {
-        return Err("invalid_snapshot".to_string());
-    }
-    let nodes = object
-        .get("nodes")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| "invalid_snapshot".to_string())?;
-    let visited = object
-        .get("visited")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| "invalid_snapshot".to_string())?;
-    if nodes.len() > 2000 || visited < nodes.len() as u64 || visited > 2000 {
-        return Err("invalid_snapshot".to_string());
-    }
-    for (index, node) in nodes.iter().enumerate() {
-        let node = node
-            .as_object()
-            .ok_or_else(|| "invalid_snapshot".to_string())?;
-        let has_opaque = node.contains_key("opaque");
-        if node.len() != if has_opaque { 7 } else { 6 }
-            || !["ref", "depth", "role", "name", "state", "bounds"]
-                .iter()
-                .all(|key| node.contains_key(*key))
-            || node
-                .get("ref")
-                .and_then(|v| v.as_str())
-                .is_none_or(|reference| reference != format!("e{}", index + 1))
-            || !node
-                .get("depth")
-                .and_then(|v| v.as_u64())
-                .is_some_and(|depth| depth <= 32)
-            || !node
-                .get("role")
-                .and_then(|v| v.as_str())
-                .is_some_and(|role| ROLES.contains(&role))
-            || !node
-                .get("name")
-                .and_then(|v| v.as_str())
-                .is_some_and(|name| name.len() <= 512)
-            || (has_opaque && !node.get("opaque").is_some_and(|v| v.is_boolean()))
-        {
-            return Err("invalid_snapshot".to_string());
-        }
-        let bounds = node
-            .get("bounds")
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| "invalid_snapshot".to_string())?;
-        if bounds.len() != 4
-            || !["x", "y", "width", "height"].iter().all(|key| {
-                bounds
-                    .get(*key)
-                    .and_then(|v| v.as_f64())
-                    .is_some_and(|number| number.is_finite() && number.abs() <= 10_000_000.0)
-            })
-            || ["width", "height"].iter().any(|key| {
-                bounds
-                    .get(*key)
-                    .and_then(|v| v.as_f64())
-                    .is_some_and(|v| v < 0.0)
-            })
-        {
-            return Err("invalid_snapshot".to_string());
-        }
-        let state = node
-            .get("state")
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| "invalid_snapshot".to_string())?;
-        for (key, value) in state {
-            let valid = match key.as_str() {
-                "value" => value.as_str().is_some_and(|text| text.len() <= 512),
-                "level" => value.as_u64().is_some_and(|level| (1..=6).contains(&level)),
-                "disabled" | "checked" | "secret" | "valuePresent" => value.is_boolean(),
-                _ => false,
-            };
-            if !valid {
-                return Err("invalid_snapshot".to_string());
-            }
-        }
-        if state.get("secret") == Some(&serde_json::Value::Bool(true))
-            && (state.len() != 2 || state.get("valuePresent").is_none_or(|v| !v.is_boolean()))
-        {
-            return Err("invalid_snapshot".to_string());
-        }
+<<OURS>>
     }
     Ok(())
 }
@@ -5835,442 +4152,26 @@ const BROWSER_AUTOMATION_RUNTIME: &str =
     include_str!("../../web/control/browser-automation-runtime.js");
 
 #[tauri::command]
-fn browser_install_automation(
-    app: AppHandle,
-    caller: tauri::Webview,
-    bindings: State<'_, BrowserBindingState>,
-    tab_id: String,
-    generation: u64,
-) -> Result<(), String> {
-    require_main_webview(&caller)?;
-    let binding = browser_binding(&bindings, &tab_id, generation)?;
-    app.get_webview(&binding.label)
-        .ok_or_else(|| "browser webview missing".to_string())?
-        .eval(BROWSER_AUTOMATION_RUNTIME)
-        .map_err(|error| error.to_string())
-}
-
-#[cfg(target_os = "macos")]
-#[tauri::command]
-async fn browser_inspect(
-    app: AppHandle,
-    caller: tauri::Webview,
-    bindings: State<'_, BrowserBindingState>,
-    request: BrowserInspectRequest,
-) -> Result<BrowserInspectResponse, String> {
-    use block2::RcBlock;
-    use objc2::{runtime::AnyObject, ClassType, MainThreadMarker};
-    use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
-    use objc2_web_kit::{WKContentWorld, WKWebView};
-
-    require_main_webview(&caller)?;
-    let initial = browser_binding(&bindings, &request.tab_id, request.generation)?;
-    let label = initial.label.clone();
-    let payload = serde_json::to_string(&serde_json::json!({
-        "kind": "inspect", "tabId": request.tab_id, "generation": request.generation,
-        "documentId": request.document_id,
-    }))
-    .map_err(|error| error.to_string())?;
-    let script = format!(
-        "{};JSON.stringify(window.__PSYCHE_AUTOMATION__.dispatch({}))",
-        BROWSER_AUTOMATION_RUNTIME, payload
-    );
-    let webview = app
-        .get_webview(&label)
-        .ok_or_else(|| "browser webview missing".to_string())?;
-    let live_url = webview
-        .url()
-        .map_err(|error| error.to_string())?
-        .to_string();
-    let binding = reconcile_browser_binding_live_url(
-        &bindings,
-        &request.tab_id,
-        request.generation,
-        &live_url,
-    )?;
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    webview
-        .with_webview(move |platform_webview| {
-            let sender = Mutex::new(Some(sender));
-            let completion = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
-                let result = if !error.is_null() {
-                    Err("browser inspection failed".to_string())
-                } else if value.is_null() {
-                    Err("invalid_snapshot".to_string())
-                } else {
-                    let object = unsafe { &*(value as *const NSObject) };
-                    if !object.isKindOfClass(NSString::class()) {
-                        Err("invalid_snapshot".to_string())
-                    } else {
-                        let text =
-                            unsafe { &*(value as *const AnyObject as *const NSString) }.to_string();
-                        if text.len() > MAX_BROWSER_INSPECTION_BYTES {
-                            Err("result_too_large".to_string())
-                        } else {
-                            Ok(text)
-                        }
-                    }
-                };
-                if let Some(sender) = sender.lock().take() {
-                    let _ = sender.send(result);
-                }
-            });
-            let mtm = MainThreadMarker::new().expect("WKWebView callback runs on the main thread");
-            let world_name = NSString::from_str("com.opencoven.psyche.browser-inspection");
-            let world = unsafe { WKContentWorld::worldWithName(&world_name, mtm) };
-            let source = NSString::from_str(&script);
-            let webview = unsafe { &*(platform_webview.inner() as *mut WKWebView) };
-            unsafe {
-                webview.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
-                    &source,
-                    None,
-                    &world,
-                    Some(&completion),
-                )
-            };
-        })
-        .map_err(|error| error.to_string())?;
-    let snapshot_json = tokio::time::timeout(BROWSER_INSPECTION_TIMEOUT, receiver)
-        .await
-        .map_err(|_| "browser inspection timed out".to_string())?
-        .map_err(|_| "browser inspection callback closed".to_string())??;
-    let bounded_live_url = bounded_browser_url(&binding.navigation_url);
-    validate_browser_snapshot_json(&snapshot_json, &request, Some(&bounded_live_url))?;
-    let after_url = webview
-        .url()
-        .map_err(|error| error.to_string())?
-        .to_string();
-    let current = reconcile_browser_binding_live_url(
-        &bindings,
-        &request.tab_id,
-        request.generation,
-        &after_url,
-    )?;
-    if current.navigation_epoch != binding.navigation_epoch
-        || current.navigation_url != binding.navigation_url
-    {
-        return Err("snapshot_stale".to_string());
-    }
-    Ok(BrowserInspectResponse {
-        snapshot_json,
-        navigation_epoch: current.navigation_epoch,
-        navigation_url: bounded_browser_url(&current.navigation_url),
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[tauri::command]
-async fn browser_action(
-    app: AppHandle,
-    caller: tauri::Webview,
-    bindings: State<'_, BrowserBindingState>,
-    request: BrowserActionRequest,
-) -> Result<serde_json::Value, String> {
-    use block2::RcBlock;
-    use objc2::{runtime::AnyObject, ClassType, MainThreadMarker};
-    use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
-    use objc2_web_kit::{WKContentWorld, WKWebView};
-
-    require_main_webview(&caller)?;
-    let _effect_guard =
-        reserve_browser_semantic_effect(&bindings, &request.tab_id, request.generation)?;
-    let initial = browser_binding(&bindings, &request.tab_id, request.generation)?;
-    let label = initial.label.clone();
-    let payload = serde_json::to_string(&browser_action_payload(&request)?)
-        .map_err(|error| error.to_string())?;
-    let script = format!(
-        "{};JSON.stringify((()=>{{try{{return {{ok:true,value:window.__PSYCHE_AUTOMATION__.dispatch({})}}}}catch(error){{return {{ok:false,code:String(error&&error.code||'invalid_action'),message:String(error&&error.message||'browser action failed')}}}}}})())",
-        BROWSER_AUTOMATION_RUNTIME, payload
-    );
-    let webview = app
-        .get_webview(&label)
-        .ok_or_else(|| "browser webview missing".to_string())?;
-    let before_url = webview
-        .url()
-        .map_err(|error| error.to_string())?
-        .to_string();
-    let binding = reconcile_browser_binding_live_url(
-        &bindings,
-        &request.tab_id,
-        request.generation,
-        &before_url,
-    )?;
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    webview
-        .with_webview(move |platform_webview| {
-            let sender = Mutex::new(Some(sender));
-            let completion = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
-                let result = if !error.is_null() {
-                    Err("browser action failed".to_string())
-                } else if value.is_null() {
-                    Err("invalid_action_result".to_string())
-                } else {
-                    let object = unsafe { &*(value as *const NSObject) };
-                    if !object.isKindOfClass(NSString::class()) {
-                        Err("invalid_action_result".to_string())
-                    } else {
-                        let text =
-                            unsafe { &*(value as *const AnyObject as *const NSString) }.to_string();
-                        if text.len() > MAX_BROWSER_INSPECTION_BYTES {
-                            Err("result_too_large".to_string())
-                        } else {
-                            Ok(text)
-                        }
-                    }
-                };
-                if let Some(sender) = sender.lock().take() {
-                    let _ = sender.send(result);
-                }
-            });
-            let mtm = MainThreadMarker::new().expect("WKWebView callback runs on the main thread");
-            let world_name = NSString::from_str("com.opencoven.psyche.browser-inspection");
-            let world = unsafe { WKContentWorld::worldWithName(&world_name, mtm) };
-            let source = NSString::from_str(&script);
-            let webview = unsafe { &*(platform_webview.inner() as *mut WKWebView) };
-            unsafe {
-                webview.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
-                    &source,
-                    None,
-                    &world,
-                    Some(&completion),
-                )
-            };
-        })
-        .map_err(|error| error.to_string())?;
-    let result_json = tokio::time::timeout(BROWSER_INSPECTION_TIMEOUT, receiver)
-        .await
-        .map_err(|_| "browser action timed out".to_string())?
-        .map_err(|_| "browser action callback closed".to_string())??;
-    let envelope: serde_json::Value =
-        serde_json::from_str(&result_json).map_err(|_| "invalid_action_result".to_string())?;
-    if envelope.get("ok") != Some(&serde_json::Value::Bool(true)) {
-        return Err(stable_browser_action_error_code(
-            envelope.get("code").and_then(|value| value.as_str()),
-        )
-        .to_string());
-    }
-    let value = envelope
-        .get("value")
-        .cloned()
-        .ok_or_else(|| "invalid_action_result".to_string())?;
-    let after_url = webview
-        .url()
-        .map_err(|error| error.to_string())?
-        .to_string();
-    let current = reconcile_browser_binding_live_url(
-        &bindings,
-        &request.tab_id,
-        request.generation,
-        &after_url,
-    )?;
-    if current.navigation_epoch != binding.navigation_epoch && before_url == after_url {
-        return Err("snapshot_stale".to_string());
-    }
-    Ok(value)
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct BrowserScriptRequest {
-    project_root: String,
-    action_id: String,
-    tab_id: String,
-    generation: u64,
-    invocation_id: String,
-    #[serde(rename = "documentId")]
-    _document_id: String,
-    document_token: String,
-    navigation_epoch: u64,
-    navigation_url: String,
-    source: String,
-    #[serde(default)]
-    args: serde_json::Value,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct BrowserScriptContextRequest {
-    tab_id: String,
-    generation: u64,
-    document_id: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserScriptContextResponse {
-    document_id: String,
-    document_token: String,
-    navigation_epoch: u64,
-    navigation_url: String,
-}
-
-fn classify_browser_script_callback<T>(
-    callback_result: Result<T, String>,
-    expected_document_token: &str,
-    observed_document_token: Result<String, String>,
-) -> Result<T, String> {
-    match observed_document_token {
-        Ok(token) if token == expected_document_token => callback_result,
-        Ok(_) | Err(_) => Err("effect_unknown".to_string()),
-    }
-}
-
-fn classify_browser_script_preflight_token(
-    expected_document_token: &str,
-    observed_document_token: Result<String, String>,
-) -> Result<(), String> {
-    match observed_document_token {
-        Ok(token) if token == expected_document_token => Ok(()),
-        Ok(_) => Err("approval_identity_mismatch".to_string()),
-        Err(_) => Err("snapshot_stale".to_string()),
-    }
-}
-
-fn classify_browser_script_deadline(
-    dispatched_binding: &BrowserBinding,
-    expected_document_token: &str,
-    observation: Result<(BrowserBinding, String), String>,
-) -> Result<(), String> {
-    match observation {
-        Ok((binding, token))
-            if binding == *dispatched_binding && token == expected_document_token =>
-        {
-            Err("action_timeout".to_string())
-        }
-        Ok(_) | Err(_) => Err("effect_unknown".to_string()),
-    }
-}
-
-fn finalize_browser_script_deadline(
-    bindings: &BrowserBindingState,
-    script_flights: &BrowserScriptFlightState,
-    tab_id: &str,
-    document_token: &str,
-    generation: u64,
-    invocation_id: &str,
-    dispatched_binding: &BrowserBinding,
-    observation: Result<(BrowserBinding, String), String>,
-) -> String {
-    let error = classify_browser_script_deadline(dispatched_binding, document_token, observation)
-        .expect_err("deadline classification is always terminal");
-    if error == "effect_unknown" {
-        script_flights.clear_matching_invocation(
-            bindings,
-            tab_id,
-            document_token,
-            generation,
-            invocation_id,
-        );
-    }
-    error
-}
-
-#[cfg(test)]
-fn post_dispatch_identity<T>(result: Result<T, String>) -> Result<T, String> {
-    result.map_err(|_| "effect_unknown".to_string())
-}
-
-fn validate_browser_script_args(args: &serde_json::Value) -> Result<(), String> {
-    let encoded = serde_json::to_vec(args).map_err(|_| "script_args_invalid".to_string())?;
-    if encoded.len() > MAX_BROWSER_SCRIPT_ARGS_BYTES {
-        return Err("script_args_too_large".to_string());
+<<OURS>>
     }
     Ok(())
 }
 
-fn browser_script_runtime_exceeded_deadline(duration_ms: f64) -> bool {
-    duration_ms >= BROWSER_SCRIPT_TIMEOUT.as_secs_f64() * 1000.0
-}
-
-fn remaining_browser_script_duration(elapsed: std::time::Duration) -> std::time::Duration {
-    BROWSER_SCRIPT_TIMEOUT.saturating_sub(elapsed)
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserScriptTerminalEvent {
-    project_root: String,
-    action_id: String,
-    tab_id: String,
-    generation: u64,
-    invocation_id: String,
-    document_token: String,
-    terminal_reason: String,
-}
-
-#[cfg(target_os = "macos")]
-fn retain_browser_script_terminal(
-    receiver: tokio::sync::oneshot::Receiver<Result<String, String>>,
-    operations: Arc<Mutex<HashMap<String, BrowserOperation>>>,
-    app: AppHandle,
-    project_root: String,
-    action_id: String,
-    tab_id: String,
-    generation: u64,
-    invocation_id: String,
-    document_token: String,
-) {
-    tauri::async_runtime::spawn(async move {
-        if await_browser_script_terminal(
-            receiver,
-            operations,
-            tab_id.clone(),
-            document_token.clone(),
-            generation,
-            invocation_id.clone(),
-        )
-        .await
-        {
-            let _ = app.emit(
-                "browser:script-terminal",
-                BrowserScriptTerminalEvent {
-                    project_root,
-                    action_id,
-                    tab_id,
-                    generation,
-                    invocation_id,
-                    document_token,
-                    terminal_reason: "completed".to_string(),
-                },
-            );
-        }
-    });
-}
-
-#[cfg(target_os = "macos")]
-async fn evaluate_browser_script_document_token(
-    webview: &tauri::Webview,
+<<OURS>>
 ) -> Result<String, String> {
     use block2::RcBlock;
     use objc2::{runtime::AnyObject, ClassType, MainThreadMarker};
     use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
     use objc2_web_kit::{WKContentWorld, WKWebView};
 
-    let native_token = uuid::Uuid::new_v4().simple().to_string();
-    let native_token_json = serde_json::to_string(&native_token)
-        .map_err(|_| "document_token_unavailable".to_string())?;
-    let script = r#"((native_token) => {
-      const key = '__PSYCHE_BROWSER_SCRIPT_DOCUMENT_CONTEXT__';
-      let state = globalThis[key];
-      if (!state || state.document !== document || state.root !== document.documentElement) {
-        state = Object.freeze({ document, root: document.documentElement,
-          token: native_token });
-        Object.defineProperty(globalThis, key, { value: state, configurable: true });
-      }
-      return JSON.stringify({ documentToken: state.token });
-    })("__PSYCHE_NATIVE_TOKEN__")"#
-        .replace("\"__PSYCHE_NATIVE_TOKEN__\"", &native_token_json);
+<<OURS>>
     let (sender, receiver) = tokio::sync::oneshot::channel();
     webview
         .with_webview(move |platform_webview| {
             let sender = Mutex::new(Some(sender));
             let completion = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
                 let result = if !error.is_null() || value.is_null() {
-                    Err("document_token_unavailable".to_string())
-                } else {
-                    let object = unsafe { &*(value as *const NSObject) };
-                    if !object.isKindOfClass(NSString::class()) {
-                        Err("document_token_unavailable".to_string())
+<<OURS>>
                     } else {
                         Ok(unsafe { &*(value as *const AnyObject as *const NSString) }.to_string())
                     }
@@ -6280,7 +4181,7 @@ async fn evaluate_browser_script_document_token(
                 }
             });
             let mtm = MainThreadMarker::new().expect("WKWebView callback runs on the main thread");
-            let world_name = NSString::from_str(BROWSER_SCRIPT_CONTEXT_WORLD_NAME);
+<<OURS>>
             let world = unsafe { WKContentWorld::worldWithName(&world_name, mtm) };
             let source = NSString::from_str(&script);
             let webview = unsafe { &*(platform_webview.inner() as *mut WKWebView) };
@@ -6293,11 +4194,7 @@ async fn evaluate_browser_script_document_token(
                 )
             };
         })
-        .map_err(|_| "document_token_unavailable".to_string())?;
-    let result_json = tokio::time::timeout(BROWSER_SCRIPT_TIMEOUT, receiver)
-        .await
-        .map_err(|_| "document_token_unavailable".to_string())?
-        .map_err(|_| "document_token_unavailable".to_string())??;
+<<OURS>>
     let value: serde_json::Value =
         serde_json::from_str(&result_json).map_err(|_| "document_token_unavailable".to_string())?;
     value
@@ -6309,687 +4206,19 @@ async fn evaluate_browser_script_document_token(
 }
 
 #[cfg(target_os = "macos")]
-async fn observe_current_browser_script_document(
-    webview: &tauri::Webview,
-    bindings: &BrowserBindingState,
-    script_flights: &BrowserScriptFlightState,
-    tab_id: &str,
-    generation: u64,
-) -> Result<(BrowserBinding, String), String> {
-    let observation_epoch = script_flights.begin_document_observation();
-    let before_url = webview.url().map_err(|_| "snapshot_stale".to_string())?;
-    let before =
-        reconcile_browser_binding_live_url(bindings, tab_id, generation, before_url.as_str())?;
-    let first_token = evaluate_browser_script_document_token(webview)
-        .await
-        .map_err(|_| "snapshot_stale".to_string())?;
-    let after_url = webview.url().map_err(|_| "snapshot_stale".to_string())?;
-    let after =
-        reconcile_browser_binding_live_url(bindings, tab_id, generation, after_url.as_str())?;
-    let second_token = evaluate_browser_script_document_token(webview)
-        .await
-        .map_err(|_| "snapshot_stale".to_string())?;
-    let confirmed_url = webview.url().map_err(|_| "snapshot_stale".to_string())?;
-    let confirmed =
-        reconcile_browser_binding_live_url(bindings, tab_id, generation, confirmed_url.as_str())?;
-    if before != after || after != confirmed || first_token != second_token {
-        return Err("snapshot_stale".to_string());
-    }
-    script_flights.observe_document(
-        tab_id,
-        &second_token,
-        generation,
-        confirmed.revision,
-        observation_epoch,
-    )?;
-    Ok((confirmed, second_token))
-}
-
-#[cfg(target_os = "macos")]
-#[tauri::command]
-async fn browser_script_context(
-    app: AppHandle,
-    caller: tauri::Webview,
-    bindings: State<'_, BrowserBindingState>,
-    script_flights: State<'_, BrowserScriptFlightState>,
-    request: BrowserScriptContextRequest,
-) -> Result<BrowserScriptContextResponse, String> {
-    require_main_webview(&caller)?;
-    let initial = browser_binding(&bindings, &request.tab_id, request.generation)?;
-    let webview = app
-        .get_webview(&initial.label)
-        .ok_or_else(|| "browser webview missing".to_string())?;
-    let (current, document_token) = observe_current_browser_script_document(
-        &webview,
-        &bindings,
-        &script_flights,
-        &request.tab_id,
-        request.generation,
-    )
-    .await?;
-    Ok(BrowserScriptContextResponse {
-        document_id: request.document_id,
-        document_token,
-        navigation_epoch: current.navigation_epoch,
-        navigation_url: current.navigation_url,
-    })
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserScriptResponse {
-    value: serde_json::Value,
-    byte_count: usize,
-    duration_ms: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error_code: Option<String>,
-    pending: bool,
-}
-
-fn browser_script_error_response(code: &str, duration_ms: f64) -> BrowserScriptResponse {
-    let exceeded_deadline = browser_script_runtime_exceeded_deadline(duration_ms);
-    let terminal_code = if code == "effect_unknown" {
-        "effect_unknown"
-    } else if exceeded_deadline {
-        "action_timeout"
-    } else {
-        code
-    };
-    BrowserScriptResponse {
-        value: serde_json::Value::Null,
-        byte_count: 0,
-        duration_ms: if exceeded_deadline {
-            5_000.0
-        } else {
-            duration_ms.clamp(0.0, 5_000.0)
-        },
-        error_code: Some(terminal_code.to_string()),
-        pending: false,
-    }
-}
-
-fn browser_script_pending_unknown_response(duration_ms: f64) -> BrowserScriptResponse {
-    BrowserScriptResponse {
-        value: serde_json::Value::Null,
-        byte_count: 0,
-        duration_ms: if duration_ms.is_finite() {
-            duration_ms.clamp(0.0, 5_000.0)
-        } else {
-            0.0
-        },
-        error_code: Some("unknown_pending".to_string()),
-        pending: true,
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[tauri::command]
-async fn browser_script(
-    app: AppHandle,
-    caller: tauri::Webview,
-    bindings: State<'_, BrowserBindingState>,
-    script_flights: State<'_, BrowserScriptFlightState>,
-    provider_state: State<'_, ControlProviderState>,
-    request: BrowserScriptRequest,
-) -> Result<BrowserScriptResponse, String> {
-    use block2::RcBlock;
-    use objc2::{runtime::AnyObject, ClassType, MainThreadMarker};
-    use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
-    use objc2_web_kit::{WKContentWorld, WKWebView};
-
-    require_main_webview(&caller)?;
-    if request.source.len() > MAX_BROWSER_SCRIPT_SOURCE_BYTES {
-        return Err("script_source_too_large".to_string());
-    }
-    validate_browser_script_args(&request.args)?;
-    let initial = browser_binding(&bindings, &request.tab_id, request.generation)?;
-    let label = initial.label.clone();
-    let input = serde_json::to_string(&serde_json::json!({
-        "source": request.source,
-        "args": request.args,
-    }))
-    .map_err(|_| "script_serialization_failed".to_string())?;
-    // The fixed runtime executes in a document-scoped, never-reused pool slot.
-    // Approved source enters only as data and cannot reach the persistent
-    // document-token world.
+<<OURS>>
     let script = format!(
         "{}({})",
         include_str!("../../web/control/browser-script-runtime.js"),
         input
     );
-    let webview = app
-        .get_webview(&label)
-        .ok_or_else(|| "browser webview missing".to_string())?;
-    script_flights.reserve(
-        &bindings,
-        request.tab_id.clone(),
-        request.document_token.clone(),
-        request.generation,
-        request.invocation_id.clone(),
-    )?;
-    let before_url = match webview.url() {
-        Ok(url) => url.to_string(),
-        Err(error) => {
-            script_flights.clear_matching_invocation(
-                &bindings,
-                &request.tab_id,
-                &request.document_token,
-                request.generation,
-                &request.invocation_id,
-            );
-            return Err(error.to_string());
-        }
-    };
-    let binding = match reconcile_browser_binding_live_url(
-        &bindings,
-        &request.tab_id,
-        request.generation,
-        &before_url,
-    ) {
-        Ok(binding) => binding,
-        Err(error) => {
-            script_flights.clear_matching_invocation(
-                &bindings,
-                &request.tab_id,
-                &request.document_token,
-                request.generation,
-                &request.invocation_id,
-            );
-            return Err(error);
-        }
-    };
-    if binding.navigation_epoch != request.navigation_epoch
-        || binding.navigation_url != request.navigation_url
-    {
-        script_flights.clear_matching_invocation(
-            &bindings,
-            &request.tab_id,
-            &request.document_token,
-            request.generation,
-            &request.invocation_id,
-        );
-        return Err("approval_identity_mismatch".to_string());
-    }
-    let flight_map = bindings.operations.clone();
-    let flight_tab_id = request.tab_id.clone();
-    let flight_token = request.document_token.clone();
-    let flight_generation = request.generation;
-    let flight_invocation_id = request.invocation_id.clone();
-    let flight_project_root = request.project_root.clone();
-    let flight_action_id = request.action_id.clone();
-    let terminal_app = app.clone();
-    let preflight = observe_current_browser_script_document(
-        &webview,
-        &bindings,
-        &script_flights,
-        &request.tab_id,
-        request.generation,
-    )
-    .await;
-    let preflight_document_token = preflight
-        .as_ref()
-        .map(|(_, token)| token.clone())
-        .map_err(Clone::clone);
-    if preflight
-        .as_ref()
-        .is_ok_and(|(current, _)| current != &binding)
-        || classify_browser_script_preflight_token(
-            &request.document_token,
-            preflight_document_token,
-        )
-        .is_err()
-    {
-        script_flights.clear_matching_invocation(
-            &bindings,
-            &request.tab_id,
-            &request.document_token,
-            request.generation,
-            &request.invocation_id,
-        );
-        return Err(if preflight.is_err() {
-            "snapshot_stale".to_string()
-        } else {
-            "approval_identity_mismatch".to_string()
-        });
-    }
-    let execution_world_name = match script_flights.allocate_realm(
-        &request.tab_id,
-        &request.document_token,
-        request.generation,
-        binding.revision,
-    ) {
-        Ok(world_name) => world_name,
-        Err(error) => {
-            script_flights.clear_matching_invocation(
-                &bindings,
-                &request.tab_id,
-                &request.document_token,
-                request.generation,
-                &request.invocation_id,
-            );
-            return Err(error);
-        }
-    };
-    if publish_provider_effect_started(
-        &provider_state,
-        request.project_root.clone(),
-        request.invocation_id.clone(),
-        request.action_id.clone(),
-        request.tab_id.clone(),
-        request.generation,
-        request.invocation_id.clone(),
-        request.document_token.clone(),
-    )
-    .await
-    .is_err()
-    {
-        script_flights.clear_matching_invocation(
-            &bindings,
-            &request.tab_id,
-            &request.document_token,
-            request.generation,
-            &request.invocation_id,
-        );
-        return Err("provider_unavailable".to_string());
-    }
-    let (submission_sender, submission_receiver) = tokio::sync::oneshot::channel();
-    if let Err(_error) = webview.with_webview(move |platform_webview| {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let sender = Mutex::new(Some(sender));
-        let completion = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
-            let result = if !error.is_null() || value.is_null() {
-                Err("script_execution_failed".to_string())
-            } else {
-                let object = unsafe { &*(value as *const NSObject) };
-                if !object.isKindOfClass(NSString::class()) {
-                    Err("script_serialization_failed".to_string())
-                } else {
-                    Ok(unsafe { &*(value as *const AnyObject as *const NSString) }.to_string())
-                }
-            };
-            let delivered = sender
-                .lock()
-                .take()
-                .is_some_and(|sender| sender.send(result).is_ok());
-            if !delivered {
-                {
-                    let mut operations = flight_map.lock();
-                    if operations.get(&flight_tab_id).is_some_and(|operation| {
-                        matches!(operation,
-                            BrowserOperation::Script(flight) if
-                            flight.document_token == flight_token
-                                && flight.generation == flight_generation
-                                && flight.invocation_id == flight_invocation_id
-                        )
-                    }) {
-                        operations.remove(&flight_tab_id);
-                    }
-                }
-                let _ = terminal_app.emit(
-                    "browser:script-terminal",
-                    BrowserScriptTerminalEvent {
-                        project_root: flight_project_root.clone(),
-                        action_id: flight_action_id.clone(),
-                        tab_id: flight_tab_id.clone(),
-                        generation: flight_generation,
-                        invocation_id: flight_invocation_id.clone(),
-                        document_token: flight_token.clone(),
-                        terminal_reason: "completed".to_string(),
-                    },
-                );
-            }
-        });
-        let mtm = MainThreadMarker::new().expect("WKWebView callback runs on the main thread");
-        let world_name = NSString::from_str(&execution_world_name);
-        let world = unsafe { WKContentWorld::worldWithName(&world_name, mtm) };
-        let source = NSString::from_str(&script);
-        let webview = unsafe { &*(platform_webview.inner() as *mut WKWebView) };
-        let native_started_at = Instant::now();
-        unsafe {
-            webview.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
-                &source,
-                None,
-                &world,
-                Some(&completion),
-            )
-        };
-        let _ = submission_sender.send((native_started_at, receiver));
-    }) {
-        script_flights.clear_matching_invocation(
-            &bindings,
-            &request.tab_id,
-            &request.document_token,
-            request.generation,
-            &request.invocation_id,
-        );
-        return Err("provider_unavailable".to_string());
-    }
-    let (native_started_at, receiver) = match submission_receiver.await {
-        Ok(submission) => submission,
-        Err(_) => {
-            script_flights.clear_matching_invocation(
-                &bindings,
-                &request.tab_id,
-                &request.document_token,
-                request.generation,
-                &request.invocation_id,
-            );
-            return Err("provider_unavailable".to_string());
-        }
-    };
-    let _ = app.emit(
-        "browser:script-start-accepted",
-        serde_json::json!({
-            "invocationId": request.invocation_id.clone(), "tabId": request.tab_id.clone(),
-            "generation": request.generation, "documentToken": request.document_token.clone(),
-        }),
-    );
-    if publish_provider_effect_executing(
-        &provider_state,
-        request.project_root.clone(),
-        request.invocation_id.clone(),
-        request.action_id.clone(),
-        request.tab_id.clone(),
-        request.generation,
-        request.document_token.clone(),
-    )
-    .await
-    .is_err()
-    {
-        let duration_ms = native_started_at.elapsed().as_secs_f64() * 1000.0;
-        let response = browser_script_pending_unknown_response(duration_ms);
-        let _ = app.emit(
-            "browser:script-unknown-pending",
-            serde_json::json!({
-                "invocationId": request.invocation_id.clone(), "tabId": request.tab_id.clone(),
-                "generation": request.generation, "documentToken": request.document_token.clone(),
-                "durationMs": response.duration_ms,
-            }),
-        );
-        retain_browser_script_terminal(
-            receiver,
-            bindings.operations.clone(),
-            app.clone(),
-            request.project_root.clone(),
-            request.action_id.clone(),
-            request.tab_id.clone(),
-            request.generation,
-            request.invocation_id.clone(),
-            request.document_token.clone(),
-        );
-        return Ok(response);
-    }
-    let remaining = remaining_browser_script_duration(native_started_at.elapsed());
-    let callback_result = match tokio::time::timeout(remaining, receiver).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(_)) => {
-            let duration_ms = native_started_at.elapsed().as_secs_f64() * 1000.0;
-            let response = browser_script_pending_unknown_response(duration_ms);
-            let _ = app.emit(
-                "browser:script-unknown-pending",
-                serde_json::json!({
-                    "invocationId": request.invocation_id.clone(), "tabId": request.tab_id.clone(),
-                    "generation": request.generation, "documentToken": request.document_token.clone(),
-                    "durationMs": response.duration_ms,
-                }),
-            );
-            return Ok(response);
-        }
-        Err(_) => {
-            let observation = tokio::time::timeout(
-                BROWSER_SCRIPT_DEADLINE_OBSERVATION_TIMEOUT,
-                observe_current_browser_script_document(
-                    &webview,
-                    &bindings,
-                    &script_flights,
-                    &request.tab_id,
-                    request.generation,
-                ),
-            )
-            .await
-            .map_err(|_| "snapshot_stale".to_string())
-            .and_then(|result| result);
-            let error = finalize_browser_script_deadline(
-                &bindings,
-                &script_flights,
-                &request.tab_id,
-                &request.document_token,
-                request.generation,
-                &request.invocation_id,
-                &binding,
-                observation,
-            );
-            return if error == "action_timeout" {
-                Ok(BrowserScriptResponse {
-                    pending: true,
-                    ..browser_script_error_response("action_timeout", 5_000.0)
-                })
-            } else {
-                Ok(browser_script_error_response(&error, 5_000.0))
-            };
-        }
-    };
-    let _flight_guard = BrowserScriptFlightGuard {
-        operations: bindings.operations.clone(),
-        tab_id: request.tab_id.clone(),
-        document_token: request.document_token.clone(),
-        generation: request.generation,
-        invocation_id: request.invocation_id.clone(),
-    };
-    let native_duration_ms = native_started_at.elapsed().as_secs_f64() * 1000.0;
-    let callback_after_url = match webview.url() {
-        Ok(url) => url.to_string(),
-        Err(_) => {
-            return Ok(browser_script_error_response(
-                "effect_unknown",
-                native_duration_ms,
-            ))
-        }
-    };
-    let callback_current = match reconcile_browser_binding_live_url(
-        &bindings,
-        &request.tab_id,
-        request.generation,
-        &callback_after_url,
-    ) {
-        Ok(current) => current,
-        Err(_) => {
-            return Ok(browser_script_error_response(
-                "effect_unknown",
-                native_duration_ms,
-            ))
-        }
-    };
-    if callback_current.navigation_epoch != binding.navigation_epoch
-        || callback_current.navigation_url != binding.navigation_url
-    {
-        return Ok(browser_script_error_response(
-            "effect_unknown",
-            native_duration_ms,
-        ));
-    }
-    let observed_document_token = evaluate_browser_script_document_token(&webview).await;
-    if classify_browser_script_callback(Ok(()), &request.document_token, observed_document_token)
-        .is_err()
-    {
-        return Ok(browser_script_error_response(
-            "effect_unknown",
-            native_started_at.elapsed().as_secs_f64() * 1000.0,
-        ));
-    }
-    let native_duration_ms = native_started_at.elapsed().as_secs_f64() * 1000.0;
-    if browser_script_runtime_exceeded_deadline(native_duration_ms) {
-        return Ok(browser_script_error_response("action_timeout", 5_000.0));
-    }
-    let result_json = match callback_result {
-        Ok(result) => result,
-        Err(code) => return Ok(browser_script_error_response(&code, native_duration_ms)),
-    };
-    let envelope: serde_json::Value = match serde_json::from_str(&result_json) {
-        Ok(envelope) => envelope,
-        Err(_) => {
-            return Ok(browser_script_error_response(
-                "script_serialization_failed",
-                native_started_at.elapsed().as_secs_f64() * 1000.0,
-            ))
-        }
-    };
-    let raw_duration_ms = match envelope
-        .get("durationMs")
-        .and_then(|value| value.as_f64())
-        .filter(|value| value.is_finite() && *value >= 0.0)
-    {
-        Some(duration) => duration,
-        None => {
-            return Ok(browser_script_error_response(
-                "script_serialization_failed",
-                native_started_at.elapsed().as_secs_f64() * 1000.0,
-            ))
-        }
-    };
-    if browser_script_runtime_exceeded_deadline(raw_duration_ms) {
-        return Ok(browser_script_error_response("action_timeout", 5_000.0));
-    }
-    if envelope.get("ok") != Some(&serde_json::Value::Bool(true)) {
-        let code = match envelope.get("code").and_then(|value| value.as_str()) {
-            Some("result_too_large") => "result_too_large",
-            Some("script_serialization_failed") => "script_serialization_failed",
-            Some("approval_identity_mismatch") => "approval_identity_mismatch",
-            Some("effect_unknown") => "effect_unknown",
-            _ => "script_execution_failed",
-        };
-        return Ok(browser_script_error_response(code, raw_duration_ms));
-    }
-    let result_text = match envelope.get("json").and_then(|value| value.as_str()) {
-        Some(result) => result,
-        None => {
-            return Ok(browser_script_error_response(
-                "script_serialization_failed",
-                raw_duration_ms,
-            ))
-        }
-    };
-    let byte_count = match envelope
-        .get("byteCount")
-        .and_then(|value| value.as_u64())
-        .and_then(|value| usize::try_from(value).ok())
-    {
-        Some(count) => count,
-        None => {
-            return Ok(browser_script_error_response(
-                "script_serialization_failed",
-                raw_duration_ms,
-            ))
-        }
-    };
-    let duration_ms = raw_duration_ms;
-    if byte_count != result_text.as_bytes().len() || byte_count > MAX_BROWSER_SCRIPT_RESULT_BYTES {
-        return Ok(browser_script_error_response(
-            "result_too_large",
-            duration_ms,
-        ));
-    }
-    let value = match serde_json::from_str(result_text) {
-        Ok(value) => value,
-        Err(_) => {
-            return Ok(browser_script_error_response(
-                "script_serialization_failed",
-                duration_ms,
-            ))
-        }
-    };
-    let after_url = match webview.url() {
-        Ok(url) => url.to_string(),
-        Err(_) => {
-            return Ok(browser_script_error_response(
-                "effect_unknown",
-                native_started_at.elapsed().as_secs_f64() * 1000.0,
-            ))
-        }
-    };
-    let current = match reconcile_browser_binding_live_url(
-        &bindings,
-        &request.tab_id,
-        request.generation,
-        &after_url,
-    ) {
-        Ok(current) => current,
-        Err(_) => {
-            return Ok(browser_script_error_response(
-                "effect_unknown",
-                native_started_at.elapsed().as_secs_f64() * 1000.0,
-            ))
-        }
-    };
-    if current.navigation_epoch != binding.navigation_epoch
-        || current.navigation_url != binding.navigation_url
-    {
-        return Ok(browser_script_error_response(
-            "effect_unknown",
-            native_started_at.elapsed().as_secs_f64() * 1000.0,
-        ));
-    }
-    if browser_script_runtime_exceeded_deadline(native_started_at.elapsed().as_secs_f64() * 1000.0)
-    {
-        return Ok(browser_script_error_response("action_timeout", 5_000.0));
-    }
-    Ok(BrowserScriptResponse {
-        value,
-        byte_count,
-        duration_ms,
-        error_code: None,
-        pending: false,
+<<OURS>>
     })
 }
 
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-async fn browser_inspect(
-    _app: AppHandle,
-    caller: tauri::Webview,
-    _bindings: State<'_, BrowserBindingState>,
-    _request: BrowserInspectRequest,
-) -> Result<BrowserInspectResponse, String> {
-    require_main_webview(&caller)?;
-    Err("backend_unavailable".to_string())
-}
-
-#[cfg(not(target_os = "macos"))]
-#[tauri::command]
-async fn browser_action(
-    _app: AppHandle,
-    caller: tauri::Webview,
-    _bindings: State<'_, BrowserBindingState>,
-    _request: BrowserActionRequest,
-) -> Result<serde_json::Value, String> {
-    require_main_webview(&caller)?;
-    Err("backend_unavailable".to_string())
-}
-
-#[cfg(not(target_os = "macos"))]
-#[tauri::command]
-async fn browser_script(
-    _app: AppHandle,
-    caller: tauri::Webview,
-    _bindings: State<'_, BrowserBindingState>,
-    _script_flights: State<'_, BrowserScriptFlightState>,
-    _request: BrowserScriptRequest,
-) -> Result<BrowserScriptResponse, String> {
-    require_main_webview(&caller)?;
-    Err("backend_unavailable".to_string())
-}
-
-#[cfg(not(target_os = "macos"))]
-#[tauri::command]
-async fn browser_script_context(
-    _app: AppHandle,
-    caller: tauri::Webview,
-    _bindings: State<'_, BrowserBindingState>,
-    _script_flights: State<'_, BrowserScriptFlightState>,
-    _request: BrowserScriptContextRequest,
-) -> Result<BrowserScriptContextResponse, String> {
-    require_main_webview(&caller)?;
-    Err("backend_unavailable".to_string())
+<<OURS>>
 }
 
 // ----------------------------------------------------------------------------
@@ -7056,6 +4285,83 @@ fn app_environment() -> AppEnvironment {
         default_shell,
         default_shell_args,
         native_workspace_v2,
+    }
+}
+
+fn native_launch_command(request: &NativeSessionCreate) -> Result<(String, Vec<String>), String> {
+    #[cfg(not(unix))]
+    {
+        let _ = request;
+        return Err("durable native sessions require tmux on a Unix platform".to_string());
+    }
+
+    #[cfg(unix)]
+    {
+        let environment = app_environment();
+        let (executable, command_args) = match &request.launch_kind {
+            NativeLaunchKind::Shell => (environment.default_shell, environment.default_shell_args),
+            NativeLaunchKind::Psyche => (
+                environment
+                    .node_path
+                    .ok_or_else(|| "node is unavailable".to_string())?,
+                vec![environment
+                    .psyche_entry
+                    .ok_or_else(|| "Psyche entrypoint is unavailable".to_string())?],
+            ),
+            NativeLaunchKind::CovenChat => {
+                let id = request
+                    .coven_session_id
+                    .clone()
+                    .filter(|id| is_safe_session_id(id))
+                    .ok_or_else(|| "Coven session id is unsafe".to_string())?;
+                (
+                    environment
+                        .coven_path
+                        .ok_or_else(|| "Coven CLI is unavailable".to_string())?,
+                    vec!["code".to_string(), "--session-id".to_string(), id],
+                )
+            }
+            NativeLaunchKind::CovenAttach => {
+                let id = request
+                    .coven_session_id
+                    .clone()
+                    .filter(|id| is_safe_session_id(id))
+                    .ok_or_else(|| "Coven session id is unsafe".to_string())?;
+                (
+                    environment
+                        .coven_path
+                        .ok_or_else(|| "Coven CLI is unavailable".to_string())?,
+                    vec!["attach".to_string(), id],
+                )
+            }
+        };
+        let mut args = vec![
+            "-u".to_string(),
+            "TMUX".to_string(),
+            "-u".to_string(),
+            "npm_config_prefix".to_string(),
+            "-u".to_string(),
+            "NPM_CONFIG_PREFIX".to_string(),
+            "-u".to_string(),
+            "PREFIX".to_string(),
+            format!("PATH={}", platform::augmented_path().to_string_lossy()),
+            "TERM=xterm-256color".to_string(),
+            "COLORTERM=truecolor".to_string(),
+            "PSYCHE_TAURI=1".to_string(),
+            "PSYCHE_NATIVE_CONTAINER=1".to_string(),
+        ];
+        if matches!(request.launch_kind, NativeLaunchKind::CovenChat) {
+            args.push(format!("{COVEN_SESSION_SOURCE}={PSYCHE_SESSION_SOURCE}"));
+        }
+        if matches!(request.launch_kind, NativeLaunchKind::Psyche) {
+            let home = environment
+                .home
+                .ok_or_else(|| "home directory is unavailable".to_string())?;
+            args.push(format!("TMUX_TMPDIR={home}/.psyche/macos-app/nested-tmux"));
+        }
+        args.push(executable);
+        args.extend(command_args);
+        Ok(("/usr/bin/env".to_string(), args))
     }
 }
 
@@ -8338,17 +5644,21 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(MetricsState::default())
         .manage(ControlProviderState::default())
-        .manage(BrowserBindingState::default())
-        .manage(BrowserScriptFlightState::default())
+<<OURS>>
         .invoke_handler(tauri::generate_handler![
             pty_start,
+            pty_attach,
             pane_session_metrics,
             canonical_project_path,
             pty_write,
-            pty_ack,
             pty_resize,
+            pty_ack,
+            pty_set_visibility,
             pty_stop,
             pty_list,
+            pty_transport_metrics,
+            browser_app_shortcut,
+            browser_automation_result,
             browser_navigate,
             browser_bind_control_generation,
             browser_set_bounds,
@@ -8357,10 +5667,7 @@ pub fn run() {
             browser_destroy,
             browser_destroy_many,
             browser_reload,
-            browser_install_automation,
-            browser_inspect,
-            browser_action,
-            browser_script_context,
+<<OURS>>
             browser_script,
             browser_snapshot,
             app_environment,
@@ -8368,6 +5675,10 @@ pub fn run() {
             coven_session_kill,
             workspace_load,
             workspace_save,
+            native_session_create,
+            native_session_list,
+            native_session_stop,
+            native_session_capture,
             agent_skills,
             fs_list_dir,
             fs_read_text,
@@ -8396,9 +5707,342 @@ pub fn run() {
 }
 
 #[cfg(test)]
+mod browser_app_shortcut_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    fn authorize(
+        authorizations: &BrowserShortcutAuthorizations,
+        label: &str,
+        secret: &str,
+        now: Instant,
+        next_secret: &str,
+        dispatched: &Cell<usize>,
+    ) -> Result<String, String> {
+        authorizations.authorize_and_rotate(
+            label,
+            secret,
+            now,
+            || Ok(next_secret.to_string()),
+            || {
+                dispatched.set(dispatched.get() + 1);
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn browser_app_shortcut_accepts_supported_mappings() {
+        let label = "psyche-browser-project-1";
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "terminal-pane").unwrap(),
+            "browser:shortcut-terminal-pane"
+        );
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "agent-pane").unwrap(),
+            "browser:shortcut-agent-pane"
+        );
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "composer").unwrap(),
+            "browser:shortcut-composer"
+        );
+    }
+
+    #[test]
+    fn browser_app_shortcut_rejects_untrusted_callers_and_unknown_actions() {
+        assert!(resolve_browser_app_shortcut("main", "terminal-pane").is_err());
+        assert!(resolve_browser_app_shortcut("psyche-browser-project-1", "new-tab").is_err());
+    }
+
+    #[test]
+    fn browser_app_shortcut_rejects_invalid_secrets_without_dispatching() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let dispatched = Cell::new(0);
+
+        assert!(authorize(
+            &authorizations,
+            label,
+            "wrong-secret",
+            Instant::now(),
+            "next-secret",
+            &dispatched,
+        )
+        .is_err());
+        assert_eq!(dispatched.get(), 0);
+    }
+
+    #[test]
+    fn browser_app_shortcut_rotates_only_after_successful_dispatch() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let now = Instant::now();
+
+        let failed = authorizations.authorize_and_rotate(
+            label,
+            "initial-secret",
+            now,
+            || Ok("unused-secret".to_string()),
+            || Err("dispatch failed".to_string()),
+        );
+        assert_eq!(failed.unwrap_err(), "dispatch failed");
+
+        let dispatched = Cell::new(0);
+        assert_eq!(
+            authorize(
+                &authorizations,
+                label,
+                "initial-secret",
+                now,
+                "rotated-secret",
+                &dispatched,
+            )
+            .unwrap(),
+            "rotated-secret"
+        );
+        assert_eq!(dispatched.get(), 1);
+        assert!(authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            now + MIN_BROWSER_SHORTCUT_INTERVAL,
+            "another-secret",
+            &dispatched,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn browser_app_shortcut_rate_limits_without_rotating() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let now = Instant::now();
+        let dispatched = Cell::new(0);
+
+        authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            now,
+            "second-secret",
+            &dispatched,
+        )
+        .unwrap();
+        assert!(authorize(
+            &authorizations,
+            label,
+            "second-secret",
+            now + MIN_BROWSER_SHORTCUT_INTERVAL - Duration::from_millis(1),
+            "too-fast-secret",
+            &dispatched,
+        )
+        .is_err());
+        assert_eq!(dispatched.get(), 1);
+        assert_eq!(
+            authorize(
+                &authorizations,
+                label,
+                "second-secret",
+                now + MIN_BROWSER_SHORTCUT_INTERVAL,
+                "third-secret",
+                &dispatched,
+            )
+            .unwrap(),
+            "third-secret"
+        );
+        assert_eq!(dispatched.get(), 2);
+    }
+
+    #[test]
+    fn browser_app_shortcut_navigation_reset_restores_initial_secret() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        let now = Instant::now();
+        let dispatched = Cell::new(0);
+
+        authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            now,
+            "rotated-secret",
+            &dispatched,
+        )
+        .unwrap();
+        assert!(authorizations.reset(label));
+        assert_eq!(
+            authorize(
+                &authorizations,
+                label,
+                "initial-secret",
+                now,
+                "post-navigation-secret",
+                &dispatched,
+            )
+            .unwrap(),
+            "post-navigation-secret"
+        );
+        assert!(authorize(
+            &authorizations,
+            label,
+            "rotated-secret",
+            now + MIN_BROWSER_SHORTCUT_INTERVAL,
+            "unused-secret",
+            &dispatched,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn browser_app_shortcut_cleanup_removes_authorization() {
+        let authorizations = BrowserShortcutAuthorizations::default();
+        let label = "psyche-browser-project-1";
+        authorizations.install(label, "initial-secret".to_string());
+        assert!(authorizations.remove(label));
+
+        let dispatched = Cell::new(0);
+        assert!(authorize(
+            &authorizations,
+            label,
+            "initial-secret",
+            Instant::now(),
+            "next-secret",
+            &dispatched,
+        )
+        .is_err());
+        assert_eq!(dispatched.get(), 0);
+    }
+
+    #[test]
+    fn browser_app_shortcut_secret_is_random_hex() {
+        let secret = random_browser_shortcut_secret().unwrap();
+        assert_eq!(secret.len(), 64);
+        assert!(secret.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn browser_automation_result_accepts_bounded_success_and_failure_payloads() {
+        let success: BrowserAutomationResultPayload = serde_json::from_value(serde_json::json!({
+            "actionId": "action-1",
+            "tabId": "tab-1",
+            "generation": 1,
+            "value": null
+        }))
+        .unwrap();
+        assert!(success.validate().is_ok());
+
+        let failure: BrowserAutomationResultPayload = serde_json::from_value(serde_json::json!({
+            "actionId": "action-1",
+            "tabId": "tab-1",
+            "generation": 1,
+            "error": { "code": "effect_unknown" }
+        }))
+        .unwrap();
+        assert!(failure.validate().is_ok());
+    }
+
+    #[test]
+    fn browser_automation_result_rejects_unbounded_or_ambiguous_payloads() {
+        let unknown_code: BrowserAutomationResultPayload =
+            serde_json::from_value(serde_json::json!({
+                "actionId": "action-1",
+                "tabId": "tab-1",
+                "generation": 1,
+                "error": { "code": "forged" }
+            }))
+            .unwrap();
+        assert!(unknown_code.validate().is_err());
+
+        assert!(
+            serde_json::from_value::<BrowserAutomationResultPayload>(serde_json::json!({
+                "actionId": "action-1",
+                "tabId": "tab-1",
+                "generation": 1,
+                "value": {},
+                "error": { "code": "automation_failed" }
+            }))
+            .is_err()
+        );
+
+        let oversized: BrowserAutomationResultPayload = serde_json::from_value(serde_json::json!({
+            "actionId": "action-1",
+            "tabId": "tab-1",
+            "generation": 1,
+            "value": "x".repeat(MAX_PROVIDER_RESULT_BYTES)
+        }))
+        .unwrap();
+        assert!(oversized.validate().is_err());
+    }
+
+    #[test]
+    fn browser_automation_result_consumes_only_the_exact_pending_correlation() {
+        let authorizations = BrowserAutomationAuthorizations::default();
+        let correlation = BrowserAutomationCorrelation {
+            action_id: "action-1".to_string(),
+            tab_id: "tab-1".to_string(),
+            generation: 7,
+        };
+        authorizations.install("psyche-browser-project-1", correlation.clone());
+        assert!(!authorizations.consume("psyche-browser-project-2", &correlation));
+        assert!(!authorizations.consume(
+            "psyche-browser-project-1",
+            &BrowserAutomationCorrelation {
+                generation: 8,
+                ..correlation.clone()
+            },
+        ));
+        assert!(authorizations.consume("psyche-browser-project-1", &correlation));
+        assert!(!authorizations.consume("psyche-browser-project-1", &correlation));
+    }
+
+    #[test]
+    fn browser_script_callback_is_stable_only_for_the_same_document() {
+        assert_eq!(
+            classify_browser_script_callback(
+                Err::<String, _>("automation_failed".to_string()),
+                "approved-token",
+                Ok("approved-token".to_string()),
+            ),
+            Err("automation_failed".to_string()),
+        );
+        assert_eq!(
+            classify_browser_script_callback(
+                Ok("old result"),
+                "approved-token",
+                Ok("replacement-token".to_string()),
+            ),
+            Err("effect_unknown".to_string()),
+        );
+    }
+
+    #[test]
+    fn browser_script_execution_uses_the_document_context_world() {
+        assert_eq!(
+            browser_script_execution_world_name(),
+            BROWSER_SCRIPT_CONTEXT_WORLD_NAME
+        );
+    }
+
+    #[test]
+    fn browser_script_worker_runtime_is_embedded_and_bounded() {
+        assert!(
+            include_str!("../../web/control/browser-script-worker-runtime.js")
+                .contains("installBrowserScriptWorkerRuntime")
+        );
+        assert_eq!(MAX_BROWSER_SCRIPT_ARGS_BYTES, 256 * 1024);
+    }
+}
+
+#[cfg(test)]
 mod pty_runtime_tests {
     #[cfg(unix)]
     use std::collections::VecDeque;
+    use std::future::Future;
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc};
@@ -8407,6 +6051,190 @@ mod pty_runtime_tests {
     use super::*;
     #[cfg(not(windows))]
     use portable_pty::ChildKiller;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pty_operation_lane_prevents_a_later_operation_from_overtaking() {
+        let lane = Arc::new(tokio::sync::Mutex::new(()));
+        let initial_guard = Arc::clone(&lane).lock_owned().await;
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let (first_waiting_tx, first_waiting_rx) = tokio::sync::oneshot::channel();
+        let first_lane = Arc::clone(&lane);
+        let first_order = Arc::clone(&order);
+        let first = tokio::spawn(async move {
+            let mut first_waiting_tx = Some(first_waiting_tx);
+            let lock = first_lane.lock_owned();
+            tokio::pin!(lock);
+            let _guard = std::future::poll_fn(|context| {
+                let result = lock.as_mut().poll(context);
+                if result.is_pending() {
+                    if let Some(waiting_tx) = first_waiting_tx.take() {
+                        let _ = waiting_tx.send(());
+                    }
+                }
+                result
+            })
+            .await;
+            first_order.lock().push(1);
+        });
+        first_waiting_rx.await.unwrap();
+
+        let (second_waiting_tx, second_waiting_rx) = tokio::sync::oneshot::channel();
+        let second_lane = Arc::clone(&lane);
+        let second_order = Arc::clone(&order);
+        let second = tokio::spawn(async move {
+            let mut second_waiting_tx = Some(second_waiting_tx);
+            let lock = second_lane.lock_owned();
+            tokio::pin!(lock);
+            let _guard = std::future::poll_fn(|context| {
+                let result = lock.as_mut().poll(context);
+                if result.is_pending() {
+                    if let Some(waiting_tx) = second_waiting_tx.take() {
+                        let _ = waiting_tx.send(());
+                    }
+                }
+                result
+            })
+            .await;
+            second_order.lock().push(2);
+        });
+        second_waiting_rx.await.unwrap();
+
+        drop(initial_guard);
+        first.await.unwrap();
+        second.await.unwrap();
+        assert_eq!(*order.lock(), vec![1, 2]);
+    }
+
+    #[test]
+    fn pty_operation_admission_is_bounded() {
+        let admission = Arc::new(tokio::sync::Semaphore::new(2));
+        let first = Arc::clone(&admission).try_acquire_owned().unwrap();
+        let second = Arc::clone(&admission).try_acquire_owned().unwrap();
+        assert!(Arc::clone(&admission).try_acquire_owned().is_err());
+        drop(first);
+        assert!(Arc::clone(&admission).try_acquire_owned().is_ok());
+        drop(second);
+    }
+
+    #[test]
+    fn browser_privileged_commands_reject_external_callers() {
+        assert_eq!(ensure_trusted_browser_caller("main"), Ok(()));
+        assert!(ensure_trusted_browser_caller("psyche-browser-untrusted").is_err());
+    }
+
+    #[test]
+    fn pty_privileged_commands_reject_external_callers() {
+        assert_eq!(ensure_trusted_pty_caller("main"), Ok(()));
+        assert_eq!(
+            ensure_trusted_pty_caller("psyche-browser-untrusted").unwrap_err(),
+            "PTY authority is only available to trusted webview 'main'; rejected caller 'psyche-browser-untrusted'"
+        );
+    }
+
+    #[test]
+    fn browser_snapshot_dimensions_are_bounded_before_capture() {
+        assert!(validate_browser_snapshot_dimensions(800, 600).is_ok());
+        assert!(validate_browser_snapshot_dimensions(0, 600).is_err());
+        assert!(validate_browser_snapshot_dimensions(8192, 8192).is_err());
+    }
+
+    fn browser_navigation_waiter(_url: &str) -> BrowserNavigationWaiter {
+        let (completion, _receiver) = tokio::sync::oneshot::channel();
+        BrowserNavigationWaiter {
+            token: "requested-token".to_string(),
+            navigation_identity: None,
+            completion: Some(completion),
+        }
+    }
+
+    #[test]
+    fn browser_navigation_waiters_correlate_only_exact_native_identity() {
+        let requested_label = "browser-native-identity-requested".to_string();
+        let unrelated_label = "browser-native-identity-unrelated".to_string();
+        let (requested_sender, mut requested_receiver) = tokio::sync::oneshot::channel();
+        let (unrelated_sender, mut unrelated_receiver) = tokio::sync::oneshot::channel();
+        BROWSER_NAVIGATION_WAITERS.lock().insert(
+            requested_label.clone(),
+            BrowserNavigationWaiter {
+                token: "requested".to_string(),
+                navigation_identity: Some(41),
+                completion: Some(requested_sender),
+            },
+        );
+        BROWSER_NAVIGATION_WAITERS.lock().insert(
+            unrelated_label.clone(),
+            BrowserNavigationWaiter {
+                token: "unrelated".to_string(),
+                navigation_identity: Some(42),
+                completion: Some(unrelated_sender),
+            },
+        );
+
+        assert!(!complete_browser_navigation(99, "https://user.example"));
+        assert!(requested_receiver.try_recv().is_err());
+        assert!(unrelated_receiver.try_recv().is_err());
+        assert!(complete_browser_navigation(41, "https://terminal.example"));
+        assert_eq!(
+            requested_receiver.try_recv().unwrap().unwrap().terminal_url,
+            "https://terminal.example"
+        );
+        assert!(unrelated_receiver.try_recv().is_err());
+        BROWSER_NAVIGATION_WAITERS.lock().remove(&unrelated_label);
+    }
+
+    #[test]
+    fn browser_navigation_waiter_guard_cleans_every_early_exit_without_removing_a_successor() {
+        for stage in ["ensure", "lookup", "bounds", "navigate", "timeout"] {
+            let label = format!("browser-waiter-guard-{stage}");
+            let token = format!("token-{stage}");
+            BROWSER_NAVIGATION_WAITERS.lock().insert(
+                label.clone(),
+                browser_navigation_waiter("https://example.test"),
+            );
+            BROWSER_NAVIGATION_WAITERS
+                .lock()
+                .get_mut(&label)
+                .unwrap()
+                .token = token.clone();
+            {
+                let _guard = BrowserNavigationWaiterGuard {
+                    label: label.clone(),
+                    token: token.clone(),
+                };
+            }
+            assert!(!BROWSER_NAVIGATION_WAITERS.lock().contains_key(&label));
+
+            BROWSER_NAVIGATION_WAITERS.lock().insert(
+                label.clone(),
+                browser_navigation_waiter("https://example.test"),
+            );
+            {
+                let _old_guard = BrowserNavigationWaiterGuard {
+                    label: label.clone(),
+                    token,
+                };
+            }
+            assert!(BROWSER_NAVIGATION_WAITERS.lock().contains_key(&label));
+            BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
+        }
+    }
+
+    #[test]
+    fn browser_navigation_setup_failure_closes_only_a_newly_created_view() {
+        let closes = AtomicUsize::new(0);
+        cleanup_created_browser_after_setup_failure(true, || {
+            closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+
+        cleanup_created_browser_after_setup_failure(false, || {
+            closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+    }
 
     #[cfg(not(windows))]
     #[derive(Debug)]
@@ -8425,6 +6253,64 @@ mod pty_runtime_tests {
             Box::new(Self {
                 calls: Arc::clone(&self.calls),
             })
+        }
+    }
+
+    #[cfg(not(windows))]
+    struct TestLivePtySession {
+        token: PtySessionToken,
+        pump: OutputPump,
+    }
+
+    #[cfg(not(windows))]
+    impl TestLivePtySession {
+        fn register(thread_id: &str) -> Self {
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 10,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            let writer = pair.master.take_writer().unwrap();
+            let (_, reader_cancellation) = prepare_pty_reader(pair.master.as_ref()).unwrap();
+            let pump = OutputPump::new(thread_id.to_string()).unwrap();
+            let pending = PendingPtyStart::reserve(thread_id).unwrap();
+            let (token, install_outcome) = pending
+                .install(PtySession {
+                    master: Arc::new(Mutex::new(pair.master)),
+                    writer: Arc::new(Mutex::new(writer)),
+                    operation_lane: Arc::new(tokio::sync::Mutex::new(())),
+                    operation_admission: Arc::new(tokio::sync::Semaphore::new(2)),
+                    pump: pump.clone(),
+                    terminator: PtyProcessTerminator::from_parts(
+                        Box::new(RecordingChildKiller {
+                            calls: Arc::new(AtomicUsize::new(0)),
+                        }),
+                        PtyProcessIdentity::direct_child(None),
+                    ),
+                    reader_cancellation,
+                    pid: Some(42),
+                    spawn_time_unix_secs: 99,
+                })
+                .unwrap();
+            assert!(matches!(install_outcome, InstallSessionOutcome::Running));
+            Self { token, pump }
+        }
+    }
+
+    #[cfg(not(windows))]
+    impl Drop for TestLivePtySession {
+        fn drop(&mut self) {
+            let action = {
+                let mut registry = PTY_LIFECYCLES.lock();
+                registry.stop(&self.token.thread_id)
+            };
+            if let Ok(StopSessionOutcome::Terminate { session, .. }) = action {
+                drop(session);
+            }
+            PTY_LIFECYCLES.lock().finish_exit(&self.token);
         }
     }
 
@@ -8573,6 +6459,23 @@ mod pty_runtime_tests {
                 "process group {process_group} remained observable after SIGKILL"
             );
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_no_output_fields(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    assert_no_output_fields(value);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for (key, value) in values {
+                    assert!(!matches!(key.as_str(), "bytes" | "data" | "payload"));
+                    assert_no_output_fields(value);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -8853,6 +6756,172 @@ mod pty_runtime_tests {
         assert!(cleanup.join().unwrap());
         let replacement = registry.lock().reserve("timed-out-pane").unwrap();
         assert_ne!(replacement.generation, old.generation);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pty_ack_reports_missing_invalid_duplicate_future_and_skipped_sequences() {
+        assert_eq!(
+            pty_ack_inner("missing-pane".to_string(), 1).unwrap_err(),
+            "thread 'missing-pane' not found"
+        );
+        assert_eq!(
+            pty_ack_inner("../unsafe".to_string(), 1).unwrap_err(),
+            "thread id is unsafe"
+        );
+
+        let session = TestLivePtySession::register("ack-pane");
+        session.pump.enqueue(vec![b'a']).unwrap();
+        assert_eq!(
+            session.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 1 })
+        );
+        session.pump.enqueue(vec![b'b']).unwrap();
+        std::thread::sleep(pty_transport::VISIBLE_CADENCE + Duration::from_millis(5));
+        assert_eq!(
+            session.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 2 })
+        );
+
+        assert!(matches!(
+            pty_ack_inner("ack-pane".to_string(), 1).unwrap(),
+            AckOutcome::Advanced {
+                sequence: 1,
+                bytes: 1,
+                latency_micros,
+            } if latency_micros >= duration_to_micros(pty_transport::VISIBLE_CADENCE)
+        ));
+        assert_eq!(
+            pty_ack_inner("ack-pane".to_string(), 1).unwrap(),
+            AckOutcome::Duplicate { sequence: 1 }
+        );
+        assert!(matches!(
+            pty_ack_inner("ack-pane".to_string(), 2).unwrap(),
+            AckOutcome::Advanced {
+                sequence: 2,
+                bytes: 1,
+                ..
+            }
+        ));
+
+        let skipped = TestLivePtySession::register("ack-skipped-pane");
+        skipped.pump.enqueue(vec![b'a']).unwrap();
+        assert_eq!(
+            skipped.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 1 })
+        );
+        skipped.pump.enqueue(vec![b'b']).unwrap();
+        std::thread::sleep(pty_transport::VISIBLE_CADENCE + Duration::from_millis(5));
+        assert_eq!(
+            skipped.pump.emit_ready(|_| Ok(())),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 2 })
+        );
+        assert_eq!(
+            pty_ack_inner("ack-skipped-pane".to_string(), 2).unwrap_err(),
+            "PTY batch acknowledgement 2 skipped expected sequence 1"
+        );
+        assert_eq!(
+            pty_ack_inner("ack-skipped-pane".to_string(), 3).unwrap_err(),
+            "PTY batch acknowledgement 3 is newer than emitted sequence 2"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pty_set_visibility_only_updates_metrics_on_actual_transitions() {
+        assert_eq!(
+            pty_set_visibility_inner("missing-visibility".to_string(), false).unwrap_err(),
+            "thread 'missing-visibility' not found"
+        );
+
+        let session = TestLivePtySession::register("visibility-pane");
+        let visible_cadence = duration_to_micros(pty_transport::VISIBLE_CADENCE);
+        let hidden_cadence = duration_to_micros(pty_transport::HIDDEN_CADENCE);
+
+        let initial = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(initial.visibility, PtyTransportVisibility::Visible);
+        assert_eq!(initial.effective_cadence_micros, visible_cadence);
+        assert_eq!(initial.metrics.visibility_transition_count, 0);
+
+        pty_set_visibility_inner("visibility-pane".to_string(), true).unwrap();
+        let noop_visible = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(noop_visible.visibility, PtyTransportVisibility::Visible);
+        assert_eq!(noop_visible.effective_cadence_micros, visible_cadence);
+        assert_eq!(noop_visible.metrics.visibility_transition_count, 0);
+
+        pty_set_visibility_inner("visibility-pane".to_string(), false).unwrap();
+        let hidden = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(hidden.visibility, PtyTransportVisibility::Hidden);
+        assert_eq!(hidden.effective_cadence_micros, hidden_cadence);
+        assert_eq!(hidden.metrics.visibility_transition_count, 1);
+
+        pty_set_visibility_inner("visibility-pane".to_string(), false).unwrap();
+        let noop_hidden = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
+            .pop()
+            .unwrap();
+        assert_eq!(noop_hidden.visibility, PtyTransportVisibility::Hidden);
+        assert_eq!(noop_hidden.effective_cadence_micros, hidden_cadence);
+        assert_eq!(noop_hidden.metrics.visibility_transition_count, 1);
+
+        drop(session);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pty_transport_metrics_filters_live_sessions_and_serializes_metadata_only() {
+        let owned_ids = ["metrics-a", "metrics-b"];
+        let first = TestLivePtySession::register("metrics-a");
+        let second = TestLivePtySession::register("metrics-b");
+        first.pump.enqueue(b"secret-metadata".to_vec()).unwrap();
+
+        let mut filtered = pty_transport_metrics_inner(Some("metrics-a".to_string()));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].thread_id, "metrics-a");
+        assert_eq!(filtered[0].pending_bytes, b"secret-metadata".len());
+        assert_eq!(
+            filtered[0].metrics.state.bytes_accepted,
+            b"secret-metadata".len() as u64
+        );
+        assert!(pty_transport_metrics_inner(Some("metrics-missing".to_string())).is_empty());
+        assert!(pty_transport_metrics_inner(Some("../unsafe".to_string())).is_empty());
+
+        let all = pty_transport_metrics_inner(None);
+        let owned_from_all = all
+            .into_iter()
+            .filter(|snapshot| owned_ids.contains(&snapshot.thread_id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            owned_from_all
+                .iter()
+                .map(|snapshot| snapshot.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["metrics-a", "metrics-b"]
+        );
+        assert_eq!(
+            owned_from_all
+                .iter()
+                .find(|snapshot| snapshot.thread_id == "metrics-a")
+                .unwrap(),
+            &filtered[0]
+        );
+
+        let serialized = serde_json::to_value(filtered.pop().unwrap()).unwrap();
+        assert_no_output_fields(&serialized);
+        assert!(!serialized.to_string().contains("secret-metadata"));
+
+        drop(second);
+        assert!(pty_transport_metrics_inner(Some("metrics-b".to_string())).is_empty());
+        drop(first);
+        assert!(pty_transport_metrics_inner(Some("metrics-a".to_string())).is_empty());
+        assert!(pty_transport_metrics_inner(None)
+            .into_iter()
+            .all(|snapshot| !owned_ids.contains(&snapshot.thread_id.as_str())));
     }
 
     #[cfg(not(windows))]

@@ -10,12 +10,11 @@ export type ApprovalErrorCode =
   | 'approval_identity_mismatch'
   | 'approval_action_conflict'
   | 'approval_id_collision'
-  | 'approval_payload_invalid';
+  | 'approval_payload_invalid'
+  | 'approval_capacity_exceeded';
 
-declare const actionPayloadDigestBrand: unique symbol;
-export type ActionPayloadDigest = string & {
-  readonly [actionPayloadDigestBrand]: 'psyche.action-payload/v1';
-};
+export const APPROVAL_ACTIVE_LIMIT = 256;
+export const APPROVAL_TERMINAL_LIMIT = 1_000;
 
 export type ApprovalEffectKind =
   | 'submit'
@@ -26,41 +25,65 @@ export type ApprovalEffectKind =
   | 'close'
   | 'script';
 
-export type RedactedApprovalEffect =
+declare const redactedApprovalEffectBrand: unique symbol;
+export type RedactedApprovalEffect = (
   | { readonly kind: 'submit'; readonly target: string }
   | { readonly kind: 'secret_input'; readonly target: string }
   | { readonly kind: 'upload'; readonly target: string }
   | { readonly kind: 'download'; readonly target: string }
   | { readonly kind: 'permission_response'; readonly target: string }
   | { readonly kind: 'close'; readonly target: string }
-  | { readonly kind: 'script'; readonly target: string };
+  | { readonly kind: 'script'; readonly target: string }
+) & { readonly [redactedApprovalEffectBrand]: true };
 
-export interface NormalizedApprovalEffect {
+export interface RedactedApprovalEffectInput {
   readonly kind: ApprovalEffectKind;
-  readonly targetDigest: string;
+  readonly target: string;
+}
+
+const redactedEffects = new WeakSet<object>();
+
+export function createRedactedApprovalEffect(
+  input: RedactedApprovalEffectInput,
+): RedactedApprovalEffect {
+  assertExactKeys(input, ['kind', 'target'], 'approval effect source');
+  if (!isApprovalEffectKind(input.kind) || typeof input.target !== 'string') {
+    throw codedError('approval_payload_invalid', 'approval effect source is invalid');
+  }
+  const effect = Object.freeze({
+    kind: input.kind,
+    target: normalizeEffectTarget(input.kind, input.target),
+  }) as RedactedApprovalEffect;
+  redactedEffects.add(effect);
+  return effect;
 }
 
 export interface ApprovalRequest {
   readonly actionId: string;
   readonly ownerEpoch: number;
+  readonly taskId: string;
+  readonly actorId: string;
+  readonly subjectId?: string;
   readonly leaseId: string;
   readonly leaseRevision: number;
   readonly resource: LeaseTarget;
   readonly capability: SurfaceCapability;
   readonly effect: RedactedApprovalEffect;
-  /** Transient immutable typed payload; canonicalized and discarded by request. */
-  readonly actionPayload: unknown;
+  readonly executablePayloadDigest: string;
 }
 
 interface ApprovalIdentity {
   readonly actionId: string;
   readonly ownerEpoch: number;
+  readonly taskId: string;
+  readonly actorId: string;
+  readonly subjectId?: string;
   readonly leaseId: string;
   readonly leaseRevision: number;
   readonly resource: LeaseTarget;
   readonly capability: SurfaceCapability;
-  readonly effect: NormalizedApprovalEffect;
-  readonly actionPayloadDigest: ActionPayloadDigest;
+  readonly effect: RedactedApprovalEffect;
+  readonly executablePayloadDigest: string;
 }
 
 export interface ApprovalConsumeAssertion {
@@ -68,13 +91,15 @@ export interface ApprovalConsumeAssertion {
   readonly payloadDigest: string;
   readonly actionId: string;
   readonly ownerEpoch: number;
+  readonly taskId: string;
+  readonly actorId: string;
+  readonly subjectId?: string;
   readonly leaseId: string;
   readonly leaseRevision: number;
   readonly resource: LeaseTarget;
   readonly capability: SurfaceCapability;
-  readonly effect: NormalizedApprovalEffect;
-  /** Current immutable typed payload; canonicalized and discarded by consume. */
-  readonly actionPayload: unknown;
+  readonly effect: RedactedApprovalEffect;
+  readonly executablePayloadDigest: string;
 }
 
 interface NormalizedApprovalConsumeAssertion extends ApprovalIdentity {
@@ -95,12 +120,15 @@ export interface Approval {
   readonly status: ApprovalStatus;
   readonly actionId: string;
   readonly ownerEpoch: number;
+  readonly taskId?: string;
+  readonly actorId?: string;
+  readonly subjectId?: string;
   readonly leaseId: string;
   readonly leaseRevision: number;
   readonly resource: LeaseTarget;
   readonly capability: SurfaceCapability;
-  readonly effect: NormalizedApprovalEffect;
-  readonly actionPayloadDigest: ActionPayloadDigest;
+  readonly effect: RedactedApprovalEffect;
+  readonly executablePayloadDigest: string;
   readonly payloadDigest: string;
   readonly createdAt: string;
   readonly expiresAt: string;
@@ -125,6 +153,16 @@ export class ApprovalStore {
 
   request(input: ApprovalRequest): Approval {
     const now = this.clock();
+    this.expireAt(now);
+    return this.requestAt(input, now);
+  }
+
+  /** Request after the caller has explicitly consumed expiry transitions. */
+  requestCurrent(input: ApprovalRequest): Approval {
+    return this.requestAt(input, this.clock());
+  }
+
+  private requestAt(input: ApprovalRequest, now: Date): Approval {
     const identity = copyIdentity(input);
     const payloadDigest = digestIdentity(identity);
     const existingId = this.approvalIdsByAction.get(identity.actionId);
@@ -132,6 +170,9 @@ export class ApprovalStore {
       const existing = this.approvals.get(existingId);
       if (existing?.payloadDigest === payloadDigest) return existing;
       throw codedError('approval_action_conflict', 'action id was reused for another approval intent');
+    }
+    if ([...this.approvals.values()].filter(isActive).length >= APPROVAL_ACTIVE_LIMIT) {
+      throw codedError('approval_capacity_exceeded', 'active approval capacity exceeded');
     }
     const id = this.generateId();
     if (!isNonemptyString(id) || this.approvals.has(id)) {
@@ -209,6 +250,13 @@ export class ApprovalStore {
     return this.revokeWhere((approval) => approval.leaseId === leaseId, now);
   }
 
+  revokeForApprovalIds(approvalIds: readonly string[]): readonly Approval[] {
+    const ids = new Set(approvalIds.filter(isNonemptyString));
+    if (ids.size === 0) return Object.freeze([]);
+    const now = this.clock();
+    return this.revokeWhere((approval) => ids.has(approval.id), now);
+  }
+
   revokeAll(): readonly Approval[] {
     const now = this.clock();
     return this.revokeWhere(() => true, now);
@@ -217,6 +265,11 @@ export class ApprovalStore {
   snapshot(): readonly Approval[] {
     const now = this.clock();
     this.expireAt(now);
+    return this.peek();
+  }
+
+  /** Read current records without causing expiry transitions. */
+  peek(): readonly Approval[] {
     return Object.freeze([...this.approvals.values()]);
   }
 
@@ -227,6 +280,9 @@ export class ApprovalStore {
     status: 'approved' | 'denied',
   ): Approval {
     const now = this.clock();
+    if (!isNonemptyString(actorId) || actorId.trim().length === 0) {
+      throw codedError('approval_identity_mismatch', 'operator identity is required');
+    }
     const approval = this.requireCurrent(id, now);
     assertDigest(approval, payloadDigest);
     assertStoredDigest(approval);
@@ -250,6 +306,7 @@ export class ApprovalStore {
     if (isActive(approval) && Date.parse(approval.expiresAt) <= now.getTime()) {
       const expired = freezeApproval({ ...approval, status: 'expired' });
       this.approvals.set(id, expired);
+      this.pruneTerminal();
       throw codedError('approval_expired', 'approval expired');
     }
     if (approval.status === 'expired') {
@@ -286,20 +343,31 @@ export class ApprovalStore {
 }
 
 function copyIdentity(input: ApprovalRequest): ApprovalIdentity {
+  assertAllowedKeys(input, [
+    'actionId', 'ownerEpoch', 'taskId', 'actorId', 'leaseId', 'leaseRevision', 'resource',
+    'capability', 'effect', 'executablePayloadDigest',
+  ], ['subjectId'], 'approval request');
   assertIdentityFields(input);
   return {
     actionId: input.actionId,
     ownerEpoch: input.ownerEpoch,
+    taskId: input.taskId,
+    actorId: input.actorId,
+    ...(input.subjectId ? { subjectId: input.subjectId } : {}),
     leaseId: input.leaseId,
     leaseRevision: input.leaseRevision,
     resource: copyTarget(input.resource),
     capability: input.capability,
-    effect: normalizeEffect(input.effect),
-    actionPayloadDigest: digestActionPayload(input.actionPayload),
+    effect: copyEffect(input.effect),
+    executablePayloadDigest: copyExecutableDigest(input.executablePayloadDigest),
   };
 }
 
 function copyAssertion(input: ApprovalConsumeAssertion): NormalizedApprovalConsumeAssertion {
+  assertAllowedKeys(input, [
+    'approvalId', 'payloadDigest', 'actionId', 'ownerEpoch', 'taskId', 'actorId',
+    'leaseId', 'leaseRevision', 'resource', 'capability', 'effect', 'executablePayloadDigest',
+  ], ['subjectId'], 'approval assertion');
   if (!isNonemptyString(input?.approvalId)) {
     throw codedError('approval_identity_mismatch', 'approval id is missing');
   }
@@ -312,20 +380,34 @@ function copyAssertion(input: ApprovalConsumeAssertion): NormalizedApprovalConsu
     payloadDigest: input.payloadDigest,
     actionId: input.actionId,
     ownerEpoch: input.ownerEpoch,
+    taskId: input.taskId,
+    actorId: input.actorId,
+    ...(input.subjectId ? { subjectId: input.subjectId } : {}),
     leaseId: input.leaseId,
     leaseRevision: input.leaseRevision,
     resource: copyTarget(input.resource),
     capability: input.capability,
-    effect: copyNormalizedEffect(input.effect),
-    actionPayloadDigest: digestActionPayload(input.actionPayload),
+    effect: copyEffect(input.effect),
+    executablePayloadDigest: copyExecutableDigest(input.executablePayloadDigest),
   };
 }
 
 const CAPABILITIES: ReadonlySet<SurfaceCapability> = new Set(SURFACE_CAPABILITIES);
 
 function assertIdentityFields(input: ApprovalIdentity | ApprovalRequest | ApprovalConsumeAssertion): void {
-  if (!isNonemptyString(input?.actionId) || !isNonemptyString(input?.leaseId)) {
-    throw codedError('approval_identity_mismatch', 'approval action and lease ids must be nonempty');
+  if (
+    !isNonemptyString(input?.actionId)
+    || !isNonemptyString(input?.taskId)
+    || !isNonemptyString(input?.actorId)
+    || !isNonemptyString(input?.leaseId)
+  ) {
+    throw codedError(
+      'approval_identity_mismatch',
+      'approval action, task, actor, and lease ids must be nonempty',
+    );
+  }
+  if (input.subjectId !== undefined && !isNonemptyString(input.subjectId)) {
+    throw codedError('approval_identity_mismatch', 'approval subject id must be nonempty when provided');
   }
   if (!isAuthorityInteger(input.ownerEpoch) || !isAuthorityInteger(input.leaseRevision)) {
     throw codedError('approval_identity_mismatch', 'approval authority revisions must be safe integers');
@@ -336,10 +418,12 @@ function assertIdentityFields(input: ApprovalIdentity | ApprovalRequest | Approv
 }
 
 function copyTarget(target: LeaseTarget): LeaseTarget {
-  if (!target || !isNonemptyString(target.id)) {
+  assertPlainDataObject(target, 'approval resource');
+  if (!isNonemptyString(target.id)) {
     throw codedError('approval_identity_mismatch', 'approval resource identity is missing');
   }
   if (target.kind === 'project') {
+    assertExactKeys(target, ['kind', 'id'], 'approval resource');
     return Object.freeze({ kind: target.kind, id: target.id });
   }
   if (
@@ -348,51 +432,115 @@ function copyTarget(target: LeaseTarget): LeaseTarget {
   ) {
     throw codedError('approval_identity_mismatch', 'approval resource identity is invalid');
   }
+  assertExactKeys(target, ['kind', 'id', 'generation'], 'approval resource');
   return Object.freeze({ kind: target.kind, id: target.id, generation: target.generation });
 }
 
-function normalizeEffect(effect: RedactedApprovalEffect): NormalizedApprovalEffect {
-  if (typeof effect?.target !== 'string') {
-    throw codedError('approval_denied', 'approval effect target must be redacted display metadata');
+function copyEffect(effect: RedactedApprovalEffect): RedactedApprovalEffect {
+  if (
+    !effect
+    || typeof effect !== 'object'
+    || !redactedEffects.has(effect)
+    || !Object.isFrozen(effect)
+  ) {
+    throw codedError('approval_payload_invalid', 'approval effect lacks redaction provenance');
   }
-  switch (effect.kind) {
-    case 'submit':
-    case 'secret_input':
-    case 'upload':
-    case 'download':
-    case 'permission_response':
-    case 'close':
-    case 'script':
-      return Object.freeze({
-        kind: effect.kind,
-        targetDigest: digestCanonical('psyche.approval-effect-target/v1', effect.target),
-      });
-    default:
-      return invalidEffect(effect);
+  return effect;
+}
+
+function copyExecutableDigest(value: string): string {
+  if (!isSha256(value)) {
+    throw codedError('approval_digest_mismatch', 'executable payload digest is invalid');
+  }
+  return value;
+}
+
+function normalizeEffectTarget(kind: ApprovalEffectKind, source: string): string {
+  const hadMultipleLines = source.split(/\r?\n/).filter((line) => line.trim().length > 0).length > 1;
+  let target = source.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!target) return '[redacted]';
+  if (kind === 'script' || kind === 'secret_input') return '[redacted]';
+
+  if (kind === 'permission_response') {
+    const permission = /^(allow|deny)\s+([^\r\n]+?)\s+for\s+(https?:\/\/\S+)$/i.exec(target);
+    if (!permission) return '[redacted]';
+    const label = permission[2].toLowerCase();
+    if (!isSafeBrowserPermissionLabel(label)) return '[redacted]';
+    const origin = sanitizeHttpTarget(permission[3]);
+    if (origin === '[redacted]') return origin;
+    return truncateUtf8(
+      `${permission[1].toLowerCase()} ${label} for ${origin}`,
+      AGENT_CONTROL_LIMITS.accessibleNameBytes,
+    );
+  }
+
+  if (/^https?:\/\//i.test(target)) {
+    return sanitizeHttpTarget(target);
+  }
+
+  if (kind === 'upload' || kind === 'download') {
+    const portablePath = target.replace(/\\/g, '/');
+    if (portablePath.includes('/')) {
+      const basename = portablePath.split('/').at(-1);
+      target = !basename || basename === '.' || basename === '..' ? '[redacted]' : basename;
+    }
+  }
+
+  if (
+    hadMultipleLines
+    || containsSensitiveTarget(target)
+  ) {
+    return '[redacted]';
+  }
+  return truncateUtf8(target, AGENT_CONTROL_LIMITS.accessibleNameBytes);
+}
+
+function isSafeBrowserPermissionLabel(value: string): boolean {
+  return value.length >= 1
+    && value.length <= 64
+    && /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/.test(value)
+    && !containsSensitiveTarget(value);
+}
+
+function sanitizeHttpTarget(target: string): string {
+  try {
+    const url = new URL(target);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    if (containsSensitiveTarget(url.pathname)) return '[redacted]';
+    let sanitized = url.toString();
+    if (url.pathname !== '/' && sanitized.endsWith('/')) sanitized = sanitized.slice(0, -1);
+    return truncateUtf8(sanitized, AGENT_CONTROL_LIMITS.accessibleNameBytes);
+  } catch {
+    return '[redacted]';
   }
 }
 
-function copyNormalizedEffect(effect: NormalizedApprovalEffect): NormalizedApprovalEffect {
-  if (!/^[a-f0-9]{64}$/.test(effect?.targetDigest)) {
-    throw codedError('approval_digest_mismatch', 'normalized approval effect digest is invalid');
-  }
-  switch (effect.kind) {
-    case 'submit':
-    case 'secret_input':
-    case 'upload':
-    case 'download':
-    case 'permission_response':
-    case 'close':
-    case 'script':
-      return Object.freeze({ kind: effect.kind, targetDigest: effect.targetDigest });
-    default:
-      return invalidEffect(effect.kind);
-  }
+function containsSensitiveTarget(value: string): boolean {
+  return /(?:password|passwd|secret|token|api[ _-]?key|authorization|bearer|cookie|localstorage|document\.)/i.test(value)
+    || /(?=[A-Za-z0-9+/_=-]{20,})(?=[A-Za-z0-9+/_=-]*[A-Za-z])(?=[A-Za-z0-9+/_=-]*\d)[A-Za-z0-9+/_=-]{20,}/.test(value);
 }
 
-function invalidEffect(effect: never): never {
-  void effect;
-  throw codedError('approval_identity_mismatch', 'approval effect is not allowlisted');
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes) return value;
+  let result = '';
+  for (const character of value) {
+    if (Buffer.byteLength(result + character, 'utf8') > maxBytes) break;
+    result += character;
+  }
+  return result || '[redacted]';
+}
+
+function isApprovalEffectKind(value: unknown): value is ApprovalEffectKind {
+  return value === 'submit'
+    || value === 'secret_input'
+    || value === 'upload'
+    || value === 'download'
+    || value === 'permission_response'
+    || value === 'close'
+    || value === 'script';
 }
 
 function digestIdentity(identity: ApprovalIdentity): string {
@@ -406,105 +554,72 @@ function digestIdentity(identity: ApprovalIdentity): string {
   const payload = {
     actionId: identity.actionId,
     ownerEpoch: identity.ownerEpoch,
-    lease: { id: identity.leaseId, revision: identity.leaseRevision },
+    taskId: identity.taskId,
+    actorId: identity.actorId,
+    ...(identity.subjectId ? { subjectId: identity.subjectId } : {}),
+    leaseId: identity.leaseId,
+    leaseRevision: identity.leaseRevision,
     resource,
     capability: identity.capability,
-    effect: { kind: identity.effect.kind, targetDigest: identity.effect.targetDigest },
-    actionPayloadDigest: identity.actionPayloadDigest,
+    effect: identity.effect,
+    executablePayloadDigest: identity.executablePayloadDigest,
   };
-  return digestCanonical('psyche.approval-payload/v1', payload);
+  return createHash('sha256').update(stableKeyJson(payload), 'utf8').digest('hex');
 }
 
-export function digestActionPayload(payload: unknown): ActionPayloadDigest {
-  return digestCanonical('psyche.action-payload/v1', payload) as ActionPayloadDigest;
+function stableKeyJson(value: unknown): string {
+  return JSON.stringify(sortObjectKeys(value));
 }
 
-function digestCanonical(domain: string, value: unknown): string {
-  const encoded = canonicalEncode(value, new WeakSet<object>());
-  const framed = `${domain.length}:${domain}|${encoded.length}:${encoded}`;
-  return createHash('sha256').update(framed, 'utf8').digest('hex');
-}
-
-function canonicalEncode(value: unknown, ancestors: WeakSet<object>): string {
-  if (value === null) return 'null;';
-  if (typeof value === 'boolean') return value ? 'bool:1;' : 'bool:0;';
-  if (typeof value === 'string') return encodeString(value);
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) return invalidPayload('numbers must be finite');
-    return `number:${Object.is(value, -0) ? '-0' : value.toString()};`;
+function sortObjectKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortObjectKeys);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [
+        key,
+        sortObjectKeys((value as Record<string, unknown>)[key]),
+      ]),
+    );
   }
-  if (typeof value !== 'object') return invalidPayload(`unsupported ${typeof value} value`);
-  if (ancestors.has(value)) return invalidPayload('cyclic values are unsupported');
-  ancestors.add(value);
-  try {
-    if (Array.isArray(value)) {
-      if (Object.getOwnPropertySymbols(value).length > 0) {
-        return invalidPayload('array symbol properties are unsupported');
-      }
-      const keys = Object.keys(value);
-      const propertyNames = Object.getOwnPropertyNames(value);
-      if (
-        keys.length !== value.length
-        || keys.some((key, index) => key !== String(index))
-        || propertyNames.length !== value.length + 1
-        || !propertyNames.includes('length')
-      ) return invalidPayload('sparse arrays and extra array properties are unsupported');
-      const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
-      if (
-        !lengthDescriptor
-        || !('value' in lengthDescriptor)
-        || lengthDescriptor.value !== value.length
-        || lengthDescriptor.enumerable
-        || lengthDescriptor.configurable
-      ) return invalidPayload('array length descriptor is invalid');
-      let encoded = `array:${value.length}:[`;
-      for (let index = 0; index < value.length; index += 1) {
-        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-        if (
-          !descriptor
-          || !('value' in descriptor)
-          || !descriptor.enumerable
-        ) {
-          return invalidPayload('array indices must be enumerable data properties');
-        }
-        encoded += canonicalEncode(descriptor.value, ancestors);
-      }
-      return `${encoded}]`;
-    }
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      return invalidPayload('only plain JSON objects are supported');
-    }
-    if (Object.getOwnPropertySymbols(value).length > 0) {
-      return invalidPayload('symbol keys are unsupported');
-    }
-    const keys = Object.keys(value).sort();
-    if (Reflect.ownKeys(value).length !== keys.length) {
-      return invalidPayload('non-enumerable properties are unsupported');
-    }
-    let encoded = `object:${keys.length}:{`;
-    for (const key of keys) {
+  return value;
+}
+
+function assertPlainDataObject(value: unknown, label: string): asserts value is Record<string, unknown> {
+  if (
+    !value
+    || typeof value !== 'object'
+    || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+    || Reflect.ownKeys(value).some((key) => typeof key !== 'string')
+    || Object.getOwnPropertyNames(value).some((key) => {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (!descriptor || !('value' in descriptor)) return invalidPayload('accessor properties are unsupported');
-      encoded += encodeString(key);
-      encoded += canonicalEncode(descriptor.value, ancestors);
-    }
-    return `${encoded}}`;
-  } finally {
-    ancestors.delete(value);
+      return !descriptor || !('value' in descriptor) || !descriptor.enumerable;
+    })
+  ) {
+    throw codedError('approval_payload_invalid', `${label} must be a plain data object`);
   }
 }
 
-function encodeString(value: string): string {
-  let codeUnits = '';
-  for (let index = 0; index < value.length; index += 1) {
-    codeUnits += value.charCodeAt(index).toString(16).padStart(4, '0');
+function assertExactKeys(value: unknown, expected: readonly string[], label: string): void {
+  assertPlainDataObject(value, label);
+  const actual = Object.keys(value).sort();
+  const allowed = [...expected].sort();
+  if (actual.length !== allowed.length || actual.some((key, index) => key !== allowed[index])) {
+    throw codedError('approval_payload_invalid', `${label} contains unsupported fields`);
   }
-  return `string:${value.length}:${codeUnits};`;
 }
 
-function invalidPayload(reason: string): never {
-  throw codedError('approval_payload_invalid', `action payload is not canonical JSON: ${reason}`);
+function assertAllowedKeys(
+  value: unknown,
+  required: readonly string[],
+  optional: readonly string[],
+  label: string,
+): void {
+  assertPlainDataObject(value, label);
+  const actual = Object.keys(value);
+  const allowed = new Set([...required, ...optional]);
+  if (actual.some((key) => !allowed.has(key)) || required.some((key) => !actual.includes(key))) {
+    throw codedError('approval_payload_invalid', `${label} contains unsupported fields`);
+  }
 }
 
 function isNonemptyString(value: unknown): value is string {
@@ -515,7 +630,7 @@ function isAuthorityInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
-function isSha256(value: unknown): value is ActionPayloadDigest {
+function isSha256(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 }
 
@@ -526,16 +641,27 @@ function assertDigest(approval: Approval, suppliedDigest: string): void {
 }
 
 function assertStoredDigest(approval: Approval): void {
-  if (digestIdentity(approval) !== approval.payloadDigest) {
+  if (!isNonemptyString(approval.taskId) || !isNonemptyString(approval.actorId)) {
+    throw codedError('approval_identity_mismatch', 'stored approval ownership is invalid');
+  }
+  if (approval.subjectId !== undefined && !isNonemptyString(approval.subjectId)) {
+    throw codedError('approval_identity_mismatch', 'stored approval subject is invalid');
+  }
+  const identity = approval as Approval & Required<Pick<Approval, 'taskId' | 'actorId'>>;
+  if (digestIdentity(identity as ApprovalIdentity) !== approval.payloadDigest) {
     throw codedError('approval_identity_mismatch', 'stored approval identity is invalid');
   }
 }
 
 function assertionMatches(approval: Approval, assertion: NormalizedApprovalConsumeAssertion): boolean {
   return approval.ownerEpoch === assertion.ownerEpoch
+    && approval.taskId === assertion.taskId
+    && approval.actorId === assertion.actorId
+    && approval.subjectId === assertion.subjectId
     && approval.leaseId === assertion.leaseId
     && approval.leaseRevision === assertion.leaseRevision
     && approval.capability === assertion.capability
+    && approval.executablePayloadDigest === assertion.executablePayloadDigest
     && targetsEqual(approval.resource, assertion.resource);
 }
 
@@ -549,11 +675,15 @@ function isActive(approval: Approval): boolean {
   return approval.status === 'pending' || approval.status === 'approved';
 }
 
+function isTerminal(approval: Approval): boolean {
+  return !isActive(approval);
+}
+
 function freezeApproval(approval: Approval): Approval {
   return Object.freeze({
     ...approval,
     resource: copyTarget(approval.resource),
-    effect: copyNormalizedEffect(approval.effect),
+    effect: copyEffect(approval.effect),
   });
 }
 

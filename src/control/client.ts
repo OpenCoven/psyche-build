@@ -2,12 +2,16 @@ import { connect, type Socket } from 'node:net';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 import { controlEndpointForProject } from './endpoint.js';
 import { encodeControlMessage, type ControlRequest, type ControlResponse } from './protocol.js';
+import {
+  isActionStatusReceipt,
+} from './types.js';
 import type {
   ActionReceipt,
   ControlCommand,
   ControlCommandInput,
   CommandOutcome,
   ControlSnapshot,
+  ControlSnapshotScope,
 } from './types.js';
 
 type InputFor<K extends ControlCommand['kind']> = Extract<ControlCommandInput, { kind: K }>;
@@ -17,6 +21,11 @@ export interface ControlClientPrincipal {
   id: string;
   kind: 'operator' | 'agent' | 'compatibility';
   capabilities: readonly string[];
+}
+
+export interface ControlClientTaskBinding {
+  taskId: string;
+  subjectId?: string;
 }
 
 export interface ControlClientOptions {
@@ -30,6 +39,16 @@ export interface ControlClientOptions {
 interface PendingRequest {
   resolve: (response: ControlResponse) => void;
   reject: (error: Error) => void;
+}
+
+export class ControlResponseError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ControlResponseError';
+  }
 }
 
 /**
@@ -52,10 +71,20 @@ export class ControlClient {
     readonly projectRoot: string,
     readonly ownerEpoch: number,
     readonly principal: ControlClientPrincipal,
+    readonly taskBinding?: ControlClientTaskBinding,
   ) {}
 
   static async connect(options: ControlClientOptions): Promise<ControlClient> {
     const canonicalRoot = await canonicalizeProjectRoot(options.projectRoot);
+    return ControlClient.connectCanonical({ ...options, projectRoot: canonicalRoot });
+  }
+
+  /**
+   * Connect using a root already resolved by the trusted owner bootstrap.
+   * Normal callers should use connect(), which canonicalizes defensively.
+   */
+  static async connectCanonical(options: ControlClientOptions): Promise<ControlClient> {
+    const canonicalRoot = options.projectRoot;
     const endpoint = options.endpoint ?? controlEndpointForProject(canonicalRoot);
 
     const socket = connect(endpoint);
@@ -86,6 +115,13 @@ export class ControlClient {
         };
         const onClose = (): void => {
           fail(new Error('control connection closed before welcome'));
+        };
+        const onAbort = (): void => {
+          const error = Object.assign(new Error('control connection aborted'), {
+            name: 'AbortError',
+            code: 'ABORT_ERR',
+          });
+          rejectAndClose(error);
         };
         const onData = (chunk: string): void => {
           buffer += chunk;
@@ -138,7 +174,13 @@ export class ControlClient {
       },
     );
 
-    const client = new ControlClient(socket, canonicalRoot, welcome.ownerEpoch, welcome.principal);
+    const client = new ControlClient(
+      socket,
+      canonicalRoot,
+      welcome.ownerEpoch,
+      welcome.principal,
+      welcome.taskBinding,
+    );
     client.attach();
     return client;
   }
@@ -155,28 +197,32 @@ export class ControlClient {
     });
   }
 
-  getState(): Promise<ControlSnapshot> {
+  getState(scope: ControlSnapshotScope = {}): Promise<ControlSnapshot> {
+    const effectiveScope = this.effectiveScope(scope);
     return this.request({
       version: 1,
       type: 'state.get',
       requestId: this.allocateRequestId(),
+      ...(effectiveScope.taskId === undefined ? {} : { taskId: effectiveScope.taskId }),
     }).then((response) => {
       if (response.type === 'state.result') return response.snapshot;
       throw responseError(response, 'state.get');
     });
   }
 
-  readEvents(afterSequence: number, limit?: number): Promise<{
+  readEvents(afterSequence: number, limit?: number, scope: ControlSnapshotScope = {}): Promise<{
     events: unknown[];
     nextSequence: number;
     gap: boolean;
   }> {
+    const effectiveScope = this.effectiveScope(scope);
     return this.request({
       version: 1,
       type: 'events.read',
       requestId: this.allocateRequestId(),
       afterSequence,
       ...(limit === undefined ? {} : { limit }),
+      ...(effectiveScope.taskId === undefined ? {} : { taskId: effectiveScope.taskId }),
     }).then((response) => {
       if (response.type === 'events.result') {
         return { events: response.events, nextSequence: response.nextSequence, gap: response.gap };
@@ -292,9 +338,21 @@ export class ControlClient {
     this.nextRequestId += 1;
     return id;
   }
+
+  private effectiveScope(scope: ControlSnapshotScope = {}): ControlSnapshotScope {
+    if (this.principal.kind === 'operator') return scope;
+    if (this.taskBinding?.taskId) return { taskId: this.taskBinding.taskId };
+    return {};
+  }
 }
 
 function responseError(response: ControlResponse, context: string): Error {
-  if (response.type === 'error') return new Error(`${response.code}: ${response.message}`);
+  if (response.type === 'error') {
+    return new ControlResponseError(response.code, `${response.code}: ${response.message}`);
+  }
   return new Error(`unexpected ${response.type} response to ${context}`);
+}
+
+function eventActionReceipt(value: unknown): ActionStatusReceipt | undefined {
+  return isActionStatusReceipt(value) ? value : undefined;
 }

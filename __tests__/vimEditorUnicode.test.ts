@@ -109,4 +109,29 @@ describe('Vim editor committed Unicode text', () => {
       type: 'status', level: 'error', message: 'Search pattern exceeds limit (4096 bytes)',
     });
   });
+
+  it.each([
+    { name: 'combining forward', text: 'e\u0301 x e\u0301', cursor: 0, motion: 'f', target: 'e\u0301', expected: 5 },
+    { name: 'combining backward', text: 'e\u0301 x e\u0301', cursor: 7, motion: 'F', target: 'e\u0301', expected: 5 },
+    { name: 'ZWJ forward', text: 'a👩‍💻b👩‍💻', cursor: 0, motion: 'f', target: '👩‍💻', expected: 1 },
+    { name: 'ZWJ backward', text: 'a👩‍💻b👩‍💻', cursor: 12, motion: 'F', target: '👩‍💻', expected: 7 },
+    { name: 'astral forward', text: 'a𐐀b𐐀', cursor: 0, motion: 'f', target: '𐐀', expected: 1 },
+    { name: 'astral backward', text: 'a𐐀b𐐀', cursor: 6, motion: 'F', target: '𐐀', expected: 4 },
+    { name: 'till forward', text: 'ab👩‍💻c', cursor: 0, motion: 't', target: '👩‍💻', expected: 1 },
+    { name: 'till backward', text: 'a👩‍💻bc', cursor: 8, motion: 'T', target: '👩‍💻', expected: 6 },
+  ])('finds whole committed graphemes for $name', async ({ text, cursor, motion, target, expected }) => {
+    const document = new UnicodeDocument(text, cursor);
+    const machine = createEditorMachine(document);
+    await send(machine, motion, { kind: 'text', text: target });
+    expect(document.ranges[0]?.head).toBe(expected);
+    expectGraphemeBoundary(text, document.ranges[0]!.head);
+  });
+
+  it('does not find a combining mark inside a grapheme and keeps the cursor snapped', async () => {
+    const document = new UnicodeDocument('e\u0301 x e\u0301');
+    const machine = createEditorMachine(document);
+    const result = await send(machine, 'f', { kind: 'text', text: '\u0301' });
+    expect(result.actions.at(-1)).toMatchObject({ level: 'error' });
+    expect(document.ranges[0]?.head).toBe(0);
+  });
 });

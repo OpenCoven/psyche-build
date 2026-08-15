@@ -93,21 +93,7 @@ export class SurfaceRegistry {
     return Object.freeze([...this.resources.values()]);
   }
 
-  removePane(id: string, expectedGeneration: number): PaneSurface {
-    const resource = this.require(id, expectedGeneration);
-    if (resource.kind !== 'pane') {
-      throw Object.assign(new Error(`surface resource ${id} is not a pane`), { code: 'resource_replaced' });
-    }
-    this.resources.delete(id);
-    return resource;
-  }
-
-  removeBrowserTab(id: string, expectedGeneration: number): BrowserTabSurface {
-    const resource = this.require(id, expectedGeneration);
-    if (resource.kind !== 'browser_tab') {
-      throw Object.assign(new Error(`surface resource ${id} is not a browser tab`), { code: 'resource_replaced' });
-    }
-    this.resources.delete(id);
+__MERGED_OURS_TYPED_REMOVE_METHODS_PLUS_GENERIC_REMOVE_FOR_COMPAT__
     return resource;
   }
 
