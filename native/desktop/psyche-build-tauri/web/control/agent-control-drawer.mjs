@@ -186,7 +186,10 @@ function renderLease(document, lease, callbacks, state, renderedKeys) {
   const card = element(document, 'article', 'agent-control-card');
   card.dataset.leaseId = lease.leaseId;
   card.append(element(document, 'strong', '', `${lease.agentId} · ${lease.taskId}`));
-  card.append(element(document, 'div', 'agent-control-meta', `expires ${lease.expiresAt}`));
+  const timing = lease.status === 'active'
+    ? `expires ${lease.expiresAt}`
+    : `${lease.status} ${lease.endedAt || lease.expiresAt}`;
+  card.append(element(document, 'div', 'agent-control-meta', timing));
   for (const resource of lease.resources) {
     const capabilities = capabilityText(resource.capabilities);
     const row = element(
@@ -216,6 +219,20 @@ function renderLease(document, lease, callbacks, state, renderedKeys) {
   }
   appendOverflow(document, card, lease.resourceOverflow, 'resources');
   return card;
+}
+
+function renderTerminalAuthority(document, title, items, callbacks, state, renderedKeys) {
+  if (items.length === 0) return null;
+  const section = element(document, 'section', 'agent-control-section');
+  section.append(element(document, 'h3', '', `${title} · ${items.length}`));
+  for (const item of items) {
+    if (item.leaseId) {
+      section.append(renderLease(document, item, callbacks, state, renderedKeys));
+    } else {
+      section.append(renderRequestedAuthority(document, item, callbacks, state, renderedKeys));
+    }
+  }
+  return section;
 }
 
 function renderApproval(document, approval, callbacks, state, renderedKeys) {
@@ -286,6 +303,14 @@ export function renderAgentControlDrawer(container, model, callbacks = {}) {
   for (const lease of model.groups.active) {
     container.append(renderLease(document, lease, normalizedCallbacks, state, renderedKeys));
   }
+  const expired = renderTerminalAuthority(
+    document, 'Expired', model.groups.expired, normalizedCallbacks, state, renderedKeys,
+  );
+  if (expired) container.append(expired);
+  const revoked = renderTerminalAuthority(
+    document, 'Revoked', model.groups.revoked, normalizedCallbacks, state, renderedKeys,
+  );
+  if (revoked) container.append(revoked);
   appendOverflow(
     document,
     container,
@@ -293,6 +318,7 @@ export function renderAgentControlDrawer(container, model, callbacks = {}) {
     model.overflow?.leaseRequests === 1 ? 'requested lease request' : 'requested lease requests',
   );
   appendOverflow(document, container, model.overflow?.leases, 'leases');
+  appendOverflow(document, container, model.overflow?.leaseHistory, 'lease history entries');
   appendOverflow(document, container, model.overflow?.approvals, 'approvals');
   for (const [actionKey, failure] of state.failures) {
     if (renderedKeys.has(actionKey)) continue;
