@@ -89,6 +89,7 @@ describe('daemon bridge Coven helpers', () => {
     const outside = await tempDir('psyche-bridge-coven-outside-');
 
     await expect(getProjectCovenSession(root, 'outside', {
+      listSessions: async () => [],
       getSession: async () => ({
         id: 'outside',
         projectRoot: outside,
