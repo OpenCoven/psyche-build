@@ -375,7 +375,8 @@ Keep the cited line range narrow and overlap the changed lines whenever they
 contain the cause. One finding should describe one defect. Combine locations
 only when they are inseparable parts of the same failure.
 
-After findings, include a short validation line only if useful:
+Under this default plain-text contract, after findings, include a short
+validation line only if useful:
 
 ```text
 Validation: `pnpm vitest --run __tests__/example.test.ts` passed.
@@ -389,6 +390,8 @@ No findings.
 
 The default contract may then add one concise `Residual risk:` sentence only
 when a material surface could not be inspected or validated. If the user
-explicitly requests another output contract, format findings, the zero-findings
-result, and any residual-risk information within that contract instead. Missing
-validation alone is not a finding.
+explicitly requests another output contract, that contract governs every
+response element: findings, validation metadata, the zero-findings
+representation, and residual-risk information. Do not emit default plain-text
+labels such as `Validation:` or `Residual risk:` unless they are valid within
+the requested contract. Missing validation alone is not a finding.
