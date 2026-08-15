@@ -12,6 +12,7 @@ import type {
   ControlPrincipalKind,
   ControlTaskBinding,
 } from './credentials.js';
+import { normalizeControlTaskId } from './taskIdentity.js';
 
 export const CONTROL_PROTOCOL_VERSION = 1;
 
@@ -189,11 +190,12 @@ export function decodeControlWelcome(
       !isPlainObject(binding)
       || Object.keys(binding).length !== 1
       || !Object.hasOwn(binding, 'taskId')
-      || !isBoundedNonBlankString(binding.taskId, MAX_CONTROL_ID_LENGTH)
     ) {
       throw new Error('invalid welcome frame');
     }
-    taskBinding = { taskId: binding.taskId };
+    const taskId = normalizeControlTaskId(binding.taskId);
+    if (taskId === undefined) throw new Error('invalid welcome frame');
+    taskBinding = { taskId };
   }
 
   return {
@@ -380,6 +382,12 @@ function validateSurfaceAuthorization(kind: unknown, payload: Record<string, unk
   const actionKinds = new Set([
     'pane.observe', 'pane.action', 'browser.inspect', 'browser.action', 'browser.script',
   ]);
+  if (kind === 'lease.request') {
+    const taskId = normalizeControlTaskId(payload.taskId);
+    if (taskId === undefined) throw new Error('invalid surface authorization');
+    payload.taskId = taskId;
+    return;
+  }
   if (kind === 'lease.release' || kind === 'orchestration.execute') {
     if (!hasTaskLeaseAuthorization(payload)) throw new Error('invalid surface authorization');
     return;
@@ -413,8 +421,10 @@ function validateSurfaceAuthorization(kind: unknown, payload: Record<string, unk
 }
 
 function hasTaskLeaseAuthorization(payload: Record<string, unknown>): boolean {
-  return typeof payload.taskId === 'string' && payload.taskId.length > 0
-    && typeof payload.leaseId === 'string' && payload.leaseId.length > 0
+  const taskId = normalizeControlTaskId(payload.taskId);
+  if (taskId === undefined) return false;
+  payload.taskId = taskId;
+  return typeof payload.leaseId === 'string' && payload.leaseId.length > 0
     && Number.isSafeInteger(payload.leaseRevision)
     && (payload.leaseRevision as number) >= 1;
 }

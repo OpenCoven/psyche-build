@@ -3,6 +3,10 @@ import { constants } from 'node:fs';
 import { chmod, link, lstat, mkdir, open, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
+import {
+  MAX_CONTROL_TASK_ID_LENGTH,
+  normalizeControlTaskId,
+} from './taskIdentity.js';
 
 export type ControlPrincipalKind = 'operator' | 'agent' | 'compatibility';
 export type ControlCapability = 'read' | 'mutate' | 'delegate';
@@ -109,14 +113,18 @@ export async function issueControlTaskTokenForCanonicalRoot(options: {
   taskId: string;
   filePath?: string;
 }): Promise<string> {
-  if (typeof options.taskId !== 'string' || options.taskId.trim().length === 0) {
+  const taskId = normalizeControlTaskId(options.taskId);
+  if (taskId === undefined) {
+    if (typeof options.taskId === 'string' && options.taskId.trim().length > 0) {
+      throw new TypeError(`taskId must be at most ${MAX_CONTROL_TASK_ID_LENGTH} characters`);
+    }
     throw new TypeError('taskId must not be blank');
   }
   const filePath = resolveCredentialPath(options.canonicalProjectRoot, options.filePath);
   const token = randomBytes(32).toString('hex');
   const bindingPath = taskBindingPath(filePath, token);
   await ensureSafeCredentialParent(options.canonicalProjectRoot, bindingPath);
-  await writeTaskBinding(bindingPath, { taskId: options.taskId });
+  await writeTaskBinding(bindingPath, { taskId });
   return token;
 }
 
@@ -364,10 +372,11 @@ async function readStoredTaskBinding(filePath: string): Promise<ControlTaskBindi
   } finally {
     await handle.close();
   }
-  if (typeof parsed.taskId !== 'string' || parsed.taskId.trim().length === 0) {
+  const taskId = normalizeControlTaskId(parsed.taskId);
+  if (taskId === undefined) {
     throw unsafeCredentialPath('task binding file is invalid');
   }
-  return { taskId: parsed.taskId };
+  return { taskId };
 }
 
 async function ensureSafeCredentialParent(canonicalRoot: string, filePath: string): Promise<void> {

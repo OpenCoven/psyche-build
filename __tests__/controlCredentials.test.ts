@@ -264,6 +264,51 @@ describe('control credential store', () => {
       .rejects.toThrow('taskId must not be blank');
   });
 
+  it('accepts 256-character task IDs and rejects 257-character IDs at issuance', async () => {
+    const root = await tempProject();
+    const filePath = path.join(root, '.psyche', 'runtime', 'control-credentials.json');
+    const store = await createControlCredentialStore({ projectRoot: root, filePath });
+    const taskId = 't'.repeat(256);
+
+    const token = await issueControlTaskToken({ projectRoot: root, taskId, filePath });
+
+    await expect(store.authenticate(token)).resolves.toMatchObject({
+      taskBinding: { taskId },
+    });
+    await expect(issueControlTaskToken({
+      projectRoot: root,
+      taskId: 't'.repeat(257),
+      filePath,
+    })).rejects.toThrow('taskId must be at most 256 characters');
+  });
+
+  it('normalizes task IDs and rejects oversized stored bindings during authentication', async () => {
+    const root = await tempProject();
+    const filePath = path.join(root, '.psyche', 'runtime', 'control-credentials.json');
+    const normalizedToken = await issueControlTaskToken({
+      projectRoot: root,
+      taskId: '  task-alpha  ',
+      filePath,
+    });
+    const oversizedToken = await issueControlTaskToken({
+      projectRoot: root,
+      taskId: 'task-beta',
+      filePath,
+    });
+    const store = await createControlCredentialStore({ projectRoot: root, filePath });
+
+    await expect(store.authenticate(normalizedToken)).resolves.toMatchObject({
+      taskBinding: { taskId: 'task-alpha' },
+    });
+    await writeFile(
+      taskBindingFilePath(filePath, oversizedToken),
+      `${JSON.stringify({ taskId: 't'.repeat(257) })}\n`,
+      { mode: 0o600 },
+    );
+    await expect(store.authenticate(oversizedToken))
+      .rejects.toMatchObject({ code: 'credential_path_unsafe' });
+  });
+
   it('stores task bindings in hashed 0600 files without exposing tokens in names', async () => {
     const root = await tempProject();
     const filePath = path.join(root, '.psyche', 'runtime', 'control-credentials.json');

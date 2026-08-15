@@ -243,6 +243,7 @@ describe('ControlClient over the socket transport', () => {
     }],
     ['ownerEpoch', { ownerEpoch: 0 }],
     ['taskBinding', { taskBinding: { taskId: 'task-alpha', injected: true } }],
+    ['oversized taskBinding', { taskBinding: { taskId: 't'.repeat(257) } }],
   ])('rejects and closes a malformed welcome %s', async (_field, overrides) => {
     const server = await startWelcomeFrameServer(welcomeFrame(overrides));
 

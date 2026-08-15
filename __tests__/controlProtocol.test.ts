@@ -80,6 +80,16 @@ describe('control protocol v1', () => {
     expect(decodeControlWelcome(encodeControlMessage(welcome))).toEqual(welcome);
   });
 
+  it('normalizes welcome task IDs up to the 256-character boundary', () => {
+    const taskId = 't'.repeat(256);
+
+    expect(decodeControlWelcome(JSON.stringify(welcomeFrame({
+      taskBinding: { taskId: `  ${taskId}  ` },
+    })))).toMatchObject({
+      taskBinding: { taskId },
+    });
+  });
+
   it.each([
     ['version', { version: 2 }],
     ['requestId', { requestId: 'not-welcome' }],
@@ -187,6 +197,33 @@ describe('control protocol v1', () => {
         version: 1, type: 'command.submit', requestId: 'req-1', command: { ...base, payload },
       }))).toThrow('invalid surface authorization');
     }
+  });
+
+  it('normalizes 256-character request task IDs and rejects 257-character IDs', () => {
+    const command = {
+      id: 'cmd-1', idempotencyKey: 'idem-1', kind: 'browser.action', projectRoot: '/repo',
+      createdAt: '2026-08-12T12:00:00.000Z',
+      payload: {
+        taskId: `  ${'t'.repeat(256)}  `,
+        leaseId: 'lease-1',
+        leaseRevision: 1,
+        tabId: 'tab-1',
+        generation: 2,
+        action: { kind: 'reload' },
+      },
+    };
+
+    expect(decodeControlRequest(JSON.stringify({
+      version: 1, type: 'command.submit', requestId: 'req-1', command,
+    }))).toMatchObject({
+      command: { payload: { taskId: 't'.repeat(256) } },
+    });
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: 1,
+      type: 'command.submit',
+      requestId: 'req-2',
+      command: { ...command, payload: { ...command.payload, taskId: 't'.repeat(257) } },
+    }))).toThrow('invalid surface authorization');
   });
 
   it('rejects events.read requests with a non-number afterSequence', () => {
