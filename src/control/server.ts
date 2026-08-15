@@ -302,6 +302,12 @@ export class ControlAuthority {
     if (afterSequenceOrLimit === undefined) {
       throw new TypeError('afterSequence is required');
     }
+    const { principal } = normalizeControlIdentity(identityOrAfterSequence);
+    if (principal.kind !== 'operator') {
+      throw Object.assign(new Error('raw control events require operator authority'), {
+        code: 'operator_required',
+      });
+    }
     const afterSequence = afterSequenceOrLimit;
     return this.runtime.readEvents(afterSequence, limit);
   }
@@ -616,17 +622,19 @@ export class ControlServer {
         });
         return;
       case 'events.read': {
-        if (principal.kind !== 'operator') {
-          write({
-            version: 1,
-            type: 'error',
-            requestId: request.requestId,
-            code: 'operator_required',
-            message: 'raw control events require operator authority',
-          });
+        let page: ReturnType<ControlAuthority['readEvents']>;
+        try {
+          page = this.authority.readEvents(identity, request.afterSequence, request.limit);
+        } catch (error) {
+          writeCodedError(
+            write,
+            request.requestId,
+            error,
+            'events_read_failed',
+            'failed to read control events',
+          );
           return;
         }
-        const page = this.authority.readEvents(identity, request.afterSequence, request.limit);
         write({
           version: 1,
           type: 'events.result',
@@ -701,15 +709,25 @@ function writeProviderError(
   requestId: string,
   error: unknown,
 ): void {
+  writeCodedError(write, requestId, error, 'provider_error', 'browser provider error');
+}
+
+function writeCodedError(
+  write: (message: ControlResponse | ProviderPush) => void,
+  requestId: string,
+  error: unknown,
+  fallbackCode: string,
+  fallbackMessage: string,
+): void {
   const code = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
     ? (error as { code: string }).code
-    : 'provider_error';
+    : fallbackCode;
   write({
     version: 1,
     type: 'error',
     requestId,
     code,
-    message: error instanceof Error ? error.message : 'browser provider error',
+    message: error instanceof Error ? error.message : fallbackMessage,
   });
 }
 

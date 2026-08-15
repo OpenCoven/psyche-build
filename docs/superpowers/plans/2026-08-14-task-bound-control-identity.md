@@ -693,12 +693,12 @@ gh pr create \
 - pnpm run typecheck
 
 ## Follow-up
-PR B adds canonical task-owned action receipts, makes raw events operator-only, and makes snapshot redaction fail closed.
+PR A enforces operator-only raw events. PR B verifies that boundary while adding canonical task-owned action receipts and explicit fail-closed snapshot redaction.
 EOF
 )"
 ```
 
-The PR body must state the security boundary, focused commands run, and that PR B will add canonical task-owned action receipts and close raw event reads.
+The PR body must state the security boundary, focused commands run, and that PR A enforces operator-only raw events while PR B verifies that boundary and adds canonical task-owned action receipts plus explicit fail-closed redaction.
 
 - [ ] **Step 6: Wait for checks and merge**
 

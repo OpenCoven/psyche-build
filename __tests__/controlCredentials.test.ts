@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { connect, type Socket } from 'node:net';
 import {
   access,
   link,
@@ -101,6 +102,40 @@ function authenticatedIdentity(
     ...principal,
     principal,
     ...(taskId === undefined ? {} : { taskBinding: { taskId } }),
+  };
+}
+
+async function connectLines(endpoint: string): Promise<{
+  socket: Socket;
+  send(value: unknown): void;
+  next(): Promise<Record<string, unknown>>;
+}> {
+  const socket = connect(endpoint);
+  await new Promise<void>((resolve, reject) => {
+    socket.once('connect', resolve);
+    socket.once('error', reject);
+  });
+  let buffer = '';
+  const lines: string[] = [];
+  const waiters: Array<(line: string) => void> = [];
+  socket.setEncoding('utf8');
+  socket.on('data', (chunk) => {
+    buffer += chunk;
+    let newline = buffer.indexOf('\n');
+    while (newline >= 0) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      const waiter = waiters.shift();
+      if (waiter) waiter(line); else lines.push(line);
+      newline = buffer.indexOf('\n');
+    }
+  });
+  return {
+    socket,
+    send: (value) => socket.write(`${JSON.stringify(value)}\n`),
+    next: async () => JSON.parse(
+      lines.shift() ?? await new Promise<string>((resolve) => waiters.push(resolve)),
+    ) as Record<string, unknown>,
   };
 }
 
@@ -518,6 +553,42 @@ describe('control server authorization', () => {
     expect(readEvents).toHaveBeenCalledWith(0, 10);
   });
 
+  it('requires operator identity for identity-aware event reads', () => {
+    const readEvents = vi.fn((afterSequence: number, limit?: number) => ({
+      events: [{ afterSequence, limit }],
+      nextSequence: afterSequence + 1,
+      gap: false,
+    }));
+    const server = createControlServerForTest({
+      runtime: stubRuntime(vi.fn(), undefined, readEvents),
+    });
+    const agentIdentity = authenticatedIdentity({
+      id: 'agent-1', kind: 'agent', capabilities: ['read', 'mutate'],
+    }, 'task-alpha');
+    const compatibilityIdentity = authenticatedIdentity({
+      id: 'compatibility-1', kind: 'compatibility', capabilities: ['read'],
+    });
+    const operatorIdentity = authenticatedIdentity({
+      id: 'operator-1', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'],
+    });
+
+    for (const identity of [agentIdentity, compatibilityIdentity]) {
+      expect(() => server.readEvents(identity, 0)).toThrowError(
+        expect.objectContaining({
+          code: 'operator_required',
+          message: 'raw control events require operator authority',
+        }),
+      );
+    }
+    expect(server.readEvents(operatorIdentity, 0, 10)).toEqual({
+      events: [{ afterSequence: 0, limit: 10 }],
+      nextSequence: 1,
+      gap: false,
+    });
+    expect(readEvents).toHaveBeenCalledOnce();
+    expect(readEvents).toHaveBeenCalledWith(0, 10);
+  });
+
   it('only exposes surface authority snapshot fields to operators', () => {
     const sensitive = sensitiveSnapshot();
     const server = createControlServerForTest({
@@ -684,13 +755,17 @@ describe('control server authorization', () => {
         clientName: 'operator',
       });
       cleanups.unshift(() => operator.close());
-      const agent = await ControlClient.connect({
-        projectRoot: root,
-        endpoint,
+      const agent = await connectLines(endpoint);
+      cleanups.unshift(async () => { agent.socket.destroy(); });
+      agent.send({
+        version: 1,
+        type: 'hello',
+        requestId: 'hello-agent',
         token: await credentials.agentToken(),
         clientName: 'agent',
+        projectRoot: root,
       });
-      cleanups.unshift(() => agent.close());
+      expect(await agent.next()).toMatchObject({ type: 'welcome' });
       const compatibility = await ControlClient.connect({
         projectRoot: root,
         endpoint,
@@ -699,7 +774,20 @@ describe('control server authorization', () => {
       });
       cleanups.unshift(() => compatibility.close());
 
-      await expect(agent.readEvents(0, 10)).rejects.toThrow('operator_required');
+      agent.send({
+        version: 1,
+        type: 'events.read',
+        requestId: 'events-agent',
+        afterSequence: 37,
+        limit: 10,
+      });
+      expect(await agent.next()).toEqual({
+        version: 1,
+        type: 'error',
+        requestId: 'events-agent',
+        code: 'operator_required',
+        message: 'raw control events require operator authority',
+      });
       await expect(compatibility.readEvents(0, 10)).rejects.toThrow('operator_required');
       await expect(operator.readEvents(0, 10)).resolves.toEqual({
         events: [{ sequence: 1 }],
