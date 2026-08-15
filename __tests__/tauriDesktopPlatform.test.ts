@@ -21,7 +21,7 @@ const stalePathPattern = /native\/macos\/psyche-build-tauri|['"]native['"]\s*,\s
 const originalBaseCsp = "default-src 'self'; img-src 'self' data: https: http:; style-src 'self'; script-src 'self'; frame-src https: http:; connect-src 'self' ipc: http://ipc.localhost https: http:";
 const pngSignature = Buffer.from('89504e470d0a1a0a', 'hex');
 const pngChunkTypePattern = /^[A-Za-z]{4}$/;
-const allowedCriticalPngChunkTypes = new Set(['IHDR', 'PLTE', 'IDAT', 'IEND']);
+const supportedCriticalPngChunkTypes = new Set(['IHDR', 'IDAT', 'IEND']);
 const requiredModernIcnsChunkDimensions: Record<string, number> = {
   ic07: 128,
   ic08: 256,
@@ -72,6 +72,28 @@ function isCriticalPngChunkType(typeBytes: Buffer) {
   return (typeBytes[0] & 0x20) === 0;
 }
 
+function isAsciiLetterByte(byte: number) {
+  return (byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a);
+}
+
+function formatPngChunkTypeBytes(typeBytes: Buffer) {
+  return [...typeBytes].map((byte) => `0x${byte.toString(16).padStart(2, '0')}`).join(' ');
+}
+
+function decodePngChunkType(typeBytes: Buffer, source: string) {
+  if (typeBytes.length !== 4 || ![...typeBytes].every(isAsciiLetterByte)) {
+    throw new Error(
+      `Invalid PNG chunk type bytes ${formatPngChunkTypeBytes(typeBytes)} (expected ASCII letters): ${source}`,
+    );
+  }
+
+  if ((typeBytes[2] & 0x20) !== 0) {
+    throw new Error(`Invalid PNG chunk type reserved bit for ${typeBytes.toString('ascii')}: ${source}`);
+  }
+
+  return typeBytes.toString('ascii');
+}
+
 function buildPngChunk(type: string, data = Buffer.alloc(0)) {
   if (!pngChunkTypePattern.test(type)) {
     throw new Error(`Invalid PNG chunk type ${JSON.stringify(type)}`);
@@ -100,7 +122,7 @@ function pngChunkOffset(png: Buffer, type: string) {
       throw new Error(`Out-of-bounds PNG chunk while locating ${type}`);
     }
 
-    if (png.subarray(offset + 4, offset + 8).toString('ascii') === type) {
+    if (decodePngChunkType(png.subarray(offset + 4, offset + 8), `while locating ${type}`) === type) {
       return offset;
     }
 
@@ -135,13 +157,10 @@ function pngRgbaBuffer(png: Buffer, source: string) {
     }
     const length = png.readUInt32BE(offset);
     const typeBytes = png.subarray(offset + 4, offset + 8);
-    const type = typeBytes.toString('ascii');
     const dataStart = offset + 8;
     const dataEnd = dataStart + length;
     const chunkEnd = dataEnd + 4;
-    if (!pngChunkTypePattern.test(type)) {
-      throw new Error(`Invalid PNG chunk type ${JSON.stringify(type)}: ${source}`);
-    }
+    const type = decodePngChunkType(typeBytes, source);
     if (chunkEnd > png.length) {
       throw new Error(`Out-of-bounds PNG chunk payload: ${source}`);
     }
@@ -150,7 +169,11 @@ function pngRgbaBuffer(png: Buffer, source: string) {
     if (actualCrc !== storedCrc) {
       throw new Error(`PNG chunk CRC mismatch for ${type}: ${source}`);
     }
-    if (isCriticalPngChunkType(typeBytes) && !allowedCriticalPngChunkTypes.has(type)) {
+    if (sawIEND) {
+      if (type === 'IEND') throw new Error(`Duplicate IEND chunk: ${source}`);
+      throw new Error(`Unexpected trailing PNG data after IEND: ${source}`);
+    }
+    if (isCriticalPngChunkType(typeBytes) && !supportedCriticalPngChunkTypes.has(type)) {
       throw new Error(`Unsupported PNG critical chunk ${type}: ${source}`);
     }
 
@@ -171,13 +194,12 @@ function pngRgbaBuffer(png: Buffer, source: string) {
       if (endedIDATSequence) throw new Error(`PNG has a non-contiguous IDAT sequence: ${source}`);
       sawIDAT = true;
       idatChunks.push(png.subarray(dataStart, dataEnd));
-    } else if (type !== 'IEND' && sawIDAT) {
-      endedIDATSequence = true;
     } else if (type === 'IEND') {
+      if (!sawIDAT) throw new Error(`PNG IEND chunk must follow IDAT data: ${source}`);
       if (length !== 0) throw new Error(`Unexpected IEND length: ${source}`);
       sawIEND = true;
-      offset = chunkEnd;
-      break;
+    } else if (sawIDAT) {
+      endedIDATSequence = true;
     }
 
     offset = chunkEnd;
@@ -185,7 +207,7 @@ function pngRgbaBuffer(png: Buffer, source: string) {
 
   if (!sawIHDR) throw new Error(`Missing IHDR chunk: ${source}`);
   if (!sawIEND) throw new Error(`Missing IEND chunk: ${source}`);
-  if (offset !== png.length) throw new Error(`Unexpected trailing PNG data: ${source}`);
+  if (offset !== png.length) throw new Error(`Unexpected trailing PNG data after IEND: ${source}`);
   if (bitDepth !== 8) throw new Error(`Unsupported PNG bit depth ${bitDepth}: ${source}`);
   if (colorType !== 6) throw new Error(`Unsupported PNG color type ${colorType}: ${source}`);
   if (compressionMethod !== 0) {
@@ -579,6 +601,57 @@ describe('desktop Tauri layout', () => {
 
     expect(() => pngRgbaBuffer(mutatedPng, 'unsupported-critical-abcd')).toThrow(
       /Unsupported PNG critical chunk ABCD: unsupported-critical-abcd/,
+    );
+  });
+
+  it('rejects PNG chunk types with non-ASCII bytes even when the CRC matches', () => {
+    const validPng = readFileSync(join(icons, '32x32.png'));
+    const mutatedPng = Buffer.from(validPng);
+    const ihdrOffset = pngChunkOffset(mutatedPng, 'IHDR');
+    const typeOffset = ihdrOffset + 4;
+    const dataStart = ihdrOffset + 8;
+    const dataEnd = dataStart + mutatedPng.readUInt32BE(ihdrOffset);
+
+    mutatedPng[typeOffset] = 0xc9;
+    mutatedPng.writeUInt32BE(
+      pngChunkCrc32(mutatedPng.subarray(typeOffset, typeOffset + 4), mutatedPng.subarray(dataStart, dataEnd)),
+      dataEnd,
+    );
+
+    expect(() => pngRgbaBuffer(mutatedPng, 'non-ascii-ihdr-type')).toThrow(
+      /Invalid PNG chunk type bytes 0xc9 0x48 0x44 0x52 \(expected ASCII letters\): non-ascii-ihdr-type/,
+    );
+  });
+
+  it('rejects unsupported PLTE chunks instead of treating them as valid critical structure', () => {
+    const validPng = readFileSync(join(icons, '32x32.png'));
+    const iendOffset = pngChunkOffset(validPng, 'IEND');
+    const mutatedPng = Buffer.concat([
+      validPng.subarray(0, iendOffset),
+      buildPngChunk('PLTE'),
+      validPng.subarray(iendOffset),
+    ]);
+
+    expect(() => pngRgbaBuffer(mutatedPng, 'unsupported-critical-plte')).toThrow(
+      /Unsupported PNG critical chunk PLTE: unsupported-critical-plte/,
+    );
+  });
+
+  it('rejects non-contiguous IDAT sequences', () => {
+    const validPng = readFileSync(join(icons, '32x32.png'));
+    const idatOffset = pngChunkOffset(validPng, 'IDAT');
+    const idatChunkEnd = idatOffset + 12 + validPng.readUInt32BE(idatOffset);
+    const iendOffset = pngChunkOffset(validPng, 'IEND');
+    const repeatedIdatChunk = validPng.subarray(idatOffset, idatChunkEnd);
+    const mutatedPng = Buffer.concat([
+      validPng.subarray(0, iendOffset),
+      buildPngChunk('tEXt'),
+      repeatedIdatChunk,
+      validPng.subarray(iendOffset),
+    ]);
+
+    expect(() => pngRgbaBuffer(mutatedPng, 'non-contiguous-idat')).toThrow(
+      /PNG has a non-contiguous IDAT sequence: non-contiguous-idat/,
     );
   });
 
