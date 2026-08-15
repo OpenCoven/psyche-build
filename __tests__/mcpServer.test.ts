@@ -39,7 +39,6 @@ function client(overrides: Record<string, unknown> = {}): any {
       ownerEpoch: 3, sequence: 9, resources: [],
     })),
     leaseStatus: vi.fn(async () => ({ requests: [], leases: [] })),
-    actionStatus: vi.fn(),
     close: vi.fn(async () => undefined),
     ...overrides,
   };
@@ -57,7 +56,6 @@ describe('MCP tool registry', () => {
       'psyche_browser_action',
       'psyche_browser_inspect',
       'psyche_browser_script',
-      'psyche_control_action_status',
       'psyche_control_lease',
       'psyche_control_list',
       'psyche_create_pane',
@@ -70,6 +68,16 @@ describe('MCP tool registry', () => {
       'psyche_pane_action',
       'psyche_pane_observe',
     ]);
+  });
+
+  it('does not advertise or dispatch deferred task action status', async () => {
+    expect(TOOLS.some((tool) => tool.name === 'psyche_control_action_status')).toBe(false);
+    await expect(call('psyche_control_action_status', {
+      action_id: 'action-1',
+      project_root: '/repo',
+    })).resolves.toMatchObject({
+      error: { code: -32601, message: 'Unknown tool: psyche_control_action_status' },
+    });
   });
 
   it('documents exactly the tools it implements', async () => {

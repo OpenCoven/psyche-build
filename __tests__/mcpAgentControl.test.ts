@@ -48,7 +48,7 @@ function payload(response: any): any {
 function fakeClient(overrides: Record<string, unknown> = {}): any {
   return {
     submit: vi.fn(), getState: vi.fn(), taskResources: vi.fn(), leaseStatus: vi.fn(),
-    actionStatus: vi.fn(), close: vi.fn(async () => undefined),
+    close: vi.fn(async () => undefined),
     ...overrides,
   };
 }
@@ -159,13 +159,14 @@ describe('MCP task binding bootstrap', () => {
 });
 
 describe('agent surface MCP tools', () => {
-  it('pins the eight typed control tools and required authorization fields', () => {
+  it('pins the seven typed control tools and required authorization fields', () => {
     const names = [
       'psyche_control_list', 'psyche_control_lease', 'psyche_pane_observe',
       'psyche_pane_action', 'psyche_browser_inspect', 'psyche_browser_action',
-      'psyche_browser_script', 'psyche_control_action_status',
+      'psyche_browser_script',
     ];
     expect(names.every((name) => TOOLS.some((tool) => tool.name === name))).toBe(true);
+    expect(TOOLS.some((tool) => tool.name === 'psyche_control_action_status')).toBe(false);
 
     for (const name of ['psyche_pane_observe', 'psyche_pane_action', 'psyche_browser_inspect',
       'psyche_browser_action', 'psyche_browser_script']) {
@@ -499,14 +500,12 @@ describe('agent surface MCP tools', () => {
     expect(readDependency).toHaveBeenCalledWith(canonicalLaunchRoot);
   });
 
-  it('maps an unavailable action transaction to unknown', async () => {
-    inject({ controlClientForRoot: vi.fn(async () => fakeClient({
-      actionStatus: vi.fn(async () => undefined),
-    })) });
-
-    expect(payload(await call('psyche_control_action_status', {
+  it('cannot invoke deferred task action status by name', async () => {
+    expect(await call('psyche_control_action_status', {
       action_id: 'missing-action', project_root: '/repo',
-    }))).toEqual({ status: 'unknown', action_id: 'missing-action' });
+    })).toMatchObject({
+      error: { code: -32601, message: 'Unknown tool: psyche_control_action_status' },
+    });
   });
 
   it('releases the control client after every tool operation', async () => {

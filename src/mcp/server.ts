@@ -134,7 +134,6 @@ export interface McpControlClient {
   getState(): Promise<ControlSnapshot>;
   taskResources(): Promise<TaskResourcesResultData>;
   leaseStatus(leaseRequestId: string, leaseId?: string): Promise<LeaseStatusResultData>;
-  actionStatus(actionId: string): Promise<ActionReceipt | undefined>;
   close(): Promise<void>;
 }
 
@@ -342,7 +341,6 @@ function borrowedControlClient(shared: SharedControlClient): McpControlClient {
     leaseStatus: (requestId, leaseId) => (
       use((client) => client.leaseStatus(requestId, leaseId))
     ),
-    actionStatus: (actionId) => use((client) => client.actionStatus(actionId)),
     async close() {
       if (released) return;
       released = true;
@@ -747,20 +745,6 @@ export const TOOLS: ToolDef[] = [
           ...('args' in args ? { args: scriptArgs } : {}),
         };
       }));
-    },
-  },
-  {
-    name: 'psyche_control_action_status',
-    description: 'Read the latest canonical receipt for an action without retrying the action.',
-    inputSchema: {
-      type: 'object', required: ['action_id'],
-      properties: { action_id: { type: 'string' }, project_root: projectRootProperty },
-    },
-    handler: async (args) => {
-      const actionId = requiredString(args, 'action_id');
-      return withControlClient(await resolveProjectRoot(args), async (client) => (
-        (await client.actionStatus(actionId)) ?? { status: 'unknown', action_id: actionId }
-      ));
     },
   },
   {

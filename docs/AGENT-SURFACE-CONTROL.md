@@ -66,11 +66,15 @@ but does not grant access.
 | `psyche_browser_inspect` | `lease_id`, `lease_revision`, `tab_id`, `generation` |
 | `psyche_browser_action` | `lease_id`, `lease_revision`, `tab_id`, `generation`, `action`; element actions additionally require `snapshot_id` and `action.elementRef` |
 | `psyche_browser_script` | `lease_id`, `lease_revision`, `tab_id`, `generation`, `source` |
-| `psyche_control_action_status` | `action_id` |
 
 Compatibility aliases route through the same owner. Create, execute-task, kill,
 and pane-output operations require lease fields; missing authority returns
 `lease_missing` before an effect.
+
+PR A does not advertise `psyche_control_action_status`. Its legacy
+implementation scans project snapshots and raw events that are redacted or
+operator-only for task-bound MCP. PR B restores the tool using canonical
+task-owned action receipts without weakening those gates.
 
 `psyche_control_list` returns only resources covered by active, unexpired leases
 for the authenticated task and current owner epoch. Lease-status queries return
@@ -180,6 +184,6 @@ raw tmux command, XPath, selector, or whole-desktop fallback.
   the new generation, and do not reuse the old lease.
 - `snapshot_stale` or `element_missing`: call `psyche_browser_inspect` again and
   use references from that response only.
-- `effect_unknown`: do not retry automatically. Inspect the resource and query
-  `psyche_control_action_status`; ask the operator if the effect cannot be
-  established safely.
+- `effect_unknown`: do not retry automatically. Inspect the resource and ask
+  the operator if the effect cannot be established safely. PR B restores
+  canonical task-owned action-status lookup.

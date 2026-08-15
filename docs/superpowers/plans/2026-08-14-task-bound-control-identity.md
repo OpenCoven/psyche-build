@@ -10,6 +10,8 @@
 
 **Launch-project boundary:** A task token is valid only for its canonical MCP launch project. Canonicalize every requested `project_root` and compare it to the stored launch root before invoking any tool dependency, including direct filesystem, ritual, and Git readers, as well as endpoint derivation, client startup, socket connection, owner spawn, or `hello`; accept symlink aliases and fail different roots locally with `task_project_mismatch` without exposing the bearer token.
 
+**Action-status boundary:** PR A does not advertise `psyche_control_action_status`. Its legacy implementation depends on snapshots redacted for task-bound MCP and raw events restricted to operators. PR B restores the tool from canonical task-owned action receipts; PR A must not weaken the event gate or implement receipt ownership.
+
 **Tech Stack:** TypeScript, Node.js Unix sockets, JSON line protocol, Vitest, MCP tools.
 
 **Coordination:** Local experimental branches `pr-130` and `codex/complete-task-bound-control-snapshot-auth-after-130` are reference material only. This clean two-PR design intentionally supersedes them: do not rebase onto or merge them, and exclude their unrelated runtime timeout/quarantine changes. Leave them untouched until final equivalence review and cleanup.
@@ -700,18 +702,19 @@ gh pr create \
 - shared-agent and compatibility identities cannot establish task scope
 - caller-provided task IDs must match the authenticated binding
 - task A cannot list or inspect task B resources, requests, or leases
+- PR A does not advertise legacy action status or relax operator-only raw events
 
 ## Verification
 - focused control credential, protocol, client, host, and MCP tests
 - pnpm run typecheck
 
 ## Follow-up
-PR A enforces operator-only raw events. PR B verifies that boundary while adding canonical task-owned action receipts and explicit fail-closed snapshot redaction.
+PR A enforces operator-only raw events and defers action status. PR B verifies that boundary while restoring action status from canonical task-owned receipts and adding explicit fail-closed snapshot redaction.
 EOF
 )"
 ```
 
-The PR body must state the security boundary, focused commands run, and that PR A enforces operator-only raw events while PR B verifies that boundary and adds canonical task-owned action receipts plus explicit fail-closed redaction.
+The PR body must state the security boundary, focused commands run, and that PR A enforces operator-only raw events without advertising legacy action status, while PR B verifies that boundary and restores action status from canonical task-owned receipts plus explicit fail-closed redaction.
 
 - [ ] **Step 6: Wait for checks and merge**
 

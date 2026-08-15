@@ -181,7 +181,6 @@ instead of adopting a supplied task ID.
 | `psyche_browser_inspect` | Capture a bounded semantic snapshot of an exact leased tab generation |
 | `psyche_browser_action` | Perform one typed leased browser action and return its canonical receipt |
 | `psyche_browser_script` | Submit an approval-gated browser script through an exact leased tab generation |
-| `psyche_control_action_status` | Read the latest canonical receipt without retrying; missing bounded history reports `unknown` |
 | `psyche_list_panes` | Compatibility alias that lists pane resources through the owner |
 | `psyche_create_pane` | Compatibility alias for leased pane creation through the owner |
 | `psyche_execute_task` | Compatibility alias that submits orchestration through the owner |
@@ -196,10 +195,12 @@ Missing authority returns a structured `lease_missing` result without an
 effect.
 
 Lease-status reads are restricted to the authenticated task. Raw control events
-are operator-only; that boundary is included in PR A. Canonical task-owned
-action status and runtime receipt ownership remain PR B. Control-domain
-failures exposed as JSON-RPC errors use numeric code `-32001`, with the stable
-domain code (for example `task_binding_required`) in `error.data.code`.
+are operator-only; that boundary is included in PR A. PR A intentionally does
+not advertise the legacy psyche_control_action_status MCP tool because it
+depends on redacted snapshots and operator-only event history. PR B restores
+action status from canonical task-owned receipts. Control-domain failures
+exposed as JSON-RPC errors use numeric code `-32001`, with the stable domain
+code (for example `task_binding_required`) in `error.data.code`.
 
 See [Agent surface control](./docs/AGENT-SURFACE-CONTROL.md) for the complete
 lease, approval, generation, browser-provider, redaction, and recovery model.
