@@ -176,7 +176,7 @@ describe('mounted control socket end-to-end', () => {
     expect(daemon.recordedResizes).toEqual([]);
   });
 
-  it('sendInput rejects a request without a current pane lease', async () => {
+  it('sendInput rejects missing human lease before attempting pane resolution', async () => {
     const daemon = await startMountedDaemon();
     const client = await ControlClient.connect({
       projectRoot: daemon.projectRoot,

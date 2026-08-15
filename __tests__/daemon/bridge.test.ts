@@ -84,6 +84,17 @@ describe('daemon bridge project scope helpers', () => {
 });
 
 describe('daemon bridge Coven helpers', () => {
+  it('rejects unsafe session ids before direct lookup', async () => {
+    const root = await tempDir('psyche-bridge-coven-root-');
+    const getSession = vi.fn();
+
+    await expect(getProjectCovenSession(root, 'outside;session', {
+      listSessions: async () => [],
+      getSession,
+    })).rejects.toMatchObject({ code: 'invalid_coven_session_id' });
+    expect(getSession).not.toHaveBeenCalled();
+  });
+
   it('refuses to resolve a Coven session outside the current project scope', async () => {
     const root = await tempDir('psyche-bridge-coven-root-');
     const outside = await tempDir('psyche-bridge-coven-outside-');
