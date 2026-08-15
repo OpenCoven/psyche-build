@@ -82,6 +82,142 @@ final class RemoteActionStoreTests: XCTestCase {
         XCTAssertEqual(store.presentation?.content, .terminal(.success))
     }
 
+    func testContinuationInheritsOmittedScopeAndRelatedFiles() async {
+        let inheritedScope = [
+            "host": "studio.local",
+            "projectId": "psyche",
+            "projectTitle": "Psyche",
+            "worktreePath": "/repo/.worktrees/action-session-tests",
+            "sourceBranch": "feature/action-session",
+            "targetBranch": "main",
+            "consequence": "Creates a pull request",
+        ]
+        let inheritedFiles = ["Sources/Action.swift", "Tests/ActionTests.swift"]
+        let requests = ActionControlRequests(responses: [
+            .actionResult(actionResult(
+                requestID: "req-1",
+                sessionID: "session-1",
+                type: "confirm",
+                data: inheritedScope,
+                relatedFiles: inheritedFiles
+            )),
+            .actionResult(actionResult(
+                requestID: "req-2",
+                sessionID: "session-2",
+                type: "input"
+            )),
+        ])
+        let store = RemoteActionStore(controlRequests: requests)
+
+        await store.start(action: .createPR, onPane: paneID, in: workspace)
+        await store.respond(.confirm)
+
+        XCTAssertEqual(store.presentation?.scope.rows, [
+            RemoteActionScopeRow(key: "host", label: "Host", value: "studio.local"),
+            RemoteActionScopeRow(key: "projectId", label: "Project ID", value: "psyche"),
+            RemoteActionScopeRow(key: "projectTitle", label: "Project", value: "Psyche"),
+            RemoteActionScopeRow(
+                key: "worktreePath",
+                label: "Worktree",
+                value: "/repo/.worktrees/action-session-tests"
+            ),
+            RemoteActionScopeRow(
+                key: "sourceBranch",
+                label: "Source branch",
+                value: "feature/action-session"
+            ),
+            RemoteActionScopeRow(key: "targetBranch", label: "Target branch", value: "main"),
+        ])
+        XCTAssertEqual(store.presentation?.scope.consequence, "Creates a pull request")
+        XCTAssertEqual(store.presentation?.relatedFiles, inheritedFiles)
+    }
+
+    func testContinuationOverridesSuppliedScopeAndFilesWhileInheritingOmittedScope() async {
+        let requests = ActionControlRequests(responses: [
+            .actionResult(actionResult(
+                requestID: "req-1",
+                sessionID: "session-1",
+                type: "confirm",
+                data: [
+                    "host": "studio.local",
+                    "projectTitle": "Psyche",
+                    "worktreePath": "/repo/.worktrees/action-session-tests",
+                    "sourceBranch": "feature/action-session",
+                    "targetBranch": "main",
+                    "consequence": "Creates a pull request",
+                ],
+                relatedFiles: ["Sources/Old.swift"]
+            )),
+            .actionResult(actionResult(
+                requestID: "req-2",
+                sessionID: "session-2",
+                type: "input",
+                data: [
+                    "host": "remote.example",
+                    "targetBranch": "release",
+                ],
+                relatedFiles: ["Sources/New.swift"]
+            )),
+        ])
+        let store = RemoteActionStore(controlRequests: requests)
+
+        await store.start(action: .createPR, onPane: paneID, in: workspace)
+        await store.respond(.confirm)
+
+        XCTAssertEqual(store.presentation?.scope.rows, [
+            RemoteActionScopeRow(key: "host", label: "Host", value: "remote.example"),
+            RemoteActionScopeRow(key: "projectTitle", label: "Project", value: "Psyche"),
+            RemoteActionScopeRow(
+                key: "worktreePath",
+                label: "Worktree",
+                value: "/repo/.worktrees/action-session-tests"
+            ),
+            RemoteActionScopeRow(
+                key: "sourceBranch",
+                label: "Source branch",
+                value: "feature/action-session"
+            ),
+            RemoteActionScopeRow(key: "targetBranch", label: "Target branch", value: "release"),
+        ])
+        XCTAssertEqual(store.presentation?.scope.consequence, "Creates a pull request")
+        XCTAssertEqual(store.presentation?.relatedFiles, ["Sources/New.swift"])
+    }
+
+    func testSeparateStartDoesNotInheritPreviousWorkflowScopeOrFiles() async {
+        let requests = ActionControlRequests(responses: [
+            .actionResult(actionResult(
+                requestID: "req-1",
+                sessionID: "session-1",
+                type: "confirm",
+                data: [
+                    "host": "studio.local",
+                    "projectTitle": "Psyche",
+                    "consequence": "Creates a pull request",
+                ],
+                relatedFiles: ["Sources/Previous.swift"]
+            )),
+            .actionResult(actionResult(
+                requestID: "req-2",
+                sessionID: nil,
+                type: "success"
+            )),
+            .actionResult(actionResult(
+                requestID: "req-3",
+                sessionID: "session-3",
+                type: "confirm"
+            )),
+        ])
+        let store = RemoteActionStore(controlRequests: requests)
+
+        await store.start(action: .createPR, onPane: paneID, in: workspace)
+        await store.respond(.confirm)
+        store.dismiss()
+        await store.start(action: .close, onPane: "bridge-protocol", in: workspace)
+
+        XCTAssertEqual(store.presentation?.scope, RemoteActionScope(rows: [], consequence: nil))
+        XCTAssertEqual(store.presentation?.relatedFiles, [])
+    }
+
     func testDuplicateResponseTapSendsExactlyOnceWhileFirstResponseIsBlocked() async {
         let gate = ActionResponseGate()
         let requests = ActionControlRequests(
@@ -721,7 +857,9 @@ private func actionResult(
     sessionID: String?,
     type: String,
     message: String? = nil,
-    dismissable: Bool? = nil
+    dismissable: Bool? = nil,
+    data: [String: String]? = nil,
+    relatedFiles: [String]? = nil
 ) -> MobileActionsResultResponse {
     MobileActionsResultResponse(
         requestID: requestID,
@@ -736,6 +874,8 @@ private func actionResult(
             placeholder: type == "input" ? "Type a response" : nil,
             defaultValue: type == "input" ? "Draft" : nil,
             inputMaxVisibleLines: type == "input" ? 5 : nil,
+            data: data,
+            relatedFiles: relatedFiles,
             dismissable: dismissable
         )
     )
