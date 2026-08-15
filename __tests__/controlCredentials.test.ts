@@ -176,6 +176,33 @@ function taskSensitiveInputs(taskId: string): ControlCommandInput[] {
   ];
 }
 
+function orchestrationInput(options: {
+  id: string;
+  taskId: string;
+  requestTaskId: string;
+  requestProjectRoot: string;
+  projectRoot?: string;
+}): Extract<ControlCommandInput, { kind: 'orchestration.execute' }> {
+  return {
+    id: options.id,
+    idempotencyKey: options.id,
+    kind: 'orchestration.execute',
+    projectRoot: options.projectRoot ?? '/canonical/project',
+    createdAt: '2026-08-14T12:00:00.000Z',
+    payload: {
+      taskId: options.taskId,
+      leaseId: 'lease-1',
+      leaseRevision: 1,
+      request: {
+        taskId: options.requestTaskId,
+        projectRoot: options.requestProjectRoot,
+        prompt: 'Run the task',
+        lanes: [{ id: 'lane-1', mode: 'terminal' }],
+      },
+    },
+  };
+}
+
 function sensitiveSnapshot(): ControlSnapshot {
   return {
     ownerEpoch: 1,
@@ -711,6 +738,65 @@ describe('control server authorization', () => {
     }
   });
 
+  it('rejects nested orchestration identity bypasses over a real socket', async () => {
+    const root = await tempProject();
+    const otherRoot = await tempProject();
+    const endpoint = path.join(root, 'control.sock');
+    const filePath = path.join(root, 'control-credentials.json');
+    const credentials = await createControlCredentialStore({ projectRoot: root, filePath });
+    const taskToken = await issueControlTaskToken({
+      projectRoot: root,
+      taskId: 'task-alpha',
+      filePath,
+    });
+    const submit = vi.fn<ControlServerRuntime['submit']>(
+      async () => ({ status: 'succeeded' as const }),
+    );
+    const server = await ControlServer.start({
+      endpoint,
+      projectRoot: root,
+      ownerEpoch: 1,
+      runtime: stubRuntime(submit),
+      credentials,
+    });
+    const cleanups: Array<() => Promise<void>> = [() => server.close()];
+
+    try {
+      const taskClient = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: taskToken,
+        clientName: 'task-alpha',
+        taskBinding: { taskId: 'task-alpha' },
+      });
+      cleanups.unshift(() => taskClient.close());
+
+      await expect(taskClient.submit(orchestrationInput({
+        id: 'nested-task-bypass',
+        taskId: 'task-alpha',
+        requestTaskId: 'task-beta',
+        requestProjectRoot: root,
+        projectRoot: root,
+      }))).resolves.toMatchObject({
+        status: 'rejected',
+        code: 'task_binding_mismatch',
+      });
+      await expect(taskClient.submit(orchestrationInput({
+        id: 'nested-project-bypass',
+        taskId: 'task-alpha',
+        requestTaskId: 'task-alpha',
+        requestProjectRoot: otherRoot,
+        projectRoot: root,
+      }))).resolves.toMatchObject({
+        status: 'rejected',
+        code: 'project_mismatch',
+      });
+      expect(submit).not.toHaveBeenCalled();
+    } finally {
+      await Promise.allSettled(cleanups.map(async (close) => close()));
+    }
+  });
+
   it('allows only operators to read raw events over authenticated sockets', async () => {
     const root = await tempProject();
     const endpoint = path.join(root, 'control.sock');
@@ -788,7 +874,10 @@ describe('control server authorization', () => {
         code: 'operator_required',
         message: 'raw control events require operator authority',
       });
-      await expect(compatibility.readEvents(0, 10)).rejects.toThrow('operator_required');
+      await expect(compatibility.readEvents(0, 10)).rejects.toMatchObject({
+        code: 'operator_required',
+        message: 'operator_required: raw control events require operator authority',
+      });
       await expect(operator.readEvents(0, 10)).resolves.toEqual({
         events: [{ sequence: 1 }],
         nextSequence: 1,
@@ -840,6 +929,74 @@ describe('control server authorization', () => {
       taskSensitiveInputs('task-beta')[0],
     )).resolves.toMatchObject({ status: 'succeeded' });
     expect(submit).toHaveBeenCalledTimes(4);
+  });
+
+  it('rejects nested orchestration identity mismatches and stamps trusted identity', async () => {
+    const submit = vi.fn<ControlServerRuntime['submit']>(
+      async () => ({ status: 'succeeded' as const }),
+    );
+    const server = createControlServerForTest({
+      runtime: stubRuntime(submit),
+      projectRoot: '/canonical/project',
+    });
+    const agent: ControlPrincipal = {
+      id: 'agent-1',
+      kind: 'agent',
+      capabilities: ['read', 'mutate'],
+    };
+    const alpha = authenticatedIdentity(agent, 'task-alpha');
+
+    await expect(server.submitAs(alpha, orchestrationInput({
+      id: 'unit-nested-task-bypass',
+      taskId: 'task-alpha',
+      requestTaskId: 'task-beta',
+      requestProjectRoot: '/canonical/project',
+    }))).resolves.toMatchObject({
+      status: 'rejected',
+      code: 'task_binding_mismatch',
+    });
+    await expect(server.submitAs(alpha, orchestrationInput({
+      id: 'unit-nested-project-bypass',
+      taskId: 'task-alpha',
+      requestTaskId: 'task-alpha',
+      requestProjectRoot: '/different/project',
+    }))).resolves.toMatchObject({
+      status: 'rejected',
+      code: 'project_mismatch',
+    });
+    expect(submit).not.toHaveBeenCalled();
+
+    const canonicalAgentInput = orchestrationInput({
+      id: 'unit-canonical-agent',
+      taskId: 'task-alpha',
+      requestTaskId: 'task-alpha',
+      requestProjectRoot: '/canonical/project',
+    });
+    await expect(server.submitAs(alpha, canonicalAgentInput))
+      .resolves.toMatchObject({ status: 'succeeded' });
+    const canonicalOperatorInput = orchestrationInput({
+      id: 'unit-canonical-operator',
+      taskId: 'task-operator',
+      requestTaskId: 'task-operator',
+      requestProjectRoot: '/canonical/project',
+    });
+    await expect(server.submitAs(
+      { id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'] },
+      canonicalOperatorInput,
+    )).resolves.toMatchObject({ status: 'succeeded' });
+
+    expect(submit).toHaveBeenCalledTimes(2);
+    const submittedInputs = [canonicalAgentInput, canonicalOperatorInput];
+    submit.mock.calls.forEach(([submitted], index) => {
+      if (submitted.kind !== 'orchestration.execute') {
+        throw new Error(`unexpected submitted command kind: ${submitted.kind}`);
+      }
+      expect(submitted.payload.request).toMatchObject({
+        taskId: submitted.payload.taskId,
+        projectRoot: '/canonical/project',
+      });
+      expect(submitted.payload.request).not.toBe(submittedInputs[index]?.payload.request);
+    });
   });
 
   it('rejects agent self-delegation and stamps operator identity', async () => {

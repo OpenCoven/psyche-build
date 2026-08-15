@@ -342,6 +342,13 @@ Use the repository's existing rejected-outcome constructor rather than creating 
 
 In `submitAs`, derive `requestedTaskId` from task-sensitive command payloads and return the guard rejection before constructing or submitting the command. Operator behavior remains unchanged.
 
+For `orchestration.execute`, also validate the nested `payload.request.taskId`
+against the authenticated task (or the operator-requested outer task) and the
+nested `payload.request.projectRoot` against the server's canonical project
+root. Reject mismatches before runtime dispatch, then reconstruct the nested
+request with the trusted task ID and canonical project root so client-supplied
+identity fields never cross the server boundary unchanged.
+
 - [ ] **Step 5: Run tests**
 
 ```bash

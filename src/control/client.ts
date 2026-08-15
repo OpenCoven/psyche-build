@@ -35,6 +35,16 @@ interface PendingRequest {
   reject: (error: Error) => void;
 }
 
+class ControlResponseError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ControlResponseError';
+  }
+}
+
 /**
  * The canonical client for the host control plane.
  *
@@ -352,7 +362,9 @@ export class ControlClient {
 }
 
 function responseError(response: ControlResponse, context: string): Error {
-  if (response.type === 'error') return new Error(`${response.code}: ${response.message}`);
+  if (response.type === 'error') {
+    return new ControlResponseError(response.code, `${response.code}: ${response.message}`);
+  }
   return new Error(`unexpected ${response.type} response to ${context}`);
 }
 

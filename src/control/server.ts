@@ -134,6 +134,10 @@ function requestedTaskId(input: ControlCommandInput): string | undefined {
   return typeof taskId === 'string' ? taskId : undefined;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function requireTaskBinding(
   identity: AuthenticatedControlIdentity,
   taskId: string | undefined,
@@ -246,8 +250,45 @@ export class ControlAuthority {
     const rejection = authorizeCommand(principal, input.kind);
     if (rejection) return rejection;
 
+    let trustedInput: ControlCommandInput = input;
+    if (input.kind === 'orchestration.execute') {
+      const nestedRequest: unknown = input.payload.request;
+      const trustedTaskId = principal.kind === 'operator'
+        ? input.payload.taskId
+        : authenticated.taskBinding?.taskId;
+      if (
+        typeof trustedTaskId !== 'string'
+        || !isPlainObject(nestedRequest)
+        || nestedRequest.taskId !== trustedTaskId
+      ) {
+        return {
+          status: 'rejected',
+          code: 'task_binding_mismatch',
+          message: 'orchestration task does not match authenticated task',
+        };
+      }
+      if (nestedRequest.projectRoot !== this.canonicalProjectRoot) {
+        return {
+          status: 'rejected',
+          code: 'project_mismatch',
+          message: 'orchestration project root does not match this owner',
+        };
+      }
+      trustedInput = {
+        ...input,
+        payload: {
+          ...input.payload,
+          request: {
+            ...input.payload.request,
+            taskId: trustedTaskId,
+            projectRoot: this.canonicalProjectRoot,
+          },
+        },
+      };
+    }
+
     const command = {
-      ...input,
+      ...trustedInput,
       projectRoot: this.canonicalProjectRoot,
       actor: actorForPrincipal(principal, clientId),
       ownerEpoch: this.ownerEpoch,

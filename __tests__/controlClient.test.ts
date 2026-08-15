@@ -65,6 +65,45 @@ async function startWelcomeFrameServer(frame: Record<string, unknown>): Promise<
   return { endpoint, closed };
 }
 
+async function startErrorResponseServer(code: string, message: string): Promise<string> {
+  const endpoint = socketPath();
+  let acceptedSocket: Socket | undefined;
+  const server = createServer((socket) => {
+    acceptedSocket = socket;
+    let buffer = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      let newline = buffer.indexOf('\n');
+      while (newline >= 0) {
+        const request = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf('\n');
+        if (request.type === 'hello') {
+          socket.write(`${JSON.stringify(welcomeFrame())}\n`);
+        } else {
+          socket.write(`${JSON.stringify({
+            version: 1,
+            type: 'error',
+            requestId: request.requestId,
+            code,
+            message,
+          })}\n`);
+        }
+      }
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(endpoint, resolve);
+  });
+  cleanups.push(async () => {
+    acceptedSocket?.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  return endpoint;
+}
+
 async function startHarness(overrides: {
   submit?: ControlServerRuntime['submit'];
   ownerEpoch?: number;
@@ -262,6 +301,26 @@ describe('ControlClient over the socket transport', () => {
 
     await expect(client.getState()).resolves.toMatchObject({ ownerEpoch: 7, sequence: 2 });
     await expect(client.readEvents(0)).resolves.toMatchObject({ nextSequence: 1, gap: false });
+  });
+
+  it.each([
+    ['operator_required', 'only an operator may perform this request'],
+    ['task_binding_required', 'task-bound control credential required'],
+    ['task_binding_mismatch', 'command task does not match authenticated task'],
+  ])('preserves the %s response code on client errors', async (code, message) => {
+    const endpoint = await startErrorResponseServer(code, message);
+    const client = await ControlClient.connectCanonical({
+      projectRoot: '/canonical/project',
+      endpoint,
+      token: 'token',
+      clientName: 'coded-error-client',
+    });
+    cleanups.push(() => client.close());
+
+    await expect(client.getState()).rejects.toMatchObject({
+      code,
+      message: `${code}: ${message}`,
+    });
   });
 
   it('constructs lease, approval, and action-status helper envelopes', async () => {
