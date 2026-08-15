@@ -309,6 +309,7 @@ function buildSample(overrides: Record<string, unknown> = {}): StatusControllerS
     fps: null,
     renderLatencyMs: null,
     droppedFrames: null,
+    framePacingHz: null,
     ...(overrides.frame as Record<string, unknown> | undefined),
   };
 
@@ -1693,6 +1694,7 @@ describe('tauri status controller', () => {
         fps: 60,
         renderLatencyMs: 16.7,
         droppedFrames: 0,
+        framePacingHz: 60,
       },
     }));
 
@@ -1702,6 +1704,7 @@ describe('tauri status controller', () => {
     expect(classTexts(elements.detailBody, 'status-cell-label')).toContain('Dropped');
     expect(classTexts(elements.detailBody, 'status-cell-value')).toContain('60 FPS');
     expect(classTexts(elements.detailBody, 'status-cell-value')).toContain('0');
+    expect(elements.detailBody.textContent).toContain('rAF 60 Hz');
   });
 
   it('renders Agent tools only for finite structured counts', () => {

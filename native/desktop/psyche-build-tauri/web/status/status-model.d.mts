@@ -158,6 +158,8 @@ export type FrameSample = {
   fps: number | null;
   renderLatencyMs: number | null;
   droppedFrames: number | null;
+  /** Measured requestAnimationFrame cadence, not a display-mode claim. */
+  framePacingHz: number | null;
 };
 
 export type FrameSampler = {
@@ -172,6 +174,7 @@ export type DiagnosticsMetrics = {
   fps?: number | null;
   renderLatencyMs?: number | null;
   droppedFrames?: number | null;
+  framePacingHz?: number | null;
   linesPerSecond?: number | null;
   outputLinesPerSecond?: number | null;
   outputBytesPerSecond?: number | null;

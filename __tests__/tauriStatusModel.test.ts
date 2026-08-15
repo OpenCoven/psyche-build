@@ -615,6 +615,7 @@ describe('tauri footer status model', () => {
       fps: null,
       renderLatencyMs: null,
       droppedFrames: null,
+      framePacingHz: null,
     });
 
     sampler.frame(0);
@@ -622,6 +623,7 @@ describe('tauri footer status model', () => {
       fps: null,
       renderLatencyMs: null,
       droppedFrames: null,
+      framePacingHz: null,
     });
 
     const zeroDropSampler = createFrameSampler();
@@ -630,6 +632,7 @@ describe('tauri footer status model', () => {
     expect(zeroDropSample.fps).toBe(3);
     expect(zeroDropSample.droppedFrames).toBe(0);
     expect(zeroDropSample.renderLatencyMs).toBeCloseTo(16.7, 1);
+    expect(zeroDropSample.framePacingHz).toBeCloseTo(60, 0);
 
     [0, 16.7, 33.4, 83.4, 100.1].forEach((time) => sampler.frame(time));
     const sample = sampler.flush(1_000);
@@ -637,5 +640,29 @@ describe('tauri footer status model', () => {
     expect(sample.fps).toBe(5);
     expect(sample.droppedFrames).toBeGreaterThanOrEqual(2);
     expect(sample.renderLatencyMs).toBeCloseTo(25.025, 3);
+  });
+
+  test('calibrates dropped-frame accounting to a high-refresh requestAnimationFrame cadence', () => {
+    const sampler = createFrameSampler();
+    const frameMs = 1000 / 240;
+    [0, frameMs, frameMs * 2, frameMs * 3, frameMs * 5, frameMs * 6].forEach((time) => sampler.frame(time));
+
+    const sample = sampler.flush(1_000);
+
+    expect(sample.framePacingHz).toBeCloseTo(240, 0);
+    expect(sample.renderLatencyMs).toBeCloseTo((frameMs * 6) / 5, 6);
+    expect(sample.droppedFrames).toBe(1);
+  });
+
+  test('records the measured rAF cadence in diagnostics without claiming a display mode', () => {
+    const text = formatLiveDiagnostics({
+      sampledAt: 1_700_000_000_000,
+      scope: 'workspace',
+      metrics: { fps: 238, framePacingHz: 240 },
+      services: [],
+    });
+
+    expect(text).toContain('rAF cadence: 240 Hz');
+    expect(text).not.toContain('display mode');
   });
 });

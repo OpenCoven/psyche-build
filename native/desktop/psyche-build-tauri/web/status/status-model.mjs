@@ -11,7 +11,6 @@ export const DEFAULT_METRIC_ORDER = Object.freeze([
 const METRIC_IDS = new Set(DEFAULT_METRIC_ORDER);
 const LOCAL_AGENT_KINDS = new Set(['coven-chat', 'coven-attach']);
 const ACTIVE_AGENT_STATUSES = new Set(['running', 'waiting', 'blocked']);
-const IDEAL_FRAME_MS = 1000 / 60;
 const MAX_TREND_SAMPLES = 60;
 const DIAGNOSTIC_LIMIT = 16_384;
 const DIAGNOSTIC_TRUNCATION_MARKER = '...(truncated)';
@@ -568,7 +567,7 @@ export function createFrameSampler() {
   let frames = 0;
   let intervals = 0;
   let totalIntervalMs = 0;
-  let droppedFrames = 0;
+  let frameIntervals = [];
 
   return {
     frame(at) {
@@ -579,7 +578,7 @@ export function createFrameSampler() {
         const delta = Math.max(0, frameAt - previousAt);
         totalIntervalMs += delta;
         intervals += 1;
-        droppedFrames += Math.max(0, Math.round(delta / IDEAL_FRAME_MS) - 1);
+        if (delta > 0) frameIntervals.push(delta);
       }
 
       previousAt = frameAt;
@@ -587,23 +586,39 @@ export function createFrameSampler() {
     },
     flush(windowMs) {
       const duration = Math.max(1, finiteNumber(windowMs) ?? 0);
+      // A WebView owns requestAnimationFrame cadence. Estimate it from the
+      // fastest quarter of the sample so missed presentation slots do not lower
+      // the target; this needs no platform-specific display API.
+      const sortedIntervals = [...frameIntervals].sort((left, right) => left - right);
+      const calibrationCount = Math.max(1, Math.ceil(sortedIntervals.length / 4));
+      const targetFrameMs = sortedIntervals.length
+        ? median(sortedIntervals.slice(0, calibrationCount))
+        : null;
+      const droppedFrames = targetFrameMs == null
+        ? null
+        : frameIntervals.reduce(
+          (total, delta) => total + Math.max(0, Math.round(delta / targetFrameMs) - 1),
+          0,
+        );
       const sample = intervals > 0
         ? {
             fps: Math.round((frames * 1000) / duration),
             renderLatencyMs: totalIntervalMs / intervals,
             droppedFrames,
+            framePacingHz: targetFrameMs == null ? null : 1000 / targetFrameMs,
           }
         : {
             fps: null,
             renderLatencyMs: null,
             droppedFrames: null,
+            framePacingHz: null,
           };
 
       previousAt = null;
       frames = 0;
       intervals = 0;
       totalIntervalMs = 0;
-      droppedFrames = 0;
+      frameIntervals = [];
 
       return sample;
     },
@@ -681,6 +696,9 @@ export function formatLiveDiagnostics(input) {
   }
   if (Number.isFinite(metrics.fps)) {
     bodyLines.push(`FPS: ${Math.round(metrics.fps)}`);
+  }
+  if (Number.isFinite(metrics.framePacingHz)) {
+    bodyLines.push(`rAF cadence: ${Math.round(metrics.framePacingHz)} Hz`);
   }
   if (Number.isFinite(outputRate)) {
     bodyLines.push(`Output: ${Math.round(outputRate)} lines/s`);

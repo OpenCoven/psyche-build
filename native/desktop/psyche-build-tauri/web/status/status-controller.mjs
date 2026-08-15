@@ -357,6 +357,7 @@ function createEmptyFrameSample() {
     fps: null,
     renderLatencyMs: null,
     droppedFrames: null,
+    framePacingHz: null,
   };
 }
 
@@ -792,6 +793,7 @@ function buildDiagnostics(sample, effectiveScope, trends) {
   metrics.fps = finiteNumber(sample.frame?.fps);
   metrics.renderLatencyMs = finiteNumber(sample.frame?.renderLatencyMs);
   metrics.droppedFrames = finiteNumber(sample.frame?.droppedFrames);
+  metrics.framePacingHz = finiteNumber(sample.frame?.framePacingHz);
   peaks.fps = peakValue(trends.fps);
   peaks.renderLatencyMs = peakValue(trends.renderLatencyMs);
   peaks.droppedFrames = peakValue(trends.droppedFrames);
@@ -1088,7 +1090,7 @@ function renderPerformance(body, doc, sample, trends) {
       doc,
       'Frame rate',
       `${Math.round(sample.frame.fps)} FPS`,
-      `${sample.frame.renderLatencyMs.toFixed(1)} ms`,
+      `${sample.frame.renderLatencyMs.toFixed(1)} ms${Number.isFinite(sample.frame.framePacingHz) ? ` · rAF ${Math.round(sample.frame.framePacingHz)} Hz` : ''}`,
       trends.fps.values,
     ));
     grid.appendChild(performanceCell(
