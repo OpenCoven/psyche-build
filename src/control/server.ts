@@ -668,6 +668,8 @@ __OURS__
     const fail = (code: string, message: string, requestId?: string): void => {
       if (socket.destroyed || !socket.writable) return;
       closing = true;
+      identity = null;
+      clientId = undefined;
       socket.end(`${encodeControlMessage({ version: 1, type: 'error', requestId, code, message })}\n`);
     };
 
