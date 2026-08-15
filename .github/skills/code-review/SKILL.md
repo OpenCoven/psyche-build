@@ -266,13 +266,13 @@ because it regenerates tracked hook documentation.
 
 ```bash
 cargo fmt --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --check
-cargo test --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
-cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
+CARGO_TARGET_DIR="${TMPDIR:-/tmp}/psyche-code-review-cargo-$$" cargo test --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
+CARGO_TARGET_DIR="${TMPDIR:-/tmp}/psyche-code-review-cargo-$$" cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
 ```
 
-Use a focused Cargo test filter when one covers the suspected path. Ignored
-build outputs created by Cargo are acceptable, but tracked source and generated
-files must remain unchanged.
+Use a focused Cargo test filter when one covers the suspected path. Directing
+Cargo build artifacts outside the repository preserves the active review tree;
+tracked source and generated files must remain unchanged.
 
 ### Release consistency
 
