@@ -3,7 +3,10 @@ import { PaneAction, type ActionResult, type RemoteActionResponse } from '../../
 import { RemoteActionSessions } from '../../actions/remoteActionSessions.js';
 import { decodeBase64Payload } from '../../utils/base64.js';
 import type { BrowserFileRecord, BrowserSnapshot } from '../../utils/fileBrowser.js';
-import type { ReadonlyWorkspaceSnapshot } from '../../workspace/snapshot.js';
+import {
+  hasPublishedTmuxBackedPane,
+  type ReadonlyWorkspaceSnapshot,
+} from '../../workspace/snapshot.js';
 import {
   createMobileInspection,
   MobileInspectionError,
@@ -434,11 +437,8 @@ export class MobileControlGateway {
   private requirePublishedPane(requestId: string, paneId: string): Promise<void> {
     return this.requireScope(
       requestId,
-      (workspace) => workspace.projects.some((project) =>
-        project.projectPanes.some((pane) => pane.id === paneId)
-        || project.worktrees.some((worktree) =>
-          worktree.panes.some((pane) => pane.id === paneId))),
-      'pane is not published by this host',
+      (workspace) => hasPublishedTmuxBackedPane(workspace, paneId),
+      'pane is not a tmux-backed published pane',
     );
   }
 

@@ -72,6 +72,22 @@ export type ReadonlyWorktreeSnapshot = DeepReadonly<WorktreeSnapshot>;
 export type ReadonlyProjectSnapshot = DeepReadonly<ProjectSnapshot>;
 export type ReadonlyWorkspaceSnapshot = DeepReadonly<WorkspaceSnapshot>;
 
+export function isTmuxBackedWorkspacePane(
+  pane: Pick<PaneSnapshot, 'kind'>,
+): pane is Pick<PaneSnapshot, 'kind'> & { kind: Exclude<WorkspacePaneKind, 'coven-session'> } {
+  return pane.kind === 'agent' || pane.kind === 'terminal';
+}
+
+export function hasPublishedTmuxBackedPane(
+  workspace: ReadonlyWorkspaceSnapshot,
+  paneId: string,
+): boolean {
+  return workspace.projects.some((project) =>
+    project.projectPanes.some((pane) => pane.id === paneId && isTmuxBackedWorkspacePane(pane))
+    || project.worktrees.some((worktree) =>
+      worktree.panes.some((pane) => pane.id === paneId && isTmuxBackedWorkspacePane(pane))));
+}
+
 export interface WorkspaceProjectInput {
   id: string;
   root: string;
