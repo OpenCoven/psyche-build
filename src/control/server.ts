@@ -697,6 +697,8 @@ export class ControlServer {
 
     const fail = (code: string, message: string, requestId?: string): void => {
       closing = true;
+      identity = null;
+      clientId = undefined;
       write({ version: 1, type: 'error', requestId, code, message });
       socket.destroy();
     };
