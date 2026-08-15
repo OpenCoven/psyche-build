@@ -21,6 +21,7 @@ const stalePathPattern = /native\/macos\/psyche-build-tauri|['"]native['"]\s*,\s
 const originalBaseCsp = "default-src 'self'; img-src 'self' data: https: http:; style-src 'self'; script-src 'self'; frame-src https: http:; connect-src 'self' ipc: http://ipc.localhost https: http:";
 const pngSignature = Buffer.from('89504e470d0a1a0a', 'hex');
 const pngChunkTypePattern = /^[A-Za-z]{4}$/;
+const allowedCriticalPngChunkTypes = new Set(['IHDR', 'PLTE', 'IDAT', 'IEND']);
 const requiredModernIcnsChunkDimensions: Record<string, number> = {
   ic07: 128,
   ic08: 256,
@@ -52,6 +53,63 @@ function paethPredictor(left: number, up: number, upLeft: number) {
   return upLeft;
 }
 
+function pngChunkCrc32(...parts: readonly Buffer[]) {
+  let crc = 0xffffffff;
+
+  for (const part of parts) {
+    for (const byte of part) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit += 1) {
+        crc = (crc & 1) === 0 ? crc >>> 1 : (crc >>> 1) ^ 0xedb88320;
+      }
+    }
+  }
+
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function isCriticalPngChunkType(typeBytes: Buffer) {
+  return (typeBytes[0] & 0x20) === 0;
+}
+
+function buildPngChunk(type: string, data = Buffer.alloc(0)) {
+  if (!pngChunkTypePattern.test(type)) {
+    throw new Error(`Invalid PNG chunk type ${JSON.stringify(type)}`);
+  }
+
+  const typeBytes = Buffer.from(type, 'ascii');
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBytes.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(pngChunkCrc32(typeBytes, data), 8 + data.length);
+  return chunk;
+}
+
+function pngChunkOffset(png: Buffer, type: string) {
+  let offset = pngSignature.length;
+
+  while (offset < png.length) {
+    if (offset + 8 > png.length) {
+      throw new Error(`Truncated PNG chunk header while locating ${type}`);
+    }
+
+    const length = png.readUInt32BE(offset);
+    const chunkEnd = offset + 12 + length;
+    if (chunkEnd > png.length) {
+      throw new Error(`Out-of-bounds PNG chunk while locating ${type}`);
+    }
+
+    if (png.subarray(offset + 4, offset + 8).toString('ascii') === type) {
+      return offset;
+    }
+
+    offset = chunkEnd;
+  }
+
+  throw new Error(`Missing PNG chunk ${type}`);
+}
+
 function pngRgbaBuffer(png: Buffer, source: string) {
   if (png.length < pngSignature.length || !png.subarray(0, pngSignature.length).equals(pngSignature)) {
     throw new Error(`Invalid PNG signature: ${source}`);
@@ -76,7 +134,8 @@ function pngRgbaBuffer(png: Buffer, source: string) {
       throw new Error(`Truncated PNG chunk header: ${source}`);
     }
     const length = png.readUInt32BE(offset);
-    const type = png.subarray(offset + 4, offset + 8).toString('ascii');
+    const typeBytes = png.subarray(offset + 4, offset + 8);
+    const type = typeBytes.toString('ascii');
     const dataStart = offset + 8;
     const dataEnd = dataStart + length;
     const chunkEnd = dataEnd + 4;
@@ -85,6 +144,14 @@ function pngRgbaBuffer(png: Buffer, source: string) {
     }
     if (chunkEnd > png.length) {
       throw new Error(`Out-of-bounds PNG chunk payload: ${source}`);
+    }
+    const actualCrc = pngChunkCrc32(typeBytes, png.subarray(dataStart, dataEnd));
+    const storedCrc = png.readUInt32BE(dataEnd);
+    if (actualCrc !== storedCrc) {
+      throw new Error(`PNG chunk CRC mismatch for ${type}: ${source}`);
+    }
+    if (isCriticalPngChunkType(typeBytes) && !allowedCriticalPngChunkTypes.has(type)) {
+      throw new Error(`Unsupported PNG critical chunk ${type}: ${source}`);
     }
 
     if (type === 'IHDR') {
@@ -486,6 +553,33 @@ describe('desktop Tauri layout', () => {
       'ic13',
       'ic14',
     ]));
+  });
+
+  it('rejects PNG chunks with invalid CRCs', () => {
+    const validPng = readFileSync(join(icons, '32x32.png'));
+    const corruptedPng = Buffer.from(validPng);
+    const ihdrCrcOffset = pngChunkOffset(corruptedPng, 'IHDR') + 8 + 13;
+
+    corruptedPng[ihdrCrcOffset] ^= 0xff;
+
+    expect(() => pngRgbaBuffer(corruptedPng, 'corrupted-ihdr-crc')).toThrow(
+      /PNG chunk CRC mismatch for IHDR: corrupted-ihdr-crc/,
+    );
+  });
+
+  it('rejects unsupported critical PNG chunks even with valid CRCs', () => {
+    const validPng = readFileSync(join(icons, '32x32.png'));
+    const iendOffset = pngChunkOffset(validPng, 'IEND');
+    const unknownCriticalChunk = buildPngChunk('ABCD');
+    const mutatedPng = Buffer.concat([
+      validPng.subarray(0, iendOffset),
+      unknownCriticalChunk,
+      validPng.subarray(iendOffset),
+    ]);
+
+    expect(() => pngRgbaBuffer(mutatedPng, 'unsupported-critical-abcd')).toThrow(
+      /Unsupported PNG critical chunk ABCD: unsupported-critical-abcd/,
+    );
   });
 
   it('routes structured targets through the native platform launch descriptor', () => {
