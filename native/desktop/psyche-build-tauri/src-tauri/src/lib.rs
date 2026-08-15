@@ -4993,7 +4993,10 @@ fn git_filter_driver_names(root: &str) -> Result<Vec<String>, String> {
         if out.status.code() == Some(1) {
             return Ok(Vec::new());
         }
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stderr = String::from_utf8(out.stderr)
+            .map_err(|err| format!("git config returned invalid UTF-8 stderr: {err}"))?
+            .trim()
+            .to_string();
         return Err(if stderr.is_empty() {
             format!("git config filter query failed with status {}", out.status)
         } else {
@@ -5015,9 +5018,10 @@ fn git_filter_driver_names(root: &str) -> Result<Vec<String>, String> {
         }) else {
             continue;
         };
-        if !driver.is_empty() {
-            drivers.push(driver.to_string());
+        if driver.is_empty() {
+            return Err("git config returned an empty filter driver name".to_string());
         }
+        drivers.push(driver.to_string());
     }
     drivers.sort();
     drivers.dedup();
