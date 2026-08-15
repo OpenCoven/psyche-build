@@ -249,6 +249,84 @@ describe('control protocol v1', () => {
     });
   });
 
+  it('decodes dedicated task resource and lease-status reads without caller task scope', () => {
+    expect(decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'task.resources.get',
+      requestId: 'resources-1',
+    }))).toEqual({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'task.resources.get',
+      requestId: 'resources-1',
+    });
+    expect(decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'lease.status.get',
+      requestId: 'lease-status-1',
+      leaseRequestId: 'request-alpha',
+    }))).toEqual({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'lease.status.get',
+      requestId: 'lease-status-1',
+      leaseRequestId: 'request-alpha',
+    });
+    expect(decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'lease.status.get',
+      requestId: 'lease-status-2',
+      leaseRequestId: 'request-alpha',
+      leaseId: 'lease-alpha',
+    }))).toEqual({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'lease.status.get',
+      requestId: 'lease-status-2',
+      leaseRequestId: 'request-alpha',
+      leaseId: 'lease-alpha',
+    });
+  });
+
+  it.each([
+    ['task resource blank request ID', {
+      version: 1, type: 'task.resources.get', requestId: '   ',
+    }],
+    ['task resource oversized request ID', {
+      version: 1, type: 'task.resources.get', requestId: 'r'.repeat(257),
+    }],
+    ['task resource caller task scope', {
+      version: 1, type: 'task.resources.get', requestId: 'resources-1', taskId: 'task-alpha',
+    }],
+    ['lease status blank request ID', {
+      version: 1, type: 'lease.status.get', requestId: '', leaseRequestId: 'request-alpha',
+    }],
+    ['lease status oversized request ID', {
+      version: 1, type: 'lease.status.get',
+      requestId: 'r'.repeat(257), leaseRequestId: 'request-alpha',
+    }],
+    ['lease status blank lease request ID', {
+      version: 1, type: 'lease.status.get',
+      requestId: 'lease-status-1', leaseRequestId: '   ',
+    }],
+    ['lease status oversized lease request ID', {
+      version: 1, type: 'lease.status.get',
+      requestId: 'lease-status-1', leaseRequestId: 'r'.repeat(257),
+    }],
+    ['lease status blank lease ID', {
+      version: 1, type: 'lease.status.get',
+      requestId: 'lease-status-1', leaseRequestId: 'request-alpha', leaseId: ' ',
+    }],
+    ['lease status oversized lease ID', {
+      version: 1, type: 'lease.status.get',
+      requestId: 'lease-status-1', leaseRequestId: 'request-alpha',
+      leaseId: 'l'.repeat(257),
+    }],
+    ['lease status caller task scope', {
+      version: 1, type: 'lease.status.get',
+      requestId: 'lease-status-1', leaseRequestId: 'request-alpha', taskId: 'task-alpha',
+    }],
+  ])('rejects malformed dedicated read: %s', (_label, request) => {
+    expect(() => decodeControlRequest(JSON.stringify(request))).toThrow(/invalid .* request/);
+  });
+
   it('rejects an unknown request type', () => {
     expect(() => decodeControlRequest(JSON.stringify({
       version: CONTROL_PROTOCOL_VERSION,

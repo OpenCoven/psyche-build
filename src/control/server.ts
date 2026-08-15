@@ -12,12 +12,16 @@ import {
   decodeControlRequest,
   encodeControlMessage,
   type ControlResponse,
+  type LeaseStatusResultData,
+  type TaskResourcesResultData,
 } from './protocol.js';
 import type {
   BrowserProviderBroker,
   BrowserProviderRegistration,
   ProviderPush,
 } from './browserProviderBroker.js';
+import type { CapabilityLease, LeaseTarget } from './capabilityLeases.js';
+import type { SurfaceResource } from './surfaces.js';
 import type {
   ControlActor,
   ControlActorKind,
@@ -25,7 +29,10 @@ import type {
   ControlCommandInput,
   CommandOutcome,
   ControlSnapshot,
+  LeaseGrant,
 } from './types.js';
+
+type LeaseRequest = ControlSnapshot['leaseRequests'][number];
 
 /** The minimal runtime surface the control server drives. */
 export interface ControlServerRuntime {
@@ -189,6 +196,103 @@ function requireTaskBinding(
   return undefined;
 }
 
+function taskIdForDedicatedRead(identity: AuthenticatedControlIdentity): string {
+  const taskId = identity.taskBinding?.taskId;
+  if (!taskId) {
+    throw Object.assign(new Error('task-bound control credential required'), {
+      code: 'task_binding_required',
+    });
+  }
+  return taskId;
+}
+
+function targetKey(target: LeaseTarget): string | undefined {
+  if (target.kind === 'project') return undefined;
+  return JSON.stringify([target.kind, target.id, target.generation]);
+}
+
+function resourceKey(resource: SurfaceResource): string {
+  return JSON.stringify([resource.kind, resource.id, resource.generation]);
+}
+
+function cloneTarget(target: LeaseTarget): LeaseTarget {
+  return target.kind === 'project'
+    ? Object.freeze({ kind: 'project', id: target.id })
+    : Object.freeze({
+      kind: target.kind,
+      id: target.id,
+      generation: target.generation,
+    });
+}
+
+function cloneGrants(grants: readonly LeaseGrant[]): readonly LeaseGrant[] {
+  return Object.freeze(grants.map((grant) => Object.freeze({
+    target: cloneTarget(grant.target),
+    capabilities: Object.freeze([...grant.capabilities]),
+  })));
+}
+
+function cloneLeaseRequest(request: LeaseRequest): LeaseRequest {
+  return Object.freeze({
+    id: request.id,
+    ownerEpoch: request.ownerEpoch,
+    actorId: request.actorId,
+    taskId: request.taskId,
+    status: request.status,
+    createdAt: request.createdAt,
+    ttlMs: request.ttlMs,
+    grants: cloneGrants(request.grants),
+  });
+}
+
+function cloneCapabilityLease(lease: CapabilityLease): CapabilityLease {
+  return Object.freeze({
+    id: lease.id,
+    requestId: lease.requestId,
+    revision: lease.revision,
+    ownerEpoch: lease.ownerEpoch,
+    actorId: lease.actorId,
+    taskId: lease.taskId,
+    grantedBy: lease.grantedBy,
+    grants: cloneGrants(lease.grants),
+    createdAt: lease.createdAt,
+    expiresAt: lease.expiresAt,
+  });
+}
+
+function cloneSurfaceResource(resource: SurfaceResource): SurfaceResource {
+  if (resource.kind === 'pane') {
+    return Object.freeze({
+      id: resource.id,
+      kind: resource.kind,
+      generation: resource.generation,
+      projectRoot: resource.projectRoot,
+      worktreeRoot: resource.worktreeRoot,
+      tmuxPaneId: resource.tmuxPaneId,
+      ...(resource.title === undefined ? {} : { title: resource.title }),
+      ...(resource.agent === undefined ? {} : { agent: resource.agent }),
+      writable: resource.writable,
+      outputSequence: resource.outputSequence,
+    });
+  }
+  return Object.freeze({
+    id: resource.id,
+    kind: resource.kind,
+    generation: resource.generation,
+    projectRoot: resource.projectRoot,
+    worktreeRoot: resource.worktreeRoot,
+    providerId: resource.providerId,
+    webviewLabel: resource.webviewLabel,
+    url: resource.url,
+    title: resource.title,
+    loading: resource.loading,
+    viewport: Object.freeze({
+      width: resource.viewport.width,
+      height: resource.viewport.height,
+    }),
+  });
+}
+
 /**
  * Decide whether a principal may submit a command of the given kind.
  *
@@ -327,6 +431,73 @@ export class ControlAuthority {
       ownerEpoch: this.ownerEpoch,
     } as ControlCommand;
     return this.runtime.submit(command);
+  }
+
+  taskResources(identity: AuthenticatedControlIdentity): TaskResourcesResultData {
+    const taskId = taskIdForDedicatedRead(identity);
+    const snapshot = this.runtime.snapshot();
+    const authorizedTargets = new Set<string>();
+
+    for (const request of snapshot.leaseRequests) {
+      if (
+        request.ownerEpoch !== this.ownerEpoch
+        || request.taskId !== taskId
+        || request.status !== 'pending'
+      ) continue;
+      for (const grant of request.grants) {
+        const key = targetKey(grant.target);
+        if (key) authorizedTargets.add(key);
+      }
+    }
+    for (const lease of snapshot.capabilityLeases) {
+      if (lease.ownerEpoch !== this.ownerEpoch || lease.taskId !== taskId) continue;
+      for (const grant of lease.grants) {
+        const key = targetKey(grant.target);
+        if (key) authorizedTargets.add(key);
+      }
+    }
+
+    const emitted = new Set<string>();
+    const resources: SurfaceResource[] = [];
+    for (const resource of snapshot.resources) {
+      const key = resourceKey(resource);
+      if (!authorizedTargets.has(key) || emitted.has(key)) continue;
+      emitted.add(key);
+      resources.push(cloneSurfaceResource(resource));
+    }
+    return Object.freeze({
+      ownerEpoch: this.ownerEpoch,
+      sequence: snapshot.sequence,
+      resources: Object.freeze(resources),
+    });
+  }
+
+  leaseStatus(
+    identity: AuthenticatedControlIdentity,
+    leaseRequestId: string,
+    leaseId?: string,
+  ): LeaseStatusResultData {
+    const taskId = taskIdForDedicatedRead(identity);
+    const snapshot = this.runtime.snapshot();
+    const requests = snapshot.leaseRequests
+      .filter((request) => (
+        request.ownerEpoch === this.ownerEpoch
+        && request.taskId === taskId
+        && request.id === leaseRequestId
+      ))
+      .map(cloneLeaseRequest);
+    const leases = snapshot.capabilityLeases
+      .filter((lease) => (
+        lease.ownerEpoch === this.ownerEpoch
+        && lease.taskId === taskId
+        && lease.requestId === leaseRequestId
+        && (leaseId === undefined || lease.id === leaseId)
+      ))
+      .map(cloneCapabilityLease);
+    return Object.freeze({
+      requests: Object.freeze(requests),
+      leases: Object.freeze(leases),
+    });
   }
 
   snapshot(identity: ControlAuthorityIdentity): ControlSnapshot {
@@ -694,6 +865,42 @@ export class ControlServer {
           requestId: request.requestId,
           snapshot: this.authority.snapshot(identity),
         });
+        return;
+      case 'task.resources.get':
+        try {
+          write({
+            version: 1,
+            type: 'task.resources.result',
+            requestId: request.requestId,
+            ...this.authority.taskResources(identity),
+          });
+        } catch (error) {
+          writeCodedError(
+            write,
+            request.requestId,
+            error,
+            'task_resources_failed',
+            'failed to read task resources',
+          );
+        }
+        return;
+      case 'lease.status.get':
+        try {
+          write({
+            version: 1,
+            type: 'lease.status.result',
+            requestId: request.requestId,
+            ...this.authority.leaseStatus(identity, request.leaseRequestId, request.leaseId),
+          });
+        } catch (error) {
+          writeCodedError(
+            write,
+            request.requestId,
+            error,
+            'lease_status_failed',
+            'failed to read lease status',
+          );
+        }
         return;
       case 'events.read': {
         let page: ReturnType<ControlAuthority['readEvents']>;

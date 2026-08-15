@@ -104,6 +104,63 @@ async function startErrorResponseServer(code: string, message: string): Promise<
   return endpoint;
 }
 
+async function startDedicatedReadServer(): Promise<{
+  endpoint: string;
+  requests: Record<string, unknown>[];
+}> {
+  const endpoint = socketPath();
+  const requests: Record<string, unknown>[] = [];
+  let acceptedSocket: Socket | undefined;
+  const server = createServer((socket) => {
+    acceptedSocket = socket;
+    let buffer = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      let newline = buffer.indexOf('\n');
+      while (newline >= 0) {
+        const request = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf('\n');
+        if (request.type === 'hello') {
+          socket.write(`${JSON.stringify(welcomeFrame({
+            taskBinding: { taskId: 'task-alpha' },
+          }))}\n`);
+          continue;
+        }
+        requests.push(request);
+        if (request.type === 'task.resources.get') {
+          socket.write(`${JSON.stringify({
+            version: 1,
+            type: 'task.resources.result',
+            requestId: request.requestId,
+            ownerEpoch: 7,
+            sequence: 11,
+            resources: [],
+          })}\n`);
+        } else if (request.type === 'lease.status.get') {
+          socket.write(`${JSON.stringify({
+            version: 1,
+            type: 'lease.status.result',
+            requestId: request.requestId,
+            requests: [],
+            leases: [],
+          })}\n`);
+        }
+      }
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(endpoint, resolve);
+  });
+  cleanups.push(async () => {
+    acceptedSocket?.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  return { endpoint, requests };
+}
+
 async function startHarness(overrides: {
   submit?: ControlServerRuntime['submit'];
   ownerEpoch?: number;
@@ -304,6 +361,52 @@ describe('ControlClient over the socket transport', () => {
     await expect(client.readEvents(0)).resolves.toMatchObject({ nextSequence: 1, gap: false });
   });
 
+  it('sends dedicated reads without a caller-supplied task ID', async () => {
+    const server = await startDedicatedReadServer();
+    const client = await ControlClient.connectCanonical({
+      projectRoot: '/canonical/project',
+      endpoint: server.endpoint,
+      token: 'task-alpha-token',
+      clientName: 'task-alpha',
+      taskBinding: { taskId: 'task-alpha' },
+    });
+    cleanups.push(() => client.close());
+
+    await expect(client.taskResources()).resolves.toEqual({
+      ownerEpoch: 7,
+      sequence: 11,
+      resources: [],
+    });
+    await expect(client.leaseStatus('request-alpha')).resolves.toEqual({
+      requests: [],
+      leases: [],
+    });
+    await expect(client.leaseStatus('request-alpha', 'lease-alpha')).resolves.toEqual({
+      requests: [],
+      leases: [],
+    });
+    expect(server.requests).toEqual([
+      {
+        version: 1,
+        type: 'task.resources.get',
+        requestId: 'req-1',
+      },
+      {
+        version: 1,
+        type: 'lease.status.get',
+        requestId: 'req-2',
+        leaseRequestId: 'request-alpha',
+      },
+      {
+        version: 1,
+        type: 'lease.status.get',
+        requestId: 'req-3',
+        leaseRequestId: 'request-alpha',
+        leaseId: 'lease-alpha',
+      },
+    ]);
+  });
+
   it.each([
     ['operator_required', 'only an operator may perform this request'],
     ['task_binding_required', 'task-bound control credential required'],
@@ -321,6 +424,29 @@ describe('ControlClient over the socket transport', () => {
     await expect(client.getState()).rejects.toMatchObject({
       code,
       message: `${code}: ${message}`,
+    });
+  });
+
+  it('preserves structured errors from dedicated reads', async () => {
+    const endpoint = await startErrorResponseServer(
+      'task_binding_required',
+      'task-bound control credential required',
+    );
+    const client = await ControlClient.connectCanonical({
+      projectRoot: '/canonical/project',
+      endpoint,
+      token: 'shared-token',
+      clientName: 'shared-agent',
+    });
+    cleanups.push(() => client.close());
+
+    await expect(client.taskResources()).rejects.toMatchObject({
+      code: 'task_binding_required',
+      message: 'task_binding_required: task-bound control credential required',
+    });
+    await expect(client.leaseStatus('request-alpha')).rejects.toMatchObject({
+      code: 'task_binding_required',
+      message: 'task_binding_required: task-bound control credential required',
     });
   });
 

@@ -3,7 +3,8 @@ import type {
   ControlCommandInput,
   ControlSnapshot,
 } from './types.js';
-import type { BrowserTabSurface } from './surfaces.js';
+import type { BrowserTabSurface, SurfaceResource } from './surfaces.js';
+import type { CapabilityLease } from './capabilityLeases.js';
 import type { ProviderEffectResult, ProviderPush } from './browserProviderBroker.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
 import { canonicalizeBoundedJson } from './boundedJson.js';
@@ -38,6 +39,18 @@ export type ControlRequest =
     }
   | {
       version: 1;
+      type: 'task.resources.get';
+      requestId: string;
+    }
+  | {
+      version: 1;
+      type: 'lease.status.get';
+      requestId: string;
+      leaseRequestId: string;
+      leaseId?: string;
+    }
+  | {
+      version: 1;
       type: 'events.read';
       requestId: string;
       afterSequence: number;
@@ -67,6 +80,33 @@ export type ProviderRequest =
       result: ProviderEffectResult;
     };
 
+type TaskResourcesResult = {
+  version: 1;
+  type: 'task.resources.result';
+  requestId: string;
+  ownerEpoch: number;
+  sequence: number;
+  resources: readonly SurfaceResource[];
+};
+
+type LeaseStatusResult = {
+  version: 1;
+  type: 'lease.status.result';
+  requestId: string;
+  requests: ReadonlyArray<ControlSnapshot['leaseRequests'][number]>;
+  leases: readonly CapabilityLease[];
+};
+
+export type TaskResourcesResultData = Omit<
+  TaskResourcesResult,
+  'version' | 'type' | 'requestId'
+>;
+
+export type LeaseStatusResultData = Omit<
+  LeaseStatusResult,
+  'version' | 'type' | 'requestId'
+>;
+
 export type ControlResponse =
   | {
       version: 1;
@@ -95,6 +135,8 @@ export type ControlResponse =
       requestId: string;
       snapshot: ControlSnapshot;
     }
+  | TaskResourcesResult
+  | LeaseStatusResult
   | {
       version: 1;
       type: 'events.result';
@@ -256,6 +298,29 @@ export function decodeControlRequest(raw: string): ControlRequest {
     }
     case 'state.get':
       break;
+    case 'task.resources.get':
+      if (
+        !hasExactKeys(value, ['version', 'type', 'requestId'])
+        || !isBoundedNonBlankString(value.requestId, MAX_CONTROL_ID_LENGTH)
+      ) {
+        throw new Error('invalid task.resources.get request');
+      }
+      break;
+    case 'lease.status.get':
+      if (
+        !hasExactKeys(
+          value,
+          ['version', 'type', 'requestId', 'leaseRequestId'],
+          ['leaseId'],
+        )
+        || !isBoundedNonBlankString(value.requestId, MAX_CONTROL_ID_LENGTH)
+        || !isBoundedNonBlankString(value.leaseRequestId, MAX_CONTROL_ID_LENGTH)
+        || (Object.hasOwn(value, 'leaseId')
+          && !isBoundedNonBlankString(value.leaseId, MAX_CONTROL_ID_LENGTH))
+      ) {
+        throw new Error('invalid lease.status.get request');
+      }
+      break;
     case 'events.read':
       if (
         typeof value.afterSequence !== 'number'
@@ -376,6 +441,17 @@ function isProviderEffectResult(value: unknown): value is ProviderEffectResult {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): boolean {
+  const allowed = new Set([...required, ...optional]);
+  const keys = Object.keys(value);
+  return required.every((key) => Object.hasOwn(value, key))
+    && keys.every((key) => allowed.has(key));
 }
 
 function validateSurfaceAuthorization(kind: unknown, payload: Record<string, unknown>): void {

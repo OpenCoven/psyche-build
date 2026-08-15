@@ -229,6 +229,163 @@ function sensitiveSnapshot(): ControlSnapshot {
   } as unknown as ControlSnapshot;
 }
 
+function scopedReadSnapshot(): ControlSnapshot {
+  return {
+    ownerEpoch: 7,
+    sequence: 41,
+    commands: {},
+    leases: {},
+    resources: [
+      {
+        id: 'pane-alpha',
+        kind: 'pane',
+        generation: 1,
+        projectRoot: '/canonical/project',
+        worktreeRoot: '/canonical/project/.worktrees/alpha',
+        tmuxPaneId: '%1',
+        title: 'alpha pane',
+        writable: true,
+        outputSequence: 3,
+      },
+      {
+        id: 'tab-alpha',
+        kind: 'browser_tab',
+        generation: 3,
+        projectRoot: '/canonical/project',
+        worktreeRoot: '/canonical/project/.worktrees/alpha',
+        providerId: 'desktop-alpha',
+        webviewLabel: 'alpha',
+        url: 'https://alpha.example.test',
+        title: 'alpha tab',
+        loading: false,
+        viewport: { width: 1280, height: 720 },
+      },
+      {
+        id: 'pane-beta',
+        kind: 'pane',
+        generation: 1,
+        projectRoot: '/canonical/project',
+        worktreeRoot: '/canonical/project/.worktrees/beta',
+        tmuxPaneId: '%2',
+        title: 'beta pane',
+        writable: true,
+        outputSequence: 4,
+      },
+      {
+        id: 'tab-beta',
+        kind: 'browser_tab',
+        generation: 4,
+        projectRoot: '/canonical/project',
+        worktreeRoot: '/canonical/project/.worktrees/beta',
+        providerId: 'desktop-beta',
+        webviewLabel: 'beta',
+        url: 'https://beta.example.test',
+        title: 'beta tab',
+        loading: false,
+        viewport: { width: 1024, height: 768 },
+      },
+      {
+        id: 'pane-stale',
+        kind: 'pane',
+        generation: 2,
+        projectRoot: '/canonical/project',
+        worktreeRoot: '/canonical/project/.worktrees/alpha',
+        tmuxPaneId: '%3',
+        writable: true,
+        outputSequence: 5,
+      },
+      {
+        id: 'pane-unreferenced',
+        kind: 'pane',
+        generation: 1,
+        projectRoot: '/canonical/project',
+        worktreeRoot: '/canonical/project',
+        tmuxPaneId: '%4',
+        writable: false,
+        outputSequence: 6,
+      },
+    ],
+    leaseRequests: [
+      {
+        id: 'request-alpha-pending',
+        ownerEpoch: 7,
+        actorId: 'agent-shared',
+        taskId: 'task-alpha',
+        status: 'pending',
+        createdAt: '2026-08-14T12:00:00.000Z',
+        ttlMs: 60_000,
+        grants: [
+          {
+            target: { kind: 'pane', id: 'pane-alpha', generation: 1 },
+            capabilities: ['pane.observe'],
+          },
+          {
+            target: { kind: 'pane', id: 'pane-alpha', generation: 1 },
+            capabilities: ['pane.focus'],
+          },
+          {
+            target: { kind: 'pane', id: 'pane-stale', generation: 1 },
+            capabilities: ['pane.observe'],
+          },
+        ],
+      },
+      {
+        id: 'request-beta-pending',
+        ownerEpoch: 7,
+        actorId: 'agent-shared',
+        taskId: 'task-beta',
+        status: 'pending',
+        createdAt: '2026-08-14T12:01:00.000Z',
+        ttlMs: 60_000,
+        grants: [{
+          target: { kind: 'pane', id: 'pane-beta', generation: 1 },
+          capabilities: ['pane.observe'],
+        }],
+      },
+    ],
+    capabilityLeases: [
+      {
+        id: 'lease-alpha',
+        requestId: 'request-alpha-active',
+        revision: 1,
+        ownerEpoch: 7,
+        actorId: 'agent-shared',
+        taskId: 'task-alpha',
+        grantedBy: 'operator',
+        grants: [
+          {
+            target: { kind: 'browser_tab', id: 'tab-alpha', generation: 3 },
+            capabilities: ['browser.inspect'],
+          },
+          {
+            target: { kind: 'pane', id: 'pane-alpha', generation: 1 },
+            capabilities: ['pane.observe'],
+          },
+        ],
+        createdAt: '2026-08-14T12:02:00.000Z',
+        expiresAt: '2026-08-14T13:02:00.000Z',
+      },
+      {
+        id: 'lease-beta',
+        requestId: 'request-beta-active',
+        revision: 2,
+        ownerEpoch: 7,
+        actorId: 'agent-shared',
+        taskId: 'task-beta',
+        grantedBy: 'operator',
+        grants: [{
+          target: { kind: 'browser_tab', id: 'tab-beta', generation: 4 },
+          capabilities: ['browser.inspect'],
+        }],
+        createdAt: '2026-08-14T12:03:00.000Z',
+        expiresAt: '2026-08-14T13:03:00.000Z',
+      },
+    ],
+    approvals: [],
+    receipts: [],
+  };
+}
+
 describe('control credential store', () => {
   it('issues distinct tokens that authenticate as agents bound to their exact tasks', async () => {
     const root = await tempProject();
@@ -688,6 +845,106 @@ describe('control server authorization', () => {
     }
   });
 
+  it('scopes dedicated authority reads to the authenticated task binding', () => {
+    const snapshot = scopedReadSnapshot();
+    (snapshot.resources[0] as unknown as Record<string, unknown>).futureSecret = 'resource-future-secret';
+    (snapshot.leaseRequests[0] as unknown as Record<string, unknown>).futureSecret = 'request-future-secret';
+    (snapshot.capabilityLeases[0] as unknown as Record<string, unknown>).futureSecret = 'lease-future-secret';
+    const authority = createControlServerForTest({
+      ownerEpoch: 7,
+      runtime: stubRuntime(vi.fn(), snapshot),
+    });
+    const agent: ControlPrincipal = {
+      id: 'agent-shared', kind: 'agent', capabilities: ['read', 'mutate'],
+    };
+    const alpha = authenticatedIdentity(agent, 'task-alpha');
+    const beta = authenticatedIdentity(agent, 'task-beta');
+
+    const alphaResources = authority.taskResources(alpha);
+    expect(alphaResources).toMatchObject({ ownerEpoch: 7, sequence: 41 });
+    expect(alphaResources.resources.map((resource) => resource.id))
+      .toEqual(['pane-alpha', 'tab-alpha']);
+    expect(new Set(alphaResources.resources.map((resource) => resource.id)).size)
+      .toBe(alphaResources.resources.length);
+    expect(JSON.stringify(alphaResources)).not.toMatch(
+      /beta|stale|unreferenced|resource-future-secret/,
+    );
+
+    const alphaPending = authority.leaseStatus(alpha, 'request-alpha-pending');
+    expect(alphaPending.requests.map((request) => request.id))
+      .toEqual(['request-alpha-pending']);
+    expect(alphaPending.leases).toEqual([]);
+    const alphaActive = authority.leaseStatus(alpha, 'request-alpha-active');
+    expect(alphaActive.requests).toEqual([]);
+    expect(alphaActive.leases.map((lease) => lease.id)).toEqual(['lease-alpha']);
+    expect(authority.leaseStatus(alpha, 'request-alpha-active', 'lease-alpha')
+      .leases.map((lease) => lease.id)).toEqual(['lease-alpha']);
+    expect(authority.leaseStatus(alpha, 'request-alpha-active', 'lease-beta'))
+      .toEqual({ requests: [], leases: [] });
+
+    const missing = authority.leaseStatus(alpha, 'request-missing');
+    expect(authority.leaseStatus(alpha, 'request-beta-pending')).toEqual(missing);
+    expect(authority.leaseStatus(alpha, 'request-beta-active')).toEqual(missing);
+    expect(missing).toEqual({ requests: [], leases: [] });
+    expect(authority.leaseStatus(beta, 'request-alpha-active')).toEqual(missing);
+    expect(JSON.stringify(alphaPending)).not.toContain('request-future-secret');
+    expect(JSON.stringify(alphaActive)).not.toContain('lease-future-secret');
+
+    const sourceViewport = (snapshot.resources.find((resource) => resource.id === 'tab-alpha') as {
+      viewport: { width: number };
+    }).viewport;
+    sourceViewport.width = 1;
+    expect((alphaResources.resources.find((resource) => resource.id === 'tab-alpha') as {
+      viewport: { width: number };
+    }).viewport.width).toBe(1280);
+    const sourceRequestCapabilities = (
+      snapshot.leaseRequests[0]?.grants[0]?.capabilities
+    ) as unknown as string[];
+    sourceRequestCapabilities[0] = 'pane.focus';
+    expect(alphaPending.requests[0]?.grants[0]?.capabilities).toEqual(['pane.observe']);
+    const sourceLeaseTarget = (
+      snapshot.capabilityLeases[0]?.grants[0]?.target
+    ) as unknown as { id: string };
+    sourceLeaseTarget.id = 'tab-mutated';
+    expect(alphaActive.leases[0]?.grants[0]?.target)
+      .toMatchObject({ id: 'tab-alpha', generation: 3 });
+    expect(Object.isFrozen(alphaResources)).toBe(true);
+    expect(Object.isFrozen(alphaResources.resources)).toBe(true);
+    expect(Object.isFrozen(alphaResources.resources[0])).toBe(true);
+    expect(Object.isFrozen(alphaPending.requests[0]?.grants[0]?.target)).toBe(true);
+    expect(Object.isFrozen(alphaActive.leases[0]?.grants[0]?.capabilities)).toBe(true);
+  });
+
+  it('requires task binding for dedicated authority reads while preserving operator snapshots', () => {
+    const snapshot = scopedReadSnapshot();
+    const authority = createControlServerForTest({
+      ownerEpoch: 7,
+      runtime: stubRuntime(vi.fn(), snapshot),
+    });
+    const unboundAgent = authenticatedIdentity({
+      id: 'agent-shared', kind: 'agent', capabilities: ['read', 'mutate'],
+    });
+    const compatibility = authenticatedIdentity({
+      id: 'compatibility', kind: 'compatibility', capabilities: ['read', 'mutate'],
+    });
+    const operator = authenticatedIdentity({
+      id: 'operator', kind: 'operator', capabilities: ['read', 'mutate', 'delegate'],
+    });
+
+    for (const identity of [unboundAgent, compatibility, operator]) {
+      expect(() => authority.taskResources(identity)).toThrowError(expect.objectContaining({
+        code: 'task_binding_required',
+        message: 'task-bound control credential required',
+      }));
+      expect(() => authority.leaseStatus(identity, 'request-alpha-active'))
+        .toThrowError(expect.objectContaining({
+          code: 'task_binding_required',
+          message: 'task-bound control credential required',
+        }));
+    }
+    expect(authority.snapshot(operator)).toEqual(snapshot);
+  });
+
   it('passes the authenticated principal into state.get snapshot redaction', async () => {
     const root = await tempProject();
     const endpoint = path.join(root, 'control.sock');
@@ -778,6 +1035,130 @@ describe('control server authorization', () => {
 
       expect(taskClient.taskBinding).toEqual({ taskId: 'task-alpha' });
       expect(sharedAgent.taskBinding).toBeUndefined();
+    } finally {
+      await Promise.allSettled(cleanups.map(async (close) => close()));
+    }
+  });
+
+  it('enforces task-scoped resource and lease-status reads over a real socket', async () => {
+    const root = await tempProject();
+    const endpoint = path.join(root, 'control.sock');
+    const filePath = path.join(root, 'control-credentials.json');
+    const baseCredentials = await createControlCredentialStore({ projectRoot: root, filePath });
+    const alphaToken = await issueControlTaskToken({
+      projectRoot: root,
+      taskId: 'task-alpha',
+      filePath,
+    });
+    const betaToken = await issueControlTaskToken({
+      projectRoot: root,
+      taskId: 'task-beta',
+      filePath,
+    });
+    const compatibilityToken = 'compatibility-token';
+    const compatibilityPrincipal: ControlPrincipal = {
+      id: 'compatibility',
+      kind: 'compatibility',
+      capabilities: ['read', 'mutate'],
+    };
+    const credentials: ControlCredentialStore = {
+      authenticate: async (token) => (
+        token === compatibilityToken
+          ? authenticatedIdentity(compatibilityPrincipal)
+          : baseCredentials.authenticate(token)
+      ),
+      operatorToken: () => baseCredentials.operatorToken(),
+      agentToken: () => baseCredentials.agentToken(),
+    };
+    const snapshot = scopedReadSnapshot();
+    const server = await ControlServer.start({
+      endpoint,
+      projectRoot: root,
+      ownerEpoch: 7,
+      runtime: stubRuntime(vi.fn(), snapshot),
+      credentials,
+    });
+    const cleanups: Array<() => Promise<void>> = [() => server.close()];
+
+    try {
+      const alpha = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: alphaToken,
+        clientName: 'task-alpha',
+        taskBinding: { taskId: 'task-alpha' },
+      });
+      cleanups.unshift(() => alpha.close());
+      const beta = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: betaToken,
+        clientName: 'task-beta',
+        taskBinding: { taskId: 'task-beta' },
+      });
+      cleanups.unshift(() => beta.close());
+      const sharedAgent = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: await credentials.agentToken(),
+        clientName: 'shared-agent',
+      });
+      cleanups.unshift(() => sharedAgent.close());
+      const compatibility = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: compatibilityToken,
+        clientName: 'compatibility',
+      });
+      cleanups.unshift(() => compatibility.close());
+      const operator = await ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: await credentials.operatorToken(),
+        clientName: 'operator',
+      });
+      cleanups.unshift(() => operator.close());
+
+      await expect(alpha.taskResources()).resolves.toMatchObject({
+        ownerEpoch: 7,
+        sequence: 41,
+        resources: [
+          expect.objectContaining({ id: 'pane-alpha', generation: 1 }),
+          expect.objectContaining({ id: 'tab-alpha', generation: 3 }),
+        ],
+      });
+      await expect(beta.taskResources()).resolves.toMatchObject({
+        resources: [
+          expect.objectContaining({ id: 'pane-beta', generation: 1 }),
+          expect.objectContaining({ id: 'tab-beta', generation: 4 }),
+        ],
+      });
+      await expect(alpha.leaseStatus('request-alpha-pending')).resolves.toMatchObject({
+        requests: [expect.objectContaining({ id: 'request-alpha-pending' })],
+        leases: [],
+      });
+      await expect(alpha.leaseStatus('request-alpha-active', 'lease-alpha'))
+        .resolves.toMatchObject({
+          requests: [],
+          leases: [expect.objectContaining({ id: 'lease-alpha' })],
+        });
+      const missing = { requests: [], leases: [] };
+      await expect(alpha.leaseStatus('request-beta-pending')).resolves.toEqual(missing);
+      await expect(alpha.leaseStatus('request-beta-active', 'lease-beta')).resolves.toEqual(missing);
+      await expect(alpha.leaseStatus('request-missing')).resolves.toEqual(missing);
+      await expect(alpha.leaseStatus('request-alpha-active', 'lease-beta'))
+        .resolves.toEqual(missing);
+
+      await expect(sharedAgent.taskResources()).rejects.toMatchObject({
+        code: 'task_binding_required',
+      });
+      await expect(compatibility.leaseStatus('request-alpha-active')).rejects.toMatchObject({
+        code: 'task_binding_required',
+      });
+      await expect(operator.taskResources()).rejects.toMatchObject({
+        code: 'task_binding_required',
+      });
+      await expect(operator.getState()).resolves.toEqual(snapshot);
     } finally {
       await Promise.allSettled(cleanups.map(async (close) => close()));
     }

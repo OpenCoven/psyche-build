@@ -6,6 +6,8 @@ import {
   encodeControlMessage,
   type ControlRequest,
   type ControlResponse,
+  type LeaseStatusResultData,
+  type TaskResourcesResultData,
 } from './protocol.js';
 import type { ControlTaskBinding } from './credentials.js';
 import type {
@@ -213,6 +215,44 @@ export class ControlClient {
     }).then((response) => {
       if (response.type === 'state.result') return response.snapshot;
       throw responseError(response, 'state.get');
+    });
+  }
+
+  taskResources(): Promise<TaskResourcesResultData> {
+    return this.request({
+      version: 1,
+      type: 'task.resources.get',
+      requestId: this.allocateRequestId(),
+    }).then((response) => {
+      if (response.type === 'task.resources.result') {
+        return {
+          ownerEpoch: response.ownerEpoch,
+          sequence: response.sequence,
+          resources: response.resources,
+        };
+      }
+      throw responseError(response, 'task.resources.get');
+    });
+  }
+
+  leaseStatus(
+    leaseRequestId: string,
+    leaseId?: string,
+  ): Promise<LeaseStatusResultData> {
+    return this.request({
+      version: 1,
+      type: 'lease.status.get',
+      requestId: this.allocateRequestId(),
+      leaseRequestId,
+      ...(leaseId === undefined ? {} : { leaseId }),
+    }).then((response) => {
+      if (response.type === 'lease.status.result') {
+        return {
+          requests: response.requests,
+          leases: response.leases,
+        };
+      }
+      throw responseError(response, 'lease.status.get');
     });
   }
 
