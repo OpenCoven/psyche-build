@@ -94,6 +94,7 @@ std::thread_local! {
     static TEST_GIT_ENV_OVERRIDES: RefCell<Vec<(OsString, Option<OsString>)>> =
         RefCell::new(Vec::new());
     static TEST_GIT_FILTER_SCOPE_QUERIES: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    static TEST_GIT_COMMAND_COUNT: RefCell<usize> = const { RefCell::new(0) };
 }
 
 fn safe_browser_label(label: Option<String>) -> String {
@@ -1499,7 +1500,7 @@ fn linked_worktree_roots(project_root: &Path) -> Result<Vec<PathBuf>, String> {
     let root = project_root
         .to_str()
         .ok_or_else(|| "project root is not valid UTF-8".to_string())?;
-    let raw = run_git(root, &["worktree", "list", "--porcelain"])?;
+    let raw = run_git_metadata(root, &["worktree", "list", "--porcelain"])?;
     Ok(parse_git_worktrees(&raw)
         .into_iter()
         .filter(|worktree| !worktree.bare && !worktree.prunable && !worktree.missing)
@@ -4986,6 +4987,7 @@ fn fs_write_text(
     }
 }
 
+#[cfg(test)]
 fn git_repository_config_available(root: &str) -> Result<bool, String> {
     let out = git_command(root)
         .args(["rev-parse", "--git-dir"])
@@ -4995,6 +4997,8 @@ fn git_repository_config_available(root: &str) -> Result<bool, String> {
 }
 
 fn git_command(root: &str) -> std::process::Command {
+    #[cfg(test)]
+    TEST_GIT_COMMAND_COUNT.with(|count| *count.borrow_mut() += 1);
     let mut command = std::process::Command::new("git");
     command.current_dir(root);
     #[cfg(test)]
@@ -5216,6 +5220,7 @@ fn git_filter_driver_override(
     )
 }
 
+#[cfg(test)]
 fn git_filter_driver_overrides(root: &str) -> Result<Vec<GitFilterDriverOverride>, String> {
     if !git_repository_config_available(root)? {
         return Ok(Vec::new());
@@ -5258,60 +5263,399 @@ fn git_filter_driver_overrides(root: &str) -> Result<Vec<GitFilterDriverOverride
         .collect()
 }
 
+fn git_trusted_filter_driver_overrides(root: &str) -> Result<Vec<GitFilterDriverOverride>, String> {
+    let system = git_filter_config_for_scope(root, "--system")?;
+    let global = git_filter_config_for_scope(root, "--global")?;
+    let mut drivers = system.driver_names()?;
+    drivers.extend(global.driver_names()?);
+    drivers.sort_by(|left, right| left.0.cmp(&right.0));
+    drivers.dedup_by(|left, right| left.0 == right.0);
+    drivers
+        .into_iter()
+        .map(|(driver, _)| {
+            git_filter_driver_override_from_scopes(driver, false, false, &system, &global)
+        })
+        .collect()
+}
+
+fn git_metadata_output(root: &str, args: &[&str]) -> Result<std::process::Output, String> {
+    git_command(root)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git: {}", e))
+}
+
+fn run_git_metadata(root: &str, args: &[&str]) -> Result<String, String> {
+    let out = git_metadata_output(root, args)?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            format!("git {:?} failed", args)
+        } else {
+            err
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn resolve_git_path(root: &Path, raw: &str) -> PathBuf {
+    let path = PathBuf::from(raw.trim());
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
+}
+
+fn git_dir_for_worktree(root: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let mut current = Some(root);
+    while let Some(candidate) = current {
+        let dot_git = candidate.join(".git");
+        if dot_git.is_dir() {
+            return Ok((candidate.to_path_buf(), dot_git));
+        }
+        if dot_git.is_file() {
+            let text = std::fs::read_to_string(&dot_git)
+                .map_err(|e| format!("read linked worktree Git directory: {e}"))?;
+            let raw = text
+                .trim()
+                .strip_prefix("gitdir:")
+                .ok_or_else(|| "linked worktree .git file is malformed".to_string())?
+                .trim();
+            let git_dir = resolve_git_path(candidate, raw);
+            return Ok((candidate.to_path_buf(), git_dir));
+        }
+        current = candidate.parent();
+    }
+    Err("not a Git worktree".to_string())
+}
+
+fn git_common_dir(git_dir: &Path) -> Result<PathBuf, String> {
+    let commondir = git_dir.join("commondir");
+    if !commondir.is_file() {
+        return Ok(git_dir.to_path_buf());
+    }
+    let raw = std::fs::read_to_string(&commondir)
+        .map_err(|e| format!("read Git common directory: {e}"))?;
+    Ok(resolve_git_path(git_dir, &raw))
+}
+
+fn collect_loose_refs(
+    directory: &Path,
+    prefix: &str,
+    refs: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    for entry in
+        std::fs::read_dir(directory).map_err(|e| format!("read Git refs directory: {e}"))?
+    {
+        let entry = entry.map_err(|e| format!("read Git ref entry: {e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("inspect Git ref entry: {e}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let ref_name = format!("{prefix}/{name}");
+        if file_type.is_dir() {
+            collect_loose_refs(&entry.path(), &ref_name, refs)?;
+        } else if file_type.is_file() {
+            let oid = std::fs::read_to_string(entry.path())
+                .map_err(|e| format!("read Git ref: {e}"))?
+                .trim()
+                .to_string();
+            if !oid.is_empty() {
+                refs.insert(ref_name, oid);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn snapshot_git_refs(common_dir: &Path) -> Result<HashMap<String, String>, String> {
+    let mut refs = HashMap::new();
+    let packed_refs = common_dir.join("packed-refs");
+    if packed_refs.is_file() {
+        let packed = std::fs::read_to_string(&packed_refs)
+            .map_err(|e| format!("read packed Git refs: {e}"))?;
+        for line in packed.lines() {
+            if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
+                continue;
+            }
+            if let Some((oid, name)) = line.split_once(' ') {
+                refs.insert(name.to_string(), oid.to_string());
+            }
+        }
+    }
+    collect_loose_refs(&common_dir.join("refs"), "refs", &mut refs)?;
+    Ok(refs)
+}
+
+fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>, String> {
+    const SAFE_CONFIG_PATTERN: &str = r"^(core\.(repositoryformatversion|filemode|ignorecase|symlinks|precomposeunicode)|extensions\.objectformat|branch\..*\.(remote|merge)|remote\..*\.(url|fetch))$";
+    let mut values = HashMap::new();
+    let mut scopes = vec!["--local"];
+    if git_worktree_config_enabled(root)? {
+        scopes.push("--worktree");
+    }
+    for scope in scopes {
+        let out = git_metadata_output(
+            root,
+            &[
+                "config",
+                scope,
+                "--includes",
+                "--null",
+                "--get-regexp",
+                SAFE_CONFIG_PATTERN,
+            ],
+        )?;
+        if !out.status.success() {
+            if out.status.code() == Some(1) {
+                continue;
+            }
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        for record in out
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            let separator = record
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .ok_or_else(|| "git config query returned malformed output".to_string())?;
+            let key = std::str::from_utf8(&record[..separator])
+                .map_err(|_| "git config query returned invalid UTF-8 keys".to_string())?;
+            let value = std::str::from_utf8(&record[separator + 1..])
+                .map_err(|_| format!("git config {key} returned invalid UTF-8"))?;
+            values.insert(key.to_string(), value.to_string());
+        }
+    }
+    Ok(values.into_iter().collect())
+}
+
+struct GitInspectionRepository {
+    git_dir: tempfile::TempDir,
+    work_tree: PathBuf,
+    index: PathBuf,
+    alternate_objects: OsString,
+    attribute_source: Option<String>,
+    config: Vec<(String, String)>,
+}
+
+impl GitInspectionRepository {
+    fn snapshot(
+        root: &str,
+        head_override: Option<&str>,
+        config: Vec<(String, String)>,
+    ) -> Result<Self, String> {
+        let (work_tree, actual_git_dir) = git_dir_for_worktree(Path::new(root))?;
+        let common_dir = git_common_dir(&actual_git_dir)?;
+        let index = actual_git_dir.join("index");
+        let alternate_objects = std::env::join_paths([common_dir.join("objects")])
+            .map_err(|e| format!("encode Git alternate object directory: {e}"))?;
+        let refs = snapshot_git_refs(&common_dir)?;
+        let actual_head = std::fs::read_to_string(actual_git_dir.join("HEAD"))
+            .map_err(|e| format!("snapshot Git HEAD: {e}"))?;
+        let mut attribute_source = head_override
+            .filter(|head| !head.is_empty() && *head != "0000000000000000000000000000000000000000")
+            .map(str::to_string)
+            .or_else(|| {
+                let head = actual_head.trim();
+                if let Some(name) = head.strip_prefix("ref: ") {
+                    refs.get(name).cloned()
+                } else if !head.is_empty() {
+                    Some(head.to_string())
+                } else {
+                    None
+                }
+            });
+
+        let git_dir = tempfile::Builder::new()
+            .prefix("psyche-git-inspection-")
+            .tempdir()
+            .map_err(|e| format!("create isolated Git inspection directory: {e}"))?;
+        std::fs::create_dir_all(git_dir.path().join("objects"))
+            .map_err(|e| format!("create isolated Git object directory: {e}"))?;
+        std::fs::create_dir_all(git_dir.path().join("refs"))
+            .map_err(|e| format!("create isolated Git refs directory: {e}"))?;
+        let repository_format_version = config
+            .iter()
+            .find_map(|(key, value)| (key == "core.repositoryformatversion").then_some(value))
+            .map(String::as_str)
+            .unwrap_or("0");
+        if !matches!(repository_format_version, "0" | "1") {
+            return Err("unsupported Git repository format version".to_string());
+        }
+        let object_format = config
+            .iter()
+            .find_map(|(key, value)| (key == "extensions.objectformat").then_some(value));
+        if object_format.is_some_and(|value| !matches!(value.as_str(), "sha1" | "sha256")) {
+            return Err("unsupported Git object format".to_string());
+        }
+        let mut isolated_config = format!(
+            "[core]\n\trepositoryformatversion = {repository_format_version}\n\tbare = false\n\tfsmonitor = false\n"
+        );
+        if let Some(object_format) = object_format {
+            isolated_config.push_str(&format!("[extensions]\n\tobjectformat = {object_format}\n"));
+        }
+        std::fs::write(git_dir.path().join("config"), isolated_config)
+            .map_err(|e| format!("write isolated Git config: {e}"))?;
+        std::fs::write(git_dir.path().join("empty-config"), "")
+            .map_err(|e| format!("write isolated empty Git config: {e}"))?;
+        std::fs::write(git_dir.path().join("HEAD"), actual_head)
+            .map_err(|e| format!("write isolated Git HEAD: {e}"))?;
+        let mut packed_refs = refs.into_iter().collect::<Vec<_>>();
+        packed_refs.sort_by(|left, right| left.0.cmp(&right.0));
+        std::fs::write(
+            git_dir.path().join("packed-refs"),
+            format!(
+                "# pack-refs with: fully-peeled sorted\n{}",
+                packed_refs
+                    .into_iter()
+                    .map(|(name, oid)| format!("{oid} {name}\n"))
+                    .collect::<String>()
+            ),
+        )
+        .map_err(|e| format!("snapshot Git refs: {e}"))?;
+        if attribute_source.is_none() {
+            let mut child = git_command(root)
+                .env("GIT_DIR", git_dir.path())
+                .env("GIT_OBJECT_DIRECTORY", git_dir.path().join("objects"))
+                .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &alternate_objects)
+                .env("GIT_CONFIG_SYSTEM", git_dir.path().join("empty-config"))
+                .env("GIT_CONFIG_GLOBAL", git_dir.path().join("empty-config"))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .args(["hash-object", "-t", "tree", "-w", "--stdin"])
+                .spawn()
+                .map_err(|e| format!("create empty Git attribute tree: {e}"))?;
+            drop(child.stdin.take());
+            let output = child
+                .wait_with_output()
+                .map_err(|e| format!("create empty Git attribute tree: {e}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "create empty Git attribute tree: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            attribute_source = Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
+        }
+
+        Ok(Self {
+            git_dir,
+            work_tree,
+            index,
+            alternate_objects,
+            attribute_source,
+            config,
+        })
+    }
+}
+
+struct GitInspectionPolicy {
+    filter_drivers: Vec<GitFilterDriverOverride>,
+}
+
+impl GitInspectionPolicy {
+    fn new(root: &str) -> Result<Self, String> {
+        Ok(Self {
+            filter_drivers: git_trusted_filter_driver_overrides(root)?,
+        })
+    }
+}
+
 struct GitInspection<'a> {
     root: &'a str,
-    filter_drivers: Vec<GitFilterDriverOverride>,
+    policy: Arc<GitInspectionPolicy>,
+    repository: GitInspectionRepository,
 }
 
 impl<'a> GitInspection<'a> {
     fn new(root: &'a str) -> Result<Self, String> {
+        let config = git_inspection_repository_config(root)?;
+        Self::with_policy_and_snapshot(
+            root,
+            Arc::new(GitInspectionPolicy::new(root)?),
+            None,
+            config,
+        )
+    }
+
+    fn with_policy(
+        root: &'a str,
+        policy: Arc<GitInspectionPolicy>,
+        head: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::with_policy_and_snapshot(root, policy, head, Vec::new())
+    }
+
+    fn with_policy_and_snapshot(
+        root: &'a str,
+        policy: Arc<GitInspectionPolicy>,
+        head: Option<&str>,
+        config: Vec<(String, String)>,
+    ) -> Result<Self, String> {
         Ok(Self {
             root,
-            filter_drivers: git_filter_driver_overrides(root)?,
+            policy,
+            repository: GitInspectionRepository::snapshot(root, head, config)?,
         })
     }
 
     fn execute(&self, args: &[&str]) -> Result<String, String> {
         let mut command = git_command(self.root);
         command
-            // Repository-local fsmonitor configuration may name an executable.
-            // Inspection commands must never run code supplied by the workspace.
-            .args(["-c", "core.fsmonitor=false"]);
-        for driver in &self.filter_drivers {
+            .env("GIT_DIR", self.repository.git_dir.path())
+            .env("GIT_WORK_TREE", &self.repository.work_tree)
+            .env("GIT_INDEX_FILE", &self.repository.index)
+            .env(
+                "GIT_OBJECT_DIRECTORY",
+                self.repository.git_dir.path().join("objects"),
+            )
+            .env(
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                &self.repository.alternate_objects,
+            )
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_ATTR_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_SYSTEM",
+                self.repository.git_dir.path().join("empty-config"),
+            )
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                self.repository.git_dir.path().join("empty-config"),
+            )
+            .env_remove("GIT_CONFIG_NOSYSTEM");
+        if let Some(source) = &self.repository.attribute_source {
+            command.env("GIT_ATTR_SOURCE", source);
+        } else {
+            command.env_remove("GIT_ATTR_SOURCE");
+        }
+        for (key, value) in &self.repository.config {
+            command.arg("-c").arg(format!("{key}={value}"));
+        }
+        for driver in &self.policy.filter_drivers {
             let has_trusted_command = driver.clean.is_some() || driver.process.is_some();
             let required = if has_trusted_command && driver.required.unwrap_or(false) {
                 "true"
             } else {
                 "false"
             };
-            // An empty command-level process filter prevents Git from falling back
-            // to a valid clean filter. If the repository owns a process command
-            // with no trusted inherited replacement, disable the whole driver.
-            if driver.repository_process && driver.process.is_none() {
+            if let Some(clean) = &driver.clean {
                 command
                     .arg("-c")
-                    .arg(format!("filter.{}.clean=", driver.driver));
-                command
-                    .arg("-c")
-                    .arg(format!("filter.{}.process=", driver.driver));
-                command
-                    .arg("-c")
-                    .arg(format!("filter.{}.required=false", driver.driver));
-                continue;
+                    .arg(format!("filter.{}.clean={clean}", driver.driver));
             }
-            if driver.repository_clean {
-                command.arg("-c").arg(format!(
-                    "filter.{}.clean={}",
-                    driver.driver,
-                    driver.clean.as_deref().unwrap_or_default()
-                ));
-            }
-            if driver.repository_process {
-                command.arg("-c").arg(format!(
-                    "filter.{}.process={}",
-                    driver.driver,
-                    driver.process.as_deref().unwrap_or_default()
-                ));
+            if let Some(process) = &driver.process {
+                command
+                    .arg("-c")
+                    .arg(format!("filter.{}.process={process}", driver.driver));
             }
             command
                 .arg("-c")
@@ -5330,6 +5674,13 @@ impl<'a> GitInspection<'a> {
             });
         }
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    }
+
+    fn config_value(&self, key: &str) -> Option<&str> {
+        self.repository
+            .config
+            .iter()
+            .find_map(|(candidate, value)| (candidate == key).then_some(value.as_str()))
     }
 }
 
@@ -5414,16 +5765,19 @@ fn parse_git_worktrees(raw: &str) -> Vec<GitWorktree> {
 #[tauri::command]
 fn git_worktrees(root: String) -> Result<Vec<GitWorktree>, String> {
     let root = canonical_project_root(&root)?.to_string_lossy().to_string();
-    let raw = run_git(&root, &["worktree", "list", "--porcelain"])?;
+    let policy = Arc::new(GitInspectionPolicy::new(&root)?);
+    let raw = run_git_metadata(&root, &["worktree", "list", "--porcelain"])?;
     let mut worktrees = parse_git_worktrees(&raw);
     for worktree in &mut worktrees {
         if worktree.prunable || worktree.bare {
             continue;
         }
-        match run_git(
-            &worktree.path,
-            &["status", "--porcelain=v1", "--untracked-files=normal"],
-        ) {
+        let status =
+            GitInspection::with_policy(&worktree.path, Arc::clone(&policy), Some(&worktree.head))
+                .and_then(|inspection| {
+                    inspection.execute(&["status", "--porcelain=v1", "--untracked-files=normal"])
+                });
+        match status {
             Ok(status) => worktree.dirty = !status.trim().is_empty(),
             Err(_) => worktree.missing = true,
         }
@@ -5475,10 +5829,8 @@ pub struct GitStatus {
 #[tauri::command]
 fn git_status(root: String) -> Result<GitStatus, String> {
     let root = canonical_project_root(&root)?.to_string_lossy().to_string();
-    let inspection = GitInspection::new(&root)?;
-    let inside = inspection
-        .execute(&["rev-parse", "--is-inside-work-tree"])
-        .unwrap_or_default();
+    let inside =
+        run_git_metadata(&root, &["rev-parse", "--is-inside-work-tree"]).unwrap_or_default();
     if inside.trim() != "true" {
         return Ok(GitStatus {
             is_repo: false,
@@ -5491,6 +5843,7 @@ fn git_status(root: String) -> Result<GitStatus, String> {
             web_url: None,
         });
     }
+    let inspection = GitInspection::new(&root)?;
 
     let prefix = inspection
         .execute(&["rev-parse", "--show-prefix"])?
@@ -5561,10 +5914,9 @@ fn git_status(root: String) -> Result<GitStatus, String> {
     }
 
     let remote_url = inspection
-        .execute(&["remote", "get-url", "origin"])
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+        .config_value("remote.origin.url")
+        .map(str::to_string)
+        .filter(|url| !url.is_empty());
     let web_url = remote_url.as_deref().and_then(remote_to_web_url);
 
     Ok(GitStatus {
@@ -7652,7 +8004,11 @@ mod workspace_panel_tests {
         git_status(path_text(&tree.root).to_string()).unwrap();
 
         let queries = TEST_GIT_FILTER_SCOPE_QUERIES.with(|queries| queries.borrow().clone());
-        for scope in ["--local", "--system", "--global"] {
+        assert!(
+            !queries.iter().any(|query| query == "--local"),
+            "repository filter config must not be loaded into the inspection policy: {queries:?}"
+        );
+        for scope in ["--system", "--global"] {
             assert_eq!(
                 queries
                     .iter()
@@ -7660,6 +8016,69 @@ mod workspace_panel_tests {
                     .count(),
                 1,
                 "{scope} filter config must be read once per git_status operation: {queries:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_worktrees_reuses_one_filter_policy_for_all_worktrees() {
+        let tree = TempTree::new("git-worktree-filter-query-count");
+        let linked_one = tree.root.join("linked-one");
+        let linked_two = tree.root.join("linked-two");
+        let repository = tree.root.join("repository");
+        std::fs::create_dir_all(&repository).unwrap();
+        run_test_git(&repository, &["init", "-q"]);
+        run_test_git(&repository, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &repository,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(repository.join("tracked.txt"), "baseline\n").unwrap();
+        run_test_git(&repository, &["add", "tracked.txt"]);
+        run_test_git(&repository, &["commit", "-qm", "baseline"]);
+        run_test_git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked-one",
+                path_text(&linked_one),
+            ],
+        );
+        run_test_git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked-two",
+                path_text(&linked_two),
+            ],
+        );
+        TEST_GIT_FILTER_SCOPE_QUERIES.with(|queries| queries.borrow_mut().clear());
+        TEST_GIT_COMMAND_COUNT.with(|count| *count.borrow_mut() = 0);
+
+        let worktrees = git_worktrees(path_text(&repository).to_string()).unwrap();
+
+        assert_eq!(worktrees.len(), 3);
+        let command_count = TEST_GIT_COMMAND_COUNT.with(|count| *count.borrow());
+        assert_eq!(
+            command_count,
+            6,
+            "worktree inspection should use three fixed preparation queries plus one status process per worktree"
+        );
+        let queries = TEST_GIT_FILTER_SCOPE_QUERIES.with(|queries| queries.borrow().clone());
+        for scope in ["--system", "--global"] {
+            assert_eq!(
+                queries
+                    .iter()
+                    .filter(|query| query.as_str() == scope)
+                    .count(),
+                1,
+                "{scope} filter config must be snapshotted once for the complete worktree operation: {queries:?}"
             );
         }
     }
@@ -8635,6 +9054,97 @@ mod workspace_panel_tests {
     }
 
     #[test]
+    fn git_status_reports_a_non_repository_without_error() {
+        let tree = TempTree::new("git-status-non-repository");
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+
+        assert!(!status.is_repo);
+        assert!(status.files.is_empty());
+    }
+
+    #[test]
+    fn git_status_preserves_branch_upstream_and_remote_metadata() {
+        let tree = TempTree::new("git-status-metadata");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "baseline\n").unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt"]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+        let branch = run_test_git_stdout_with_env(&tree.root, &["branch", "--show-current"], &[])
+            .trim()
+            .to_string();
+        run_test_git(
+            &tree.root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/repo.git",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{branch}"),
+                "HEAD",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &["config", &format!("branch.{branch}.remote"), "origin"],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                &format!("branch.{branch}.merge"),
+                &format!("refs/heads/{branch}"),
+            ],
+        );
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+        let expected_upstream = format!("origin/{branch}");
+
+        assert_eq!(status.branch.as_deref(), Some(branch.as_str()));
+        assert_eq!(status.upstream.as_deref(), Some(expected_upstream.as_str()));
+        assert_eq!(
+            status.remote_url.as_deref(),
+            Some("https://example.invalid/repo.git")
+        );
+    }
+
+    #[test]
+    fn git_inspection_preserves_sha256_repository_format() {
+        let tree = TempTree::new("git-sha256-inspection");
+        run_test_git(&tree.root, &["init", "-q", "--object-format=sha256"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt"]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+        std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
+
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("tracked.txt".to_string()),
+            Some(false),
+            None,
+        )
+        .unwrap();
+
+        assert!(diff.text.contains("+after"));
+    }
+
+    #[test]
     fn git_diff_does_not_execute_repository_clean_filter() {
         let tree = TempTree::new("git-clean-filter");
         let helper = tree.root.join("clean-filter.sh");
@@ -8967,6 +9477,7 @@ mod workspace_panel_tests {
             &project,
             &["config", "filter.trusted-normalize.required", "true"],
         );
+        std::fs::write(project.join("tracked.txt"), "same content\t\t\n").unwrap();
 
         let raw_status =
             run_test_git_stdout_with_env(&project, &["status", "--porcelain", "--", "."], &env);
@@ -8974,13 +9485,11 @@ mod workspace_panel_tests {
             !raw_status.trim().is_empty(),
             "shadowing local clean filter should dirty raw git status: {raw_status:?}"
         );
-        assert!(
-            marker.exists(),
-            "shadowing local clean filter should execute during raw git status"
-        );
-        std::fs::remove_file(&marker).unwrap();
+        if marker.exists() {
+            std::fs::remove_file(&marker).unwrap();
+        }
 
-        std::fs::write(project.join("tracked.txt"), "same content\t\t\n").unwrap();
+        std::fs::write(project.join("tracked.txt"), "same content\t\t\t\n").unwrap();
         let raw_diff = run_test_git_stdout_with_env(
             &project,
             &["diff", "--no-color", "--relative", "--", "tracked.txt"],
@@ -9286,6 +9795,131 @@ mod workspace_panel_tests {
     }
 
     #[test]
+    fn git_inspection_does_not_execute_a_filter_added_after_policy_construction() {
+        let tree = TempTree::new("git-filter-policy-race");
+        let helper = if cfg!(windows) {
+            tree.root.join("late-filter.bat")
+        } else {
+            tree.root.join("late-filter.sh")
+        };
+        let marker = tree.root.join("late-filter-ran");
+        write_marker_executable(&helper);
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
+        std::fs::write(
+            tree.root.join(".gitattributes"),
+            "tracked.txt filter=late-filter\n",
+        )
+        .unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt", ".gitattributes"]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+
+        let inspection = GitInspection::new(path_text(&tree.root)).unwrap();
+
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "filter.late-filter.clean",
+                &format!("{}; cat", marker_command(&helper, &marker)),
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &["config", "filter.late-filter.required", "true"],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
+
+        let diff = inspection
+            .execute(&[
+                "--no-pager",
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--relative",
+                "--",
+                "tracked.txt",
+            ])
+            .unwrap();
+
+        assert!(diff.contains("+after"));
+        assert!(
+            !marker.exists(),
+            "an inspection must not reread repository filter config after its policy is constructed"
+        );
+    }
+
+    #[test]
+    fn git_inspection_does_not_read_attributes_added_after_policy_construction() {
+        let tree = TempTree::new("git-attribute-policy-race");
+        let home = tree.root.join("home");
+        let global_config = home.join(".gitconfig");
+        let helper = if cfg!(windows) {
+            tree.root.join("trusted-late-filter.bat")
+        } else {
+            tree.root.join("trusted-late-filter.sh")
+        };
+        let marker = tree.root.join("trusted-late-filter-ran");
+        std::fs::create_dir_all(&home).unwrap();
+        write_marker_executable(&helper);
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt"]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+        std::fs::write(
+            &global_config,
+            format!(
+                "[filter \"trusted-late-filter\"]\n\tclean = {}; cat\n\trequired = true\n",
+                marker_command(&helper, &marker)
+            ),
+        )
+        .unwrap();
+        let _git_env = TestGitEnvOverrideGuard::set(&[
+            ("HOME", Some(home.as_os_str())),
+            ("GIT_CONFIG_GLOBAL", Some(global_config.as_os_str())),
+            ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
+        ]);
+
+        let inspection = GitInspection::new(path_text(&tree.root)).unwrap();
+
+        std::fs::write(
+            tree.root.join(".gitattributes"),
+            "tracked.txt filter=trusted-late-filter\n",
+        )
+        .unwrap();
+        std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
+        let diff = inspection
+            .execute(&[
+                "--no-pager",
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--relative",
+                "--",
+                "tracked.txt",
+            ])
+            .unwrap();
+
+        assert!(diff.contains("+after"));
+        assert!(
+            !marker.exists(),
+            "an inspection must keep using its immutable attribute tree"
+        );
+    }
+
+    #[test]
     fn git_status_and_diff_stay_inside_a_nested_project_root() {
         let tree = TempTree::new("git-scope");
         let project = tree.root.join("project");
@@ -9437,15 +10071,15 @@ mod workspace_panel_tests {
     #[test]
     fn git_diff_widens_context_and_clamps_the_request() {
         let tree = TempTree::new("git-diff-context");
-        run_git(path_text(&tree.root), &["init", "--quiet"]).unwrap();
+        run_test_git(&tree.root, &["init", "--quiet"]);
         let mut body = String::new();
         for index in 0..40 {
             body.push_str(&format!("line {}\n", index));
         }
         std::fs::write(tree.root.join("wide.txt"), &body).unwrap();
-        run_git(path_text(&tree.root), &["add", "-A"]).unwrap();
-        run_git(
-            path_text(&tree.root),
+        run_test_git(&tree.root, &["add", "-A"]);
+        run_test_git(
+            &tree.root,
             &[
                 "-c",
                 "user.email=t@e",
@@ -9456,8 +10090,7 @@ mod workspace_panel_tests {
                 "seed",
                 "--quiet",
             ],
-        )
-        .unwrap();
+        );
         let edited = body.replace("line 20\n", "line twenty\n");
         std::fs::write(tree.root.join("wide.txt"), edited).unwrap();
 
