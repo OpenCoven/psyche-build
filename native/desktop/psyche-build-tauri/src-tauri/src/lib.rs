@@ -7564,10 +7564,10 @@ mod workspace_panel_tests {
             // Git for Windows invokes configured helpers through its POSIX
             // shell. A shell command avoids Windows command-line quoting of
             // temporary paths while retaining the positive-control assertion.
-            format!(
-                "sh -c 'touch \"$1\"' sh {}",
-                shell_single_quote(path_text(marker))
-            )
+            // Forward slashes are required so the git config parser does not
+            // interpret backslashes as escape sequences (bad config line).
+            let marker_fwd = path_text(marker).replace('\\', "/");
+            format!("sh -c 'touch \"$1\"' sh {}", shell_single_quote(&marker_fwd))
         }
     }
 
