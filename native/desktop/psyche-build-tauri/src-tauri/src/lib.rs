@@ -7536,39 +7536,30 @@ mod workspace_panel_tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    #[cfg(unix)]
     fn write_marker_executable(path: &Path) {
         std::fs::write(
             path,
             "#!/bin/sh\n: \"${PSYCHE_TEST_MARKER:?missing marker}\"\ntouch \"$PSYCHE_TEST_MARKER\"\n",
         )
         .unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
-    #[cfg(windows)]
-    fn write_marker_executable(_path: &Path) {}
+    // Git invokes configured helpers through a POSIX shell on every platform,
+    // including Git for Windows. Forward slashes are required so the git config
+    // parser does not interpret backslashes as escape sequences (bad config
+    // line) and so the shell resolves the helper path.
+    fn shell_path(path: &Path) -> String {
+        path_text(path).replace('\\', "/")
+    }
 
     fn marker_command(helper: &Path, marker: &Path) -> String {
-        #[cfg(unix)]
-        {
-            format!(
-                "PSYCHE_TEST_MARKER={} {}",
-                shell_single_quote(path_text(marker)),
-                shell_single_quote(path_text(helper))
-            )
-        }
-        #[cfg(windows)]
-        {
-            let _ = helper;
-            // Git for Windows invokes configured helpers through its POSIX
-            // shell. A shell command avoids Windows command-line quoting of
-            // temporary paths while retaining the positive-control assertion.
-            // Forward slashes are required so the git config parser does not
-            // interpret backslashes as escape sequences (bad config line).
-            let marker_fwd = path_text(marker).replace('\\', "/");
-            format!("sh -c 'touch \"$1\"' sh {}", shell_single_quote(&marker_fwd))
-        }
+        format!(
+            "PSYCHE_TEST_MARKER={} {}",
+            shell_single_quote(&shell_path(marker)),
+            shell_single_quote(&shell_path(helper))
+        )
     }
 
     fn trusted_normalizing_clean_command() -> &'static str {
@@ -8622,11 +8613,7 @@ mod workspace_panel_tests {
     #[test]
     fn git_status_does_not_execute_a_repository_fsmonitor() {
         let tree = TempTree::new("git-fsmonitor");
-        let hook = if cfg!(windows) {
-            tree.root.join("fsmonitor.bat")
-        } else {
-            tree.root.join("fsmonitor.sh")
-        };
+        let hook = tree.root.join("fsmonitor.sh");
         let marker = tree.root.join("fsmonitor-ran");
         write_marker_executable(&hook);
         run_test_git(&tree.root, &["init", "-q"]);
@@ -8650,11 +8637,7 @@ mod workspace_panel_tests {
     #[test]
     fn git_diff_does_not_execute_repository_clean_filter() {
         let tree = TempTree::new("git-clean-filter");
-        let helper = if cfg!(windows) {
-            tree.root.join("clean-filter.bat")
-        } else {
-            tree.root.join("clean-filter.sh")
-        };
+        let helper = tree.root.join("clean-filter.sh");
         let marker = tree.root.join("clean-filter-ran");
         write_marker_executable(&helper);
         run_test_git(&tree.root, &["init", "-q"]);
@@ -8729,11 +8712,7 @@ mod workspace_panel_tests {
     #[test]
     fn git_diff_does_not_execute_command_scope_clean_filter() {
         let tree = TempTree::new("git-command-clean-filter");
-        let helper = if cfg!(windows) {
-            tree.root.join("command-clean-filter.bat")
-        } else {
-            tree.root.join("command-clean-filter.sh")
-        };
+        let helper = tree.root.join("command-clean-filter.sh");
         let marker = tree.root.join("command-clean-filter-ran");
         write_marker_executable(&helper);
         run_test_git(&tree.root, &["init", "-q"]);
@@ -8810,11 +8789,7 @@ mod workspace_panel_tests {
     #[test]
     fn git_diff_does_not_execute_git_config_parameters_clean_filter() {
         let tree = TempTree::new("git-parameters-clean-filter");
-        let helper = if cfg!(windows) {
-            tree.root.join("parameters-clean-filter.bat")
-        } else {
-            tree.root.join("parameters-clean-filter.sh")
-        };
+        let helper = tree.root.join("parameters-clean-filter.sh");
         let marker = tree.root.join("parameters-clean-filter-ran");
         write_marker_executable(&helper);
         run_test_git(&tree.root, &["init", "-q"]);
@@ -8930,11 +8905,7 @@ mod workspace_panel_tests {
         let project = tree.root.join("project");
         let home = tree.root.join("home");
         let global_config = home.join(".gitconfig");
-        let helper = if cfg!(windows) {
-            tree.root.join("shadow-clean-filter.bat")
-        } else {
-            tree.root.join("shadow-clean-filter.sh")
-        };
+        let helper = tree.root.join("shadow-clean-filter.sh");
         let marker = tree.root.join("shadow-clean-filter-ran");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&home).unwrap();
@@ -9061,11 +9032,7 @@ mod workspace_panel_tests {
     #[test]
     fn git_diff_does_not_execute_repository_clean_filter_from_local_include() {
         let tree = TempTree::new("git-clean-filter-include");
-        let helper = if cfg!(windows) {
-            tree.root.join("clean-filter-include.bat")
-        } else {
-            tree.root.join("clean-filter-include.sh")
-        };
+        let helper = tree.root.join("clean-filter-include.sh");
         let marker = tree.root.join("clean-filter-include-ran");
         let include = tree.root.join("filter-include.cfg");
         write_marker_executable(&helper);
@@ -9134,11 +9101,7 @@ mod workspace_panel_tests {
     #[test]
     fn git_diff_does_not_execute_repository_diff_helpers() {
         let tree = TempTree::new("git-external-diff");
-        let helper = if cfg!(windows) {
-            tree.root.join("external-diff.bat")
-        } else {
-            tree.root.join("external-diff.sh")
-        };
+        let helper = tree.root.join("external-diff.sh");
         let marker = tree.root.join("external-diff-ran");
         write_marker_executable(&helper);
         std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
@@ -9187,11 +9150,7 @@ mod workspace_panel_tests {
     #[test]
     fn git_diff_does_not_execute_repository_process_filter() {
         let tree = TempTree::new("git-process-filter");
-        let helper = if cfg!(windows) {
-            tree.root.join("process-filter.bat")
-        } else {
-            tree.root.join("process-filter.sh")
-        };
+        let helper = tree.root.join("process-filter.sh");
         let marker = tree.root.join("process-filter-ran");
         write_marker_executable(&helper);
         run_test_git(&tree.root, &["init", "-q"]);
@@ -9259,11 +9218,7 @@ mod workspace_panel_tests {
     #[test]
     fn git_diff_does_not_execute_repository_process_filter_from_worktree_include() {
         let tree = TempTree::new("git-process-filter-worktree-include");
-        let helper = if cfg!(windows) {
-            tree.root.join("process-filter-worktree-include.bat")
-        } else {
-            tree.root.join("process-filter-worktree-include.sh")
-        };
+        let helper = tree.root.join("process-filter-worktree-include.sh");
         let marker = tree.root.join("process-filter-worktree-include-ran");
         let include = tree.root.join("worktree-filter-include.cfg");
         write_marker_executable(&helper);
