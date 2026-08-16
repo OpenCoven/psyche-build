@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::ffi::CString;
@@ -86,6 +88,12 @@ const BROWSER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
 const BROWSER_SCRIPT_CONTEXT_WORLD_NAME: &str = "com.opencoven.psyche.browser-script-context";
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
 const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_GIT_ENV_OVERRIDES: RefCell<Vec<(OsString, Option<OsString>)>> =
+        RefCell::new(Vec::new());
+}
 
 fn safe_browser_label(label: Option<String>) -> String {
     let raw = label.unwrap_or_else(|| "default".to_string());
@@ -4977,11 +4985,64 @@ fn fs_write_text(
     }
 }
 
-fn git_filter_driver_names(root: &str) -> Result<Vec<String>, String> {
+fn git_repository_config_available(root: &str) -> Result<bool, String> {
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .map_err(|e| format!("git: {}", e))?;
+    Ok(out.status.success())
+}
+
+fn git_worktree_config_enabled(root: &str) -> Result<bool, String> {
     let out = std::process::Command::new("git")
         .current_dir(root)
         .args([
             "config",
+            "--local",
+            "--includes",
+            "--bool",
+            "--default=false",
+            "extensions.worktreeConfig",
+        ])
+        .output()
+        .map_err(|e| format!("git: {}", e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8(out.stderr)
+            .map_err(|err| format!("git config returned invalid UTF-8 stderr: {err}"))?
+            .trim()
+            .to_string();
+        return Err(if stderr.is_empty() {
+            format!(
+                "git config extensions.worktreeConfig query failed with status {}",
+                out.status
+            )
+        } else {
+            format!(
+                "git config extensions.worktreeConfig query failed: {}",
+                stderr
+            )
+        });
+    }
+    match String::from_utf8(out.stdout)
+        .map_err(|err| format!("git config returned invalid UTF-8 stdout: {err}"))?
+        .trim()
+    {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(
+            "git config extensions.worktreeConfig query returned a non-boolean value".to_string(),
+        ),
+    }
+}
+
+fn git_filter_driver_names_for_scope(root: &str, scope: &str) -> Result<Vec<String>, String> {
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args([
+            "config",
+            scope,
+            "--includes",
             "--null",
             "--name-only",
             "--get-regexp",
@@ -5023,6 +5084,21 @@ fn git_filter_driver_names(root: &str) -> Result<Vec<String>, String> {
         }
         drivers.push(driver.to_string());
     }
+    Ok(drivers)
+}
+
+fn git_filter_driver_names(root: &str) -> Result<Vec<String>, String> {
+    if !git_repository_config_available(root)? {
+        return Ok(Vec::new());
+    }
+
+    let mut drivers = git_filter_driver_names_for_scope(root, "--local")?;
+    // Without extensions.worktreeConfig, `git config --worktree` falls back to
+    // local config instead of reporting an unavailable worktree scope. Only
+    // query worktree-owned config when the repository explicitly enables it.
+    if git_worktree_config_enabled(root)? {
+        drivers.extend(git_filter_driver_names_for_scope(root, "--worktree")?);
+    }
     drivers.sort();
     drivers.dedup();
     Ok(drivers)
@@ -5043,6 +5119,19 @@ fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
             .arg("-c")
             .arg(format!("filter.{driver}.required=false"));
     }
+    #[cfg(test)]
+    TEST_GIT_ENV_OVERRIDES.with(|overrides| {
+        for (key, value) in overrides.borrow().iter() {
+            match value {
+                Some(value) => {
+                    command.env(key, value);
+                }
+                None => {
+                    command.env_remove(key);
+                }
+            }
+        }
+    });
     let out = command
         .args(args)
         .output()
@@ -7180,6 +7269,7 @@ mod pty_runtime_tests {
 #[cfg(test)]
 mod workspace_panel_tests {
     use super::*;
+    use std::ffi::{OsStr, OsString};
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -7208,6 +7298,35 @@ mod workspace_panel_tests {
     impl Drop for TempTree {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    struct TestGitEnvOverrideGuard {
+        previous: Vec<(OsString, Option<OsString>)>,
+    }
+
+    impl TestGitEnvOverrideGuard {
+        fn set(overrides: &[(&str, Option<&OsStr>)]) -> Self {
+            let overrides = overrides
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        OsString::from(key),
+                        value.map(std::borrow::ToOwned::to_owned),
+                    )
+                })
+                .collect();
+            let previous = TEST_GIT_ENV_OVERRIDES
+                .with(|slot| std::mem::replace(&mut *slot.borrow_mut(), overrides));
+            Self { previous }
+        }
+    }
+
+    impl Drop for TestGitEnvOverrideGuard {
+        fn drop(&mut self) {
+            TEST_GIT_ENV_OVERRIDES.with(|slot| {
+                *slot.borrow_mut() = std::mem::take(&mut self.previous);
+            });
         }
     }
 
@@ -7258,6 +7377,10 @@ mod workspace_panel_tests {
                 shell_single_quote(path_text(marker))
             )
         }
+    }
+
+    fn trusted_normalizing_clean_command() -> &'static str {
+        "sed -e 's/[[:space:]]*$//'"
     }
 
     #[cfg(unix)]
@@ -7854,6 +7977,22 @@ mod workspace_panel_tests {
         run_test_git_with_env(root, args, &[]);
     }
 
+    fn run_test_git_stdout_with_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .envs(env.iter().copied())
+            .args(args)
+            .output()
+            .expect("git must run in tests");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("git stdout must be UTF-8 in tests")
+    }
+
     #[test]
     fn parses_feature_flag_values_without_mutating_process_environment() {
         assert!(feature_flag_value(None, true));
@@ -8298,6 +8437,159 @@ mod workspace_panel_tests {
     }
 
     #[test]
+    fn git_status_and_diff_preserve_trusted_global_clean_filters() {
+        let tree = TempTree::new("git-global-clean-filter");
+        let project = tree.root.join("project");
+        let home = tree.root.join("home");
+        let global_config = home.join(".gitconfig");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            &global_config,
+            format!(
+                "[filter \"trusted-normalize\"]\n\tclean = {}\n\trequired = true\n",
+                trusted_normalizing_clean_command()
+            ),
+        )
+        .unwrap();
+
+        run_test_git(&project, &["init", "-q"]);
+        run_test_git(&project, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &project,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(
+            project.join(".gitattributes"),
+            "tracked.txt filter=trusted-normalize\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("tracked.txt"), "same content   \n").unwrap();
+
+        let env = [
+            ("HOME", path_text(&home)),
+            ("GIT_CONFIG_GLOBAL", path_text(&global_config)),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ];
+        run_test_git_with_env(&project, &["add", "tracked.txt", ".gitattributes"], &env);
+        run_test_git_with_env(&project, &["commit", "-qm", "baseline"], &env);
+
+        let raw_status =
+            run_test_git_stdout_with_env(&project, &["status", "--porcelain", "--", "."], &env);
+        assert!(
+            raw_status.trim().is_empty(),
+            "trusted global clean filter should start with a clean raw git status: {raw_status:?}"
+        );
+
+        std::fs::write(project.join("tracked.txt"), "same content   \n").unwrap();
+        let raw_status =
+            run_test_git_stdout_with_env(&project, &["status", "--porcelain", "--", "."], &env);
+        assert!(
+            raw_status.trim().is_empty(),
+            "trusted global clean filter should keep raw git status clean: {raw_status:?}"
+        );
+
+        let _git_env = TestGitEnvOverrideGuard::set(&[
+            ("HOME", Some(home.as_os_str())),
+            ("GIT_CONFIG_GLOBAL", Some(global_config.as_os_str())),
+            ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
+        ]);
+
+        let status = git_status(path_text(&project).to_string()).unwrap();
+        assert!(status.files.is_empty());
+
+        std::fs::write(project.join("tracked.txt"), "same content\t\t\n").unwrap();
+        let raw_diff = run_test_git_stdout_with_env(
+            &project,
+            &["diff", "--no-color", "--relative", "--", "tracked.txt"],
+            &env,
+        );
+        assert!(
+            raw_diff.trim().is_empty(),
+            "trusted global clean filter should keep raw git diff empty: {raw_diff:?}"
+        );
+
+        let diff = git_diff(path_text(&project).to_string(), None, Some(false), None).unwrap();
+        assert!(diff.text.is_empty());
+        assert_eq!(diff.bytes, 0);
+        assert_eq!(diff.lines, 0);
+        assert!(!diff.truncated);
+    }
+
+    #[test]
+    fn git_diff_does_not_execute_repository_clean_filter_from_local_include() {
+        let tree = TempTree::new("git-clean-filter-include");
+        let helper = if cfg!(windows) {
+            tree.root.join("clean-filter-include.bat")
+        } else {
+            tree.root.join("clean-filter-include.sh")
+        };
+        let marker = tree.root.join("clean-filter-include-ran");
+        let include = tree.root.join("filter-include.cfg");
+        write_marker_executable(&helper);
+        run_test_git(&tree.root, &["init", "-q"]);
+        std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
+        std::fs::write(
+            tree.root.join(".gitattributes"),
+            "tracked.txt filter=psyche-include\n",
+        )
+        .unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt", ".gitattributes"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Psyche Tests",
+                "commit",
+                "-qm",
+                "baseline",
+            ],
+        );
+        std::fs::write(
+            &include,
+            format!(
+                "[filter \"psyche-include\"]\n\tclean = {}; cat\n\trequired = true\n",
+                marker_command(&helper, &marker)
+            ),
+        )
+        .unwrap();
+        run_test_git(&tree.root, &["config", "include.path", path_text(&include)]);
+        std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
+
+        let output = std::process::Command::new("git")
+            .current_dir(&tree.root)
+            .args(["diff", "--no-color", "--relative", "--", "tracked.txt"])
+            .output()
+            .expect("git diff must run in tests");
+        assert!(
+            output.status.success(),
+            "raw git diff positive control must succeed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        assert!(
+            marker.exists(),
+            "raw git diff positive control must execute the included clean filter"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("tracked.txt".to_string()),
+            Some(false),
+            None,
+        )
+        .unwrap();
+
+        assert!(diff.text.contains("+after"));
+        assert!(
+            !marker.exists(),
+            "hardened git_diff must not execute repository clean filters loaded through local includes"
+        );
+    }
+
+    #[test]
     fn git_diff_does_not_execute_repository_diff_helpers() {
         let tree = TempTree::new("git-external-diff");
         let helper = if cfg!(windows) {
@@ -8419,6 +8711,80 @@ mod workspace_panel_tests {
         assert!(
             !marker.exists(),
             "hardened git_diff must not execute repository process filters"
+        );
+    }
+
+    #[test]
+    fn git_diff_does_not_execute_repository_process_filter_from_worktree_include() {
+        let tree = TempTree::new("git-process-filter-worktree-include");
+        let helper = if cfg!(windows) {
+            tree.root.join("process-filter-worktree-include.bat")
+        } else {
+            tree.root.join("process-filter-worktree-include.sh")
+        };
+        let marker = tree.root.join("process-filter-worktree-include-ran");
+        let include = tree.root.join("worktree-filter-include.cfg");
+        write_marker_executable(&helper);
+        run_test_git(&tree.root, &["init", "-q"]);
+        std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
+        std::fs::write(
+            tree.root.join(".gitattributes"),
+            "tracked.txt filter=psyche-worktree-include\n",
+        )
+        .unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt", ".gitattributes"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Psyche Tests",
+                "commit",
+                "-qm",
+                "baseline",
+            ],
+        );
+        run_test_git(&tree.root, &["config", "extensions.worktreeConfig", "true"]);
+        std::fs::write(
+            &include,
+            format!(
+                "[filter \"psyche-worktree-include\"]\n\tprocess = {}\n\trequired = true\n",
+                marker_command(&helper, &marker)
+            ),
+        )
+        .unwrap();
+        run_test_git(
+            &tree.root,
+            &["config", "--worktree", "include.path", path_text(&include)],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
+
+        let output = std::process::Command::new("git")
+            .current_dir(&tree.root)
+            .args(["diff", "--no-color", "--relative", "--", "tracked.txt"])
+            .output()
+            .expect("git diff must run in tests");
+        assert!(
+            marker.exists(),
+            "raw git diff positive control must execute the worktree-included process filter (status: {}, stderr: {})",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("tracked.txt".to_string()),
+            Some(false),
+            None,
+        )
+        .unwrap();
+
+        assert!(diff.text.contains("+after"));
+        assert!(
+            !marker.exists(),
+            "hardened git_diff must not execute repository process filters loaded through worktree includes"
         );
     }
 
