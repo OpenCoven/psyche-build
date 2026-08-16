@@ -5416,6 +5416,26 @@ fn is_null_git_oid(value: &str, object_format: Option<&str>) -> bool {
     value.len() == expected_len && value.bytes().all(|byte| byte == b'0')
 }
 
+fn validate_git_ref_storage(
+    ref_storage: &str,
+    detected_format: Result<String, String>,
+) -> Result<(), String> {
+    match ref_storage {
+        "files" => Ok(()),
+        "reftable" => match detected_format {
+            Ok(format) if format.trim() == "reftable" => Ok(()),
+            Ok(format) => Err(format!(
+                "installed Git does not support reftable ref storage: reported {}",
+                format.trim()
+            )),
+            Err(error) => Err(format!(
+                "installed Git does not support reftable ref storage: {error}"
+            )),
+        },
+        _ => Err(format!("unsupported Git ref storage: {ref_storage}")),
+    }
+}
+
 fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>, String> {
     const SAFE_CONFIG_PATTERN: &str = r"^(core\.(repositoryformatversion|filemode|ignorecase|symlinks|precomposeunicode)|extensions\.(objectformat|refstorage)|branch\..*\.(remote|merge)|remote\..*\.(url|fetch))$";
     let mut values = HashMap::new();
@@ -5482,14 +5502,12 @@ impl GitInspectionRepository {
             .iter()
             .find_map(|(key, value)| (key == "extensions.refstorage").then_some(value.as_str()))
             .unwrap_or("files");
-        if !matches!(ref_storage, "files" | "reftable") {
-            return Err(format!("unsupported Git ref storage: {ref_storage}"));
-        }
-        if ref_storage == "reftable"
-            && run_git_metadata(root, &["rev-parse", "--show-ref-format"])?.trim() != "reftable"
-        {
-            return Err("installed Git does not support reftable ref storage".to_string());
-        }
+        let detected_format = if ref_storage == "reftable" {
+            run_git_metadata(root, &["rev-parse", "--show-ref-format"])
+        } else {
+            Ok(String::new())
+        };
+        validate_git_ref_storage(ref_storage, detected_format)?;
         let refs = if ref_storage == "files" {
             snapshot_git_refs(&common_dir)?
         } else {
@@ -9337,6 +9355,17 @@ mod workspace_panel_tests {
         assert!(diff.text.contains("+after"));
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].subject, "baseline");
+    }
+
+    #[test]
+    fn reftable_probe_failures_return_an_explicit_unsupported_error() {
+        let error =
+            validate_git_ref_storage("reftable", Err("unknown option".to_string())).unwrap_err();
+
+        assert_eq!(
+            error,
+            "installed Git does not support reftable ref storage: unknown option"
+        );
     }
 
     #[test]
