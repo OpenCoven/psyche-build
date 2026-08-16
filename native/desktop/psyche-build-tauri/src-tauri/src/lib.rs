@@ -5271,7 +5271,7 @@ impl<'a> GitInspection<'a> {
         })
     }
 
-    fn run(&self, args: &[&str]) -> Result<String, String> {
+    fn execute(&self, args: &[&str]) -> Result<String, String> {
         let mut command = git_command(self.root);
         command
             // Repository-local fsmonitor configuration may name an executable.
@@ -5334,7 +5334,7 @@ impl<'a> GitInspection<'a> {
 }
 
 fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
-    GitInspection::new(root)?.run(args)
+    GitInspection::new(root)?.execute(args)
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -5477,7 +5477,7 @@ fn git_status(root: String) -> Result<GitStatus, String> {
     let root = canonical_project_root(&root)?.to_string_lossy().to_string();
     let inspection = GitInspection::new(&root)?;
     let inside = inspection
-        .run(&["rev-parse", "--is-inside-work-tree"])
+        .execute(&["rev-parse", "--is-inside-work-tree"])
         .unwrap_or_default();
     if inside.trim() != "true" {
         return Ok(GitStatus {
@@ -5493,10 +5493,10 @@ fn git_status(root: String) -> Result<GitStatus, String> {
     }
 
     let prefix = inspection
-        .run(&["rev-parse", "--show-prefix"])?
+        .execute(&["rev-parse", "--show-prefix"])?
         .trim()
         .to_string();
-    let raw = inspection.run(&[
+    let raw = inspection.execute(&[
         "status",
         "--porcelain",
         "-b",
@@ -5561,7 +5561,7 @@ fn git_status(root: String) -> Result<GitStatus, String> {
     }
 
     let remote_url = inspection
-        .run(&["remote", "get-url", "origin"])
+        .execute(&["remote", "get-url", "origin"])
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
