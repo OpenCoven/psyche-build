@@ -5391,8 +5391,33 @@ fn snapshot_git_refs(common_dir: &Path) -> Result<HashMap<String, String>, Strin
     Ok(refs)
 }
 
+fn snapshot_git_reftable(source: &Path, destination: &Path) -> Result<(), String> {
+    let tables = std::fs::read_to_string(source.join("tables.list"))
+        .map_err(|e| format!("read Git reftable table list: {e}"))?;
+    std::fs::create_dir_all(destination)
+        .map_err(|e| format!("create isolated Git reftable directory: {e}"))?;
+    for table in tables.lines().filter(|table| !table.is_empty()) {
+        if Path::new(table).file_name().and_then(OsStr::to_str) != Some(table) {
+            return Err("Git reftable table list contains an invalid path".to_string());
+        }
+        std::fs::copy(source.join(table), destination.join(table))
+            .map_err(|e| format!("snapshot Git reftable table {table}: {e}"))?;
+    }
+    std::fs::write(destination.join("tables.list"), tables)
+        .map_err(|e| format!("snapshot Git reftable table list: {e}"))
+}
+
+fn is_null_git_oid(value: &str, object_format: Option<&str>) -> bool {
+    let expected_len = if object_format == Some("sha256") {
+        64
+    } else {
+        40
+    };
+    value.len() == expected_len && value.bytes().all(|byte| byte == b'0')
+}
+
 fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>, String> {
-    const SAFE_CONFIG_PATTERN: &str = r"^(core\.(repositoryformatversion|filemode|ignorecase|symlinks|precomposeunicode)|extensions\.objectformat|branch\..*\.(remote|merge)|remote\..*\.(url|fetch))$";
+    const SAFE_CONFIG_PATTERN: &str = r"^(core\.(repositoryformatversion|filemode|ignorecase|symlinks|precomposeunicode)|extensions\.(objectformat|refstorage)|branch\..*\.(remote|merge)|remote\..*\.(url|fetch))$";
     let mut values = HashMap::new();
     let mut scopes = vec!["--local"];
     if git_worktree_config_enabled(root)? {
@@ -5439,7 +5464,6 @@ struct GitInspectionRepository {
     git_dir: tempfile::TempDir,
     work_tree: PathBuf,
     index: PathBuf,
-    alternate_objects: OsString,
     attribute_source: Option<String>,
     config: Vec<(String, String)>,
 }
@@ -5453,13 +5477,36 @@ impl GitInspectionRepository {
         let (work_tree, actual_git_dir) = git_dir_for_worktree(Path::new(root))?;
         let common_dir = git_common_dir(&actual_git_dir)?;
         let index = actual_git_dir.join("index");
-        let alternate_objects = std::env::join_paths([common_dir.join("objects")])
-            .map_err(|e| format!("encode Git alternate object directory: {e}"))?;
-        let refs = snapshot_git_refs(&common_dir)?;
+        let alternate_objects = common_dir.join("objects");
+        let ref_storage = config
+            .iter()
+            .find_map(|(key, value)| (key == "extensions.refstorage").then_some(value.as_str()))
+            .unwrap_or("files");
+        if !matches!(ref_storage, "files" | "reftable") {
+            return Err(format!("unsupported Git ref storage: {ref_storage}"));
+        }
+        if ref_storage == "reftable"
+            && run_git_metadata(root, &["rev-parse", "--show-ref-format"])?.trim() != "reftable"
+        {
+            return Err("installed Git does not support reftable ref storage".to_string());
+        }
+        let refs = if ref_storage == "files" {
+            snapshot_git_refs(&common_dir)?
+        } else {
+            HashMap::new()
+        };
         let actual_head = std::fs::read_to_string(actual_git_dir.join("HEAD"))
             .map_err(|e| format!("snapshot Git HEAD: {e}"))?;
+        let object_format = config
+            .iter()
+            .find_map(|(key, value)| (key == "extensions.objectformat").then_some(value));
+        if object_format.is_some_and(|value| !matches!(value.as_str(), "sha1" | "sha256")) {
+            return Err("unsupported Git object format".to_string());
+        }
         let mut attribute_source = head_override
-            .filter(|head| !head.is_empty() && *head != "0000000000000000000000000000000000000000")
+            .filter(|head| {
+                !head.is_empty() && !is_null_git_oid(head, object_format.map(String::as_str))
+            })
             .map(str::to_string)
             .or_else(|| {
                 let head = actual_head.trim();
@@ -5478,6 +5525,16 @@ impl GitInspectionRepository {
             .map_err(|e| format!("create isolated Git inspection directory: {e}"))?;
         std::fs::create_dir_all(git_dir.path().join("objects"))
             .map_err(|e| format!("create isolated Git object directory: {e}"))?;
+        std::fs::create_dir_all(git_dir.path().join("objects/info"))
+            .map_err(|e| format!("create isolated Git object info directory: {e}"))?;
+        let alternate_objects = alternate_objects.to_string_lossy();
+        #[cfg(windows)]
+        let alternate_objects = alternate_objects.replace('\\', "/");
+        std::fs::write(
+            git_dir.path().join("objects/info/alternates"),
+            format!("{alternate_objects}\n"),
+        )
+        .map_err(|e| format!("write isolated Git alternates file: {e}"))?;
         std::fs::create_dir_all(git_dir.path().join("refs"))
             .map_err(|e| format!("create isolated Git refs directory: {e}"))?;
         let repository_format_version = config
@@ -5488,17 +5545,14 @@ impl GitInspectionRepository {
         if !matches!(repository_format_version, "0" | "1") {
             return Err("unsupported Git repository format version".to_string());
         }
-        let object_format = config
-            .iter()
-            .find_map(|(key, value)| (key == "extensions.objectformat").then_some(value));
-        if object_format.is_some_and(|value| !matches!(value.as_str(), "sha1" | "sha256")) {
-            return Err("unsupported Git object format".to_string());
-        }
         let mut isolated_config = format!(
             "[core]\n\trepositoryformatversion = {repository_format_version}\n\tbare = false\n\tfsmonitor = false\n"
         );
         if let Some(object_format) = object_format {
             isolated_config.push_str(&format!("[extensions]\n\tobjectformat = {object_format}\n"));
+        }
+        if ref_storage == "reftable" {
+            isolated_config.push_str("[extensions]\n\trefStorage = reftable\n");
         }
         std::fs::write(git_dir.path().join("config"), isolated_config)
             .map_err(|e| format!("write isolated Git config: {e}"))?;
@@ -5506,24 +5560,30 @@ impl GitInspectionRepository {
             .map_err(|e| format!("write isolated empty Git config: {e}"))?;
         std::fs::write(git_dir.path().join("HEAD"), actual_head)
             .map_err(|e| format!("write isolated Git HEAD: {e}"))?;
-        let mut packed_refs = refs.into_iter().collect::<Vec<_>>();
-        packed_refs.sort_by(|left, right| left.0.cmp(&right.0));
-        std::fs::write(
-            git_dir.path().join("packed-refs"),
-            format!(
-                "# pack-refs with: fully-peeled sorted\n{}",
-                packed_refs
-                    .into_iter()
-                    .map(|(name, oid)| format!("{oid} {name}\n"))
-                    .collect::<String>()
-            ),
-        )
-        .map_err(|e| format!("snapshot Git refs: {e}"))?;
+        if ref_storage == "reftable" {
+            snapshot_git_reftable(
+                &common_dir.join("reftable"),
+                &git_dir.path().join("reftable"),
+            )?;
+        } else {
+            let mut packed_refs = refs.into_iter().collect::<Vec<_>>();
+            packed_refs.sort_by(|left, right| left.0.cmp(&right.0));
+            std::fs::write(
+                git_dir.path().join("packed-refs"),
+                format!(
+                    "# pack-refs with: fully-peeled sorted\n{}",
+                    packed_refs
+                        .into_iter()
+                        .map(|(name, oid)| format!("{oid} {name}\n"))
+                        .collect::<String>()
+                ),
+            )
+            .map_err(|e| format!("snapshot Git refs: {e}"))?;
+        }
         if attribute_source.is_none() {
             let mut child = git_command(root)
                 .env("GIT_DIR", git_dir.path())
                 .env("GIT_OBJECT_DIRECTORY", git_dir.path().join("objects"))
-                .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &alternate_objects)
                 .env("GIT_CONFIG_SYSTEM", git_dir.path().join("empty-config"))
                 .env("GIT_CONFIG_GLOBAL", git_dir.path().join("empty-config"))
                 .stdin(std::process::Stdio::piped())
@@ -5549,7 +5609,6 @@ impl GitInspectionRepository {
             git_dir,
             work_tree,
             index,
-            alternate_objects,
             attribute_source,
             config,
         })
@@ -5593,7 +5652,8 @@ impl<'a> GitInspection<'a> {
         policy: Arc<GitInspectionPolicy>,
         head: Option<&str>,
     ) -> Result<Self, String> {
-        Self::with_policy_and_snapshot(root, policy, head, Vec::new())
+        let config = git_inspection_repository_config(root)?;
+        Self::with_policy_and_snapshot(root, policy, head, config)
     }
 
     fn with_policy_and_snapshot(
@@ -5619,10 +5679,7 @@ impl<'a> GitInspection<'a> {
                 "GIT_OBJECT_DIRECTORY",
                 self.repository.git_dir.path().join("objects"),
             )
-            .env(
-                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                &self.repository.alternate_objects,
-            )
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
             .env("GIT_OPTIONAL_LOCKS", "0")
             .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_ATTR_NOSYSTEM", "1")
@@ -8070,8 +8127,8 @@ mod workspace_panel_tests {
         let command_count = TEST_GIT_COMMAND_COUNT.with(|count| *count.borrow());
         assert_eq!(
             command_count,
-            6,
-            "worktree inspection should use three fixed preparation queries plus one status process per worktree"
+            12,
+            "worktree inspection should reuse three shared policy/list queries while snapshotting two safe config scopes plus one status process per worktree"
         );
         let queries = TEST_GIT_FILTER_SCOPE_QUERIES.with(|queries| queries.borrow().clone());
         for scope in ["--system", "--global"] {
@@ -8084,6 +8141,71 @@ mod workspace_panel_tests {
                 "{scope} filter config must be snapshotted once for the complete worktree operation: {queries:?}"
             );
         }
+    }
+
+    #[test]
+    fn git_worktrees_preserves_linked_worktree_sha256_and_filemode_config() {
+        let tree = TempTree::new("git-worktree-sha256-filemode");
+        let repository = tree.root.join("repository");
+        let linked = tree.root.join("linked");
+        std::fs::create_dir_all(&repository).unwrap();
+        run_test_git(&repository, &["init", "-q", "--object-format=sha256"]);
+        run_test_git(&repository, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &repository,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        run_test_git(&repository, &["config", "core.filemode", "false"]);
+        std::fs::write(repository.join("tracked.txt"), "baseline\n").unwrap();
+        run_test_git(&repository, &["add", "tracked.txt"]);
+        run_test_git(&repository, &["commit", "-qm", "baseline"]);
+        run_test_git(
+            &repository,
+            &["worktree", "add", "-q", "-b", "linked", path_text(&linked)],
+        );
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            linked.join("tracked.txt"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        let worktrees = git_worktrees(path_text(&repository).to_string()).unwrap();
+        let linked_status = worktrees
+            .iter()
+            .find(|worktree| worktree.branch.as_deref() == Some("linked"))
+            .expect("linked worktree must be reported");
+
+        assert!(
+            !linked_status.missing,
+            "SHA-256 linked worktree inspection must succeed"
+        );
+        assert!(
+            !linked_status.dirty,
+            "linked worktree inspection must preserve core.filemode=false"
+        );
+    }
+
+    #[test]
+    fn git_worktrees_handles_an_unborn_sha256_head() {
+        let tree = TempTree::new("git-worktree-unborn-sha256");
+        run_test_git(&tree.root, &["init", "-q", "--object-format=sha256"]);
+        let policy = Arc::new(GitInspectionPolicy::new(path_text(&tree.root)).unwrap());
+        let zero_oid = "0".repeat(64);
+
+        let inspection =
+            GitInspection::with_policy(path_text(&tree.root), policy, Some(&zero_oid)).unwrap();
+        let attribute_source = inspection
+            .repository
+            .attribute_source
+            .as_deref()
+            .expect("unborn repositories must use an isolated empty attribute tree");
+
+        assert!(
+            attribute_source.chars().any(|character| character != '0'),
+            "all-zero SHA-256 HEAD must not be used as an attribute source"
+        );
+        assert_eq!(attribute_source.len(), 64);
     }
 
     #[cfg(unix)]
@@ -9145,6 +9267,76 @@ mod workspace_panel_tests {
         .unwrap();
 
         assert!(diff.text.contains("+after"));
+    }
+
+    #[test]
+    fn git_inspection_supports_object_paths_with_path_list_separators() {
+        let tree = TempTree::new("git-alternate-separator");
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        let repository = tree.root.join(format!("repository{separator}objects"));
+        std::fs::create_dir_all(&repository).unwrap();
+        run_test_git(&repository, &["init", "-q"]);
+        run_test_git(&repository, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &repository,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(repository.join("tracked.txt"), "before\n").unwrap();
+        run_test_git(&repository, &["add", "tracked.txt"]);
+        run_test_git(&repository, &["commit", "-qm", "baseline"]);
+        std::fs::write(repository.join("tracked.txt"), "after\n").unwrap();
+
+        let diff = git_diff(
+            path_text(&repository).to_string(),
+            Some("tracked.txt".to_string()),
+            Some(false),
+            None,
+        )
+        .unwrap();
+
+        assert!(diff.text.contains("+after"));
+    }
+
+    #[test]
+    fn git_inspection_preserves_reftable_refs_when_supported() {
+        let tree = TempTree::new("git-reftable-inspection");
+        let init = std::process::Command::new("git")
+            .current_dir(&tree.root)
+            .args(["init", "-q", "--ref-format=reftable"])
+            .output()
+            .expect("git init must run in tests");
+        if !init.status.success() {
+            assert!(
+                !String::from_utf8_lossy(&init.stderr).trim().is_empty(),
+                "Git without reftable support must reject the requested ref format clearly"
+            );
+            return;
+        }
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt"]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+        std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("tracked.txt".to_string()),
+            Some(false),
+            None,
+        )
+        .unwrap();
+        let log = git_log(path_text(&tree.root).to_string(), Some(1)).unwrap();
+
+        assert_eq!(status.branch.as_deref(), Some("main"));
+        assert_eq!(status.files.len(), 1);
+        assert!(diff.text.contains("+after"));
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].subject, "baseline");
     }
 
     #[test]
