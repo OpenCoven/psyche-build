@@ -5563,6 +5563,9 @@ struct GitInspectionPolicy {
 impl GitInspectionPolicy {
     fn new(root: &str) -> Result<Self, String> {
         Ok(Self {
+            // Inspection replays only trusted system/global filter commands.
+            // Repository-local/worktree config is snapshotted separately and
+            // never gets to shadow those inherited filter fallbacks by name.
             filter_drivers: git_trusted_filter_driver_overrides(root)?,
         })
     }
