@@ -4986,17 +4986,34 @@ fn fs_write_text(
 }
 
 fn git_repository_config_available(root: &str) -> Result<bool, String> {
-    let out = std::process::Command::new("git")
-        .current_dir(root)
+    let out = git_command(root)
         .args(["rev-parse", "--git-dir"])
         .output()
         .map_err(|e| format!("git: {}", e))?;
     Ok(out.status.success())
 }
 
+fn git_command(root: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command.current_dir(root);
+    #[cfg(test)]
+    TEST_GIT_ENV_OVERRIDES.with(|overrides| {
+        for (key, value) in overrides.borrow().iter() {
+            match value {
+                Some(value) => {
+                    command.env(key, value);
+                }
+                None => {
+                    command.env_remove(key);
+                }
+            }
+        }
+    });
+    command
+}
+
 fn git_worktree_config_enabled(root: &str) -> Result<bool, String> {
-    let out = std::process::Command::new("git")
-        .current_dir(root)
+    let out = git_command(root)
         .args([
             "config",
             "--local",
@@ -5036,9 +5053,17 @@ fn git_worktree_config_enabled(root: &str) -> Result<bool, String> {
     }
 }
 
-fn git_filter_driver_names_for_scope(root: &str, scope: &str) -> Result<Vec<String>, String> {
-    let out = std::process::Command::new("git")
-        .current_dir(root)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GitFilterDriverKind {
+    Clean,
+    Process,
+}
+
+fn git_filter_driver_names_for_scope(
+    root: &str,
+    scope: &str,
+) -> Result<Vec<(String, GitFilterDriverKind)>, String> {
+    let out = git_command(root)
         .args([
             "config",
             scope,
@@ -5073,21 +5098,136 @@ fn git_filter_driver_names_for_scope(root: &str, scope: &str) -> Result<Vec<Stri
     {
         let key = std::str::from_utf8(key_bytes)
             .map_err(|_| "git config filter query returned invalid UTF-8 keys".to_string())?;
-        let Some(driver) = key.strip_prefix("filter.").and_then(|rest| {
-            rest.strip_suffix(".clean")
-                .or_else(|| rest.strip_suffix(".process"))
-        }) else {
+        let Some(rest) = key.strip_prefix("filter.") else {
+            continue;
+        };
+        let (driver, kind) = if let Some(driver) = rest.strip_suffix(".clean") {
+            (driver, GitFilterDriverKind::Clean)
+        } else if let Some(driver) = rest.strip_suffix(".process") {
+            (driver, GitFilterDriverKind::Process)
+        } else {
             continue;
         };
         if driver.is_empty() {
             return Err("git config returned an empty filter driver name".to_string());
         }
-        drivers.push(driver.to_string());
+        drivers.push((driver.to_string(), kind));
     }
     Ok(drivers)
 }
 
-fn git_filter_driver_names(root: &str) -> Result<Vec<String>, String> {
+#[derive(Debug, PartialEq, Eq)]
+struct GitFilterDriverOverride {
+    driver: String,
+    clean: Option<String>,
+    process: Option<String>,
+    required: Option<bool>,
+    repository_clean: bool,
+    repository_process: bool,
+}
+
+fn git_config_value_for_scope(
+    root: &str,
+    scope: &str,
+    key: &str,
+) -> Result<Option<String>, String> {
+    let out = git_command(root)
+        .args(["config", scope, "--includes", "--null", "--get", key])
+        .output()
+        .map_err(|e| format!("git: {}", e))?;
+    if !out.status.success() {
+        if out.status.code() == Some(1) {
+            return Ok(None);
+        }
+        let stderr = String::from_utf8(out.stderr)
+            .map_err(|err| format!("git config {key} query returned invalid UTF-8 stderr: {err}"))?
+            .trim()
+            .to_string();
+        return Err(if stderr.is_empty() {
+            format!("git config {key} query failed with status {}", out.status)
+        } else {
+            format!("git config {key} query failed: {}", stderr)
+        });
+    }
+
+    let mut stdout = out.stdout;
+    if stdout.last() == Some(&0) {
+        stdout.pop();
+    }
+    if stdout.contains(&0) {
+        return Err(format!(
+            "git config {key} query returned multiple NUL-delimited values"
+        ));
+    }
+    String::from_utf8(stdout)
+        .map(Some)
+        .map_err(|err| format!("git config {key} query returned invalid UTF-8 stdout: {err}"))
+}
+
+fn git_config_bool_for_scope(root: &str, scope: &str, key: &str) -> Result<Option<bool>, String> {
+    let out = git_command(root)
+        .args(["config", scope, "--includes", "--bool", "--get", key])
+        .output()
+        .map_err(|e| format!("git: {}", e))?;
+    if !out.status.success() {
+        if out.status.code() == Some(1) {
+            return Ok(None);
+        }
+        let stderr = String::from_utf8(out.stderr)
+            .map_err(|err| format!("git config {key} query returned invalid UTF-8 stderr: {err}"))?
+            .trim()
+            .to_string();
+        return Err(if stderr.is_empty() {
+            format!("git config {key} query failed with status {}", out.status)
+        } else {
+            format!("git config {key} query failed: {}", stderr)
+        });
+    }
+
+    match String::from_utf8(out.stdout)
+        .map_err(|err| format!("git config {key} query returned invalid UTF-8 stdout: {err}"))?
+        .trim()
+    {
+        "true" => Ok(Some(true)),
+        "false" => Ok(Some(false)),
+        _ => Err(format!(
+            "git config {key} query returned a non-boolean value"
+        )),
+    }
+}
+
+fn git_trusted_config_value(root: &str, key: &str) -> Result<Option<String>, String> {
+    let system = git_config_value_for_scope(root, "--system", key)?;
+    let global = git_config_value_for_scope(root, "--global", key)?;
+    Ok(global.or(system))
+}
+
+fn git_trusted_config_bool(root: &str, key: &str) -> Result<Option<bool>, String> {
+    let system = git_config_bool_for_scope(root, "--system", key)?;
+    let global = git_config_bool_for_scope(root, "--global", key)?;
+    Ok(global.or(system))
+}
+
+fn git_filter_driver_override(
+    root: &str,
+    driver: String,
+    repository_clean: bool,
+    repository_process: bool,
+) -> Result<GitFilterDriverOverride, String> {
+    let clean_key = format!("filter.{driver}.clean");
+    let process_key = format!("filter.{driver}.process");
+    let required_key = format!("filter.{driver}.required");
+    Ok(GitFilterDriverOverride {
+        clean: git_trusted_config_value(root, &clean_key)?,
+        process: git_trusted_config_value(root, &process_key)?,
+        required: git_trusted_config_bool(root, &required_key)?,
+        repository_clean,
+        repository_process,
+        driver,
+    })
+}
+
+fn git_filter_driver_overrides(root: &str) -> Result<Vec<GitFilterDriverOverride>, String> {
     if !git_repository_config_available(root)? {
         return Ok(Vec::new());
     }
@@ -5099,39 +5239,73 @@ fn git_filter_driver_names(root: &str) -> Result<Vec<String>, String> {
     if git_worktree_config_enabled(root)? {
         drivers.extend(git_filter_driver_names_for_scope(root, "--worktree")?);
     }
-    drivers.sort();
-    drivers.dedup();
-    Ok(drivers)
+    drivers.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut driver_sources: Vec<(String, bool, bool)> = Vec::new();
+    for (driver, kind) in drivers {
+        if driver_sources.last().map(|entry| entry.0.as_str()) != Some(driver.as_str()) {
+            driver_sources.push((driver, false, false));
+        }
+        let entry = driver_sources.last_mut().expect("driver entry must exist");
+        match kind {
+            GitFilterDriverKind::Clean => entry.1 = true,
+            GitFilterDriverKind::Process => entry.2 = true,
+        }
+    }
+    driver_sources
+        .into_iter()
+        .map(|(driver, repository_clean, repository_process)| {
+            git_filter_driver_override(root, driver, repository_clean, repository_process)
+        })
+        .collect()
 }
 
 fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
-    let filter_drivers = git_filter_driver_names(root)?;
-    let mut command = std::process::Command::new("git");
+    let filter_drivers = git_filter_driver_overrides(root)?;
+    let mut command = git_command(root);
     command
-        .current_dir(root)
         // Repository-local fsmonitor configuration may name an executable.
         // Inspection commands must never run code supplied by the workspace.
         .args(["-c", "core.fsmonitor=false"]);
     for driver in filter_drivers {
-        command.arg("-c").arg(format!("filter.{driver}.clean="));
-        command.arg("-c").arg(format!("filter.{driver}.process="));
+        let has_trusted_command = driver.clean.is_some() || driver.process.is_some();
+        let required = if has_trusted_command && driver.required.unwrap_or(false) {
+            "true"
+        } else {
+            "false"
+        };
+        // An empty command-level process filter prevents Git from falling back
+        // to a valid clean filter. If the repository owns a process command
+        // with no trusted inherited replacement, disable the whole driver.
+        if driver.repository_process && driver.process.is_none() {
+            command
+                .arg("-c")
+                .arg(format!("filter.{}.clean=", driver.driver));
+            command
+                .arg("-c")
+                .arg(format!("filter.{}.process=", driver.driver));
+            command
+                .arg("-c")
+                .arg(format!("filter.{}.required=false", driver.driver));
+            continue;
+        }
+        if driver.repository_clean {
+            command.arg("-c").arg(format!(
+                "filter.{}.clean={}",
+                driver.driver,
+                driver.clean.unwrap_or_default()
+            ));
+        }
+        if driver.repository_process {
+            command.arg("-c").arg(format!(
+                "filter.{}.process={}",
+                driver.driver,
+                driver.process.unwrap_or_default()
+            ));
+        }
         command
             .arg("-c")
-            .arg(format!("filter.{driver}.required=false"));
+            .arg(format!("filter.{}.required={required}", driver.driver));
     }
-    #[cfg(test)]
-    TEST_GIT_ENV_OVERRIDES.with(|overrides| {
-        for (key, value) in overrides.borrow().iter() {
-            match value {
-                Some(value) => {
-                    command.env(key, value);
-                }
-                None => {
-                    command.env_remove(key);
-                }
-            }
-        }
-    });
     let out = command
         .args(args)
         .output()
@@ -7383,6 +7557,78 @@ mod workspace_panel_tests {
         "sed -e 's/[[:space:]]*$//'"
     }
 
+    #[test]
+    fn git_filter_driver_overrides_respect_includes_and_prefer_global_over_system_per_key() {
+        let tree = TempTree::new("git-filter-scope-precedence");
+        let project = tree.root.join("project");
+        let home = tree.root.join("home");
+        let system_config = tree.root.join("system.gitconfig");
+        let system_include = tree.root.join("system-filter.cfg");
+        let global_config = home.join(".gitconfig");
+        let global_include = tree.root.join("global-filter.cfg");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        run_test_git(&project, &["init", "-q"]);
+        std::fs::write(
+            &system_include,
+            "[filter \"trusted-mixed\"]\n\tclean = system-clean --mode normalize\n\tprocess = system-process --mode normalize\n\trequired = true\n",
+        )
+        .unwrap();
+        run_test_git(
+            &project,
+            &[
+                "config",
+                "--file",
+                path_text(&system_config),
+                "include.path",
+                path_text(&system_include),
+            ],
+        );
+        std::fs::write(
+            &global_include,
+            "[filter \"trusted-mixed\"]\n\tprocess = global-process --mode normalize\n\trequired = false\n",
+        )
+        .unwrap();
+        run_test_git(
+            &project,
+            &[
+                "config",
+                "--file",
+                path_text(&global_config),
+                "include.path",
+                path_text(&global_include),
+            ],
+        );
+
+        let _git_env = TestGitEnvOverrideGuard::set(&[
+            ("HOME", Some(home.as_os_str())),
+            ("GIT_CONFIG_GLOBAL", Some(global_config.as_os_str())),
+            ("GIT_CONFIG_SYSTEM", Some(system_config.as_os_str())),
+            ("GIT_CONFIG_NOSYSTEM", None),
+        ]);
+
+        let config = git_filter_driver_override(
+            path_text(&project),
+            "trusted-mixed".to_string(),
+            true,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(config.driver, "trusted-mixed");
+        assert!(config.repository_clean);
+        assert!(config.repository_process);
+        assert_eq!(
+            config.clean.as_deref(),
+            Some("system-clean --mode normalize")
+        );
+        assert_eq!(
+            config.process.as_deref(),
+            Some("global-process --mode normalize")
+        );
+        assert_eq!(config.required, Some(false));
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolves_the_first_executable_on_path_to_its_canonical_path() {
@@ -8437,13 +8683,20 @@ mod workspace_panel_tests {
     }
 
     #[test]
-    fn git_status_and_diff_preserve_trusted_global_clean_filters() {
+    fn git_status_and_diff_restore_trusted_global_clean_filters_under_local_shadow() {
         let tree = TempTree::new("git-global-clean-filter");
         let project = tree.root.join("project");
         let home = tree.root.join("home");
         let global_config = home.join(".gitconfig");
+        let helper = if cfg!(windows) {
+            tree.root.join("shadow-clean-filter.bat")
+        } else {
+            tree.root.join("shadow-clean-filter.sh")
+        };
+        let marker = tree.root.join("shadow-clean-filter-ran");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&home).unwrap();
+        write_marker_executable(&helper);
         std::fs::write(
             &global_config,
             format!(
@@ -8489,14 +8742,30 @@ mod workspace_panel_tests {
             "trusted global clean filter should keep raw git status clean: {raw_status:?}"
         );
 
-        let _git_env = TestGitEnvOverrideGuard::set(&[
-            ("HOME", Some(home.as_os_str())),
-            ("GIT_CONFIG_GLOBAL", Some(global_config.as_os_str())),
-            ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
-        ]);
+        run_test_git(
+            &project,
+            &[
+                "config",
+                "filter.trusted-normalize.clean",
+                &format!("{}; cat", marker_command(&helper, &marker)),
+            ],
+        );
+        run_test_git(
+            &project,
+            &["config", "filter.trusted-normalize.required", "true"],
+        );
 
-        let status = git_status(path_text(&project).to_string()).unwrap();
-        assert!(status.files.is_empty());
+        let raw_status =
+            run_test_git_stdout_with_env(&project, &["status", "--porcelain", "--", "."], &env);
+        assert!(
+            !raw_status.trim().is_empty(),
+            "shadowing local clean filter should dirty raw git status: {raw_status:?}"
+        );
+        assert!(
+            marker.exists(),
+            "shadowing local clean filter should execute during raw git status"
+        );
+        std::fs::remove_file(&marker).unwrap();
 
         std::fs::write(project.join("tracked.txt"), "same content\t\t\n").unwrap();
         let raw_diff = run_test_git_stdout_with_env(
@@ -8505,15 +8774,46 @@ mod workspace_panel_tests {
             &env,
         );
         assert!(
-            raw_diff.trim().is_empty(),
-            "trusted global clean filter should keep raw git diff empty: {raw_diff:?}"
+            !raw_diff.trim().is_empty(),
+            "shadowing local clean filter should dirty raw git diff: {raw_diff:?}"
         );
+        assert!(
+            marker.exists(),
+            "shadowing local clean filter should execute during raw git diff"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        let _git_env = TestGitEnvOverrideGuard::set(&[
+            ("HOME", Some(home.as_os_str())),
+            ("GIT_CONFIG_GLOBAL", Some(global_config.as_os_str())),
+            ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
+        ]);
+
+        let overrides = git_filter_driver_overrides(path_text(&project)).unwrap();
+        assert_eq!(
+            overrides,
+            vec![GitFilterDriverOverride {
+                driver: "trusted-normalize".to_string(),
+                clean: Some(trusted_normalizing_clean_command().to_string()),
+                process: None,
+                required: Some(true),
+                repository_clean: true,
+                repository_process: false,
+            }]
+        );
+
+        let status = git_status(path_text(&project).to_string()).unwrap();
+        assert!(status.files.is_empty());
 
         let diff = git_diff(path_text(&project).to_string(), None, Some(false), None).unwrap();
         assert!(diff.text.is_empty());
         assert_eq!(diff.bytes, 0);
         assert_eq!(diff.lines, 0);
         assert!(!diff.truncated);
+        assert!(
+            !marker.exists(),
+            "hardened git inspection must not execute the shadowing local clean filter"
+        );
     }
 
     #[test]
