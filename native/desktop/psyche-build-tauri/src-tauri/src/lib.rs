@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 #[cfg(test)]
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -4998,11 +4999,32 @@ fn git_repository_config_available(root: &str) -> Result<bool, String> {
     Ok(out.status.success())
 }
 
+fn git_subprocess_root(root: &Path) -> Cow<'_, Path> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+        const VERBATIM_PREFIX: [u16; 4] = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+        let encoded = root.as_os_str().encode_wide().collect::<Vec<_>>();
+        let is_verbatim_disk = encoded.starts_with(&VERBATIM_PREFIX)
+            && encoded
+                .get(4)
+                .is_some_and(|unit| (*unit as u8).is_ascii_alphabetic())
+            && encoded.get(5) == Some(&(b':' as u16))
+            && encoded.get(6) == Some(&(b'\\' as u16));
+        if is_verbatim_disk {
+            return Cow::Owned(PathBuf::from(OsString::from_wide(&encoded[4..])));
+        }
+    }
+
+    Cow::Borrowed(root)
+}
+
 fn git_command(root: &str) -> std::process::Command {
     #[cfg(test)]
     TEST_GIT_COMMAND_COUNT.with(|count| *count.borrow_mut() += 1);
     let mut command = std::process::Command::new("git");
-    command.current_dir(root);
+    command.current_dir(git_subprocess_root(Path::new(root)).as_ref());
     #[cfg(test)]
     TEST_GIT_ENV_OVERRIDES.with(|overrides| {
         for (key, value) in overrides.borrow().iter() {
