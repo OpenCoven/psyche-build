@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { withFilesScopeSelectionHelper } from './tauriMainHarness';
 
 const mainJs = readFileSync(
   join(process.cwd(), 'native/desktop/psyche-build-tauri/web/main.js'),
@@ -27,7 +28,10 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
 ) {
-  const resolvedDependencies = { saveWorkspaceSoon: () => undefined, ...dependencies };
+  const resolvedDependencies = withFilesScopeSelectionHelper(
+    (name) => functionSource(mainJs, name),
+    { saveWorkspaceSoon: () => undefined, ...dependencies },
+  );
   const names = Object.keys(resolvedDependencies);
   const values = Object.values(resolvedDependencies);
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
@@ -116,6 +120,48 @@ describe('Tauri thread focus activation', () => {
     expect(dependencies.renderPaneWorkspace).not.toHaveBeenCalled();
     expect(frames).toHaveLength(0);
     expect(thread.terminalController.focus).not.toHaveBeenCalled();
+  });
+
+  it('synchronizes the Files scope when focus selects another worktree', async () => {
+    const project = {
+      id: 'project-1',
+      selectedWorktreePath: '/other',
+    };
+    const thread = {
+      id: 'thread-1',
+      projectId: project.id,
+      worktreePath: '/repo',
+      kind: 'shell',
+      status: 'running',
+      hidden: false,
+      closing: false,
+      closeStarted: false,
+      pane: {},
+      terminalController: { focus: vi.fn() },
+    };
+    const state = {
+      activeThreadId: null,
+      activeProjectId: project.id,
+      threads: [thread],
+    };
+    const invalidateFilesPanelRender = vi.fn(() => 7);
+    const renderFilesPanel = vi.fn(() => true);
+    const dependencies = {
+      ...focusDependencies(state, async () => true, () => 1),
+      findProject: () => project,
+      sidebarView: 'files',
+      invalidateFilesPanelRender,
+      renderFilesPanel,
+    };
+    const focusThread = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource(mainJs, 'focusThread'),
+      dependencies,
+    );
+
+    await expect(focusThread(thread.id)).resolves.toBe(true);
+    expect(project.selectedWorktreePath).toBe('/repo');
+    expect(invalidateFilesPanelRender).toHaveBeenCalledOnce();
+    expect(renderFilesPanel).toHaveBeenCalledWith({ generation: 7 });
   });
 
   it('can render and select a live thread without queueing terminal autofocus', async () => {

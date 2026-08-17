@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { withFilesScopeSelectionHelper } from './tauriMainHarness';
 import * as PsycheSessions from '../native/desktop/psyche-build-tauri/web/sessions/session-model.mjs';
 
 const webRoot = join(process.cwd(), 'native/desktop/psyche-build-tauri');
@@ -110,8 +111,12 @@ function compileOpenCovenSession<T extends (...args: never[]) => unknown>(
 function compileOpenWithProjectActivation<T extends (...args: never[]) => unknown>(
   dependencies: Record<string, unknown>,
 ) {
-  const names = Object.keys(dependencies);
-  const values = Object.values(dependencies);
+  const resolvedDependencies = withFilesScopeSelectionHelper(
+    (name) => functionSource(mainJs, name),
+    dependencies,
+  );
+  const names = Object.keys(resolvedDependencies);
+  const values = Object.values(resolvedDependencies);
   return Function(
     ...names,
     `"use strict";

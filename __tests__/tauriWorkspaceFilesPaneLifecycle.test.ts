@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { withFilesScopeSelectionHelper } from './tauriMainHarness';
 
 const mainJs = readFileSync(
   join(process.cwd(), 'native/desktop/psyche-build-tauri/web/main.js'),
@@ -36,11 +37,15 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   name: string,
   dependencies: Record<string, unknown>,
 ) {
-  const names = Object.keys(dependencies);
+  const resolvedDependencies = withFilesScopeSelectionHelper(
+    extractFunctionSource,
+    dependencies,
+  );
+  const names = Object.keys(resolvedDependencies);
   return Function(
     ...names,
     `"use strict"; return (${extractFunctionSource(name)});`,
-  )(...Object.values(dependencies)) as T;
+  )(...Object.values(resolvedDependencies)) as T;
 }
 
 describe('native Files pane lifecycle', () => {
@@ -455,12 +460,10 @@ describe('native Files pane lifecycle', () => {
     const filesPaneKey = (projectId: string, root: string) => `${projectId}\0${root}`;
     const findProject = () => project;
     const findOpenFile = (id: string) => state.openFiles.find((file) => file.id === id) || null;
-    const assignSelectedWorktreePath = (
-      selectedProject: typeof project,
-      worktreePath: string,
-    ) => {
-      selectedProject.selectedWorktreePath = worktreePath;
-      return true;
+    let filesScopeInvalidations = 0;
+    const invalidateFilesPanelRender = () => {
+      filesScopeInvalidations += 1;
+      return filesScopeInvalidations;
     };
     const renderPaneWorkspace = () => {
       const pane = filesPanes.get(filesPaneKey(project.id, project.selectedWorktreePath));
@@ -486,7 +489,7 @@ describe('native Files pane lifecycle', () => {
       'activateFileTabNow',
       {
         findOpenFile, findProject, state,
-        assignSelectedWorktreePath,
+        invalidateFilesPanelRender,
         ensureFilesPane: (_project: typeof project, root: string) =>
           filesPanes.get(filesPaneKey(project.id, root)),
         renderPaneWorkspace, enterFileFocus,
@@ -498,7 +501,7 @@ describe('native Files pane lifecycle', () => {
       'revealFileForDecision',
       {
         findOpenFile, findProject, state,
-        assignSelectedWorktreePath,
+        invalidateFilesPanelRender,
         activeWorkspaceRoot: () => project.selectedWorktreePath,
         clearPassiveCovenPaneFocus: () => undefined, renderPaneWorkspace,
         renderGitSurface: () => undefined, loadAgentSkills: () => undefined,
@@ -532,6 +535,7 @@ describe('native Files pane lifecycle', () => {
     expect(state.openFiles).toEqual(beforeFiles);
     expect(filesPanes.size).toBe(beforePaneCount);
     expect(paneLayouts.size).toBe(beforeLayoutCount);
+    expect(filesScopeInvalidations).toBe(1);
   });
 
   it('cleans final-tab ownership and lets the next Files pane capture a fresh terminal', async () => {
