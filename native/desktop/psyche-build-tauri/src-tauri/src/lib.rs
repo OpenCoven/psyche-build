@@ -5920,9 +5920,15 @@ fn git_inspection_line_ending_config(root: &str) -> Result<Vec<(String, String)>
     Ok(values.into_iter().collect())
 }
 
+fn git_inspection_config_is_multi_valued(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.starts_with("remote.") && (key.ends_with(".url") || key.ends_with(".fetch"))
+}
+
 fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>, String> {
     const SAFE_CONFIG_PATTERN: &str = r"^(core\.(repositoryformatversion|filemode|ignorecase|symlinks|precomposeunicode)|extensions\.(objectformat|refstorage)|branch\..*\.(remote|merge)|remote\..*\.(url|fetch))$";
-    let mut values = HashMap::new();
+    let mut scalar_values = HashMap::new();
+    let mut multi_values = Vec::new();
     let mut scopes = vec!["--local"];
     if git_worktree_config_enabled(root)? {
         scopes.push("--worktree");
@@ -5955,10 +5961,16 @@ fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>,
                 .position(|byte| *byte == b'\n')
                 .ok_or_else(|| "git config query returned malformed output".to_string())?;
             let key = std::str::from_utf8(&record[..separator])
-                .map_err(|_| "git config query returned invalid UTF-8 keys".to_string())?;
+                .map_err(|_| "git config query returned invalid UTF-8 keys".to_string())?
+                .to_ascii_lowercase();
             let value = std::str::from_utf8(&record[separator + 1..])
-                .map_err(|_| format!("git config {key} returned invalid UTF-8"))?;
-            values.insert(key.to_string(), value.to_string());
+                .map_err(|_| format!("git config {key} returned invalid UTF-8"))?
+                .to_string();
+            if git_inspection_config_is_multi_valued(&key) {
+                multi_values.push((key, value));
+            } else {
+                scalar_values.insert(key, value);
+            }
         }
     }
     // Preserve only validated, non-executable EOL conversion semantics from
@@ -5966,8 +5978,12 @@ fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>,
     // because it governs diagnostics for the same irreversible conversions.
     // Encoding conversion policy remains outside this deliberately narrow
     // contract.
-    values.extend(git_inspection_line_ending_config(root)?);
-    Ok(values.into_iter().collect())
+    for (key, value) in git_inspection_line_ending_config(root)? {
+        scalar_values.insert(key, value);
+    }
+    let mut values = scalar_values.into_iter().collect::<Vec<_>>();
+    values.extend(multi_values);
+    Ok(values)
 }
 
 struct GitInspectionRepository {
@@ -10183,6 +10199,81 @@ mod workspace_panel_tests {
         assert_eq!(
             status.remote_url.as_deref(),
             Some("https://example.invalid/repo.git")
+        );
+    }
+
+    #[test]
+    fn git_inspection_preserves_ordered_remote_urls_and_fetch_refspecs() {
+        let tree = TempTree::new("git-remote-multivalue");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://first.invalid/repo.git",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://second.invalid/repo.git",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/main:refs/remotes/origin/main",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/release:refs/remotes/origin/release",
+            ],
+        );
+
+        let config = git_inspection_repository_config(path_text(&tree.root)).unwrap();
+        let urls = config
+            .iter()
+            .filter(|(key, _)| key == "remote.origin.url")
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+        let fetch = config
+            .iter()
+            .filter(|(key, _)| key == "remote.origin.fetch")
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://first.invalid/repo.git",
+                "https://second.invalid/repo.git",
+            ]
+        );
+        assert_eq!(
+            fetch,
+            vec![
+                "+refs/heads/main:refs/remotes/origin/main",
+                "+refs/heads/release:refs/remotes/origin/release",
+            ]
+        );
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+        assert_eq!(
+            status.remote_url.as_deref(),
+            Some("https://first.invalid/repo.git")
         );
     }
 
