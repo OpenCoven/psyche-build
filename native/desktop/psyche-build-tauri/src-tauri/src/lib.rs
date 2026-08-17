@@ -5632,6 +5632,70 @@ fn validate_git_ref_storage(
     }
 }
 
+fn normalize_git_line_ending_config(key: &str, value: &str) -> Result<String, String> {
+    let value = value.trim().to_ascii_lowercase();
+    let normalized = match key {
+        "core.autocrlf" => match value.as_str() {
+            "" | "true" | "yes" | "on" | "1" => "true",
+            "false" | "no" | "off" | "0" => "false",
+            "input" => "input",
+            _ => return Err("git config core.autocrlf has an invalid value".to_string()),
+        },
+        "core.eol" => match value.as_str() {
+            "lf" => "lf",
+            "crlf" => "crlf",
+            "native" => "native",
+            _ => return Err("git config core.eol has an invalid value".to_string()),
+        },
+        "core.safecrlf" => match value.as_str() {
+            "" | "true" | "yes" | "on" | "1" => "true",
+            "false" | "no" | "off" | "0" => "false",
+            "warn" => "warn",
+            _ => return Err("git config core.safecrlf has an invalid value".to_string()),
+        },
+        _ => return Err("unsupported Git line-ending config key".to_string()),
+    };
+    Ok(normalized.to_string())
+}
+
+fn git_inspection_line_ending_config(root: &str) -> Result<Vec<(String, String)>, String> {
+    const LINE_ENDING_CONFIG_PATTERN: &str = r"^core\.(autocrlf|eol|safecrlf)$";
+    let out = git_metadata_output(
+        root,
+        &[
+            "config",
+            "--includes",
+            "--null",
+            "--get-regexp",
+            LINE_ENDING_CONFIG_PATTERN,
+        ],
+    )?;
+    if !out.status.success() {
+        if out.status.code() == Some(1) {
+            return Ok(Vec::new());
+        }
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let mut values = HashMap::new();
+    for record in out
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let separator = record
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or_else(|| "git config query returned malformed output".to_string())?;
+        let key = std::str::from_utf8(&record[..separator])
+            .map_err(|_| "git config query returned invalid UTF-8 keys".to_string())?
+            .to_ascii_lowercase();
+        let value = std::str::from_utf8(&record[separator + 1..])
+            .map_err(|_| format!("git config {key} returned invalid UTF-8"))?;
+        values.insert(key.clone(), normalize_git_line_ending_config(&key, value)?);
+    }
+    Ok(values.into_iter().collect())
+}
+
 fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>, String> {
     const SAFE_CONFIG_PATTERN: &str = r"^(core\.(repositoryformatversion|filemode|ignorecase|symlinks|precomposeunicode)|extensions\.(objectformat|refstorage)|branch\..*\.(remote|merge)|remote\..*\.(url|fetch))$";
     let mut values = HashMap::new();
@@ -5673,6 +5737,12 @@ fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>,
             values.insert(key.to_string(), value.to_string());
         }
     }
+    // Preserve only validated, non-executable EOL conversion semantics from
+    // the complete effective config. safecrlf travels with autocrlf/eol
+    // because it governs diagnostics for the same irreversible conversions.
+    // Encoding conversion policy remains outside this deliberately narrow
+    // contract.
+    values.extend(git_inspection_line_ending_config(root)?);
     Ok(values.into_iter().collect())
 }
 
@@ -8363,8 +8433,8 @@ mod workspace_panel_tests {
         let command_count = TEST_GIT_COMMAND_COUNT.with(|count| *count.borrow());
         assert_eq!(
             command_count,
-            12,
-            "worktree inspection should reuse three shared policy/list queries while snapshotting two safe config scopes plus one status process per worktree"
+            15,
+            "worktree inspection should reuse three shared policy/list queries while snapshotting two repository config scopes, effective line endings, and one status process per worktree"
         );
         let queries = TEST_GIT_FILTER_SCOPE_QUERIES.with(|queries| queries.borrow().clone());
         for scope in ["--system", "--global"] {
@@ -8419,6 +8489,157 @@ mod workspace_panel_tests {
         assert!(
             !linked_status.dirty,
             "linked worktree inspection must preserve core.filemode=false"
+        );
+    }
+
+    #[test]
+    fn git_status_and_diff_preserve_effective_global_crlf_normalization() {
+        let tree = TempTree::new("git-global-crlf-normalization");
+        let project = tree.root.join("project");
+        let home = tree.root.join("home");
+        let global_config = home.join(".gitconfig");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            &global_config,
+            "[core]\n\tautocrlf = true\n\teol = crlf\n\tsafecrlf = true\n",
+        )
+        .unwrap();
+        run_test_git(&project, &["init", "-q"]);
+        std::fs::write(project.join(".gitattributes"), "tracked.txt text\r\n").unwrap();
+        std::fs::write(project.join("tracked.txt"), "first\r\nsecond\r\n").unwrap();
+
+        let env = [
+            ("HOME", path_text(&home)),
+            ("GIT_CONFIG_GLOBAL", path_text(&global_config)),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ];
+        run_test_git_with_env(&project, &["add", ".gitattributes", "tracked.txt"], &env);
+        run_test_git_with_env(
+            &project,
+            &[
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Psyche Tests",
+                "commit",
+                "-qm",
+                "baseline",
+            ],
+            &env,
+        );
+        std::fs::write(project.join("tracked.txt"), "first\r\nsecond\r\n").unwrap();
+        let raw_status =
+            run_test_git_stdout_with_env(&project, &["status", "--porcelain", "--", "."], &env);
+        assert!(
+            raw_status.trim().is_empty(),
+            "effective global CRLF normalization must keep raw status clean: {raw_status:?}"
+        );
+
+        let _git_env = TestGitEnvOverrideGuard::set(&[
+            ("HOME", Some(home.as_os_str())),
+            ("GIT_CONFIG_GLOBAL", Some(global_config.as_os_str())),
+            ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
+        ]);
+        let status = git_status(path_text(&project).to_string()).unwrap();
+        let diff = git_diff(path_text(&project).to_string(), None, Some(false), None).unwrap();
+
+        assert!(status.files.is_empty());
+        assert!(diff.text.is_empty());
+        assert_eq!(diff.bytes, 0);
+    }
+
+    #[test]
+    fn git_inspection_snapshots_only_effective_line_ending_config() {
+        let tree = TempTree::new("git-effective-line-ending-config");
+        let project = tree.root.join("project");
+        let home = tree.root.join("home");
+        let global_config = home.join(".gitconfig");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            &global_config,
+            "[core]\n\tautocrlf = true\n\teol = crlf\n\tsafecrlf = warn\n\tcheckRoundtripEncoding = SHIFT-JIS\n",
+        )
+        .unwrap();
+        run_test_git(&project, &["init", "-q"]);
+        run_test_git(&project, &["config", "core.autocrlf", "input"]);
+        run_test_git(&project, &["config", "core.eol", "lf"]);
+
+        let _git_env = TestGitEnvOverrideGuard::set(&[
+            ("HOME", Some(home.as_os_str())),
+            ("GIT_CONFIG_GLOBAL", Some(global_config.as_os_str())),
+            ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
+        ]);
+        let config = git_inspection_repository_config(path_text(&project)).unwrap();
+        let values = config.into_iter().collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            values.get("core.autocrlf").map(String::as_str),
+            Some("input")
+        );
+        assert_eq!(values.get("core.eol").map(String::as_str), Some("lf"));
+        assert_eq!(
+            values.get("core.safecrlf").map(String::as_str),
+            Some("warn")
+        );
+        assert!(
+            !values.contains_key("core.checkroundtripencoding"),
+            "encoding conversion policy is outside the line-ending snapshot contract"
+        );
+    }
+
+    #[test]
+    fn git_worktrees_preserve_worktree_specific_crlf_normalization() {
+        let tree = TempTree::new("git-worktree-crlf-normalization");
+        let repository = tree.root.join("repository");
+        let linked = tree.root.join("linked");
+        std::fs::create_dir_all(&repository).unwrap();
+        run_test_git(&repository, &["init", "-q"]);
+        run_test_git(&repository, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &repository,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        run_test_git(&repository, &["config", "core.autocrlf", "false"]);
+        run_test_git(&repository, &["config", "core.eol", "lf"]);
+        std::fs::write(repository.join(".gitattributes"), "tracked.txt text\n").unwrap();
+        std::fs::write(repository.join("tracked.txt"), "first\nsecond\n").unwrap();
+        run_test_git(&repository, &["add", ".gitattributes", "tracked.txt"]);
+        run_test_git(&repository, &["commit", "-qm", "baseline"]);
+        run_test_git(
+            &repository,
+            &["config", "extensions.worktreeConfig", "true"],
+        );
+        run_test_git(
+            &repository,
+            &["worktree", "add", "-q", "-b", "linked", path_text(&linked)],
+        );
+        run_test_git(&linked, &["config", "--worktree", "core.autocrlf", "true"]);
+        run_test_git(&linked, &["config", "--worktree", "core.eol", "crlf"]);
+        std::fs::remove_file(linked.join("tracked.txt")).unwrap();
+        run_test_git(&linked, &["checkout", "HEAD", "--", "tracked.txt"]);
+        assert_eq!(
+            std::fs::read(linked.join("tracked.txt")).unwrap(),
+            b"first\r\nsecond\r\n"
+        );
+        let raw_status =
+            run_test_git_stdout_with_env(&linked, &["status", "--porcelain", "--", "."], &[]);
+        assert!(
+            raw_status.trim().is_empty(),
+            "linked worktree CRLF normalization must keep raw status clean: {raw_status:?}"
+        );
+
+        let worktrees = git_worktrees(path_text(&repository).to_string()).unwrap();
+        let linked_status = worktrees
+            .iter()
+            .find(|worktree| worktree.branch.as_deref() == Some("linked"))
+            .expect("linked worktree must be reported");
+
+        assert!(!linked_status.missing);
+        assert!(
+            !linked_status.dirty,
+            "linked worktree inspection must preserve worktree-specific line endings"
         );
     }
 
