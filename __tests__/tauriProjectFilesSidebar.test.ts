@@ -382,6 +382,41 @@ function bindProjectGroupInteractions(dependencies: {
   );
 }
 
+function registerSessionListScrollHandler(dependencies: {
+  sessionListEl: FakeElement;
+  ptyRuntime?: unknown;
+  syncSessionListScroll: () => void;
+  document: FakeDocument;
+  terminalFrameScheduler: {
+    schedule: (key: string, callback: () => void) => unknown;
+  };
+  renderSessionList: (options?: Record<string, unknown>) => void;
+}) {
+  const scrollRegistration = between(
+    mainJs,
+    'if (sessionListEl) {\n    sessionListEl.__psycheVirtualRuntime = ptyRuntime;',
+    '  var sidebarView = "sessions";',
+  );
+  return Function(
+    'sessionListEl',
+    'ptyRuntime',
+    'syncSessionListScroll',
+    'document',
+    'terminalFrameScheduler',
+    'renderSessionList',
+    `"use strict";
+    ${scrollRegistration}
+    return sessionListEl;`,
+  )(
+    dependencies.sessionListEl,
+    dependencies.ptyRuntime,
+    dependencies.syncSessionListScroll,
+    dependencies.document,
+    dependencies.terminalFrameScheduler,
+    dependencies.renderSessionList,
+  );
+}
+
 function registerFilesBackRailClick(document: FakeDocument, showSessionsSidebar: () => unknown) {
   const filesBackRegistration = between(
     mainJs,
@@ -1168,6 +1203,111 @@ describe('project Files sidebar navigation', () => {
     expect(document.activeElement).toBe(replacementButton);
     expect(harness.sessionTreeFocusKey()).toBe('project:project-1');
     expect(activeTreeItem?.getAttribute('tabindex')).toBe('0');
+  });
+
+  it('restores focus to the replacement project Files button after a scroll-style rerender request', () => {
+    const document = new FakeDocument();
+    const sessionListEl = document.createElement('div');
+    const harness = compileRenderSessionListFocusHarness({
+      document,
+      sessionListEl,
+      projects: [
+        { id: 'project-a', root: '/repo/one' },
+        { id: 'project-b', root: '/repo/two' },
+      ],
+      activeProjectId: 'project-a',
+    });
+
+    harness.renderSessionList();
+    const originalButton = harness.projectFilesButtons().find(
+      (button) => button.dataset.projectFiles === 'project-a',
+    );
+
+    expect(originalButton).toBeDefined();
+    originalButton!.focus();
+
+    harness.renderSessionList({
+      preserveFocus: false,
+      restoreFocusKey: '',
+      restoreProjectFilesId: 'project-a',
+    });
+
+    const replacementButton = harness.projectFilesButtons().find(
+      (button) => button.dataset.projectFiles === 'project-a',
+    );
+    const activeTreeItem = harness.treeItems().find(
+      (item) => item.dataset.treeKey === 'project:project-a',
+    );
+
+    expect(replacementButton).toBeDefined();
+    expect(replacementButton).not.toBe(originalButton);
+    expect(document.activeElement).toBe(replacementButton);
+    expect(harness.sessionTreeFocusKey()).toBe('project:project-a');
+    expect(activeTreeItem?.getAttribute('tabindex')).toBe('0');
+  });
+
+  it('captures focused project Files buttons during virtualized session scroll rerenders', async () => {
+    const document = new FakeDocument();
+    const sessionListEl = document.createElement('div');
+    const harness = compileRenderSessionListFocusHarness({
+      document,
+      sessionListEl,
+      projects: [
+        { id: 'project-a', root: '/repo/one' },
+        { id: 'project-b', root: '/repo/two' },
+      ],
+      activeProjectId: 'project-a',
+    });
+    const syncSessionListScroll = vi.fn();
+    const scheduledKeys: string[] = [];
+    const renderSessionList = vi.fn((options?: Record<string, unknown>) => {
+      harness.renderSessionList(options);
+    });
+
+    registerSessionListScrollHandler({
+      document,
+      sessionListEl,
+      ptyRuntime: null,
+      syncSessionListScroll,
+      terminalFrameScheduler: {
+        schedule: (key: string, callback: () => void) => {
+          scheduledKeys.push(key);
+          callback();
+          return key;
+        },
+      },
+      renderSessionList,
+    });
+
+    harness.renderSessionList();
+    const originalButton = harness.projectFilesButtons().find(
+      (button) => button.dataset.projectFiles === 'project-a',
+    );
+    const virtualSessionList = sessionListEl as FakeElement & {
+      __psycheVirtualState?: { virtualized: boolean };
+    };
+
+    expect(originalButton).toBeDefined();
+    originalButton!.focus();
+    virtualSessionList.__psycheVirtualState = { virtualized: true };
+
+    await sessionListEl.emit('scroll');
+
+    const replacementButton = harness.projectFilesButtons().find(
+      (button) => button.dataset.projectFiles === 'project-a',
+    );
+
+    expect(syncSessionListScroll).toHaveBeenCalledOnce();
+    expect(scheduledKeys).toEqual(['collection:sessions']);
+    expect(renderSessionList).toHaveBeenCalledOnce();
+    expect(renderSessionList).toHaveBeenCalledWith({
+      preserveFocus: false,
+      restoreFocusKey: '',
+      restoreProjectFilesId: 'project-a',
+    });
+    expect(replacementButton).toBeDefined();
+    expect(replacementButton).not.toBe(originalButton);
+    expect(document.activeElement).toBe(replacementButton);
   });
 
   it('keeps tree focus restoration ahead of project Files buttons for focused tree items', () => {

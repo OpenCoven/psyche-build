@@ -5435,14 +5435,21 @@
       syncSessionListScroll();
       if (!sessionListEl.__psycheVirtualState ||
           !sessionListEl.__psycheVirtualState.virtualized) return;
-      var sessionScrollFocusKey = sessionListEl.contains(document.activeElement) &&
+      var focusedSessionControl = sessionListEl.contains(document.activeElement) &&
         document.activeElement.dataset
-        ? document.activeElement.dataset.treeKey || ""
+        ? document.activeElement.dataset
+        : null;
+      var sessionScrollFocusKey = focusedSessionControl
+        ? focusedSessionControl.treeKey || ""
+        : "";
+      var sessionScrollProjectFilesId = focusedSessionControl
+        ? focusedSessionControl.projectFiles || ""
         : "";
       terminalFrameScheduler.schedule("collection:sessions", function () {
         renderSessionList({
           preserveFocus: false,
           restoreFocusKey: sessionScrollFocusKey,
+          restoreProjectFilesId: sessionScrollProjectFilesId,
         });
       });
     });
@@ -7105,10 +7112,12 @@
     sessionListEl.__psycheVirtualState = virtualState;
     var preserveFocus = !options || options.preserveFocus !== false;
     var requestedRestoreKey = options && options.restoreFocusKey;
-    var activeProjectFilesId = preserveFocus &&
+    var requestedProjectFilesId = options && options.restoreProjectFilesId;
+    var activeProjectFilesId = requestedProjectFilesId ||
+      (preserveFocus &&
       document.activeElement && document.activeElement.dataset
       ? document.activeElement.dataset.projectFiles || ""
-      : "";
+      : "");
     var activeTreeKey = virtualState.focusKey || (preserveFocus &&
       document.activeElement && document.activeElement.dataset
       ? document.activeElement.dataset.treeKey
@@ -7610,7 +7619,7 @@
     var renderedItems = Array.prototype.slice.call(
       sessionListEl.querySelectorAll("[data-tree-item]")
     );
-    var replacementProjectFilesButton = activeProjectFilesId
+    var replacementProjectFilesButton = !requestedRestoreKey && activeProjectFilesId
       ? Array.prototype.find.call(
           sessionListEl.querySelectorAll("[data-project-files]"),
           function (button) {
