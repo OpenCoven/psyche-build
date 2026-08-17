@@ -29,9 +29,13 @@ function safeCovenAttachmentId(value) {
 }
 
 function normalizeKind(value) {
+  if (value === LEGACY_COVEN_KIND) return CANONICAL_COVEN_KIND;
   const kind = safeString(value);
-  if (kind === LEGACY_COVEN_KIND) return CANONICAL_COVEN_KIND;
   return kind && ALLOWED_KINDS.has(kind) ? kind : null;
+}
+
+function isPaddedLegacyKind(value) {
+  return typeof value === 'string' && safeString(value) === LEGACY_COVEN_KIND && value !== LEGACY_COVEN_KIND;
 }
 
 function normalizeRatio(value) {
@@ -168,6 +172,11 @@ export function sanitizeSessionDescriptor(saved) {
   const id = safeId(saved.id);
   const projectId = safeId(saved.projectId);
   const worktreePath = safeString(saved.worktreePath);
+
+  if (isPaddedLegacyKind(saved.kind) || isPaddedLegacyKind(saved.launchKind)) {
+    return null;
+  }
+
   const launchKind = normalizeKind(saved.launchKind);
 
   if (!id || !projectId || !worktreePath || !launchKind) return null;
