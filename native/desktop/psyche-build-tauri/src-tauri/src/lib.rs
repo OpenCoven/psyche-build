@@ -8868,28 +8868,43 @@ mod workspace_panel_tests {
     #[test]
     fn git_status_and_diff_preserve_local_line_endings_after_root_canonicalization() {
         let tree = TempTree::new("git-canonical-root-line-endings");
-        run_test_git(&tree.root, &["init", "-q"]);
-        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        let project = tree.root.join("project");
+        let home = tree.root.join("home");
+        let global_config = home.join(".gitconfig");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            &global_config,
+            "[core]\n\tautocrlf = true\n\teol = crlf\n\tsafecrlf = true\n",
+        )
+        .unwrap();
+        run_test_git(&project, &["init", "-q"]);
+        run_test_git(&project, &["config", "user.name", "Psyche Tests"]);
         run_test_git(
-            &tree.root,
+            &project,
             &["config", "user.email", "psyche-tests@example.invalid"],
         );
-        run_test_git(&tree.root, &["config", "core.autocrlf", "false"]);
-        std::fs::write(tree.root.join("tracked.txt"), b"first\nsecond\nthird\n").unwrap();
-        run_test_git(&tree.root, &["add", "tracked.txt"]);
-        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+        run_test_git(&project, &["config", "core.autocrlf", "false"]);
+        std::fs::write(project.join("tracked.txt"), b"first\nsecond\nthird\n").unwrap();
+        run_test_git(&project, &["add", "tracked.txt"]);
+        run_test_git(&project, &["commit", "-qm", "baseline"]);
 
-        std::fs::write(tree.root.join("tracked.txt"), b"first\nsecond\nthird\n").unwrap();
-        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+        std::fs::write(project.join("tracked.txt"), b"first\nsecond\nthird\n").unwrap();
+        let _git_env = TestGitEnvOverrideGuard::set(&[
+            ("HOME", Some(home.as_os_str())),
+            ("GIT_CONFIG_GLOBAL", Some(global_config.as_os_str())),
+            ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
+        ]);
+        let status = git_status(path_text(&project).to_string()).unwrap();
         assert!(
             status.files.is_empty(),
             "canonicalized inspection must preserve local core.autocrlf=false: {:?}",
             status.files
         );
 
-        std::fs::write(tree.root.join("tracked.txt"), b"first\nchanged\nthird\n").unwrap();
+        std::fs::write(project.join("tracked.txt"), b"first\nchanged\nthird\n").unwrap();
         let diff = git_diff(
-            path_text(&tree.root).to_string(),
+            path_text(&project).to_string(),
             Some("tracked.txt".to_string()),
             Some(false),
             Some(0),
