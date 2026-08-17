@@ -5343,7 +5343,7 @@ fn git_common_dir(git_dir: &Path) -> Result<PathBuf, String> {
 fn collect_loose_refs(
     directory: &Path,
     prefix: &str,
-    refs: &mut HashMap<String, String>,
+    refs: &mut HashMap<String, GitRefValue>,
 ) -> Result<(), String> {
     if !directory.is_dir() {
         return Ok(());
@@ -5360,19 +5360,26 @@ fn collect_loose_refs(
         if file_type.is_dir() {
             collect_loose_refs(&entry.path(), &ref_name, refs)?;
         } else if file_type.is_file() {
-            let oid = std::fs::read_to_string(entry.path())
+            let value = std::fs::read_to_string(entry.path())
                 .map_err(|e| format!("read Git ref: {e}"))?
                 .trim()
                 .to_string();
-            if !oid.is_empty() {
-                refs.insert(ref_name, oid);
+            if let Some(target) = value.strip_prefix("ref: ") {
+                refs.insert(ref_name, GitRefValue::Symbolic(target.to_string()));
+            } else if !value.is_empty() {
+                refs.insert(ref_name, GitRefValue::Direct(value));
             }
         }
     }
     Ok(())
 }
 
-fn snapshot_git_refs(common_dir: &Path) -> Result<HashMap<String, String>, String> {
+enum GitRefValue {
+    Direct(String),
+    Symbolic(String),
+}
+
+fn snapshot_git_refs(common_dir: &Path) -> Result<HashMap<String, GitRefValue>, String> {
     let mut refs = HashMap::new();
     let packed_refs = common_dir.join("packed-refs");
     if packed_refs.is_file() {
@@ -5383,12 +5390,25 @@ fn snapshot_git_refs(common_dir: &Path) -> Result<HashMap<String, String>, Strin
                 continue;
             }
             if let Some((oid, name)) = line.split_once(' ') {
-                refs.insert(name.to_string(), oid.to_string());
+                refs.insert(name.to_string(), GitRefValue::Direct(oid.to_string()));
             }
         }
     }
     collect_loose_refs(&common_dir.join("refs"), "refs", &mut refs)?;
     Ok(refs)
+}
+
+fn resolve_git_ref(refs: &HashMap<String, GitRefValue>, name: &str) -> Option<String> {
+    let mut current = name;
+    let mut remaining = refs.len().saturating_add(1);
+    while remaining > 0 {
+        match refs.get(current)? {
+            GitRefValue::Direct(oid) => return Some(oid.clone()),
+            GitRefValue::Symbolic(target) => current = target,
+        }
+        remaining -= 1;
+    }
+    None
 }
 
 fn snapshot_git_reftable(source: &Path, destination: &Path) -> Result<(), String> {
@@ -5529,7 +5549,7 @@ impl GitInspectionRepository {
             .or_else(|| {
                 let head = actual_head.trim();
                 if let Some(name) = head.strip_prefix("ref: ") {
-                    refs.get(name).cloned()
+                    resolve_git_ref(&refs, name)
                 } else if !head.is_empty() {
                     Some(head.to_string())
                 } else {
@@ -5584,7 +5604,21 @@ impl GitInspectionRepository {
                 &git_dir.path().join("reftable"),
             )?;
         } else {
-            let mut packed_refs = refs.into_iter().collect::<Vec<_>>();
+            let mut packed_refs = Vec::new();
+            for (name, value) in refs {
+                match value {
+                    GitRefValue::Direct(oid) => packed_refs.push((name, oid)),
+                    GitRefValue::Symbolic(target) => {
+                        let destination = git_dir.path().join(&name);
+                        if let Some(parent) = destination.parent() {
+                            std::fs::create_dir_all(parent)
+                                .map_err(|e| format!("create isolated Git ref directory: {e}"))?;
+                        }
+                        std::fs::write(destination, format!("ref: {target}\n"))
+                            .map_err(|e| format!("snapshot symbolic Git ref {name}: {e}"))?;
+                    }
+                }
+            }
             packed_refs.sort_by(|left, right| left.0.cmp(&right.0));
             std::fs::write(
                 git_dir.path().join("packed-refs"),
@@ -5710,6 +5744,9 @@ impl<'a> GitInspection<'a> {
                 self.repository.git_dir.path().join("empty-config"),
             )
             .env_remove("GIT_CONFIG_NOSYSTEM");
+        // Preserve gitlink commit/index reporting without launching Git inside
+        // populated submodules, whose repository config is not isolated here.
+        command.arg("-c").arg("diff.ignoreSubmodules=dirty");
         if let Some(source) = &self.repository.attribute_source {
             command.env("GIT_ATTR_SOURCE", source);
         } else {
@@ -9260,6 +9297,200 @@ mod workspace_panel_tests {
             status.remote_url.as_deref(),
             Some("https://example.invalid/repo.git")
         );
+    }
+
+    #[test]
+    fn git_inspection_preserves_a_loose_remote_head_symbolic_ref() {
+        let tree = TempTree::new("git-symbolic-remote-head");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "baseline\n").unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt"]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+        run_test_git(&tree.root, &["branch", "-M", "main"]);
+        run_test_git(
+            &tree.root,
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+
+        let inspection = GitInspection::new(path_text(&tree.root)).unwrap();
+
+        assert_eq!(
+            inspection
+                .execute(&["symbolic-ref", "refs/remotes/origin/HEAD"])
+                .unwrap()
+                .trim(),
+            "refs/remotes/origin/main"
+        );
+        assert_eq!(
+            inspection
+                .execute(&["rev-parse", "refs/remotes/origin/HEAD"])
+                .unwrap()
+                .trim(),
+            run_test_git_stdout_with_env(&tree.root, &["rev-parse", "HEAD"], &[]).trim()
+        );
+        assert!(git_status(path_text(&tree.root).to_string()).is_ok());
+    }
+
+    #[test]
+    fn parent_inspection_does_not_execute_populated_submodule_helpers() {
+        let tree = TempTree::new("git-submodule-inspection");
+        let parent = tree.root.join("parent");
+        let source = tree.root.join("submodule-source");
+        let submodule = parent.join("vendor/submodule");
+        let filter_helper = tree.root.join("submodule-filter.sh");
+        let filter_marker = tree.root.join("submodule-filter-ran");
+        let fsmonitor_helper = tree.root.join("submodule-fsmonitor.sh");
+        let fsmonitor_marker = tree.root.join("submodule-fsmonitor-ran");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        write_marker_executable(&filter_helper);
+        write_marker_executable(&fsmonitor_helper);
+
+        run_test_git(&source, &["init", "-q"]);
+        run_test_git(&source, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &source,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(source.join("tracked.txt"), "baseline\n").unwrap();
+        std::fs::write(
+            source.join(".gitattributes"),
+            "tracked.txt filter=malicious-submodule\n",
+        )
+        .unwrap();
+        run_test_git(&source, &["add", "tracked.txt", ".gitattributes"]);
+        run_test_git(&source, &["commit", "-qm", "baseline"]);
+
+        run_test_git(&parent, &["init", "-q"]);
+        run_test_git(&parent, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &parent,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        run_test_git(
+            &parent,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                path_text(&source),
+                "vendor/submodule",
+            ],
+        );
+        run_test_git(&parent, &["commit", "-qam", "add submodule"]);
+        run_test_git(
+            &submodule,
+            &[
+                "config",
+                "filter.malicious-submodule.clean",
+                &format!("{}; cat", marker_command(&filter_helper, &filter_marker)),
+            ],
+        );
+        run_test_git(
+            &submodule,
+            &["config", "filter.malicious-submodule.required", "true"],
+        );
+        run_test_git(
+            &submodule,
+            &[
+                "config",
+                "core.fsmonitor",
+                &marker_command(&fsmonitor_helper, &fsmonitor_marker),
+            ],
+        );
+        std::fs::write(submodule.join("tracked.txt"), "dirty\n").unwrap();
+
+        run_test_git(&parent, &["status", "--porcelain"]);
+        assert!(fsmonitor_marker.exists());
+        std::fs::remove_file(&fsmonitor_marker).unwrap();
+        run_test_git(&submodule, &["config", "--unset", "core.fsmonitor"]);
+        run_test_git(&submodule, &["diff", "--no-color"]);
+        assert!(filter_marker.exists());
+        std::fs::remove_file(&filter_marker).unwrap();
+        run_test_git(
+            &submodule,
+            &[
+                "config",
+                "core.fsmonitor",
+                &marker_command(&fsmonitor_helper, &fsmonitor_marker),
+            ],
+        );
+
+        let status = git_status(path_text(&parent).to_string()).unwrap();
+        assert!(status.files.is_empty());
+        assert!(!filter_marker.exists());
+        assert!(!fsmonitor_marker.exists());
+
+        let diff = git_diff(path_text(&parent).to_string(), None, Some(false), None).unwrap();
+        assert!(diff.text.is_empty());
+        assert!(!filter_marker.exists());
+        assert!(!fsmonitor_marker.exists());
+
+        let worktrees = git_worktrees(path_text(&parent).to_string()).unwrap();
+        assert_eq!(worktrees.len(), 1);
+        assert!(!worktrees[0].dirty);
+        assert!(!filter_marker.exists());
+        assert!(!fsmonitor_marker.exists());
+
+        run_test_git(&submodule, &["add", "tracked.txt"]);
+        run_test_git(&submodule, &["commit", "-qm", "advance submodule"]);
+        if filter_marker.exists() {
+            std::fs::remove_file(&filter_marker).unwrap();
+        }
+        if fsmonitor_marker.exists() {
+            std::fs::remove_file(&fsmonitor_marker).unwrap();
+        }
+
+        let status = git_status(path_text(&parent).to_string()).unwrap();
+        assert_eq!(status.files.len(), 1);
+        assert_eq!(status.files[0].path, "vendor/submodule");
+        assert!(status.files[0].unstaged);
+        assert!(!filter_marker.exists());
+        assert!(!fsmonitor_marker.exists());
+
+        let diff = git_diff(path_text(&parent).to_string(), None, Some(false), None).unwrap();
+        assert!(diff.text.contains("Subproject commit"));
+        assert!(!filter_marker.exists());
+        assert!(!fsmonitor_marker.exists());
+
+        let worktrees = git_worktrees(path_text(&parent).to_string()).unwrap();
+        assert!(worktrees[0].dirty);
+        assert!(!filter_marker.exists());
+        assert!(!fsmonitor_marker.exists());
+
+        run_test_git(&parent, &["add", "vendor/submodule"]);
+
+        let status = git_status(path_text(&parent).to_string()).unwrap();
+        assert_eq!(status.files.len(), 1);
+        assert!(status.files[0].staged);
+        assert!(!status.files[0].unstaged);
+        assert!(!filter_marker.exists());
+        assert!(!fsmonitor_marker.exists());
+
+        let diff = git_diff(path_text(&parent).to_string(), None, Some(true), None).unwrap();
+        assert!(diff.text.contains("Subproject commit"));
+        assert!(!filter_marker.exists());
+        assert!(!fsmonitor_marker.exists());
+
+        let worktrees = git_worktrees(path_text(&parent).to_string()).unwrap();
+        assert!(worktrees[0].dirty);
+        assert!(!filter_marker.exists());
+        assert!(!fsmonitor_marker.exists());
     }
 
     #[test]
