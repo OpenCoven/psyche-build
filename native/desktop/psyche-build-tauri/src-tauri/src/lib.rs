@@ -42,8 +42,6 @@ use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
 };
-use unicode_normalization::UnicodeNormalization;
-
 mod control_provider;
 mod coven_sessions;
 mod metrics;
@@ -99,6 +97,7 @@ std::thread_local! {
         RefCell::new(Vec::new());
     static TEST_GIT_FILTER_SCOPE_QUERIES: RefCell<Vec<String>> = RefCell::new(Vec::new());
     static TEST_GIT_COMMAND_COUNT: RefCell<usize> = const { RefCell::new(0) };
+    static TEST_GIT_METADATA_READ_LIMITS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 fn safe_browser_label(label: Option<String>) -> String {
@@ -5656,7 +5655,10 @@ fn snapshot_git_shallow(
         .map_err(|e| format!("snapshot Git shallow boundary: {e}"))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
+
+#[cfg(any(windows, test))]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
 #[cfg(windows)]
@@ -5684,15 +5686,33 @@ struct WindowsGitMetadataState {
 }
 
 #[cfg(any(windows, test))]
-fn windows_git_metadata_path_matches_handle(
-    path: WindowsGitMetadataState,
-    handle: WindowsGitMetadataState,
+fn windows_git_metadata_same_identity(
+    before: WindowsGitMetadataState,
+    after: WindowsGitMetadataState,
 ) -> bool {
-    path.volume_serial_number == handle.volume_serial_number
-        && path.file_index == handle.file_index
-        && path.file_attributes == handle.file_attributes
-        && path.file_size == handle.file_size
-        && path.last_write_time == handle.last_write_time
+    before.volume_serial_number == after.volume_serial_number
+        && before.file_index == after.file_index
+}
+
+#[cfg(any(windows, test))]
+fn windows_git_metadata_file_state_matches(
+    before: WindowsGitMetadataState,
+    after: WindowsGitMetadataState,
+) -> bool {
+    windows_git_metadata_same_identity(before, after)
+        && before.file_attributes == after.file_attributes
+        && before.file_size == after.file_size
+        && before.last_write_time == after.last_write_time
+}
+
+#[cfg(any(windows, test))]
+fn windows_git_metadata_directory_state_matches(
+    before: WindowsGitMetadataState,
+    after: WindowsGitMetadataState,
+) -> bool {
+    windows_git_metadata_same_identity(before, after)
+        && before.file_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+            == after.file_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -5919,19 +5939,40 @@ fn windows_open_relative_no_follow(
     Ok(unsafe { std::fs::File::from_raw_handle(handle) })
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum GitMetadataReadError {
+    TooLarge,
+    Other(String),
+}
+
+impl From<String> for GitMetadataReadError {
+    fn from(error: String) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl GitMetadataReadError {
+    fn into_message(self, label: &str) -> String {
+        match self {
+            Self::TooLarge => format!("{label} is too large"),
+            Self::Other(error) => error,
+        }
+    }
+}
+
 #[cfg(all(not(unix), not(windows)))]
 fn read_bounded_git_metadata_file(
     path: &Path,
     label: &str,
     max_bytes: u64,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, GitMetadataReadError> {
     let before =
         std::fs::symlink_metadata(path).map_err(|error| format!("inspect {label}: {error}"))?;
     if metadata_is_link_like(&before) || !before.is_file() {
-        return Err(format!("{label} is not a regular file"));
+        return Err(format!("{label} is not a regular file").into());
     }
     if before.len() > max_bytes {
-        return Err(format!("{label} is too large"));
+        return Err(GitMetadataReadError::TooLarge);
     }
     let path_before_state = other_git_metadata_state(&before, label)?;
 
@@ -5944,21 +5985,21 @@ fn read_bounded_git_metadata_file(
         .metadata()
         .map_err(|error| format!("inspect open {label}: {error}"))?;
     if metadata_is_link_like(&handle_before_metadata) || !handle_before_metadata.is_file() {
-        return Err(format!("{label} is not a regular file"));
+        return Err(format!("{label} is not a regular file").into());
     }
     if handle_before_metadata.len() > max_bytes {
-        return Err(format!("{label} is too large"));
+        return Err(GitMetadataReadError::TooLarge);
     }
     let handle_before_state = other_git_metadata_state(&handle_before_metadata, label)?;
     if path_before_state != handle_before_state {
-        return Err(format!("{label} changed while being opened"));
+        return Err(format!("{label} changed while being opened").into());
     }
 
     let read_limit = max_bytes
         .checked_add(1)
         .ok_or_else(|| format!("{label} byte limit is invalid"))?;
     let initial_capacity = usize::try_from(handle_before_metadata.len())
-        .map_err(|_| format!("{label} is too large"))?;
+        .map_err(|_| GitMetadataReadError::TooLarge)?;
     let mut bytes = Vec::with_capacity(initial_capacity);
     std::io::Read::by_ref(&mut file)
         .take(read_limit)
@@ -5969,25 +6010,25 @@ fn read_bounded_git_metadata_file(
         .metadata()
         .map_err(|error| format!("inspect open {label} after reading: {error}"))?;
     if metadata_is_link_like(&handle_after_metadata) || !handle_after_metadata.is_file() {
-        return Err(format!("{label} changed while being read"));
+        return Err(format!("{label} changed while being read").into());
     }
     let handle_after_state = other_git_metadata_state(&handle_after_metadata, label)?;
     if handle_before_state != handle_after_state {
-        return Err(format!("{label} changed while being read"));
+        return Err(format!("{label} changed while being read").into());
     }
-    let bytes_read = u64::try_from(bytes.len()).map_err(|_| format!("{label} is too large"))?;
+    let bytes_read = u64::try_from(bytes.len()).map_err(|_| GitMetadataReadError::TooLarge)?;
     if bytes_read > max_bytes {
-        return Err(format!("{label} is too large"));
+        return Err(GitMetadataReadError::TooLarge);
     }
 
     let after = std::fs::symlink_metadata(path)
         .map_err(|error| format!("inspect {label} after reading: {error}"))?;
     if metadata_is_link_like(&after) || !after.is_file() {
-        return Err(format!("{label} changed while being read"));
+        return Err(format!("{label} changed while being read").into());
     }
     let path_after_state = other_git_metadata_state(&after, label)?;
     if path_before_state != path_after_state || path_after_state != handle_after_state {
-        return Err(format!("{label} changed while being read"));
+        return Err(format!("{label} changed while being read").into());
     }
     Ok(bytes)
 }
@@ -5998,6 +6039,14 @@ fn validate_git_metadata_child_name(name: &str, label: &str) -> Result<(), Strin
     }
     Ok(())
 }
+
+#[cfg(test)]
+fn record_git_metadata_read_limit(max_bytes: u64) {
+    TEST_GIT_METADATA_READ_LIMITS.with(|limits| limits.borrow_mut().push(max_bytes));
+}
+
+#[cfg(not(test))]
+fn record_git_metadata_read_limit(_max_bytes: u64) {}
 
 #[cfg(unix)]
 struct GitMetadataDirectory {
@@ -6017,7 +6066,13 @@ impl GitMetadataDirectory {
         Ok(Self { directory, state })
     }
 
-    fn read_file(&self, name: &str, label: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+    fn read_file(
+        &self,
+        name: &str,
+        label: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, GitMetadataReadError> {
+        record_git_metadata_read_limit(max_bytes);
         validate_git_metadata_child_name(name, label)?;
         let name = CString::new(name).map_err(|_| format!("{label} has an invalid file name"))?;
         let fd = unsafe {
@@ -6030,24 +6085,24 @@ impl GitMetadataDirectory {
         if fd < 0 {
             let error = std::io::Error::last_os_error();
             if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
-                return Err(format!("{label} is not a regular file"));
+                return Err(format!("{label} is not a regular file").into());
             }
-            return Err(format!("open {label}: {error}"));
+            return Err(format!("open {label}: {error}").into());
         }
         let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
         let before = file_state(&file).map_err(|error| format!("inspect open {label}: {error}"))?;
         if before.mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFREG) {
-            return Err(format!("{label} is not a regular file"));
+            return Err(format!("{label} is not a regular file").into());
         }
         if before.size > max_bytes {
-            return Err(format!("{label} is too large"));
+            return Err(GitMetadataReadError::TooLarge);
         }
 
         let read_limit = max_bytes
             .checked_add(1)
             .ok_or_else(|| format!("{label} byte limit is invalid"))?;
         let initial_capacity =
-            usize::try_from(before.size).map_err(|_| format!("{label} is too large"))?;
+            usize::try_from(before.size).map_err(|_| GitMetadataReadError::TooLarge)?;
         let mut bytes = Vec::with_capacity(initial_capacity);
         std::io::Read::by_ref(&mut file)
             .take(read_limit)
@@ -6057,11 +6112,11 @@ impl GitMetadataDirectory {
         let after = file_state(&file)
             .map_err(|error| format!("inspect open {label} after reading: {error}"))?;
         if before != after {
-            return Err(format!("{label} changed while being read"));
+            return Err(format!("{label} changed while being read").into());
         }
-        let bytes_read = u64::try_from(bytes.len()).map_err(|_| format!("{label} is too large"))?;
+        let bytes_read = u64::try_from(bytes.len()).map_err(|_| GitMetadataReadError::TooLarge)?;
         if bytes_read > max_bytes {
-            return Err(format!("{label} is too large"));
+            return Err(GitMetadataReadError::TooLarge);
         }
         Ok(bytes)
     }
@@ -6087,8 +6142,6 @@ struct GitMetadataDirectory {
 #[cfg(windows)]
 impl GitMetadataDirectory {
     fn open(path: &Path, label: &str) -> Result<Self, String> {
-        const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
-
         let directory = windows_open_directory_no_follow(path, label)?;
         let state = windows_git_metadata_handle_state(&directory, label)?;
         if state.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
@@ -6099,24 +6152,29 @@ impl GitMetadataDirectory {
         Ok(Self { directory, state })
     }
 
-    fn read_file(&self, name: &str, label: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
-        const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
+    fn read_file(
+        &self,
+        name: &str,
+        label: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, GitMetadataReadError> {
+        record_git_metadata_read_limit(max_bytes);
 
         validate_git_metadata_child_name(name, label)?;
         let mut file = windows_open_relative_no_follow(&self.directory, name, label)?;
         let before = windows_git_metadata_handle_state(&file, label)?;
         if before.file_attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
-            return Err(format!("{label} is not a regular file"));
+            return Err(format!("{label} is not a regular file").into());
         }
         if before.file_size > max_bytes {
-            return Err(format!("{label} is too large"));
+            return Err(GitMetadataReadError::TooLarge);
         }
 
         let read_limit = max_bytes
             .checked_add(1)
             .ok_or_else(|| format!("{label} byte limit is invalid"))?;
         let initial_capacity =
-            usize::try_from(before.file_size).map_err(|_| format!("{label} is too large"))?;
+            usize::try_from(before.file_size).map_err(|_| GitMetadataReadError::TooLarge)?;
         let mut bytes = Vec::with_capacity(initial_capacity);
         std::io::Read::by_ref(&mut file)
             .take(read_limit)
@@ -6124,24 +6182,22 @@ impl GitMetadataDirectory {
             .map_err(|error| format!("read {label}: {error}"))?;
 
         let after = windows_git_metadata_handle_state(&file, label)?;
-        if !windows_git_metadata_path_matches_handle(before, after)
+        if !windows_git_metadata_file_state_matches(before, after)
             || after.file_attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)
                 != 0
         {
-            return Err(format!("{label} changed while being read"));
+            return Err(format!("{label} changed while being read").into());
         }
-        let bytes_read = u64::try_from(bytes.len()).map_err(|_| format!("{label} is too large"))?;
+        let bytes_read = u64::try_from(bytes.len()).map_err(|_| GitMetadataReadError::TooLarge)?;
         if bytes_read > max_bytes {
-            return Err(format!("{label} is too large"));
+            return Err(GitMetadataReadError::TooLarge);
         }
         Ok(bytes)
     }
 
     fn validate(&self, label: &str) -> Result<(), String> {
-        const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
-
         let after = windows_git_metadata_handle_state(&self.directory, label)?;
-        if !windows_git_metadata_path_matches_handle(self.state, after)
+        if !windows_git_metadata_directory_state_matches(self.state, after)
             || after.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
             || after.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
         {
@@ -6172,7 +6228,13 @@ impl GitMetadataDirectory {
         })
     }
 
-    fn read_file(&self, name: &str, label: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+    fn read_file(
+        &self,
+        name: &str,
+        label: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, GitMetadataReadError> {
+        record_git_metadata_read_limit(max_bytes);
         validate_git_metadata_child_name(name, label)?;
         read_bounded_git_metadata_file(&self.path.join(name), label, max_bytes)
     }
@@ -6325,11 +6387,18 @@ fn is_valid_git_reftable_table_name(name: &str) -> bool {
             return true;
         }
 
-        let uppercase = stem.to_ascii_uppercase();
-        let bytes = uppercase.as_bytes();
-        bytes.len() == 4
-            && (bytes.starts_with(b"COM") || bytes.starts_with(b"LPT"))
-            && matches!(bytes[3], b'1'..=b'9')
+        let bytes = stem.as_bytes();
+        let Some(prefix) = bytes.get(..3) else {
+            return false;
+        };
+        if !prefix.eq_ignore_ascii_case(b"COM") && !prefix.eq_ignore_ascii_case(b"LPT") {
+            return false;
+        }
+
+        matches!(
+            &stem[3..],
+            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+        )
     }
 
     if name.ends_with([' ', '.'])
@@ -6340,7 +6409,6 @@ fn is_valid_git_reftable_table_name(name: &str) -> bool {
                     '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
                 )
         })
-        || !name.nfc().eq(name.chars())
     {
         return false;
     }
@@ -6367,8 +6435,10 @@ where
     let directory = GitMetadataDirectory::open(source, "Git reftable directory")?;
     let hook_guard = after_directory_open();
 
-    let list_bytes =
-        directory.read_file("tables.list", "Git reftable table list", limits.list_bytes)?;
+    let list_label = "Git reftable table list";
+    let list_bytes = directory
+        .read_file("tables.list", list_label, limits.list_bytes)
+        .map_err(|error| error.into_message(list_label))?;
     let tables = std::str::from_utf8(&list_bytes)
         .map_err(|_| "Git reftable table list is not UTF-8".to_string())?;
     let mut names = Vec::new();
@@ -6388,11 +6458,20 @@ where
     let mut snapshots = Vec::with_capacity(names.len());
     let mut total_bytes = 0_u64;
     for table in names {
-        let bytes = directory.read_file(
-            table,
-            &format!("Git reftable table {table}"),
-            limits.table_bytes,
-        )?;
+        let remaining_bytes = limits
+            .total_bytes
+            .checked_sub(total_bytes)
+            .ok_or_else(|| "Git reftable aggregate size is too large".to_string())?;
+        let read_limit = limits.table_bytes.min(remaining_bytes);
+        let aggregate_limited = remaining_bytes < limits.table_bytes;
+        let label = format!("Git reftable table {table}");
+        let bytes = match directory.read_file(table, &label, read_limit) {
+            Ok(bytes) => bytes,
+            Err(GitMetadataReadError::TooLarge) if aggregate_limited => {
+                return Err("Git reftable aggregate size is too large".to_string());
+            }
+            Err(error) => return Err(error.into_message(&label)),
+        };
         let table_bytes = u64::try_from(bytes.len())
             .map_err(|_| "Git reftable aggregate size overflowed".to_string())?;
         total_bytes = total_bytes
@@ -11583,6 +11662,7 @@ mod workspace_panel_tests {
     const REPRESENTATIVE_GIT_REFTABLE_TABLE: &str = "0x000000000001-0x000000000002-3b8de075.ref";
     const SPEC_GIT_REFTABLE_LOG: &str = "00000001-00000001-RANDOM1.log";
     const SAFE_ARBITRARY_GIT_REFTABLE_TABLE: &str = "réftable-随机-7Kp9.ref";
+    const SAFE_DECOMPOSED_GIT_REFTABLE_TABLE: &str = "re\u{301}ftable.ref";
 
     fn write_test_reftable_table_list(source: &Path, names: &[&str]) {
         let mut list = names.join("\n");
@@ -11595,11 +11675,17 @@ mod workspace_panel_tests {
             "NUL.ref",
             "COM1.ref",
             "COM1.any.ref",
+            "cOm\u{00b9}.ref",
+            "COM\u{00b2}.any.ref",
+            "com\u{00b3}.log",
             "nul.any.log",
             "CLOCK$.ref",
             "CONIN$.log",
             "CONOUT$.any.ref",
             "LPT9.log",
+            "LpT\u{00b9}.log",
+            "LPT\u{00b2}.any.log",
+            "lpt\u{00b3}.ref",
             "NUL .ref",
             "safe.ref.",
             "safe.ref ",
@@ -11610,7 +11696,6 @@ mod workspace_panel_tests {
             ".ref",
             ".log",
             "nested/name.ref",
-            "re\u{301}ftable.ref",
         ]
         .into_iter()
         .map(str::to_string)
@@ -11630,6 +11715,7 @@ mod workspace_panel_tests {
             REPRESENTATIVE_GIT_REFTABLE_TABLE,
             SPEC_GIT_REFTABLE_LOG,
             SAFE_ARBITRARY_GIT_REFTABLE_TABLE,
+            SAFE_DECOMPOSED_GIT_REFTABLE_TABLE,
         ] {
             assert!(
                 is_valid_git_reftable_table_name(name),
@@ -11673,21 +11759,88 @@ mod workspace_panel_tests {
     }
 
     #[test]
-    fn git_metadata_windows_identity_distinguishes_file_ids() {
-        let path = WindowsGitMetadataState {
+    fn git_metadata_windows_directory_state_ignores_mutable_size_and_time() {
+        let before = WindowsGitMetadataState {
+            volume_serial_number: 7,
+            file_index: 11,
+            file_attributes: FILE_ATTRIBUTE_DIRECTORY,
+            file_size: 23,
+            last_write_time: 29,
+        };
+        let after = WindowsGitMetadataState {
+            file_size: 31,
+            last_write_time: 37,
+            ..before
+        };
+
+        assert!(windows_git_metadata_directory_state_matches(before, after));
+    }
+
+    #[test]
+    fn git_metadata_windows_directory_state_rejects_identity_reparse_and_type_changes() {
+        let directory = WindowsGitMetadataState {
+            volume_serial_number: 7,
+            file_index: 11,
+            file_attributes: FILE_ATTRIBUTE_DIRECTORY,
+            file_size: 23,
+            last_write_time: 29,
+        };
+
+        assert!(!windows_git_metadata_directory_state_matches(
+            directory,
+            WindowsGitMetadataState {
+                volume_serial_number: 13,
+                ..directory
+            }
+        ));
+        assert!(!windows_git_metadata_directory_state_matches(
+            directory,
+            WindowsGitMetadataState {
+                file_index: 17,
+                ..directory
+            }
+        ));
+        assert!(!windows_git_metadata_directory_state_matches(
+            directory,
+            WindowsGitMetadataState {
+                file_attributes: FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT,
+                ..directory
+            }
+        ));
+        assert!(!windows_git_metadata_directory_state_matches(
+            directory,
+            WindowsGitMetadataState {
+                file_attributes: 0,
+                ..directory
+            }
+        ));
+    }
+
+    #[test]
+    fn git_metadata_windows_file_state_compares_size_and_time() {
+        let file = WindowsGitMetadataState {
             volume_serial_number: 7,
             file_index: 11,
             file_attributes: 0,
             file_size: 23,
             last_write_time: 29,
         };
-        let handle = WindowsGitMetadataState {
-            file_index: 13,
-            ..path
-        };
 
-        assert!(windows_git_metadata_path_matches_handle(path, path));
-        assert!(!windows_git_metadata_path_matches_handle(path, handle));
+        assert!(windows_git_metadata_file_state_matches(file, file));
+        assert!(!windows_git_metadata_file_state_matches(
+            file,
+            WindowsGitMetadataState {
+                file_size: 31,
+                ..file
+            }
+        ));
+        assert!(!windows_git_metadata_file_state_matches(
+            file,
+            WindowsGitMetadataState {
+                last_write_time: 37,
+                ..file
+            }
+        ));
     }
 
     #[cfg(unix)]
@@ -11907,6 +12060,34 @@ mod workspace_panel_tests {
         .unwrap_err();
 
         assert!(error.contains("aggregate size"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn git_reftable_snapshot_caps_reads_to_remaining_aggregate_budget() {
+        let tree = TempTree::new("git-reftable-remaining-budget");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(
+            &source,
+            &[TEST_REFTABLE_TABLE_ONE, TEST_REFTABLE_TABLE_TWO],
+        );
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"12345678").unwrap();
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_TWO), b"12345").unwrap();
+        TEST_GIT_METADATA_READ_LIMITS.with(|limits| limits.borrow_mut().clear());
+
+        let error = snapshot_git_reftable_with_limits(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+        )
+        .unwrap_err();
+
+        let read_limits =
+            TEST_GIT_METADATA_READ_LIMITS.with(|limits| std::mem::take(&mut *limits.borrow_mut()));
+        assert_eq!(read_limits, vec![32, 8, 4]);
+        assert_eq!(error, "Git reftable aggregate size is too large");
         assert!(!destination.exists());
     }
 
