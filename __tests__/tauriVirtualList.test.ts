@@ -242,9 +242,12 @@ describe('desktop collection virtualization', () => {
     expect(mainJs).toContain('restoreFocusKey: fileScrollFocusKey');
     expect(mainJs).toContain('var requestedRestoreKey = options && options.restoreFocusKey');
     expect(mainJs).toContain('var restoreFileFocusKey = options && options.restoreFocusKey');
+    expect(mainJs).toContain('var replacementProjectFilesButton = activeProjectFilesId');
     expect(mainJs).toContain(
-      'if (shouldRestoreTreeFocus && (!requestedRestoreKey || requestedFocusItem)) preferred.focus();',
+      'if (!replacementProjectFilesButton &&\n' +
+      '          shouldRestoreTreeFocus && (!requestedRestoreKey || requestedFocusItem)) {',
     );
+    expect(mainJs).toContain('if (replacementProjectFilesButton) replacementProjectFilesButton.focus();');
   });
 
   it('maps session scroll coordinates through measured category structure', () => {

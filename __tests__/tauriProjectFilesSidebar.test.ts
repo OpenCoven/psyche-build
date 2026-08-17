@@ -79,12 +79,20 @@ class FakeEvent {
 
 class FakeDocument {
   private readonly elementsById = new Map<string, FakeElement>();
+  activeElement: FakeElement | null;
+  readonly body: FakeElement;
+
+  constructor() {
+    this.body = new FakeElement('body', this);
+    this.activeElement = this.body;
+  }
 
   createElement(tagName: string) {
-    return new FakeElement(tagName);
+    return new FakeElement(tagName, this);
   }
 
   registerElement(id: string, element: FakeElement) {
+    element.attachDocument(this);
     element.setAttribute('id', id);
     this.elementsById.set(id, element);
     return element;
@@ -102,21 +110,45 @@ class FakeElement {
   readonly children: FakeElement[] = [];
   readonly listeners = new Map<string, Listener[]>();
   readonly style = new FakeStyle();
+  ownerDocument: FakeDocument | null = null;
   parentNode: FakeElement | null = null;
   className = '';
   textContent = '';
   title = '';
   type = '';
   focused = false;
+  hidden = false;
 
-  constructor(tagName: string) {
+  constructor(tagName: string, ownerDocument: FakeDocument | null = null) {
     this.tagName = tagName.toUpperCase();
+    this.ownerDocument = ownerDocument;
+  }
+
+  get classList() {
+    return {
+      contains: (name: string) => this.className.split(/\s+/).includes(name),
+    };
+  }
+
+  attachDocument(document: FakeDocument) {
+    this.ownerDocument = document;
+    this.children.forEach((child) => child.attachDocument(document));
   }
 
   appendChild(child: FakeElement) {
     child.parentNode = this;
+    if (this.ownerDocument) child.attachDocument(this.ownerDocument);
     this.children.push(child);
     return child;
+  }
+
+  replaceChildren(...children: FakeElement[]) {
+    this.releaseFocusedDescendant();
+    this.children.forEach((child) => {
+      child.parentNode = null;
+    });
+    this.children.splice(0, this.children.length);
+    children.forEach((child) => this.appendChild(child));
   }
 
   setAttribute(name: string, value: string) {
@@ -125,6 +157,16 @@ class FakeElement {
 
   getAttribute(name: string) {
     return this.attributes.get(name) ?? null;
+  }
+
+  removeAttribute(name: string) {
+    this.attributes.delete(name);
+  }
+
+  contains(candidate: FakeElement | null): boolean {
+    if (!candidate) return false;
+    if (candidate === this) return true;
+    return this.children.some((child) => child.contains(candidate));
   }
 
   addEventListener(name: string, listener: Listener) {
@@ -145,7 +187,40 @@ class FakeElement {
   }
 
   focus() {
+    const activeElement = this.ownerDocument?.activeElement;
+    if (activeElement) activeElement.focused = false;
     this.focused = true;
+    if (this.ownerDocument) this.ownerDocument.activeElement = this;
+  }
+
+  querySelector(selector: string): FakeElement | null {
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
+
+  querySelectorAll(selector: string): FakeElement[] {
+    const matches: FakeElement[] = [];
+    const visit = (element: FakeElement) => {
+      const matchesSelector = selector === '[data-tree-item]'
+        ? Boolean(element.dataset.treeItem)
+        : selector === '[data-project-files]'
+          ? Boolean(element.dataset.projectFiles)
+          : selector === 'button'
+            ? element.tagName === 'BUTTON'
+            : selector.startsWith('.')
+              ? element.classList.contains(selector.slice(1))
+              : false;
+      if (matchesSelector) matches.push(element);
+      element.children.forEach(visit);
+    };
+    this.children.forEach(visit);
+    return matches;
+  }
+
+  private releaseFocusedDescendant() {
+    const activeElement = this.ownerDocument?.activeElement ?? null;
+    if (!activeElement || !this.contains(activeElement)) return;
+    activeElement.focused = false;
+    if (this.ownerDocument) this.ownerDocument.activeElement = this.ownerDocument.body;
   }
 }
 
@@ -188,18 +263,30 @@ function compileFilesNavigationRenderHarness(initial: {
   activeProjectId: string;
   sidebarView: string;
   projects: FilesPanelProject[];
+  activationResults?: Record<string, boolean>;
+  document?: FakeDocument;
+  sidebarSessionControlsEl?: { hidden: boolean } | null;
+  sessionListEl?: { hidden: boolean } | null;
+  sidebarFilesEl?: { hidden: boolean } | null;
+  requestAnimationFrame?: (callback: () => void) => number;
 }) {
   return Function(
     'seedActiveProjectId',
     'seedSidebarView',
     'projects',
+    'activationResults',
+    'document',
+    'seedSidebarSessionControlsEl',
+    'seedSessionListEl',
+    'seedSidebarFilesEl',
+    'requestAnimationFrame',
     `"use strict";
     var state = { activeProjectId: seedActiveProjectId };
     var sidebarView = seedSidebarView;
     var sidebarFilesReturnProjectId = null;
-    var sidebarSessionControlsEl = null;
-    var sessionListEl = null;
-    var sidebarFilesEl = null;
+    var sidebarSessionControlsEl = seedSidebarSessionControlsEl;
+    var sessionListEl = seedSessionListEl;
+    var sidebarFilesEl = seedSidebarFilesEl;
     var syncCount = 0;
     function findProject(id) {
       return projects.find(function (project) { return project.id === id; }) || null;
@@ -210,6 +297,11 @@ function compileFilesNavigationRenderHarness(initial: {
     }
     function closeNewPaneMenu() {}
     async function setActiveProject(id) {
+      if (activationResults &&
+          Object.prototype.hasOwnProperty.call(activationResults, id) &&
+          !activationResults[id]) {
+        return false;
+      }
       if (state.activeProjectId === id) return true;
       state.activeProjectId = id;
       syncFilesPanelScope();
@@ -225,6 +317,15 @@ function compileFilesNavigationRenderHarness(initial: {
     initial.activeProjectId,
     initial.sidebarView,
     initial.projects,
+    initial.activationResults ?? null,
+    initial.document ?? new FakeDocument(),
+    initial.sidebarSessionControlsEl ?? null,
+    initial.sessionListEl ?? null,
+    initial.sidebarFilesEl ?? null,
+    initial.requestAnimationFrame ?? ((callback: () => void) => {
+      callback();
+      return 1;
+    }),
   ) as {
     showProjectFiles: (projectId: string) => Promise<boolean>;
     getSyncCount: () => number;
@@ -461,6 +562,132 @@ function compileRenderFilesPanelHarness(dependencies: {
   };
 }
 
+function compileRenderSessionListFocusHarness(initial: {
+  document?: FakeDocument;
+  sessionListEl?: FakeElement;
+  projects: FilesPanelProject[];
+  activeProjectId?: string;
+  sessionTreeFocusKey?: string;
+}) {
+  const documentRef = initial.document ?? new FakeDocument();
+  const sessionListRef = initial.sessionListEl ?? new FakeElement('div', documentRef);
+  return Function(
+    'document',
+    'sessionListEl',
+    'seedProjects',
+    'seedActiveProjectId',
+    'seedSessionTreeFocusKey',
+    `"use strict";
+    var editingContext = null;
+    var projectAppearancePopover = null;
+    var projectAppearancePopoverRestoreKey = "";
+    var armedSessionClose = null;
+    var setPicking = null;
+    var sessionTypeFilter = "all";
+    var sessionTreeFocusKey = seedSessionTreeFocusKey;
+    var projectAppearances = {};
+    var isRestoringWorkspace = false;
+    var state = {
+      projects: seedProjects,
+      threads: [],
+      activeProjectId: seedActiveProjectId,
+      activeThreadId: null,
+    };
+    var settings = { selectedSessionKey: "" };
+    var covenDiscovery = { phase: "ready" };
+    function closeProjectAppearancePopover() {}
+    function syncLocalSidebarStatusKeys() {}
+    function disarmSessionClose() {}
+    function covenInlineState() { return null; }
+    function canvasThreadIds() { return []; }
+    function covenSessionAssignments() { return new Map(); }
+    function covenSessionsForProject() { return []; }
+    function saveSettings() {}
+    function findThread() { return null; }
+    function refreshSidebar() {}
+    function saveWorkspaceSoon() {}
+    function clearFocusSet() {}
+    function setActiveProject() { return Promise.resolve(true); }
+    function showProjectFiles() { return Promise.resolve(true); }
+    function openSessionContextMenu() {}
+    function activateProjectWorktree() { return Promise.resolve(true); }
+    function createProjectGroup(projectModel, options) {
+      var group = document.createElement("div");
+      group.className = "session-project" + (options.current ? " is-current" : "");
+      group.dataset.treeItem = "project";
+      group.dataset.treeKey = projectModel.key;
+      group.dataset.projectId = projectModel.project.id;
+      var head = document.createElement("div");
+      head.className = "session-project-head";
+      var disclosure = document.createElement("button");
+      disclosure.className = "session-disclosure";
+      var files = document.createElement("button");
+      files.className = "session-project-files";
+      files.dataset.projectFiles = projectModel.project.id;
+      files.textContent = "Files";
+      head.appendChild(disclosure);
+      head.appendChild(files);
+      var children = document.createElement("div");
+      children.className = "session-project-children";
+      group.appendChild(head);
+      return {
+        group: group,
+        head: head,
+        disclosure: disclosure,
+        files: files,
+        children: children,
+      };
+    }
+    var PsycheSessions = {
+      buildSidebarProjectModel: function (options) {
+        return {
+          key: "project:" + options.project.id,
+          title: options.project.id,
+          titleMatches: [],
+          expanded: false,
+          autoExpanded: false,
+          count: 0,
+          attentionCount: 0,
+          visibleCount: 1,
+          branches: [],
+          project: options.project,
+        };
+      },
+      resolveProjectAppearance: function () {
+        return {
+          accent: { id: "violet", rgb: "120 90 200" },
+          customized: false,
+          glyph: null,
+        };
+      },
+    };
+    ${functionSource('renderSessionList')}
+    return {
+      renderSessionList: renderSessionList,
+      projectFilesButtons: function () {
+        return sessionListEl.querySelectorAll("[data-project-files]");
+      },
+      treeItems: function () {
+        return sessionListEl.querySelectorAll("[data-tree-item]");
+      },
+      sessionTreeFocusKey: function () {
+        return sessionTreeFocusKey;
+      },
+    };`,
+  )(
+    documentRef,
+    sessionListRef,
+    initial.projects,
+    initial.activeProjectId ?? '',
+    initial.sessionTreeFocusKey ?? '',
+  ) as {
+    renderSessionList: (options?: Record<string, unknown>) => void;
+    projectFilesButtons: () => FakeElement[];
+    treeItems: () => FakeElement[];
+    sessionTreeFocusKey: () => string;
+  };
+}
+
 describe('project Files sidebar navigation', () => {
   it('activates the project before switching to Files and keeps the selected worktree intact', async () => {
     const project = {
@@ -502,6 +729,36 @@ describe('project Files sidebar navigation', () => {
     expect(project.selectedWorktreePath).toBe('/repo/worktrees/feature');
   });
 
+  it('moves keyboard/click project Files focus to files-back after activation', async () => {
+    const document = new FakeDocument();
+    const sidebarSessionControlsEl = document.createElement('div');
+    const sessionListEl = document.createElement('div');
+    const sidebarFilesEl = document.createElement('div');
+    sidebarFilesEl.hidden = true;
+    const filesBack = document.registerElement('files-back', document.createElement('button'));
+    sidebarFilesEl.appendChild(filesBack);
+    const origin = document.createElement('button');
+    origin.dataset.projectFiles = 'project-1';
+    sessionListEl.appendChild(origin);
+    origin.focus();
+
+    const navigation = compileFilesNavigationRenderHarness({
+      activeProjectId: '',
+      sidebarView: 'sessions',
+      projects: [{ id: 'project-1', root: '/repo/one' }],
+      document,
+      sidebarSessionControlsEl,
+      sessionListEl,
+      sidebarFilesEl,
+    });
+
+    await expect(navigation.showProjectFiles('project-1')).resolves.toBe(true);
+    expect(sidebarSessionControlsEl.hidden).toBe(true);
+    expect(sessionListEl.hidden).toBe(true);
+    expect(sidebarFilesEl.hidden).toBe(false);
+    expect(document.activeElement).toBe(filesBack);
+  });
+
   it('returns false when project activation fails and never switches the sidebar view', async () => {
     const setSidebarView = vi.fn();
     const sidebar = compileShowProjectFilesHarness({
@@ -532,6 +789,37 @@ describe('project Files sidebar navigation', () => {
     expect(setActiveProject).not.toHaveBeenCalled();
     expect(setSidebarView).not.toHaveBeenCalled();
     expect(sidebar.returnProjectId()).toBe('return-project');
+  });
+
+  it('does not steal focus when project Files activation fails', async () => {
+    const document = new FakeDocument();
+    const sidebarSessionControlsEl = document.createElement('div');
+    const sessionListEl = document.createElement('div');
+    const sidebarFilesEl = document.createElement('div');
+    sidebarFilesEl.hidden = true;
+    const filesBack = document.registerElement('files-back', document.createElement('button'));
+    sidebarFilesEl.appendChild(filesBack);
+    const origin = document.createElement('button');
+    origin.dataset.projectFiles = 'project-1';
+    sessionListEl.appendChild(origin);
+    origin.focus();
+
+    const navigation = compileFilesNavigationRenderHarness({
+      activeProjectId: '',
+      sidebarView: 'sessions',
+      projects: [{ id: 'project-1', root: '/repo/one' }],
+      activationResults: { 'project-1': false },
+      document,
+      sidebarSessionControlsEl,
+      sessionListEl,
+      sidebarFilesEl,
+    });
+
+    await expect(navigation.showProjectFiles('project-1')).resolves.toBe(false);
+    expect(sidebarSessionControlsEl.hidden).toBe(false);
+    expect(sessionListEl.hidden).toBe(false);
+    expect(sidebarFilesEl.hidden).toBe(true);
+    expect(document.activeElement).toBe(origin);
   });
 
   it('creates a Files button for every project group with the project-scoped label', () => {
@@ -845,6 +1133,68 @@ describe('project Files sidebar navigation', () => {
     expect(focus).toHaveBeenCalledOnce();
   });
 
+  it('restores focus to the replacement project Files button after rerendering the session list', () => {
+    const document = new FakeDocument();
+    const sessionListEl = document.createElement('div');
+    const harness = compileRenderSessionListFocusHarness({
+      document,
+      sessionListEl,
+      projects: [
+        { id: 'project-1', root: '/repo/one' },
+        { id: 'project-2', root: '/repo/two' },
+      ],
+      activeProjectId: 'project-1',
+    });
+
+    harness.renderSessionList();
+    const originalButton = harness.projectFilesButtons().find(
+      (button) => button.dataset.projectFiles === 'project-1',
+    );
+
+    expect(originalButton).toBeDefined();
+    originalButton!.focus();
+
+    harness.renderSessionList();
+
+    const replacementButton = harness.projectFilesButtons().find(
+      (button) => button.dataset.projectFiles === 'project-1',
+    );
+    const activeTreeItem = harness.treeItems().find(
+      (item) => item.dataset.treeKey === 'project:project-1',
+    );
+
+    expect(replacementButton).toBeDefined();
+    expect(replacementButton).not.toBe(originalButton);
+    expect(document.activeElement).toBe(replacementButton);
+    expect(harness.sessionTreeFocusKey()).toBe('project:project-1');
+    expect(activeTreeItem?.getAttribute('tabindex')).toBe('0');
+  });
+
+  it('keeps tree focus restoration ahead of project Files buttons for focused tree items', () => {
+    const document = new FakeDocument();
+    const sessionListEl = document.createElement('div');
+    const harness = compileRenderSessionListFocusHarness({
+      document,
+      sessionListEl,
+      projects: [{ id: 'project-1', root: '/repo/one' }],
+      activeProjectId: 'project-1',
+    });
+
+    harness.renderSessionList();
+    const originalTreeItem = harness.treeItems()[0];
+    originalTreeItem?.focus();
+
+    harness.renderSessionList();
+
+    const replacementTreeItem = harness.treeItems()[0];
+    const replacementButton = harness.projectFilesButtons()[0];
+
+    expect(replacementTreeItem).toBeDefined();
+    expect(replacementTreeItem).not.toBe(originalTreeItem);
+    expect(document.activeElement).toBe(replacementTreeItem);
+    expect(replacementButton?.focused).toBe(false);
+  });
+
   it('matches only the current Files render scope', () => {
     const project = {
       id: 'project-1',
@@ -906,7 +1256,12 @@ describe('project Files sidebar navigation', () => {
     expect(functionSource('assignSelectedWorktreePath')).toContain('syncFilesPanelScope();');
     expect(functionSource('setActiveProject')).not.toContain('renderFilesPanel');
     expect(functionSource('activateProjectWorktree')).not.toContain('renderFilesPanel');
-    expect(functionSource('setSidebarView')).toContain('if (enteringFiles) syncFilesPanelScope();');
+    const setSidebarViewSource = functionSource('setSidebarView');
+    expect(setSidebarViewSource).toContain('if (enteringFiles) {');
+    expect(setSidebarViewSource).toContain('document.getElementById("files-back")');
+    expect(setSidebarViewSource).toContain('syncFilesPanelScope();');
+    expect(setSidebarViewSource.indexOf('document.getElementById("files-back")'))
+      .toBeLessThan(setSidebarViewSource.indexOf('syncFilesPanelScope();'));
   });
 
   it('routes active project and selected worktree mutations through the central scope seams', () => {

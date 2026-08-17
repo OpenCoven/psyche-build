@@ -5461,7 +5461,28 @@
     if (sidebarFilesEl) sidebarFilesEl.hidden = !showingFiles;
     if (showingFiles) {
       closeNewPaneMenu();
-      if (enteringFiles) syncFilesPanelScope();
+      if (enteringFiles) {
+        var focusFilesControl = function () {
+          if (sidebarFilesEl && sidebarFilesEl.hidden) return false;
+          var back = document.getElementById("files-back");
+          if (back && !back.hidden && typeof back.focus === "function") {
+            back.focus();
+            if (document.activeElement === back) return true;
+          }
+          var refresh = document.getElementById("files-refresh");
+          if (refresh && !refresh.hidden && typeof refresh.focus === "function") {
+            refresh.focus();
+            if (document.activeElement === refresh) return true;
+          }
+          return false;
+        };
+        if (!focusFilesControl() && typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(function () {
+            focusFilesControl();
+          });
+        }
+        syncFilesPanelScope();
+      }
     }
     return sidebarView;
   }
@@ -7084,6 +7105,10 @@
     sessionListEl.__psycheVirtualState = virtualState;
     var preserveFocus = !options || options.preserveFocus !== false;
     var requestedRestoreKey = options && options.restoreFocusKey;
+    var activeProjectFilesId = preserveFocus &&
+      document.activeElement && document.activeElement.dataset
+      ? document.activeElement.dataset.projectFiles || ""
+      : "";
     var activeTreeKey = virtualState.focusKey || (preserveFocus &&
       document.activeElement && document.activeElement.dataset
       ? document.activeElement.dataset.treeKey
@@ -7585,6 +7610,14 @@
     var renderedItems = Array.prototype.slice.call(
       sessionListEl.querySelectorAll("[data-tree-item]")
     );
+    var replacementProjectFilesButton = activeProjectFilesId
+      ? Array.prototype.find.call(
+          sessionListEl.querySelectorAll("[data-project-files]"),
+          function (button) {
+            return button.dataset.projectFiles === activeProjectFilesId;
+          }
+        )
+      : null;
     var requestedFocusItem = renderedItems.find(function (item) {
       return requestedRestoreKey && item.dataset.treeKey === requestedRestoreKey;
     });
@@ -7601,8 +7634,12 @@
     });
     if (preferred) {
       sessionTreeFocusKey = preferred.dataset.treeKey || "";
-      if (shouldRestoreTreeFocus && (!requestedRestoreKey || requestedFocusItem)) preferred.focus();
+      if (!replacementProjectFilesButton &&
+          shouldRestoreTreeFocus && (!requestedRestoreKey || requestedFocusItem)) {
+        preferred.focus();
+      }
     }
+    if (replacementProjectFilesButton) replacementProjectFilesButton.focus();
     virtualState.focusKey = "";
   }
 
