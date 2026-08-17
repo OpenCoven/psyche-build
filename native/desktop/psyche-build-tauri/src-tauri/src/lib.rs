@@ -5428,6 +5428,108 @@ fn snapshot_git_refs(common_dir: &Path) -> Result<HashMap<String, GitRefValue>, 
     Ok(refs)
 }
 
+const MAX_GIT_SHALLOW_BYTES: u64 = 16 * 1024 * 1024;
+
+fn validate_git_shallow(bytes: &[u8], object_format: Option<&str>) -> Result<(), String> {
+    let expected_len = if object_format == Some("sha256") {
+        64
+    } else {
+        40
+    };
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| "invalid Git shallow boundary: content is not UTF-8".to_string())?;
+    if text.is_empty()
+        || text.lines().any(|oid| {
+            oid.len() != expected_len || !oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err("invalid Git shallow boundary".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_git_shallow(common_dir: &Path) -> Result<Option<Vec<u8>>, String> {
+    let directory = open_directory_no_follow(common_dir, "Git common directory")?;
+    let name = CString::new("shallow").expect("static file name has no NUL");
+    let mut file = match open_target_no_follow(&directory, &name) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("open Git shallow boundary: {error}")),
+    };
+    let before = file_state(&file)?;
+    if before.mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFREG) {
+        return Err("Git shallow boundary is not a regular file".to_string());
+    }
+    if before.size > MAX_GIT_SHALLOW_BYTES {
+        return Err("Git shallow boundary is too large".to_string());
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("read Git shallow boundary: {e}"))?;
+    let mut bytes = Vec::with_capacity(before.size as usize);
+    std::io::Read::by_ref(&mut file)
+        .take(MAX_GIT_SHALLOW_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read Git shallow boundary: {e}"))?;
+    let after = file_state(&file)?;
+    if before != after {
+        return Err("Git shallow boundary changed while being read".to_string());
+    }
+    if bytes.len() as u64 > MAX_GIT_SHALLOW_BYTES {
+        return Err("Git shallow boundary is too large".to_string());
+    }
+    Ok(Some(bytes))
+}
+
+#[cfg(not(unix))]
+fn read_git_shallow(common_dir: &Path) -> Result<Option<Vec<u8>>, String> {
+    let path = common_dir.join("shallow");
+    let before = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("inspect Git shallow boundary: {error}")),
+    };
+    if before.file_type().is_symlink() || !before.is_file() {
+        return Err("Git shallow boundary is not a regular file".to_string());
+    }
+    if before.len() > MAX_GIT_SHALLOW_BYTES {
+        return Err("Git shallow boundary is too large".to_string());
+    }
+    let mut file =
+        std::fs::File::open(&path).map_err(|e| format!("open Git shallow boundary: {e}"))?;
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    std::io::Read::by_ref(&mut file)
+        .take(MAX_GIT_SHALLOW_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read Git shallow boundary: {e}"))?;
+    let after = std::fs::symlink_metadata(&path)
+        .map_err(|e| format!("inspect Git shallow boundary after reading: {e}"))?;
+    if before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+        || after.file_type().is_symlink()
+        || !after.is_file()
+    {
+        return Err("Git shallow boundary changed while being read".to_string());
+    }
+    if bytes.len() as u64 > MAX_GIT_SHALLOW_BYTES {
+        return Err("Git shallow boundary is too large".to_string());
+    }
+    Ok(Some(bytes))
+}
+
+fn snapshot_git_shallow(
+    common_dir: &Path,
+    destination: &Path,
+    object_format: Option<&str>,
+) -> Result<(), String> {
+    let Some(bytes) = read_git_shallow(common_dir)? else {
+        return Ok(());
+    };
+    validate_git_shallow(&bytes, object_format)?;
+    std::fs::write(destination.join("shallow"), bytes)
+        .map_err(|e| format!("snapshot Git shallow boundary: {e}"))
+}
+
 fn resolve_git_ref(refs: &HashMap<String, GitRefValue>, name: &str) -> Option<String> {
     let mut current = name;
     let mut remaining = refs.len().saturating_add(1);
@@ -5673,6 +5775,11 @@ impl GitInspectionRepository {
             .map_err(|e| format!("write isolated empty Git config: {e}"))?;
         std::fs::write(git_dir.path().join("HEAD"), actual_head)
             .map_err(|e| format!("write isolated Git HEAD: {e}"))?;
+        snapshot_git_shallow(
+            &common_dir,
+            git_dir.path(),
+            object_format.map(String::as_str),
+        )?;
         if ref_storage == "reftable" {
             snapshot_git_reftable(
                 &common_dir.join("reftable"),
@@ -9748,6 +9855,82 @@ mod workspace_panel_tests {
         .unwrap();
 
         assert!(diff.text.contains("+after"));
+    }
+
+    #[test]
+    fn isolated_git_log_preserves_linked_worktree_shallow_boundary() {
+        let tree = TempTree::new("git-shallow-linked-worktree");
+        let source = tree.root.join("source");
+        let shallow = tree.root.join("shallow");
+        let linked = tree.root.join("linked");
+        std::fs::create_dir_all(&source).unwrap();
+        run_test_git(&source, &["init", "-q"]);
+        run_test_git(&source, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &source,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        for subject in ["first", "second", "third"] {
+            std::fs::write(source.join("tracked.txt"), format!("{subject}\n")).unwrap();
+            run_test_git(&source, &["add", "tracked.txt"]);
+            run_test_git(&source, &["commit", "-qm", subject]);
+        }
+        run_test_git(
+            &tree.root,
+            &[
+                "clone",
+                "-q",
+                "--depth=2",
+                &format!("file://{}", path_text(&source)),
+                path_text(&shallow),
+            ],
+        );
+        run_test_git(
+            &shallow,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                path_text(&linked),
+                "HEAD",
+            ],
+        );
+
+        let (_, linked_git_dir) = git_dir_for_worktree(&linked).unwrap();
+        let common_dir = git_common_dir(&linked_git_dir).unwrap();
+        assert!(common_dir.join("shallow").is_file());
+        assert!(!linked_git_dir.join("shallow").exists());
+
+        let inspection = GitInspection::new(path_text(&linked)).unwrap();
+        std::fs::remove_file(common_dir.join("shallow")).unwrap();
+        let log = inspection
+            .execute(&["--no-pager", "log", "--pretty=format:%s"])
+            .unwrap();
+
+        assert_eq!(log.lines().collect::<Vec<_>>(), ["third", "second"]);
+    }
+
+    #[test]
+    fn git_inspection_rejects_malformed_shallow_boundaries() {
+        let tree = TempTree::new("git-invalid-shallow");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "baseline\n").unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt"]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+        std::fs::write(tree.root.join(".git/shallow"), "../not-an-object\n").unwrap();
+
+        let error = match GitInspection::new(path_text(&tree.root)) {
+            Ok(_) => panic!("malformed shallow metadata must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("invalid Git shallow boundary"));
     }
 
     #[test]
