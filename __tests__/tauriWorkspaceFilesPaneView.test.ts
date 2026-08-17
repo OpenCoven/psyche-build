@@ -46,7 +46,7 @@ class FakeElement {
   attributes = new Map<string, string>();
   children: FakeElement[] = [];
   parentElement: FakeElement | null = null;
-  listeners = new Map<string, Array<(...args: never[]) => unknown>>();
+  listeners = new Map<string, Array<(event: Record<string, unknown>) => unknown>>();
 
   appendChild(child: FakeElement) {
     child.parentElement = this;
@@ -58,7 +58,7 @@ class FakeElement {
     this.attributes.set(name, value);
   }
 
-  addEventListener(name: string, listener: (...args: never[]) => unknown) {
+  addEventListener(name: string, listener: (event: Record<string, unknown>) => unknown) {
     this.listeners.set(name, [...(this.listeners.get(name) || []), listener]);
   }
 
@@ -159,6 +159,62 @@ describe('native Files pane view', () => {
     expect(source).not.toMatch(/cyclePaneSpan\(filesPane\)/);
     expect(source).toMatch(/togglePaneMaximize\(filesPane\)/);
     expect(source).toMatch(/closeFilesPane\(filesPane\)/);
+  });
+
+  it('repositions and maximizes Files from non-button header gestures', () => {
+    const fileView = new FakeElement();
+    const calls: Array<unknown> = [];
+    const mountFilesPane = compileFunction<(surface: Record<string, unknown>) => FakeElement>(
+      extractFunctionSource('mountFilesPane'),
+      {
+        document: {
+          createElement: (tagName: string) => Object.assign(new FakeElement(), { tagName }),
+        },
+        fileViewEl: fileView,
+        createPaneHideButton: () => new FakeElement(),
+        startPaneReposition: (surface: unknown, event: unknown) => calls.push(['reposition', surface, event]),
+        togglePaneMaximize: (surface: unknown) => calls.push(['maximize', surface]),
+        closeFilesPane: () => undefined,
+        focusCanvasSurface: () => undefined,
+      },
+    );
+    const surface = { id: 'files-a', workspaceRoot: '/worktree', kind: 'files' };
+    const pane = mountFilesPane(surface);
+    const header = pane.children[0];
+    const pointerdown = header.listeners.get('pointerdown')?.[0];
+    const dblclick = header.listeners.get('dblclick')?.[0];
+    const pointerEvent = {
+      target: { closest: () => null },
+    };
+    const buttonEvent = {
+      preventDefault: () => {
+        throw new Error('preventDefault should not run for button targets');
+      },
+      target: { closest: () => ({}) },
+    };
+    let prevented = 0;
+    const dblclickEvent = {
+      preventDefault: () => { prevented += 1; },
+      target: { closest: () => null },
+    };
+
+    expect(pointerdown).toBeTypeOf('function');
+    expect(dblclick).toBeTypeOf('function');
+
+    pointerdown?.(pointerEvent);
+    dblclick?.(dblclickEvent);
+    expect(prevented).toBe(1);
+    expect(calls).toEqual([
+      ['reposition', surface, pointerEvent],
+      ['maximize', surface],
+    ]);
+
+    calls.length = 0;
+    prevented = 0;
+    pointerdown?.(buttonEvent);
+    dblclick?.(buttonEvent);
+    expect(prevented).toBe(0);
+    expect(calls).toEqual([]);
   });
 
   it('hides Files non-destructively and restores it when a file is selected', () => {

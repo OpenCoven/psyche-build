@@ -2990,6 +2990,15 @@
       closeFilesPane(filesPane);
     });
 
+    header.addEventListener("pointerdown", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      startPaneReposition(filesPane, event);
+    });
+    header.addEventListener("dblclick", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      event.preventDefault();
+      togglePaneMaximize(filesPane);
+    });
     header.appendChild(glyph);
     header.appendChild(label);
     header.appendChild(hide);
