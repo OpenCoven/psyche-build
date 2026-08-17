@@ -5340,6 +5340,30 @@ fn git_common_dir(git_dir: &Path) -> Result<PathBuf, String> {
     Ok(resolve_git_path(git_dir, &raw))
 }
 
+fn is_valid_git_ref_name(name: &str) -> bool {
+    if name == "@"
+        || !name.contains('/')
+        || name.starts_with('/')
+        || name.ends_with('/')
+        || name.ends_with('.')
+        || name.contains("..")
+        || name.contains("@{")
+        || name.contains("//")
+    {
+        return false;
+    }
+    if name.split('/').any(|component| {
+        component.is_empty() || component.starts_with('.') || component.ends_with(".lock")
+    }) {
+        return false;
+    }
+    !name.bytes().any(|byte| {
+        byte < b' '
+            || byte == 0x7f
+            || matches!(byte, b' ' | b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+    })
+}
+
 fn collect_loose_refs(
     directory: &Path,
     prefix: &str,
@@ -5355,11 +5379,17 @@ fn collect_loose_refs(
         let file_type = entry
             .file_type()
             .map_err(|e| format!("inspect Git ref entry: {e}"))?;
-        let name = entry.file_name().to_string_lossy().to_string();
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if name.ends_with(".lock") {
+            continue;
+        }
         let ref_name = format!("{prefix}/{name}");
         if file_type.is_dir() {
             collect_loose_refs(&entry.path(), &ref_name, refs)?;
-        } else if file_type.is_file() {
+        } else if file_type.is_file() && is_valid_git_ref_name(&ref_name) {
             let value = std::fs::read_to_string(entry.path())
                 .map_err(|e| format!("read Git ref: {e}"))?
                 .trim()
@@ -9373,6 +9403,60 @@ mod workspace_panel_tests {
             run_test_git_stdout_with_env(&tree.root, &["rev-parse", "HEAD"], &[]).trim()
         );
         assert!(git_status(path_text(&tree.root).to_string()).is_ok());
+    }
+
+    #[test]
+    fn git_ref_snapshot_ignores_populated_lockfiles() {
+        let tree = TempTree::new("git-ref-lockfile");
+        let common_dir = tree.root.join("common");
+        let heads = common_dir.join("refs/heads");
+        std::fs::create_dir_all(&heads).unwrap();
+        std::fs::write(
+            heads.join("main"),
+            "1111111111111111111111111111111111111111\n",
+        )
+        .unwrap();
+        std::fs::write(
+            heads.join("main.lock"),
+            "2222222222222222222222222222222222222222\n",
+        )
+        .unwrap();
+
+        let refs = snapshot_git_refs(&common_dir).unwrap();
+
+        assert!(matches!(
+            refs.get("refs/heads/main"),
+            Some(GitRefValue::Direct(oid))
+                if oid == "1111111111111111111111111111111111111111"
+        ));
+        assert!(!refs.contains_key("refs/heads/main.lock"));
+    }
+
+    #[test]
+    fn git_ref_snapshot_ignores_invalid_files_and_keeps_valid_symbolic_refs() {
+        let tree = TempTree::new("git-invalid-ref-file");
+        let common_dir = tree.root.join("common");
+        let remote_refs = common_dir.join("refs/remotes/origin");
+        std::fs::create_dir_all(&remote_refs).unwrap();
+        std::fs::write(
+            remote_refs.join("main"),
+            "1111111111111111111111111111111111111111\n",
+        )
+        .unwrap();
+        std::fs::write(remote_refs.join("HEAD"), "ref: refs/remotes/origin/main\n").unwrap();
+        std::fs::write(
+            remote_refs.join("bad..name"),
+            "2222222222222222222222222222222222222222\n",
+        )
+        .unwrap();
+
+        let refs = snapshot_git_refs(&common_dir).unwrap();
+
+        assert!(matches!(
+            refs.get("refs/remotes/origin/HEAD"),
+            Some(GitRefValue::Symbolic(target)) if target == "refs/remotes/origin/main"
+        ));
+        assert!(!refs.contains_key("refs/remotes/origin/bad..name"));
     }
 
     #[test]
