@@ -43,10 +43,17 @@ export interface WorktreeSnapshot extends GitWorktreeSnapshotInput {
   attentionCount: number;
 }
 
+export interface RitualSnapshot {
+  id: string;
+  displayName: string;
+  description?: string;
+}
+
 export interface ProjectSnapshot {
   id: string;
   root: string;
   title: string;
+  rituals?: RitualSnapshot[];
   worktrees: WorktreeSnapshot[];
   projectPanes: PaneSnapshot[];
   runningCount: number;
@@ -92,6 +99,7 @@ export interface WorkspaceProjectInput {
   id: string;
   root: string;
   title: string;
+  rituals?: RitualSnapshot[];
   worktrees: GitWorktreeSnapshotInput[];
   panes: WorkspacePaneInput[];
   covenSessions?: CovenSessionSummary[];
@@ -390,6 +398,7 @@ function buildProjectSnapshot(project: WorkspaceProjectInput): ProjectSnapshot {
     id: project.id,
     root: project.root,
     title: project.title,
+    rituals: project.rituals ?? [],
     worktrees,
     projectPanes,
     runningCount:

@@ -6,8 +6,36 @@ import {
   readProjectWorktrees,
   readProjectWorktreesAsync,
 } from '../src/workspace/snapshot.js';
+import { readDaemonWorkspaceSnapshot } from '../src/daemon/workspace.js';
 
 describe('workspace snapshot', () => {
+  it('publishes bounded ritual metadata without executable commands', async () => {
+    const snapshot = await readDaemonWorkspaceSnapshot('/repo', {
+      revision: () => 10,
+      readWorktrees: () => [],
+      listPanes: async () => [],
+      listCovenSessions: async () => [],
+      listRituals: () => Array.from({ length: 51 }, (_, index) => ({
+        version: 1 as const,
+        id: index === 0 ? 'release' : `ritual-${index}`,
+        name: index === 0 ? 'Release checklist' : `Ritual ${index}`,
+        ...(index === 0 ? { description: 'Prepare a release safely.' } : {}),
+        scope: 'project' as const,
+        projects: [{ panes: [{ kind: 'terminal' as const, command: 'npm publish' }] }],
+      })),
+    });
+
+    expect(snapshot.projects[0].rituals).toContainEqual(
+      {
+        id: 'release',
+        displayName: 'Release checklist',
+        description: 'Prepare a release safely.',
+      },
+    );
+    expect(snapshot.projects[0].rituals).toHaveLength(50);
+    expect(JSON.stringify(snapshot)).not.toContain('npm publish');
+  });
+
   it('parses main, detached, locked, and prunable worktrees', () => {
     expect(parseGitWorktreePorcelain([
       'worktree /repo',
