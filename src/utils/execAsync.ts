@@ -5,7 +5,22 @@ export interface ExecAsyncOptions extends Omit<SpawnOptions, 'stdio'> {
   timeout?: number;
   /** If true, resolve with empty string on error instead of rejecting */
   silent?: boolean;
+  /**
+   * Maximum stdout bytes to buffer before the child is killed and the call
+   * fails. Default: 16 MiB — far above any command psyche legitimately runs,
+   * but bounded so a runaway process cannot exhaust the heap.
+   */
+  maxBytes?: number;
 }
+
+/** Default stdout ceiling. See ExecAsyncOptions.maxBytes. */
+export const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * stderr is only ever used to build an error message, so it is capped far
+ * lower than stdout and simply stops accumulating rather than failing the call.
+ */
+const MAX_STDERR_BYTES = 64 * 1024;
 
 /**
  * Async wrapper around child_process.spawn that returns stdout as a string.
@@ -31,7 +46,12 @@ export function execAsync(
   command: string,
   options: ExecAsyncOptions = {}
 ): Promise<string> {
-  const { timeout = 30000, silent = false, ...spawnOptions } = options;
+  const {
+    timeout = 30000,
+    silent = false,
+    maxBytes = DEFAULT_MAX_BYTES,
+    ...spawnOptions
+  } = options;
 
   return new Promise((resolve, reject) => {
     const proc = spawn(command, [], {
@@ -40,9 +60,15 @@ export function execAsync(
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    let stdout = '';
-    let stderr = '';
+    // Chunks are kept as Buffers and decoded once at close. Decoding each
+    // chunk in isolation would corrupt any multi-byte character that straddles
+    // a chunk boundary.
+    const stdoutChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    const stderrChunks: Buffer[] = [];
+    let stderrBytes = 0;
     let timedOut = false;
+    let overflowed = false;
     let timeoutId: NodeJS.Timeout | undefined;
 
     if (timeout > 0) {
@@ -53,11 +79,26 @@ export function execAsync(
     }
 
     proc.stdout?.on('data', (data: Buffer) => {
-      stdout += data.toString();
+      if (overflowed) return;
+      if (stdoutBytes + data.length > maxBytes) {
+        // Truncating silently would hand callers a partial result they cannot
+        // distinguish from a complete one, so fail loudly instead.
+        overflowed = true;
+        stdoutChunks.length = 0;
+        stdoutBytes = 0;
+        proc.kill('SIGTERM');
+        return;
+      }
+      stdoutChunks.push(data);
+      stdoutBytes += data.length;
     });
 
     proc.stderr?.on('data', (data: Buffer) => {
-      stderr += data.toString();
+      if (stderrBytes >= MAX_STDERR_BYTES) return;
+      const room = MAX_STDERR_BYTES - stderrBytes;
+      const slice = data.length > room ? data.subarray(0, room) : data;
+      stderrChunks.push(slice);
+      stderrBytes += slice.length;
     });
 
     proc.on('error', (error: Error) => {
@@ -72,6 +113,15 @@ export function execAsync(
     proc.on('close', (code: number | null) => {
       if (timeoutId) clearTimeout(timeoutId);
 
+      if (overflowed) {
+        if (silent) {
+          resolve('');
+        } else {
+          reject(new Error(`Command exceeded ${maxBytes} bytes of output: ${command}`));
+        }
+        return;
+      }
+
       if (timedOut) {
         if (silent) {
           resolve('');
@@ -81,9 +131,12 @@ export function execAsync(
         return;
       }
 
+      const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8');
+
       if (code === 0) {
         resolve(stdout.trim());
       } else {
+        const stderr = Buffer.concat(stderrChunks, stderrBytes).toString('utf8');
         if (silent) {
           resolve('');
         } else {
