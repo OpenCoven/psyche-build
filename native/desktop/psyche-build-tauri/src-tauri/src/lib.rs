@@ -5427,6 +5427,38 @@ fn snapshot_git_reftable(source: &Path, destination: &Path) -> Result<(), String
         .map_err(|e| format!("snapshot Git reftable table list: {e}"))
 }
 
+fn isolated_git_metadata_command(root: &str, git_dir: &Path) -> std::process::Command {
+    let mut command = git_command(root);
+    command
+        .env("GIT_DIR", git_dir)
+        .env("GIT_OBJECT_DIRECTORY", git_dir.join("objects"))
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_CONFIG_SYSTEM", git_dir.join("empty-config"))
+        .env("GIT_CONFIG_GLOBAL", git_dir.join("empty-config"))
+        .env_remove("GIT_CONFIG_NOSYSTEM");
+    command
+}
+
+fn resolve_isolated_git_attribute_source(
+    root: &str,
+    git_dir: &Path,
+) -> Result<Option<String>, String> {
+    let output = isolated_git_metadata_command(root, git_dir)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .map_err(|e| format!("resolve isolated Git attribute source: {e}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let source = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if source.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(source))
+    }
+}
+
 fn is_null_git_oid(value: &str, object_format: Option<&str>) -> bool {
     let expected_len = if object_format == Some("sha256") {
         64
@@ -5633,11 +5665,10 @@ impl GitInspectionRepository {
             .map_err(|e| format!("snapshot Git refs: {e}"))?;
         }
         if attribute_source.is_none() {
-            let mut child = git_command(root)
-                .env("GIT_DIR", git_dir.path())
-                .env("GIT_OBJECT_DIRECTORY", git_dir.path().join("objects"))
-                .env("GIT_CONFIG_SYSTEM", git_dir.path().join("empty-config"))
-                .env("GIT_CONFIG_GLOBAL", git_dir.path().join("empty-config"))
+            attribute_source = resolve_isolated_git_attribute_source(root, git_dir.path())?;
+        }
+        if attribute_source.is_none() {
+            let mut child = isolated_git_metadata_command(root, git_dir.path())
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -9586,6 +9617,128 @@ mod workspace_panel_tests {
         assert!(diff.text.contains("+after"));
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].subject, "baseline");
+    }
+
+    #[test]
+    fn git_status_and_diff_preserve_trusted_global_attributes_in_reftable_repositories() {
+        let tree = TempTree::new("git-reftable-global-clean-filter");
+        let project = tree.root.join("project");
+        let home = tree.root.join("home");
+        let global_config = home.join(".gitconfig");
+        let helper = tree.root.join("shadow-reftable-clean-filter.sh");
+        let marker = tree.root.join("shadow-reftable-clean-filter-ran");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        write_marker_executable(&helper);
+        std::fs::write(
+            &global_config,
+            format!(
+                "[filter \"trusted-normalize\"]\n\tclean = {}\n\trequired = true\n",
+                trusted_normalizing_clean_command()
+            ),
+        )
+        .unwrap();
+
+        let init = std::process::Command::new("git")
+            .current_dir(&project)
+            .args(["init", "-q", "--ref-format=reftable"])
+            .output()
+            .expect("git init must run in tests");
+        if !init.status.success() {
+            let stderr = String::from_utf8_lossy(&init.stderr);
+            assert!(
+                stderr.contains("reftable")
+                    || stderr.contains("ref-format")
+                    || stderr.contains("unknown option"),
+                "Git without reftable support must fail the exact reftable capability probe clearly: {}",
+                stderr.trim()
+            );
+            eprintln!("skipping reftable-only regression: {}", stderr.trim());
+            return;
+        }
+        run_test_git(&project, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &project,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(
+            project.join(".gitattributes"),
+            "tracked.txt filter=trusted-normalize\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("tracked.txt"), "same content   \n").unwrap();
+
+        let env = [
+            ("HOME", path_text(&home)),
+            ("GIT_CONFIG_GLOBAL", path_text(&global_config)),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ];
+        run_test_git_with_env(&project, &["add", "tracked.txt", ".gitattributes"], &env);
+        run_test_git_with_env(&project, &["commit", "-qm", "baseline"], &env);
+
+        run_test_git(
+            &project,
+            &[
+                "config",
+                "filter.trusted-normalize.clean",
+                &format!("{}; cat", marker_command(&helper, &marker)),
+            ],
+        );
+        run_test_git(
+            &project,
+            &["config", "filter.trusted-normalize.required", "true"],
+        );
+        std::fs::write(project.join("tracked.txt"), "same content\t\t\t\n").unwrap();
+
+        let raw_status =
+            run_test_git_stdout_with_env(&project, &["status", "--porcelain", "--", "."], &env);
+        assert!(
+            !raw_status.trim().is_empty(),
+            "shadowing local clean filter should dirty raw git status in reftable repos: {raw_status:?}"
+        );
+        if marker.exists() {
+            std::fs::remove_file(&marker).unwrap();
+        }
+
+        let raw_diff = run_test_git_stdout_with_env(
+            &project,
+            &["diff", "--no-color", "--relative", "--", "tracked.txt"],
+            &env,
+        );
+        assert!(
+            !raw_diff.trim().is_empty(),
+            "shadowing local clean filter should dirty raw git diff in reftable repos: {raw_diff:?}"
+        );
+        assert!(
+            marker.exists(),
+            "shadowing local clean filter should execute during raw git diff in reftable repos"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        let _git_env = TestGitEnvOverrideGuard::set(&[
+            ("HOME", Some(home.as_os_str())),
+            ("GIT_CONFIG_GLOBAL", Some(global_config.as_os_str())),
+            ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
+        ]);
+
+        let status = git_status(path_text(&project).to_string()).unwrap();
+        assert!(
+            status.files.is_empty(),
+            "isolated git_status must preserve committed reftable attributes"
+        );
+
+        let diff = git_diff(path_text(&project).to_string(), None, Some(false), None).unwrap();
+        assert!(
+            diff.text.is_empty(),
+            "isolated git_diff must preserve committed reftable attributes"
+        );
+        assert_eq!(diff.bytes, 0);
+        assert_eq!(diff.lines, 0);
+        assert!(!diff.truncated);
+        assert!(
+            !marker.exists(),
+            "isolated inspection must keep blocking repo-owned executable filters in reftable repos"
+        );
     }
 
     #[test]
