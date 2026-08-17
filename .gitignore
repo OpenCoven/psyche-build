@@ -37,3 +37,5 @@ native/desktop/psyche-build-tauri/pnpm-lock.yaml
 /.opencode
 /.copilot/goals.md
 /Library
+/.cargo-target-git-filter-hardening
+/.cargo-target
