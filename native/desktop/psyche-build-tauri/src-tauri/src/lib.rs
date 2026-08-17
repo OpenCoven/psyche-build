@@ -5962,7 +5962,7 @@ fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>,
                 .ok_or_else(|| "git config query returned malformed output".to_string())?;
             let key = std::str::from_utf8(&record[..separator])
                 .map_err(|_| "git config query returned invalid UTF-8 keys".to_string())?
-                .to_ascii_lowercase();
+                .to_string();
             let value = std::str::from_utf8(&record[separator + 1..])
                 .map_err(|_| format!("git config {key} returned invalid UTF-8"))?
                 .to_string();
@@ -10274,6 +10274,67 @@ mod workspace_panel_tests {
         assert_eq!(
             status.remote_url.as_deref(),
             Some("https://first.invalid/repo.git")
+        );
+    }
+
+    #[test]
+    fn git_inspection_preserves_remote_subsection_case() {
+        let tree = TempTree::new("git-remote-subsection-case");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.Origin.url",
+                "https://uppercase.invalid/repo.git",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://lowercase-first.invalid/repo.git",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://lowercase-second.invalid/repo.git",
+            ],
+        );
+
+        let config = git_inspection_repository_config(path_text(&tree.root)).unwrap();
+        let urls = config
+            .iter()
+            .filter(|(key, _)| key.ends_with(".url"))
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            urls,
+            vec![
+                ("remote.Origin.url", "https://uppercase.invalid/repo.git",),
+                (
+                    "remote.origin.url",
+                    "https://lowercase-first.invalid/repo.git",
+                ),
+                (
+                    "remote.origin.url",
+                    "https://lowercase-second.invalid/repo.git",
+                ),
+            ]
+        );
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+        assert_eq!(
+            status.remote_url.as_deref(),
+            Some("https://lowercase-first.invalid/repo.git")
         );
     }
 
