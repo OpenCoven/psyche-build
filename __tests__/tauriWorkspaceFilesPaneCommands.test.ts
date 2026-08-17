@@ -81,6 +81,8 @@ describe('native Files pane commands and dirty boundaries', () => {
       routeGitPaneShortcut: () => false,
       routeFilesShortcut: () => false,
       canvasThreadIds,
+      activePaneLayout: () => ({ root: { leaves }, activeSetId: null }),
+      paneFocusEligible: () => true,
       focusThread: async (id: string) => { focused.push(id); return true; },
     });
     const event = keyEvent('2', { ctrlKey: true });

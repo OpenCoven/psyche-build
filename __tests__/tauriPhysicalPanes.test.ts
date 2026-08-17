@@ -80,6 +80,8 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     nativeSessionRequest: (thread: Record<string, any>) => ({ id: thread.id }),
     invoke: async () => [],
     attachThreadClient: dependencies.spawnPty || (() => Promise.resolve(true)),
+    paneLayoutForThread: () => null,
+    paneFocusEligible: () => true,
     ...dependencies,
   };
   const names = Object.keys(resolvedDependencies);
@@ -231,7 +233,22 @@ type PaneFocusLayout = {
   root: Record<string, unknown>;
   focusedLeafId: string | null;
   maximizedLeafId?: string | null;
+  activeSetId?: string | null;
 };
+
+function compilePaneFocusEligible(
+  focusSets: Array<{ id: string; threadIds: string[] }>,
+) {
+  const findFocusSet = compileFunction<
+    (id: string) => { id: string; threadIds: string[] } | null
+  >(functionSource('findFocusSet'), { focusSets });
+  const scopedPaneRoot = compileFunction<
+    (layout: PaneFocusLayout) => Record<string, unknown> | null
+  >(functionSource('scopedPaneRoot'), { findFocusSet, PsychePanes });
+  return compileFunction<
+    (layout: PaneFocusLayout | null, threadId: string) => boolean
+  >(functionSource('paneFocusEligible'), { scopedPaneRoot, PsychePanes });
+}
 
 function compileFocusTokenRuntime() {
   const isTerminalFocusReport = compileFunction<(data: unknown) => boolean>(
@@ -286,6 +303,8 @@ function createPaneFocusHarness(
   activeThreadId: string,
   activeElement: unknown = null,
   layout: PaneFocusLayout | null = null,
+  paneFocusEligible: (layout: PaneFocusLayout | null, threadId: string) => boolean =
+    () => true,
 ) {
   threads.forEach((thread) => {
     if (thread.terminalController) return;
@@ -385,6 +404,7 @@ function createPaneFocusHarness(
     findProject: (id: string) => id === project.id ? project : null,
     activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
     paneLayoutFor: () => layout,
+    paneFocusEligible,
     PsychePanes,
     withTerminalFocusReportToken: tokens.withTerminalFocusReportToken,
     renderPaneWorkspace,
@@ -413,6 +433,52 @@ function createPaneFocusHarness(
     state,
     terminalHost,
   };
+}
+
+function createScopedFullscreenFocusHarness() {
+  const member: PaneFocusThread = {
+    id: 'thread-member',
+    kind: 'shell',
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    pane: { id: 'pane-member' },
+    host: { contains: () => false },
+    term: null,
+  };
+  const excluded: PaneFocusThread = {
+    id: 'thread-excluded',
+    kind: 'shell',
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    pane: { id: 'pane-excluded' },
+    host: { contains: () => false },
+    term: null,
+  };
+  const layout: PaneFocusLayout = {
+    root: PsychePanes.insertBelow(
+      PsychePanes.createLeaf('leaf-excluded', excluded.id),
+      'leaf-excluded',
+      PsychePanes.createLeaf('leaf-member', member.id),
+      'split-member',
+    ),
+    focusedLeafId: 'leaf-member',
+    maximizedLeafId: 'leaf-member',
+    activeSetId: 'set-1',
+  };
+  const paneFocusEligible = compilePaneFocusEligible([{
+    id: 'set-1',
+    threadIds: [member.id],
+  }]);
+  const harness = createPaneFocusHarness(
+    [member, excluded],
+    member.id,
+    null,
+    layout,
+    paneFocusEligible,
+  );
+  return { excluded, harness, layout, member, paneFocusEligible };
 }
 
 function createMinimapFocusHarness(targetKind: 'shell' | 'web') {
@@ -1483,6 +1549,54 @@ describe('Tauri physical terminal panes', () => {
     expect(tiledLayout.maximizedLeafId).toBeNull();
   });
 
+  it('rejects centralized focus outside the active focus set before mutating fullscreen state', async () => {
+    const { excluded, harness, layout, member } = createScopedFullscreenFocusHarness();
+
+    await expect(harness.focusThread(excluded.id)).resolves.toBe(false);
+
+    expect(harness.state.activeThreadId).toBe(member.id);
+    expect(harness.project.lastActiveThreadId).toBe(member.id);
+    expect(layout.focusedLeafId).toBe('leaf-member');
+    expect(layout.maximizedLeafId).toBe('leaf-member');
+    expect(harness.queued).toHaveLength(0);
+  });
+
+  it('keeps Ctrl-number focus inside the active fullscreen focus set', async () => {
+    const {
+      excluded, harness, layout, member, paneFocusEligible,
+    } = createScopedFullscreenFocusHarness();
+    const routeGlobalShortcut = compileFunction<
+      (event: Record<string, unknown>) => Promise<void>
+    >(functionSource('routeGlobalShortcut'), {
+      runNewShellCommand: async () => undefined,
+      runNewThreadCommand: async () => undefined,
+      routeAgentPickerModalKeydown: () => false,
+      routeGitPaneShortcut: () => false,
+      routeFilesShortcut: () => false,
+      canvasThreadIds: () => [excluded.id, member.id],
+      activePaneLayout: () => layout,
+      paneFocusEligible,
+      focusThread: harness.focusThread,
+    });
+    const event = {
+      key: '1',
+      code: 'Digit1',
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      target: null,
+      preventDefault: vi.fn(),
+    };
+
+    await routeGlobalShortcut(event);
+
+    expect(harness.state.activeThreadId).toBe(member.id);
+    expect(harness.project.lastActiveThreadId).toBe(member.id);
+    expect(layout.focusedLeafId).toBe('leaf-member');
+    expect(layout.maximizedLeafId).toBe('leaf-member');
+  });
+
   it('rejects a tearing-down browser pane before centralized focus mutates state', async () => {
     const source: PaneFocusThread = {
       id: 'thread-source',
@@ -1793,6 +1907,132 @@ describe('Tauri physical terminal panes', () => {
     expect(source.internalFocusReportTokens).toBeUndefined();
     expect(target.internalFocusReportTokens).toBeUndefined();
   });
+
+  it.each(['close', 'hide'] as const)(
+    'chooses the %s replacement from the active focus set while another member is fullscreen',
+    async (action) => {
+      const source: PaneFocusThread = {
+        id: 'thread-remove-source',
+        kind: 'shell',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        status: 'running',
+        closing: false,
+        closeStarted: false,
+        hidden: false,
+        metricsGeneration: 0,
+        metricsRefreshTimer: 0,
+        startInFlight: false,
+        pane: { id: 'pane-remove-source' },
+        host: { contains: () => false },
+        term: null,
+      };
+      const excluded: PaneFocusThread = {
+        id: 'thread-remove-excluded',
+        kind: 'shell',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        status: 'running',
+        pane: { id: 'pane-remove-excluded' },
+        host: { contains: () => false },
+        term: null,
+      };
+      const member: PaneFocusThread = {
+        id: 'thread-remove-member',
+        kind: 'shell',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        status: 'running',
+        pane: { id: 'pane-remove-member' },
+        host: { contains: () => false },
+        term: null,
+      };
+      const root = PsychePanes.insertBelow(
+        PsychePanes.insertBelow(
+          PsychePanes.createLeaf('leaf-remove-source', source.id),
+          'leaf-remove-source',
+          PsychePanes.createLeaf('leaf-remove-excluded', excluded.id),
+          'split-remove-excluded',
+        ),
+        'leaf-remove-excluded',
+        PsychePanes.createLeaf('leaf-remove-member', member.id),
+        'split-remove-member',
+      );
+      const layout: PaneFocusLayout = {
+        root,
+        focusedLeafId: 'leaf-remove-source',
+        maximizedLeafId: 'leaf-remove-member',
+        activeSetId: 'set-remove',
+      };
+      const paneFocusEligible = compilePaneFocusEligible([{
+        id: 'set-remove',
+        threadIds: [source.id, member.id],
+      }]);
+      const harness = createPaneFocusHarness(
+        [source, excluded, member],
+        source.id,
+        null,
+        layout,
+        paneFocusEligible,
+      );
+      const key = 'project-a\0/repo';
+      const paneLayouts = new Map([[key, layout]]);
+      const detachThreadPaneImpl = compileFunction<(
+        thread: PaneFocusThread,
+      ) => string | null>(functionSource('detachThreadPane'), {
+        focusedTerminalThreadForRender: harness.focusedTerminalThreadForRender,
+        withTerminalFocusReportToken: harness.withTerminalFocusReportToken,
+        paneLayoutKey: () => key,
+        paneLayouts,
+        paneFocusEligible,
+        PsychePanes,
+      });
+      const detachThreadPane = (thread: PaneFocusThread) => {
+        const nextThreadId = detachThreadPaneImpl(thread);
+        if (thread.pane) harness.attachedPanes.delete(thread.pane);
+        return nextThreadId;
+      };
+      const sharedDependencies = {
+        findThread: (id: string) => (
+          harness.state.threads.find((thread) => thread.id === id) || null
+        ),
+        detachThreadPane,
+        retainFileFocusAfterThreadRemoval: () => false,
+        state: harness.state,
+        focusThread: harness.focusThread,
+        renderPaneWorkspace: harness.renderPaneWorkspace,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      };
+
+      if (action === 'close') {
+        const closeThread = compileFunction<(id: string) => Promise<boolean>>(
+          functionSource('closeThread'),
+          {
+            ...sharedDependencies,
+            forgetThreadInSets: () => undefined,
+            stopThreadPty: async () => true,
+            setProjectStatus: () => undefined,
+            findProject: () => harness.project,
+          },
+        );
+        await expect(closeThread(source.id)).resolves.toBe(true);
+      } else {
+        const hideThread = compileFunction<(id: string) => boolean>(
+          functionSource('hideThread'),
+          sharedDependencies,
+        );
+        expect(hideThread(source.id)).toBe(true);
+      }
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(harness.state.activeThreadId).toBe(member.id);
+      expect(harness.project.lastActiveThreadId).toBe(member.id);
+      expect(layout.focusedLeafId).toBe('leaf-remove-member');
+      expect(layout.maximizedLeafId).toBe('leaf-remove-member');
+    },
+  );
 
   it('allows focus-out when closing the active pane without a successor', async () => {
     const sourceElement = { id: 'close-source' };
