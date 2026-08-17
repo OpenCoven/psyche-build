@@ -4999,20 +4999,25 @@ fn git_repository_config_available(root: &str) -> Result<bool, String> {
     Ok(out.status.success())
 }
 
+#[cfg(any(windows, test))]
+fn has_windows_verbatim_disk_prefix(encoded: &[u16]) -> bool {
+    const VERBATIM_PREFIX: [u16; 4] = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+
+    encoded.starts_with(&VERBATIM_PREFIX)
+        && encoded.get(4).is_some_and(|unit| {
+            (b'A' as u16..=b'Z' as u16).contains(unit) || (b'a' as u16..=b'z' as u16).contains(unit)
+        })
+        && encoded.get(5) == Some(&(b':' as u16))
+        && encoded.get(6) == Some(&(b'\\' as u16))
+}
+
 fn git_subprocess_root(root: &Path) -> Cow<'_, Path> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
-        const VERBATIM_PREFIX: [u16; 4] = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
         let encoded = root.as_os_str().encode_wide().collect::<Vec<_>>();
-        let is_verbatim_disk = encoded.starts_with(&VERBATIM_PREFIX)
-            && encoded
-                .get(4)
-                .is_some_and(|unit| (*unit as u8).is_ascii_alphabetic())
-            && encoded.get(5) == Some(&(b':' as u16))
-            && encoded.get(6) == Some(&(b'\\' as u16));
-        if is_verbatim_disk {
+        if has_windows_verbatim_disk_prefix(&encoded) {
             return Cow::Owned(PathBuf::from(OsString::from_wide(&encoded[4..])));
         }
     }
@@ -8493,6 +8498,18 @@ mod workspace_panel_tests {
 
     fn path_text(path: &Path) -> &str {
         path.to_str().expect("test paths must be UTF-8")
+    }
+
+    #[test]
+    fn git_subprocess_root_requires_ascii_drive_letters() {
+        let prefix = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+        let mut ascii_drive = prefix.to_vec();
+        ascii_drive.extend([b'C' as u16, b':' as u16, b'\\' as u16]);
+        let mut non_ascii_drive = prefix.to_vec();
+        non_ascii_drive.extend([0x0141, b':' as u16, b'\\' as u16]);
+
+        assert!(has_windows_verbatim_disk_prefix(&ascii_drive));
+        assert!(!has_windows_verbatim_disk_prefix(&non_ascii_drive));
     }
 
     #[cfg(windows)]
