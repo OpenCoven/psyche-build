@@ -124,6 +124,7 @@ import {
   getPaneTitlePrefixValue,
   paneNeedsAnimatedTitlePrefix,
   PANE_TITLE_BUSY_FRAMES,
+  PANE_TITLE_SPINNER_INTERVAL_MS,
 } from "./utils/paneTitlePrefix.js"
 import { getPaneTmuxDisplayTitle } from "./utils/paneTitle.js"
 import {
@@ -886,6 +887,10 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         }
       }
 
+      // Collected and flushed as one tmux invocation: on an animated frame this
+      // is one option per busy pane, and a process per option adds up fast.
+      const paneOptionUpdates: Array<{ paneId: string; option: string; value: string }> = []
+
       for (const pane of panes) {
         const paneThemeName = getPaneColorTheme(
           pane,
@@ -906,21 +911,29 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         const activeBorderStyle = `fg=colour${getPsycheThemePalette(paneThemeName).activeBorder}`
 
         if (cachedPrefixes.get(pane.paneId) !== prefixValue) {
-          tmuxService.setPaneOptionSync(pane.paneId, '@psyche_title_prefix', prefixValue)
+          paneOptionUpdates.push({
+            paneId: pane.paneId,
+            option: '@psyche_title_prefix',
+            value: prefixValue,
+          })
           cachedPrefixes.set(pane.paneId, prefixValue)
         }
 
         if (cachedLabels.get(pane.paneId) !== labelValue) {
-          tmuxService.setPaneOptionSync(pane.paneId, '@psyche_title_label', labelValue)
+          paneOptionUpdates.push({
+            paneId: pane.paneId,
+            option: '@psyche_title_label',
+            value: labelValue,
+          })
           cachedLabels.set(pane.paneId, labelValue)
         }
 
         if (cachedActiveBorderStyles.get(pane.paneId) !== activeBorderStyle) {
-          tmuxService.setPaneOptionSync(
-            pane.paneId,
-            '@psyche_active_border_style',
-            activeBorderStyle
-          )
+          paneOptionUpdates.push({
+            paneId: pane.paneId,
+            option: '@psyche_active_border_style',
+            value: activeBorderStyle,
+          })
           cachedActiveBorderStyles.set(pane.paneId, activeBorderStyle)
         }
 
@@ -934,13 +947,15 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       }
 
       if (controlPaneId && cachedActiveBorderStyles.get(controlPaneId) !== controlPaneActiveBorderStyle) {
-        tmuxService.setPaneOptionSync(
-          controlPaneId,
-          '@psyche_active_border_style',
-          controlPaneActiveBorderStyle
-        )
+        paneOptionUpdates.push({
+          paneId: controlPaneId,
+          option: '@psyche_active_border_style',
+          value: controlPaneActiveBorderStyle,
+        })
         cachedActiveBorderStyles.set(controlPaneId, controlPaneActiveBorderStyle)
       }
+
+      tmuxService.setPaneOptionsSync(paneOptionUpdates)
 
       if (!focusedPane) {
         tmuxService.setSessionOptionSync(
@@ -967,7 +982,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         paneTitleSpinnerFrameRef.current + 1
       ) % PANE_TITLE_BUSY_FRAMES.length
       syncPaneTitlePrefixes()
-    }, 90)
+    }, PANE_TITLE_SPINNER_INTERVAL_MS)
 
     return () => {
       clearInterval(interval)
