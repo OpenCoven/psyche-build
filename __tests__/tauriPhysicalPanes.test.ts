@@ -84,6 +84,11 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     paneLayoutForThread: () => null,
     paneFocusEligible: () => true,
     paneSurfaceFocusEligible: () => true,
+    resolvePaneFocusSuccessor: (
+      _layout: PaneFocusLayout | null,
+      preferredId: string | null,
+      _threadsOnly?: boolean,
+    ) => preferredId,
     ...dependencies,
   };
   const names = Object.keys(resolvedDependencies);
@@ -250,6 +255,32 @@ function compilePaneFocusEligible(
   return compileFunction<
     (layout: PaneFocusLayout | null, threadId: string) => boolean
   >(functionSource('paneFocusEligible'), { scopedPaneRoot, PsychePanes });
+}
+
+function compilePaneFocusSuccessor(
+  focusSets: Array<{ id: string; threadIds: string[] }>,
+  canvasSurfaceById: (id: string) => PaneFocusThread | null,
+  paneSurfaceFocusEligible: (
+    layout: PaneFocusLayout | null,
+    surface: PaneFocusThread | null,
+  ) => boolean,
+) {
+  const findFocusSet = compileFunction<
+    (id: string) => { id: string; threadIds: string[] } | null
+  >(functionSource('findFocusSet'), { focusSets });
+  const scopedPaneRoot = compileFunction<
+    (layout: PaneFocusLayout) => Record<string, unknown> | null
+  >(functionSource('scopedPaneRoot'), { findFocusSet, PsychePanes });
+  return compileFunction<(
+    layout: PaneFocusLayout | null,
+    preferredId: string | null,
+    threadsOnly?: boolean,
+  ) => string | null>(functionSource('resolvePaneFocusSuccessor'), {
+    canvasSurfaceById,
+    paneSurfaceFocusEligible,
+    scopedPaneRoot,
+    PsychePanes,
+  });
 }
 
 function compileFocusTokenRuntime() {
@@ -555,7 +586,10 @@ function createMinimapFocusHarness(targetKind: 'shell' | 'web') {
   return { ...focusHarness, entry, layout, source, target };
 }
 
-function createPaneRemovalLifecycleHarness(includeHealthySuccessor: boolean) {
+function createPaneRemovalLifecycleHarness(
+  includeHealthySuccessor: boolean,
+  staleDuringStop: 'tearing-down' | 'hidden' | null = null,
+) {
   const source: PaneFocusThread = {
     id: 'thread-remove-source',
     kind: 'shell',
@@ -617,10 +651,11 @@ function createPaneRemovalLifecycleHarness(includeHealthySuccessor: boolean) {
   const threads = includeHealthySuccessor
     ? [source, tearingBrowser, healthy]
     : [source, tearingBrowser];
-  const paneFocusEligible = compilePaneFocusEligible([{
+  const focusSets = [{
     id: 'set-remove',
     threadIds: threads.map((thread) => thread.id),
-  }]);
+  }];
+  const paneFocusEligible = compilePaneFocusEligible(focusSets);
   const harness = createPaneFocusHarness(
     threads,
     source.id,
@@ -628,21 +663,30 @@ function createPaneRemovalLifecycleHarness(includeHealthySuccessor: boolean) {
     layout,
     paneFocusEligible,
   );
-  harness.browserPaneLifecycle(tearingBrowser).tearingDown = true;
+  if (!staleDuringStop) {
+    harness.browserPaneLifecycle(tearingBrowser).tearingDown = true;
+  }
+  const canvasSurfaceById = (id: string) => (
+    harness.state.threads.find((thread) => thread.id === id) || null
+  );
+  const resolvePaneFocusSuccessor = compilePaneFocusSuccessor(
+    focusSets,
+    canvasSurfaceById,
+    harness.paneSurfaceFocusEligible,
+  );
   const key = 'project-a\0/repo';
   const paneLayouts = new Map([[key, layout]]);
   const detachThreadPaneImpl = compileFunction<(
     thread: PaneFocusThread,
   ) => string | null>(functionSource('detachThreadPane'), {
-    canvasSurfaceById: (id: string) => (
-      harness.state.threads.find((thread) => thread.id === id) || null
-    ),
+    canvasSurfaceById,
     focusedTerminalThreadForRender: harness.focusedTerminalThreadForRender,
     withTerminalFocusReportToken: harness.withTerminalFocusReportToken,
     paneLayoutKey: () => key,
     paneLayouts,
     paneFocusEligible,
     paneSurfaceFocusEligible: harness.paneSurfaceFocusEligible,
+    resolvePaneFocusSuccessor,
     PsychePanes,
   });
   const detachThreadPane = (thread: PaneFocusThread) => {
@@ -659,8 +703,12 @@ function createPaneRemovalLifecycleHarness(includeHealthySuccessor: boolean) {
     retainFileFocusAfterThreadRemoval: () => false,
     state: harness.state,
     focusThread: harness.focusThread,
+    canvasSurfaceById,
     paneLayoutForThread: () => layout,
     paneFocusEligible,
+    paneSurfaceFocusEligible: harness.paneSurfaceFocusEligible,
+    resolvePaneFocusSuccessor,
+    PsychePanes,
     renderPaneWorkspace: (options?: { preserveTerminalFocus?: boolean }) => {
       renderOptions.push(options);
       harness.renderPaneWorkspace(options);
@@ -676,7 +724,14 @@ function createPaneRemovalLifecycleHarness(includeHealthySuccessor: boolean) {
         {
           ...sharedDependencies,
           forgetThreadInSets: () => undefined,
-          stopThreadPty: async () => true,
+          stopThreadPty: () => Promise.resolve().then(() => {
+            if (staleDuringStop === 'tearing-down') {
+              harness.browserPaneLifecycle(tearingBrowser).tearingDown = true;
+            } else if (staleDuringStop === 'hidden') {
+              tearingBrowser.hidden = true;
+            }
+            return true;
+          }),
           setProjectStatus: () => undefined,
           findProject: () => harness.project,
         },
@@ -2186,10 +2241,11 @@ describe('Tauri physical terminal panes', () => {
         maximizedLeafId: 'leaf-remove-member',
         activeSetId: 'set-remove',
       };
-      const paneFocusEligible = compilePaneFocusEligible([{
+      const focusSets = [{
         id: 'set-remove',
         threadIds: [source.id, member.id],
-      }]);
+      }];
+      const paneFocusEligible = compilePaneFocusEligible(focusSets);
       const harness = createPaneFocusHarness(
         [source, excluded, member],
         source.id,
@@ -2197,20 +2253,27 @@ describe('Tauri physical terminal panes', () => {
         layout,
         paneFocusEligible,
       );
+      const canvasSurfaceById = (id: string) => (
+        harness.state.threads.find((thread) => thread.id === id) || null
+      );
+      const resolvePaneFocusSuccessor = compilePaneFocusSuccessor(
+        focusSets,
+        canvasSurfaceById,
+        harness.paneSurfaceFocusEligible,
+      );
       const key = 'project-a\0/repo';
       const paneLayouts = new Map([[key, layout]]);
       const detachThreadPaneImpl = compileFunction<(
         thread: PaneFocusThread,
       ) => string | null>(functionSource('detachThreadPane'), {
-        canvasSurfaceById: (id: string) => (
-          harness.state.threads.find((thread) => thread.id === id) || null
-        ),
+        canvasSurfaceById,
         focusedTerminalThreadForRender: harness.focusedTerminalThreadForRender,
         withTerminalFocusReportToken: harness.withTerminalFocusReportToken,
         paneLayoutKey: () => key,
         paneLayouts,
         paneFocusEligible,
         paneSurfaceFocusEligible: harness.paneSurfaceFocusEligible,
+        resolvePaneFocusSuccessor,
         PsychePanes,
       });
       const detachThreadPane = (thread: PaneFocusThread) => {
@@ -2226,6 +2289,11 @@ describe('Tauri physical terminal panes', () => {
         retainFileFocusAfterThreadRemoval: () => false,
         state: harness.state,
         focusThread: harness.focusThread,
+        canvasSurfaceById,
+        paneLayoutForThread: () => layout,
+        paneSurfaceFocusEligible: harness.paneSurfaceFocusEligible,
+        resolvePaneFocusSuccessor,
+        PsychePanes,
         renderPaneWorkspace: harness.renderPaneWorkspace,
         refreshSidebar: () => undefined,
         refreshTabs: () => undefined,
@@ -2288,6 +2356,32 @@ describe('Tauri physical terminal panes', () => {
       expect(renderOptions).toEqual([{ preserveTerminalFocus: false }]);
     },
   );
+
+  it.each(['tearing-down', 'hidden'] as const)(
+    'revalidates a successor that becomes %s during async close',
+    async (staleDuringStop) => {
+      const { harness, healthy, layout, remove } =
+        createPaneRemovalLifecycleHarness(true, staleDuringStop);
+
+      await remove('close');
+
+      expect(harness.state.activeThreadId).toBe(healthy.id);
+      expect(harness.project.lastActiveThreadId).toBe(healthy.id);
+      expect(layout.focusedLeafId).toBe('leaf-remove-healthy');
+      expect(layout.maximizedLeafId).toBe('leaf-remove-healthy');
+    },
+  );
+
+  it('clears and renders when the close successor becomes ineligible during async stop', async () => {
+    const { harness, layout, remove, renderOptions } =
+      createPaneRemovalLifecycleHarness(false, 'tearing-down');
+
+    await remove('close');
+
+    expect(harness.state.activeThreadId).toBeNull();
+    expect(layout.focusedLeafId).toBeNull();
+    expect(renderOptions).toEqual([{ preserveTerminalFocus: false }]);
+  });
 
   it('allows focus-out when closing the active pane without a successor', async () => {
     const sourceElement = { id: 'close-source' };
@@ -3520,6 +3614,7 @@ describe('Tauri physical terminal panes', () => {
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       focusThread: (id: string) => { focused.push(id); return true; },
+      resolvePaneFocusSuccessor: () => threadB.id,
     });
 
     await expect(closeThread(threadA.id)).resolves.toBe(true);
@@ -3558,6 +3653,7 @@ describe('Tauri physical terminal panes', () => {
       canvasThreadIds: () => [threadB.id],
       state,
       focusThread: (id: string) => { focused.push(id); return true; },
+      resolvePaneFocusSuccessor: () => threadB.id,
       renderPaneWorkspace: () => undefined,
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
