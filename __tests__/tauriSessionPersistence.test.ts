@@ -203,6 +203,28 @@ describe('Tauri workspace persistence model', () => {
     });
   });
 
+  test('rejects padded legacy Coven kinds in either descriptor field', () => {
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'code-padded-kind',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        kind: ' coven-chat ',
+        launchKind: 'shell',
+      }),
+    ).toBeNull();
+
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'code-padded-launch-kind',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        kind: 'shell',
+        launchKind: ' coven-chat ',
+      }),
+    ).toBeNull();
+  });
+
   test('preserves canonical Coven Code identifiers needed for explicit retry', () => {
     expect(
       workspaceModel.sanitizeSessionDescriptor({
