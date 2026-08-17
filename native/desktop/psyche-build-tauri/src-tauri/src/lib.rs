@@ -5280,6 +5280,65 @@ fn git_trusted_filter_driver_overrides(root: &str) -> Result<Vec<GitFilterDriver
         .collect()
 }
 
+fn git_url_rewrite_config_for_scope(
+    root: &str,
+    scope: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let out = git_command(root)
+        .args([
+            "config",
+            scope,
+            "--includes",
+            "--null",
+            "--get-regexp",
+            r"^url\..*\.insteadof$",
+        ])
+        .output()
+        .map_err(|e| format!("git: {}", e))?;
+    if !out.status.success() {
+        if out.status.code() == Some(1) {
+            return Ok(Vec::new());
+        }
+        let stderr = String::from_utf8(out.stderr)
+            .map_err(|err| format!("git config returned invalid UTF-8 stderr: {err}"))?
+            .trim()
+            .to_string();
+        return Err(if stderr.is_empty() {
+            format!(
+                "git config URL rewrite query failed with status {}",
+                out.status
+            )
+        } else {
+            format!("git config URL rewrite query failed: {}", stderr)
+        });
+    }
+
+    let mut values = Vec::new();
+    for record in out
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let Some(separator) = record.iter().position(|byte| *byte == b'\n') else {
+            return Err("git config URL rewrite query returned malformed output".to_string());
+        };
+        let (key_bytes, value_bytes) = record.split_at(separator);
+        let key = std::str::from_utf8(key_bytes)
+            .map_err(|_| "git config URL rewrite query returned invalid UTF-8 keys".to_string())?;
+        let value = std::str::from_utf8(&value_bytes[1..]).map_err(|err| {
+            format!("git config {key} query returned invalid UTF-8 stdout: {err}")
+        })?;
+        values.push((key.to_string(), value.to_string()));
+    }
+    Ok(values)
+}
+
+fn git_trusted_url_rewrite_config(root: &str) -> Result<Vec<(String, String)>, String> {
+    let mut values = git_url_rewrite_config_for_scope(root, "--system")?;
+    values.extend(git_url_rewrite_config_for_scope(root, "--global")?);
+    Ok(values)
+}
+
 fn git_metadata_output(root: &str, args: &[&str]) -> Result<std::process::Output, String> {
     git_command(root)
         .args(args)
@@ -6111,7 +6170,7 @@ impl<'a> GitInspection<'a> {
         })
     }
 
-    fn execute(&self, args: &[&str]) -> Result<String, String> {
+    fn git_command_with_config(&self, extra_config: &[(String, String)]) -> std::process::Command {
         let mut command = git_command(self.root);
         command
             .env("GIT_DIR", self.repository.git_dir.path())
@@ -6145,6 +6204,9 @@ impl<'a> GitInspection<'a> {
         for (key, value) in &self.repository.config {
             command.arg("-c").arg(format!("{key}={value}"));
         }
+        for (key, value) in extra_config {
+            command.arg("-c").arg(format!("{key}={value}"));
+        }
         for driver in &self.policy.filter_drivers {
             let has_trusted_command = driver.clean.is_some() || driver.process.is_some();
             let required = if has_trusted_command && driver.required.unwrap_or(false) {
@@ -6166,7 +6228,20 @@ impl<'a> GitInspection<'a> {
                 .arg("-c")
                 .arg(format!("filter.{}.required={required}", driver.driver));
         }
-        let out = command
+        command
+    }
+
+    fn execute(&self, args: &[&str]) -> Result<String, String> {
+        self.execute_with_config(args, &[])
+    }
+
+    fn execute_with_config(
+        &self,
+        args: &[&str],
+        extra_config: &[(String, String)],
+    ) -> Result<String, String> {
+        let out = self
+            .git_command_with_config(extra_config)
             .args(args)
             .output()
             .map_err(|e| format!("git: {}", e))?;
@@ -6348,6 +6423,7 @@ fn git_status(root: String) -> Result<GitStatus, String> {
             web_url: None,
         });
     }
+    let trusted_url_rewrites = git_trusted_url_rewrite_config(&root)?;
     let inspection = GitInspection::new(&root)?;
 
     let prefix = inspection
@@ -6420,7 +6496,16 @@ fn git_status(root: String) -> Result<GitStatus, String> {
 
     let remote_url = inspection
         .config_value("remote.origin.url")
-        .map(str::to_string)
+        .filter(|url| !url.is_empty())
+        .map(|_| {
+            // `git remote get-url` ignores command-scope `-c remote.*` values,
+            // but `ls-remote --get-url` resolves the same fetch URL without
+            // consulting live repository config.
+            inspection
+                .execute_with_config(&["ls-remote", "--get-url", "origin"], &trusted_url_rewrites)
+        })
+        .transpose()?
+        .map(|url| url.trim().to_string())
         .filter(|url| !url.is_empty());
     let web_url = remote_url.as_deref().and_then(remote_to_web_url);
 
@@ -8690,8 +8775,12 @@ mod workspace_panel_tests {
         )
         .unwrap();
         run_test_git(&project, &["init", "-q"]);
-        std::fs::write(project.join(".gitattributes"), "tracked.txt text\r\n").unwrap();
-        std::fs::write(project.join("tracked.txt"), "first\r\nsecond\r\n").unwrap();
+        std::fs::write(
+            project.join(".gitattributes"),
+            b"/.gitattributes -text\r\ntracked.txt text\r\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("tracked.txt"), b"first\r\nsecond\r\n").unwrap();
 
         let env = [
             ("HOME", path_text(&home)),
@@ -8712,7 +8801,7 @@ mod workspace_panel_tests {
             ],
             &env,
         );
-        std::fs::write(project.join("tracked.txt"), "first\r\nsecond\r\n").unwrap();
+        std::fs::write(project.join("tracked.txt"), b"first\r\nsecond\r\n").unwrap();
         let raw_status =
             run_test_git_stdout_with_env(&project, &["status", "--porcelain", "--", "."], &env);
         assert!(
@@ -10007,6 +10096,58 @@ mod workspace_panel_tests {
     }
 
     #[test]
+    fn git_status_resolves_origin_url_through_trusted_global_instead_of_rules() {
+        let tree = TempTree::new("git-status-remote-url-rewrite");
+        let project = tree.root.join("project");
+        let home = tree.root.join("home");
+        let global_config = home.join(".gitconfig");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            &global_config,
+            "[url \"git@github.com:\"]\n\tinsteadOf = gh:\n",
+        )
+        .unwrap();
+
+        run_test_git(&project, &["init", "-q"]);
+        run_test_git(&project, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &project,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(project.join("tracked.txt"), "baseline\n").unwrap();
+        run_test_git(&project, &["add", "tracked.txt"]);
+        run_test_git(&project, &["commit", "-qm", "baseline"]);
+        run_test_git(&project, &["remote", "add", "origin", "gh:owner/repo.git"]);
+
+        let env = [
+            ("HOME", path_text(&home)),
+            ("GIT_CONFIG_GLOBAL", path_text(&global_config)),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ];
+        let raw_remote =
+            run_test_git_stdout_with_env(&project, &["remote", "get-url", "origin"], &env);
+        assert_eq!(raw_remote.trim(), "git@github.com:owner/repo.git");
+
+        let _git_env = TestGitEnvOverrideGuard::set(&[
+            ("HOME", Some(home.as_os_str())),
+            ("GIT_CONFIG_GLOBAL", Some(global_config.as_os_str())),
+            ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
+        ]);
+
+        let status = git_status(path_text(&project).to_string()).unwrap();
+
+        assert_eq!(
+            status.remote_url.as_deref(),
+            Some("git@github.com:owner/repo.git")
+        );
+        assert_eq!(
+            status.web_url.as_deref(),
+            Some("https://github.com/owner/repo")
+        );
+    }
+
+    #[test]
     fn git_ref_snapshot_ignores_populated_lockfiles() {
         let tree = TempTree::new("git-ref-lockfile");
         let common_dir = tree.root.join("common");
@@ -10151,6 +10292,7 @@ mod workspace_panel_tests {
             &source,
             &["config", "user.email", "psyche-tests@example.invalid"],
         );
+        run_test_git(&source, &["config", "core.autocrlf", "false"]);
         std::fs::write(source.join("tracked.txt"), "baseline\n").unwrap();
         std::fs::write(
             source.join(".gitattributes"),
@@ -10166,6 +10308,7 @@ mod workspace_panel_tests {
             &parent,
             &["config", "user.email", "psyche-tests@example.invalid"],
         );
+        run_test_git(&parent, &["config", "core.autocrlf", "false"]);
         run_test_git(
             &parent,
             &[
@@ -10178,6 +10321,12 @@ mod workspace_panel_tests {
                 "vendor/submodule",
             ],
         );
+        run_test_git(&submodule, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &submodule,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        run_test_git(&submodule, &["config", "core.autocrlf", "false"]);
         run_test_git(&parent, &["commit", "-qam", "add submodule"]);
         run_test_git(
             &submodule,
@@ -10428,6 +10577,7 @@ mod workspace_panel_tests {
             &tree.root,
             &["config", "user.email", "psyche-tests@example.invalid"],
         );
+        run_test_git(&tree.root, &["config", "core.autocrlf", "false"]);
         std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
         run_test_git(&tree.root, &["add", "tracked.txt"]);
         run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
@@ -10445,6 +10595,7 @@ mod workspace_panel_tests {
 
         assert_eq!(status.branch.as_deref(), Some("main"));
         assert_eq!(status.files.len(), 1);
+        assert_eq!(status.files[0].path, "tracked.txt");
         assert!(diff.text.contains("+after"));
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].subject, "baseline");
@@ -10498,7 +10649,7 @@ mod workspace_panel_tests {
 
         let init = std::process::Command::new("git")
             .current_dir(&project)
-            .args(["init", "-q", "--ref-format=reftable"])
+            .args(["init", "-q", "-b", "main", "--ref-format=reftable"])
             .output()
             .expect("git init must run in tests");
         if !init.status.success() {
@@ -10518,6 +10669,7 @@ mod workspace_panel_tests {
             &project,
             &["config", "user.email", "psyche-tests@example.invalid"],
         );
+        run_test_git(&project, &["config", "core.autocrlf", "false"]);
         std::fs::write(
             project.join(".gitattributes"),
             "tracked.txt filter=trusted-normalize\n",
@@ -10900,6 +11052,7 @@ mod workspace_panel_tests {
             &project,
             &["config", "user.email", "psyche-tests@example.invalid"],
         );
+        run_test_git(&project, &["config", "core.autocrlf", "false"]);
         std::fs::write(
             project.join(".gitattributes"),
             "tracked.txt filter=trusted-normalize\n",
@@ -11566,6 +11719,7 @@ mod workspace_panel_tests {
             &tree.root,
             &["config", "user.email", "psyche-tests@example.invalid"],
         );
+        run_test_git(&tree.root, &["config", "core.autocrlf", "false"]);
         run_test_git(&tree.root, &["add", "."]);
         run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
         std::fs::write(tree.root.join("outside.txt"), "outside changed\n").unwrap();
@@ -11607,16 +11761,17 @@ mod workspace_panel_tests {
     fn caps_large_tracked_git_diffs_with_full_result_metadata() {
         let tree = TempTree::new("large-tracked-diff");
         let target = tree.root.join("large.txt");
-        std::fs::write(&target, "baseline\n").unwrap();
+        std::fs::write(&target, b"baseline\n").unwrap();
         run_test_git(&tree.root, &["init", "-q"]);
         run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
         run_test_git(
             &tree.root,
             &["config", "user.email", "psyche-tests@example.invalid"],
         );
+        run_test_git(&tree.root, &["config", "core.autocrlf", "false"]);
         run_test_git(&tree.root, &["add", "large.txt"]);
         run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
-        std::fs::write(&target, "changed payload\n".repeat(180_000)).unwrap();
+        std::fs::write(&target, b"changed payload\n".repeat(180_000)).unwrap();
 
         let full = run_git(
             path_text(&tree.root),
@@ -11706,6 +11861,7 @@ mod workspace_panel_tests {
     fn git_diff_widens_context_and_clamps_the_request() {
         let tree = TempTree::new("git-diff-context");
         run_test_git(&tree.root, &["init", "--quiet"]);
+        run_test_git(&tree.root, &["config", "core.autocrlf", "false"]);
         let mut body = String::new();
         for index in 0..40 {
             body.push_str(&format!("line {}\n", index));
