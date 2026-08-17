@@ -1477,7 +1477,7 @@ export class ControlRuntime {
         ...(receipt ? { receipt: journalReceiptMetadata(receipt) } : {}),
       });
       await this.journal.append(built.kind, built.payload);
-      this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
+      this.rememberOutcome(command.idempotencyKey, outcome);
       return outcome;
     }
     const event = await this.journal.append(terminalKindForOutcome(outcome), {
@@ -1485,7 +1485,7 @@ export class ControlRuntime {
       idempotencyKey: command.idempotencyKey,
       ...payloadForOutcome(outcome),
     });
-    this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
+    this.rememberOutcome(command.idempotencyKey, outcome);
     const record = this.commandRecords.get(command.id);
     if (record) {
       record.outcome = outcome;
@@ -1509,12 +1509,29 @@ export class ControlRuntime {
     }
   }
 
+  /**
+   * Replay protection for idempotency keys, bounded like commandRecords: an
+   * outcome carries the command's result payload, so retaining one per key for
+   * the owner's lifetime grows without limit. Keys evicted past the window
+   * re-execute rather than replay, which is the same behaviour a key gets
+   * after an owner restart.
+   */
+  private rememberOutcome(idempotencyKey: string, outcome: CommandOutcome): void {
+    this.outcomesByIdempotencyKey.delete(idempotencyKey);
+    this.outcomesByIdempotencyKey.set(idempotencyKey, outcome);
+    while (this.outcomesByIdempotencyKey.size > MAX_COMMAND_RECORDS) {
+      const oldest = this.outcomesByIdempotencyKey.keys().next().value;
+      if (oldest === undefined) break;
+      this.outcomesByIdempotencyKey.delete(oldest);
+    }
+  }
+
   private reduceOutcomes(events: RuntimeEvent[]): void {
     for (const event of events) {
       if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
       const idempotencyKey = stringPayload(event, 'idempotencyKey');
       if (!idempotencyKey) continue;
-      this.outcomesByIdempotencyKey.set(idempotencyKey, outcomeFromEvent(event));
+      this.rememberOutcome(idempotencyKey, outcomeFromEvent(event));
     }
   }
 
