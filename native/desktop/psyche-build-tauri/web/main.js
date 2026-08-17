@@ -3802,6 +3802,14 @@
     return Boolean(root && PsychePanes.findLeafByThreadId(root, threadId));
   }
 
+  function paneSurfaceFocusEligible(layout, surface) {
+    if (!surface || surface.hidden || !paneFocusEligible(layout, surface.id)) return false;
+    if (surface.kind === "files") return true;
+    return surface.kind === "web"
+      ? !browserPaneIsClosing(surface)
+      : !surface.closing && !surface.closeStarted;
+  }
+
   /**
    * The tree the canvas actually draws. Maximise and span are presentation
    * modes, so neither one edits the tiled tree — leaving them restores exactly
@@ -4049,6 +4057,7 @@
       : surface) || surface;
     var layout = paneLayoutForThread(surface);
     if (!layout || !layout.root) return;
+    if (!paneSurfaceFocusEligible(layout, surface)) return;
     var leaf = PsychePanes.findLeafByThreadId(layout.root, surface.id);
     if (!leaf) return;
     layout.maximizedLeafId = layout.maximizedLeafId === leaf.id ? null : leaf.id;
@@ -4464,21 +4473,16 @@
   async function focusThread(id, options) {
     function resolveFocusableThread() {
       var candidate = findThread(id);
-      if (!candidate || candidate.hidden ||
-          (candidate.kind === "web"
-            ? browserPaneIsClosing(candidate)
-            : candidate.closing || candidate.closeStarted)) return null;
-      return candidate;
+      var candidateLayout = paneLayoutForThread(candidate);
+      return paneSurfaceFocusEligible(candidateLayout, candidate) ? candidate : null;
     }
     var thread = resolveFocusableThread();
     if (!thread) return false;
-    var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
-    if (!paneFocusEligible(layout, id)) return false;
+    var layout = paneLayoutForThread(thread);
     if (!(await showTerminalView())) return false;
     thread = resolveFocusableThread();
     if (!thread) return false;
-    layout = paneLayoutFor(thread.projectId, thread.worktreePath);
-    if (!paneFocusEligible(layout, id)) return false;
+    layout = paneLayoutForThread(thread);
     var focusedSourceThread = focusedTerminalThreadForRender();
     if (focusedSourceThread) {
       withTerminalFocusReportToken(
@@ -4641,11 +4645,16 @@
     }
     layout.root = removed.root;
     var nextLeaf = PsychePanes.findLeafById(removed.root, removed.nextLeafId);
-    if (layout.activeSetId &&
-        (!nextLeaf || !paneFocusEligible(layout, nextLeaf.threadId))) {
+    var nextSurface = nextLeaf && (typeof canvasSurfaceById === "function"
+      ? canvasSurfaceById(nextLeaf.threadId)
+      : typeof findThread === "function" ? findThread(nextLeaf.threadId) : nextLeaf);
+    if (!nextLeaf || !paneSurfaceFocusEligible(layout, nextSurface)) {
       var nextEligibleLeafId = PsychePanes.leafIds(removed.root).find(function (leafId) {
         var candidate = PsychePanes.findLeafById(removed.root, leafId);
-        return candidate && paneFocusEligible(layout, candidate.threadId);
+        var candidateSurface = candidate && (typeof canvasSurfaceById === "function"
+          ? canvasSurfaceById(candidate.threadId)
+          : typeof findThread === "function" ? findThread(candidate.threadId) : candidate);
+        return candidate && paneSurfaceFocusEligible(layout, candidateSurface);
       });
       nextLeaf = nextEligibleLeafId
         ? PsychePanes.findLeafById(removed.root, nextEligibleLeafId)
@@ -4935,7 +4944,7 @@
     if (nextThreadId && !findThread(nextThreadId)) {
       var closingLayout = paneLayoutForThread(thread);
       nextThreadId = canvasThreadIds().find(function (candidateId) {
-        return paneFocusEligible(closingLayout, candidateId);
+        return paneSurfaceFocusEligible(closingLayout, findThread(candidateId));
       }) || null;
     }
     if (thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
@@ -4987,7 +4996,7 @@
     if (nextThreadId && !findThread(nextThreadId)) {
       var hidingLayout = paneLayoutForThread(thread);
       nextThreadId = canvasThreadIds().find(function (candidateId) {
-        return paneFocusEligible(hidingLayout, candidateId);
+        return paneSurfaceFocusEligible(hidingLayout, findThread(candidateId));
       }) || null;
     }
     thread.hidden = true;
