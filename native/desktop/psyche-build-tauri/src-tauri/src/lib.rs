@@ -8470,6 +8470,23 @@ mod workspace_panel_tests {
         path.to_str().expect("test paths must be UTF-8")
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn git_subprocess_root_removes_only_verbatim_disk_prefixes() {
+        assert_eq!(
+            git_subprocess_root(Path::new(r"\\?\C:\workspace\project")).as_ref(),
+            Path::new(r"C:\workspace\project")
+        );
+        assert_eq!(
+            git_subprocess_root(Path::new(r"\\?\UNC\server\share\project")).as_ref(),
+            Path::new(r"\\?\UNC\server\share\project")
+        );
+        assert_eq!(
+            git_subprocess_root(Path::new(r"C:\workspace\project")).as_ref(),
+            Path::new(r"C:\workspace\project")
+        );
+    }
+
     fn shell_single_quote(value: &str) -> String {
         format!("'{}'", value.replace('\'', "'\\''"))
     }
@@ -8824,6 +8841,44 @@ mod workspace_panel_tests {
         );
         assert!(diff.text.is_empty(), "isolated CRLF diff: {:?}", diff.text);
         assert_eq!(diff.bytes, 0);
+    }
+
+    #[test]
+    fn git_status_and_diff_preserve_local_line_endings_after_root_canonicalization() {
+        let tree = TempTree::new("git-canonical-root-line-endings");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        run_test_git(&tree.root, &["config", "core.autocrlf", "false"]);
+        std::fs::write(tree.root.join("tracked.txt"), b"first\nsecond\nthird\n").unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt"]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+
+        std::fs::write(tree.root.join("tracked.txt"), b"first\nsecond\nthird\n").unwrap();
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+        assert!(
+            status.files.is_empty(),
+            "canonicalized inspection must preserve local core.autocrlf=false: {:?}",
+            status.files
+        );
+
+        std::fs::write(tree.root.join("tracked.txt"), b"first\nchanged\nthird\n").unwrap();
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("tracked.txt".to_string()),
+            Some(false),
+            Some(0),
+        )
+        .unwrap();
+        assert!(diff.text.contains("-second"));
+        assert!(diff.text.contains("+changed"));
+        assert!(!diff.text.contains("-first"));
+        assert!(!diff.text.contains("+first"));
+        assert!(!diff.text.contains("-third"));
+        assert!(!diff.text.contains("+third"));
     }
 
     #[test]
