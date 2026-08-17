@@ -648,6 +648,118 @@ describe('Tauri physical terminal panes', () => {
     expect(replacementDivider.focusCalls).toBe(1);
   });
 
+  it('starts the shared Files pane reposition drag with one terminal beside it', () => {
+    const windowTarget = new FakeEventTarget();
+    const movePaneTo = vi.fn();
+    const layout = {
+      root: {
+        type: 'split',
+        id: 'split-files',
+        orientation: 'row',
+        ratio: 0.5,
+        first: { type: 'leaf', id: 'leaf-terminal', threadId: 'thread-a' },
+        second: { type: 'leaf', id: 'leaf-files', threadId: 'files-a' },
+      },
+      focusedLeafId: 'leaf-files',
+    };
+    const filesClasses = new Set<string>();
+    const terminal = {
+      id: 'thread-a',
+      kind: 'shell',
+      pane: {
+        getBoundingClientRect: () => ({
+          left: 0, right: 100, top: 0, bottom: 100, width: 100, height: 100,
+        }),
+      },
+    };
+    const filesPane = {
+      id: 'files-a',
+      kind: 'files',
+      pane: {
+        classList: {
+          add: (name: string) => { filesClasses.add(name); },
+          remove: (name: string) => { filesClasses.delete(name); },
+        },
+        getBoundingClientRect: () => ({
+          left: 100, right: 200, top: 0, bottom: 100, width: 100, height: 100,
+        }),
+      },
+    };
+    const findThread = (id: string) => (id === terminal.id ? terminal : null);
+    const canvasSurfaceById = (id: string) => {
+      if (id === terminal.id) return terminal;
+      if (id === filesPane.id) return filesPane;
+      return null;
+    };
+    const canvasThreadIds = compileFunction<() => string[]>(
+      functionSource('canvasThreadIds'),
+      {
+        activePaneLayout: () => layout,
+        PsychePanes,
+        findThread,
+      },
+    );
+    const paneRepositionSurfaceIds = compileFunction<() => string[]>(
+      functionSource('paneRepositionSurfaceIds'),
+      {
+        activePaneLayout: () => layout,
+        effectivePaneRoot: (value: typeof layout) => value.root,
+        PsychePanes,
+        canvasSurfaceById,
+      },
+    );
+    const paneElementAt = compileFunction<(
+      clientX: number,
+      clientY: number,
+    ) => { thread: typeof terminal | typeof filesPane; rect: Record<string, number> } | null>(
+      functionSource('paneElementAt'),
+      {
+        canvasThreadIds,
+        paneRepositionSurfaceIds,
+        canvasSurfaceById,
+        findThread,
+      },
+    );
+    const startPaneReposition = compileFunction<(
+      surface: typeof filesPane,
+      event: { button: number; pointerId: number; clientX: number; clientY: number },
+    ) => void>(functionSource('startPaneReposition'), {
+      terminalHost: {},
+      window: windowTarget,
+      document: { body: { classList: { add: () => undefined, remove: () => undefined } } },
+      PANE_DRAG_THRESHOLD: 5,
+      canvasThreadIds,
+      paneRepositionSurfaceIds,
+      paneElementAt,
+      paneDropZone: () => 'left',
+      showPaneDropIndicator: () => undefined,
+      clearPaneDropIndicator: () => undefined,
+      movePaneTo,
+    });
+
+    expect(canvasThreadIds()).toEqual([terminal.id]);
+    expect(paneRepositionSurfaceIds()).toEqual([terminal.id, filesPane.id]);
+
+    startPaneReposition(filesPane, {
+      button: 0,
+      pointerId: 9,
+      clientX: 150,
+      clientY: 50,
+    });
+    expect(windowTarget.listeners.get('pointermove')?.size || 0).toBe(1);
+
+    windowTarget.dispatch('pointermove', {
+      pointerId: 9,
+      clientX: 40,
+      clientY: 50,
+    });
+    windowTarget.dispatch('pointerup', { pointerId: 9 });
+
+    expect(movePaneTo).toHaveBeenCalledWith(filesPane.id, terminal.id, 'left');
+    expect(filesClasses.has('is-dragging')).toBe(false);
+    expect(windowTarget.listeners.get('pointermove')?.size || 0).toBe(0);
+  });
+
   it('delegates visible pane fitting to each keyed controller', () => {
     expect(mainJs).not.toMatch(/var visiblePaneFitFrame = 0;/);
     expect(mainJs).not.toMatch(/fitActiveTerm/);
