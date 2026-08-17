@@ -131,6 +131,11 @@ interface LeaseRequestRecord {
   grants: readonly LeaseGrant[];
 }
 
+interface RetainedReceipt {
+  taskId?: string;
+  receipt: ActionStatusReceipt;
+}
+
 interface SurfaceActionContext {
   command: Extract<ControlCommand, { kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script' }>;
   target: LeaseTarget;
@@ -205,7 +210,7 @@ export class ControlRuntime {
   private readonly leaseRequests = new Map<string, LeaseRequestRecord>();
   private readonly leaseRequestTombstones = new Set<string>();
   private readonly pendingApprovals = new Map<string, SurfaceActionContext>();
-  private readonly receipts = new Map<string, ActionStatusReceipt>();
+  private readonly receipts = new Map<string, RetainedReceipt>();
   private readonly approvalTerminalizations = new Map<string, Promise<void>>();
   private readonly readActiveTaskCredential?: ControlRuntimeOptions['readActiveTaskCredential'];
 
@@ -297,8 +302,17 @@ export class ControlRuntime {
         })),
       })),
       approvals,
-      receipts: [...this.receipts.values()],
+      receipts: [...this.receipts.values()].map((owned) => owned.receipt),
     };
+  }
+
+  receipt(actionId: string): ActionStatusReceipt | undefined {
+    return this.receipts.get(actionId)?.receipt;
+  }
+
+  receiptForTask(actionId: string, taskId: string): ActionStatusReceipt | undefined {
+    const owned = this.receipts.get(actionId);
+    return owned?.taskId === taskId ? owned.receipt : undefined;
   }
 
   readEvents(afterSequence: number, limit?: number): {
@@ -563,7 +577,7 @@ export class ControlRuntime {
             const receipt = this.makeReceipt(command, context.target, 'approval_required', {
               value: { approvalId: approval.id, payloadDigest: approval.payloadDigest },
             }, context.ownership);
-            this.rememberReceipt(receipt);
+            this.rememberReceipt(receipt, context.ownership.taskId);
             return this.appendTerminal(command, succeededOutcome({
               ...receipt,
               approvalId: approval.id,
@@ -718,7 +732,7 @@ export class ControlRuntime {
         { code: 'approval_denied' },
         context.ownership,
       );
-      this.rememberReceipt(receipt);
+      this.rememberReceipt(receipt, context.ownership.taskId);
       this.pendingApprovals.delete(approval.id);
       await this.appendTerminal(context.command, outcomeForReceipt(receipt), receipt);
       return this.appendTerminal(command, succeededOutcome(receipt));
@@ -763,7 +777,7 @@ export class ControlRuntime {
         { code: 'effect_unknown' },
         context.ownership,
       );
-      this.rememberReceipt(receipt);
+      this.rememberReceipt(receipt, context.ownership.taskId);
       return receipt;
     }
     if (queue.pendingEffects >= AGENT_CONTROL_LIMITS.resourceQueueDepth) {
@@ -774,7 +788,7 @@ export class ControlRuntime {
         { code: 'queue_full' },
         context.ownership,
       );
-      this.rememberReceipt(receipt);
+      this.rememberReceipt(receipt, context.ownership.taskId);
       return receipt;
     }
     queue.pendingEffects += 1;
@@ -798,7 +812,7 @@ export class ControlRuntime {
             ? 'action_invalidated'
             : 'action_validation_failed',
         }, context.ownership);
-        this.rememberReceipt(receipt);
+        this.rememberReceipt(receipt, context.ownership.taskId);
         return receipt;
       }
       let value: unknown;
@@ -828,7 +842,7 @@ export class ControlRuntime {
           { code: ambiguous ? 'effect_unknown' : stableSurfaceEffectCode(error) },
           context.ownership,
         );
-        this.rememberReceipt(receipt);
+        this.rememberReceipt(receipt, context.ownership.taskId);
         return receipt;
       }
       let receipt: ActionReceipt;
@@ -845,7 +859,7 @@ export class ControlRuntime {
           context.ownership,
         );
       }
-      this.rememberReceipt(receipt);
+      this.rememberReceipt(receipt, context.ownership.taskId);
       return receipt;
     } finally {
       queue.pendingEffects -= 1;
@@ -1182,7 +1196,7 @@ export class ControlRuntime {
   }
 
   private approvalAlreadyTerminalized(actionId: string): boolean {
-    const receipt = this.receipts.get(actionId);
+    const receipt = this.receipts.get(actionId)?.receipt;
     return receipt !== undefined && receipt.state !== 'approval_required';
   }
 
@@ -1379,10 +1393,10 @@ export class ControlRuntime {
     }, ownership);
   }
 
-  private rememberReceipt(receipt: ActionStatusReceipt): void {
+  private rememberReceipt(receipt: ActionStatusReceipt, taskId?: string): void {
     const redacted = redactReceipt(receipt);
     this.receipts.delete(receipt.actionId);
-    this.receipts.set(receipt.actionId, redacted);
+    this.receipts.set(receipt.actionId, { taskId, receipt: redacted });
     while (this.receipts.size > MAX_COMMAND_RECORDS) {
       const oldest = this.receipts.keys().next().value;
       if (oldest === undefined) break;
@@ -1397,7 +1411,7 @@ export class ControlRuntime {
     ownership?: TrustedReceiptOwnership,
   ): Promise<CommandOutcome> {
     const receipt = this.makeReceipt(command, target, 'failed', { code }, ownership);
-    this.rememberReceipt(receipt);
+    this.rememberReceipt(receipt, ownership?.taskId);
     const outcome = outcomeForReceipt(receipt);
     return this.appendTerminal(command, outcome, receipt);
   }
@@ -1507,7 +1521,7 @@ export class ControlRuntime {
   private rehydrateReceipts(events: readonly RuntimeEvent[]): void {
     this.receipts.clear();
     for (const record of latestDurableReceiptRecords(events)) {
-      this.rememberReceipt(record.receipt);
+      this.rememberReceipt(record.receipt, record.receipt.taskId);
     }
   }
 
