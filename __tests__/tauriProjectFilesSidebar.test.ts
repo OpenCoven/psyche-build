@@ -377,6 +377,74 @@ describe('project Files sidebar navigation', () => {
     expect(projectGroup.head.children.at(-1)).toBe(projectGroup.files);
   });
 
+  it('keeps project titles ahead of fixed count and Files controls so narrow sidebars can truncate them', () => {
+    const createProjectGroup = compileFunction<
+      (projectModel: Record<string, unknown>, options: Record<string, unknown>) => {
+        head: FakeElement;
+        files?: FakeElement;
+      }
+    >('createProjectGroup', {
+      document: {
+        createElement: (tagName: string) => new FakeElement(tagName),
+      },
+      PsycheSessions: {
+        resolveProjectAppearance: () => ({
+          accent: { id: 'violet', rgb: '120 90 200' },
+          customized: false,
+          glyph: null,
+        }),
+      },
+      projectAppearances: {},
+      createDisclosure: () => new FakeElement('button'),
+      appendHighlightedText: (element: FakeElement, value: string) => {
+        element.textContent = value;
+      },
+      attachTooltip: () => undefined,
+    });
+
+    const projectGroup = createProjectGroup({
+      key: 'project:1',
+      title: 'Potion Laboratory With A Very Long Name',
+      titleMatches: [],
+      expanded: true,
+      autoExpanded: false,
+      count: 12,
+      attentionCount: 0,
+      project: {
+        id: 'project-1',
+        root: '/repo/potion-lab',
+      },
+    }, {
+      current: false,
+      tabindex: '-1',
+    });
+
+    const titleIndex = projectGroup.head.children.findIndex(
+      (child) => child.className === 'session-project-name',
+    );
+    const countIndex = projectGroup.head.children.findIndex(
+      (child) => child.className === 'session-project-count',
+    );
+    const filesIndex = projectGroup.head.children.findIndex(
+      (child) => child.className === 'session-project-files',
+    );
+    const titleRule = ruleBlock('.session-project-name');
+    const countRule = styles.match(
+      /\.session-project-count,\s*\.session-branch-count,\s*\.session-category-count\s*\{([^}]*)\}/s,
+    )?.[1] ?? '';
+    const filesRule = ruleBlock('.session-project-files');
+
+    expect(titleIndex).toBeGreaterThan(-1);
+    expect(countIndex).toBeGreaterThan(titleIndex);
+    expect(filesIndex).toBeGreaterThan(countIndex);
+    expect(titleRule).toMatch(/min-width:\s*0;/);
+    expect(titleRule).toMatch(/overflow:\s*hidden;/);
+    expect(titleRule).toMatch(/text-overflow:\s*ellipsis;/);
+    expect(titleRule).toMatch(/white-space:\s*nowrap;/);
+    expect(countRule).toMatch(/flex:\s*none;/);
+    expect(filesRule).toMatch(/flex:\s*none;/);
+  });
+
   it('dispatches project Files button events without selecting or toggling the project group', async () => {
     const document = new FakeDocument();
     const project = {
@@ -470,6 +538,8 @@ describe('project Files sidebar navigation', () => {
       throw new Error('expected requestAnimationFrame callback');
     };
     const focus = vi.fn();
+    const restoreSessionTreeFocus = vi.fn().mockReturnValue(false);
+    const getElementById = vi.fn();
     const showSessionsSidebar = compileFunction<() => boolean>('showSessionsSidebar', {
       sidebarFilesReturnProjectId: 'project-1',
       setSidebarView: vi.fn(),
@@ -484,19 +554,23 @@ describe('project Files sidebar navigation', () => {
           { dataset: { projectFiles: 'project-1' }, focus },
         ],
       },
-      restoreSessionTreeFocus: vi.fn(),
+      restoreSessionTreeFocus,
+      document: { getElementById },
     });
 
     expect(showSessionsSidebar()).toBe(true);
     rafCallback();
     expect(focus).toHaveBeenCalledOnce();
+    expect(restoreSessionTreeFocus).not.toHaveBeenCalled();
+    expect(getElementById).not.toHaveBeenCalled();
   });
 
-  it('falls back to tree focus restoration when the originating Files button is missing', () => {
+  it('falls back to tree focus restoration when the originating Files button is missing and the tree can take focus', () => {
     let rafCallback: () => void = () => {
       throw new Error('expected requestAnimationFrame callback');
     };
-    const restoreSessionTreeFocus = vi.fn();
+    const focus = vi.fn();
+    const restoreSessionTreeFocus = vi.fn().mockReturnValue(true);
     const setSidebarView = vi.fn();
     const renderSessionList = vi.fn();
     const showSessionsSidebar = compileFunction<() => boolean>('showSessionsSidebar', {
@@ -511,6 +585,9 @@ describe('project Files sidebar navigation', () => {
         querySelectorAll: () => [{ dataset: { projectFiles: 'project-2' }, focus: vi.fn() }],
       },
       restoreSessionTreeFocus,
+      document: {
+        getElementById: vi.fn((id: string) => id === 'rail-new-tab' ? { focus } : null),
+      },
     });
 
     expect(showSessionsSidebar()).toBe(true);
@@ -519,6 +596,36 @@ describe('project Files sidebar navigation', () => {
     expect(functionSource('showSessionsSidebar')).toContain('sidebarFilesReturnProjectId = null;');
     rafCallback();
     expect(restoreSessionTreeFocus).toHaveBeenCalledWith('');
+    expect(focus).not.toHaveBeenCalled();
+  });
+
+  it('focuses the New Session trigger when the originating Files button is missing and tree focus restoration fails', () => {
+    let rafCallback: () => void = () => {
+      throw new Error('expected requestAnimationFrame callback');
+    };
+    const focus = vi.fn();
+    const restoreSessionTreeFocus = vi.fn().mockReturnValue(false);
+    const showSessionsSidebar = compileFunction<() => boolean>('showSessionsSidebar', {
+      sidebarFilesReturnProjectId: 'missing-project',
+      setSidebarView: vi.fn(),
+      renderSessionList: vi.fn(),
+      requestAnimationFrame: (callback: () => void) => {
+        rafCallback = callback;
+        return 1;
+      },
+      sessionListEl: {
+        querySelectorAll: () => [{ dataset: { projectFiles: 'project-2' }, focus: vi.fn() }],
+      },
+      restoreSessionTreeFocus,
+      document: {
+        getElementById: vi.fn((id: string) => id === 'rail-new-tab' ? { focus } : null),
+      },
+    });
+
+    expect(showSessionsSidebar()).toBe(true);
+    rafCallback();
+    expect(restoreSessionTreeFocus).toHaveBeenCalledWith('');
+    expect(focus).toHaveBeenCalledOnce();
   });
 
   it('routes files-back rail clicks through the registered listener to showSessionsSidebar', async () => {

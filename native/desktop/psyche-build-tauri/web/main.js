@@ -5474,7 +5474,10 @@
         return button.dataset.projectFiles === restoreProjectId;
       });
       if (target) target.focus();
-      else restoreSessionTreeFocus("");
+      else if (!restoreSessionTreeFocus("")) {
+        var trigger = document.getElementById("rail-new-tab");
+        if (trigger && typeof trigger.focus === "function") trigger.focus();
+      }
     });
     return true;
   }
