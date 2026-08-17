@@ -587,7 +587,7 @@ describe('Tauri footer status bar shell', () => {
         {
           id: 'agent',
           name: 'Agent',
-          kind: 'coven-chat',
+          kind: 'coven-code',
           status: 'running',
           launch: { covenSessionId: 'live' },
           needsAttention: true,
@@ -737,7 +737,7 @@ describe('Tauri footer status bar shell', () => {
         {
           id: 'agent',
           name: 'Agent',
-          kind: 'coven-chat',
+          kind: 'coven-code',
           status: 'running',
           covenSessionId: 'live',
           processBacked: true,

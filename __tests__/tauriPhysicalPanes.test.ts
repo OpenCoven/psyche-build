@@ -76,7 +76,7 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     saveWorkspaceNow: async () => true,
     scheduleBrowserBounds: () => undefined,
     isPersistentThread: (thread: Record<string, any>) =>
-      ['shell', 'psyche', 'coven-chat', 'coven-attach'].includes(thread?.launch?.launchKind),
+      ['shell', 'psyche', 'coven-code', 'coven-attach'].includes(thread?.launch?.launchKind),
     nativeSessionRequest: (thread: Record<string, any>) => ({ id: thread.id }),
     invoke: async () => [],
     attachThreadClient: dependencies.spawnPty || (() => Promise.resolve(true)),
@@ -2116,7 +2116,7 @@ describe('Tauri physical terminal panes', () => {
     const project = { id: 'project', worktrees: [{ path: '/repo' }] };
     const thread = {
       id: 'thread-a', projectId: project.id, worktreePath: '/repo',
-      kind: 'coven-chat', status: 'running', hidden: true, pane: { id: 'pane-a' },
+      kind: 'coven-code', status: 'running', hidden: true, pane: { id: 'pane-a' },
     };
     const state = { threads: [thread] };
     let focused = 0;
@@ -3051,7 +3051,7 @@ describe('Tauri physical terminal panes', () => {
       threads: [
         {
           id: 'thread-chat',
-          kind: 'coven-chat',
+          kind: 'coven-code',
           projectId: project.id,
           worktreePath: '/target',
           hidden: false,
@@ -3359,7 +3359,7 @@ describe('Tauri physical terminal panes', () => {
   it('routes /new-thread through ensureProjectCoven(activeProject())', async () => {
     const project = { id: 'project', root: '/repo' };
     let ensured: typeof project | null = null;
-    const result = { kind: 'coven-chat' };
+    const result = { kind: 'coven-code' };
     const runNewThreadCommand = compileFunction<() => Promise<typeof result | null>>(
       functionSource('runNewThreadCommand'),
       {

@@ -9,7 +9,7 @@ export const DEFAULT_METRIC_ORDER = Object.freeze([
 ]);
 
 const METRIC_IDS = new Set(DEFAULT_METRIC_ORDER);
-const LOCAL_AGENT_KINDS = new Set(['coven-chat', 'coven-attach']);
+const LOCAL_AGENT_KINDS = new Set(['coven-code', 'coven-attach']);
 const ACTIVE_AGENT_STATUSES = new Set(['running', 'waiting', 'blocked']);
 const MAX_TREND_SAMPLES = 60;
 const DIAGNOSTIC_LIMIT = 16_384;
