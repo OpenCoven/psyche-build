@@ -126,7 +126,7 @@ describe('pane footer model', () => {
 
   it('treats only allowlisted pane kinds as agent-backed', () => {
     expect([
-      'coven-chat',
+      'coven-code',
       'coven-attach',
       'agent-copilot',
       'agent-codex',
@@ -137,7 +137,7 @@ describe('pane footer model', () => {
 
   it('orders agent controls and formats unavailable metrics', () => {
     const items = footerItems({
-      kind: 'coven-chat',
+      kind: 'coven-code',
       branch: 'feat/footer',
       worktreeLabel: 'footer-pane',
       worktreePath: '/repo/.worktrees/footer-pane',
@@ -202,7 +202,7 @@ describe('pane footer model', () => {
 
   it('uses session truncation and the expected footer actions', () => {
     const items = footerItems({
-      kind: 'coven-chat',
+      kind: 'coven-code',
       branch: 'feat/footer',
       worktreeLabel: 'footer-pane',
       worktreePath: '/repo/.worktrees/footer-pane',
@@ -238,7 +238,7 @@ describe('pane footer model', () => {
 
   it('keeps missing session ids semantically empty and truthfully labelled', () => {
     const item = footerItems({
-      kind: 'coven-chat',
+      kind: 'coven-code',
       branch: 'feat/footer',
       worktreeLabel: 'footer-pane',
       worktreePath: '/repo/.worktrees/footer-pane',
@@ -269,7 +269,7 @@ describe('pane footer model', () => {
   it('uses ellipses while agent metrics are loading or idle', () => {
     for (const phase of ['idle', 'loading'] as const) {
       const items = footerItems({
-        kind: 'coven-chat',
+        kind: 'coven-code',
         branch: 'feat/footer',
         worktreeLabel: 'footer-pane',
         worktreePath: '/repo/.worktrees/footer-pane',
@@ -332,7 +332,7 @@ describe('pane metrics refresh contract', () => {
   it('polls visible agent panes only', () => {
     expect(mainJs).toMatch(/function threadWantsMetrics\(thread\)/);
     expect(mainJs).toMatch(
-      /function threadWantsMetrics\(thread\)[\s\S]*isLiveThread\(thread\)[\s\S]*thread\.launch\.launchKind === "coven-chat"[\s\S]*thread\.pane\.isConnected[\s\S]*effectiveCanvasThreadIds\(\)\.indexOf\(thread\.id\)/,
+      /function threadWantsMetrics\(thread\)[\s\S]*isLiveThread\(thread\)[\s\S]*thread\.launch\.launchKind === "coven-code"[\s\S]*thread\.pane\.isConnected[\s\S]*effectiveCanvasThreadIds\(\)\.indexOf\(thread\.id\)/,
     );
     expect(mainJs).toMatch(/setInterval\(refreshVisiblePaneMetrics,\s*15000\)/);
     expect(mainJs).toMatch(/var PANE_METRICS_POLL_MS = 15000;/);
@@ -385,14 +385,14 @@ describe('pane metrics refresh contract', () => {
       closing: false,
       status: 'running',
       pane: { isConnected: true },
-      launch: { launchKind: 'coven-chat', covenSessionId: `session-${id}` },
+      launch: { launchKind: 'coven-code', covenSessionId: `session-${id}` },
     };
   }
 
   it('selects only canonical live, connected Coven sessions with an exact id', () => {
     const eligible = {
       ...eligibleThread('visible'),
-      launch: { launchKind: 'coven-chat', covenSessionId: 'session-exact' },
+      launch: { launchKind: 'coven-code', covenSessionId: 'session-exact' },
     };
     const layout = { root: paneTreeModule.createLeaf('leaf-visible', 'visible') };
     const threadWantsMetrics = metricsEligibility(layout, [eligible]);
@@ -760,7 +760,7 @@ describe('pane usage popover lifecycle', () => {
     const threadA = {
       id: 'thread-a',
       name: 'Agent A',
-      kind: 'coven-chat',
+      kind: 'coven-code',
       paneFooter: createElement(),
       paneFooterItems: createElement(),
       paneFooterOverflow: createElement(),
@@ -769,7 +769,7 @@ describe('pane usage popover lifecycle', () => {
     const threadB = {
       id: 'thread-b',
       name: 'Agent B',
-      kind: 'coven-chat',
+      kind: 'coven-code',
       paneFooter: createElement(),
       paneFooterItems: createElement(),
       paneFooterOverflow: createElement(),
@@ -1504,7 +1504,7 @@ describe('pane footer integration contract', () => {
     expect(state).toContain('Session metrics are not reported by this harness');
     expect(state).toMatch(/canSwitchModel:\s*false/);
     expect(create).toMatch(
-      /metrics:\s*launch\.launchKind === "coven-chat" && launch\.covenSessionId[\s\S]*loadingPaneMetrics\(launch\)/,
+      /metrics:\s*launch\.launchKind === "coven-code" && launch\.covenSessionId[\s\S]*loadingPaneMetrics\(launch\)/,
     );
   });
 
@@ -1524,11 +1524,11 @@ describe('pane footer integration contract', () => {
 
     expect(paneFooterState({
       id: 'thread-1',
-      kind: 'coven-chat',
+      kind: 'coven-code',
       worktreePath: '/repo',
       metrics: null,
       launch: {
-        launchKind: 'coven-chat',
+        launchKind: 'coven-code',
         covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
         metricsProvider: 'coven',
       },

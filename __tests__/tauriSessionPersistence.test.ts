@@ -39,6 +39,15 @@ function functionSource(name: string) {
   throw new Error(`unterminated function ${name}`);
 }
 
+function compileFunction<T extends (...args: never[]) => unknown>(
+  source: string,
+  dependencies: Record<string, unknown> = {},
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(...names, `"use strict"; return (${source});`)(...values) as T;
+}
+
 describe('Tauri workspace persistence model', () => {
   test('imports v2 state without inventing sessions or layouts', () => {
     expect(
@@ -60,7 +69,7 @@ describe('Tauri workspace persistence model', () => {
     });
   });
 
-  test('sanitizes session descriptors and strips command env payloads', () => {
+  test('validates persisted session descriptor kinds and Coven attach launches', () => {
     expect(
       workspaceModel.sanitizeSessionDescriptor({
         id: 'session-1.alpha:beta',
@@ -73,15 +82,7 @@ describe('Tauri workspace persistence model', () => {
         command: 'rm -rf /',
         env: { SECRET: 'nope' },
       }),
-    ).toEqual({
-      id: 'session-1.alpha:beta',
-      projectId: 'project-a',
-      worktreePath: '/repo',
-      name: 'Shell',
-      kind: 'shell',
-      launchKind: 'shell',
-      hidden: true,
-    });
+    ).toBeNull();
 
     expect(
       workspaceModel.sanitizeSessionDescriptor({
@@ -129,6 +130,46 @@ describe('Tauri workspace persistence model', () => {
         launchKind: 'coven-attach',
       }),
     ).toBeNull();
+  });
+
+  test('falls back to launch kind when persisted kind is omitted or null', () => {
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'session-without-kind',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        name: 'Shell',
+        launchKind: 'shell',
+        hidden: true,
+        command: 'rm -rf /',
+        env: { SECRET: 'nope' },
+      }),
+    ).toEqual({
+      id: 'session-without-kind',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Shell',
+      kind: 'shell',
+      launchKind: 'shell',
+      hidden: true,
+    });
+
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'session-with-null-kind',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        kind: null,
+        launchKind: 'psyche',
+      }),
+    ).toEqual({
+      id: 'session-with-null-kind',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      kind: 'psyche',
+      launchKind: 'psyche',
+      hidden: false,
+    });
   });
 
   test('accepts only safe Coven attachment identifiers', () => {
@@ -180,19 +221,162 @@ describe('Tauri workspace persistence model', () => {
     ).toBeNull();
   });
 
-  test('preserves safe Coven chat identifiers needed for explicit retry', () => {
+  test('migrates legacy Coven descriptors to Coven Code metadata', () => {
     expect(
       workspaceModel.sanitizeSessionDescriptor({
-        id: 'chat-1',
+        id: 'code-legacy',
         projectId: 'project-a',
         worktreePath: '/repo',
+        name: 'Coven',
         kind: 'coven-chat',
         launchKind: 'coven-chat',
         covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
       }),
-    ).toMatchObject({
-      launchKind: 'coven-chat',
+    ).toEqual({
+      id: 'code-legacy',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Coven',
+      kind: 'coven-code',
+      launchKind: 'coven-code',
+      hidden: false,
       covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+    });
+  });
+
+  test('rejects padded legacy Coven kinds in either descriptor field', () => {
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'code-padded-kind',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        kind: ' coven-chat ',
+        launchKind: 'shell',
+      }),
+    ).toBeNull();
+
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'code-padded-launch-kind',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        kind: 'shell',
+        launchKind: ' coven-chat ',
+      }),
+    ).toBeNull();
+  });
+
+  test('preserves canonical Coven Code identifiers needed for explicit retry', () => {
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'code-current',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        name: 'Coven Code',
+        kind: 'coven-code',
+        launchKind: 'coven-code',
+        covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+      }),
+    ).toEqual({
+      id: 'code-current',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Coven Code',
+      kind: 'coven-code',
+      launchKind: 'coven-code',
+      hidden: false,
+      covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+    });
+  });
+
+  test('normalizes legacy Coven metadata before workspace state is returned', () => {
+    expect(
+      workspaceModel.sanitizeWorkspaceV3({
+        version: 3,
+        activeProjectId: 'project-a',
+        activeThreadId: 'code-legacy',
+        projects: [{ id: 'project-a', root: '/repo' }],
+        sessions: [
+          {
+            id: 'code-legacy',
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            name: 'Coven',
+            kind: 'coven-chat',
+            launchKind: 'coven-chat',
+            covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+          },
+        ],
+        filesPanes: [],
+        paneLayouts: [],
+      }),
+    ).toEqual({
+      version: 3,
+      activeProjectId: 'project-a',
+      activeThreadId: 'code-legacy',
+      projects: [{ id: 'project-a', root: '/repo' }],
+      sessions: [
+        {
+          id: 'code-legacy',
+          projectId: 'project-a',
+          worktreePath: '/repo',
+          name: 'Coven',
+          kind: 'coven-code',
+          launchKind: 'coven-code',
+          hidden: false,
+          covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+        },
+      ],
+      filesPanes: [],
+      paneLayouts: [],
+    });
+  });
+
+  test('persists restored legacy Coven sessions with canonical live metadata', () => {
+    const sessionId = '12345678-1234-4abc-8def-1234567890ab';
+    const descriptor = workspaceModel.sanitizeSessionDescriptor({
+      id: 'code-legacy-restored',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Coven Code',
+      kind: 'coven-chat',
+      launchKind: 'coven-chat',
+      covenSessionId: sessionId,
+    });
+    const restoredSessionThread = compileFunction<(
+      saved: Record<string, unknown>,
+      project: { id: string; root: string },
+    ) => Record<string, any>>(functionSource('restoredSessionThread'), {
+      restoredSessionLaunch: compileFunction(functionSource('restoredSessionLaunch')),
+      createThreadPtyIoQueue: () => ({ closed: false }),
+      loadingPaneMetrics: (launch: Record<string, unknown>) => ({
+        provider: launch.metricsProvider,
+      }),
+    });
+    const persistableSession = compileFunction<(
+      thread: Record<string, unknown>,
+    ) => Record<string, unknown> | null>(functionSource('persistableSession'));
+
+    const restored = restoredSessionThread(descriptor, { id: 'project-a', root: '/repo' });
+
+    expect(restored).toMatchObject({
+      kind: 'coven-code',
+      launch: {
+        launchKind: 'coven-code',
+        covenSessionId: sessionId,
+        metricsProvider: 'coven',
+      },
+      metrics: { provider: 'coven' },
+    });
+    expect(persistableSession(restored)).toEqual({
+      id: 'code-legacy-restored',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Coven Code',
+      kind: 'coven-code',
+      launchKind: 'coven-code',
+      hidden: false,
+      covenSessionId: sessionId,
     });
   });
 
@@ -1154,9 +1338,9 @@ describe('Tauri workspace persistence model', () => {
       'Shell — login shell<span class="new-pane-key">⌃T</span>',
     );
     expect(indexHtml).toContain(
-      'Agent — coven chat<span class="new-pane-key">⌃A</span>',
+      'Agent — Coven Code<span class="new-pane-key">⌃A</span>',
     );
     expect(mainSource).toContain('["New shell pane", "⌃T"]');
-    expect(mainSource).toContain('["New agent pane (coven chat)", "⌃A"]');
+    expect(mainSource).toContain('["New agent pane (Coven Code)", "⌃A"]');
   });
 });

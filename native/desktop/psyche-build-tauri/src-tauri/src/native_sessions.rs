@@ -12,7 +12,7 @@ const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) enum NativeLaunchKind {
     Shell,
     Psyche,
-    CovenChat,
+    CovenCode,
     CovenAttach,
 }
 
@@ -92,7 +92,7 @@ pub(crate) fn build_create_args(
     let name = session_name(&request.id)?;
     if matches!(
         request.launch_kind,
-        NativeLaunchKind::CovenChat | NativeLaunchKind::CovenAttach
+        NativeLaunchKind::CovenCode | NativeLaunchKind::CovenAttach
     ) {
         let id = request
             .coven_session_id
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn coven_launch_requires_a_safe_session_id() {
-        for kind in [NativeLaunchKind::CovenChat, NativeLaunchKind::CovenAttach] {
+        for kind in [NativeLaunchKind::CovenCode, NativeLaunchKind::CovenAttach] {
             let mut launch = request(kind);
             launch.coven_session_id = Some("valid:session-1".to_string());
             assert!(build_create_args(
@@ -337,6 +337,52 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn accepts_canonical_native_coven_code_request() {
+        let launch: NativeSessionCreate = serde_json::from_value(serde_json::json!({
+            "id": "session-1",
+            "projectRoot": "/repo",
+            "cwd": "/repo/worktree",
+            "launchKind": "coven-code",
+            "covenSessionId": "valid:session-1"
+        }))
+        .expect("canonical Coven Code request should deserialize");
+
+        assert_eq!(launch.launch_kind, NativeLaunchKind::CovenCode);
+        assert_eq!(
+            serde_json::to_value(&launch.launch_kind).unwrap(),
+            serde_json::json!("coven-code")
+        );
+        let create_args = build_create_args(
+            Path::new("/tmp/socket"),
+            &launch,
+            "/usr/local/bin/coven",
+            &[
+                "code".to_string(),
+                "--session-id".to_string(),
+                "valid:session-1".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            create_args.last().map(String::as_str),
+            Some("'/usr/local/bin/coven' 'code' '--session-id' 'valid:session-1'")
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_native_coven_chat_request() {
+        let result = serde_json::from_value::<NativeSessionCreate>(serde_json::json!({
+            "id": "session-1",
+            "projectRoot": "/repo",
+            "cwd": "/repo/worktree",
+            "launchKind": "coven-chat",
+            "covenSessionId": "valid:session-1"
+        }));
+
+        assert!(result.is_err());
     }
 
     #[test]
