@@ -238,6 +238,80 @@ describe('ControlRuntime', () => {
     expect(JSON.stringify(terminal)).not.toContain('missing-secret-lease');
   });
 
+  it('retains exact task-owned receipts beyond the bounded journal status scan', async () => {
+    const harness = await createBrowserActionHarness();
+    handlers.actOnBrowser = vi.fn(async () => ({ secret: 'returned-only-to-caller' }));
+    await submit(harness.runtime, command({
+      id: 'action-alpha', idempotencyKey: 'action-alpha', kind: 'browser.action', ownerEpoch: 7,
+      actor: { id: harness.actorId, kind: 'psyche' }, payload: {
+        taskId: harness.taskId, leaseId: harness.lease.id, leaseRevision: harness.lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation, action: { kind: 'reload' },
+      },
+    }));
+    const alphaReceipt = harness.runtime.snapshot().receipts.find(
+      (receipt) => receipt.actionId === 'action-alpha',
+    );
+    expect(alphaReceipt).toBeDefined();
+
+    for (let index = 0; index < 1_001; index += 1) {
+      await harness.journal.append('unrelated.event', { index });
+    }
+
+    expect(harness.runtime.receiptForTask('action-alpha', harness.taskId)).toEqual(alphaReceipt);
+    expect(harness.runtime.receiptForTask('action-alpha', 'task-beta')).toBeUndefined();
+    expect(harness.runtime.receiptForTask('missing-action', harness.taskId)).toBeUndefined();
+    expect(harness.runtime.receipt('action-alpha')).toEqual(alphaReceipt);
+    expect(JSON.stringify(alphaReceipt)).not.toContain('returned-only-to-caller');
+  });
+
+  it('refreshes receipt retention order and replaces ownership on action ID collisions', async () => {
+    const harness = await createBrowserActionHarness({ taskId: 'task-alpha', actorId: 'agent-alpha' });
+    handlers.actOnBrowser = vi.fn(async () => ({ ok: true }));
+    const act = async (
+      actionId: string,
+      idempotencyKey: string,
+      actorId = harness.actorId,
+      taskId = harness.taskId,
+      lease = harness.lease,
+    ) => submit(harness.runtime, command({
+      id: actionId, idempotencyKey, kind: 'browser.action', ownerEpoch: 7,
+      actor: { id: actorId, kind: 'psyche' }, payload: {
+        taskId, leaseId: lease.id, leaseRevision: lease.revision,
+        tabId: harness.tab.id, generation: harness.tab.generation, action: { kind: 'reload' },
+      },
+    }));
+
+    await act('action-alpha', 'action-alpha:first');
+    for (let index = 1; index < 1_000; index += 1) {
+      await act(`action-${index}`, `action-${index}`);
+    }
+    await act('action-alpha', 'action-alpha:refresh');
+    await act('action-newest', 'action-newest');
+
+    expect(harness.runtime.receipt('action-1')).toBeUndefined();
+    expect(harness.runtime.receiptForTask('action-alpha', 'task-alpha')).toBeDefined();
+    expect(harness.runtime.snapshot().receipts.at(-2)?.actionId).toBe('action-alpha');
+
+    const betaGrant = await submit(harness.runtime, command({
+      id: 'grant-beta', idempotencyKey: 'grant-beta', kind: 'lease.grant', ownerEpoch: 7,
+      payload: {
+        requestId: 'request-beta', actorId: 'agent-beta', taskId: 'task-beta', ttlMs: 60_000,
+        grants: [{
+          target: { kind: 'browser_tab', id: harness.tab.id, generation: harness.tab.generation },
+          capabilities: ['browser.history'],
+        }],
+      },
+    }));
+    const betaLease = (betaGrant as { value: { lease: { id: string; revision: number } } }).value.lease;
+    await act('action-alpha', 'action-alpha:beta', 'agent-beta', 'task-beta', betaLease);
+
+    expect(harness.runtime.receiptForTask('action-alpha', 'task-alpha')).toBeUndefined();
+    expect(harness.runtime.receiptForTask('action-alpha', 'task-beta')).toEqual(
+      harness.runtime.receipt('action-alpha'),
+    );
+    expect(harness.runtime.snapshot().receipts.at(-1)).toEqual(harness.runtime.receipt('action-alpha'));
+  });
+
   it('stamps task-bound validation failures with exact subject ownership and omits unprovable lease metadata', async () => {
     const subject: ControlTaskCredentialReference = {
       taskBinding: { taskId: 'task-review', subjectId: 'subject-review' },
