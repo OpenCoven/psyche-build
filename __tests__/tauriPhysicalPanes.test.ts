@@ -268,6 +268,17 @@ function createPaneFocusHarness(
     queued.push(callback);
     return queued.length;
   };
+  const browserPaneLifecycleStates = new WeakMap<object, { tearingDown: boolean }>();
+  const browserPaneLifecycle = compileFunction<
+    (thread: PaneFocusThread | null) => { tearingDown: boolean }
+  >(functionSource('browserPaneLifecycle'), {
+    browserPaneLifecycleStates,
+  });
+  const browserPaneIsClosing = compileFunction<
+    (thread: PaneFocusThread | null) => boolean
+  >(functionSource('browserPaneIsClosing'), {
+    browserPaneLifecycle,
+  });
   const isLiveThread = (thread: PaneFocusThread | null) => (
     Boolean(thread) && !thread?.closing && state.threads.includes(thread as PaneFocusThread)
   );
@@ -311,6 +322,7 @@ function createPaneFocusHarness(
     options?: { preserveFullscreenLeafId?: string; refreshStatus?: boolean },
   ) => Promise<boolean>>(functionSource('focusThread'), {
     findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+    browserPaneIsClosing,
     showTerminalView: async () => true,
     focusedTerminalThreadForRender,
     markActiveSurface: () => undefined,
@@ -336,6 +348,7 @@ function createPaneFocusHarness(
   return {
     ...tokens,
     attachedPanes,
+    browserPaneLifecycle,
     documentRef,
     focusThread,
     focusedTerminalThreadForRender,
@@ -1351,6 +1364,49 @@ describe('Tauri physical terminal panes', () => {
     expect(tiledHarness.state.activeThreadId).toBe(target.id);
     expect(tiledLayout.focusedLeafId).toBe('leaf-target-tiled');
     expect(tiledLayout.maximizedLeafId).toBeNull();
+  });
+
+  it('rejects a tearing-down browser pane before centralized focus mutates state', async () => {
+    const source: PaneFocusThread = {
+      id: 'thread-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-source' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const target: PaneFocusThread = {
+      id: 'thread-browser',
+      kind: 'web',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-browser' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-source', source.id),
+        'leaf-source',
+        PsychePanes.createLeaf('leaf-browser', target.id),
+        'split-browser',
+      ),
+      focusedLeafId: 'leaf-source',
+      maximizedLeafId: 'leaf-source',
+    };
+    const harness = createPaneFocusHarness([source, target], source.id, null, layout);
+    harness.browserPaneLifecycle(target).tearingDown = true;
+
+    await expect(harness.focusThread(target.id)).resolves.toBe(false);
+
+    expect(harness.state.activeThreadId).toBe(source.id);
+    expect(harness.project.lastActiveThreadId).toBe(source.id);
+    expect(layout.focusedLeafId).toBe('leaf-source');
+    expect(layout.maximizedLeafId).toBe('leaf-source');
+    expect(harness.queued).toHaveLength(0);
   });
 
   it('preserves fullscreen through focus-set activation for a siderail pane selection', async () => {
