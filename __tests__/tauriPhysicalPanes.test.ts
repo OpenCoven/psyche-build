@@ -144,6 +144,61 @@ class FakeEventTarget {
   }
 }
 
+class FakeMinimapElement extends FakeEventTarget {
+  readonly tagName: string;
+  type = '';
+  textContent = '';
+  children: FakeMinimapElement[] = [];
+  parentNode: FakeMinimapElement | null = null;
+
+  constructor(tagName: string) {
+    super();
+    this.tagName = tagName.toUpperCase();
+  }
+
+  appendChild(child: FakeMinimapElement) {
+    child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }
+
+  replaceChildren(...children: FakeMinimapElement[]) {
+    this.children.forEach((child) => { child.parentNode = null; });
+    this.children = [];
+    children.forEach((child) => this.appendChild(child));
+  }
+
+  querySelector(selector: string): FakeMinimapElement | null {
+    if (!selector.startsWith('.')) throw new Error(`unsupported selector ${selector}`);
+    const className = selector.slice(1);
+    const visit = (element: FakeMinimapElement): FakeMinimapElement | null => {
+      if (element.className.split(/\s+/).includes(className)) return element;
+      for (const child of element.children) {
+        const match = visit(child);
+        if (match) return match;
+      }
+      return null;
+    };
+    for (const child of this.children) {
+      const match = visit(child);
+      if (match) return match;
+    }
+    return null;
+  }
+
+  remove() {
+    if (!this.parentNode) return;
+    this.parentNode.children = this.parentNode.children.filter((child) => child !== this);
+    this.parentNode = null;
+  }
+
+  async emit(name: string, event: Record<string, unknown> = {}) {
+    for (const listener of this.listeners.get(name) ?? []) {
+      await listener(event);
+    }
+  }
+}
+
 type FocusReportPolicy = 'suppress' | 'allow';
 type FocusReportToken = {
   report: string;
@@ -358,6 +413,68 @@ function createPaneFocusHarness(
     state,
     terminalHost,
   };
+}
+
+function createMinimapFocusHarness(targetKind: 'shell' | 'web') {
+  const source: PaneFocusThread = {
+    id: 'thread-source',
+    kind: 'shell',
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    pane: { id: 'pane-source' },
+    host: { contains: () => false },
+    term: null,
+  };
+  const target: PaneFocusThread = {
+    id: 'thread-target',
+    kind: targetKind,
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    pane: { id: 'pane-target' },
+    host: { contains: () => false },
+    term: null,
+  };
+  const layout: PaneFocusLayout = {
+    root: PsychePanes.insertBelow(
+      PsychePanes.createLeaf('leaf-source', source.id),
+      'leaf-source',
+      PsychePanes.createLeaf('leaf-target', target.id),
+      'split-target',
+    ),
+    focusedLeafId: 'leaf-source',
+    maximizedLeafId: 'leaf-source',
+  };
+  const focusHarness = createPaneFocusHarness([source, target], source.id, null, layout);
+  const terminalArea = new FakeMinimapElement('section');
+  const renderPaneMinimap = compileFunction<
+    (paneLayout: PaneFocusLayout, activeFile: unknown) => void
+  >(functionSource('renderPaneMinimap'), {
+    terminalArea,
+    document: {
+      createElement: (tagName: string) => new FakeMinimapElement(tagName),
+    },
+    paneMinimapItems: () => [{
+      kind: 'pane',
+      id: target.id,
+      label: 'Target',
+      detail: 'running',
+      current: false,
+      thread: target,
+    }],
+    paneGlyphFor: () => '❯_',
+    sessionStatusClass: () => 'running',
+    PsychePanes,
+    filesPaneHasCanvasFocus: () => false,
+    returnFromFileFocus: async () => false,
+    focusThread: focusHarness.focusThread,
+    restoreFileEditorFocus: () => undefined,
+  });
+  renderPaneMinimap(layout, null);
+  const entry = terminalArea.querySelector('.minimap-pane');
+  if (!entry) throw new Error('missing minimap pane');
+  return { ...focusHarness, entry, layout, source, target };
 }
 
 describe('Tauri physical terminal panes', () => {
@@ -1408,6 +1525,28 @@ describe('Tauri physical terminal panes', () => {
     expect(layout.maximizedLeafId).toBe('leaf-source');
     expect(harness.queued).toHaveLength(0);
   });
+
+  it.each(['closing', 'tearing-down'] as const)(
+    'does not mutate fullscreen when a minimap target becomes %s before activation',
+    async (staleState) => {
+      const harness = createMinimapFocusHarness(
+        staleState === 'tearing-down' ? 'web' : 'shell',
+      );
+      if (staleState === 'tearing-down') {
+        harness.browserPaneLifecycle(harness.target).tearingDown = true;
+      } else {
+        harness.target.closing = true;
+      }
+
+      await harness.entry.emit('click');
+
+      expect(harness.state.activeThreadId).toBe(harness.source.id);
+      expect(harness.project.lastActiveThreadId).toBe(harness.source.id);
+      expect(harness.layout.focusedLeafId).toBe('leaf-source');
+      expect(harness.layout.maximizedLeafId).toBe('leaf-source');
+      expect(harness.queued).toHaveLength(0);
+    },
+  );
 
   it('preserves fullscreen through focus-set activation for a siderail pane selection', async () => {
     const source: PaneFocusThread = {

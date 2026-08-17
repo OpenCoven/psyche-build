@@ -3125,7 +3125,7 @@ describe('Tauri Coven session project rail', () => {
       });
     });
 
-    it('scopes fullscreen selection to the target worktree layout', async () => {
+    async function expectTargetWorktreeFocusScope(activation: 'row' | 'context menu') {
       const project: Project = {
         id: 'alpha',
         name: 'Alpha',
@@ -3165,6 +3165,13 @@ describe('Tauri Coven session project rail', () => {
         ['/alpha/a', layoutA],
         ['/alpha/b', layoutB],
       ]);
+      const sourceSet = {
+        id: 'set-a',
+        index: 1,
+        name: 'Source set',
+        key: 'alpha\0/alpha/a',
+        threadIds: ['source-a'],
+      };
       const targetSet = {
         id: 'set-b',
         index: 2,
@@ -3183,7 +3190,8 @@ describe('Tauri Coven session project rail', () => {
         ],
         activeProjectId: project.id,
         activeThreadId: 'source-a',
-        focusSets: [targetSet],
+        focusSets: [sourceSet, targetSet],
+        scopingSet: sourceSet,
         paneLayout: layoutB,
       });
       renderer.applySetScopeForThread.mockImplementation((thread?: LocalThread) => {
@@ -3222,7 +3230,18 @@ describe('Tauri Coven session project rail', () => {
 
       const targetRow = renderer.sessionListEl.querySelectorAll('.session-row')
         .find((row) => row.dataset.threadId === targetThread.id);
-      await targetRow?.emit('click');
+      if (activation === 'row') {
+        await targetRow?.emit('click');
+      } else {
+        await targetRow?.emit('contextmenu');
+        const actions = renderer.openSessionContextMenu.mock.calls[0]?.[1] as Array<{
+          label: string;
+          run: () => unknown;
+        }>;
+        const focusAction = actions.find((action) => action.label === 'Focus');
+        expect(focusAction).toBeDefined();
+        await focusAction!.run();
+      }
 
       expect(renderer.activateProjectWorktree).toHaveBeenCalledWith(
         project,
@@ -3245,7 +3264,13 @@ describe('Tauri Coven session project rail', () => {
       expect(layoutB.spanSignature).toBeNull();
       const visibleRoot = PsychePanes.findLeafById(layoutB.root, layoutB.maximizedLeafId);
       expect(PsychePanes.leafIds(visibleRoot)).toEqual(['leaf-b-target']);
-    });
+      expect(renderer.saveSettings).toHaveBeenCalledOnce();
+    }
+
+    it.each(['row', 'context menu'] as const)(
+      'scopes fullscreen selection to the target worktree layout from the %s',
+      expectTargetWorktreeFocusScope,
+    );
 
     it.each([
       ['hidden', (renderer: ReturnType<typeof createRenderer>) => {
@@ -3284,6 +3309,56 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.setActiveProject).not.toHaveBeenCalled();
       expect(renderer.applySetScopeForThread).not.toHaveBeenCalled();
       expect(paneLayout.maximizedLeafId).toBe('leaf-local');
+      expect(renderer.focusThread).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['hidden', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads[0].hidden = true;
+      }],
+      ['closing', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads[0].closing = true;
+      }],
+      ['close-started', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads[0].closeStarted = true;
+      }],
+      ['removed', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads.splice(0, 1);
+      }],
+      ['tearing-down', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.browserPaneLifecycle(renderer.state.threads[0]).tearingDown = true;
+      }],
+    ])('rejects context-menu Focus when its target becomes %s', async (_state, stale) => {
+      const paneLayout = { maximizedLeafId: 'leaf-web' as string | null };
+      const renderer = createRenderer({
+        threads: [{
+          id: 'web', kind: 'web', projectId: 'alpha', name: 'Browser', status: 'running',
+          worktreePath: '/alpha',
+        }],
+        activeProjectId: 'alpha',
+        paneLayout,
+        selectedSessionKey: 'coven:previous',
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row');
+      await row?.emit('contextmenu');
+      const actions = renderer.openSessionContextMenu.mock.calls[0]?.[1] as Array<{
+        label: string;
+        run: () => unknown;
+      }>;
+      const focusAction = actions.find((action) => action.label === 'Focus');
+      const selectedSessionKey = renderer.settings.selectedSessionKey;
+      renderer.saveSettings.mockClear();
+
+      stale(renderer);
+      expect(focusAction).toBeDefined();
+      await focusAction!.run();
+
+      expect(renderer.settings.selectedSessionKey).toBe(selectedSessionKey);
+      expect(renderer.saveSettings).not.toHaveBeenCalled();
+      expect(renderer.activateProjectWorktree).not.toHaveBeenCalled();
+      expect(renderer.applySetScopeForThread).not.toHaveBeenCalled();
+      expect(paneLayout.maximizedLeafId).toBe('leaf-web');
       expect(renderer.focusThread).not.toHaveBeenCalled();
     });
 

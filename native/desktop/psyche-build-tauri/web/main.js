@@ -4389,9 +4389,7 @@
             await returnFromFileFocus(item.thread.id, true);
             return;
           }
-          layout.maximizedLeafId = leaf.id;
-          layout.focusedLeafId = leaf.id;
-          focusThread(item.thread.id);
+          await focusThread(item.thread.id);
         });
       }
       rail.appendChild(entry);
@@ -7506,7 +7504,7 @@
                   thread,
                   memberships,
                   {
-                    focus: function () { focusThread(thread.id); },
+                    focus: activateLocalRow,
                     showSet: function () { activateFocusSet(memberships[0].id); },
                     removeSet: function () {
                       removeFromFocusSet(memberships[0].id, thread.id);
