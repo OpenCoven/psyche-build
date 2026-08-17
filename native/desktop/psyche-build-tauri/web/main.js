@@ -356,6 +356,14 @@
     if (!options || options.resetAgentControl !== false) {
       resetAgentControlProject(findProject(id));
     }
+    syncFilesPanelScope();
+    return true;
+  }
+
+  function assignSelectedWorktreePath(project, worktreePath) {
+    if (!project || project.selectedWorktreePath === worktreePath) return false;
+    project.selectedWorktreePath = worktreePath;
+    if (project.id === state.activeProjectId) syncFilesPanelScope();
     return true;
   }
 
@@ -504,7 +512,7 @@
     return null;
   }
   function activatePaneLayoutFocus(project, worktreePath) {
-    project.selectedWorktreePath = worktreePath;
+    assignSelectedWorktreePath(project, worktreePath);
     var layout = paneLayoutFor(project.id, worktreePath);
     var leaf = layout && PsychePanes.findLeafById(layout.root, layout.focusedLeafId);
     var surface = leaf && (typeof canvasSurfaceById === "function"
@@ -528,15 +536,15 @@
     var previousWorktreePath = project.selectedWorktreePath;
     var projectChanged = project.id !== state.activeProjectId;
     if (!(await showTerminalView())) return false;
-    project.selectedWorktreePath = worktreePath;
+    assignSelectedWorktreePath(project, worktreePath);
     if (projectChanged) {
       var projectOptions = Object.assign(
         {},
         options || {},
-        { refreshStatus: false, skipFilesRender: true }
+        { refreshStatus: false }
       );
       if (!(await setActiveProject(project.id, projectOptions))) {
-        project.selectedWorktreePath = previousWorktreePath;
+        assignSelectedWorktreePath(project, previousWorktreePath);
         return false;
       }
     } else {
@@ -553,7 +561,6 @@
     if (refreshStatus && typeof refreshStatusController === "function") {
       refreshStatusController();
     }
-    if (sidebarView === "files") renderFilesPanel();
     return true;
   }
   function measuredTerminalHost() {
@@ -854,7 +861,7 @@
       project.worktrees = mergeWorktreePresentationState(project, [{
         path: project.root, branch: null, is_main: true, dirty: false, missing: false,
       }]);
-      project.selectedWorktreePath = project.root;
+      assignSelectedWorktreePath(project, project.root);
       invalidateChangedDiffScope();
       refreshSidebar();
       if (typeof refreshStatusController === "function") refreshStatusController();
@@ -864,7 +871,7 @@
     return invoke("git_worktrees", { root: project.root }).then(function (worktrees) {
       project.worktrees = mergeWorktreePresentationState(project, worktrees);
       var selected = selectedWorktree(project);
-      project.selectedWorktreePath = selected ? selected.path : project.root;
+      assignSelectedWorktreePath(project, selected ? selected.path : project.root);
       invalidateChangedDiffScope();
       refreshSidebar();
       saveWorkspaceSoon();
@@ -875,7 +882,7 @@
       project.worktrees = mergeWorktreePresentationState(project, [{
         path: project.root, branch: null, is_main: true, dirty: false, missing: false,
       }]);
-      project.selectedWorktreePath = project.root;
+      assignSelectedWorktreePath(project, project.root);
       invalidateChangedDiffScope();
       refreshSidebar();
       if (typeof refreshStatusController === "function") refreshStatusController();
@@ -902,13 +909,14 @@
     if (!(await showTerminalView())) return false;
     var project = findProject(id);
     if (!project) return false;
+    var workspaceRoot = activeWorkspaceRoot(project);
+    assignSelectedWorktreePath(project, workspaceRoot);
     if (typeof assignActiveProjectId === "function") assignActiveProjectId(id);
     else Object.assign(state, { activeProjectId: id });
     clearPassiveCovenPaneFocus();
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
     // Restore the project's last-focused thread, falling back to its first.
-    var workspaceRoot = activeWorkspaceRoot(project);
     if (typeof restoreFilesPaneSelection === "function") {
       restoreFilesPaneSelection(project, workspaceRoot);
     }
@@ -942,9 +950,6 @@
     saveWorkspaceSoon();
     if (refreshStatus && typeof refreshStatusController === "function") {
       refreshStatusController();
-    }
-    if (!options || options.skipFilesRender !== true) {
-      if (sidebarView === "files") renderFilesPanel();
     }
     return true;
   }
@@ -4406,9 +4411,9 @@
     }
     var project = findProject(surface.projectId);
     if (project) {
+      assignSelectedWorktreePath(project, surface.workspaceRoot);
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
       else Object.assign(state, { activeProjectId: project.id });
-      project.selectedWorktreePath = surface.workspaceRoot;
     }
     state.activeThreadId = null;
     var layout = paneLayoutFor(surface.projectId, surface.workspaceRoot);
@@ -4460,6 +4465,7 @@
     state.activeThreadId = id;
     // Make the thread's project the active one so the sidebar/tabs
     // stay in sync if the user clicked into a different project's thread.
+    if (project) assignSelectedWorktreePath(project, thread.worktreePath);
     if (thread.projectId && state.activeProjectId !== thread.projectId) {
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(thread.projectId);
       else Object.assign(state, { activeProjectId: thread.projectId });
@@ -4468,7 +4474,6 @@
       if (thread.kind !== "coven-chat" && thread.kind !== "coven-attach") {
         project.lastActiveThreadId = id;
       }
-      project.selectedWorktreePath = thread.worktreePath;
     }
     var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
     var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
@@ -4820,7 +4825,7 @@
       project.lastActiveThreadId = nextThreadId || null;
       if (nextThreadId) {
         var nextThread = findThread(nextThreadId);
-        if (nextThread) project.selectedWorktreePath = nextThread.worktreePath;
+        if (nextThread) assignSelectedWorktreePath(project, nextThread.worktreePath);
       }
     }
     return true;
@@ -5448,6 +5453,7 @@
   // The file tree renders lazily: switching to it is the only thing that has to
   // ask the filesystem, and the sessions rail should not pay for that.
   function setSidebarView(name) {
+    var enteringFiles = sidebarView !== "files" && name === "files";
     sidebarView = name === "files" ? "files" : "sessions";
     var showingFiles = sidebarView === "files";
     if (sidebarSessionControlsEl) sidebarSessionControlsEl.hidden = showingFiles;
@@ -5455,7 +5461,7 @@
     if (sidebarFilesEl) sidebarFilesEl.hidden = !showingFiles;
     if (showingFiles) {
       closeNewPaneMenu();
-      renderFilesPanel();
+      if (enteringFiles) syncFilesPanelScope();
     }
     return sidebarView;
   }
@@ -5463,11 +5469,14 @@
   async function showProjectFiles(projectId) {
     var project = findProject(projectId);
     if (!project) return false;
+    var refreshingCurrentScope = sidebarView === "files" &&
+      state.activeProjectId === project.id;
     if (!(await setActiveProject(projectId))) return false;
     project = findProject(projectId);
     if (!project || state.activeProjectId !== project.id) return false;
     sidebarFilesReturnProjectId = project.id;
     setSidebarView("files");
+    if (refreshingCurrentScope) syncFilesPanelScope();
     return true;
   }
 
@@ -8393,9 +8402,9 @@
     if (!file) return false;
     var project = findProject(file.projectId);
     if (project) {
+      assignSelectedWorktreePath(project, file.workspaceRoot);
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
       else Object.assign(state, { activeProjectId: project.id });
-      project.selectedWorktreePath = file.workspaceRoot;
     }
     var filesPane = project ? ensureFilesPane(project, file.workspaceRoot) : null;
     if (filesPane) filesPane.activeFileId = file.id;
@@ -8411,10 +8420,10 @@
     if (!file || !findOpenFile(file.id)) return false;
     var project = findProject(file.projectId);
     if (project) {
+      var workspaceRoot = file.workspaceRoot || project.root || activeWorkspaceRoot(project);
+      assignSelectedWorktreePath(project, workspaceRoot);
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
       else Object.assign(state, { activeProjectId: project.id });
-      var workspaceRoot = file.workspaceRoot || project.root || activeWorkspaceRoot(project);
-      project.selectedWorktreePath = workspaceRoot;
       var threads = state.threads.filter(function (thread) {
         return thread.projectId === project.id && !thread.hidden &&
           thread.worktreePath === workspaceRoot &&
@@ -11540,6 +11549,12 @@
     return filesPanelGeneration;
   }
 
+  function syncFilesPanelScope() {
+    var generation = invalidateFilesPanelRender();
+    if (sidebarView !== "files") return false;
+    return renderFilesPanel({ generation: generation });
+  }
+
   function filesPanelRequestMatches(generation, projectId, workspaceRoot) {
     var project = activeProject();
     return sidebarView === "files" &&
@@ -11663,16 +11678,22 @@
 
   // ---- Files ----
 
-  async function renderFilesPanel() {
+  async function renderFilesPanel(options) {
     if (!fileTreeEl) return false;
-    var generation = invalidateFilesPanelRender();
+    var generation = options && options.generation !== undefined
+      ? options.generation
+      : invalidateFilesPanelRender();
+    renderedFileRows = [];
+    fileVirtualFocusKey = "";
     var project = activeProject();
     if (!project) {
+      if (filesCrumbEl) filesCrumbEl.textContent = "";
       panelMessage(fileTreeEl, "No project open — ⌘O to add one.");
       return false;
     }
     var workspaceRoot = activeWorkspaceRoot(project);
     if (filesCrumbEl) filesCrumbEl.textContent = shortenRoot(workspaceRoot);
+    panelMessage(fileTreeEl, "Loading files…");
     var fileRows = [];
     await appendDirInto(fileRows, workspaceRoot, workspaceRoot, 0);
     if (!filesPanelRequestMatches(generation, project.id, workspaceRoot)) return false;
@@ -12296,8 +12317,8 @@
       return target;
     }
     var previousSelectedWorktreePath = project.selectedWorktreePath;
+    var selectedWorktreePath = remapPath(project.selectedWorktreePath);
     project.root = canonicalRoot;
-    project.selectedWorktreePath = remapPath(project.selectedWorktreePath);
     project.worktrees = (project.worktrees || []).map(function (worktree) {
       if (!worktree) return worktree;
       return Object.assign({}, worktree, { path: remapPath(worktree.path) });
@@ -12315,6 +12336,7 @@
       );
     });
     project.browsersByWorktree = migratedBrowsers;
+    assignSelectedWorktreePath(project, selectedWorktreePath);
     return project;
   }
 
@@ -12366,7 +12388,7 @@
     });
     if (preferIncoming) {
       target.collapsed = incoming.collapsed;
-      target.selectedWorktreePath = incoming.selectedWorktreePath;
+      assignSelectedWorktreePath(target, incoming.selectedWorktreePath);
       target.name = incoming.name;
     }
     return target;

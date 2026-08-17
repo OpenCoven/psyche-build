@@ -368,7 +368,7 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(tauri).toMatch(/native_workspace_v2:\s*bool/);
     expect(tauri).toMatch(/feature_flag_enabled\("PSYCHE_NATIVE_WORKSPACE_V2",\s*true\)/);
     expect(mainJs).toMatch(/state\.env\.native_workspace_v2\s*===\s*false/);
-    expect(mainJs).toMatch(/project\.selectedWorktreePath\s*=\s*project\.root/);
+    expect(mainJs).toMatch(/assignSelectedWorktreePath\(project,\s*project\.root\)/);
   });
 
   it('renders project, worktree, then pane rows and scopes new panes to selection', () => {
@@ -412,7 +412,9 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toMatch(/saved\.browser/);
 
     const activateWorktree = functionSource(mainJs, 'activateProjectWorktree');
-    const selection = activateWorktree.indexOf('project.selectedWorktreePath = worktreePath;');
+    const selection = activateWorktree.indexOf(
+      'assignSelectedWorktreePath(project, worktreePath);',
+    );
     expect(selection).toBeGreaterThan(-1);
     for (const sync of [
       'renderPaneWorkspace({ preserveTerminalFocus: false });',

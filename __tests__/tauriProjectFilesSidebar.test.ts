@@ -166,6 +166,7 @@ function compileShowProjectFilesHarness(
     'seedSidebarFilesReturnProjectId',
     `"use strict";
     var sidebarFilesReturnProjectId = seedSidebarFilesReturnProjectId;
+    var sidebarView = "sessions";
     ${functionSource('showProjectFiles')}
     return {
       showProjectFiles: showProjectFiles,
@@ -180,6 +181,53 @@ function compileShowProjectFilesHarness(
   ) as {
     showProjectFiles: (projectId: string) => Promise<boolean>;
     returnProjectId: () => string | null;
+  };
+}
+
+function compileFilesNavigationRenderHarness(initial: {
+  activeProjectId: string;
+  sidebarView: string;
+  projects: FilesPanelProject[];
+}) {
+  return Function(
+    'seedActiveProjectId',
+    'seedSidebarView',
+    'projects',
+    `"use strict";
+    var state = { activeProjectId: seedActiveProjectId };
+    var sidebarView = seedSidebarView;
+    var sidebarFilesReturnProjectId = null;
+    var sidebarSessionControlsEl = null;
+    var sessionListEl = null;
+    var sidebarFilesEl = null;
+    var syncCount = 0;
+    function findProject(id) {
+      return projects.find(function (project) { return project.id === id; }) || null;
+    }
+    function syncFilesPanelScope() {
+      syncCount += 1;
+      return true;
+    }
+    function closeNewPaneMenu() {}
+    async function setActiveProject(id) {
+      if (state.activeProjectId === id) return true;
+      state.activeProjectId = id;
+      syncFilesPanelScope();
+      return true;
+    }
+    ${functionSource('setSidebarView')}
+    ${functionSource('showProjectFiles')}
+    return {
+      showProjectFiles: showProjectFiles,
+      getSyncCount: function () { return syncCount; },
+    };`,
+  )(
+    initial.activeProjectId,
+    initial.sidebarView,
+    initial.projects,
+  ) as {
+    showProjectFiles: (projectId: string) => Promise<boolean>;
+    getSyncCount: () => number;
   };
 }
 
@@ -350,6 +398,7 @@ function compileRenderFilesPanelHarness(dependencies: {
     var filesPanelGeneration = seedFilesPanelGeneration;
     var sidebarFilesReturnProjectId = seedSidebarFilesReturnProjectId;
     var renderedFileRows = [];
+    var fileVirtualFocusKey = "";
     var sessionListEl = null;
     var currentProject = seedActiveProject;
     function activeProject() {
@@ -370,10 +419,12 @@ function compileRenderFilesPanelHarness(dependencies: {
         !!project && project.id === projectId &&
         activeWorkspaceRoot(project) === workspaceRoot;
     }
+    ${functionSource('syncFilesPanelScope')}
     ${functionSource('renderFilesPanel')}
     ${functionSource('showSessionsSidebar')}
     return {
       renderFilesPanel: renderFilesPanel,
+      syncFilesPanelScope: syncFilesPanelScope,
       showSessionsSidebar: showSessionsSidebar,
       getRenderedFileRows: function () { return renderedFileRows; },
       getFilesPanelGeneration: function () { return filesPanelGeneration; },
@@ -401,6 +452,7 @@ function compileRenderFilesPanelHarness(dependencies: {
     }),
   ) as {
     renderFilesPanel: () => Promise<boolean | void>;
+    syncFilesPanelScope: () => Promise<boolean | void> | false;
     showSessionsSidebar: () => boolean;
     getRenderedFileRows: () => Array<Record<string, unknown>>;
     getFilesPanelGeneration: () => number;
@@ -833,7 +885,11 @@ describe('project Files sidebar navigation', () => {
     const showSessionsSidebarSource = functionSource('showSessionsSidebar');
 
     expect(renderFilesPanelSource).toContain('if (!fileTreeEl) return false;');
-    expect(renderFilesPanelSource).toContain('var generation = invalidateFilesPanelRender();');
+    expect(renderFilesPanelSource).toContain(
+      'var generation = options && options.generation !== undefined',
+    );
+    expect(renderFilesPanelSource).toContain('renderedFileRows = [];');
+    expect(renderFilesPanelSource).toContain('panelMessage(fileTreeEl, "Loading files…");');
     expect(renderFilesPanelSource).toContain(
       'if (!filesPanelRequestMatches(generation, project.id, workspaceRoot)) return false;',
     );
@@ -846,12 +902,267 @@ describe('project Files sidebar navigation', () => {
     expect(showSessionsSidebarSource).toContain('invalidateFilesPanelRender();');
     expect(showSessionsSidebarSource.indexOf('invalidateFilesPanelRender();'))
       .toBeLessThan(showSessionsSidebarSource.indexOf('setSidebarView("sessions");'));
-    expect(functionSource('setActiveProject')).toContain(
-      'if (sidebarView === "files") renderFilesPanel();',
+    expect(functionSource('assignActiveProjectId')).toContain('syncFilesPanelScope();');
+    expect(functionSource('assignSelectedWorktreePath')).toContain('syncFilesPanelScope();');
+    expect(functionSource('setActiveProject')).not.toContain('renderFilesPanel');
+    expect(functionSource('activateProjectWorktree')).not.toContain('renderFilesPanel');
+    expect(functionSource('setSidebarView')).toContain('if (enteringFiles) syncFilesPanelScope();');
+  });
+
+  it('routes active project and selected worktree mutations through the central scope seams', () => {
+    const syncFilesPanelScope = vi.fn();
+    const state = { activeProjectId: 'project-1' };
+    const assignActiveProjectId = compileFunction<
+      (projectId: string | null) => boolean
+    >('assignActiveProjectId', {
+      state,
+      resetAgentControlProject: vi.fn(),
+      findProject: () => null,
+      syncFilesPanelScope,
+    });
+
+    expect(assignActiveProjectId(null)).toBe(true);
+    expect(state.activeProjectId).toBeNull();
+    expect(syncFilesPanelScope).toHaveBeenCalledOnce();
+    expect(assignActiveProjectId(null)).toBe(false);
+    expect(syncFilesPanelScope).toHaveBeenCalledOnce();
+
+    [
+      'activatePaneLayoutFocus',
+      'activateProjectWorktree',
+      'refreshProjectWorktrees',
+      'focusCanvasSurface',
+      'focusThread',
+      'retainFileFocusAfterThreadRemoval',
+      'activateFileTabNow',
+      'revealFileForDecision',
+      'migrateProjectRoot',
+      'mergeRestoredProject',
+    ].forEach((name) => {
+      expect(functionSource(name)).not.toMatch(/project\.selectedWorktreePath\s*=/);
+    });
+    expect(functionSource('mergeRestoredProject')).toContain(
+      'assignSelectedWorktreePath(target, incoming.selectedWorktreePath);',
     );
-    expect(functionSource('activateProjectWorktree')).toContain(
-      'if (sidebarView === "files") renderFilesPanel();',
-    );
+    [
+      'setActiveProject',
+      'focusCanvasSurface',
+      'focusThread',
+      'removeProject',
+      'activateFileTabNow',
+      'revealFileForDecision',
+      'addProject',
+      'boot',
+    ].forEach((name) => {
+      expect(functionSource(name)).toContain('assignActiveProjectId(');
+    });
+  });
+
+  it('clears old rows immediately when a direct Files scope sync starts', async () => {
+    const nextRead = createDeferred<void>();
+    const messages: string[] = [];
+    const fileTree = { firstChild: null as unknown };
+    const panel = compileRenderFilesPanelHarness({
+      activeProject: {
+        id: 'project-1',
+        root: '/repo/one',
+      },
+      fileTreeEl: fileTree,
+      panelMessage: (element, text) => {
+        messages.push(text);
+        element.firstChild = { message: text };
+      },
+      appendDirInto: async (fileRows, root) => {
+        if (root === '/repo/one') {
+          fileRows.push({
+            key: '/repo/one/old.ts',
+            entry: { path: '/repo/one/old.ts', name: 'old.ts' },
+            depth: 0,
+          });
+          return;
+        }
+        await nextRead.promise;
+        fileRows.push({
+          key: '/repo/two/new.ts',
+          entry: { path: '/repo/two/new.ts', name: 'new.ts' },
+          depth: 0,
+        });
+      },
+      renderFileRows: (fileRows) => {
+        fileTree.firstChild = fileRows[0] ?? null;
+      },
+    });
+
+    await expect(panel.renderFilesPanel()).resolves.toBe(true);
+    expect(panel.getRenderedFileRows()).toHaveLength(1);
+
+    panel.setActiveProject({ id: 'project-2', root: '/repo/two' });
+    const pendingSync = panel.syncFilesPanelScope();
+
+    expect(pendingSync).not.toBe(false);
+    expect(panel.getRenderedFileRows()).toEqual([]);
+    expect(messages.at(-1)).toBe('Loading files…');
+    expect(fileTree.firstChild).toEqual({ message: 'Loading files…' });
+
+    nextRead.resolve();
+    await expect(pendingSync).resolves.toBe(true);
+    expect(panel.getRenderedFileRows()).toEqual([
+      {
+        key: '/repo/two/new.ts',
+        entry: { path: '/repo/two/new.ts', name: 'new.ts' },
+        depth: 0,
+      },
+    ]);
+  });
+
+  it('replaces final-project rows with the no-project state', async () => {
+    const messages: string[] = [];
+    const fileTree = { firstChild: null as unknown };
+    const filesCrumb = { textContent: 'old scope' };
+    const panel = compileRenderFilesPanelHarness({
+      activeProject: { id: 'project-1', root: '/repo/one' },
+      fileTreeEl: fileTree,
+      filesCrumbEl: filesCrumb,
+      panelMessage: (element, text) => {
+        messages.push(text);
+        element.firstChild = { message: text };
+      },
+      appendDirInto: async (fileRows) => {
+        fileRows.push({
+          key: '/repo/one/old.ts',
+          entry: { path: '/repo/one/old.ts', name: 'old.ts' },
+          depth: 0,
+        });
+      },
+      renderFileRows: (fileRows) => {
+        fileTree.firstChild = fileRows[0] ?? null;
+      },
+    });
+
+    await expect(panel.renderFilesPanel()).resolves.toBe(true);
+    panel.setActiveProject(null);
+
+    await expect(panel.syncFilesPanelScope()).resolves.toBe(false);
+    expect(panel.getRenderedFileRows()).toEqual([]);
+    expect(filesCrumb.textContent).toBe('');
+    expect(messages.at(-1)).toBe('No project open — ⌘O to add one.');
+    expect(fileTree.firstChild).toEqual({
+      message: 'No project open — ⌘O to add one.',
+    });
+  });
+
+  it('removes stale file buttons before a same-scope refresh resolves', async () => {
+    const refreshRead = createDeferred<void>();
+    const openFileTab = vi.fn();
+    let readCount = 0;
+    let visibleButtons: Array<{ click: () => void }> = [];
+    const fileTree = { firstChild: null as unknown };
+    const panel = compileRenderFilesPanelHarness({
+      activeProject: { id: 'project-1', root: '/repo/one' },
+      fileTreeEl: fileTree,
+      panelMessage: (element, text) => {
+        visibleButtons = [];
+        element.firstChild = { message: text };
+      },
+      appendDirInto: async (fileRows) => {
+        readCount += 1;
+        if (readCount > 1) await refreshRead.promise;
+        fileRows.push({
+          key: '/repo/one/file.ts',
+          entry: { path: '/repo/one/file.ts', name: 'file.ts' },
+          depth: 0,
+        });
+      },
+      renderFileRows: (fileRows) => {
+        visibleButtons = fileRows.map((fileRow) => ({
+          click: () => openFileTab(
+            (fileRow.entry as { path: string }).path,
+          ),
+        }));
+        fileTree.firstChild = visibleButtons[0] ?? null;
+      },
+    });
+
+    await expect(panel.renderFilesPanel()).resolves.toBe(true);
+    expect(visibleButtons).toHaveLength(1);
+
+    const pendingRefresh = panel.renderFilesPanel();
+    expect(visibleButtons).toEqual([]);
+    visibleButtons[0]?.click();
+    expect(openFileTab).not.toHaveBeenCalled();
+
+    refreshRead.resolve();
+    await expect(pendingRefresh).resolves.toBe(true);
+    expect(visibleButtons).toHaveLength(1);
+  });
+
+  it('applies only the newest rows across rapid project scope changes', async () => {
+    const reads = new Map<string, ReturnType<typeof createDeferred<void>>>();
+    const pendingRows = new Map<string, Array<Record<string, unknown>>>();
+    const renderFileRows = vi.fn();
+    const panel = compileRenderFilesPanelHarness({
+      activeProject: { id: 'project-1', root: '/repo/one' },
+      appendDirInto: (fileRows, root) => {
+        const deferred = createDeferred<void>();
+        reads.set(root, deferred);
+        pendingRows.set(root, fileRows);
+        return deferred.promise;
+      },
+      renderFileRows,
+    });
+
+    const firstScope = panel.syncFilesPanelScope();
+    panel.setActiveProject({ id: 'project-2', root: '/repo/two' });
+    const secondScope = panel.syncFilesPanelScope();
+    panel.setActiveProject({ id: 'project-3', root: '/repo/three' });
+    const newestScope = panel.syncFilesPanelScope();
+
+    pendingRows.get('/repo/two')?.push({
+      key: '/repo/two/stale.ts',
+      entry: { path: '/repo/two/stale.ts', name: 'stale.ts' },
+      depth: 0,
+    });
+    reads.get('/repo/two')?.resolve();
+    await expect(secondScope).resolves.toBe(false);
+
+    pendingRows.get('/repo/three')?.push({
+      key: '/repo/three/current.ts',
+      entry: { path: '/repo/three/current.ts', name: 'current.ts' },
+      depth: 0,
+    });
+    reads.get('/repo/three')?.resolve();
+    await expect(newestScope).resolves.toBe(true);
+
+    pendingRows.get('/repo/one')?.push({
+      key: '/repo/one/stale.ts',
+      entry: { path: '/repo/one/stale.ts', name: 'stale.ts' },
+      depth: 0,
+    });
+    reads.get('/repo/one')?.resolve();
+    await expect(firstScope).resolves.toBe(false);
+
+    expect(renderFileRows).toHaveBeenCalledOnce();
+    expect(panel.getRenderedFileRows()).toEqual([
+      {
+        key: '/repo/three/current.ts',
+        entry: { path: '/repo/three/current.ts', name: 'current.ts' },
+        depth: 0,
+      },
+    ]);
+  });
+
+  it('renders once when showProjectFiles activates a new project while Files is already open', async () => {
+    const navigation = compileFilesNavigationRenderHarness({
+      activeProjectId: 'project-1',
+      sidebarView: 'files',
+      projects: [
+        { id: 'project-1', root: '/repo/one' },
+        { id: 'project-2', root: '/repo/two' },
+      ],
+    });
+
+    await expect(navigation.showProjectFiles('project-2')).resolves.toBe(true);
+    expect(navigation.getSyncCount()).toBe(1);
   });
 
   it('ignores an older deferred Files render after a newer render wins', async () => {

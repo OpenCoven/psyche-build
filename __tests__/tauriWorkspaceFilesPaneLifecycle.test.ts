@@ -455,6 +455,13 @@ describe('native Files pane lifecycle', () => {
     const filesPaneKey = (projectId: string, root: string) => `${projectId}\0${root}`;
     const findProject = () => project;
     const findOpenFile = (id: string) => state.openFiles.find((file) => file.id === id) || null;
+    const assignSelectedWorktreePath = (
+      selectedProject: typeof project,
+      worktreePath: string,
+    ) => {
+      selectedProject.selectedWorktreePath = worktreePath;
+      return true;
+    };
     const renderPaneWorkspace = () => {
       const pane = filesPanes.get(filesPaneKey(project.id, project.selectedWorktreePath));
       if (pane) fileViewEl.parentElement = pane.host;
@@ -479,6 +486,7 @@ describe('native Files pane lifecycle', () => {
       'activateFileTabNow',
       {
         findOpenFile, findProject, state,
+        assignSelectedWorktreePath,
         ensureFilesPane: (_project: typeof project, root: string) =>
           filesPanes.get(filesPaneKey(project.id, root)),
         renderPaneWorkspace, enterFileFocus,
@@ -490,6 +498,7 @@ describe('native Files pane lifecycle', () => {
       'revealFileForDecision',
       {
         findOpenFile, findProject, state,
+        assignSelectedWorktreePath,
         activeWorkspaceRoot: () => project.selectedWorktreePath,
         clearPassiveCovenPaneFocus: () => undefined, renderPaneWorkspace,
         renderGitSurface: () => undefined, loadAgentSkills: () => undefined,

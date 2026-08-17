@@ -280,6 +280,13 @@ describe('native Files pane view', () => {
       {
         focusThread: () => { terminalFocuses += 1; },
         findProject: () => ({ id: 'project-a', selectedWorktreePath: '' }),
+        assignSelectedWorktreePath: (
+          project: { selectedWorktreePath: string },
+          worktreePath: string,
+        ) => {
+          project.selectedWorktreePath = worktreePath;
+          return true;
+        },
         state,
         paneLayoutFor: () => layout,
         PsychePanes: {
