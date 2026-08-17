@@ -251,6 +251,164 @@ function registerFilesBackRailClick(document: FakeDocument, showSessionsSidebar:
   );
 }
 
+type FilesPanelProject = {
+  id: string;
+  root: string;
+  selectedWorktreePath?: string;
+};
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function compileFilesPanelRequestHarness(initial: {
+  activeProject: FilesPanelProject | null;
+  sidebarView?: string;
+  filesPanelGeneration?: number;
+  activeWorkspaceRoot?: (project: FilesPanelProject) => string;
+}) {
+  return Function(
+    'seedActiveProject',
+    'activeWorkspaceRoot',
+    'seedSidebarView',
+    'seedFilesPanelGeneration',
+    `"use strict";
+    var currentProject = seedActiveProject;
+    var sidebarView = seedSidebarView;
+    var filesPanelGeneration = seedFilesPanelGeneration;
+    function activeProject() {
+      return currentProject;
+    }
+    ${functionSource('filesPanelRequestMatches')}
+    return {
+      filesPanelRequestMatches: filesPanelRequestMatches,
+      setActiveProject: function (project) { currentProject = project; },
+      setSidebarView: function (view) { sidebarView = view; },
+      setFilesPanelGeneration: function (generation) { filesPanelGeneration = generation; },
+    };`,
+  )(
+    initial.activeProject,
+    initial.activeWorkspaceRoot ?? ((project: FilesPanelProject) => project.selectedWorktreePath || project.root),
+    initial.sidebarView ?? 'files',
+    initial.filesPanelGeneration ?? 0,
+  ) as {
+    filesPanelRequestMatches: (generation: number, projectId: string, workspaceRoot: string) => boolean;
+    setActiveProject: (project: FilesPanelProject | null) => void;
+    setSidebarView: (view: string) => void;
+    setFilesPanelGeneration: (generation: number) => void;
+  };
+}
+
+function compileRenderFilesPanelHarness(dependencies: {
+  activeProject: FilesPanelProject | null;
+  appendDirInto: (
+    fileRows: Array<Record<string, unknown>>,
+    root: string,
+    dirPath: string,
+    depth: number,
+  ) => Promise<void>;
+  fileTreeEl?: { firstChild: unknown } | null;
+  filesCrumbEl?: { textContent: string };
+  sidebarView?: string;
+  filesPanelGeneration?: number;
+  sidebarFilesReturnProjectId?: string | null;
+  activeWorkspaceRoot?: (project: FilesPanelProject) => string;
+  panelMessage?: (el: { firstChild: unknown }, text: string, cls?: string) => unknown;
+  shortenRoot?: (workspaceRoot: string) => string;
+  renderFileRows?: (fileRows: Array<Record<string, unknown>>) => unknown;
+  renderSessionList?: (options: Record<string, unknown>) => unknown;
+  restoreSessionTreeFocus?: (key: string) => boolean;
+  document?: { getElementById: (id: string) => { focus?: () => void } | null };
+  requestAnimationFrame?: (callback: () => void) => number;
+}) {
+  return Function(
+    'seedFileTreeEl',
+    'seedFilesCrumbEl',
+    'seedSidebarView',
+    'seedFilesPanelGeneration',
+    'seedSidebarFilesReturnProjectId',
+    'seedActiveProject',
+    'panelMessage',
+    'activeWorkspaceRoot',
+    'shortenRoot',
+    'appendDirInto',
+    'renderFileRows',
+    'renderSessionList',
+    'restoreSessionTreeFocus',
+    'document',
+    'requestAnimationFrame',
+    `"use strict";
+    var fileTreeEl = seedFileTreeEl;
+    var filesCrumbEl = seedFilesCrumbEl;
+    var sidebarView = seedSidebarView;
+    var filesPanelGeneration = seedFilesPanelGeneration;
+    var sidebarFilesReturnProjectId = seedSidebarFilesReturnProjectId;
+    var renderedFileRows = [];
+    var sessionListEl = null;
+    var currentProject = seedActiveProject;
+    function activeProject() {
+      return currentProject;
+    }
+    function setSidebarView(name) {
+      sidebarView = name === "files" ? "files" : "sessions";
+      return sidebarView;
+    }
+    function invalidateFilesPanelRender() {
+      filesPanelGeneration += 1;
+      return filesPanelGeneration;
+    }
+    function filesPanelRequestMatches(generation, projectId, workspaceRoot) {
+      var project = activeProject();
+      return sidebarView === "files" &&
+        generation === filesPanelGeneration &&
+        !!project && project.id === projectId &&
+        activeWorkspaceRoot(project) === workspaceRoot;
+    }
+    ${functionSource('renderFilesPanel')}
+    ${functionSource('showSessionsSidebar')}
+    return {
+      renderFilesPanel: renderFilesPanel,
+      showSessionsSidebar: showSessionsSidebar,
+      getRenderedFileRows: function () { return renderedFileRows; },
+      getFilesPanelGeneration: function () { return filesPanelGeneration; },
+      getSidebarView: function () { return sidebarView; },
+      setActiveProject: function (project) { currentProject = project; },
+    };`,
+  )(
+    dependencies.fileTreeEl ?? { firstChild: null },
+    dependencies.filesCrumbEl ?? { textContent: '' },
+    dependencies.sidebarView ?? 'files',
+    dependencies.filesPanelGeneration ?? 0,
+    dependencies.sidebarFilesReturnProjectId ?? null,
+    dependencies.activeProject,
+    dependencies.panelMessage ?? (() => undefined),
+    dependencies.activeWorkspaceRoot ?? ((project: FilesPanelProject) => project.selectedWorktreePath || project.root),
+    dependencies.shortenRoot ?? ((workspaceRoot: string) => workspaceRoot),
+    dependencies.appendDirInto,
+    dependencies.renderFileRows ?? (() => undefined),
+    dependencies.renderSessionList ?? (() => undefined),
+    dependencies.restoreSessionTreeFocus ?? (() => true),
+    dependencies.document ?? { getElementById: () => null },
+    dependencies.requestAnimationFrame ?? ((callback: () => void) => {
+      callback();
+      return 1;
+    }),
+  ) as {
+    renderFilesPanel: () => Promise<boolean | void>;
+    showSessionsSidebar: () => boolean;
+    getRenderedFileRows: () => Array<Record<string, unknown>>;
+    getFilesPanelGeneration: () => number;
+    getSidebarView: () => string;
+    setActiveProject: (project: FilesPanelProject | null) => void;
+  };
+}
+
 describe('project Files sidebar navigation', () => {
   it('activates the project before switching to Files and keeps the selected worktree intact', async () => {
     const project = {
@@ -538,9 +696,11 @@ describe('project Files sidebar navigation', () => {
       throw new Error('expected requestAnimationFrame callback');
     };
     const focus = vi.fn();
+    const invalidateFilesPanelRender = vi.fn();
     const restoreSessionTreeFocus = vi.fn().mockReturnValue(false);
     const getElementById = vi.fn();
     const showSessionsSidebar = compileFunction<() => boolean>('showSessionsSidebar', {
+      invalidateFilesPanelRender,
       sidebarFilesReturnProjectId: 'project-1',
       setSidebarView: vi.fn(),
       renderSessionList: vi.fn(),
@@ -559,6 +719,7 @@ describe('project Files sidebar navigation', () => {
     });
 
     expect(showSessionsSidebar()).toBe(true);
+    expect(invalidateFilesPanelRender).toHaveBeenCalledOnce();
     rafCallback();
     expect(focus).toHaveBeenCalledOnce();
     expect(restoreSessionTreeFocus).not.toHaveBeenCalled();
@@ -571,9 +732,11 @@ describe('project Files sidebar navigation', () => {
     };
     const focus = vi.fn();
     const restoreSessionTreeFocus = vi.fn().mockReturnValue(true);
+    const invalidateFilesPanelRender = vi.fn();
     const setSidebarView = vi.fn();
     const renderSessionList = vi.fn();
     const showSessionsSidebar = compileFunction<() => boolean>('showSessionsSidebar', {
+      invalidateFilesPanelRender,
       sidebarFilesReturnProjectId: 'missing-project',
       setSidebarView,
       renderSessionList,
@@ -591,6 +754,7 @@ describe('project Files sidebar navigation', () => {
     });
 
     expect(showSessionsSidebar()).toBe(true);
+    expect(invalidateFilesPanelRender).toHaveBeenCalledOnce();
     expect(setSidebarView).toHaveBeenCalledWith('sessions');
     expect(renderSessionList).toHaveBeenCalledWith({ preserveFocus: false });
     expect(functionSource('showSessionsSidebar')).toContain('sidebarFilesReturnProjectId = null;');
@@ -606,6 +770,7 @@ describe('project Files sidebar navigation', () => {
     const focus = vi.fn();
     const restoreSessionTreeFocus = vi.fn().mockReturnValue(false);
     const showSessionsSidebar = compileFunction<() => boolean>('showSessionsSidebar', {
+      invalidateFilesPanelRender: vi.fn(),
       sidebarFilesReturnProjectId: 'missing-project',
       setSidebarView: vi.fn(),
       renderSessionList: vi.fn(),
@@ -626,6 +791,154 @@ describe('project Files sidebar navigation', () => {
     rafCallback();
     expect(restoreSessionTreeFocus).toHaveBeenCalledWith('');
     expect(focus).toHaveBeenCalledOnce();
+  });
+
+  it('matches only the current Files render scope', () => {
+    const project = {
+      id: 'project-1',
+      root: '/repo',
+      selectedWorktreePath: '/repo/worktrees/feature',
+    };
+    const harness = compileFilesPanelRequestHarness({
+      activeProject: project,
+      sidebarView: 'files',
+      filesPanelGeneration: 3,
+    });
+
+    expect(
+      harness.filesPanelRequestMatches(3, project.id, project.selectedWorktreePath),
+    ).toBe(true);
+    expect(
+      harness.filesPanelRequestMatches(2, project.id, project.selectedWorktreePath),
+    ).toBe(false);
+    expect(
+      harness.filesPanelRequestMatches(3, 'project-2', project.selectedWorktreePath),
+    ).toBe(false);
+    expect(harness.filesPanelRequestMatches(3, project.id, project.root)).toBe(false);
+
+    harness.setSidebarView('sessions');
+    expect(
+      harness.filesPanelRequestMatches(3, project.id, project.selectedWorktreePath),
+    ).toBe(false);
+
+    harness.setSidebarView('files');
+    harness.setActiveProject(null);
+    expect(
+      harness.filesPanelRequestMatches(3, project.id, project.selectedWorktreePath),
+    ).toBe(false);
+  });
+
+  it('guards Files rendering and scope refreshes in source', () => {
+    const renderFilesPanelSource = functionSource('renderFilesPanel');
+    const showSessionsSidebarSource = functionSource('showSessionsSidebar');
+
+    expect(renderFilesPanelSource).toContain('if (!fileTreeEl) return false;');
+    expect(renderFilesPanelSource).toContain('var generation = invalidateFilesPanelRender();');
+    expect(renderFilesPanelSource).toContain(
+      'if (!filesPanelRequestMatches(generation, project.id, workspaceRoot)) return false;',
+    );
+    expect(renderFilesPanelSource.indexOf('await appendDirInto(fileRows, workspaceRoot, workspaceRoot, 0);'))
+      .toBeLessThan(
+        renderFilesPanelSource.indexOf(
+          'if (!filesPanelRequestMatches(generation, project.id, workspaceRoot)) return false;',
+        ),
+      );
+    expect(showSessionsSidebarSource).toContain('invalidateFilesPanelRender();');
+    expect(showSessionsSidebarSource.indexOf('invalidateFilesPanelRender();'))
+      .toBeLessThan(showSessionsSidebarSource.indexOf('setSidebarView("sessions");'));
+    expect(functionSource('setActiveProject')).toContain(
+      'if (sidebarView === "files") renderFilesPanel();',
+    );
+    expect(functionSource('activateProjectWorktree')).toContain(
+      'if (sidebarView === "files") renderFilesPanel();',
+    );
+  });
+
+  it('ignores an older deferred Files render after a newer render wins', async () => {
+    const pendingAppends: Array<{
+      release: (rows: Array<Record<string, unknown>>) => void;
+    }> = [];
+    const renderFileRows = vi.fn((fileRows: Array<Record<string, unknown>>) => {
+      fileTree.firstChild = fileRows.length ? { rendered: true } : null;
+    });
+    const fileTree = { firstChild: null as unknown };
+    const panel = compileRenderFilesPanelHarness({
+      activeProject: {
+        id: 'project-1',
+        root: '/repo',
+        selectedWorktreePath: '/repo/worktrees/feature',
+      },
+      fileTreeEl: fileTree,
+      renderFileRows,
+      appendDirInto: (fileRows) => {
+        const deferred = createDeferred<void>();
+        pendingAppends.push({
+          release(rows) {
+            fileRows.push(...rows);
+            deferred.resolve();
+          },
+        });
+        return deferred.promise;
+      },
+    });
+
+    const olderRender = panel.renderFilesPanel();
+    const newerRender = panel.renderFilesPanel();
+
+    expect(pendingAppends).toHaveLength(2);
+
+    pendingAppends[1].release([{ key: '/repo/newer.ts', entry: { path: '/repo/newer.ts', name: 'newer.ts' }, depth: 0 }]);
+    await expect(newerRender).resolves.toBe(true);
+    expect(renderFileRows).toHaveBeenCalledTimes(1);
+    expect(panel.getRenderedFileRows()).toEqual([
+      { key: '/repo/newer.ts', entry: { path: '/repo/newer.ts', name: 'newer.ts' }, depth: 0 },
+    ]);
+
+    pendingAppends[0].release([{ key: '/repo/older.ts', entry: { path: '/repo/older.ts', name: 'older.ts' }, depth: 0 }]);
+    await expect(olderRender).resolves.toBe(false);
+    expect(renderFileRows).toHaveBeenCalledTimes(1);
+    expect(panel.getRenderedFileRows()).toEqual([
+      { key: '/repo/newer.ts', entry: { path: '/repo/newer.ts', name: 'newer.ts' }, depth: 0 },
+    ]);
+  });
+
+  it('ignores a deferred Files render after returning to Sessions', async () => {
+    const pendingAppend = createDeferred<void>();
+    const renderFileRows = vi.fn((fileRows: Array<Record<string, unknown>>) => {
+      fileTree.firstChild = fileRows.length ? { rendered: true } : null;
+    });
+    const fileTree = { firstChild: null as unknown };
+    let appendRows: Array<Record<string, unknown>> | null = null;
+    const panel = compileRenderFilesPanelHarness({
+      activeProject: {
+        id: 'project-1',
+        root: '/repo',
+        selectedWorktreePath: '/repo/worktrees/feature',
+      },
+      fileTreeEl: fileTree,
+      renderFileRows,
+      appendDirInto: (fileRows) => {
+        appendRows = fileRows;
+        return pendingAppend.promise;
+      },
+    });
+
+    const pendingRender = panel.renderFilesPanel();
+
+    expect(panel.showSessionsSidebar()).toBe(true);
+
+    expect(appendRows).not.toBeNull();
+    appendRows!.push({
+      key: '/repo/stale.ts',
+      entry: { path: '/repo/stale.ts', name: 'stale.ts' },
+      depth: 0,
+    });
+    pendingAppend.resolve();
+
+    await expect(pendingRender).resolves.toBe(false);
+    expect(panel.getSidebarView()).toBe('sessions');
+    expect(renderFileRows).not.toHaveBeenCalled();
+    expect(panel.getRenderedFileRows()).toEqual([]);
   });
 
   it('routes files-back rail clicks through the registered listener to showSessionsSidebar', async () => {

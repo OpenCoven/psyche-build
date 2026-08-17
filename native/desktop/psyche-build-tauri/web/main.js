@@ -530,7 +530,11 @@
     if (!(await showTerminalView())) return false;
     project.selectedWorktreePath = worktreePath;
     if (projectChanged) {
-      var projectOptions = Object.assign({}, options || {}, { refreshStatus: false });
+      var projectOptions = Object.assign(
+        {},
+        options || {},
+        { refreshStatus: false, skipFilesRender: true }
+      );
       if (!(await setActiveProject(project.id, projectOptions))) {
         project.selectedWorktreePath = previousWorktreePath;
         return false;
@@ -549,6 +553,7 @@
     if (refreshStatus && typeof refreshStatusController === "function") {
       refreshStatusController();
     }
+    if (sidebarView === "files") renderFilesPanel();
     return true;
   }
   function measuredTerminalHost() {
@@ -937,6 +942,9 @@
     saveWorkspaceSoon();
     if (refreshStatus && typeof refreshStatusController === "function") {
       refreshStatusController();
+    }
+    if (!options || options.skipFilesRender !== true) {
+      if (sidebarView === "files") renderFilesPanel();
     }
     return true;
   }
@@ -5464,6 +5472,7 @@
   }
 
   function showSessionsSidebar() {
+    invalidateFilesPanelRender();
     var restoreProjectId = sidebarFilesReturnProjectId;
     sidebarFilesReturnProjectId = null;
     setSidebarView("sessions");
@@ -11524,6 +11533,20 @@
   var gitOpenRemoteBtn = document.getElementById("git-open-remote");
   var renderedFileRows = [];
   var fileVirtualFocusKey = "";
+  var filesPanelGeneration = 0;
+
+  function invalidateFilesPanelRender() {
+    filesPanelGeneration += 1;
+    return filesPanelGeneration;
+  }
+
+  function filesPanelRequestMatches(generation, projectId, workspaceRoot) {
+    var project = activeProject();
+    return sidebarView === "files" &&
+      generation === filesPanelGeneration &&
+      !!project && project.id === projectId &&
+      activeWorkspaceRoot(project) === workspaceRoot;
+  }
 
   // Directory paths the user has expanded, so a refresh keeps the tree open.
   var expandedDirs = Object.create(null);
@@ -11641,16 +11664,22 @@
   // ---- Files ----
 
   async function renderFilesPanel() {
-    if (!fileTreeEl) return;
+    if (!fileTreeEl) return false;
+    var generation = invalidateFilesPanelRender();
     var project = activeProject();
-    if (!project) { panelMessage(fileTreeEl, "No project open — ⌘O to add one."); return; }
+    if (!project) {
+      panelMessage(fileTreeEl, "No project open — ⌘O to add one.");
+      return false;
+    }
     var workspaceRoot = activeWorkspaceRoot(project);
     if (filesCrumbEl) filesCrumbEl.textContent = shortenRoot(workspaceRoot);
     var fileRows = [];
     await appendDirInto(fileRows, workspaceRoot, workspaceRoot, 0);
+    if (!filesPanelRequestMatches(generation, project.id, workspaceRoot)) return false;
     renderedFileRows = fileRows;
     renderFileRows(fileRows);
     if (!fileTreeEl.firstChild) panelMessage(fileTreeEl, "Empty directory.");
+    return true;
   }
 
   async function appendDirInto(fileRows, root, dirPath, depth) {
