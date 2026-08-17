@@ -245,6 +245,8 @@ describe('native Files pane layout contract', () => {
         findThread: (id: string) => state.threads.find((item) => item.id === id) || null,
         canvasSurfaceById: (id: string) => id === filesPane.id ? filesPane : null,
         canvasThreadIds: () => [],
+        paneLayoutForThread: () => layout,
+        paneFocusEligible: () => true,
         forgetThreadInSets: () => undefined,
         detachThreadPane: () => { layout.focusedLeafId = filesPane.id; return filesPane.id; },
         retainFileFocusAfterThreadRemoval: () => false,
