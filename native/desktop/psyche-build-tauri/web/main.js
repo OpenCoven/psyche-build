@@ -3810,6 +3810,29 @@
       : !surface.closing && !surface.closeStarted;
   }
 
+  function resolvePaneFocusSuccessor(layout, preferredId, threadsOnly) {
+    if (!layout || !layout.root) return null;
+    var root = scopedPaneRoot(layout);
+    if (!root) return null;
+    var leafIds = PsychePanes.leafIds(root);
+    var preferredLeaf = preferredId &&
+      PsychePanes.findLeafByThreadId(root, preferredId);
+    if (preferredLeaf) {
+      leafIds = [preferredLeaf.id].concat(leafIds.filter(function (leafId) {
+        return leafId !== preferredLeaf.id;
+      }));
+    }
+    for (var i = 0; i < leafIds.length; i += 1) {
+      var leaf = PsychePanes.findLeafById(root, leafIds[i]);
+      var surface = leaf && (typeof canvasSurfaceById === "function"
+        ? canvasSurfaceById(leaf.threadId)
+        : typeof findThread === "function" ? findThread(leaf.threadId) : leaf);
+      if (threadsOnly && surface && surface.kind === "files") continue;
+      if (paneSurfaceFocusEligible(layout, surface)) return surface.id;
+    }
+    return null;
+  }
+
   /**
    * The tree the canvas actually draws. Maximise and span are presentation
    * modes, so neither one edits the tiled tree — leaving them restores exactly
@@ -4645,21 +4668,13 @@
     }
     layout.root = removed.root;
     var nextLeaf = PsychePanes.findLeafById(removed.root, removed.nextLeafId);
-    var nextSurface = nextLeaf && (typeof canvasSurfaceById === "function"
-      ? canvasSurfaceById(nextLeaf.threadId)
-      : typeof findThread === "function" ? findThread(nextLeaf.threadId) : nextLeaf);
-    if (!nextLeaf || !paneSurfaceFocusEligible(layout, nextSurface)) {
-      var nextEligibleLeafId = PsychePanes.leafIds(removed.root).find(function (leafId) {
-        var candidate = PsychePanes.findLeafById(removed.root, leafId);
-        var candidateSurface = candidate && (typeof canvasSurfaceById === "function"
-          ? canvasSurfaceById(candidate.threadId)
-          : typeof findThread === "function" ? findThread(candidate.threadId) : candidate);
-        return candidate && paneSurfaceFocusEligible(layout, candidateSurface);
-      });
-      nextLeaf = nextEligibleLeafId
-        ? PsychePanes.findLeafById(removed.root, nextEligibleLeafId)
-        : null;
-    }
+    var nextThreadId = resolvePaneFocusSuccessor(
+      layout,
+      nextLeaf ? nextLeaf.threadId : null
+    );
+    nextLeaf = nextThreadId
+      ? PsychePanes.findLeafByThreadId(removed.root, nextThreadId)
+      : null;
     if (layout.focusedLeafId === leaf.id) {
       layout.focusedLeafId = nextLeaf ? nextLeaf.id : null;
     }
@@ -4941,18 +4956,26 @@
     var nextThreadId = detachThreadPane(thread);
     thread.terminalController = null;
     thread.term = null;
-    if (nextThreadId && !findThread(nextThreadId)) {
-      var closingLayout = paneLayoutForThread(thread);
-      nextThreadId = canvasThreadIds().find(function (candidateId) {
-        return paneSurfaceFocusEligible(closingLayout, findThread(candidateId));
-      }) || null;
-    }
     if (thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
       await stopThreadPty(thread);
     }
     var closingProjectId = thread.projectId;
     state.threads = state.threads.filter(function (t) { return t.id !== id; });
     if (wasActive) {
+      var closingLayout = paneLayoutForThread(thread);
+      nextThreadId = resolvePaneFocusSuccessor(closingLayout, nextThreadId, true);
+      if (closingLayout) {
+        var focusedLeaf = closingLayout.focusedLeafId &&
+          PsychePanes.findLeafById(closingLayout.root, closingLayout.focusedLeafId);
+        var focusedSurface = focusedLeaf && (typeof canvasSurfaceById === "function"
+          ? canvasSurfaceById(focusedLeaf.threadId)
+          : findThread(focusedLeaf.threadId));
+        if (!paneSurfaceFocusEligible(closingLayout, focusedSurface)) {
+          var successorLeaf = nextThreadId &&
+            PsychePanes.findLeafByThreadId(closingLayout.root, nextThreadId);
+          closingLayout.focusedLeafId = successorLeaf ? successorLeaf.id : null;
+        }
+      }
       // Prefer the next thread in the same project so closing a tab doesn't
       // teleport the user into a different project.
       state.activeThreadId = null;
@@ -4993,13 +5016,12 @@
     }
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     var nextThreadId = detachThreadPane(thread);
-    if (nextThreadId && !findThread(nextThreadId)) {
-      var hidingLayout = paneLayoutForThread(thread);
-      nextThreadId = canvasThreadIds().find(function (candidateId) {
-        return paneSurfaceFocusEligible(hidingLayout, findThread(candidateId));
-      }) || null;
-    }
     thread.hidden = true;
+    nextThreadId = resolvePaneFocusSuccessor(
+      paneLayoutForThread(thread),
+      nextThreadId,
+      true
+    );
     var focusingNext = false;
     if (wasActive) {
       state.activeThreadId = null;
