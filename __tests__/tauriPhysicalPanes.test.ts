@@ -83,6 +83,7 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     paneLayoutFor: () => null,
     paneLayoutForThread: () => null,
     paneFocusEligible: () => true,
+    paneSurfaceFocusEligible: () => true,
     ...dependencies,
   };
   const names = Object.keys(resolvedDependencies);
@@ -354,6 +355,13 @@ function createPaneFocusHarness(
   >(functionSource('browserPaneIsClosing'), {
     browserPaneLifecycle,
   });
+  const paneSurfaceFocusEligible = compileFunction<(
+    layout: PaneFocusLayout | null,
+    surface: PaneFocusThread | null,
+  ) => boolean>(functionSource('paneSurfaceFocusEligible'), {
+    browserPaneIsClosing,
+    paneFocusEligible,
+  });
   const isLiveThread = (thread: PaneFocusThread | null) => (
     Boolean(thread) && !thread?.closing && state.threads.includes(thread as PaneFocusThread)
   );
@@ -405,7 +413,9 @@ function createPaneFocusHarness(
     findProject: (id: string) => id === project.id ? project : null,
     activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
     paneLayoutFor: () => layout,
+    paneLayoutForThread: () => layout,
     paneFocusEligible,
+    paneSurfaceFocusEligible,
     PsychePanes,
     withTerminalFocusReportToken: tokens.withTerminalFocusReportToken,
     renderPaneWorkspace,
@@ -428,6 +438,7 @@ function createPaneFocusHarness(
     documentRef,
     focusThread,
     focusedTerminalThreadForRender,
+    paneSurfaceFocusEligible,
     project,
     queued,
     renderPaneWorkspace,
@@ -542,6 +553,154 @@ function createMinimapFocusHarness(targetKind: 'shell' | 'web') {
   const entry = terminalArea.querySelector('.minimap-pane');
   if (!entry) throw new Error('missing minimap pane');
   return { ...focusHarness, entry, layout, source, target };
+}
+
+function createPaneRemovalLifecycleHarness(includeHealthySuccessor: boolean) {
+  const source: PaneFocusThread = {
+    id: 'thread-remove-source',
+    kind: 'shell',
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    closing: false,
+    closeStarted: false,
+    hidden: false,
+    metricsGeneration: 0,
+    metricsRefreshTimer: 0,
+    startInFlight: false,
+    pane: { id: 'pane-remove-source' },
+    host: { contains: () => false },
+    term: null,
+  };
+  const tearingBrowser: PaneFocusThread = {
+    id: 'thread-remove-browser',
+    kind: 'web',
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    hidden: false,
+    pane: { id: 'pane-remove-browser' },
+    host: { contains: () => false },
+    term: null,
+  };
+  const healthy: PaneFocusThread = {
+    id: 'thread-remove-healthy',
+    kind: 'shell',
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    hidden: false,
+    pane: { id: 'pane-remove-healthy' },
+    host: { contains: () => false },
+    term: null,
+  };
+  let root = PsychePanes.insertBelow(
+    PsychePanes.createLeaf('leaf-remove-source', source.id),
+    'leaf-remove-source',
+    PsychePanes.createLeaf('leaf-remove-browser', tearingBrowser.id),
+    'split-remove-browser',
+  );
+  if (includeHealthySuccessor) {
+    root = PsychePanes.insertBelow(
+      root,
+      'leaf-remove-browser',
+      PsychePanes.createLeaf('leaf-remove-healthy', healthy.id),
+      'split-remove-healthy',
+    );
+  }
+  const layout: PaneFocusLayout = {
+    root,
+    focusedLeafId: 'leaf-remove-source',
+    maximizedLeafId: 'leaf-remove-browser',
+    activeSetId: 'set-remove',
+  };
+  const threads = includeHealthySuccessor
+    ? [source, tearingBrowser, healthy]
+    : [source, tearingBrowser];
+  const paneFocusEligible = compilePaneFocusEligible([{
+    id: 'set-remove',
+    threadIds: threads.map((thread) => thread.id),
+  }]);
+  const harness = createPaneFocusHarness(
+    threads,
+    source.id,
+    null,
+    layout,
+    paneFocusEligible,
+  );
+  harness.browserPaneLifecycle(tearingBrowser).tearingDown = true;
+  const key = 'project-a\0/repo';
+  const paneLayouts = new Map([[key, layout]]);
+  const detachThreadPaneImpl = compileFunction<(
+    thread: PaneFocusThread,
+  ) => string | null>(functionSource('detachThreadPane'), {
+    canvasSurfaceById: (id: string) => (
+      harness.state.threads.find((thread) => thread.id === id) || null
+    ),
+    focusedTerminalThreadForRender: harness.focusedTerminalThreadForRender,
+    withTerminalFocusReportToken: harness.withTerminalFocusReportToken,
+    paneLayoutKey: () => key,
+    paneLayouts,
+    paneFocusEligible,
+    paneSurfaceFocusEligible: harness.paneSurfaceFocusEligible,
+    PsychePanes,
+  });
+  const detachThreadPane = (thread: PaneFocusThread) => {
+    const nextThreadId = detachThreadPaneImpl(thread);
+    if (thread.pane) harness.attachedPanes.delete(thread.pane);
+    return nextThreadId;
+  };
+  const renderOptions: Array<{ preserveTerminalFocus?: boolean } | undefined> = [];
+  const sharedDependencies = {
+    findThread: (id: string) => (
+      harness.state.threads.find((thread) => thread.id === id) || null
+    ),
+    detachThreadPane,
+    retainFileFocusAfterThreadRemoval: () => false,
+    state: harness.state,
+    focusThread: harness.focusThread,
+    paneLayoutForThread: () => layout,
+    paneFocusEligible,
+    renderPaneWorkspace: (options?: { preserveTerminalFocus?: boolean }) => {
+      renderOptions.push(options);
+      harness.renderPaneWorkspace(options);
+    },
+    refreshSidebar: () => undefined,
+    refreshTabs: () => undefined,
+  };
+
+  async function remove(action: 'close' | 'hide') {
+    if (action === 'close') {
+      const closeThread = compileFunction<(id: string) => Promise<boolean>>(
+        functionSource('closeThread'),
+        {
+          ...sharedDependencies,
+          forgetThreadInSets: () => undefined,
+          stopThreadPty: async () => true,
+          setProjectStatus: () => undefined,
+          findProject: () => harness.project,
+        },
+      );
+      await expect(closeThread(source.id)).resolves.toBe(true);
+    } else {
+      const hideThread = compileFunction<(id: string) => boolean>(
+        functionSource('hideThread'),
+        sharedDependencies,
+      );
+      expect(hideThread(source.id)).toBe(true);
+    }
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
+  return {
+    harness,
+    healthy,
+    layout,
+    remove,
+    renderOptions,
+    tearingBrowser,
+  };
 }
 
 describe('Tauri physical terminal panes', () => {
@@ -1663,6 +1822,68 @@ describe('Tauri physical terminal panes', () => {
     },
   );
 
+  it('does not mutate layout when maximizing an inactive tearing-down browser', () => {
+    const source: PaneFocusThread = {
+      id: 'thread-maximize-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-maximize-source' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const target: PaneFocusThread = {
+      id: 'thread-maximize-browser',
+      kind: 'web',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-maximize-browser' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-maximize-source', source.id),
+        'leaf-maximize-source',
+        PsychePanes.createLeaf('leaf-maximize-browser', target.id),
+        'split-maximize-browser',
+      ),
+      focusedLeafId: 'leaf-maximize-source',
+      maximizedLeafId: 'leaf-maximize-source',
+    };
+    const harness = createPaneFocusHarness([source, target], source.id, null, layout);
+    harness.browserPaneLifecycle(target).tearingDown = true;
+    const focusThread = vi.fn(harness.focusThread);
+    const renderPaneWorkspace = vi.fn();
+    const togglePaneMaximize = compileFunction<
+      (surface: PaneFocusThread) => void
+    >(functionSource('togglePaneMaximize'), {
+      canvasSurfaceById: (id: string) => (
+        harness.state.threads.find((thread) => thread.id === id) || null
+      ),
+      paneLayoutForThread: () => layout,
+      paneSurfaceFocusEligible: harness.paneSurfaceFocusEligible,
+      findThread: (id: string) => (
+        harness.state.threads.find((thread) => thread.id === id) || null
+      ),
+      focusThread,
+      renderPaneWorkspace,
+      state: harness.state,
+      PsychePanes,
+    });
+
+    togglePaneMaximize(target);
+
+    expect(harness.state.activeThreadId).toBe(source.id);
+    expect(harness.project.lastActiveThreadId).toBe(source.id);
+    expect(layout.focusedLeafId).toBe('leaf-maximize-source');
+    expect(layout.maximizedLeafId).toBe('leaf-maximize-source');
+    expect(focusThread).not.toHaveBeenCalled();
+    expect(renderPaneWorkspace).not.toHaveBeenCalled();
+  });
+
   it('preserves fullscreen through focus-set activation for a siderail pane selection', async () => {
     const source: PaneFocusThread = {
       id: 'thread-source',
@@ -1981,11 +2202,15 @@ describe('Tauri physical terminal panes', () => {
       const detachThreadPaneImpl = compileFunction<(
         thread: PaneFocusThread,
       ) => string | null>(functionSource('detachThreadPane'), {
+        canvasSurfaceById: (id: string) => (
+          harness.state.threads.find((thread) => thread.id === id) || null
+        ),
         focusedTerminalThreadForRender: harness.focusedTerminalThreadForRender,
         withTerminalFocusReportToken: harness.withTerminalFocusReportToken,
         paneLayoutKey: () => key,
         paneLayouts,
         paneFocusEligible,
+        paneSurfaceFocusEligible: harness.paneSurfaceFocusEligible,
         PsychePanes,
       });
       const detachThreadPane = (thread: PaneFocusThread) => {
@@ -2032,6 +2257,35 @@ describe('Tauri physical terminal panes', () => {
       expect(harness.project.lastActiveThreadId).toBe(member.id);
       expect(layout.focusedLeafId).toBe('leaf-remove-member');
       expect(layout.maximizedLeafId).toBe('leaf-remove-member');
+    },
+  );
+
+  it.each(['close', 'hide'] as const)(
+    'skips a tearing-down browser when choosing the %s successor',
+    async (action) => {
+      const { harness, healthy, layout, remove } =
+        createPaneRemovalLifecycleHarness(true);
+
+      await remove(action);
+
+      expect(harness.state.activeThreadId).toBe(healthy.id);
+      expect(harness.project.lastActiveThreadId).toBe(healthy.id);
+      expect(layout.focusedLeafId).toBe('leaf-remove-healthy');
+      expect(layout.maximizedLeafId).toBe('leaf-remove-healthy');
+    },
+  );
+
+  it.each(['close', 'hide'] as const)(
+    'clears and renders after %s when only a tearing-down successor remains',
+    async (action) => {
+      const { harness, layout, remove, renderOptions } =
+        createPaneRemovalLifecycleHarness(false);
+
+      await remove(action);
+
+      expect(harness.state.activeThreadId).toBeNull();
+      expect(layout.focusedLeafId).toBeNull();
+      expect(renderOptions).toEqual([{ preserveTerminalFocus: false }]);
     },
   );
 
@@ -4214,7 +4468,7 @@ describe('Tauri physical terminal panes', () => {
     ) {
       const factory = Function(
         'PsychePanes', 'activePaneLayout', 'paneLayoutFor', 'state',
-        'focusThread', 'renderPaneWorkspace', 'seedSets',
+        'focusThread', 'renderPaneWorkspace', 'paneSurfaceFocusEligible', 'seedSets',
         `"use strict";
          var SPAN_ORIENTATION = { column: "row", row: "column" };
          var focusSets = seedSets;
@@ -4236,6 +4490,7 @@ describe('Tauri physical terminal panes', () => {
         { activeThreadId: 'thread-a', ...(extras.state as object ?? {}) },
         extras.focusThread ?? (() => undefined),
         extras.renderPaneWorkspace ?? (() => undefined),
+        extras.paneSurfaceFocusEligible ?? (() => true),
         sets,
       ) as {
         effectivePaneRoot: (value: Layout) => Record<string, unknown> | null;
