@@ -77,7 +77,7 @@ function compileFunction<T extends (...args: never[]) => unknown>(
 ) {
   const resolvedDependencies = {
     isPersistentThread: (thread: Record<string, any>) =>
-      ['shell', 'psyche', 'coven-chat', 'coven-attach'].includes(thread?.launch?.launchKind),
+      ['shell', 'psyche', 'coven-code', 'coven-attach'].includes(thread?.launch?.launchKind),
     nativeSessionRequest: (thread: Record<string, any>) => ({ id: thread.id }),
     invoke: async () => undefined,
     attachThreadClient: () => Promise.resolve(true),
@@ -533,7 +533,7 @@ describe('macOS Coven session lifecycle boundary', () => {
   });
 
   it('keeps native Coven create and attach outside daemon/tmux mutation paths', () => {
-    const create = functionSource(mainJs, 'covenChatLaunch');
+    const create = functionSource(mainJs, 'covenCodeLaunch');
     const attach = functionSource(mainJs, 'openCovenSession');
     const nativeCovenSource = `${create}\n${attach}`;
     expect(nativeCovenSource).not.toMatch(

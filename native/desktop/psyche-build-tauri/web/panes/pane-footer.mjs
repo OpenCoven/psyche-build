@@ -13,7 +13,7 @@ export const FOOTER_TIERS = Object.freeze({
 });
 
 const AGENT_PANE_KINDS = Object.freeze([
-  "coven-chat",
+  "coven-code",
   "coven-attach",
   "agent-copilot",
   "agent-codex",

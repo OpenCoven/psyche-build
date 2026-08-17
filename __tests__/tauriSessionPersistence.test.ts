@@ -39,6 +39,15 @@ function functionSource(name: string) {
   throw new Error(`unterminated function ${name}`);
 }
 
+function compileFunction<T extends (...args: never[]) => unknown>(
+  source: string,
+  dependencies: Record<string, unknown> = {},
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(...names, `"use strict"; return (${source});`)(...values) as T;
+}
+
 describe('Tauri workspace persistence model', () => {
   test('imports v2 state without inventing sessions or layouts', () => {
     expect(
@@ -288,6 +297,54 @@ describe('Tauri workspace persistence model', () => {
       ],
       filesPanes: [],
       paneLayouts: [],
+    });
+  });
+
+  test('persists restored legacy Coven sessions with canonical live metadata', () => {
+    const sessionId = '12345678-1234-4abc-8def-1234567890ab';
+    const descriptor = workspaceModel.sanitizeSessionDescriptor({
+      id: 'code-legacy-restored',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Coven Code',
+      kind: 'coven-chat',
+      launchKind: 'coven-chat',
+      covenSessionId: sessionId,
+    });
+    const restoredSessionThread = compileFunction<(
+      saved: Record<string, unknown>,
+      project: { id: string; root: string },
+    ) => Record<string, any>>(functionSource('restoredSessionThread'), {
+      restoredSessionLaunch: compileFunction(functionSource('restoredSessionLaunch')),
+      createThreadPtyIoQueue: () => ({ closed: false }),
+      loadingPaneMetrics: (launch: Record<string, unknown>) => ({
+        provider: launch.metricsProvider,
+      }),
+    });
+    const persistableSession = compileFunction<(
+      thread: Record<string, unknown>,
+    ) => Record<string, unknown> | null>(functionSource('persistableSession'));
+
+    const restored = restoredSessionThread(descriptor, { id: 'project-a', root: '/repo' });
+
+    expect(restored).toMatchObject({
+      kind: 'coven-code',
+      launch: {
+        launchKind: 'coven-code',
+        covenSessionId: sessionId,
+        metricsProvider: 'coven',
+      },
+      metrics: { provider: 'coven' },
+    });
+    expect(persistableSession(restored)).toEqual({
+      id: 'code-legacy-restored',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Coven Code',
+      kind: 'coven-code',
+      launchKind: 'coven-code',
+      hidden: false,
+      covenSessionId: sessionId,
     });
   });
 
@@ -1249,9 +1306,9 @@ describe('Tauri workspace persistence model', () => {
       'Shell — login shell<span class="new-pane-key">⌃T</span>',
     );
     expect(indexHtml).toContain(
-      'Agent — coven chat<span class="new-pane-key">⌃A</span>',
+      'Agent — Coven Code<span class="new-pane-key">⌃A</span>',
     );
     expect(mainSource).toContain('["New shell pane", "⌃T"]');
-    expect(mainSource).toContain('["New agent pane (coven chat)", "⌃A"]');
+    expect(mainSource).toContain('["New agent pane (Coven Code)", "⌃A"]');
   });
 });

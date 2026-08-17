@@ -512,7 +512,7 @@
       : findThread(leaf.threadId));
     var thread = surface && findThread(surface.id);
     var activeThread = thread &&
-      thread.kind !== "coven-chat" && thread.kind !== "coven-attach"
+      thread.kind !== "coven-code" && thread.kind !== "coven-attach"
         ? thread
         : null;
     state.activeThreadId = activeThread ? activeThread.id : null;
@@ -909,13 +909,13 @@
     }
     var threads = state.threads.filter(function (t) {
       return t.projectId === id && t.worktreePath === workspaceRoot && !t.hidden &&
-        t.kind !== "coven-chat" && t.kind !== "coven-attach";
+        t.kind !== "coven-code" && t.kind !== "coven-attach";
     });
     var rememberedThread = project.lastActiveThreadId && state.threads.find(function (thread) {
       return thread.id === project.lastActiveThreadId;
     });
     if (rememberedThread &&
-        (rememberedThread.kind === "coven-chat" || rememberedThread.kind === "coven-attach")) {
+        (rememberedThread.kind === "coven-code" || rememberedThread.kind === "coven-attach")) {
       project.lastActiveThreadId = null;
     }
     var nextId = project.lastActiveThreadId &&
@@ -1112,7 +1112,7 @@
   }
   function persistableSession(thread) {
     if (!thread || !thread.launch ||
-        ["shell", "psyche", "coven-chat", "coven-attach"].indexOf(thread.launch.launchKind) === -1) {
+        ["shell", "psyche", "coven-code", "coven-attach"].indexOf(thread.launch.launchKind) === -1) {
       return null;
     }
     return {
@@ -2201,7 +2201,7 @@
 
   function isPersistentThread(thread) {
     var launchKind = thread && thread.launch && thread.launch.launchKind;
-    return ["shell", "psyche", "coven-chat", "coven-attach"].indexOf(launchKind) !== -1;
+    return ["shell", "psyche", "coven-code", "coven-attach"].indexOf(launchKind) !== -1;
   }
 
   function nativeSessionRequest(thread) {
@@ -2286,7 +2286,7 @@
         pendingInputWrites: 0,
       },
       metricsGeneration: 0,
-      metrics: launch.launchKind === "coven-chat" && launch.covenSessionId
+      metrics: launch.launchKind === "coven-code" && launch.covenSessionId
         ? loadingPaneMetrics(launch)
         : null,
       metricsRefreshTimer: 0,
@@ -2468,7 +2468,7 @@
       if (state.activeThreadId === thread.id) {
         setProjectStatus(findProject(thread.projectId), "ok");
       }
-      if (launch.launchKind === "coven-chat") refreshCovenSessions();
+      if (launch.launchKind === "coven-code") refreshCovenSessions();
       return true;
     }).catch(function (err) {
       thread.startInFlight = false;
@@ -2527,7 +2527,7 @@
         if (state.activeThreadId === thread.id) {
           setProjectStatus(findProject(thread.projectId), "ok");
         }
-        if (launch.launchKind === "coven-chat") refreshCovenSessions();
+        if (launch.launchKind === "coven-code") refreshCovenSessions();
       } else {
         if (terminalController &&
             typeof terminalController.restoreAfterFailedPtyStart === "function") {
@@ -4436,7 +4436,7 @@
       else Object.assign(state, { activeProjectId: thread.projectId });
     }
     if (project) {
-      if (thread.kind !== "coven-chat" && thread.kind !== "coven-attach") {
+      if (thread.kind !== "coven-code" && thread.kind !== "coven-attach") {
         project.lastActiveThreadId = id;
       }
       project.selectedWorktreePath = thread.worktreePath;
@@ -4979,7 +4979,7 @@
       if (staleFooter) staleFooter.remove();
       thread.pane.appendChild(createPaneFooter(thread));
     }
-    if (thread.kind !== "coven-chat" && thread.kind !== "coven-attach") {
+    if (thread.kind !== "coven-code" && thread.kind !== "coven-attach") {
       project.lastActiveThreadId = thread.id;
     }
     state.activeThreadId = thread.id;
@@ -5018,8 +5018,8 @@
     if (!thread || thread.status === "exited" || threadIsToolPane(thread)) return null;
     var project = findProject(thread.projectId);
     var launch = thread.launch;
-    if (launch && launch.launchKind === "coven-chat") {
-      launch = covenChatLaunch(project || { root: launch.projectRoot }, thread.worktreePath || launch.cwd);
+    if (launch && launch.launchKind === "coven-code") {
+      launch = covenCodeLaunch(project || { root: launch.projectRoot }, thread.worktreePath || launch.cwd);
       if (!launch) return null;
     }
     return createThread({
@@ -5530,7 +5530,7 @@
       && !thread.hidden
       && thread.status !== "exited"
       && thread.launch
-      && thread.launch.launchKind === "coven-chat"
+      && thread.launch.launchKind === "coven-code"
       && thread.pane
       && thread.pane.isConnected
       && terminalHost.contains(thread.pane)
@@ -5718,7 +5718,7 @@
     var isAgent = PsychePanes.isAgentPaneKind(thread.kind);
     var metrics = thread.metrics || null;
     var isEligibleCoven = thread.launch
-      && thread.launch.launchKind === "coven-chat"
+      && thread.launch.launchKind === "coven-code"
       && Boolean(thread.launch.covenSessionId);
     if (isEligibleCoven && !metrics) {
       metrics = loadingPaneMetrics(thread.launch);
@@ -8071,7 +8071,7 @@
     if (!filesPane) return null;
     var thread = findThread(state.activeThreadId);
     var processBacked = thread && thread.kind !== "web" && thread.kind !== "git" &&
-      thread.kind !== "coven-chat" && thread.kind !== "coven-attach";
+      thread.kind !== "coven-code" && thread.kind !== "coven-attach";
     var live = processBacked && !thread.hidden && !thread.closing &&
       thread.status !== "exited" && thread.status !== "failed";
     if (!live || thread.projectId !== filesPane.projectId ||
@@ -8134,7 +8134,7 @@
       thread.projectId === project.id &&
       thread.worktreePath === workspaceRoot &&
       (allowCoven ||
-        (thread.kind !== "coven-chat" && thread.kind !== "coven-attach")) &&
+        (thread.kind !== "coven-code" && thread.kind !== "coven-attach")) &&
       thread.kind !== "web" && thread.kind !== "git" &&
       !!PsychePanes.findLeafByThreadId(root, thread.id);
   }
@@ -8209,7 +8209,7 @@
   function clearPassiveCovenPaneFocus(layout) {
     var activeThread = findThread(state.activeThreadId);
     if (activeThread &&
-      (activeThread.kind === "coven-chat" || activeThread.kind === "coven-attach")) {
+      (activeThread.kind === "coven-code" || activeThread.kind === "coven-attach")) {
       state.activeThreadId = null;
     }
     layout = layout || activePaneLayout();
@@ -8219,7 +8219,7 @@
       var hasPassiveThread = activeSet && activeSet.threadIds.some(function (threadId) {
         var thread = findThread(threadId);
         return thread && !thread.hidden &&
-          thread.kind !== "coven-chat" && thread.kind !== "coven-attach" &&
+          thread.kind !== "coven-code" && thread.kind !== "coven-attach" &&
           !!PsychePanes.findLeafByThreadId(layout.root, threadId);
       });
       if (!hasPassiveThread) layout.activeSetId = null;
@@ -8227,7 +8227,7 @@
     ["focusedLeafId", "maximizedLeafId"].forEach(function (key) {
       var leaf = layout[key] ? PsychePanes.findLeafById(layout.root, layout[key]) : null;
       var thread = leaf ? findThread(leaf.threadId) : null;
-      if (thread && (thread.kind === "coven-chat" || thread.kind === "coven-attach")) {
+      if (thread && (thread.kind === "coven-code" || thread.kind === "coven-attach")) {
         layout[key] = null;
       }
     });
@@ -8355,7 +8355,7 @@
       var threads = state.threads.filter(function (thread) {
         return thread.projectId === project.id && !thread.hidden &&
           thread.worktreePath === workspaceRoot &&
-          thread.kind !== "coven-chat" && thread.kind !== "coven-attach";
+          thread.kind !== "coven-code" && thread.kind !== "coven-attach";
       });
       var nextThreadId = project.lastActiveThreadId &&
         threads.some(function (thread) { return thread.id === project.lastActiveThreadId; })
@@ -8892,7 +8892,7 @@
   var commands = [
     {
       cmd: "/new-thread",
-      desc: "Spawn a new Coven chat thread",
+      desc: "Spawn a new Coven Code thread",
       run: runNewThreadCommand,
     },
     {
@@ -11269,7 +11269,7 @@
   });
   onMenuClick("new-pane-agent", async function () {
     var thread = await runNewThreadCommand();
-    if (thread) toast("Coven chat opened");
+    if (thread) toast("Coven Code opened");
   });
   onMenuClick("new-pane-web", async function () {
     await openBlankBrowserTab();
@@ -11381,7 +11381,7 @@
     ["Resize a pane split", "drag the divider"],
     ["New shell pane", "⌃T"],
     ["New terminal pane", "⌘T"],
-    ["New agent pane (coven chat)", "⌃A"],
+    ["New agent pane (Coven Code)", "⌃A"],
     ["Choose an agent", "⌘D"],
     ["New browser tab", "Web pane +"],
     ["Open or focus Git", "⌘G"],
@@ -12335,7 +12335,7 @@
       cwd: descriptor.worktreePath,
       launchKind: launchKind,
       covenSessionId: descriptor.covenSessionId || null,
-      metricsProvider: launchKind === "coven-chat" || launchKind === "coven-attach"
+      metricsProvider: launchKind === "coven-code" || launchKind === "coven-attach"
         ? "coven"
         : null,
     };
@@ -12520,7 +12520,7 @@
 
   function agentLaunchOptions() {
     return [
-      { id: "coven-code", label: "Coven Code", command: null, args: ["chat"], kind: "coven-chat" },
+      { id: "coven-code", label: "Coven Code", command: null, args: ["code"], kind: "coven-code" },
       { id: "copilot", label: "Copilot CLI", command: "copilot", args: [], kind: "agent-copilot" },
       { id: "codex", label: "Codex CLI", command: "codex", args: [], kind: "agent-codex" },
       { id: "anthropic", label: "Anthropic CLI", command: "claude", args: [], kind: "agent-anthropic" },
@@ -12554,7 +12554,7 @@
       option.innerHTML =
         '<span class="agent-picker-label">' + escapeHtml(entry.label) + "</span>" +
         '<span class="agent-picker-option-command">' +
-          escapeHtml(entry.id === "coven-code" ? "coven chat" : (entry.command || "")) +
+          escapeHtml(entry.id === "coven-code" ? "coven code" : (entry.command || "")) +
         "</span>";
       option.addEventListener("pointermove", function () {
         if (agentPickerIndex === index) return;
@@ -12651,7 +12651,7 @@
     });
   }
 
-  function covenChatLaunch(project, worktreePath) {
+  function covenCodeLaunch(project, worktreePath) {
     var worktree = worktreePath ? { path: worktreePath } : selectedWorktree(project);
     var sessionId = makeCovenSessionId();
     if (!sessionId) return null;
@@ -12661,8 +12661,8 @@
       env: { COVEN_SESSION_SOURCE: "psyche-build" },
       projectRoot: project.root,
       cwd: worktree.path,
-      kind: "coven-chat",
-      launchKind: "coven-chat",
+      kind: "coven-code",
+      launchKind: "coven-code",
       covenSessionId: sessionId,
       metricsProvider: "coven",
     };
@@ -12686,13 +12686,13 @@
     var currentWorktree = selectedWorktree(currentProject);
     if (!currentProject || currentProject.id !== intendedProjectId ||
         !currentWorktree || currentWorktree.path !== intendedWorktreePath) return null;
-    var launch = covenChatLaunch({ root: intendedProjectRoot }, intendedWorktreePath);
+    var launch = covenCodeLaunch({ root: intendedProjectRoot }, intendedWorktreePath);
     if (!launch) return null;
     return createThread({
       project: currentProject,
       worktreePath: launch.cwd,
-      name: "Coven",
-      kind: "coven-chat",
+      name: "Coven Code",
+      kind: "coven-code",
       launch: launch,
     });
   }
@@ -12703,7 +12703,7 @@
     if (!worktree || !worktree.path) return Promise.resolve(null);
     var existing = state.threads.find(function (t) {
       return t.projectId === project.id && t.worktreePath === worktree.path &&
-        t.kind === "coven-chat" &&
+        t.kind === "coven-code" &&
         (t.status === "starting" || t.status === "running") &&
         !t.closing && !t.hidden;
     });
