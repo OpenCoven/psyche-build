@@ -8817,8 +8817,12 @@ mod workspace_panel_tests {
         let status = git_status(path_text(&project).to_string()).unwrap();
         let diff = git_diff(path_text(&project).to_string(), None, Some(false), None).unwrap();
 
-        assert!(status.files.is_empty());
-        assert!(diff.text.is_empty());
+        assert!(
+            status.files.is_empty(),
+            "isolated CRLF status files: {:?}",
+            status.files
+        );
+        assert!(diff.text.is_empty(), "isolated CRLF diff: {:?}", diff.text);
         assert_eq!(diff.bytes, 0);
     }
 
@@ -10265,7 +10269,12 @@ mod workspace_panel_tests {
         )
         .unwrap();
 
-        assert_eq!(status.files.len(), 1);
+        assert_eq!(
+            status.files.len(),
+            1,
+            "unexpected malformed-ref status files: {:?}",
+            status.files
+        );
         assert_eq!(status.files[0].path, "tracked.txt");
         assert!(status.files[0].unstaged);
         assert!(diff.text.contains("+after"));
@@ -10367,7 +10376,11 @@ mod workspace_panel_tests {
         );
 
         let status = git_status(path_text(&parent).to_string()).unwrap();
-        assert!(status.files.is_empty());
+        assert!(
+            status.files.is_empty(),
+            "unexpected parent status files: {:?}",
+            status.files
+        );
         assert!(!filter_marker.exists());
         assert!(!fsmonitor_marker.exists());
 
@@ -10392,7 +10405,12 @@ mod workspace_panel_tests {
         }
 
         let status = git_status(path_text(&parent).to_string()).unwrap();
-        assert_eq!(status.files.len(), 1);
+        assert_eq!(
+            status.files.len(),
+            1,
+            "unexpected reftable status files: {:?}",
+            status.files
+        );
         assert_eq!(status.files[0].path, "vendor/submodule");
         assert!(status.files[0].unstaged);
         assert!(!filter_marker.exists());
@@ -10733,7 +10751,8 @@ mod workspace_panel_tests {
         let status = git_status(path_text(&project).to_string()).unwrap();
         assert!(
             status.files.is_empty(),
-            "isolated git_status must preserve committed reftable attributes"
+            "isolated git_status must preserve committed reftable attributes: {:?}",
+            status.files
         );
 
         let diff = git_diff(path_text(&project).to_string(), None, Some(false), None).unwrap();
@@ -11143,7 +11162,11 @@ mod workspace_panel_tests {
         );
 
         let status = git_status(path_text(&project).to_string()).unwrap();
-        assert!(status.files.is_empty());
+        assert!(
+            status.files.is_empty(),
+            "isolated trusted-filter status files: {:?}",
+            status.files
+        );
 
         let diff = git_diff(path_text(&project).to_string(), None, Some(false), None).unwrap();
         assert!(diff.text.is_empty());
@@ -11726,7 +11749,12 @@ mod workspace_panel_tests {
         std::fs::write(project.join("inside.txt"), "inside changed\n").unwrap();
 
         let status = git_status(path_text(&project).to_string()).unwrap();
-        assert_eq!(status.files.len(), 1);
+        assert_eq!(
+            status.files.len(),
+            1,
+            "unexpected nested-root status files: {:?}",
+            status.files
+        );
         assert_eq!(status.files[0].path, "inside.txt");
 
         let diff = git_diff(
@@ -11797,7 +11825,13 @@ mod workspace_panel_tests {
 
         assert!(diff.truncated);
         assert!(diff.text.len() <= MAX_DIFF_BYTES);
-        assert_eq!(diff.bytes, full.len() as u64);
+        assert_eq!(
+            diff.bytes,
+            full.len() as u64,
+            "full diff prefix: {:?}; bounded diff prefix: {:?}",
+            full.lines().take(8).collect::<Vec<_>>(),
+            diff.text.lines().take(8).collect::<Vec<_>>()
+        );
         assert_eq!(diff.lines, full.lines().count() as u64);
         assert!(diff.bytes > diff.text.len() as u64);
         assert!(diff.lines > diff.text.lines().count() as u64);
@@ -11899,7 +11933,12 @@ mod workspace_panel_tests {
         )
         .unwrap();
         // More context means more surrounding lines for the same one-line edit.
-        assert!(wide.text.lines().count() > narrow.text.lines().count());
+        assert!(
+            wide.text.lines().count() > narrow.text.lines().count(),
+            "narrow diff: {:?}; wide diff: {:?}",
+            narrow.text,
+            wide.text
+        );
 
         // Beyond the cap the request is clamped, not honoured: the argument
         // reaches a subprocess and an unbounded one is not ours to forward.
