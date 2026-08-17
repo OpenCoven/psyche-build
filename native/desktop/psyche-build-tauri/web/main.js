@@ -356,6 +356,14 @@
     if (!options || options.resetAgentControl !== false) {
       resetAgentControlProject(findProject(id));
     }
+    syncFilesPanelScope();
+    return true;
+  }
+
+  function assignSelectedWorktreePath(project, worktreePath) {
+    if (!project || project.selectedWorktreePath === worktreePath) return false;
+    project.selectedWorktreePath = worktreePath;
+    if (project.id === state.activeProjectId) syncFilesPanelScope();
     return true;
   }
 
@@ -504,7 +512,7 @@
     return null;
   }
   function activatePaneLayoutFocus(project, worktreePath) {
-    project.selectedWorktreePath = worktreePath;
+    assignSelectedWorktreePath(project, worktreePath);
     var layout = paneLayoutFor(project.id, worktreePath);
     var leaf = layout && PsychePanes.findLeafById(layout.root, layout.focusedLeafId);
     var surface = leaf && (typeof canvasSurfaceById === "function"
@@ -528,11 +536,15 @@
     var previousWorktreePath = project.selectedWorktreePath;
     var projectChanged = project.id !== state.activeProjectId;
     if (!(await showTerminalView())) return false;
-    project.selectedWorktreePath = worktreePath;
+    assignSelectedWorktreePath(project, worktreePath);
     if (projectChanged) {
-      var projectOptions = Object.assign({}, options || {}, { refreshStatus: false });
+      var projectOptions = Object.assign(
+        {},
+        options || {},
+        { refreshStatus: false }
+      );
       if (!(await setActiveProject(project.id, projectOptions))) {
-        project.selectedWorktreePath = previousWorktreePath;
+        assignSelectedWorktreePath(project, previousWorktreePath);
         return false;
       }
     } else {
@@ -849,7 +861,7 @@
       project.worktrees = mergeWorktreePresentationState(project, [{
         path: project.root, branch: null, is_main: true, dirty: false, missing: false,
       }]);
-      project.selectedWorktreePath = project.root;
+      assignSelectedWorktreePath(project, project.root);
       invalidateChangedDiffScope();
       refreshSidebar();
       if (typeof refreshStatusController === "function") refreshStatusController();
@@ -859,7 +871,7 @@
     return invoke("git_worktrees", { root: project.root }).then(function (worktrees) {
       project.worktrees = mergeWorktreePresentationState(project, worktrees);
       var selected = selectedWorktree(project);
-      project.selectedWorktreePath = selected ? selected.path : project.root;
+      assignSelectedWorktreePath(project, selected ? selected.path : project.root);
       invalidateChangedDiffScope();
       refreshSidebar();
       saveWorkspaceSoon();
@@ -870,7 +882,7 @@
       project.worktrees = mergeWorktreePresentationState(project, [{
         path: project.root, branch: null, is_main: true, dirty: false, missing: false,
       }]);
-      project.selectedWorktreePath = project.root;
+      assignSelectedWorktreePath(project, project.root);
       invalidateChangedDiffScope();
       refreshSidebar();
       if (typeof refreshStatusController === "function") refreshStatusController();
@@ -897,13 +909,14 @@
     if (!(await showTerminalView())) return false;
     var project = findProject(id);
     if (!project) return false;
+    var workspaceRoot = activeWorkspaceRoot(project);
+    assignSelectedWorktreePath(project, workspaceRoot);
     if (typeof assignActiveProjectId === "function") assignActiveProjectId(id);
     else Object.assign(state, { activeProjectId: id });
     clearPassiveCovenPaneFocus();
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
     // Restore the project's last-focused thread, falling back to its first.
-    var workspaceRoot = activeWorkspaceRoot(project);
     if (typeof restoreFilesPaneSelection === "function") {
       restoreFilesPaneSelection(project, workspaceRoot);
     }
@@ -1012,7 +1025,6 @@
       bgOpacity: DEFAULT_BG_OPACITY,
       theme: DEFAULT_THEME,
       solidBg: false,
-      sidebarTab: "sessions",
       sessionFilter: "all",
       selectedSessionKey: "",
     };
@@ -1024,7 +1036,6 @@
         bgOpacity: clampFloat(saved.bgOpacity, defaults.bgOpacity, MIN_BG_OPACITY, MAX_BG_OPACITY),
         theme: THEMES.indexOf(saved.theme) === -1 ? defaults.theme : saved.theme,
         solidBg: saved.solidBg === true,
-        sidebarTab: saved.sidebarTab === "files" ? "files" : "sessions",
         sessionFilter: PsycheSessions.normalizeSidebarFilter(saved.sessionFilter),
         selectedSessionKey: typeof saved.selectedSessionKey === "string" ? saved.selectedSessionKey.slice(0, 1024) : "",
       };
@@ -1046,7 +1057,6 @@
     settings.bgOpacity = clampFloat(settings.bgOpacity, DEFAULT_BG_OPACITY, MIN_BG_OPACITY, MAX_BG_OPACITY);
     if (THEMES.indexOf(settings.theme) === -1) settings.theme = DEFAULT_THEME;
     settings.solidBg = settings.solidBg === true;
-    settings.sidebarTab = settings.sidebarTab === "files" ? "files" : "sessions";
     settings.sessionFilter = PsycheSessions.normalizeSidebarFilter(settings.sessionFilter);
     settings.selectedSessionKey = typeof settings.selectedSessionKey === "string" ? settings.selectedSessionKey.slice(0, 1024) : "";
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -4401,9 +4411,9 @@
     }
     var project = findProject(surface.projectId);
     if (project) {
+      assignSelectedWorktreePath(project, surface.workspaceRoot);
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
       else Object.assign(state, { activeProjectId: project.id });
-      project.selectedWorktreePath = surface.workspaceRoot;
     }
     state.activeThreadId = null;
     var layout = paneLayoutFor(surface.projectId, surface.workspaceRoot);
@@ -4455,6 +4465,7 @@
     state.activeThreadId = id;
     // Make the thread's project the active one so the sidebar/tabs
     // stay in sync if the user clicked into a different project's thread.
+    if (project) assignSelectedWorktreePath(project, thread.worktreePath);
     if (thread.projectId && state.activeProjectId !== thread.projectId) {
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(thread.projectId);
       else Object.assign(state, { activeProjectId: thread.projectId });
@@ -4463,7 +4474,6 @@
       if (thread.kind !== "coven-code" && thread.kind !== "coven-attach") {
         project.lastActiveThreadId = id;
       }
-      project.selectedWorktreePath = thread.worktreePath;
     }
     var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
     var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
@@ -4815,7 +4825,7 @@
       project.lastActiveThreadId = nextThreadId || null;
       if (nextThreadId) {
         var nextThread = findThread(nextThreadId);
-        if (nextThread) project.selectedWorktreePath = nextThread.worktreePath;
+        if (nextThread) assignSelectedWorktreePath(project, nextThread.worktreePath);
       }
     }
     return true;
@@ -5416,6 +5426,7 @@
   var solidBgEl = document.getElementById("solid-bg");
   var bgOpacityInput = document.getElementById("bg-opacity");
   var bgOpacityValueEl = document.getElementById("bg-opacity-value");
+  var sidebarSessionControlsEl = document.getElementById("sidebar-session-controls");
   var sessionListEl = document.getElementById("session-list");
   var sidebarFilesEl = document.getElementById("sidebar-files");
   if (sessionListEl) {
@@ -5424,48 +5435,98 @@
       syncSessionListScroll();
       if (!sessionListEl.__psycheVirtualState ||
           !sessionListEl.__psycheVirtualState.virtualized) return;
-      var sessionScrollFocusKey = sessionListEl.contains(document.activeElement) &&
+      var focusedSessionControl = sessionListEl.contains(document.activeElement) &&
         document.activeElement.dataset
-        ? document.activeElement.dataset.treeKey || ""
+        ? document.activeElement.dataset
+        : null;
+      var sessionScrollFocusKey = focusedSessionControl
+        ? focusedSessionControl.treeKey || ""
+        : "";
+      var sessionScrollProjectFilesId = focusedSessionControl
+        ? focusedSessionControl.projectFiles || ""
         : "";
       terminalFrameScheduler.schedule("collection:sessions", function () {
         renderSessionList({
           preserveFocus: false,
           restoreFocusKey: sessionScrollFocusKey,
+          restoreProjectFilesId: sessionScrollProjectFilesId,
         });
       });
     });
   }
-  var sidebarTab = settings.sidebarTab;
+  var sidebarView = "sessions";
+  var sidebarFilesReturnProjectId = null;
 
   // The file tree renders lazily: switching to it is the only thing that has to
   // ask the filesystem, and the sessions rail should not pay for that.
-  function setSidebarTab(name, options) {
-    sidebarTab = name === "files" ? "files" : "sessions";
-    if (sessionListEl) sessionListEl.hidden = sidebarTab !== "sessions";
-    if (sidebarFilesEl) sidebarFilesEl.hidden = sidebarTab !== "files";
-    Array.prototype.forEach.call(
-      document.querySelectorAll("[data-sidebar-tab]"),
-      function (btn) {
-        var active = btn.dataset.sidebarTab === sidebarTab;
-        btn.classList.toggle("is-active", active);
-        btn.setAttribute("aria-selected", active ? "true" : "false");
+  function setSidebarView(name) {
+    var enteringFiles = sidebarView !== "files" && name === "files";
+    sidebarView = name === "files" ? "files" : "sessions";
+    var showingFiles = sidebarView === "files";
+    if (sidebarSessionControlsEl) sidebarSessionControlsEl.hidden = showingFiles;
+    if (sessionListEl) sessionListEl.hidden = showingFiles;
+    if (sidebarFilesEl) sidebarFilesEl.hidden = !showingFiles;
+    if (showingFiles) {
+      closeNewPaneMenu();
+      if (enteringFiles) {
+        var focusFilesControl = function () {
+          if (sidebarFilesEl && sidebarFilesEl.hidden) return false;
+          var back = document.getElementById("files-back");
+          if (back && !back.hidden && typeof back.focus === "function") {
+            back.focus();
+            if (document.activeElement === back) return true;
+          }
+          var refresh = document.getElementById("files-refresh");
+          if (refresh && !refresh.hidden && typeof refresh.focus === "function") {
+            refresh.focus();
+            if (document.activeElement === refresh) return true;
+          }
+          return false;
+        };
+        if (!focusFilesControl() && typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(function () {
+            focusFilesControl();
+          });
+        }
+        syncFilesPanelScope();
       }
-    );
-    if (sidebarTab === "files") renderFilesPanel();
-    settings.sidebarTab = sidebarTab;
-    if (!options || options.persist !== false) saveSettings();
-    return sidebarTab;
+    }
+    return sidebarView;
   }
 
-  Array.prototype.forEach.call(
-    document.querySelectorAll("[data-sidebar-tab]"),
-    function (btn) {
-      btn.addEventListener("click", function () {
-        setSidebarTab(btn.dataset.sidebarTab);
+  async function showProjectFiles(projectId) {
+    var project = findProject(projectId);
+    if (!project) return false;
+    var refreshingCurrentScope = sidebarView === "files" &&
+      state.activeProjectId === project.id;
+    if (!(await setActiveProject(projectId))) return false;
+    project = findProject(projectId);
+    if (!project || state.activeProjectId !== project.id) return false;
+    sidebarFilesReturnProjectId = project.id;
+    setSidebarView("files");
+    if (refreshingCurrentScope) syncFilesPanelScope();
+    return true;
+  }
+
+  function showSessionsSidebar() {
+    invalidateFilesPanelRender();
+    var restoreProjectId = sidebarFilesReturnProjectId;
+    sidebarFilesReturnProjectId = null;
+    setSidebarView("sessions");
+    renderSessionList({ preserveFocus: false });
+    requestAnimationFrame(function () {
+      var buttons = sessionListEl ? sessionListEl.querySelectorAll("[data-project-files]") : [];
+      var target = Array.prototype.find.call(buttons, function (button) {
+        return button.dataset.projectFiles === restoreProjectId;
       });
-    }
-  );
+      if (target) target.focus();
+      else if (!restoreSessionTreeFocus("")) {
+        var trigger = document.getElementById("rail-new-tab");
+        if (trigger && typeof trigger.focus === "function") trigger.focus();
+      }
+    });
+    return true;
+  }
 
   // The git panel uses the same segmented switch as the sidebar: Changes is the
   // working tree and its diffs, Commit is the branch state and history. Two
@@ -6778,8 +6839,15 @@
       attention.textContent = "!" + projectModel.attentionCount;
       count.appendChild(attention);
     }
+    var files = document.createElement("button");
+    files.type = "button";
+    files.className = "session-project-files";
+    files.dataset.projectFiles = projectModel.project.id;
+    files.textContent = "Files";
+    files.setAttribute("aria-label", "Browse files in " + projectModel.title);
     head.appendChild(title);
     head.appendChild(count);
+    head.appendChild(files);
     attachTooltip(
       head,
       (projectModel.project.root || projectModel.title) +
@@ -6806,6 +6874,7 @@
       group: group,
       head: head,
       disclosure: disclosure,
+      files: files,
       children: children,
     };
   }
@@ -7043,6 +7112,12 @@
     sessionListEl.__psycheVirtualState = virtualState;
     var preserveFocus = !options || options.preserveFocus !== false;
     var requestedRestoreKey = options && options.restoreFocusKey;
+    var requestedProjectFilesId = options && options.restoreProjectFilesId;
+    var activeProjectFilesId = requestedProjectFilesId ||
+      (preserveFocus &&
+      document.activeElement && document.activeElement.dataset
+      ? document.activeElement.dataset.projectFiles || ""
+      : "");
     var activeTreeKey = virtualState.focusKey || (preserveFocus &&
       document.activeElement && document.activeElement.dataset
       ? document.activeElement.dataset.treeKey
@@ -7129,7 +7204,6 @@
         selectedKey: selectedKey,
         now: now,
       });
-      if (projectModel.visibleCount === 0) return;
       matched += projectModel.visibleCount;
       projectModels.push({
         project: project,
@@ -7231,6 +7305,14 @@
         event.preventDefault();
         event.stopPropagation();
         setProjectExpanded(!projectModel.expanded);
+      });
+      projectParts.files.addEventListener("pointerdown", function (event) {
+        event.stopPropagation();
+      });
+      projectParts.files.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        showProjectFiles(project.id);
       });
       projectParts.group.addEventListener("click", function (event) {
         if (!targetWithin(event, projectParts.head) ||
@@ -7537,6 +7619,14 @@
     var renderedItems = Array.prototype.slice.call(
       sessionListEl.querySelectorAll("[data-tree-item]")
     );
+    var replacementProjectFilesButton = !requestedRestoreKey && activeProjectFilesId
+      ? Array.prototype.find.call(
+          sessionListEl.querySelectorAll("[data-project-files]"),
+          function (button) {
+            return button.dataset.projectFiles === activeProjectFilesId;
+          }
+        )
+      : null;
     var requestedFocusItem = renderedItems.find(function (item) {
       return requestedRestoreKey && item.dataset.treeKey === requestedRestoreKey;
     });
@@ -7553,8 +7643,12 @@
     });
     if (preferred) {
       sessionTreeFocusKey = preferred.dataset.treeKey || "";
-      if (shouldRestoreTreeFocus && (!requestedRestoreKey || requestedFocusItem)) preferred.focus();
+      if (!replacementProjectFilesButton &&
+          shouldRestoreTreeFocus && (!requestedRestoreKey || requestedFocusItem)) {
+        preferred.focus();
+      }
     }
+    if (replacementProjectFilesButton) replacementProjectFilesButton.focus();
     virtualState.focusKey = "";
   }
 
@@ -7794,7 +7888,7 @@
       });
     }
   );
-  setSidebarTab(settings.sidebarTab, { persist: false });
+  setSidebarView("sessions");
   setSessionTypeFilter(settings.sessionFilter, { persist: false });
 
   /**
@@ -8354,9 +8448,9 @@
     if (!file) return false;
     var project = findProject(file.projectId);
     if (project) {
+      assignSelectedWorktreePath(project, file.workspaceRoot);
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
       else Object.assign(state, { activeProjectId: project.id });
-      project.selectedWorktreePath = file.workspaceRoot;
     }
     var filesPane = project ? ensureFilesPane(project, file.workspaceRoot) : null;
     if (filesPane) filesPane.activeFileId = file.id;
@@ -8372,10 +8466,10 @@
     if (!file || !findOpenFile(file.id)) return false;
     var project = findProject(file.projectId);
     if (project) {
+      var workspaceRoot = file.workspaceRoot || project.root || activeWorkspaceRoot(project);
+      assignSelectedWorktreePath(project, workspaceRoot);
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
       else Object.assign(state, { activeProjectId: project.id });
-      var workspaceRoot = file.workspaceRoot || project.root || activeWorkspaceRoot(project);
-      project.selectedWorktreePath = workspaceRoot;
       var threads = state.threads.filter(function (thread) {
         return thread.projectId === project.id && !thread.hidden &&
           thread.worktreePath === workspaceRoot &&
@@ -11494,6 +11588,26 @@
   var gitOpenRemoteBtn = document.getElementById("git-open-remote");
   var renderedFileRows = [];
   var fileVirtualFocusKey = "";
+  var filesPanelGeneration = 0;
+
+  function invalidateFilesPanelRender() {
+    filesPanelGeneration += 1;
+    return filesPanelGeneration;
+  }
+
+  function syncFilesPanelScope() {
+    var generation = invalidateFilesPanelRender();
+    if (sidebarView !== "files") return false;
+    return renderFilesPanel({ generation: generation });
+  }
+
+  function filesPanelRequestMatches(generation, projectId, workspaceRoot) {
+    var project = activeProject();
+    return sidebarView === "files" &&
+      generation === filesPanelGeneration &&
+      !!project && project.id === projectId &&
+      activeWorkspaceRoot(project) === workspaceRoot;
+  }
 
   // Directory paths the user has expanded, so a refresh keeps the tree open.
   var expandedDirs = Object.create(null);
@@ -11610,17 +11724,29 @@
 
   // ---- Files ----
 
-  async function renderFilesPanel() {
-    if (!fileTreeEl) return;
+  async function renderFilesPanel(options) {
+    if (!fileTreeEl) return false;
+    var generation = options && options.generation !== undefined
+      ? options.generation
+      : invalidateFilesPanelRender();
+    renderedFileRows = [];
+    fileVirtualFocusKey = "";
     var project = activeProject();
-    if (!project) { panelMessage(fileTreeEl, "No project open — ⌘O to add one."); return; }
+    if (!project) {
+      if (filesCrumbEl) filesCrumbEl.textContent = "";
+      panelMessage(fileTreeEl, "No project open — ⌘O to add one.");
+      return false;
+    }
     var workspaceRoot = activeWorkspaceRoot(project);
     if (filesCrumbEl) filesCrumbEl.textContent = shortenRoot(workspaceRoot);
+    panelMessage(fileTreeEl, "Loading files…");
     var fileRows = [];
     await appendDirInto(fileRows, workspaceRoot, workspaceRoot, 0);
+    if (!filesPanelRequestMatches(generation, project.id, workspaceRoot)) return false;
     renderedFileRows = fileRows;
     renderFileRows(fileRows);
     if (!fileTreeEl.firstChild) panelMessage(fileTreeEl, "Empty directory.");
+    return true;
   }
 
   async function appendDirInto(fileRows, root, dirPath, depth) {
@@ -11775,6 +11901,9 @@
     });
   }
 
+  onRailClick("files-back", function () {
+    showSessionsSidebar();
+  });
   onRailClick("files-refresh", function () { renderFilesPanel(); });
 
   // ---- Diffs ----
@@ -12234,8 +12363,8 @@
       return target;
     }
     var previousSelectedWorktreePath = project.selectedWorktreePath;
+    var selectedWorktreePath = remapPath(project.selectedWorktreePath);
     project.root = canonicalRoot;
-    project.selectedWorktreePath = remapPath(project.selectedWorktreePath);
     project.worktrees = (project.worktrees || []).map(function (worktree) {
       if (!worktree) return worktree;
       return Object.assign({}, worktree, { path: remapPath(worktree.path) });
@@ -12253,6 +12382,7 @@
       );
     });
     project.browsersByWorktree = migratedBrowsers;
+    assignSelectedWorktreePath(project, selectedWorktreePath);
     return project;
   }
 
@@ -12304,7 +12434,7 @@
     });
     if (preferIncoming) {
       target.collapsed = incoming.collapsed;
-      target.selectedWorktreePath = incoming.selectedWorktreePath;
+      assignSelectedWorktreePath(target, incoming.selectedWorktreePath);
       target.name = incoming.name;
     }
     return target;

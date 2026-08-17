@@ -42,6 +42,14 @@ function sidebarHeadHtml(source: string) {
   return match[0];
 }
 
+function buttonHtml(source: string, id: string) {
+  const match = source.match(
+    new RegExp(`<button[^>]*id="${escapeRegExp(id)}"[^>]*>[\\s\\S]*?<\\/button>`),
+  );
+  if (!match) throw new Error(`missing button ${id}`);
+  return match[0];
+}
+
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -99,9 +107,10 @@ describe('Tauri project/worktree/pane rail', () => {
   it('ships the Dia-inspired two-zone native shell and pinned sidebar controls', () => {
     const titlebar = titlebarHtml(indexHtml);
     const sidebarHead = sidebarHeadHtml(indexHtml);
+    const railNewSessionButton = buttonHtml(sidebarHead, 'rail-new-tab');
+    const filesBackButton = buttonHtml(indexHtml, 'files-back');
 
-    expect(indexHtml).toContain('class="sidebar-controls"');
-    expect(indexHtml).toContain('class="sidebar-tabs" role="tablist" aria-label="Sidebar sections"');
+    expect(indexHtml).toContain('class="sidebar-controls" id="sidebar-session-controls"');
     expect(indexHtml).toContain('class="sidebar-settings" id="sidebar-settings"');
     expect(indexHtml).toContain('class="sidebar-resize"');
     expect(indexHtml).toMatch(
@@ -136,6 +145,17 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(sidebarHead).toContain('id="rail-new-tab"');
     expect(sidebarHead).not.toContain('id="sidebar-collapse"');
     expect(indexHtml).not.toContain('session-filter-btn');
+    expect(indexHtml).not.toContain('aria-label="Sidebar sections"');
+    expect(indexHtml).not.toContain('data-sidebar-tab=');
+    expect(railNewSessionButton).toContain('new-session-button');
+    expect(railNewSessionButton).toContain('aria-label="Create a new session"');
+    expect(railNewSessionButton).toContain('aria-haspopup="menu"');
+    expect(railNewSessionButton).toContain('aria-expanded="false"');
+    expect(railNewSessionButton).toContain('aria-controls="new-pane-menu"');
+    expect(railNewSessionButton).toContain('New Session');
+    expect(railNewSessionButton).not.toContain('<svg');
+    expect(filesBackButton).toContain('aria-label="Back to Sessions"');
+    expect(filesBackButton).toContain('‹ Sessions');
 
     const filterRowMatch = indexHtml.match(
       /<div class="session-filter-row" role="toolbar" aria-label="Filter sessions">([\s\S]*?)<\/div>/,
@@ -162,10 +182,8 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(renderSessionList).toContain('sessionListEl.setAttribute("aria-multiselectable", "true")');
     expect(renderSessionList).toContain('sessionListEl.removeAttribute("aria-multiselectable")');
     expect(indexHtml).toMatch(/id="rail-new-tab"[^>]*aria-label="Create a new session"/);
+    expect(indexHtml).toMatch(/id="files-back"[^>]*aria-label="Back to Sessions"/);
     expect(titlebar).toMatch(/id="sidebar-collapse"[^>]*aria-label="Collapse sidebar"/);
-    expect(indexHtml).toMatch(/aria-label="Sidebar sections"/);
-    expect(indexHtml).toMatch(/data-sidebar-tab="sessions"/);
-    expect(indexHtml).toMatch(/data-sidebar-tab="files"/);
   });
 
   it('ships a browser-loadable OpenCoven titlebar mark asset', () => {
@@ -350,7 +368,7 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(tauri).toMatch(/native_workspace_v2:\s*bool/);
     expect(tauri).toMatch(/feature_flag_enabled\("PSYCHE_NATIVE_WORKSPACE_V2",\s*true\)/);
     expect(mainJs).toMatch(/state\.env\.native_workspace_v2\s*===\s*false/);
-    expect(mainJs).toMatch(/project\.selectedWorktreePath\s*=\s*project\.root/);
+    expect(mainJs).toMatch(/assignSelectedWorktreePath\(project,\s*project\.root\)/);
   });
 
   it('renders project, worktree, then pane rows and scopes new panes to selection', () => {
@@ -394,7 +412,9 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toMatch(/saved\.browser/);
 
     const activateWorktree = functionSource(mainJs, 'activateProjectWorktree');
-    const selection = activateWorktree.indexOf('project.selectedWorktreePath = worktreePath;');
+    const selection = activateWorktree.indexOf(
+      'assignSelectedWorktreePath(project, worktreePath);',
+    );
     expect(selection).toBeGreaterThan(-1);
     for (const sync of [
       'renderPaneWorkspace({ preserveTerminalFocus: false });',
@@ -486,11 +506,13 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).not.toContain('sessionSearchEl.addEventListener');
     expect(mainJs).not.toContain('sessionSearchEl.focus()');
     expect(mainJs).not.toContain('sessionSearchEl.select()');
-    expect(mainJs).toContain('var sidebarTab = settings.sidebarTab;');
+    expect(mainJs).not.toMatch(/\bsidebarTab\b/);
+    expect(mainJs).toContain('var sidebarView = "sessions";');
+    expect(mainJs).toContain('function setSidebarView(name)');
     expect(mainJs).toContain('var sessionTypeFilter = settings.sessionFilter;');
     expect(mainJs).toContain('function setSessionTypeFilter(value, options)');
     expect(mainJs).toContain('settings.sessionFilter = sessionTypeFilter;');
-    expect(mainJs).toContain('setSidebarTab(settings.sidebarTab, { persist: false });');
+    expect(mainJs).toContain('setSidebarView("sessions");');
     expect(mainJs).toContain('setSessionTypeFilter(settings.sessionFilter, { persist: false });');
     expect(mainJs).toContain('Reset filter');
     expect(mainJs).not.toContain('Clear search');
@@ -509,20 +531,15 @@ describe('Tauri project/worktree/pane rail', () => {
     const sanitizeSavedProjectSource = functionSource(mainJs, 'sanitizeSavedProject');
     const mergeRestoredProjectSource = functionSource(mainJs, 'mergeRestoredProject');
 
-    expect(loadSettingsSource).toMatch(/sidebarTab:\s*"sessions"/);
+    expect(loadSettingsSource).not.toContain('sidebarTab');
     expect(loadSettingsSource).toMatch(/sessionFilter:\s*"all"/);
     expect(loadSettingsSource).toMatch(/selectedSessionKey:\s*""/);
-    expect(loadSettingsSource).toMatch(
-      /sidebarTab:\s*saved\.sidebarTab\s*===\s*"files"\s*\?\s*"files"\s*:\s*"sessions"/,
-    );
     expect(loadSettingsSource).toContain('PsycheSessions.normalizeSidebarFilter(saved.sessionFilter)');
     expect(loadSettingsSource).toMatch(
       /selectedSessionKey:\s*typeof saved\.selectedSessionKey\s*===\s*"string"\s*\?\s*saved\.selectedSessionKey\.slice\(0,\s*1024\)\s*:\s*""/,
     );
 
-    expect(saveSettingsSource).toMatch(
-      /settings\.sidebarTab\s*=\s*settings\.sidebarTab\s*===\s*"files"\s*\?\s*"files"\s*:\s*"sessions"/,
-    );
+    expect(saveSettingsSource).not.toContain('sidebarTab');
     expect(saveSettingsSource).toContain(
       'settings.sessionFilter = PsycheSessions.normalizeSidebarFilter(settings.sessionFilter)',
     );

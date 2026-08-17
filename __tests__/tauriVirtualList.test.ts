@@ -239,12 +239,17 @@ describe('desktop collection virtualization', () => {
 
   it('restores focus after scroll only when the stable row remains mounted', () => {
     expect(mainJs).toContain('restoreFocusKey: sessionScrollFocusKey');
+    expect(mainJs).toContain('restoreProjectFilesId: sessionScrollProjectFilesId');
     expect(mainJs).toContain('restoreFocusKey: fileScrollFocusKey');
     expect(mainJs).toContain('var requestedRestoreKey = options && options.restoreFocusKey');
+    expect(mainJs).toContain('var requestedProjectFilesId = options && options.restoreProjectFilesId');
     expect(mainJs).toContain('var restoreFileFocusKey = options && options.restoreFocusKey');
+    expect(mainJs).toContain('var replacementProjectFilesButton = !requestedRestoreKey && activeProjectFilesId');
     expect(mainJs).toContain(
-      'if (shouldRestoreTreeFocus && (!requestedRestoreKey || requestedFocusItem)) preferred.focus();',
+      'if (!replacementProjectFilesButton &&\n' +
+      '          shouldRestoreTreeFocus && (!requestedRestoreKey || requestedFocusItem)) {',
     );
+    expect(mainJs).toContain('if (replacementProjectFilesButton) replacementProjectFilesButton.focus();');
   });
 
   it('maps session scroll coordinates through measured category structure', () => {
