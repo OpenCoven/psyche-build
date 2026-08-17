@@ -4467,7 +4467,10 @@
     }
     var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
     var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
-    if (layout && leaf) layout.focusedLeafId = leaf.id;
+    if (layout && leaf) {
+      if (layout.maximizedLeafId) layout.maximizedLeafId = leaf.id;
+      layout.focusedLeafId = leaf.id;
+    }
     renderPaneWorkspace({ focusTargetThread: thread });
     if (scopeChanged) renderGitSurface();
     refreshSidebar();
