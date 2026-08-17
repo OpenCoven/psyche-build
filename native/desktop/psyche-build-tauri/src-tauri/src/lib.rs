@@ -9,6 +9,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 #[cfg(unix)]
 use std::sync::atomic::AtomicBool;
@@ -5543,21 +5545,48 @@ fn snapshot_git_shallow(
         .map_err(|e| format!("snapshot Git shallow boundary: {e}"))
 }
 
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+#[cfg(windows)]
+fn metadata_is_reparse_like(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_like(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+fn metadata_is_link_like(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink() || metadata_is_reparse_like(metadata)
+}
+
+fn inspect_real_git_info_directory(git_dir: &Path) -> Result<Option<PathBuf>, String> {
+    let info_dir = git_dir.join("info");
+    match std::fs::symlink_metadata(&info_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata_is_link_like(&metadata) => {
+            Ok(Some(info_dir))
+        }
+        Ok(_) => Err("Git info directory is not a real directory".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("inspect Git info directory: {error}")),
+    }
+}
+
 #[cfg(unix)]
 fn read_git_info_file(git_dir: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
-    let info_dir = git_dir.join("info");
-    let directory = match std::fs::symlink_metadata(&info_dir) {
-        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => {
-            open_directory_no_follow(&info_dir, "Git info directory")?
-        }
-        Ok(_) => return Err("Git info directory is not a directory".to_string()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("inspect Git info directory: {error}")),
+    let Some(info_dir) = inspect_real_git_info_directory(git_dir)? else {
+        return Ok(None);
     };
+    let directory = open_directory_no_follow(&info_dir, "Git info directory")?;
     let file_name = CString::new(name).expect("static file name has no NUL");
     let mut file = match open_target_no_follow(&directory, &file_name) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ELOOP)) => {
+            return Err(format!("Git info/{name} is not a regular file"));
+        }
         Err(error) => return Err(format!("open Git info/{name}: {error}")),
     };
     let before = file_state(&file)?;
@@ -5586,13 +5615,16 @@ fn read_git_info_file(git_dir: &Path, name: &str) -> Result<Option<Vec<u8>>, Str
 
 #[cfg(not(unix))]
 fn read_git_info_file(git_dir: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
-    let path = git_dir.join("info").join(name);
+    let Some(info_dir) = inspect_real_git_info_directory(git_dir)? else {
+        return Ok(None);
+    };
+    let path = info_dir.join(name);
     let before = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("inspect Git info/{name}: {error}")),
     };
-    if before.file_type().is_symlink() || !before.is_file() {
+    if metadata_is_link_like(&before) || !before.is_file() {
         return Err(format!("Git info/{name} is not a regular file"));
     }
     if before.len() > MAX_GIT_INFO_FILE_BYTES {
@@ -5608,9 +5640,12 @@ fn read_git_info_file(git_dir: &Path, name: &str) -> Result<Option<Vec<u8>>, Str
         .map_err(|e| format!("inspect Git info/{name} after reading: {e}"))?;
     if before.len() != after.len()
         || before.modified().ok() != after.modified().ok()
-        || after.file_type().is_symlink()
+        || metadata_is_link_like(&after)
         || !after.is_file()
     {
+        return Err(format!("Git info/{name} changed while being read"));
+    }
+    if inspect_real_git_info_directory(git_dir)?.is_none() {
         return Err(format!("Git info/{name} changed while being read"));
     }
     if bytes.len() as u64 > MAX_GIT_INFO_FILE_BYTES {
@@ -8286,6 +8321,8 @@ mod workspace_panel_tests {
     use std::ffi::{OsStr, OsString};
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
+    #[cfg(windows)]
+    use std::os::windows::fs::{symlink_dir, symlink_file};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TempTree {
@@ -8386,6 +8423,49 @@ mod workspace_panel_tests {
 
     fn trusted_normalizing_clean_command() -> &'static str {
         "sed -e 's/[[:space:]]*$//'"
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestSymlinkKind {
+        Directory,
+        File,
+    }
+
+    fn can_skip_symlink_test(error: &std::io::Error) -> bool {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+        ) || matches!(error.raw_os_error(), Some(1314))
+    }
+
+    fn create_test_symlink(kind: TestSymlinkKind, target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        let result = {
+            let _ = kind;
+            symlink(target, link)
+        };
+        #[cfg(windows)]
+        let result = match kind {
+            TestSymlinkKind::Directory => symlink_dir(target, link),
+            TestSymlinkKind::File => symlink_file(target, link),
+        };
+        #[cfg(all(not(unix), not(windows)))]
+        let result: std::io::Result<()> = {
+            let _ = (kind, target, link);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "symlinks unsupported on this target",
+            ))
+        };
+        match result {
+            Ok(()) => true,
+            Err(error) if can_skip_symlink_test(&error) => false,
+            Err(error) => panic!(
+                "create test symlink '{}' -> '{}': {error}",
+                link.display(),
+                target.display()
+            ),
+        }
     }
 
     #[test]
@@ -11047,6 +11127,49 @@ mod workspace_panel_tests {
         assert_eq!(diff.bytes, 0);
         assert_eq!(diff.lines, 0);
         assert!(!diff.truncated);
+    }
+
+    #[test]
+    fn git_info_metadata_rejects_symlinked_info_directory_when_supported() {
+        let tree = TempTree::new("git-info-linked-dir");
+        let git_dir = tree.root.join("source.git");
+        let outside_info = tree.root.join("outside-info");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::create_dir_all(&outside_info).unwrap();
+        std::fs::write(outside_info.join("attributes"), "tracked.txt text\n").unwrap();
+        if !create_test_symlink(
+            TestSymlinkKind::Directory,
+            &outside_info,
+            &git_dir.join("info"),
+        ) {
+            return;
+        }
+
+        let error = read_git_info_file(&git_dir, "attributes").unwrap_err();
+
+        assert!(error.contains("Git info directory"));
+        assert!(error.contains("real directory"));
+    }
+
+    #[test]
+    fn git_info_metadata_rejects_symlinked_child_files_when_supported() {
+        for name in ["attributes", "exclude"] {
+            let label = format!("git-info-linked-file-{name}");
+            let tree = TempTree::new(&label);
+            let git_dir = tree.root.join("source.git");
+            let info_dir = git_dir.join("info");
+            let outside = tree.root.join(format!("outside-{name}"));
+            std::fs::create_dir_all(&info_dir).unwrap();
+            std::fs::write(&outside, format!("{name}\n")).unwrap();
+            if !create_test_symlink(TestSymlinkKind::File, &outside, &info_dir.join(name)) {
+                return;
+            }
+
+            let error = read_git_info_file(&git_dir, name).unwrap_err();
+
+            assert!(error.contains(&format!("Git info/{name}")));
+            assert!(error.contains("regular file"));
+        }
     }
 
     #[test]
