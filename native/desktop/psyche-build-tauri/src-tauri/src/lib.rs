@@ -5498,6 +5498,18 @@ fn is_null_git_oid(value: &str, object_format: Option<&str>) -> bool {
     value.len() == expected_len && value.bytes().all(|byte| byte == b'0')
 }
 
+fn snapshotted_git_attribute_source(
+    actual_head: &str,
+    refs: &HashMap<String, GitRefValue>,
+    object_format: Option<&str>,
+) -> Option<String> {
+    let head = actual_head.trim();
+    if let Some(name) = head.strip_prefix("ref: ") {
+        return resolve_git_ref(refs, name).filter(|oid| !is_null_git_oid(oid, object_format));
+    }
+    (!head.is_empty() && !is_null_git_oid(head, object_format)).then(|| head.to_string())
+}
+
 fn validate_git_ref_storage(
     ref_storage: &str,
     detected_format: Result<String, String>,
@@ -5603,21 +5615,22 @@ impl GitInspectionRepository {
         if object_format.is_some_and(|value| !matches!(value.as_str(), "sha1" | "sha256")) {
             return Err("unsupported Git object format".to_string());
         }
-        let mut attribute_source = head_override
+        let expected_head = head_override
             .filter(|head| {
                 !head.is_empty() && !is_null_git_oid(head, object_format.map(String::as_str))
             })
-            .map(str::to_string)
-            .or_else(|| {
-                let head = actual_head.trim();
-                if let Some(name) = head.strip_prefix("ref: ") {
-                    resolve_git_ref(&refs, name)
-                } else if !head.is_empty() {
-                    Some(head.to_string())
-                } else {
-                    None
-                }
-            });
+            .map(str::to_string);
+        let mut attribute_source = match (
+            expected_head.as_deref(),
+            snapshotted_git_attribute_source(
+                &actual_head,
+                &refs,
+                object_format.map(String::as_str),
+            ),
+        ) {
+            (Some(expected), Some(actual)) if expected == actual => Some(expected.to_string()),
+            (_, actual) => actual,
+        };
 
         let git_dir = tempfile::Builder::new()
             .prefix("psyche-git-inspection-")
@@ -6214,7 +6227,7 @@ pub struct GitCommit {
 fn git_log(root: String, limit: Option<u32>) -> Result<Vec<GitCommit>, String> {
     let root = canonical_project_root(&root)?.to_string_lossy().to_string();
     let n = limit.unwrap_or(30).clamp(1, 200).to_string();
-    let raw = run_git(
+    let raw = run_git_metadata(
         &root,
         &[
             "--no-pager",
@@ -8324,6 +8337,82 @@ mod workspace_panel_tests {
         assert_eq!(attribute_source.len(), 64);
     }
 
+    #[test]
+    fn stale_worktree_head_override_cannot_change_dirty_semantics() {
+        let tree = TempTree::new("git-stale-worktree-head-override");
+        let project = tree.root.join("project");
+        let home = tree.root.join("home");
+        let global_config = home.join(".gitconfig");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            &global_config,
+            format!(
+                "[filter \"trusted-normalize\"]\n\tclean = {}\n\trequired = true\n",
+                trusted_normalizing_clean_command()
+            ),
+        )
+        .unwrap();
+        run_test_git(&project, &["init", "-q"]);
+        run_test_git(&project, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &project,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(project.join("tracked.txt"), "same content\n").unwrap();
+
+        let env = [
+            ("HOME", path_text(&home)),
+            ("GIT_CONFIG_GLOBAL", path_text(&global_config)),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ];
+        run_test_git_with_env(&project, &["add", "tracked.txt"], &env);
+        run_test_git_with_env(&project, &["commit", "-qm", "baseline"], &env);
+        let stale_head = run_test_git_stdout_with_env(&project, &["rev-parse", "HEAD"], &env)
+            .trim()
+            .to_string();
+
+        std::fs::write(
+            project.join(".gitattributes"),
+            "tracked.txt filter=trusted-normalize\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("tracked.txt"), "same content   \n").unwrap();
+        run_test_git_with_env(&project, &["add", ".gitattributes", "tracked.txt"], &env);
+        run_test_git_with_env(&project, &["commit", "-qm", "attributes"], &env);
+        let current_head = run_test_git_stdout_with_env(&project, &["rev-parse", "HEAD"], &env)
+            .trim()
+            .to_string();
+        let raw_status =
+            run_test_git_stdout_with_env(&project, &["status", "--porcelain", "--", "."], &env);
+        assert!(
+            raw_status.trim().is_empty(),
+            "current attributes should keep the repository clean: {raw_status:?}"
+        );
+
+        let _git_env = TestGitEnvOverrideGuard::set(&[
+            ("HOME", Some(home.as_os_str())),
+            ("GIT_CONFIG_GLOBAL", Some(global_config.as_os_str())),
+            ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
+        ]);
+        let policy = Arc::new(GitInspectionPolicy::new(path_text(&project)).unwrap());
+        let inspection =
+            GitInspection::with_policy(path_text(&project), policy, Some(&stale_head)).unwrap();
+        let status = inspection
+            .execute(&["status", "--porcelain=v1", "--untracked-files=normal"])
+            .unwrap();
+
+        assert_eq!(
+            inspection.repository.attribute_source.as_deref(),
+            Some(current_head.as_str()),
+            "stale worktree-list HEAD metadata must not override the snapshotted attribute source"
+        );
+        assert!(
+            status.trim().is_empty(),
+            "stale worktree-list HEAD metadata must not change dirty semantics"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolves_the_first_executable_on_path_to_its_canonical_path() {
@@ -9699,6 +9788,32 @@ mod workspace_panel_tests {
         assert_eq!(status.branch.as_deref(), Some("main"));
         assert_eq!(status.files.len(), 1);
         assert!(diff.text.contains("+after"));
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].subject, "baseline");
+    }
+
+    #[test]
+    fn git_log_succeeds_for_a_bare_repository() {
+        let tree = TempTree::new("git-log-bare");
+        let source = tree.root.join("source");
+        let bare = tree.root.join("bare.git");
+        std::fs::create_dir_all(&source).unwrap();
+        run_test_git(&source, &["init", "-q"]);
+        run_test_git(&source, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &source,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(source.join("tracked.txt"), "baseline\n").unwrap();
+        run_test_git(&source, &["add", "tracked.txt"]);
+        run_test_git(&source, &["commit", "-qm", "baseline"]);
+        run_test_git(
+            &tree.root,
+            &["clone", "--bare", path_text(&source), path_text(&bare)],
+        );
+
+        let log = git_log(path_text(&bare).to_string(), Some(1)).unwrap();
+
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].subject, "baseline");
     }
