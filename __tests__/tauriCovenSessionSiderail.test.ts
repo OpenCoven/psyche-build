@@ -555,6 +555,7 @@ function createRenderer(options: {
   canvasThreadIds?: string[];
   focusSets?: Array<{ id: string; index: number; name: string; key: string; threadIds: string[] }>;
   scopingSet?: { id: string; name: string; threadIds: string[] } | null;
+  paneLayout?: { maximizedLeafId?: string | null };
   setPicking?: { key: string; picked: string[] } | null;
   selectedSessionKey?: string;
   typeFilter?: string;
@@ -645,7 +646,9 @@ function createRenderer(options: {
   const focusSets = options.focusSets ?? [];
   const scopingSet = options.scopingSet ?? null;
   const removeFromFocusSet = vi.fn();
-  const applySetScopeForThread = vi.fn();
+  const applySetScopeForThread = vi.fn(() => {
+    if (options.paneLayout) options.paneLayout.maximizedLeafId = null;
+  });
   const activateFocusSet = vi.fn();
   const clearFocusSet = vi.fn();
   const settings = {
@@ -732,6 +735,7 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'projectAppearanceContextActions'),
     extractFunctionSource(mainJs, 'saveProjectAppearances'),
     extractFunctionSource(mainJs, 'applyProjectAppearance'),
+    extractFunctionSource(mainJs, 'focusThreadFromSidebar'),
     extractFunctionSource(mainJs, 'renderSessionList'),
   ];
   const harness = Function(
@@ -741,7 +745,7 @@ function createRenderer(options: {
     'requestThreadClose', 'hideThread', 'renameThread', 'editLabelInline',
     'openCovenSession', 'setStatus',
     'canvasThreadIds', 'paneGlyphFor', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout',
-    'seedFocusSets', 'seedSetPicking', 'refreshSidebar', 'activeFocusSet',
+    'seedFocusSets', 'seedSetPicking', 'refreshSidebar', 'activeFocusSet', 'paneLayoutForThread',
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
     'saveWorkspaceSoon', 'activateProjectWorktree', 'setSessionTypeFilter',
@@ -814,6 +818,7 @@ function createRenderer(options: {
     options.setPicking ?? null,
     () => { harness.render(); },
     () => scopingSet,
+    () => options.paneLayout ?? null,
     removeFromFocusSet,
     applySetScopeForThread,
     activateFocusSet,
@@ -3079,14 +3084,18 @@ describe('Tauri Coven session project rail', () => {
       expect(rows[1].querySelector('.session-set-swatch')).toBeNull();
     });
 
-    it('scopes the canvas to a member\'s set when the row is clicked', async () => {
-      const renderer = createRenderer({ threads, focusSets: [memberSet] });
+    it('preserves fullscreen while scoping to a member\'s set from its row', async () => {
+      const paneLayout = { maximizedLeafId: 'leaf-local' as string | null };
+      const renderer = createRenderer({ threads, focusSets: [memberSet], paneLayout });
       renderer.render();
 
       await renderer.sessionListEl.querySelectorAll('.session-row')[0].emit('click');
 
       expect(renderer.applySetScopeForThread).toHaveBeenCalled();
-      expect(renderer.focusThread).toHaveBeenCalledWith('local');
+      expect(paneLayout.maximizedLeafId).toBeNull();
+      expect(renderer.focusThread).toHaveBeenCalledWith('local', {
+        preserveFullscreenLeafId: 'leaf-local',
+      });
     });
 
     it('uses aria-selected for picked membership while keeping aria-current on the active row', async () => {

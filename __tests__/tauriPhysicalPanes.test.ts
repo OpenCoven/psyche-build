@@ -308,7 +308,7 @@ function createPaneFocusHarness(
   });
   const focusThread = compileFunction<(
     id: string,
-    options?: { refreshStatus?: boolean },
+    options?: { preserveFullscreenLeafId?: string; refreshStatus?: boolean },
   ) => Promise<boolean>>(functionSource('focusThread'), {
     findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
     showTerminalView: async () => true,
@@ -1351,6 +1351,94 @@ describe('Tauri physical terminal panes', () => {
     expect(tiledHarness.state.activeThreadId).toBe(target.id);
     expect(tiledLayout.focusedLeafId).toBe('leaf-target-tiled');
     expect(tiledLayout.maximizedLeafId).toBeNull();
+  });
+
+  it('preserves fullscreen through focus-set activation for a siderail pane selection', async () => {
+    const source: PaneFocusThread = {
+      id: 'thread-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-source' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const target: PaneFocusThread = {
+      id: 'thread-target',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-target' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-source', source.id),
+        'leaf-source',
+        PsychePanes.createLeaf('leaf-target', target.id),
+        'split-target',
+      ),
+      focusedLeafId: 'leaf-source',
+      maximizedLeafId: 'leaf-source',
+    };
+    const harness = createPaneFocusHarness([source, target], source.id, null, layout);
+    const focusThreadFromSidebar = compileFunction<
+      (thread: PaneFocusThread) => Promise<boolean>
+    >(functionSource('focusThreadFromSidebar'), {
+      paneLayoutForThread: () => layout,
+      applySetScopeForThread: () => {
+        layout.maximizedLeafId = null;
+        return true;
+      },
+      focusThread: harness.focusThread,
+    });
+
+    await expect(focusThreadFromSidebar(target)).resolves.toBe(true);
+    expect(harness.state.activeThreadId).toBe(target.id);
+    expect(layout.focusedLeafId).toBe('leaf-target');
+    expect(layout.maximizedLeafId).toBe('leaf-target');
+  });
+
+  it('restores tiling instead of transferring a stale maximized leaf', async () => {
+    const source: PaneFocusThread = {
+      id: 'thread-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-source' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const target: PaneFocusThread = {
+      id: 'thread-target',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-target' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-source', source.id),
+        'leaf-source',
+        PsychePanes.createLeaf('leaf-target', target.id),
+        'split-target',
+      ),
+      focusedLeafId: 'leaf-source',
+      maximizedLeafId: 'leaf-gone',
+    };
+    const harness = createPaneFocusHarness([source, target], source.id, null, layout);
+
+    await expect(harness.focusThread(target.id)).resolves.toBe(true);
+    expect(harness.state.activeThreadId).toBe(target.id);
+    expect(layout.focusedLeafId).toBe('leaf-target');
+    expect(layout.maximizedLeafId).toBeNull();
   });
 
   it('allows explicit focus-out and focus-in when refocusing the current target', async () => {
