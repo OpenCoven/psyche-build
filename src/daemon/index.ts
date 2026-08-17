@@ -29,6 +29,7 @@ import {
   bridgeErrorMessage,
   buildScopedProject,
   capturePaneText,
+  dispatchOrchestrationRequest,
   getProjectCovenSession,
   listProjectCovenSessions,
   listScopedProjects,
@@ -56,6 +57,7 @@ import {
 import { readDaemonWorkspaceSnapshot } from './workspace.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
 import type { BridgeSpawnRequest, BridgeSpawnResult } from './bridge.js';
+import { Orchestrator, type LaneBackend } from '../orchestration/orchestrator.js';
 import { PaneOutputFanout } from './paneOutputFanout.js';
 import { BrowserProviderBroker } from '../control/browserProviderBroker.js';
 import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
@@ -66,6 +68,10 @@ export interface DaemonOptions {
   printToken: boolean;
   serverVersion: string;
   capabilityStrategies: readonly AgenticCapabilityStrategy[];
+  /** Optional lane backend for orchestration tasks. Defaults to a no-op. */
+  laneBackend?: LaneBackend;
+  /** Pre-constructed orchestrator. When omitted one is built from `laneBackend`. */
+  orchestrator?: Orchestrator;
 }
 
 const DEFAULT_PORT = Number(process.env.PSYCHE_DAEMON_PORT ?? 47123);
@@ -195,6 +201,11 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       createCovenNativeCapabilityStrategy(),
       ...(opts.capabilityStrategies ?? []),
     ],
+  });
+
+  const defaultLaneBackend: LaneBackend = async () => ({});
+  const orchestrator = opts.orchestrator ?? new Orchestrator({
+    executeLane: opts.laneBackend ?? defaultLaneBackend,
   });
 
   const token = await readOrCreateToken();
@@ -411,6 +422,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       paneOutput,
       controlRuntime: host.runtime,
       ownerEpoch: host.epoch,
+      orchestrator,
     });
     conn.bind();
   });
@@ -457,6 +469,8 @@ export interface ConnectionDeps {
   /** Current owner epoch, stamped onto every translated command. */
   ownerEpoch: number;
   workspaceProvider?: () => Promise<WorkspaceSnapshot>;
+  /** Orchestrator for `orchestration.execute` requests. */
+  orchestrator?: Orchestrator;
 }
 
 /**
@@ -1167,6 +1181,34 @@ export class Connection {
         }
         this.send({ type: 'panes.spawnMany.result', requestId: msg.requestId, outcomes });
         if (changed) await this.emitWorkspaceChanged();
+        return;
+      }
+      case 'orchestration.execute': {
+        if (!this.deps.orchestrator) {
+          this.send({
+            type: 'error',
+            requestId: msg.requestId,
+            code: 'orchestration_unavailable',
+            message: 'orchestration is not configured for this daemon',
+          });
+          return;
+        }
+        try {
+          const response = await dispatchOrchestrationRequest(
+            this.deps.projectRoot,
+            msg,
+            this.deps.orchestrator,
+          );
+          this.send(response);
+          await this.emitWorkspaceChanged();
+        } catch (e) {
+          this.send({
+            type: 'error',
+            requestId: msg.requestId,
+            code: bridgeErrorCode(e, 'orchestration_failed'),
+            message: bridgeErrorMessage(e),
+          });
+        }
         return;
       }
       default: {

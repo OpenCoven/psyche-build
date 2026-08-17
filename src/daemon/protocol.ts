@@ -147,7 +147,8 @@ export type ClientRequest =
   | { type: 'panes.input'; requestId: string; streamId: StreamId; data: string }
   | { type: 'panes.resize'; requestId: string; streamId: StreamId; cols: number; rows: number }
   | { type: 'panes.kill'; requestId: string; id: PaneId }
-  | { type: 'panes.meta'; requestId: string; id: PaneId; title?: string; agent?: string };
+  | { type: 'panes.meta'; requestId: string; id: PaneId; title?: string; agent?: string }
+  | { type: 'orchestration.execute'; requestId: string; task: OrchestrationTaskRequest };
 
 export type ServerResponse =
   | { type: 'welcome'; protocol: number; serverVersion: string }
@@ -169,7 +170,8 @@ export type ServerResponse =
   | { type: 'panes.capture.result'; requestId: string; id: PaneId; text: string; lines: number }
   | { type: 'panes.status.result'; requestId: string; status: PaneStatusResult }
   | { type: 'panes.attach.result'; requestId: string; streamId: StreamId; id: PaneId }
-  | { type: 'panes.stream.exit'; streamId: StreamId; reason: string };
+  | { type: 'panes.stream.exit'; streamId: StreamId; reason: string }
+  | { type: 'orchestration.execute.result'; requestId: string; result: OrchestrationTaskResult };
 
 export interface BinaryFrameHeader {
   streamId: StreamId;
@@ -201,4 +203,8 @@ import type {
   AgenticCapabilityExecution,
   AgenticCapabilityRequest,
 } from '../orchestration/capabilityRouter.js';
+import type {
+  OrchestrationTaskRequest,
+  OrchestrationTaskResult,
+} from '../orchestration/types.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
