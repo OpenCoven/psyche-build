@@ -2200,3 +2200,59 @@ describe('ControlRuntime', () => {
     }));
   });
 });
+
+describe('ControlRuntime pane barrier retention', () => {
+  /** Seeds a takeover barrier for a pane without going through a command. */
+  function seedBarrier(runtime: ControlRuntime, paneId: string, generation = 1) {
+    (runtime as any).paneBarrierGenerations.set(paneId, generation);
+  }
+
+  function barriers(runtime: ControlRuntime): Map<string, number> {
+    return (runtime as any).paneBarrierGenerations;
+  }
+
+  function prune(runtime: ControlRuntime) {
+    (runtime as any).pruneInactiveResourceQueues();
+  }
+
+  it('releases the barrier of a pane with no surface and no queue', async () => {
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces: new SurfaceRegistry(),
+    });
+    seedBarrier(runtime, '%9');
+
+    prune(runtime);
+
+    expect(barriers(runtime).has('%9')).toBe(false);
+  });
+
+  it('keeps the barrier of a pane that still has a surface', async () => {
+    const surfaces = new SurfaceRegistry();
+    surfaces.upsertPane({
+      id: '%9', projectRoot: '/repo', worktreeRoot: '/repo', tmuxPaneId: '%9',
+      writable: true, outputSequence: 0,
+    });
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces,
+    });
+    seedBarrier(runtime, '%9', 3);
+
+    prune(runtime);
+
+    expect(barriers(runtime).get('%9')).toBe(3);
+  });
+
+  it('keeps the barrier of a surfaceless pane that still has a queue', async () => {
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces: new SurfaceRegistry(),
+    });
+    seedBarrier(runtime, '%9', 2);
+    // A queue created while the pane had a surface keeps that generation in its
+    // key, so pruning must match on pane id rather than rebuilding the key.
+    (runtime as any).queueForResource({ kind: 'pane', id: '%9', generation: 5 });
+
+    prune(runtime);
+
+    expect(barriers(runtime).get('%9')).toBe(2);
+  });
+});

@@ -1570,6 +1570,32 @@ export class ControlRuntime {
         this.resourceQueues.delete(key);
       }
     }
+    this.pruneRetiredPaneBarriers();
+  }
+
+  /**
+   * Drop the takeover barrier of a pane that has no surface and no queue.
+   *
+   * Queued automation is compared against these generations, so a pane with
+   * work still parked on it must keep its counter: resetting it would make
+   * that work read as preempted. Both conditions together mean nothing is left
+   * to compare, and a pane that returns starts from 0 exactly as a pane the
+   * runtime has never seen does.
+   */
+  private pruneRetiredPaneBarriers(): void {
+    if (this.paneBarrierGenerations.size === 0) return;
+    // Queues are keyed by surface generation, and a retired pane reports
+    // generation 0, so a queue must be matched on pane id rather than by
+    // rebuilding its key.
+    const queuedPaneIds = new Set<string>();
+    for (const queue of this.resourceQueues.values()) {
+      if (queue.target.kind === 'pane') queuedPaneIds.add(queue.target.id);
+    }
+    for (const paneId of [...this.paneBarrierGenerations.keys()]) {
+      if (this.surfaces.get(paneId)) continue;
+      if (queuedPaneIds.has(paneId)) continue;
+      this.paneBarrierGenerations.delete(paneId);
+    }
   }
 
   private pruneResourceQueue(key: string, queue: PaneQueueState, tail: Promise<void>): void {

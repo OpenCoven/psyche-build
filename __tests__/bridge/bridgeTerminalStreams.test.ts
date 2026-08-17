@@ -41,6 +41,12 @@ function createHub() {
     resizePane(paneId: string, cols: number, rows: number) {
       this.resizes.push({ paneId, cols, rows });
     },
+    bufferedPaneIds() {
+      return [...buffers.keys()];
+    },
+    forgetPane(paneId: string) {
+      buffers.delete(paneId);
+    },
   };
 }
 
@@ -63,6 +69,18 @@ function createDaemon() {
 
 function install(daemon: BridgeDaemon, sessions: any[]) {
   (daemon as any).listener = { activeSessions: new Set(sessions) };
+}
+
+/** Pins the provider to a workspace that no longer publishes `paneId`. */
+function dropPaneFromWorkspace(daemon: BridgeDaemon, paneId: string) {
+  const workspace = (daemon as any).opts.workspaceProvider();
+  for (const project of workspace.projects) {
+    for (const worktree of project.worktrees) {
+      worktree.panes = worktree.panes.filter((pane: any) => pane.id !== paneId);
+    }
+  }
+  (daemon as any).opts.workspaceProvider = () => workspace;
+  return workspace;
 }
 
 /** Drives one control request the way the socket handler does. */
@@ -142,6 +160,45 @@ describe("BridgeDaemon terminal streams", () => {
     });
 
     expect(response).toMatchObject({ type: "error", code: "invalid_pane" });
+  });
+
+  it("releases the buffer of a pane the workspace stops publishing", async () => {
+    const { daemon, hub } = createDaemon();
+    const session = createSession();
+    install(daemon, [session]);
+    hub.bufferFor(PUBLISHED_PANE).write(Buffer.from("output\n", "utf8"));
+    expect(hub.bufferedPaneIds()).toContain(PUBLISHED_PANE);
+
+    dropPaneFromWorkspace(daemon, PUBLISHED_PANE);
+    await (daemon as any).broadcastWorkspaceChanged();
+
+    expect(hub.bufferedPaneIds()).not.toContain(PUBLISHED_PANE);
+  });
+
+  it("keeps the buffer of a closed pane while a client is still streaming it", async () => {
+    const { daemon, hub } = createDaemon();
+    const session = createSession();
+    install(daemon, [session]);
+    hub.bufferFor(PUBLISHED_PANE).write(Buffer.from("output\n", "utf8"));
+    await attach(daemon, session);
+    expect(session.controlStreams.size).toBe(1);
+
+    dropPaneFromWorkspace(daemon, PUBLISHED_PANE);
+    await (daemon as any).broadcastWorkspaceChanged();
+
+    // The subscription outlives the pane; its teardown reclaims the buffer.
+    expect(hub.bufferedPaneIds()).toContain(PUBLISHED_PANE);
+  });
+
+  it("keeps buffers for panes the workspace still publishes", async () => {
+    const { daemon, hub } = createDaemon();
+    const session = createSession();
+    install(daemon, [session]);
+    hub.bufferFor(PUBLISHED_PANE).write(Buffer.from("output\n", "utf8"));
+
+    await (daemon as any).broadcastWorkspaceChanged();
+
+    expect(hub.bufferedPaneIds()).toContain(PUBLISHED_PANE);
   });
 
   it("answers with stream metadata before any output frame", async () => {
