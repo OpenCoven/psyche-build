@@ -6031,6 +6031,7 @@ impl GitInspectionRepository {
             .map_err(|e| format!("create isolated Git object directory: {e}"))?;
         std::fs::create_dir_all(git_dir.path().join("objects/info"))
             .map_err(|e| format!("create isolated Git object info directory: {e}"))?;
+        let alternate_objects = git_subprocess_root(&alternate_objects);
         let alternate_objects = alternate_objects.to_string_lossy();
         #[cfg(windows)]
         let alternate_objects = alternate_objects.replace('\\', "/");
@@ -6194,10 +6195,12 @@ impl<'a> GitInspection<'a> {
 
     fn git_command_with_config(&self, extra_config: &[(String, String)]) -> std::process::Command {
         let mut command = git_command(self.root);
+        let work_tree = git_subprocess_root(&self.repository.work_tree);
+        let index = git_subprocess_root(&self.repository.index);
         command
             .env("GIT_DIR", self.repository.git_dir.path())
-            .env("GIT_WORK_TREE", &self.repository.work_tree)
-            .env("GIT_INDEX_FILE", &self.repository.index)
+            .env("GIT_WORK_TREE", work_tree.as_ref())
+            .env("GIT_INDEX_FILE", index.as_ref())
             .env(
                 "GIT_OBJECT_DIRECTORY",
                 self.repository.git_dir.path().join("objects"),

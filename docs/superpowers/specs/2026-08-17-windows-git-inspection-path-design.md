@@ -22,8 +22,9 @@ Windows expects. Other Windows path forms and all non-Windows paths remain
 unchanged.
 
 The conversion belongs at the Git subprocess boundary so every metadata and
-isolated inspection command receives the same compatible working directory.
-Callers continue to canonicalize roots before reaching that boundary.
+isolated inspection command receives compatible working-directory, worktree,
+index, and object paths. Callers continue to canonicalize roots before reaching
+that boundary.
 
 ## Rejected Alternatives
 
@@ -37,8 +38,8 @@ Callers continue to canonicalize roots before reaching that boundary.
 ## Behavior
 
 1. `canonical_project_root` continues returning the canonical filesystem path.
-2. The Git command factory derives a subprocess-compatible working directory
-   from that path.
+2. The Git command factory derives subprocess-compatible paths for the working
+   directory and Git environment values.
 3. On Windows, only `\\?\X:\...` disk paths are converted to `X:\...`.
 4. UNC and non-verbatim paths are preserved unless a tested Git-compatible
    conversion is explicitly defined.

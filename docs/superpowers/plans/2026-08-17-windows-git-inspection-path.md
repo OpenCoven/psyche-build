@@ -4,7 +4,7 @@
 
 **Goal:** Preserve canonical filesystem validation while giving Git for Windows a non-verbatim working directory so local line-ending configuration remains effective during isolated inspections.
 
-**Architecture:** Add one platform-aware path adapter at the Git subprocess boundary. All callers keep canonicalizing roots; `git_command` alone converts `\\?\X:\...` disk paths to `X:\...` before setting `current_dir`, leaving UNC, ordinary Windows, and non-Windows paths unchanged.
+**Architecture:** Add one platform-aware path adapter at the Git subprocess boundary. All callers keep canonicalizing roots; Git command construction converts `\\?\X:\...` disk paths to `X:\...` before setting `current_dir` and Git path environment values, leaving UNC, ordinary Windows, and non-Windows paths unchanged.
 
 **Tech Stack:** Rust standard library, Git CLI, Cargo tests, GitHub Actions Windows runner.
 
@@ -14,7 +14,8 @@
 
 - Modify `native/desktop/psyche-build-tauri/src-tauri/src/lib.rs`
   - Add the Git subprocess path adapter beside `git_command`.
-  - Route every Git subprocess working directory through the adapter.
+  - Route every Git subprocess working directory and live repository path
+    supplied through Git environment/config boundaries through the adapter.
   - Add focused path-shape and public `git_status`/`git_diff` regressions.
 - Existing design: `docs/superpowers/specs/2026-08-17-windows-git-inspection-path-design.md`
 
@@ -118,7 +119,7 @@ git commit -m "test: cover canonical Windows Git inspection roots" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 ```
 
-### Task 2: Normalize Only the Git Subprocess Working Directory
+### Task 2: Normalize Git-Bound Subprocess Paths
 
 **Files:**
 - Modify: `native/desktop/psyche-build-tauri/src-tauri/src/lib.rs:1-20`
@@ -179,8 +180,9 @@ let mut command = std::process::Command::new("git");
 command.current_dir(git_subprocess_root(Path::new(root)).as_ref());
 ```
 
-Do not change `canonical_project_root`, repository snapshot paths, containment
-checks, or the environment/config isolation logic.
+Apply the same adapter to live worktree, index, and alternate-object paths
+passed to Git. Do not change `canonical_project_root`, containment checks, or
+the environment/config isolation policy.
 
 - [ ] **Step 3: Run formatting and focused Git tests**
 
