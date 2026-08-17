@@ -5840,6 +5840,28 @@ fn windows_git_metadata_handle_state(
     })
 }
 
+#[cfg(any(test, windows))]
+fn windows_git_metadata_child_share_mode() -> u32 {
+    const FILE_SHARE_READ: u32 = 0x0001;
+    const FILE_SHARE_DELETE: u32 = 0x0004;
+
+    FILE_SHARE_READ | FILE_SHARE_DELETE
+}
+
+#[cfg(any(test, windows))]
+fn windows_git_metadata_open_error(label: &str, error: u32) -> String {
+    const ERROR_SHARING_VIOLATION: u32 = 32;
+
+    if error == ERROR_SHARING_VIOLATION {
+        format!("{label} changed while being read")
+    } else {
+        format!(
+            "open {label}: {}",
+            std::io::Error::from_raw_os_error(error as i32)
+        )
+    }
+}
+
 #[cfg(windows)]
 fn windows_open_directory_no_follow(path: &Path, label: &str) -> Result<std::fs::File, String> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -5874,9 +5896,6 @@ fn windows_open_relative_no_follow(
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
 
     const FILE_GENERIC_READ: u32 = 0x0012_0089;
-    const FILE_SHARE_READ: u32 = 0x0001;
-    const FILE_SHARE_WRITE: u32 = 0x0002;
-    const FILE_SHARE_DELETE: u32 = 0x0004;
     const FILE_OPEN: u32 = 0x0001;
     const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0020;
     const FILE_NON_DIRECTORY_FILE: u32 = 0x0040;
@@ -5919,7 +5938,7 @@ fn windows_open_relative_no_follow(
             &mut io_status,
             std::ptr::null_mut(),
             0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            windows_git_metadata_child_share_mode(),
             FILE_OPEN,
             FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
             std::ptr::null_mut(),
@@ -5928,10 +5947,7 @@ fn windows_open_relative_no_follow(
     };
     if status < 0 {
         let error = unsafe { RtlNtStatusToDosError(status) };
-        return Err(format!(
-            "open {label}: {}",
-            std::io::Error::from_raw_os_error(error as i32)
-        ));
+        return Err(windows_git_metadata_open_error(label, error));
     }
     if handle.is_null() {
         return Err(format!("open {label}: Windows returned an invalid handle"));
@@ -11756,6 +11772,23 @@ mod workspace_panel_tests {
             );
             assert!(!destination.exists(), "{name} must not be published");
         }
+    }
+
+    #[test]
+    fn git_reftable_windows_child_share_mode_allows_read_and_delete_but_not_write() {
+        let share_mode = windows_git_metadata_child_share_mode();
+
+        assert_ne!(share_mode & 0x0001, 0, "read sharing must remain enabled");
+        assert_eq!(share_mode & 0x0002, 0, "write sharing must be disabled");
+        assert_ne!(share_mode & 0x0004, 0, "delete sharing must remain enabled");
+    }
+
+    #[test]
+    fn git_reftable_windows_sharing_violation_reports_change() {
+        assert_eq!(
+            windows_git_metadata_open_error("Git reftable table list", 32),
+            "Git reftable table list changed while being read"
+        );
     }
 
     #[test]
