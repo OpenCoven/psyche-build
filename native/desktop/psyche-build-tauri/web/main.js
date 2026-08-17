@@ -4468,7 +4468,13 @@
     var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
     var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
     if (layout && leaf) {
-      if (layout.maximizedLeafId) layout.maximizedLeafId = leaf.id;
+      var maximizedLeafId = layout.maximizedLeafId ||
+        options && options.preserveFullscreenLeafId;
+      if (maximizedLeafId) {
+        layout.maximizedLeafId = PsychePanes.findLeafById(layout.root, maximizedLeafId)
+          ? leaf.id
+          : null;
+      }
       layout.focusedLeafId = leaf.id;
     }
     renderPaneWorkspace({ focusTargetThread: thread });
@@ -4501,6 +4507,16 @@
     }
     saveWorkspaceSoon();
     return true;
+  }
+
+  async function focusThreadFromSidebar(thread) {
+    var layout = paneLayoutForThread(thread);
+    var maximizedLeafId = layout && layout.maximizedLeafId;
+    applySetScopeForThread(thread);
+    if (maximizedLeafId) {
+      return focusThread(thread.id, { preserveFullscreenLeafId: maximizedLeafId });
+    }
+    return focusThread(thread.id);
   }
 
   function statusLevel(s) {
@@ -7415,8 +7431,7 @@
                 saveSettings();
                 if (project.id !== state.activeProjectId &&
                     !(await setActiveProject(project.id))) return;
-                applySetScopeForThread(thread);
-                await focusThread(thread.id);
+                await focusThreadFromSidebar(thread);
               }
               row.addEventListener("click", activateLocalRow);
               row.addEventListener("keydown", function (event) {
