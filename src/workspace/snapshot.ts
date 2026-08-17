@@ -53,7 +53,7 @@ export interface ProjectSnapshot {
   id: string;
   root: string;
   title: string;
-  rituals?: RitualSnapshot[];
+  rituals: RitualSnapshot[];
   worktrees: WorktreeSnapshot[];
   projectPanes: PaneSnapshot[];
   runningCount: number;

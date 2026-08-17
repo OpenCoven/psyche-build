@@ -33,7 +33,7 @@ describe('workspace snapshot', () => {
       },
     );
     expect(snapshot.projects[0].rituals).toHaveLength(50);
-    expect(JSON.stringify(snapshot)).not.toContain('npm publish');
+    expect(JSON.stringify(snapshot)).not.toContain('"command"');
   });
 
   it('parses main, detached, locked, and prunable worktrees', () => {
