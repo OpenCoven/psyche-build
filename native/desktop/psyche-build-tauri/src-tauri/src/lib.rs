@@ -5364,10 +5364,24 @@ fn is_valid_git_ref_name(name: &str) -> bool {
     })
 }
 
+fn git_oid_hex_len(object_format: Option<&str>) -> usize {
+    if object_format == Some("sha256") {
+        64
+    } else {
+        40
+    }
+}
+
+fn is_valid_git_oid(value: &str, object_format: Option<&str>) -> bool {
+    value.len() == git_oid_hex_len(object_format)
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn collect_loose_refs(
     directory: &Path,
     prefix: &str,
     refs: &mut HashMap<String, GitRefValue>,
+    object_format: Option<&str>,
 ) -> Result<(), String> {
     if !directory.is_dir() {
         return Ok(());
@@ -5388,7 +5402,7 @@ fn collect_loose_refs(
         }
         let ref_name = format!("{prefix}/{name}");
         if file_type.is_dir() {
-            collect_loose_refs(&entry.path(), &ref_name, refs)?;
+            collect_loose_refs(&entry.path(), &ref_name, refs, object_format)?;
         } else if file_type.is_file() && is_valid_git_ref_name(&ref_name) {
             let value = std::fs::read_to_string(entry.path())
                 .map_err(|e| format!("read Git ref: {e}"))?
@@ -5396,7 +5410,7 @@ fn collect_loose_refs(
                 .to_string();
             if let Some(target) = value.strip_prefix("ref: ") {
                 refs.insert(ref_name, GitRefValue::Symbolic(target.to_string()));
-            } else if !value.is_empty() {
+            } else if is_valid_git_oid(&value, object_format) {
                 refs.insert(ref_name, GitRefValue::Direct(value));
             }
         }
@@ -5409,7 +5423,10 @@ enum GitRefValue {
     Symbolic(String),
 }
 
-fn snapshot_git_refs(common_dir: &Path) -> Result<HashMap<String, GitRefValue>, String> {
+fn snapshot_git_refs(
+    common_dir: &Path,
+    object_format: Option<&str>,
+) -> Result<HashMap<String, GitRefValue>, String> {
     let mut refs = HashMap::new();
     let packed_refs = common_dir.join("packed-refs");
     if packed_refs.is_file() {
@@ -5424,24 +5441,20 @@ fn snapshot_git_refs(common_dir: &Path) -> Result<HashMap<String, GitRefValue>, 
             }
         }
     }
-    collect_loose_refs(&common_dir.join("refs"), "refs", &mut refs)?;
+    collect_loose_refs(&common_dir.join("refs"), "refs", &mut refs, object_format)?;
     Ok(refs)
 }
 
 const MAX_GIT_SHALLOW_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_GIT_INFO_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 fn validate_git_shallow(bytes: &[u8], object_format: Option<&str>) -> Result<(), String> {
-    let expected_len = if object_format == Some("sha256") {
-        64
-    } else {
-        40
-    };
     let text = std::str::from_utf8(bytes)
         .map_err(|_| "invalid Git shallow boundary: content is not UTF-8".to_string())?;
     if text.is_empty()
-        || text.lines().any(|oid| {
-            oid.len() != expected_len || !oid.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
+        || text
+            .lines()
+            .any(|oid| !is_valid_git_oid(oid, object_format))
     {
         return Err("invalid Git shallow boundary".to_string());
     }
@@ -5530,6 +5543,101 @@ fn snapshot_git_shallow(
         .map_err(|e| format!("snapshot Git shallow boundary: {e}"))
 }
 
+#[cfg(unix)]
+fn read_git_info_file(git_dir: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
+    let info_dir = git_dir.join("info");
+    let directory = match std::fs::symlink_metadata(&info_dir) {
+        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => {
+            open_directory_no_follow(&info_dir, "Git info directory")?
+        }
+        Ok(_) => return Err("Git info directory is not a directory".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("inspect Git info directory: {error}")),
+    };
+    let file_name = CString::new(name).expect("static file name has no NUL");
+    let mut file = match open_target_no_follow(&directory, &file_name) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("open Git info/{name}: {error}")),
+    };
+    let before = file_state(&file)?;
+    if before.mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFREG) {
+        return Err(format!("Git info/{name} is not a regular file"));
+    }
+    if before.size > MAX_GIT_INFO_FILE_BYTES {
+        return Err(format!("Git info/{name} is too large"));
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("read Git info/{name}: {e}"))?;
+    let mut bytes = Vec::with_capacity(before.size as usize);
+    std::io::Read::by_ref(&mut file)
+        .take(MAX_GIT_INFO_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read Git info/{name}: {e}"))?;
+    let after = file_state(&file)?;
+    if before != after {
+        return Err(format!("Git info/{name} changed while being read"));
+    }
+    if bytes.len() as u64 > MAX_GIT_INFO_FILE_BYTES {
+        return Err(format!("Git info/{name} is too large"));
+    }
+    Ok(Some(bytes))
+}
+
+#[cfg(not(unix))]
+fn read_git_info_file(git_dir: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
+    let path = git_dir.join("info").join(name);
+    let before = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("inspect Git info/{name}: {error}")),
+    };
+    if before.file_type().is_symlink() || !before.is_file() {
+        return Err(format!("Git info/{name} is not a regular file"));
+    }
+    if before.len() > MAX_GIT_INFO_FILE_BYTES {
+        return Err(format!("Git info/{name} is too large"));
+    }
+    let mut file = std::fs::File::open(&path).map_err(|e| format!("open Git info/{name}: {e}"))?;
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    std::io::Read::by_ref(&mut file)
+        .take(MAX_GIT_INFO_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read Git info/{name}: {e}"))?;
+    let after = std::fs::symlink_metadata(&path)
+        .map_err(|e| format!("inspect Git info/{name} after reading: {e}"))?;
+    if before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+        || after.file_type().is_symlink()
+        || !after.is_file()
+    {
+        return Err(format!("Git info/{name} changed while being read"));
+    }
+    if bytes.len() as u64 > MAX_GIT_INFO_FILE_BYTES {
+        return Err(format!("Git info/{name} is too large"));
+    }
+    Ok(Some(bytes))
+}
+
+fn snapshot_git_info_file(
+    source_git_dir: &Path,
+    destination: &Path,
+    name: &str,
+) -> Result<(), String> {
+    let Some(bytes) = read_git_info_file(source_git_dir, name)? else {
+        return Ok(());
+    };
+    let info_dir = destination.join("info");
+    std::fs::create_dir_all(&info_dir)
+        .map_err(|e| format!("create isolated Git info directory: {e}"))?;
+    std::fs::write(info_dir.join(name), bytes).map_err(|e| format!("snapshot Git info/{name}: {e}"))
+}
+
+fn snapshot_trusted_git_info(source_git_dir: &Path, destination: &Path) -> Result<(), String> {
+    snapshot_git_info_file(source_git_dir, destination, "attributes")?;
+    snapshot_git_info_file(source_git_dir, destination, "exclude")
+}
+
 fn resolve_git_ref(refs: &HashMap<String, GitRefValue>, name: &str) -> Option<String> {
     let mut current = name;
     let mut remaining = refs.len().saturating_add(1);
@@ -5592,12 +5700,7 @@ fn resolve_isolated_git_attribute_source(
 }
 
 fn is_null_git_oid(value: &str, object_format: Option<&str>) -> bool {
-    let expected_len = if object_format == Some("sha256") {
-        64
-    } else {
-        40
-    };
-    value.len() == expected_len && value.bytes().all(|byte| byte == b'0')
+    value.len() == git_oid_hex_len(object_format) && value.bytes().all(|byte| byte == b'0')
 }
 
 fn snapshotted_git_attribute_source(
@@ -5774,19 +5877,19 @@ impl GitInspectionRepository {
             Ok(String::new())
         };
         validate_git_ref_storage(ref_storage, detected_format)?;
-        let refs = if ref_storage == "files" {
-            snapshot_git_refs(&common_dir)?
-        } else {
-            HashMap::new()
-        };
-        let actual_head = std::fs::read_to_string(actual_git_dir.join("HEAD"))
-            .map_err(|e| format!("snapshot Git HEAD: {e}"))?;
         let object_format = config
             .iter()
             .find_map(|(key, value)| (key == "extensions.objectformat").then_some(value));
         if object_format.is_some_and(|value| !matches!(value.as_str(), "sha1" | "sha256")) {
             return Err("unsupported Git object format".to_string());
         }
+        let refs = if ref_storage == "files" {
+            snapshot_git_refs(&common_dir, object_format.map(String::as_str))?
+        } else {
+            HashMap::new()
+        };
+        let actual_head = std::fs::read_to_string(actual_git_dir.join("HEAD"))
+            .map_err(|e| format!("snapshot Git HEAD: {e}"))?;
         let expected_head = head_override
             .filter(|head| {
                 !head.is_empty() && !is_null_git_oid(head, object_format.map(String::as_str))
@@ -5843,6 +5946,7 @@ impl GitInspectionRepository {
             .map_err(|e| format!("write isolated Git config: {e}"))?;
         std::fs::write(git_dir.path().join("empty-config"), "")
             .map_err(|e| format!("write isolated empty Git config: {e}"))?;
+        snapshot_trusted_git_info(&common_dir, git_dir.path())?;
         std::fs::write(git_dir.path().join("HEAD"), actual_head)
             .map_err(|e| format!("write isolated Git HEAD: {e}"))?;
         snapshot_git_shallow(
@@ -9839,7 +9943,7 @@ mod workspace_panel_tests {
         )
         .unwrap();
 
-        let refs = snapshot_git_refs(&common_dir).unwrap();
+        let refs = snapshot_git_refs(&common_dir, None).unwrap();
 
         assert!(matches!(
             refs.get("refs/heads/main"),
@@ -9867,13 +9971,83 @@ mod workspace_panel_tests {
         )
         .unwrap();
 
-        let refs = snapshot_git_refs(&common_dir).unwrap();
+        let refs = snapshot_git_refs(&common_dir, None).unwrap();
 
         assert!(matches!(
             refs.get("refs/remotes/origin/HEAD"),
             Some(GitRefValue::Symbolic(target)) if target == "refs/remotes/origin/main"
         ));
         assert!(!refs.contains_key("refs/remotes/origin/bad..name"));
+    }
+
+    #[test]
+    fn git_ref_snapshot_skips_malformed_sha256_loose_refs() {
+        let tree = TempTree::new("git-invalid-sha256-ref-file");
+        let common_dir = tree.root.join("common");
+        let tag_refs = common_dir.join("refs/tags");
+        std::fs::create_dir_all(&tag_refs).unwrap();
+        std::fs::write(
+            tag_refs.join("good"),
+            "1111111111111111111111111111111111111111111111111111111111111111\n",
+        )
+        .unwrap();
+        std::fs::write(tag_refs.join("bad"), "22222222222222222222\n").unwrap();
+
+        let refs = snapshot_git_refs(&common_dir, Some("sha256")).unwrap();
+
+        assert!(matches!(
+            refs.get("refs/tags/good"),
+            Some(GitRefValue::Direct(oid))
+                if oid == "1111111111111111111111111111111111111111111111111111111111111111"
+        ));
+        assert!(!refs.contains_key("refs/tags/bad"));
+    }
+
+    #[test]
+    fn git_status_and_diff_ignore_unrelated_malformed_loose_refs() {
+        let tree = TempTree::new("git-malformed-loose-ref");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "before\n").unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt"]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+        std::fs::create_dir_all(tree.root.join(".git/refs/tags")).unwrap();
+        std::fs::write(tree.root.join(".git/refs/tags/bad"), "not-an-oid\n").unwrap();
+        std::fs::write(tree.root.join("tracked.txt"), "after\n").unwrap();
+
+        let raw_status =
+            run_test_git_stdout_with_env(&tree.root, &["status", "--porcelain", "--", "."], &[]);
+        assert!(
+            raw_status.contains(" M tracked.txt"),
+            "raw git status should ignore unrelated malformed loose refs: {raw_status:?}"
+        );
+        let raw_diff = run_test_git_stdout_with_env(
+            &tree.root,
+            &["diff", "--no-color", "--relative", "--", "tracked.txt"],
+            &[],
+        );
+        assert!(
+            raw_diff.contains("+after"),
+            "raw git diff should ignore unrelated malformed loose refs: {raw_diff:?}"
+        );
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("tracked.txt".to_string()),
+            Some(false),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(status.files.len(), 1);
+        assert_eq!(status.files[0].path, "tracked.txt");
+        assert!(status.files[0].unstaged);
+        assert!(diff.text.contains("+after"));
     }
 
     #[test]
@@ -10747,6 +10921,132 @@ mod workspace_panel_tests {
             !marker.exists(),
             "hardened git inspection must not execute the shadowing local clean filter"
         );
+    }
+
+    #[test]
+    fn git_status_and_diff_preserve_trusted_worktree_info_attributes() {
+        let tree = TempTree::new("git-worktree-info-attributes");
+        let repository = tree.root.join("repository");
+        let linked = tree.root.join("linked");
+        let home = tree.root.join("home");
+        let global_config = home.join(".gitconfig");
+        std::fs::create_dir_all(&repository).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            &global_config,
+            format!(
+                "[filter \"trusted-normalize\"]\n\tclean = {}\n\trequired = true\n",
+                trusted_normalizing_clean_command()
+            ),
+        )
+        .unwrap();
+
+        run_test_git(&repository, &["init", "-q"]);
+        run_test_git(&repository, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &repository,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(repository.join("tracked.txt"), "seed\n").unwrap();
+        run_test_git(&repository, &["add", "tracked.txt"]);
+        run_test_git(&repository, &["commit", "-qm", "seed"]);
+        run_test_git(
+            &repository,
+            &["worktree", "add", "-q", "-b", "linked", path_text(&linked)],
+        );
+
+        let (_, linked_git_dir) = git_dir_for_worktree(&linked).unwrap();
+        let common_git_dir = git_common_dir(&linked_git_dir).unwrap();
+        std::fs::create_dir_all(common_git_dir.join("info")).unwrap();
+        std::fs::write(
+            common_git_dir.join("info/attributes"),
+            "tracked.txt filter=trusted-normalize\n",
+        )
+        .unwrap();
+        std::fs::write(linked.join("tracked.txt"), "same content   \n").unwrap();
+
+        let env = [
+            ("HOME", path_text(&home)),
+            ("GIT_CONFIG_GLOBAL", path_text(&global_config)),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ];
+        run_test_git_with_env(&linked, &["add", "tracked.txt"], &env);
+        run_test_git_with_env(&linked, &["commit", "-qm", "baseline"], &env);
+
+        std::fs::write(linked.join("tracked.txt"), "same content\t\t\t\n").unwrap();
+        let raw_status =
+            run_test_git_stdout_with_env(&linked, &["status", "--porcelain", "--", "."], &env);
+        assert!(
+            raw_status.trim().is_empty(),
+            "worktree info/attributes should keep raw git status clean: {raw_status:?}"
+        );
+        let raw_diff = run_test_git_stdout_with_env(
+            &linked,
+            &["diff", "--no-color", "--relative", "--", "."],
+            &env,
+        );
+        assert!(
+            raw_diff.trim().is_empty(),
+            "worktree info/attributes should keep raw git diff clean: {raw_diff:?}"
+        );
+
+        let _git_env = TestGitEnvOverrideGuard::set(&[
+            ("HOME", Some(home.as_os_str())),
+            ("GIT_CONFIG_GLOBAL", Some(global_config.as_os_str())),
+            ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
+        ]);
+        let status = git_status(path_text(&linked).to_string()).unwrap();
+        let diff = git_diff(path_text(&linked).to_string(), None, Some(false), None).unwrap();
+
+        assert!(status.files.is_empty());
+        assert!(diff.text.is_empty());
+        assert_eq!(diff.bytes, 0);
+        assert_eq!(diff.lines, 0);
+        assert!(!diff.truncated);
+    }
+
+    #[test]
+    fn git_status_and_diff_preserve_trusted_worktree_info_exclude() {
+        let tree = TempTree::new("git-worktree-info-exclude");
+        let repository = tree.root.join("repository");
+        let linked = tree.root.join("linked");
+        std::fs::create_dir_all(&repository).unwrap();
+
+        run_test_git(&repository, &["init", "-q"]);
+        run_test_git(&repository, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &repository,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(repository.join("tracked.txt"), "baseline\n").unwrap();
+        run_test_git(&repository, &["add", "tracked.txt"]);
+        run_test_git(&repository, &["commit", "-qm", "baseline"]);
+        run_test_git(
+            &repository,
+            &["worktree", "add", "-q", "-b", "linked", path_text(&linked)],
+        );
+
+        let (_, linked_git_dir) = git_dir_for_worktree(&linked).unwrap();
+        let common_git_dir = git_common_dir(&linked_git_dir).unwrap();
+        std::fs::create_dir_all(common_git_dir.join("info")).unwrap();
+        std::fs::write(common_git_dir.join("info/exclude"), "ignored.txt\n").unwrap();
+        std::fs::write(linked.join("ignored.txt"), "ignored\n").unwrap();
+
+        let raw_status =
+            run_test_git_stdout_with_env(&linked, &["status", "--porcelain", "--", "."], &[]);
+        assert!(
+            raw_status.trim().is_empty(),
+            "worktree info/exclude should hide ignored untracked files from raw git status: {raw_status:?}"
+        );
+
+        let status = git_status(path_text(&linked).to_string()).unwrap();
+        let diff = git_diff(path_text(&linked).to_string(), None, Some(false), None).unwrap();
+
+        assert!(status.files.is_empty());
+        assert!(diff.text.is_empty());
+        assert_eq!(diff.bytes, 0);
+        assert_eq!(diff.lines, 0);
+        assert!(!diff.truncated);
     }
 
     #[test]
