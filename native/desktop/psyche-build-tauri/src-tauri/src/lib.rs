@@ -6308,6 +6308,22 @@ impl<'a> GitInspection<'a> {
             .iter()
             .find_map(|(candidate, value)| (candidate == key).then_some(value.as_str()))
     }
+
+    fn first_non_empty_config_value_after_last_empty_reset(&self, key: &str) -> Option<&str> {
+        let last_reset = self
+            .repository
+            .config
+            .iter()
+            .rposition(|(candidate, value)| candidate == key && value.is_empty());
+        let Some(last_reset) = last_reset else {
+            return self.config_value(key).filter(|value| !value.is_empty());
+        };
+        self.repository.config[last_reset + 1..]
+            .iter()
+            .find_map(|(candidate, value)| {
+                (candidate == key && !value.is_empty()).then_some(value.as_str())
+            })
+    }
 }
 
 fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
@@ -6541,8 +6557,7 @@ fn git_status(root: String) -> Result<GitStatus, String> {
     }
 
     let remote_url = inspection
-        .config_value("remote.origin.url")
-        .filter(|url| !url.is_empty())
+        .first_non_empty_config_value_after_last_empty_reset("remote.origin.url")
         .map(|_| {
             // `git remote get-url` ignores command-scope `-c remote.*` values,
             // but `ls-remote --get-url` resolves the same fetch URL without
@@ -10275,6 +10290,59 @@ mod workspace_panel_tests {
             status.remote_url.as_deref(),
             Some("https://first.invalid/repo.git")
         );
+    }
+
+    #[test]
+    fn git_status_uses_first_origin_url_after_empty_reset() {
+        let tree = TempTree::new("git-remote-url-after-reset");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://first.invalid/repo.git",
+            ],
+        );
+        run_test_git(&tree.root, &["config", "--add", "remote.origin.url", ""]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://later.invalid/repo.git",
+            ],
+        );
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+
+        assert_eq!(
+            status.remote_url.as_deref(),
+            Some("https://later.invalid/repo.git")
+        );
+    }
+
+    #[test]
+    fn git_status_omits_origin_url_after_trailing_empty_reset() {
+        let tree = TempTree::new("git-remote-url-trailing-reset");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://first.invalid/repo.git",
+            ],
+        );
+        run_test_git(&tree.root, &["config", "--add", "remote.origin.url", ""]);
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+
+        assert_eq!(status.remote_url, None);
+        assert_eq!(status.web_url, None);
     }
 
     #[test]
