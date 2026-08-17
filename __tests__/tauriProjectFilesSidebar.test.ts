@@ -48,6 +48,8 @@ function ruleBlock(selector: string) {
   return match?.[2] ?? '';
 }
 
+type Listener = (event: FakeEvent) => unknown;
+
 class FakeStyle {
   private readonly properties = new Map<string, string>();
 
@@ -60,11 +62,45 @@ class FakeStyle {
   }
 }
 
+class FakeEvent {
+  propagationStopped = false;
+  defaultPrevented = false;
+
+  constructor(readonly target: FakeElement) {}
+
+  stopPropagation() {
+    this.propagationStopped = true;
+  }
+
+  preventDefault() {
+    this.defaultPrevented = true;
+  }
+}
+
+class FakeDocument {
+  private readonly elementsById = new Map<string, FakeElement>();
+
+  createElement(tagName: string) {
+    return new FakeElement(tagName);
+  }
+
+  registerElement(id: string, element: FakeElement) {
+    element.setAttribute('id', id);
+    this.elementsById.set(id, element);
+    return element;
+  }
+
+  getElementById(id: string) {
+    return this.elementsById.get(id) ?? null;
+  }
+}
+
 class FakeElement {
   readonly tagName: string;
   readonly dataset: Record<string, string> = {};
   readonly attributes = new Map<string, string>();
   readonly children: FakeElement[] = [];
+  readonly listeners = new Map<string, Listener[]>();
   readonly style = new FakeStyle();
   parentNode: FakeElement | null = null;
   className = '';
@@ -91,9 +127,128 @@ class FakeElement {
     return this.attributes.get(name) ?? null;
   }
 
+  addEventListener(name: string, listener: Listener) {
+    const listeners = this.listeners.get(name) ?? [];
+    listeners.push(listener);
+    this.listeners.set(name, listeners);
+  }
+
+  async emit(name: string) {
+    const event = new FakeEvent(this);
+    for (let element: FakeElement | null = this; element; element = element.parentNode) {
+      for (const listener of element.listeners.get(name) ?? []) {
+        await listener(event);
+      }
+      if (event.propagationStopped) break;
+    }
+    return event;
+  }
+
   focus() {
     this.focused = true;
   }
+}
+
+function compileShowProjectFilesHarness(
+  dependencies: {
+    findProject: (projectId: string) => { id: string } | null;
+    setActiveProject: (projectId: string) => Promise<boolean>;
+    state: { activeProjectId: string };
+    setSidebarView: (view: string) => void;
+    sidebarFilesReturnProjectId: string | null;
+  },
+) {
+  return Function(
+    'findProject',
+    'setActiveProject',
+    'state',
+    'setSidebarView',
+    'seedSidebarFilesReturnProjectId',
+    `"use strict";
+    var sidebarFilesReturnProjectId = seedSidebarFilesReturnProjectId;
+    ${functionSource('showProjectFiles')}
+    return {
+      showProjectFiles: showProjectFiles,
+      returnProjectId: function () { return sidebarFilesReturnProjectId; },
+    };`,
+  )(
+    dependencies.findProject,
+    dependencies.setActiveProject,
+    dependencies.state,
+    dependencies.setSidebarView,
+    dependencies.sidebarFilesReturnProjectId,
+  ) as {
+    showProjectFiles: (projectId: string) => Promise<boolean>;
+    returnProjectId: () => string | null;
+  };
+}
+
+function bindProjectGroupInteractions(dependencies: {
+  project: { id: string; collapsed?: boolean };
+  projectModel: { expanded: boolean; autoExpanded: boolean };
+  projectParts: {
+    group: FakeElement;
+    head: FakeElement;
+    disclosure: FakeElement;
+    files: FakeElement;
+  };
+  refreshSidebar: () => void;
+  saveWorkspaceSoon: () => void;
+  clearFocusSet: () => void;
+  setActiveProject: (projectId: string) => unknown;
+  showProjectFiles: (projectId: string) => unknown;
+}) {
+  const projectListeners = between(
+    functionSource('renderSessionList'),
+    'function setProjectExpanded(expanded) {',
+    'projectParts.head.addEventListener("contextmenu"',
+  );
+  return Function(
+    'project',
+    'projectModel',
+    'projectParts',
+    'refreshSidebar',
+    'saveWorkspaceSoon',
+    'clearFocusSet',
+    'setActiveProject',
+    'showProjectFiles',
+    'targetWithin',
+    `"use strict";
+    ${projectListeners}`,
+  )(
+    dependencies.project,
+    dependencies.projectModel,
+    dependencies.projectParts,
+    dependencies.refreshSidebar,
+    dependencies.saveWorkspaceSoon,
+    dependencies.clearFocusSet,
+    dependencies.setActiveProject,
+    dependencies.showProjectFiles,
+    (event: FakeEvent, element: FakeElement) => {
+      for (let node: FakeElement | null = event.target; node; node = node.parentNode) {
+        if (node === element) return true;
+      }
+      return false;
+    },
+  );
+}
+
+function registerFilesBackRailClick(document: FakeDocument, showSessionsSidebar: () => unknown) {
+  const filesBackRegistration = between(
+    mainJs,
+    'onRailClick("files-back"',
+    'onRailClick("files-refresh"',
+  );
+  return Function(
+    'document',
+    'showSessionsSidebar',
+    `"use strict";
+    ${functionSource('onRailClick')}
+    ${filesBackRegistration}`,
+  )(
+    document,
+    showSessionsSidebar,
+  );
 }
 
 describe('project Files sidebar navigation', () => {
@@ -114,9 +269,7 @@ describe('project Files sidebar navigation', () => {
       };
     }));
 
-    const showProjectFiles = compileFunction<
-      (projectId: string) => Promise<boolean>
-    >('showProjectFiles', {
+    const sidebar = compileShowProjectFilesHarness({
       findProject: (projectId: string) => (projectId === project.id ? project : null),
       setActiveProject,
       state,
@@ -124,9 +277,10 @@ describe('project Files sidebar navigation', () => {
       sidebarFilesReturnProjectId: null,
     });
 
-    const pending = showProjectFiles(project.id);
+    const pending = sidebar.showProjectFiles(project.id);
     expect(setActiveProject).toHaveBeenCalledWith(project.id);
     expect(setSidebarView).not.toHaveBeenCalled();
+    expect(sidebar.returnProjectId()).toBeNull();
     expect(project.selectedWorktreePath).toBe('/repo/worktrees/feature');
 
     continueActivation();
@@ -134,24 +288,40 @@ describe('project Files sidebar navigation', () => {
     await expect(pending).resolves.toBe(true);
     expect(setSidebarView).toHaveBeenCalledOnce();
     expect(setSidebarView).toHaveBeenCalledWith('files');
+    expect(sidebar.returnProjectId()).toBe(project.id);
     expect(project.selectedWorktreePath).toBe('/repo/worktrees/feature');
-    expect(functionSource('showProjectFiles')).toContain('sidebarFilesReturnProjectId = project.id;');
   });
 
   it('returns false when project activation fails and never switches the sidebar view', async () => {
     const setSidebarView = vi.fn();
-    const showProjectFiles = compileFunction<
-      (projectId: string) => Promise<boolean>
-    >('showProjectFiles', {
+    const sidebar = compileShowProjectFilesHarness({
       findProject: () => ({ id: 'project-1', selectedWorktreePath: '/repo' }),
       setActiveProject: vi.fn().mockResolvedValue(false),
       state: { activeProjectId: '' },
       setSidebarView,
-      sidebarFilesReturnProjectId: null,
+      sidebarFilesReturnProjectId: 'return-project',
     });
 
-    await expect(showProjectFiles('project-1')).resolves.toBe(false);
+    await expect(sidebar.showProjectFiles('project-1')).resolves.toBe(false);
     expect(setSidebarView).not.toHaveBeenCalled();
+    expect(sidebar.returnProjectId()).toBe('return-project');
+  });
+
+  it('returns false without touching sidebar navigation state when the project is missing', async () => {
+    const setActiveProject = vi.fn().mockResolvedValue(true);
+    const setSidebarView = vi.fn();
+    const sidebar = compileShowProjectFilesHarness({
+      findProject: () => null,
+      setActiveProject,
+      state: { activeProjectId: 'project-0' },
+      setSidebarView,
+      sidebarFilesReturnProjectId: 'return-project',
+    });
+
+    await expect(sidebar.showProjectFiles('missing-project')).resolves.toBe(false);
+    expect(setActiveProject).not.toHaveBeenCalled();
+    expect(setSidebarView).not.toHaveBeenCalled();
+    expect(sidebar.returnProjectId()).toBe('return-project');
   });
 
   it('creates a Files button for every project group with the project-scoped label', () => {
@@ -207,18 +377,92 @@ describe('project Files sidebar navigation', () => {
     expect(projectGroup.head.children.at(-1)).toBe(projectGroup.files);
   });
 
-  it('wires project Files clicks without reusing the removed zero-visible-session guard', () => {
-    const renderSessionList = functionSource('renderSessionList');
-    const projectFilesBlock = between(
-      renderSessionList,
-      'projectParts.files.addEventListener("pointerdown"',
-      'projectParts.head.addEventListener("contextmenu"',
-    );
+  it('dispatches project Files button events without selecting or toggling the project group', async () => {
+    const document = new FakeDocument();
+    const project = {
+      id: 'project-1',
+      root: '/repo/potion-lab',
+      collapsed: false,
+    };
+    type ProjectGroupModel = {
+      key: string;
+      title: string;
+      titleMatches: string[];
+      expanded: boolean;
+      autoExpanded: boolean;
+      count: number;
+      attentionCount: number;
+      project: typeof project;
+    };
+    const projectModel: ProjectGroupModel = {
+      key: 'project:1',
+      title: 'Potion Lab',
+      titleMatches: [],
+      expanded: true,
+      autoExpanded: false,
+      count: 0,
+      attentionCount: 0,
+      project,
+    };
+    const createProjectGroup = compileFunction<
+      (projectModel: ProjectGroupModel, options: Record<string, unknown>) => {
+        group: FakeElement;
+        head: FakeElement;
+        disclosure: FakeElement;
+        files: FakeElement;
+      }
+    >('createProjectGroup', {
+      document,
+      PsycheSessions: {
+        resolveProjectAppearance: () => ({
+          accent: { id: 'violet', rgb: '120 90 200' },
+          customized: false,
+          glyph: null,
+        }),
+      },
+      projectAppearances: {},
+      createDisclosure: () => new FakeElement('button'),
+      appendHighlightedText: (element: FakeElement, value: string) => {
+        element.textContent = value;
+      },
+      attachTooltip: () => undefined,
+    });
+    const projectParts = createProjectGroup(projectModel, {
+      current: false,
+      tabindex: '-1',
+    });
+    const clearFocusSet = vi.fn();
+    const setActiveProject = vi.fn();
+    const refreshSidebar = vi.fn();
+    const saveWorkspaceSoon = vi.fn();
+    const showProjectFiles = vi.fn().mockResolvedValue(true);
 
-    expect(renderSessionList).not.toContain('if (projectModel.visibleCount === 0) return;');
-    expect(projectFilesBlock).toContain('event.stopPropagation();');
-    expect(projectFilesBlock).toContain('event.preventDefault();');
-    expect(projectFilesBlock).toContain('showProjectFiles(project.id);');
+    bindProjectGroupInteractions({
+      project,
+      projectModel,
+      projectParts,
+      refreshSidebar,
+      saveWorkspaceSoon,
+      clearFocusSet,
+      setActiveProject,
+      showProjectFiles,
+    });
+
+    const pointerdown = await projectParts.files.emit('pointerdown');
+    expect(pointerdown.propagationStopped).toBe(true);
+    expect(pointerdown.defaultPrevented).toBe(false);
+    expect(showProjectFiles).not.toHaveBeenCalled();
+
+    const click = await projectParts.files.emit('click');
+    expect(click.defaultPrevented).toBe(true);
+    expect(click.propagationStopped).toBe(true);
+    expect(showProjectFiles).toHaveBeenCalledOnce();
+    expect(showProjectFiles).toHaveBeenCalledWith(project.id);
+    expect(clearFocusSet).not.toHaveBeenCalled();
+    expect(setActiveProject).not.toHaveBeenCalled();
+    expect(refreshSidebar).not.toHaveBeenCalled();
+    expect(saveWorkspaceSoon).not.toHaveBeenCalled();
+    expect(functionSource('renderSessionList')).not.toContain('if (projectModel.visibleCount === 0) return;');
   });
 
   it('restores focus to the originating project Files button when returning to Sessions', () => {
@@ -275,7 +519,17 @@ describe('project Files sidebar navigation', () => {
     expect(functionSource('showSessionsSidebar')).toContain('sidebarFilesReturnProjectId = null;');
     rafCallback();
     expect(restoreSessionTreeFocus).toHaveBeenCalledWith('');
-    expect(mainJs).toMatch(/onRailClick\("files-back", function \(\) \{\s*showSessionsSidebar\(\);\s*\}\);/);
+  });
+
+  it('routes files-back rail clicks through the registered listener to showSessionsSidebar', async () => {
+    const document = new FakeDocument();
+    const filesBack = document.registerElement('files-back', new FakeElement('button'));
+    const showSessionsSidebar = vi.fn();
+
+    registerFilesBackRailClick(document, showSessionsSidebar);
+
+    await filesBack.emit('click');
+    expect(showSessionsSidebar).toHaveBeenCalledOnce();
   });
 
   it('styles the project Files button as a compact surface control', () => {
