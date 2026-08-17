@@ -42,6 +42,7 @@ use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
 };
+use unicode_normalization::UnicodeNormalization;
 
 mod control_provider;
 mod coven_sessions;
@@ -6315,28 +6316,43 @@ fn resolve_git_ref(refs: &HashMap<String, GitRefValue>, name: &str) -> Option<St
 }
 
 fn is_valid_git_reftable_table_name(name: &str) -> bool {
-    fn is_ascii_hex(value: &str) -> bool {
-        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    fn is_windows_device_alias(stem: &str) -> bool {
+        let stem = stem.trim_end_matches(|character| character == ' ' || character == '.');
+        if ["CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$"]
+            .iter()
+            .any(|alias| stem.eq_ignore_ascii_case(alias))
+        {
+            return true;
+        }
+
+        let uppercase = stem.to_ascii_uppercase();
+        let bytes = uppercase.as_bytes();
+        bytes.len() == 4
+            && (bytes.starts_with(b"COM") || bytes.starts_with(b"LPT"))
+            && matches!(bytes[3], b'1'..=b'9')
     }
 
-    fn is_prefixed_ascii_hex(value: &str) -> bool {
-        value.strip_prefix("0x").is_some_and(is_ascii_hex)
-    }
-
-    let Some(stem) = name.strip_suffix(".ref") else {
+    if name.ends_with([' ', '.'])
+        || name.chars().any(|character| {
+            character.is_ascii_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+        })
+        || !name.nfc().eq(name.chars())
+    {
         return false;
-    };
-    let mut components = stem.split('-');
-    let (Some(first), Some(second), Some(third)) =
-        (components.next(), components.next(), components.next())
+    }
+
+    let Some(stem) = name
+        .strip_suffix(".ref")
+        .or_else(|| name.strip_suffix(".log"))
     else {
         return false;
     };
 
-    components.next().is_none()
-        && is_prefixed_ascii_hex(first)
-        && is_prefixed_ascii_hex(second)
-        && is_ascii_hex(third)
+    !stem.is_empty() && !is_windows_device_alias(name.split('.').next().unwrap_or_default())
 }
 
 fn snapshot_git_reftable_with_limits_and_hook<F, G>(
@@ -11561,10 +11577,12 @@ mod workspace_panel_tests {
         }
     }
 
-    const TEST_REFTABLE_TABLE_ONE: &str = "0x1-0x2-3.ref";
-    const TEST_REFTABLE_TABLE_TWO: &str = "0x4-0x5-6.ref";
-    const TEST_REFTABLE_TABLE_THREE: &str = "0x7-0x8-9.ref";
+    const TEST_REFTABLE_TABLE_ONE: &str = "table-alpha.ref";
+    const TEST_REFTABLE_TABLE_TWO: &str = "table-beta.log";
+    const TEST_REFTABLE_TABLE_THREE: &str = "table-gamma.ref";
     const REPRESENTATIVE_GIT_REFTABLE_TABLE: &str = "0x000000000001-0x000000000002-3b8de075.ref";
+    const SPEC_GIT_REFTABLE_LOG: &str = "00000001-00000001-RANDOM1.log";
+    const SAFE_ARBITRARY_GIT_REFTABLE_TABLE: &str = "réftable-随机-7Kp9.ref";
 
     fn write_test_reftable_table_list(source: &Path, names: &[&str]) {
         let mut list = names.join("\n");
@@ -11572,23 +11590,59 @@ mod workspace_panel_tests {
         std::fs::write(source.join("tables.list"), list).unwrap();
     }
 
-    #[test]
-    fn git_reftable_table_name_validation_matches_git_grammar() {
-        assert!(is_valid_git_reftable_table_name(
-            REPRESENTATIVE_GIT_REFTABLE_TABLE
-        ));
-        for name in [
+    fn invalid_git_reftable_table_names() -> Vec<String> {
+        let mut names = [
             "NUL.ref",
             "COM1.ref",
-            "one.ref",
-            "0x-0x2-3.ref",
-            "0x1-0x-3.ref",
-            "0x1-0x2-.ref",
-            "0x1-0x2-3-4.ref",
-            "0x1-0x2-3g.ref",
+            "COM1.any.ref",
+            "nul.any.log",
+            "CLOCK$.ref",
+            "CONIN$.log",
+            "CONOUT$.any.ref",
+            "LPT9.log",
+            "NUL .ref",
+            "safe.ref.",
+            "safe.ref ",
+            "missing-extension",
+            "uppercase.REF",
+            "uppercase.LOG",
+            "other.txt",
+            ".ref",
+            ".log",
+            "nested/name.ref",
+            "re\u{301}ftable.ref",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        for forbidden in ['<', '>', ':', '"', '/', '\\', '|', '?', '*'] {
+            names.push(format!("bad{forbidden}name.ref"));
+        }
+        for control in ['\0', '\u{0001}', '\u{001f}', '\u{007f}'] {
+            names.push(format!("bad{control}name.log"));
+        }
+        names
+    }
+
+    #[test]
+    fn git_reftable_table_name_validation_accepts_safe_git_names() {
+        for name in [
+            REPRESENTATIVE_GIT_REFTABLE_TABLE,
+            SPEC_GIT_REFTABLE_LOG,
+            SAFE_ARBITRARY_GIT_REFTABLE_TABLE,
         ] {
             assert!(
-                !is_valid_git_reftable_table_name(name),
+                is_valid_git_reftable_table_name(name),
+                "unexpectedly rejected {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_reftable_table_name_validation_rejects_unsafe_names() {
+        for name in invalid_git_reftable_table_names() {
+            assert!(
+                !is_valid_git_reftable_table_name(&name),
                 "unexpectedly accepted {name}"
             );
         }
@@ -11596,12 +11650,12 @@ mod workspace_panel_tests {
 
     #[test]
     fn git_reftable_snapshot_rejects_invalid_table_names_without_publication() {
-        for name in ["NUL.ref", "COM1.ref", "one.ref", "0x1-0x2-3-4.ref"] {
+        for name in invalid_git_reftable_table_names() {
             let tree = TempTree::new("git-reftable-invalid-table-name");
             let source = tree.root.join("source");
             let destination = tree.root.join("destination");
             std::fs::create_dir_all(&source).unwrap();
-            write_test_reftable_table_list(&source, &[name]);
+            write_test_reftable_table_list(&source, &[&name]);
 
             let error = snapshot_git_reftable_with_limits(
                 &source,
@@ -11610,7 +11664,10 @@ mod workspace_panel_tests {
             )
             .unwrap_err();
 
-            assert!(error.contains("invalid table name"), "{name}: {error}");
+            assert!(
+                error.contains("invalid table name") || error.contains("invalid path"),
+                "{name}: {error}"
+            );
             assert!(!destination.exists(), "{name} must not be published");
         }
     }
