@@ -25,6 +25,8 @@ import {
   agentControlJournalPayload,
   createAgentControlJournalResource,
   type AgentControlJournalReceipt,
+  type DurableReceiptRecord,
+  type JournalSnapshotFile,
 } from './journal.js';
 import { canonicalizeBoundedJson } from './boundedJson.js';
 import { isActionReceipt, isJournalActionReceipt } from './types.js';
@@ -102,6 +104,33 @@ export interface RuntimeJournal {
   read(afterSequence: number, limit?: number): RuntimeEvent[];
   findByIdempotencyKey(key: string): RuntimeEvent | undefined;
   recoverNonterminalCommands(): Promise<RuntimeEvent[]>;
+}
+
+/**
+ * A journal that can drop its own history once a snapshot covers it.
+ *
+ * Kept separate from RuntimeJournal and feature-detected rather than folded
+ * into it: an in-memory journal has nothing to compact, and requiring every
+ * one to implement the durable half would be ceremony with no behaviour
+ * behind it.
+ */
+export interface CompactableJournal extends RuntimeJournal {
+  readonly sequence: number;
+  readonly firstSequence: number;
+  loadSnapshot(): Promise<JournalSnapshotFile | undefined>;
+  writeSnapshot(file: JournalSnapshotFile): Promise<void>;
+  compact(coveredSequence: number): Promise<void>;
+}
+
+function asCompactable(journal: RuntimeJournal): CompactableJournal | undefined {
+  const candidate = journal as Partial<CompactableJournal>;
+  return typeof candidate.compact === 'function'
+    && typeof candidate.loadSnapshot === 'function'
+    && typeof candidate.writeSnapshot === 'function'
+    && typeof candidate.sequence === 'number'
+    && typeof candidate.firstSequence === 'number'
+    ? (journal as CompactableJournal)
+    : undefined;
 }
 
 interface ControlRuntimeOptions {
@@ -191,6 +220,18 @@ const TERMINAL_EVENT_KINDS = new Set([
  */
 const MAX_COMMAND_RECORDS = 1000;
 
+/**
+ * Events kept in the journal after compaction.
+ *
+ * Deliberately equal to MAX_COMMAND_RECORDS: that is the size of the in-memory
+ * idempotency window, so retaining the same number of events means compaction
+ * discards only what a restart would have discarded anyway.
+ */
+const JOURNAL_RETAINED_EVENTS = MAX_COMMAND_RECORDS;
+
+/** Compact only once the journal is well past the retained window. */
+const JOURNAL_COMPACTION_TRIGGER = MAX_COMMAND_RECORDS * 2;
+
 export class ControlRuntime {
   public readonly leases = new LaneLeaseStore();
   public readonly surfaces: SurfaceRegistry;
@@ -213,6 +254,8 @@ export class ControlRuntime {
   private readonly receipts = new Map<string, RetainedReceipt>();
   private readonly approvalTerminalizations = new Map<string, Promise<void>>();
   private readonly readActiveTaskCredential?: ControlRuntimeOptions['readActiveTaskCredential'];
+  private readonly compactable?: CompactableJournal;
+  private compactionInFlight = false;
 
   private constructor(
     private readonly ownerEpoch: number,
@@ -225,6 +268,7 @@ export class ControlRuntime {
     this.approvals = options.approvals ?? new ApprovalStore();
     this.readActiveTaskCredential = options.readActiveTaskCredential;
     this.resolveBrowserElementSemantics = options.resolveBrowserElementSemantics;
+    this.compactable = asCompactable(options.journal);
     this.promptDispatcher = new PromptDispatcher(async (envelope) => {
       const result = await this.handlers.sendPrompt(envelope);
       if (isReceiptResult(result)) return result;
@@ -235,10 +279,23 @@ export class ControlRuntime {
   static async create(opts: ControlRuntimeOptions): Promise<ControlRuntime> {
     await opts.journal.recoverNonterminalCommands();
     const runtime = new ControlRuntime(opts.ownerEpoch, opts.handlers, opts.journal, opts);
-    await runtime.recoverRestartedApprovalReceipts();
-    const events = opts.journal.read(0);
-    runtime.reduceOutcomes(events);
-    runtime.rehydrateReceipts(events);
+
+    // A compacted journal no longer holds the whole history, so the durable
+    // state it dropped comes from the snapshot and only the tail is replayed.
+    const snapshot = await runtime.compactable?.loadSnapshot();
+    const covered = snapshot?.coveredSequence ?? 0;
+    const restored = snapshot?.receiptRecords ?? [];
+    const durableRecords = () => mergeDurableReceiptRecords(
+      restored,
+      latestDurableReceiptRecords(opts.journal.read(covered)),
+    );
+
+    await runtime.recoverRestartedApprovalReceipts(durableRecords());
+    if (snapshot) runtime.restoreOutcomes(snapshot.outcomes);
+    // Read the tail again: recovery appends the invalidation events whose
+    // receipts must win over the approval_required ones they replace.
+    runtime.reduceOutcomes(opts.journal.read(covered));
+    runtime.rehydrateReceipts(durableRecords());
     return runtime;
   }
 
@@ -324,7 +381,11 @@ export class ControlRuntime {
     const nextSequence = events.length > 0
       ? events[events.length - 1].sequence
       : afterSequence;
-    return { events, nextSequence, gap: false };
+    // Everything below the journal's first retained sequence has been
+    // compacted away. A reader resuming from there cannot be served the
+    // events it asked for, and has to be told rather than handed a short read.
+    const firstRetained = this.compactable?.firstSequence ?? 1;
+    return { events, nextSequence, gap: afterSequence < firstRetained - 1 };
   }
 
   blockPaneQueue(paneId: string): () => void {
@@ -1260,8 +1321,10 @@ export class ControlRuntime {
     await this.finalizeApprovals(this.approvals.revokeForLease(leaseId), 'action_invalidated');
   }
 
-  private async recoverRestartedApprovalReceipts(): Promise<void> {
-    for (const record of latestDurableReceiptRecords(this.journal.read(0))) {
+  private async recoverRestartedApprovalReceipts(
+    records: readonly DurableReceiptRecord[],
+  ): Promise<void> {
+    for (const record of records) {
       if (record.receipt.state !== 'approval_required') continue;
       await this.journal.append('command.failed', restartInvalidatedPayload(record));
     }
@@ -1478,6 +1541,7 @@ export class ControlRuntime {
       });
       await this.journal.append(built.kind, built.payload);
       this.rememberOutcome(command.idempotencyKey, outcome);
+      this.maybeCompact();
       return outcome;
     }
     const event = await this.journal.append(terminalKindForOutcome(outcome), {
@@ -1493,6 +1557,7 @@ export class ControlRuntime {
     } else if (!isSurfaceControlCommand(command)) {
       this.retainCommandRecord(command.id, { command, outcome, sequence: event.sequence });
     }
+    this.maybeCompact();
     return outcome;
   }
 
@@ -1535,11 +1600,59 @@ export class ControlRuntime {
     }
   }
 
-  private rehydrateReceipts(events: readonly RuntimeEvent[]): void {
+  private rehydrateReceipts(records: readonly DurableReceiptRecord[]): void {
     this.receipts.clear();
-    for (const record of latestDurableReceiptRecords(events)) {
+    for (const record of records) {
       this.rememberReceipt(record.receipt, record.receipt.taskId);
     }
+  }
+
+  /** Seeds the dedup window from a snapshot before the tail is replayed over it. */
+  private restoreOutcomes(outcomes: Record<string, CommandOutcome>): void {
+    for (const [idempotencyKey, outcome] of Object.entries(outcomes)) {
+      this.rememberOutcome(idempotencyKey, outcome);
+    }
+  }
+
+  /**
+   * Compacts once the journal has grown well past the window the runtime can
+   * actually use, so the rewrite cost is amortised rather than paid per append.
+   */
+  private maybeCompact(): void {
+    const journal = this.compactable;
+    if (!journal || this.compactionInFlight) return;
+    if (journal.sequence - journal.firstSequence + 1 <= JOURNAL_COMPACTION_TRIGGER) return;
+    this.compactionInFlight = true;
+    void this.compactJournal(journal)
+      .catch(() => {
+        // A failed compaction leaves the previous journal intact by way of the
+        // atomic rename, so the next terminal command simply tries again.
+      })
+      .finally(() => {
+        this.compactionInFlight = false;
+      });
+  }
+
+  private async compactJournal(journal: CompactableJournal): Promise<void> {
+    const coveredSequence = journal.sequence - JOURNAL_RETAINED_EVENTS;
+    if (coveredSequence < journal.firstSequence) return;
+
+    // Records older than the retained window survive only in the previous
+    // snapshot, so the new one is the union rather than a fresh projection.
+    const previous = await journal.loadSnapshot();
+    const records = mergeDurableReceiptRecords(
+      previous?.receiptRecords ?? [],
+      latestDurableReceiptRecords(journal.read(previous?.coveredSequence ?? 0)),
+    ).slice(-MAX_COMMAND_RECORDS);
+
+    // The snapshot must be durable before the events it covers are dropped.
+    await journal.writeSnapshot({
+      snapshot: this.snapshot(),
+      coveredSequence,
+      outcomes: Object.fromEntries(this.outcomesByIdempotencyKey),
+      receiptRecords: records,
+    });
+    await journal.compact(coveredSequence);
   }
 
   private queueForPane(paneId: string): PaneQueueState {
@@ -2140,12 +2253,8 @@ function outcomeFromEvent(event: RuntimeEvent): CommandOutcome {
   }
 }
 
-interface DurableReceiptRecord {
-  readonly sequence: number;
-  readonly commandId: string;
-  readonly idempotencyKey: string;
-  readonly receipt: JournalActionReceipt;
-}
+// DurableReceiptRecord now lives in journal.ts: it is the durable shape the
+// snapshot file persists, not just an in-flight projection of journal events.
 
 function durableJournalReceiptPayload(event: RuntimeEvent): JournalActionReceipt | undefined {
   const receipt = event.payload.receipt;
@@ -2188,6 +2297,20 @@ function latestDurableReceiptRecords(events: readonly RuntimeEvent[]): DurableRe
       receipt,
     });
   }
+  return [...latest.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
+/**
+ * Latest-wins union of the receipts a snapshot preserved and those still in
+ * the journal tail. The tail is newer by construction, so it overwrites.
+ */
+function mergeDurableReceiptRecords(
+  restored: readonly DurableReceiptRecord[],
+  replayed: readonly DurableReceiptRecord[],
+): DurableReceiptRecord[] {
+  const latest = new Map<string, DurableReceiptRecord>();
+  for (const record of restored) latest.set(record.receipt.actionId, record);
+  for (const record of replayed) latest.set(record.receipt.actionId, record);
   return [...latest.values()].sort((left, right) => left.sequence - right.sequence);
 }
 

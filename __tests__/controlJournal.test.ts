@@ -281,6 +281,141 @@ describe('ControlJournal', () => {
     expect(reopened.sequence).toBe(1);
   });
 
+  it('drops covered events from the file and from memory', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
+    roots.push(root);
+    const journal = await ControlJournal.open(root, 3);
+    for (let index = 1; index <= 6; index += 1) {
+      await journal.append('command.succeeded', { commandId: `c${index}`, idempotencyKey: `i${index}` });
+    }
+
+    await journal.compact(4);
+
+    expect(journal.firstSequence).toBe(5);
+    expect(journal.sequence).toBe(6);
+    expect(journal.read(0).map((event) => event.sequence)).toEqual([5, 6]);
+    // The dropped keys leave the index with the events themselves.
+    expect(journal.findByIdempotencyKey('i1')).toBeUndefined();
+    expect(journal.findByIdempotencyKey('i6')?.kind).toBe('command.succeeded');
+  });
+
+  it('reopens a compacted journal and keeps appending contiguously', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
+    roots.push(root);
+    const journal = await ControlJournal.open(root, 3);
+    for (let index = 1; index <= 6; index += 1) {
+      await journal.append('command.succeeded', { commandId: `c${index}`, idempotencyKey: `i${index}` });
+    }
+    await journal.compact(4);
+
+    const reopened = await ControlJournal.open(root, 3);
+    expect(reopened.firstSequence).toBe(5);
+    expect(reopened.sequence).toBe(6);
+    expect(reopened.read(0).map((event) => event.sequence)).toEqual([5, 6]);
+
+    const appended = await reopened.append('command.succeeded', { commandId: 'c7', idempotencyKey: 'i7' });
+    expect(appended.sequence).toBe(7);
+
+    const again = await ControlJournal.open(root, 3);
+    expect(again.read(0).map((event) => event.sequence)).toEqual([5, 6, 7]);
+  });
+
+  it('reopens a fully compacted journal at the right head', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
+    roots.push(root);
+    const journal = await ControlJournal.open(root, 3);
+    await journal.append('command.succeeded', { commandId: 'c1', idempotencyKey: 'i1' });
+    await journal.append('command.succeeded', { commandId: 'c2', idempotencyKey: 'i2' });
+
+    await journal.compact(2);
+
+    const reopened = await ControlJournal.open(root, 3);
+    expect(reopened.read(0)).toEqual([]);
+    expect(reopened.sequence).toBe(2);
+    expect((await reopened.append('command.succeeded', { commandId: 'c3' })).sequence).toBe(3);
+  });
+
+  it('still rejects a hole in the middle of a compacted journal', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
+    roots.push(root);
+    const runtime = path.join(root, '.psyche', 'runtime');
+    await mkdir(runtime, { recursive: true });
+    await writeFile(
+      path.join(runtime, 'events.ndjson'),
+      '{"journal":"psyche.control.journal/v1","firstSequence":5}\n{"sequence":5}\n{"sequence":7}\n',
+    );
+    await expect(ControlJournal.open(root, 1)).rejects.toThrow('journal corruption');
+  });
+
+  it('rejects a journal whose head does not match its declared first sequence', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
+    roots.push(root);
+    const runtime = path.join(root, '.psyche', 'runtime');
+    await mkdir(runtime, { recursive: true });
+    await writeFile(
+      path.join(runtime, 'events.ndjson'),
+      '{"journal":"psyche.control.journal/v1","firstSequence":5}\n{"sequence":6}\n',
+    );
+    await expect(ControlJournal.open(root, 1)).rejects.toThrow('journal corruption');
+  });
+
+  it('ignores a repeated or already-covered compaction', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
+    roots.push(root);
+    const journal = await ControlJournal.open(root, 3);
+    for (let index = 1; index <= 4; index += 1) {
+      await journal.append('command.succeeded', { commandId: `c${index}`, idempotencyKey: `i${index}` });
+    }
+    await journal.compact(3);
+    expect(journal.firstSequence).toBe(4);
+
+    // Re-running the same compaction, or one below the head, changes nothing.
+    await journal.compact(3);
+    await journal.compact(1);
+
+    expect(journal.firstSequence).toBe(4);
+    expect(journal.read(0).map((event) => event.sequence)).toEqual([4]);
+    const reopened = await ControlJournal.open(root, 3);
+    expect(reopened.read(0).map((event) => event.sequence)).toEqual([4]);
+  });
+
+  it('serialises compaction against concurrent appends', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
+    roots.push(root);
+    const journal = await ControlJournal.open(root, 3);
+    for (let index = 1; index <= 4; index += 1) {
+      await journal.append('command.succeeded', { commandId: `c${index}`, idempotencyKey: `i${index}` });
+    }
+
+    // Both are queued on the append tail without awaiting in between.
+    const compaction = journal.compact(3);
+    const appended = journal.append('command.succeeded', { commandId: 'c5', idempotencyKey: 'i5' });
+    await Promise.all([compaction, appended]);
+
+    expect((await appended).sequence).toBe(5);
+    const reopened = await ControlJournal.open(root, 3);
+    expect(reopened.read(0).map((event) => event.sequence)).toEqual([4, 5]);
+  });
+
+  it('round-trips a snapshot file with its durable extras', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
+    roots.push(root);
+    const journal = await ControlJournal.open(root, 3);
+    expect(await journal.loadSnapshot()).toBeUndefined();
+
+    await journal.writeSnapshot({
+      snapshot: { ownerEpoch: 3, sequence: 6, commands: {}, leases: {}, resources: [],
+        capabilityLeases: [], leaseHistory: [], leaseRequests: [], approvals: [], receipts: [] } as any,
+      coveredSequence: 4,
+      outcomes: { 'i1': { status: 'succeeded' } as any },
+      receiptRecords: [],
+    });
+
+    const loaded = await journal.loadSnapshot();
+    expect(loaded?.coveredSequence).toBe(4);
+    expect(loaded?.outcomes.i1).toMatchObject({ status: 'succeeded' });
+  });
+
   it('tolerates trailing blank lines in the journal file', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
     roots.push(root);
