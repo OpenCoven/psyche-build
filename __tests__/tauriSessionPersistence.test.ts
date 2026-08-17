@@ -82,15 +82,7 @@ describe('Tauri workspace persistence model', () => {
         command: 'rm -rf /',
         env: { SECRET: 'nope' },
       }),
-    ).toEqual({
-      id: 'session-1.alpha:beta',
-      projectId: 'project-a',
-      worktreePath: '/repo',
-      name: 'Shell',
-      kind: 'shell',
-      launchKind: 'shell',
-      hidden: true,
-    });
+    ).toBeNull();
 
     expect(
       workspaceModel.sanitizeSessionDescriptor({
@@ -138,6 +130,46 @@ describe('Tauri workspace persistence model', () => {
         launchKind: 'coven-attach',
       }),
     ).toBeNull();
+  });
+
+  test('falls back to launch kind when persisted kind is omitted or null', () => {
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'session-without-kind',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        name: 'Shell',
+        launchKind: 'shell',
+        hidden: true,
+        command: 'rm -rf /',
+        env: { SECRET: 'nope' },
+      }),
+    ).toEqual({
+      id: 'session-without-kind',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Shell',
+      kind: 'shell',
+      launchKind: 'shell',
+      hidden: true,
+    });
+
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'session-with-null-kind',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        kind: null,
+        launchKind: 'psyche',
+      }),
+    ).toEqual({
+      id: 'session-with-null-kind',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      kind: 'psyche',
+      launchKind: 'psyche',
+      hidden: false,
+    });
   });
 
   test('accepts only safe Coven attachment identifiers', () => {

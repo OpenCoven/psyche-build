@@ -178,8 +178,12 @@ export function sanitizeSessionDescriptor(saved) {
   }
 
   const launchKind = normalizeKind(saved.launchKind);
+  const kind =
+    saved.kind === undefined || saved.kind === null
+      ? launchKind
+      : normalizeKind(saved.kind);
 
-  if (!id || !projectId || !worktreePath || !launchKind) return null;
+  if (!id || !projectId || !worktreePath || !launchKind || !kind) return null;
 
   const descriptor = {
     id,
@@ -187,7 +191,7 @@ export function sanitizeSessionDescriptor(saved) {
     worktreePath,
     hidden: saved.hidden === true,
     launchKind,
-    kind: normalizeKind(saved.kind) || launchKind,
+    kind,
   };
 
   const name = safeString(saved.name, 256);
