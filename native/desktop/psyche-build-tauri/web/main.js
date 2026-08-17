@@ -1793,6 +1793,11 @@
     }
     return null;
   }
+  function findFocusableThread(id) {
+    var thread = findThread(id);
+    if (!thread || thread.hidden || thread.closing || thread.closeStarted) return null;
+    return thread;
+  }
   function findFilesPaneBySurfaceId(id) {
     var match = null;
     filesPanes.forEach(function (pane) {
@@ -7427,11 +7432,15 @@
               }
               async function activateLocalRow() {
                 if (setPicking) { toggleSetPick(thread.id); return; }
-                settings.selectedSessionKey = rowModel.selectionKey;
-                saveSettings();
+                var liveThread = findFocusableThread(thread.id);
+                if (!liveThread) return;
                 if (project.id !== state.activeProjectId &&
                     !(await setActiveProject(project.id))) return;
-                await focusThreadFromSidebar(thread);
+                liveThread = findFocusableThread(thread.id);
+                if (!liveThread) return;
+                settings.selectedSessionKey = rowModel.selectionKey;
+                saveSettings();
+                await focusThreadFromSidebar(liveThread);
               }
               row.addEventListener("click", activateLocalRow);
               row.addEventListener("keydown", function (event) {

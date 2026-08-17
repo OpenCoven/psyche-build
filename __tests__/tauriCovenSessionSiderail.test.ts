@@ -514,6 +514,8 @@ type LocalThread = {
   status?: string;
   spawning?: boolean;
   hidden?: boolean;
+  closing?: boolean;
+  closeStarted?: boolean;
   launch?: {
     covenSessionId?: string | null;
     launchKind?: string | null;
@@ -735,6 +737,7 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'projectAppearanceContextActions'),
     extractFunctionSource(mainJs, 'saveProjectAppearances'),
     extractFunctionSource(mainJs, 'applyProjectAppearance'),
+    extractFunctionSource(mainJs, 'findFocusableThread'),
     extractFunctionSource(mainJs, 'focusThreadFromSidebar'),
     extractFunctionSource(mainJs, 'renderSessionList'),
   ];
@@ -3096,6 +3099,75 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.focusThread).toHaveBeenCalledWith('local', {
         preserveFullscreenLeafId: 'leaf-local',
       });
+    });
+
+    it.each([
+      ['hidden', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads[0].hidden = true;
+      }],
+      ['closing', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads[0].closing = true;
+      }],
+      ['close-started', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads[0].closeStarted = true;
+      }],
+      ['removed', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads.splice(0, 1);
+      }],
+    ])('rejects a local row that becomes %s before activation', async (_state, stale) => {
+      const paneLayout = { maximizedLeafId: 'leaf-local' as string | null };
+      const renderer = createRenderer({
+        threads: [{
+          id: 'local', projectId: 'alpha', name: 'Local', status: 'running',
+          worktreePath: '/alpha',
+        }],
+        activeProjectId: 'alpha',
+        paneLayout,
+        selectedSessionKey: 'coven:previous',
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row');
+      const selectedSessionKey = renderer.settings.selectedSessionKey;
+      renderer.saveSettings.mockClear();
+
+      stale(renderer);
+      await row?.emit('click');
+
+      expect(renderer.settings.selectedSessionKey).toBe(selectedSessionKey);
+      expect(renderer.saveSettings).not.toHaveBeenCalled();
+      expect(renderer.setActiveProject).not.toHaveBeenCalled();
+      expect(renderer.applySetScopeForThread).not.toHaveBeenCalled();
+      expect(paneLayout.maximizedLeafId).toBe('leaf-local');
+      expect(renderer.focusThread).not.toHaveBeenCalled();
+    });
+
+    it('revalidates a local row after switching projects', async () => {
+      const paneLayout = { maximizedLeafId: 'leaf-local' as string | null };
+      const renderer = createRenderer({
+        threads: [{
+          id: 'local', projectId: 'alpha', name: 'Local', status: 'running',
+          worktreePath: '/alpha',
+        }],
+        activeProjectId: 'other',
+        paneLayout,
+        selectedSessionKey: 'coven:previous',
+      });
+      renderer.render();
+      const selectedSessionKey = renderer.settings.selectedSessionKey;
+      renderer.saveSettings.mockClear();
+      renderer.setActiveProject.mockImplementation(async () => {
+        renderer.state.threads[0].hidden = true;
+        return true;
+      });
+
+      await renderer.sessionListEl.querySelector('.session-row')?.emit('click');
+
+      expect(renderer.setActiveProject).toHaveBeenCalledWith('alpha');
+      expect(renderer.settings.selectedSessionKey).toBe(selectedSessionKey);
+      expect(renderer.saveSettings).not.toHaveBeenCalled();
+      expect(renderer.applySetScopeForThread).not.toHaveBeenCalled();
+      expect(paneLayout.maximizedLeafId).toBe('leaf-local');
+      expect(renderer.focusThread).not.toHaveBeenCalled();
     });
 
     it('uses aria-selected for picked membership while keeping aria-current on the active row', async () => {
