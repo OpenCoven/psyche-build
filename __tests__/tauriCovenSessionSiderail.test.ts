@@ -697,6 +697,7 @@ function createRenderer(options: {
     'var toastTimer = 0;',
     'var sessionTreeFocusKey = "";',
     'var isRestoringWorkspace = false;',
+    'var browserPaneLifecycleStates = new WeakMap();',
     extractFunctionSource(mainJs, 'toast'),
     extractFunctionSource(mainJs, 'showStatusError'),
     extractFunctionSource(mainJs, 'queueDeferredStatus'),
@@ -752,6 +753,8 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'projectAppearanceContextActions'),
     extractFunctionSource(mainJs, 'saveProjectAppearances'),
     extractFunctionSource(mainJs, 'applyProjectAppearance'),
+    extractFunctionSource(mainJs, 'browserPaneLifecycle'),
+    extractFunctionSource(mainJs, 'browserPaneIsClosing'),
     extractFunctionSource(mainJs, 'findFocusableThread'),
     extractFunctionSource(mainJs, 'focusThreadFromSidebar'),
     extractFunctionSource(mainJs, 'renderSessionList'),
@@ -784,6 +787,7 @@ function createRenderer(options: {
       picked: function () { return setPicking ? setPicking.picked.slice() : null; },
       saveProjectAppearances: saveProjectAppearances,
       applyProjectAppearance: applyProjectAppearance,
+      browserPaneLifecycle: browserPaneLifecycle,
       projectAppearances: function () { return projectAppearances; },
       sessionTreeFocusKey: function () { return sessionTreeFocusKey; },
       setProjectAppearancePopover: function (popover, restoreKey) {
@@ -874,6 +878,7 @@ function createRenderer(options: {
       project: Project | null | undefined,
       patch: { accent?: string | null; glyph?: string | null } | null,
     ) => boolean;
+    browserPaneLifecycle: (thread: LocalThread) => { tearingDown: boolean };
     projectAppearances: () => Record<string, { accent?: string; glyph?: string }>;
     sessionTreeFocusKey: () => string;
     setProjectAppearancePopover: (popover: FakeElement | null, restoreKey?: string) => void;
@@ -3279,6 +3284,33 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.setActiveProject).not.toHaveBeenCalled();
       expect(renderer.applySetScopeForThread).not.toHaveBeenCalled();
       expect(paneLayout.maximizedLeafId).toBe('leaf-local');
+      expect(renderer.focusThread).not.toHaveBeenCalled();
+    });
+
+    it('rejects a rendered browser row that starts tearing down before activation', async () => {
+      const paneLayout = { maximizedLeafId: 'leaf-web' as string | null };
+      const browserThread = {
+        id: 'web', kind: 'web', projectId: 'alpha', name: 'Browser', status: 'running',
+        worktreePath: '/alpha',
+      };
+      const renderer = createRenderer({
+        threads: [browserThread],
+        activeProjectId: 'alpha',
+        paneLayout,
+        selectedSessionKey: 'coven:previous',
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row');
+      const selectedSessionKey = renderer.settings.selectedSessionKey;
+      renderer.saveSettings.mockClear();
+
+      renderer.browserPaneLifecycle(browserThread).tearingDown = true;
+      await row?.emit('click');
+
+      expect(renderer.settings.selectedSessionKey).toBe(selectedSessionKey);
+      expect(renderer.saveSettings).not.toHaveBeenCalled();
+      expect(renderer.applySetScopeForThread).not.toHaveBeenCalled();
+      expect(paneLayout.maximizedLeafId).toBe('leaf-web');
       expect(renderer.focusThread).not.toHaveBeenCalled();
     });
 

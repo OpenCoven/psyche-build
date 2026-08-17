@@ -1795,7 +1795,10 @@
   }
   function findFocusableThread(id) {
     var thread = findThread(id);
-    if (!thread || thread.hidden || thread.closing || thread.closeStarted) return null;
+    if (!thread || thread.hidden ||
+        (thread.kind === "web"
+          ? browserPaneIsClosing(thread)
+          : thread.closing || thread.closeStarted)) return null;
     return thread;
   }
   function findFilesPaneBySurfaceId(id) {
@@ -4433,8 +4436,10 @@
   async function focusThread(id, options) {
     function resolveFocusableThread() {
       var candidate = findThread(id);
-      if (!candidate || candidate.hidden || candidate.closing ||
-          candidate.closeStarted) return null;
+      if (!candidate || candidate.hidden ||
+          (candidate.kind === "web"
+            ? browserPaneIsClosing(candidate)
+            : candidate.closing || candidate.closeStarted)) return null;
       return candidate;
     }
     var thread = resolveFocusableThread();
