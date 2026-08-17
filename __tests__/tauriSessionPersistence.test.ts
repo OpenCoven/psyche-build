@@ -69,7 +69,7 @@ describe('Tauri workspace persistence model', () => {
     });
   });
 
-  test('sanitizes session descriptors and strips command env payloads', () => {
+  test('validates persisted session descriptor kinds and Coven attach launches', () => {
     expect(
       workspaceModel.sanitizeSessionDescriptor({
         id: 'session-1.alpha:beta',
