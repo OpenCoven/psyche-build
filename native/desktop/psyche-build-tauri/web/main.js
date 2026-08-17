@@ -5452,6 +5452,33 @@
     return sidebarView;
   }
 
+  async function showProjectFiles(projectId) {
+    var project = findProject(projectId);
+    if (!project) return false;
+    if (!(await setActiveProject(projectId))) return false;
+    project = findProject(projectId);
+    if (!project || state.activeProjectId !== project.id) return false;
+    sidebarFilesReturnProjectId = project.id;
+    setSidebarView("files");
+    return true;
+  }
+
+  function showSessionsSidebar() {
+    var restoreProjectId = sidebarFilesReturnProjectId;
+    sidebarFilesReturnProjectId = null;
+    setSidebarView("sessions");
+    renderSessionList({ preserveFocus: false });
+    requestAnimationFrame(function () {
+      var buttons = sessionListEl ? sessionListEl.querySelectorAll("[data-project-files]") : [];
+      var target = Array.prototype.find.call(buttons, function (button) {
+        return button.dataset.projectFiles === restoreProjectId;
+      });
+      if (target) target.focus();
+      else restoreSessionTreeFocus("");
+    });
+    return true;
+  }
+
   // The git panel uses the same segmented switch as the sidebar: Changes is the
   // working tree and its diffs, Commit is the branch state and history. Two
   // rails, one control to learn.
@@ -6763,8 +6790,15 @@
       attention.textContent = "!" + projectModel.attentionCount;
       count.appendChild(attention);
     }
+    var files = document.createElement("button");
+    files.type = "button";
+    files.className = "session-project-files";
+    files.dataset.projectFiles = projectModel.project.id;
+    files.textContent = "Files";
+    files.setAttribute("aria-label", "Browse files in " + projectModel.title);
     head.appendChild(title);
     head.appendChild(count);
+    head.appendChild(files);
     attachTooltip(
       head,
       (projectModel.project.root || projectModel.title) +
@@ -6791,6 +6825,7 @@
       group: group,
       head: head,
       disclosure: disclosure,
+      files: files,
       children: children,
     };
   }
@@ -7114,7 +7149,6 @@
         selectedKey: selectedKey,
         now: now,
       });
-      if (projectModel.visibleCount === 0) return;
       matched += projectModel.visibleCount;
       projectModels.push({
         project: project,
@@ -7216,6 +7250,14 @@
         event.preventDefault();
         event.stopPropagation();
         setProjectExpanded(!projectModel.expanded);
+      });
+      projectParts.files.addEventListener("pointerdown", function (event) {
+        event.stopPropagation();
+      });
+      projectParts.files.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        showProjectFiles(project.id);
       });
       projectParts.group.addEventListener("click", function (event) {
         if (!targetWithin(event, projectParts.head) ||
@@ -11761,8 +11803,7 @@
   }
 
   onRailClick("files-back", function () {
-    sidebarFilesReturnProjectId = null;
-    setSidebarView("sessions");
+    showSessionsSidebar();
   });
   onRailClick("files-refresh", function () { renderFilesPanel(); });
 

@@ -4829,3 +4829,28 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .session-project-head .session-project-count {
   color: rgb(var(--project-accent-rgb) / 0.84);
 }
+
+.session-project-files {
+  flex: none;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.session-project-files:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.session-project-files:focus-visible {
+  outline: none;
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
