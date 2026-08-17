@@ -180,19 +180,92 @@ describe('Tauri workspace persistence model', () => {
     ).toBeNull();
   });
 
-  test('preserves safe Coven chat identifiers needed for explicit retry', () => {
+  test('migrates legacy Coven descriptors to Coven Code metadata', () => {
     expect(
       workspaceModel.sanitizeSessionDescriptor({
-        id: 'chat-1',
+        id: 'code-legacy',
         projectId: 'project-a',
         worktreePath: '/repo',
+        name: 'Coven',
         kind: 'coven-chat',
         launchKind: 'coven-chat',
         covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
       }),
-    ).toMatchObject({
-      launchKind: 'coven-chat',
+    ).toEqual({
+      id: 'code-legacy',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Coven',
+      kind: 'coven-code',
+      launchKind: 'coven-code',
+      hidden: false,
       covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+    });
+  });
+
+  test('preserves canonical Coven Code identifiers needed for explicit retry', () => {
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'code-current',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        name: 'Coven Code',
+        kind: 'coven-code',
+        launchKind: 'coven-code',
+        covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+      }),
+    ).toEqual({
+      id: 'code-current',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Coven Code',
+      kind: 'coven-code',
+      launchKind: 'coven-code',
+      hidden: false,
+      covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+    });
+  });
+
+  test('normalizes legacy Coven metadata before workspace state is returned', () => {
+    expect(
+      workspaceModel.sanitizeWorkspaceV3({
+        version: 3,
+        activeProjectId: 'project-a',
+        activeThreadId: 'code-legacy',
+        projects: [{ id: 'project-a', root: '/repo' }],
+        sessions: [
+          {
+            id: 'code-legacy',
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            name: 'Coven',
+            kind: 'coven-chat',
+            launchKind: 'coven-chat',
+            covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+          },
+        ],
+        filesPanes: [],
+        paneLayouts: [],
+      }),
+    ).toEqual({
+      version: 3,
+      activeProjectId: 'project-a',
+      activeThreadId: 'code-legacy',
+      projects: [{ id: 'project-a', root: '/repo' }],
+      sessions: [
+        {
+          id: 'code-legacy',
+          projectId: 'project-a',
+          worktreePath: '/repo',
+          name: 'Coven',
+          kind: 'coven-code',
+          launchKind: 'coven-code',
+          hidden: false,
+          covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+        },
+      ],
+      filesPanes: [],
+      paneLayouts: [],
     });
   });
 
