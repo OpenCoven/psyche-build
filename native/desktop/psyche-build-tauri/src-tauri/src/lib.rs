@@ -6314,6 +6314,31 @@ fn resolve_git_ref(refs: &HashMap<String, GitRefValue>, name: &str) -> Option<St
     None
 }
 
+fn is_valid_git_reftable_table_name(name: &str) -> bool {
+    fn is_ascii_hex(value: &str) -> bool {
+        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    fn is_prefixed_ascii_hex(value: &str) -> bool {
+        value.strip_prefix("0x").is_some_and(is_ascii_hex)
+    }
+
+    let Some(stem) = name.strip_suffix(".ref") else {
+        return false;
+    };
+    let mut components = stem.split('-');
+    let (Some(first), Some(second), Some(third)) =
+        (components.next(), components.next(), components.next())
+    else {
+        return false;
+    };
+
+    components.next().is_none()
+        && is_prefixed_ascii_hex(first)
+        && is_prefixed_ascii_hex(second)
+        && is_ascii_hex(third)
+}
+
 fn snapshot_git_reftable_with_limits_and_hook<F, G>(
     source: &Path,
     destination: &Path,
@@ -6337,6 +6362,9 @@ where
         }
         if Path::new(table).file_name().and_then(OsStr::to_str) != Some(table) {
             return Err("Git reftable table list contains an invalid path".to_string());
+        }
+        if !is_valid_git_reftable_table_name(table) {
+            return Err("Git reftable table list contains an invalid table name".to_string());
         }
         names.push(table);
     }
@@ -11533,6 +11561,60 @@ mod workspace_panel_tests {
         }
     }
 
+    const TEST_REFTABLE_TABLE_ONE: &str = "0x1-0x2-3.ref";
+    const TEST_REFTABLE_TABLE_TWO: &str = "0x4-0x5-6.ref";
+    const TEST_REFTABLE_TABLE_THREE: &str = "0x7-0x8-9.ref";
+    const REPRESENTATIVE_GIT_REFTABLE_TABLE: &str = "0x000000000001-0x000000000002-3b8de075.ref";
+
+    fn write_test_reftable_table_list(source: &Path, names: &[&str]) {
+        let mut list = names.join("\n");
+        list.push('\n');
+        std::fs::write(source.join("tables.list"), list).unwrap();
+    }
+
+    #[test]
+    fn git_reftable_table_name_validation_matches_git_grammar() {
+        assert!(is_valid_git_reftable_table_name(
+            REPRESENTATIVE_GIT_REFTABLE_TABLE
+        ));
+        for name in [
+            "NUL.ref",
+            "COM1.ref",
+            "one.ref",
+            "0x-0x2-3.ref",
+            "0x1-0x-3.ref",
+            "0x1-0x2-.ref",
+            "0x1-0x2-3-4.ref",
+            "0x1-0x2-3g.ref",
+        ] {
+            assert!(
+                !is_valid_git_reftable_table_name(name),
+                "unexpectedly accepted {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_reftable_snapshot_rejects_invalid_table_names_without_publication() {
+        for name in ["NUL.ref", "COM1.ref", "one.ref", "0x1-0x2-3-4.ref"] {
+            let tree = TempTree::new("git-reftable-invalid-table-name");
+            let source = tree.root.join("source");
+            let destination = tree.root.join("destination");
+            std::fs::create_dir_all(&source).unwrap();
+            write_test_reftable_table_list(&source, &[name]);
+
+            let error = snapshot_git_reftable_with_limits(
+                &source,
+                &destination,
+                tiny_git_reftable_snapshot_limits(),
+            )
+            .unwrap_err();
+
+            assert!(error.contains("invalid table name"), "{name}: {error}");
+            assert!(!destination.exists(), "{name} must not be published");
+        }
+    }
+
     #[test]
     fn git_metadata_windows_identity_distinguishes_file_ids() {
         let path = WindowsGitMetadataState {
@@ -11576,10 +11658,10 @@ mod workspace_panel_tests {
         let destination = tree.root.join("destination");
         std::fs::create_dir_all(&source).unwrap();
         std::fs::create_dir_all(&replacement).unwrap();
-        std::fs::write(source.join("tables.list"), b"one.ref\n").unwrap();
-        std::fs::write(source.join("one.ref"), b"orig").unwrap();
-        std::fs::write(replacement.join("tables.list"), b"one.ref\n").unwrap();
-        std::fs::write(replacement.join("one.ref"), b"evil").unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"orig").unwrap();
+        write_test_reftable_table_list(&replacement, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(replacement.join(TEST_REFTABLE_TABLE_ONE), b"evil").unwrap();
 
         snapshot_git_reftable_with_limits_and_hook(
             &source,
@@ -11597,7 +11679,10 @@ mod workspace_panel_tests {
         )
         .unwrap();
 
-        assert_eq!(std::fs::read(destination.join("one.ref")).unwrap(), b"orig");
+        assert_eq!(
+            std::fs::read(destination.join(TEST_REFTABLE_TABLE_ONE)).unwrap(),
+            b"orig"
+        );
     }
 
     #[cfg(unix)]
@@ -11608,9 +11693,9 @@ mod workspace_panel_tests {
         let tree = TempTree::new("git-reftable-fifo-table");
         let source = tree.root.join("source");
         let destination = tree.root.join("destination");
-        let fifo = source.join("one.ref");
+        let fifo = source.join(TEST_REFTABLE_TABLE_ONE);
         std::fs::create_dir_all(&source).unwrap();
-        std::fs::write(source.join("tables.list"), b"one.ref\n").unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
         let fifo_path = c_path(&fifo).unwrap();
         let created = unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) };
         assert_eq!(
@@ -11660,8 +11745,8 @@ mod workspace_panel_tests {
         let source = tree.root.join("source");
         let destination = tree.root.join("destination");
         std::fs::create_dir_all(&source).unwrap();
-        std::fs::write(source.join("tables.list"), b"one.ref\n").unwrap();
-        std::fs::write(source.join("one.ref"), b"table").unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"table").unwrap();
 
         snapshot_git_reftable_with_limits(
             &source,
@@ -11671,12 +11756,12 @@ mod workspace_panel_tests {
         .unwrap();
 
         assert_eq!(
-            std::fs::read(destination.join("one.ref")).unwrap(),
+            std::fs::read(destination.join(TEST_REFTABLE_TABLE_ONE)).unwrap(),
             b"table"
         );
         assert_eq!(
             std::fs::read(destination.join("tables.list")).unwrap(),
-            b"one.ref\n"
+            format!("{TEST_REFTABLE_TABLE_ONE}\n").as_bytes()
         );
     }
 
@@ -11705,14 +11790,20 @@ mod workspace_panel_tests {
         let source = tree.root.join("source");
         let destination = tree.root.join("destination");
         std::fs::create_dir_all(&source).unwrap();
-        std::fs::write(source.join("tables.list"), b"one.ref\ntwo.ref\nthree.ref\n").unwrap();
-
-        let error = snapshot_git_reftable_with_limits(
+        write_test_reftable_table_list(
             &source,
-            &destination,
-            tiny_git_reftable_snapshot_limits(),
-        )
-        .unwrap_err();
+            &[
+                TEST_REFTABLE_TABLE_ONE,
+                TEST_REFTABLE_TABLE_TWO,
+                TEST_REFTABLE_TABLE_THREE,
+            ],
+        );
+        let limits = GitReftableSnapshotLimits {
+            list_bytes: 64,
+            ..tiny_git_reftable_snapshot_limits()
+        };
+
+        let error = snapshot_git_reftable_with_limits(&source, &destination, limits).unwrap_err();
 
         assert!(error.contains("too many tables"));
         assert!(!destination.exists());
@@ -11724,8 +11815,8 @@ mod workspace_panel_tests {
         let source = tree.root.join("source");
         let destination = tree.root.join("destination");
         std::fs::create_dir_all(&source).unwrap();
-        std::fs::write(source.join("tables.list"), b"one.ref\n").unwrap();
-        std::fs::write(source.join("one.ref"), b"123456789").unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"123456789").unwrap();
 
         let error = snapshot_git_reftable_with_limits(
             &source,
@@ -11734,7 +11825,7 @@ mod workspace_panel_tests {
         )
         .unwrap_err();
 
-        assert!(error.contains("table one.ref is too large"));
+        assert!(error.contains(&format!("table {TEST_REFTABLE_TABLE_ONE} is too large")));
         assert!(!destination.exists());
     }
 
@@ -11744,9 +11835,12 @@ mod workspace_panel_tests {
         let source = tree.root.join("source");
         let destination = tree.root.join("destination");
         std::fs::create_dir_all(&source).unwrap();
-        std::fs::write(source.join("tables.list"), b"one.ref\ntwo.ref\n").unwrap();
-        std::fs::write(source.join("one.ref"), b"12345678").unwrap();
-        std::fs::write(source.join("two.ref"), b"12345678").unwrap();
+        write_test_reftable_table_list(
+            &source,
+            &[TEST_REFTABLE_TABLE_ONE, TEST_REFTABLE_TABLE_TWO],
+        );
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"12345678").unwrap();
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_TWO), b"12345678").unwrap();
 
         let error = snapshot_git_reftable_with_limits(
             &source,
@@ -11766,9 +11860,13 @@ mod workspace_panel_tests {
         let destination = tree.root.join("destination");
         let linked = tree.root.join("linked.ref");
         std::fs::create_dir_all(&source).unwrap();
-        std::fs::write(source.join("tables.list"), b"one.ref\n").unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
         std::fs::write(&linked, b"linked").unwrap();
-        if !create_test_symlink(TestSymlinkKind::File, &linked, &source.join("one.ref")) {
+        if !create_test_symlink(
+            TestSymlinkKind::File,
+            &linked,
+            &source.join(TEST_REFTABLE_TABLE_ONE),
+        ) {
             return;
         }
 
