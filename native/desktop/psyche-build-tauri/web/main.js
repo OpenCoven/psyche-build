@@ -7434,10 +7434,23 @@
                 if (setPicking) { toggleSetPick(thread.id); return; }
                 var liveThread = findFocusableThread(thread.id);
                 if (!liveThread) return;
-                if (project.id !== state.activeProjectId &&
-                    !(await setActiveProject(project.id))) return;
+                var liveProject = findProject(liveThread.projectId);
+                if (!liveProject) return;
+                var worktreePath = liveThread.worktreePath || liveProject.root;
+                if ((liveProject.id !== state.activeProjectId ||
+                    activeWorkspaceRoot(liveProject) !== worktreePath) &&
+                    !(await activateProjectWorktree(
+                      liveProject,
+                      worktreePath,
+                      { refreshStatus: false }
+                    ))) return;
                 liveThread = findFocusableThread(thread.id);
-                if (!liveThread) return;
+                liveProject = liveThread && findProject(liveThread.projectId);
+                worktreePath = liveThread && liveProject &&
+                  (liveThread.worktreePath || liveProject.root);
+                if (!liveThread || !liveProject ||
+                    liveProject.id !== state.activeProjectId ||
+                    activeWorkspaceRoot(liveProject) !== worktreePath) return;
                 settings.selectedSessionKey = rowModel.selectionKey;
                 saveSettings();
                 await focusThreadFromSidebar(liveThread);

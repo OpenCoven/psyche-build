@@ -44,6 +44,10 @@ const PsycheSessions = {
     'native/desktop/psyche-build-tauri/web/sessions/project-appearance.mjs',
   )).href)),
 };
+const PsychePanes = await import(pathToFileURL(join(
+  repoRoot,
+  'native/desktop/psyche-build-tauri/web/panes/pane-tree.mjs',
+)).href);
 
 function extractFunctionSource(source: string, name: string) {
   const asyncStart = source.indexOf(`async function ${name}(`);
@@ -603,10 +607,21 @@ function createRenderer(options: {
     stale: options.stale ?? false,
   };
   const setActiveProject = vi.fn().mockResolvedValue(true);
-  const activateProjectWorktree = vi.fn(async (project: Project) => {
-    await setActiveProject(project.id);
+  const activateProjectWorktree = vi.fn(async (project: Project, worktreePath: string) => {
+    const previousWorktreePath = project.selectedWorktreePath;
+    project.selectedWorktreePath = worktreePath;
+    if (project.id !== state.activeProjectId) {
+      if (!(await setActiveProject(project.id))) {
+        project.selectedWorktreePath = previousWorktreePath;
+        return false;
+      }
+      state.activeProjectId = project.id;
+    }
     return true;
   });
+  const activeWorkspaceRoot = (project: Project) =>
+    project.selectedWorktreePath ?? project.worktrees?.find((worktree) => worktree.is_main)?.path ??
+    project.worktrees?.[0]?.path ?? project.root;
   const findThread = (id: string | null | undefined) =>
     state.threads.find((thread) => thread.id === id) ?? null;
   const findProject = (id: string | null | undefined) =>
@@ -648,7 +663,7 @@ function createRenderer(options: {
   const focusSets = options.focusSets ?? [];
   const scopingSet = options.scopingSet ?? null;
   const removeFromFocusSet = vi.fn();
-  const applySetScopeForThread = vi.fn(() => {
+  const applySetScopeForThread = vi.fn((_thread?: LocalThread) => {
     if (options.paneLayout) options.paneLayout.maximizedLeafId = null;
   });
   const activateFocusSet = vi.fn();
@@ -744,7 +759,8 @@ function createRenderer(options: {
   const harness = Function(
     'document', 'sessionListEl', 'editingContext', 'state',
     'covenDiscovery', 'PsycheSessions', 'sessionStatusClass', 'shortenRoot',
-    'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread', 'closeBrowserPane',
+    'escapeHtml', 'setActiveProject', 'activeWorkspaceRoot', 'focusThread', 'closeThread',
+    'closeBrowserPane',
     'requestThreadClose', 'hideThread', 'renameThread', 'editLabelInline',
     'openCovenSession', 'setStatus',
     'canvasThreadIds', 'paneGlyphFor', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout',
@@ -795,6 +811,7 @@ function createRenderer(options: {
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#39;'),
     setActiveProject,
+    activeWorkspaceRoot,
     focusThread,
     closeThread,
     closeBrowserPane,
@@ -2777,12 +2794,14 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.focusThread).toHaveBeenCalledWith('local');
 
     renderer.setActiveProject.mockClear();
+    renderer.activateProjectWorktree.mockClear();
     renderer.focusThread.mockClear();
     localRow.focus();
     const enterEvent = new FakeEvent(localRow, 'Enter');
     renderer.handleTreeKeydown(enterEvent);
     expect(enterEvent.defaultPrevented).toBe(true);
-    expect(renderer.setActiveProject).toHaveBeenCalledWith('alpha');
+    expect(renderer.setActiveProject).not.toHaveBeenCalled();
+    expect(renderer.activateProjectWorktree).not.toHaveBeenCalled();
     await vi.waitFor(() => {
       expect(renderer.focusThread).toHaveBeenCalledWith('local');
     });
@@ -3099,6 +3118,128 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.focusThread).toHaveBeenCalledWith('local', {
         preserveFullscreenLeafId: 'leaf-local',
       });
+    });
+
+    it('scopes fullscreen selection to the target worktree layout', async () => {
+      const project: Project = {
+        id: 'alpha',
+        name: 'Alpha',
+        root: '/alpha',
+        selectedWorktreePath: '/alpha/a',
+        worktrees: [
+          { path: '/alpha/a', branch: 'a', is_main: true, dirty: false, missing: false },
+          { path: '/alpha/b', branch: 'b', is_main: false, dirty: false, missing: false },
+        ],
+      };
+      const targetThread = {
+        id: 'target', projectId: 'alpha', name: 'Target', status: 'running',
+        worktreePath: '/alpha/b',
+      };
+      const layoutA = {
+        root: PsychePanes.createLeaf('leaf-a', 'source-a'),
+        focusedLeafId: 'leaf-a',
+        maximizedLeafId: 'leaf-a' as string | null,
+        activeSetId: 'set-a' as string | null,
+        spanRoot: { stale: 'a' } as unknown,
+        spanSignature: 'a',
+      };
+      const layoutB = {
+        root: PsychePanes.insertBelow(
+          PsychePanes.createLeaf('leaf-b-source', 'source-b'),
+          'leaf-b-source',
+          PsychePanes.createLeaf('leaf-b-target', targetThread.id),
+          'split-b',
+        ),
+        focusedLeafId: 'leaf-b-source',
+        maximizedLeafId: 'leaf-b-source' as string | null,
+        activeSetId: null as string | null,
+        spanRoot: { stale: 'b' } as unknown,
+        spanSignature: 'b' as string | null,
+      };
+      const layouts = new Map([
+        ['/alpha/a', layoutA],
+        ['/alpha/b', layoutB],
+      ]);
+      const targetSet = {
+        id: 'set-b',
+        index: 2,
+        name: 'Target set',
+        key: 'alpha\0/alpha/b',
+        threadIds: [targetThread.id],
+      };
+      const renderer = createRenderer({
+        projects: [project],
+        threads: [
+          {
+            id: 'source-a', projectId: 'alpha', name: 'Source A', status: 'running',
+            worktreePath: '/alpha/a',
+          },
+          targetThread,
+        ],
+        activeProjectId: project.id,
+        activeThreadId: 'source-a',
+        focusSets: [targetSet],
+        paneLayout: layoutB,
+      });
+      renderer.applySetScopeForThread.mockImplementation((thread?: LocalThread) => {
+        if (!thread) return false;
+        const activeLayout = layouts.get(project.selectedWorktreePath ?? '');
+        const set = renderer.focusSets.find((candidate) =>
+          candidate.key === `alpha\0${thread.worktreePath}` &&
+          candidate.threadIds.includes(thread.id));
+        if (!activeLayout || !set) return false;
+        activeLayout.activeSetId = set.id;
+        activeLayout.maximizedLeafId = null;
+        activeLayout.spanRoot = null;
+        activeLayout.spanSignature = null;
+        return true;
+      });
+      renderer.focusThread.mockImplementation(async (id: string, focusOptions?: {
+        preserveFullscreenLeafId?: string;
+      }) => {
+        const thread = renderer.state.threads.find((candidate) => candidate.id === id);
+        if (!thread) return;
+        project.selectedWorktreePath = thread.worktreePath;
+        const layout = layouts.get(thread.worktreePath ?? '');
+        const leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
+        if (!layout || !leaf) return;
+        const maximizedLeafId = layout.maximizedLeafId ??
+          focusOptions?.preserveFullscreenLeafId;
+        if (maximizedLeafId) {
+          layout.maximizedLeafId = PsychePanes.findLeafById(layout.root, maximizedLeafId)
+            ? leaf.id
+            : null;
+        }
+        layout.focusedLeafId = leaf.id;
+        renderer.state.activeThreadId = id;
+      });
+      renderer.render();
+
+      const targetRow = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((row) => row.dataset.threadId === targetThread.id);
+      await targetRow?.emit('click');
+
+      expect(renderer.activateProjectWorktree).toHaveBeenCalledWith(
+        project,
+        '/alpha/b',
+        { refreshStatus: false },
+      );
+      expect(layoutA).toMatchObject({
+        focusedLeafId: 'leaf-a',
+        maximizedLeafId: 'leaf-a',
+        activeSetId: 'set-a',
+        spanSignature: 'a',
+      });
+      expect(layoutA.spanRoot).toEqual({ stale: 'a' });
+      expect(layoutB).toMatchObject({
+        focusedLeafId: 'leaf-b-target',
+        maximizedLeafId: 'leaf-b-target',
+        activeSetId: targetSet.id,
+      });
+      expect(layoutB.spanRoot).toBeNull();
+      expect(layoutB.spanSignature).toBeNull();
+      const visibleRoot = PsychePanes.findLeafById(layoutB.root, layoutB.maximizedLeafId);
+      expect(PsychePanes.leafIds(visibleRoot)).toEqual(['leaf-b-target']);
     });
 
     it.each([
