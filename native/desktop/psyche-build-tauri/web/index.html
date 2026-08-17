@@ -57,22 +57,11 @@
 
       <div class="workbench" id="workbench">
         <aside class="rail sidebar" id="sidebar" aria-label="Sessions">
-          <div class="sidebar-controls">
-            <div class="sidebar-tabs" role="tablist" aria-label="Sidebar sections">
-              <button class="sidebar-tab is-active" data-sidebar-tab="sessions" type="button" role="tab" aria-selected="true">
-                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.75 4.25h10.5M2.75 8h10.5M2.75 11.75h6.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-                <span>Sessions</span>
-              </button>
-              <button class="sidebar-tab" data-sidebar-tab="files" type="button" role="tab" aria-selected="false">
-                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.4 4.6A1.35 1.35 0 0 1 3.75 3.25h2.3c.42 0 .82.2 1.07.54l.62.83h4.51a1.35 1.35 0 0 1 1.35 1.35v5.68a1.35 1.35 0 0 1-1.35 1.35H3.75a1.35 1.35 0 0 1-1.35-1.35z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
-                <span>Files</span>
-              </button>
-            </div>
-
+          <div class="sidebar-controls" id="sidebar-session-controls">
             <div class="sidebar-head">
               <button
                 id="rail-new-tab"
-                class="rail-btn has-tooltip"
+                class="rail-btn new-session-button has-tooltip"
                 type="button"
                 data-tooltip="Create a new session"
                 title="Create a new session (t / a / w)"
@@ -80,12 +69,7 @@
                 aria-haspopup="menu"
                 aria-expanded="false"
                 aria-controls="new-pane-menu"
-              >
-                <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-                  <path d="M8 3.75v8.5M3.75 8h8.5" fill="none" stroke="currentColor"
-                        stroke-width="1.6" stroke-linecap="round"/>
-                </svg>
-              </button>
+              >New Session</button>
             </div>
 
             <div class="session-filter-row" role="toolbar" aria-label="Filter sessions">
@@ -125,6 +109,13 @@
 
           <div class="sidebar-files" id="sidebar-files" hidden>
             <div class="sidebar-subbar">
+              <button
+                id="files-back"
+                class="sidebar-back-button"
+                type="button"
+                title="Back to Sessions"
+                aria-label="Back to Sessions"
+              >‹ Sessions</button>
               <span class="panel-crumb" id="files-crumb"></span>
               <button id="files-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh file tree">
                 <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>

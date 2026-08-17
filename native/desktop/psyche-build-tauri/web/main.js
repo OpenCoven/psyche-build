@@ -1012,7 +1012,6 @@
       bgOpacity: DEFAULT_BG_OPACITY,
       theme: DEFAULT_THEME,
       solidBg: false,
-      sidebarTab: "sessions",
       sessionFilter: "all",
       selectedSessionKey: "",
     };
@@ -1024,7 +1023,6 @@
         bgOpacity: clampFloat(saved.bgOpacity, defaults.bgOpacity, MIN_BG_OPACITY, MAX_BG_OPACITY),
         theme: THEMES.indexOf(saved.theme) === -1 ? defaults.theme : saved.theme,
         solidBg: saved.solidBg === true,
-        sidebarTab: saved.sidebarTab === "files" ? "files" : "sessions",
         sessionFilter: PsycheSessions.normalizeSidebarFilter(saved.sessionFilter),
         selectedSessionKey: typeof saved.selectedSessionKey === "string" ? saved.selectedSessionKey.slice(0, 1024) : "",
       };
@@ -1046,7 +1044,6 @@
     settings.bgOpacity = clampFloat(settings.bgOpacity, DEFAULT_BG_OPACITY, MIN_BG_OPACITY, MAX_BG_OPACITY);
     if (THEMES.indexOf(settings.theme) === -1) settings.theme = DEFAULT_THEME;
     settings.solidBg = settings.solidBg === true;
-    settings.sidebarTab = settings.sidebarTab === "files" ? "files" : "sessions";
     settings.sessionFilter = PsycheSessions.normalizeSidebarFilter(settings.sessionFilter);
     settings.selectedSessionKey = typeof settings.selectedSessionKey === "string" ? settings.selectedSessionKey.slice(0, 1024) : "";
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -5416,6 +5413,7 @@
   var solidBgEl = document.getElementById("solid-bg");
   var bgOpacityInput = document.getElementById("bg-opacity");
   var bgOpacityValueEl = document.getElementById("bg-opacity-value");
+  var sidebarSessionControlsEl = document.getElementById("sidebar-session-controls");
   var sessionListEl = document.getElementById("session-list");
   var sidebarFilesEl = document.getElementById("sidebar-files");
   if (sessionListEl) {
@@ -5436,36 +5434,23 @@
       });
     });
   }
-  var sidebarTab = settings.sidebarTab;
+  var sidebarView = "sessions";
+  var sidebarFilesReturnProjectId = null;
 
   // The file tree renders lazily: switching to it is the only thing that has to
   // ask the filesystem, and the sessions rail should not pay for that.
-  function setSidebarTab(name, options) {
-    sidebarTab = name === "files" ? "files" : "sessions";
-    if (sessionListEl) sessionListEl.hidden = sidebarTab !== "sessions";
-    if (sidebarFilesEl) sidebarFilesEl.hidden = sidebarTab !== "files";
-    Array.prototype.forEach.call(
-      document.querySelectorAll("[data-sidebar-tab]"),
-      function (btn) {
-        var active = btn.dataset.sidebarTab === sidebarTab;
-        btn.classList.toggle("is-active", active);
-        btn.setAttribute("aria-selected", active ? "true" : "false");
-      }
-    );
-    if (sidebarTab === "files") renderFilesPanel();
-    settings.sidebarTab = sidebarTab;
-    if (!options || options.persist !== false) saveSettings();
-    return sidebarTab;
-  }
-
-  Array.prototype.forEach.call(
-    document.querySelectorAll("[data-sidebar-tab]"),
-    function (btn) {
-      btn.addEventListener("click", function () {
-        setSidebarTab(btn.dataset.sidebarTab);
-      });
+  function setSidebarView(name) {
+    sidebarView = name === "files" ? "files" : "sessions";
+    var showingFiles = sidebarView === "files";
+    if (sidebarSessionControlsEl) sidebarSessionControlsEl.hidden = showingFiles;
+    if (sessionListEl) sessionListEl.hidden = showingFiles;
+    if (sidebarFilesEl) sidebarFilesEl.hidden = !showingFiles;
+    if (showingFiles) {
+      closeNewPaneMenu();
+      renderFilesPanel();
     }
-  );
+    return sidebarView;
+  }
 
   // The git panel uses the same segmented switch as the sidebar: Changes is the
   // working tree and its diffs, Commit is the branch state and history. Two
@@ -7794,7 +7779,7 @@
       });
     }
   );
-  setSidebarTab(settings.sidebarTab, { persist: false });
+  setSidebarView("sessions");
   setSessionTypeFilter(settings.sessionFilter, { persist: false });
 
   /**
@@ -11775,6 +11760,10 @@
     });
   }
 
+  onRailClick("files-back", function () {
+    sidebarFilesReturnProjectId = null;
+    setSidebarView("sessions");
+  });
   onRailClick("files-refresh", function () { renderFilesPanel(); });
 
   // ---- Diffs ----
