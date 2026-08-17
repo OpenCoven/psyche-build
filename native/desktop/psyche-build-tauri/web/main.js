@@ -2990,6 +2990,15 @@
       closeFilesPane(filesPane);
     });
 
+    header.addEventListener("pointerdown", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      startPaneReposition(filesPane, event);
+    });
+    header.addEventListener("dblclick", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      event.preventDefault();
+      togglePaneMaximize(filesPane);
+    });
     header.appendChild(glyph);
     header.appendChild(label);
     header.appendChild(hide);
@@ -3429,10 +3438,25 @@
 
   var PANE_DRAG_THRESHOLD = 5;
 
+  function paneRepositionSurfaceIds() {
+    var layout = activePaneLayout();
+    var root = effectivePaneRoot(layout);
+    if (!root) return [];
+    return PsychePanes.leafIds(root).map(function (leafId) {
+      var leaf = PsychePanes.findLeafById(root, leafId);
+      var surface = leaf && (typeof canvasSurfaceById === "function"
+        ? canvasSurfaceById(leaf.threadId)
+        : findThread(leaf.threadId));
+      return surface ? surface.id : null;
+    }).filter(Boolean);
+  }
+
   function paneElementAt(clientX, clientY) {
-    var ids = canvasThreadIds();
+    var ids = paneRepositionSurfaceIds();
     for (var i = 0; i < ids.length; i++) {
-      var thread = findThread(ids[i]);
+      var thread = typeof canvasSurfaceById === "function"
+        ? canvasSurfaceById(ids[i])
+        : findThread(ids[i]);
       var pane = thread && thread.pane;
       if (!pane) continue;
       var rect = pane.getBoundingClientRect();
@@ -3518,7 +3542,7 @@
   function startPaneReposition(thread, event) {
     if (!terminalHost || event.button !== 0 || !thread || !thread.pane) return;
     // A lone pane has nothing to be repositioned against.
-    if (canvasThreadIds().length < 2) return;
+    if (paneRepositionSurfaceIds().length < 2) return;
 
     var pointerId = event.pointerId;
     var startX = event.clientX;
