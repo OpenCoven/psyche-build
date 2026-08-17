@@ -4051,7 +4051,7 @@ fn native_launch_command(request: &NativeSessionCreate) -> Result<(String, Vec<S
                     .psyche_entry
                     .ok_or_else(|| "Psyche entrypoint is unavailable".to_string())?],
             ),
-            NativeLaunchKind::CovenChat => {
+            NativeLaunchKind::CovenCode => {
                 let id = request
                     .coven_session_id
                     .clone()
@@ -4093,7 +4093,7 @@ fn native_launch_command(request: &NativeSessionCreate) -> Result<(String, Vec<S
             "PSYCHE_TAURI=1".to_string(),
             "PSYCHE_NATIVE_CONTAINER=1".to_string(),
         ];
-        if matches!(request.launch_kind, NativeLaunchKind::CovenChat) {
+        if matches!(request.launch_kind, NativeLaunchKind::CovenCode) {
             args.push(format!("{COVEN_SESSION_SOURCE}={PSYCHE_SESSION_SOURCE}"));
         }
         if matches!(request.launch_kind, NativeLaunchKind::Psyche) {
