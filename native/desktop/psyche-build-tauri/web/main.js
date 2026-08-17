@@ -902,11 +902,14 @@
     clearPassiveCovenPaneFocus();
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
-    // Restore the project's last-focused thread, falling back to its first.
+    // Restore the project's last-focused thread, falling back within the
+    // workspace tree the active canvas is allowed to show.
     var workspaceRoot = activeWorkspaceRoot(project);
     if (typeof restoreFilesPaneSelection === "function") {
       restoreFilesPaneSelection(project, workspaceRoot);
     }
+    var layout = paneLayoutFor(id, workspaceRoot);
+    var scopedRoot = layout ? scopedPaneRoot(layout) : null;
     var threads = state.threads.filter(function (t) {
       return t.projectId === id && t.worktreePath === workspaceRoot && !t.hidden &&
         t.kind !== "coven-code" && t.kind !== "coven-attach";
@@ -918,14 +921,34 @@
         (rememberedThread.kind === "coven-code" || rememberedThread.kind === "coven-attach")) {
       project.lastActiveThreadId = null;
     }
-    var nextId = project.lastActiveThreadId &&
-      threads.some(function (t) { return t.id === project.lastActiveThreadId; })
-        ? project.lastActiveThreadId
-        : (threads[0] ? threads[0].id : null);
-    if (nextId) {
-      var focusOptions = Object.assign({}, options || {}, { refreshStatus: false });
-      await focusThread(nextId, focusOptions);
-    } else {
+    var fallbackIds = layout && layout.activeSetId && scopedRoot
+      ? PsychePanes.leafIds(scopedRoot).map(function (leafId) {
+          var leaf = PsychePanes.findLeafById(scopedRoot, leafId);
+          return leaf ? leaf.threadId : null;
+        })
+      : threads.map(function (thread) { return thread.id; });
+    var candidateIds = [];
+    if (project.lastActiveThreadId &&
+        threads.some(function (thread) { return thread.id === project.lastActiveThreadId; }) &&
+        paneFocusEligible(layout, project.lastActiveThreadId)) {
+      candidateIds.push(project.lastActiveThreadId);
+    }
+    fallbackIds.forEach(function (threadId) {
+      if (threadId && candidateIds.indexOf(threadId) === -1 &&
+          threads.some(function (thread) { return thread.id === threadId; })) {
+        candidateIds.push(threadId);
+      }
+    });
+    var focused = false;
+    var focusOptions = Object.assign({}, options || {}, { refreshStatus: false });
+    for (var i = 0; i < candidateIds.length; i += 1) {
+      if (!paneFocusEligible(layout, candidateIds[i])) continue;
+      if (await focusThread(candidateIds[i], focusOptions)) {
+        focused = true;
+        break;
+      }
+    }
+    if (!focused) {
       state.activeThreadId = null;
       renderPaneWorkspace({ preserveTerminalFocus: false });
       refreshSidebar();

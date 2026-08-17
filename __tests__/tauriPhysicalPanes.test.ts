@@ -80,6 +80,7 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     nativeSessionRequest: (thread: Record<string, any>) => ({ id: thread.id }),
     invoke: async () => [],
     attachThreadClient: dependencies.spawnPty || (() => Promise.resolve(true)),
+    paneLayoutFor: () => null,
     paneLayoutForThread: () => null,
     paneFocusEligible: () => true,
     ...dependencies,
@@ -3695,6 +3696,173 @@ describe('Tauri physical terminal panes', () => {
     expect(sidebarCalls).toBe(1);
     expect(tabCalls).toBe(1);
     expect(syncCalls).toBe(2);
+  });
+
+  it('restores an eligible scoped pane when the remembered pane is outside the active set', async () => {
+    const project = {
+      id: 'project-b',
+      selectedWorktreePath: '/repo-b',
+      lastActiveThreadId: 'thread-excluded',
+    };
+    const excluded = {
+      id: 'thread-excluded',
+      projectId: project.id,
+      worktreePath: project.selectedWorktreePath,
+      hidden: false,
+    };
+    const member = {
+      id: 'thread-member',
+      projectId: project.id,
+      worktreePath: project.selectedWorktreePath,
+      hidden: false,
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-excluded', excluded.id),
+        'leaf-excluded',
+        PsychePanes.createLeaf('leaf-member', member.id),
+        'split-b',
+      ),
+      focusedLeafId: 'leaf-excluded',
+      activeSetId: 'set-b',
+    };
+    const focusSets = [{ id: 'set-b', threadIds: [member.id] }];
+    const findFocusSet = compileFunction<
+      (id: string) => { id: string; threadIds: string[] } | null
+    >(functionSource('findFocusSet'), { focusSets });
+    const scopedPaneRoot = compileFunction<
+      (value: PaneFocusLayout) => Record<string, unknown> | null
+    >(functionSource('scopedPaneRoot'), { findFocusSet, PsychePanes });
+    const paneFocusEligible = compileFunction<
+      (value: PaneFocusLayout | null, threadId: string) => boolean
+    >(functionSource('paneFocusEligible'), { scopedPaneRoot, PsychePanes });
+    const state = {
+      activeProjectId: 'project-a',
+      activeThreadId: 'thread-a' as string | null,
+      threads: [excluded, member],
+    };
+    const focusCalls: string[] = [];
+    const renderedThreadIds: Array<string | null> = [];
+    const setActiveProject = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('setActiveProject'), {
+        state,
+        showTerminalView: async () => true,
+        findProject: () => project,
+        clearPassiveCovenPaneFocus: () => undefined,
+        loadAgentSkills: () => undefined,
+        activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
+        paneLayoutFor: () => layout,
+        scopedPaneRoot,
+        paneFocusEligible,
+        PsychePanes,
+        focusThread: async (id: string) => {
+          focusCalls.push(id);
+          if (!paneFocusEligible(layout, id)) return false;
+          state.activeThreadId = id;
+          project.lastActiveThreadId = id;
+          renderedThreadIds.push(id);
+          return true;
+        },
+        renderPaneWorkspace: () => { renderedThreadIds.push(state.activeThreadId); },
+        renderGitSurface: () => false,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        syncProjectBrowser: () => undefined,
+        saveWorkspaceSoon: () => undefined,
+      },
+    );
+
+    await expect(setActiveProject(project.id)).resolves.toBe(true);
+    expect(state.activeProjectId).toBe(project.id);
+    expect(state.activeThreadId).toBe(member.id);
+    expect(project.lastActiveThreadId).toBe(member.id);
+    expect(focusCalls).toEqual([member.id]);
+    expect(renderedThreadIds).toEqual([member.id]);
+  });
+
+  it('clears the previous project thread when the active set has no eligible live pane', async () => {
+    const project = {
+      id: 'project-b',
+      selectedWorktreePath: '/repo-b',
+      lastActiveThreadId: 'thread-excluded',
+    };
+    const excluded = {
+      id: 'thread-excluded',
+      projectId: project.id,
+      worktreePath: project.selectedWorktreePath,
+      hidden: false,
+    };
+    const hiddenMember = {
+      id: 'thread-hidden',
+      projectId: project.id,
+      worktreePath: project.selectedWorktreePath,
+      hidden: true,
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-excluded', excluded.id),
+        'leaf-excluded',
+        PsychePanes.createLeaf('leaf-hidden', hiddenMember.id),
+        'split-b',
+      ),
+      focusedLeafId: 'leaf-excluded',
+      activeSetId: 'set-b',
+    };
+    const focusSets = [{ id: 'set-b', threadIds: [hiddenMember.id] }];
+    const findFocusSet = compileFunction<
+      (id: string) => { id: string; threadIds: string[] } | null
+    >(functionSource('findFocusSet'), { focusSets });
+    const scopedPaneRoot = compileFunction<
+      (value: PaneFocusLayout) => Record<string, unknown> | null
+    >(functionSource('scopedPaneRoot'), { findFocusSet, PsychePanes });
+    const paneFocusEligible = compileFunction<
+      (value: PaneFocusLayout | null, threadId: string) => boolean
+    >(functionSource('paneFocusEligible'), { scopedPaneRoot, PsychePanes });
+    const state = {
+      activeProjectId: 'project-a',
+      activeThreadId: 'thread-a' as string | null,
+      threads: [excluded, hiddenMember],
+    };
+    const focusCalls: string[] = [];
+    const renderCalls: Array<{ projectId: string; threadId: string | null }> = [];
+    const setActiveProject = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('setActiveProject'), {
+        state,
+        showTerminalView: async () => true,
+        findProject: () => project,
+        clearPassiveCovenPaneFocus: () => undefined,
+        loadAgentSkills: () => undefined,
+        activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
+        paneLayoutFor: () => layout,
+        scopedPaneRoot,
+        paneFocusEligible,
+        PsychePanes,
+        focusThread: async (id: string) => {
+          focusCalls.push(id);
+          const thread = state.threads.find((candidate) => candidate.id === id);
+          if (!thread || thread.hidden || !paneFocusEligible(layout, id)) return false;
+          state.activeThreadId = id;
+          return true;
+        },
+        renderPaneWorkspace: () => {
+          renderCalls.push({
+            projectId: state.activeProjectId,
+            threadId: state.activeThreadId,
+          });
+        },
+        renderGitSurface: () => false,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        syncProjectBrowser: () => undefined,
+        saveWorkspaceSoon: () => undefined,
+      },
+    );
+
+    await expect(setActiveProject(project.id)).resolves.toBe(true);
+    expect(state.activeProjectId).toBe(project.id);
+    expect(state.activeThreadId).toBeNull();
+    expect(focusCalls).toEqual([]);
+    expect(renderCalls).toEqual([{ projectId: project.id, threadId: null }]);
   });
 
 
