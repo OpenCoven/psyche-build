@@ -10159,7 +10159,7 @@ mod workspace_panel_tests {
         let tree = TempTree::new("git-reftable-inspection");
         let init = std::process::Command::new("git")
             .current_dir(&tree.root)
-            .args(["init", "-q", "--ref-format=reftable"])
+            .args(["init", "-q", "-b", "main", "--ref-format=reftable"])
             .output()
             .expect("git init must run in tests");
         if !init.status.success() {
