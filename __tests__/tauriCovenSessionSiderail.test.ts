@@ -770,7 +770,7 @@ function createRenderer(options: {
     'seedFocusSets', 'seedSetPicking', 'refreshSidebar', 'activeFocusSet', 'paneLayoutForThread',
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
-    'saveWorkspaceSoon', 'activateProjectWorktree', 'setSessionTypeFilter',
+    'saveWorkspaceSoon', 'activateProjectWorktree', 'showProjectFiles', 'setSessionTypeFilter',
     'openSessionContextMenu', 'openProjectAppearancePopover',
     'invoke', 'refreshCovenSessions', 'localStorage', 'seedStatusAlertEl', 'seedToastEl',
     `"use strict"; ${sources.join('\n')}; return {
@@ -854,6 +854,7 @@ function createRenderer(options: {
     findProject,
     saveWorkspaceSoon,
     activateProjectWorktree,
+    () => Promise.resolve(false),
     setSessionTypeFilter,
     openSessionContextMenu,
     openProjectAppearancePopover,
@@ -1015,6 +1016,12 @@ function covenRows(element: FakeElement) {
 
 function localRows(element: FakeElement) {
   return element.querySelectorAll('.session-row').filter((row) => row.dataset.threadId);
+}
+
+function projectNamesWithRows(element: FakeElement) {
+  return element.querySelectorAll('.session-project')
+    .filter((project) => Boolean(project.querySelector('.session-row')))
+    .map((project) => project.querySelector('.session-project-name')?.textContent ?? '');
 }
 
 describe('Tauri Coven session project rail', () => {
@@ -2089,7 +2096,7 @@ describe('Tauri Coven session project rail', () => {
       expect(covenRows(renderer.sessionListEl)).toHaveLength(1);
       expect(covenRows(renderer.sessionListEl)[0]?.dataset.sessionId)
         .toBe('owned-worktree-session');
-      expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      expect(projectNamesWithRows(renderer.sessionListEl))
         .toEqual(['Task']);
     });
 
@@ -2152,7 +2159,7 @@ describe('Tauri Coven session project rail', () => {
       renderer.render();
 
       expect(covenRows(renderer.sessionListEl)).toHaveLength(1);
-      expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      expect(projectNamesWithRows(renderer.sessionListEl))
         .toEqual(['Deep']);
     });
 
@@ -2170,7 +2177,9 @@ describe('Tauri Coven session project rail', () => {
       renderer.render();
 
       expect(covenRows(renderer.sessionListEl)).toHaveLength(0);
-      expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(0);
+      expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(1);
+      expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+        .toEqual(['Parent']);
     },
   );
 
@@ -2186,7 +2195,9 @@ describe('Tauri Coven session project rail', () => {
     renderer.render();
 
     expect(covenRows(renderer.sessionListEl)).toHaveLength(0);
-    expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(0);
+    expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(1);
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      .toEqual([project.name]);
   });
 
   it('keeps exact-root ownership even when the matching project worktree is flagged', () => {
@@ -2217,7 +2228,7 @@ describe('Tauri Coven session project rail', () => {
     renderer.render();
 
     expect(covenRows(renderer.sessionListEl)).toHaveLength(1);
-    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+    expect(projectNamesWithRows(renderer.sessionListEl))
       .toEqual(['Deep']);
   });
 
@@ -2247,7 +2258,7 @@ describe('Tauri Coven session project rail', () => {
       renderer.render();
 
       expect(covenRows(renderer.sessionListEl)).toHaveLength(1);
-      expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      expect(projectNamesWithRows(renderer.sessionListEl))
         .toEqual([expectedOwner]);
     });
   });
@@ -2295,7 +2306,7 @@ describe('Tauri Coven session project rail', () => {
       .toContain('coven-tone-warn');
   });
 
-  it('renders one global loading state across empty projects', () => {
+  it('renders one global loading state across empty projects while keeping project headers', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
@@ -2308,7 +2319,10 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.querySelectorAll('.session-inline-state')).toHaveLength(1);
     expect(renderer.sessionListEl.querySelector('.session-inline-state')?.textContent)
       .toBe('Loading Coven sessions');
-    expect(renderer.sessionListEl.querySelector('.session-group')).toBeNull();
+    expect(renderer.sessionListEl.querySelectorAll('.session-group')).toHaveLength(2);
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      .toEqual(['Alpha', 'Beta']);
+    expect(renderer.sessionListEl.querySelectorAll('.session-row')).toHaveLength(0);
     expect(renderer.sessionListEl.querySelector('.session-empty')).toBeNull();
   });
 
@@ -2341,7 +2355,7 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.querySelector('.session-row')).toBeNull();
   });
 
-  it('groups local threads by pane kind, in input order, without empty project headers', () => {
+  it('groups local threads by pane kind, in input order, while keeping zero-session project headers', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
@@ -2360,14 +2374,17 @@ describe('Tauri Coven session project rail', () => {
     renderer.render();
 
     const groups = renderer.sessionListEl.querySelectorAll('.session-group');
-    expect(groups).toHaveLength(1);
+    expect(groups).toHaveLength(2);
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      .toEqual(['Alpha', 'Beta']);
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-category-name')))
       .toEqual(['Agents', 'Shells']);
-    expect(groups[0].querySelectorAll('.session-row').map((row) => row.dataset.threadId))
+    const populated = groups.find((group) => group.querySelector('.session-row'));
+    expect(populated?.querySelectorAll('.session-row').map((row) => row.dataset.threadId))
       .toEqual(['attached', 'local']);
   });
 
-  it('renders one global error across empty projects', () => {
+  it('renders one global error across empty projects while keeping project headers', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
@@ -2381,7 +2398,10 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.querySelectorAll('.session-inline-state')).toHaveLength(1);
     expect(renderer.sessionListEl.querySelector('.session-inline-state')?.textContent)
       .toBe('Discovery failed');
-    expect(renderer.sessionListEl.querySelector('.session-group')).toBeNull();
+    expect(renderer.sessionListEl.querySelectorAll('.session-group')).toHaveLength(2);
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      .toEqual(['Alpha', 'Beta']);
+    expect(renderer.sessionListEl.querySelectorAll('.session-row')).toHaveLength(0);
     expect(renderer.sessionListEl.querySelector('.session-empty')).toBeNull();
   });
 
@@ -2435,7 +2455,7 @@ describe('Tauri Coven session project rail', () => {
       .toEqual(['REPLY', 'REPLY']);
   });
 
-  it('omits a project when its only worktree session is hidden', () => {
+  it('keeps a project header when its only worktree session is hidden', () => {
     const renderer = createRenderer({
       projects: [
         {
@@ -2466,9 +2486,10 @@ describe('Tauri Coven session project rail', () => {
     renderer.render();
 
     const groups = renderer.sessionListEl.querySelectorAll('.session-group');
-    expect(groups).toHaveLength(1);
-    expect(groups[0].textContent).toContain('Beta');
-    expect(renderer.sessionListEl.textContent).not.toContain('Alpha');
+    expect(groups).toHaveLength(2);
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      .toEqual(['Alpha', 'Beta']);
+    expect(renderer.sessionListEl.textContent).not.toContain('Hidden Alpha');
     expect(renderer.sessionListEl.querySelectorAll('.session-worktree-group')).toHaveLength(1);
     expect(renderer.sessionListEl.querySelector('.session-row')?.dataset.threadId)
       .toBe('visible-beta');

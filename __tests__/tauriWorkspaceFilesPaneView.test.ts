@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { withFilesScopeSelectionHelper } from './tauriMainHarness';
 
 const webRoot = join(process.cwd(), 'native/desktop/psyche-build-tauri/web');
 const mainJs = readFileSync(join(webRoot, 'main.js'), 'utf8');
@@ -26,10 +27,14 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
 ) {
+  const resolvedDependencies = withFilesScopeSelectionHelper(
+    extractFunctionSource,
+    dependencies,
+  );
   return Function(
-    ...Object.keys(dependencies),
+    ...Object.keys(resolvedDependencies),
     `"use strict"; return (${source});`,
-  )(...Object.values(dependencies)) as T;
+  )(...Object.values(resolvedDependencies)) as T;
 }
 
 class FakeElement {
@@ -275,11 +280,17 @@ describe('native Files pane view', () => {
       },
     };
     let terminalFocuses = 0;
+    let filesScopeInvalidations = 0;
+    const project = { id: 'project-a', selectedWorktreePath: '' };
     const focusCanvasSurface = compileFunction<(surface: typeof surfaces['files-a']) => boolean>(
       extractFunctionSource('focusCanvasSurface'),
       {
         focusThread: () => { terminalFocuses += 1; },
-        findProject: () => ({ id: 'project-a', selectedWorktreePath: '' }),
+        findProject: () => project,
+        invalidateFilesPanelRender: () => {
+          filesScopeInvalidations += 1;
+          return filesScopeInvalidations;
+        },
         state,
         paneLayoutFor: () => layout,
         PsychePanes: {
@@ -299,6 +310,8 @@ describe('native Files pane view', () => {
     expect(state.activeThreadId).toBeNull();
     expect(toggles).toEqual({ terminal: false, files: true });
     expect(terminalFocuses).toBe(0);
+    expect(project.selectedWorktreePath).toBe('/worktree');
+    expect(filesScopeInvalidations).toBe(1);
   });
 
   it('distinguishes an open file from Files owning canvas focus', () => {
