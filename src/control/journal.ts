@@ -1,4 +1,5 @@
-import { chmod, mkdir, open, readFile, rename, truncate } from 'node:fs/promises';
+import { type BigIntStats } from 'node:fs';
+import { chmod, mkdir, open, readFile, rename, truncate, type FileHandle } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
@@ -203,6 +204,16 @@ interface StoredOutcomeRecord {
   readonly outcome: CommandOutcome;
 }
 
+interface DurableOutcomeFileSnapshot {
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly mode: bigint;
+  readonly size: bigint;
+  readonly mtimeNs: bigint;
+  readonly ctimeNs: bigint;
+  readonly birthtimeNs: bigint;
+}
+
 /**
  * Large exact outcomes are accepted durably, but one file still needs a hard
  * ceiling so a single retry record cannot grow without bound. The cap is sized
@@ -398,17 +409,18 @@ export class ControlJournal {
 
   async loadOutcome(idempotencyKey: string): Promise<CommandOutcome | undefined> {
     const outcomePath = this.outcomePath(idempotencyKey);
-    let raw: Buffer;
+    let handle: FileHandle;
     try {
-      raw = await readFile(outcomePath);
+      handle = await open(outcomePath, 'r');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
     }
-    if (raw.byteLength > DURABLE_OUTCOME_RECORD_MAX_BYTES) {
-      throw new Error('durable outcome file exceeds the maximum size');
+    try {
+      return parseStoredOutcome(await readBoundedStoredOutcome(handle), idempotencyKey);
+    } finally {
+      await handle.close();
     }
-    return parseStoredOutcome(raw.toString('utf8'), idempotencyKey);
   }
 
   async storeOutcome(idempotencyKey: string, outcome: CommandOutcome): Promise<void> {
@@ -563,6 +575,58 @@ export class ControlJournal {
 
 function commandTransactionKey(commandId: string, idempotencyKey: unknown): string {
   return JSON.stringify([commandId, typeof idempotencyKey === 'string' ? idempotencyKey : '']);
+}
+
+function snapshotDurableOutcomeFile(stats: BigIntStats): DurableOutcomeFileSnapshot {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    mode: stats.mode,
+    size: stats.size,
+    mtimeNs: stats.mtimeNs,
+    ctimeNs: stats.ctimeNs,
+    birthtimeNs: stats.birthtimeNs,
+  };
+}
+
+function sameDurableOutcomeFileSnapshot(
+  left: DurableOutcomeFileSnapshot,
+  right: DurableOutcomeFileSnapshot,
+): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs
+    && left.birthtimeNs === right.birthtimeNs;
+}
+
+async function readBoundedStoredOutcome(handle: FileHandle): Promise<string> {
+  const opened = snapshotDurableOutcomeFile(await handle.stat({ bigint: true }));
+  const maximumSize = BigInt(DURABLE_OUTCOME_RECORD_MAX_BYTES);
+  if (opened.size > maximumSize) {
+    throw new Error('durable outcome file exceeds the maximum size');
+  }
+
+  const buffer = Buffer.alloc(Math.min(Number(opened.size), DURABLE_OUTCOME_RECORD_MAX_BYTES + 1));
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+    if (bytesRead === 0) {
+      throw new Error('durable outcome file changed while reading');
+    }
+    offset += bytesRead;
+  }
+
+  const current = snapshotDurableOutcomeFile(await handle.stat({ bigint: true }));
+  if (current.size > maximumSize) {
+    throw new Error('durable outcome file exceeds the maximum size');
+  }
+  if (!sameDurableOutcomeFileSnapshot(opened, current)) {
+    throw new Error('durable outcome file changed while reading');
+  }
+  return buffer.toString('utf8');
 }
 
 function parseStoredOutcome(raw: string, expectedKey: string): CommandOutcome {

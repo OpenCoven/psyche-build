@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -201,6 +201,23 @@ describe('ControlJournal', () => {
       status: 'succeeded',
       value: 'x'.repeat(DURABLE_OUTCOME_RECORD_MAX_BYTES),
     })).rejects.toThrow('durable outcome file exceeds the maximum size');
+  });
+
+  it('rejects oversized durable outcome sidecars from disk with the explicit size error', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const idempotencyKey = 'oversized-outcome-on-disk';
+    const filePath = storedOutcomePath(root, idempotencyKey);
+
+    await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    const handle = await open(filePath, 'w', 0o600);
+    try {
+      await handle.truncate(Math.max(DURABLE_OUTCOME_RECORD_MAX_BYTES + 1, 2 ** 31));
+    } finally {
+      await handle.close();
+    }
+
+    await expect(journal.loadOutcome(idempotencyKey)).rejects.toThrow('durable outcome file exceeds the maximum size');
   });
 
   it('persists optional approval ownership metadata across journal replay', async () => {

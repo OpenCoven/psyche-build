@@ -152,12 +152,15 @@ Regressions prove:
 - sidecars use `0700`/`0600` permissions, reject records larger than
   `8_781_824` bytes, and throw on malformed, mismatched, or invalid exact
   outcomes;
-- unresolved commands recover exactly once; and
-- retired buffers release only after the final stream or subscription.
+- Task 2 will verify unresolved commands recover exactly once; and
+- Task 3 will verify retired buffers release only after the final stream or
+  subscription.
 
 ## Scope
 
-This repair changes idempotency durability, journal recovery metadata, redacted
-snapshot persistence, and closed-pane buffer ownership. It does not change
-command protocol shapes, key expiration semantics, workspace publication, or
-live pane-stream behavior.
+This repair already changes idempotency durability and redacted snapshot
+persistence for exact terminal replay. Task 2 will later extend journal
+recovery metadata for unresolved commands, and Task 3 will later change
+closed-pane buffer ownership. The repair does not change command protocol
+shapes, key expiration semantics, workspace publication, or live pane-stream
+behavior.
