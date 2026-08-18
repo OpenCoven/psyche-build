@@ -21,13 +21,17 @@ const requiredSourceFiles = sortUnique([
 const allowedNonDocumentPublicationEntries = new Set(['dist/**/*', 'psyche', 'LICENSE']);
 const ROOT_MARKDOWN_RE = /^[A-Za-z0-9._-]+\.md$/;
 const DOCS_MARKDOWN_RE = /^docs\/[A-Za-z0-9._-]+\.md$/;
-const prohibitedFiles = new Set(['docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md']);
-const prohibitedText = [
-  ['Coven Demo Loop', 'standalone Coven demo positioning'],
-  ['Fix OpenClaw cockpit', 'standalone OpenClaw promotion'],
-  ['OpenCoven public roadmap', 'external ecosystem roadmap promotion'],
-  ['led by <strong>Coven Code</strong>', 'agent catalog product favoritism'],
+const prohibitedReferencePatterns = [
+  [/COVEN-DEMO-LOOP\.md/i, 'reference to prohibited standalone documentation'],
+  [/COVEN-SESSIONS\.md/i, 'reference to prohibited standalone documentation'],
 ];
+const prohibitedPositionPatterns = [
+  [/coven demo loop/i, 'standalone Coven demo positioning'],
+  [/fix openclaw cockpit/i, 'standalone OpenClaw promotion'],
+  [/opencoven public roadmap/i, 'external ecosystem roadmap promotion'],
+  [/led by\s*<strong>\s*coven code\s*<\/strong>/i, 'agent catalog product favoritism'],
+];
+const prohibitedFiles = new Set(['docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md']);
 
 function isEnoent(error) {
   return Boolean(error && typeof error === 'object' && error.code === 'ENOENT');
@@ -205,8 +209,46 @@ async function collectTopLevelMarkdownFiles(relativeDirectory, readDirectory) {
   return { files: sortUnique(files), missingRootFailure: null };
 }
 
+async function collectRootMarkdownFiles(readDirectory) {
+  let entries;
+  try {
+    entries = await readDirectory('');
+  } catch (error) {
+    if (isEnoent(error)) {
+      return {
+        files: [],
+        missingRootFailure: {
+          file: '.',
+          reason: 'public documentation root is missing',
+        },
+      };
+    }
+
+    throw error;
+  }
+
+  const sortedEntries = [...entries].sort((left, right) => compareStrings(left.name, right.name));
+  const files = [];
+
+  for (const entry of sortedEntries) {
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    if (path.extname(entry.name).toLowerCase() === '.md') {
+      files.push(entry.name);
+    }
+  }
+
+  return { files: sortUnique(files), missingRootFailure: null };
+}
+
 async function readDirectoryFromFilesystem(relativeDirectory) {
   return readdir(path.join(root, relativeDirectory), { withFileTypes: true });
+}
+
+async function collectPublicRootMarkdownFiles() {
+  return collectRootMarkdownFiles(readDirectoryFromFilesystem);
 }
 
 async function collectPublicRecursiveFiles() {
@@ -217,10 +259,9 @@ async function collectPublicTopLevelDocsFiles() {
   return collectTopLevelMarkdownFiles('docs', readDirectoryFromFilesystem);
 }
 
-function buildPublicInventory({ recursiveFiles, topLevelDocsFiles, packageMarkdownFiles }) {
+function buildPublicInventory({ rootMarkdownFiles, recursiveFiles, topLevelDocsFiles, packageMarkdownFiles }) {
   return sortUnique([
-    'README.md',
-    'docs/README.md',
+    ...rootMarkdownFiles,
     ...requiredSourceFiles,
     ...recursiveFiles,
     ...topLevelDocsFiles,
@@ -263,6 +304,24 @@ function assertRequiredInventoryFiles(inventory) {
   }
 }
 
+function findProhibitedReasons(source) {
+  const reasons = [];
+
+  for (const [pattern, reason] of prohibitedReferencePatterns) {
+    if (pattern.test(source)) {
+      reasons.push(reason);
+    }
+  }
+
+  for (const [pattern, reason] of prohibitedPositionPatterns) {
+    if (pattern.test(source)) {
+      reasons.push(reason);
+    }
+  }
+
+  return sortUnique(reasons);
+}
+
 function createSyntheticDirEntry(name, type) {
   return {
     name,
@@ -290,6 +349,31 @@ function createSyntheticDirectoryReader(tree, missingPaths = new Set()) {
 }
 
 async function selfCheckPublicInventory() {
+  const rootTree = new Map([
+    [
+      '',
+      [
+        createSyntheticDirEntry('CHANGELOG.md', 'file'),
+        createSyntheticDirEntry('README.md', 'file'),
+        createSyntheticDirEntry('CONTRIBUTING.md', 'file'),
+        createSyntheticDirEntry('docs', 'dir'),
+        createSyntheticDirEntry('notes.txt', 'file'),
+      ],
+    ],
+    [
+      'docs',
+      [createSyntheticDirEntry('ignored.md', 'file')],
+    ],
+  ]);
+  const rootResult = await collectRootMarkdownFiles(createSyntheticDirectoryReader(rootTree));
+  assert.deepEqual(rootResult.files, ['CHANGELOG.md', 'CONTRIBUTING.md', 'README.md']);
+  assert.deepEqual(rootResult.files, sortUnique(rootResult.files));
+  assert(rootResult.files.every((file) => !file.includes('/')));
+  assert.deepEqual(rootResult.missingRootFailure, null);
+  assert(rootResult.files.includes('CHANGELOG.md'));
+  assert(rootResult.files.includes('CONTRIBUTING.md'));
+  assert(rootResult.files.includes('README.md'));
+
   const syntheticTree = new Map([
     [
       'docs/src',
@@ -368,7 +452,20 @@ async function selfCheckPublicInventory() {
     },
   });
 
-  const requiredInventory = buildPublicInventory({ recursiveFiles: [], topLevelDocsFiles: [], packageMarkdownFiles: [] });
+  assert.deepEqual(findProhibitedReasons('Coven demo loop'), ['standalone Coven demo positioning']);
+  assert.deepEqual(findProhibitedReasons('coven-demo-loop.md'), ['reference to prohibited standalone documentation']);
+  assert.deepEqual(
+    findProhibitedReasons('See [Different anchor text](../coven-sessions.md#section)'),
+    ['reference to prohibited standalone documentation'],
+  );
+  assert.deepEqual(findProhibitedReasons('OPENCOVEN PUBLIC ROADMAP'), ['external ecosystem roadmap promotion']);
+
+  const requiredInventory = buildPublicInventory({
+    rootMarkdownFiles: rootResult.files,
+    recursiveFiles: [],
+    topLevelDocsFiles: topLevelDocsResult.files,
+    packageMarkdownFiles: [],
+  });
   assert(requiredInventory.includes('README.md'));
   assert(requiredInventory.includes('docs/README.md'));
   assertRequiredInventoryFiles(requiredInventory);
@@ -503,6 +600,7 @@ async function selfCheckPublicInventory() {
   );
 
   const packageInventory = buildPublicInventory({
+    rootMarkdownFiles: rootResult.files,
     recursiveFiles: [],
     topLevelDocsFiles: topLevelDocsResult.files,
     packageMarkdownFiles: packageBoundaryA.markdownFiles,
@@ -535,6 +633,7 @@ async function selfCheckPublicInventory() {
   ]);
 
   const partialCleanupInventory = buildPublicInventory({
+    rootMarkdownFiles: rootResult.files,
     recursiveFiles: ['docs/src/main.js'],
     topLevelDocsFiles: ['docs/CONTROL-PLANE.md', 'docs/COVEN-DEMO-LOOP.md'],
     packageMarkdownFiles: ['README.md', 'docs/README.md', 'docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md'],
@@ -542,6 +641,7 @@ async function selfCheckPublicInventory() {
   assert(partialCleanupInventory.includes('docs/COVEN-DEMO-LOOP.md'));
   assert(partialCleanupInventory.includes('docs/COVEN-SESSIONS.md'));
   assert(partialCleanupInventory.includes('docs/CONTROL-PLANE.md'));
+  assert(partialCleanupInventory.includes('README.md'));
   assert.equal(
     countInventoryPasses(partialCleanupInventory, new Set(['docs/src/main.js'])),
     partialCleanupInventory.length - 1,
@@ -558,11 +658,13 @@ async function main() {
 
   const packageMarkdownResult = collectPackageMarkdownFiles(packageJson.files);
   const packageFiles = packageMarkdownResult.packageFiles;
+  const rootMarkdownResult = await collectPublicRootMarkdownFiles();
   const recursiveResult = await collectPublicRecursiveFiles();
   const recursiveFiles = recursiveResult.files;
   const topLevelDocsResult = await collectPublicTopLevelDocsFiles();
   const topLevelDocsFiles = topLevelDocsResult.files;
   const uniqueInventory = buildPublicInventory({
+    rootMarkdownFiles: rootMarkdownResult.files,
     recursiveFiles,
     topLevelDocsFiles,
     packageMarkdownFiles: packageMarkdownResult.markdownFiles,
@@ -571,7 +673,13 @@ async function main() {
 
   const inventoryFailures = [];
   const packageBoundaryFailures = [...packageMarkdownResult.boundaryFailures];
-  const sourceRootFailures = recursiveResult.missingRootFailure ? [recursiveResult.missingRootFailure] : [];
+  const sourceRootFailures = [];
+  if (rootMarkdownResult.missingRootFailure) {
+    sourceRootFailures.push(rootMarkdownResult.missingRootFailure);
+  }
+  if (recursiveResult.missingRootFailure) {
+    sourceRootFailures.push(recursiveResult.missingRootFailure);
+  }
   if (topLevelDocsResult.missingRootFailure) {
     sourceRootFailures.push(topLevelDocsResult.missingRootFailure);
   }
@@ -621,10 +729,8 @@ async function main() {
       continue;
     }
 
-    for (const [needle, reason] of prohibitedText) {
-      if (inspected.source.includes(needle)) {
-        recordInventoryFailure(file, reason);
-      }
+    for (const reason of findProhibitedReasons(inspected.source)) {
+      recordInventoryFailure(file, reason);
     }
   }
 
