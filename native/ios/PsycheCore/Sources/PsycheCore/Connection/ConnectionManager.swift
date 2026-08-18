@@ -202,8 +202,19 @@ public actor ConnectionManager {
         guard canStartStoredReconnect(intentEpoch: intentEpoch) else { return }
 
         do {
-            guard let host = try await pairedHostStore.hosts().first else { return }
+            let storedHost = try await pairedHostStore.hosts().first
             guard canStartStoredReconnect(intentEpoch: intentEpoch) else { return }
+            guard let host = storedHost else {
+                guard let credential = try? await mobileCredentialStore.storedCredential() else { return }
+                await connect(
+                    using: ConnectionConfiguration(
+                        endpoint: credential.endpoint,
+                        credentials: ConnectionCredentials(clientID: manualCredentials.clientID, token: credential.token)
+                    ),
+                    intentEpoch: intentEpoch
+                )
+                return
+            }
             let credential: MobileCredential?
             do {
                 credential = try await mobileCredentialStore.credential(for: host.endpoint)

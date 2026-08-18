@@ -90,6 +90,17 @@ public actor MobileCredentialStore {
         return credential
     }
 
+    /// The sole durable record is also the reconnect discovery record for a
+    /// freshly invited device, which has no legacy paired-host entry.
+    public func storedCredential() throws -> MobileCredential? {
+        guard let data = try secureStore.data(forKey: key) else { return nil }
+        do {
+            return try JSONDecoder().decode(MobileCredential.self, from: data)
+        } catch {
+            throw MobileCredentialStoreError.corruptedRecord
+        }
+    }
+
     public func clear() throws {
         try secureStore.removeValue(forKey: key)
     }

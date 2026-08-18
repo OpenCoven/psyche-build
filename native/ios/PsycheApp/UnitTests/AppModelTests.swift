@@ -135,7 +135,7 @@ final class AppModelTests: XCTestCase {
         let model = AppModel(fixture: WorkspaceFixtures.multiproject)
 
         model.receive(url: URL(string:
-            "psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&fingerprint='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'&psyche_invite=one-time-token"
+            "psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&psyche_invite=one-time-token"
         )!)
 
         XCTAssertEqual(model.pendingInvite?.endpoint.host, "studio.example")
@@ -160,7 +160,7 @@ final class AppModelTests: XCTestCase {
             mobileCredentialStore: MobileCredentialStore(secureStore: InMemorySecureStore())
         ))
         model.receive(url: URL(string:
-            "psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&fingerprint='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'&psyche_invite=one-time-invite"
+            "psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&psyche_invite=one-time-invite"
         )!)
 
         let start = Task { await model.start() }
@@ -173,7 +173,7 @@ final class AppModelTests: XCTestCase {
     func testRejectsAnInvalidDeepLinkWithoutChangingPendingInvite() {
         let model = AppModel(fixture: WorkspaceFixtures.multiproject)
 
-        model.receive(url: URL(string: "coven://connect?host=wss%3A%2F%2Fstudio.example&fingerprint='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'&psyche_invite=token")!)
+        model.receive(url: URL(string: "coven://connect?host=wss%3A%2F%2Fstudio.example&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&psyche_invite=token")!)
 
         XCTAssertNil(model.pendingInvite)
     }
