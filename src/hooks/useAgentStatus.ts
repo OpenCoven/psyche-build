@@ -12,6 +12,12 @@ interface UseAgentStatusParams {
 // Return type: map of pane ID to status
 export type AgentStatusMap = Map<string, AgentStatus | undefined>;
 
+export function getPaneMonitorSignature(
+  panes: Array<Pick<PsychePane, 'id' | 'paneId'>>
+): string {
+  return JSON.stringify(panes.map((pane) => [pane.id, pane.paneId]));
+}
+
 export default function useAgentStatus({ panes, suspend, onPaneRemoved }: UseAgentStatusParams): AgentStatusMap {
   const [statuses, setStatuses] = useState<AgentStatusMap>(new Map());
   const statusDetector = useRef(getStatusDetector());
@@ -70,7 +76,7 @@ export default function useAgentStatus({ panes, suspend, onPaneRemoved }: UseAge
 
   useEffect(() => {
     const detector = statusDetector.current;
-    const paneSignature = panes.map((pane) => pane.id).join(',');
+    const paneSignature = getPaneMonitorSignature(panes);
 
     if (suspend || panes.length === 0) {
       lastMonitorSignature.current = '';
