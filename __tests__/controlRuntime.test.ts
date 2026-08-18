@@ -514,6 +514,83 @@ describe('ControlRuntime', () => {
     await expect(reopened.loadOutcome(idempotencyKey)).resolves.toBeUndefined();
   });
 
+  it('matches retained replay kinds by commandId and idempotencyKey for non-surface reconstruction', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 7);
+    const nonSurfaceOutcome = { status: 'succeeded', value: { paneId: '%retained' } } as const;
+    const surfaceCommand = providerUpsertCommand('surface-keep') as Extract<ControlCommand, { kind: 'provider.resource.upsert' }>;
+    const surfaceOutcome = {
+      status: 'succeeded',
+      value: { resource: surfaceCommand.payload.resource },
+    } as const;
+
+    await journal.append('command.requested', {
+      commandId: 'shared-command',
+      idempotencyKey: 'non-surface-reused-id',
+      kind: 'pane.terminal.open',
+      ownerEpoch: 7,
+    });
+    await journal.append('command.succeeded', {
+      commandId: 'shared-command',
+      idempotencyKey: 'non-surface-reused-id',
+      status: 'succeeded',
+      value: nonSurfaceOutcome.value,
+    });
+    await journal.append('command.requested', {
+      commandId: 'shared-command',
+      idempotencyKey: 'surface-keep',
+      kind: 'provider.resource.upsert',
+      ownerEpoch: 7,
+    });
+    await journal.append('command.succeeded', {
+      commandId: 'shared-command',
+      idempotencyKey: 'surface-keep',
+      status: 'succeeded',
+    });
+    await journal.storeOutcome('surface-keep', surfaceOutcome);
+
+    const restartedJournal = await ControlJournal.open(root, 8);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal: restartedJournal });
+
+    await expect(restartedJournal.loadOutcome('non-surface-reused-id')).resolves.toEqual(nonSurfaceOutcome);
+    const sequenceBefore = restartedJournal.sequence;
+    await expect(submit(runtime, openTerminalCommand('non-surface-reused-id', 'retry-non-surface-reused-id')))
+      .resolves.toEqual(nonSurfaceOutcome);
+    expect(restartedJournal.sequence).toBe(sequenceBefore);
+  });
+
+  it('fails closed for a retained surface terminal even when a reused command id has a non-surface request', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const idempotencyKey = 'surface-reused-command-id';
+    const journal = await ControlJournal.open(root, 7);
+
+    await journal.append('command.requested', {
+      commandId: 'shared-command',
+      idempotencyKey,
+      kind: 'provider.resource.upsert',
+      ownerEpoch: 7,
+    });
+    await journal.append('command.succeeded', {
+      commandId: 'shared-command',
+      idempotencyKey,
+      status: 'succeeded',
+    });
+    await journal.append('command.requested', {
+      commandId: 'shared-command',
+      idempotencyKey: 'later-non-surface',
+      kind: 'pane.terminal.open',
+      ownerEpoch: 7,
+    });
+
+    const reopened = await ControlJournal.open(root, 8);
+    const surfaceEventsBefore = reopened.read(0).filter((event) => event.payload.idempotencyKey === idempotencyKey).length;
+
+    await expect(ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened }))
+      .rejects.toThrow('durable outcome sidecar is required for retained surface or unknown terminal events');
+    expect(reopened.read(0).filter((event) => event.payload.idempotencyKey === idempotencyKey)).toHaveLength(surfaceEventsBefore);
+    await expect(reopened.loadOutcome(idempotencyKey)).resolves.toBeUndefined();
+  });
+
   it('rejects a stale owner epoch before side effects', async () => {
     const runtime = await ControlRuntime.create({
       ownerEpoch: 4,

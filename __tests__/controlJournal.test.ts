@@ -1,4 +1,4 @@
-import { appendFile, mkdir, open, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -218,6 +218,48 @@ describe('ControlJournal', () => {
     }
 
     await expect(journal.loadOutcome(idempotencyKey)).rejects.toThrow('durable outcome file exceeds the maximum size');
+  });
+
+  it('rejects symlinked outcome directories without touching the external target', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const idempotencyKey = 'symlinked-outcomes';
+    const externalDirectory = path.join(root, 'external-outcomes');
+    await mkdir(externalDirectory, { recursive: true, mode: 0o755 });
+    const externalFile = path.join(externalDirectory, path.basename(storedOutcomePath(root, idempotencyKey)));
+    const externalOutcome = { status: 'succeeded', value: { paneId: '%external' } } as const;
+    await writeFile(externalFile, JSON.stringify({ idempotencyKey, outcome: externalOutcome }), 'utf8');
+    const externalBefore = await readFile(externalFile, 'utf8');
+    const externalModeBefore = (await stat(externalDirectory)).mode & 0o777;
+
+    const runtimeDirectory = path.join(root, '.psyche', 'runtime');
+    await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
+    await symlink(
+      externalDirectory,
+      path.join(runtimeDirectory, 'outcomes'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    await expect(journal.loadOutcome(idempotencyKey)).rejects.toThrow('durable outcome path is unsafe');
+    await expect(journal.storeOutcome(idempotencyKey, {
+      status: 'succeeded',
+      value: { paneId: '%new' },
+    })).rejects.toThrow('durable outcome path is unsafe');
+
+    expect(await readFile(externalFile, 'utf8')).toBe(externalBefore);
+    expect((await stat(externalDirectory)).mode & 0o777).toBe(externalModeBefore);
+  });
+
+  it('rejects a durable outcome path that is not a regular file', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const idempotencyKey = 'non-regular-outcome';
+    const filePath = storedOutcomePath(root, idempotencyKey);
+
+    await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    await mkdir(filePath, { mode: 0o700 });
+
+    await expect(journal.loadOutcome(idempotencyKey)).rejects.toThrow('durable outcome path is unsafe');
   });
 
   it('persists optional approval ownership metadata across journal replay', async () => {

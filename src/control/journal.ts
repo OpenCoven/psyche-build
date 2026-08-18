@@ -1,5 +1,5 @@
-import { type BigIntStats } from 'node:fs';
-import { chmod, mkdir, open, readFile, rename, truncate, type FileHandle } from 'node:fs/promises';
+import { constants, type BigIntStats } from 'node:fs';
+import { chmod, lstat, mkdir, open, readFile, rename, truncate, type FileHandle } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
@@ -408,16 +408,38 @@ export class ControlJournal {
   }
 
   async loadOutcome(idempotencyKey: string): Promise<CommandOutcome | undefined> {
+    if (!await durableOutcomeDirectoryExists(this.outcomeDirectoryPath)) return undefined;
     const outcomePath = this.outcomePath(idempotencyKey);
+    const preOpenPath = await readDurableOutcomeFilePathSnapshot(outcomePath);
+    if (preOpenPath.missing) return undefined;
+    if (preOpenPath.invalid || !preOpenPath.snapshot) {
+      throw unsafeDurableOutcomePath();
+    }
+    const preOpenSnapshot = preOpenPath.snapshot;
     let handle: FileHandle;
     try {
-      handle = await open(outcomePath, 'r');
+      handle = await open(outcomePath, durableOutcomeFileReadFlags());
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      if (isUnsafeDurableOutcomeOpenError(error)) throw unsafeDurableOutcomePath();
       throw error;
     }
     try {
-      return parseStoredOutcome(await readBoundedStoredOutcome(handle), idempotencyKey);
+      const openedStats = await handle.stat({ bigint: true });
+      if (!isSafeDurableOutcomeFileStats(openedStats)) throw unsafeDurableOutcomePath();
+      const openedSnapshot = snapshotDurableOutcomeFile(openedStats);
+      if (!sameDurableOutcomeFileSnapshot(preOpenSnapshot, openedSnapshot)) {
+        throw new Error('durable outcome file changed while reading');
+      }
+      const raw = await readBoundedStoredOutcome(handle);
+      const currentPath = await readDurableOutcomeFilePathSnapshot(outcomePath);
+      if (currentPath.missing || currentPath.invalid || !currentPath.snapshot) {
+        throw new Error('durable outcome file changed while reading');
+      }
+      if (!sameDurableOutcomeFileSnapshot(openedSnapshot, currentPath.snapshot)) {
+        throw new Error('durable outcome file changed while reading');
+      }
+      return parseStoredOutcome(raw, idempotencyKey);
     } finally {
       await handle.close();
     }
@@ -425,8 +447,7 @@ export class ControlJournal {
 
   async storeOutcome(idempotencyKey: string, outcome: CommandOutcome): Promise<void> {
     const serialized = serializeStoredOutcomeRecord({ idempotencyKey, outcome }, idempotencyKey);
-    await mkdir(this.outcomeDirectoryPath, { recursive: true, mode: 0o700 });
-    await chmod(this.outcomeDirectoryPath, 0o700);
+    await ensureDurableOutcomeDirectory(this.outcomeDirectoryPath);
     const destination = this.outcomePath(idempotencyKey);
     const temporary = path.join(
       this.outcomeDirectoryPath,
@@ -573,8 +594,91 @@ export class ControlJournal {
   }
 }
 
-function commandTransactionKey(commandId: string, idempotencyKey: unknown): string {
+export function commandTransactionKey(commandId: string, idempotencyKey: unknown): string {
   return JSON.stringify([commandId, typeof idempotencyKey === 'string' ? idempotencyKey : '']);
+}
+
+function durableOutcomeFileReadFlags(): number {
+  let flags = constants.O_RDONLY;
+  if (process.platform !== 'win32') {
+    flags |= constants.O_NOFOLLOW;
+    flags |= constants.O_NONBLOCK;
+  }
+  return flags;
+}
+
+function isSafeDurableOutcomeFileStats(stats: BigIntStats): boolean {
+  return stats.isFile() && !stats.isSymbolicLink();
+}
+
+function isSafeDurableOutcomeDirectoryStats(stats: BigIntStats): boolean {
+  return stats.isDirectory() && !stats.isSymbolicLink();
+}
+
+async function durableOutcomeDirectoryExists(directoryPath: string): Promise<boolean> {
+  for (const component of durableOutcomeDirectoryComponents(directoryPath)) {
+    const stats = await readDurableOutcomeDirectoryStats(component);
+    if (!stats) return false;
+    if (!isSafeDurableOutcomeDirectoryStats(stats)) throw unsafeDurableOutcomePath();
+  }
+  return true;
+}
+
+async function ensureDurableOutcomeDirectory(directoryPath: string): Promise<void> {
+  for (const component of durableOutcomeDirectoryComponents(directoryPath)) {
+    let stats = await readDurableOutcomeDirectoryStats(component);
+    if (!stats) {
+      try {
+        await mkdir(component, { mode: 0o700 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      stats = await readDurableOutcomeDirectoryStats(component);
+    }
+    if (!stats || !isSafeDurableOutcomeDirectoryStats(stats)) throw unsafeDurableOutcomePath();
+  }
+  await chmod(directoryPath, 0o700);
+}
+
+function durableOutcomeDirectoryComponents(directoryPath: string): string[] {
+  const runtimeDirectory = path.dirname(directoryPath);
+  return [path.dirname(runtimeDirectory), runtimeDirectory, directoryPath];
+}
+
+async function readDurableOutcomeDirectoryStats(directoryPath: string): Promise<BigIntStats | undefined> {
+  try {
+    return await lstat(directoryPath, { bigint: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+async function readDurableOutcomeFilePathSnapshot(
+  filePath: string,
+): Promise<{ missing: true } | { missing: false; invalid: true } | {
+  missing: false;
+  invalid: false;
+  snapshot: DurableOutcomeFileSnapshot;
+}> {
+  let stats: BigIntStats;
+  try {
+    stats = await lstat(filePath, { bigint: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { missing: true };
+    throw error;
+  }
+  if (!isSafeDurableOutcomeFileStats(stats)) return { missing: false, invalid: true };
+  return { missing: false, invalid: false, snapshot: snapshotDurableOutcomeFile(stats) };
+}
+
+function isUnsafeDurableOutcomeOpenError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ELOOP' || code === 'ENOTDIR' || code === 'EISDIR';
+}
+
+function unsafeDurableOutcomePath(): Error {
+  return new Error('durable outcome path is unsafe');
 }
 
 function snapshotDurableOutcomeFile(stats: BigIntStats): DurableOutcomeFileSnapshot {

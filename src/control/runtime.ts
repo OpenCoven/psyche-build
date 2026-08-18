@@ -23,6 +23,7 @@ import { SurfaceRegistry } from './surfaces.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
 import {
   agentControlJournalPayload,
+  commandTransactionKey,
   createAgentControlJournalResource,
   type AgentControlJournalReceipt,
   type DurableReceiptRecord,
@@ -1689,7 +1690,9 @@ export class ControlRuntime {
       const idempotencyKey = stringPayload(event, 'idempotencyKey');
       if (!idempotencyKey) continue;
       const commandId = stringPayload(event, 'commandId');
-      const commandKind = commandId ? commandKinds.get(commandId) : undefined;
+      const commandKind = commandId
+        ? commandKinds.get(commandTransactionKey(commandId, idempotencyKey))
+        : undefined;
       const stored = await this.compactable.loadOutcome(idempotencyKey);
       if (stored) {
         this.clearDirtyTerminalOutcome(idempotencyKey, event.sequence);
@@ -2446,9 +2449,10 @@ function retainedCommandKinds(events: readonly RuntimeEvent[]): Map<string, Cont
   for (const event of events) {
     if (event.kind !== 'command.requested') continue;
     const commandId = stringPayload(event, 'commandId');
+    const idempotencyKey = stringPayload(event, 'idempotencyKey');
     const kind = stringPayload(event, 'kind');
-    if (!commandId || !kind) continue;
-    kinds.set(commandId, kind);
+    if (!commandId || !idempotencyKey || !kind) continue;
+    kinds.set(commandTransactionKey(commandId, idempotencyKey), kind);
   }
   return kinds;
 }
@@ -2458,8 +2462,9 @@ function retainedCommandKind(
   terminalEvent: RuntimeEvent,
 ): ControlCommand['kind'] | string | undefined {
   const commandId = stringPayload(terminalEvent, 'commandId');
-  if (!commandId) return undefined;
-  return retainedCommandKinds(events).get(commandId);
+  const idempotencyKey = stringPayload(terminalEvent, 'idempotencyKey');
+  if (!commandId || !idempotencyKey) return undefined;
+  return retainedCommandKinds(events).get(commandTransactionKey(commandId, idempotencyKey));
 }
 
 function isRetainedNonSurfaceCommandKind(kind?: ControlCommand['kind'] | string): kind is ControlCommand['kind'] {
