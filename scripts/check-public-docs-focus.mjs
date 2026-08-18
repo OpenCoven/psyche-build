@@ -54,12 +54,29 @@ function collectPackageMarkdownFiles(packageFiles) {
   const boundaryFailures = [];
   const markdownFiles = [];
 
-  for (const file of sortUnique(packageFiles.filter((entry) => entry.startsWith('docs/')))) {
-    const isExplicitMarkdownPath =
-      !hasGlobMetacharacters(file) && !file.endsWith('/') && path.extname(file).toLowerCase() === '.md';
+  for (const file of sortUnique(packageFiles)) {
+    const isDocsEntry = file === 'docs' || file === 'docs/' || file.startsWith('docs/');
+    const isMarkdown = path.extname(file).toLowerCase() === '.md';
 
-    if (!isExplicitMarkdownPath) {
-      boundaryFailures.push({ file, reason: 'package-published docs must use explicit Markdown file paths' });
+    if (isDocsEntry) {
+      if (hasGlobMetacharacters(file) || !/^docs\/[^/]+\.md$/.test(file)) {
+        boundaryFailures.push({
+          file,
+          reason: 'package-published docs must use explicit top-level Markdown file paths',
+        });
+        continue;
+      }
+
+      markdownFiles.push(file);
+      continue;
+    }
+
+    if (!isMarkdown) {
+      continue;
+    }
+
+    if (hasGlobMetacharacters(file) || file.endsWith('/')) {
+      boundaryFailures.push({ file, reason: 'package-published Markdown must use explicit file paths' });
       continue;
     }
 
@@ -169,36 +186,61 @@ async function selfCheckPublicInventory() {
 
   const packageBoundaryA = collectPackageMarkdownFiles([
     'dist/**/*',
-    'docs/',
-    'docs/superpowers',
-    'docs/**/*',
+    'CHANGELOG*.md',
+    'CHANGELOG.md',
+    'CONTRIBUTING.md',
     'README.md',
-    'docs/README.md',
+    'docs/',
+    'docs/**/*',
     'docs/COVEN-DEMO-LOOP.md',
     'docs/AGENT-SURFACE-CONTROL.md',
+    'docs/README.md',
+    'docs/not-md.txt',
+    'docs/superpowers',
+    'docs/superpowers/x.md',
   ]);
   const packageBoundaryB = collectPackageMarkdownFiles([
-    'docs/**/*',
-    'docs/COVEN-DEMO-LOOP.md',
-    'docs/AGENT-SURFACE-CONTROL.md',
-    'docs/README.md',
-    'docs/superpowers',
-    'docs/',
-    'README.md',
     'dist/**/*',
+    'README.md',
+    'CONTRIBUTING.md',
+    'CHANGELOG.md',
+    'CHANGELOG*.md',
+    'docs/superpowers/x.md',
+    'docs/not-md.txt',
+    'docs/superpowers',
+    'docs/README.md',
+    'docs/AGENT-SURFACE-CONTROL.md',
+    'docs/COVEN-DEMO-LOOP.md',
+    'docs/**/*',
+    'docs/',
   ]);
 
   assert.deepEqual(packageBoundaryA, packageBoundaryB);
-  assert.deepEqual(packageBoundaryA.markdownFiles, [
-    'docs/AGENT-SURFACE-CONTROL.md',
-    'docs/COVEN-DEMO-LOOP.md',
-    'docs/README.md',
-  ]);
-  assert.deepEqual(packageBoundaryA.boundaryFailures, [
-    { file: 'docs/', reason: 'package-published docs must use explicit Markdown file paths' },
-    { file: 'docs/**/*', reason: 'package-published docs must use explicit Markdown file paths' },
-    { file: 'docs/superpowers', reason: 'package-published docs must use explicit Markdown file paths' },
-  ]);
+  assert(packageBoundaryA.markdownFiles.includes('CHANGELOG.md'));
+  assert(packageBoundaryA.markdownFiles.includes('CONTRIBUTING.md'));
+  assert(packageBoundaryA.markdownFiles.includes('README.md'));
+  assert(packageBoundaryA.markdownFiles.includes('docs/AGENT-SURFACE-CONTROL.md'));
+  assert(packageBoundaryA.markdownFiles.includes('docs/COVEN-DEMO-LOOP.md'));
+  assert(packageBoundaryA.markdownFiles.includes('docs/README.md'));
+  assert.deepEqual(
+    packageBoundaryA.boundaryFailures,
+    sortFailureRecords([
+      { file: 'CHANGELOG*.md', reason: 'package-published Markdown must use explicit file paths' },
+      { file: 'docs/', reason: 'package-published docs must use explicit top-level Markdown file paths' },
+      { file: 'docs/**/*', reason: 'package-published docs must use explicit top-level Markdown file paths' },
+      { file: 'docs/not-md.txt', reason: 'package-published docs must use explicit top-level Markdown file paths' },
+      { file: 'docs/superpowers', reason: 'package-published docs must use explicit top-level Markdown file paths' },
+      { file: 'docs/superpowers/x.md', reason: 'package-published docs must use explicit top-level Markdown file paths' },
+    ]),
+  );
+
+  const packageInventory = buildPublicInventory({
+    recursiveFiles: [],
+    packageMarkdownFiles: packageBoundaryA.markdownFiles,
+  });
+  assert(packageInventory.includes('CHANGELOG.md'));
+  assert(packageInventory.includes('CONTRIBUTING.md'));
+  assert(packageInventory.includes('README.md'));
 
   const partialCleanupInventory = buildPublicInventory({
     recursiveFiles: ['docs/src/main.js'],
