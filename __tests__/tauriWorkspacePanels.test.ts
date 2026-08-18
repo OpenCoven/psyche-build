@@ -233,8 +233,9 @@ describe('Tauri workspace panels', () => {
       indexHtml.indexOf('class="rail sidebar"'),
       indexHtml.indexOf('</aside>'),
     );
-    expect(sidebar).toContain('data-sidebar-tab="sessions"');
-    expect(sidebar).toContain('data-sidebar-tab="files"');
+    expect(sidebar).not.toContain('aria-label="Sidebar sections"');
+    expect(sidebar).not.toContain('data-sidebar-tab=');
+    expect(sidebar).toContain('id="files-back"');
     expect(sidebar).toContain('id="file-tree"');
     // File tabs belong to the file view now, not the whole terminal area.
     const fileView = indexHtml.slice(indexHtml.indexOf('class="file-view"'));

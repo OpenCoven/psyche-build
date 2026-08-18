@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { FrameScheduler } from '../native/desktop/psyche-build-tauri/web/runtime/frame-scheduler';
+import { withFilesScopeSelectionHelper } from './tauriMainHarness';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
@@ -94,8 +95,12 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     ) => preferredId,
     ...dependencies,
   };
-  const names = Object.keys(resolvedDependencies);
-  const values = Object.values(resolvedDependencies);
+  const dependenciesWithFilesScope = withFilesScopeSelectionHelper(
+    functionSource,
+    resolvedDependencies,
+  );
+  const names = Object.keys(dependenciesWithFilesScope);
+  const values = Object.values(dependenciesWithFilesScope);
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
