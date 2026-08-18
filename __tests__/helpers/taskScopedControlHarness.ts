@@ -288,6 +288,7 @@ export async function createTaskScopedControlHarness(options: {
     commandId: legacyActionId,
     idempotencyKey: legacyActionId,
     status: 'failed',
+    outcomeDigest: 'd'.repeat(64),
     receipt: {
       schema: 'psyche.control.receipt/v1',
       actionId: legacyActionId,
