@@ -282,7 +282,9 @@ export class ControlRuntime {
   private readonly readActiveTaskCredential?: ControlRuntimeOptions['readActiveTaskCredential'];
   private readonly compactable?: CompactableJournal;
   private activeCompaction?: ActiveCompactionAttempt;
+  private compactionBlockedByDurability = false;
   private compactionInFlight = false;
+  private compactionPromise?: Promise<void>;
 
   private constructor(
     private readonly ownerEpoch: number,
@@ -500,6 +502,12 @@ export class ControlRuntime {
   }
 
   private async submitFreshWhenCapacityAvailable(command: ControlCommand): Promise<CommandOutcome> {
+    if (!await this.ensureDurabilityReadyForFreshExecution()) {
+      return rejectedOutcome(
+        'durability_unavailable',
+        'durable outcome persistence is unavailable; refusing a new effect',
+      );
+    }
     if (!await this.hasDirtyDurabilityCapacity()) {
       return rejectedOutcome('durability_unavailable', 'durable outcome persistence capacity is exhausted');
     }
@@ -1635,9 +1643,7 @@ export class ControlRuntime {
       });
       const event = await this.journal.append(built.kind, built.payload);
       this.rememberOutcome(command.idempotencyKey, outcome);
-      this.markDirtyTerminalOutcome(command.idempotencyKey, event.sequence, outcome);
-      await this.persistTerminalOutcome(command.idempotencyKey, event.sequence, outcome);
-      this.maybeCompact();
+      await this.persistTerminalOutcomeOrLeaveDirty(command.idempotencyKey, event.sequence, outcome);
       return outcome;
     }
     const event = await this.journal.append(terminalKindForOutcome(outcome), {
@@ -1653,9 +1659,7 @@ export class ControlRuntime {
       this.retainCommandRecord(command.id, { command, outcome, sequence: event.sequence });
     }
     this.rememberOutcome(command.idempotencyKey, outcome);
-    this.markDirtyTerminalOutcome(command.idempotencyKey, event.sequence, outcome);
-    await this.persistTerminalOutcome(command.idempotencyKey, event.sequence, outcome);
-    this.maybeCompact();
+    await this.persistTerminalOutcomeOrLeaveDirty(command.idempotencyKey, event.sequence, outcome);
     return outcome;
   }
 
@@ -1862,6 +1866,24 @@ export class ControlRuntime {
     this.clearDirtyTerminalOutcome(idempotencyKey, sequence);
   }
 
+  private async persistTerminalOutcomeOrLeaveDirty(
+    idempotencyKey: string,
+    sequence: number,
+    outcome: CommandOutcome,
+  ): Promise<void> {
+    try {
+      this.markDirtyTerminalOutcome(idempotencyKey, sequence, outcome);
+      await this.persistTerminalOutcome(idempotencyKey, sequence, outcome);
+    } catch (error) {
+      console.error(
+        `[control-runtime] durable outcome persistence failed for ${idempotencyKey}`,
+        error,
+      );
+    } finally {
+      this.maybeCompact();
+    }
+  }
+
   private async flushDirtyTerminalOutcomesThrough(coveredSequence: number): Promise<void> {
     if (!this.compactable) return;
     for (const [idempotencyKey, dirty] of this.dirtyTerminalOutcomes) {
@@ -1980,30 +2002,46 @@ export class ControlRuntime {
    */
   private maybeCompact(): void {
     const journal = this.compactable;
-    if (!journal || this.compactionInFlight) return;
+    if (!journal) return;
     if (journal.sequence - journal.firstSequence + 1 <= JOURNAL_COMPACTION_TRIGGER) return;
-    this.compactionInFlight = true;
-    void this.compactJournal(journal)
-      .catch(() => {
-        // A failed compaction leaves the previous journal intact by way of the
-        // atomic rename, so the next terminal command simply tries again.
-      })
-      .finally(() => {
-        this.compactionInFlight = false;
-      });
+    void this.compactJournal(journal);
   }
 
   private async compactJournal(journal: CompactableJournal): Promise<void> {
+    if (this.compactionPromise) return this.compactionPromise;
+    this.compactionInFlight = true;
+    const running = this.performCompaction(journal)
+      .catch((error) => {
+        this.markCompactionBlockedByDurability(error);
+      })
+      .finally(() => {
+        this.compactionInFlight = false;
+        this.compactionPromise = undefined;
+      });
+    this.compactionPromise = running;
+    return running;
+  }
+
+  private async performCompaction(journal: CompactableJournal): Promise<void> {
     const coveredSequence = journal.sequence - JOURNAL_RETAINED_EVENTS;
-    if (coveredSequence < journal.firstSequence) return;
+    if (coveredSequence < journal.firstSequence) {
+      this.compactionBlockedByDurability = false;
+      return;
+    }
     const attempt = this.beginCompactionAttempt(coveredSequence);
     const guard: JournalMutationGuard = {
       shouldAbort: () => this.compactionShouldAbort(attempt),
     };
     try {
       await this.flushDirtyTerminalOutcomesThrough(coveredSequence);
-      if (this.compactionShouldAbort(attempt)) return;
-      if (!await this.verifyCoveredTerminalOutcomes(journal, attempt)) return;
+      if (this.compactionShouldAbort(attempt)) {
+        this.markCompactionBlockedByDurability();
+        return;
+      }
+      if (!await this.verifyCoveredTerminalOutcomes(journal, attempt)) {
+        this.markCompactionBlockedByDurability();
+        return;
+      }
 
       // Records older than the retained window survive only in the previous
       // snapshot, so the new one is the union rather than a fresh projection.
@@ -2023,11 +2061,38 @@ export class ControlRuntime {
         outcomes: {},
         receiptRecords: records,
       }, guard);
-      if (this.compactionShouldAbort(attempt)) return;
+      if (this.compactionShouldAbort(attempt)) {
+        this.markCompactionBlockedByDurability();
+        return;
+      }
       await journal.compact(coveredSequence, guard);
+      if (this.compactionShouldAbort(attempt)) {
+        this.markCompactionBlockedByDurability();
+        return;
+      }
+      this.compactionBlockedByDurability = false;
     } finally {
       this.finishCompactionAttempt(attempt);
     }
+  }
+
+  private async ensureDurabilityReadyForFreshExecution(): Promise<boolean> {
+    if (!this.compactionBlockedByDurability) return true;
+    const journal = this.compactable;
+    if (!journal) return false;
+    await this.compactJournal(journal);
+    return !this.compactionBlockedByDurability;
+  }
+
+  private markCompactionBlockedByDurability(error?: unknown): void {
+    if (!this.compactionBlockedByDurability) {
+      if (error === undefined) {
+        console.error('[control-runtime] deferred compaction until durable outcomes are repaired');
+      } else {
+        console.error('[control-runtime] deferred compaction until durable outcomes are repaired', error);
+      }
+    }
+    this.compactionBlockedByDurability = true;
   }
 
   private queueForPane(paneId: string): PaneQueueState {

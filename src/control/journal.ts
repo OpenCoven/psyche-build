@@ -319,6 +319,7 @@ export const DURABLE_OUTCOME_RECORD_MAX_BYTES =
 
 export class ControlJournal {
   readonly path: string;
+  private readonly runtimeDirectoryPath: string;
   private readonly snapshotPath: string;
   private readonly outcomeDirectoryPath: string;
   private currentSequence: number;
@@ -330,6 +331,7 @@ export class ControlJournal {
   private appendTail: Promise<void> = Promise.resolve();
 
   private constructor(
+    runtimeDirectoryPath: string,
     journalPath: string,
     snapshotPath: string,
     outcomeDirectoryPath: string,
@@ -337,6 +339,7 @@ export class ControlJournal {
     events: ControlEvent[],
     firstSequence: number,
   ) {
+    this.runtimeDirectoryPath = runtimeDirectoryPath;
     this.path = journalPath;
     this.snapshotPath = snapshotPath;
     this.outcomeDirectoryPath = outcomeDirectoryPath;
@@ -359,6 +362,7 @@ export class ControlJournal {
     const outcomeDirectoryPath = path.join(runtimeDir, 'outcomes');
     const { events, firstSequence } = await ControlJournal.replay(journalPath);
     return new ControlJournal(
+      runtimeDir,
       journalPath,
       snapshotPath,
       outcomeDirectoryPath,
@@ -649,25 +653,24 @@ export class ControlJournal {
   }
 
   async writeSnapshot(file: JournalSnapshotFile, guard?: JournalMutationGuard): Promise<void> {
-    const temporary = `${this.snapshotPath}.${process.pid}.tmp`;
-    const handle = await open(temporary, 'w');
-    try {
-      await handle.writeFile(JSON.stringify(file), 'utf8');
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
+    const temporary = path.join(
+      this.runtimeDirectoryPath,
+      `${path.basename(this.snapshotPath)}.${process.pid}.${randomUUID()}.tmp`,
+    );
     const context = {
       snapshotPath: this.snapshotPath,
       temporaryPath: temporary,
       coveredSequence: file.coveredSequence,
     } satisfies SnapshotWriteContext;
-    await invokeDurableOutcomePublicationHook('beforeSnapshotRename', context);
-    if (guard?.shouldAbort?.()) {
-      await unlink(temporary).catch(() => undefined);
-      return;
-    }
-    await rename(temporary, this.snapshotPath);
+    await this.replaceRuntimeFile({
+      serialized: JSON.stringify(file),
+      temporaryPath: temporary,
+      destinationPath: this.snapshotPath,
+      hookStep: 'beforeSnapshotRename',
+      hookContext: context,
+      guard,
+      mismatchError: runtimeDirectoryChangedDuringSnapshotPublication,
+    });
   }
 
   /**
@@ -702,27 +705,29 @@ export class ControlJournal {
         .map((entry) => JSON.stringify(entry))
         .join('\n');
 
-      const temporary = `${this.path}.${process.pid}.tmp`;
-      const handle = await open(temporary, 'w');
-      try {
-        await handle.writeFile(`${body}\n`, 'utf8');
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
+      const temporary = path.join(
+        this.runtimeDirectoryPath,
+        `${path.basename(this.path)}.${process.pid}.${randomUUID()}.tmp`,
+      );
       const context = {
         journalPath: this.path,
         temporaryPath: temporary,
         coveredSequence,
         firstSequence,
       } satisfies JournalCompactionContext;
-      await invokeDurableOutcomePublicationHook('beforeCompactRename', context);
-      if (guard?.shouldAbort?.()) {
-        await unlink(temporary).catch(() => undefined);
+      const replaced = await this.replaceRuntimeFile({
+        serialized: `${body}\n`,
+        temporaryPath: temporary,
+        destinationPath: this.path,
+        hookStep: 'beforeCompactRename',
+        hookContext: context,
+        guard,
+        mismatchError: runtimeDirectoryChangedDuringCompaction,
+      });
+      if (!replaced) {
         resolveDone();
         return;
       }
-      await rename(temporary, this.path);
 
       this.events.splice(0, keepFrom);
       this.firstRetainedSequence = firstSequence;
@@ -734,6 +739,90 @@ export class ControlJournal {
       rejectDone(error);
     });
     return result;
+  }
+
+  private async replaceRuntimeFile(
+    input: {
+      serialized: string;
+      temporaryPath: string;
+      destinationPath: string;
+      hookStep: 'beforeSnapshotRename' | 'beforeCompactRename';
+      hookContext: SnapshotWriteContext | JournalCompactionContext;
+      guard?: JournalMutationGuard;
+      mismatchError: () => Error;
+    },
+  ): Promise<boolean> {
+    const runtimeIdentity = await ensureRuntimeDirectoryIdentity(this.runtimeDirectoryPath);
+    let handle: FileHandle | undefined;
+    let temporarySnapshot: DurableOutcomeFileSnapshot | undefined;
+    let published = false;
+    try {
+      await assertRuntimeDirectoryIdentity(this.runtimeDirectoryPath, runtimeIdentity, input.mismatchError);
+      if (input.guard?.shouldAbort?.()) return false;
+      try {
+        handle = await openExclusiveDurableOutcomeFile(input.temporaryPath);
+      } catch (error) {
+        if (isRuntimeDirectoryMutationError(error)) throw input.mismatchError();
+        throw error;
+      }
+      const openedStats = await handle.stat({ bigint: true });
+      if (!isSafeDurableOutcomeFileStats(openedStats)) throw input.mismatchError();
+      temporarySnapshot = snapshotDurableOutcomeFile(openedStats);
+      await assertRuntimeDirectoryIdentity(this.runtimeDirectoryPath, runtimeIdentity, input.mismatchError);
+      if (input.guard?.shouldAbort?.()) {
+        await handle.close().catch(() => undefined);
+        handle = undefined;
+        await removeDurableOutcomePathIfMatching(input.temporaryPath, temporarySnapshot);
+        return false;
+      }
+      await handle.writeFile(input.serialized, 'utf8');
+      await handle.sync();
+      const syncedStats = await handle.stat({ bigint: true });
+      if (!isSafeDurableOutcomeFileStats(syncedStats)) throw input.mismatchError();
+      temporarySnapshot = snapshotDurableOutcomeFile(syncedStats);
+      await handle.close();
+      handle = undefined;
+      await assertRuntimeDirectoryIdentity(this.runtimeDirectoryPath, runtimeIdentity, input.mismatchError);
+      await invokeDurableOutcomePublicationHook(input.hookStep as any, input.hookContext as any);
+      await assertRuntimeDirectoryIdentity(this.runtimeDirectoryPath, runtimeIdentity, input.mismatchError);
+      if (input.guard?.shouldAbort?.()) {
+        await removeDurableOutcomePathIfMatching(input.temporaryPath, temporarySnapshot);
+        return false;
+      }
+      try {
+        await rename(input.temporaryPath, input.destinationPath);
+      } catch (error) {
+        if (isRuntimeDirectoryMutationError(error)) throw input.mismatchError();
+        throw error;
+      }
+      published = true;
+      const publishedPath = await readDurableOutcomeFilePathSnapshot(input.destinationPath);
+      if (
+        temporarySnapshot
+        && (
+          publishedPath.missing
+          || publishedPath.invalid
+          || !publishedPath.snapshot
+          || !sameDurableOutcomeFileIdentity(temporarySnapshot, publishedPath.snapshot)
+        )
+      ) {
+        await removeDurableOutcomePathIfMatching(input.destinationPath, temporarySnapshot);
+        throw input.mismatchError();
+      }
+      await assertRuntimeDirectoryIdentity(this.runtimeDirectoryPath, runtimeIdentity, input.mismatchError);
+      return true;
+    } catch (error) {
+      if (handle) await handle.close().catch(() => undefined);
+      if (temporarySnapshot) {
+        await removeDurableOutcomePathIfMatching(
+          published ? input.destinationPath : input.temporaryPath,
+          temporarySnapshot,
+        );
+      } else if (!published) {
+        await unlink(input.temporaryPath).catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   async recoverNonterminalCommands(): Promise<ControlEvent[]> {
@@ -826,6 +915,13 @@ async function ensureDurableOutcomeDirectory(directoryPath: string): Promise<Dur
   return identity;
 }
 
+async function ensureRuntimeDirectoryIdentity(directoryPath: string): Promise<DurableOutcomeDirectoryIdentity> {
+  await ensurePrivateDirectoryChain(runtimeDirectoryComponents(directoryPath));
+  const identity = await snapshotDurableOutcomeDirectoryIdentity(directoryPath);
+  if (!identity) throw unsafeRuntimeDirectoryPath();
+  return identity;
+}
+
 async function invokeDurableOutcomePublicationHook<K extends keyof JournalTestHookContexts>(
   step: K,
   context: JournalTestHookContexts[K],
@@ -888,6 +984,14 @@ async function assertDurableOutcomeDirectoryIdentity(
   if (!current || !sameDurableOutcomeDirectoryIdentity(expected, current)) {
     throw mismatchError();
   }
+}
+
+async function assertRuntimeDirectoryIdentity(
+  directoryPath: string,
+  expected: DurableOutcomeDirectoryIdentity,
+  mismatchError: () => Error,
+): Promise<void> {
+  await assertDurableOutcomeDirectoryIdentity(directoryPath, expected, mismatchError);
 }
 
 async function openExclusiveDurableOutcomeFile(filePath: string): Promise<FileHandle> {
@@ -961,6 +1065,11 @@ function isUnsafeDurableOutcomeOpenError(error: unknown): boolean {
   return code === 'ELOOP' || code === 'ENOTDIR' || code === 'EISDIR';
 }
 
+function isRuntimeDirectoryMutationError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || isUnsafeDurableOutcomeOpenError(error);
+}
+
 function unsafeDurableOutcomePath(): Error {
   return new Error('durable outcome path is unsafe');
 }
@@ -971,6 +1080,18 @@ function durableOutcomeDirectoryChangedDuringPublication(): Error {
 
 function durableOutcomeDirectoryChangedDuringRead(): Error {
   return new Error('durable outcome directory changed during read');
+}
+
+function unsafeRuntimeDirectoryPath(): Error {
+  return new Error('runtime directory path is unsafe');
+}
+
+function runtimeDirectoryChangedDuringSnapshotPublication(): Error {
+  return new Error('runtime directory changed during snapshot publication');
+}
+
+function runtimeDirectoryChangedDuringCompaction(): Error {
+  return new Error('runtime directory changed during journal compaction');
 }
 
 function snapshotDurableOutcomeFile(stats: BigIntStats): DurableOutcomeFileSnapshot {

@@ -394,6 +394,43 @@ describe('ControlJournal', () => {
       .resolves.toContain('%trusted');
   });
 
+  it('fails closed if the runtime directory identity changes during snapshot publication', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const runtimeDirectory = path.join(root, '.psyche', 'runtime');
+    const externalDirectory = path.join(root, 'external-runtime-snapshot');
+    const quarantinedDirectory = path.join(root, '.psyche', 'runtime-private');
+    const snapshotPath = path.join(runtimeDirectory, 'snapshot.json');
+
+    await mkdir(externalDirectory, { recursive: true, mode: 0o755 });
+
+    let swapped = false;
+    setDurableOutcomePublicationTestHooksForTesting({
+      beforeSnapshotRename: async ({ snapshotPath: hookSnapshotPath }) => {
+        if (swapped || hookSnapshotPath !== snapshotPath) return;
+        swapped = true;
+        await rename(runtimeDirectory, quarantinedDirectory);
+        await symlink(
+          externalDirectory,
+          runtimeDirectory,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      },
+    });
+
+    await expect(journal.writeSnapshot({
+      snapshot: { ownerEpoch: 7, sequence: 0, commands: {}, leases: {}, resources: [],
+        capabilityLeases: [], leaseHistory: [], leaseRequests: [], approvals: [], receipts: [] } as any,
+      coveredSequence: 0,
+      outcomes: {},
+      receiptRecords: [],
+    })).rejects.toThrow('runtime directory changed during snapshot publication');
+
+    expect(await pathExists(path.join(externalDirectory, 'snapshot.json'))).toBe(false);
+    expect(await readdir(externalDirectory)).toEqual([]);
+    expect(await pathExists(path.join(quarantinedDirectory, 'snapshot.json'))).toBe(false);
+  });
+
   it('persists optional approval ownership metadata across journal replay', async () => {
     const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 7);
@@ -684,6 +721,42 @@ describe('ControlJournal', () => {
     const loaded = await journal.loadSnapshot();
     expect(loaded?.coveredSequence).toBe(4);
     expect(loaded?.outcomes.i1).toMatchObject({ status: 'succeeded' });
+  });
+
+  it('fails closed if the runtime directory identity changes during journal compaction', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 3);
+    for (let index = 1; index <= 4; index += 1) {
+      await journal.append('command.succeeded', { commandId: `c${index}`, idempotencyKey: `i${index}` });
+    }
+    const runtimeDirectory = path.join(root, '.psyche', 'runtime');
+    const externalDirectory = path.join(root, 'external-runtime-compact');
+    const quarantinedDirectory = path.join(root, '.psyche', 'runtime-private');
+    const journalBefore = await readFile(journal.path, 'utf8');
+
+    await mkdir(externalDirectory, { recursive: true, mode: 0o755 });
+
+    let swapped = false;
+    setDurableOutcomePublicationTestHooksForTesting({
+      beforeCompactRename: async ({ journalPath }) => {
+        if (swapped || journalPath !== path.join(runtimeDirectory, 'events.ndjson')) return;
+        swapped = true;
+        await rename(runtimeDirectory, quarantinedDirectory);
+        await symlink(
+          externalDirectory,
+          runtimeDirectory,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      },
+    });
+
+    await expect(journal.compact(3)).rejects.toThrow('runtime directory changed during journal compaction');
+
+    expect(journal.firstSequence).toBe(1);
+    expect(journal.read(0).map((event) => event.sequence)).toEqual([1, 2, 3, 4]);
+    expect(await pathExists(path.join(externalDirectory, 'events.ndjson'))).toBe(false);
+    expect(await readdir(externalDirectory)).toEqual([]);
+    expect(await readFile(path.join(quarantinedDirectory, 'events.ndjson'), 'utf8')).toBe(journalBefore);
   });
 
   it('tolerates trailing blank lines in the journal file', async () => {

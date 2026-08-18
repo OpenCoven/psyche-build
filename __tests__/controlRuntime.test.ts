@@ -383,7 +383,7 @@ describe('ControlRuntime', () => {
     ))).toHaveLength(1);
   });
 
-  it('keeps a dirty terminal outcome replayable and blocks compaction until persistence recovers', async () => {
+  it('returns the exact completed outcome when sidecar persistence fails and deduplicates dirty retries', async () => {
     const root = await newJournalRoot('control-runtime');
     const journal = await ControlJournal.open(root, 4);
     const persist = journal.storeOutcome.bind(journal);
@@ -394,32 +394,80 @@ describe('ControlRuntime', () => {
       }
       await persist(idempotencyKey, outcome);
     });
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
 
-    await expect(submit(runtime, command({ id: 'dirty-1', idempotencyKey: 'idem-dirty' })))
-      .rejects.toThrow('sidecar write failed');
+    await expect(submit(runtime, openTerminalCommand('idem-dirty', 'dirty-1')))
+      .resolves.toEqual({ status: 'succeeded', value: { paneId: 'pane-1' } });
     const terminal = journal.findByIdempotencyKey('idem-dirty');
     expect(terminal?.kind).toBe('command.succeeded');
+    const sequenceBefore = journal.sequence;
+    await expect(submit(runtime, openTerminalCommand('idem-dirty', 'dirty-2')))
+      .resolves.toEqual({ status: 'succeeded', value: { paneId: 'pane-1' } });
+    expect(journal.sequence).toBe(sequenceBefore);
+    expect(invocations).toBe(1);
+    expect(await journal.loadOutcome('idem-dirty')).toBeUndefined();
+    expect((runtime as any).dirtyTerminalOutcomes.get('idem-dirty')).toMatchObject({
+      outcome: { status: 'succeeded', value: { paneId: 'pane-1' } },
+    });
+    expect(error.mock.calls.some(([message]) => (
+      String(message).includes('durable outcome persistence failed')
+    ))).toBe(true);
+
+    failDirty = false;
+  });
+
+  it('blocks fresh cold misses after compaction is deferred until durability is repaired', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    const persist = journal.storeOutcome.bind(journal);
+    let failDirty = true;
+    vi.spyOn(journal, 'storeOutcome').mockImplementation(async (idempotencyKey, outcome) => {
+      if (idempotencyKey === 'idem-blocked-dirty' && failDirty) {
+        throw new Error('sidecar write failed');
+      }
+      await persist(idempotencyKey, outcome);
+    });
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    const first = await submit(runtime, openTerminalCommand('idem-blocked-dirty', 'blocked-dirty-1'));
+    expect(first).toEqual({ status: 'succeeded', value: { paneId: 'pane-1' } });
+    const terminal = journal.findByIdempotencyKey('idem-blocked-dirty');
+    expect(terminal?.sequence).toBeDefined();
 
     for (let index = 0; index < 1_001; index += 1) {
       await submit(runtime, command({ id: `later-${index}`, idempotencyKey: `idem-later-${index}` }));
     }
+
+    await (runtime as any).compactJournal(journal);
+    expect((runtime as any).compactionBlockedByDurability).toBe(true);
     expect(journal.firstSequence).toBeLessThanOrEqual(terminal?.sequence ?? 0);
 
-    const sequenceBefore = journal.sequence;
-    await expect(submit(runtime, command({ id: 'dirty-2', idempotencyKey: 'idem-dirty' })))
-      .resolves.toEqual({ status: 'succeeded', value: { actorId: 'human-1', revision: 1 } });
-    expect(journal.sequence).toBe(sequenceBefore);
-    expect(await journal.loadOutcome('idem-dirty')).toBeUndefined();
+    const blockedSequenceBefore = journal.sequence;
+    const blockedCallsBefore = invocations;
+    await expect(submit(runtime, openTerminalCommand('idem-blocked-fresh', 'blocked-fresh-1')))
+      .resolves.toMatchObject({ status: 'rejected', code: 'durability_unavailable' });
+    expect(journal.sequence).toBe(blockedSequenceBefore);
+    expect(invocations).toBe(blockedCallsBefore);
+
+    (runtime as any).outcomesByIdempotencyKey.delete('idem-blocked-dirty');
+    const retrySequenceBefore = journal.sequence;
+    await expect(submit(runtime, openTerminalCommand('idem-blocked-dirty', 'blocked-dirty-2')))
+      .resolves.toEqual(first);
+    expect(journal.sequence).toBe(retrySequenceBefore);
+    expect(invocations).toBe(1);
 
     failDirty = false;
-    await submit(runtime, command({ id: 'compaction-trigger', idempotencyKey: 'idem-compaction-trigger' }));
-    await (runtime as any).compactJournal(journal);
+    await expect(submit(runtime, openTerminalCommand('idem-blocked-repaired', 'blocked-repaired-1')))
+      .resolves.toEqual({ status: 'succeeded', value: { paneId: 'pane-2' } });
+    expect((runtime as any).compactionBlockedByDurability).toBe(false);
     expect(journal.firstSequence).toBeGreaterThan(terminal?.sequence ?? 0);
-    await expect(journal.loadOutcome('idem-dirty')).resolves.toEqual({
-      status: 'succeeded',
-      value: { actorId: 'human-1', revision: 1 },
-    });
+    await expect(journal.loadOutcome('idem-blocked-dirty')).resolves.toEqual(first);
+    expect(invocations).toBe(2);
   }, 90_000);
 
   it('bounds dirty durability failures without blocking retries and reopens fresh capacity after a flush', async () => {
@@ -439,7 +487,7 @@ describe('ControlRuntime', () => {
 
     for (let index = 0; index < 256; index += 1) {
       await expect(submit(runtime, openTerminalCommand(`idem-backlog-${index}`, `cmd-backlog-${index}`)))
-        .rejects.toThrow('sidecar write failed');
+        .resolves.toEqual({ status: 'succeeded', value: { paneId: `pane-${index + 1}` } });
     }
 
     const retrySequenceBefore = journal.sequence;
