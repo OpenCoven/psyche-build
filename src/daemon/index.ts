@@ -58,6 +58,7 @@ import { readDaemonWorkspaceSnapshot } from './workspace.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
 import type { BridgeSpawnRequest, BridgeSpawnResult } from './bridge.js';
 import { Orchestrator, type LaneBackend } from '../orchestration/orchestrator.js';
+import { createDaemonOrchestrator } from './orchestrationBackend.js';
 import { PaneOutputFanout } from './paneOutputFanout.js';
 import { BrowserProviderBroker } from '../control/browserProviderBroker.js';
 import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
@@ -68,9 +69,9 @@ export interface DaemonOptions {
   printToken: boolean;
   serverVersion: string;
   capabilityStrategies: readonly AgenticCapabilityStrategy[];
-  /** Optional lane backend for orchestration tasks. Defaults to a no-op. */
+  /** Optional lane backend override for orchestration tasks. */
   laneBackend?: LaneBackend;
-  /** Pre-constructed orchestrator. When omitted one is built from `laneBackend`. */
+  /** Pre-constructed orchestrator override. */
   orchestrator?: Orchestrator;
 }
 
@@ -203,11 +204,6 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     ],
   });
 
-  const defaultLaneBackend: LaneBackend = async () => ({});
-  const orchestrator = opts.orchestrator ?? new Orchestrator({
-    executeLane: opts.laneBackend ?? defaultLaneBackend,
-  });
-
   const token = await readOrCreateToken();
 
   if (opts.printToken) {
@@ -229,6 +225,10 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   // project owner fence before accepting any connection; a failed acquire must
   // fail startup loudly rather than fall back to unfenced mutation.
   const canonicalProjectRoot = await canonicalizeProjectRoot(projectRoot);
+  const orchestrator = opts.orchestrator
+    ?? (opts.laneBackend
+      ? new Orchestrator({ executeLane: opts.laneBackend })
+      : createDaemonOrchestrator({ sessionName }));
   const paneObservations = new PaneObservationStore();
   const surfaces = new SurfaceRegistry();
   await refreshPaneSurfaces(canonicalProjectRoot, surfaces, paneObservations);
