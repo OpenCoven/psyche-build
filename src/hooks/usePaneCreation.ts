@@ -10,6 +10,7 @@ import { type AgentName } from '../utils/agentLaunch.js';
 import { Orchestrator } from '../orchestration/orchestrator.js';
 import { createLocalPaneBackend } from '../orchestration/localPaneBackend.js';
 import { buildMultiAgentTaskRequest } from '../orchestration/adapters.js';
+import { summarizeOrchestrationWarnings } from '../orchestration/warnings.js';
 import { generateSlug } from '../utils/slug.js';
 import { SettingsManager } from '../utils/settingsManager.js';
 
@@ -333,6 +334,12 @@ export default function usePaneCreation({
         lane.status === 'completed' && lane.pane ? [lane.pane] : []
       );
       const failures = result.lanes.filter((lane) => lane.status === 'failed');
+      const warningMessage = summarizeOrchestrationWarnings(
+        result.lanes,
+        failures.length > 0
+          ? `${failures.length} lane${failures.length === 1 ? '' : 's'} failed`
+          : undefined,
+      );
 
       for (const failure of failures) {
         if (failure.status !== 'failed') continue;
@@ -356,7 +363,9 @@ export default function usePaneCreation({
         await loadPanes();
       }
 
-      if (failures.length > 0) {
+      if (warningMessage) {
+        setStatusMessage(warningMessage);
+      } else if (failures.length > 0) {
         setStatusMessage(
           `Created ${createdPanes.length}/${dedupedAgents.length} panes (${failures.length} failed)`
         );

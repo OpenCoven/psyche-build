@@ -13,7 +13,7 @@ import { generateSiblingSlugForTargetPane } from '../utils/attachAgent.js';
 
 const MAX_ORCHESTRATION_WARNING_LENGTH = 1_024;
 const ORCHESTRATION_PERSISTENCE_WARNING_PREFIX =
-  'Pane launched, but orchestration metadata persistence failed: ';
+  'Pane launched, but orchestration metadata was not saved: ';
 
 function orchestrationPersistenceWarningMessage(error: unknown): string {
   let detail: string;

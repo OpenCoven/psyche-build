@@ -117,6 +117,7 @@ import {
 } from "../utils/covenDesktopUse.js"
 import { createTransactionalPane } from "../utils/transactionalPaneCreation.js"
 import { withWorktreePaneCreationReservation } from "../utils/worktreePaneCreationReservation.js"
+import { summarizeOrchestrationWarnings } from "../orchestration/warnings.js"
 
 // Type for the action system returned by useActionSystem hook
 interface ActionSystem {
@@ -1798,6 +1799,12 @@ export function useInputHandling(params: UseInputHandlingParams) {
         lane.status === "completed" && lane.pane ? [lane.pane] : []
       )
       const failures = result.lanes.filter((lane) => lane.status === "failed")
+      const warningMessage = summarizeOrchestrationWarnings(
+        result.lanes,
+        failures.length > 0
+          ? `${failures.length} lane${failures.length === 1 ? "" : "s"} failed`
+          : undefined
+      )
 
       if (createdPanes.length > 0 || failures.length > 0) {
         // createPane makes each pane durable while its reuse reservation is
@@ -1806,7 +1813,10 @@ export function useInputHandling(params: UseInputHandlingParams) {
         await loadPanes()
       }
 
-      if (failures.length === 0) {
+      if (warningMessage) {
+        setStatusMessage(warningMessage)
+        setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)
+      } else if (failures.length === 0) {
         setStatusMessage(
           `Attached ${createdPanes.length} agent${createdPanes.length === 1 ? "" : "s"} to ${getPaneDisplayName(selectedPane)}`
         )

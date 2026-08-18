@@ -363,7 +363,7 @@ describe('localPaneBackend', () => {
         code: 'orchestration_persistence_failed',
       });
       expect(output.warnings?.[0].message).toMatch(
-        /^Pane launched, but orchestration metadata persistence failed: disk full /,
+        /^Pane launched, but orchestration metadata was not saved: disk full /,
       );
       expect(output.warnings?.[0].message).not.toContain('\n');
       expect(output.warnings?.[0].message.length).toBeLessThanOrEqual(1_024);
