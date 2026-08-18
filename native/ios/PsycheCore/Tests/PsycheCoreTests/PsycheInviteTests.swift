@@ -4,7 +4,7 @@ import XCTest
 
 final class PsycheInviteTests: XCTestCase {
     func testParsesPsycheConnectIntoANormalizedEndpoint() throws {
-        let invite = try XCTUnwrap(PsycheInvite(url: URL(string:
+        let invite = try XCTUnwrap(PsycheInvite.parse(URL(string:
             "psyche://connect?host=wss%3A%2F%2FStudio.EXAMPLE.%3A4242&psyche_invite=one-time-token"
         )!))
 

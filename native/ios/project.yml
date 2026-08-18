@@ -44,6 +44,10 @@ targets:
         CFBundleDisplayName: Psyche Build
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleURLTypes:
+          - CFBundleURLName: ai.opencoven.psyche-ios
+            CFBundleURLSchemes:
+              - psyche
         NSLocalNetworkUsageDescription: Psyche uses your local network to discover and connect to your paired coding host.
         NSBonjourServices:
           - _psyche._tcp

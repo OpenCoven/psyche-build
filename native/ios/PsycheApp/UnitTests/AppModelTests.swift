@@ -102,4 +102,43 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertEqual(model.hostName, "studio.local")
     }
+
+    func testAcceptsAValidDeepLinkAsAPendingInvite() {
+        let model = AppModel(fixture: WorkspaceFixtures.multiproject)
+
+        model.receive(url: URL(string:
+            "psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&psyche_invite=one-time-token"
+        )!)
+
+        XCTAssertEqual(model.pendingInvite?.endpoint.host, "studio.example")
+        XCTAssertEqual(model.pendingInvite?.endpoint.port, 4242)
+        XCTAssertEqual(model.pendingInvite?.token, "one-time-token")
+    }
+
+    func testRejectsAnInvalidDeepLinkWithoutChangingPendingInvite() {
+        let model = AppModel(fixture: WorkspaceFixtures.multiproject)
+
+        model.receive(url: URL(string: "coven://connect?host=wss%3A%2F%2Fstudio.example&psyche_invite=token")!)
+
+        XCTAssertNil(model.pendingInvite)
+    }
+
+    func testGeneratedAppRegistersPsycheURLDeliveryPath() throws {
+        let sourceRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let infoURL = sourceRoot.appendingPathComponent("Resources/Info.plist")
+        let appURL = sourceRoot.appendingPathComponent("Sources/PsycheApp/PsycheApp.swift")
+        let infoData = try Data(contentsOf: infoURL)
+        let info = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: infoData, format: nil) as? [String: Any]
+        )
+        let urlTypes = try XCTUnwrap(info["CFBundleURLTypes"] as? [[String: Any]])
+        let schemes = try XCTUnwrap(urlTypes.first?["CFBundleURLSchemes"] as? [String])
+        let appSource = try String(contentsOf: appURL, encoding: .utf8)
+
+        XCTAssertEqual(schemes, ["psyche"])
+        XCTAssertTrue(appSource.contains(".onOpenURL"))
+        XCTAssertTrue(appSource.contains("model.receive(url: url)"))
+    }
 }

@@ -16,6 +16,10 @@ public struct PsycheInvite: Sendable, Equatable {
     public let endpoint: Endpoint
     public let token: String
 
+    public static func parse(_ url: URL) -> PsycheInvite? {
+        PsycheInvite(url: url)
+    }
+
     public init?(url: URL) {
         guard Self.isPsycheConnectURL(url),
               let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,

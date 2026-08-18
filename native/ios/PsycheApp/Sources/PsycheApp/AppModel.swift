@@ -15,6 +15,9 @@ final class AppModel: ObservableObject {
     /// Which host the state on screen came from. Rows read it for VoiceOver,
     /// where the host is not otherwise recoverable from the visible text.
     @Published private(set) var hostName: String?
+    /// Held for the deferred connection flow only. This is deliberately not
+    /// published, rendered, logged, or exposed through accessibility state.
+    private(set) var pendingInvite: PsycheInvite?
 
     let workspaceStore: WorkspaceStore
     /// `nil` under a fixture launch — that absence is what makes the fixture
@@ -63,6 +66,11 @@ final class AppModel: ObservableObject {
 
     func recordPairedHostName(_ name: String) {
         hostName = name
+    }
+
+    func receive(url: URL) {
+        guard let invite = PsycheInvite.parse(url) else { return }
+        pendingInvite = invite
     }
 
     /// Reads the launch arguments once so the decision cannot drift between

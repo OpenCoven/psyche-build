@@ -22,6 +22,9 @@ struct PsycheApp: App {
                 .environmentObject(model.workspaceStore)
                 .environmentObject(model.terminalRegistry)
                 .preferredColorScheme(.dark)
+                .onOpenURL { url in
+                    model.receive(url: url)
+                }
                 .task {
                     await model.start()
                 }
