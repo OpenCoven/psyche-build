@@ -90,6 +90,7 @@ export async function retainPaneRecovery(
   const retainedReservation = options.reservation?.retain();
   try {
     const marker = await writeWorktreeRecoveryMarker({
+      sessionProjectRoot: options.sessionProjectRoot,
       projectRoot: options.projectRoot,
       worktreePath: options.pane.worktreePath || options.projectRoot,
       pane: {

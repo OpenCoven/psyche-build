@@ -307,10 +307,13 @@ export async function createPane(
   }
 
   const existingWorktree = options.existingWorktree;
+  const projectRoot = resolvePaneProjectRoot(options.projectRoot);
+  const sessionProjectRoot = resolvePaneSessionProjectRoot(options, projectRoot);
   const reservation = await WorktreeCleanupService.getInstance().beginWorktreeReuseReservation(
     existingWorktree.worktreePath,
-    options.projectRoot,
+    projectRoot,
     options.projectLifecycleLease,
+    sessionProjectRoot,
   );
   let settled = false;
   try {
@@ -329,9 +332,6 @@ export async function createPane(
 
     let result: CreatePaneResult;
     if (options.resolveExistingWorktreeSlug) {
-      const projectRoot = resolvePaneProjectRoot(options.projectRoot);
-      const sessionProjectRoot = resolvePaneSessionProjectRoot(options, projectRoot);
-
       // Lock order is reuse reservation -> project slug allocation -> pane
       // config read/write. Release the slug lock before completing or
       // cancelling reuse so cleanup never waits while holding this namespace.
@@ -726,6 +726,7 @@ async function createPaneWithReuseReservation(
     ].join(' ');
     try {
       const marker = await writeWorktreeRecoveryMarker({
+        sessionProjectRoot,
         projectRoot,
         worktreePath,
         pane: { id: newPane.id, paneId: newPane.paneId },
@@ -799,6 +800,7 @@ async function createPaneWithReuseReservation(
           worktreePath,
           projectRoot,
           options.projectLifecycleLease,
+          sessionProjectRoot,
         );
       worktreePath = creationReservation.canonicalWorktreePath;
       newPane.worktreePath = worktreePath;

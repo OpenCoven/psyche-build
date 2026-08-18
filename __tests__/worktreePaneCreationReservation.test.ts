@@ -155,9 +155,11 @@ describe('worktree pane creation reservation', () => {
     ]);
   });
 
-  it('treats durable recovery pane slugs as occupied during local sibling allocation', async () => {
+  it('reads cross-project recovery slugs from the session allocation namespace', async () => {
+    const sessionProjectRoot = `${process.cwd()}/session-project`;
+    const targetProjectRoot = `${process.cwd()}/target-project`;
     beginWorktreeReuseReservationMock.mockResolvedValueOnce({
-      canonicalWorktreePath: `${process.cwd()}/.psyche/worktrees/feature`,
+      canonicalWorktreePath: `${targetProjectRoot}/.psyche/worktrees/feature`,
       complete: vi.fn(async () => {}),
       cancel: vi.fn(async () => {}),
       retain: vi.fn(),
@@ -182,12 +184,12 @@ describe('worktree pane creation reservation', () => {
     await createPane({
       prompt: 'review',
       projectName: 'repo',
-      projectRoot: process.cwd(),
-      sessionProjectRoot: process.cwd(),
+      projectRoot: targetProjectRoot,
+      sessionConfigPath: `${sessionProjectRoot}/.psyche/psyche.config.json`,
       existingPanes: [{ slug: 'feature' } as PsychePane],
       existingWorktree: {
         slug: 'feature',
-        worktreePath: `${process.cwd()}/.psyche/worktrees/feature`,
+        worktreePath: `${targetProjectRoot}/.psyche/worktrees/feature`,
         branchName: 'feature',
       },
       persistReusedPane: vi.fn(async () => {}),
@@ -195,6 +197,15 @@ describe('worktree pane creation reservation', () => {
     }, ['claude', 'codex']);
 
     expect(resolveExistingWorktreeSlug).toHaveBeenCalledOnce();
+    expect(beginWorktreeReuseReservationMock).toHaveBeenLastCalledWith(
+      `${targetProjectRoot}/.psyche/worktrees/feature`,
+      targetProjectRoot,
+      undefined,
+      sessionProjectRoot,
+    );
+    expect(withProjectPaneSlugAllocationLockMock)
+      .toHaveBeenCalledWith(sessionProjectRoot, expect.any(Function));
+    expect(listQuarantinedPaneSlugsMock).toHaveBeenCalledWith(sessionProjectRoot);
   });
 
   it('releases the slug lock before cancelling reuse after allocation failure', async () => {

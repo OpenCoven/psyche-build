@@ -10,12 +10,13 @@ import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 
 const RECOVERY_DIRECTORY_NAME = 'worktree-recovery';
-const RECOVERY_MARKER_VERSION = 3;
+const RECOVERY_MARKER_VERSION = 4;
 
 export interface WorktreeRecoveryMarker {
   version: number;
   id: string;
   generation?: string;
+  sessionProjectRoot?: string;
   projectRoot: string;
   worktreePath: string;
   pane: {
@@ -31,6 +32,7 @@ export interface WorktreeRecoveryMarker {
 }
 
 export interface WorktreeRecoveryMarkerRequest {
+  sessionProjectRoot?: string;
   projectRoot: string;
   worktreePath: string;
   pane: {
@@ -50,9 +52,9 @@ export interface BlockingWorktreeRecoveryMarker {
 }
 
 /**
- * Recovery markers live in the project runtime directory, never beside a
- * pane config or inside a worktree that may need to be removed. They keep
- * later cleanup attempts conservative after a live pane could not be tracked.
+ * Recovery markers live beside the pane registry that owns the pane slug,
+ * never inside a target worktree that may need to be removed. The marker
+ * separately records the target project/worktree identity for cleanup checks.
  */
 export async function writeWorktreeRecoveryMarker(
   request: WorktreeRecoveryMarkerRequest,
@@ -61,6 +63,9 @@ export async function writeWorktreeRecoveryMarker(
     throw new Error('Reusable recovery quarantine requires a pane slug');
   }
   const projectRoot = canonicalizePathWithExistingAncestor(request.projectRoot);
+  const sessionProjectRoot = canonicalizePathWithExistingAncestor(
+    request.sessionProjectRoot || projectRoot,
+  );
   const worktreePath = canonicalizePathWithExistingAncestor(request.worktreePath);
   const generation = randomUUID();
   const id = recoveryMarkerId(projectRoot, worktreePath, request.pane, generation);
@@ -68,6 +73,7 @@ export async function writeWorktreeRecoveryMarker(
     version: RECOVERY_MARKER_VERSION,
     id,
     generation,
+    sessionProjectRoot,
     projectRoot,
     worktreePath,
     pane: {
@@ -84,11 +90,11 @@ export async function writeWorktreeRecoveryMarker(
       ...(request.pane.slug
         ? [`Treat pane slug ${request.pane.slug} as occupied until reconciliation completes.`]
         : []),
-      `After reconciling the pane registry, run \`psyche recover --project "${projectRoot}" --acknowledge ${id}\`.`,
+      `After reconciling the pane registry, run \`psyche recover --project "${sessionProjectRoot}" --acknowledge ${id}\`.`,
       'Until that explicit acknowledgement, Psyche will refuse destructive worktree cleanup.',
     ].join(' '),
   };
-  const directory = worktreeRecoveryMarkerDirectory(projectRoot);
+  const directory = worktreeRecoveryMarkerDirectory(sessionProjectRoot);
   const markerPath = path.join(directory, `${id}.json`);
   await mkdir(directory, { recursive: true });
   await atomicWriteJson(markerPath, marker);
@@ -169,25 +175,41 @@ export async function acknowledgeWorktreeRecoveryMarker(
  * reason to stop: silently ignoring it would defeat crash recovery.
  */
 export function findBlockingWorktreeRecoveryMarker(
-  projectRoot: string,
+  sessionProjectRoot: string,
+  targetProjectRoot: string,
   targetWorktreePath: string,
 ): BlockingWorktreeRecoveryMarker {
-  return findBlockingRecoveryMarker(projectRoot, targetWorktreePath, false);
+  return findBlockingRecoveryMarker(
+    sessionProjectRoot,
+    targetProjectRoot,
+    targetWorktreePath,
+    false,
+  );
 }
 
 export function findBlockingWorktreeReuseRecoveryMarker(
-  projectRoot: string,
+  sessionProjectRoot: string,
+  targetProjectRoot: string,
   targetWorktreePath: string,
 ): BlockingWorktreeRecoveryMarker {
-  return findBlockingRecoveryMarker(projectRoot, targetWorktreePath, true);
+  return findBlockingRecoveryMarker(
+    sessionProjectRoot,
+    targetProjectRoot,
+    targetWorktreePath,
+    true,
+  );
 }
 
 function findBlockingRecoveryMarker(
-  projectRoot: string,
+  sessionProjectRoot: string,
+  targetProjectRoot: string,
   targetWorktreePath: string,
   allowReusablePaneQuarantines: boolean,
 ): BlockingWorktreeRecoveryMarker {
-  const directory = worktreeRecoveryMarkerDirectory(projectRoot);
+  const canonicalSessionProjectRoot = canonicalizePathWithExistingAncestor(
+    sessionProjectRoot,
+  );
+  const directory = worktreeRecoveryMarkerDirectory(canonicalSessionProjectRoot);
   if (!existsSync(directory)) {
     return { blocked: false };
   }
@@ -203,6 +225,7 @@ function findBlockingRecoveryMarker(
   }
 
   const target = canonicalizePathWithExistingAncestor(targetWorktreePath);
+  const targetProject = canonicalizePathWithExistingAncestor(targetProjectRoot);
   for (const entry of entries) {
     if (!entry.endsWith('.json')) {
       continue;
@@ -224,6 +247,18 @@ function findBlockingRecoveryMarker(
       };
     }
     if (
+      marker.version === RECOVERY_MARKER_VERSION
+      && canonicalizePathWithExistingAncestor(marker.sessionProjectRoot!)
+        !== canonicalSessionProjectRoot
+    ) {
+      return {
+        blocked: true,
+        reason: `recovery marker ${markerPath} belongs to another session project`,
+      };
+    }
+    if (
+      canonicalizePathWithExistingAncestor(marker.projectRoot) === targetProject
+      &&
       pathsOverlap(marker.worktreePath, target)
       && !(allowReusablePaneQuarantines && marker.allowWorktreeReuse === true)
     ) {
@@ -272,6 +307,10 @@ function isWorktreeRecoveryMarker(value: unknown): value is WorktreeRecoveryMark
       || (
         typeof marker.generation === 'string'
         && /^[0-9a-f-]{36}$/i.test(marker.generation)
+      )
+      && (
+        marker.version !== RECOVERY_MARKER_VERSION
+        || typeof marker.sessionProjectRoot === 'string'
       )
     )
     && typeof marker.projectRoot === 'string'
