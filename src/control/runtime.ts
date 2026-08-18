@@ -250,6 +250,9 @@ export class ControlRuntime {
 
   private readonly outcomesByIdempotencyKey = new Map<string, CommandOutcome>();
   private readonly pendingByIdempotencyKey = new Map<string, Promise<CommandOutcome>>();
+  // Dedup lookups can exceed this; only cold misses that actually execute
+  // fresh work consume the bounded pending-command capacity.
+  private readonly activeFreshExecutions = new Set<string>();
   private readonly commandRecords = new Map<string, {
     command: ControlCommand;
     outcome?: CommandOutcome;
@@ -323,10 +326,6 @@ export class ControlRuntime {
 
     const pending = this.pendingByIdempotencyKey.get(command.idempotencyKey);
     if (pending) return pending;
-
-    if (this.pendingByIdempotencyKey.size >= AGENT_CONTROL_LIMITS.pendingCommands) {
-      return Promise.resolve(rejectedOutcome('runtime_busy', 'control runtime pending command capacity exceeded'));
-    }
 
     const execution = this.lookupOutcomeOrSubmitFresh(command).finally(() => {
       this.pendingByIdempotencyKey.delete(command.idempotencyKey);
@@ -474,7 +473,19 @@ export class ControlRuntime {
       return stored;
     }
 
-    return this.submitFresh(command);
+    return this.submitFreshWhenCapacityAvailable(command);
+  }
+
+  private async submitFreshWhenCapacityAvailable(command: ControlCommand): Promise<CommandOutcome> {
+    if (this.activeFreshExecutions.size >= AGENT_CONTROL_LIMITS.pendingCommands) {
+      return rejectedOutcome('runtime_busy', 'control runtime pending command capacity exceeded');
+    }
+    this.activeFreshExecutions.add(command.idempotencyKey);
+    try {
+      return await this.submitFresh(command);
+    } finally {
+      this.activeFreshExecutions.delete(command.idempotencyKey);
+    }
   }
 
   private async rejectStaleOwnerEpoch(command: ControlCommand): Promise<CommandOutcome> {

@@ -259,6 +259,72 @@ describe('ControlRuntime', () => {
     expect(journal.sequence).toBe(sequenceBefore);
   }, 90_000);
 
+  it('replays an evicted durable key even when fresh execution capacity is full', async () => {
+    const root = await newJournalRoot('control-runtime');
+    let terminalInvocations = 0;
+    let releaseExecutions!: () => void;
+    const executionGate = new Promise<void>((resolve) => { releaseExecutions = resolve; });
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++terminalInvocations}` }));
+    handlers.launchRitual = vi.fn(async () => {
+      await executionGate;
+      return undefined;
+    });
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+
+    const first = await submit(runtime, openTerminalCommand('idem-durable', 'durable-1'));
+    for (let index = 0; index < 1_001; index += 1) {
+      await submit(runtime, openTerminalCommand(`idem-later-${index}`, `later-${index}`));
+    }
+
+    const covered = journal.sequence;
+    await journal.writeSnapshot({
+      snapshot: runtime.snapshot(),
+      coveredSequence: covered,
+      outcomes: {},
+      receiptRecords: [],
+    });
+    await journal.compact(covered);
+
+    const reopened = await ControlJournal.open(root, 8);
+    const originalLoadOutcome = reopened.loadOutcome.bind(reopened);
+    vi.spyOn(reopened, 'loadOutcome').mockImplementation(async (idempotencyKey) => (
+      idempotencyKey.startsWith('pending-') ? undefined : originalLoadOutcome(idempotencyKey)
+    ));
+    const restarted = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened });
+    const occupiedExecutions = Array.from(
+      { length: 256 },
+      (_, index) => restarted.submit(command({
+        id: `pending-${index}`,
+        idempotencyKey: `pending-${index}`,
+        kind: 'ritual.launch',
+        ownerEpoch: 8,
+        payload: { projectId: 'project-1', ritualId: `ritual-${index}`, params: {} },
+      })),
+    );
+
+    try {
+      await vi.waitFor(() => expect((restarted as unknown as {
+        activeFreshExecutions?: Set<string>;
+      }).activeFreshExecutions?.size ?? 0).toBe(256));
+
+      const durableEventsBefore = reopened.read(0).filter((event) => (
+        event.payload.idempotencyKey === 'idem-durable'
+      )).length;
+      const callsBefore = terminalInvocations;
+      const replayed = await submit(restarted, openTerminalCommand('idem-durable', 'durable-2'));
+
+      expect(replayed).toEqual(first);
+      expect(terminalInvocations).toBe(callsBefore);
+      expect(reopened.read(0).filter((event) => (
+        event.payload.idempotencyKey === 'idem-durable'
+      ))).toHaveLength(durableEventsBefore);
+    } finally {
+      releaseExecutions();
+      await Promise.allSettled(occupiedExecutions);
+    }
+  }, 90_000);
+
   it('installs one pending promise before an async cold-miss lookup', async () => {
     const root = await newJournalRoot('control-runtime');
     let invocations = 0;
@@ -1524,18 +1590,20 @@ describe('ControlRuntime', () => {
   });
 
   it('bounds pending commands before retaining another unresolved execution', async () => {
-    handlers.executeOrchestration = vi.fn(() => new Promise<never>(() => undefined));
+    handlers.launchRitual = vi.fn(() => new Promise<never>(() => undefined));
     const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
     for (let index = 0; index < 256; index += 1) {
       void runtime.submit(command({
         id: `pending-${index}`, idempotencyKey: `pending-${index}`,
-        kind: 'orchestration.execute', ownerEpoch: 7, payload: { request: {} },
+        kind: 'ritual.launch', ownerEpoch: 7,
+        payload: { projectId: 'project-1', ritualId: `ritual-${index}`, params: {} },
       }));
     }
 
     await expect(runtime.submit(command({
       id: 'pending-overflow', idempotencyKey: 'pending-overflow',
-      kind: 'orchestration.execute', ownerEpoch: 7, payload: { request: {} },
+      kind: 'ritual.launch', ownerEpoch: 7,
+      payload: { projectId: 'project-1', ritualId: 'ritual-overflow', params: {} },
     }))).resolves.toMatchObject({ status: 'rejected', code: 'runtime_busy' });
   });
 

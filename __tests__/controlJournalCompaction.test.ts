@@ -54,13 +54,14 @@ describe('control journal compaction', () => {
     const first = await runtime.submit(takeover('idem-keep'));
     expect(first.status).toBe('succeeded');
 
-    // Compact everything this owner wrote, preserving the dedup window in the
-    // snapshot the way the runtime's own compaction does.
+    // Compact everything this owner wrote the way the runtime now does: legacy
+    // snapshot outcomes stay empty, so restart must replay from the exact
+    // durable sidecar.
     const covered = journal.sequence;
     await journal.writeSnapshot({
       snapshot: runtime.snapshot(),
       coveredSequence: covered,
-      outcomes: { 'idem-keep': first },
+      outcomes: {},
       receiptRecords: [],
     });
     await journal.compact(covered);
