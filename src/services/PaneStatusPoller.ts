@@ -148,6 +148,7 @@ export class PaneStatusPoller {
   private async observePane(paneId: string, entry: TrackedPane, now: number): Promise<void> {
     try {
       const output = await this.capture(entry.tracker.tmuxPaneId, this.captureLines);
+      if (this.panes.get(paneId) !== entry) return;
       const codexEvent = entry.tracker.codexEventFile
         ? await this.readCodexEvent(entry.tracker.codexEventFile)
         : undefined;
@@ -159,6 +160,7 @@ export class PaneStatusPoller {
       if (this.panes.get(paneId) !== entry) return;
       this.emit(paneId, entry.tracker.observe(output, now, codexEvent));
     } catch (error) {
+      if (this.panes.get(paneId) !== entry) return;
       const message = error instanceof Error ? error.message : String(error);
       if (isMissingPaneError(message)) {
         this.panes.delete(paneId);

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PaneStatusPoller } from '../src/services/PaneStatusPoller.js';
 import type { PaneStatusEvent } from '../src/services/PaneStatusTracker.js';
+import { createDeferred } from './utils/deferred.js';
 
 function harness(
   capture: (tmuxPaneId: string, lines: number) => Promise<string>,
@@ -129,15 +130,14 @@ describe('PaneStatusPoller', () => {
     expect(capture).not.toHaveBeenCalled();
   });
 
-  it('drops an in-flight capture when the pane id is rebound to another tmux pane', async () => {
+  it('ignores a successful old capture after the pane id is rebound', async () => {
     let calls = 0;
-    let resolveThirdCapture: ((output: string) => void) | undefined;
-    const { poller, events } = harness(async () => {
+    const oldCapture = createDeferred<string>();
+    const { poller, events, removed, errors } = harness(async (tmuxPaneId) => {
+      if (tmuxPaneId === '%2') return 'replacement screen';
       calls += 1;
-      if (calls < 3) return 'screen';
-      return new Promise<string>((resolve) => {
-        resolveThirdCapture = resolve;
-      });
+      if (calls < 3) return 'old screen';
+      return oldCapture.promise;
     });
     poller.add({ paneId: 'a', tmuxPaneId: '%1' });
 
@@ -146,12 +146,65 @@ describe('PaneStatusPoller', () => {
     const inFlightTick = poller.tick();
     await Promise.resolve();
 
-    poller.remove('a');
     poller.add({ paneId: 'a', tmuxPaneId: '%2' });
-    resolveThirdCapture?.('screen');
+    oldCapture.resolve('old screen');
     await inFlightTick;
+    await tickTimes(poller, 3);
 
-    expect(events).toEqual([]);
+    const analyses = events.filter((entry) => entry.event.type === 'analysis-needed');
+    expect(analyses).toHaveLength(1);
+    expect(analyses[0].event.payload).toMatchObject({ captureSnapshot: 'replacement screen' });
+    expect(removed).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(poller.has('a')).toBe(true);
+    expect(poller.tmuxPaneIdFor('a')).toBe('%2');
+  });
+
+  it('ignores an old missing-pane failure after the pane id is rebound', async () => {
+    const oldCapture = createDeferred<string>();
+    const { poller, events, removed, errors } = harness(async (tmuxPaneId) => {
+      if (tmuxPaneId === '%1') return oldCapture.promise;
+      return 'replacement screen';
+    });
+    poller.add({ paneId: 'a', tmuxPaneId: '%1' });
+
+    const inFlightTick = poller.tick();
+    await Promise.resolve();
+    poller.add({ paneId: 'a', tmuxPaneId: '%2' });
+    oldCapture.reject(new Error("can't find pane: %1"));
+    await inFlightTick;
+    await tickTimes(poller, 3);
+
+    const analyses = events.filter((entry) => entry.event.type === 'analysis-needed');
+    expect(analyses).toHaveLength(1);
+    expect(analyses[0].event.payload).toMatchObject({ captureSnapshot: 'replacement screen' });
+    expect(removed).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(poller.has('a')).toBe(true);
+    expect(poller.tmuxPaneIdFor('a')).toBe('%2');
+  });
+
+  it('ignores an old generic capture failure after the pane id is rebound', async () => {
+    const oldCapture = createDeferred<string>();
+    const { poller, events, removed, errors } = harness(async (tmuxPaneId) => {
+      if (tmuxPaneId === '%1') return oldCapture.promise;
+      return 'replacement screen';
+    });
+    poller.add({ paneId: 'a', tmuxPaneId: '%1' });
+
+    const inFlightTick = poller.tick();
+    await Promise.resolve();
+    poller.add({ paneId: 'a', tmuxPaneId: '%2' });
+    oldCapture.reject(new Error('tmux exploded'));
+    await inFlightTick;
+    await tickTimes(poller, 3);
+
+    const analyses = events.filter((entry) => entry.event.type === 'analysis-needed');
+    expect(analyses).toHaveLength(1);
+    expect(analyses[0].event.payload).toMatchObject({ captureSnapshot: 'replacement screen' });
+    expect(removed).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(poller.has('a')).toBe(true);
     expect(poller.tmuxPaneIdFor('a')).toBe('%2');
   });
 
