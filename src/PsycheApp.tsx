@@ -142,6 +142,10 @@ import {
 } from "./utils/shellPaneDetection.js"
 import type { InlineRenameState } from "./utils/inlineRename.js"
 import { createTransactionalPane } from "./utils/transactionalPaneCreation.js"
+import {
+  summarizeDurableEffectWarnings,
+  type DurableEffectWarning,
+} from "./utils/durableEffectWarnings.js"
 
 const SidePanelRail: React.FC = () => (
   <Box flexDirection="column" width={4} alignItems="center">
@@ -1198,6 +1202,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
   ) => {
     let workingPanes = panes
     let createdCount = 0
+    const recoveryWarnings: DurableEffectWarning[] = []
 
     for (const ritualProject of ritual.projects) {
       const targetProjectRoot = resolveRitualProjectRoot(
@@ -1216,6 +1221,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
           if (pane) {
             workingPanes = [...workingPanes, pane]
             createdCount += 1
+            recoveryWarnings.push(...(pane.recoveryWarnings || []))
           }
           continue
         }
@@ -1258,10 +1264,18 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     }
 
     if (createdCount > 0) {
-      setStatusMessage(
-        `Opened ${ritual.name} (${createdCount} pane${createdCount === 1 ? "" : "s"})`
+      const recoveryNotice = summarizeDurableEffectWarnings(
+        recoveryWarnings,
+        `Opened ${createdCount} ritual pane${createdCount === 1 ? "" : "s"}`,
       )
-      setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
+      setStatusMessage(
+        recoveryNotice
+          || `Opened ${ritual.name} (${createdCount} pane${createdCount === 1 ? "" : "s"})`
+      )
+      setTimeout(
+        () => setStatusMessage(""),
+        recoveryNotice ? 5000 : STATUS_MESSAGE_DURATION_SHORT,
+      )
     } else {
       setStatusMessage(`Ritual did not create panes: ${ritual.name}`)
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)

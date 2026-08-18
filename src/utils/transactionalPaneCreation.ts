@@ -31,6 +31,10 @@ import {
   reserveCrashSafePaneSlug,
   settlePaneSlugReservationAfterFailure,
 } from '../services/PaneSlugReservation.js';
+import {
+  attachDurableEffectWarning,
+  type DurableEffectWarning,
+} from './durableEffectWarnings.js';
 
 export interface TmuxPaneAllocation {
   paneId: string;
@@ -77,6 +81,7 @@ export interface TransactionalPaneCreationOptions<T extends PsychePane> {
   ) => Promise<VerifiedPaneTeardownResult>;
   reservation?: RetainableWorktreeReservation;
   persistRecovery?: (pane: T) => Promise<PaneRecoveryPersistenceResult>;
+  removeCleanupBlocker?: Parameters<typeof reserveCrashSafePaneSlug>[0]['removeCleanupBlocker'];
 }
 
 /**
@@ -94,6 +99,7 @@ export async function createTransactionalPane<T extends PsychePane>(
     projectRoot: options.projectRoot,
     paneId: options.paneRecordId || createPsychePaneId(),
     operation: options.operation,
+    removeCleanupBlocker: options.removeCleanupBlocker,
     allocate: async ({ occupiedSlugs }) => {
       const slug = await allocateUniquePaneSlug(
         options.slugBase || options.operation,
@@ -150,19 +156,26 @@ export async function createTransactionalPane<T extends PsychePane>(
     pane.id = slugReservation.paneId;
     pane.slug = slugReservation.slug;
     await options.persist(pane);
-    await slugReservation.completeAfterPanePersisted(pane);
+    const settlement = await slugReservation.completeAfterPanePersisted(pane);
+    applyRecoveryWarning(pane, settlement?.cleanupWarning);
   } catch (error) {
     if (pane && await hasExactDurablePane(options.sessionProjectRoot, pane)) {
+      let cleanupWarning: string | undefined;
       try {
-        await slugReservation.completeAfterPanePersisted(pane);
+        const settlement = await slugReservation.completeAfterPanePersisted(pane);
+        applyRecoveryWarning(pane, settlement?.cleanupWarning);
+        cleanupWarning = settlement?.cleanupWarning?.message;
       } catch {
-        await settlePaneSlugReservationAfterFailure(slugReservation, {
+        const settlement = await settlePaneSlugReservationAfterFailure(slugReservation, {
           operation: `${options.operation}-durable-pane-reconciliation`,
           reason: errorMessage(error),
         });
+        cleanupWarning = settlement.message;
       }
       throw new Error(
-        `${errorMessage(error)}; exact pane ${pane.id} remains durably persisted`,
+        `${errorMessage(error)}; exact pane ${pane.id} remains durably persisted${
+          cleanupWarning ? `; ${cleanupWarning}` : ''
+        }`,
       );
     }
     let failure = error;
@@ -205,6 +218,9 @@ export async function createTransactionalPane<T extends PsychePane>(
         }`,
       );
     }
+    if (settlement.message) {
+      throw new Error(`${errorMessage(failure)}; ${settlement.message}`);
+    }
     throw failure;
   }
 
@@ -213,6 +229,16 @@ export async function createTransactionalPane<T extends PsychePane>(
   // pane untracked again.
   await options.activate?.(pane!);
   return pane!;
+}
+
+function applyRecoveryWarning(
+  pane: PsychePane,
+  warning: DurableEffectWarning | undefined,
+): void {
+  if (!warning) {
+    return;
+  }
+  attachDurableEffectWarning(pane, warning);
 }
 
 async function hasExactDurablePane(
@@ -255,9 +281,13 @@ async function compensateAllocatedPaneFailure<T extends PsychePane>(
     pane === undefined,
   );
   if (teardown.presence === 'absent') {
-    await slugReservation.clearAfterConfirmedTeardown('absent');
+    const settlement = await slugReservation.clearAfterConfirmedTeardown('absent');
     throw new Error(
-      `${options.operation} ${reason}; pane ${paneId} was removed`,
+      `${options.operation} ${reason}; pane ${paneId} was removed${
+        settlement?.cleanupWarning
+          ? `; ${settlement.cleanupWarning.message}`
+          : ''
+      }`,
     );
   }
 

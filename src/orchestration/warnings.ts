@@ -44,7 +44,18 @@ export function summarizeOrchestrationWarnings(
   const subject = warnedLanes.length === 1
     ? 'Pane launched'
     : `${warnedLanes.length} panes launched`;
-  let message = `${subject}, but orchestration metadata was not saved`;
+  const codes = new Set(warnedLanes.flatMap((lane) => (
+    lane.status === 'completed'
+      ? (lane.warnings || []).map((warning) => warning.code)
+      : []
+  )));
+  let message = codes.size === 1 && codes.has('orchestration_persistence_failed')
+    ? `${subject}, but orchestration metadata was not saved`
+    : codes.size === 1 && codes.has('effect_unknown')
+      ? `${subject}, but launch command outcome is unknown`
+      : codes.size === 1 && codes.has('pane_cleanup_repair_required')
+        ? `${subject}, but cleanup marker removal requires repair`
+        : `${subject} with recovery warnings`;
 
   if (visibleDetails.length > 0) {
     message += `: ${visibleDetails.join('; ')}`;

@@ -1,5 +1,6 @@
 import type { PsychePane, MergeTargetReference } from '../types.js';
 import type { AgentName, PermissionMode } from '../utils/agentLaunch.js';
+import type { DurableEffectWarning } from '../utils/durableEffectWarnings.js';
 
 export const ORCHESTRATION_LANE_MODES = [
   'isolated-worktree',
@@ -65,10 +66,14 @@ export interface OrchestrationLaneResultBase {
   completedAt: string;
 }
 
-export interface OrchestrationWarning {
+export interface OrchestrationPersistenceWarning {
   code: 'orchestration_persistence_failed';
   message: string;
 }
+
+export type OrchestrationWarning =
+  | OrchestrationPersistenceWarning
+  | DurableEffectWarning;
 
 export interface OrchestrationLaneSuccess extends OrchestrationLaneResultBase {
   status: 'completed';

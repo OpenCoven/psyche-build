@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
-import { mkdir, realpath } from 'node:fs/promises';
+import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { generateSiblingSlugForTargetPane } from '../utils/attachAgent.js';
 import { homedir } from 'node:os';
@@ -65,6 +65,7 @@ import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.
 import { createPsychePaneId } from '../utils/paneIdentity.js';
 import { runGitProcess } from '../utils/gitProcess.js';
 import type { PsycheConfig, PsychePane } from '../types.js';
+import type { DurableEffectWarning } from '../utils/durableEffectWarnings.js';
 import {
   isAgenticCapability,
   type AgenticCapabilityRouter,
@@ -149,6 +150,7 @@ export interface BridgeSpawnResult {
   persistedPane?: Required<
     Pick<PsychePane, 'id' | 'slug' | 'paneId' | 'worktreePath' | 'branchName'>
   >;
+  warnings?: readonly DurableEffectWarning[];
 }
 
 export interface BridgeError {
@@ -188,6 +190,7 @@ export interface BridgeCovenOpenResult {
   id: string;
   pane: PaneSummary;
   session: CovenSessionSummary;
+  warnings?: readonly DurableEffectWarning[];
 }
 
 export interface ProjectCovenCapabilityRequest {
@@ -232,6 +235,7 @@ interface RawConfigPane extends Record<string, unknown> {
   };
   needsAttention?: boolean;
   lastUpdated?: string;
+  launchRequestId?: string;
 }
 
 interface BridgeConfig extends Omit<Partial<PsycheConfig>, 'panes'> {
@@ -535,7 +539,6 @@ export async function openProjectCovenSession(
   if (!deps.tmuxSessionExists(sessionName)) {
     throw bridgeError('tmux_session_missing', 'psyche tmux session is not running; start psyche for this project first');
   }
-
   const titleLabel = `coven:${session.title || session.id.slice(0, 8)}`;
   const baseSlug = derivePaneSlug(`coven-${session.id}`);
   const psychePaneId = nextBridgePaneId();
@@ -640,9 +643,6 @@ export async function openProjectCovenSession(
       try {
         deps.sendTmuxCommand(paneId, buildCovenAttachCommand(session.id));
       } catch (error) {
-        // A durable record is removed only after tmux has confirmed the pane
-        // is absent. A kill request or probe error is not enough evidence to
-        // orphan a possibly live Coven attachment.
         const teardown = await tearDownBridgeTmuxPane(deps, paneId);
         if (teardown.presence !== 'absent') {
           throw bridgeError(
@@ -678,16 +678,21 @@ export async function openProjectCovenSession(
       },
     );
     const { paneId, pane } = transaction.result;
-    await paneSlugReservation.completeAfterPanePersisted({
+    const warnings: DurableEffectWarning[] = [];
+    const settlement = await paneSlugReservation.completeAfterPanePersisted({
       id: String(pane.id),
       paneId,
       slug: String(pane.slug),
     });
+    if (settlement?.cleanupWarning) {
+      warnings.push(settlement.cleanupWarning);
+    }
 
     return {
       id: paneId,
       pane: rawPaneToSummary(pane, projectRoot),
       session,
+      ...(warnings.length > 0 ? { warnings } : {}),
     };
   } catch (error) {
     const settlement = await settlePaneSlugReservationAfterFailure(
@@ -707,6 +712,12 @@ export async function openProjectCovenSession(
         `${bridgeErrorMessage(error)}; ${
           settlement.message || 'pane slug remains quarantined'
         }`,
+      );
+    }
+    if (settlement.message) {
+      throw bridgeError(
+        bridgeErrorCode(error, 'coven_attach_failed'),
+        `${bridgeErrorMessage(error)}; ${settlement.message}`,
       );
     }
     throw error;
@@ -1337,6 +1348,12 @@ export async function spawnBridgePane(
     projectRoot,
     typeof request?.cwd === 'string' ? request.cwd : undefined,
   );
+  const reconciled = request.requestId
+    ? await findPersistedBridgeSpawnByRequestId(scoped.projectRoot, request.requestId)
+    : undefined;
+  if (reconciled) {
+    return reconciled;
+  }
   if (!deps.tmuxSessionExists(sessionName)) {
     throw bridgeError('tmux_session_missing', 'psyche tmux session is not running; start psyche for this project first');
   }
@@ -1503,6 +1520,12 @@ export async function spawnBridgePane(
           }`,
         );
       }
+      if (slugSettlement.message) {
+        throw bridgeError(
+          bridgeErrorCode(error, 'worktree_create_failed'),
+          `${bridgeErrorMessage(error)}; ${slugSettlement.message}`,
+        );
+      }
       throw error;
     }
     slug = allocated.slug;
@@ -1593,6 +1616,12 @@ export async function spawnBridgePane(
               }`,
             );
           }
+          if (slugSettlement.message) {
+            throw bridgeError(
+              bridgeErrorCode(error, 'bridge_spawn_failed'),
+              `${bridgeErrorMessage(error)}; ${slugSettlement.message}`,
+            );
+          }
         }
         throw error;
       } finally {
@@ -1621,8 +1650,8 @@ export async function spawnBridgePane(
       if (slugSettlement.quarantined) {
         rollbackBlockedByUnconfirmedPane = true;
         durableRecoveryOwnership = true;
-        slugRecovery = slugSettlement.message;
       }
+      slugRecovery = slugSettlement.message;
     }
     if (
       !attaching
@@ -1754,6 +1783,7 @@ export async function spawnBridgePane(
             ? { permissionMode: request.permissionMode }
             : {}),
           agentStatus: agent ? 'working' : 'idle',
+          ...(request.requestId ? { launchRequestId: request.requestId } : {}),
           lastUpdated: now,
         };
         config.projectName = config.projectName || path.basename(scoped.projectRoot);
@@ -1816,11 +1846,15 @@ export async function spawnBridgePane(
     const transaction = await persistPane();
     const { pane, paneSlug, settings } = transaction.result;
     const persistedPaneId = String(pane.paneId);
-    await paneSlugReservation?.completeAfterPanePersisted({
+    const warnings: DurableEffectWarning[] = [];
+    const settlement = await paneSlugReservation?.completeAfterPanePersisted({
       id: String(pane.id),
       paneId: persistedPaneId,
       slug: paneSlug,
     });
+    if (settlement?.cleanupWarning) {
+      warnings.push(settlement.cleanupWarning);
+    }
 
     if (!attaching && creationReservation) {
       await creationReservation.complete();
@@ -1828,39 +1862,113 @@ export async function spawnBridgePane(
     }
 
     if (agent) {
-      const launchCommand = await buildLaunchCommand(
-        scoped.projectRoot,
-        paneSlug,
-        agent,
-        request.prompt,
-        request.permissionMode
-          ?? (settings as PsycheConfig['settings'] | undefined)?.permissionMode,
-      );
-      deps.sendTmuxCommand(persistedPaneId, launchCommand);
+      try {
+        const launchCommand = await buildLaunchCommand(
+          scoped.projectRoot,
+          paneSlug,
+          agent,
+          request.prompt,
+          request.permissionMode
+            ?? (settings as PsycheConfig['settings'] | undefined)?.permissionMode,
+        );
+        deps.sendTmuxCommand(persistedPaneId, launchCommand);
 
-      // send-keys agents were launched bare above; type the prompt into their
-      // TUI once it is up. Without this the prompt is silently dropped.
-      const prompt = request.prompt;
-      if (prompt && prompt.trim() && getPromptTransport(agent) === 'send-keys') {
-        const sendPromptKeys = deps.sendPromptKeys ?? sendPromptKeysToPane;
-        await sendPromptKeys({ paneId: persistedPaneId, prompt, agent });
+        // send-keys agents were launched bare above; type the prompt into their
+        // TUI once it is up. Without this the prompt is silently dropped.
+        const prompt = request.prompt;
+        if (prompt && prompt.trim() && getPromptTransport(agent) === 'send-keys') {
+          const sendPromptKeys = deps.sendPromptKeys ?? sendPromptKeysToPane;
+          await sendPromptKeys({ paneId: persistedPaneId, prompt, agent });
+        }
+      } catch (error) {
+        warnings.push(effectUnknownWarning(
+          `Pane ${persistedPaneId} is durable, but launch command dispatch failed: ${bridgeErrorMessage(error)}`,
+        ));
       }
     }
 
-    return {
-      id: persistedPaneId,
-      pane: rawPaneToSummary(pane, scoped.projectRoot),
+    if (!hasBridgeSpawnResultIdentity(pane)) {
+      throw bridgeError(
+        'config_persist_failed',
+        'Persisted bridge pane is missing its canonical identity',
+      );
+    }
+    return bridgeSpawnResult(scoped.projectRoot, pane, warnings);
+  }
+}
+
+async function findPersistedBridgeSpawnByRequestId(
+  projectRoot: string,
+  requestId: string,
+): Promise<BridgeSpawnResult | undefined> {
+  let config: BridgeConfig;
+  try {
+    config = JSON.parse(await readFile(
+      projectPaneConfigPath(projectRoot),
+      'utf8',
+    )) as BridgeConfig;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+  const pane = (config.panes || []).find((candidate) => (
+    candidate.launchRequestId === requestId
+  ));
+  if (!pane || !hasBridgeSpawnResultIdentity(pane)) {
+    return undefined;
+  }
+  return bridgeSpawnResult(projectRoot, pane, [
+    effectUnknownWarning(
+      `Pane ${pane.paneId} was already durably created for request ${requestId}; reconciled the existing pane without repeating the launch effect`,
+    ),
+  ]);
+}
+
+function hasBridgeSpawnResultIdentity(
+  pane: RawConfigPane,
+): pane is RawConfigPane & Required<
+  Pick<RawConfigPane, 'id' | 'slug' | 'paneId' | 'worktreePath'>
+> {
+  return (
+    typeof pane.id === 'string'
+    && typeof pane.slug === 'string'
+    && typeof pane.paneId === 'string'
+    && typeof pane.worktreePath === 'string'
+    && typeof (pane.branchName || pane.branch) === 'string'
+  );
+}
+
+function bridgeSpawnResult(
+  projectRoot: string,
+  pane: RawConfigPane & Required<
+    Pick<RawConfigPane, 'id' | 'slug' | 'paneId' | 'worktreePath'>
+  >,
+  warnings: readonly DurableEffectWarning[],
+): BridgeSpawnResult {
+  const branchName = String(pane.branchName || pane.branch);
+  return {
+      id: String(pane.paneId),
+      pane: rawPaneToSummary(pane, projectRoot),
       worktreePath: String(pane.worktreePath),
-      branch: String(pane.branchName || pane.branch),
+      branch: branchName,
       persistedPane: {
         id: String(pane.id),
         slug: String(pane.slug),
-        paneId: persistedPaneId,
+        paneId: String(pane.paneId),
         worktreePath: String(pane.worktreePath),
-        branchName: String(pane.branchName || pane.branch),
+        branchName,
       },
+      ...(warnings.length > 0 ? { warnings } : {}),
     };
-  }
+}
+
+function effectUnknownWarning(message: string): DurableEffectWarning {
+  return {
+    code: 'effect_unknown',
+    message: message.replace(/[\r\n\0]/g, ' ').slice(0, 1_024),
+  };
 }
 
 export interface BridgeKillDeps {

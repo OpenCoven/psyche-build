@@ -20,6 +20,10 @@ import {
   reserveCrashSafePaneSlug,
   settlePaneSlugReservationAfterFailure,
 } from '../services/PaneSlugReservation.js';
+import {
+  attachDurableEffectWarning,
+  type DurableEffectWarning,
+} from '../utils/durableEffectWarnings.js';
 
 /**
  * Detects untracked panes (manually created via tmux commands)
@@ -34,7 +38,11 @@ export async function detectAndAddShellPanes(
     selectedPaneId?: string;
     sidebarWidth?: number;
   } = {}
-): Promise<{ updatedPanes: PsychePane[]; shellPanesAdded: boolean }> {
+): Promise<{
+  updatedPanes: PsychePane[];
+  shellPanesAdded: boolean;
+  warnings?: readonly DurableEffectWarning[];
+}> {
   // Only detect if we have pane IDs from tmux
   if (allPaneIds.length === 0) {
     return { updatedPanes: activePanes, shellPanesAdded: false };
@@ -141,6 +149,7 @@ export async function detectAndAddShellPanes(
         pane: PsychePane;
         insertion: NonNullable<Awaited<ReturnType<typeof captureShellPaneInsertion>>>;
       }> = [];
+      const warnings: DurableEffectWarning[] = [];
       let plannedPanes = [...activePanes];
       for (const shellPane of newShellPanes) {
         const insertion = await captureShellPaneInsertion({
@@ -167,7 +176,16 @@ export async function detectAndAddShellPanes(
       for (let index = 0; index < reservations.length; index += 1) {
         const reservation = reservations[index];
         const shellPane = newShellPanes[index];
-        await reservation.completeAfterPanePersisted(shellPane);
+        const settlement = await reservation.completeAfterPanePersisted(shellPane);
+        if (settlement?.cleanupWarning) {
+          warnings.push(settlement.cleanupWarning);
+          attachDurableEffectWarning(shellPane, settlement.cleanupWarning);
+          LogService.getInstance().warn(
+            settlement.cleanupWarning.message,
+            'shellDetection',
+            shellPane.paneId,
+          );
+        }
         completedRecoveryIds.add(reservation.recoveryId);
         try {
           await TmuxService.getInstance().setPaneTitle(
@@ -180,16 +198,31 @@ export async function detectAndAddShellPanes(
       }
       const updatedPanes = [...activePanes, ...newShellPanes];
 
-      return { updatedPanes, shellPanesAdded: newShellPanes.length > 0 };
+      return {
+        updatedPanes,
+        shellPanesAdded: newShellPanes.length > 0,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
     } catch (error) {
+      const settlementWarnings: string[] = [];
       for (const reservation of reservations) {
         if (completedRecoveryIds.has(reservation.recoveryId)) {
           continue;
         }
-        await settlePaneSlugReservationAfterFailure(reservation, {
+        const settlement = await settlePaneSlugReservationAfterFailure(reservation, {
           operation: 'shell-pane-adoption-failure',
           reason: error instanceof Error ? error.message : String(error),
         });
+        if (settlement.message) {
+          settlementWarnings.push(settlement.message);
+        }
+      }
+      if (settlementWarnings.length > 0) {
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}; ${
+            settlementWarnings.join('; ')
+          }`,
+        );
       }
       throw error;
     }

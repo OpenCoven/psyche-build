@@ -3,7 +3,14 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PsychePane } from '../src/types.js';
 import { listPaneSlugOwnershipRecords } from '../src/services/PaneSlugRegistry.js';
-import { mutateProjectPaneConfig } from '../src/services/ProjectPaneConfig.js';
+import {
+  mutateProjectPaneConfig,
+  readProjectPaneConfig,
+} from '../src/services/ProjectPaneConfig.js';
+import {
+  acknowledgeWorktreeRecoveryMarker,
+  listWorktreeRecoveryMarkers,
+} from '../src/services/WorktreeRecoveryMarker.js';
 import { createTransactionalPane } from '../src/utils/transactionalPaneCreation.js';
 import {
   buildManagedPaneTitle,
@@ -198,6 +205,51 @@ describe('transactional pane creation', () => {
     })).rejects.toThrow(/retained exact recovery record/);
 
     expect(persistRecovery).toHaveBeenCalledOnce();
+  });
+
+  it('surfaces cleanup marker deletion failure and leaves an acknowledgeable repair marker', async () => {
+    const projectRoot = createProjectRoot();
+
+    const pane = await createTransactionalPane({
+      projectRoot,
+      sessionProjectRoot: projectRoot,
+      operation: 'terminal-pane',
+      allocate: () => '%43',
+      getTmuxServerIdentity: () => generation,
+      createPane: ({ paneId, tmuxServerIdentity }): PsychePane => ({
+        id: 'discarded-id',
+        slug: 'discarded-slug',
+        prompt: '',
+        paneId,
+        tmuxServerIdentity,
+        type: 'shell',
+      }),
+      persist: async (nextPane) => {
+        await mutateProjectPaneConfig(projectRoot, (config) => {
+          config.panes = [...(config.panes || []), nextPane];
+        });
+      },
+      removeCleanupBlocker: async () => {
+        throw new Error('injected marker deletion failure');
+      },
+    });
+
+    expect(pane.recoveryWarnings).toEqual([
+      expect.objectContaining({
+        code: 'pane_cleanup_repair_required',
+        message: expect.stringContaining('injected marker deletion failure'),
+        projectRoot,
+        markerId: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    ]);
+    const [marker] = await listWorktreeRecoveryMarkers(projectRoot);
+    expect(marker.id).toBe(pane.recoveryWarnings?.[0]?.markerId);
+    expect((await readProjectPaneConfig(projectRoot)).panes?.[0])
+      .not.toHaveProperty('recoveryWarnings');
+
+    await expect(acknowledgeWorktreeRecoveryMarker(projectRoot, marker.id))
+      .resolves.toBe(true);
+    expect(await listWorktreeRecoveryMarkers(projectRoot)).toEqual([]);
   });
 
   it('compensates an allocated split when its post-allocation generation capture fails', async () => {

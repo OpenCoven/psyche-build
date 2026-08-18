@@ -5,6 +5,10 @@ import { spawn } from 'node:child_process';
 import type { PsychePane, MergeTargetReference, SavePanes } from '../types.js';
 import { createPane, type CreatePaneOptions } from '../utils/paneCreation.js';
 import { LogService } from '../services/LogService.js';
+import {
+  summarizeDurableEffectWarnings,
+  type DurableEffectWarning,
+} from '../utils/durableEffectWarnings.js';
 import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
 import { type AgentName } from '../utils/agentLaunch.js';
 import { Orchestrator } from '../orchestration/orchestrator.js';
@@ -176,7 +180,11 @@ export default function usePaneCreation({
     prompt: string,
     agent?: AgentName,
     options: CreateNewPaneOptions = {}
-  ): Promise<{ pane: PsychePane; persistedDuringLifecycle: boolean }> => {
+  ): Promise<{
+    pane: PsychePane;
+    persistedDuringLifecycle: boolean;
+    warnings?: readonly DurableEffectWarning[];
+  }> => {
     const panesForCreation = options.existingPanes ?? panes;
     const result = await createPane(
       {
@@ -206,7 +214,10 @@ export default function usePaneCreation({
     );
 
     if (result.needsAgentChoice) {
-      throw new Error('Agent choice is required');
+      const warning = summarizeDurableEffectWarnings(result.warnings);
+      throw new Error(
+        warning ? `Agent choice is required; ${warning}` : 'Agent choice is required',
+      );
     }
 
     return {
@@ -214,6 +225,7 @@ export default function usePaneCreation({
       persistedDuringLifecycle: Boolean(
         result.persistedDuringLifecycle || options.existingWorktree
       ),
+      ...(result.warnings ? { warnings: result.warnings } : {}),
     };
   };
 
@@ -228,7 +240,11 @@ export default function usePaneCreation({
       setIsCreatingPane(true)
       setStatusMessage("Creating pane...")
 
-      const { pane, persistedDuringLifecycle } = await createPaneInternal(prompt, agent, options);
+      const {
+        pane,
+        persistedDuringLifecycle,
+        warnings,
+      } = await createPaneInternal(prompt, agent, options);
 
       // Save the pane
       const updatedPanes = [...panesForCreation, pane];
@@ -242,8 +258,11 @@ export default function usePaneCreation({
       );
 
       await loadPanes();
-      setStatusMessage("Pane created")
-      setTimeout(() => setStatusMessage(""), 2000)
+      setStatusMessage(summarizeDurableEffectWarnings(warnings) || "Pane created")
+      setTimeout(
+        () => setStatusMessage(""),
+        warnings?.length ? 5000 : 2000,
+      )
       return pane;
     } catch (error) {
       const msg = 'Failed to create pane';

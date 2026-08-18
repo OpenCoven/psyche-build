@@ -92,6 +92,7 @@ export function createBridgePaneBackend(options: BridgePaneBackendOptions): Brid
           mode: lane.mode,
         },
       },
+      ...(result.warnings ? { warnings: result.warnings } : {}),
     };
   };
 

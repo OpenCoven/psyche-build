@@ -354,10 +354,13 @@ export async function ensurePaneSlugCleanupBlocker(
         current.recoveryId,
       );
       const existing = await readMarkerIfPresent(current.projectRoot, expectedId);
-      if (existing?.recoveryId === current.recoveryId) {
+      const marker = buildPaneSlugCleanupMarker(current, current.state);
+      if (
+        existing?.recoveryId === current.recoveryId
+        && samePaneSlugCleanupMarker(existing, marker)
+      ) {
         return;
       }
-      const marker = buildPaneSlugCleanupMarker(current, current.state);
       const directory = worktreeRecoveryMarkerDirectory(current.projectRoot);
       await mkdir(directory, { recursive: true });
       await atomicWriteJson(path.join(directory, `${marker.id}.json`), marker);
@@ -704,6 +707,30 @@ function buildPaneSlugCleanupMarker(
       'Until that explicit acknowledgement, Psyche will refuse destructive worktree cleanup.',
     ].join(' '),
   };
+}
+
+function samePaneSlugCleanupMarker(
+  existing: WorktreeRecoveryMarker,
+  expected: WorktreeRecoveryMarker,
+): boolean {
+  return (
+    existing.version === expected.version
+    && existing.id === expected.id
+    && existing.recoveryId === expected.recoveryId
+    && existing.generation === expected.generation
+    && existing.sessionProjectRoot === expected.sessionProjectRoot
+    && existing.projectRoot === expected.projectRoot
+    && existing.worktreePath === expected.worktreePath
+    && existing.pane.id === expected.pane.id
+    && existing.pane.paneId === expected.pane.paneId
+    && existing.pane.slug === expected.pane.slug
+    && existing.allowWorktreeReuse === expected.allowWorktreeReuse
+    && existing.paneOwnershipState === expected.paneOwnershipState
+    && existing.operation === expected.operation
+    && existing.reason === expected.reason
+    && existing.createdAt === expected.createdAt
+    && existing.operatorInstructions === expected.operatorInstructions
+  );
 }
 
 function isWorktreeRecoveryMarker(value: unknown): value is WorktreeRecoveryMarker {

@@ -21,6 +21,7 @@ import {
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
 import type { TmuxPanePresence } from '../utils/paneTeardown.js';
+import type { DurableEffectWarning } from '../utils/durableEffectWarnings.js';
 
 const PANE_SLUG_RECORD_VERSION = 1;
 const PANE_SLUG_DIRECTORY_NAME = 'pane-slug-ownership';
@@ -65,7 +66,7 @@ export interface PaneSlugCandidate {
 }
 
 export interface PaneSlugSettlementResult {
-  cleanupWarning?: string;
+  cleanupWarning?: DurableEffectWarning;
 }
 
 export interface PaneSlugReservation {

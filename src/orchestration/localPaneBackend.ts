@@ -175,9 +175,12 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
     // decide which agent to use. A lane always names its agent, so reaching
     // here means the request was built wrong.
     if (result.needsAgentChoice || !result.pane) {
+      const recovery = result.warnings?.map((warning) => warning.message).join('; ');
       throw new OrchestrationError(
         'unsupported_agent',
-        `Lane "${lane.id}" could not resolve an agent`,
+        `Lane "${lane.id}" could not resolve an agent${
+          recovery ? `; ${recovery}` : ''
+        }`,
       );
     }
 
@@ -204,14 +207,20 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
         paneWithOrchestration,
       );
       created[createdIndex] = enrichedPane;
-      return { pane: enrichedPane };
+      return {
+        pane: enrichedPane,
+        ...(result.warnings ? { warnings: result.warnings } : {}),
+      };
     } catch (error) {
       return {
         pane: persistedPane,
-        warnings: [{
-          code: 'orchestration_persistence_failed',
-          message: orchestrationPersistenceWarningMessage(error),
-        }],
+        warnings: [
+          ...(result.warnings || []),
+          {
+            code: 'orchestration_persistence_failed',
+            message: orchestrationPersistenceWarningMessage(error),
+          },
+        ],
       };
     }
   };

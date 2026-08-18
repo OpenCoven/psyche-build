@@ -2,6 +2,7 @@ import path from 'path';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
 import type { PaneLayout, PsychePane, PsycheConfig, MergeTargetReference } from '../types.js';
+import { attachDurableEffectWarning } from './durableEffectWarnings.js';
 import { TmuxService } from '../services/TmuxService.js';
 import {
   assertTmuxGenerationUnchanged,
@@ -133,6 +134,7 @@ export interface CreatePaneResult {
   pane: PsychePane;
   needsAgentChoice: boolean;
   persistedDuringLifecycle?: boolean;
+  warnings?: readonly import('./durableEffectWarnings.js').DurableEffectWarning[];
 }
 
 async function waitForPaneReady(
@@ -433,11 +435,26 @@ async function createPaneWithSlugOwnership(
       availableAgents,
     );
     if (result.needsAgentChoice || !result.pane) {
-      await reservation.clearBeforeEffect();
+      const settlement = await reservation.clearBeforeEffect();
+      return {
+        ...result,
+        ...(settlement?.cleanupWarning
+          ? { warnings: [settlement.cleanupWarning] }
+          : {}),
+      };
+    }
+    const settlement = await reservation.completeAfterPanePersisted(result.pane);
+    if (!settlement?.cleanupWarning) {
       return result;
     }
-    await reservation.completeAfterPanePersisted(result.pane);
-    return result;
+    attachDurableEffectWarning(result.pane, settlement.cleanupWarning);
+    return {
+      ...result,
+      warnings: [
+        ...(result.warnings || []),
+        settlement.cleanupWarning,
+      ],
+    };
   } catch (error) {
     const settlement = await settlePaneSlugReservationAfterFailure(
       reservation,
@@ -456,6 +473,11 @@ async function createPaneWithSlugOwnership(
         `${error instanceof Error ? error.message : String(error)}; ${
           settlement.message || `pane slug ${reservation.slug} remains quarantined`
         }`,
+      );
+    }
+    if (settlement.message && !isPaneLifecycleReservationRetainedError(error)) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; ${settlement.message}`,
       );
     }
     throw error;

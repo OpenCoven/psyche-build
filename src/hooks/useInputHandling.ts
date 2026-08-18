@@ -118,6 +118,7 @@ import {
 import { createTransactionalPane } from "../utils/transactionalPaneCreation.js"
 import { withWorktreePaneCreationReservation } from "../utils/worktreePaneCreationReservation.js"
 import { summarizeOrchestrationWarnings } from "../orchestration/warnings.js"
+import { summarizeDurableEffectWarnings } from "../utils/durableEffectWarnings.js"
 
 // Type for the action system returned by useActionSystem hook
 interface ActionSystem {
@@ -330,7 +331,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
 
       const tmuxService = TmuxService.getInstance()
       const nextId = getNextPsycheId(panes)
-      await createTransactionalPane({
+      const createdPane = await createTransactionalPane({
         projectRoot: targetProjectRoot,
         sessionProjectRoot: projectRoot,
         operation: "terminal-pane",
@@ -363,8 +364,16 @@ export function useInputHandling(params: UseInputHandlingParams) {
       })
 
       setIsCreatingPane(false)
-      setStatusMessage("Terminal pane created")
-      setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
+      setStatusMessage(
+        summarizeDurableEffectWarnings(createdPane.recoveryWarnings)
+          || "Terminal pane created"
+      )
+      setTimeout(
+        () => setStatusMessage(""),
+        createdPane.recoveryWarnings?.length
+          ? STATUS_MESSAGE_DURATION_LONG
+          : STATUS_MESSAGE_DURATION_SHORT
+      )
 
       // Force a reload to ensure tmux metadata and pane IDs are in sync
       await loadPanes()
@@ -394,7 +403,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
 
       const tmuxService = TmuxService.getInstance()
       const nextId = getNextPsycheId(panes)
-      await createTransactionalPane({
+      const createdPane = await createTransactionalPane({
         projectRoot: targetProjectRoot,
         sessionProjectRoot: projectRoot,
         operation: "desktop-use-pane",
@@ -442,8 +451,16 @@ export function useInputHandling(params: UseInputHandlingParams) {
       })
       await loadPanes()
 
-      setStatusMessage("Desktop-use pane connected to Coven")
-      setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
+      setStatusMessage(
+        summarizeDurableEffectWarnings((createdPane as PsychePane).recoveryWarnings)
+          || "Desktop-use pane connected to Coven"
+      )
+      setTimeout(
+        () => setStatusMessage(""),
+        (createdPane as PsychePane).recoveryWarnings?.length
+          ? STATUS_MESSAGE_DURATION_LONG
+          : STATUS_MESSAGE_DURATION_SHORT
+      )
     } catch (error: any) {
       setStatusMessage(`Failed to create desktop-use pane: ${error?.message || String(error)}`)
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)
@@ -482,7 +499,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     try {
       setIsCreatingPane(true)
       setStatusMessage(`Opening Coven session ${session.title || session.id}...`)
-      await openProjectCovenSession(
+      const opened = await openProjectCovenSession(
         {
           sessionProjectRoot: projectRoot,
           targetProjectRoot,
@@ -492,8 +509,16 @@ export function useInputHandling(params: UseInputHandlingParams) {
         createKnownCovenSessionClient(covenSessionsState)
       )
       await loadPanes()
-      setStatusMessage(`Opened Coven session ${session.title || session.id}`)
-      setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
+      setStatusMessage(
+        summarizeDurableEffectWarnings(opened.warnings)
+          || `Opened Coven session ${session.title || session.id}`
+      )
+      setTimeout(
+        () => setStatusMessage(""),
+        opened.warnings?.length
+          ? STATUS_MESSAGE_DURATION_LONG
+          : STATUS_MESSAGE_DURATION_SHORT
+      )
     } catch (error: any) {
       setStatusMessage(`Failed to open Coven session: ${error?.message || String(error)}`)
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)
@@ -570,7 +595,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
 
       const tmuxService = TmuxService.getInstance()
       const nextId = getNextPsycheId(panes)
-      await withWorktreePaneCreationReservation({
+      const createdPane = await withWorktreePaneCreationReservation({
         worktreePath: selectedPane.worktreePath,
         projectRoot: targetProjectRoot,
         operation: (canonicalWorktreePath, reservation) => createTransactionalPane({
@@ -608,8 +633,16 @@ export function useInputHandling(params: UseInputHandlingParams) {
         }),
       })
 
-      setStatusMessage(`Opened terminal in ${getPaneDisplayName(selectedPane)}`)
-      setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
+      setStatusMessage(
+        summarizeDurableEffectWarnings(createdPane.recoveryWarnings)
+          || `Opened terminal in ${getPaneDisplayName(selectedPane)}`
+      )
+      setTimeout(
+        () => setStatusMessage(""),
+        createdPane.recoveryWarnings?.length
+          ? STATUS_MESSAGE_DURATION_LONG
+          : STATUS_MESSAGE_DURATION_SHORT
+      )
 
       // Force a reload to ensure tmux metadata and pane IDs are in sync
       await loadPanes()
@@ -654,7 +687,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       const tmuxService = TmuxService.getInstance()
       const slugBase = `files-${path.basename(selectedPane.worktreePath)}`
 
-      await withWorktreePaneCreationReservation({
+      const createdPane = await withWorktreePaneCreationReservation({
         worktreePath: selectedPane.worktreePath,
         projectRoot: targetProjectRoot,
         operation: (canonicalWorktreePath, reservation) => createTransactionalPane({
@@ -693,8 +726,16 @@ export function useInputHandling(params: UseInputHandlingParams) {
       })
       await loadPanes()
 
-      setStatusMessage(`Opened file browser for ${getPaneDisplayName(selectedPane)}`)
-      setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
+      setStatusMessage(
+        summarizeDurableEffectWarnings((createdPane as PsychePane).recoveryWarnings)
+          || `Opened file browser for ${getPaneDisplayName(selectedPane)}`
+      )
+      setTimeout(
+        () => setStatusMessage(""),
+        (createdPane as PsychePane).recoveryWarnings?.length
+          ? STATUS_MESSAGE_DURATION_LONG
+          : STATUS_MESSAGE_DURATION_SHORT
+      )
     } catch (error: any) {
       setStatusMessage(`Failed to open file browser: ${error?.message || String(error)}`)
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)

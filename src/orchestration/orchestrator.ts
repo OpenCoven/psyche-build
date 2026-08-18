@@ -120,11 +120,15 @@ export class Orchestrator {
 
     const lanes = results as OrchestrationLaneResult[];
     const completed = lanes.filter((lane) => lane.status === 'completed').length;
+    const hasUnknownEffect = lanes.some((lane) => (
+      lane.status === 'completed'
+      && lane.warnings?.some((warning) => warning.code === 'effect_unknown')
+    ));
 
     return {
       taskId: plan.taskId,
       traceId: plan.traceId,
-      status: completed === lanes.length
+      status: completed === lanes.length && !hasUnknownEffect
         ? 'completed'
         : completed === 0 ? 'failed' : 'partial',
       startedAt,

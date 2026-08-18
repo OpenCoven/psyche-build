@@ -390,6 +390,53 @@ describe('crash-safe pane slug ownership', () => {
     ]);
   });
 
+  it('upgrades a provisional target marker from current quarantined ownership after restart', async () => {
+    const sessionRoot = project('.psyche-slug-upgrade-session-');
+    const targetRoot = project('.psyche-slug-upgrade-target-');
+    const worktreePath = path.join(targetRoot, '.psyche', 'worktrees', 'upgrade');
+    mkdirSync(worktreePath, { recursive: true });
+    const reservation = await reserveCrashSafePaneSlug({
+      sessionProjectRoot: sessionRoot,
+      projectRoot: targetRoot,
+      paneId: 'upgrade-pane',
+      operation: 'upgrade-quarantine',
+      allocate: () => ({ slug: 'upgrade', worktreePath }),
+    });
+    const [provisionalMarker] = await listWorktreeRecoveryMarkers(targetRoot);
+    await quarantinePaneSlugOwnershipRecord({
+      sessionProjectRoot: sessionRoot,
+      recoveryId: reservation.recoveryId,
+      projectRoot: targetRoot,
+      worktreePath,
+      slug: reservation.slug,
+      pane: { id: reservation.paneId, paneId: '%upgrade' },
+      operation: 'upgrade-quarantine',
+      reason: 'quarantine succeeded before target marker rewrite failed',
+      targetMarkerId: provisionalMarker.id,
+    });
+
+    await reconcileStalePaneSlugReservations({
+      sessionProjectRoot: sessionRoot,
+    });
+
+    expect(await listWorktreeRecoveryMarkers(targetRoot)).toEqual([
+      expect.objectContaining({
+        id: provisionalMarker.id,
+        recoveryId: reservation.recoveryId,
+        pane: expect.objectContaining({ paneId: '%upgrade', slug: 'upgrade' }),
+        paneOwnershipState: 'quarantined',
+        allowWorktreeReuse: true,
+        reason: 'quarantine succeeded before target marker rewrite failed',
+      }),
+    ]);
+    await expect(acknowledgeWorktreeRecoveryMarker(
+      sessionRoot,
+      provisionalMarker.id,
+    )).resolves.toBe(true);
+    expect(await listPaneSlugOwnershipRecords(sessionRoot)).toEqual([]);
+    expect(await listWorktreeRecoveryMarkers(targetRoot)).toEqual([]);
+  });
+
   it('does not recreate a cleanup marker after the producer settles ownership', async () => {
     const sessionRoot = project('.psyche-slug-interleave-');
     let ownershipSettled!: () => void;

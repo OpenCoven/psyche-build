@@ -27,6 +27,7 @@ import type {
   TmuxPanePresence,
   VerifiedPaneTeardownResult,
 } from '../utils/paneTeardown.js';
+import type { DurableEffectWarning } from '../utils/durableEffectWarnings.js';
 
 export interface CrashSafePaneSlugReservationOptions {
   sessionProjectRoot: string;
@@ -165,6 +166,7 @@ export async function settlePaneSlugReservationAfterFailure(
   released: boolean;
   quarantined: boolean;
   message?: string;
+  warning?: DurableEffectWarning;
   marker?: { path: string; generation?: string };
 }> {
   const record = await readPaneSlugOwnershipRecord(
@@ -202,14 +204,26 @@ export async function settlePaneSlugReservationAfterFailure(
       released: true,
       quarantined: false,
       ...(settlement.cleanupWarning
-        ? { message: settlement.cleanupWarning }
+        ? {
+          message: settlement.cleanupWarning.message,
+          warning: settlement.cleanupWarning,
+        }
         : {}),
     };
   }
 
   if (!reservation.effect && !record.pane.paneId) {
-    await reservation.clearBeforeEffect();
-    return { released: true, quarantined: false };
+    const settlement = await reservation.clearBeforeEffect();
+    return {
+      released: true,
+      quarantined: false,
+      ...(settlement.cleanupWarning
+        ? {
+          message: settlement.cleanupWarning.message,
+          warning: settlement.cleanupWarning,
+        }
+        : {}),
+    };
   }
 
   const effect = reservation.effect || (
@@ -226,8 +240,17 @@ export async function settlePaneSlugReservationAfterFailure(
     ? await options.teardown(effect)
     : { presence: 'unknown' as const };
   if (teardown.presence === 'absent') {
-    await reservation.clearAfterConfirmedTeardown('absent');
-    return { released: true, quarantined: false };
+    const settlement = await reservation.clearAfterConfirmedTeardown('absent');
+    return {
+      released: true,
+      quarantined: false,
+      ...(settlement.cleanupWarning
+        ? {
+          message: settlement.cleanupWarning.message,
+          warning: settlement.cleanupWarning,
+        }
+        : {}),
+    };
   }
 
   const marker = await writeWorktreeRecoveryMarker({
@@ -308,7 +331,7 @@ function wrapCrashSafeReservation(
     } catch (error) {
       return {
         ...result,
-        cleanupWarning: boundedCleanupWarning(error),
+        cleanupWarning: boundedCleanupWarning(error, cleanupRecord),
       };
     }
   };
@@ -349,10 +372,24 @@ function wrapCrashSafeReservation(
   };
 }
 
-function boundedCleanupWarning(error: unknown): string {
+function boundedCleanupWarning(
+  error: unknown,
+  cleanupRecord: Parameters<typeof ensurePaneSlugCleanupBlocker>[0],
+): DurableEffectWarning {
   const detail = error instanceof Error ? error.message : String(error);
   const bounded = detail.length > 400 ? `${detail.slice(0, 397)}...` : detail;
-  return `Pane ownership settled, but cleanup marker removal requires repair: ${bounded}`;
+  const markerId = cleanupRecord.targetMarkerId;
+  const repair = markerId
+    ? ` Recovery marker ${markerId} remains and can be acknowledged with psyche recover after verification.`
+    : '';
+  return {
+    code: 'pane_cleanup_repair_required',
+    recoveryId: cleanupRecord.recoveryId,
+    projectRoot: cleanupRecord.projectRoot,
+    ...(markerId ? { markerId } : {}),
+    message: `Pane ownership settled, but cleanup marker removal requires repair: ${bounded}${repair}`
+      .slice(0, 480),
+  };
 }
 
 function hasExactPersistedPane(

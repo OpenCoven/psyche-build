@@ -1232,6 +1232,114 @@ describe('daemon bridge pane helpers', () => {
 
   });
 
+  it('preserves a persisted pane and reconciles retries when launch command dispatch fails', async () => {
+    const root = await tempDir('psyche-bridge-dispatch-failure-');
+    execSync('git init', { cwd: root, stdio: 'ignore' });
+    execSync('git config user.email test@example.invalid', { cwd: root, stdio: 'ignore' });
+    execSync('git config user.name Test', { cwd: root, stdio: 'ignore' });
+    await writeFile(path.join(root, 'README.md'), '# dispatch failure\n');
+    execSync('git add README.md && git -c commit.gpgsign=false commit -m init', {
+      cwd: root,
+      stdio: 'ignore',
+    });
+    await writeConfig(root, {
+      projectName: 'demo',
+      projectRoot: root,
+      panes: [],
+      settings: {},
+      lastUpdated: '2026-04-27T00:00:00.000Z',
+    });
+    const request = {
+      requestId: 'req-dispatch-failure',
+      cwd: root,
+      title: 'Dispatch failure',
+      agent: 'codex' as const,
+      prompt: 'Run once',
+    };
+    const createTmuxPane = vi.fn(() => '%91');
+    const sendTmuxCommand = vi.fn(() => {
+      throw new Error('injected command dispatch failure');
+    });
+    let tmuxSessionAvailable = true;
+    const deps = {
+      tmuxSessionExists: () => tmuxSessionAvailable,
+      createTmuxPane,
+      sendTmuxCommand,
+      getTmuxServerIdentity: () => mockTmuxServerIdentity,
+    };
+
+    const first = await spawnBridgePane(root, 'psyche-demo', request, deps);
+    tmuxSessionAvailable = false;
+    const retry = await spawnBridgePane(root, 'psyche-demo', request, deps);
+
+    expect(first).toMatchObject({
+      id: '%91',
+      persistedPane: {
+        paneId: '%91',
+      },
+      warnings: [{
+        code: 'effect_unknown',
+        message: expect.stringContaining('injected command dispatch failure'),
+      }],
+    });
+    expect(retry).toMatchObject({
+      id: '%91',
+      persistedPane: first.persistedPane,
+      warnings: [{
+        code: 'effect_unknown',
+        message: expect.stringContaining('without repeating the launch effect'),
+      }],
+    });
+    expect(createTmuxPane).toHaveBeenCalledOnce();
+    expect(sendTmuxCommand).toHaveBeenCalledOnce();
+  });
+
+  it('preserves a persisted pane when send-keys prompt dispatch fails', async () => {
+    const root = await tempDir('psyche-bridge-prompt-failure-');
+    execSync('git init', { cwd: root, stdio: 'ignore' });
+    execSync('git config user.email test@example.invalid', { cwd: root, stdio: 'ignore' });
+    execSync('git config user.name Test', { cwd: root, stdio: 'ignore' });
+    await writeFile(path.join(root, 'README.md'), '# prompt failure\n');
+    execSync('git add README.md && git -c commit.gpgsign=false commit -m init', {
+      cwd: root,
+      stdio: 'ignore',
+    });
+    await writeConfig(root, {
+      projectName: 'demo',
+      projectRoot: root,
+      panes: [],
+      settings: {},
+      lastUpdated: '2026-04-27T00:00:00.000Z',
+    });
+    const sendPromptKeys = vi.fn(async () => {
+      throw new Error('injected prompt dispatch failure');
+    });
+
+    const result = await spawnBridgePane(root, 'psyche-demo', {
+      requestId: 'req-prompt-failure',
+      cwd: root,
+      title: 'Prompt failure',
+      agent: 'cline',
+      prompt: 'Type once',
+    }, {
+      tmuxSessionExists: () => true,
+      createTmuxPane: () => '%92',
+      sendTmuxCommand: vi.fn(),
+      sendPromptKeys,
+      getTmuxServerIdentity: () => mockTmuxServerIdentity,
+    });
+
+    expect(result).toMatchObject({
+      id: '%92',
+      persistedPane: { paneId: '%92' },
+      warnings: [{
+        code: 'effect_unknown',
+        message: expect.stringContaining('injected prompt dispatch failure'),
+      }],
+    });
+    expect(sendPromptKeys).toHaveBeenCalledOnce();
+  });
+
   it('gives daemon panes with the same custom title distinct slug-bound titles', async () => {
     const root = await tempDir('psyche-bridge-title-collision-');
     execSync('git init', { cwd: root, stdio: 'ignore' });

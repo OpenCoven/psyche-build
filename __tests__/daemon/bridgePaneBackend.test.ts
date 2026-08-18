@@ -96,6 +96,38 @@ describe('createBridgePaneBackend', () => {
     }).toEqual(result.persistedPane);
   });
 
+  it('returns effect-unknown launches as a partial task with the persisted pane identity', async () => {
+    const result = {
+      ...spawnResult('codex'),
+      warnings: [{
+        code: 'effect_unknown' as const,
+        message: 'Pane persisted, but command dispatch outcome is unknown',
+      }],
+    };
+    const backend = createBridgePaneBackend({
+      sessionName: 's',
+      spawnPane: vi.fn(async () => result),
+    });
+    const orchestrator = new Orchestrator({ executeLane: backend.execute });
+
+    const execution = await orchestrator.execute({
+      taskId: 'task-effect-unknown',
+      projectRoot: ROOT,
+      prompt: 'Run once',
+      lanes: [{ id: 'codex', mode: 'isolated-worktree', agent: 'codex' }],
+    });
+
+    expect(execution).toMatchObject({
+      status: 'partial',
+      lanes: [{
+        id: 'codex',
+        status: 'completed',
+        pane: result.persistedPane,
+        warnings: [{ code: 'effect_unknown' }],
+      }],
+    });
+  });
+
   it('can execute without retaining completed spawn summaries', async () => {
     const backend = createBridgePaneBackend({
       sessionName: 's',
