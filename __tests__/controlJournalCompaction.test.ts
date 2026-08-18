@@ -312,6 +312,45 @@ describe('control journal compaction', () => {
     expect(first).toMatchObject({ status: 'succeeded' });
   }, 90_000);
 
+  it('aborts compaction when a covered terminal sidecar has the right status but the wrong exact value', async () => {
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 4);
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 4, handlers: makeHandlers(), journal,
+    });
+    const idempotencyKey = 'surface-compaction-digest-mismatch';
+    const command = providerUpsert(idempotencyKey) as Extract<ControlCommand, { kind: 'provider.resource.upsert' }>;
+    await runtime.submit(command);
+
+    for (let index = 0; index < 500; index += 1) {
+      await runtime.submit(takeover(`surface-compaction-digest-later-${index}`));
+    }
+
+    const terminalSequence = journal.read(0).find((event) => (
+      event.kind === 'command.succeeded' && event.payload.idempotencyKey === idempotencyKey
+    ))?.sequence;
+    expect(terminalSequence).toBeDefined();
+
+    await journal.storeOutcome(idempotencyKey, {
+      status: 'succeeded',
+      value: {
+        resource: {
+          ...command.payload.resource,
+          title: 'Forged Surface Value',
+        },
+      },
+    });
+
+    await (runtime as any).compactJournal(journal);
+
+    expect(journal.firstSequence).toBeLessThanOrEqual(terminalSequence as number);
+    (runtime as any).outcomesByIdempotencyKey.delete(idempotencyKey);
+    const sequenceBeforeRetry = journal.sequence;
+    await expect(runtime.submit({ ...command, id: 'provider-surface-compaction-digest-retry' }))
+      .rejects.toThrow('durable outcome sidecar does not match retained terminal event');
+    expect(journal.sequence).toBe(sequenceBeforeRetry);
+  }, 90_000);
+
   it('reports a gap to a reader resuming below the retained window', async () => {
     const root = await newRoot();
     const journal = await ControlJournal.open(root, 4);

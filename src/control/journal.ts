@@ -70,6 +70,7 @@ export type AgentControlJournalInput =
       commandId: string;
       idempotencyKey: string;
       status: CommandOutcome['status'];
+      outcomeDigest: string;
       code?: string;
       receipt?: AgentControlJournalReceipt;
     });
@@ -104,11 +105,32 @@ export function agentControlJournalPayload(input: AgentControlJournalInput): {
     kind: input.kind,
     payload: receipt
       ? { commandId: input.commandId, idempotencyKey: input.idempotencyKey,
-          status: input.status, receipt }
+          status: input.status, outcomeDigest: input.outcomeDigest, receipt }
       : { commandId: input.commandId, idempotencyKey: input.idempotencyKey,
-          status: input.status,
+          status: input.status, outcomeDigest: input.outcomeDigest,
           ...(input.status === 'succeeded' ? {} : { code: input.code ?? 'surface_command_failed' }) },
   };
+}
+
+export function exactCommandOutcomeDigest(outcome: CommandOutcome): string {
+  return createHash('sha256').update(stableOutcomeJson(outcome), 'utf8').digest('hex');
+}
+
+function stableOutcomeJson(outcome: CommandOutcome): string {
+  return JSON.stringify(sortOutcomeValue(outcome));
+}
+
+function sortOutcomeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => sortOutcomeValue(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value as Record<string, unknown>).sort().map((key) => [
+        key,
+        sortOutcomeValue((value as Record<string, unknown>)[key]),
+      ]),
+    );
+  }
+  return value;
 }
 
 function journalReceipt(receipt: AgentControlJournalReceipt): AgentControlJournalReceipt {
@@ -717,10 +739,12 @@ export class ControlJournal {
     const recovered: ControlEvent[] = [];
     for (const [transaction, event] of nonterminal) {
       if (terminalTransactions.has(transaction)) continue;
+      const outcome = recoveredNonterminalOutcome();
       recovered.push(await this.append('command.unknown', {
         commandId: event.payload.commandId,
         idempotencyKey: event.payload.idempotencyKey,
         reason: 'recovered-nonterminal',
+        outcomeDigest: exactCommandOutcomeDigest(outcome),
       }));
     }
     return recovered;
@@ -752,6 +776,14 @@ export class ControlJournal {
 
 export function commandTransactionKey(commandId: string, idempotencyKey: unknown): string {
   return JSON.stringify([commandId, typeof idempotencyKey === 'string' ? idempotencyKey : '']);
+}
+
+function recoveredNonterminalOutcome(): CommandOutcome {
+  return {
+    status: 'unknown',
+    code: 'recovered-nonterminal',
+    message: 'command outcome is unknown',
+  };
 }
 
 function durableOutcomeFileReadFlags(): number {

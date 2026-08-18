@@ -50,16 +50,18 @@ describe('ControlJournal', () => {
     const built = agentControlJournalPayload({
       kind: 'command.succeeded', commandId: 'script-1', idempotencyKey: 'idem-1',
       status: 'succeeded',
+      outcomeDigest: 'd'.repeat(64),
       receipt: {
         schema: 'psyche.control.receipt/v1', actionId: 'script-1', state: 'succeeded',
         resource: createAgentControlJournalResource({ kind: 'browser_tab', id: 'tab-1', generation: 2 }),
         createdAt: '2026-08-12T00:00:00.000Z', sourceDigest: 'digest', sourceBytes: 10,
         resultBytes: 2, durationMs: 1,
       },
-    });
+    } as any);
     expect(built.payload).toMatchObject({ receipt: {
       sourceDigest: 'digest', sourceBytes: 10, resultBytes: 2, durationMs: 1,
     } });
+    expect(built.payload).toMatchObject({ outcomeDigest: 'd'.repeat(64) });
   });
 
   it('persists optional receipt ownership metadata across journal replay', async () => {
@@ -70,6 +72,7 @@ describe('ControlJournal', () => {
       commandId: 'owned-receipt',
       idempotencyKey: 'owned-receipt',
       status: 'failed',
+      outcomeDigest: 'd'.repeat(64),
       receipt: {
         schema: 'psyche.control.receipt/v1',
         actionId: 'owned-receipt',
@@ -109,6 +112,7 @@ describe('ControlJournal', () => {
       commandId: 'task-owned-receipt',
       idempotencyKey: 'task-owned-receipt',
       status: 'failed',
+      outcomeDigest: 'd'.repeat(64),
       receipt: {
         schema: 'psyche.control.receipt/v1',
         actionId: 'task-owned-receipt',
@@ -440,7 +444,7 @@ describe('ControlJournal', () => {
       });
       const terminal = {
         kind: 'command.failed' as const, commandId: 'c', idempotencyKey: 'i',
-        status: 'failed' as const, code: 'surface_command_failed',
+        status: 'failed' as const, outcomeDigest: 'd'.repeat(64), code: 'surface_command_failed',
       };
       // @ts-expect-error full command outcomes are not accepted at the journal boundary
       agentControlJournalPayload({ ...terminal, outcome: { status: 'failed', code: 'x', message: 'secret' } });

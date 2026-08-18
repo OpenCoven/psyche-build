@@ -221,6 +221,9 @@ dedupe from the retained journal tail or the durable outcome store, and
 compaction will not cover a terminal key until one of those exact replay paths
 is authoritative. Because surface journal events are redacted, a missing exact
 surface sidecar fails closed instead of being reconstructed approximately.
+Retained terminal records carry only a digest of the exact outcome, so
+compaction and retained replay can verify the sidecar without exposing exact
+surface values in the journal.
 
 There is deliberately no accessibility, coordinate, screenshot-click, shell,
 raw tmux command, XPath, selector, or whole-desktop fallback.

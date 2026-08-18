@@ -6,7 +6,7 @@ import { ControlRuntime, type ControlHandlers, type RuntimeJournal } from '../sr
 import { ApprovalStore } from '../src/control/approvals.js';
 import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
 import type { ControlTaskCredentialReference } from '../src/control/credentials.js';
-import { ControlJournal } from '../src/control/journal.js';
+import { ControlJournal, exactCommandOutcomeDigest } from '../src/control/journal.js';
 import { createCanonicalElementSemantics } from '../src/control/policy.js';
 import { SurfaceRegistry } from '../src/control/surfaces.js';
 import type { ControlCommand } from '../src/control/types.js';
@@ -414,7 +414,8 @@ describe('ControlRuntime', () => {
 
     failDirty = false;
     await submit(runtime, command({ id: 'compaction-trigger', idempotencyKey: 'idem-compaction-trigger' }));
-    await vi.waitFor(() => expect(journal.firstSequence).toBeGreaterThan(terminal?.sequence ?? 0));
+    await (runtime as any).compactJournal(journal);
+    expect(journal.firstSequence).toBeGreaterThan(terminal?.sequence ?? 0);
     await expect(journal.loadOutcome('idem-dirty')).resolves.toEqual({
       status: 'succeeded',
       value: { actorId: 'human-1', revision: 1 },
@@ -442,6 +443,36 @@ describe('ControlRuntime', () => {
       code: 'recovered-nonterminal',
       message: 'command outcome is unknown',
     });
+  });
+
+  it('replays a recovered surface crash as an exact unknown without re-executing it', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    const command = providerUpsertCommand('surface-crash-recovered') as Extract<ControlCommand, { kind: 'provider.resource.upsert' }>;
+    await journal.append('command.requested', {
+      commandId: command.id,
+      idempotencyKey: command.idempotencyKey,
+      kind: command.kind,
+      ownerEpoch: command.ownerEpoch,
+    });
+
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+    expect(runtime.surfaces.get(command.payload.resource.id)).toBeUndefined();
+    await expect(journal.loadOutcome(command.idempotencyKey)).resolves.toEqual({
+      status: 'unknown',
+      code: 'recovered-nonterminal',
+      message: 'command outcome is unknown',
+    });
+
+    const sequenceBefore = journal.sequence;
+    await expect(submit(runtime, { ...command, id: 'provider-surface-crash-recovered-retry' }))
+      .resolves.toEqual({
+        status: 'unknown',
+        code: 'recovered-nonterminal',
+        message: 'command outcome is unknown',
+      });
+    expect(journal.sequence).toBe(sequenceBefore);
+    expect(runtime.surfaces.get(command.payload.resource.id)).toBeUndefined();
   });
 
   it('reconstructs a retained non-surface terminal when its exact sidecar is missing', async () => {
@@ -575,6 +606,7 @@ describe('ControlRuntime', () => {
       commandId: 'shared-command',
       idempotencyKey: 'surface-keep',
       status: 'succeeded',
+      outcomeDigest: exactCommandOutcomeDigest(surfaceOutcome),
     });
     await journal.storeOutcome('surface-keep', surfaceOutcome);
 

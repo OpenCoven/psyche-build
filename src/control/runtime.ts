@@ -25,6 +25,7 @@ import {
   agentControlJournalPayload,
   commandTransactionKey,
   createAgentControlJournalResource,
+  exactCommandOutcomeDigest,
   type AgentControlJournalReceipt,
   type DurableReceiptRecord,
   type JournalMutationGuard,
@@ -299,7 +300,7 @@ export class ControlRuntime {
   }
 
   static async create(opts: ControlRuntimeOptions): Promise<ControlRuntime> {
-    await opts.journal.recoverNonterminalCommands();
+    const recovered = await opts.journal.recoverNonterminalCommands();
     const runtime = new ControlRuntime(opts.ownerEpoch, opts.handlers, opts.journal, opts);
 
     // A compacted journal no longer holds the whole history, so the durable
@@ -314,6 +315,7 @@ export class ControlRuntime {
       latestDurableReceiptRecords(opts.journal.read(covered)),
     );
 
+    await runtime.persistRecoveredTerminalOutcomes(recovered);
     await runtime.recoverRestartedApprovalReceipts(durableRecords());
     if (snapshot) runtime.restoreOutcomes(snapshot.outcomes);
     // Read the tail again: recovery appends the invalidation events whose
@@ -459,7 +461,7 @@ export class ControlRuntime {
         return outcome;
       }
       const commandKind = retainedCommandKind(this.journal.read(0), retained);
-      const stored = await this.loadRetainedReplayOutcome(command.idempotencyKey, retained.sequence);
+      const stored = await this.loadRetainedReplayOutcome(retained, commandKind);
       if (stored) {
         this.clearDirtyTerminalOutcome(command.idempotencyKey, retained.sequence);
         this.rememberOutcome(command.idempotencyKey, stored);
@@ -1605,11 +1607,13 @@ export class ControlRuntime {
     outcome: CommandOutcome,
     receipt?: ActionReceipt,
   ): Promise<CommandOutcome> {
+    const outcomeDigest = exactCommandOutcomeDigest(outcome);
     if (isSurfaceControlCommand(command)) {
       const built = agentControlJournalPayload({
         kind: terminalKindForOutcome(outcome), commandId: command.id,
         idempotencyKey: command.idempotencyKey,
         status: outcome.status,
+        outcomeDigest,
         ...(outcome.status === 'succeeded' ? {} : { code: 'surface_command_failed' }),
         ...(receipt ? { receipt: journalReceiptMetadata(receipt) } : {}),
       });
@@ -1623,7 +1627,7 @@ export class ControlRuntime {
     const event = await this.journal.append(terminalKindForOutcome(outcome), {
       commandId: command.id,
       idempotencyKey: command.idempotencyKey,
-      ...payloadForOutcome(outcome),
+      ...payloadForOutcome(outcome, outcomeDigest),
     });
     const record = this.commandRecords.get(command.id);
     if (record) {
@@ -1685,15 +1689,34 @@ export class ControlRuntime {
     }
   }
 
+  private async persistRecoveredTerminalOutcomes(events: readonly RuntimeEvent[]): Promise<void> {
+    if (!this.compactable) return;
+    for (const event of events) {
+      if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
+      const idempotencyKey = stringPayload(event, 'idempotencyKey');
+      if (!idempotencyKey) continue;
+      await this.persistTerminalOutcome(idempotencyKey, event.sequence, outcomeFromEvent(event));
+    }
+  }
+
   private async loadRetainedReplayOutcome(
-    idempotencyKey: string,
-    retainedSequence: number,
+    terminalEvent: RuntimeEvent,
+    commandKind?: ControlCommand['kind'] | string,
   ): Promise<CommandOutcome | undefined> {
     if (!this.compactable) return undefined;
+    const idempotencyKey = stringPayload(terminalEvent, 'idempotencyKey');
+    if (!idempotencyKey) return undefined;
     try {
-      return await this.compactable.loadOutcome(idempotencyKey);
+      const stored = await this.compactable.loadOutcome(idempotencyKey);
+      if (!stored) return undefined;
+      const verification = verifyExactOutcomeAgainstTerminalEvent(stored, terminalEvent, commandKind);
+      if (!verification.ok) {
+        this.invalidateActiveCompactionForSequence(terminalEvent.sequence);
+        throw verification.error;
+      }
+      return stored;
     } catch (error) {
-      this.invalidateActiveCompactionForSequence(retainedSequence);
+      this.invalidateActiveCompactionForSequence(terminalEvent.sequence);
       throw error;
     }
   }
@@ -1711,15 +1734,14 @@ export class ControlRuntime {
       return;
     }
     const commandKinds = retainedCommandKinds(events);
-    for (const event of events) {
-      if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
+    for (const event of latestTerminalEvents(events)) {
       const idempotencyKey = stringPayload(event, 'idempotencyKey');
       if (!idempotencyKey) continue;
       const commandId = stringPayload(event, 'commandId');
       const commandKind = commandId
         ? commandKinds.get(commandTransactionKey(commandId, idempotencyKey))
         : undefined;
-      const stored = await this.loadRetainedReplayOutcome(idempotencyKey, event.sequence);
+      const stored = await this.loadRetainedReplayOutcome(event, commandKind);
       if (stored) {
         this.clearDirtyTerminalOutcome(idempotencyKey, event.sequence);
         this.rememberOutcome(idempotencyKey, stored);
@@ -1816,8 +1838,17 @@ export class ControlRuntime {
   private coveredTerminalSequences(
     journal: CompactableJournal,
     coveredSequence: number,
-  ): Map<string, number> {
-    const covered = new Map<string, number>();
+  ): Map<string, {
+    sequence: number;
+    event: RuntimeEvent;
+    commandKind?: ControlCommand['kind'] | string;
+  }> {
+    const covered = new Map<string, {
+      sequence: number;
+      event: RuntimeEvent;
+      commandKind?: ControlCommand['kind'] | string;
+    }>();
+    const commandKinds = new Map<string, ControlCommand['kind'] | string>();
     let afterSequence = journal.firstSequence - 1;
     while (afterSequence < coveredSequence) {
       const batch = journal.read(
@@ -1828,10 +1859,26 @@ export class ControlRuntime {
       for (const event of batch) {
         afterSequence = event.sequence;
         if (event.sequence > coveredSequence) return covered;
+        if (event.kind === 'command.requested') {
+          const commandId = stringPayload(event, 'commandId');
+          const idempotencyKey = stringPayload(event, 'idempotencyKey');
+          const kind = stringPayload(event, 'kind');
+          if (commandId && idempotencyKey && kind) {
+            commandKinds.set(commandTransactionKey(commandId, idempotencyKey), kind);
+          }
+          continue;
+        }
         if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
         const idempotencyKey = stringPayload(event, 'idempotencyKey');
         if (!idempotencyKey) continue;
-        covered.set(idempotencyKey, event.sequence);
+        const commandId = stringPayload(event, 'commandId');
+        covered.set(idempotencyKey, {
+          sequence: event.sequence,
+          event,
+          commandKind: commandId
+            ? commandKinds.get(commandTransactionKey(commandId, idempotencyKey))
+            : undefined,
+        });
       }
     }
     return covered;
@@ -1842,15 +1889,22 @@ export class ControlRuntime {
     attempt: ActiveCompactionAttempt,
   ): Promise<boolean> {
     if (!this.compactable) return true;
-    for (const [idempotencyKey, sequence] of this.coveredTerminalSequences(journal, attempt.coveredSequence)) {
+    for (const [idempotencyKey, covered] of this.coveredTerminalSequences(journal, attempt.coveredSequence)) {
       if (this.compactionShouldAbort(attempt)) return false;
       try {
         const stored = await this.compactable.loadOutcome(idempotencyKey);
-        if (stored) continue;
+        if (stored) {
+          const verification = verifyExactOutcomeAgainstTerminalEvent(
+            stored,
+            covered.event,
+            covered.commandKind,
+          );
+          if (verification.ok) continue;
+        }
       } catch {
         // Compaction fails closed: unreadable exact replay keeps the journal.
       }
-      this.invalidateActiveCompactionForSequence(sequence);
+      this.invalidateActiveCompactionForSequence(covered.sequence);
       return false;
     }
     return !this.compactionShouldAbort(attempt);
@@ -2398,13 +2452,15 @@ function redactedPayloadForOutcome(
   outcome: CommandOutcome,
   explicitReceipt?: ActionReceipt,
 ): Record<string, unknown> {
+  const outcomeDigest = exactCommandOutcomeDigest(outcome);
   const receipt = explicitReceipt
     ?? (outcome.status === 'succeeded' && 'value' in outcome && isActionReceipt(outcome.value)
       ? outcome.value
       : undefined);
-  if (receipt) return { status: outcome.status, receipt: redactReceipt(receipt) };
+  if (receipt) return { status: outcome.status, outcomeDigest, receipt: redactReceipt(receipt) };
   return {
     status: outcome.status,
+    outcomeDigest,
     ...(outcome.status === 'succeeded' ? {} : { code: 'surface_command_failed' }),
   };
 }
@@ -2471,11 +2527,25 @@ function terminalKindForOutcome(outcome: CommandOutcome):
   }
 }
 
-function payloadForOutcome(outcome: CommandOutcome): Record<string, unknown> {
+function payloadForOutcome(outcome: CommandOutcome, outcomeDigest = exactCommandOutcomeDigest(outcome)): Record<string, unknown> {
   if (outcome.status === 'succeeded') {
-    return 'value' in outcome ? { status: outcome.status, value: outcome.value } : { status: outcome.status };
+    return 'value' in outcome
+      ? { status: outcome.status, outcomeDigest, value: outcome.value }
+      : { status: outcome.status, outcomeDigest };
   }
-  return { status: outcome.status, code: outcome.code, message: outcome.message };
+  return { status: outcome.status, outcomeDigest, code: outcome.code, message: outcome.message };
+}
+
+function verifyExactOutcomeAgainstTerminalEvent(
+  outcome: CommandOutcome,
+  event: RuntimeEvent,
+  commandKind?: ControlCommand['kind'] | string,
+): { ok: true } | { ok: false; error: Error } {
+  const expected = terminalOutcomeDigestForVerification(event, commandKind);
+  if (!expected.ok) return expected;
+  return exactCommandOutcomeDigest(outcome) === expected.digest
+    ? { ok: true }
+    : { ok: false, error: retainedOutcomeDigestMismatchError() };
 }
 
 function outcomeFromEvent(event: RuntimeEvent): CommandOutcome {
@@ -2522,6 +2592,39 @@ function missingRetainedOutcomeSidecarError(): Error {
   return new Error('durable outcome sidecar is required for retained surface or unknown terminal events');
 }
 
+function terminalOutcomeDigestForVerification(
+  event: RuntimeEvent,
+  commandKind?: ControlCommand['kind'] | string,
+): { ok: true; digest: string } | { ok: false; error: Error } {
+  const digest = event.payload.outcomeDigest;
+  if (digest !== undefined) {
+    return typeof digest === 'string' && isSha256Digest(digest)
+      ? { ok: true, digest }
+      : { ok: false, error: invalidRetainedOutcomeDigestError() };
+  }
+  const reconstructed = reconstructRetainedOutcome(event, commandKind);
+  if (!reconstructed) {
+    return { ok: false, error: missingRetainedOutcomeDigestError() };
+  }
+  return { ok: true, digest: exactCommandOutcomeDigest(reconstructed) };
+}
+
+function isSha256Digest(value: string): boolean {
+  return /^[0-9a-f]{64}$/u.test(value);
+}
+
+function missingRetainedOutcomeDigestError(): Error {
+  return new Error('retained surface or unknown terminal events require an exact outcome digest');
+}
+
+function invalidRetainedOutcomeDigestError(): Error {
+  return new Error('retained terminal outcome digest is invalid');
+}
+
+function retainedOutcomeDigestMismatchError(): Error {
+  return new Error('durable outcome sidecar does not match retained terminal event');
+}
+
 // DurableReceiptRecord now lives in journal.ts: it is the durable shape the
 // snapshot file persists, not just an in-flight projection of journal events.
 
@@ -2557,6 +2660,17 @@ function retainedCommandKinds(events: readonly RuntimeEvent[]): Map<string, Cont
     kinds.set(commandTransactionKey(commandId, idempotencyKey), kind);
   }
   return kinds;
+}
+
+function latestTerminalEvents(events: readonly RuntimeEvent[]): RuntimeEvent[] {
+  const latest = new Map<string, RuntimeEvent>();
+  for (const event of events) {
+    if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
+    const idempotencyKey = stringPayload(event, 'idempotencyKey');
+    if (!idempotencyKey) continue;
+    latest.set(idempotencyKey, event);
+  }
+  return [...latest.values()].sort((left, right) => left.sequence - right.sequence);
 }
 
 function retainedCommandKind(
@@ -2635,10 +2749,12 @@ function mergeDurableReceiptRecords(
 }
 
 function restartInvalidatedPayload(record: DurableReceiptRecord): Record<string, unknown> {
+  const outcomeDigest = exactCommandOutcomeDigest(restartInvalidatedOutcome());
   return {
     commandId: record.commandId,
     idempotencyKey: record.idempotencyKey,
     status: 'failed',
+    outcomeDigest,
     receipt: {
       schema: record.receipt.schema,
       actionId: record.receipt.actionId,

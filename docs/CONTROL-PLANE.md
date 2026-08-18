@@ -94,9 +94,11 @@ through the identical authority checks and lands in the same journal.
    After a terminal append, the runtime remembers the exact outcome in memory,
    tracks it as dirty until the disk-backed sidecar fsync succeeds, and refuses
    to compact that terminal key away until authoritative durable replay data
-   exists. Non-surface tail events can be reconstructed while they remain
-   retained; surface tail events fail closed when their exact sidecar is
-   missing.
+   exists. Terminal journal events also carry a SHA-256 digest of the exact
+   `CommandOutcome`, and compaction verifies the retained event digest against
+   the durable sidecar before dropping older evidence. Non-surface tail events
+   can be reconstructed while they remain retained; surface tail events fail
+   closed when their exact sidecar is missing or unverifiable.
 6. **Handler dispatch** — only then does it call the matching `ControlHandlers`
    method to perform the effect and shape the `CommandOutcome`.
 
