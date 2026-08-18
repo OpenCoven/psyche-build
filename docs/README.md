@@ -1,6 +1,8 @@
-# psyche Documentation Site
+# Psyche Build documentation site
 
-Single-page marketing and documentation site for psyche.
+Public documentation for Psyche Build. `docs/src/` is the authoritative source
+for the published site. `docs/superpowers/` contains internal historical design
+and implementation records; it is not public product guidance.
 
 ## Development
 
@@ -50,17 +52,17 @@ are unavailable in `0.0.1`.
 
 ## Structure
 
-- `src/` - Source files
+- `src/` - Authoritative public site source files
 - `src/content/` - Documentation page content
 - `public/` - Static assets
 - `dist/` - Production build output (generated)
+- `superpowers/` - Internal historical design and implementation records
 
 ## Related docs
 
 - [Breaking changes](BREAKING-CHANGES.md)
 - [Control-plane architecture](CONTROL-PLANE.md)
-- [Coven sessions](COVEN-SESSIONS.md)
-- [psyche + Coven demo loop](COVEN-DEMO-LOOP.md)
+- [Psyche Build integrations](INTEGRATIONS.md)
 - [Product spec](PRODUCT-SPEC.md)
 - [Smoke test](SMOKE.md)
 - [Release runbook](RELEASE.md)
