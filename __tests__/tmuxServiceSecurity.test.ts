@@ -76,6 +76,57 @@ describe('TmuxService command construction', () => {
     );
   });
 
+  it('stops a send-keys retry when ownership is lost during the retry delay', async () => {
+    vi.useFakeTimers();
+    execSyncMock.mockImplementationOnce(() => {
+      throw new Error('transient tmux failure');
+    });
+    const capturedTarget = '%old';
+    let currentTarget = capturedTarget;
+
+    try {
+      const result = TmuxService.getInstance().sendKeys(capturedTarget, "'Enter'", {
+        isCurrent: () => currentTarget === capturedTarget,
+      });
+      await Promise.resolve();
+      expect(execSyncMock).toHaveBeenCalledTimes(1);
+
+      currentTarget = '%new';
+      await vi.advanceTimersByTimeAsync(50);
+
+      await expect(result).resolves.toBe(false);
+      expect(execSyncMock).toHaveBeenCalledTimes(1);
+      expect(execSyncMock).not.toHaveBeenCalledWith(
+        expect.stringContaining('%new'),
+        expect.anything(),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps normal send-keys retry behavior without an ownership guard', async () => {
+    vi.useFakeTimers();
+    execSyncMock
+      .mockImplementationOnce(() => {
+        throw new Error('transient tmux failure');
+      })
+      .mockReturnValue('');
+
+    try {
+      const result = TmuxService.getInstance().sendKeys('%1', "'Enter'");
+      await Promise.resolve();
+      expect(execSyncMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(50);
+
+      await expect(result).resolves.toBeUndefined();
+      expect(execSyncMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports aggregate pane option write failure instead of returning success-shaped output', () => {
     execSyncMock.mockImplementation(() => {
       throw new Error('invalid pane');
