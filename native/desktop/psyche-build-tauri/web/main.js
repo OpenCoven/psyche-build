@@ -902,11 +902,14 @@
     clearPassiveCovenPaneFocus();
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
-    // Restore the project's last-focused thread, falling back to its first.
+    // Restore the project's last-focused thread, falling back within the
+    // workspace tree the active canvas is allowed to show.
     var workspaceRoot = activeWorkspaceRoot(project);
     if (typeof restoreFilesPaneSelection === "function") {
       restoreFilesPaneSelection(project, workspaceRoot);
     }
+    var layout = paneLayoutFor(id, workspaceRoot);
+    var scopedRoot = layout ? scopedPaneRoot(layout) : null;
     var threads = state.threads.filter(function (t) {
       return t.projectId === id && t.worktreePath === workspaceRoot && !t.hidden &&
         t.kind !== "coven-code" && t.kind !== "coven-attach";
@@ -918,14 +921,34 @@
         (rememberedThread.kind === "coven-code" || rememberedThread.kind === "coven-attach")) {
       project.lastActiveThreadId = null;
     }
-    var nextId = project.lastActiveThreadId &&
-      threads.some(function (t) { return t.id === project.lastActiveThreadId; })
-        ? project.lastActiveThreadId
-        : (threads[0] ? threads[0].id : null);
-    if (nextId) {
-      var focusOptions = Object.assign({}, options || {}, { refreshStatus: false });
-      await focusThread(nextId, focusOptions);
-    } else {
+    var fallbackIds = layout && layout.activeSetId && scopedRoot
+      ? PsychePanes.leafIds(scopedRoot).map(function (leafId) {
+          var leaf = PsychePanes.findLeafById(scopedRoot, leafId);
+          return leaf ? leaf.threadId : null;
+        })
+      : threads.map(function (thread) { return thread.id; });
+    var candidateIds = [];
+    if (project.lastActiveThreadId &&
+        threads.some(function (thread) { return thread.id === project.lastActiveThreadId; }) &&
+        paneFocusEligible(layout, project.lastActiveThreadId)) {
+      candidateIds.push(project.lastActiveThreadId);
+    }
+    fallbackIds.forEach(function (threadId) {
+      if (threadId && candidateIds.indexOf(threadId) === -1 &&
+          threads.some(function (thread) { return thread.id === threadId; })) {
+        candidateIds.push(threadId);
+      }
+    });
+    var focused = false;
+    var focusOptions = Object.assign({}, options || {}, { refreshStatus: false });
+    for (var i = 0; i < candidateIds.length; i += 1) {
+      if (!paneFocusEligible(layout, candidateIds[i])) continue;
+      if (await focusThread(candidateIds[i], focusOptions)) {
+        focused = true;
+        break;
+      }
+    }
+    if (!focused) {
       state.activeThreadId = null;
       renderPaneWorkspace({ preserveTerminalFocus: false });
       refreshSidebar();
@@ -1792,6 +1815,14 @@
       if (state.threads[i].id === id) return state.threads[i];
     }
     return null;
+  }
+  function findFocusableThread(id) {
+    var thread = findThread(id);
+    if (!thread || thread.hidden ||
+        (thread.kind === "web"
+          ? browserPaneIsClosing(thread)
+          : thread.closing || thread.closeStarted)) return null;
+    return thread;
   }
   function findFilesPaneBySurfaceId(id) {
     var match = null;
@@ -3764,6 +3795,44 @@
     return scoped;
   }
 
+  function paneFocusEligible(layout, threadId) {
+    if (!layout || !layout.root || !layout.activeSetId) return true;
+    var root = scopedPaneRoot(layout);
+    if (!layout.activeSetId) return true;
+    return Boolean(root && PsychePanes.findLeafByThreadId(root, threadId));
+  }
+
+  function paneSurfaceFocusEligible(layout, surface) {
+    if (!surface || surface.hidden || !paneFocusEligible(layout, surface.id)) return false;
+    if (surface.kind === "files") return true;
+    return surface.kind === "web"
+      ? !browserPaneIsClosing(surface)
+      : !surface.closing && !surface.closeStarted;
+  }
+
+  function resolvePaneFocusSuccessor(layout, preferredId, threadsOnly) {
+    if (!layout || !layout.root) return null;
+    var root = scopedPaneRoot(layout);
+    if (!root) return null;
+    var leafIds = PsychePanes.leafIds(root);
+    var preferredLeaf = preferredId &&
+      PsychePanes.findLeafByThreadId(root, preferredId);
+    if (preferredLeaf) {
+      leafIds = [preferredLeaf.id].concat(leafIds.filter(function (leafId) {
+        return leafId !== preferredLeaf.id;
+      }));
+    }
+    for (var i = 0; i < leafIds.length; i += 1) {
+      var leaf = PsychePanes.findLeafById(root, leafIds[i]);
+      var surface = leaf && (typeof canvasSurfaceById === "function"
+        ? canvasSurfaceById(leaf.threadId)
+        : typeof findThread === "function" ? findThread(leaf.threadId) : leaf);
+      if (threadsOnly && surface && surface.kind === "files") continue;
+      if (paneSurfaceFocusEligible(layout, surface)) return surface.id;
+    }
+    return null;
+  }
+
   /**
    * The tree the canvas actually draws. Maximise and span are presentation
    * modes, so neither one edits the tiled tree — leaving them restores exactly
@@ -4011,6 +4080,7 @@
       : surface) || surface;
     var layout = paneLayoutForThread(surface);
     if (!layout || !layout.root) return;
+    if (!paneSurfaceFocusEligible(layout, surface)) return;
     var leaf = PsychePanes.findLeafByThreadId(layout.root, surface.id);
     if (!leaf) return;
     layout.maximizedLeafId = layout.maximizedLeafId === leaf.id ? null : leaf.id;
@@ -4381,9 +4451,7 @@
             await returnFromFileFocus(item.thread.id, true);
             return;
           }
-          layout.maximizedLeafId = leaf.id;
-          layout.focusedLeafId = leaf.id;
-          focusThread(item.thread.id);
+          await focusThread(item.thread.id);
         });
       }
       rail.appendChild(entry);
@@ -4428,15 +4496,16 @@
   async function focusThread(id, options) {
     function resolveFocusableThread() {
       var candidate = findThread(id);
-      if (!candidate || candidate.hidden || candidate.closing ||
-          candidate.closeStarted) return null;
-      return candidate;
+      var candidateLayout = paneLayoutForThread(candidate);
+      return paneSurfaceFocusEligible(candidateLayout, candidate) ? candidate : null;
     }
     var thread = resolveFocusableThread();
     if (!thread) return false;
+    var layout = paneLayoutForThread(thread);
     if (!(await showTerminalView())) return false;
     thread = resolveFocusableThread();
     if (!thread) return false;
+    layout = paneLayoutForThread(thread);
     var focusedSourceThread = focusedTerminalThreadForRender();
     if (focusedSourceThread) {
       withTerminalFocusReportToken(
@@ -4465,9 +4534,17 @@
       }
       project.selectedWorktreePath = thread.worktreePath;
     }
-    var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
     var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
-    if (layout && leaf) layout.focusedLeafId = leaf.id;
+    if (layout && leaf) {
+      var maximizedLeafId = layout.maximizedLeafId ||
+        options && options.preserveFullscreenLeafId;
+      if (maximizedLeafId) {
+        layout.maximizedLeafId = PsychePanes.findLeafById(layout.root, maximizedLeafId)
+          ? leaf.id
+          : null;
+      }
+      layout.focusedLeafId = leaf.id;
+    }
     renderPaneWorkspace({ focusTargetThread: thread });
     if (scopeChanged) renderGitSurface();
     refreshSidebar();
@@ -4498,6 +4575,16 @@
     }
     saveWorkspaceSoon();
     return true;
+  }
+
+  async function focusThreadFromSidebar(thread) {
+    var layout = paneLayoutForThread(thread);
+    var maximizedLeafId = layout && layout.maximizedLeafId;
+    applySetScopeForThread(thread);
+    if (maximizedLeafId) {
+      return focusThread(thread.id, { preserveFullscreenLeafId: maximizedLeafId });
+    }
+    return focusThread(thread.id);
   }
 
   function statusLevel(s) {
@@ -4580,12 +4667,19 @@
       return null;
     }
     layout.root = removed.root;
+    var nextLeaf = PsychePanes.findLeafById(removed.root, removed.nextLeafId);
+    var nextThreadId = resolvePaneFocusSuccessor(
+      layout,
+      nextLeaf ? nextLeaf.threadId : null
+    );
+    nextLeaf = nextThreadId
+      ? PsychePanes.findLeafByThreadId(removed.root, nextThreadId)
+      : null;
     if (layout.focusedLeafId === leaf.id) {
-      layout.focusedLeafId = removed.nextLeafId;
+      layout.focusedLeafId = nextLeaf ? nextLeaf.id : null;
     }
     paneLayouts.set(key, layout);
     saveWorkspaceSoon();
-    var nextLeaf = PsychePanes.findLeafById(removed.root, removed.nextLeafId);
     return nextLeaf ? nextLeaf.threadId : null;
   }
 
@@ -4862,15 +4956,26 @@
     var nextThreadId = detachThreadPane(thread);
     thread.terminalController = null;
     thread.term = null;
-    if (nextThreadId && !findThread(nextThreadId)) {
-      nextThreadId = canvasThreadIds()[0] || null;
-    }
     if (thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
       await stopThreadPty(thread);
     }
     var closingProjectId = thread.projectId;
     state.threads = state.threads.filter(function (t) { return t.id !== id; });
     if (wasActive) {
+      var closingLayout = paneLayoutForThread(thread);
+      nextThreadId = resolvePaneFocusSuccessor(closingLayout, nextThreadId, true);
+      if (closingLayout) {
+        var focusedLeaf = closingLayout.focusedLeafId &&
+          PsychePanes.findLeafById(closingLayout.root, closingLayout.focusedLeafId);
+        var focusedSurface = focusedLeaf && (typeof canvasSurfaceById === "function"
+          ? canvasSurfaceById(focusedLeaf.threadId)
+          : findThread(focusedLeaf.threadId));
+        if (!paneSurfaceFocusEligible(closingLayout, focusedSurface)) {
+          var successorLeaf = nextThreadId &&
+            PsychePanes.findLeafByThreadId(closingLayout.root, nextThreadId);
+          closingLayout.focusedLeafId = successorLeaf ? successorLeaf.id : null;
+        }
+      }
       // Prefer the next thread in the same project so closing a tab doesn't
       // teleport the user into a different project.
       state.activeThreadId = null;
@@ -4911,10 +5016,12 @@
     }
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     var nextThreadId = detachThreadPane(thread);
-    if (nextThreadId && !findThread(nextThreadId)) {
-      nextThreadId = canvasThreadIds()[0] || null;
-    }
     thread.hidden = true;
+    nextThreadId = resolvePaneFocusSuccessor(
+      paneLayoutForThread(thread),
+      nextThreadId,
+      true
+    );
     var focusingNext = false;
     if (wasActive) {
       state.activeThreadId = null;
@@ -7408,12 +7515,28 @@
               }
               async function activateLocalRow() {
                 if (setPicking) { toggleSetPick(thread.id); return; }
+                var liveThread = findFocusableThread(thread.id);
+                if (!liveThread) return;
+                var liveProject = findProject(liveThread.projectId);
+                if (!liveProject) return;
+                var worktreePath = liveThread.worktreePath || liveProject.root;
+                if ((liveProject.id !== state.activeProjectId ||
+                    activeWorkspaceRoot(liveProject) !== worktreePath) &&
+                    !(await activateProjectWorktree(
+                      liveProject,
+                      worktreePath,
+                      { refreshStatus: false }
+                    ))) return;
+                liveThread = findFocusableThread(thread.id);
+                liveProject = liveThread && findProject(liveThread.projectId);
+                worktreePath = liveThread && liveProject &&
+                  (liveThread.worktreePath || liveProject.root);
+                if (!liveThread || !liveProject ||
+                    liveProject.id !== state.activeProjectId ||
+                    activeWorkspaceRoot(liveProject) !== worktreePath) return;
                 settings.selectedSessionKey = rowModel.selectionKey;
                 saveSettings();
-                if (project.id !== state.activeProjectId &&
-                    !(await setActiveProject(project.id))) return;
-                applySetScopeForThread(thread);
-                await focusThread(thread.id);
+                await focusThreadFromSidebar(liveThread);
               }
               row.addEventListener("click", activateLocalRow);
               row.addEventListener("keydown", function (event) {
@@ -7461,7 +7584,7 @@
                   thread,
                   memberships,
                   {
-                    focus: function () { focusThread(thread.id); },
+                    focus: activateLocalRow,
                     showSet: function () { activateFocusSet(memberships[0].id); },
                     removeSet: function () {
                       removeFromFocusSet(memberships[0].id, thread.id);
@@ -11064,7 +11187,11 @@
     if (e.ctrlKey && !e.metaKey) {
       var paneIndex = parseInt(e.key, 10);
       if (Number.isInteger(paneIndex) && paneIndex >= 1) {
-        var paneId = canvasThreadIds()[paneIndex - 1];
+        var shortcutLayout = activePaneLayout();
+        var shortcutPaneIds = canvasThreadIds().filter(function (candidateId) {
+          return paneFocusEligible(shortcutLayout, candidateId);
+        });
+        var paneId = shortcutPaneIds[paneIndex - 1];
         if (paneId) { await focusThread(paneId); e.preventDefault(); }
         return;
       }

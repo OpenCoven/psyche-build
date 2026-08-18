@@ -1,11 +1,16 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 const mainJs = readFileSync(
   join(process.cwd(), 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
+const PsychePanes = await import(pathToFileURL(join(
+  process.cwd(),
+  'native/desktop/psyche-build-tauri/web/panes/pane-tree.mjs',
+)).href);
 
 function functionSource(source: string, name: string) {
   const asyncStart = source.indexOf(`async function ${name}(`);
@@ -39,6 +44,79 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function compilePaneFocusDependencies(
+  state: { threads: Array<{ id: string; projectId: string; worktreePath: string }> },
+) {
+  const paneLayoutKey = compileFunction<(projectId: string, worktreePath: string) => string>(
+    functionSource(mainJs, 'paneLayoutKey'),
+    {},
+  );
+  const paneLayouts = new Map<string, { root: unknown; focusedLeafId: string | null }>();
+  state.threads.forEach((thread) => {
+    const key = paneLayoutKey(thread.projectId, thread.worktreePath);
+    const leaf = PsychePanes.createLeaf(`leaf-${thread.id}`, thread.id);
+    const layout = paneLayouts.get(key);
+    if (!layout) {
+      paneLayouts.set(key, { root: leaf, focusedLeafId: leaf.id });
+      return;
+    }
+    layout.root = PsychePanes.insertBelow(
+      layout.root,
+      layout.focusedLeafId!,
+      leaf,
+      `split-${thread.id}`,
+    );
+  });
+  const paneLayoutFor = compileFunction<
+    (projectId: string, worktreePath: string) => { root: unknown } | null
+  >(functionSource(mainJs, 'paneLayoutFor'), { paneLayouts, paneLayoutKey });
+  const paneLayoutForThread = compileFunction<
+    (surface: { projectId: string; worktreePath: string } | null) => { root: unknown } | null
+  >(functionSource(mainJs, 'paneLayoutForThread'), { paneLayoutFor });
+  const findThread = (id: string) => state.threads.find((thread) => thread.id === id) ?? null;
+  const findFilesPaneBySurfaceId = compileFunction<(id: string) => null>(
+    functionSource(mainJs, 'findFilesPaneBySurfaceId'),
+    { filesPanes: new Map() },
+  );
+  const canvasSurfaceById = compileFunction<(id: string) => unknown>(
+    functionSource(mainJs, 'canvasSurfaceById'),
+    { findThread, findFilesPaneBySurfaceId },
+  );
+  const findFocusSet = compileFunction<(id: string) => null>(
+    functionSource(mainJs, 'findFocusSet'),
+    { focusSets: [] },
+  );
+  const scopedPaneRoot = compileFunction<(layout: { root: unknown }) => unknown>(
+    functionSource(mainJs, 'scopedPaneRoot'),
+    { findFocusSet, canvasSurfaceById, PsychePanes },
+  );
+  const paneFocusEligible = compileFunction<
+    (layout: { root: unknown } | null, threadId: string) => boolean
+  >(functionSource(mainJs, 'paneFocusEligible'), { scopedPaneRoot, PsychePanes });
+  const browserPaneLifecycle = compileFunction<
+    (thread: object | null) => { tearingDown: boolean }
+  >(functionSource(mainJs, 'browserPaneLifecycle'), {
+    browserPaneLifecycleStates: new WeakMap(),
+  });
+  const browserPaneIsClosing = compileFunction<(thread: object | null) => boolean>(
+    functionSource(mainJs, 'browserPaneIsClosing'),
+    { browserPaneLifecycle },
+  );
+  const paneSurfaceFocusEligible = compileFunction<
+    (layout: { root: unknown } | null, surface: object | null) => boolean
+  >(functionSource(mainJs, 'paneSurfaceFocusEligible'), {
+    browserPaneIsClosing,
+    paneFocusEligible,
+  });
+  return {
+    paneLayoutFor,
+    paneLayoutForThread,
+    paneFocusEligible,
+    paneSurfaceFocusEligible,
+    PsychePanes,
+  };
+}
+
 function focusDependencies(
   state: { activeThreadId: string | null; activeProjectId: string | null; threads: any[] },
   showTerminalView: () => Promise<boolean>,
@@ -59,8 +137,7 @@ function focusDependencies(
     state,
     findProject: () => ({ id: 'project-1' }),
     activeWorkspaceRoot: () => '/repo',
-    paneLayoutFor: () => ({ root: {}, focusedLeafId: null }),
-    PsychePanes: { findLeafByThreadId: () => ({ id: 'leaf-1' }) },
+    ...compilePaneFocusDependencies(state),
     renderPaneWorkspace: vi.fn(),
     renderGitSurface: vi.fn(),
     refreshSidebar: vi.fn(),
