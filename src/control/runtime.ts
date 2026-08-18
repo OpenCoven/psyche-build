@@ -1697,13 +1697,12 @@ export class ControlRuntime {
         continue;
       }
       const reconstructed = reconstructRetainedOutcome(event, commandKind);
-      const retained = reconstructed ?? this.outcomesByIdempotencyKey.get(idempotencyKey);
-      if (!retained) {
+      if (!reconstructed) {
         this.markDirtyTerminalOutcome(idempotencyKey, event.sequence);
         throw missingRetainedOutcomeSidecarError();
       }
-      this.markDirtyTerminalOutcome(idempotencyKey, event.sequence, retained);
-      this.rememberOutcome(idempotencyKey, retained);
+      this.markDirtyTerminalOutcome(idempotencyKey, event.sequence, reconstructed);
+      this.rememberOutcome(idempotencyKey, reconstructed);
     }
     await this.flushDirtyTerminalOutcomesThrough(Number.POSITIVE_INFINITY);
   }

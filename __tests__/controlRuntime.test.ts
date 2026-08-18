@@ -483,6 +483,37 @@ describe('ControlRuntime', () => {
     await expect(reopened.loadOutcome(idempotencyKey)).resolves.toBeUndefined();
   });
 
+  it('fails closed when a legacy snapshot seeds a retained surface terminal without its exact sidecar', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const idempotencyKey = 'surface-legacy-snapshot-fallback';
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    const first = await submit(runtime, providerUpsertCommand(idempotencyKey));
+    const requested = journal.read(0).find((event) => (
+      event.kind === 'command.requested' && event.payload.idempotencyKey === idempotencyKey
+    ));
+    expect(requested).toBeDefined();
+
+    await journal.writeSnapshot({
+      snapshot: runtime.snapshot(),
+      coveredSequence: requested!.sequence,
+      outcomes: { [idempotencyKey]: first },
+      receiptRecords: [],
+    });
+    await journal.compact(requested!.sequence);
+    await rm(storedOutcomePath(root, idempotencyKey), { force: true });
+
+    const reopened = await ControlJournal.open(root, 8);
+    const retained = reopened.read(0).filter((event) => event.payload.idempotencyKey === idempotencyKey);
+    expect(retained.map((event) => event.kind)).toEqual(['command.succeeded']);
+    const sequenceBefore = reopened.sequence;
+
+    await expect(ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened }))
+      .rejects.toThrow('durable outcome sidecar is required for retained surface or unknown terminal events');
+    expect(reopened.sequence).toBe(sequenceBefore);
+    await expect(reopened.loadOutcome(idempotencyKey)).resolves.toBeUndefined();
+  });
+
   it('rejects a stale owner epoch before side effects', async () => {
     const runtime = await ControlRuntime.create({
       ownerEpoch: 4,
