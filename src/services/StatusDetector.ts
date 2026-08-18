@@ -37,6 +37,11 @@ export interface PaneUserInteractionEvent {
   paneId: string;
 }
 
+export interface PaneLifecycleEvent {
+  paneId: string;
+  reason?: string;
+}
+
 const LLM_ABORT_REASON_TIMEOUT = 'timeout';
 const LLM_ABORT_REASON_SUPERSEDED = 'superseded';
 const LLM_ABORT_REASON_PANE_REMOVED = 'pane-removed';
@@ -93,8 +98,12 @@ export class StatusDetector extends EventEmitter {
       this.emit('pane-removed', { paneId, reason: message.payload?.reason });
     });
 
-    this.messageBus.subscribe('pane-reset', (paneId) => {
+    this.messageBus.subscribe('pane-reset', (paneId, message) => {
       this.forgetPane(paneId);
+      this.emit('pane-reset', {
+        paneId,
+        reason: message.payload?.reason,
+      } satisfies PaneLifecycleEvent);
     });
 
     // Handle worker ready events
@@ -169,17 +178,16 @@ export class StatusDetector extends EventEmitter {
   ): Promise<void> {
     const payload = (message.payload || {}) as CodexTurnStoppedPayload;
     const captureSnapshot = payload.captureSnapshot || '';
+    const lifecycle = this.paneLifecycles.get(paneId);
+    const tmuxPaneId = this.paneIdMap.get(paneId);
 
-    this.cancelLLMRequest(paneId, LLM_ABORT_REASON_SUPERSEDED);
-
-    const tmuxPaneId = await this.getTmuxPaneId(paneId);
-    if (!tmuxPaneId) {
+    if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
       return;
     }
+    this.cancelLLMRequest(paneId, LLM_ABORT_REASON_SUPERSEDED);
 
     const previousStatus = this.paneStatuses.get(paneId);
     const finalStatus: AgentStatus = 'idle';
-    this.paneStatuses.set(paneId, finalStatus);
 
     let summaryDetails: Pick<PaneAnalysis, 'summary' | 'attentionTitle' | 'attentionBody'> = {};
     try {
@@ -192,7 +200,13 @@ export class StatusDetector extends EventEmitter {
           agentLabel: pane?.agent,
         }
       );
+      if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+        return;
+      }
     } catch (error) {
+      if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+        return;
+      }
       LogService.getInstance().debug(
         `Codex hook summary extraction failed for pane ${paneId}: ${error instanceof Error ? error.message : String(error)}`,
         'statusDetector',
@@ -215,14 +229,27 @@ export class StatusDetector extends EventEmitter {
       source: payload.source,
       timestamp: payload.timestamp,
     });
+    if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+      return;
+    }
 
     try {
       await persistPaneAgentSessionReference(
         StateManager.getInstance().getState().panesFile,
         paneId,
         agentSession,
+        {
+          expectedTmuxPaneId: tmuxPaneId,
+          isCurrent: () => this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle),
+        },
       );
+      if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+        return;
+      }
     } catch (error) {
+      if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+        return;
+      }
       LogService.getInstance().debug(
         `Failed to persist Codex session reference for pane ${paneId}: ${error instanceof Error ? error.message : String(error)}`,
         'statusDetector',
@@ -230,6 +257,14 @@ export class StatusDetector extends EventEmitter {
       );
     }
 
+    if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+      return;
+    }
+    this.paneStatuses.set(paneId, finalStatus);
+
+    if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+      return;
+    }
     this.emit('status-updated', {
       paneId,
       status: finalStatus,
@@ -239,10 +274,29 @@ export class StatusDetector extends EventEmitter {
       agentSession,
     } satisfies StatusUpdateEvent);
 
+    if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+      return;
+    }
     const attentionEvent = this.buildAttentionEvent(paneId, tmuxPaneId, finalStatus, analysis);
     if (attentionEvent) {
+      if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+        return;
+      }
       this.emit('attention-needed', attentionEvent);
     }
+  }
+
+  private isPaneLifecycleCurrent(
+    paneId: string,
+    tmuxPaneId: string | undefined,
+    lifecycle: symbol | undefined
+  ): tmuxPaneId is string {
+    return (
+      tmuxPaneId !== undefined
+      && lifecycle !== undefined
+      && this.paneIdMap.get(paneId) === tmuxPaneId
+      && this.paneLifecycles.get(paneId) === lifecycle
+    );
   }
 
   /**

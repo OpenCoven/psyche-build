@@ -43,6 +43,14 @@ function emitPaneUserInteraction(event: { paneId: string }): void {
   getStatusDetector().emit('pane-user-interaction', event);
 }
 
+function emitPaneReset(event: { paneId: string }): void {
+  getStatusDetector().emit('pane-reset', event);
+}
+
+function emitPaneRemoved(event: { paneId: string }): void {
+  getStatusDetector().emit('pane-removed', event);
+}
+
 async function flushAsyncWork(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
@@ -299,5 +307,81 @@ describe('PsycheAttentionService', () => {
     expect(focusService.setPaneAttentionIndicator).toHaveBeenCalledWith('%6', true);
 
     service.stop();
+  });
+
+  it('clears attention and notification fingerprints on repeated pane resets', async () => {
+    const focusService = new MockFocusService();
+    const service = new PsycheAttentionService({ focusService: focusService as any });
+
+    service.start();
+    emitStatusUpdated({ paneId: 'pane-reset', status: 'working' });
+    emitAttentionNeeded({
+      paneId: 'pane-reset',
+      tmuxPaneId: '%30',
+      status: 'idle',
+      title: 'Ready',
+      body: 'Continue.',
+      fingerprint: 'idle:ready',
+    });
+    await flushAsyncWork();
+    expect(focusService.sendAttentionNotification).toHaveBeenCalledTimes(1);
+
+    emitPaneReset({ paneId: 'pane-reset' });
+    emitPaneReset({ paneId: 'pane-reset' });
+    expect(focusService.setPaneAttentionIndicator).toHaveBeenCalledWith('%30', false);
+
+    focusService.sendAttentionNotification.mockClear();
+    emitStatusUpdated({ paneId: 'pane-reset', status: 'working' });
+    emitAttentionNeeded({
+      paneId: 'pane-reset',
+      tmuxPaneId: '%31',
+      status: 'idle',
+      title: 'Ready',
+      body: 'Continue.',
+      fingerprint: 'idle:ready',
+    });
+    await flushAsyncWork();
+
+    expect(focusService.sendAttentionNotification).toHaveBeenCalledTimes(1);
+    expect(focusService.sendAttentionNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ tmuxPaneId: '%31' }),
+    );
+
+    emitPaneRemoved({ paneId: 'pane-reset' });
+    emitPaneRemoved({ paneId: 'pane-reset' });
+    expect(focusService.setPaneAttentionIndicator).toHaveBeenCalledWith('%31', false);
+
+    focusService.sendAttentionNotification.mockClear();
+    emitStatusUpdated({ paneId: 'pane-reset', status: 'working' });
+    emitAttentionNeeded({
+      paneId: 'pane-reset',
+      tmuxPaneId: '%32',
+      status: 'idle',
+      title: 'Ready',
+      body: 'Continue.',
+      fingerprint: 'idle:ready',
+    });
+    await flushAsyncWork();
+
+    expect(focusService.sendAttentionNotification).toHaveBeenCalledTimes(1);
+    service.stop();
+  });
+
+  it('does not duplicate or leak lifecycle listeners', () => {
+    const detector = getStatusDetector();
+    const focusService = new MockFocusService();
+    const service = new PsycheAttentionService({ focusService: focusService as any });
+    const resetListenersBefore = detector.listenerCount('pane-reset');
+    const removedListenersBefore = detector.listenerCount('pane-removed');
+
+    service.start();
+    service.start();
+    expect(detector.listenerCount('pane-reset')).toBe(resetListenersBefore + 1);
+    expect(detector.listenerCount('pane-removed')).toBe(removedListenersBefore + 1);
+
+    service.stop();
+    service.stop();
+    expect(detector.listenerCount('pane-reset')).toBe(resetListenersBefore);
+    expect(detector.listenerCount('pane-removed')).toBe(removedListenersBefore);
   });
 });

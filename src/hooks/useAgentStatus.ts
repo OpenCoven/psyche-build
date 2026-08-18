@@ -45,24 +45,34 @@ export default function useAgentStatus({ panes, suspend, onPaneRemoved }: UseAge
       });
     };
 
-    // Handle pane removal events
-    const handlePaneRemoved = (event: any) => {
-      // Remove from statuses
+    const clearPaneStatus = (paneId: string) => {
       setStatuses(prevStatuses => {
+        if (!prevStatuses.has(paneId)) {
+          return prevStatuses;
+        }
         const newStatuses = new Map(prevStatuses);
-        newStatuses.delete(event.paneId);
+        newStatuses.delete(paneId);
         return newStatuses;
       });
+    };
 
+    // Handle pane removal events
+    const handlePaneRemoved = (event: any) => {
+      clearPaneStatus(event.paneId);
       // Call callback if provided
       if (onPaneRemovedRef.current) {
         onPaneRemovedRef.current(event.paneId);
       }
     };
 
+    const handlePaneReset = (event: any) => {
+      clearPaneStatus(event.paneId);
+    };
+
     // Listen for status updates
     detector.on('status-updated', handleStatusUpdate);
     detector.on('pane-removed', handlePaneRemoved);
+    detector.on('pane-reset', handlePaneReset);
 
     // Initial load of current statuses
     const currentStatuses = detector.getAllStatuses();
@@ -71,6 +81,7 @@ export default function useAgentStatus({ panes, suspend, onPaneRemoved }: UseAge
     return () => {
       detector.off('status-updated', handleStatusUpdate);
       detector.off('pane-removed', handlePaneRemoved);
+      detector.off('pane-reset', handlePaneReset);
     };
   }, []);
 

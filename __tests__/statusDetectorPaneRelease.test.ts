@@ -1,9 +1,14 @@
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { describe, it, expect, vi } from 'vitest';
 import { PaneWorkerManager } from '../src/services/PaneWorkerManager.js';
 import { StatusDetector } from '../src/services/StatusDetector.js';
 import { WorkerMessageBus } from '../src/services/WorkerMessageBus.js';
 import type { PsychePane } from '../src/types.js';
 import { createDeferred } from './utils/deferred.js';
+import { StateManager } from '../src/shared/StateManager.js';
+import { acquireProjectPaneConfigLock } from '../src/services/ProjectPaneConfig.js';
 
 function pane(paneId: string): PsychePane {
   return {
@@ -98,6 +103,7 @@ describe('StatusDetector pane release', () => {
     const paneIds: Map<string, string> = (detector as any).paneIdMap;
     const messageBus = (detector as any).messageBus;
     const lifecycle: string[] = [];
+    const reset: string[] = [];
     const removed: string[] = [];
 
     messageBus.subscribe('pane-reset', () => {
@@ -106,6 +112,7 @@ describe('StatusDetector pane release', () => {
       expect(paneIds.has('pane-a')).toBe(false);
       lifecycle.push('reset');
     });
+    detector.on('pane-reset', (event: { paneId: string }) => reset.push(event.paneId));
     detector.on('pane-removed', (event: { paneId: string }) => removed.push(event.paneId));
     messageBus.on('worker:ready', () => lifecycle.push('ready'));
 
@@ -120,12 +127,130 @@ describe('StatusDetector pane release', () => {
 
       expect(controller.signal.aborted).toBe(true);
       expect(lifecycle).toEqual(['reset', 'ready']);
+      expect(reset).toEqual(['pane-a']);
       expect(removed).toEqual([]);
       expect(statuses.has('pane-a')).toBe(false);
       expect(paneIds.get('pane-a')).toBe('%2');
       expect((detector as any).workerManager.getStats().workerCount).toBe(1);
     } finally {
       await detector.shutdown();
+    }
+  });
+
+  it('publishes nothing from a Codex stop after a rebind during summary extraction', async () => {
+    const detector = new StatusDetector();
+    const summary = createDeferred<{
+      summary: string;
+      attentionTitle: string;
+      attentionBody: string;
+    }>();
+    (detector as any).paneAnalyzer.extractSummary = vi.fn(() => summary.promise);
+    const updates: Array<{ paneId: string; summary?: string }> = [];
+    const attention: Array<{ paneId: string }> = [];
+    detector.on('status-updated', (event) => updates.push(event));
+    detector.on('attention-needed', (event) => attention.push(event));
+
+    try {
+      await detector.monitorPanes([pane('%1')]);
+      const completion = (detector as any).handleCodexTurnStopped('pane-a', {
+        id: 'codex-stop-1',
+        type: 'codex-turn-stopped',
+        timestamp: Date.now(),
+        paneId: 'pane-a',
+        payload: {
+          sessionId: 'old-session',
+          lastAssistantMessage: 'old completion',
+        },
+      });
+      await vi.waitFor(() => expect((detector as any).paneAnalyzer.extractSummary).toHaveBeenCalledOnce());
+
+      await detector.monitorPanes([pane('%2')]);
+      summary.resolve({
+        summary: 'old summary',
+        attentionTitle: 'Old title',
+        attentionBody: 'Old body',
+      });
+      await completion;
+
+      expect(updates.some((event) => event.summary === 'old summary')).toBe(false);
+      expect(attention).toEqual([]);
+      expect((detector as any).paneStatuses.has('pane-a')).toBe(false);
+      expect((detector as any).paneIdMap.get('pane-a')).toBe('%2');
+    } finally {
+      summary.resolve({
+        summary: 'old summary',
+        attentionTitle: 'Old title',
+        attentionBody: 'Old body',
+      });
+      await detector.shutdown();
+    }
+  });
+
+  it('does not persist an old Codex reference onto a replacement while persistence is deferred', async () => {
+    const detector = new StatusDetector();
+    const root = path.join(process.cwd(), '.test-artifacts', `codex-lifecycle-${randomUUID()}`);
+    const projectRoot = path.join(root, 'project');
+    const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
+    await mkdir(path.dirname(configPath), { recursive: true });
+    const config = (tmuxPaneId: string) => ({
+      projectName: 'repo',
+      projectRoot,
+      panes: [
+        { id: 'pane-a', slug: 'pane-a', prompt: '', paneId: tmuxPaneId, agent: 'codex' },
+      ],
+      settings: {},
+      lastUpdated: '2026-08-18T00:00:00.000Z',
+    });
+    await writeFile(configPath, JSON.stringify(config('%1'), null, 2), 'utf8');
+    const stateManager = StateManager.getInstance();
+    const previousState = (stateManager as any).state;
+    (stateManager as any).state = {
+      ...previousState,
+      panes: [pane('%1')],
+      panesFile: configPath,
+    };
+    const lock = await acquireProjectPaneConfigLock(projectRoot);
+    (detector as any).paneAnalyzer.extractSummary = vi.fn(async () => ({
+      summary: 'old summary',
+    }));
+    const updates: Array<{ paneId: string }> = [];
+    const attention: Array<{ paneId: string }> = [];
+    detector.on('status-updated', (event) => updates.push(event));
+    detector.on('attention-needed', (event) => attention.push(event));
+
+    try {
+      await detector.monitorPanes([pane('%1')]);
+      const completion = (detector as any).handleCodexTurnStopped('pane-a', {
+        id: 'codex-stop-2',
+        type: 'codex-turn-stopped',
+        timestamp: Date.now(),
+        paneId: 'pane-a',
+        payload: {
+          sessionId: 'old-session',
+          lastAssistantMessage: 'old completion',
+        },
+      });
+      await vi.waitFor(() => expect((detector as any).paneAnalyzer.extractSummary).toHaveBeenCalledOnce());
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      await writeFile(configPath, JSON.stringify(config('%2'), null, 2), 'utf8');
+      (stateManager as any).state = {
+        ...(stateManager as any).state,
+        panes: [pane('%2')],
+      };
+      await detector.monitorPanes([pane('%2')]);
+      await lock.release();
+      await completion;
+      const saved = JSON.parse(await readFile(configPath, 'utf8'));
+      expect(saved.panes[0].agentSession).toBeUndefined();
+      expect(updates).toEqual([]);
+      expect(attention).toEqual([]);
+      expect((detector as any).paneStatuses.has('pane-a')).toBe(false);
+    } finally {
+      await lock.release().catch(() => undefined);
+      (stateManager as any).state = previousState;
+      await detector.shutdown();
+      await rm(root, { recursive: true, force: true });
     }
   });
 
