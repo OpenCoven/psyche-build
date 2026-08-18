@@ -2406,18 +2406,20 @@ export async function dispatchOrchestrationRequest(
   requestId: string;
   result: import('../orchestration/types.js').OrchestrationTaskResult;
 }> {
-  const scoped = await resolveScopedCwd(
-    daemonProjectRoot,
+  const scoped = await resolveScopedCwd(daemonProjectRoot);
+  const claimed = await resolveScopedCwd(
+    scoped.projectRoot,
     request.task.projectRoot,
   );
+  const cwd = await resolveScopedCwd(
+    claimed.requestedCwd,
+    request.task.cwd,
+  );
 
-  // Override the task's projectRoot with the resolved, scope-validated path
-  // so the orchestrator (and downstream backends) always use the canonical path.
-  // `requestedCwd` is the realpath of the task's claimed projectRoot, which
-  // has been validated to be inside the daemon's project root.
   const task: import('../orchestration/types.js').OrchestrationTaskRequest = {
     ...request.task,
-    projectRoot: scoped.requestedCwd,
+    projectRoot: scoped.projectRoot,
+    cwd: cwd.requestedCwd,
   };
 
   const result = await orchestrator.execute(task);

@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -64,7 +64,71 @@ describe('dispatchOrchestrationRequest', () => {
     });
   });
 
-  it('rejects cwd outside the daemon project root', async () => {
+  it('keeps the daemon root authoritative when task projectRoot names a subdirectory', async () => {
+    const root = await tempDir('psyche-orch-authority-');
+    const claimedRoot = path.join(root, 'packages', 'app');
+    await mkdir(claimedRoot, { recursive: true });
+    let delegatedLane: OrchestrationLanePlan | undefined;
+    const orchestrator = createMockOrchestrator(async (lane) => {
+      delegatedLane = lane;
+      return {};
+    });
+
+    await dispatchOrchestrationRequest(
+      root,
+      {
+        type: 'orchestration.execute',
+        requestId: 'request-authority',
+        task: {
+          taskId: 'task-authority',
+          projectRoot: claimedRoot,
+          prompt: 'Work in app',
+          lanes: [{ id: 'lane', mode: 'terminal' }],
+        },
+      },
+      orchestrator,
+    );
+
+    expect(delegatedLane).toMatchObject({
+      projectRoot: root,
+      cwd: claimedRoot,
+    });
+  });
+
+  it('resolves explicit task cwd relative to the claimed in-scope path', async () => {
+    const root = await tempDir('psyche-orch-relative-cwd-');
+    const claimedRoot = path.join(root, 'packages', 'app');
+    const claimedCwd = path.join(claimedRoot, 'src');
+    await mkdir(claimedCwd, { recursive: true });
+    let delegatedLane: OrchestrationLanePlan | undefined;
+    const orchestrator = createMockOrchestrator(async (lane) => {
+      delegatedLane = lane;
+      return {};
+    });
+
+    await dispatchOrchestrationRequest(
+      root,
+      {
+        type: 'orchestration.execute',
+        requestId: 'request-relative-cwd',
+        task: {
+          taskId: 'task-relative-cwd',
+          projectRoot: claimedRoot,
+          cwd: 'src',
+          prompt: 'Work in src',
+          lanes: [{ id: 'lane', mode: 'terminal' }],
+        },
+      },
+      orchestrator,
+    );
+
+    expect(delegatedLane).toMatchObject({
+      projectRoot: root,
+      cwd: claimedCwd,
+    });
+  });
+
+  it('rejects task projectRoot outside the daemon project root', async () => {
     const root = await tempDir('psyche-orch-scope-');
     const outside = await tempDir('psyche-orch-outside-');
     const orchestrator = createMockOrchestrator();
@@ -75,6 +139,31 @@ describe('dispatchOrchestrationRequest', () => {
       task: {
         taskId: 'task-2',
         projectRoot: outside,
+        prompt: 'Escape attempt',
+        lanes: [{ id: 'bad', mode: 'terminal' as const }],
+      },
+    };
+
+    await expect(
+      dispatchOrchestrationRequest(root, request, orchestrator),
+    ).rejects.toThrow(/outside the psyche project root/);
+  });
+
+  it('rejects task cwd symlink escapes from the claimed path', async () => {
+    const root = await tempDir('psyche-orch-symlink-scope-');
+    const outside = await tempDir('psyche-orch-symlink-outside-');
+    const claimedRoot = path.join(root, 'packages', 'app');
+    await mkdir(claimedRoot, { recursive: true });
+    await symlink(outside, path.join(claimedRoot, 'escape'), 'dir');
+    const orchestrator = createMockOrchestrator();
+
+    const request = {
+      type: 'orchestration.execute' as const,
+      requestId: 'request-symlink-escape',
+      task: {
+        taskId: 'task-symlink-escape',
+        projectRoot: claimedRoot,
+        cwd: 'escape',
         prompt: 'Escape attempt',
         lanes: [{ id: 'bad', mode: 'terminal' as const }],
       },
