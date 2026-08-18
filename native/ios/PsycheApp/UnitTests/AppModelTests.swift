@@ -95,12 +95,40 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(model.terminalRegistry.lastErrorMessage)
     }
 
-    func testPairingRecordsTheHostForLaterContext() {
+    func testClearingAFixtureConnectionRemovesItsVisibleHostContext() async {
         let model = AppModel(fixture: WorkspaceFixtures.multiproject)
 
-        model.recordPairedHostName("studio.local")
+        await model.clearConnection()
 
-        XCTAssertEqual(model.hostName, "studio.local")
+        XCTAssertNil(model.hostName)
+        XCTAssertNil(model.pendingInvite)
+    }
+
+    func testClearingAConnectionDeletesBothStoredHostAndMobileCredential() async throws {
+        let pairedHostStore = PairedHostStore(secureStore: InMemorySecureStore())
+        let credentialStore = MobileCredentialStore(secureStore: InMemorySecureStore())
+        let endpoint = HostEndpoint(
+            host: "studio.example", port: 4242,
+            certificateFingerprint: String(repeating: "a", count: 64)
+        )
+        try await pairedHostStore.save(PairedHost(
+            serverID: "host", serverName: "Studio", endpoint: endpoint,
+            clientID: "client", token: "legacy-token"
+        ))
+        try await credentialStore.save(endpoint: endpoint, token: "durable-token")
+        let model = AppModel(composition: MobileAppComposition(
+            transport: AppModelFakeTransport(),
+            pairedHostStore: pairedHostStore,
+            mobileCredentialStore: credentialStore
+        ))
+
+        await model.clearConnection()
+
+        let storedHosts = try await pairedHostStore.hosts()
+        let storedCredential = try await credentialStore.credential(for: endpoint)
+        XCTAssertTrue(storedHosts.isEmpty)
+        XCTAssertNil(storedCredential)
+        XCTAssertNil(model.hostName)
     }
 
     func testAcceptsAValidDeepLinkAsAPendingInvite() {

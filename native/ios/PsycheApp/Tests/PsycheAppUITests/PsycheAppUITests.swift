@@ -352,6 +352,63 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(element("now-view", in: app).waitForExistence(timeout: 10))
     }
 
+    func testSettingsUsesAnInviteOnlyConnectionSurface() throws {
+        let app = launchApp()
+        try openSettings(in: app)
+
+        let connect = app.buttons["settings-connect-psyche"]
+        XCTAssertTrue(connect.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["settings-pair-host"].exists)
+        XCTAssertFalse(app.staticTexts["Pair a host"].exists)
+        connect.tap()
+
+        let invite = app.textFields["connect-psyche-invite"]
+        XCTAssertTrue(invite.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.textFields["pair-code-field"].exists)
+        XCTAssertTrue(app.buttons["Paste"].exists)
+    }
+
+    func testInviteSheetRecoversFromInvalidInput() throws {
+        let app = launchApp()
+        try openSettings(in: app)
+        app.buttons["settings-connect-psyche"].tap()
+
+        let invite = app.textFields["connect-psyche-invite"]
+        XCTAssertTrue(invite.waitForExistence(timeout: 10))
+        invite.tap()
+        invite.typeText("not-an-invite")
+        app.buttons["Connect"].tap()
+        XCTAssertTrue(
+            app.staticTexts["That invite is not valid. Create a fresh Open on phone invite from Psyche."].waitForExistence(timeout: 10)
+        )
+
+    }
+
+    func testInviteSheetAcceptsAValidInvite() throws {
+        let app = launchApp()
+        try openSettings(in: app)
+        app.buttons["settings-connect-psyche"].tap()
+
+        let invite = app.textFields["connect-psyche-invite"]
+        XCTAssertTrue(invite.waitForExistence(timeout: 10))
+        invite.tap()
+        invite.typeText("psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&psyche_invite=one-time-token")
+        app.buttons["Connect"].tap()
+        XCTAssertFalse(invite.waitForExistence(timeout: 3))
+    }
+
+    func testSettingsCanClearTheVisibleFixtureConnection() throws {
+        let app = launchApp()
+        try openSettings(in: app)
+
+        let clear = app.buttons["settings-clear-connection"]
+        XCTAssertTrue(clear.waitForExistence(timeout: 10))
+        clear.tap()
+        XCTAssertTrue(
+            element("settings-host", in: app).label.contains("not connected")
+        )
+    }
+
     /// Each tab keeps its own place, so leaving Now and coming back does not
     /// dump you out of the pane you were reading.
     func testCompactReturningToNowKeepsTheOpenPane() throws {
@@ -653,6 +710,18 @@ final class PsycheAppUITests: XCTestCase {
         let paneRow = row("now-pane-web-home", in: app)
         XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
         paneRow.tap()
+    }
+
+    private func openSettings(in app: XCUIApplication) throws {
+        XCTAssertTrue(element("main-cockpit", in: app).waitForExistence(timeout: 10))
+        if app.tabBars.buttons["Settings"].exists {
+            app.tabBars.buttons["Settings"].tap()
+        } else if row("source-settings", in: app).exists {
+            row("source-settings", in: app).tap()
+        } else {
+            throw XCTSkip("Settings navigation is not available on this simulator configuration.")
+        }
+        XCTAssertTrue(element("settings-view", in: app).waitForExistence(timeout: 10))
     }
 
     /// Always launches the fixture root.

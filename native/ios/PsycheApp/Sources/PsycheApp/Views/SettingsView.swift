@@ -6,7 +6,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var store: WorkspaceStore
     @EnvironmentObject private var model: AppModel
-    @State private var isPairSheetPresented = false
+    @State private var isConnectSheetPresented = false
 
     var body: some View {
         List {
@@ -20,11 +20,11 @@ struct SettingsView: View {
                 .accessibilityIdentifier("settings-status")
 
                 LabeledContent("Host") {
-                    Text(model.hostName ?? "Not paired")
+                    Text(model.hostName ?? "Not connected")
                         .foregroundStyle(.secondary)
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Host, \(model.hostName ?? "not paired")")
+                .accessibilityLabel("Host, \(model.hostName ?? "not connected")")
                 .accessibilityIdentifier("settings-host")
 
                 if let lastConfirmedAt = store.lastConfirmedAt {
@@ -44,11 +44,23 @@ struct SettingsView: View {
             }
 
             Section {
-                Button("Pair a host") { isPairSheetPresented = true }
+                Button("Connect to Psyche") { isConnectSheetPresented = true }
                     .frame(minHeight: PsycheTheme.minimumTapTarget)
-                    .accessibilityIdentifier("settings-pair-host")
+                    .accessibilityIdentifier("settings-connect-psyche")
             } footer: {
-                Text("Pairing exchanges a token with a host on your local network.")
+                Text("Open Psyche on your Mac, then choose Open on phone to create an invite.")
+            }
+
+            if model.hostName != nil {
+                Section {
+                    Button("Clear connection", role: .destructive) {
+                        Task { await model.clearConnection() }
+                    }
+                    .frame(minHeight: PsycheTheme.minimumTapTarget)
+                    .accessibilityIdentifier("settings-clear-connection")
+                } footer: {
+                    Text("Removes this device’s saved connection and credential.")
+                }
             }
 
             Section("Diagnostics") {
@@ -69,9 +81,9 @@ struct SettingsView: View {
         .listStyle(.insetGrouped)
         .navigationTitle("Settings")
         .accessibilityIdentifier("settings-view")
-        .sheet(isPresented: $isPairSheetPresented) {
-            PairHostSheet { host, _ in
-                model.recordPairedHostName(host)
+        .sheet(isPresented: $isConnectSheetPresented) {
+            ConnectPsycheSheet { invite in
+                model.accept(invite: invite)
             }
         }
     }

@@ -71,17 +71,42 @@ final class AppModel: ObservableObject {
     /// Fixed so UI tests can assert host context without a paired record.
     static let fixtureHostName = "psyche-demo.local"
 
-    func recordPairedHostName(_ name: String) {
-        hostName = name
-    }
-
     func receive(url: URL) {
         guard let invite = PsycheInvite.parse(url) else { return }
+        accept(invite: invite)
+    }
+
+    /// Accepts an already-validated invite without ever publishing its token.
+    /// Only the endpoint host may be used as visible connection context.
+    func accept(invite: PsycheInvite) {
         pendingInvite = invite
+        hostName = invite.endpoint.host
         guard hasStarted, let composition else { return }
         Task { [weak self] in
             guard await composition.connectionManager.connect(using: invite) else { return }
             self?.pendingInvite = nil
+        }
+    }
+
+    /// Disconnects first, then removes every durable record that could
+    /// reconnect this device. Neither credential values nor invite values are
+    /// retained in published state or error text.
+    func clearConnection() async {
+        pendingInvite = nil
+        guard let composition else {
+            hostName = nil
+            connectionError = nil
+            return
+        }
+
+        await composition.connectionManager.disconnect()
+        do {
+            try await composition.pairedHostStore.removeAll()
+            try await composition.mobileCredentialStore.clear()
+            hostName = nil
+            connectionError = nil
+        } catch {
+            connectionError = "Could not clear this connection. Try again."
         }
     }
 

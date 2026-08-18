@@ -35,7 +35,7 @@ struct NowView: View {
                     ContentUnavailableView(
                         "Not connected",
                         systemImage: "wifi.slash",
-                        description: Text("Pair a host in Settings to see what is running.")
+                        description: Text("Connect to Psyche in Settings to see what is running.")
                     )
                     .accessibilityIdentifier("now-disconnected")
                 } else {

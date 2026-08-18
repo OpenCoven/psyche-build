@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0390FD4FD55EA588F1AFDAE8 /* ConnectPsycheSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1E9F85F42642BF61DCB87B1 /* ConnectPsycheSheet.swift */; };
 		0471C40617596B588B68F316 /* PaneWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36C2542B4B731C8B314F83FA /* PaneWorkspaceView.swift */; };
 		04E83890A129FB1782F79F98 /* BridgeMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0899D0A654BB447D7D88380A /* BridgeMessages.swift */; };
 		054F31B1D48F28B5BFCDC16C /* DiffView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC95135143B5BA7FEFB904A9 /* DiffView.swift */; };
@@ -22,7 +23,6 @@
 		2F55F53C111C6532AB9A6FD3 /* PaneAccessibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32B37ACB2BDE762E4091F2CC /* PaneAccessibilityTests.swift */; };
 		34B46BF1DE462796D55D6F88 /* TerminalKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF803A7087CE4B5777C57208 /* TerminalKey.swift */; };
 		36C478336226BA4B15A8766E /* PaneIndicatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 145FE2009F0E817AF44D610E /* PaneIndicatorTests.swift */; };
-		37AC8C53A77A8747916251FF /* PairHostSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A050B0898E8E4F6815CEB76 /* PairHostSheet.swift */; };
 		3972FA586E2A7FAB38059759 /* RemoteActionPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B13C649CC039988D5DC4CE90 /* RemoteActionPresentation.swift */; };
 		3A9AAA98C90BA65DDED19F3F /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6A1D2D3833898A9E46B0861 /* AppModel.swift */; };
 		425E3A122F5F2D512005F9B6 /* RemoteActionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5390567D236D9A698EA62D27 /* RemoteActionStore.swift */; };
@@ -185,7 +185,6 @@
 		570996D2BB27B824377A07A7 /* PaneControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneControls.swift; sourceTree = "<group>"; };
 		57532C369ADD3A8953FA08FF /* ControlRequestClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlRequestClient.swift; sourceTree = "<group>"; };
 		587923E031AA726CC0A26E11 /* PaneSwitcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneSwitcher.swift; sourceTree = "<group>"; };
-		5A050B0898E8E4F6815CEB76 /* PairHostSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairHostSheet.swift; sourceTree = "<group>"; };
 		61F1FA349C4783166939B55D /* RemoteActionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteActionStoreTests.swift; sourceTree = "<group>"; };
 		62AEDC0262461A3E2670DA01 /* NowItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowItem.swift; sourceTree = "<group>"; };
 		66DD2F0B4265066CF3CF4F0C /* TerminalControlClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalControlClientTests.swift; sourceTree = "<group>"; };
@@ -224,6 +223,7 @@
 		D9D412D06D4B9BE4902586CC /* ControlMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMessages.swift; sourceTree = "<group>"; };
 		DAFF9B97F032BB54D8E8104B /* ActionSheetPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionSheetPresentation.swift; sourceTree = "<group>"; };
 		E199D1958A85D0E5AA22B1D5 /* CreatePaneForm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreatePaneForm.swift; sourceTree = "<group>"; };
+		E1E9F85F42642BF61DCB87B1 /* ConnectPsycheSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectPsycheSheet.swift; sourceTree = "<group>"; };
 		E6A1D2D3833898A9E46B0861 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		E8E8406429DED9F64BBF20B3 /* PsycheTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheTransportTests.swift; sourceTree = "<group>"; };
 		E98949BD17F265015F596B21 /* PairedHostStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairedHostStoreTests.swift; sourceTree = "<group>"; };
@@ -467,12 +467,12 @@
 				DAFF9B97F032BB54D8E8104B /* ActionSheetPresentation.swift */,
 				10304A718AB6678431A06A44 /* ActionSheetView.swift */,
 				F7313D981B100847A9B66306 /* CodingKeyRow.swift */,
+				E1E9F85F42642BF61DCB87B1 /* ConnectPsycheSheet.swift */,
 				E199D1958A85D0E5AA22B1D5 /* CreatePaneForm.swift */,
 				492A51919A54966E13C891B5 /* CreatePaneSheet.swift */,
 				FC95135143B5BA7FEFB904A9 /* DiffView.swift */,
 				447108F74982FADF35C38408 /* FileBrowserView.swift */,
 				40D4A071246B0EBEC1668CCE /* NowView.swift */,
-				5A050B0898E8E4F6815CEB76 /* PairHostSheet.swift */,
 				2F43EBFD69B1019D3EA5429D /* PaneAccessibility.swift */,
 				6840F19F5D15D082882D668C /* PaneComposer.swift */,
 				570996D2BB27B824377A07A7 /* PaneControls.swift */,
@@ -722,13 +722,13 @@
 				3A9AAA98C90BA65DDED19F3F /* AppModel.swift in Sources */,
 				B3A62E2DE6A3F7B9E94D8936 /* CockpitView.swift in Sources */,
 				240852AD94156EFDD5CCE5C5 /* CodingKeyRow.swift in Sources */,
+				0390FD4FD55EA588F1AFDAE8 /* ConnectPsycheSheet.swift in Sources */,
 				4E7FC9584A7DF9B3D9DCD285 /* CreatePaneForm.swift in Sources */,
 				A848D729CFF3700011AAE0B3 /* CreatePaneSheet.swift in Sources */,
 				834FD0F2CEF75F2B4DED623D /* DemoStore.swift in Sources */,
 				054F31B1D48F28B5BFCDC16C /* DiffView.swift in Sources */,
 				6BDEF69B00F7C6E870A940EA /* FileBrowserView.swift in Sources */,
 				ADE2364200253F66FF3F60A5 /* NowView.swift in Sources */,
-				37AC8C53A77A8747916251FF /* PairHostSheet.swift in Sources */,
 				C41A0357612B4800ACCEDBBC /* PaneAccessibility.swift in Sources */,
 				57C00E3E569EB487C94E4297 /* PaneComposer.swift in Sources */,
 				C0126860C6A962DBC68CD1B7 /* PaneControls.swift in Sources */,
