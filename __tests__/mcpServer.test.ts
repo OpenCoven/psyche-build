@@ -77,6 +77,30 @@ describe('MCP tool registry', () => {
     expect(documented).toEqual(TOOLS.map((tool) => tool.name).sort());
   });
 
+  it('includes all orchestration tools under psyche_ naming', async () => {
+    const response = await handleMcpRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const names = (response as any).result.tools.map((tool: any) => tool.name);
+    for (const required of [
+      'psyche_list_panes',
+      'psyche_execute_task',
+      'psyche_create_pane',
+      'psyche_kill_pane',
+      'psyche_get_pane_output',
+      'psyche_list_rituals',
+      'psyche_list_worktrees',
+    ]) {
+      expect(names).toContain(required);
+    }
+  });
+
+  it('contains no STUB or wiring-in-progress claims in descriptions', async () => {
+    const response = await handleMcpRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    for (const tool of (response as any).result.tools) {
+      expect(tool.description).not.toMatch(/STUB/i);
+      expect(tool.description).not.toMatch(/wiring in progress/i);
+    }
+  });
+
   it('returns method errors and ignores notifications', async () => {
     expect((await call('psyche_nope')).error.code).toBe(-32601);
     expect(await handleMcpRequest({
@@ -185,5 +209,133 @@ describe('MCP canonical delegation and read-only helpers', () => {
         request: { taskId: 'task-1', projectRoot: '/repo', prompt: 'test' },
       },
     });
+  });
+
+  it('delegates multi-lane execute_task with normalized task request', async () => {
+    const fake = client({ submit: vi.fn(async () => ({ status: 'succeeded' })) });
+    inject({ controlClientForRoot: vi.fn(async () => fake), randomId: () => 'id-2' });
+    const auth = { task_id: 'task-2', lease_id: 'lease-2', lease_revision: 1 };
+
+    await call('psyche_execute_task', {
+      ...auth, project_root: '/repo', prompt: 'Fix tests',
+      lanes: [
+        { id: 'codex', mode: 'isolated-worktree', agent: 'codex' },
+        { id: 'claude', mode: 'isolated-worktree', agent: 'claude' },
+      ],
+      concurrency: 2,
+    });
+
+    expect(fake.submit).toHaveBeenCalledOnce();
+    const submitted = fake.submit.mock.calls[0][0];
+    expect(submitted.kind).toBe('orchestration.execute');
+    expect(submitted.payload.request).toMatchObject({
+      taskId: 'task-2',
+      projectRoot: '/repo',
+      prompt: 'Fix tests',
+      concurrency: 2,
+      lanes: [
+        { id: 'codex', mode: 'isolated-worktree', agent: 'codex' },
+        { id: 'claude', mode: 'isolated-worktree', agent: 'claude' },
+      ],
+    });
+  });
+
+  it('translates create_pane to a single-lane pane action via control owner', async () => {
+    const receipt = {
+      schema: 'psyche.control.receipt/v1', actionId: 'b', state: 'queued',
+      resource: { kind: 'pane', id: 'pane-new' }, createdAt: 'now',
+    };
+    const fake = client({ submit: vi.fn(async () => ({ status: 'succeeded', value: receipt })) });
+    inject({ controlClientForRoot: vi.fn(async () => fake), randomId: () => 'cmd-2' });
+    const auth = { task_id: 'task-3', lease_id: 'lease-3', lease_revision: 1 };
+
+    const result = payload(await call('psyche_create_pane', {
+      ...auth, project_root: '/repo', prompt: 'implement auth', agent: 'claude',
+      branch: 'feat/auth', title: 'Auth work',
+    }));
+    expect(result).toEqual({ status: 'succeeded', value: receipt });
+
+    const submitted = fake.submit.mock.calls[0][0];
+    expect(submitted.kind).toBe('pane.action');
+    expect(submitted.payload.action).toMatchObject({
+      kind: 'create',
+      agent: 'claude',
+      prompt: 'implement auth',
+      branch: 'feat/auth',
+      title: 'Auth work',
+    });
+    expect(submitted.payload.projectId).toBe('/repo');
+  });
+
+  it('kill_pane sends close action without worktree or branch deletion', async () => {
+    const receipt = {
+      schema: 'psyche.control.receipt/v1', actionId: 'c', state: 'queued',
+      resource: { kind: 'pane', id: 'pane-1' }, createdAt: 'now',
+    };
+    const fake = client({ submit: vi.fn(async () => ({ status: 'succeeded', value: receipt })) });
+    inject({ controlClientForRoot: vi.fn(async () => fake), randomId: () => 'cmd-3' });
+    const auth = { task_id: 'task-4', lease_id: 'lease-4', lease_revision: 1 };
+
+    const result = payload(await call('psyche_kill_pane', {
+      ...auth, project_root: '/repo', pane_id: 'pane-1', generation: 3,
+    }));
+    expect(result).toEqual({ status: 'succeeded', value: receipt });
+
+    const submitted = fake.submit.mock.calls[0][0];
+    expect(submitted.kind).toBe('pane.action');
+    expect(submitted.payload).toMatchObject({
+      paneId: 'pane-1',
+      generation: 3,
+      action: { kind: 'close' },
+    });
+    // Close action must NOT include worktree or branch deletion directives
+    expect(submitted.payload.action).not.toHaveProperty('deleteWorktree');
+    expect(submitted.payload.action).not.toHaveProperty('deleteBranch');
+  });
+
+  it('kill_pane requires pane_id and generation', async () => {
+    const fake = client({ submit: vi.fn() });
+    inject({ controlClientForRoot: vi.fn(async () => fake) });
+    const auth = { task_id: 'task-5', lease_id: 'lease-5', lease_revision: 1 };
+
+    const noPaneId = await call('psyche_kill_pane', {
+      ...auth, project_root: '/repo', generation: 1,
+    });
+    expect(noPaneId.error.code).toBe(-32602);
+
+    const noGeneration = await call('psyche_kill_pane', {
+      ...auth, project_root: '/repo', pane_id: 'pane-1',
+    });
+    expect(noGeneration.error.code).toBe(-32602);
+    expect(fake.submit).not.toHaveBeenCalled();
+  });
+
+  it('execute_task rejects when no lanes are provided', async () => {
+    const fake = client({ submit: vi.fn() });
+    inject({ controlClientForRoot: vi.fn(async () => fake) });
+    const auth = { task_id: 'task-6', lease_id: 'lease-6', lease_revision: 1 };
+
+    const result = await call('psyche_execute_task', {
+      ...auth, project_root: '/repo', prompt: 'test', lanes: [],
+    });
+    expect(result.error.code).toBe(-32602);
+    expect(fake.submit).not.toHaveBeenCalled();
+  });
+
+  it('create_pane requires prompt and agent', async () => {
+    const fake = client({ submit: vi.fn() });
+    inject({ controlClientForRoot: vi.fn(async () => fake) });
+    const auth = { task_id: 'task-7', lease_id: 'lease-7', lease_revision: 1 };
+
+    const noPrompt = await call('psyche_create_pane', {
+      ...auth, project_root: '/repo', agent: 'claude',
+    });
+    expect(noPrompt.error.code).toBe(-32602);
+
+    const noAgent = await call('psyche_create_pane', {
+      ...auth, project_root: '/repo', prompt: 'fix tests',
+    });
+    expect(noAgent.error.code).toBe(-32602);
+    expect(fake.submit).not.toHaveBeenCalled();
   });
 });
