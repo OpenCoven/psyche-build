@@ -384,10 +384,10 @@ export class ControlJournal {
 
   static async open(projectRoot: string, ownerEpoch: number): Promise<ControlJournal> {
     const runtimeDir = path.join(projectRoot, '.psyche', 'runtime');
-    await ensurePrivateDirectoryChain(runtimeDirectoryComponents(runtimeDir));
+    const outcomeDirectoryPath = path.join(runtimeDir, 'outcomes');
+    await ensureDurableOutcomeDirectory(outcomeDirectoryPath);
     const journalPath = path.join(runtimeDir, 'events.ndjson');
     const snapshotPath = path.join(runtimeDir, 'snapshot.json');
-    const outcomeDirectoryPath = path.join(runtimeDir, 'outcomes');
     const { events, firstSequence } = await ControlJournal.replay(journalPath);
     return new ControlJournal(
       runtimeDir,

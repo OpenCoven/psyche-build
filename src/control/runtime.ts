@@ -508,16 +508,14 @@ export class ControlRuntime {
         'durable outcome persistence is unavailable; refusing a new effect',
       );
     }
-    if (!await this.hasReservedDurabilityCapacity()) {
+    await this.flushDirtyTerminalOutcomesBeforeFreshReservation();
+    const reservation = this.tryReserveFreshExecution(command.idempotencyKey);
+    if (reservation === 'durability_unavailable') {
       return rejectedOutcome('durability_unavailable', 'durable outcome persistence capacity is exhausted');
     }
-    if (!await this.hasDirtyDurabilityCapacity()) {
-      return rejectedOutcome('durability_unavailable', 'durable outcome persistence capacity is exhausted');
-    }
-    if (this.activeFreshExecutions.size >= AGENT_CONTROL_LIMITS.pendingCommands) {
+    if (reservation === 'runtime_busy') {
       return rejectedOutcome('runtime_busy', 'control runtime pending command capacity exceeded');
     }
-    this.activeFreshExecutions.add(command.idempotencyKey);
     try {
       return await this.submitFresh(command);
     } finally {
@@ -1823,19 +1821,28 @@ export class ControlRuntime {
     return outcomeDigest;
   }
 
-  private async hasDirtyDurabilityCapacity(): Promise<boolean> {
-    if (this.dirtyTerminalOutcomes.size < DIRTY_TERMINAL_OUTCOME_LIMIT) return true;
-    await this.flushDirtyTerminalOutcomesThrough(Number.POSITIVE_INFINITY);
-    return this.dirtyTerminalOutcomes.size < DIRTY_TERMINAL_OUTCOME_LIMIT;
-  }
-
-  private async hasReservedDurabilityCapacity(): Promise<boolean> {
-    if (!this.compactable) return true;
+  private async flushDirtyTerminalOutcomesBeforeFreshReservation(): Promise<void> {
+    if (!this.compactable) return;
     if (this.dirtyTerminalOutcomes.size + this.activeFreshExecutions.size < DIRTY_TERMINAL_OUTCOME_LIMIT) {
-      return true;
+      return;
     }
     await this.flushDirtyTerminalOutcomesThrough(Number.POSITIVE_INFINITY);
-    return this.dirtyTerminalOutcomes.size + this.activeFreshExecutions.size < DIRTY_TERMINAL_OUTCOME_LIMIT;
+  }
+
+  private tryReserveFreshExecution(
+    idempotencyKey: string,
+  ): 'reserved' | 'durability_unavailable' | 'runtime_busy' {
+    if (
+      this.compactable
+      && this.dirtyTerminalOutcomes.size + this.activeFreshExecutions.size >= DIRTY_TERMINAL_OUTCOME_LIMIT
+    ) {
+      return 'durability_unavailable';
+    }
+    if (this.activeFreshExecutions.size >= AGENT_CONTROL_LIMITS.pendingCommands) {
+      return 'runtime_busy';
+    }
+    this.activeFreshExecutions.add(idempotencyKey);
+    return 'reserved';
   }
 
   private markDirtyTerminalOutcome(

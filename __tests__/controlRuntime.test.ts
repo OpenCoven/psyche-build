@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { ControlRuntime, type ControlHandlers, type RuntimeJournal } from '../src/control/runtime.js';
@@ -10,6 +10,7 @@ import { ControlJournal, exactCommandOutcomeDigest } from '../src/control/journa
 import { createCanonicalElementSemantics } from '../src/control/policy.js';
 import { SurfaceRegistry } from '../src/control/surfaces.js';
 import type { ControlCommand } from '../src/control/types.js';
+import { createDeferred } from './utils/deferred.js';
 
 const handlers: ControlHandlers = {
   executeOrchestration: vi.fn(),
@@ -298,6 +299,29 @@ describe('ControlRuntime', () => {
     expect(journal.sequence).toBe(sequenceBefore);
   }, 90_000);
 
+  it('replays a raw b389 exact sidecar without journal migration or re-execution', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const idempotencyKey = 'idem-b389-sidecar';
+    const outcome = {
+      status: 'succeeded',
+      value: { paneId: '%legacy' },
+    } as const;
+    const outcomePath = storedOutcomePath(root, idempotencyKey);
+    await mkdir(path.dirname(outcomePath), { recursive: true, mode: 0o700 });
+    await writeFile(outcomePath, JSON.stringify({ idempotencyKey, outcome }), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    handlers.openTerminal = vi.fn(async () => ({ paneId: '%should-not-run' }));
+    const journal = await ControlJournal.open(root, 4);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    expect(journal.sequence).toBe(0);
+    await expect(submit(runtime, openTerminalCommand(idempotencyKey, 'b389-retry'))).resolves.toEqual(outcome);
+    expect(journal.sequence).toBe(0);
+    expect(handlers.openTerminal).not.toHaveBeenCalled();
+  });
+
   it('replays an evicted durable key even when fresh execution capacity is full', async () => {
     const root = await newJournalRoot('control-runtime');
     let terminalInvocations = 0;
@@ -581,6 +605,70 @@ describe('ControlRuntime', () => {
 
     failDirty = false;
   }, 90_000);
+
+  it('atomically reserves the last shared durability slot for one cold miss', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+    const dirtyTerminalOutcomes = (runtime as unknown as {
+      dirtyTerminalOutcomes: Map<string, { sequence: number; outcome?: { status: 'succeeded' } }>;
+    }).dirtyTerminalOutcomes;
+    for (let index = 0; index < 255; index += 1) {
+      dirtyTerminalOutcomes.set(`seed-dirty-${index}`, {
+        sequence: index + 1,
+        outcome: { status: 'succeeded' },
+      });
+    }
+
+    const coldLookupsReady = createDeferred<void>();
+    const releaseColdLookups = createDeferred<void>();
+    let waitingLookups = 0;
+    const originalLoadOutcome = journal.loadOutcome.bind(journal);
+    vi.spyOn(journal, 'loadOutcome').mockImplementation(async (idempotencyKey) => {
+      if (!idempotencyKey.startsWith('idem-atomic-slot-')) return originalLoadOutcome(idempotencyKey);
+      waitingLookups += 1;
+      if (waitingLookups === 2) coldLookupsReady.resolve();
+      await releaseColdLookups.promise;
+      return undefined;
+    });
+
+    const releaseEffect = createDeferred<void>();
+    handlers.launchRitual = vi.fn(async () => {
+      await releaseEffect.promise;
+      return undefined;
+    });
+
+    const first = submit(runtime, ritualLaunchCommand('idem-atomic-slot-a', 'atomic-a'));
+    const second = submit(runtime, ritualLaunchCommand('idem-atomic-slot-b', 'atomic-b'));
+    await coldLookupsReady.promise;
+    releaseColdLookups.resolve();
+
+    const early = await Promise.race([
+      first.then((value) => ({ key: 'a' as const, value })),
+      second.then((value) => ({ key: 'b' as const, value })),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('expected a durability rejection before fresh execution completed')), 5_000);
+      }),
+    ]);
+
+    expect(early.value).toMatchObject({ status: 'rejected', code: 'durability_unavailable' });
+    const rejectedKey = early.key === 'a' ? 'idem-atomic-slot-a' : 'idem-atomic-slot-b';
+    const admittedKey = early.key === 'a' ? 'idem-atomic-slot-b' : 'idem-atomic-slot-a';
+    await vi.waitFor(() => expect(handlers.launchRitual).toHaveBeenCalledTimes(1));
+    expect(journal.findByIdempotencyKey(rejectedKey)).toBeUndefined();
+    expect(journal.findByIdempotencyKey(admittedKey)?.kind).toBe('command.requested');
+
+    releaseEffect.resolve();
+    const outcomes = await Promise.all([first, second]);
+    expect(outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'succeeded' }),
+      expect.objectContaining({ status: 'rejected', code: 'durability_unavailable' }),
+    ]));
+    expect(journal.read(0).filter((event) => (
+      event.payload.idempotencyKey === 'idem-atomic-slot-a'
+      || event.payload.idempotencyKey === 'idem-atomic-slot-b'
+    ))).toHaveLength(2);
+  });
 
   it('persists a recovery-generated unknown outcome to the durable sidecar', async () => {
     const root = await newJournalRoot('control-runtime');

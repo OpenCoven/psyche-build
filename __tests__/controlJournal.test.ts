@@ -146,6 +146,9 @@ describe('ControlJournal', () => {
     const journal = await ControlJournal.open(root, 7);
     const idempotencyKey = 'panes/漢字/../☕️/retry:key';
     const outcome = { status: 'succeeded', value: { paneId: '%3', ok: true } } as const;
+    const outcomesDirectory = path.join(root, '.psyche', 'runtime', 'outcomes');
+
+    expect((await stat(outcomesDirectory)).mode & 0o777).toBe(0o700);
 
     await journal.storeOutcome(idempotencyKey, outcome);
 
@@ -346,32 +349,35 @@ describe('ControlJournal', () => {
 
   it('rejects symlinked outcome directories without touching the external target', async () => {
     const root = await newRoot('psyche-journal');
-    const journal = await ControlJournal.open(root, 7);
     const idempotencyKey = 'symlinked-outcomes';
     const externalDirectory = path.join(root, 'external-outcomes');
+    const runtimeDirectory = path.join(root, '.psyche', 'runtime');
+    await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
     await mkdir(externalDirectory, { recursive: true, mode: 0o755 });
     const externalFile = path.join(externalDirectory, path.basename(storedOutcomePath(root, idempotencyKey)));
     const externalOutcome = { status: 'succeeded', value: { paneId: '%external' } } as const;
     await writeFile(externalFile, JSON.stringify({ idempotencyKey, outcome: externalOutcome }), 'utf8');
     const externalBefore = await readFile(externalFile, 'utf8');
     const externalModeBefore = (await stat(externalDirectory)).mode & 0o777;
-
-    const runtimeDirectory = path.join(root, '.psyche', 'runtime');
-    await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
     await symlink(
       externalDirectory,
       path.join(runtimeDirectory, 'outcomes'),
       process.platform === 'win32' ? 'junction' : 'dir',
     );
 
-    await expect(journal.loadOutcome(idempotencyKey)).rejects.toThrow('durable outcome path is unsafe');
-    await expect(journal.storeOutcome(idempotencyKey, {
-      status: 'succeeded',
-      value: { paneId: '%new' },
-    })).rejects.toThrow('durable outcome path is unsafe');
+    await expect(ControlJournal.open(root, 7)).rejects.toThrow('durable outcome path is unsafe');
 
     expect(await readFile(externalFile, 'utf8')).toBe(externalBefore);
     expect((await stat(externalDirectory)).mode & 0o777).toBe(externalModeBefore);
+  });
+
+  it('rejects a non-directory outcomes path during startup validation', async () => {
+    const root = await newRoot('psyche-journal');
+    const runtimeDirectory = path.join(root, '.psyche', 'runtime');
+    await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(path.join(runtimeDirectory, 'outcomes'), 'not-a-directory', 'utf8');
+
+    await expect(ControlJournal.open(root, 7)).rejects.toThrow('durable outcome path is unsafe');
   });
 
   it('rejects a durable outcome path that is not a regular file', async () => {
