@@ -161,6 +161,9 @@ export class PsycheAttentionService extends EventEmitter {
     }
 
     const attentionSurface = await this.options.focusService.getPaneAttentionSurface(candidate.tmuxPaneId);
+    if (!this.isCandidateCurrent(paneId, candidate)) {
+      return;
+    }
     if (attentionSurface === 'fully-focused') {
       return;
     }
@@ -168,9 +171,15 @@ export class PsycheAttentionService extends EventEmitter {
     const activeAttentionPaneId = this.activeAttentionPanes.get(paneId);
     if (activeAttentionPaneId) {
       if (activeAttentionPaneId !== candidate.tmuxPaneId) {
+        if (!this.isCandidateCurrent(paneId, candidate)) {
+          return;
+        }
         this.setPaneAttention(paneId, candidate.tmuxPaneId, true);
       }
 
+      if (!this.isCandidateCurrent(paneId, candidate)) {
+        return;
+      }
       this.baselineFingerprints.delete(paneId);
       this.notifiedFingerprints.set(paneId, candidate.fingerprint);
       return;
@@ -181,13 +190,25 @@ export class PsycheAttentionService extends EventEmitter {
     }
 
     if (attentionSurface === 'same-window') {
+      if (!this.isCandidateCurrent(paneId, candidate)) {
+        return;
+      }
       await this.options.focusService.flashPaneAttention(candidate.tmuxPaneId);
+      if (!this.isCandidateCurrent(paneId, candidate)) {
+        return;
+      }
       this.setPaneAttention(paneId, candidate.tmuxPaneId, true);
+      if (!this.isCandidateCurrent(paneId, candidate)) {
+        return;
+      }
       this.baselineFingerprints.delete(paneId);
       this.notifiedFingerprints.set(paneId, candidate.fingerprint);
       return;
     }
 
+    if (!this.isCandidateCurrent(paneId, candidate)) {
+      return;
+    }
     const sent = await this.options.focusService.sendAttentionNotification({
       title: candidate.title,
       subtitle: candidate.subtitle,
@@ -195,6 +216,9 @@ export class PsycheAttentionService extends EventEmitter {
       tmuxPaneId: candidate.tmuxPaneId,
     });
 
+    if (!this.isCandidateCurrent(paneId, candidate)) {
+      return;
+    }
     if (!sent) {
       this.logger.debug(
         `Attention notification skipped for ${paneId} because the helper notification send failed`,
@@ -205,6 +229,9 @@ export class PsycheAttentionService extends EventEmitter {
     }
 
     this.setPaneAttention(paneId, candidate.tmuxPaneId, true);
+    if (!this.isCandidateCurrent(paneId, candidate)) {
+      return;
+    }
     this.baselineFingerprints.delete(paneId);
     this.notifiedFingerprints.set(paneId, candidate.fingerprint);
   }
@@ -215,6 +242,16 @@ export class PsycheAttentionService extends EventEmitter {
     this.notifiedFingerprints.delete(paneId);
     this.baselineFingerprints.delete(paneId);
     this.armedPanes.delete(paneId);
+  }
+
+  private isCandidateCurrent(
+    paneId: string,
+    candidate: AttentionCandidate
+  ): boolean {
+    return (
+      this.active
+      && this.candidates.get(paneId) === candidate
+    );
   }
 
   private setPaneAttention(
