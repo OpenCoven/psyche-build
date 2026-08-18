@@ -17,11 +17,13 @@ import { supportsNativePsycheHelper } from '../utils/focusDetection.js';
 interface AttentionCandidate {
   paneId: string;
   tmuxPaneId: string;
+  lifecycle?: symbol;
   status: Extract<AgentStatus, 'idle' | 'waiting'>;
   title: string;
   body: string;
   subtitle?: string;
   fingerprint: string;
+  controller: AbortController;
 }
 
 interface PsycheAttentionServiceOptions {
@@ -67,6 +69,9 @@ export class PsycheAttentionService extends EventEmitter {
       return;
     }
 
+    for (const candidate of this.candidates.values()) {
+      candidate.controller.abort();
+    }
     this.active = false;
     this.statusDetector.off('status-updated', this.handleStatusUpdate);
     this.statusDetector.off('attention-needed', this.handleAttentionNeeded);
@@ -97,7 +102,7 @@ export class PsycheAttentionService extends EventEmitter {
     }
 
     if (event.status === 'analyzing') {
-      this.candidates.delete(event.paneId);
+      this.cancelCandidate(event.paneId);
       return;
     }
   };
@@ -111,14 +116,17 @@ export class PsycheAttentionService extends EventEmitter {
   };
 
   private readonly handleAttentionNeeded = (event: AttentionNeededEvent): void => {
+    this.cancelCandidate(event.paneId);
     this.candidates.set(event.paneId, {
       paneId: event.paneId,
       tmuxPaneId: event.tmuxPaneId,
+      lifecycle: event.lifecycle,
       status: event.status,
       title: event.title,
       body: event.body,
       subtitle: event.subtitle,
       fingerprint: event.fingerprint,
+      controller: new AbortController(),
     });
 
     void this.maybeNotify(event.paneId);
@@ -131,15 +139,29 @@ export class PsycheAttentionService extends EventEmitter {
   };
 
   private async maybeNotify(paneId: string): Promise<void> {
-    if (!this.active) {
-      return;
-    }
-
     const candidate = this.candidates.get(paneId);
-    if (!candidate) {
-      return;
-    }
+    if (!candidate) return;
 
+    try {
+      await this.maybeNotifyCandidate(paneId, candidate);
+    } catch (error) {
+      if (candidate.controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+        return;
+      }
+      this.logger.error(
+        `Attention effect failed for ${paneId}: ${error instanceof Error ? error.message : String(error)}`,
+        'attentionService',
+        paneId,
+        error instanceof Error ? error : undefined,
+      );
+    }
+  }
+
+  private async maybeNotifyCandidate(
+    paneId: string,
+    candidate: AttentionCandidate,
+  ): Promise<void> {
+    if (!this.isCandidateCurrent(paneId, candidate)) return;
     if (!this.armedPanes.has(paneId)) {
       const baselineFingerprint = this.baselineFingerprints.get(paneId);
       if (!baselineFingerprint) {
@@ -193,7 +215,10 @@ export class PsycheAttentionService extends EventEmitter {
       if (!this.isCandidateCurrent(paneId, candidate)) {
         return;
       }
-      await this.options.focusService.flashPaneAttention(candidate.tmuxPaneId);
+      await this.options.focusService.flashPaneAttention(candidate.tmuxPaneId, {
+        signal: candidate.controller.signal,
+        isCurrent: () => this.isCandidateOwned(paneId, candidate),
+      });
       if (!this.isCandidateCurrent(paneId, candidate)) {
         return;
       }
@@ -209,12 +234,18 @@ export class PsycheAttentionService extends EventEmitter {
     if (!this.isCandidateCurrent(paneId, candidate)) {
       return;
     }
-    const sent = await this.options.focusService.sendAttentionNotification({
-      title: candidate.title,
-      subtitle: candidate.subtitle,
-      body: candidate.body,
-      tmuxPaneId: candidate.tmuxPaneId,
-    });
+    const sent = await this.options.focusService.sendAttentionNotification(
+      {
+        title: candidate.title,
+        subtitle: candidate.subtitle,
+        body: candidate.body,
+        tmuxPaneId: candidate.tmuxPaneId,
+      },
+      {
+        signal: candidate.controller.signal,
+        isCurrent: () => this.isCandidateOwned(paneId, candidate),
+      },
+    );
 
     if (!this.isCandidateCurrent(paneId, candidate)) {
       return;
@@ -237,8 +268,8 @@ export class PsycheAttentionService extends EventEmitter {
   }
 
   private resetPaneAttention(paneId: string): void {
+    this.cancelCandidate(paneId);
     this.setPaneAttention(paneId, undefined, false);
-    this.candidates.delete(paneId);
     this.notifiedFingerprints.delete(paneId);
     this.baselineFingerprints.delete(paneId);
     this.armedPanes.delete(paneId);
@@ -249,9 +280,31 @@ export class PsycheAttentionService extends EventEmitter {
     candidate: AttentionCandidate
   ): boolean {
     return (
+      !candidate.controller.signal.aborted
+      && this.isCandidateOwned(paneId, candidate)
+    );
+  }
+
+  private isCandidateOwned(paneId: string, candidate: AttentionCandidate): boolean {
+    return (
       this.active
       && this.candidates.get(paneId) === candidate
+      && (
+        candidate.lifecycle === undefined
+        || this.statusDetector.isPaneLifecycleCurrent(
+          paneId,
+          candidate.tmuxPaneId,
+          candidate.lifecycle,
+        )
+      )
     );
+  }
+
+  private cancelCandidate(paneId: string): void {
+    const candidate = this.candidates.get(paneId);
+    if (!candidate) return;
+    candidate.controller.abort();
+    this.candidates.delete(paneId);
   }
 
   private setPaneAttention(

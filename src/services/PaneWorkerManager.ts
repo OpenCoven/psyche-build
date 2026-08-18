@@ -102,6 +102,24 @@ export class PaneWorkerManager {
     };
   }
 
+  async sendKeysToExpectedPane(
+    paneId: string,
+    expectedTmuxPaneId: string,
+    keys: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const pane = this.panes.get(paneId);
+    if (signal?.aborted || pane?.tmuxPaneId !== expectedTmuxPaneId) {
+      return;
+    }
+
+    const escapedKeys = keys.replace(/'/g, "'\\''");
+    await this.tmux.sendKeys(expectedTmuxPaneId, `'${escapedKeys}'`);
+    if (!signal?.aborted && this.panes.get(paneId)?.tmuxPaneId === expectedTmuxPaneId) {
+      this.poller.onKeysSent(paneId);
+    }
+  }
+
   /**
    * Deliver a message for a pane without waiting for a response.
    */
