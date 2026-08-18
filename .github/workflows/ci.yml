@@ -43,6 +43,7 @@ jobs:
       - name: Verify TypeScript and package surfaces
         run: |
           set -euo pipefail
+          pnpm docs:focus:check
           pnpm test
           pnpm typecheck
           pnpm build

@@ -192,15 +192,15 @@ ledger.
 6. Press `f` to inspect files or `m` to open the pane menu.
 7. Merge, create a PR, attach another agent, or close the pane explicitly.
 8. Press `u` to open a reusable ritual when starting a known workflow.
-9. If Coven is running, open or launch a Coven-managed session from the bridge path.
+9. If an optional local session provider is available, open or launch a
+   project-scoped session from the bridge path.
 
 If this loop is boringly reliable, Psyche Build is doing its job.
 
-## Relationship to OpenMeow, OpenClaw, and Coven
+## Optional integrations
 
-- **OpenMeow** is the lightweight intake surface: toss the task.
-- **Cody/OpenClaw** is the conductor: decide what needs doing and report back.
-- **Coven** is the harness substrate: run and expose managed coding sessions.
-- **Psyche Build** is the cockpit: keep the visible terminal/worktree control plane understandable.
-
-These integrations should make Psyche Build more useful, but Psyche Build must remain valuable as a standalone CLI.
+Psyche Build remains complete as a standalone tmux and git-worktree cockpit.
+Supported coding agents and a compatible local session provider may extend the
+workflow, but they do not own Psyche Build's project identity, pane lifecycle,
+merge decisions, or cleanup behavior. See
+[Psyche Build integrations](INTEGRATIONS.md).

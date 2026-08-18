@@ -44,6 +44,9 @@ const prohibitedPositionPatterns = [
   [/fix openclaw cockpit/i, 'standalone OpenClaw promotion'],
   [/opencoven public roadmap/i, 'external ecosystem roadmap promotion'],
   [/led by\s*<strong>\s*coven code\s*<\/strong>/i, 'agent catalog product favoritism'],
+  [/^## Coven integration smoke/im, 'standalone Coven integration runbook'],
+  [/^## Coven bridge smoke/im, 'standalone Coven bridge runbook'],
+  [/^## Relationship to OpenMeow, OpenClaw, and Coven/im, 'external ecosystem positioning'],
 ];
 const prohibitedFiles = new Map(
   ['docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md'].map((file) => [normalizePublicPath(file), file]),
