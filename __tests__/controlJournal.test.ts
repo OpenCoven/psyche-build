@@ -160,6 +160,74 @@ describe('ControlJournal', () => {
     await expect(journal.loadOutcome(idempotencyKey)).resolves.toEqual(outcome);
   });
 
+  it('orders exact outcome publication through directory sync before success', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const steps: string[] = [];
+    setDurableOutcomePublicationTestHooksForTesting({
+      durableMutationStep: ({ target, step }) => {
+        if (target === 'outcome') steps.push(step);
+      },
+    });
+
+    await journal.storeOutcome('ordered-outcome', {
+      status: 'succeeded',
+      value: { paneId: '%ordered' },
+    });
+
+    expect(steps).toEqual([
+      'temporary-written',
+      'temporary-synced',
+      'temporary-closed',
+      'identity-checked',
+      'renamed',
+      'directory-synced',
+      'succeeded',
+    ]);
+  });
+
+  it('orders snapshot and compacted journal publication through directory sync before success', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const steps: string[] = [];
+    setDurableOutcomePublicationTestHooksForTesting({
+      durableMutationStep: ({ target, step }) => {
+        if (target === 'snapshot' || target === 'journal') steps.push(`${target}:${step}`);
+      },
+    });
+
+    await journal.writeSnapshot({
+      snapshot: { ownerEpoch: 7, sequence: 0, commands: {}, leases: {}, resources: [],
+        capabilityLeases: [], leaseHistory: [], leaseRequests: [], approvals: [], receipts: [] } as any,
+      coveredSequence: 0,
+      outcomes: {},
+      receiptRecords: [],
+    });
+    for (let index = 1; index <= 4; index += 1) {
+      await journal.append('command.succeeded', { commandId: `ordered-${index}`, idempotencyKey: `ordered-${index}` });
+    }
+    await journal.compact(3);
+
+    expect(steps.slice(0, 7)).toEqual([
+      'snapshot:temporary-written',
+      'snapshot:temporary-synced',
+      'snapshot:temporary-closed',
+      'snapshot:identity-checked',
+      'snapshot:renamed',
+      'snapshot:directory-synced',
+      'snapshot:succeeded',
+    ]);
+    expect(steps.slice(7)).toEqual([
+      'journal:temporary-written',
+      'journal:temporary-synced',
+      'journal:temporary-closed',
+      'journal:identity-checked',
+      'journal:renamed',
+      'journal:directory-synced',
+      'journal:succeeded',
+    ]);
+  });
+
   it('returns undefined for a missing durable outcome', async () => {
     const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 7);
@@ -354,6 +422,38 @@ describe('ControlJournal', () => {
     expect(await readdir(quarantinedDirectory)).toEqual([]);
   });
 
+  it('treats outcome directory sync failure after rename as a durability failure', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const idempotencyKey = 'directory-sync-outcome-failure';
+    const steps: string[] = [];
+    setDurableOutcomePublicationTestHooksForTesting({
+      durableMutationStep: ({ target, step }) => {
+        if (target === 'outcome') steps.push(step);
+      },
+      syncContainingDirectory: async ({ target, sync }) => {
+        if (target !== 'outcome') return await sync();
+        throw new Error('injected outcome directory sync failure');
+      },
+    });
+
+    await expect(journal.storeOutcome(idempotencyKey, {
+      status: 'succeeded',
+      value: { paneId: '%sync-failure' },
+    })).rejects.toThrow('injected outcome directory sync failure');
+
+    expect(steps).toEqual([
+      'temporary-written',
+      'temporary-synced',
+      'temporary-closed',
+      'identity-checked',
+      'renamed',
+    ]);
+    await expect(readFile(storedOutcomePath(root, idempotencyKey), 'utf8')).resolves.toContain(idempotencyKey);
+    expect((await readdir(path.join(root, '.psyche', 'runtime', 'outcomes'))).some((entry) => entry.endsWith('.tmp')))
+      .toBe(false);
+  });
+
   it('fails closed if the outcomes directory identity changes during read', async () => {
     const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 7);
@@ -429,6 +529,39 @@ describe('ControlJournal', () => {
     expect(await pathExists(path.join(externalDirectory, 'snapshot.json'))).toBe(false);
     expect(await readdir(externalDirectory)).toEqual([]);
     expect(await pathExists(path.join(quarantinedDirectory, 'snapshot.json'))).toBe(false);
+  });
+
+  it('treats runtime directory sync failure after snapshot rename as a durability failure', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const steps: string[] = [];
+    setDurableOutcomePublicationTestHooksForTesting({
+      durableMutationStep: ({ target, step }) => {
+        if (target === 'snapshot') steps.push(step);
+      },
+      syncContainingDirectory: async ({ target, sync }) => {
+        if (target !== 'snapshot') return await sync();
+        throw new Error('injected snapshot directory sync failure');
+      },
+    });
+
+    await expect(journal.writeSnapshot({
+      snapshot: { ownerEpoch: 7, sequence: 0, commands: {}, leases: {}, resources: [],
+        capabilityLeases: [], leaseHistory: [], leaseRequests: [], approvals: [], receipts: [] } as any,
+      coveredSequence: 0,
+      outcomes: {},
+      receiptRecords: [],
+    })).rejects.toThrow('injected snapshot directory sync failure');
+
+    expect(steps).toEqual([
+      'temporary-written',
+      'temporary-synced',
+      'temporary-closed',
+      'identity-checked',
+      'renamed',
+    ]);
+    await expect(readFile(path.join(root, '.psyche', 'runtime', 'snapshot.json'), 'utf8'))
+      .resolves.toContain('"coveredSequence":0');
   });
 
   it('persists optional approval ownership metadata across journal replay', async () => {
@@ -757,6 +890,36 @@ describe('ControlJournal', () => {
     expect(await pathExists(path.join(externalDirectory, 'events.ndjson'))).toBe(false);
     expect(await readdir(externalDirectory)).toEqual([]);
     expect(await readFile(path.join(quarantinedDirectory, 'events.ndjson'), 'utf8')).toBe(journalBefore);
+  });
+
+  it('treats runtime directory sync failure after compaction rename as a durability failure', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 3);
+    const steps: string[] = [];
+    for (let index = 1; index <= 4; index += 1) {
+      await journal.append('command.succeeded', { commandId: `c${index}`, idempotencyKey: `i${index}` });
+    }
+    setDurableOutcomePublicationTestHooksForTesting({
+      durableMutationStep: ({ target, step }) => {
+        if (target === 'journal') steps.push(step);
+      },
+      syncContainingDirectory: async ({ target, sync }) => {
+        if (target !== 'journal') return await sync();
+        throw new Error('injected journal directory sync failure');
+      },
+    });
+
+    await expect(journal.compact(3)).rejects.toThrow('injected journal directory sync failure');
+
+    expect(steps).toEqual([
+      'temporary-written',
+      'temporary-synced',
+      'temporary-closed',
+      'identity-checked',
+      'renamed',
+    ]);
+    expect(journal.firstSequence).toBe(1);
+    expect(journal.read(0).map((event) => event.sequence)).toEqual([1, 2, 3, 4]);
   });
 
   it('tolerates trailing blank lines in the journal file', async () => {

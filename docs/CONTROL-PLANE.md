@@ -92,18 +92,25 @@ through the identical authority checks and lands in the same journal.
    (`src/control/journal.ts`) *before* the effect is considered committed, so a
    crash mid-flight is recoverable (`recoverNonterminalCommands` on startup).
    After a terminal append, the runtime remembers the exact outcome in memory,
-   tracks it as dirty until the disk-backed sidecar fsync succeeds, and refuses
-   to compact that terminal key away until authoritative durable replay data
-   exists. Terminal journal events also carry a SHA-256 digest of the exact
-   `CommandOutcome`, and compaction verifies the retained event digest against
-   the durable sidecar before dropping older evidence. Non-surface tail events
-   can be reconstructed while they remain retained; surface tail events fail
-   closed when their exact sidecar is missing or unverifiable. Legacy
-   pre-digest surface terminals can append a later digest attestation keyed by
-   `(commandId, idempotencyKey)` once the exact sidecar is loaded, after which
-   compaction may treat that attestation as the integrity source. Dirty
-   sidecar-failure state is capped at 256 keys; once full, new fresh commands
-   are rejected with `durability_unavailable` until a later flush succeeds,
+   tracks it as dirty until temp-file fsync, atomic rename, and containing-
+   directory fsync succeed, and refuses to compact that terminal key away until
+   authoritative durable replay data exists. Terminal journal events also carry
+   a SHA-256 digest of the exact `CommandOutcome`, and compaction verifies the
+   retained event digest against the durable sidecar before dropping older
+   evidence. Non-surface tail events can be reconstructed while they remain
+   retained; ordinary surface tail events fail closed when their exact sidecar
+   is missing or unverifiable. The one narrow exception is a recovery-generated
+   `command.unknown` with `reason: recovered-nonterminal`, which is treated as
+   an authoritative exact unknown, replayed from the retained journal, and kept
+   dirty until persistence succeeds. Legacy pre-digest surface terminals can
+   append a later digest attestation keyed by `(commandId, idempotencyKey)`
+   once the exact sidecar is loaded, after which compaction may treat that
+   attestation as the integrity source. Fresh execution shares one 256-slot
+   durability budget across dirty terminal outcomes and active fresh
+   reservations, so no new effect starts unless its terminal could still remain
+   replayable if sidecar persistence fails. Once that shared budget is full,
+   or compaction is already blocked on durability, new fresh commands are
+   rejected with `durability_unavailable` until a later repair/flush succeeds,
    while hot/tail/sidecar retries remain available.
 6. **Handler dispatch** — only then does it call the matching `ControlHandlers`
    method to perform the effect and shape the `CommandOutcome`.

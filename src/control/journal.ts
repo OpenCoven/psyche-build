@@ -265,6 +265,32 @@ interface DurableOutcomeReadContext {
   readonly outcomePath: string;
 }
 
+type DurableMetadataMutationTarget = 'outcome' | 'snapshot' | 'journal';
+type DurableMetadataMutationStep =
+  | 'temporary-written'
+  | 'temporary-synced'
+  | 'temporary-closed'
+  | 'identity-checked'
+  | 'renamed'
+  | 'directory-synced'
+  | 'succeeded';
+
+interface DurableMetadataMutationStepContext {
+  readonly target: DurableMetadataMutationTarget;
+  readonly directoryPath: string;
+  readonly destinationPath: string;
+  readonly temporaryPath: string;
+  readonly step: DurableMetadataMutationStep;
+}
+
+interface DurableMetadataDirectorySyncContext {
+  readonly target: DurableMetadataMutationTarget;
+  readonly directoryPath: string;
+  readonly destinationPath: string;
+  readonly temporaryPath: string;
+  readonly sync: () => Promise<void>;
+}
+
 interface SnapshotWriteContext {
   readonly snapshotPath: string;
   readonly temporaryPath: string;
@@ -286,6 +312,8 @@ interface JournalTestHookContexts {
   readonly beforeTemporaryOpen: DurableOutcomePublicationContext;
   readonly beforeDestinationRename: DurableOutcomePublicationContext;
   readonly beforeOutcomePathRead: DurableOutcomeReadContext;
+  readonly durableMutationStep: DurableMetadataMutationStepContext;
+  readonly syncContainingDirectory: DurableMetadataDirectorySyncContext;
   readonly beforeSnapshotRename: SnapshotWriteContext;
   readonly beforeCompactRename: JournalCompactionContext;
 }
@@ -587,6 +615,7 @@ export class ControlJournal {
     let handle: FileHandle | undefined;
     let temporarySnapshot: DurableOutcomeFileSnapshot | undefined;
     let published = false;
+    let preservePublishedDestination = false;
     try {
       await assertDurableOutcomeDirectoryIdentity(this.outcomeDirectoryPath, directoryIdentity);
       await invokeDurableOutcomePublicationHook('beforeTemporaryOpen', publication);
@@ -597,17 +626,52 @@ export class ControlJournal {
       temporarySnapshot = snapshotDurableOutcomeFile(openedStats);
       await assertDurableOutcomeDirectoryIdentity(this.outcomeDirectoryPath, directoryIdentity);
       await handle.writeFile(serialized, 'utf8');
+      await recordDurableMetadataMutationStep({
+        target: 'outcome',
+        directoryPath: this.outcomeDirectoryPath,
+        destinationPath: destination,
+        temporaryPath: temporary,
+        step: 'temporary-written',
+      });
       await handle.sync();
+      await recordDurableMetadataMutationStep({
+        target: 'outcome',
+        directoryPath: this.outcomeDirectoryPath,
+        destinationPath: destination,
+        temporaryPath: temporary,
+        step: 'temporary-synced',
+      });
       const syncedStats = await handle.stat({ bigint: true });
       if (!isSafeDurableOutcomeFileStats(syncedStats)) throw unsafeDurableOutcomePath();
       temporarySnapshot = snapshotDurableOutcomeFile(syncedStats);
       await handle.close();
       handle = undefined;
+      await recordDurableMetadataMutationStep({
+        target: 'outcome',
+        directoryPath: this.outcomeDirectoryPath,
+        destinationPath: destination,
+        temporaryPath: temporary,
+        step: 'temporary-closed',
+      });
       await assertDurableOutcomeDirectoryIdentity(this.outcomeDirectoryPath, directoryIdentity);
+      await recordDurableMetadataMutationStep({
+        target: 'outcome',
+        directoryPath: this.outcomeDirectoryPath,
+        destinationPath: destination,
+        temporaryPath: temporary,
+        step: 'identity-checked',
+      });
       await invokeDurableOutcomePublicationHook('beforeDestinationRename', publication);
       await assertDurableOutcomeDirectoryIdentity(this.outcomeDirectoryPath, directoryIdentity);
       await rename(temporary, destination);
       published = true;
+      await recordDurableMetadataMutationStep({
+        target: 'outcome',
+        directoryPath: this.outcomeDirectoryPath,
+        destinationPath: destination,
+        temporaryPath: temporary,
+        step: 'renamed',
+      });
       if (temporarySnapshot) {
         const publishedPath = await readDurableOutcomeFilePathSnapshot(destination);
         if (
@@ -617,17 +681,37 @@ export class ControlJournal {
           || !sameDurableOutcomeFileIdentity(temporarySnapshot, publishedPath.snapshot)
         ) {
           await removeDurableOutcomePathIfMatching(destination, temporarySnapshot);
+          temporarySnapshot = undefined;
           throw durableOutcomeDirectoryChangedDuringPublication();
         }
       }
       await assertDurableOutcomeDirectoryIdentity(this.outcomeDirectoryPath, directoryIdentity);
+      preservePublishedDestination = true;
+      await syncPublishedMetadataDirectory({
+        target: 'outcome',
+        directoryPath: this.outcomeDirectoryPath,
+        destinationPath: destination,
+        temporaryPath: temporary,
+        directoryIdentity,
+        mismatchError: durableOutcomeDirectoryChangedDuringPublication,
+        syncUnsupportedError: durableOutcomeDirectorySyncUnsupported,
+      });
+      await recordDurableMetadataMutationStep({
+        target: 'outcome',
+        directoryPath: this.outcomeDirectoryPath,
+        destinationPath: destination,
+        temporaryPath: temporary,
+        step: 'succeeded',
+      });
     } catch (error) {
       if (handle) await handle.close().catch(() => undefined);
       if (temporarySnapshot) {
-        await removeDurableOutcomePathIfMatching(
-          published ? destination : temporary,
-          temporarySnapshot,
-        );
+        if (!(published && preservePublishedDestination)) {
+          await removeDurableOutcomePathIfMatching(
+            published ? destination : temporary,
+            temporarySnapshot,
+          );
+        }
       } else if (!published) {
         await unlink(temporary).catch(() => undefined);
       }
@@ -666,10 +750,12 @@ export class ControlJournal {
       serialized: JSON.stringify(file),
       temporaryPath: temporary,
       destinationPath: this.snapshotPath,
+      target: 'snapshot',
       hookStep: 'beforeSnapshotRename',
       hookContext: context,
       guard,
       mismatchError: runtimeDirectoryChangedDuringSnapshotPublication,
+      syncUnsupportedError: runtimeDirectorySyncUnsupportedDuringSnapshotPublication,
     });
   }
 
@@ -719,10 +805,12 @@ export class ControlJournal {
         serialized: `${body}\n`,
         temporaryPath: temporary,
         destinationPath: this.path,
+        target: 'journal',
         hookStep: 'beforeCompactRename',
         hookContext: context,
         guard,
         mismatchError: runtimeDirectoryChangedDuringCompaction,
+        syncUnsupportedError: runtimeDirectorySyncUnsupportedDuringCompaction,
       });
       if (!replaced) {
         resolveDone();
@@ -746,16 +834,19 @@ export class ControlJournal {
       serialized: string;
       temporaryPath: string;
       destinationPath: string;
+      target: DurableMetadataMutationTarget;
       hookStep: 'beforeSnapshotRename' | 'beforeCompactRename';
       hookContext: SnapshotWriteContext | JournalCompactionContext;
       guard?: JournalMutationGuard;
       mismatchError: () => Error;
+      syncUnsupportedError: () => Error;
     },
   ): Promise<boolean> {
     const runtimeIdentity = await ensureRuntimeDirectoryIdentity(this.runtimeDirectoryPath);
     let handle: FileHandle | undefined;
     let temporarySnapshot: DurableOutcomeFileSnapshot | undefined;
     let published = false;
+    let preservePublishedDestination = false;
     try {
       await assertRuntimeDirectoryIdentity(this.runtimeDirectoryPath, runtimeIdentity, input.mismatchError);
       if (input.guard?.shouldAbort?.()) return false;
@@ -776,13 +867,41 @@ export class ControlJournal {
         return false;
       }
       await handle.writeFile(input.serialized, 'utf8');
+      await recordDurableMetadataMutationStep({
+        target: input.target,
+        directoryPath: this.runtimeDirectoryPath,
+        destinationPath: input.destinationPath,
+        temporaryPath: input.temporaryPath,
+        step: 'temporary-written',
+      });
       await handle.sync();
+      await recordDurableMetadataMutationStep({
+        target: input.target,
+        directoryPath: this.runtimeDirectoryPath,
+        destinationPath: input.destinationPath,
+        temporaryPath: input.temporaryPath,
+        step: 'temporary-synced',
+      });
       const syncedStats = await handle.stat({ bigint: true });
       if (!isSafeDurableOutcomeFileStats(syncedStats)) throw input.mismatchError();
       temporarySnapshot = snapshotDurableOutcomeFile(syncedStats);
       await handle.close();
       handle = undefined;
+      await recordDurableMetadataMutationStep({
+        target: input.target,
+        directoryPath: this.runtimeDirectoryPath,
+        destinationPath: input.destinationPath,
+        temporaryPath: input.temporaryPath,
+        step: 'temporary-closed',
+      });
       await assertRuntimeDirectoryIdentity(this.runtimeDirectoryPath, runtimeIdentity, input.mismatchError);
+      await recordDurableMetadataMutationStep({
+        target: input.target,
+        directoryPath: this.runtimeDirectoryPath,
+        destinationPath: input.destinationPath,
+        temporaryPath: input.temporaryPath,
+        step: 'identity-checked',
+      });
       await invokeDurableOutcomePublicationHook(input.hookStep as any, input.hookContext as any);
       await assertRuntimeDirectoryIdentity(this.runtimeDirectoryPath, runtimeIdentity, input.mismatchError);
       if (input.guard?.shouldAbort?.()) {
@@ -796,6 +915,13 @@ export class ControlJournal {
         throw error;
       }
       published = true;
+      await recordDurableMetadataMutationStep({
+        target: input.target,
+        directoryPath: this.runtimeDirectoryPath,
+        destinationPath: input.destinationPath,
+        temporaryPath: input.temporaryPath,
+        step: 'renamed',
+      });
       const publishedPath = await readDurableOutcomeFilePathSnapshot(input.destinationPath);
       if (
         temporarySnapshot
@@ -807,17 +933,37 @@ export class ControlJournal {
         )
       ) {
         await removeDurableOutcomePathIfMatching(input.destinationPath, temporarySnapshot);
+        temporarySnapshot = undefined;
         throw input.mismatchError();
       }
       await assertRuntimeDirectoryIdentity(this.runtimeDirectoryPath, runtimeIdentity, input.mismatchError);
+      preservePublishedDestination = true;
+      await syncPublishedMetadataDirectory({
+        target: input.target,
+        directoryPath: this.runtimeDirectoryPath,
+        destinationPath: input.destinationPath,
+        temporaryPath: input.temporaryPath,
+        directoryIdentity: runtimeIdentity,
+        mismatchError: input.mismatchError,
+        syncUnsupportedError: input.syncUnsupportedError,
+      });
+      await recordDurableMetadataMutationStep({
+        target: input.target,
+        directoryPath: this.runtimeDirectoryPath,
+        destinationPath: input.destinationPath,
+        temporaryPath: input.temporaryPath,
+        step: 'succeeded',
+      });
       return true;
     } catch (error) {
       if (handle) await handle.close().catch(() => undefined);
       if (temporarySnapshot) {
-        await removeDurableOutcomePathIfMatching(
-          published ? input.destinationPath : input.temporaryPath,
-          temporarySnapshot,
-        );
+        if (!(published && preservePublishedDestination)) {
+          await removeDurableOutcomePathIfMatching(
+            published ? input.destinationPath : input.temporaryPath,
+            temporarySnapshot,
+          );
+        }
       } else if (!published) {
         await unlink(input.temporaryPath).catch(() => undefined);
       }
@@ -932,6 +1078,12 @@ async function invokeDurableOutcomePublicationHook<K extends keyof JournalTestHo
   await hook?.(context);
 }
 
+async function recordDurableMetadataMutationStep(
+  context: DurableMetadataMutationStepContext,
+): Promise<void> {
+  await invokeDurableOutcomePublicationHook('durableMutationStep', context);
+}
+
 function normalizeDurableOutcomeRealPath(value: string): string {
   const normalized = path.normalize(value);
   return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
@@ -992,6 +1144,59 @@ async function assertRuntimeDirectoryIdentity(
   mismatchError: () => Error,
 ): Promise<void> {
   await assertDurableOutcomeDirectoryIdentity(directoryPath, expected, mismatchError);
+}
+
+function durableMetadataDirectoryReadFlags(): number {
+  let flags = constants.O_RDONLY;
+  if (process.platform !== 'win32') {
+    flags |= constants.O_NOFOLLOW;
+    if (typeof constants.O_DIRECTORY === 'number') flags |= constants.O_DIRECTORY;
+  }
+  return flags;
+}
+
+async function syncPublishedMetadataDirectory(
+  context: Omit<DurableMetadataDirectorySyncContext, 'sync'> & {
+    readonly directoryIdentity: DurableOutcomeDirectoryIdentity;
+    readonly mismatchError: () => Error;
+    readonly syncUnsupportedError: () => Error;
+  },
+): Promise<void> {
+  const sync = async (): Promise<void> => {
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(context.directoryPath, durableMetadataDirectoryReadFlags());
+      await handle.sync();
+    } catch (error) {
+      if (isRuntimeDirectoryMutationError(error)) throw context.mismatchError();
+      if (isUnsupportedDirectorySyncError(error)) throw context.syncUnsupportedError();
+      throw error;
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  };
+
+  await assertDurableOutcomeDirectoryIdentity(
+    context.directoryPath,
+    context.directoryIdentity,
+    context.mismatchError,
+  );
+  await invokeDurableOutcomePublicationHook('syncContainingDirectory', { ...context, sync });
+  if (!durableOutcomePublicationTestHooks?.syncContainingDirectory) {
+    await sync();
+  }
+  await assertDurableOutcomeDirectoryIdentity(
+    context.directoryPath,
+    context.directoryIdentity,
+    context.mismatchError,
+  );
+  await recordDurableMetadataMutationStep({
+    target: context.target,
+    directoryPath: context.directoryPath,
+    destinationPath: context.destinationPath,
+    temporaryPath: context.temporaryPath,
+    step: 'directory-synced',
+  });
 }
 
 async function openExclusiveDurableOutcomeFile(filePath: string): Promise<FileHandle> {
@@ -1070,6 +1275,16 @@ function isRuntimeDirectoryMutationError(error: unknown): boolean {
   return code === 'ENOENT' || isUnsafeDurableOutcomeOpenError(error);
 }
 
+function isUnsupportedDirectorySyncError(error: unknown): boolean {
+  if (process.platform !== 'win32') return false;
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'EPERM'
+    || code === 'EACCES'
+    || code === 'EINVAL'
+    || code === 'UNKNOWN'
+    || code === 'EISDIR';
+}
+
 function unsafeDurableOutcomePath(): Error {
   return new Error('durable outcome path is unsafe');
 }
@@ -1082,6 +1297,10 @@ function durableOutcomeDirectoryChangedDuringRead(): Error {
   return new Error('durable outcome directory changed during read');
 }
 
+function durableOutcomeDirectorySyncUnsupported(): Error {
+  return new Error('outcome directory fsync is unsupported on this platform');
+}
+
 function unsafeRuntimeDirectoryPath(): Error {
   return new Error('runtime directory path is unsafe');
 }
@@ -1092,6 +1311,14 @@ function runtimeDirectoryChangedDuringSnapshotPublication(): Error {
 
 function runtimeDirectoryChangedDuringCompaction(): Error {
   return new Error('runtime directory changed during journal compaction');
+}
+
+function runtimeDirectorySyncUnsupportedDuringSnapshotPublication(): Error {
+  return new Error('runtime directory fsync is unsupported during snapshot publication');
+}
+
+function runtimeDirectorySyncUnsupportedDuringCompaction(): Error {
+  return new Error('runtime directory fsync is unsupported during journal compaction');
 }
 
 function snapshotDurableOutcomeFile(stats: BigIntStats): DurableOutcomeFileSnapshot {
