@@ -558,6 +558,7 @@ type BrowserPaneThreadFixture = {
   kind: string;
   projectId: string;
   worktreePath: string;
+  hidden?: boolean;
 };
 
 type PersistedBrowserTabFixture = BrowserNavigationTab & {
@@ -1827,7 +1828,7 @@ function browserNativeEventHandlers(options: {
   browser: { activeTabId: string; tabs: BrowserNavigationTab[] };
   tab: BrowserNavigationTab;
   pane: BrowserPaneThreadFixture | null;
-  state?: { activeProjectId: string };
+  state?: { activeProjectId: string; activeThreadId: string | null };
   calls?: string[];
   nativeLabel?: string;
 }) {
@@ -1838,7 +1839,10 @@ function browserNativeEventHandlers(options: {
     browser,
     tab,
   } = options;
-  const state = options.state ?? { activeProjectId: project.id };
+  const state = options.state ?? {
+    activeProjectId: project.id,
+    activeThreadId: 'terminal-pane',
+  };
   const calls = options.calls ?? [];
   const nativeLabel = options.nativeLabel ?? 'native-tab-a';
   let pane = options.pane;
@@ -1891,14 +1895,108 @@ function browserNativeEventHandlers(options: {
   >(functionSource(mainJs, 'handleBrowserTitle'), {
     markBrowserTabLoaded,
   });
+  const browserFocusEventContext = compileFunction<
+    (payload: {
+      label: string;
+      url?: string;
+      generation?: number;
+      navigationToken?: string;
+    }) => {
+      pair: {
+        project: typeof project;
+        worktreePath: string;
+        browser: typeof browser;
+        tab: typeof tab;
+      };
+      pane: BrowserPaneThreadFixture;
+    } | null
+  >(functionSource(mainJs, 'browserFocusEventContext'), {
+    browserTabForNativeLabel: (label: string) => label === nativeLabel
+      ? { project, worktreePath, browser, tab }
+      : null,
+    browserTabLifecycle: lifecycle.browserTabLifecycle,
+    browserTabIsClosing: lifecycle.browserTabIsClosing,
+    browserPaneIsClosing: lifecycle.browserPaneIsClosing,
+    findProject: (projectId: string) => projectId === project.id ? project : null,
+    findBrowserPane: () => pane,
+    findThread: (threadId: string) => pane?.id === threadId ? pane : null,
+    activeWorkspaceRoot: () => worktreePath,
+    browserUrlsMatch,
+    state,
+  });
+  const handleBrowserFocus = compileFunction<
+    (event: {
+      payload: {
+        label: string;
+        url?: string;
+        generation?: number;
+        navigationToken?: string;
+      };
+    }) => boolean
+  >(functionSource(mainJs, 'handleBrowserFocus'), {
+    browserFocusEventContext,
+    markActiveSurface: (surface: string) => calls.push(`surface:${surface}`),
+    state,
+    focusThread: (threadId: string) => calls.push(`focus:${threadId}`),
+    publishBrowserControlResource: async () => { calls.push('publish'); },
+  });
   return {
     calls,
+    handleBrowserFocus,
     handleBrowserPageLoad,
     handleBrowserTitle,
     setPane(nextPane: BrowserPaneThreadFixture | null) {
       pane = nextPane;
     },
   };
+}
+
+function browserFocusFixture() {
+  const lifecycle = browserLifecycleHarness();
+  const project = {
+    id: 'project-a',
+    browsersByWorktree: {} as Record<string, unknown>,
+  };
+  const tab: BrowserNavigationTab = {
+    id: 'tab-a',
+    url: 'https://current.example',
+    created: true,
+    loading: false,
+    title: 'Current title',
+    history: ['https://current.example'],
+    historyIndex: 0,
+  };
+  const browser = { activeTabId: tab.id, tabs: [tab] };
+  project.browsersByWorktree['/workspace'] = browser;
+  const pane: BrowserPaneThreadFixture = {
+    id: 'web-pane',
+    kind: 'web',
+    projectId: project.id,
+    worktreePath: '/workspace',
+  };
+  const state = {
+    activeProjectId: project.id,
+    activeThreadId: 'terminal-pane' as string | null,
+  };
+  Object.assign(lifecycle.browserTabLifecycle(tab), {
+    generation: 3,
+    nativeLabel: 'native-tab-a',
+    liveGeneration: 3,
+    liveUrl: tab.url,
+    liveNavigationToken: 'current-token',
+    eventUrl: tab.url,
+    viewLive: true,
+  });
+  const handlers = browserNativeEventHandlers({
+    lifecycle,
+    project,
+    worktreePath: '/workspace',
+    browser,
+    tab,
+    pane,
+    state,
+  });
+  return { lifecycle, project, tab, browser, pane, state, handlers };
 }
 
 function tauriHandlerNames(source: string) {
@@ -1913,7 +2011,200 @@ function tauriHandlerNames(source: string) {
 }
 
 describe('Tauri native browser lifecycle', () => {
+  it('ignores a queued focus event after ambiguous navigation retirement', async () => {
+    const fixture = browserFocusFixture();
+    const discardObsoleteBrowserNavigation = compileFunction<
+      (context: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'discardObsoleteBrowserNavigation'), {
+      ...fixture.lifecycle,
+      invalidateBrowserAutomation: async () => true,
+      removeBrowserControlResource: async () => true,
+      invoke: async () => {},
+      syncProjectBrowser: () => {},
+      saveWorkspaceSoon: () => {},
+      setStatus: () => {},
+      boundedBrowserError: compileFunction<
+        (error: unknown) => string
+      >(functionSource(mainJs, 'boundedBrowserError'), {}),
+    });
+
+    await expect(discardObsoleteBrowserNavigation({
+      project: fixture.project,
+      worktreePath: '/workspace',
+      browser: fixture.browser,
+      pane: fixture.pane,
+      tab: fixture.tab,
+      generation: 3,
+      label: 'native-tab-a',
+      previousCreated: true,
+      previousLoading: false,
+      previousTitle: 'Current title',
+      previousUrl: 'https://current.example',
+      previousHistory: ['https://current.example'],
+      previousHistoryIndex: 0,
+      ambiguousAfterDispatch: true,
+    })).resolves.toBe(true);
+
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+      },
+    })).toBe(false);
+    expect(fixture.handlers.calls).toEqual([]);
+  });
+
+  it('ignores focus from a stale native view when ambiguous destroy fails', async () => {
+    const fixture = browserFocusFixture();
+    const discardObsoleteBrowserNavigation = compileFunction<
+      (context: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'discardObsoleteBrowserNavigation'), {
+      ...fixture.lifecycle,
+      invalidateBrowserAutomation: async () => true,
+      removeBrowserControlResource: async () => true,
+      invoke: async (command: string) => {
+        if (command === 'browser_destroy') throw new Error('destroy failed');
+      },
+      syncProjectBrowser: () => {},
+      saveWorkspaceSoon: () => {},
+      setStatus: () => {},
+      boundedBrowserError: compileFunction<
+        (error: unknown) => string
+      >(functionSource(mainJs, 'boundedBrowserError'), {}),
+    });
+
+    await expect(discardObsoleteBrowserNavigation({
+      project: fixture.project,
+      worktreePath: '/workspace',
+      browser: fixture.browser,
+      pane: fixture.pane,
+      tab: fixture.tab,
+      generation: 3,
+      label: 'native-tab-a',
+      previousCreated: true,
+      previousLoading: false,
+      previousTitle: 'Current title',
+      previousUrl: 'https://current.example',
+      previousHistory: ['https://current.example'],
+      previousHistoryIndex: 0,
+      ambiguousAfterDispatch: true,
+    })).resolves.toBe(false);
+
+    fixture.tab.created = true;
+    Object.assign(fixture.lifecycle.browserTabLifecycle(fixture.tab), {
+      generation: 4,
+      nativeLabel: 'native-tab-a',
+      liveGeneration: 4,
+      liveUrl: 'https://current.example',
+      liveNavigationToken: 'replacement-token',
+      eventUrl: 'https://current.example',
+      viewLive: true,
+    });
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        navigationToken: 'current-token',
+      },
+    })).toBe(false);
+    expect(fixture.handlers.calls).toEqual([]);
+  });
+
+  it('focuses only the valid live current native browser view', () => {
+    const fixture = browserFocusFixture();
+
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'wrong-label',
+        url: 'https://current.example',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(false);
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        generation: 2,
+        navigationToken: 'current-token',
+      },
+    })).toBe(false);
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        generation: 3,
+        navigationToken: 'stale-token',
+      },
+    })).toBe(false);
+    fixture.tab.created = false;
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        navigationToken: 'current-token',
+      },
+    })).toBe(false);
+    fixture.tab.created = true;
+    fixture.lifecycle.browserTabLifecycle(fixture.tab).viewLive = false;
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        navigationToken: 'current-token',
+      },
+    })).toBe(false);
+    fixture.lifecycle.browserTabLifecycle(fixture.tab).viewLive = true;
+    fixture.lifecycle.browserTabLifecycle(fixture.tab).closing = true;
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        navigationToken: 'current-token',
+      },
+    })).toBe(false);
+    fixture.lifecycle.browserTabLifecycle(fixture.tab).closing = false;
+    fixture.pane.hidden = true;
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        navigationToken: 'current-token',
+      },
+    })).toBe(false);
+    fixture.pane.hidden = false;
+    fixture.browser.tabs = [{ ...fixture.tab }];
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        navigationToken: 'current-token',
+      },
+    })).toBe(false);
+    fixture.browser.tabs = [fixture.tab];
+    expect(fixture.handlers.calls).toEqual([]);
+
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    expect(fixture.handlers.calls).toEqual([
+      'surface:browser',
+      'focus:web-pane',
+      'publish',
+    ]);
+  });
+
   it('documents the browser lifecycle source contract', () => {
+    expect(nativeLib).toContain(
+      'navigationToken: window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ || null',
+    );
+    expect(nativeLib).toContain(
+      'window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ = {navigation_token_json};',
+    );
     const destroyBrowserWebview = rustFunctionSource(nativeLib, 'destroy_browser_webview');
     expect(destroyBrowserWebview).toContain('BROWSER_NAVIGATION_WAITERS.lock().remove(&label);');
     expect(destroyBrowserWebview).toContain('webview.close().map_err(|error| error.to_string())?;');

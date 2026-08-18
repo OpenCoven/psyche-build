@@ -3324,10 +3324,10 @@ fn ensure_browser(
                         if (!window.__PSYCHE_BROWSER_FOCUS_INSTALLED__) {{
                           window.__PSYCHE_BROWSER_FOCUS_INSTALLED__ = true;
                           window.addEventListener("pointerdown", function() {{
-                            emit("browser:focus", {{ label: browserLabel, url: location.href }});
+                            emit("browser:focus", {{ label: browserLabel, url: location.href, navigationToken: window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ || null }});
                           }}, true);
                           window.addEventListener("focusin", function() {{
-                            emit("browser:focus", {{ label: browserLabel, url: location.href }});
+                            emit("browser:focus", {{ label: browserLabel, url: location.href, navigationToken: window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ || null }});
                           }}, true);
                         }}
                       }} catch (_) {{}}
@@ -3481,7 +3481,17 @@ async fn browser_navigate(
         return Err(error);
     }
     match tokio::time::timeout(std::time::Duration::from_secs(30), receiver).await {
-        Ok(Ok(result)) => result,
+        Ok(Ok(Ok(result))) => {
+            let navigation_token_json =
+                serde_json::to_string(&navigation_token).map_err(|error| error.to_string())?;
+            webview
+                .eval(&format!(
+                    "window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ = {navigation_token_json};"
+                ))
+                .map_err(|error| error.to_string())?;
+            Ok(result)
+        }
+        Ok(Ok(Err(error))) => Err(error),
         Ok(Err(_)) => Err("browser navigation was cancelled".to_string()),
         Err(_) => {
             if let Some(webview) = app.get_webview(&label) {

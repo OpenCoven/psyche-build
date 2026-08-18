@@ -10922,16 +10922,52 @@
     }
     return marked;
   }
+  function browserFocusEventContext(payload) {
+    payload = payload || {};
+    var nativeLabel = payload.label;
+    var pair = browserTabForNativeLabel(nativeLabel);
+    if (!pair || findProject(pair.project.id) !== pair.project) return null;
+    if (!pair.project.browsersByWorktree ||
+        pair.project.browsersByWorktree[pair.worktreePath] !== pair.browser ||
+        pair.browser.tabs.indexOf(pair.tab) === -1 ||
+        pair.browser.activeTabId !== pair.tab.id ||
+        !pair.tab.created ||
+        browserTabIsClosing(pair.tab)) return null;
+    if (state.activeProjectId !== pair.project.id ||
+        activeWorkspaceRoot(pair.project) !== pair.worktreePath) return null;
+    var pane = findBrowserPane(pair.project.id, pair.worktreePath);
+    if (!pane || pane.projectId !== pair.project.id ||
+        pane.worktreePath !== pair.worktreePath ||
+        findThread(pane.id) !== pane ||
+        browserPaneIsClosing(pane) ||
+        pane.hidden) return null;
+    var lifecycle = browserTabLifecycle(pair.tab);
+    if (!lifecycle.viewLive ||
+        lifecycle.nativeLabel !== nativeLabel ||
+        !lifecycle.liveGeneration ||
+        lifecycle.liveGeneration !== lifecycle.generation) return null;
+    if (payload.generation != null &&
+        payload.generation !== lifecycle.liveGeneration) return null;
+    if (payload.navigationToken != null &&
+        payload.navigationToken !== lifecycle.liveNavigationToken) return null;
+    if (payload.url && lifecycle.liveUrl &&
+        !browserUrlsMatch(payload.url, lifecycle.liveUrl) &&
+        (!lifecycle.eventUrl || !browserUrlsMatch(payload.url, lifecycle.eventUrl))) return null;
+    return { pair: pair, pane: pane };
+  }
+  function handleBrowserFocus(event) {
+    var context = browserFocusEventContext(event && event.payload || {});
+    if (!context) return false;
+    markActiveSurface("browser");
+    if (state.activeThreadId !== context.pane.id) focusThread(context.pane.id);
+    if (typeof publishBrowserControlResource === "function") {
+      publishBrowserControlResource(context.pair).catch(function () {});
+    }
+    return true;
+  }
   listen("browser:page-load", handleBrowserPageLoad).catch(function () {});
   listen("browser:title", handleBrowserTitle).catch(function () {});
-  listen("browser:focus", function (event) {
-    markActiveSurface("browser");
-    var payload = event.payload || {};
-    var pair = browserTabForNativeLabel(payload.label);
-    var pane = pair && findBrowserPane(pair.project.id, pair.worktreePath);
-    if (pane && state.activeThreadId !== pane.id) focusThread(pane.id);
-    if (pair) publishBrowserControlResource(pair).catch(function () {});
-  }).catch(function () {});
+  listen("browser:focus", handleBrowserFocus).catch(function () {});
   function ensureBrowserModel(project, workspaceRoot) {
     if (!project) return null;
     if (!project.browsersByWorktree) project.browsersByWorktree = {};
