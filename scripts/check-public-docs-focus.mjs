@@ -295,6 +295,10 @@ async function collectPublicSharedFiles() {
   return collectRecursiveTextFiles('docs/shared', readDirectoryFromFilesystem);
 }
 
+async function collectPublicStaticFiles() {
+  return collectRecursiveTextFiles('docs/public', readDirectoryFromFilesystem);
+}
+
 async function collectPublicTopLevelDocsFiles() {
   return collectTopLevelMarkdownFiles('docs', readDirectoryFromFilesystem);
 }
@@ -303,6 +307,7 @@ function buildPublicInventory({
   rootMarkdownFiles,
   recursiveFiles,
   sharedFiles = [],
+  staticFiles = [],
   topLevelDocsFiles,
   packageMarkdownFiles,
 }) {
@@ -311,6 +316,7 @@ function buildPublicInventory({
     ...requiredSourceFiles,
     ...recursiveFiles,
     ...sharedFiles,
+    ...staticFiles,
     ...topLevelDocsFiles,
     ...packageMarkdownFiles,
   ]);
@@ -469,6 +475,22 @@ async function selfCheckPublicInventory() {
   assert.deepEqual(sharedResult.files, ['docs/shared/githubStars.js', 'docs/shared/navigation.js']);
   assert.deepEqual(sharedResult.missingRootFailure, null);
 
+  const staticTree = new Map([
+    [
+      'docs/public',
+      [
+        createSyntheticDirEntry('favicon.svg', 'file'),
+        createSyntheticDirEntry('og.svg', 'file'),
+      ],
+    ],
+  ]);
+  const staticResult = await collectRecursiveTextFiles(
+    'docs/public',
+    createSyntheticDirectoryReader(staticTree),
+  );
+  assert.deepEqual(staticResult.files, ['docs/public/favicon.svg', 'docs/public/og.svg']);
+  assert.deepEqual(staticResult.missingRootFailure, null);
+
   const topLevelDocsTree = new Map([
     [
       'docs',
@@ -527,6 +549,7 @@ async function selfCheckPublicInventory() {
     rootMarkdownFiles: rootResult.files,
     recursiveFiles: [],
     sharedFiles: sharedResult.files,
+    staticFiles: staticResult.files,
     topLevelDocsFiles: topLevelDocsResult.files,
     packageMarkdownFiles: [],
   });
@@ -735,12 +758,15 @@ async function main() {
   const recursiveFiles = recursiveResult.files;
   const sharedResult = await collectPublicSharedFiles();
   const sharedFiles = sharedResult.files;
+  const staticResult = await collectPublicStaticFiles();
+  const staticFiles = staticResult.files;
   const topLevelDocsResult = await collectPublicTopLevelDocsFiles();
   const topLevelDocsFiles = topLevelDocsResult.files;
   const uniqueInventory = buildPublicInventory({
     rootMarkdownFiles: rootMarkdownResult.files,
     recursiveFiles,
     sharedFiles,
+    staticFiles,
     topLevelDocsFiles,
     packageMarkdownFiles: packageMarkdownResult.markdownFiles,
   });
@@ -757,6 +783,9 @@ async function main() {
   }
   if (sharedResult.missingRootFailure) {
     sourceRootFailures.push(sharedResult.missingRootFailure);
+  }
+  if (staticResult.missingRootFailure) {
+    sourceRootFailures.push(staticResult.missingRootFailure);
   }
   if (topLevelDocsResult.missingRootFailure) {
     sourceRootFailures.push(topLevelDocsResult.missingRootFailure);
