@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { withFilesScopeSelectionHelper } from './tauriMainHarness';
 import * as PsycheSessions from '../native/desktop/psyche-build-tauri/web/sessions/session-model.mjs';
@@ -8,6 +9,10 @@ const webRoot = join(process.cwd(), 'native/desktop/psyche-build-tauri');
 const mainJs = readFileSync(join(webRoot, 'web/main.js'), 'utf8');
 const nativeLib = readFileSync(join(webRoot, 'src-tauri/src/lib.rs'), 'utf8');
 const sessionModel = readFileSync(join(webRoot, 'web/sessions/session-model.mjs'), 'utf8');
+const PsychePanes = await import(pathToFileURL(join(
+  webRoot,
+  'web/panes/pane-tree.mjs',
+)).href);
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -72,6 +77,15 @@ function functionSource(source: string, name: string) {
   throw new Error(`unterminated function ${name}`);
 }
 
+function compileIsolatedFunction<T>(
+  source: string,
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(...names, `"use strict"; return (${source});`)(...values) as T;
+}
+
 function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
@@ -84,9 +98,41 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     attachThreadClient: () => Promise.resolve(true),
     ...dependencies,
   };
-  const names = Object.keys(resolvedDependencies);
-  const values = Object.values(resolvedDependencies);
-  return Function(...names, `"use strict"; return (${source});`)(...values) as T;
+  return compileIsolatedFunction<T>(source, resolvedDependencies);
+}
+
+function compileProjectFocusDependencies(dependencies: Record<string, unknown>) {
+  const paneLayouts = dependencies.paneLayouts instanceof Map
+    ? dependencies.paneLayouts
+    : new Map();
+  const paneLayoutKey = compileIsolatedFunction(functionSource(mainJs, 'paneLayoutKey'), {});
+  const paneLayoutFor = compileIsolatedFunction(functionSource(mainJs, 'paneLayoutFor'), {
+    paneLayouts,
+    paneLayoutKey,
+  });
+  const state = dependencies.state || { threads: [] };
+  const findThread = compileIsolatedFunction(functionSource(mainJs, 'findThread'), { state });
+  const findFilesPaneBySurfaceId = compileIsolatedFunction(
+    functionSource(mainJs, 'findFilesPaneBySurfaceId'),
+    { filesPanes: new Map() },
+  );
+  const canvasSurfaceById = compileIsolatedFunction(functionSource(mainJs, 'canvasSurfaceById'), {
+    findThread,
+    findFilesPaneBySurfaceId,
+  });
+  const findFocusSet = compileIsolatedFunction(functionSource(mainJs, 'findFocusSet'), {
+    focusSets: [],
+  });
+  const scopedPaneRoot = compileIsolatedFunction(functionSource(mainJs, 'scopedPaneRoot'), {
+    findFocusSet,
+    canvasSurfaceById,
+    PsychePanes,
+  });
+  const paneFocusEligible = compileIsolatedFunction(functionSource(mainJs, 'paneFocusEligible'), {
+    scopedPaneRoot,
+    PsychePanes,
+  });
+  return { paneLayoutFor, paneFocusEligible, scopedPaneRoot, PsychePanes };
 }
 
 function compileOpenCovenSession<T extends (...args: never[]) => unknown>(
@@ -113,7 +159,10 @@ function compileOpenWithProjectActivation<T extends (...args: never[]) => unknow
 ) {
   const resolvedDependencies = withFilesScopeSelectionHelper(
     (name) => functionSource(mainJs, name),
-    dependencies,
+    {
+      ...compileProjectFocusDependencies(dependencies),
+      ...dependencies,
+    },
   );
   const names = Object.keys(resolvedDependencies);
   const values = Object.values(resolvedDependencies);

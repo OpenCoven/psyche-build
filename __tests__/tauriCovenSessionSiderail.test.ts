@@ -44,6 +44,10 @@ const PsycheSessions = {
     'native/desktop/psyche-build-tauri/web/sessions/project-appearance.mjs',
   )).href)),
 };
+const PsychePanes = await import(pathToFileURL(join(
+  repoRoot,
+  'native/desktop/psyche-build-tauri/web/panes/pane-tree.mjs',
+)).href);
 
 function extractFunctionSource(source: string, name: string) {
   const asyncStart = source.indexOf(`async function ${name}(`);
@@ -514,6 +518,8 @@ type LocalThread = {
   status?: string;
   spawning?: boolean;
   hidden?: boolean;
+  closing?: boolean;
+  closeStarted?: boolean;
   launch?: {
     covenSessionId?: string | null;
     launchKind?: string | null;
@@ -555,6 +561,7 @@ function createRenderer(options: {
   canvasThreadIds?: string[];
   focusSets?: Array<{ id: string; index: number; name: string; key: string; threadIds: string[] }>;
   scopingSet?: { id: string; name: string; threadIds: string[] } | null;
+  paneLayout?: { maximizedLeafId?: string | null };
   setPicking?: { key: string; picked: string[] } | null;
   selectedSessionKey?: string;
   typeFilter?: string;
@@ -600,10 +607,21 @@ function createRenderer(options: {
     stale: options.stale ?? false,
   };
   const setActiveProject = vi.fn().mockResolvedValue(true);
-  const activateProjectWorktree = vi.fn(async (project: Project) => {
-    await setActiveProject(project.id);
+  const activateProjectWorktree = vi.fn(async (project: Project, worktreePath: string) => {
+    const previousWorktreePath = project.selectedWorktreePath;
+    project.selectedWorktreePath = worktreePath;
+    if (project.id !== state.activeProjectId) {
+      if (!(await setActiveProject(project.id))) {
+        project.selectedWorktreePath = previousWorktreePath;
+        return false;
+      }
+      state.activeProjectId = project.id;
+    }
     return true;
   });
+  const activeWorkspaceRoot = (project: Project) =>
+    project.selectedWorktreePath ?? project.worktrees?.find((worktree) => worktree.is_main)?.path ??
+    project.worktrees?.[0]?.path ?? project.root;
   const findThread = (id: string | null | undefined) =>
     state.threads.find((thread) => thread.id === id) ?? null;
   const findProject = (id: string | null | undefined) =>
@@ -645,7 +663,9 @@ function createRenderer(options: {
   const focusSets = options.focusSets ?? [];
   const scopingSet = options.scopingSet ?? null;
   const removeFromFocusSet = vi.fn();
-  const applySetScopeForThread = vi.fn();
+  const applySetScopeForThread = vi.fn((_thread?: LocalThread) => {
+    if (options.paneLayout) options.paneLayout.maximizedLeafId = null;
+  });
   const activateFocusSet = vi.fn();
   const clearFocusSet = vi.fn();
   const settings = {
@@ -677,6 +697,7 @@ function createRenderer(options: {
     'var toastTimer = 0;',
     'var sessionTreeFocusKey = "";',
     'var isRestoringWorkspace = false;',
+    'var browserPaneLifecycleStates = new WeakMap();',
     extractFunctionSource(mainJs, 'toast'),
     extractFunctionSource(mainJs, 'showStatusError'),
     extractFunctionSource(mainJs, 'queueDeferredStatus'),
@@ -732,16 +753,21 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'projectAppearanceContextActions'),
     extractFunctionSource(mainJs, 'saveProjectAppearances'),
     extractFunctionSource(mainJs, 'applyProjectAppearance'),
+    extractFunctionSource(mainJs, 'browserPaneLifecycle'),
+    extractFunctionSource(mainJs, 'browserPaneIsClosing'),
+    extractFunctionSource(mainJs, 'findFocusableThread'),
+    extractFunctionSource(mainJs, 'focusThreadFromSidebar'),
     extractFunctionSource(mainJs, 'renderSessionList'),
   ];
   const harness = Function(
     'document', 'sessionListEl', 'editingContext', 'state',
     'covenDiscovery', 'PsycheSessions', 'sessionStatusClass', 'shortenRoot',
-    'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread', 'closeBrowserPane',
+    'escapeHtml', 'setActiveProject', 'activeWorkspaceRoot', 'focusThread', 'closeThread',
+    'closeBrowserPane',
     'requestThreadClose', 'hideThread', 'renameThread', 'editLabelInline',
     'openCovenSession', 'setStatus',
     'canvasThreadIds', 'paneGlyphFor', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout',
-    'seedFocusSets', 'seedSetPicking', 'refreshSidebar', 'activeFocusSet',
+    'seedFocusSets', 'seedSetPicking', 'refreshSidebar', 'activeFocusSet', 'paneLayoutForThread',
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
     'saveWorkspaceSoon', 'activateProjectWorktree', 'showProjectFiles', 'setSessionTypeFilter',
@@ -761,6 +787,7 @@ function createRenderer(options: {
       picked: function () { return setPicking ? setPicking.picked.slice() : null; },
       saveProjectAppearances: saveProjectAppearances,
       applyProjectAppearance: applyProjectAppearance,
+      browserPaneLifecycle: browserPaneLifecycle,
       projectAppearances: function () { return projectAppearances; },
       sessionTreeFocusKey: function () { return sessionTreeFocusKey; },
       setProjectAppearancePopover: function (popover, restoreKey) {
@@ -788,6 +815,7 @@ function createRenderer(options: {
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#39;'),
     setActiveProject,
+    activeWorkspaceRoot,
     focusThread,
     closeThread,
     closeBrowserPane,
@@ -814,6 +842,7 @@ function createRenderer(options: {
     options.setPicking ?? null,
     () => { harness.render(); },
     () => scopingSet,
+    () => options.paneLayout ?? null,
     removeFromFocusSet,
     applySetScopeForThread,
     activateFocusSet,
@@ -850,6 +879,7 @@ function createRenderer(options: {
       project: Project | null | undefined,
       patch: { accent?: string | null; glyph?: string | null } | null,
     ) => boolean;
+    browserPaneLifecycle: (thread: LocalThread) => { tearingDown: boolean };
     projectAppearances: () => Record<string, { accent?: string; glyph?: string }>;
     sessionTreeFocusKey: () => string;
     setProjectAppearancePopover: (popover: FakeElement | null, restoreKey?: string) => void;
@@ -2790,12 +2820,14 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.focusThread).toHaveBeenCalledWith('local');
 
     renderer.setActiveProject.mockClear();
+    renderer.activateProjectWorktree.mockClear();
     renderer.focusThread.mockClear();
     localRow.focus();
     const enterEvent = new FakeEvent(localRow, 'Enter');
     renderer.handleTreeKeydown(enterEvent);
     expect(enterEvent.defaultPrevented).toBe(true);
-    expect(renderer.setActiveProject).toHaveBeenCalledWith('alpha');
+    expect(renderer.setActiveProject).not.toHaveBeenCalled();
+    expect(renderer.activateProjectWorktree).not.toHaveBeenCalled();
     await vi.waitFor(() => {
       expect(renderer.focusThread).toHaveBeenCalledWith('local');
     });
@@ -3100,14 +3132,311 @@ describe('Tauri Coven session project rail', () => {
       expect(rows[1].querySelector('.session-set-swatch')).toBeNull();
     });
 
-    it('scopes the canvas to a member\'s set when the row is clicked', async () => {
-      const renderer = createRenderer({ threads, focusSets: [memberSet] });
+    it('preserves fullscreen while scoping to a member\'s set from its row', async () => {
+      const paneLayout = { maximizedLeafId: 'leaf-local' as string | null };
+      const renderer = createRenderer({ threads, focusSets: [memberSet], paneLayout });
       renderer.render();
 
       await renderer.sessionListEl.querySelectorAll('.session-row')[0].emit('click');
 
       expect(renderer.applySetScopeForThread).toHaveBeenCalled();
-      expect(renderer.focusThread).toHaveBeenCalledWith('local');
+      expect(paneLayout.maximizedLeafId).toBeNull();
+      expect(renderer.focusThread).toHaveBeenCalledWith('local', {
+        preserveFullscreenLeafId: 'leaf-local',
+      });
+    });
+
+    async function expectTargetWorktreeFocusScope(activation: 'row' | 'context menu') {
+      const project: Project = {
+        id: 'alpha',
+        name: 'Alpha',
+        root: '/alpha',
+        selectedWorktreePath: '/alpha/a',
+        worktrees: [
+          { path: '/alpha/a', branch: 'a', is_main: true, dirty: false, missing: false },
+          { path: '/alpha/b', branch: 'b', is_main: false, dirty: false, missing: false },
+        ],
+      };
+      const targetThread = {
+        id: 'target', projectId: 'alpha', name: 'Target', status: 'running',
+        worktreePath: '/alpha/b',
+      };
+      const layoutA = {
+        root: PsychePanes.createLeaf('leaf-a', 'source-a'),
+        focusedLeafId: 'leaf-a',
+        maximizedLeafId: 'leaf-a' as string | null,
+        activeSetId: 'set-a' as string | null,
+        spanRoot: { stale: 'a' } as unknown,
+        spanSignature: 'a',
+      };
+      const layoutB = {
+        root: PsychePanes.insertBelow(
+          PsychePanes.createLeaf('leaf-b-source', 'source-b'),
+          'leaf-b-source',
+          PsychePanes.createLeaf('leaf-b-target', targetThread.id),
+          'split-b',
+        ),
+        focusedLeafId: 'leaf-b-source',
+        maximizedLeafId: 'leaf-b-source' as string | null,
+        activeSetId: null as string | null,
+        spanRoot: { stale: 'b' } as unknown,
+        spanSignature: 'b' as string | null,
+      };
+      const layouts = new Map([
+        ['/alpha/a', layoutA],
+        ['/alpha/b', layoutB],
+      ]);
+      const sourceSet = {
+        id: 'set-a',
+        index: 1,
+        name: 'Source set',
+        key: 'alpha\0/alpha/a',
+        threadIds: ['source-a'],
+      };
+      const targetSet = {
+        id: 'set-b',
+        index: 2,
+        name: 'Target set',
+        key: 'alpha\0/alpha/b',
+        threadIds: [targetThread.id],
+      };
+      const renderer = createRenderer({
+        projects: [project],
+        threads: [
+          {
+            id: 'source-a', projectId: 'alpha', name: 'Source A', status: 'running',
+            worktreePath: '/alpha/a',
+          },
+          targetThread,
+        ],
+        activeProjectId: project.id,
+        activeThreadId: 'source-a',
+        focusSets: [sourceSet, targetSet],
+        scopingSet: sourceSet,
+        paneLayout: layoutB,
+      });
+      renderer.applySetScopeForThread.mockImplementation((thread?: LocalThread) => {
+        if (!thread) return false;
+        const activeLayout = layouts.get(project.selectedWorktreePath ?? '');
+        const set = renderer.focusSets.find((candidate) =>
+          candidate.key === `alpha\0${thread.worktreePath}` &&
+          candidate.threadIds.includes(thread.id));
+        if (!activeLayout || !set) return false;
+        activeLayout.activeSetId = set.id;
+        activeLayout.maximizedLeafId = null;
+        activeLayout.spanRoot = null;
+        activeLayout.spanSignature = null;
+        return true;
+      });
+      renderer.focusThread.mockImplementation(async (id: string, focusOptions?: {
+        preserveFullscreenLeafId?: string;
+      }) => {
+        const thread = renderer.state.threads.find((candidate) => candidate.id === id);
+        if (!thread) return;
+        project.selectedWorktreePath = thread.worktreePath;
+        const layout = layouts.get(thread.worktreePath ?? '');
+        const leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
+        if (!layout || !leaf) return;
+        const maximizedLeafId = layout.maximizedLeafId ??
+          focusOptions?.preserveFullscreenLeafId;
+        if (maximizedLeafId) {
+          layout.maximizedLeafId = PsychePanes.findLeafById(layout.root, maximizedLeafId)
+            ? leaf.id
+            : null;
+        }
+        layout.focusedLeafId = leaf.id;
+        renderer.state.activeThreadId = id;
+      });
+      renderer.render();
+
+      const targetRow = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((row) => row.dataset.threadId === targetThread.id);
+      if (activation === 'row') {
+        await targetRow?.emit('click');
+      } else {
+        await targetRow?.emit('contextmenu');
+        const actions = renderer.openSessionContextMenu.mock.calls[0]?.[1] as Array<{
+          label: string;
+          run: () => unknown;
+        }>;
+        const focusAction = actions.find((action) => action.label === 'Focus');
+        expect(focusAction).toBeDefined();
+        await focusAction!.run();
+      }
+
+      expect(renderer.activateProjectWorktree).toHaveBeenCalledWith(
+        project,
+        '/alpha/b',
+        { refreshStatus: false },
+      );
+      expect(layoutA).toMatchObject({
+        focusedLeafId: 'leaf-a',
+        maximizedLeafId: 'leaf-a',
+        activeSetId: 'set-a',
+        spanSignature: 'a',
+      });
+      expect(layoutA.spanRoot).toEqual({ stale: 'a' });
+      expect(layoutB).toMatchObject({
+        focusedLeafId: 'leaf-b-target',
+        maximizedLeafId: 'leaf-b-target',
+        activeSetId: targetSet.id,
+      });
+      expect(layoutB.spanRoot).toBeNull();
+      expect(layoutB.spanSignature).toBeNull();
+      const visibleRoot = PsychePanes.findLeafById(layoutB.root, layoutB.maximizedLeafId);
+      expect(PsychePanes.leafIds(visibleRoot)).toEqual(['leaf-b-target']);
+      expect(renderer.saveSettings).toHaveBeenCalledOnce();
+    }
+
+    it.each(['row', 'context menu'] as const)(
+      'scopes fullscreen selection to the target worktree layout from the %s',
+      expectTargetWorktreeFocusScope,
+    );
+
+    it.each([
+      ['hidden', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads[0].hidden = true;
+      }],
+      ['closing', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads[0].closing = true;
+      }],
+      ['close-started', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads[0].closeStarted = true;
+      }],
+      ['removed', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads.splice(0, 1);
+      }],
+    ])('rejects a local row that becomes %s before activation', async (_state, stale) => {
+      const paneLayout = { maximizedLeafId: 'leaf-local' as string | null };
+      const renderer = createRenderer({
+        threads: [{
+          id: 'local', projectId: 'alpha', name: 'Local', status: 'running',
+          worktreePath: '/alpha',
+        }],
+        activeProjectId: 'alpha',
+        paneLayout,
+        selectedSessionKey: 'coven:previous',
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row');
+      const selectedSessionKey = renderer.settings.selectedSessionKey;
+      renderer.saveSettings.mockClear();
+
+      stale(renderer);
+      await row?.emit('click');
+
+      expect(renderer.settings.selectedSessionKey).toBe(selectedSessionKey);
+      expect(renderer.saveSettings).not.toHaveBeenCalled();
+      expect(renderer.setActiveProject).not.toHaveBeenCalled();
+      expect(renderer.applySetScopeForThread).not.toHaveBeenCalled();
+      expect(paneLayout.maximizedLeafId).toBe('leaf-local');
+      expect(renderer.focusThread).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['hidden', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads[0].hidden = true;
+      }],
+      ['closing', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads[0].closing = true;
+      }],
+      ['close-started', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads[0].closeStarted = true;
+      }],
+      ['removed', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.state.threads.splice(0, 1);
+      }],
+      ['tearing-down', (renderer: ReturnType<typeof createRenderer>) => {
+        renderer.browserPaneLifecycle(renderer.state.threads[0]).tearingDown = true;
+      }],
+    ])('rejects context-menu Focus when its target becomes %s', async (_state, stale) => {
+      const paneLayout = { maximizedLeafId: 'leaf-web' as string | null };
+      const renderer = createRenderer({
+        threads: [{
+          id: 'web', kind: 'web', projectId: 'alpha', name: 'Browser', status: 'running',
+          worktreePath: '/alpha',
+        }],
+        activeProjectId: 'alpha',
+        paneLayout,
+        selectedSessionKey: 'coven:previous',
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row');
+      await row?.emit('contextmenu');
+      const actions = renderer.openSessionContextMenu.mock.calls[0]?.[1] as Array<{
+        label: string;
+        run: () => unknown;
+      }>;
+      const focusAction = actions.find((action) => action.label === 'Focus');
+      const selectedSessionKey = renderer.settings.selectedSessionKey;
+      renderer.saveSettings.mockClear();
+
+      stale(renderer);
+      expect(focusAction).toBeDefined();
+      await focusAction!.run();
+
+      expect(renderer.settings.selectedSessionKey).toBe(selectedSessionKey);
+      expect(renderer.saveSettings).not.toHaveBeenCalled();
+      expect(renderer.activateProjectWorktree).not.toHaveBeenCalled();
+      expect(renderer.applySetScopeForThread).not.toHaveBeenCalled();
+      expect(paneLayout.maximizedLeafId).toBe('leaf-web');
+      expect(renderer.focusThread).not.toHaveBeenCalled();
+    });
+
+    it('rejects a rendered browser row that starts tearing down before activation', async () => {
+      const paneLayout = { maximizedLeafId: 'leaf-web' as string | null };
+      const browserThread = {
+        id: 'web', kind: 'web', projectId: 'alpha', name: 'Browser', status: 'running',
+        worktreePath: '/alpha',
+      };
+      const renderer = createRenderer({
+        threads: [browserThread],
+        activeProjectId: 'alpha',
+        paneLayout,
+        selectedSessionKey: 'coven:previous',
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row');
+      const selectedSessionKey = renderer.settings.selectedSessionKey;
+      renderer.saveSettings.mockClear();
+
+      renderer.browserPaneLifecycle(browserThread).tearingDown = true;
+      await row?.emit('click');
+
+      expect(renderer.settings.selectedSessionKey).toBe(selectedSessionKey);
+      expect(renderer.saveSettings).not.toHaveBeenCalled();
+      expect(renderer.applySetScopeForThread).not.toHaveBeenCalled();
+      expect(paneLayout.maximizedLeafId).toBe('leaf-web');
+      expect(renderer.focusThread).not.toHaveBeenCalled();
+    });
+
+    it('revalidates a local row after switching projects', async () => {
+      const paneLayout = { maximizedLeafId: 'leaf-local' as string | null };
+      const renderer = createRenderer({
+        threads: [{
+          id: 'local', projectId: 'alpha', name: 'Local', status: 'running',
+          worktreePath: '/alpha',
+        }],
+        activeProjectId: 'other',
+        paneLayout,
+        selectedSessionKey: 'coven:previous',
+      });
+      renderer.render();
+      const selectedSessionKey = renderer.settings.selectedSessionKey;
+      renderer.saveSettings.mockClear();
+      renderer.setActiveProject.mockImplementation(async () => {
+        renderer.state.threads[0].hidden = true;
+        return true;
+      });
+
+      await renderer.sessionListEl.querySelector('.session-row')?.emit('click');
+
+      expect(renderer.setActiveProject).toHaveBeenCalledWith('alpha');
+      expect(renderer.settings.selectedSessionKey).toBe(selectedSessionKey);
+      expect(renderer.saveSettings).not.toHaveBeenCalled();
+      expect(renderer.applySetScopeForThread).not.toHaveBeenCalled();
+      expect(paneLayout.maximizedLeafId).toBe('leaf-local');
+      expect(renderer.focusThread).not.toHaveBeenCalled();
     });
 
     it('uses aria-selected for picked membership while keeping aria-current on the active row', async () => {

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createPtyClient,
@@ -17,6 +18,10 @@ const mainJs = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
+const PsychePanes = await import(pathToFileURL(join(
+  repoRoot,
+  'native/desktop/psyche-build-tauri/web/panes/pane-tree.mjs',
+)).href);
 const COVEN_SESSION_ID = '12345678-1234-4abc-8def-1234567890ab';
 const DUPLICATE_COVEN_SESSION_ID = '87654321-4321-4cba-8fed-0987654321ba';
 const runtimeThreadIds = new Set<string>();
@@ -36,6 +41,81 @@ function functionSource(name: string) {
   throw new Error(`unterminated function ${name}`);
 }
 
+function compileIsolatedFunction<T>(
+  source: string,
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(...names, `"use strict"; return (${source});`)(...values) as T;
+}
+
+function compilePaneFocusDependencies(dependencies: Record<string, unknown>) {
+  const state = dependencies.state || { threads: [] };
+  const findThread = typeof dependencies.findThread === 'function'
+    ? dependencies.findThread
+    : compileIsolatedFunction(functionSource('findThread'), { state });
+  const filesPanes = dependencies.filesPanes instanceof Map
+    ? dependencies.filesPanes
+    : new Map();
+  const findFilesPaneBySurfaceId = compileIsolatedFunction(
+    functionSource('findFilesPaneBySurfaceId'),
+    { filesPanes },
+  );
+  const canvasSurfaceById = typeof dependencies.canvasSurfaceById === 'function'
+    ? dependencies.canvasSurfaceById
+    : compileIsolatedFunction(functionSource('canvasSurfaceById'), {
+        findThread,
+        findFilesPaneBySurfaceId,
+      });
+  const paneLayouts = dependencies.paneLayouts instanceof Map
+    ? dependencies.paneLayouts
+    : new Map();
+  const paneLayoutKey = compileIsolatedFunction(functionSource('paneLayoutKey'), {});
+  const paneLayoutFor = compileIsolatedFunction(functionSource('paneLayoutFor'), {
+    paneLayouts,
+    paneLayoutKey,
+  });
+  const paneLayoutForThread = compileIsolatedFunction(functionSource('paneLayoutForThread'), {
+    paneLayoutFor,
+  });
+  const focusSets = Array.isArray(dependencies.focusSets) ? dependencies.focusSets : [];
+  const findFocusSet = compileIsolatedFunction(functionSource('findFocusSet'), { focusSets });
+  const scopedPaneRoot = compileIsolatedFunction(functionSource('scopedPaneRoot'), {
+    findFocusSet,
+    canvasSurfaceById,
+    PsychePanes,
+  });
+  const paneFocusEligible = compileIsolatedFunction(functionSource('paneFocusEligible'), {
+    scopedPaneRoot,
+    PsychePanes,
+  });
+  const browserPaneLifecycle = compileIsolatedFunction(functionSource('browserPaneLifecycle'), {
+    browserPaneLifecycleStates: new WeakMap(),
+  });
+  const browserPaneIsClosing = compileIsolatedFunction(functionSource('browserPaneIsClosing'), {
+    browserPaneLifecycle,
+  });
+  const paneSurfaceFocusEligible = compileIsolatedFunction(
+    functionSource('paneSurfaceFocusEligible'),
+    { browserPaneIsClosing, paneFocusEligible },
+  );
+  const resolvePaneFocusSuccessor = compileIsolatedFunction(
+    functionSource('resolvePaneFocusSuccessor'),
+    { canvasSurfaceById, paneSurfaceFocusEligible, scopedPaneRoot, PsychePanes },
+  );
+  return {
+    canvasSurfaceById,
+    paneLayoutFor,
+    paneLayoutForThread,
+    paneFocusEligible,
+    paneSurfaceFocusEligible,
+    resolvePaneFocusSuccessor,
+    scopedPaneRoot,
+    PsychePanes,
+  };
+}
+
 function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
@@ -52,15 +132,14 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     readSavedWorkspace: dependencies.loadSavedWorkspace || (async () => null),
     restorePersistedSessions: async () => ({ sessions: [], unknownLiveIds: [] }),
     renderPaneWorkspace: () => undefined,
+    ...compilePaneFocusDependencies(dependencies),
     ...dependencies,
   };
   const dependenciesWithFilesScope = withFilesScopeSelectionHelper(
     functionSource,
     resolvedDependencies,
   );
-  const names = Object.keys(dependenciesWithFilesScope);
-  const values = Object.values(dependenciesWithFilesScope);
-  return Function(...names, `"use strict"; return (${source});`)(...values) as T;
+  return compileIsolatedFunction<T>(source, dependenciesWithFilesScope);
 }
 
 function deferred<T>() {

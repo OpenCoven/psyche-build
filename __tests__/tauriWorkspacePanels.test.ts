@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
@@ -27,6 +28,10 @@ const statusBundle = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/web/status.bundle.js'),
   'utf8'
 );
+const PsychePanes = await import(pathToFileURL(join(
+  repoRoot,
+  'native/desktop/psyche-build-tauri/web/panes/pane-tree.mjs',
+)).href);
 const stylesCss = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'),
   'utf8'
@@ -55,6 +60,78 @@ function functionSource(name: string) {
     if (depth === 0) return mainJs.slice(start, i + 1);
   }
   throw new Error(`unterminated ${name}`);
+}
+
+function compileExtractedFunction<T>(
+  name: string,
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(
+    ...names,
+    `"use strict"; return (${functionSource(name)});`,
+  )(...values) as T;
+}
+
+function compileCloseThreadPaneDependencies(
+  findThread: (id: string) => Record<string, unknown> | null,
+) {
+  const findFilesPaneBySurfaceId = compileExtractedFunction<(id: string) => null>(
+    'findFilesPaneBySurfaceId',
+    { filesPanes: new Map() },
+  );
+  const canvasSurfaceById = compileExtractedFunction<(id: string) => Record<string, unknown> | null>(
+    'canvasSurfaceById',
+    { findThread, findFilesPaneBySurfaceId },
+  );
+  const paneLayoutKey = compileExtractedFunction<
+    (projectId: string, worktreePath: string) => string
+  >('paneLayoutKey', {});
+  const paneLayoutFor = compileExtractedFunction<
+    (projectId: string, worktreePath: string) => Record<string, unknown> | null
+  >('paneLayoutFor', { paneLayouts: new Map(), paneLayoutKey });
+  const paneLayoutForThread = compileExtractedFunction<
+    (surface: Record<string, unknown> | null) => Record<string, unknown> | null
+  >('paneLayoutForThread', { paneLayoutFor });
+  const findFocusSet = compileExtractedFunction<(id: string) => null>(
+    'findFocusSet',
+    { focusSets: [] },
+  );
+  const scopedPaneRoot = compileExtractedFunction<
+    (layout: Record<string, unknown>) => unknown
+  >('scopedPaneRoot', { findFocusSet, canvasSurfaceById, PsychePanes });
+  const paneFocusEligible = compileExtractedFunction<
+    (layout: Record<string, unknown> | null, threadId: string) => boolean
+  >('paneFocusEligible', { scopedPaneRoot, PsychePanes });
+  const browserPaneLifecycle = compileExtractedFunction<
+    (thread: object | null) => { tearingDown: boolean }
+  >('browserPaneLifecycle', { browserPaneLifecycleStates: new WeakMap() });
+  const browserPaneIsClosing = compileExtractedFunction<(thread: object | null) => boolean>(
+    'browserPaneIsClosing',
+    { browserPaneLifecycle },
+  );
+  const paneSurfaceFocusEligible = compileExtractedFunction<
+    (layout: Record<string, unknown> | null, surface: Record<string, unknown> | null) => boolean
+  >('paneSurfaceFocusEligible', { browserPaneIsClosing, paneFocusEligible });
+  const resolvePaneFocusSuccessor = compileExtractedFunction<
+    (
+      layout: Record<string, unknown> | null,
+      preferredId: string | null,
+      threadsOnly?: boolean,
+    ) => string | null
+  >('resolvePaneFocusSuccessor', {
+    canvasSurfaceById,
+    paneSurfaceFocusEligible,
+    scopedPaneRoot,
+    PsychePanes,
+  });
+  return {
+    canvasSurfaceById,
+    paneLayoutForThread,
+    paneSurfaceFocusEligible,
+    resolvePaneFocusSuccessor,
+  };
 }
 
 function deferred<T>() {
@@ -1248,8 +1325,14 @@ describe('Tauri workspace panels', () => {
       },
     };
     const state = { threads: [thread], activeThreadId: thread.id };
+    const findThread = (id: string) => (
+      state.threads.find((candidate) => candidate.id === id) || null
+    );
+    const paneFocusDependencies = compileCloseThreadPaneDependencies(findThread);
     const closeThread = Function(
-      'findThread', 'markActiveSurface', 'stageGitSurface', 'suspendGitRequests', 'clearTimeout',
+      'findThread', 'canvasSurfaceById', 'paneLayoutForThread', 'paneSurfaceFocusEligible',
+      'resolvePaneFocusSuccessor', 'PsychePanes',
+      'markActiveSurface', 'stageGitSurface', 'suspendGitRequests', 'clearTimeout',
       'noteStatusActivity', 'pendingDataBuffers', 'forgetThreadInSets',
       'detachThreadPane', 'stopThreadPty', 'state',
       'retainFileFocusAfterThreadRemoval', 'renderPaneWorkspace',
@@ -1257,7 +1340,12 @@ describe('Tauri workspace panels', () => {
       'isPersistentThread', 'invoke', 'saveWorkspaceNow', 'setStatus',
       `"use strict"; return (${functionSource('closeThread')});`,
     )(
-      () => thread,
+      findThread,
+      paneFocusDependencies.canvasSurfaceById,
+      paneFocusDependencies.paneLayoutForThread,
+      paneFocusDependencies.paneSurfaceFocusEligible,
+      paneFocusDependencies.resolvePaneFocusSuccessor,
+      PsychePanes,
       () => undefined,
       () => { calls.push('stage'); },
       () => { calls.push('suspend'); },
