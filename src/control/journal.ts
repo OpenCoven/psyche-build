@@ -1,5 +1,5 @@
 import { constants, type BigIntStats } from 'node:fs';
-import { chmod, lstat, mkdir, open, readFile, rename, truncate, type FileHandle } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rename, truncate, type FileHandle, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
@@ -212,6 +212,31 @@ interface DurableOutcomeFileSnapshot {
   readonly mtimeNs: bigint;
   readonly ctimeNs: bigint;
   readonly birthtimeNs: bigint;
+}
+
+interface DurableOutcomeDirectoryIdentity {
+  readonly realPath: string;
+  readonly dev?: bigint;
+  readonly ino?: bigint;
+}
+
+interface DurableOutcomePublicationContext {
+  readonly directoryPath: string;
+  readonly destinationPath: string;
+  readonly temporaryPath: string;
+}
+
+interface DurableOutcomePublicationTestHooks {
+  readonly beforeTemporaryOpen?: (context: DurableOutcomePublicationContext) => Promise<void> | void;
+  readonly beforeDestinationRename?: (context: DurableOutcomePublicationContext) => Promise<void> | void;
+}
+
+let durableOutcomePublicationTestHooks: DurableOutcomePublicationTestHooks | undefined;
+
+export function setDurableOutcomePublicationTestHooksForTesting(
+  hooks: DurableOutcomePublicationTestHooks | undefined,
+): void {
+  durableOutcomePublicationTestHooks = hooks;
 }
 
 /**
@@ -447,20 +472,66 @@ export class ControlJournal {
 
   async storeOutcome(idempotencyKey: string, outcome: CommandOutcome): Promise<void> {
     const serialized = serializeStoredOutcomeRecord({ idempotencyKey, outcome }, idempotencyKey);
-    await ensureDurableOutcomeDirectory(this.outcomeDirectoryPath);
+    const directoryIdentity = await ensureDurableOutcomeDirectory(this.outcomeDirectoryPath);
     const destination = this.outcomePath(idempotencyKey);
     const temporary = path.join(
       this.outcomeDirectoryPath,
       `${path.basename(destination)}.${process.pid}.${randomUUID()}.tmp`,
     );
-    const handle = await open(temporary, 'wx', 0o600);
+    const publication = {
+      directoryPath: this.outcomeDirectoryPath,
+      destinationPath: destination,
+      temporaryPath: temporary,
+    } satisfies DurableOutcomePublicationContext;
+    let handle: FileHandle | undefined;
+    let temporarySnapshot: DurableOutcomeFileSnapshot | undefined;
+    let published = false;
     try {
+      await assertDurableOutcomeDirectoryIdentity(this.outcomeDirectoryPath, directoryIdentity);
+      await invokeDurableOutcomePublicationHook('beforeTemporaryOpen', publication);
+      await assertDurableOutcomeDirectoryIdentity(this.outcomeDirectoryPath, directoryIdentity);
+      handle = await openExclusiveDurableOutcomeFile(temporary);
+      const openedStats = await handle.stat({ bigint: true });
+      if (!isSafeDurableOutcomeFileStats(openedStats)) throw unsafeDurableOutcomePath();
+      temporarySnapshot = snapshotDurableOutcomeFile(openedStats);
+      await assertDurableOutcomeDirectoryIdentity(this.outcomeDirectoryPath, directoryIdentity);
       await handle.writeFile(serialized, 'utf8');
       await handle.sync();
-    } finally {
+      const syncedStats = await handle.stat({ bigint: true });
+      if (!isSafeDurableOutcomeFileStats(syncedStats)) throw unsafeDurableOutcomePath();
+      temporarySnapshot = snapshotDurableOutcomeFile(syncedStats);
       await handle.close();
+      handle = undefined;
+      await assertDurableOutcomeDirectoryIdentity(this.outcomeDirectoryPath, directoryIdentity);
+      await invokeDurableOutcomePublicationHook('beforeDestinationRename', publication);
+      await assertDurableOutcomeDirectoryIdentity(this.outcomeDirectoryPath, directoryIdentity);
+      await rename(temporary, destination);
+      published = true;
+      if (temporarySnapshot) {
+        const publishedPath = await readDurableOutcomeFilePathSnapshot(destination);
+        if (
+          publishedPath.missing
+          || publishedPath.invalid
+          || !publishedPath.snapshot
+          || !sameDurableOutcomeFileIdentity(temporarySnapshot, publishedPath.snapshot)
+        ) {
+          await removeDurableOutcomePathIfMatching(destination, temporarySnapshot);
+          throw durableOutcomeDirectoryChangedDuringPublication();
+        }
+      }
+      await assertDurableOutcomeDirectoryIdentity(this.outcomeDirectoryPath, directoryIdentity);
+    } catch (error) {
+      if (handle) await handle.close().catch(() => undefined);
+      if (temporarySnapshot) {
+        await removeDurableOutcomePathIfMatching(
+          published ? destination : temporary,
+          temporarySnapshot,
+        );
+      } else if (!published) {
+        await unlink(temporary).catch(() => undefined);
+      }
+      throw error;
     }
-    await rename(temporary, destination);
   }
 
   async loadSnapshot(): Promise<JournalSnapshotFile | undefined> {
@@ -619,9 +690,77 @@ async function durableOutcomeDirectoryExists(directoryPath: string): Promise<boo
   return privateDirectoryChainExists(durableOutcomeDirectoryComponents(directoryPath));
 }
 
-async function ensureDurableOutcomeDirectory(directoryPath: string): Promise<void> {
+async function ensureDurableOutcomeDirectory(directoryPath: string): Promise<DurableOutcomeDirectoryIdentity> {
   await ensurePrivateDirectoryChain(durableOutcomeDirectoryComponents(directoryPath));
-  await chmod(directoryPath, 0o700);
+  const identity = await snapshotDurableOutcomeDirectoryIdentity(directoryPath);
+  if (!identity) throw unsafeDurableOutcomePath();
+  return identity;
+}
+
+async function invokeDurableOutcomePublicationHook(
+  step: keyof DurableOutcomePublicationTestHooks,
+  context: DurableOutcomePublicationContext,
+): Promise<void> {
+  await durableOutcomePublicationTestHooks?.[step]?.(context);
+}
+
+function normalizeDurableOutcomeRealPath(value: string): string {
+  const normalized = path.normalize(value);
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+async function snapshotDurableOutcomeDirectoryIdentity(
+  directoryPath: string,
+): Promise<DurableOutcomeDirectoryIdentity | undefined> {
+  const stats = await readDurableOutcomeDirectoryStats(directoryPath);
+  if (!stats) return undefined;
+  if (!isSafeDurableOutcomeDirectoryStats(stats)) throw unsafeDurableOutcomePath();
+  let resolved: string;
+  try {
+    resolved = await realpath(directoryPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    if (isUnsafeDurableOutcomeOpenError(error)) throw unsafeDurableOutcomePath();
+    throw error;
+  }
+  return {
+    realPath: normalizeDurableOutcomeRealPath(resolved),
+    dev: stats.dev,
+    ino: stats.ino,
+  };
+}
+
+function sameDurableOutcomeDirectoryIdentity(
+  left: DurableOutcomeDirectoryIdentity,
+  right: DurableOutcomeDirectoryIdentity,
+): boolean {
+  return left.realPath === right.realPath
+    && (left.dev === undefined || right.dev === undefined || left.dev === right.dev)
+    && (left.ino === undefined || right.ino === undefined || left.ino === right.ino);
+}
+
+async function assertDurableOutcomeDirectoryIdentity(
+  directoryPath: string,
+  expected: DurableOutcomeDirectoryIdentity,
+): Promise<void> {
+  let current: DurableOutcomeDirectoryIdentity | undefined;
+  try {
+    current = await snapshotDurableOutcomeDirectoryIdentity(directoryPath);
+  } catch (error) {
+    if (error instanceof Error && error.message === unsafeDurableOutcomePath().message) {
+      throw durableOutcomeDirectoryChangedDuringPublication();
+    }
+    throw error;
+  }
+  if (!current || !sameDurableOutcomeDirectoryIdentity(expected, current)) {
+    throw durableOutcomeDirectoryChangedDuringPublication();
+  }
+}
+
+async function openExclusiveDurableOutcomeFile(filePath: string): Promise<FileHandle> {
+  let flags = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY;
+  if (process.platform !== 'win32') flags |= constants.O_NOFOLLOW;
+  return open(filePath, flags, 0o600);
 }
 
 function runtimeDirectoryComponents(runtimeDirectoryPath: string): string[] {
@@ -693,6 +832,10 @@ function unsafeDurableOutcomePath(): Error {
   return new Error('durable outcome path is unsafe');
 }
 
+function durableOutcomeDirectoryChangedDuringPublication(): Error {
+  return new Error('durable outcome directory changed during publication');
+}
+
 function snapshotDurableOutcomeFile(stats: BigIntStats): DurableOutcomeFileSnapshot {
   return {
     dev: stats.dev,
@@ -716,6 +859,23 @@ function sameDurableOutcomeFileSnapshot(
     && left.mtimeNs === right.mtimeNs
     && left.ctimeNs === right.ctimeNs
     && left.birthtimeNs === right.birthtimeNs;
+}
+
+function sameDurableOutcomeFileIdentity(
+  left: DurableOutcomeFileSnapshot,
+  right: DurableOutcomeFileSnapshot,
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function removeDurableOutcomePathIfMatching(
+  filePath: string,
+  expected: DurableOutcomeFileSnapshot,
+): Promise<void> {
+  const current = await readDurableOutcomeFilePathSnapshot(filePath);
+  if (current.missing || current.invalid || !current.snapshot) return;
+  if (!sameDurableOutcomeFileIdentity(expected, current.snapshot)) return;
+  await unlink(filePath).catch(() => undefined);
 }
 
 async function readBoundedStoredOutcome(handle: FileHandle): Promise<string> {

@@ -1387,6 +1387,12 @@ export class ControlRuntime {
   ): Promise<void> {
     for (const record of records) {
       if (record.receipt.state !== 'approval_required') continue;
+      if (this.compactable) {
+        await this.compactable.storeOutcome(
+          record.idempotencyKey,
+          restartInvalidatedOutcome(),
+        );
+      }
       await this.journal.append('command.failed', restartInvalidatedPayload(record));
     }
     this.capabilityLeases.revokeAll();
@@ -2558,5 +2564,13 @@ function restartInvalidatedPayload(record: DurableReceiptRecord): Record<string,
       completedAt: new Date().toISOString(),
       code: 'action_invalidated',
     },
+  };
+}
+
+function restartInvalidatedOutcome(): CommandOutcome {
+  return {
+    status: 'failed',
+    code: 'action_invalidated',
+    message: 'surface effect failed',
   };
 }

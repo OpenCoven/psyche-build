@@ -1,4 +1,4 @@
-import { appendFile, mkdir, open, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -7,12 +7,14 @@ import {
   ControlJournal,
   createAgentControlJournalResource,
   DURABLE_OUTCOME_RECORD_MAX_BYTES,
+  setDurableOutcomePublicationTestHooksForTesting,
 } from '../src/control/journal.js';
 import { createRedactedApprovalEffect } from '../src/control/approvals.js';
 import type { ActionReceipt } from '../src/control/types.js';
 
 const roots: string[] = [];
 afterEach(async () => {
+  setDurableOutcomePublicationTestHooksForTesting(undefined);
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -310,6 +312,42 @@ describe('ControlJournal', () => {
     await mkdir(filePath, { mode: 0o700 });
 
     await expect(journal.loadOutcome(idempotencyKey)).rejects.toThrow('durable outcome path is unsafe');
+  });
+
+  it('fails closed if the outcomes directory identity changes before temp publication', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const idempotencyKey = 'swapped-before-temp-open';
+    const runtimeDirectory = path.join(root, '.psyche', 'runtime');
+    const externalDirectory = path.join(root, 'external-swapped-outcomes');
+    const quarantinedDirectory = path.join(runtimeDirectory, 'outcomes-private');
+    const destination = storedOutcomePath(root, idempotencyKey);
+    const externalModeBefore = 0o755;
+    await mkdir(externalDirectory, { recursive: true, mode: externalModeBefore });
+
+    let swapped = false;
+    setDurableOutcomePublicationTestHooksForTesting({
+      beforeTemporaryOpen: async ({ directoryPath }) => {
+        if (swapped || directoryPath !== path.join(runtimeDirectory, 'outcomes')) return;
+        swapped = true;
+        await rename(directoryPath, quarantinedDirectory);
+        await symlink(
+          externalDirectory,
+          directoryPath,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      },
+    });
+
+    await expect(journal.storeOutcome(idempotencyKey, {
+      status: 'succeeded',
+      value: { paneId: '%race' },
+    })).rejects.toThrow('durable outcome directory changed during publication');
+
+    expect(await pathExists(path.join(externalDirectory, path.basename(destination)))).toBe(false);
+    expect(await readdir(externalDirectory)).toEqual([]);
+    expect((await stat(externalDirectory)).mode & 0o777).toBe(externalModeBefore);
+    expect(await readdir(quarantinedDirectory)).toEqual([]);
   });
 
   it('persists optional approval ownership metadata across journal replay', async () => {

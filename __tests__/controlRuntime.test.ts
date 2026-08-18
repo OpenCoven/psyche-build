@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { ControlRuntime, type ControlHandlers } from '../src/control/runtime.js';
+import { ControlRuntime, type ControlHandlers, type RuntimeJournal } from '../src/control/runtime.js';
 import { ApprovalStore } from '../src/control/approvals.js';
 import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
 import type { ControlTaskCredentialReference } from '../src/control/credentials.js';
@@ -144,7 +144,7 @@ async function submit(runtime: ControlRuntime, input: ControlCommand) {
   return runtime.submit({ ...input, payload: { requestId } });
 }
 
-async function createBrowserActionHarness(options: {
+type BrowserActionHarnessOptions = {
   resolver?: (input: { snapshotId: string; elementRef: string }) => ReturnType<typeof createCanonicalElementSemantics>;
   actOnBrowser?: ControlHandlers['actOnBrowser'];
   runBrowserScript?: ControlHandlers['runBrowserScript'];
@@ -153,8 +153,37 @@ async function createBrowserActionHarness(options: {
   clock?: () => Date;
   leaseTtlMs?: number;
   readActiveTaskCredential?: (taskId: string) => Promise<ControlTaskCredentialReference | null>;
-} = {}) {
-  const journal = createMemoryJournal();
+};
+
+type MemoryRuntimeJournal = ReturnType<typeof createMemoryJournal>;
+type BrowserActionHarness<TJournal extends RuntimeJournal> = {
+  runtime: ControlRuntime;
+  journal: TJournal;
+  surfaces: SurfaceRegistry;
+  capabilityLeases: CapabilityLeaseStore;
+  approvals: ApprovalStore;
+  tab: ReturnType<SurfaceRegistry['upsertBrowserTab']>;
+  lease: { id: string; revision: number };
+  actorId: string;
+  taskId: string;
+};
+
+async function createBrowserActionHarness(
+  options?: BrowserActionHarnessOptions,
+): Promise<BrowserActionHarness<MemoryRuntimeJournal>>;
+async function createBrowserActionHarness<TJournal extends RuntimeJournal>(
+  options: BrowserActionHarnessOptions & { journal: TJournal },
+): Promise<BrowserActionHarness<TJournal>>;
+async function createBrowserActionHarness<TJournal extends RuntimeJournal>(
+  options: BrowserActionHarnessOptions & { journal?: TJournal } = {},
+) {
+  return createBrowserActionHarnessWithJournal(options);
+}
+
+async function createBrowserActionHarnessWithJournal<TJournal extends RuntimeJournal>(
+  options: BrowserActionHarnessOptions & { journal?: TJournal } = {},
+) {
+  const journal = (options.journal ?? createMemoryJournal()) as TJournal | MemoryRuntimeJournal;
   const surfaces = new SurfaceRegistry();
   const actorId = options.actorId ?? 'agent-review';
   const taskId = options.taskId ?? 'task-review';
@@ -2548,8 +2577,15 @@ describe('ControlRuntime', () => {
   });
 
   it('invalidates restart-pending approval receipts once and rehydrates the terminal status', async () => {
-    const harness = await createBrowserActionHarness();
-    await requestReviewApproval(harness);
+    const root = await newJournalRoot('psyche-approval-durability');
+    const journal = await ControlJournal.open(root, 7);
+    const harness = await createBrowserActionHarness({ journal });
+    const approval = await requestReviewApproval(harness);
+
+    await expect(journal.loadOutcome('approval-action')).resolves.toMatchObject({
+      status: 'succeeded',
+      value: { state: 'approval_required', approvalId: approval.approvalId },
+    });
 
     const restarted = await ControlRuntime.create({
       ownerEpoch: 8,
@@ -2579,6 +2615,10 @@ describe('ControlRuntime', () => {
       actionId: 'approval-action',
       state: 'approval_required',
     }));
+    await expect(journal.loadOutcome('approval-action')).resolves.toMatchObject({
+      status: 'failed',
+      code: 'action_invalidated',
+    });
     await expect(restarted.submit(command({
       id: 'approval-action-retry',
       idempotencyKey: 'approval-action',
@@ -2596,21 +2636,25 @@ describe('ControlRuntime', () => {
       },
     }))).resolves.toMatchObject({ status: 'failed', code: 'action_invalidated' });
 
-    const invalidations = harness.journal.read().filter((event) => (
+    const invalidations = journal.read(0).filter((event) => (
       event.kind === 'command.failed'
       && (event.payload.receipt as { actionId?: string; code?: string } | undefined)?.actionId === 'approval-action'
       && (event.payload.receipt as { actionId?: string; code?: string } | undefined)?.code === 'action_invalidated'
     ));
     expect(invalidations).toHaveLength(1);
 
-    const eventsAfterFirstRestart = harness.journal.read().length;
+    const eventsAfterFirstRestart = journal.read(0).length;
     const restartedAgain = await ControlRuntime.create({ ownerEpoch: 9, handlers, journal: harness.journal });
-    expect(harness.journal.read()).toHaveLength(eventsAfterFirstRestart);
+    expect(journal.read(0)).toHaveLength(eventsAfterFirstRestart);
     expect(restartedAgain.snapshot().receipts).toContainEqual(expect.objectContaining({
       actionId: 'approval-action',
       state: 'failed',
       code: 'action_invalidated',
     }));
+    await expect(journal.loadOutcome('approval-action')).resolves.toMatchObject({
+      status: 'failed',
+      code: 'action_invalidated',
+    });
   });
 });
 
