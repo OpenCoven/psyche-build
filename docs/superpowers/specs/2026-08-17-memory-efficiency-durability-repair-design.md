@@ -160,11 +160,15 @@ Regressions prove:
 - temp write, temp fsync, close, rename, and directory fsync occur in order,
   including parent fsync for a newly created outcomes directory;
 - directory-fsync failure leaves terminal evidence ineligible for compaction;
-- 999 successful terminal commands reach sequence 1,998, one dirty command
-  reaches sequence 2,000, one trigger attempts compaction, the terminal event
-  remains, and blocked submissions execute no effects;
-- after persistence is restored, flush and compaction succeed, restart returns
-  the compact outcome, and the original command's effect count remains one;
+- the sidecar-failing dirty command runs first and reaches terminal sequence 2,
+  then 999 successful fillers reach sequence 2,000 without compaction;
+- one successful trigger reaches sequence 2,002, computes cutoff 1,002, fails
+  while flushing the covered dirty key, retains its terminal evidence, and
+  blocks only subsequent fresh effects;
+- after persistence is restored, the blocked-state reservation retry flushes
+  the dirty outcome and the recovery trigger requests compaction; restart
+  returns the original key's compact tombstone and its effect count remains
+  one;
 - unresolved commands recover exactly once;
 - snapshots contain no exact or sensitive values except raw keys in bounded
   open transactions; and

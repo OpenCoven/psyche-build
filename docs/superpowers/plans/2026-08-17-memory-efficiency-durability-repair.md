@@ -314,44 +314,53 @@ it('blocks new effects while a covered terminal outcome is not durable', async (
     journal,
   });
 
-  for (let index = 0; index < 999; index += 1) {
-    await runtime.submit(openTerminalCommand(`idem-fill-${index}`));
-  }
-  expect(journal.sequence).toBe(1_998);
-
   failDirty = true;
   await expect(runtime.submit(openTerminalCommand('idem-dirty')))
     .resolves.toMatchObject({ status: 'succeeded' });
   const terminal = journal.findByIdempotencyKey('idem-dirty');
   expect(terminal?.kind).toBe('command.succeeded');
-  expect(terminal?.sequence).toBe(2_000);
+  expect(terminal?.sequence).toBe(2);
   expect(dirtyEffect).toHaveBeenCalledTimes(1);
 
-  await runtime.submit(openTerminalCommand('idem-compaction-trigger'));
+  for (let index = 0; index < 999; index += 1) {
+    await runtime.submit(openTerminalCommand(`idem-fill-${index}`));
+  }
+  expect(journal.sequence).toBe(2_000);
+  expect(journal.firstSequence).toBe(1);
+
+  await expect(runtime.submit(openTerminalCommand('idem-compaction-trigger')))
+    .resolves.toMatchObject({ status: 'succeeded' });
+  expect(journal.sequence).toBe(2_002);
+  expect(journal.sequence - 1_000).toBe(1_002);
   await vi.waitFor(() => expect(error.mock.calls.some(([message]) => (
     String(message).includes('deferred compaction')
   ))).toBe(true));
 
   expect(journal.findByIdempotencyKey('idem-dirty')).toEqual(terminal);
-  expect(journal.firstSequence).toBeLessThanOrEqual(terminal!.sequence);
+  expect(journal.firstSequence).toBe(1);
+  expect(openTerminalEffect).toHaveBeenCalledTimes(1_001);
   expect((runtime as unknown as {
     compactionBlockedByDurability: boolean;
   }).compactionBlockedByDurability).toBe(true);
 
   const callsBeforeBlocked = openTerminalEffect.mock.calls.length;
+  const sequenceBeforeBlocked = journal.sequence;
   await expect(runtime.submit(openTerminalCommand('idem-blocked'))).resolves.toMatchObject({
     status: 'rejected',
     code: 'durability_unavailable',
   });
   expect(openTerminalEffect).toHaveBeenCalledTimes(callsBeforeBlocked);
+  expect(journal.sequence).toBe(sequenceBeforeBlocked);
   expect(dirtyEffect).toHaveBeenCalledTimes(1);
 
   failDirty = false;
   await expect(runtime.submit(openTerminalCommand('idem-recovery-trigger')))
     .resolves.toMatchObject({ status: 'succeeded' });
+  expect(journal.sequence).toBe(2_004);
+  expect(openTerminalEffect).toHaveBeenCalledTimes(1_002);
   await vi.waitFor(() => expect(
     journal.firstSequence,
-  ).toBeGreaterThan(terminal!.sequence));
+  ).toBe(1_005));
 
   const reopened = await ControlJournal.open(root, 5);
   const restartedHandlers = makeHandlers();
@@ -378,8 +387,18 @@ it('blocks new effects while a covered terminal outcome is not durable', async (
 }, 120_000);
 ```
 
-Only one command crosses the compaction threshold. No filler loop continues
-after durability blocks compaction.
+The dirty command is first, so its terminal is sequence 2. The 999 durable
+fillers add 1,998 events and stop at sequence 2,000, where the `<= 2_000`
+guard does not compact. The trigger adds two events, reaches sequence 2,002,
+and computes cutoff 1,002, which covers the dirty terminal and forces its
+failed flush to defer compaction. The trigger effect has already completed;
+only the later fresh submission is rejected without appending events.
+
+After persistence is restored, the recovery-trigger submission uses the
+planned blocked-state reservation check to flush dirty outcomes, then its
+terminal path invokes the existing compaction request. No private flush or
+compaction API is invented. Restart must return the dirty key's compact
+tombstone without invoking its effect again.
 
 ### Step 7: Redact snapshots
 
