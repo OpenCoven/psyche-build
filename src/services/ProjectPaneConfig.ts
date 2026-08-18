@@ -29,6 +29,7 @@ const DEFAULT_POLL_INTERVAL_MS = 50;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const LOCK_DIRECTORY_NAME = 'pane-config.lock';
 const SLUG_ALLOCATION_LOCK_DIRECTORY_NAME = 'pane-slug-allocation.lock';
+const RECOVERY_LOCK_DIRECTORY_NAME = 'worktree-recovery.lock';
 const LOCK_RECORD_NAME = 'lease.json';
 
 export type ProjectPaneConfigPane = Record<string, unknown> | PsychePane;
@@ -146,6 +147,28 @@ export async function acquireProjectPaneSlugAllocationLock(
     projectRoot,
     SLUG_ALLOCATION_LOCK_DIRECTORY_NAME,
     'pane slug allocation',
+    options,
+  );
+}
+
+/**
+ * Acquires the target-project recovery namespace before coordinating a
+ * target-wide cleanup marker with a session-local slug ownership record.
+ *
+ * Global lock order:
+ * worktree lifecycle/reuse -> target recovery -> session slug -> pane config.
+ * New-worktree flows may reserve and release the slug before taking the
+ * lifecycle lease, but no flow acquires lifecycle/reuse while a project
+ * namespace lock is held.
+ */
+export async function acquireProjectWorktreeRecoveryLock(
+  projectRoot: string,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigLock> {
+  return acquireProjectScopedLock(
+    projectRoot,
+    RECOVERY_LOCK_DIRECTORY_NAME,
+    'worktree recovery',
     options,
   );
 }
@@ -317,6 +340,7 @@ export async function transactProjectPaneConfig<T>(
     let persisted = false;
     const persist = async (): Promise<void> => {
       assertUniquePaneIds(config.panes, projectPaneConfigPath(lock.canonicalProjectRoot));
+      assertUniquePaneSlugs(config.panes, projectPaneConfigPath(lock.canonicalProjectRoot));
       reconcileProjectPaneLayout(config);
       await writeProjectPaneConfig(lock.canonicalProjectRoot, config);
       persisted = true;
@@ -1018,6 +1042,27 @@ function assertUniquePaneIds(
         tmuxConflict.secondOwnerId
       }" in the same server generation`,
     );
+  }
+}
+
+function assertUniquePaneSlugs(
+  panes: readonly ProjectPaneConfigPane[] | undefined,
+  configPath: string,
+): void {
+  const seen = new Set<string>();
+  for (const pane of Array.isArray(panes) ? panes : []) {
+    const record = asRecord(pane);
+    const slug = typeof record.slug === 'string' ? record.slug : undefined;
+    if (!slug) {
+      continue;
+    }
+    if (seen.has(slug)) {
+      throw new ProjectPaneConfigError(
+        'config_corrupt',
+        `Pane config ${configPath} contains duplicate pane slug "${slug}"`,
+      );
+    }
+    seen.add(slug);
   }
 }
 

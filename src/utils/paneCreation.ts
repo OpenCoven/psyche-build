@@ -39,9 +39,15 @@ import {
   ensureProjectPaneConfigPane,
   mutateProjectPaneConfig,
   projectPaneConfigPath,
-  readProjectPaneConfigUnderLock,
-  withProjectPaneSlugAllocationLock,
 } from '../services/ProjectPaneConfig.js';
+import {
+  allocateUniquePaneSlug,
+  type PaneSlugReservation,
+} from '../services/PaneSlugRegistry.js';
+import {
+  reserveCrashSafePaneSlug,
+  settlePaneSlugReservationAfterFailure,
+} from '../services/PaneSlugReservation.js';
 import {
   appendSlugSuffix,
   launchAgentInPane,
@@ -63,10 +69,7 @@ import {
 } from './paneTeardown.js';
 import { createPsychePaneId } from './paneIdentity.js';
 import { runGitProcess } from './gitProcess.js';
-import {
-  listQuarantinedPaneSlugs,
-  writeWorktreeRecoveryMarker,
-} from '../services/WorktreeRecoveryMarker.js';
+import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.js';
 import {
   isPaneLifecycleReservationRetainedError,
   PaneLifecycleReservationRetainedError,
@@ -118,6 +121,12 @@ export interface CreatePaneOptions {
    * made durable.
    */
   reuseReservation?: WorktreeReuseReservation;
+  /** Internal crash-safe slug ownership, created by createPane. */
+  paneSlugReservation?: PaneSlugReservation;
+  /** Internal slug chosen from the fresh session registry namespace. */
+  reservedPaneSlug?: string;
+  /** Internal stable pane identity written into the provisional reservation. */
+  reservedPaneId?: string;
 }
 
 export interface CreatePaneResult {
@@ -297,7 +306,7 @@ export async function createPane(
   availableAgents: AgentName[]
 ): Promise<CreatePaneResult> {
   if (!options.existingWorktree) {
-    return createPaneWithReuseReservation(options, availableAgents);
+    return createPaneWithSlugOwnership(options, availableAgents);
   }
 
   if (!options.persistReusedPane) {
@@ -325,23 +334,11 @@ export async function createPane(
         worktreePath: reservation.canonicalWorktreePath,
       },
     };
-    const createReservedPane = () => createPaneWithReuseReservation(
+    const createReservedPane = () => createPaneWithSlugOwnership(
       reservedOptions,
       availableAgents,
     );
-
-    let result: CreatePaneResult;
-    if (options.resolveExistingWorktreeSlug) {
-      // Lock order is reuse reservation -> project slug allocation -> pane
-      // config read/write. Release the slug lock before completing or
-      // cancelling reuse so cleanup never waits while holding this namespace.
-      result = await withProjectPaneSlugAllocationLock(
-        sessionProjectRoot,
-        createReservedPane,
-      );
-    } else {
-      result = await createReservedPane();
-    }
+    const result = await createReservedPane();
 
     await reservation.complete();
     settled = true;
@@ -355,6 +352,113 @@ export async function createPane(
     if (!settled) {
       await reservation.cancel();
     }
+  }
+}
+
+async function createPaneWithSlugOwnership(
+  options: CreatePaneOptions,
+  availableAgents: AgentName[],
+): Promise<CreatePaneResult> {
+  const projectRoot = resolvePaneProjectRoot(options.projectRoot);
+  const sessionProjectRoot = resolvePaneSessionProjectRoot(options, projectRoot);
+  const reservedPaneId = createPsychePaneId();
+  const baseSlug = options.existingWorktree
+    ? options.existingWorktree.slug
+    : appendSlugSuffix(
+      options.slugBase || await generateSlug(options.prompt),
+      options.slugSuffix,
+    );
+  const reservation = await reserveCrashSafePaneSlug({
+    sessionProjectRoot,
+    projectRoot,
+    paneId: reservedPaneId,
+    operation: options.existingWorktree
+      ? 'local-existing-worktree-pane'
+      : 'local-new-worktree-pane',
+    allocate: async ({ config, occupiedSlugs }) => {
+      const persistedPanes = (Array.isArray(config.panes) ? config.panes : [])
+        .filter((pane): pane is PsychePane => (
+          typeof pane === 'object'
+          && pane !== null
+          && typeof (pane as Partial<PsychePane>).slug === 'string'
+        ));
+      const ownershipPanes = Array.from(occupiedSlugs)
+        .filter((slug) => !persistedPanes.some((pane) => pane.slug === slug))
+        .map((slug) => ({ slug } as PsychePane));
+      const requestedSlug = options.existingWorktree
+        && options.resolveExistingWorktreeSlug
+        ? options.resolveExistingWorktreeSlug([
+          ...persistedPanes,
+          ...ownershipPanes,
+        ])
+        : baseSlug;
+      const slug = options.existingWorktree
+        ? requestedSlug
+        : await allocateUniquePaneSlug(
+          requestedSlug,
+          occupiedSlugs,
+          (candidate) => fs.existsSync(path.join(
+            projectRoot,
+            '.psyche',
+            'worktrees',
+            candidate,
+          )),
+        );
+      return {
+        slug,
+        worktreePath: options.existingWorktree?.worktreePath
+          || path.join(projectRoot, '.psyche', 'worktrees', slug),
+      };
+    },
+  });
+
+  try {
+    const result = await createPaneWithReuseReservation(
+      {
+        ...options,
+        projectRoot,
+        sessionProjectRoot,
+        paneSlugReservation: reservation,
+        reservedPaneSlug: reservation.slug,
+        reservedPaneId,
+        ...(options.existingWorktree
+          ? {
+            existingWorktree: {
+              ...options.existingWorktree,
+              slug: reservation.slug,
+            },
+          }
+          : {}),
+      },
+      availableAgents,
+    );
+    if (result.needsAgentChoice || !result.pane) {
+      await reservation.clearBeforeEffect();
+      return result;
+    }
+    await reservation.completeAfterPanePersisted(result.pane);
+    return result;
+  } catch (error) {
+    const settlement = await settlePaneSlugReservationAfterFailure(
+      reservation,
+      {
+        operation: 'local-pane-creation-failure',
+        reason: error instanceof Error ? error.message : String(error),
+        teardown: async (effect) => terminatePaneForRollback(
+          TmuxService.getInstance(),
+          effect.paneId,
+          effect.tmuxServerIdentity,
+        ),
+      },
+    );
+    if (settlement.quarantined && !isPaneLifecycleReservationRetainedError(error)) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; ${
+          settlement.message || `pane slug ${reservation.slug} remains quarantined`
+        }`,
+      );
+    }
+    throw error;
   }
 }
 
@@ -386,25 +490,6 @@ async function createPaneWithReuseReservation(
   const projectRoot = resolvePaneProjectRoot(optionsProjectRoot);
 
   const sessionProjectRoot = resolvePaneSessionProjectRoot(options, projectRoot);
-  if (existingWorktree && options.resolveExistingWorktreeSlug) {
-    const config = await readProjectPaneConfigUnderLock(sessionProjectRoot);
-    const freshPanes = Array.isArray(config.panes)
-      ? config.panes.filter((pane): pane is PsychePane => (
-        typeof pane === 'object'
-        && pane !== null
-        && typeof (pane as Partial<PsychePane>).slug === 'string'
-      ))
-      : [];
-    const quarantinedSlugs = await listQuarantinedPaneSlugs(sessionProjectRoot);
-    existingWorktree = {
-      ...existingWorktree,
-      slug: options.resolveExistingWorktreeSlug([
-        ...freshPanes,
-        ...quarantinedSlugs.map((slug) => ({ slug } as PsychePane)),
-      ]),
-    };
-  }
-
   const settingsManager = new SettingsManager(projectRoot);
   const settings = settingsManager.getSettings();
   const existingWorktreeMetadata = existingWorktree
@@ -448,12 +533,10 @@ async function createPaneWithReuseReservation(
   }
 
   // Generate slug (filesystem-safe directory name) and branch name (may include prefix).
-  const generatedSlug = existingWorktree
-    ? existingWorktree.slug
-    : (slugBase || await generateSlug(prompt));
-  const slug = existingWorktree
-    ? existingWorktree.slug
-    : appendSlugSuffix(generatedSlug, slugSuffix);
+  const slug = options.reservedPaneSlug
+    || (existingWorktree
+      ? existingWorktree.slug
+      : appendSlugSuffix(slugBase || await generateSlug(prompt), slugSuffix));
   const branchName = existingWorktree
     ? existingWorktree.branchName
     : (branchPrefix ? `${branchPrefix}${slug}` : slug);
@@ -600,8 +683,13 @@ async function createPaneWithReuseReservation(
   }
 
   const tmuxServerIdentity = allocationGeneration;
+  await options.paneSlugReservation?.recordPaneEffect(
+    paneInfo,
+    allocationGeneration,
+  );
+
   const newPane: PsychePane = {
-    id: createPsychePaneId(),
+    id: options.reservedPaneId || createPsychePaneId(),
     slug,
     displayName: existingWorktreeMetadata?.displayName,
     branchName: branchName !== slug ? branchName : undefined,
@@ -638,6 +726,7 @@ async function createPaneWithReuseReservation(
     const recovery = teardown.presence === 'absent'
       ? undefined
       : await retainPaneRecovery({
+        recoveryId: options.paneSlugReservation?.recoveryId,
         projectRoot,
         sessionProjectRoot,
         pane: newPane,
@@ -678,6 +767,7 @@ async function createPaneWithReuseReservation(
     const recovery = teardown.presence === 'absent'
       ? undefined
       : await retainPaneRecovery({
+        recoveryId: options.paneSlugReservation?.recoveryId,
         projectRoot,
         sessionProjectRoot,
         pane: newPane,
@@ -702,6 +792,7 @@ async function createPaneWithReuseReservation(
     operation: string,
     reason: string,
   ) => retainPaneRecovery({
+    recoveryId: options.paneSlugReservation?.recoveryId,
     projectRoot,
     sessionProjectRoot,
     pane: newPane,
@@ -726,10 +817,11 @@ async function createPaneWithReuseReservation(
     ].join(' ');
     try {
       const marker = await writeWorktreeRecoveryMarker({
+        recoveryId: options.paneSlugReservation?.recoveryId,
         sessionProjectRoot,
         projectRoot,
         worktreePath,
-        pane: { id: newPane.id, paneId: newPane.paneId },
+        pane: { id: newPane.id, paneId: newPane.paneId, slug: newPane.slug },
         operation: 'worktree-creation-ownership',
         reason,
       });

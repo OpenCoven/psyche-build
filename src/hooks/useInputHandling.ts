@@ -327,16 +327,18 @@ export function useInputHandling(params: UseInputHandlingParams) {
       setStatusMessage("Creating terminal pane...")
 
       const tmuxService = TmuxService.getInstance()
+      const nextId = getNextPsycheId(panes)
       await createTransactionalPane({
         projectRoot: targetProjectRoot,
         sessionProjectRoot: projectRoot,
         operation: "terminal-pane",
+        slugBase: `shell-${nextId}`,
         tmuxService,
         allocate: () => tmuxService.splitPane({ cwd: targetProjectRoot }),
         createPane: async ({ paneId, tmuxServerIdentity }) => {
           const pane = await createShellPane(
             paneId,
-            getNextPsycheId(panes),
+            nextId,
             undefined,
             { tmuxServerIdentity, setPaneTitle: false },
           )
@@ -394,6 +396,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
         projectRoot: targetProjectRoot,
         sessionProjectRoot: projectRoot,
         operation: "desktop-use-pane",
+        slugBase: `desktop-use-${nextId}`,
         tmuxService,
         allocate: () => tmuxService.splitPane({ cwd: targetProjectRoot }),
         createPane: ({ paneId, tmuxServerIdentity }) => ({
@@ -558,6 +561,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       setStatusMessage(`Opening terminal in ${getPaneDisplayName(selectedPane)}...`)
 
       const tmuxService = TmuxService.getInstance()
+      const nextId = getNextPsycheId(panes)
       await withWorktreePaneCreationReservation({
         worktreePath: selectedPane.worktreePath,
         projectRoot: targetProjectRoot,
@@ -565,13 +569,15 @@ export function useInputHandling(params: UseInputHandlingParams) {
           projectRoot: targetProjectRoot,
           sessionProjectRoot: projectRoot,
           operation: "worktree-terminal-pane",
+          slugBase: `shell-${nextId}`,
+          worktreePath: canonicalWorktreePath,
           tmuxService,
           reservation,
           allocate: () => tmuxService.splitPane({ cwd: canonicalWorktreePath }),
           createPane: async ({ paneId, tmuxServerIdentity }) => {
             const pane = await createShellPane(
               paneId,
-              getNextPsycheId(panes),
+              nextId,
               undefined,
               { tmuxServerIdentity, setPaneTitle: false },
             )
@@ -639,12 +645,6 @@ export function useInputHandling(params: UseInputHandlingParams) {
 
       const tmuxService = TmuxService.getInstance()
       const slugBase = `files-${path.basename(selectedPane.worktreePath)}`
-      let slug = slugBase
-      let suffix = 2
-      while (panes.some((pane) => pane.slug === slug)) {
-        slug = `${slugBase}-${suffix}`
-        suffix += 1
-      }
 
       await withWorktreePaneCreationReservation({
         worktreePath: selectedPane.worktreePath,
@@ -653,6 +653,8 @@ export function useInputHandling(params: UseInputHandlingParams) {
           projectRoot: targetProjectRoot,
           sessionProjectRoot: projectRoot,
           operation: "file-browser-pane",
+          slugBase,
+          worktreePath: canonicalWorktreePath,
           tmuxService,
           reservation,
           // Do not pass a command to split-window: the browser must not start
@@ -662,7 +664,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
           }),
           createPane: ({ paneId, tmuxServerIdentity }) => ({
             id: createPsychePaneId(),
-            slug,
+            slug: slugBase,
             prompt: "",
             paneId,
             ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
@@ -675,7 +677,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
           }),
           persist: (pane) => savePanes([...panes, pane], panes),
           activate: async (pane) => {
-            await tmuxService.setPaneTitle(pane.paneId, slug)
+            await tmuxService.setPaneTitle(pane.paneId, pane.slug)
             await tmuxService.sendShellCommand(pane.paneId, buildFilesOnlyCommand())
             await tmuxService.sendTmuxKeys(pane.paneId, "Enter")
           },

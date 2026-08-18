@@ -1,12 +1,13 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PsychePane } from '../src/types.js';
 
 const beginWorktreeReuseReservationMock = vi.hoisted(() => vi.fn());
-const withProjectPaneSlugAllocationLockMock = vi.hoisted(() => vi.fn());
 const readProjectPaneConfigUnderLockMock = vi.hoisted(() => vi.fn());
 const listQuarantinedPaneSlugsMock = vi.hoisted(() => (
   vi.fn<() => Promise<string[]>>(async () => [])
 ));
+const reserveCrashSafePaneSlugMock = vi.hoisted(() => vi.fn());
+const settlePaneSlugReservationAfterFailureMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
@@ -23,7 +24,11 @@ vi.mock('../src/services/ProjectPaneConfig.js', () => ({
     `${projectRoot}/.psyche/psyche.config.json`
   ),
   readProjectPaneConfigUnderLock: readProjectPaneConfigUnderLockMock,
-  withProjectPaneSlugAllocationLock: withProjectPaneSlugAllocationLockMock,
+}));
+
+vi.mock('../src/services/PaneSlugReservation.js', () => ({
+  reserveCrashSafePaneSlug: reserveCrashSafePaneSlugMock,
+  settlePaneSlugReservationAfterFailure: settlePaneSlugReservationAfterFailureMock,
 }));
 
 vi.mock('../src/services/WorktreeRecoveryMarker.js', () => ({
@@ -32,6 +37,42 @@ vi.mock('../src/services/WorktreeRecoveryMarker.js', () => ({
 }));
 
 describe('worktree pane creation reservation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    listQuarantinedPaneSlugsMock.mockResolvedValue([]);
+    settlePaneSlugReservationAfterFailureMock.mockResolvedValue({
+      released: true,
+      quarantined: false,
+    });
+    reserveCrashSafePaneSlugMock.mockImplementation(async (options) => {
+      const config = await readProjectPaneConfigUnderLockMock();
+      const quarantined = await listQuarantinedPaneSlugsMock();
+      const persistedSlugs = new Set(
+        (config.panes || []).map((pane: PsychePane) => pane.slug),
+      );
+      const occupiedSlugs = new Set([...persistedSlugs, ...quarantined]);
+      const candidate = await options.allocate({
+        config,
+        persistedSlugs,
+        occupiedSlugs,
+        ownershipRecords: [],
+      });
+      return {
+        recoveryId: '00000000-0000-4000-8000-000000000001',
+        sessionProjectRoot: options.sessionProjectRoot,
+        projectRoot: options.projectRoot,
+        slug: candidate.slug,
+        paneId: options.paneId,
+        worktreePath: candidate.worktreePath,
+        effect: undefined,
+        recordPaneEffect: vi.fn(async () => {}),
+        completeAfterPanePersisted: vi.fn(async () => {}),
+        clearBeforeEffect: vi.fn(async () => {}),
+        clearAfterConfirmedTeardown: vi.fn(async () => {}),
+      };
+    });
+  });
+
   it('holds reuse ownership through durable pane persistence', async () => {
     const module = await import('../src/utils/worktreePaneCreationReservation.js');
     const withReservation = (
@@ -100,17 +141,6 @@ describe('worktree pane creation reservation', () => {
         retain: vi.fn(),
       };
     });
-    withProjectPaneSlugAllocationLockMock.mockImplementationOnce(async (
-      _projectRoot: string,
-      operation: () => Promise<unknown>,
-    ) => {
-      order.push('acquire-slug-lock');
-      try {
-        return await operation();
-      } finally {
-        order.push('release-slug-lock');
-      }
-    });
     readProjectPaneConfigUnderLockMock.mockImplementationOnce(async () => {
       order.push('load-fresh-panes');
       return {
@@ -147,10 +177,8 @@ describe('worktree pane creation reservation', () => {
     expect(result.needsAgentChoice).toBe(true);
     expect(order).toEqual([
       'begin-reservation',
-      'acquire-slug-lock',
       'load-fresh-panes',
       'allocate-slug',
-      'release-slug-lock',
       'complete-reservation',
     ]);
   });
@@ -164,10 +192,6 @@ describe('worktree pane creation reservation', () => {
       cancel: vi.fn(async () => {}),
       retain: vi.fn(),
     });
-    withProjectPaneSlugAllocationLockMock.mockImplementationOnce(async (
-      _projectRoot: string,
-      operation: () => Promise<unknown>,
-    ) => operation());
     readProjectPaneConfigUnderLockMock.mockResolvedValueOnce({
       panes: [{ slug: 'feature' }],
     });
@@ -203,9 +227,10 @@ describe('worktree pane creation reservation', () => {
       undefined,
       sessionProjectRoot,
     );
-    expect(withProjectPaneSlugAllocationLockMock)
-      .toHaveBeenCalledWith(sessionProjectRoot, expect.any(Function));
-    expect(listQuarantinedPaneSlugsMock).toHaveBeenCalledWith(sessionProjectRoot);
+    expect(reserveCrashSafePaneSlugMock).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionProjectRoot }),
+    );
+    expect(listQuarantinedPaneSlugsMock).toHaveBeenCalledOnce();
   });
 
   it('releases the slug lock before cancelling reuse after allocation failure', async () => {
@@ -220,16 +245,6 @@ describe('worktree pane creation reservation', () => {
       },
       retain: vi.fn(),
     }));
-    withProjectPaneSlugAllocationLockMock.mockImplementationOnce(async (
-      _projectRoot: string,
-      operation: () => Promise<unknown>,
-    ) => {
-      try {
-        return await operation();
-      } finally {
-        order.push('release-slug-lock');
-      }
-    });
     readProjectPaneConfigUnderLockMock.mockImplementationOnce(async () => {
       order.push('load-fresh-panes');
       return { panes: [{ slug: 'feature' }] };
@@ -257,7 +272,6 @@ describe('worktree pane creation reservation', () => {
     expect(order).toEqual([
       'load-fresh-panes',
       'allocate-slug',
-      'release-slug-lock',
       'cancel-reservation',
     ]);
   });

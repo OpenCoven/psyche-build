@@ -4,17 +4,27 @@ import {
   readdirSync,
   readFileSync,
 } from 'node:fs';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
+import {
+  acquireProjectPaneSlugAllocationLock,
+  acquireProjectWorktreeRecoveryLock,
+} from './ProjectPaneConfig.js';
+import {
+  listPaneSlugOwnershipRecords,
+  quarantinePaneSlugOwnershipRecord,
+  removePaneSlugOwnershipRecord,
+} from './PaneSlugRegistry.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 
 const RECOVERY_DIRECTORY_NAME = 'worktree-recovery';
-const RECOVERY_MARKER_VERSION = 4;
+const RECOVERY_MARKER_VERSION = 5;
 
 export interface WorktreeRecoveryMarker {
   version: number;
   id: string;
+  recoveryId?: string;
   generation?: string;
   sessionProjectRoot?: string;
   projectRoot: string;
@@ -32,6 +42,7 @@ export interface WorktreeRecoveryMarker {
 }
 
 export interface WorktreeRecoveryMarkerRequest {
+  recoveryId?: string;
   sessionProjectRoot?: string;
   projectRoot: string;
   worktreePath: string;
@@ -52,9 +63,13 @@ export interface BlockingWorktreeRecoveryMarker {
 }
 
 /**
- * Recovery markers live beside the pane registry that owns the pane slug,
- * never inside a target worktree that may need to be removed. The marker
- * separately records the target project/worktree identity for cleanup checks.
+ * The destructive cleanup marker is target-project-wide. The linked slug
+ * quarantine remains session-local, so unrelated sessions share cleanup
+ * authority without sharing pane names.
+ *
+ * Lock order is target recovery -> session slug. The target marker is written
+ * only after the slug record is durable, so a crash can leave an
+ * over-conservative slug quarantine but never an unguarded cleanup target.
  */
 export async function writeWorktreeRecoveryMarker(
   request: WorktreeRecoveryMarkerRequest,
@@ -67,12 +82,16 @@ export async function writeWorktreeRecoveryMarker(
     request.sessionProjectRoot || projectRoot,
   );
   const worktreePath = canonicalizePathWithExistingAncestor(request.worktreePath);
-  const generation = randomUUID();
-  const id = recoveryMarkerId(projectRoot, worktreePath, request.pane, generation);
+  const recoveryId = request.recoveryId || randomUUID();
+  if (!/^[0-9a-f-]{36}$/i.test(recoveryId)) {
+    throw new Error('Worktree recovery ID must be a UUID');
+  }
+  const id = recoveryMarkerId(projectRoot, worktreePath, request.pane, recoveryId);
   const marker: WorktreeRecoveryMarker = {
     version: RECOVERY_MARKER_VERSION,
     id,
-    generation,
+    recoveryId,
+    generation: recoveryId,
     sessionProjectRoot,
     projectRoot,
     worktreePath,
@@ -90,15 +109,45 @@ export async function writeWorktreeRecoveryMarker(
       ...(request.pane.slug
         ? [`Treat pane slug ${request.pane.slug} as occupied until reconciliation completes.`]
         : []),
-      `After reconciling the pane registry, run \`psyche recover --project "${sessionProjectRoot}" --acknowledge ${id}\`.`,
+      `After reconciling the pane registry, run \`psyche recover --project "${projectRoot}" --acknowledge ${id}\`.`,
       'Until that explicit acknowledgement, Psyche will refuse destructive worktree cleanup.',
     ].join(' '),
   };
-  const directory = worktreeRecoveryMarkerDirectory(sessionProjectRoot);
-  const markerPath = path.join(directory, `${id}.json`);
-  await mkdir(directory, { recursive: true });
-  await atomicWriteJson(markerPath, marker);
-  return { marker, path: markerPath };
+  const targetLock = await acquireProjectWorktreeRecoveryLock(projectRoot);
+  try {
+    let slugLock: Awaited<ReturnType<typeof acquireProjectPaneSlugAllocationLock>>
+      | undefined;
+    if (request.pane.slug) {
+      slugLock = await acquireProjectPaneSlugAllocationLock(sessionProjectRoot);
+    }
+    try {
+      if (request.pane.slug) {
+        await quarantinePaneSlugOwnershipRecord({
+          sessionProjectRoot,
+          recoveryId,
+          projectRoot,
+          worktreePath,
+          slug: request.pane.slug,
+          pane: {
+            id: request.pane.id,
+            paneId: request.pane.paneId,
+          },
+          operation: request.operation,
+          reason: request.reason,
+          targetMarkerId: id,
+        });
+      }
+      const directory = worktreeRecoveryMarkerDirectory(projectRoot);
+      const markerPath = path.join(directory, `${id}.json`);
+      await mkdir(directory, { recursive: true });
+      await atomicWriteJson(markerPath, marker);
+      return { marker, path: markerPath };
+    } finally {
+      await slugLock?.release();
+    }
+  } finally {
+    await targetLock.release();
+  }
 }
 
 export async function listWorktreeRecoveryMarkers(
@@ -107,7 +156,7 @@ export async function listWorktreeRecoveryMarkers(
   const directory = worktreeRecoveryMarkerDirectory(projectRoot);
   let entries: string[];
   try {
-    entries = await (await import('node:fs/promises')).readdir(directory);
+    entries = await readdir(directory);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return [];
@@ -120,13 +169,10 @@ export async function listWorktreeRecoveryMarkers(
     if (!entry.endsWith('.json')) {
       continue;
     }
-    const raw = await (await import('node:fs/promises')).readFile(
-      path.join(directory, entry),
-      'utf8',
-    );
-    const parsed = JSON.parse(raw) as unknown;
+    const markerPath = path.join(directory, entry);
+    const parsed = JSON.parse(await readFile(markerPath, 'utf8')) as unknown;
     if (!isWorktreeRecoveryMarker(parsed)) {
-      throw new Error(`Invalid worktree recovery marker: ${path.join(directory, entry)}`);
+      throw new Error(`Invalid worktree recovery marker: ${markerPath}`);
     }
     markers.push(parsed);
   }
@@ -134,18 +180,26 @@ export async function listWorktreeRecoveryMarkers(
 }
 
 export async function listQuarantinedPaneSlugs(
-  projectRoot: string,
+  sessionProjectRoot: string,
 ): Promise<string[]> {
-  const markers = await listWorktreeRecoveryMarkers(projectRoot);
-  return Array.from(new Set(markers.flatMap((marker) => (
-    marker.pane.slug ? [marker.pane.slug] : []
-  )))).sort();
+  const records = await listPaneSlugOwnershipRecords(sessionProjectRoot);
+  const legacyMarkers = await listWorktreeRecoveryMarkers(sessionProjectRoot);
+  return Array.from(new Set([
+    ...records.flatMap((record) => (
+      record.state === 'quarantined' ? [record.slug] : []
+    )),
+    ...legacyMarkers.flatMap((marker) => (
+      marker.version < RECOVERY_MARKER_VERSION && marker.pane.slug
+        ? [marker.pane.slug]
+        : []
+    )),
+  ])).sort();
 }
 
 /**
- * Acknowledge is intentionally explicit and does not attempt to kill panes,
- * edit pane config, or release a live process's lease. It only removes the
- * durable block after an operator has completed those checks.
+ * Acknowledgement coordinates the target marker and its originating
+ * session-local slug record. Both namespace locks make concurrent
+ * acknowledgement idempotent; each record is removed at most once.
  */
 export async function acknowledgeWorktreeRecoveryMarker(
   projectRoot: string,
@@ -154,25 +208,60 @@ export async function acknowledgeWorktreeRecoveryMarker(
   if (!/^[a-f0-9]{64}$/.test(markerId)) {
     throw new Error('Recovery marker ID must be a SHA-256 hex identifier');
   }
-  const markerPath = path.join(
-    worktreeRecoveryMarkerDirectory(projectRoot),
-    `${markerId}.json`,
+  const suppliedRoot = canonicalizePathWithExistingAncestor(projectRoot);
+  const directMarker = await readMarkerIfPresent(suppliedRoot, markerId);
+  const suppliedRecords = await listPaneSlugOwnershipRecords(suppliedRoot);
+  const linkedRecord = suppliedRecords.find(
+    (record) => record.targetMarkerId === markerId,
   );
+  const targetRoot = directMarker?.projectRoot || linkedRecord?.projectRoot;
+  if (!targetRoot) {
+    return false;
+  }
+
+  const targetLock = await acquireProjectWorktreeRecoveryLock(targetRoot);
   try {
-    await rm(markerPath);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return false;
+    const marker = await readMarkerIfPresent(targetRoot, markerId);
+    const sessionProjectRoot = marker?.sessionProjectRoot
+      || linkedRecord?.sessionProjectRoot;
+    let slugLock: Awaited<ReturnType<typeof acquireProjectPaneSlugAllocationLock>>
+      | undefined;
+    if (sessionProjectRoot) {
+      slugLock = await acquireProjectPaneSlugAllocationLock(sessionProjectRoot);
     }
-    throw error;
+    try {
+      let removed = false;
+      const recoveryId = marker?.recoveryId || linkedRecord?.recoveryId;
+      if (sessionProjectRoot && recoveryId) {
+        removed = await removePaneSlugOwnershipRecord(
+          sessionProjectRoot,
+          recoveryId,
+        ) || removed;
+      }
+      try {
+        await rm(path.join(
+          worktreeRecoveryMarkerDirectory(targetRoot),
+          `${markerId}.json`,
+        ));
+        removed = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+      }
+      return removed;
+    } finally {
+      await slugLock?.release();
+    }
+  } finally {
+    await targetLock.release();
   }
 }
 
 /**
- * Cleanup paths use this synchronous conservative check immediately before a
- * destructive Git command. A malformed or unreadable marker is itself a
- * reason to stop: silently ignoring it would defeat crash recovery.
+ * Cleanup authority always comes from the target project's durable namespace.
+ * The session argument remains for API compatibility but is intentionally not
+ * used to scope destructive recovery.
  */
 export function findBlockingWorktreeRecoveryMarker(
   sessionProjectRoot: string,
@@ -206,67 +295,71 @@ function findBlockingRecoveryMarker(
   targetWorktreePath: string,
   allowReusablePaneQuarantines: boolean,
 ): BlockingWorktreeRecoveryMarker {
-  const canonicalSessionProjectRoot = canonicalizePathWithExistingAncestor(
-    sessionProjectRoot,
-  );
-  const directory = worktreeRecoveryMarkerDirectory(canonicalSessionProjectRoot);
-  if (!existsSync(directory)) {
+  const targetProject = canonicalizePathWithExistingAncestor(targetProjectRoot);
+  const sessionProject = canonicalizePathWithExistingAncestor(sessionProjectRoot);
+  const directories = Array.from(new Set([
+    worktreeRecoveryMarkerDirectory(targetProject),
+    worktreeRecoveryMarkerDirectory(sessionProject),
+  ]));
+  if (!directories.some((directory) => existsSync(directory))) {
     return { blocked: false };
   }
 
-  let entries: string[];
-  try {
-    entries = readdirSync(directory);
-  } catch (error) {
-    return {
-      blocked: true,
-      reason: `could not read recovery marker directory: ${errorMessage(error)}`,
-    };
-  }
-
   const target = canonicalizePathWithExistingAncestor(targetWorktreePath);
-  const targetProject = canonicalizePathWithExistingAncestor(targetProjectRoot);
-  for (const entry of entries) {
-    if (!entry.endsWith('.json')) {
+  for (const directory of directories) {
+    if (!existsSync(directory)) {
       continue;
     }
-    const markerPath = path.join(directory, entry);
-    let marker: unknown;
+    let entries: string[];
     try {
-      marker = JSON.parse(readFileSync(markerPath, 'utf8')) as unknown;
+      entries = readdirSync(directory);
     } catch (error) {
       return {
         blocked: true,
-        reason: `could not read recovery marker ${markerPath}: ${errorMessage(error)}`,
+        reason: `could not read recovery marker directory: ${errorMessage(error)}`,
       };
     }
-    if (!isWorktreeRecoveryMarker(marker)) {
-      return {
-        blocked: true,
-        reason: `invalid recovery marker ${markerPath}`,
-      };
-    }
-    if (
-      marker.version === RECOVERY_MARKER_VERSION
-      && canonicalizePathWithExistingAncestor(marker.sessionProjectRoot!)
-        !== canonicalSessionProjectRoot
-    ) {
-      return {
-        blocked: true,
-        reason: `recovery marker ${markerPath} belongs to another session project`,
-      };
-    }
-    if (
-      canonicalizePathWithExistingAncestor(marker.projectRoot) === targetProject
-      &&
-      pathsOverlap(marker.worktreePath, target)
-      && !(allowReusablePaneQuarantines && marker.allowWorktreeReuse === true)
-    ) {
-      return {
-        blocked: true,
-        marker,
-        reason: `recovery marker ${marker.id} requires operator acknowledgement`,
-      };
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) {
+        continue;
+      }
+      const markerPath = path.join(directory, entry);
+      let marker: unknown;
+      try {
+        marker = JSON.parse(readFileSync(markerPath, 'utf8')) as unknown;
+      } catch (error) {
+        return {
+          blocked: true,
+          reason: `could not read recovery marker ${markerPath}: ${errorMessage(error)}`,
+        };
+      }
+      if (!isWorktreeRecoveryMarker(marker)) {
+        return {
+          blocked: true,
+          reason: `invalid recovery marker ${markerPath}`,
+        };
+      }
+      if (
+        canonicalizePathWithExistingAncestor(marker.projectRoot) !== targetProject
+      ) {
+        if (directory === worktreeRecoveryMarkerDirectory(targetProject)) {
+          return {
+            blocked: true,
+            reason: `recovery marker ${markerPath} belongs to another target project`,
+          };
+        }
+        continue;
+      }
+      if (
+        pathsOverlap(marker.worktreePath, target)
+        && !(allowReusablePaneQuarantines && marker.allowWorktreeReuse === true)
+      ) {
+        return {
+          blocked: true,
+          marker,
+          reason: `recovery marker ${marker.id} requires operator acknowledgement`,
+        };
+      }
     }
   }
 
@@ -282,14 +375,35 @@ export function worktreeRecoveryMarkerDirectory(projectRoot: string): string {
   );
 }
 
+async function readMarkerIfPresent(
+  projectRoot: string,
+  markerId: string,
+): Promise<WorktreeRecoveryMarker | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(
+      path.join(worktreeRecoveryMarkerDirectory(projectRoot), `${markerId}.json`),
+      'utf8',
+    )) as unknown;
+    if (!isWorktreeRecoveryMarker(parsed)) {
+      throw new Error(`Invalid worktree recovery marker ${markerId}`);
+    }
+    return parsed;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
 function recoveryMarkerId(
   projectRoot: string,
   worktreePath: string,
   pane: { id: string; paneId: string },
-  generation: string,
+  recoveryId: string,
 ): string {
   return createHash('sha256')
-    .update(`${projectRoot}\0${worktreePath}\0${pane.id}\0${pane.paneId}\0${generation}`)
+    .update(`${projectRoot}\0${worktreePath}\0${pane.id}\0${pane.paneId}\0${recoveryId}`)
     .digest('hex');
 }
 
@@ -299,18 +413,21 @@ function isWorktreeRecoveryMarker(value: unknown): value is WorktreeRecoveryMark
   }
   const marker = value as Partial<WorktreeRecoveryMarker>;
   return (
-    (marker.version === 1 || marker.version === 2 || marker.version === RECOVERY_MARKER_VERSION)
+    (
+      marker.version === 1
+      || marker.version === 2
+      || marker.version === 4
+      || marker.version === RECOVERY_MARKER_VERSION
+    )
     && typeof marker.id === 'string'
     && /^[a-f0-9]{64}$/.test(marker.id)
     && (
-      marker.version === 1
+      marker.version !== RECOVERY_MARKER_VERSION
       || (
-        typeof marker.generation === 'string'
-        && /^[0-9a-f-]{36}$/i.test(marker.generation)
-      )
-      && (
-        marker.version !== RECOVERY_MARKER_VERSION
-        || typeof marker.sessionProjectRoot === 'string'
+        typeof marker.recoveryId === 'string'
+        && /^[0-9a-f-]{36}$/i.test(marker.recoveryId)
+        && marker.generation === marker.recoveryId
+        && typeof marker.sessionProjectRoot === 'string'
       )
     )
     && typeof marker.projectRoot === 'string'
@@ -318,13 +435,11 @@ function isWorktreeRecoveryMarker(value: unknown): value is WorktreeRecoveryMark
     && typeof marker.pane?.id === 'string'
     && typeof marker.pane?.paneId === 'string'
     && (
-      marker.version !== RECOVERY_MARKER_VERSION
-      || marker.pane.slug === undefined
+      marker.pane.slug === undefined
       || typeof marker.pane.slug === 'string'
     )
     && (
-      marker.version !== RECOVERY_MARKER_VERSION
-      || marker.allowWorktreeReuse === undefined
+      marker.allowWorktreeReuse === undefined
       || typeof marker.allowWorktreeReuse === 'boolean'
     )
     && (

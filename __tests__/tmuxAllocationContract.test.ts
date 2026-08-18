@@ -21,8 +21,8 @@ const allocationSites = [
   ['desktop-use input flow', 'src/hooks/useInputHandling.ts', 'operation: "desktop-use-pane"'],
   ['browser input flow', 'src/hooks/useInputHandling.ts', 'operation: "file-browser-pane"'],
   ['ritual terminal flow', 'src/PsycheApp.tsx', 'operation: "ritual-terminal-pane"'],
-  ['bridge/MCP worktree pane', 'src/daemon/bridge.ts', 'operation: \'bridge-pane-generation\''],
-  ['Coven open pane', 'src/daemon/bridge.ts', '\'coven-session-open\''],
+  ['bridge/MCP worktree pane', 'src/daemon/bridge.ts', "operation: 'daemon-new-worktree-pane'"],
+  ['Coven open pane', 'src/daemon/bridge.ts', "operation: 'daemon-coven-session-pane'"],
 ] as const;
 
 describe('tmux allocation ownership contract', () => {

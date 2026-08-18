@@ -119,14 +119,9 @@ describe('worktree recovery markers', () => {
         message: 'session pane registry unavailable',
       }),
     });
-    expect(recovery).toMatchObject({ durable: true, retained: true });
-    const [written] = await listWorktreeRecoveryMarkers(sessionProjectRoot);
-    expect(associateRecoveryMarker).toHaveBeenCalledWith({
-      path: expect.stringContaining(
-        path.join(sessionProjectRoot, '.psyche', 'runtime', 'worktree-recovery'),
-      ),
-      generation: written.generation,
-    });
+    expect(recovery).toMatchObject({ durable: true, retained: false });
+    const [written] = await listWorktreeRecoveryMarkers(targetProjectRoot);
+    expect(associateRecoveryMarker).not.toHaveBeenCalled();
 
     vi.resetModules();
     const restartedRecovery = await import('../src/services/WorktreeRecoveryMarker.js');
@@ -145,15 +140,10 @@ describe('worktree recovery markers', () => {
       worktreePath,
     ).blocked).toBe(true);
     expect(restartedRecovery.findBlockingWorktreeRecoveryMarker(
-      sessionProjectRoot,
       targetProjectRoot,
-      sessionProjectRoot,
-    )).toEqual({ blocked: false });
-    expect(restartedRecovery.findBlockingWorktreeRecoveryMarker(
-      sessionProjectRoot,
-      sessionProjectRoot,
+      targetProjectRoot,
       worktreePath,
-    )).toEqual({ blocked: false });
+    ).blocked).toBe(true);
     expect(restartedRecovery.findBlockingWorktreeReuseRecoveryMarker(
       sessionProjectRoot,
       targetProjectRoot,

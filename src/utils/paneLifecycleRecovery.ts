@@ -67,6 +67,7 @@ export function isPaneLifecycleReservationRetainedError(
  */
 export async function retainPaneRecovery(
   options: {
+    recoveryId?: string;
     projectRoot: string;
     sessionProjectRoot: string;
     pane: PsychePane;
@@ -85,11 +86,9 @@ export async function retainPaneRecovery(
     };
   }
 
-  // Retain before writing the marker so even marker I/O failure cannot turn an
-  // uncertain live pane into an automatically reusable/deletable worktree.
-  const retainedReservation = options.reservation?.retain();
   try {
     const marker = await writeWorktreeRecoveryMarker({
+      ...(options.recoveryId ? { recoveryId: options.recoveryId } : {}),
       sessionProjectRoot: options.sessionProjectRoot,
       projectRoot: options.projectRoot,
       worktreePath: options.pane.worktreePath || options.projectRoot,
@@ -102,16 +101,13 @@ export async function retainPaneRecovery(
       operation: options.operation,
       reason: `${options.reason}; ${configRecovery.message}`,
     });
-    retainedReservation?.associateRecoveryMarker?.({
-      path: marker.path,
-      generation: marker.marker.generation,
-    });
     return {
       durable: true,
-      retained: true,
-      message: `${configRecovery.message}; retained cleanup lease and wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`,
+      retained: false,
+      message: `${configRecovery.message}; wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`,
     };
   } catch (error) {
+    options.reservation?.retain();
     return {
       durable: false,
       retained: true,
@@ -127,6 +123,7 @@ export async function retainPaneRecovery(
 
 export async function compensatePostSplitPaneFailure(
   options: {
+    recoveryId?: string;
     pane: PsychePane;
     projectRoot: string;
     sessionProjectRoot: string;
@@ -146,6 +143,7 @@ export async function compensatePostSplitPaneFailure(
   }
 
   const recovery = await retainPaneRecovery({
+    ...(options.recoveryId ? { recoveryId: options.recoveryId } : {}),
     projectRoot: options.projectRoot,
     sessionProjectRoot: options.sessionProjectRoot,
     pane: options.pane,

@@ -32,8 +32,15 @@ import {
   projectPaneConfigPath,
   readProjectPaneConfig,
   transactProjectPaneConfig,
-  withProjectPaneSlugAllocationLock,
 } from '../services/ProjectPaneConfig.js';
+import {
+  allocateUniquePaneSlug,
+  type PaneSlugReservation,
+} from '../services/PaneSlugRegistry.js';
+import {
+  reserveCrashSafePaneSlug,
+  settlePaneSlugReservationAfterFailure,
+} from '../services/PaneSlugReservation.js';
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
 import {
   paneRecoveryInstructions,
@@ -52,14 +59,7 @@ import {
 import {
   assessTmuxTeardownOwnership,
 } from '../services/TmuxResourceOwnership.js';
-import {
-  listQuarantinedPaneSlugs,
-  writeWorktreeRecoveryMarker,
-} from '../services/WorktreeRecoveryMarker.js';
-import {
-  retainReservationWithRecoveryMarker,
-  type RetainableWorktreeReservation,
-} from '../utils/paneLifecycleRecovery.js';
+import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.js';
 import { createPsychePaneId } from '../utils/paneIdentity.js';
 import { runGitProcess } from '../utils/gitProcess.js';
 import type { PsycheConfig, PsychePane } from '../types.js';
@@ -250,10 +250,6 @@ interface VerifiedSharedWorktree {
   worktreePath: string;
   branch: string;
   oid: string;
-}
-
-class BridgePaneReservationRetainedError extends Error {
-  readonly reservationRetained = true;
 }
 
 class ScopedCwdError extends Error {
@@ -504,32 +500,47 @@ export async function openProjectCovenSession(
   }
 
   const title = `coven:${session.title || session.id.slice(0, 8)}`;
+  const psychePaneId = nextBridgePaneId();
+  const paneSlugReservation = await reserveCrashSafePaneSlug({
+    sessionProjectRoot: projectRoot,
+    projectRoot,
+    paneId: psychePaneId,
+    operation: 'daemon-coven-session-pane',
+    allocate: async ({ occupiedSlugs }) => {
+      const slug = await allocateUniquePaneSlug(
+        `coven-${session.id.slice(0, 8)}`,
+        occupiedSlugs,
+      );
+      return { slug, worktreePath: session.projectRoot };
+    },
+  });
   // Keep the config lease through pane creation, initial persistence, attach,
   // and compensation. This gives the tmux pane a durable registry record
   // before `coven attach` starts and prevents another writer from observing a
   // half-completed lifecycle.
-  const transaction = await transactProjectPaneConfig(
-    projectRoot,
-    async ({ config, persist }) => {
+  try {
+    const transaction = await transactProjectPaneConfig(
+      projectRoot,
+      async ({ config, persist }) => {
       const paneId = deps.createTmuxPane(sessionName, session.projectRoot, title);
       const tmuxServerIdentity = (
         deps.getTmuxServerIdentity ?? getCurrentTmuxServerIdentity
       )(paneId);
+      await paneSlugReservation.recordPaneEffect(
+        paneId,
+        tmuxServerIdentity,
+      );
       if (!tmuxServerIdentity) {
         await rejectUnversionedBridgePaneAllocation(
-          projectRoot,
-          session.projectRoot,
           paneId,
           deps,
-          'coven-session-open',
-          nextBridgePaneId(),
         );
       }
 
       const now = new Date().toISOString();
       const record: RawConfigPane = {
-        id: nextBridgePaneId(),
-        slug: uniqueCovenPaneSlug(config as BridgeConfig, session),
+        id: psychePaneId,
+        slug: paneSlugReservation.slug,
         title,
         displayName: title,
         prompt: '',
@@ -622,15 +633,42 @@ export async function openProjectCovenSession(
       }
 
       return { paneId, pane: record };
-    },
-  );
-  const { paneId, pane } = transaction.result;
+      },
+    );
+    const { paneId, pane } = transaction.result;
+    await paneSlugReservation.completeAfterPanePersisted({
+      id: String(pane.id),
+      paneId,
+      slug: String(pane.slug),
+    });
 
-  return {
-    id: paneId,
-    pane: rawPaneToSummary(pane, projectRoot),
-    session,
-  };
+    return {
+      id: paneId,
+      pane: rawPaneToSummary(pane, projectRoot),
+      session,
+    };
+  } catch (error) {
+    const settlement = await settlePaneSlugReservationAfterFailure(
+      paneSlugReservation,
+      {
+        operation: 'daemon-coven-session-pane-failure',
+        reason: bridgeErrorMessage(error),
+        teardown: async (effect) => tearDownBridgeTmuxPane(
+          deps,
+          effect.paneId,
+        ),
+      },
+    );
+    if (settlement.quarantined) {
+      throw bridgeError(
+        bridgeErrorCode(error, 'coven_attach_failed'),
+        `${bridgeErrorMessage(error)}; ${
+          settlement.message || 'pane slug remains quarantined'
+        }`,
+      );
+    }
+    throw error;
+  }
 }
 
 export function buildCovenAttachCommand(sessionId: string): string {
@@ -642,17 +680,6 @@ export function buildCovenAttachCommand(sessionId: string): string {
 
 function isSafeCovenSessionId(sessionId: string): boolean {
   return /^[A-Za-z0-9._:-]+$/.test(sessionId);
-}
-
-function uniqueCovenPaneSlug(config: BridgeConfig, session: CovenSessionSummary): string {
-  const base = `coven-${session.id.slice(0, 8)}`;
-  const panes = Array.isArray(config.panes) ? config.panes : [];
-  const existing = new Set(panes.map((pane) => String(pane.slug ?? '')));
-  for (let i = 0; i < 100; i++) {
-    const slug = i === 0 ? base : `${base}-${i + 1}`;
-    if (!existing.has(slug)) return slug;
-  }
-  return `${base}-${Date.now()}`;
 }
 
 export function createCovenClient(options: string | CovenClientOptions = {}): CovenClient {
@@ -1227,6 +1254,7 @@ async function preserveBridgeHookModifiedWorktree(
   requestId: string,
   ownershipReason: string,
   failureReason: string,
+  paneSlugReservation?: PaneSlugReservation,
 ): Promise<string> {
   const reason = [
     ownershipReason,
@@ -1235,11 +1263,14 @@ async function preserveBridgeHookModifiedWorktree(
   ].join(' ');
   try {
     const marker = await writeWorktreeRecoveryMarker({
+      recoveryId: paneSlugReservation?.recoveryId,
+      sessionProjectRoot: paneSlugReservation?.sessionProjectRoot,
       projectRoot,
       worktreePath,
       pane: {
-        id: `bridge-${requestId}`,
+        id: paneSlugReservation?.paneId || `bridge-${requestId}`,
         paneId: 'uncreated',
+        slug: paneSlugReservation?.slug,
       },
       operation: 'bridge-worktree-creation-ownership',
       reason,
@@ -1275,100 +1306,155 @@ export async function spawnBridgePane(
   let panePersisted = false;
   let rollbackBlockedByUnconfirmedPane = false;
   let durableRecoveryOwnership = false;
+  const psychePaneId = nextBridgePaneId();
+  let paneSlugReservation: PaneSlugReservation | undefined;
 
   let slug = '';
   let branch = '';
   let worktreePath = '';
   if (!attaching) {
-    const allocated = await claimWorktree<BridgeCreatedWorktreeAllocation>(async () => {
-      const nextSlug = await uniqueSlug(scoped.projectRoot, slugFromRequest(request));
-      const nextBranch = await resolveSpawnBranch(scoped.projectRoot, request.branch, nextSlug);
-      const worktreesRoot = await ensureGeneratedWorktreesRoot(scoped.projectRoot);
-      const nextWorktreePath = path.join(worktreesRoot, nextSlug);
-      assertGeneratedWorktreePath(scoped.projectRoot, nextWorktreePath);
-
-      const reservation = await WorktreeCleanupService.getInstance()
-        .beginWorktreeCreation(nextWorktreePath, scoped.projectRoot);
-      let provisionalIdentity: CreatedWorktreeIdentity | undefined;
-      let rollbackOwnershipLostReason: string | undefined;
-      try {
-        const creation = await createGitWorktree(
-          scoped.projectRoot,
-          reservation.canonicalWorktreePath,
-          nextBranch,
-          reservation,
-          request.startPointBranch,
-          (provisional) => {
-            if (!provisional.rollbackOwnershipClaimed) {
-              rollbackOwnershipLostReason = provisional.rollbackOwnershipLostReason
-                || `Could not prove destructive rollback ownership for ${nextBranch}.`;
-              return;
+    paneSlugReservation = await reserveCrashSafePaneSlug({
+      sessionProjectRoot: scoped.projectRoot,
+      projectRoot: scoped.projectRoot,
+      paneId: psychePaneId,
+      operation: 'daemon-new-worktree-pane',
+      allocate: async ({ occupiedSlugs }) => {
+        const nextSlug = await allocateUniquePaneSlug(
+          slugFromRequest(request),
+          occupiedSlugs,
+          async (candidate) => {
+            try {
+              await realpath(path.join(
+                scoped.projectRoot,
+                '.psyche',
+                'worktrees',
+                candidate,
+              ));
+              return true;
+            } catch {
+              return false;
             }
-            // The path was absent before this claim. Git has verified that no
-            // hook or external writer changed the branch while worktree add
-            // completed, so a later verification failure can be rolled back.
-            provisionalIdentity = reservation.recordCreatedWorktree({
-              branchName: nextBranch,
-              startingOid: provisional.startingOid,
-              createdOid: provisional.createdOid,
-              deleteBranch: provisional.branchCreatedByThisAttempt,
-              configProjectRoot: scoped.projectRoot,
-            });
           },
-          deps.readCreatedWorktreeBranch,
         );
-        const identity = creation.rollbackOwnershipClaimed
-          ? reservation.recordCreatedWorktree({
-            branchName: nextBranch,
-            startingOid: creation.startingOid,
-            createdOid: creation.createdOid,
-            deleteBranch: creation.branchCreatedByThisAttempt,
-            configProjectRoot: scoped.projectRoot,
-          })
-          : undefined;
-        rollbackOwnershipLostReason ||= creation.rollbackOwnershipLostReason;
         return {
           slug: nextSlug,
-          branch: nextBranch,
-          worktreePath: reservation.canonicalWorktreePath,
-          reservation,
-          identity,
-          ...(rollbackOwnershipLostReason ? { rollbackOwnershipLostReason } : {}),
+          worktreePath: path.join(
+            scoped.projectRoot,
+            '.psyche',
+            'worktrees',
+            nextSlug,
+          ),
         };
-      } catch (error) {
-        let rollbackFailure: string | undefined;
-        if (provisionalIdentity) {
-          const rollback = await reservation.rollbackCreatedWorktree(
-            provisionalIdentity,
-          );
-          if (!rollback.success) {
-            rollbackFailure = rollback.error || 'unknown rollback failure';
-          }
-        }
-        const ownershipRecovery = rollbackOwnershipLostReason
-          ? await preserveBridgeHookModifiedWorktree(
+      },
+    });
+    slug = paneSlugReservation.slug;
+    let allocated: BridgeCreatedWorktreeAllocation;
+    try {
+      allocated = await claimWorktree<BridgeCreatedWorktreeAllocation>(async () => {
+        const nextSlug = slug;
+        const nextBranch = await resolveSpawnBranch(scoped.projectRoot, request.branch, nextSlug);
+        const worktreesRoot = await ensureGeneratedWorktreesRoot(scoped.projectRoot);
+        const nextWorktreePath = path.join(worktreesRoot, nextSlug);
+        assertGeneratedWorktreePath(scoped.projectRoot, nextWorktreePath);
+
+        const reservation = await WorktreeCleanupService.getInstance()
+          .beginWorktreeCreation(nextWorktreePath, scoped.projectRoot);
+        let provisionalIdentity: CreatedWorktreeIdentity | undefined;
+        let rollbackOwnershipLostReason: string | undefined;
+        try {
+          const creation = await createGitWorktree(
             scoped.projectRoot,
             reservation.canonicalWorktreePath,
             nextBranch,
-            request.requestId,
-            rollbackOwnershipLostReason,
-            bridgeErrorMessage(error),
-          )
-          : undefined;
-        await reservation.cancel();
-        if (rollbackFailure || ownershipRecovery) {
-          throw bridgeError(
-            bridgeErrorCode(error, 'worktree_create_failed'),
-            `${bridgeErrorMessage(error)}${
-              rollbackFailure ? `; rollback failed: ${rollbackFailure}` : ''
-            }${
-              ownershipRecovery ? `; ${ownershipRecovery}` : ''
-            }`,
+            reservation,
+            request.startPointBranch,
+            (provisional) => {
+              if (!provisional.rollbackOwnershipClaimed) {
+                rollbackOwnershipLostReason = provisional.rollbackOwnershipLostReason
+                  || `Could not prove destructive rollback ownership for ${nextBranch}.`;
+                return;
+              }
+              provisionalIdentity = reservation.recordCreatedWorktree({
+                branchName: nextBranch,
+                startingOid: provisional.startingOid,
+                createdOid: provisional.createdOid,
+                deleteBranch: provisional.branchCreatedByThisAttempt,
+                configProjectRoot: scoped.projectRoot,
+              });
+            },
+            deps.readCreatedWorktreeBranch,
           );
+          const identity = creation.rollbackOwnershipClaimed
+            ? reservation.recordCreatedWorktree({
+              branchName: nextBranch,
+              startingOid: creation.startingOid,
+              createdOid: creation.createdOid,
+              deleteBranch: creation.branchCreatedByThisAttempt,
+              configProjectRoot: scoped.projectRoot,
+            })
+            : undefined;
+          rollbackOwnershipLostReason ||= creation.rollbackOwnershipLostReason;
+          return {
+            slug: nextSlug,
+            branch: nextBranch,
+            worktreePath: reservation.canonicalWorktreePath,
+            reservation,
+            identity,
+            ...(rollbackOwnershipLostReason ? { rollbackOwnershipLostReason } : {}),
+          };
+        } catch (error) {
+          let rollbackFailure: string | undefined;
+          if (provisionalIdentity) {
+            const rollback = await reservation.rollbackCreatedWorktree(
+              provisionalIdentity,
+            );
+            if (!rollback.success) {
+              rollbackFailure = rollback.error || 'unknown rollback failure';
+            }
+          }
+          const ownershipRecovery = rollbackOwnershipLostReason
+            ? await preserveBridgeHookModifiedWorktree(
+              scoped.projectRoot,
+              reservation.canonicalWorktreePath,
+              nextBranch,
+              request.requestId,
+              rollbackOwnershipLostReason,
+              bridgeErrorMessage(error),
+              paneSlugReservation,
+            )
+            : undefined;
+          await reservation.cancel();
+          if (rollbackFailure || ownershipRecovery) {
+            throw bridgeError(
+              bridgeErrorCode(error, 'worktree_create_failed'),
+              `${bridgeErrorMessage(error)}${
+                rollbackFailure ? `; rollback failed: ${rollbackFailure}` : ''
+              }${
+                ownershipRecovery ? `; ${ownershipRecovery}` : ''
+              }`,
+            );
+          }
+          throw error;
         }
-        throw error;
+      });
+    } catch (error) {
+      const slugSettlement = await settlePaneSlugReservationAfterFailure(
+        paneSlugReservation,
+        {
+          operation: 'daemon-worktree-allocation-failure',
+          reason: bridgeErrorMessage(error),
+        },
+      );
+      if (slugSettlement.quarantined) {
+        throw bridgeError(
+          bridgeErrorCode(error, 'worktree_create_failed'),
+          `${bridgeErrorMessage(error)}; ${
+            slugSettlement.message || 'pane slug remains quarantined'
+          }`,
+        );
       }
-    });
+      throw error;
+    }
     slug = allocated.slug;
     branch = allocated.branch;
     worktreePath = allocated.worktreePath;
@@ -1395,30 +1481,99 @@ export async function spawnBridgePane(
         throw error;
       }
       let settled = false;
-      let retained = false;
       try {
+        paneSlugReservation = await reserveCrashSafePaneSlug({
+          sessionProjectRoot: scoped.projectRoot,
+          projectRoot: scoped.projectRoot,
+          paneId: psychePaneId,
+          operation: 'daemon-existing-worktree-pane',
+          allocate: async ({ config, occupiedSlugs }) => {
+            const sharedIdentity = await resolveSharedWorktreeUnderLease(
+              scoped.projectRoot,
+              request.existingWorktree!,
+              config as BridgeConfig,
+            );
+            if (
+              sharedIdentity.worktreePath
+              !== reservation.canonicalWorktreePath
+            ) {
+              throw bridgeError(
+                'worktree_identity_changed',
+                'existing worktree realpath changed after its lifecycle lease was acquired',
+              );
+            }
+            return {
+              slug: generateSiblingSlugForTargetPane(
+                {
+                  slug: sharedIdentity.slug,
+                  worktreePath: sharedIdentity.worktreePath,
+                },
+                Array.from(occupiedSlugs).map((occupiedSlug) => ({
+                  slug: occupiedSlug,
+                })),
+              ),
+              worktreePath: sharedIdentity.worktreePath,
+            };
+          },
+        });
         const result = await finishSpawn(
           reservation.canonicalWorktreePath,
-          reservation,
         );
         await reservation.complete();
         settled = true;
         return result;
       } catch (error) {
-        if (error instanceof BridgePaneReservationRetainedError) {
-          retained = true;
+        if (paneSlugReservation) {
+          const slugSettlement = await settlePaneSlugReservationAfterFailure(
+            paneSlugReservation,
+            {
+              operation: 'daemon-existing-worktree-pane-failure',
+              reason: bridgeErrorMessage(error),
+              teardown: async (effect) => tearDownBridgeTmuxPane(
+                deps,
+                effect.paneId,
+              ),
+            },
+          );
+          if (slugSettlement.quarantined) {
+            throw bridgeError(
+              bridgeErrorCode(error, 'bridge_spawn_failed'),
+              `${bridgeErrorMessage(error)}; ${
+                slugSettlement.message || 'pane slug remains quarantined'
+              }`,
+            );
+          }
         }
         throw error;
       } finally {
-        if (!settled && !retained) {
+        if (!settled) {
           await reservation.cancel();
         }
       }
     }
-    return await finishSpawn(worktreePath, creationReservation);
+    return await finishSpawn(worktreePath);
   } catch (error) {
     let rollbackFailure: string | undefined;
     let ownershipRecovery: string | undefined;
+    let slugRecovery: string | undefined;
+    if (!attaching && paneSlugReservation) {
+      const slugSettlement = await settlePaneSlugReservationAfterFailure(
+        paneSlugReservation,
+        {
+          operation: 'daemon-new-worktree-pane-failure',
+          reason: bridgeErrorMessage(error),
+          teardown: async (effect) => tearDownBridgeTmuxPane(
+            deps,
+            effect.paneId,
+          ),
+        },
+      );
+      if (slugSettlement.quarantined) {
+        rollbackBlockedByUnconfirmedPane = true;
+        durableRecoveryOwnership = true;
+        slugRecovery = slugSettlement.message;
+      }
+    }
     if (
       !attaching
       && !panePersisted
@@ -1444,6 +1599,7 @@ export async function spawnBridgePane(
         request.requestId,
         rollbackOwnershipLostReason,
         bridgeErrorMessage(error),
+        paneSlugReservation,
       );
     }
 
@@ -1453,13 +1609,15 @@ export async function spawnBridgePane(
     ) {
       await creationReservation.cancel();
     }
-    if (rollbackFailure || ownershipRecovery) {
+    if (rollbackFailure || ownershipRecovery || slugRecovery) {
       throw bridgeError(
         bridgeErrorCode(error, 'bridge_spawn_failed'),
         `${bridgeErrorMessage(error)}${
           rollbackFailure ? `; rollback failed: ${rollbackFailure}` : ''
         }${
           ownershipRecovery ? `; ${ownershipRecovery}` : ''
+        }${
+          slugRecovery ? `; ${slugRecovery}` : ''
         }`,
       );
     }
@@ -1468,7 +1626,6 @@ export async function spawnBridgePane(
 
   async function finishSpawn(
     paneWorktreePath: string,
-    recoveryReservation?: RetainableWorktreeReservation,
   ): Promise<BridgeSpawnResult> {
     const persistPane = () => transactProjectPaneConfig(
       scoped.projectRoot,
@@ -1494,21 +1651,7 @@ export async function spawnBridgePane(
         }
         const effectiveWorktreePath = sharedIdentity?.worktreePath || paneWorktreePath;
         const effectiveBranch = sharedIdentity?.branch || branch;
-        const effectiveSlug = sharedIdentity?.slug || slug;
-        const quarantinedSlugs = attaching
-          ? await listQuarantinedPaneSlugs(scoped.projectRoot)
-          : [];
-        // Existing-worktree attachments make no filesystem claim, so their
-        // sibling slug must be allocated from the fresh locked registry.
-        const paneSlug = attaching
-          ? generateSiblingSlugForTargetPane(
-            { slug: effectiveSlug, worktreePath: effectiveWorktreePath },
-            [
-              ...freshPanes.map((candidate) => ({ slug: String(candidate.slug ?? '') })),
-              ...quarantinedSlugs.map((quarantinedSlug) => ({ slug: quarantinedSlug })),
-            ],
-          )
-          : effectiveSlug;
+        const paneSlug = paneSlugReservation?.slug || slug;
         // A sibling's visible title must carry the reserved slug as well;
         // otherwise concurrent attaches can create distinct records that
         // rebind to the same tmux title.
@@ -1519,37 +1662,17 @@ export async function spawnBridgePane(
         const tmuxServerIdentity = (
           deps.getTmuxServerIdentity ?? getCurrentTmuxServerIdentity
         )(paneId);
-        const psychePaneId = nextBridgePaneId();
+        await paneSlugReservation?.recordPaneEffect(
+          paneId,
+          tmuxServerIdentity,
+        );
         if (!tmuxServerIdentity) {
           const teardown = await tearDownBridgeTmuxPane(deps, paneId);
           if (teardown.presence !== 'absent') {
             rollbackBlockedByUnconfirmedPane = true;
-            let recovery = 'could not write a recovery marker';
-            try {
-              if (!recoveryReservation) {
-                throw new Error('no worktree reservation is available for recovery');
-              }
-              const marker = await retainReservationWithRecoveryMarker(
-                recoveryReservation,
-                {
-                projectRoot: scoped.projectRoot,
-                worktreePath: effectiveWorktreePath,
-                pane: { id: psychePaneId, paneId, slug: paneSlug },
-                allowWorktreeReuse: true,
-                operation: 'bridge-pane-generation',
-                reason: `could not capture tmux server generation; pane teardown is ${teardown.presence}`,
-                },
-              );
-              recovery = `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
-            } catch (error) {
-              recovery = `could not write recovery marker: ${bridgeErrorMessage(error)}`;
-            }
             const message = `could not capture tmux server generation for pane ${paneId}; pane teardown is ${
               teardown.presence
-            }; ${recovery}`;
-            if (attaching) {
-              throw new BridgePaneReservationRetainedError(message);
-            }
+            }; slug ownership remains provisional until recovery coordination completes`;
             throw bridgeError('tmux_generation_unverified', message);
           }
           throw bridgeError(
@@ -1622,37 +1745,6 @@ export async function spawnBridgePane(
             } catch (recoveryError) {
               rollbackBlockedByUnconfirmedPane = true;
               recoveryFailure = bridgeErrorMessage(recoveryError);
-              try {
-                const marker = await writeWorktreeRecoveryMarker({
-                  projectRoot: scoped.projectRoot,
-                  worktreePath: effectiveWorktreePath,
-                  pane: {
-                    id: psychePaneId,
-                    paneId,
-                    slug: paneSlug,
-                  },
-                  allowWorktreeReuse: true,
-                  operation: 'bridge-pane-persistence',
-                  reason: `${bridgeErrorMessage(error)}; pane teardown is ${
-                    teardown.presence
-                  }; recovery persistence failed: ${recoveryFailure}`,
-                });
-                durableRecoveryOwnership = true;
-                recoveryFailure = `${recoveryFailure}; quarantined slug ${paneSlug} in ${
-                  marker.path
-                }`;
-              } catch (markerError) {
-                recoveryReservation?.retain();
-                const message = `${bridgeErrorMessage(error)}; pane teardown is ${
-                  teardown.presence
-                }; could not persist recovery record ${pane.id}; recovery persist failed: ${
-                  recoveryFailure
-                }; could not quarantine slug ${paneSlug}: ${bridgeErrorMessage(markerError)}`;
-                if (attaching) {
-                  throw new BridgePaneReservationRetainedError(message);
-                }
-                throw bridgeError('config_persist_failed', message);
-              }
             }
             throw bridgeError(
               bridgeErrorCode(error, 'config_persist_failed'),
@@ -1676,14 +1768,14 @@ export async function spawnBridgePane(
         };
       },
     );
-    // Attach lock order matches local pane creation: reuse reservation ->
-    // project slug allocation -> pane config transaction. The namespace lease
-    // is released immediately after the sibling record is durable.
-    const transaction = attaching
-      ? await withProjectPaneSlugAllocationLock(scoped.projectRoot, persistPane)
-      : await persistPane();
+    const transaction = await persistPane();
     const { pane, paneSlug, settings } = transaction.result;
     const persistedPaneId = String(pane.paneId);
+    await paneSlugReservation?.completeAfterPanePersisted({
+      id: String(pane.id),
+      paneId: persistedPaneId,
+      slug: paneSlug,
+    });
 
     if (!attaching && creationReservation) {
       await creationReservation.complete();
@@ -1949,12 +2041,8 @@ async function tearDownBridgeTmuxPane(
  * marker rather than silently orphaning the pane behind a reusable ID.
  */
 async function rejectUnversionedBridgePaneAllocation(
-  projectRoot: string,
-  worktreePath: string,
   paneId: string,
   deps: Pick<BridgeSpawnDeps, 'killTmuxPane' | 'probeTmuxPane'>,
-  operation: string,
-  psychePaneId: string,
 ): Promise<never> {
   const teardown = await tearDownBridgeTmuxPane(deps, paneId);
   if (teardown.presence === 'absent') {
@@ -1964,24 +2052,11 @@ async function rejectUnversionedBridgePaneAllocation(
     );
   }
 
-  let recovery = 'could not write a recovery marker';
-  try {
-    const marker = await writeWorktreeRecoveryMarker({
-      projectRoot,
-      worktreePath,
-      pane: { id: psychePaneId, paneId },
-      operation,
-      reason: `could not capture tmux server generation; pane teardown is ${teardown.presence}`,
-    });
-    recovery = `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
-  } catch (error) {
-    recovery = `could not write recovery marker: ${bridgeErrorMessage(error)}`;
-  }
   throw bridgeError(
     'tmux_generation_unverified',
     `could not capture tmux server generation for pane ${paneId}; pane teardown is ${
       teardown.presence
-    }; ${recovery}`,
+    }; crash-safe slug ownership will require recovery reconciliation`,
   );
 }
 
@@ -2262,19 +2337,6 @@ function slugFromRequest(request: BridgeSpawnRequest): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 48);
   return slug || 'bridge-pane';
-}
-
-async function uniqueSlug(projectRoot: string, baseSlug: string): Promise<string> {
-  for (let i = 0; i < 100; i++) {
-    const slug = i === 0 ? baseSlug : `${baseSlug}-${i + 1}`;
-    const worktreePath = path.join(projectRoot, '.psyche', 'worktrees', slug);
-    try {
-      await realpath(worktreePath);
-    } catch {
-      return slug;
-    }
-  }
-  throw bridgeError('slug_exhausted', 'could not allocate a unique psyche worktree slug');
 }
 
 async function resolveSpawnBranch(projectRoot: string, requestedBranch: string | undefined, slug: string): Promise<string> {

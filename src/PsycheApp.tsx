@@ -1144,16 +1144,18 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       setStatusMessage("Creating ritual terminal pane...")
 
       const tmuxService = TmuxService.getInstance()
+      const nextId = getNextPsycheId(existingPanes)
       const shellPane = await createTransactionalPane({
         projectRoot: targetProjectRoot,
         sessionProjectRoot,
         operation: "ritual-terminal-pane",
+        slugBase: `shell-${nextId}`,
         tmuxService,
         allocate: () => tmuxService.splitPane({ cwd: targetProjectRoot }),
         createPane: async ({ paneId, tmuxServerIdentity }) => {
           const pane = await createShellPane(
             paneId,
-            getNextPsycheId(existingPanes),
+            nextId,
             undefined,
             { tmuxServerIdentity, setPaneTitle: false },
           )
