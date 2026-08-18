@@ -256,6 +256,10 @@ export interface DurableOpenTransaction {
 Absent `openTransactions` loads as `[]`. Present records require a positive
 integer sequence, nonempty IDs, and an allowed kind.
 
+The persisted `snapshot` is a separate `ownerEpoch`/`sequence` durable
+projection, not `ControlRuntime.snapshot()`. It also retains at most 1,000
+redacted completed transaction identities; exact outcomes remain in sidecars.
+
 Change both journal interfaces to:
 
 ```ts

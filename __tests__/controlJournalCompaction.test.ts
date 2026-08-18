@@ -1,4 +1,4 @@
-import { mkdir, rename, rm, symlink, unlink } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, symlink, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -36,6 +36,14 @@ function takeover(idempotencyKey: string): ControlCommand {
     createdAt: '2026-08-03T20:00:00.000Z',
     payload: { paneId: '%3' },
   } as ControlCommand;
+}
+
+function openTerminalCommand(idempotencyKey: string, ownerEpoch = 4, title = idempotencyKey): ControlCommand {
+  return {
+    id: `cmd-${idempotencyKey}-${ownerEpoch}`, idempotencyKey, kind: 'pane.terminal.open',
+    projectRoot: '/repo', actor: { id: 'human-1', kind: 'human' }, ownerEpoch,
+    createdAt: '2026-08-17T20:00:00.000Z', payload: { cwd: '/repo', title },
+  };
 }
 
 async function newRoot(): Promise<string> {
@@ -81,6 +89,70 @@ function providerUpsert(idempotencyKey: string): ControlCommand {
 }
 
 describe('control journal compaction', () => {
+  it('preserves an open transaction older than the cutoff and recovers it as unknown', async () => {
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 4);
+    const handlers = makeHandlers();
+    const effect = vi.fn(async () => ({ paneId: '%must-not-run' }));
+    handlers.openTerminal = effect;
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+    const openCommand = openTerminalCommand('open-before-cutoff');
+    await journal.append('command.requested', {
+      commandId: openCommand.id, idempotencyKey: openCommand.idempotencyKey,
+      kind: openCommand.kind, ownerEpoch: openCommand.ownerEpoch,
+    });
+    for (let index = 0; index < 501; index += 1) await runtime.submit(takeover(`open-filler-${index}`));
+    expect(journal.sequence).toBe(1_504);
+    await (runtime as any).compactJournal(journal);
+    expect(journal.firstSequence).toBe(505);
+    const durableFile = JSON.parse(
+      await readFile(path.join(root, '.psyche', 'runtime', 'snapshot.json'), 'utf8'),
+    ) as { openTransactions?: unknown[] };
+    expect(durableFile.openTransactions).toContainEqual({
+      sequence: 1, commandId: openCommand.id, idempotencyKey: openCommand.idempotencyKey,
+      kind: 'command.requested',
+    });
+    const reopened = await ControlJournal.open(root, 5);
+    const restarted = await ControlRuntime.create({ ownerEpoch: 5, handlers, journal: reopened });
+    await expect(restarted.submit({ ...openCommand, ownerEpoch: 5 }))
+      .resolves.toMatchObject({ status: 'unknown', code: 'recovered-nonterminal' });
+    expect(effect).not.toHaveBeenCalled();
+  }, 90_000);
+
+  it('persists a redacted durable snapshot projection and replays its compact marker', async () => {
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 4);
+    const handlers = makeHandlers();
+    handlers.openTerminal = vi.fn(async () => ({ paneId: '%browser-result-secret-script-result-secret' }));
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+    await runtime.submit(openTerminalCommand('redacted-command', 4, 'terminal-input-secret prompt-secret'));
+    const resourceCommand = providerUpsert('redacted-resource') as Extract<
+      ControlCommand, { kind: 'provider.resource.upsert' }
+    >;
+    await runtime.submit({
+      ...resourceCommand,
+      payload: { resource: { ...resourceCommand.payload.resource, title: 'resource-value-secret' } },
+    });
+    for (let index = 0; index < 500; index += 1) await runtime.submit(takeover(`redacted-filler-${index}`));
+    await (runtime as any).compactJournal(journal);
+    const serialized = await readFile(path.join(root, '.psyche', 'runtime', 'snapshot.json'), 'utf8');
+    for (const secret of ['terminal-input-secret', 'prompt-secret', 'browser-result-secret',
+      'script-result-secret', 'resource-value-secret']) expect(serialized).not.toContain(secret);
+    const durableFile = JSON.parse(serialized) as {
+      snapshot: unknown; completedTransactions: Array<{ idempotencyKey: string }>;
+    };
+    expect(durableFile.snapshot).toEqual({ ownerEpoch: 4, sequence: journal.sequence });
+    expect(durableFile.completedTransactions).toContainEqual(expect.objectContaining({
+      idempotencyKey: 'redacted-command',
+    }));
+    const reopened = await ControlJournal.open(root, 5);
+    const restarted = await ControlRuntime.create({ ownerEpoch: 5, handlers, journal: reopened });
+    const callsBefore = vi.mocked(handlers.openTerminal).mock.calls.length;
+    await expect(restarted.submit(openTerminalCommand('redacted-command', 5))).resolves.toEqual({
+      status: 'succeeded', value: { paneId: '%browser-result-secret-script-result-secret' },
+    });
+    expect(handlers.openTerminal).toHaveBeenCalledTimes(callsBefore);
+  }, 90_000);
   it('keeps idempotency dedup across a compaction and restart', async () => {
     const root = await newRoot();
     const journal = await ControlJournal.open(root, 4);

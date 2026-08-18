@@ -117,20 +117,24 @@ sidecar they fail closed.
 Existing b389 records load directly even when their terminal journal events
 were already compacted.
 
-### Task 2 will keep snapshots redacted while preserving open transactions
+### Keep snapshots redacted while preserving open transactions
 
-Task 2 will reduce snapshots to owner epoch, covered sequence, bounded
-redacted receipt records, and bounded open transactions. It will omit exact
+Snapshots contain owner epoch, covered sequence, bounded redacted receipt
+records, and bounded open transactions. They omit exact
 outcomes, command envelopes, live resources, effect data, messages, typed
 values, and scripts.
 
-Task 2 open transactions will contain only sequence, command ID, raw
+Open transactions contain only sequence, command ID, raw
 idempotency key, and latest nonterminal kind. The raw key will remain the
 narrow exception needed for restart matching. Tail terminal events will
 override snapshot records. Otherwise startup will append exactly one
 `command.unknown` before accepting new commands. Open transactions will remain
 bounded by the 256 pending-command cap, and recovery-generated terminal events
 will use the same sidecar durability gate.
+
+The durable projection also retains at most 1,000 completed transaction
+identities as fail-closed compacted-key markers. Exact outcomes remain in the
+existing hashed sidecars; markers contain no outcome value.
 
 ### Task 3 will reclaim retired pane buffers
 

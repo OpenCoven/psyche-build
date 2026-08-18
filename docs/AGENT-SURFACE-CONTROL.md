@@ -234,6 +234,12 @@ dirty exact-outcome entries and active fresh reservations; once that combined
 budget is full, fresh commands fail with `durability_unavailable` until
 persistence drains or guarded compaction succeeds, but existing hot/tail/sidecar
 retries still deduplicate.
+Compaction persists a separate bounded recovery projection, not the
+operator-facing snapshot. It contains owner/sequence metadata, redacted
+receipts, completed-key markers, and open transaction identity only. Command
+envelopes, terminal input, prompts, browser/script results, sensitive resource
+values, and full resource payloads are omitted. A restored open transaction
+becomes one durable `command.unknown` before new commands are accepted.
 
 There is deliberately no accessibility, coordinate, screenshot-click, shell,
 raw tmux command, XPath, selector, or whole-desktop fallback.

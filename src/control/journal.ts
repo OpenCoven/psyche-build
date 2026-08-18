@@ -3,7 +3,6 @@ import { lstat, mkdir, open, readFile, realpath, rename, truncate, type FileHand
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
-import type { ControlSnapshot } from './types.js';
 import type {
   ActionReceipt,
   CommandOutcome,
@@ -220,10 +219,35 @@ function parseJournalHeader(value: unknown): JournalHeader | undefined {
  * rebuild them by replay.
  */
 export interface JournalSnapshotFile {
-  snapshot: ControlSnapshot;
+  snapshot: DurableControlSnapshot;
   coveredSequence: number;
   outcomes: Record<string, CommandOutcome>;
   receiptRecords: DurableReceiptRecord[];
+  openTransactions?: DurableOpenTransaction[];
+  completedTransactions?: DurableCompletedTransaction[];
+}
+
+export interface DurableControlSnapshot {
+  readonly ownerEpoch: number;
+  readonly sequence: number;
+}
+
+export type DurableOpenTransactionKind =
+  | 'command.requested'
+  | 'command.accepted'
+  | 'command.running';
+
+export interface DurableOpenTransaction {
+  readonly sequence: number;
+  readonly commandId: string;
+  readonly idempotencyKey: string;
+  readonly kind: DurableOpenTransactionKind;
+}
+
+export interface DurableCompletedTransaction {
+  readonly sequence: number;
+  readonly commandId: string;
+  readonly idempotencyKey: string;
 }
 
 export interface DurableReceiptRecord {
@@ -265,8 +289,10 @@ interface DurableOutcomeReadContext {
   readonly outcomePath: string;
 }
 
-type DurableMetadataMutationTarget = 'outcome' | 'snapshot' | 'journal';
+type DurableMetadataMutationTarget = 'directory' | 'outcome' | 'snapshot' | 'journal';
 type DurableMetadataMutationStep =
+  | 'created'
+  | 'parent-directory-synced'
   | 'temporary-written'
   | 'temporary-synced'
   | 'temporary-closed'
@@ -725,10 +751,12 @@ export class ControlJournal {
       const parsed = JSON.parse(raw) as Partial<JournalSnapshotFile>;
       if (!parsed || typeof parsed.coveredSequence !== 'number') return undefined;
       return {
-        snapshot: parsed.snapshot as ControlSnapshot,
+        snapshot: parseDurableControlSnapshot(parsed.snapshot),
         coveredSequence: parsed.coveredSequence,
         outcomes: parsed.outcomes ?? {},
         receiptRecords: parsed.receiptRecords ?? [],
+        openTransactions: parseDurableOpenTransactions(parsed.openTransactions),
+        completedTransactions: parseDurableCompletedTransactions(parsed.completedTransactions),
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
@@ -971,25 +999,45 @@ export class ControlJournal {
     }
   }
 
-  async recoverNonterminalCommands(): Promise<ControlEvent[]> {
+  async recoverNonterminalCommands(
+    restored: readonly DurableOpenTransaction[] = [],
+  ): Promise<ControlEvent[]> {
     const terminalTransactions = new Set<string>();
-    const nonterminal = new Map<string, ControlEvent>();
+    const nonterminal = new Map<string, DurableOpenTransaction>();
     const terminalKinds = new Set(['command.succeeded', 'command.failed', 'command.unknown', 'command.rejected']);
     const openKinds = new Set(['command.requested', 'command.accepted', 'command.running']);
+    for (const event of restored) {
+      nonterminal.set(commandTransactionKey(event.commandId, event.idempotencyKey), event);
+    }
     for (const event of this.events) {
       const commandId = event.payload.commandId as string | undefined;
-      if (!commandId) continue;
-      const transaction = commandTransactionKey(commandId, event.payload.idempotencyKey);
-      if (terminalKinds.has(event.kind)) terminalTransactions.add(transaction);
-      else if (openKinds.has(event.kind)) nonterminal.set(transaction, event);
+      const idempotencyKey = event.payload.idempotencyKey;
+      if (!commandId || typeof idempotencyKey !== 'string' || idempotencyKey.length === 0) continue;
+      const transaction = commandTransactionKey(commandId, idempotencyKey);
+      if (terminalKinds.has(event.kind)) {
+        terminalTransactions.add(transaction);
+        nonterminal.delete(transaction);
+      } else if (openKinds.has(event.kind)) {
+        nonterminal.set(transaction, {
+          sequence: event.sequence,
+          commandId,
+          idempotencyKey,
+          kind: event.kind as DurableOpenTransactionKind,
+        });
+      }
     }
     const recovered: ControlEvent[] = [];
-    for (const [transaction, event] of nonterminal) {
+    for (const [transaction, event] of [...nonterminal].sort((left, right) => left[1].sequence - right[1].sequence)) {
       if (terminalTransactions.has(transaction)) continue;
+      if (this.events.some((candidate) => (
+        terminalKinds.has(candidate.kind)
+        && candidate.payload.commandId === event.commandId
+        && candidate.payload.idempotencyKey === event.idempotencyKey
+      ))) continue;
       const outcome = recoveredNonterminalOutcome();
       recovered.push(await this.append('command.unknown', {
-        commandId: event.payload.commandId,
-        idempotencyKey: event.payload.idempotencyKey,
+        commandId: event.commandId,
+        idempotencyKey: event.idempotencyKey,
         reason: 'recovered-nonterminal',
         outcomeDigest: exactCommandOutcomeDigest(outcome),
       }));
@@ -1031,6 +1079,52 @@ function recoveredNonterminalOutcome(): CommandOutcome {
     code: 'recovered-nonterminal',
     message: 'command outcome is unknown',
   };
+}
+
+function parseDurableControlSnapshot(value: unknown): DurableControlSnapshot {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid durable control snapshot');
+  const candidate = value as { ownerEpoch?: unknown; sequence?: unknown };
+  if (typeof candidate.ownerEpoch !== 'number' || !Number.isInteger(candidate.ownerEpoch)
+    || candidate.ownerEpoch < 0 || typeof candidate.sequence !== 'number'
+    || !Number.isInteger(candidate.sequence) || candidate.sequence < 0) {
+    throw new Error('invalid durable control snapshot');
+  }
+  return { ownerEpoch: candidate.ownerEpoch, sequence: candidate.sequence };
+}
+
+function parseDurableOpenTransactions(value: unknown): DurableOpenTransaction[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > AGENT_CONTROL_LIMITS.pendingCommands) {
+    throw new Error('invalid durable open transactions');
+  }
+  return value.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('invalid durable open transaction');
+    const candidate = item as Partial<DurableOpenTransaction>;
+    if (typeof candidate.sequence !== 'number' || !Number.isInteger(candidate.sequence)
+      || candidate.sequence < 1 || typeof candidate.commandId !== 'string' || candidate.commandId.length === 0
+      || typeof candidate.idempotencyKey !== 'string' || candidate.idempotencyKey.length === 0
+      || !isDurableOpenTransactionKind(candidate.kind)) throw new Error('invalid durable open transaction');
+    return candidate as DurableOpenTransaction;
+  });
+}
+
+function parseDurableCompletedTransactions(value: unknown): DurableCompletedTransaction[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 1_000) throw new Error('invalid durable completed transactions');
+  return value.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('invalid durable completed transaction');
+    const candidate = item as Partial<DurableCompletedTransaction>;
+    if (typeof candidate.sequence !== 'number' || !Number.isInteger(candidate.sequence)
+      || candidate.sequence < 1 || typeof candidate.commandId !== 'string' || candidate.commandId.length === 0
+      || typeof candidate.idempotencyKey !== 'string' || candidate.idempotencyKey.length === 0) {
+      throw new Error('invalid durable completed transaction');
+    }
+    return candidate as DurableCompletedTransaction;
+  });
+}
+
+function isDurableOpenTransactionKind(value: unknown): value is DurableOpenTransactionKind {
+  return value === 'command.requested' || value === 'command.accepted' || value === 'command.running';
 }
 
 function durableOutcomeFileReadFlags(): number {
@@ -1160,6 +1254,7 @@ async function syncPublishedMetadataDirectory(
     readonly directoryIdentity: DurableOutcomeDirectoryIdentity;
     readonly mismatchError: () => Error;
     readonly syncUnsupportedError: () => Error;
+    readonly syncedStep?: DurableMetadataMutationStep;
   },
 ): Promise<void> {
   const sync = async (): Promise<void> => {
@@ -1195,7 +1290,7 @@ async function syncPublishedMetadataDirectory(
     directoryPath: context.directoryPath,
     destinationPath: context.destinationPath,
     temporaryPath: context.temporaryPath,
-    step: 'directory-synced',
+    step: context.syncedStep ?? 'directory-synced',
   });
 }
 
@@ -1225,6 +1320,9 @@ async function privateDirectoryChainExists(directoryPaths: readonly string[]): P
 
 async function ensurePrivateDirectoryChain(directoryPaths: readonly string[]): Promise<void> {
   for (const directoryPath of directoryPaths) {
+    const parentPath = path.dirname(directoryPath);
+    const parentIdentity = await snapshotDurableOutcomeDirectoryIdentity(parentPath);
+    if (!parentIdentity) throw unsafeRuntimeDirectoryPath();
     let stats = await readDurableOutcomeDirectoryStats(directoryPath);
     if (!stats) {
       try {
@@ -1232,9 +1330,20 @@ async function ensurePrivateDirectoryChain(directoryPaths: readonly string[]): P
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
+      await recordDurableMetadataMutationStep({
+        target: 'directory', directoryPath: parentPath, destinationPath: directoryPath,
+        temporaryPath: directoryPath, step: 'created',
+      });
       stats = await readDurableOutcomeDirectoryStats(directoryPath);
     }
     if (!stats || !isSafeDurableOutcomeDirectoryStats(stats)) throw unsafeDurableOutcomePath();
+    await syncPublishedMetadataDirectory({
+      target: 'directory', directoryPath: parentPath, destinationPath: directoryPath,
+      temporaryPath: directoryPath, directoryIdentity: parentIdentity,
+      mismatchError: runtimeDirectoryChangedDuringCreation,
+      syncUnsupportedError: parentDirectorySyncUnsupportedDuringCreation,
+      syncedStep: 'parent-directory-synced',
+    });
   }
 }
 
@@ -1313,12 +1422,20 @@ function runtimeDirectoryChangedDuringCompaction(): Error {
   return new Error('runtime directory changed during journal compaction');
 }
 
+function runtimeDirectoryChangedDuringCreation(): Error {
+  return new Error('parent directory changed during runtime directory creation');
+}
+
 function runtimeDirectorySyncUnsupportedDuringSnapshotPublication(): Error {
   return new Error('runtime directory fsync is unsupported during snapshot publication');
 }
 
 function runtimeDirectorySyncUnsupportedDuringCompaction(): Error {
   return new Error('runtime directory fsync is unsupported during journal compaction');
+}
+
+function parentDirectorySyncUnsupportedDuringCreation(): Error {
+  return new Error('parent directory fsync is unsupported during runtime directory creation');
 }
 
 function snapshotDurableOutcomeFile(stats: BigIntStats): DurableOutcomeFileSnapshot {

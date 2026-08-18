@@ -112,6 +112,12 @@ through the identical authority checks and lands in the same journal.
    or compaction is already blocked on durability, new fresh commands are
    rejected with `durability_unavailable` until a later repair/flush succeeds,
    while hot/tail/sidecar retries remain available.
+   Compaction persists a separate redacted durable projection rather than the
+   operator-facing `snapshot()`: owner/sequence metadata, bounded redacted
+   receipts, bounded completed-key markers, and at most 256 open transaction
+   identities. Raw command envelopes, terminal input, prompts, browser/script
+   results, live resources, and exact outcomes are omitted. A restored open
+   transaction is terminalized once as `command.unknown`, never re-executed.
 6. **Handler dispatch** — only then does it call the matching `ControlHandlers`
    method to perform the effect and shape the `CommandOutcome`.
 

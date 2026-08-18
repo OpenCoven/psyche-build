@@ -28,6 +28,10 @@ import {
   createAgentControlJournalResource,
   exactCommandOutcomeDigest,
   type AgentControlJournalReceipt,
+  type DurableCompletedTransaction,
+  type DurableControlSnapshot,
+  type DurableOpenTransaction,
+  type DurableOpenTransactionKind,
   type DurableReceiptRecord,
   type JournalMutationGuard,
   type JournalSnapshotFile,
@@ -107,7 +111,7 @@ export interface RuntimeJournal {
   append(kind: string, payload: Record<string, unknown>): Promise<RuntimeEvent>;
   read(afterSequence: number, limit?: number): RuntimeEvent[];
   findByIdempotencyKey(key: string): RuntimeEvent | undefined;
-  recoverNonterminalCommands(): Promise<RuntimeEvent[]>;
+  recoverNonterminalCommands(restored?: readonly DurableOpenTransaction[]): Promise<RuntimeEvent[]>;
 }
 
 /**
@@ -306,7 +310,9 @@ export class ControlRuntime {
   }
 
   static async create(opts: ControlRuntimeOptions): Promise<ControlRuntime> {
-    const recovered = await opts.journal.recoverNonterminalCommands();
+    const compactable = asCompactable(opts.journal);
+    const snapshot = await compactable?.loadSnapshot();
+    const recovered = await opts.journal.recoverNonterminalCommands(snapshot?.openTransactions);
     const runtime = new ControlRuntime(opts.ownerEpoch, opts.handlers, opts.journal, opts);
 
     // A compacted journal no longer holds the whole history, so the durable
@@ -314,7 +320,6 @@ export class ControlRuntime {
     // replayed. Legacy snapshot outcome keys remain only as fail-closed
     // markers: exact replay now comes from the retained journal tail and the
     // disk-backed outcome store, never from snapshot hot-cache seeding.
-    const snapshot = await runtime.compactable?.loadSnapshot();
     const covered = snapshot?.coveredSequence ?? 0;
     const restored = snapshot?.receiptRecords ?? [];
     const durableRecords = () => mergeDurableReceiptRecords(
@@ -324,7 +329,10 @@ export class ControlRuntime {
 
     await runtime.persistRecoveredTerminalOutcomes(recovered);
     await runtime.recoverRestartedApprovalReceipts(durableRecords());
-    if (snapshot) runtime.rememberLegacySnapshotOutcomeKeys(snapshot.outcomes);
+    if (snapshot) {
+      runtime.rememberLegacySnapshotOutcomeKeys(snapshot.outcomes);
+      runtime.rememberCompletedTransactions(snapshot.completedTransactions ?? []);
+    }
     // Read the tail again: recovery appends the invalidation events whose
     // receipts must win over the approval_required ones they replace.
     await runtime.restoreRetainedOutcomes(opts.journal.read(covered));
@@ -391,6 +399,13 @@ export class ControlRuntime {
       })),
       approvals,
       receipts: [...this.receipts.values()].map((owned) => owned.receipt),
+    };
+  }
+
+  private durableSnapshot(): DurableControlSnapshot {
+    return {
+      ownerEpoch: this.ownerEpoch,
+      sequence: this.compactable?.sequence ?? this.journal.read(0).at(-1)?.sequence ?? 0,
     };
   }
 
@@ -1716,6 +1731,10 @@ export class ControlRuntime {
     }
   }
 
+  private rememberCompletedTransactions(transactions: readonly DurableCompletedTransaction[]): void {
+    for (const transaction of transactions) this.legacySnapshotOutcomeKeys.add(transaction.idempotencyKey);
+  }
+
   private async persistRecoveredTerminalOutcomes(events: readonly RuntimeEvent[]): Promise<void> {
     if (!this.compactable) return;
     for (const event of events) {
@@ -2068,19 +2087,28 @@ export class ControlRuntime {
       // snapshot, so the new one is the union rather than a fresh projection.
       // Exact outcomes still remain authoritative in the sidecar store.
       const previous = await journal.loadSnapshot();
+      const eventsSincePreviousSnapshot = journal.read(previous?.coveredSequence ?? 0)
+        .filter((event) => event.sequence <= coveredSequence);
       const records = mergeDurableReceiptRecords(
         previous?.receiptRecords ?? [],
-        latestDurableReceiptRecords(journal.read(previous?.coveredSequence ?? 0)),
+        latestDurableReceiptRecords(eventsSincePreviousSnapshot),
       ).slice(-MAX_COMMAND_RECORDS);
+      const openTransactions = durableOpenTransactions(previous?.openTransactions ?? [], eventsSincePreviousSnapshot);
+      const completedTransactions = durableCompletedTransactions(
+        previous?.completedTransactions ?? [],
+        eventsSincePreviousSnapshot,
+      );
 
       // The snapshot must be durable before the events it covers are dropped.
       // Exact outcomes stay in the sidecar, so new snapshots no longer duplicate
       // them.
       await journal.writeSnapshot({
-        snapshot: this.snapshot(),
+        snapshot: this.durableSnapshot(),
         coveredSequence,
         outcomes: {},
         receiptRecords: records,
+        openTransactions,
+        completedTransactions,
       }, guard);
       if (this.compactionShouldAbort(attempt)) {
         this.markCompactionBlockedByDurability();
@@ -2912,6 +2940,50 @@ function isRetainedNonSurfaceCommandKind(kind?: ControlCommand['kind'] | string)
 function isReceiptResult(value: unknown): value is { receiptId?: string } {
   return typeof value === 'object' && value !== null &&
     (!('receiptId' in value) || typeof (value as { receiptId?: unknown }).receiptId === 'string');
+}
+
+function durableOpenTransactions(
+  restored: readonly DurableOpenTransaction[],
+  events: readonly RuntimeEvent[],
+): DurableOpenTransaction[] {
+  const open = new Map<string, DurableOpenTransaction>();
+  for (const item of restored) open.set(commandTransactionKey(item.commandId, item.idempotencyKey), item);
+  for (const event of events) {
+    const commandId = stringPayload(event, 'commandId');
+    const idempotencyKey = stringPayload(event, 'idempotencyKey');
+    if (!commandId || !idempotencyKey) continue;
+    const key = commandTransactionKey(commandId, idempotencyKey);
+    if (TERMINAL_EVENT_KINDS.has(event.kind)) open.delete(key);
+    else if (isDurableOpenTransactionKind(event.kind)) {
+      open.set(key, { sequence: event.sequence, commandId, idempotencyKey, kind: event.kind });
+    }
+  }
+  if (open.size > AGENT_CONTROL_LIMITS.pendingCommands) {
+    throw codedRuntimeError('durability_unavailable', 'durable open transaction capacity is exhausted');
+  }
+  return [...open.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
+function durableCompletedTransactions(
+  restored: readonly DurableCompletedTransaction[],
+  events: readonly RuntimeEvent[],
+): DurableCompletedTransaction[] {
+  const completed = new Map<string, DurableCompletedTransaction>();
+  for (const item of restored) completed.set(commandTransactionKey(item.commandId, item.idempotencyKey), item);
+  for (const event of events) {
+    if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
+    const commandId = stringPayload(event, 'commandId');
+    const idempotencyKey = stringPayload(event, 'idempotencyKey');
+    if (!commandId || !idempotencyKey) continue;
+    completed.set(commandTransactionKey(commandId, idempotencyKey), {
+      sequence: event.sequence, commandId, idempotencyKey,
+    });
+  }
+  return [...completed.values()].sort((left, right) => left.sequence - right.sequence).slice(-MAX_COMMAND_RECORDS);
+}
+
+function isDurableOpenTransactionKind(value: string): value is DurableOpenTransactionKind {
+  return value === 'command.requested' || value === 'command.accepted' || value === 'command.running';
 }
 
 function latestDurableReceiptRecords(events: readonly RuntimeEvent[]): DurableReceiptRecord[] {

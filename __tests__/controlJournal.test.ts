@@ -46,6 +46,37 @@ function storedOutcomePath(root: string, idempotencyKey: string): string {
 }
 
 describe('ControlJournal', () => {
+  it('durably publishes newly created runtime directories through their parents', async () => {
+    const root = await newRoot('psyche-journal');
+    const steps: string[] = [];
+    setDurableOutcomePublicationTestHooksForTesting({
+      durableMutationStep: ({ target, destinationPath, step }) => {
+        if (target === 'directory') steps.push(`${path.basename(destinationPath)}:${step}`);
+      },
+    });
+    const journal = await ControlJournal.open(root, 7);
+    await journal.storeOutcome('directory-publication', {
+      status: 'succeeded', value: { paneId: '%directory' },
+    });
+    expect(steps).toEqual([
+      '.psyche:created', '.psyche:parent-directory-synced',
+      'runtime:created', 'runtime:parent-directory-synced',
+      'outcomes:created', 'outcomes:parent-directory-synced',
+      '.psyche:parent-directory-synced', 'runtime:parent-directory-synced',
+      'outcomes:parent-directory-synced',
+    ]);
+  });
+
+  it('fails closed when a newly created runtime directory parent cannot be synced', async () => {
+    const root = await newRoot('psyche-journal');
+    setDurableOutcomePublicationTestHooksForTesting({
+      syncContainingDirectory: async ({ target, sync }) => {
+        if (target !== 'directory') return await sync();
+        throw new Error('injected parent directory sync failure');
+      },
+    });
+    await expect(ControlJournal.open(root, 7)).rejects.toThrow('injected parent directory sync failure');
+  });
   it('constructs agent-control records from allowlisted metadata only', () => {
     const built = agentControlJournalPayload({
       kind: 'command.succeeded', commandId: 'script-1', idempotencyKey: 'idem-1',
@@ -691,6 +722,37 @@ describe('ControlJournal', () => {
       }) }),
     ]);
     expect(journal.findByIdempotencyKey('new-key')).toMatchObject({ kind: 'command.unknown' });
+  });
+
+  it('recovers a compacted open transaction once and lets a terminal tail win', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const restored = [{
+      sequence: 1, commandId: 'compacted-open', idempotencyKey: 'compacted-open-key',
+      kind: 'command.running' as const,
+    }];
+    await expect(journal.recoverNonterminalCommands(restored)).resolves.toHaveLength(1);
+    await expect(journal.recoverNonterminalCommands(restored)).resolves.toEqual([]);
+    const terminalJournal = await ControlJournal.open(await newRoot('psyche-journal'), 7);
+    await terminalJournal.append('command.succeeded', {
+      commandId: 'compacted-terminal', idempotencyKey: 'compacted-terminal-key',
+    });
+    await expect(terminalJournal.recoverNonterminalCommands([{
+      sequence: 1, commandId: 'compacted-terminal', idempotencyKey: 'compacted-terminal-key',
+      kind: 'command.requested',
+    }])).resolves.toEqual([]);
+  });
+
+  it('rejects invalid durable open transaction snapshot records', async () => {
+    const root = await newRoot('psyche-journal');
+    const runtimeDirectory = path.join(root, '.psyche', 'runtime');
+    await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(path.join(runtimeDirectory, 'snapshot.json'), JSON.stringify({
+      snapshot: { ownerEpoch: 7, sequence: 1 }, coveredSequence: 1, outcomes: {}, receiptRecords: [],
+      openTransactions: [{ sequence: 0, commandId: 'bad', idempotencyKey: 'bad-key', kind: 'command.requested' }],
+    }));
+    const journal = await ControlJournal.open(root, 7);
+    await expect(journal.loadSnapshot()).rejects.toThrow('invalid durable open transaction');
   });
 
   it('truncates only an incomplete final line', async () => {

@@ -480,6 +480,9 @@ describe('ControlRuntime', () => {
     await (runtime as any).compactJournal(journal);
     expect((runtime as any).compactionBlockedByDurability).toBe(true);
     expect(journal.firstSequence).toBeLessThanOrEqual(terminal?.sequence ?? 0);
+    expect(journal.read(0).filter((event) => (
+      event.kind === 'command.succeeded' && event.payload.idempotencyKey === 'idem-blocked-dirty'
+    ))).toHaveLength(1);
 
     const blockedSequenceBefore = journal.sequence;
     const blockedCallsBefore = invocations;
@@ -501,6 +504,14 @@ describe('ControlRuntime', () => {
     expect((runtime as any).compactionBlockedByDurability).toBe(false);
     expect(journal.firstSequence).toBeGreaterThan(terminal?.sequence ?? 0);
     await expect(journal.loadOutcome('idem-blocked-dirty')).resolves.toEqual(first);
+    expect(invocations).toBe(2);
+    const reopened = await ControlJournal.open(root, 5);
+    const restarted = await ControlRuntime.create({ ownerEpoch: 5, handlers, journal: reopened });
+    const sequenceBeforeRestartRetry = reopened.sequence;
+    await expect(submit(restarted, {
+      ...openTerminalCommand('idem-blocked-dirty', 'blocked-dirty-restart'), ownerEpoch: 5,
+    })).resolves.toEqual(first);
+    expect(reopened.sequence).toBe(sequenceBeforeRestartRetry);
     expect(invocations).toBe(2);
   }, 90_000);
 
