@@ -99,7 +99,7 @@ browser operations additionally require the current resource `generation`.
 | `psyche_browser_script` | `lease_id`, `lease_revision`, `tab_id`, `generation`, `source`; `task_id` optional when task-bound |
 | `psyche_control_action_status` | `action_id`; `task_id` optional for compatibility; replay results keep `resource.idDigest` instead of a live `resource.id` |
 | `psyche_list_panes` | `project_root` optional; `task_id` optional for compatibility |
-| `psyche_execute_task` | `prompt`, `lanes`, `lease_id`, `lease_revision`; `task_id` optional when task-bound |
+| `psyche_execute_task` | `prompt`, `lanes`, `lease_id`, `lease_revision`; `task_id` optional when task-bound; stable `operation_id` recommended for safe retry reconciliation |
 | `psyche_create_pane` | `prompt`, `agent`, `lease_id`, `lease_revision`; `task_id` optional when task-bound |
 | `psyche_kill_pane` | `pane_id`, `generation`, `lease_id`, `lease_revision`; `task_id` optional when task-bound |
 | `psyche_get_pane_output` | `pane_id`, `generation`, `lease_id`, `lease_revision`; `task_id` optional when task-bound |

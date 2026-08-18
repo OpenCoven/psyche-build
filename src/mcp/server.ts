@@ -652,11 +652,12 @@ function command(
   kind: ControlCommandInput['kind'],
   projectRoot: string,
   payload: unknown,
+  idempotencyKey?: string,
 ): ControlCommandInput {
   const id = deps.randomId();
   return {
     id,
-    idempotencyKey: `mcp:${id}`,
+    idempotencyKey: idempotencyKey ?? `mcp:${id}`,
     kind,
     projectRoot,
     createdAt: deps.now().toISOString(),
@@ -960,12 +961,13 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'psyche_execute_task',
-    description: 'Compatibility alias that submits leased orchestration to the project control owner.',
+    description: 'Compatibility alias that submits leased orchestration to the project control owner. Supply operation_id to safely reconcile retries after an ambiguous control response.',
     inputSchema: {
       type: 'object', required: ['prompt', 'lanes', ...authorizationRequired],
       properties: {
         prompt: { type: 'string' }, lanes: { type: 'array', minItems: 1 },
         ...authorizationProperties,
+        operation_id: { type: 'string', minLength: 1, maxLength: 256 },
         concurrency: { type: 'integer', minimum: 1 }, branch: { type: 'string' }, project_root: projectRootProperty,
       },
     },
@@ -974,6 +976,10 @@ export const TOOLS: ToolDef[] = [
       requireLease: true,
     }, async ({ client, projectRoot, authorization }) => {
       const prompt = requiredString(args, 'prompt');
+      const operationId = Object.hasOwn(args, 'operation_id')
+        ? requiredString(args, 'operation_id')
+        : undefined;
+      if (operationId && operationId.length > 256) invalid('`operation_id` exceeds 256 characters');
       if (!Array.isArray(args.lanes) || args.lanes.length === 0) invalid('requires at least one lane');
       const request: OrchestrationTaskRequest = {
         taskId: authorization!.taskId,
@@ -983,7 +989,12 @@ export const TOOLS: ToolDef[] = [
         ...(typeof args.branch === 'string' ? { startPointBranch: args.branch } : {}),
         ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}),
       };
-      return client.submit(command('orchestration.execute', projectRoot, { ...authorization!, request }));
+      return client.submit(command(
+        'orchestration.execute',
+        projectRoot,
+        { ...authorization!, request },
+        operationId ? `mcp:orchestration.execute:${operationId}` : undefined,
+      ));
     }),
   },
   {

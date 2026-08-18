@@ -101,6 +101,58 @@ describe('Orchestrator', () => {
     expect(seen).toHaveLength(5);
   });
 
+  it('checks authority immediately before every lane effect', async () => {
+    const effects: string[] = [];
+    let authorized = true;
+    const orchestrator = new Orchestrator({
+      executeLane: async (lane) => {
+        effects.push(lane.id);
+        authorized = false;
+        return {};
+      },
+    });
+
+    await expect(orchestrator.execute(task({
+      concurrency: 1,
+      lanes: [
+        { id: 'first', mode: 'terminal' },
+        { id: 'second', mode: 'terminal' },
+      ],
+    }), {
+      beforeLaneEffect: () => {
+        if (!authorized) throw Object.assign(new Error('lease revoked'), { code: 'lease_missing' });
+      },
+    })).rejects.toMatchObject({ code: 'lease_missing' });
+
+    expect(effects).toEqual(['first']);
+  });
+
+  it('does not pre-authorize concurrent lane effects', async () => {
+    const effects: string[] = [];
+    let authorized = true;
+    const orchestrator = new Orchestrator({
+      executeLane: async (lane) => {
+        effects.push(lane.id);
+        authorized = false;
+        return {};
+      },
+    });
+
+    await expect(orchestrator.execute(task({
+      concurrency: 2,
+      lanes: [
+        { id: 'first', mode: 'terminal' },
+        { id: 'second', mode: 'terminal' },
+      ],
+    }), {
+      beforeLaneEffect: () => {
+        if (!authorized) throw Object.assign(new Error('lease revoked'), { code: 'lease_missing' });
+      },
+    })).rejects.toMatchObject({ code: 'lease_missing' });
+
+    expect(effects).toEqual(['first']);
+  });
+
   describe('outcome aggregation', () => {
     it('reports completed when every lane succeeds', async () => {
       const orchestrator = new Orchestrator({ executeLane: async () => ({}) });

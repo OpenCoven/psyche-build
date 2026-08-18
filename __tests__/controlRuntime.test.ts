@@ -1609,6 +1609,135 @@ describe('ControlRuntime', () => {
     expect(handlers.executeOrchestration).toHaveBeenCalledOnce();
   });
 
+  it('revalidates lease revocation before each orchestration lane effect', async () => {
+    const capabilityLeases = new CapabilityLeaseStore(
+      () => new Date('2026-08-17T12:00:00.000Z'),
+      7,
+    );
+    const effects: string[] = [];
+    let leaseId = '';
+    handlers.executeOrchestration = vi.fn(async (...args: unknown[]) => {
+      const authorize = args[1] as () => Promise<void>;
+      await authorize();
+      effects.push('first');
+      capabilityLeases.revoke(leaseId);
+      await authorize();
+      effects.push('second');
+      return {};
+    });
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7,
+      handlers,
+      journal: createMemoryJournal(),
+      capabilityLeases,
+    });
+    const request = { taskId: 'task-orchestration', projectRoot: '/repo', prompt: 'test',
+      concurrency: 1, lanes: [
+        { id: 'first', mode: 'terminal' as const },
+        { id: 'second', mode: 'terminal' as const },
+      ] };
+    const granted = await submit(runtime, command({
+      id: 'grant-orchestration-revoke', idempotencyKey: 'grant-orchestration-revoke',
+      kind: 'lease.grant', ownerEpoch: 7, payload: {
+        requestId: 'request-orchestration-revoke', actorId: 'agent-1',
+        taskId: request.taskId, ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: '/repo' }, capabilities: ['pane.create'] }],
+      },
+    }));
+    const lease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
+    leaseId = lease.id;
+
+    await expect(submit(runtime, command({
+      id: 'orchestration-revoke', idempotencyKey: 'orchestration-revoke',
+      kind: 'orchestration.execute', ownerEpoch: 7, actor: { id: 'agent-1', kind: 'psyche' },
+      payload: { request, taskId: request.taskId, leaseId: lease.id, leaseRevision: lease.revision },
+    }))).resolves.toMatchObject({ status: 'failed', code: 'lease_missing' });
+    expect(effects).toEqual(['first']);
+  });
+
+  it('revalidates lease expiry before each orchestration lane effect', async () => {
+    let now = new Date('2026-08-17T12:00:00.000Z');
+    const capabilityLeases = new CapabilityLeaseStore(() => now, 7);
+    const effects: string[] = [];
+    handlers.executeOrchestration = vi.fn(async (...args: unknown[]) => {
+      const authorize = args[1] as () => Promise<void>;
+      await authorize();
+      effects.push('first');
+      now = new Date('2026-08-17T12:01:01.000Z');
+      await authorize();
+      effects.push('second');
+      return {};
+    });
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7,
+      handlers,
+      journal: createMemoryJournal(),
+      capabilityLeases,
+    });
+    const request = { taskId: 'task-orchestration', projectRoot: '/repo', prompt: 'test',
+      concurrency: 1, lanes: [
+        { id: 'first', mode: 'terminal' as const },
+        { id: 'second', mode: 'terminal' as const },
+      ] };
+    const granted = await submit(runtime, command({
+      id: 'grant-orchestration-expiry', idempotencyKey: 'grant-orchestration-expiry',
+      kind: 'lease.grant', ownerEpoch: 7, payload: {
+        requestId: 'request-orchestration-expiry', actorId: 'agent-1',
+        taskId: request.taskId, ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: '/repo' }, capabilities: ['pane.create'] }],
+      },
+    }));
+    const lease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
+
+    await expect(submit(runtime, command({
+      id: 'orchestration-expiry', idempotencyKey: 'orchestration-expiry',
+      kind: 'orchestration.execute', ownerEpoch: 7, actor: { id: 'agent-1', kind: 'psyche' },
+      payload: { request, taskId: request.taskId, leaseId: lease.id, leaseRevision: lease.revision },
+    }))).resolves.toMatchObject({ status: 'failed', code: 'lease_expired' });
+    expect(effects).toEqual(['first']);
+  });
+
+  it('reconciles recovered orchestration ambiguity as effect_unknown without replay', async () => {
+    const journal = createMemoryJournal();
+    await journal.append('command.requested', {
+      commandId: 'orchestration-before-drop',
+      idempotencyKey: 'stable-operation',
+      kind: 'orchestration.execute',
+      ownerEpoch: 7,
+    });
+    journal.recoverNonterminalCommands = vi.fn(async () => [
+      await journal.append('command.unknown', {
+        commandId: 'orchestration-before-drop',
+        idempotencyKey: 'stable-operation',
+        reason: 'recovered-nonterminal',
+      }),
+    ]);
+    handlers.executeOrchestration = vi.fn(async () => {
+      throw new Error('must not replay');
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+
+    await expect(runtime.submit(command({
+      id: 'orchestration-retry',
+      idempotencyKey: 'stable-operation',
+      kind: 'orchestration.execute',
+      ownerEpoch: 7,
+      actor: { id: 'agent-1', kind: 'psyche' },
+      payload: {
+        taskId: 'task-orchestration',
+        leaseId: 'lease-1',
+        leaseRevision: 1,
+        request: {
+          taskId: 'task-orchestration',
+          projectRoot: '/repo',
+          prompt: 'test',
+          lanes: [{ id: 'one', mode: 'terminal' }],
+        },
+      },
+    }))).resolves.toMatchObject({ status: 'unknown', code: 'effect_unknown' });
+    expect(handlers.executeOrchestration).not.toHaveBeenCalled();
+  });
+
   it('revalidates lease expiry before an approved effect', async () => {
     let now = new Date('2026-08-12T12:00:00.000Z');
     const clock = () => now;

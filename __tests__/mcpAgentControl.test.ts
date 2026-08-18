@@ -1647,7 +1647,10 @@ describe('agent surface MCP tools', () => {
 
     expect(response).toMatchObject({ status: 'succeeded', value: completed });
     expect(execute).toHaveBeenCalledOnce();
-    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ taskId, projectRoot }));
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId, projectRoot }),
+      { beforeLaneEffect: expect.any(Function) },
+    );
 
     host.runtime.capabilityLeases.grant(grant);
     const stale = payload(await call('psyche_execute_task', {

@@ -240,6 +240,52 @@ describe('MCP canonical delegation and read-only helpers', () => {
     });
   });
 
+  it('reuses an explicit execute_task operation id after an ambiguous response', async () => {
+    const outcomes = new Map<string, { status: 'unknown'; code: string; message: string }>();
+    const effects = vi.fn();
+    let dropResponse = true;
+    const fake = client({
+      submit: vi.fn(async (submitted) => {
+        const prior = outcomes.get(submitted.idempotencyKey);
+        if (prior) return prior;
+        effects();
+        const outcome = {
+          status: 'unknown' as const,
+          code: 'effect_unknown',
+          message: 'effect outcome is unknown',
+        };
+        outcomes.set(submitted.idempotencyKey, outcome);
+        if (dropResponse) {
+          dropResponse = false;
+          throw new Error('control connection closed');
+        }
+        return outcome;
+      }),
+    });
+    let id = 0;
+    inject({
+      controlClientForRoot: vi.fn(async () => fake),
+      randomId: () => `random-${++id}`,
+    });
+    const args = {
+      task_id: 'task-2',
+      lease_id: 'lease-2',
+      lease_revision: 1,
+      project_root: '/repo',
+      operation_id: 'caller-operation-7',
+      prompt: 'Fix tests',
+      lanes: [{ id: 'codex', mode: 'isolated-worktree', agent: 'codex' }],
+    };
+
+    expect((await call('psyche_execute_task', args)).error.message).toBe('control connection closed');
+    expect(payload(await call('psyche_execute_task', args)))
+      .toMatchObject({ status: 'unknown', code: 'effect_unknown' });
+    expect(effects).toHaveBeenCalledOnce();
+    expect(fake.submit.mock.calls[0][0].id).not.toBe(fake.submit.mock.calls[1][0].id);
+    expect(fake.submit.mock.calls[0][0].idempotencyKey)
+      .toBe(fake.submit.mock.calls[1][0].idempotencyKey);
+  });
+
   it('translates create_pane to a single-lane pane action via control owner', async () => {
     const receipt = {
       schema: 'psyche.control.receipt/v1', actionId: 'b', state: 'queued',

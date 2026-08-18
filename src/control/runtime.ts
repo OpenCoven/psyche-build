@@ -64,9 +64,13 @@ const STABLE_SURFACE_EFFECT_CODES = new Set([
 ]);
 
 export type Payload<K extends ControlCommand['kind']> = Extract<ControlCommand, { kind: K }>['payload'];
+export type OrchestrationEffectGuard = () => Promise<void>;
 
 export interface ControlHandlers {
-  executeOrchestration(payload: Payload<'orchestration.execute'>): Promise<unknown>;
+  executeOrchestration(
+    payload: Payload<'orchestration.execute'>,
+    authorizeEffect: OrchestrationEffectGuard,
+  ): Promise<unknown>;
   spawnPane(payload: Payload<'pane.spawn'>): Promise<unknown>;
   sendPrompt(payload: PromptEnvelope): Promise<unknown>;
   interruptPane(payload: Payload<'pane.interrupt'>): Promise<unknown>;
@@ -963,16 +967,14 @@ export class ControlRuntime {
         case 'pane.meta.update':
           return succeededOutcome(await this.handlers.updatePaneMeta(command.payload));
         case 'orchestration.execute':
-          await this.assertCapabilityLease({
-            leaseId: command.payload.leaseId,
-            revision: command.payload.leaseRevision,
-            ownerEpoch: command.ownerEpoch,
-            actorId: command.actor.id,
-            taskId: command.payload.taskId,
-            target: { kind: 'project', id: command.projectRoot },
-            capability: 'pane.create',
-          });
-          return succeededOutcome(await this.handlers.executeOrchestration(command.payload));
+          {
+            const authorizeEffect = this.orchestrationEffectGuard(command);
+            await authorizeEffect();
+            return succeededOutcome(await this.handlers.executeOrchestration(
+              command.payload,
+              authorizeEffect,
+            ));
+          }
         case 'ritual.launch':
           return succeededOutcome(await this.handlers.launchRitual(command.payload));
         case 'coven.session.launch':
@@ -1120,6 +1122,21 @@ export class ControlRuntime {
   private async assertCapabilityLease(assertion: CapabilityLeaseAssertion): Promise<void> {
     await this.assertTaskSubjectActive(assertion.taskId, assertion.actorId);
     this.capabilityLeases.assert(assertion);
+  }
+
+  private orchestrationEffectGuard(
+    command: Extract<ControlCommand, { kind: 'orchestration.execute' }>,
+  ): OrchestrationEffectGuard {
+    const assertion = Object.freeze({
+      leaseId: command.payload.leaseId,
+      revision: command.payload.leaseRevision,
+      ownerEpoch: command.ownerEpoch,
+      actorId: command.actor.id,
+      taskId: command.payload.taskId,
+      target: Object.freeze({ kind: 'project' as const, id: command.projectRoot }),
+      capability: 'pane.create' as const,
+    });
+    return () => this.assertCapabilityLease(assertion);
   }
 
   private async assertTaskSubjectActive(taskId: string, actorId: string): Promise<void> {
@@ -2089,7 +2106,12 @@ function outcomeFromEvent(event: RuntimeEvent): CommandOutcome {
     case 'command.unknown':
       return {
         status: 'unknown',
-        code: receipt?.code ?? stringPayload(event, 'code') ?? stringPayload(event, 'reason') ?? 'command_unknown',
+        code: receipt?.code
+          ?? stringPayload(event, 'code')
+          ?? (stringPayload(event, 'reason') === 'recovered-nonterminal'
+            ? 'effect_unknown'
+            : stringPayload(event, 'reason'))
+          ?? 'command_unknown',
         message: receipt ? 'surface effect outcome is unknown' : stringPayload(event, 'message') ?? 'command outcome is unknown',
       };
     default:

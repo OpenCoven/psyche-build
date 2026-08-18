@@ -26,6 +26,10 @@ export interface OrchestratorOptions {
   clock?: () => string;
 }
 
+export interface OrchestrationExecutionOptions {
+  beforeLaneEffect?: (lane: OrchestrationLanePlan) => void | Promise<void>;
+}
+
 /**
  * Runs a task's lanes with bounded concurrency and aggregates the outcome.
  *
@@ -44,7 +48,10 @@ export class Orchestrator {
     this.clock = options.clock ?? (() => new Date().toISOString());
   }
 
-  async execute(request: OrchestrationTaskRequest): Promise<OrchestrationTaskResult> {
+  async execute(
+    request: OrchestrationTaskRequest,
+    options: OrchestrationExecutionOptions = {},
+  ): Promise<OrchestrationTaskResult> {
     // Plan first, and let a bad request throw before any lane starts —
     // otherwise a task that is invalid halfway through would leave real
     // worktrees and panes behind with no result to clean up from.
@@ -55,17 +62,43 @@ export class Orchestrator {
     // survives lanes settling out of order.
     const results = new Array<OrchestrationLaneResult | undefined>(plan.lanes.length);
     let cursor = 0;
+    let effectStartTail = Promise.resolve();
+    let authorizationFailure: { error: unknown } | undefined;
+
+    const runAuthorizedLane = async (
+      lane: OrchestrationLanePlan,
+    ): Promise<OrchestrationLaneResult> => {
+      if (!options.beforeLaneEffect) return this.runLane(lane);
+      let release!: () => void;
+      const priorStart = effectStartTail;
+      effectStartTail = new Promise<void>((resolve) => { release = resolve; });
+      await priorStart;
+      try {
+        if (authorizationFailure) throw authorizationFailure.error;
+        await options.beforeLaneEffect(lane);
+        return this.runLane(lane);
+      } catch (error) {
+        authorizationFailure ??= { error };
+        throw error;
+      } finally {
+        release();
+      }
+    };
 
     const worker = async (): Promise<void> => {
-      while (cursor < plan.lanes.length) {
+      while (cursor < plan.lanes.length && !authorizationFailure) {
         const index = cursor++;
-        results[index] = await this.runLane(plan.lanes[index]);
+        const lane = plan.lanes[index];
+        results[index] = await runAuthorizedLane(lane);
       }
     };
 
     await Promise.all(
-      Array.from({ length: plan.concurrency }, () => worker()),
+      Array.from({ length: plan.concurrency }, () => worker().catch((error) => {
+        authorizationFailure ??= { error };
+      })),
     );
+    if (authorizationFailure) throw authorizationFailure.error;
 
     const lanes = results as OrchestrationLaneResult[];
     const completed = lanes.filter((lane) => lane.status === 'completed').length;

@@ -32,24 +32,31 @@ describe('createDaemonControlHandlers executeOrchestration', () => {
       orchestrator: { execute },
     });
 
-    const result = await handlers.executeOrchestration({
-      taskId: 'authorized-task',
-      leaseId: 'lease-1',
-      leaseRevision: 1,
-      request: {
-        taskId: 'caller-task',
-        projectRoot: path.join(projectRoot, 'src'),
-        cwd: 'daemon',
-        prompt: 'test',
-        lanes: [{ id: 'one', mode: 'terminal' }],
+    const authorizeEffect = vi.fn(async () => undefined);
+    const result = await handlers.executeOrchestration(
+      {
+        taskId: 'authorized-task',
+        leaseId: 'lease-1',
+        leaseRevision: 1,
+        request: {
+          taskId: 'caller-task',
+          projectRoot: path.join(projectRoot, 'src'),
+          cwd: 'daemon',
+          prompt: 'test',
+          lanes: [{ id: 'one', mode: 'terminal' }],
+        },
       },
-    });
+      authorizeEffect,
+    );
 
-    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
-      taskId: 'authorized-task',
-      projectRoot,
-      cwd: path.join(projectRoot, 'src', 'daemon'),
-    }));
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: 'authorized-task',
+        projectRoot,
+        cwd: path.join(projectRoot, 'src', 'daemon'),
+      }),
+      { beforeLaneEffect: authorizeEffect },
+    );
     expect(result).toEqual(completed);
   });
 });

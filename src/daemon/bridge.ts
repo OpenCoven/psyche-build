@@ -2451,6 +2451,7 @@ export async function dispatchOrchestrationRequest(
     task: import('../orchestration/types.js').OrchestrationTaskRequest;
   },
   orchestrator: import('../orchestration/orchestrator.js').Orchestrator,
+  options?: import('../orchestration/orchestrator.js').OrchestrationExecutionOptions,
 ): Promise<{
   type: 'orchestration.execute.result';
   requestId: string;
@@ -2485,7 +2486,7 @@ export async function dispatchOrchestrationRequest(
     cwd: cwd.requestedCwd,
   };
 
-  const result = await orchestrator.execute(task);
+  const result = await orchestrator.execute(task, options);
 
   return {
     type: 'orchestration.execute.result',
