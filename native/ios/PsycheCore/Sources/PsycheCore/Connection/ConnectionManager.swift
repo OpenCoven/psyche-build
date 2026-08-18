@@ -129,6 +129,7 @@ public actor ConnectionManager {
     private var activeGeneration: ConnectionGeneration?
     private var activeConnectAttempt: UUID?
     private var connectExecutionOwner: UUID?
+    private var pendingInvite: PsycheInvite?
     private var activeTeardown: UUID?
     private var teardownWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var lifecycleIntentEpoch: UInt64 = 0
@@ -241,9 +242,23 @@ public actor ConnectionManager {
     /// The link supplies routing, never certificate identity, so it cannot
     /// authorize a connection to an endpoint the device has not already
     /// verified.
-    public func connect(using invite: PsycheInvite) async {
+    @discardableResult
+    public func connect(using invite: PsycheInvite) async -> Bool {
         lifecycleIntentEpoch &+= 1
         let intentEpoch = lifecycleIntentEpoch
+        pendingInvite = invite
+        if let generation = activeGeneration {
+            await tearDownActiveConnection(generation: generation, finalState: .disconnected)
+        }
+        guard connectExecutionOwner == nil else { return true }
+        await startPendingInviteIfIdle(intentEpoch: intentEpoch)
+        return true
+    }
+
+    private func startPendingInviteIfIdle(intentEpoch: UInt64) async {
+        guard connectExecutionOwner == nil,
+              let invite = pendingInvite else { return }
+        pendingInvite = nil
         do {
             let hosts = try await pairedHostStore.hosts()
             guard let host = hosts.first(where: { Self.matches(invite.endpoint, $0.endpoint) }) else {
@@ -279,6 +294,11 @@ public actor ConnectionManager {
         defer {
             if connectExecutionOwner == attempt {
                 connectExecutionOwner = nil
+            }
+            Task { [weak self] in
+                guard let self else { return }
+                let intentEpoch = await self.lifecycleIntentEpoch
+                await self.startPendingInviteIfIdle(intentEpoch: intentEpoch)
             }
         }
 

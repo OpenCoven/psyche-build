@@ -747,7 +747,8 @@ final class ConnectionManagerTests: XCTestCase {
         let persistedHosts = try await pairedHostStore.hosts()
         XCTAssertEqual(persistedHosts, [])
 
-        let hellos = await fake.sentMessages.compactMap { message -> HelloPayload? in
+        let messages = await fake.sentMessages
+        let hellos = messages.compactMap { message -> HelloPayload? in
             guard case let .legacy(.hello(payload)) = message else { return nil }
             return payload
         }
@@ -932,6 +933,48 @@ final class ConnectionManagerTests: XCTestCase {
 
         let credential = try await credentialStore.credential(for: endpoint)
         XCTAssertNil(credential)
+    }
+
+    func testNewestInviteSupersedesInFlightInviteBeforeHello() async throws {
+        let fake = FakeTransport()
+        let transport = AllocatedConnectSuspensionTransport(base: fake)
+        let pairedHostStore = PairedHostStore(secureStore: InMemorySecureStore())
+        let endpoint = testEndpoint()
+        try await pairedHostStore.save(PairedHost(
+            serverID: "host", serverName: "Host", endpoint: endpoint,
+            clientID: "legacy-client", token: "legacy-token"
+        ))
+        let credentialStore = MobileCredentialStore(secureStore: InMemorySecureStore())
+        let manager = makeManager(
+            transport: transport,
+            pairedHostStore: pairedHostStore,
+            credentialStore: credentialStore
+        )
+        let firstInvite = try XCTUnwrap(PsycheInvite.parse(URL(string:
+            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&psyche_invite=first-invite"
+        )!))
+        let latestInvite = try XCTUnwrap(PsycheInvite.parse(URL(string:
+            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&psyche_invite=latest-invite"
+        )!))
+
+        let first = Task { await manager.connect(using: firstInvite) }
+        await transport.waitUntilFirstConnectSuspends()
+        let second = Task { await manager.connect(using: latestInvite) }
+        await transport.releaseFirstConnect()
+        _ = await second.value
+        try await waitForHello(on: fake)
+
+        let hellos = await fake.sentMessages.compactMap { message -> HelloPayload? in
+            guard case let .legacy(.hello(payload)) = message else { return nil }
+            return payload
+        }
+        XCTAssertEqual(hellos.map(\.invite), ["latest-invite"])
+        XCTAssertEqual(hellos.map(\.token), [nil])
+        let disconnectCount = await fake.disconnectCount
+        let credential = try await credentialStore.credential(for: endpoint)
+        XCTAssertEqual(disconnectCount, 1)
+        XCTAssertNil(credential)
+        _ = await first.value
     }
 
     func testPairOverridePersistsAndReconnectsWithRequestIdentityAndToken() async throws {

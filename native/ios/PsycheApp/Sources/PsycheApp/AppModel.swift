@@ -79,8 +79,10 @@ final class AppModel: ObservableObject {
         guard let invite = PsycheInvite.parse(url) else { return }
         pendingInvite = invite
         guard hasStarted, let composition else { return }
-        pendingInvite = nil
-        Task { await composition.connectionManager.connect(using: invite) }
+        Task { [weak self] in
+            guard await composition.connectionManager.connect(using: invite) else { return }
+            self?.pendingInvite = nil
+        }
     }
 
     /// Reads the launch arguments once so the decision cannot drift between
@@ -108,9 +110,10 @@ final class AppModel: ObservableObject {
         guard let composition else { return }
 
         if let invite = pendingInvite {
-            pendingInvite = nil
             await composition.start(reconnectToStoredHost: false)
-            await composition.connectionManager.connect(using: invite)
+            if await composition.connectionManager.connect(using: invite) {
+                pendingInvite = nil
+            }
         } else {
             await composition.start()
         }
