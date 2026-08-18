@@ -31,6 +31,13 @@ function spawnResult(id: string) {
     },
     worktreePath: `/w/${id}`,
     branch: `psyche/${id}`,
+    persistedPane: {
+      id: `pane-${id}`,
+      slug: `persisted-${id}`,
+      paneId: `%${id}`,
+      worktreePath: `/persisted/${id}`,
+      branchName: `persisted/${id}`,
+    },
   };
 }
 
@@ -62,20 +69,31 @@ describe('createBridgePaneBackend', () => {
     expect((spawnPane.mock.calls[0] as any[])[2].permissionMode).toBe('plan');
   });
 
-  it('returns the created pane, worktree, and branch identity', async () => {
+  it('forwards an explicit empty permission mode to preserve agent defaults', async () => {
+    const spawnPane = vi.fn(async () => spawnResult('codex'));
+    const backend = createBridgePaneBackend({ sessionName: 's', spawnPane });
+
+    await backend.execute(lane({ permissionMode: '' }));
+
+    expect((spawnPane.mock.calls[0] as any[])[2]).toHaveProperty('permissionMode', '');
+  });
+
+  it('returns the exact pane identity persisted by the spawn result', async () => {
+    const result = spawnResult('codex');
     const backend = createBridgePaneBackend({
       sessionName: 's',
-      spawnPane: vi.fn(async () => spawnResult('codex')),
+      spawnPane: vi.fn(async () => result),
     });
 
     const output = await backend.execute(lane());
 
-    expect(output.pane).toMatchObject({
-      id: '%codex',
-      paneId: '%codex',
-      worktreePath: '/w/codex',
-      branchName: 'psyche/codex',
-    });
+    expect({
+      id: output.pane?.id,
+      slug: output.pane?.slug,
+      paneId: output.pane?.paneId,
+      worktreePath: output.pane?.worktreePath,
+      branchName: output.pane?.branchName,
+    }).toEqual(result.persistedPane);
   });
 
   it('can execute without retaining completed spawn summaries', async () => {

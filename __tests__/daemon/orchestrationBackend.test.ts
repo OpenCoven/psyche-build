@@ -70,6 +70,13 @@ function spawnResult() {
     },
     worktreePath: root,
     branch: BRANCH,
+    persistedPane: {
+      id: 'pane-1',
+      slug: 'persisted-pane',
+      paneId: '%1',
+      worktreePath: root,
+      branchName: BRANCH,
+    },
   };
 }
 
@@ -112,7 +119,7 @@ describe('createDaemonOrchestrator', () => {
     expect(launchSession).not.toHaveBeenCalled();
   });
 
-  it('preserves bridge pane correlation identity in the lane result', async () => {
+  it('preserves the bridge spawn persisted identity in the lane result', async () => {
     const orchestrator = createDaemonOrchestrator({
       sessionName: 'psyche-repo',
       spawnPane: vi.fn(async () => spawnResult()),
@@ -125,7 +132,8 @@ describe('createDaemonOrchestrator', () => {
       id: 'lane-isolated-worktree',
       status: 'completed',
       pane: {
-        id: '%1',
+        id: 'pane-1',
+        slug: 'persisted-pane',
         paneId: '%1',
         worktreePath: root,
         branchName: BRANCH,

@@ -139,6 +139,10 @@ export interface BridgeSpawnResult {
   pane: PaneSummary;
   worktreePath: string;
   branch: string;
+  /** Canonical identity copied from the pane record after it is persisted. */
+  persistedPane?: Required<
+    Pick<PsychePane, 'id' | 'slug' | 'paneId' | 'worktreePath' | 'branchName'>
+  >;
 }
 
 export interface BridgeError {
@@ -1658,6 +1662,13 @@ export async function spawnBridgePane(
       pane: rawPaneToSummary(pane, scoped.projectRoot),
       worktreePath: String(pane.worktreePath),
       branch: String(pane.branchName || pane.branch),
+      persistedPane: {
+        id: String(pane.id),
+        slug: String(pane.slug),
+        paneId: persistedPaneId,
+        worktreePath: String(pane.worktreePath),
+        branchName: String(pane.branchName || pane.branch),
+      },
     };
   }
 }

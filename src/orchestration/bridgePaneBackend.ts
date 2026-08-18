@@ -60,28 +60,31 @@ export function createBridgePaneBackend(options: BridgePaneBackendOptions): Brid
       cwd: lane.cwd,
       ...(lane.agent ? { agent: lane.agent } : {}),
       prompt: lane.prompt,
-      ...(lane.permissionMode ? { permissionMode: lane.permissionMode } : {}),
+      ...(lane.permissionMode !== undefined ? { permissionMode: lane.permissionMode } : {}),
       ...(lane.startPointBranch ? { startPointBranch: lane.startPointBranch } : {}),
       ...(lane.title ? { title: lane.title } : {}),
       ...(lane.existingWorktree ? { existingWorktree: lane.existingWorktree } : {}),
     });
+
+    if (!result.persistedPane) {
+      throw new OrchestrationError(
+        'lane_execution_failed',
+        'Bridge spawn did not return its persisted pane identity',
+      );
+    }
 
     if (options.retainResults !== false) {
       spawned.set(lane.id, result);
     }
     return {
       pane: {
-        id: result.pane.id || result.id,
-        slug: lane.existingWorktree?.slug ?? lane.id,
+        ...result.persistedPane,
         ...(result.pane.title ? { displayName: result.pane.title } : {}),
-        branchName: result.branch,
         prompt: lane.prompt,
-        paneId: result.id,
         projectRoot: lane.projectRoot,
         type: 'worktree',
-        worktreePath: result.worktreePath,
         ...(lane.agent ? { agent: lane.agent } : {}),
-        ...(lane.permissionMode ? { permissionMode: lane.permissionMode } : {}),
+        ...(lane.permissionMode !== undefined ? { permissionMode: lane.permissionMode } : {}),
         orchestration: {
           taskId: lane.taskId,
           laneId: lane.id,
