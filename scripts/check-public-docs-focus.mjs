@@ -6,14 +6,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const contentDir = path.join(root, 'docs/src/content');
-const contentIndexPath = path.join(contentDir, 'index.js');
-const shellSourceFiles = [
-  'docs/src/hero.js',
+const recursiveRoots = ['docs/src', 'docs/shared', 'docs/public'];
+const textExtensions = new Set(['.js', '.mjs', '.html', '.css', '.svg', '.md', '.json']);
+const skippedDirectoryNames = new Set(['client', 'dist', 'generated', 'node_modules']);
+const requiredEntrypoints = sortUnique([
+  'docs/src/content/index.js',
   'docs/src/index.html',
   'docs/src/main.js',
-  'docs/src/sidebar.js',
-];
+  'docs/src/style.css',
+  'docs/vite.config.js',
+]);
 const prohibitedFiles = new Set(['docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md']);
 const prohibitedText = [
   ['Coven Demo Loop', 'standalone Coven demo positioning'],
@@ -26,28 +28,36 @@ function isEnoent(error) {
   return Boolean(error && typeof error === 'object' && error.code === 'ENOENT');
 }
 
-function compareStrings(a, b) {
-  return a < b ? -1 : a > b ? 1 : 0;
+function compareStrings(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function sortUnique(values) {
   return [...new Set(values)].sort(compareStrings);
 }
 
-function compareFailureRecords(left, right) {
-  return compareStrings(left.file, right.file) || compareStrings(left.reason, right.reason);
+function sortFailureRecords(records) {
+  return [...records].sort(
+    (left, right) => compareStrings(left.file, right.file) || compareStrings(left.reason, right.reason),
+  );
 }
 
-function sortFailureRecords(records) {
-  return [...records].sort(compareFailureRecords);
+function isRecursiveTextPath(relativePath) {
+  if (!textExtensions.has(path.extname(relativePath).toLowerCase())) {
+    return false;
+  }
+
+  return !relativePath.split('/').some((segment) => skippedDirectoryNames.has(segment));
 }
 
 function parseRelativeImports(source) {
   const imports = [];
   const importPattern = /from\s+['"](\.\/[^'"]+\.js)['"]/g;
+
   for (const match of source.matchAll(importPattern)) {
     imports.push(path.posix.normalize(path.posix.join('docs/src/content', match[1])));
   }
+
   return sortUnique(imports);
 }
 
@@ -59,80 +69,80 @@ async function loadPackageJson() {
       console.error('package.json: missing');
       return null;
     }
+
     throw error;
   }
 }
 
 async function readContentIndexImports() {
   try {
-    const source = await readFile(contentIndexPath, 'utf8');
+    const source = await readFile(path.join(root, 'docs/src/content/index.js'), 'utf8');
     return parseRelativeImports(source);
   } catch (error) {
     if (isEnoent(error)) {
       return [];
     }
+
     throw error;
   }
 }
 
-async function readContentModuleFiles() {
-  try {
-    const entries = await readdir(contentDir, { withFileTypes: true });
-    return sortUnique(
-      entries
-        .filter((entry) => entry.isFile() && path.extname(entry.name).toLowerCase() === '.js')
-        .map((entry) => path.posix.join('docs/src/content', entry.name)),
+async function collectRecursiveTextFiles(absoluteDirectory, relativeDirectory) {
+  const entries = await readdir(absoluteDirectory, { withFileTypes: true });
+  const sortedEntries = [...entries].sort((left, right) => compareStrings(left.name, right.name));
+  const files = [];
+
+  for (const entry of sortedEntries) {
+    const absolutePath = path.join(absoluteDirectory, entry.name);
+    const relativePath = path.posix.join(relativeDirectory, entry.name);
+
+    if (entry.isDirectory()) {
+      if (skippedDirectoryNames.has(entry.name)) {
+        continue;
+      }
+
+      files.push(...await collectRecursiveTextFiles(absolutePath, relativePath));
+      continue;
+    }
+
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    if (isRecursiveTextPath(relativePath)) {
+      files.push(relativePath);
+    }
+  }
+
+  return files;
+}
+
+async function collectPublicRecursiveFiles() {
+  const files = [];
+
+  for (const relativeRoot of recursiveRoots) {
+    files.push(
+      ...await collectRecursiveTextFiles(path.join(root, relativeRoot), relativeRoot),
     );
-  } catch (error) {
-    if (isEnoent(error)) {
-      return [];
-    }
-    throw error;
   }
+
+  return sortUnique(files);
 }
 
-async function inspectFile(file) {
-  const absolutePath = path.join(root, file);
-
-  try {
-    const info = await stat(absolutePath);
-    if (!info.isFile()) {
-      return { state: 'non-file' };
-    }
-
-    return { state: 'ok', source: await readFile(absolutePath, 'utf8') };
-  } catch (error) {
-    if (isEnoent(error)) {
-      return { state: 'missing' };
-    }
-    throw error;
-  }
-}
-
-function buildPublicInventory({ packageFiles, indexImports, contentModuleFiles, shellFiles }) {
-  const packageMarkdownFiles = sortUnique(
-    packageFiles.filter(
-      (file) => path.extname(file).toLowerCase() === '.md' && !prohibitedFiles.has(file),
-    ),
-  );
-
+function composeInventory({ recursiveFiles, importedContentFiles, packageMarkdownFiles }) {
   return sortUnique([
     'README.md',
     'docs/README.md',
-    'docs/src/content/index.js',
-    ...indexImports,
-    ...contentModuleFiles,
-    ...shellFiles,
-    ...packageMarkdownFiles,
+    ...requiredEntrypoints,
+    ...recursiveFiles,
+    ...importedContentFiles,
+    ...packageMarkdownFiles.filter((file) => !prohibitedFiles.has(file)),
   ]);
 }
 
 function countInventoryPasses(uniqueInventory, failedInventoryFiles) {
   for (const file of failedInventoryFiles) {
-    assert(
-      uniqueInventory.includes(file),
-      `inventory failure escaped inventory: ${file}`,
-    );
+    assert(uniqueInventory.includes(file), `inventory failure escaped inventory: ${file}`);
   }
 
   const passCount = uniqueInventory.length - failedInventoryFiles.size;
@@ -140,81 +150,58 @@ function countInventoryPasses(uniqueInventory, failedInventoryFiles) {
   return passCount;
 }
 
-function selfCheckDeterminism() {
-  const packageFiles = [
-    'README.md',
-    'docs/README.md',
-    'docs/BRIDGE-SECURITY.md',
-    'docs/COVEN-DEMO-LOOP.md',
-    'docs/COVEN-SESSIONS.md',
-    'CONTRIBUTING.md',
-  ];
-  const indexImports = [
-    'docs/src/content/getting-started.js',
-    'docs/src/content/coven-demo.js',
-    'docs/src/content/agents.js',
-  ];
-  const contentModuleFiles = [
-    'docs/src/content/troubleshooting.js',
-    'docs/src/content/index.js',
-    'docs/src/content/coven-demo.js',
-    'docs/src/content/agents.js',
-  ];
-  const shellFiles = [
-    'docs/src/sidebar.js',
-    'docs/src/main.js',
-    'docs/src/index.html',
-    'docs/src/hero.js',
-  ];
+function selfCheckInventoryComposition() {
+  assert.equal(isRecursiveTextPath('docs/src/index.html'), true);
+  assert.equal(isRecursiveTextPath('docs/src/style.css'), true);
+  assert.equal(isRecursiveTextPath('docs/public/agents/amp.svg'), true);
+  assert.equal(isRecursiveTextPath('docs/public/agents/png/amp.png'), false);
+  assert.equal(isRecursiveTextPath('docs/src/dist/generated.js'), false);
+  assert.equal(isRecursiveTextPath('docs/shared/node_modules/runtime.json'), false);
+  assert.equal(isRecursiveTextPath('docs/shared/client/runtime.js'), false);
 
-  const shuffledInventory = buildPublicInventory({
-    packageFiles: [...packageFiles].reverse(),
-    indexImports: [...indexImports].reverse(),
-    contentModuleFiles: [...contentModuleFiles].reverse(),
-    shellFiles: [...shellFiles].reverse(),
-  });
-  const orderedInventory = buildPublicInventory({
-    packageFiles,
-    indexImports,
-    contentModuleFiles,
-    shellFiles,
-  });
+  assert.deepEqual(
+    parseRelativeImports(
+      "import * as covenDemo from './coven-demo.js';\nimport * as gettingStarted from './getting-started.js';",
+    ),
+    ['docs/src/content/coven-demo.js', 'docs/src/content/getting-started.js'],
+  );
 
+  const shuffledInventory = composeInventory({
+    recursiveFiles: ['docs/public/og.svg', 'docs/src/style.css', 'docs/src/index.html'],
+    importedContentFiles: ['docs/src/content/getting-started.js', 'docs/src/content/coven-demo.js'],
+    packageMarkdownFiles: ['docs/PRODUCT-SPEC.md', 'CHANGELOG.md'],
+  });
+  const orderedInventory = composeInventory({
+    recursiveFiles: ['docs/src/index.html', 'docs/src/style.css', 'docs/public/og.svg'],
+    importedContentFiles: ['docs/src/content/coven-demo.js', 'docs/src/content/getting-started.js'],
+    packageMarkdownFiles: ['CHANGELOG.md', 'docs/PRODUCT-SPEC.md'],
+  });
   assert.deepEqual(shuffledInventory, orderedInventory);
-  assert(orderedInventory.includes('docs/src/content/coven-demo.js'));
 
-  const missingImportedInventory = buildPublicInventory({
-    packageFiles: [],
-    indexImports: ['docs/src/content/missing-page.js'],
-    contentModuleFiles: ['docs/src/content/index.js'],
-    shellFiles: [],
+  const requiredOnlyInventory = composeInventory({
+    recursiveFiles: [],
+    importedContentFiles: [],
+    packageMarkdownFiles: [],
   });
-  assert(missingImportedInventory.includes('docs/src/content/missing-page.js'));
-
-  const partialCleanupInventory = buildPublicInventory({
-    packageFiles: [
-      'README.md',
-      'docs/README.md',
-      'docs/COVEN-DEMO-LOOP.md',
-      'docs/COVEN-SESSIONS.md',
-    ],
-    indexImports: ['docs/src/content/index.js'],
-    contentModuleFiles: ['docs/src/content/index.js'],
-    shellFiles: ['docs/src/index.html'],
-  });
-  const partialCleanupInventorySet = new Set(partialCleanupInventory);
-  const partialCleanupGlobalFailures = sortFailureRecords([
-    { file: 'docs/COVEN-DEMO-LOOP.md', reason: 'must not be package-published' },
-    { file: 'docs/COVEN-SESSIONS.md', reason: 'standalone public document must be removed' },
-  ]);
-  for (const failure of partialCleanupGlobalFailures) {
-    assert(!partialCleanupInventorySet.has(failure.file));
+  for (const file of requiredEntrypoints) {
+    assert(requiredOnlyInventory.includes(file), `required entrypoint missing from inventory: ${file}`);
   }
-  assert.equal(countInventoryPasses(partialCleanupInventory, new Set(['docs/src/content/index.js'])), 3);
+  assert.equal(
+    countInventoryPasses(requiredOnlyInventory, new Set(['docs/src/main.js'])),
+    requiredOnlyInventory.length - 1,
+  );
+
+  const packageBoundaryInventory = composeInventory({
+    recursiveFiles: [],
+    importedContentFiles: [],
+    packageMarkdownFiles: ['README.md', 'docs/README.md', 'docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md'],
+  });
+  assert(!packageBoundaryInventory.includes('docs/COVEN-DEMO-LOOP.md'));
+  assert(!packageBoundaryInventory.includes('docs/COVEN-SESSIONS.md'));
 }
 
 async function main() {
-  selfCheckDeterminism();
+  selfCheckInventoryComposition();
 
   const packageJson = await loadPackageJson();
   if (!packageJson) {
@@ -224,14 +211,18 @@ async function main() {
   const packageFiles = Array.isArray(packageJson.files)
     ? packageJson.files.filter((file) => typeof file === 'string')
     : [];
+  const packageMarkdownFiles = sortUnique(
+    packageFiles.filter(
+      (file) => path.extname(file).toLowerCase() === '.md' && !prohibitedFiles.has(file),
+    ),
+  );
 
-  const indexImports = await readContentIndexImports();
-  const contentModuleFiles = await readContentModuleFiles();
-  const uniqueInventory = buildPublicInventory({
-    packageFiles,
-    indexImports,
-    contentModuleFiles,
-    shellFiles: shellSourceFiles,
+  const recursiveFiles = await collectPublicRecursiveFiles();
+  const importedContentFiles = await readContentIndexImports();
+  const uniqueInventory = composeInventory({
+    recursiveFiles,
+    importedContentFiles,
+    packageMarkdownFiles,
   });
   const inventorySet = new Set(uniqueInventory);
 
@@ -268,22 +259,28 @@ async function main() {
   }
 
   for (const file of uniqueInventory) {
-    const entry = await inspectFile(file);
+    const absolutePath = path.join(root, file);
 
-    if (entry.state === 'missing') {
-      recordInventoryFailure(file, 'public documentation entry is missing');
-      continue;
-    }
-
-    if (entry.state === 'non-file') {
-      recordInventoryFailure(file, 'public documentation entry is not a file');
-      continue;
-    }
-
-    for (const [needle, reason] of prohibitedText) {
-      if (entry.source.includes(needle)) {
-        recordInventoryFailure(file, reason);
+    try {
+      const info = await stat(absolutePath);
+      if (!info.isFile()) {
+        recordInventoryFailure(file, 'public documentation source entry is not a file');
+        continue;
       }
+
+      const source = await readFile(absolutePath, 'utf8');
+      for (const [needle, reason] of prohibitedText) {
+        if (source.includes(needle)) {
+          recordInventoryFailure(file, reason);
+        }
+      }
+    } catch (error) {
+      if (isEnoent(error)) {
+        recordInventoryFailure(file, 'public documentation source entry is missing');
+        continue;
+      }
+
+      throw error;
     }
   }
 
@@ -292,7 +289,7 @@ async function main() {
   const sortedGlobalFailures = sortFailureRecords(globalFailures);
 
   if (sortedInventoryFailures.length > 0 || sortedGlobalFailures.length > 0) {
-    console.error(`Passed ${passCount}/${uniqueInventory.length} public docs files.`);
+    console.error(`Passed ${passCount}/${uniqueInventory.length} public documentation source files.`);
 
     if (sortedInventoryFailures.length > 0) {
       console.error('Inventory file failures:');
@@ -311,7 +308,7 @@ async function main() {
     return 1;
   }
 
-  console.log(`Passed ${passCount}/${uniqueInventory.length} public docs files.`);
+  console.log(`Passed ${passCount}/${uniqueInventory.length} public documentation source files.`);
   return 0;
 }
 
