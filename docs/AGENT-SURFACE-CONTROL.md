@@ -199,9 +199,12 @@ journal tail before that store. Those sidecars initially keep the exact prior
 result with restrictive permissions and a bounded per-record size. Once compaction has durably
 published its redacted snapshot, covered sidecars are atomically replaced by a
 small `idempotency_outcome_compacted` marker before journal evidence is
-removed. Exact payload retention is bounded, but non-expiring idempotency
-intentionally retains one durable marker per unique key; total disk usage is
-not constant-bounded without an explicit expiry policy.
+removed. Replacement is serialized per key and compare-and-replace guarded by
+the exact digest verified for that attempt, so a newer terminal or exact
+publication cannot be overwritten. Exact payload retention is bounded, but
+non-expiring idempotency intentionally retains one durable marker per unique
+key; total disk usage is not constant-bounded without an explicit expiry
+policy.
 Sidecar lookup or write failures, JSON corruption, or key/outcome mismatches
 fail closed instead of silently re-executing a mutation.
 Task-scoped reads may expose only resources named by persisted capability-lease
@@ -244,6 +247,8 @@ receipts, completed-key markers, and open transaction identity only. Command
 envelopes, terminal input, prompts, browser/script results, sensitive resource
 values, and full resource payloads are omitted. A restored open transaction
 becomes one durable `command.unknown` before new commands are accepted.
+An absent snapshot is accepted only on `ENOENT`; any existing malformed
+snapshot or invalid durable projection fails startup closed.
 
 There is deliberately no accessibility, coordinate, screenshot-click, shell,
 raw tmux command, XPath, selector, or whole-desktop fallback.

@@ -3,6 +3,7 @@ import { lstat, mkdir, open, readFile, realpath, rename, rmdir, truncate, type F
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
+import { isJournalActionReceipt } from './types.js';
 import type {
   ActionReceipt,
   CommandOutcome,
@@ -395,6 +396,7 @@ export class ControlJournal {
   private readonly events: ControlEvent[];
   private readonly idempotencyIndex = new Map<string, ControlEvent>();
   private readonly listeners = new Set<EventListener>();
+  private readonly outcomePublicationTails = new Map<string, Promise<void>>();
   private appendTail: Promise<void> = Promise.resolve();
 
   private constructor(
@@ -639,6 +641,27 @@ export class ControlJournal {
   }
 
   async storeOutcome(idempotencyKey: string, outcome: CommandOutcome): Promise<void> {
+    await this.serializeOutcomePublication(
+      idempotencyKey,
+      () => this.publishOutcome(idempotencyKey, outcome),
+    );
+  }
+
+  async replaceOutcomeIfMatches(
+    idempotencyKey: string,
+    expectedOutcomeDigest: string,
+    replacement: CommandOutcome,
+  ): Promise<boolean> {
+    return this.serializeOutcomePublication(idempotencyKey, async () => {
+      const current = await this.loadOutcome(idempotencyKey);
+      if (!current || exactCommandOutcomeDigest(current) !== expectedOutcomeDigest) return false;
+      if (exactCommandOutcomeDigest(replacement) === expectedOutcomeDigest) return true;
+      await this.publishOutcome(idempotencyKey, replacement);
+      return true;
+    });
+  }
+
+  private async publishOutcome(idempotencyKey: string, outcome: CommandOutcome): Promise<void> {
     const serialized = serializeStoredOutcomeRecord({ idempotencyKey, outcome }, idempotencyKey);
     const directoryIdentity = await ensureDurableOutcomeDirectory(this.outcomeDirectoryPath);
     const destination = this.outcomePath(idempotencyKey);
@@ -758,22 +781,40 @@ export class ControlJournal {
     }
   }
 
-  async loadSnapshot(): Promise<JournalSnapshotFile | undefined> {
+  private async serializeOutcomePublication<T>(
+    idempotencyKey: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.outcomePublicationTails.get(idempotencyKey) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.catch(() => undefined).then(() => gate);
+    this.outcomePublicationTails.set(idempotencyKey, tail);
+    await previous.catch(() => undefined);
     try {
-      const raw = await readFile(this.snapshotPath, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<JournalSnapshotFile>;
-      if (!parsed || typeof parsed.coveredSequence !== 'number') return undefined;
-      return {
-        snapshot: parseDurableControlSnapshot(parsed.snapshot),
-        coveredSequence: parsed.coveredSequence,
-        outcomes: parsed.outcomes ?? {},
-        receiptRecords: parsed.receiptRecords ?? [],
-        openTransactions: parseDurableOpenTransactions(parsed.openTransactions),
-        completedTransactions: parseDurableCompletedTransactions(parsed.completedTransactions),
-      };
+      return await operation();
+    } finally {
+      release();
+      if (this.outcomePublicationTails.get(idempotencyKey) === tail) {
+        this.outcomePublicationTails.delete(idempotencyKey);
+      }
+    }
+  }
+
+  async loadSnapshot(): Promise<JournalSnapshotFile | undefined> {
+    let raw: string;
+    try {
+      raw = await readFile(this.snapshotPath, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
+    }
+    try {
+      return parseJournalSnapshotFile(JSON.parse(raw));
+    } catch {
+      throw durableSnapshotCorruption();
     }
   }
 
@@ -1097,12 +1138,77 @@ function recoveredNonterminalOutcome(): CommandOutcome {
 function parseDurableControlSnapshot(value: unknown): DurableControlSnapshot {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid durable control snapshot');
   const candidate = value as { ownerEpoch?: unknown; sequence?: unknown };
-  if (typeof candidate.ownerEpoch !== 'number' || !Number.isInteger(candidate.ownerEpoch)
+  if (typeof candidate.ownerEpoch !== 'number' || !Number.isSafeInteger(candidate.ownerEpoch)
     || candidate.ownerEpoch < 0 || typeof candidate.sequence !== 'number'
-    || !Number.isInteger(candidate.sequence) || candidate.sequence < 0) {
+    || !Number.isSafeInteger(candidate.sequence) || candidate.sequence < 0) {
     throw new Error('invalid durable control snapshot');
   }
   return { ownerEpoch: candidate.ownerEpoch, sequence: candidate.sequence };
+}
+
+function parseJournalSnapshotFile(value: unknown): JournalSnapshotFile {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('invalid durable snapshot');
+  }
+  const candidate = value as Partial<JournalSnapshotFile>;
+  if (
+    typeof candidate.coveredSequence !== 'number'
+    || !Number.isSafeInteger(candidate.coveredSequence)
+    || candidate.coveredSequence < 0
+  ) {
+    throw new Error('invalid durable snapshot covered sequence');
+  }
+  return {
+    snapshot: parseDurableControlSnapshot(candidate.snapshot),
+    coveredSequence: candidate.coveredSequence,
+    outcomes: parseLegacySnapshotOutcomes(candidate.outcomes),
+    receiptRecords: parseDurableReceiptRecords(candidate.receiptRecords),
+    openTransactions: parseDurableOpenTransactions(candidate.openTransactions),
+    completedTransactions: parseDurableCompletedTransactions(candidate.completedTransactions),
+  };
+}
+
+function parseLegacySnapshotOutcomes(value: unknown): Record<string, CommandOutcome> {
+  if (value === undefined) return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('invalid durable snapshot outcomes');
+  }
+  const entries = Object.entries(value);
+  if (entries.length > 1_000) throw new Error('invalid durable snapshot outcomes');
+  const outcomes: Record<string, CommandOutcome> = {};
+  for (const [idempotencyKey, outcome] of entries) {
+    if (idempotencyKey.length === 0 || !isStoredCommandOutcome(outcome)) {
+      throw new Error('invalid durable snapshot outcome');
+    }
+    outcomes[idempotencyKey] = outcome;
+  }
+  return outcomes;
+}
+
+function parseDurableReceiptRecords(value: unknown): DurableReceiptRecord[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 1_000) {
+    throw new Error('invalid durable receipt records');
+  }
+  return value.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error('invalid durable receipt record');
+    }
+    const candidate = item as Partial<DurableReceiptRecord>;
+    if (
+      typeof candidate.sequence !== 'number'
+      || !Number.isSafeInteger(candidate.sequence)
+      || candidate.sequence < 1
+      || typeof candidate.commandId !== 'string'
+      || candidate.commandId.length === 0
+      || typeof candidate.idempotencyKey !== 'string'
+      || candidate.idempotencyKey.length === 0
+      || !isJournalActionReceipt(candidate.receipt)
+    ) {
+      throw new Error('invalid durable receipt record');
+    }
+    return candidate as DurableReceiptRecord;
+  });
 }
 
 function parseDurableOpenTransactions(value: unknown): DurableOpenTransaction[] {
@@ -1113,7 +1219,7 @@ function parseDurableOpenTransactions(value: unknown): DurableOpenTransaction[] 
   return value.map((item) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('invalid durable open transaction');
     const candidate = item as Partial<DurableOpenTransaction>;
-    if (typeof candidate.sequence !== 'number' || !Number.isInteger(candidate.sequence)
+    if (typeof candidate.sequence !== 'number' || !Number.isSafeInteger(candidate.sequence)
       || candidate.sequence < 1 || typeof candidate.commandId !== 'string' || candidate.commandId.length === 0
       || typeof candidate.idempotencyKey !== 'string' || candidate.idempotencyKey.length === 0
       || !isDurableOpenTransactionKind(candidate.kind)) throw new Error('invalid durable open transaction');
@@ -1127,7 +1233,7 @@ function parseDurableCompletedTransactions(value: unknown): DurableCompletedTran
   return value.map((item) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('invalid durable completed transaction');
     const candidate = item as Partial<DurableCompletedTransaction>;
-    if (typeof candidate.sequence !== 'number' || !Number.isInteger(candidate.sequence)
+    if (typeof candidate.sequence !== 'number' || !Number.isSafeInteger(candidate.sequence)
       || candidate.sequence < 1 || typeof candidate.commandId !== 'string' || candidate.commandId.length === 0
       || typeof candidate.idempotencyKey !== 'string' || candidate.idempotencyKey.length === 0) {
       throw new Error('invalid durable completed transaction');
@@ -1439,6 +1545,10 @@ function unsafeRuntimeDirectoryPath(): Error {
 
 function runtimeDirectoryChangedDuringSnapshotPublication(): Error {
   return new Error('runtime directory changed during snapshot publication');
+}
+
+function durableSnapshotCorruption(): Error {
+  return new Error('durable snapshot corruption');
 }
 
 function runtimeDirectoryChangedDuringCompaction(): Error {

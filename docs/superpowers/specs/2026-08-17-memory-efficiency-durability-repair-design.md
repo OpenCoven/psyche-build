@@ -95,8 +95,11 @@ Before compaction covers a terminal event, the runtime:
    SHA-256 digest matches either the terminal event itself or a later digest
    attestation keyed by `(commandId, idempotencyKey)`; and
 3. durably publishes the redacted snapshot;
-4. rewrites every covered sidecar at the same hashed path to the compact
-   `idempotency_outcome_compacted` outcome marker; and
+4. for keys whose latest terminal is itself covered, conditionally rewrites
+   each sidecar at the same hashed path to the compact
+   `idempotency_outcome_compacted` outcome marker. Publication is serialized
+   per key with ordinary exact writes and proceeds only if the current record
+   still matches the digest captured during verification; and
 5. only after every marker rewrite succeeds compacts the journal.
 
 Any failed flush, digest verification, or attestation lookup aborts the whole attempt, retains the terminal
@@ -107,6 +110,8 @@ the sidecar remain available.
 If a compact-marker rewrite fails after snapshot publication, the durable
 snapshot may remain, but the journal prefix is retained and fresh effects stay
 blocked until every covered marker is durable and compaction succeeds.
+Any terminal published while compaction is active invalidates the attempt,
+including a terminal above the current cutoff.
 
 Startup scans retained terminal events. A missing sidecar becomes dirty only
 when the retained event can be reconstructed exactly; otherwise startup fails
@@ -129,6 +134,10 @@ Snapshots contain owner epoch, covered sequence, bounded redacted receipt
 records, and bounded open transactions. They omit exact
 outcomes, command envelopes, live resources, effect data, messages, typed
 values, and scripts.
+
+Only `ENOENT` represents an absent snapshot. Any existing file with malformed
+JSON, a missing/non-safe/nonnegative covered sequence, or an invalid durable
+projection is corruption and fails startup closed.
 
 Open transactions contain only sequence, command ID, raw
 idempotency key, and latest nonterminal kind. The raw key will remain the

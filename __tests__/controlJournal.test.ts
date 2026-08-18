@@ -2,11 +2,14 @@ import { appendFile, mkdir, open, readFile, readdir, rename, rm, stat, symlink, 
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { createDeferred } from './utils/deferred.js';
 import {
   agentControlJournalPayload,
+  compactedCommandOutcome,
   ControlJournal,
   createAgentControlJournalResource,
   DURABLE_OUTCOME_RECORD_MAX_BYTES,
+  exactCommandOutcomeDigest,
   setDurableOutcomePublicationTestHooksForTesting,
 } from '../src/control/journal.js';
 import { createRedactedApprovalEffect } from '../src/control/approvals.js';
@@ -190,6 +193,40 @@ describe('ControlJournal', () => {
     expect(directory.mode & 0o777).toBe(0o700);
     expect(file.mode & 0o777).toBe(0o600);
     await expect(journal.loadOutcome(idempotencyKey)).resolves.toEqual(outcome);
+  });
+
+  it('serializes conditional outcome replacement with a newer exact publication', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 3);
+    const key = 'serialized-outcome-replacement';
+    const original = { status: 'succeeded', value: { paneId: '%old' } } as const;
+    const newer = { status: 'succeeded', value: { paneId: '%new' } } as const;
+    await journal.storeOutcome(key, original);
+
+    const renameEntered = createDeferred<void>();
+    const releaseRename = createDeferred<void>();
+    let renameCalls = 0;
+    setDurableOutcomePublicationTestHooksForTesting({
+      beforeDestinationRename: async () => {
+        renameCalls += 1;
+        if (renameCalls !== 1) return;
+        renameEntered.resolve();
+        await releaseRename.promise;
+      },
+    });
+
+    const publishingNewer = journal.storeOutcome(key, newer);
+    await renameEntered.promise;
+    const replacing = journal.replaceOutcomeIfMatches(
+      key,
+      exactCommandOutcomeDigest(original),
+      compactedCommandOutcome(),
+    );
+    releaseRename.resolve();
+
+    await publishingNewer;
+    await expect(replacing).resolves.toBe(false);
+    await expect(journal.loadOutcome(key)).resolves.toEqual(newer);
   });
 
   it('orders exact outcome publication through directory sync before success', async () => {
@@ -741,6 +778,36 @@ describe('ControlJournal', () => {
     }])).resolves.toEqual([]);
   });
 
+  it.each([
+    ['missing covered sequence', {
+      snapshot: { ownerEpoch: 3, sequence: 1 },
+      outcomes: {},
+      receiptRecords: [],
+    }],
+    ['negative covered sequence', {
+      snapshot: { ownerEpoch: 3, sequence: 1 },
+      coveredSequence: -1,
+      outcomes: {},
+      receiptRecords: [],
+    }],
+    ['unsafe covered sequence', {
+      snapshot: { ownerEpoch: 3, sequence: 1 },
+      coveredSequence: Number.MAX_SAFE_INTEGER + 1,
+      outcomes: {},
+      receiptRecords: [],
+    }],
+  ])('rejects an existing snapshot with %s', async (_label, contents) => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 3);
+    await writeFile(
+      path.join(root, '.psyche', 'runtime', 'snapshot.json'),
+      JSON.stringify(contents),
+      'utf8',
+    );
+
+    await expect(journal.loadSnapshot()).rejects.toThrow('durable snapshot corruption');
+  });
+
   it('rejects invalid durable open transaction snapshot records', async () => {
     const root = await newRoot('psyche-journal');
     const runtimeDirectory = path.join(root, '.psyche', 'runtime');
@@ -750,7 +817,7 @@ describe('ControlJournal', () => {
       openTransactions: [{ sequence: 0, commandId: 'bad', idempotencyKey: 'bad-key', kind: 'command.requested' }],
     }));
     const journal = await ControlJournal.open(root, 7);
-    await expect(journal.loadSnapshot()).rejects.toThrow('invalid durable open transaction');
+    await expect(journal.loadSnapshot()).rejects.toThrow('durable snapshot corruption');
   });
 
   it('truncates only an incomplete final line', async () => {

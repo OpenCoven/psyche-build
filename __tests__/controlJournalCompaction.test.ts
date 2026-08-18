@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, symlink, unlink } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -6,6 +6,7 @@ import { createDeferred } from './utils/deferred.js';
 import {
   COMPACTED_OUTCOME_CODE,
   ControlJournal,
+  exactCommandOutcomeDigest,
   setDurableOutcomePublicationTestHooksForTesting,
 } from '../src/control/journal.js';
 import { ControlRuntime, type ControlHandlers } from '../src/control/runtime.js';
@@ -129,6 +130,34 @@ describe('control journal compaction', () => {
     expect(effect).not.toHaveBeenCalled();
   }, 90_000);
 
+  it('fails closed when a compacted open transaction snapshot loses its cutoff', async () => {
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 4);
+    const handlers = makeHandlers();
+    const effect = vi.fn(async () => ({ paneId: '%must-not-run' }));
+    handlers.openTerminal = effect;
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+    const openCommand = openTerminalCommand('open-malformed-snapshot');
+    await journal.append('command.requested', {
+      commandId: openCommand.id,
+      idempotencyKey: openCommand.idempotencyKey,
+      kind: openCommand.kind,
+      ownerEpoch: openCommand.ownerEpoch,
+    });
+    await appendCompactionPressure(journal, 'malformed-snapshot-filler');
+    await (runtime as any).compactJournal(journal);
+
+    const snapshotPath = path.join(root, '.psyche', 'runtime', 'snapshot.json');
+    const snapshot = JSON.parse(await readFile(snapshotPath, 'utf8')) as Record<string, unknown>;
+    delete snapshot.coveredSequence;
+    await writeFile(snapshotPath, JSON.stringify(snapshot), 'utf8');
+
+    const reopened = await ControlJournal.open(root, 5);
+    await expect(ControlRuntime.create({ ownerEpoch: 5, handlers, journal: reopened }))
+      .rejects.toThrow('durable snapshot corruption');
+    expect(effect).not.toHaveBeenCalled();
+  }, 90_000);
+
   it('persists a redacted durable snapshot projection and replays its compact marker', async () => {
     const root = await newRoot();
     const journal = await ControlJournal.open(root, 4);
@@ -210,6 +239,115 @@ describe('control journal compaction', () => {
     expect(journal.firstSequence).toBeGreaterThan(1);
   }, 90_000);
 
+  it('does not compact a key whose latest terminal is above the cutoff', async () => {
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 4);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers: makeHandlers(), journal });
+    const key = 'newer-terminal-above-cutoff';
+    await runtime.submit(takeover(key));
+    await appendCompactionPressure(journal, 'newer-terminal-filler');
+
+    const newer = {
+      status: 'succeeded',
+      value: { actorId: 'human-newer', revision: 2 },
+    } as const;
+    await journal.append('command.requested', {
+      commandId: 'cmd-newer-terminal',
+      idempotencyKey: key,
+      kind: 'pane.takeover',
+      ownerEpoch: 4,
+    });
+    const newerTerminal = await journal.append('command.succeeded', {
+      commandId: 'cmd-newer-terminal',
+      idempotencyKey: key,
+      status: newer.status,
+      value: newer.value,
+      outcomeDigest: exactCommandOutcomeDigest(newer),
+    });
+    await journal.storeOutcome(key, newer);
+
+    const coveredSequence = journal.sequence - 1_000;
+    expect(newerTerminal.sequence).toBeGreaterThan(coveredSequence);
+    await (runtime as any).compactJournal(journal);
+
+    await expect(journal.loadOutcome(key)).resolves.toEqual(newer);
+    expect(journal.firstSequence).toBe(coveredSequence + 1);
+    (runtime as any).outcomesByIdempotencyKey.delete(key);
+    await expect(runtime.submit({ ...takeover(key), id: 'cmd-newer-terminal-retry' }))
+      .resolves.toEqual(newer);
+  }, 90_000);
+
+  it('retains journal evidence and the latest exact retry when a newer terminal publishes during compaction', async () => {
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 4);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers: makeHandlers(), journal });
+    const key = 'outcome-cas-mismatch';
+    await runtime.submit(takeover(key));
+    await appendCompactionPressure(journal, 'outcome-cas-filler');
+
+    const snapshotReady = createDeferred<void>();
+    const releaseSnapshot = createDeferred<void>();
+    setDurableOutcomePublicationTestHooksForTesting({
+      beforeSnapshotRename: async () => {
+        snapshotReady.resolve();
+        await releaseSnapshot.promise;
+      },
+    });
+    const compacting = (runtime as any).compactJournal(journal);
+    await snapshotReady.promise;
+
+    const newer = {
+      status: 'succeeded',
+      value: { actorId: 'human-newer', revision: 3 },
+    } as const;
+    await (runtime as any).appendTerminal(
+      { ...takeover(key), id: 'outcome-cas-mismatch-newer' },
+      newer,
+    );
+    releaseSnapshot.resolve();
+    await compacting;
+
+    expect((runtime as any).compactionBlockedByDurability).toBe(true);
+    expect(journal.firstSequence).toBe(1);
+    expect(journal.read(0).some((event) => event.payload.idempotencyKey === key)).toBe(true);
+    await expect(journal.loadOutcome(key)).resolves.toEqual(newer);
+    (runtime as any).outcomesByIdempotencyKey.delete(key);
+    const sequenceBeforeRetry = journal.sequence;
+    await expect(runtime.submit({ ...takeover(key), id: 'outcome-cas-mismatch-retry' }))
+      .resolves.toEqual(newer);
+    expect(journal.sequence).toBe(sequenceBeforeRetry);
+  }, 90_000);
+
+  it('retains journal evidence and exact retries when marker compare-and-replace mismatches', async () => {
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 4);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers: makeHandlers(), journal });
+    const key = 'outcome-cas-deferred';
+    const first = await runtime.submit(takeover(key));
+    await appendCompactionPressure(journal, 'outcome-cas-deferred-filler');
+
+    const replace = journal.replaceOutcomeIfMatches.bind(journal);
+    vi.spyOn(journal, 'replaceOutcomeIfMatches').mockImplementation(
+      async (idempotencyKey, expectedDigest, replacement) => (
+        idempotencyKey === key
+          ? false
+          : replace(idempotencyKey, expectedDigest, replacement)
+      ),
+    );
+
+    await (runtime as any).compactJournal(journal);
+
+    expect((runtime as any).compactionBlockedByDurability).toBe(true);
+    expect(journal.firstSequence).toBe(1);
+    expect(journal.read(0).some((event) => event.payload.idempotencyKey === key)).toBe(true);
+    await expect(journal.loadOutcome(key)).resolves.toEqual(first);
+    (runtime as any).outcomesByIdempotencyKey.delete(key);
+    const sequenceBeforeRetry = journal.sequence;
+    await expect(runtime.submit({ ...takeover(key), id: 'outcome-cas-deferred-retry' }))
+      .resolves.toEqual(first);
+    expect(journal.sequence).toBe(sequenceBeforeRetry);
+  }, 90_000);
+
   it('retains journal evidence and blocks fresh effects when marker publication fails', async () => {
     const root = await newRoot();
     const journal = await ControlJournal.open(root, 4);
@@ -222,19 +360,21 @@ describe('control journal compaction', () => {
     const terminalSequence = journal.findByIdempotencyKey(command.idempotencyKey)?.sequence ?? 0;
     await appendCompactionPressure(journal, 'marker-failure-filler');
 
-    const persist = journal.storeOutcome.bind(journal);
+    const replace = journal.replaceOutcomeIfMatches.bind(journal);
     let failMarker = true;
-    vi.spyOn(journal, 'storeOutcome').mockImplementation(async (idempotencyKey, outcome) => {
+    vi.spyOn(journal, 'replaceOutcomeIfMatches').mockImplementation(
+      async (idempotencyKey, expectedDigest, replacement) => {
       if (
         failMarker
         && idempotencyKey === command.idempotencyKey
-        && outcome.status === 'unknown'
-        && outcome.code === COMPACTED_OUTCOME_CODE
+        && replacement.status === 'unknown'
+        && replacement.code === COMPACTED_OUTCOME_CODE
       ) {
         throw new Error('injected compact marker publication failure');
       }
-      await persist(idempotencyKey, outcome);
-    });
+      return replace(idempotencyKey, expectedDigest, replacement);
+      },
+    );
 
     await (runtime as any).compactJournal(journal);
     expect((runtime as any).compactionBlockedByDurability).toBe(true);

@@ -113,8 +113,12 @@ through the identical authority checks and lands in the same journal.
    rejected with `durability_unavailable` until a later repair/flush succeeds,
    while hot/tail/sidecar retries remain available.
    After the redacted snapshot is durable, every covered exact sidecar is
-   atomically downgraded at the same hashed path to
-   `idempotency_outcome_compacted`; only after all marker publications succeed
+   conditionally downgraded at the same hashed path to
+   `idempotency_outcome_compacted`. The replacement is serialized with normal
+   outcome publication and proceeds only while the current record still
+   matches the exact digest verified by that compaction attempt. A key whose
+   latest terminal is above the cutoff is excluded, and any concurrent terminal
+   publication aborts the attempt. Only after all marker publications succeed
    may the journal prefix be removed. The exact payload retention window is
    therefore bounded, while non-expiring idempotency still requires one small
    durable fact per unique key. Total sidecar count is intentionally not
@@ -125,6 +129,9 @@ through the identical authority checks and lands in the same journal.
    identities. Raw command envelopes, terminal input, prompts, browser/script
    results, live resources, and exact outcomes are omitted. A restored open
    transaction is terminalized once as `command.unknown`, never re-executed.
+   `ENOENT` alone means no prior snapshot; malformed JSON, a missing or invalid
+   covered sequence, or any invalid durable projection fails startup closed as
+   `durable snapshot corruption`.
 6. **Handler dispatch** — only then does it call the matching `ControlHandlers`
    method to perform the effect and shape the `CommandOutcome`.
 

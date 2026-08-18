@@ -129,6 +129,11 @@ export interface CompactableJournal extends RuntimeJournal {
   readonly firstSequence: number;
   loadOutcome(key: string): Promise<CommandOutcome | undefined>;
   storeOutcome(key: string, outcome: CommandOutcome): Promise<void>;
+  replaceOutcomeIfMatches(
+    key: string,
+    expectedOutcomeDigest: string,
+    replacement: CommandOutcome,
+  ): Promise<boolean>;
   loadSnapshot(): Promise<JournalSnapshotFile | undefined>;
   writeSnapshot(file: JournalSnapshotFile, guard?: JournalMutationGuard): Promise<void>;
   compact(coveredSequence: number, guard?: JournalMutationGuard): Promise<void>;
@@ -139,6 +144,7 @@ function asCompactable(journal: RuntimeJournal): CompactableJournal | undefined 
   return typeof candidate.compact === 'function'
     && typeof candidate.loadOutcome === 'function'
     && typeof candidate.storeOutcome === 'function'
+    && typeof candidate.replaceOutcomeIfMatches === 'function'
     && typeof candidate.loadSnapshot === 'function'
     && typeof candidate.writeSnapshot === 'function'
     && typeof candidate.sequence === 'number'
@@ -190,10 +196,10 @@ interface ActiveCompactionAttempt {
 }
 
 type CoveredTerminalOutcome = {
-  sequence: number;
   event: RuntimeEvent;
   commandKind?: ControlCommand['kind'] | string;
   attestedDigest?: string;
+  verifiedOutcomeDigest?: string;
 };
 
 interface SurfaceActionContext {
@@ -1766,7 +1772,7 @@ export class ControlRuntime {
     try {
       return await this.compactable.loadOutcome(idempotencyKey);
     } catch (error) {
-      this.invalidateActiveCompactionForSequence(terminalEvent.sequence);
+      this.invalidateActiveCompaction();
       throw error;
     }
   }
@@ -1786,7 +1792,7 @@ export class ControlRuntime {
       attestedDigest,
     );
     if (!verification.ok) {
-      this.invalidateActiveCompactionForSequence(terminalEvent.sequence);
+      this.invalidateActiveCompaction();
       throw verification.error;
     }
     // Exact sidecars retain the original terminal value for integrity and
@@ -1887,7 +1893,7 @@ export class ControlRuntime {
     outcome?: CommandOutcome,
   ): void {
     if (!this.compactable) return;
-    this.invalidateActiveCompactionForSequence(sequence);
+    this.invalidateActiveCompaction();
     const prior = this.dirtyTerminalOutcomes.get(idempotencyKey);
     if (!prior && this.dirtyTerminalOutcomes.size >= DIRTY_TERMINAL_OUTCOME_LIMIT) {
       throw codedRuntimeError(
@@ -1970,9 +1976,9 @@ export class ControlRuntime {
     if (this.activeCompaction === attempt) this.activeCompaction = undefined;
   }
 
-  private invalidateActiveCompactionForSequence(sequence: number): void {
+  private invalidateActiveCompaction(): void {
     const active = this.activeCompaction;
-    if (!active || sequence > active.coveredSequence) return;
+    if (!active) return;
     active.invalidated = true;
   }
 
@@ -1996,18 +2002,12 @@ export class ControlRuntime {
       const idempotencyKey = stringPayload(event, 'idempotencyKey');
       if (!idempotencyKey) continue;
       latestByIdempotencyKey.set(idempotencyKey, event);
-      if (event.sequence > coveredSequence) continue;
-      covered.set(idempotencyKey, {
-        sequence: event.sequence,
-        event,
-      });
     }
-    for (const [idempotencyKey, item] of covered) {
-      const latest = latestByIdempotencyKey.get(idempotencyKey) ?? item.event;
+    for (const [idempotencyKey, latest] of latestByIdempotencyKey) {
+      if (latest.sequence > coveredSequence) continue;
       const commandId = stringPayload(latest, 'commandId');
       const transactionKey = commandId ? commandTransactionKey(commandId, idempotencyKey) : undefined;
       covered.set(idempotencyKey, {
-        sequence: item.sequence,
         event: latest,
         commandKind: transactionKey ? commandKinds.get(transactionKey) : undefined,
         attestedDigest: transactionKey ? attestations.get(transactionKey) : undefined,
@@ -2026,19 +2026,25 @@ export class ControlRuntime {
       try {
         const stored = await this.compactable.loadOutcome(idempotencyKey);
         if (stored) {
-          if (isCompactedCommandOutcome(stored)) continue;
+          if (isCompactedCommandOutcome(stored)) {
+            covered.verifiedOutcomeDigest = exactCommandOutcomeDigest(stored);
+            continue;
+          }
           const verification = verifyExactOutcomeAgainstTerminalEvent(
             stored,
             covered.event,
             covered.commandKind,
             covered.attestedDigest,
           );
-          if (verification.ok) continue;
+          if (verification.ok) {
+            covered.verifiedOutcomeDigest = exactCommandOutcomeDigest(stored);
+            continue;
+          }
         }
       } catch {
         // Compaction fails closed: unreadable exact replay keeps the journal.
       }
-      this.invalidateActiveCompactionForSequence(covered.sequence);
+      this.invalidateActiveCompaction();
       return false;
     }
     return !this.compactionShouldAbort(attempt);
@@ -2056,9 +2062,13 @@ export class ControlRuntime {
       const results = await Promise.allSettled(
         idempotencyKeys
           .slice(offset, offset + OUTCOME_COMPACTION_BATCH_SIZE)
-          .map((idempotencyKey) => this.compactable!.storeOutcome(idempotencyKey, marker)),
+          .map((idempotencyKey) => {
+            const expectedDigest = coveredTerminals.get(idempotencyKey)?.verifiedOutcomeDigest;
+            if (!expectedDigest) return Promise.resolve(false);
+            return this.compactable!.replaceOutcomeIfMatches(idempotencyKey, expectedDigest, marker);
+          }),
       );
-      if (results.some((result) => result.status === 'rejected')) return false;
+      if (results.some((result) => result.status === 'rejected' || !result.value)) return false;
       if (this.compactionShouldAbort(attempt)) return false;
     }
     return true;
