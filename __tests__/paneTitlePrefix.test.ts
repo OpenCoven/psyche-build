@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   flushPaneOptionCacheChanges,
+  pruneDeadPaneOptionCacheEntries,
+  startPaneOptionSyncEffect,
   type PaneOptionCacheChange,
   type PaneOptionMutation,
+  PANE_TITLE_SPINNER_INTERVAL_MS,
 } from '../src/utils/paneTitlePrefix.js';
 
 function setChange(
@@ -15,6 +18,60 @@ function setChange(
 }
 
 describe('pane title option cache transactions', () => {
+  it('prunes dead panes locally while committing live mutations in one batch', () => {
+    const prefixCache = new Map([
+      ['%dead', 'dead-prefix'],
+      ['%control', 'control-prefix'],
+    ]);
+    const labelCache = new Map([
+      ['%dead', 'dead-label'],
+      ['%control', 'control-label'],
+    ]);
+    const livePaneIds = new Set(['%1', '%control']);
+    const activePaneIds = new Set(['%1']);
+    const writeBatch = vi.fn(() => true);
+
+    pruneDeadPaneOptionCacheEntries(prefixCache, livePaneIds);
+    pruneDeadPaneOptionCacheEntries(labelCache, livePaneIds);
+
+    const changes: PaneOptionCacheChange[] = [
+      {
+        cache: prefixCache,
+        mutation: {
+          paneId: '%control',
+          option: '@psyche_title_prefix',
+          unset: true as const,
+        },
+      },
+      {
+        cache: labelCache,
+        mutation: {
+          paneId: '%control',
+          option: '@psyche_title_label',
+          unset: true as const,
+        },
+      },
+      setChange(prefixCache, '%1', '@psyche_title_prefix', 'live-prefix'),
+      setChange(labelCache, '%1', '@psyche_title_label', 'live-label'),
+    ].filter(({ mutation }) =>
+      'unset' in mutation ? !activePaneIds.has(mutation.paneId) : true
+    );
+
+    expect(flushPaneOptionCacheChanges(changes, writeBatch)).toBe(true);
+    expect(writeBatch).toHaveBeenCalledTimes(1);
+    expect(writeBatch).toHaveBeenCalledWith([
+      { paneId: '%1', option: '@psyche_title_prefix', value: 'live-prefix' },
+      { paneId: '%1', option: '@psyche_title_label', value: 'live-label' },
+      { paneId: '%control', option: '@psyche_title_prefix', unset: true },
+      { paneId: '%control', option: '@psyche_title_label', unset: true },
+    ]);
+    expect(prefixCache).toEqual(new Map([['%1', 'live-prefix']]));
+    expect(labelCache).toEqual(new Map([['%1', 'live-label']]));
+
+    expect(flushPaneOptionCacheChanges(changes, writeBatch)).toBe(true);
+    expect(writeBatch).toHaveBeenCalledTimes(1);
+  });
+
   it('retries the full batch after an ambiguous middle failure and commits only after success', () => {
     const cache = new Map<string, string>();
     const changes = [
@@ -109,5 +166,71 @@ describe('pane title option cache transactions', () => {
     expect(prefixCache.get('%1')).toBe('prefix');
     expect(labelCache.get('%1')).toBe('label');
     expect(staleCache.has('%stale')).toBe(false);
+  });
+});
+
+describe('pane title option sync effect', () => {
+  it('retries a failed static batch at spinner cadence and stops after success', () => {
+    vi.useFakeTimers();
+    try {
+      const prefixCache = new Map<string, string>();
+      const labelCache = new Map<string, string>();
+      const changes = [
+        setChange(prefixCache, '%1', '@psyche_title_prefix', 'prefix'),
+        setChange(labelCache, '%1', '@psyche_title_label', 'label'),
+      ];
+      const writeBatch = vi.fn()
+        .mockReturnValueOnce(false)
+        .mockReturnValueOnce(true);
+      const sync = () => flushPaneOptionCacheChanges(changes, writeBatch);
+
+      const dispose = startPaneOptionSyncEffect({
+        hasAnimatedPrefix: false,
+        sync,
+        advanceFrame: vi.fn(),
+        intervalMs: PANE_TITLE_SPINNER_INTERVAL_MS,
+      });
+
+      expect(writeBatch).toHaveBeenCalledTimes(1);
+      expect(writeBatch).toHaveBeenLastCalledWith(changes.map(({ mutation }) => mutation));
+      expect(vi.getTimerCount()).toBe(1);
+
+      vi.advanceTimersByTime(PANE_TITLE_SPINNER_INTERVAL_MS);
+
+      expect(writeBatch).toHaveBeenCalledTimes(2);
+      expect(writeBatch).toHaveBeenLastCalledWith(changes.map(({ mutation }) => mutation));
+      expect(prefixCache).toEqual(new Map([['%1', 'prefix']]));
+      expect(labelCache).toEqual(new Map([['%1', 'label']]));
+      expect(vi.getTimerCount()).toBe(0);
+
+      vi.advanceTimersByTime(PANE_TITLE_SPINNER_INTERVAL_MS * 3);
+      expect(writeBatch).toHaveBeenCalledTimes(2);
+
+      dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a pending static retry on disposal', () => {
+    vi.useFakeTimers();
+    try {
+      const sync = vi.fn(() => false);
+      const dispose = startPaneOptionSyncEffect({
+        hasAnimatedPrefix: false,
+        sync,
+        advanceFrame: vi.fn(),
+        intervalMs: PANE_TITLE_SPINNER_INTERVAL_MS,
+      });
+
+      expect(sync).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(1);
+      dispose();
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(PANE_TITLE_SPINNER_INTERVAL_MS * 3);
+      expect(sync).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -124,6 +124,8 @@ import {
   flushPaneOptionCacheChanges,
   getPaneTitlePrefixValue,
   paneNeedsAnimatedTitlePrefix,
+  pruneDeadPaneOptionCacheEntries,
+  startPaneOptionSyncEffect,
   type PaneOptionCacheChange,
   PANE_TITLE_BUSY_FRAMES,
   PANE_TITLE_SPINNER_INTERVAL_MS,
@@ -865,10 +867,16 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       const cachedLabels = paneTitleLabelCacheRef.current
       const cachedActiveBorderStyles = paneActiveBorderStyleCacheRef.current
       const activePaneIds = new Set(panes.map((pane) => pane.paneId))
-      const activeBorderStylePaneIds = new Set(activePaneIds)
+      const livePaneIds = new Set(activePaneIds)
       if (controlPaneId) {
-        activeBorderStylePaneIds.add(controlPaneId)
+        livePaneIds.add(controlPaneId)
       }
+      const activeBorderStylePaneIds = livePaneIds
+
+      pruneDeadPaneOptionCacheEntries(cachedPrefixes, livePaneIds)
+      pruneDeadPaneOptionCacheEntries(cachedLabels, livePaneIds)
+      pruneDeadPaneOptionCacheEntries(cachedActiveBorderStyles, livePaneIds)
+
       const paneOptionChanges: PaneOptionCacheChange[] = []
 
       for (const paneId of Array.from(cachedPrefixes.keys())) {
@@ -974,7 +982,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         })
       }
 
-      flushPaneOptionCacheChanges(
+      const paneOptionsFlushed = flushPaneOptionCacheChanges(
         paneOptionChanges,
         (mutations) => tmuxService.updatePaneOptionsSync(mutations)
       )
@@ -986,6 +994,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
           controlPaneActiveBorderStyle
         )
       }
+
+      return paneOptionsFlushed
     }
 
     const hasAnimatedPrefix = panes.some(paneNeedsAnimatedTitlePrefix)
@@ -993,22 +1003,16 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       paneTitleSpinnerFrameRef.current = 0
     }
 
-    syncPaneTitlePrefixes()
-
-    if (!hasAnimatedPrefix) {
-      return
-    }
-
-    const interval = setInterval(() => {
-      paneTitleSpinnerFrameRef.current = (
-        paneTitleSpinnerFrameRef.current + 1
-      ) % PANE_TITLE_BUSY_FRAMES.length
-      syncPaneTitlePrefixes()
-    }, PANE_TITLE_SPINNER_INTERVAL_MS)
-
-    return () => {
-      clearInterval(interval)
-    }
+    return startPaneOptionSyncEffect({
+      hasAnimatedPrefix,
+      sync: syncPaneTitlePrefixes,
+      advanceFrame: () => {
+        paneTitleSpinnerFrameRef.current = (
+          paneTitleSpinnerFrameRef.current + 1
+        ) % PANE_TITLE_BUSY_FRAMES.length
+      },
+      intervalMs: PANE_TITLE_SPINNER_INTERVAL_MS,
+    })
   }, [
     panes,
     sidebarProjects,

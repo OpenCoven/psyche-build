@@ -10,6 +10,13 @@ export interface PaneOptionCacheChange {
   mutation: PaneOptionMutation;
 }
 
+export interface PaneOptionSyncEffectOptions {
+  hasAnimatedPrefix: boolean;
+  sync: () => boolean;
+  advanceFrame: () => void;
+  intervalMs: number;
+}
+
 export const PANE_TITLE_BUSY_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const;
 
 /**
@@ -44,6 +51,47 @@ export function getPaneTitlePrefixValue(
 
 export function paneNeedsAnimatedTitlePrefix(pane: PsychePane): boolean {
   return isBusyPane(pane);
+}
+
+export function pruneDeadPaneOptionCacheEntries(
+  cache: Map<string, string>,
+  authoritativePaneIds: ReadonlySet<string>
+): void {
+  for (const paneId of cache.keys()) {
+    if (!authoritativePaneIds.has(paneId)) {
+      cache.delete(paneId);
+    }
+  }
+}
+
+export function startPaneOptionSyncEffect({
+  hasAnimatedPrefix,
+  sync,
+  advanceFrame,
+  intervalMs,
+}: PaneOptionSyncEffectOptions): () => void {
+  let interval: ReturnType<typeof setInterval> | undefined;
+  const initialSyncSucceeded = sync();
+
+  if (hasAnimatedPrefix || !initialSyncSucceeded) {
+    interval = setInterval(() => {
+      if (hasAnimatedPrefix) {
+        advanceFrame();
+      }
+
+      if (sync() && !hasAnimatedPrefix && interval) {
+        clearInterval(interval);
+        interval = undefined;
+      }
+    }, intervalMs);
+  }
+
+  return () => {
+    if (interval) {
+      clearInterval(interval);
+      interval = undefined;
+    }
+  };
 }
 
 export function flushPaneOptionCacheChanges(
