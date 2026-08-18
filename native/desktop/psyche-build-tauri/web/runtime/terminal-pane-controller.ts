@@ -142,6 +142,11 @@ type QueuedWrite = {
 };
 
 const HIDDEN_DRAIN_MS = 100;
+// A pane that stops intersecting because the canvas is being rebuilt around it
+// is not hidden, it is mid-layout. Charging it the hidden cadence for that would
+// make every rebuild cost a 100 ms stall, so a disappearance has to persist
+// before it counts. Reappearing inside the window is free.
+const INTERSECTION_HIDE_DEBOUNCE_MS = 250;
 const MAX_SYNTHETIC_RETAINED_BYTES = 64 * 1024;
 const WEBGL_RECOVERY_COOLDOWN_MS = 30_000;
 const controllers = new Map<string, TerminalPaneController>();
@@ -260,6 +265,7 @@ export function createTerminalPaneController(
   let fitPending = true;
   let writeInProgress = false;
   let hiddenTimer: ReturnType<typeof setTimeout> | null = null;
+  let intersectionHideTimer: ReturnType<typeof setTimeout> | null = null;
   let lastHiddenDrainAt = isEffectivelyVisible(visibility)
     ? Number.NEGATIVE_INFINITY
     : (options.now ?? Date.now)();
@@ -413,6 +419,12 @@ export function createTerminalPaneController(
     hiddenTimer = null;
   }
 
+  function clearIntersectionHideTimer(): void {
+    if (intersectionHideTimer == null) return;
+    clearTimer(intersectionHideTimer);
+    intersectionHideTimer = null;
+  }
+
   function canFit(): boolean {
     return isEffectivelyVisible(visibility) &&
       options.container.isConnected &&
@@ -428,7 +440,6 @@ export function createTerminalPaneController(
       lastSentDimensions?.cols === dimensions.cols &&
       lastSentDimensions.rows === dimensions.rows
     ) {
-      if (pendingDimensions) sendPendingResize();
       return;
     }
     const flight = options.invoke('pty_resize', {
@@ -449,9 +460,11 @@ export function createTerminalPaneController(
 
   function fitIfPossible(): void {
     if (!fitPending || !fitAddon || !canFit()) return;
-    fitPending = false;
     try {
       fitAddon.fit();
+      // Cleared only once a fit has actually landed: a throw here used to leave
+      // the pane permanently unfitted at whatever size it happened to hold.
+      fitPending = false;
       const dimensions = { cols: terminal.cols, rows: terminal.rows };
       if (
         lastSentDimensions?.cols !== dimensions.cols ||
@@ -584,6 +597,9 @@ export function createTerminalPaneController(
 
   function applyVisibility(next: VisibilityState): Promise<boolean> {
     if (disposed) return Promise.resolve(false);
+    // Any authority asserting the pane intersects outranks a debounce still
+    // waiting to decide that it does not.
+    if (next.intersecting) clearIntersectionHideTimer();
     const wasVisible = isEffectivelyVisible(visibility);
     visibility = { ...next };
     const visibleNow = isEffectivelyVisible(visibility);
@@ -618,7 +634,18 @@ export function createTerminalPaneController(
   )((entries) => {
     const entry = entries[entries.length - 1];
     if (!entry || disposed) return;
-    void applyVisibility({ ...visibility, intersecting: entry.isIntersecting }).catch(() => {});
+    if (entry.isIntersecting) {
+      clearIntersectionHideTimer();
+      if (visibility.intersecting) return;
+      void applyVisibility({ ...visibility, intersecting: true }).catch(() => {});
+      return;
+    }
+    if (!visibility.intersecting || intersectionHideTimer != null) return;
+    intersectionHideTimer = setTimer(() => {
+      intersectionHideTimer = null;
+      if (disposed || !visibility.intersecting) return;
+      void applyVisibility({ ...visibility, intersecting: false }).catch(() => {});
+    }, INTERSECTION_HIDE_DEBOUNCE_MS);
   });
   intersectionObserver?.observe(options.container);
 
@@ -707,6 +734,7 @@ export function createTerminalPaneController(
       controllers.delete(options.paneId);
       options.frameScheduler.cancelPrefix(framePrefix);
       clearHiddenTimer();
+      clearIntersectionHideTimer();
       ptyWrites.length = 0;
       syntheticWrite = null;
       activeWrite = null;

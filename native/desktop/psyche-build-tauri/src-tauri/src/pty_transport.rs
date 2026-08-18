@@ -11,8 +11,20 @@ pub const MAX_PENDING_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_PENDING_FRAGMENTS: usize = 128;
 pub const MAX_BATCH_BYTES: usize = 64 * 1024;
 pub const MAX_IN_FLIGHT: usize = 2;
-pub const VISIBLE_CADENCE: Duration = Duration::from_millis(16);
+/// A visible pane is paced by acknowledgement credit — `max_in_flight` batches
+/// may be outstanding, and the next one leaves the moment the client acks. It is
+/// deliberately not paced by a timer: any floor here caps every display at
+/// `1s / floor` no matter how fast the client consumes batches, and the 16ms
+/// this used to hold capped all of them at 62.5 Hz.
+pub const VISIBLE_CADENCE: Duration = Duration::ZERO;
+/// A hidden pane keeps its floor. Nobody is looking at it, so trading latency
+/// for idle CPU is the right bargain there.
 pub const HIDDEN_CADENCE: Duration = Duration::from_millis(100);
+/// How long to wait before re-attempting an emission that failed. This used to
+/// borrow whatever cadence the pane's visibility implied; with the visible floor
+/// gone it needs a value of its own, or a persistently failing emitter spins the
+/// worker thread against a zero-length backoff.
+pub const EMIT_RETRY_BACKOFF: Duration = Duration::from_millis(16);
 pub const EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 pub const EXIT_TERMINATION_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MAX_RECENT_OUTPUT_SNAPSHOTS: usize = 128;
@@ -25,6 +37,7 @@ pub struct PumpLimits {
     pub max_in_flight: usize,
     pub visible_cadence: Duration,
     pub hidden_cadence: Duration,
+    pub emit_retry_backoff: Duration,
     pub exit_drain_timeout: Duration,
 }
 
@@ -37,6 +50,7 @@ impl Default for PumpLimits {
             max_in_flight: MAX_IN_FLIGHT,
             visible_cadence: VISIBLE_CADENCE,
             hidden_cadence: HIDDEN_CADENCE,
+            emit_retry_backoff: EMIT_RETRY_BACKOFF,
             exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
         }
     }
@@ -1480,17 +1494,28 @@ fn effective_cadence(state: &SynchronizedPumpState) -> Duration {
     }
 }
 
+/// Retrying a failed emission is a different concern from pacing a healthy one,
+/// so it does not inherit the visible pane's (now absent) cadence. A hidden pane
+/// still waits at least its own cadence, which is the longer of the two.
+fn emit_retry_backoff(state: &SynchronizedPumpState) -> Duration {
+    state
+        .state
+        .limits()
+        .emit_retry_backoff
+        .max(effective_cadence(state))
+}
+
 fn synchronized_readiness(state: &SynchronizedPumpState, now: Instant) -> BatchReadiness {
     if let Some(prepared) = &state.prepared_event {
         if prepared.failed_attempts != 0 {
             if let Some(last_attempt_at) = prepared.last_attempt_at {
-                let cadence = effective_cadence(state);
+                let backoff = emit_retry_backoff(state);
                 let elapsed = now
                     .checked_duration_since(last_attempt_at)
                     .unwrap_or(Duration::ZERO);
-                if elapsed < cadence {
+                if elapsed < backoff {
                     return BatchReadiness::WaitingForCadence {
-                        remaining: cadence - elapsed,
+                        remaining: backoff - elapsed,
                     };
                 }
             }
@@ -1721,6 +1746,7 @@ mod tests {
         PumpLimits {
             visible_cadence: Duration::ZERO,
             hidden_cadence: Duration::ZERO,
+            emit_retry_backoff: Duration::ZERO,
             ..PumpLimits::default()
         }
     }
@@ -1932,8 +1958,9 @@ mod tests {
         assert_eq!(limits.max_pending_fragments, 128);
         assert_eq!(limits.max_batch_bytes, 64 * 1024);
         assert_eq!(limits.max_in_flight, 2);
-        assert_eq!(limits.visible_cadence, Duration::from_millis(16));
+        assert_eq!(limits.visible_cadence, Duration::ZERO);
         assert_eq!(limits.hidden_cadence, Duration::from_millis(100));
+        assert_eq!(limits.emit_retry_backoff, Duration::from_millis(16));
         assert_eq!(limits.exit_drain_timeout, Duration::from_secs(2));
     }
 
@@ -2224,23 +2251,23 @@ mod tests {
     }
 
     #[test]
-    fn cadence_eligibility_uses_visible_and_hidden_intervals() {
+    fn cadence_gates_hidden_panes_and_leaves_visible_ones_to_acknowledgement() {
         let now = Instant::now();
 
+        // A visible pane owes nothing to the clock: the batch it just emitted is
+        // acknowledged, so the next one is ready in the same instant.
         let mut visible = state_with_batch_bytes(1);
         visible.push(vec![1, 2]).unwrap();
         commit_next(&mut visible, now, PaneVisibility::Visible).unwrap();
+        assert_eq!(
+            visible.readiness(now, PaneVisibility::Visible),
+            BatchReadiness::Ready
+        );
         visible
             .acknowledge(1, now + Duration::from_millis(1))
             .unwrap();
         assert_eq!(
-            visible.readiness(now + Duration::from_millis(15), PaneVisibility::Visible),
-            BatchReadiness::WaitingForCadence {
-                remaining: Duration::from_millis(1)
-            }
-        );
-        assert_eq!(
-            visible.readiness(now + Duration::from_millis(16), PaneVisibility::Visible),
+            visible.readiness(now + Duration::from_millis(1), PaneVisibility::Visible),
             BatchReadiness::Ready
         );
 
@@ -2271,6 +2298,7 @@ mod tests {
             max_in_flight: 2,
             visible_cadence: Duration::ZERO,
             hidden_cadence: Duration::ZERO,
+            emit_retry_backoff: Duration::ZERO,
             exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
         })
         .unwrap();
@@ -2405,6 +2433,7 @@ mod tests {
             max_in_flight: 1,
             visible_cadence: Duration::ZERO,
             hidden_cadence: Duration::ZERO,
+            emit_retry_backoff: Duration::ZERO,
             exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
         })
         .unwrap();
@@ -2477,6 +2506,7 @@ mod tests {
             max_in_flight: 1,
             visible_cadence: Duration::ZERO,
             hidden_cadence: Duration::ZERO,
+            emit_retry_backoff: Duration::ZERO,
             exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
         })
         .unwrap();
@@ -2516,6 +2546,7 @@ mod tests {
             max_in_flight: 1,
             visible_cadence: Duration::ZERO,
             hidden_cadence: Duration::ZERO,
+            emit_retry_backoff: Duration::ZERO,
             exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
         })
         .unwrap();
@@ -2554,6 +2585,7 @@ mod tests {
                     max_in_flight: 1,
                     visible_cadence: Duration::ZERO,
                     hidden_cadence: Duration::ZERO,
+                    emit_retry_backoff: Duration::ZERO,
                     exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
                 },
                 vec![1, 2],
@@ -2567,6 +2599,7 @@ mod tests {
                     max_in_flight: 1,
                     visible_cadence: Duration::ZERO,
                     hidden_cadence: Duration::ZERO,
+                    emit_retry_backoff: Duration::ZERO,
                     exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
                 },
                 vec![1],
@@ -2615,6 +2648,7 @@ mod tests {
             max_in_flight: 1,
             visible_cadence: Duration::ZERO,
             hidden_cadence: Duration::ZERO,
+            emit_retry_backoff: Duration::ZERO,
             exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
         };
         let slow = test_pump("slow", limits.clone(), Arc::clone(&clock));
@@ -2690,6 +2724,49 @@ mod tests {
     }
 
     #[test]
+    fn a_visible_pane_is_paced_by_acknowledgement_credit_rather_than_the_clock() {
+        let clock = TestClock::new();
+        let pump = test_pump(
+            "credit",
+            PumpLimits {
+                max_batch_bytes: 1,
+                ..PumpLimits::default()
+            },
+            Arc::clone(&clock),
+        );
+        pump.enqueue(vec![1, 2, 3]).unwrap();
+
+        // Two batches leave back to back without the clock moving at all. Under a
+        // 16ms floor the second would have reported WaitingForCadence.
+        assert_eq!(
+            pump.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::Emitted { sequence: 1 })
+        );
+        assert_eq!(
+            pump.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::Emitted { sequence: 2 })
+        );
+
+        // The third waits on credit, not on time — no amount of elapsed clock
+        // releases it, and the acknowledgement releases it immediately.
+        assert_eq!(
+            pump.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::NotReady(BatchReadiness::InFlightFull))
+        );
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(
+            pump.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::NotReady(BatchReadiness::InFlightFull))
+        );
+
+        pump.acknowledge(1).unwrap();
+        assert_eq!(
+            pump.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::Emitted { sequence: 3 })
+        );
+    }
+
+    #[test]
     fn failed_emit_reuses_sequence_and_bytes_with_a_fresh_attempt_timestamp() {
         let clock = TestClock::new();
         let pump = test_pump("retry", PumpLimits::default(), Arc::clone(&clock));
@@ -2718,7 +2795,16 @@ mod tests {
         assert_eq!(failed.metrics.emit_failure_count, 1);
         assert_eq!(failed.metrics.emit_retry_count, 0);
 
-        clock.advance(VISIBLE_CADENCE);
+        // The retry is held off even though a visible pane has no cadence: a
+        // failed emission backs off on its own account.
+        assert_eq!(
+            pump.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::NotReady(BatchReadiness::WaitingForCadence {
+                remaining: EMIT_RETRY_BACKOFF,
+            }))
+        );
+
+        clock.advance(EMIT_RETRY_BACKOFF);
         let mut retry = None;
         assert_eq!(
             pump.emit_ready(|event| {
@@ -2734,14 +2820,14 @@ mod tests {
         assert_eq!(retry.0, first.0);
         assert_eq!(retry.1, first.1);
         assert_eq!(first.2, 0);
-        assert_eq!(retry.2, duration_micros(VISIBLE_CADENCE));
+        assert_eq!(retry.2, duration_micros(EMIT_RETRY_BACKOFF));
         assert_eq!(
             pump.acknowledge(1),
             Ok(AckOutcome::Advanced {
                 sequence: 1,
                 bytes: b"retry exactly".len(),
-                emitted_at: clock.origin + VISIBLE_CADENCE,
-                acknowledged_at: clock.origin + VISIBLE_CADENCE + Duration::from_millis(5),
+                emitted_at: clock.origin + EMIT_RETRY_BACKOFF,
+                acknowledged_at: clock.origin + EMIT_RETRY_BACKOFF + Duration::from_millis(5),
                 latency: Duration::from_millis(5),
             })
         );
@@ -3031,6 +3117,7 @@ mod tests {
                 max_in_flight: 1,
                 visible_cadence: Duration::ZERO,
                 hidden_cadence: Duration::ZERO,
+                emit_retry_backoff: Duration::ZERO,
                 exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
             },
             Arc::clone(&clock),
@@ -3080,6 +3167,7 @@ mod tests {
                 max_in_flight: 1,
                 visible_cadence: Duration::ZERO,
                 hidden_cadence: Duration::ZERO,
+                emit_retry_backoff: Duration::ZERO,
                 exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
             },
             Arc::clone(&clock),
@@ -3139,6 +3227,7 @@ mod tests {
                 max_in_flight: 1,
                 visible_cadence: Duration::ZERO,
                 hidden_cadence: Duration::ZERO,
+                emit_retry_backoff: Duration::ZERO,
                 exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
             },
             clock,
@@ -3184,6 +3273,7 @@ mod tests {
                 max_in_flight: 2,
                 visible_cadence: Duration::ZERO,
                 hidden_cadence: Duration::ZERO,
+                emit_retry_backoff: Duration::ZERO,
                 exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
             },
             clock,
@@ -3235,6 +3325,7 @@ mod tests {
                 max_in_flight: 1,
                 visible_cadence: Duration::ZERO,
                 hidden_cadence: Duration::ZERO,
+                emit_retry_backoff: Duration::ZERO,
                 exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
             },
             Arc::clone(&clock),
