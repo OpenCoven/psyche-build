@@ -107,17 +107,29 @@ export class PaneWorkerManager {
     expectedTmuxPaneId: string,
     keys: string,
     signal?: AbortSignal,
-  ): Promise<void> {
-    const pane = this.panes.get(paneId);
-    if (signal?.aborted || pane?.tmuxPaneId !== expectedTmuxPaneId) {
-      return;
+    isCurrent?: () => boolean,
+  ): Promise<boolean> {
+    const ownsExpectedPane = () => (
+      !signal?.aborted
+      && this.panes.get(paneId)?.tmuxPaneId === expectedTmuxPaneId
+      && (isCurrent?.() ?? true)
+    );
+    if (!ownsExpectedPane()) {
+      return false;
     }
 
     const escapedKeys = keys.replace(/'/g, "'\\''");
-    await this.tmux.sendKeys(expectedTmuxPaneId, `'${escapedKeys}'`);
-    if (!signal?.aborted && this.panes.get(paneId)?.tmuxPaneId === expectedTmuxPaneId) {
+    const sent = await this.tmux.sendKeys(expectedTmuxPaneId, `'${escapedKeys}'`, {
+      signal,
+      isCurrent: ownsExpectedPane,
+    });
+    if (!sent) {
+      return false;
+    }
+    if (ownsExpectedPane()) {
       this.poller.onKeysSent(paneId);
     }
+    return true;
   }
 
   /**

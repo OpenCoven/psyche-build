@@ -729,7 +729,8 @@ describe('PsycheAttentionService', () => {
     (detector as any).paneLifecycles.set('pane-real-flash', Symbol('replacement'));
     await vi.runAllTimersAsync();
 
-    expect(setOption).not.toHaveBeenCalledWith('%80', 'window-style', expect.anything());
+    expect(setOption).toHaveBeenCalledOnce();
+    expect(setOption).toHaveBeenCalledWith('%80', 'window-style', 'bg=colour20');
     expect(unsetOption).not.toHaveBeenCalledWith('%80', 'window-style');
     expect((service as any).activeAttentionPanes.has('pane-real-flash')).toBe(false);
     expect((focusService as any).flashingTmuxPaneIds.has('%80')).toBe(false);
