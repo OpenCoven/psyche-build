@@ -42,6 +42,7 @@ const prohibitedReferencePatterns = [
 const prohibitedPositionPatterns = [
   [/coven demo loop/i, 'standalone Coven demo positioning'],
   [/fix openclaw cockpit/i, 'standalone OpenClaw promotion'],
+  [/\b(?:OpenMeow|OpenClaw)\b/i, 'external ecosystem product positioning'],
   [/opencoven public roadmap/i, 'external ecosystem roadmap promotion'],
   [/led by\s*<strong>\s*coven code\s*<\/strong>/i, 'agent catalog product favoritism'],
   [/^## Coven integration smoke/im, 'standalone Coven integration runbook'],
