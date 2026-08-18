@@ -9,7 +9,9 @@ import { describe, expect, it } from 'vitest';
  */
 const allocationSites = [
   ['worktree pane creation', 'src/utils/paneCreation.ts', "captureTmuxGeneration(\n    tmuxService,\n    'pane allocation'"],
-  ['attached agent pane', 'src/utils/attachAgent.ts', "captureTmuxGeneration(\n        tmuxService,\n        'attached pane allocation'"],
+  // attachAgent.ts no longer allocates tmux panes directly; it delegates
+  // to createPane (worktree pane creation above) via the shared-worktree
+  // existingWorktree flow.
   ['reopened worktree pane', 'src/utils/reopenWorktree.ts', "captureTmuxGeneration(\n    tmuxService,\n    'reopened pane allocation'"],
   ['conflict resolution pane', 'src/utils/conflictResolutionPane.ts', "captureTmuxGeneration(\n    tmuxService,\n    'conflict pane allocation'"],
   ['startup restoration pane', 'src/hooks/usePaneLoading.ts', 'getServerIdentity?.(newPaneId)'],

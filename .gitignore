@@ -39,3 +39,4 @@ native/desktop/psyche-build-tauri/pnpm-lock.yaml
 /Library
 /.cargo-target-git-filter-hardening
 /.cargo-target
+/.claude
