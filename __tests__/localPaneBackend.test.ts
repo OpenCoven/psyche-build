@@ -157,6 +157,82 @@ describe('localPaneBackend', () => {
       const options = (createPaneFn.mock.calls[0] as any[])[0];
       expect(options.persistReusedPane).toBeDefined();
     });
+
+    it('allocates a sibling slug from fresh persisted panes', async () => {
+      const existingWorktree = {
+        slug: 'fix-auth',
+        worktreePath: `${ROOT}/.psyche/worktrees/fix-auth`,
+        branchName: 'psyche/fix-auth',
+      };
+      const createPaneFn = vi.fn(async (options: any) => {
+        const slug = options.resolveExistingWorktreeSlug([
+          pane('fix-auth'),
+          pane('fix-auth-a2'),
+        ]);
+        return {
+          pane: pane(slug),
+          needsAgentChoice: false,
+        };
+      });
+      const backend = backendWith(createPaneFn);
+
+      const output = await backend.execute(lane({
+        mode: 'shared-worktree',
+        existingWorktree,
+      }));
+
+      expect(output.pane?.slug).toBe('fix-auth-a3');
+    });
+
+    it('allocates distinct sibling slugs for parallel shared-worktree lanes', async () => {
+      const existingWorktree = {
+        slug: 'fix-auth',
+        worktreePath: `${ROOT}/.psyche/worktrees/fix-auth`,
+        branchName: 'psyche/fix-auth',
+      };
+      let persistedPanes = [pane('fix-auth')];
+      let reservationTail = Promise.resolve();
+      const createPaneFn = vi.fn(async (options: any) => {
+        const previousReservation = reservationTail;
+        let releaseReservation!: () => void;
+        reservationTail = new Promise<void>((resolve) => {
+          releaseReservation = resolve;
+        });
+        await previousReservation;
+
+        try {
+          const slug = options.resolveExistingWorktreeSlug(persistedPanes);
+          const createdPane = pane(slug);
+          persistedPanes = [...persistedPanes, createdPane];
+          return {
+            pane: createdPane,
+            needsAgentChoice: false,
+          };
+        } finally {
+          releaseReservation();
+        }
+      });
+      const firstBackend = backendWith(createPaneFn);
+      const secondBackend = backendWith(createPaneFn);
+
+      const [first, second] = await Promise.all([
+        firstBackend.execute(lane({
+          id: 'first',
+          mode: 'shared-worktree',
+          existingWorktree,
+        })),
+        secondBackend.execute(lane({
+          id: 'second',
+          mode: 'shared-worktree',
+          existingWorktree,
+        })),
+      ]);
+
+      expect([first.pane?.slug, second.pane?.slug].sort()).toEqual([
+        'fix-auth-a2',
+        'fix-auth-a3',
+      ]);
+    });
   });
 
   describe('terminal lane translation', () => {

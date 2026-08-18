@@ -107,7 +107,7 @@ describe('attachAgentToWorktree', () => {
     expect(createPaneMock).not.toHaveBeenCalled();
   });
 
-  it('passes the sibling slug as existingWorktree to createPane', async () => {
+  it('passes the target worktree and a reserved sibling slug allocator to createPane', async () => {
     const targetPane = createTargetPane();
     const result = createdPane('feature-a2');
     createPaneMock.mockResolvedValueOnce({
@@ -127,10 +127,11 @@ describe('attachAgentToWorktree', () => {
     expect(createPaneMock).toHaveBeenCalledOnce();
     const options = createPaneMock.mock.calls[0][0];
     expect(options.existingWorktree).toEqual({
-      slug: 'feature-a2',
+      slug: 'feature',
       worktreePath: WORKTREE_PATH,
       branchName: 'feature',
     });
+    expect(options.resolveExistingWorktreeSlug([targetPane])).toBe('feature-a2');
     expect(options.agent).toBe('claude');
     expect(options.prompt).toBe('Review the changes');
     expect(options.sessionProjectRoot).toBe('/session');
@@ -156,7 +157,7 @@ describe('attachAgentToWorktree', () => {
     expect(agents).toEqual(['codex']);
   });
 
-  it('increments sibling slug based on existingPanes', async () => {
+  it('does not treat the caller pane snapshot as sibling slug authority', async () => {
     const targetPane = createTargetPane();
     createPaneMock.mockResolvedValueOnce({
       pane: createdPane('feature-a3'),
@@ -172,7 +173,81 @@ describe('attachAgentToWorktree', () => {
     });
 
     const options = createPaneMock.mock.calls[0][0];
-    expect(options.existingWorktree.slug).toBe('feature-a3');
+    expect(options.resolveExistingWorktreeSlug([targetPane])).toBe('feature-a2');
+  });
+
+  it('allocates the sibling slug from fresh persisted panes instead of the caller snapshot', async () => {
+    const targetPane = createTargetPane();
+    const persistedSibling = createdPane('feature-a2');
+    createPaneMock.mockImplementationOnce(async (options) => {
+      const slug = options.resolveExistingWorktreeSlug([
+        targetPane,
+        persistedSibling,
+      ]);
+      return {
+        pane: createdPane(slug),
+        needsAgentChoice: false,
+      };
+    });
+
+    const { pane } = await attachAgentToWorktree({
+      targetPane,
+      prompt: 'p',
+      agent: 'claude',
+      existingPanes: [targetPane],
+      sessionProjectRoot: '/session',
+    });
+
+    expect(pane.slug).toBe('feature-a3');
+  });
+
+  it('allocates distinct sibling slugs for parallel attaches', async () => {
+    const targetPane = createTargetPane();
+    let persistedPanes = [targetPane];
+    let reservationTail = Promise.resolve();
+
+    createPaneMock.mockImplementation(async (options) => {
+      const previousReservation = reservationTail;
+      let releaseReservation!: () => void;
+      reservationTail = new Promise<void>((resolve) => {
+        releaseReservation = resolve;
+      });
+      await previousReservation;
+
+      try {
+        const slug = options.resolveExistingWorktreeSlug(persistedPanes);
+        const pane = createdPane(slug);
+        persistedPanes = [...persistedPanes, pane];
+        return {
+          pane,
+          needsAgentChoice: false,
+        };
+      } finally {
+        releaseReservation();
+      }
+    });
+
+    const [first, second] = await Promise.all([
+      attachAgentToWorktree({
+        targetPane,
+        prompt: 'first',
+        agent: 'claude',
+        existingPanes: [targetPane],
+        sessionProjectRoot: '/session',
+      }),
+      attachAgentToWorktree({
+        targetPane,
+        prompt: 'second',
+        agent: 'codex',
+        existingPanes: [targetPane],
+        sessionProjectRoot: '/session',
+      }),
+    ]);
+
+    expect([first.pane.slug, second.pane.slug].sort()).toEqual([
+      'feature-a2',
+      'feature-a3',
+    ]);
   });
 
   it('returns the pane created by createPane', async () => {

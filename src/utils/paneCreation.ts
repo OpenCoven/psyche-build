@@ -39,6 +39,7 @@ import {
   ensureProjectPaneConfigPane,
   mutateProjectPaneConfig,
   projectPaneConfigPath,
+  readProjectPaneConfigUnderLock,
 } from '../services/ProjectPaneConfig.js';
 import {
   appendSlugSuffix,
@@ -79,6 +80,13 @@ export interface CreatePaneOptions {
     worktreePath: string;
     branchName: string;
   };
+  /**
+   * Internal allocator for reused-worktree panes. It is invoked only after
+   * reuse has been reserved and the persisted pane registry has been reloaded.
+   */
+  resolveExistingWorktreeSlug?: (
+    freshPanes: readonly PsychePane[],
+  ) => string;
   /**
    * Persists a newly-created pane while its creation lease is still held.
    */
@@ -305,7 +313,6 @@ async function createPaneWithReuseReservation(
     existingPanes,
     slugSuffix,
     slugBase,
-    existingWorktree,
     startPointBranch,
     mergeTargetChain,
     skipAgentSelection = false,
@@ -314,7 +321,11 @@ async function createPaneWithReuseReservation(
     focusedTmuxPaneId,
     selectedPaneId,
   } = options;
-  let { agent, projectRoot: optionsProjectRoot } = options;
+  let {
+    agent,
+    existingWorktree,
+    projectRoot: optionsProjectRoot,
+  } = options;
 
   // Load settings to check for default agent and autopilot
   const { SettingsManager } = await import('./settingsManager.js');
@@ -349,14 +360,29 @@ async function createPaneWithReuseReservation(
     }
   }
 
+  const sessionProjectRoot = optionsSessionProjectRoot
+    || (optionsSessionConfigPath ? path.dirname(path.dirname(optionsSessionConfigPath)) : projectRoot);
+  if (existingWorktree && options.resolveExistingWorktreeSlug) {
+    const config = await readProjectPaneConfigUnderLock(sessionProjectRoot);
+    const freshPanes = Array.isArray(config.panes)
+      ? config.panes.filter((pane): pane is PsychePane => (
+        typeof pane === 'object'
+        && pane !== null
+        && typeof (pane as Partial<PsychePane>).slug === 'string'
+      ))
+      : [];
+    existingWorktree = {
+      ...existingWorktree,
+      slug: options.resolveExistingWorktreeSlug(freshPanes),
+    };
+  }
+
   const settingsManager = new SettingsManager(projectRoot);
   const settings = settingsManager.getSettings();
   const existingWorktreeMetadata = existingWorktree
     ? readWorktreeMetadata(existingWorktree.worktreePath)
     : null;
 
-  const sessionProjectRoot = optionsSessionProjectRoot
-    || (optionsSessionConfigPath ? path.dirname(path.dirname(optionsSessionConfigPath)) : projectRoot);
   let paneProjectName = path.basename(projectRoot);
 
   // If no agent specified, check settings for default agent unless caller explicitly disabled auto-selection.

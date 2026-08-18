@@ -1746,33 +1746,21 @@ export function useInputHandling(params: UseInputHandlingParams) {
           : "Attaching agent..."
       )
 
-      const { generateSiblingSlugForTargetPane } = await import("../utils/attachAgent.js")
       const { Orchestrator } = await import("../orchestration/orchestrator.js")
       const { createLocalPaneBackend } = await import("../orchestration/localPaneBackend.js")
 
-      // Compute sibling slugs so each agent gets a unique slug while sharing
-      // the same worktree.  The slugs are pre-computed against the current
-      // pane list and then injected into per-agent existingWorktree refs so
-      // that createPane (inside the local backend) uses them directly.
       const existingWorktreeBase = {
+        slug: selectedPane.slug,
         worktreePath: selectedPane.worktreePath!,
         branchName: selectedPane.branchName || selectedPane.slug,
       }
 
-      // Build per-agent lane requests with unique sibling slugs
-      const allPanes = [...panes]
-      const lanes = selectedAgents.map((agent) => {
-        const slug = generateSiblingSlugForTargetPane(selectedPane, allPanes)
-        // Add a synthetic pane entry so subsequent sibling slug computations
-        // see this lane's slug and produce a distinct suffix.
-        allPanes.push({ slug } as PsychePane)
-        return {
-          id: `${agent}-attach`,
-          mode: "shared-worktree" as const,
-          agent,
-          existingWorktree: { ...existingWorktreeBase, slug },
-        }
-      })
+      const lanes = selectedAgents.map((agent) => ({
+        id: `${agent}-attach`,
+        mode: "shared-worktree" as const,
+        agent,
+        existingWorktree: existingWorktreeBase,
+      }))
 
       const backend = createLocalPaneBackend({
         projectName: selectedPane.projectName || path.basename(targetProjectRoot),

@@ -9,6 +9,7 @@ import { laneSlugSuffix } from './adapters.js';
 import type { LaneBackend, LaneExecutionOutput } from './orchestrator.js';
 import { OrchestrationError, type OrchestrationLanePlan } from './types.js';
 import { persistProjectPaneConfigPaneDelta } from '../services/ProjectPaneConfig.js';
+import { generateSiblingSlugForTargetPane } from '../utils/attachAgent.js';
 
 export interface LocalPaneBackendOptions {
   projectName: string;
@@ -33,6 +34,11 @@ export interface LocalPaneBackendOptions {
     previousPanes: PsychePane[],
     nextPanes: PsychePane[],
   ) => Promise<void>;
+  /** Injectable shared-worktree slug allocator. */
+  resolveExistingWorktreeSlug?: (
+    targetPane: Pick<PsychePane, 'slug' | 'worktreePath'>,
+    freshPanes: readonly PsychePane[],
+  ) => string;
   /**
    * Shared slug stem for multi-lane tasks, so sibling lanes read as variants
    * of one task (fix-auth-codex, fix-auth-claude) rather than unrelated names.
@@ -82,6 +88,8 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
       );
       return mutation.result as PsychePane;
     });
+  const resolveExistingWorktreeSlug = options.resolveExistingWorktreeSlug
+    ?? generateSiblingSlugForTargetPane;
   const created: PsychePane[] = [];
 
   // The first createPane call in a session may build the sidebar layout and
@@ -109,6 +117,13 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
         ...(options.slugBase ? { slugBase: options.slugBase } : {}),
         ...(laneSlugSuffix(lane.agent) ? { slugSuffix: laneSlugSuffix(lane.agent) } : {}),
         ...(lane.existingWorktree ? { existingWorktree: lane.existingWorktree } : {}),
+        ...(lane.existingWorktree
+          ? {
+            resolveExistingWorktreeSlug: (freshPanes: readonly PsychePane[]) => (
+              resolveExistingWorktreeSlug(lane.existingWorktree!, freshPanes)
+            ),
+          }
+          : {}),
         ...(lane.startPointBranch ? { startPointBranch: lane.startPointBranch } : {}),
         ...(lane.mergeTargetChain ? { mergeTargetChain: lane.mergeTargetChain } : {}),
         projectName: options.projectName,

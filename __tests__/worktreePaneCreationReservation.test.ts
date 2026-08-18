@@ -1,4 +1,25 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { PsychePane } from '../src/types.js';
+
+const beginWorktreeReuseReservationMock = vi.hoisted(() => vi.fn());
+const readProjectPaneConfigUnderLockMock = vi.hoisted(() => vi.fn());
+
+vi.mock('../src/services/WorktreeCleanupService.js', () => ({
+  WorktreeCleanupService: {
+    getInstance: () => ({
+      beginWorktreeReuseReservation: beginWorktreeReuseReservationMock,
+    }),
+  },
+}));
+
+vi.mock('../src/services/ProjectPaneConfig.js', () => ({
+  ensureProjectPaneConfigPane: vi.fn(),
+  mutateProjectPaneConfig: vi.fn(),
+  projectPaneConfigPath: (projectRoot: string) => (
+    `${projectRoot}/.psyche/psyche.config.json`
+  ),
+  readProjectPaneConfigUnderLock: readProjectPaneConfigUnderLockMock,
+}));
 
 describe('worktree pane creation reservation', () => {
   it('holds reuse ownership through durable pane persistence', async () => {
@@ -18,19 +39,27 @@ describe('worktree pane creation reservation', () => {
     });
     const complete = vi.fn(async () => {});
     const cancel = vi.fn(async () => {});
+    const order: string[] = [];
     const operation = vi.fn(async () => {
       await persistence;
+      order.push('persist-pane');
       return 'created';
     });
     const creation = withReservation!({
       worktreePath: '/repo/.psyche/worktrees/feature',
       projectRoot: '/repo',
-      beginReservation: vi.fn(async () => ({
-        canonicalWorktreePath: '/repo/.psyche/worktrees/feature',
-        complete,
-        cancel,
-        retain: vi.fn(),
-      })),
+      beginReservation: vi.fn(async () => {
+        order.push('begin-reservation');
+        return {
+          canonicalWorktreePath: '/repo/.psyche/worktrees/feature',
+          complete: async () => {
+            order.push('complete-reservation');
+            await complete();
+          },
+          cancel,
+          retain: vi.fn(),
+        };
+      }),
       operation,
     });
 
@@ -41,5 +70,65 @@ describe('worktree pane creation reservation', () => {
     await expect(creation).resolves.toBe('created');
     expect(complete).toHaveBeenCalledOnce();
     expect(cancel).not.toHaveBeenCalled();
+    expect(order).toEqual([
+      'begin-reservation',
+      'persist-pane',
+      'complete-reservation',
+    ]);
+  });
+
+  it('invokes the allocator only after reserving reuse and loading fresh panes', async () => {
+    const order: string[] = [];
+    beginWorktreeReuseReservationMock.mockImplementationOnce(async () => {
+      order.push('begin-reservation');
+      return {
+        canonicalWorktreePath: `${process.cwd()}/.psyche/worktrees/feature`,
+        complete: async () => {
+          order.push('complete-reservation');
+        },
+        cancel: vi.fn(async () => {}),
+        retain: vi.fn(),
+      };
+    });
+    readProjectPaneConfigUnderLockMock.mockImplementationOnce(async () => {
+      order.push('load-fresh-panes');
+      return {
+        panes: [
+          { slug: 'feature' },
+          { slug: 'feature-a2' },
+        ],
+      };
+    });
+
+    const { createPane } = await import('../src/utils/paneCreation.js');
+    const result = await createPane({
+      prompt: 'review',
+      projectName: 'repo',
+      projectRoot: process.cwd(),
+      sessionProjectRoot: process.cwd(),
+      existingPanes: [{ slug: 'feature' } as PsychePane],
+      existingWorktree: {
+        slug: 'feature',
+        worktreePath: `${process.cwd()}/.psyche/worktrees/feature`,
+        branchName: 'feature',
+      },
+      persistReusedPane: vi.fn(async () => {}),
+      resolveExistingWorktreeSlug: (freshPanes) => {
+        order.push('allocate-slug');
+        expect(freshPanes.map((pane) => pane.slug)).toEqual([
+          'feature',
+          'feature-a2',
+        ]);
+        return 'feature-a3';
+      },
+    }, ['claude', 'codex']);
+
+    expect(result.needsAgentChoice).toBe(true);
+    expect(order).toEqual([
+      'begin-reservation',
+      'load-fresh-panes',
+      'allocate-slug',
+      'complete-reservation',
+    ]);
   });
 });
