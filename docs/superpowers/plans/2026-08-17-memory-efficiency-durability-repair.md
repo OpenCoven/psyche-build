@@ -9,7 +9,8 @@ release retired pane buffers after their final subscriber.
 **Architecture:** Keep the existing
 `.psyche/runtime/outcomes/<sha256>` files as authoritative exact-outcome
 records. `ControlRuntime` retains exact outcomes in its bounded hot cache,
-caps dirty durability failures at 256 keys, appends bounded digest
+caps one shared 256-slot durability budget across dirty outcomes and active
+fresh reservations, appends bounded digest
 attestations for retained pre-digest surface terminals, and prevents
 compaction from covering a terminal event until an exact sidecar both loads and
 matches either the terminal digest or that later attestation. Legacy
@@ -109,7 +110,7 @@ interface StoredOutcomeRecord {
 bounded handle reads. It rejects malformed JSON, key mismatches, invalid
 outcome shapes, oversized files, symlink/non-regular entries, and directory
 identity swaps. `storeOutcome(key, outcome)` continues to publish that exact
-record only; Task 1 does not add a compact/tombstone sidecar format.
+record only; Task 1 keeps the exact sidecar format.
 
 ### Step 3: Harden exact sidecar publication
 
@@ -128,18 +129,25 @@ close temp file
 revalidate directory identity
 rename temp file -> hashed destination
 revalidate directory identity again
+fsync containing directory
+report success
 ```
 
 `loadOutcome()` applies the same containment checks around `lstat`, bounded
 open, bounded read, and post-read validation. Existing directories keep their
-current mode; newly created private directories use `0700`.
+current mode; newly created private directories use `0700`. A rename followed
+by containing-directory fsync failure remains a durability failure, so the
+runtime must leave the terminal dirty and block compaction even if the renamed
+file is already visible on disk. The same post-rename runtime-directory fsync
+rule applies to `snapshot.json` replacement and journal compaction rewrites
+before success or in-memory state advancement.
 
 ### Step 4: Keep exact replay authoritative during failures and upgrades
 
 For every terminal path, append the journal event first, remember the exact
 outcome in the bounded hot cache immediately, mark it dirty in memory, then try
 to persist the exact sidecar. Recovery-generated `command.unknown` outcomes use
-the same persistence path.
+the same remember/mark-dirty/attempt-store path.
 
 Startup and retained-tail replay verify exact sidecars against the terminal
 event digest. When a retained pre-digest surface terminal still has a valid
@@ -147,17 +155,24 @@ exact sidecar, startup appends a bounded `command.outcome.attested` digest
 record keyed by `(commandId, idempotencyKey)` so later compaction can trust the
 sidecar without exposing the exact surface value. Legacy `snapshot.outcomes`
 entries no longer warm the hot cache; without the exact sidecar they fail
-closed.
+closed. Ordinary retained surface terminals and generic retained
+`command.unknown` events require an exact sidecar. The one narrow exception is
+`command.unknown` with `reason: recovered-nonterminal`: even for a surface
+request, that retained terminal is itself the authoritative exact unknown, so
+startup may reconstruct it, keep it dirty, and flush the sidecar later.
 
 ### Step 5: Gate compaction and bound exact records
 
 `flushDirtyOutcomesThrough(cutoff)` retries dirty exact records at or below the
 cutoff. Startup scans retained terminal events after recovery. A missing
 sidecar becomes dirty only when retained reconstruction is provably exact;
-surface or unknown replay without an exact sidecar aborts startup.
+ordinary surface or unknown replay without an exact sidecar aborts startup,
+except for recovery-generated `recovered-nonterminal` unknown terminals.
 
-Before a fresh effect, retry dirty records whenever the 256-entry dirty budget
-is full. If the backlog cannot be drained, return:
+Before a fresh effect, reserve room in one shared 256-slot durability budget
+covering dirty entries plus active fresh reservations. Same-key retries reuse
+their existing state and do not consume another slot. If the backlog cannot be
+drained enough to admit a new reservation, return:
 
 ```ts
 rejectedOutcome(
@@ -181,9 +196,9 @@ rejectedOutcome(
 7. compact only after all earlier steps succeed.
 
 This bounds exact disk outcomes by the fixed 2,000-event trigger plus at most
-256 dirty tracked failures. After compaction, authoritative exact sidecars
-still replay old keys while the retained 1,000-event tail remains available
-for cold lookup compatibility.
+256 combined dirty-or-reserved durability slots. After compaction,
+authoritative exact sidecars still replay old keys while the retained
+1,000-event tail remains available for cold lookup compatibility.
 
 ### Step 6: Add the deterministic fail-closed regression
 
@@ -194,8 +209,9 @@ In `controlJournalCompaction.test.ts`, cover:
   unreadable, or digest-mismatched;
 - retained pre-digest surface terminals gaining an attestation before they can
   be compacted; and
-- the 256-entry dirty durability cap rejecting fresh effects without
-  re-executing known retries.
+- the shared 256-slot durability budget rejecting fresh effects without
+  re-executing known retries, while `recovered-nonterminal` exact unknowns stay
+  replayable across restart until persistence succeeds.
 
 ### Step 7: Defer snapshot redesign to Task 2
 
@@ -215,7 +231,9 @@ pnpm run typecheck:tests
 
 Update `docs/CONTROL-PLANE.md` and `docs/AGENT-SURFACE-CONTROL.md` with the
 single-path exact-sidecar contract, digest attestation compatibility,
-256-entry dirty durability bound, and fail-closed replay/compaction behavior.
+post-rename containing-directory fsync requirement, shared 256-slot durability
+budget, and fail-closed replay/compaction behavior with the
+`recovered-nonterminal` exact-unknown exception.
 
 ## Task 2: Preserve unresolved commands through compaction
 
