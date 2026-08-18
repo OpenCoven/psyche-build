@@ -42,7 +42,6 @@ use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
 };
-
 mod control_provider;
 mod coven_sessions;
 mod metrics;
@@ -98,6 +97,7 @@ std::thread_local! {
         RefCell::new(Vec::new());
     static TEST_GIT_FILTER_SCOPE_QUERIES: RefCell<Vec<String>> = RefCell::new(Vec::new());
     static TEST_GIT_COMMAND_COUNT: RefCell<usize> = const { RefCell::new(0) };
+    static TEST_GIT_METADATA_READ_LIMITS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 fn safe_browser_label(label: Option<String>) -> String {
@@ -4658,7 +4658,12 @@ struct FileState {
 #[cfg(unix)]
 fn file_state(file: &std::fs::File) -> Result<FileState, String> {
     let metadata = file.metadata().map_err(|e| e.to_string())?;
-    Ok(FileState {
+    Ok(metadata_file_state(&metadata))
+}
+
+#[cfg(unix)]
+fn metadata_file_state(metadata: &std::fs::Metadata) -> FileState {
+    FileState {
         dev: metadata.dev(),
         ino: metadata.ino(),
         mode: metadata.mode(),
@@ -4669,7 +4674,7 @@ fn file_state(file: &std::fs::File) -> Result<FileState, String> {
         mtime_nsec: metadata.mtime_nsec(),
         ctime: metadata.ctime(),
         ctime_nsec: metadata.ctime_nsec(),
-    })
+    }
 }
 
 #[cfg(unix)]
@@ -5535,6 +5540,25 @@ fn snapshot_git_refs(
 
 const MAX_GIT_SHALLOW_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GIT_INFO_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_GIT_REFTABLE_LIST_BYTES: u64 = 1024 * 1024;
+const MAX_GIT_REFTABLE_TABLES: usize = 4096;
+const MAX_GIT_REFTABLE_TABLE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_GIT_REFTABLE_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct GitReftableSnapshotLimits {
+    list_bytes: u64,
+    tables: usize,
+    table_bytes: u64,
+    total_bytes: u64,
+}
+
+const GIT_REFTABLE_SNAPSHOT_LIMITS: GitReftableSnapshotLimits = GitReftableSnapshotLimits {
+    list_bytes: MAX_GIT_REFTABLE_LIST_BYTES,
+    tables: MAX_GIT_REFTABLE_TABLES,
+    table_bytes: MAX_GIT_REFTABLE_TABLE_BYTES,
+    total_bytes: MAX_GIT_REFTABLE_TOTAL_BYTES,
+};
 
 fn validate_git_shallow(bytes: &[u8], object_format: Option<&str>) -> Result<(), String> {
     let text = std::str::from_utf8(bytes)
@@ -5631,7 +5655,10 @@ fn snapshot_git_shallow(
         .map_err(|e| format!("snapshot Git shallow boundary: {e}"))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
+
+#[cfg(any(windows, test))]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
 #[cfg(windows)]
@@ -5646,6 +5673,600 @@ fn metadata_is_reparse_like(_metadata: &std::fs::Metadata) -> bool {
 
 fn metadata_is_link_like(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink() || metadata_is_reparse_like(metadata)
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowsGitMetadataState {
+    volume_serial_number: u32,
+    file_index: u64,
+    file_attributes: u32,
+    file_size: u64,
+    last_write_time: u64,
+}
+
+#[cfg(any(windows, test))]
+fn windows_git_metadata_same_identity(
+    before: WindowsGitMetadataState,
+    after: WindowsGitMetadataState,
+) -> bool {
+    before.volume_serial_number == after.volume_serial_number
+        && before.file_index == after.file_index
+}
+
+#[cfg(any(windows, test))]
+fn windows_git_metadata_file_state_matches(
+    before: WindowsGitMetadataState,
+    after: WindowsGitMetadataState,
+) -> bool {
+    windows_git_metadata_same_identity(before, after)
+        && before.file_attributes == after.file_attributes
+        && before.file_size == after.file_size
+        && before.last_write_time == after.last_write_time
+}
+
+#[cfg(any(windows, test))]
+fn windows_git_metadata_directory_state_matches(
+    before: WindowsGitMetadataState,
+    after: WindowsGitMetadataState,
+) -> bool {
+    windows_git_metadata_same_identity(before, after)
+        && before.file_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+            == after.file_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+}
+
+#[cfg(all(not(unix), not(windows)))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OtherGitMetadataState {
+    length: u64,
+    modified: SystemTime,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsFileTime {
+    low_date_time: u32,
+    high_date_time: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsByHandleFileInformation {
+    file_attributes: u32,
+    creation_time: WindowsFileTime,
+    last_access_time: WindowsFileTime,
+    last_write_time: WindowsFileTime,
+    volume_serial_number: u32,
+    file_size_high: u32,
+    file_size_low: u32,
+    number_of_links: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsUnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsObjectAttributes {
+    length: u32,
+    root_directory: *mut std::ffi::c_void,
+    object_name: *mut WindowsUnicodeString,
+    attributes: u32,
+    security_descriptor: *mut std::ffi::c_void,
+    security_quality_of_service: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsIoStatusBlock {
+    status: isize,
+    information: usize,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetFileInformationByHandle(
+        file: *mut std::ffi::c_void,
+        information: *mut WindowsByHandleFileInformation,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtCreateFile(
+        file_handle: *mut *mut std::ffi::c_void,
+        desired_access: u32,
+        object_attributes: *mut WindowsObjectAttributes,
+        io_status_block: *mut WindowsIoStatusBlock,
+        allocation_size: *mut i64,
+        file_attributes: u32,
+        share_access: u32,
+        create_disposition: u32,
+        create_options: u32,
+        ea_buffer: *mut std::ffi::c_void,
+        ea_length: u32,
+    ) -> i32;
+    fn RtlNtStatusToDosError(status: i32) -> u32;
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn other_git_metadata_state(
+    metadata: &std::fs::Metadata,
+    label: &str,
+) -> Result<OtherGitMetadataState, String> {
+    Ok(OtherGitMetadataState {
+        length: metadata.len(),
+        modified: metadata
+            .modified()
+            .map_err(|error| format!("inspect {label} modification time: {error}"))?,
+    })
+}
+
+#[cfg(windows)]
+fn windows_git_metadata_handle_state(
+    file: &std::fs::File,
+    label: &str,
+) -> Result<WindowsGitMetadataState, String> {
+    use std::os::windows::io::AsRawHandle;
+
+    let mut information = std::mem::MaybeUninit::<WindowsByHandleFileInformation>::uninit();
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+    if succeeded == 0 {
+        return Err(format!(
+            "inspect open {label}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let information = unsafe { information.assume_init() };
+    Ok(WindowsGitMetadataState {
+        volume_serial_number: information.volume_serial_number,
+        file_index: (u64::from(information.file_index_high) << 32)
+            | u64::from(information.file_index_low),
+        file_attributes: information.file_attributes,
+        file_size: (u64::from(information.file_size_high) << 32)
+            | u64::from(information.file_size_low),
+        last_write_time: (u64::from(information.last_write_time.high_date_time) << 32)
+            | u64::from(information.last_write_time.low_date_time),
+    })
+}
+
+#[cfg(any(test, windows))]
+fn windows_git_metadata_child_share_mode() -> u32 {
+    const FILE_SHARE_READ: u32 = 0x0001;
+    const FILE_SHARE_DELETE: u32 = 0x0004;
+
+    FILE_SHARE_READ | FILE_SHARE_DELETE
+}
+
+#[cfg(any(test, windows))]
+fn windows_git_metadata_open_error(label: &str, error: u32) -> String {
+    const ERROR_SHARING_VIOLATION: u32 = 32;
+
+    if error == ERROR_SHARING_VIOLATION {
+        format!("{label} changed while being read")
+    } else {
+        format!(
+            "open {label}: {}",
+            std::io::Error::from_raw_os_error(error as i32)
+        )
+    }
+}
+
+#[cfg(windows)]
+fn windows_open_directory_no_follow(path: &Path, label: &str) -> Result<std::fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_LIST_DIRECTORY: u32 = 0x0001;
+    const FILE_TRAVERSE: u32 = 0x0020;
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const FILE_SHARE_READ: u32 = 0x0001;
+    const FILE_SHARE_WRITE: u32 = 0x0002;
+    const FILE_SHARE_DELETE: u32 = 0x0004;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .access_mode(FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    options
+        .open(path)
+        .map_err(|error| format!("open {label} '{}': {error}", path.display()))
+}
+
+#[cfg(windows)]
+fn windows_open_relative_no_follow(
+    directory: &std::fs::File,
+    name: &str,
+    label: &str,
+) -> Result<std::fs::File, String> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+
+    const FILE_GENERIC_READ: u32 = 0x0012_0089;
+    const FILE_OPEN: u32 = 0x0001;
+    const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0020;
+    const FILE_NON_DIRECTORY_FILE: u32 = 0x0040;
+    const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const OBJ_CASE_INSENSITIVE: u32 = 0x0040;
+
+    let mut name = name.encode_utf16().collect::<Vec<_>>();
+    if name.iter().any(|unit| *unit == 0) {
+        return Err(format!("{label} has an invalid file name"));
+    }
+    let byte_length = name
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or_else(|| format!("{label} has an invalid file name"))?;
+    let mut unicode_name = WindowsUnicodeString {
+        length: byte_length,
+        maximum_length: byte_length,
+        buffer: name.as_mut_ptr(),
+    };
+    let mut object_attributes = WindowsObjectAttributes {
+        length: u32::try_from(std::mem::size_of::<WindowsObjectAttributes>())
+            .expect("Windows object attributes size fits u32"),
+        root_directory: directory.as_raw_handle(),
+        object_name: &mut unicode_name,
+        attributes: OBJ_CASE_INSENSITIVE,
+        security_descriptor: std::ptr::null_mut(),
+        security_quality_of_service: std::ptr::null_mut(),
+    };
+    let mut io_status = WindowsIoStatusBlock {
+        status: 0,
+        information: 0,
+    };
+    let mut handle = std::ptr::null_mut();
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            FILE_GENERIC_READ,
+            &mut object_attributes,
+            &mut io_status,
+            std::ptr::null_mut(),
+            0,
+            windows_git_metadata_child_share_mode(),
+            FILE_OPEN,
+            FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status < 0 {
+        let error = unsafe { RtlNtStatusToDosError(status) };
+        return Err(windows_git_metadata_open_error(label, error));
+    }
+    if handle.is_null() {
+        return Err(format!("open {label}: Windows returned an invalid handle"));
+    }
+    Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum GitMetadataReadError {
+    TooLarge,
+    Other(String),
+}
+
+impl From<String> for GitMetadataReadError {
+    fn from(error: String) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl GitMetadataReadError {
+    fn into_message(self, label: &str) -> String {
+        match self {
+            Self::TooLarge => format!("{label} is too large"),
+            Self::Other(error) => error,
+        }
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn read_bounded_git_metadata_file(
+    path: &Path,
+    label: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, GitMetadataReadError> {
+    let before =
+        std::fs::symlink_metadata(path).map_err(|error| format!("inspect {label}: {error}"))?;
+    if metadata_is_link_like(&before) || !before.is_file() {
+        return Err(format!("{label} is not a regular file").into());
+    }
+    if before.len() > max_bytes {
+        return Err(GitMetadataReadError::TooLarge);
+    }
+    let path_before_state = other_git_metadata_state(&before, label)?;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("open {label}: {error}"))?;
+    let handle_before_metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect open {label}: {error}"))?;
+    if metadata_is_link_like(&handle_before_metadata) || !handle_before_metadata.is_file() {
+        return Err(format!("{label} is not a regular file").into());
+    }
+    if handle_before_metadata.len() > max_bytes {
+        return Err(GitMetadataReadError::TooLarge);
+    }
+    let handle_before_state = other_git_metadata_state(&handle_before_metadata, label)?;
+    if path_before_state != handle_before_state {
+        return Err(format!("{label} changed while being opened").into());
+    }
+
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| format!("{label} byte limit is invalid"))?;
+    let initial_capacity = usize::try_from(handle_before_metadata.len())
+        .map_err(|_| GitMetadataReadError::TooLarge)?;
+    let mut bytes = Vec::with_capacity(initial_capacity);
+    std::io::Read::by_ref(&mut file)
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read {label}: {error}"))?;
+
+    let handle_after_metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect open {label} after reading: {error}"))?;
+    if metadata_is_link_like(&handle_after_metadata) || !handle_after_metadata.is_file() {
+        return Err(format!("{label} changed while being read").into());
+    }
+    let handle_after_state = other_git_metadata_state(&handle_after_metadata, label)?;
+    if handle_before_state != handle_after_state {
+        return Err(format!("{label} changed while being read").into());
+    }
+    let bytes_read = u64::try_from(bytes.len()).map_err(|_| GitMetadataReadError::TooLarge)?;
+    if bytes_read > max_bytes {
+        return Err(GitMetadataReadError::TooLarge);
+    }
+
+    let after = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect {label} after reading: {error}"))?;
+    if metadata_is_link_like(&after) || !after.is_file() {
+        return Err(format!("{label} changed while being read").into());
+    }
+    let path_after_state = other_git_metadata_state(&after, label)?;
+    if path_before_state != path_after_state || path_after_state != handle_after_state {
+        return Err(format!("{label} changed while being read").into());
+    }
+    Ok(bytes)
+}
+
+fn validate_git_metadata_child_name(name: &str, label: &str) -> Result<(), String> {
+    if name.is_empty() || Path::new(name).file_name().and_then(OsStr::to_str) != Some(name) {
+        return Err(format!("{label} has an invalid file name"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn record_git_metadata_read_limit(max_bytes: u64) {
+    TEST_GIT_METADATA_READ_LIMITS.with(|limits| limits.borrow_mut().push(max_bytes));
+}
+
+#[cfg(not(test))]
+fn record_git_metadata_read_limit(_max_bytes: u64) {}
+
+#[cfg(unix)]
+struct GitMetadataDirectory {
+    directory: std::fs::File,
+    state: FileState,
+}
+
+#[cfg(unix)]
+impl GitMetadataDirectory {
+    fn open(path: &Path, label: &str) -> Result<Self, String> {
+        let directory = open_directory_no_follow(path, label)?;
+        let state =
+            file_state(&directory).map_err(|error| format!("inspect open {label}: {error}"))?;
+        if state.mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFDIR) {
+            return Err(format!("{label} is not a real directory"));
+        }
+        Ok(Self { directory, state })
+    }
+
+    fn read_file(
+        &self,
+        name: &str,
+        label: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, GitMetadataReadError> {
+        record_git_metadata_read_limit(max_bytes);
+        validate_git_metadata_child_name(name, label)?;
+        let name = CString::new(name).map_err(|_| format!("{label} has an invalid file name"))?;
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
+                return Err(format!("{label} is not a regular file").into());
+            }
+            return Err(format!("open {label}: {error}").into());
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let before = file_state(&file).map_err(|error| format!("inspect open {label}: {error}"))?;
+        if before.mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFREG) {
+            return Err(format!("{label} is not a regular file").into());
+        }
+        if before.size > max_bytes {
+            return Err(GitMetadataReadError::TooLarge);
+        }
+
+        let read_limit = max_bytes
+            .checked_add(1)
+            .ok_or_else(|| format!("{label} byte limit is invalid"))?;
+        let initial_capacity =
+            usize::try_from(before.size).map_err(|_| GitMetadataReadError::TooLarge)?;
+        let mut bytes = Vec::with_capacity(initial_capacity);
+        std::io::Read::by_ref(&mut file)
+            .take(read_limit)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("read {label}: {error}"))?;
+
+        let after = file_state(&file)
+            .map_err(|error| format!("inspect open {label} after reading: {error}"))?;
+        if before != after {
+            return Err(format!("{label} changed while being read").into());
+        }
+        let bytes_read = u64::try_from(bytes.len()).map_err(|_| GitMetadataReadError::TooLarge)?;
+        if bytes_read > max_bytes {
+            return Err(GitMetadataReadError::TooLarge);
+        }
+        Ok(bytes)
+    }
+
+    fn validate(&self, label: &str) -> Result<(), String> {
+        let after = file_state(&self.directory)
+            .map_err(|error| format!("inspect open {label} after reading: {error}"))?;
+        if !same_identity(self.state, after)
+            || after.mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFDIR)
+        {
+            return Err(format!("{label} changed while being read"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+struct GitMetadataDirectory {
+    directory: std::fs::File,
+    state: WindowsGitMetadataState,
+}
+
+#[cfg(windows)]
+impl GitMetadataDirectory {
+    fn open(path: &Path, label: &str) -> Result<Self, String> {
+        let directory = windows_open_directory_no_follow(path, label)?;
+        let state = windows_git_metadata_handle_state(&directory, label)?;
+        if state.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || state.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        {
+            return Err(format!("{label} is not a real directory"));
+        }
+        Ok(Self { directory, state })
+    }
+
+    fn read_file(
+        &self,
+        name: &str,
+        label: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, GitMetadataReadError> {
+        record_git_metadata_read_limit(max_bytes);
+
+        validate_git_metadata_child_name(name, label)?;
+        let mut file = windows_open_relative_no_follow(&self.directory, name, label)?;
+        let before = windows_git_metadata_handle_state(&file, label)?;
+        if before.file_attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
+            return Err(format!("{label} is not a regular file").into());
+        }
+        if before.file_size > max_bytes {
+            return Err(GitMetadataReadError::TooLarge);
+        }
+
+        let read_limit = max_bytes
+            .checked_add(1)
+            .ok_or_else(|| format!("{label} byte limit is invalid"))?;
+        let initial_capacity =
+            usize::try_from(before.file_size).map_err(|_| GitMetadataReadError::TooLarge)?;
+        let mut bytes = Vec::with_capacity(initial_capacity);
+        std::io::Read::by_ref(&mut file)
+            .take(read_limit)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("read {label}: {error}"))?;
+
+        let after = windows_git_metadata_handle_state(&file, label)?;
+        if !windows_git_metadata_file_state_matches(before, after)
+            || after.file_attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)
+                != 0
+        {
+            return Err(format!("{label} changed while being read").into());
+        }
+        let bytes_read = u64::try_from(bytes.len()).map_err(|_| GitMetadataReadError::TooLarge)?;
+        if bytes_read > max_bytes {
+            return Err(GitMetadataReadError::TooLarge);
+        }
+        Ok(bytes)
+    }
+
+    fn validate(&self, label: &str) -> Result<(), String> {
+        let after = windows_git_metadata_handle_state(&self.directory, label)?;
+        if !windows_git_metadata_directory_state_matches(self.state, after)
+            || after.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || after.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        {
+            return Err(format!("{label} changed while being read"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+struct GitMetadataDirectory {
+    path: PathBuf,
+    state: OtherGitMetadataState,
+}
+
+#[cfg(all(not(unix), not(windows)))]
+impl GitMetadataDirectory {
+    fn open(path: &Path, label: &str) -> Result<Self, String> {
+        let metadata =
+            std::fs::symlink_metadata(path).map_err(|error| format!("inspect {label}: {error}"))?;
+        if metadata_is_link_like(&metadata) || !metadata.is_dir() {
+            return Err(format!("{label} is not a real directory"));
+        }
+        let state = other_git_metadata_state(&metadata, label)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            state,
+        })
+    }
+
+    fn read_file(
+        &self,
+        name: &str,
+        label: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, GitMetadataReadError> {
+        record_git_metadata_read_limit(max_bytes);
+        validate_git_metadata_child_name(name, label)?;
+        read_bounded_git_metadata_file(&self.path.join(name), label, max_bytes)
+    }
+
+    fn validate(&self, label: &str) -> Result<(), String> {
+        let metadata = std::fs::symlink_metadata(&self.path)
+            .map_err(|error| format!("inspect {label} after reading: {error}"))?;
+        if metadata_is_link_like(&metadata) || !metadata.is_dir() {
+            return Err(format!("{label} changed while being read"));
+        }
+        let after = other_git_metadata_state(&metadata, label)?;
+        if self.state != after {
+            return Err(format!("{label} changed while being read"));
+        }
+        Ok(())
+    }
 }
 
 fn inspect_real_git_info_directory(git_dir: &Path) -> Result<Option<PathBuf>, String> {
@@ -5772,20 +6393,135 @@ fn resolve_git_ref(refs: &HashMap<String, GitRefValue>, name: &str) -> Option<St
     None
 }
 
-fn snapshot_git_reftable(source: &Path, destination: &Path) -> Result<(), String> {
-    let tables = std::fs::read_to_string(source.join("tables.list"))
-        .map_err(|e| format!("read Git reftable table list: {e}"))?;
-    std::fs::create_dir_all(destination)
-        .map_err(|e| format!("create isolated Git reftable directory: {e}"))?;
+fn is_valid_git_reftable_table_name(name: &str) -> bool {
+    fn is_windows_device_alias(stem: &str) -> bool {
+        let stem = stem.trim_end_matches(|character| character == ' ' || character == '.');
+        if ["CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$"]
+            .iter()
+            .any(|alias| stem.eq_ignore_ascii_case(alias))
+        {
+            return true;
+        }
+
+        let bytes = stem.as_bytes();
+        let Some(prefix) = bytes.get(..3) else {
+            return false;
+        };
+        if !prefix.eq_ignore_ascii_case(b"COM") && !prefix.eq_ignore_ascii_case(b"LPT") {
+            return false;
+        }
+
+        matches!(
+            &stem[3..],
+            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+        )
+    }
+
+    if name.ends_with([' ', '.'])
+        || name.chars().any(|character| {
+            character.is_ascii_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+        })
+    {
+        return false;
+    }
+
+    let Some(stem) = name
+        .strip_suffix(".ref")
+        .or_else(|| name.strip_suffix(".log"))
+    else {
+        return false;
+    };
+
+    !stem.is_empty() && !is_windows_device_alias(name.split('.').next().unwrap_or_default())
+}
+
+fn snapshot_git_reftable_with_limits_and_hook<F, G>(
+    source: &Path,
+    destination: &Path,
+    limits: GitReftableSnapshotLimits,
+    after_directory_open: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> G,
+{
+    let directory = GitMetadataDirectory::open(source, "Git reftable directory")?;
+    let hook_guard = after_directory_open();
+
+    let list_label = "Git reftable table list";
+    let list_bytes = directory
+        .read_file("tables.list", list_label, limits.list_bytes)
+        .map_err(|error| error.into_message(list_label))?;
+    let tables = std::str::from_utf8(&list_bytes)
+        .map_err(|_| "Git reftable table list is not UTF-8".to_string())?;
+    let mut names = Vec::new();
     for table in tables.lines().filter(|table| !table.is_empty()) {
+        if names.len() >= limits.tables {
+            return Err("Git reftable table list contains too many tables".to_string());
+        }
         if Path::new(table).file_name().and_then(OsStr::to_str) != Some(table) {
             return Err("Git reftable table list contains an invalid path".to_string());
         }
-        std::fs::copy(source.join(table), destination.join(table))
-            .map_err(|e| format!("snapshot Git reftable table {table}: {e}"))?;
+        if !is_valid_git_reftable_table_name(table) {
+            return Err("Git reftable table list contains an invalid table name".to_string());
+        }
+        names.push(table);
     }
-    std::fs::write(destination.join("tables.list"), tables)
-        .map_err(|e| format!("snapshot Git reftable table list: {e}"))
+
+    let mut snapshots = Vec::with_capacity(names.len());
+    let mut total_bytes = 0_u64;
+    for table in names {
+        let remaining_bytes = limits
+            .total_bytes
+            .checked_sub(total_bytes)
+            .ok_or_else(|| "Git reftable aggregate size is too large".to_string())?;
+        let read_limit = limits.table_bytes.min(remaining_bytes);
+        let aggregate_limited = remaining_bytes < limits.table_bytes;
+        let label = format!("Git reftable table {table}");
+        let bytes = match directory.read_file(table, &label, read_limit) {
+            Ok(bytes) => bytes,
+            Err(GitMetadataReadError::TooLarge) if aggregate_limited => {
+                return Err("Git reftable aggregate size is too large".to_string());
+            }
+            Err(error) => return Err(error.into_message(&label)),
+        };
+        let table_bytes = u64::try_from(bytes.len())
+            .map_err(|_| "Git reftable aggregate size overflowed".to_string())?;
+        total_bytes = total_bytes
+            .checked_add(table_bytes)
+            .ok_or_else(|| "Git reftable aggregate size overflowed".to_string())?;
+        if total_bytes > limits.total_bytes {
+            return Err("Git reftable aggregate size is too large".to_string());
+        }
+        snapshots.push((table.to_string(), bytes));
+    }
+
+    drop(hook_guard);
+    directory.validate("Git reftable directory")?;
+
+    std::fs::create_dir_all(destination)
+        .map_err(|error| format!("create isolated Git reftable directory: {error}"))?;
+    for (table, bytes) in snapshots {
+        std::fs::write(destination.join(&table), bytes)
+            .map_err(|error| format!("snapshot Git reftable table {table}: {error}"))?;
+    }
+    std::fs::write(destination.join("tables.list"), list_bytes)
+        .map_err(|error| format!("snapshot Git reftable table list: {error}"))
+}
+
+fn snapshot_git_reftable_with_limits(
+    source: &Path,
+    destination: &Path,
+    limits: GitReftableSnapshotLimits,
+) -> Result<(), String> {
+    snapshot_git_reftable_with_limits_and_hook(source, destination, limits, || ())
+}
+
+fn snapshot_git_reftable(source: &Path, destination: &Path) -> Result<(), String> {
+    snapshot_git_reftable_with_limits(source, destination, GIT_REFTABLE_SNAPSHOT_LIMITS)
 }
 
 fn isolated_git_metadata_command(root: &str, git_dir: &Path) -> std::process::Command {
@@ -5920,9 +6656,15 @@ fn git_inspection_line_ending_config(root: &str) -> Result<Vec<(String, String)>
     Ok(values.into_iter().collect())
 }
 
+fn git_inspection_config_is_multi_valued(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.starts_with("remote.") && (key.ends_with(".url") || key.ends_with(".fetch"))
+}
+
 fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>, String> {
     const SAFE_CONFIG_PATTERN: &str = r"^(core\.(repositoryformatversion|filemode|ignorecase|symlinks|precomposeunicode)|extensions\.(objectformat|refstorage)|branch\..*\.(remote|merge)|remote\..*\.(url|fetch))$";
-    let mut values = HashMap::new();
+    let mut scalar_values = HashMap::new();
+    let mut multi_values = Vec::new();
     let mut scopes = vec!["--local"];
     if git_worktree_config_enabled(root)? {
         scopes.push("--worktree");
@@ -5955,10 +6697,16 @@ fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>,
                 .position(|byte| *byte == b'\n')
                 .ok_or_else(|| "git config query returned malformed output".to_string())?;
             let key = std::str::from_utf8(&record[..separator])
-                .map_err(|_| "git config query returned invalid UTF-8 keys".to_string())?;
+                .map_err(|_| "git config query returned invalid UTF-8 keys".to_string())?
+                .to_string();
             let value = std::str::from_utf8(&record[separator + 1..])
-                .map_err(|_| format!("git config {key} returned invalid UTF-8"))?;
-            values.insert(key.to_string(), value.to_string());
+                .map_err(|_| format!("git config {key} returned invalid UTF-8"))?
+                .to_string();
+            if git_inspection_config_is_multi_valued(&key) {
+                multi_values.push((key, value));
+            } else {
+                scalar_values.insert(key, value);
+            }
         }
     }
     // Preserve only validated, non-executable EOL conversion semantics from
@@ -5966,8 +6714,12 @@ fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>,
     // because it governs diagnostics for the same irreversible conversions.
     // Encoding conversion policy remains outside this deliberately narrow
     // contract.
-    values.extend(git_inspection_line_ending_config(root)?);
-    Ok(values.into_iter().collect())
+    for (key, value) in git_inspection_line_ending_config(root)? {
+        scalar_values.insert(key, value);
+    }
+    let mut values = scalar_values.into_iter().collect::<Vec<_>>();
+    values.extend(multi_values);
+    Ok(values)
 }
 
 struct GitInspectionRepository {
@@ -6292,6 +7044,22 @@ impl<'a> GitInspection<'a> {
             .iter()
             .find_map(|(candidate, value)| (candidate == key).then_some(value.as_str()))
     }
+
+    fn first_non_empty_config_value_after_last_empty_reset(&self, key: &str) -> Option<&str> {
+        let last_reset = self
+            .repository
+            .config
+            .iter()
+            .rposition(|(candidate, value)| candidate == key && value.is_empty());
+        let Some(last_reset) = last_reset else {
+            return self.config_value(key).filter(|value| !value.is_empty());
+        };
+        self.repository.config[last_reset + 1..]
+            .iter()
+            .find_map(|(candidate, value)| {
+                (candidate == key && !value.is_empty()).then_some(value.as_str())
+            })
+    }
 }
 
 fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
@@ -6525,8 +7293,7 @@ fn git_status(root: String) -> Result<GitStatus, String> {
     }
 
     let remote_url = inspection
-        .config_value("remote.origin.url")
-        .filter(|url| !url.is_empty())
+        .first_non_empty_config_value_after_last_empty_reset("remote.origin.url")
         .map(|_| {
             // `git remote get-url` ignores command-scope `-c remote.*` values,
             // but `ls-remote --get-url` resolves the same fetch URL without
@@ -10187,6 +10954,195 @@ mod workspace_panel_tests {
     }
 
     #[test]
+    fn git_inspection_preserves_ordered_remote_urls_and_fetch_refspecs() {
+        let tree = TempTree::new("git-remote-multivalue");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://first.invalid/repo.git",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://second.invalid/repo.git",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/main:refs/remotes/origin/main",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/release:refs/remotes/origin/release",
+            ],
+        );
+
+        let config = git_inspection_repository_config(path_text(&tree.root)).unwrap();
+        let urls = config
+            .iter()
+            .filter(|(key, _)| key == "remote.origin.url")
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+        let fetch = config
+            .iter()
+            .filter(|(key, _)| key == "remote.origin.fetch")
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://first.invalid/repo.git",
+                "https://second.invalid/repo.git",
+            ]
+        );
+        assert_eq!(
+            fetch,
+            vec![
+                "+refs/heads/main:refs/remotes/origin/main",
+                "+refs/heads/release:refs/remotes/origin/release",
+            ]
+        );
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+        assert_eq!(
+            status.remote_url.as_deref(),
+            Some("https://first.invalid/repo.git")
+        );
+    }
+
+    #[test]
+    fn git_status_uses_first_origin_url_after_empty_reset() {
+        let tree = TempTree::new("git-remote-url-after-reset");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://first.invalid/repo.git",
+            ],
+        );
+        run_test_git(&tree.root, &["config", "--add", "remote.origin.url", ""]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://later.invalid/repo.git",
+            ],
+        );
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+
+        assert_eq!(
+            status.remote_url.as_deref(),
+            Some("https://later.invalid/repo.git")
+        );
+    }
+
+    #[test]
+    fn git_status_omits_origin_url_after_trailing_empty_reset() {
+        let tree = TempTree::new("git-remote-url-trailing-reset");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://first.invalid/repo.git",
+            ],
+        );
+        run_test_git(&tree.root, &["config", "--add", "remote.origin.url", ""]);
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+
+        assert_eq!(status.remote_url, None);
+        assert_eq!(status.web_url, None);
+    }
+
+    #[test]
+    fn git_inspection_preserves_remote_subsection_case() {
+        let tree = TempTree::new("git-remote-subsection-case");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.Origin.url",
+                "https://uppercase.invalid/repo.git",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://lowercase-first.invalid/repo.git",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://lowercase-second.invalid/repo.git",
+            ],
+        );
+
+        let config = git_inspection_repository_config(path_text(&tree.root)).unwrap();
+        let urls = config
+            .iter()
+            .filter(|(key, _)| key.ends_with(".url"))
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            urls,
+            vec![
+                ("remote.Origin.url", "https://uppercase.invalid/repo.git",),
+                (
+                    "remote.origin.url",
+                    "https://lowercase-first.invalid/repo.git",
+                ),
+                (
+                    "remote.origin.url",
+                    "https://lowercase-second.invalid/repo.git",
+                ),
+            ]
+        );
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+        assert_eq!(
+            status.remote_url.as_deref(),
+            Some("https://lowercase-first.invalid/repo.git")
+        );
+    }
+
+    #[test]
     fn git_inspection_preserves_a_loose_remote_head_symbolic_ref() {
         let tree = TempTree::new("git-symbolic-remote-head");
         run_test_git(&tree.root, &["init", "-q"]);
@@ -10705,6 +11661,495 @@ mod workspace_panel_tests {
         };
 
         assert!(error.contains("invalid Git shallow boundary"));
+    }
+
+    fn tiny_git_reftable_snapshot_limits() -> GitReftableSnapshotLimits {
+        GitReftableSnapshotLimits {
+            list_bytes: 32,
+            tables: 2,
+            table_bytes: 8,
+            total_bytes: 12,
+        }
+    }
+
+    const TEST_REFTABLE_TABLE_ONE: &str = "table-alpha.ref";
+    const TEST_REFTABLE_TABLE_TWO: &str = "table-beta.log";
+    const TEST_REFTABLE_TABLE_THREE: &str = "table-gamma.ref";
+    const REPRESENTATIVE_GIT_REFTABLE_TABLE: &str = "0x000000000001-0x000000000002-3b8de075.ref";
+    const SPEC_GIT_REFTABLE_LOG: &str = "00000001-00000001-RANDOM1.log";
+    const SAFE_ARBITRARY_GIT_REFTABLE_TABLE: &str = "réftable-随机-7Kp9.ref";
+    const SAFE_DECOMPOSED_GIT_REFTABLE_TABLE: &str = "re\u{301}ftable.ref";
+
+    fn write_test_reftable_table_list(source: &Path, names: &[&str]) {
+        let mut list = names.join("\n");
+        list.push('\n');
+        std::fs::write(source.join("tables.list"), list).unwrap();
+    }
+
+    fn invalid_git_reftable_table_names() -> Vec<String> {
+        let mut names = [
+            "NUL.ref",
+            "COM1.ref",
+            "COM1.any.ref",
+            "cOm\u{00b9}.ref",
+            "COM\u{00b2}.any.ref",
+            "com\u{00b3}.log",
+            "nul.any.log",
+            "CLOCK$.ref",
+            "CONIN$.log",
+            "CONOUT$.any.ref",
+            "LPT9.log",
+            "LpT\u{00b9}.log",
+            "LPT\u{00b2}.any.log",
+            "lpt\u{00b3}.ref",
+            "NUL .ref",
+            "safe.ref.",
+            "safe.ref ",
+            "missing-extension",
+            "uppercase.REF",
+            "uppercase.LOG",
+            "other.txt",
+            ".ref",
+            ".log",
+            "nested/name.ref",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        for forbidden in ['<', '>', ':', '"', '/', '\\', '|', '?', '*'] {
+            names.push(format!("bad{forbidden}name.ref"));
+        }
+        for control in ['\0', '\u{0001}', '\u{001f}', '\u{007f}'] {
+            names.push(format!("bad{control}name.log"));
+        }
+        names
+    }
+
+    #[test]
+    fn git_reftable_table_name_validation_accepts_safe_git_names() {
+        for name in [
+            REPRESENTATIVE_GIT_REFTABLE_TABLE,
+            SPEC_GIT_REFTABLE_LOG,
+            SAFE_ARBITRARY_GIT_REFTABLE_TABLE,
+            SAFE_DECOMPOSED_GIT_REFTABLE_TABLE,
+        ] {
+            assert!(
+                is_valid_git_reftable_table_name(name),
+                "unexpectedly rejected {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_reftable_table_name_validation_rejects_unsafe_names() {
+        for name in invalid_git_reftable_table_names() {
+            assert!(
+                !is_valid_git_reftable_table_name(&name),
+                "unexpectedly accepted {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_reftable_snapshot_rejects_invalid_table_names_without_publication() {
+        for name in invalid_git_reftable_table_names() {
+            let tree = TempTree::new("git-reftable-invalid-table-name");
+            let source = tree.root.join("source");
+            let destination = tree.root.join("destination");
+            std::fs::create_dir_all(&source).unwrap();
+            write_test_reftable_table_list(&source, &[&name]);
+
+            let error = snapshot_git_reftable_with_limits(
+                &source,
+                &destination,
+                tiny_git_reftable_snapshot_limits(),
+            )
+            .unwrap_err();
+
+            assert!(
+                error.contains("invalid table name") || error.contains("invalid path"),
+                "{name}: {error}"
+            );
+            assert!(!destination.exists(), "{name} must not be published");
+        }
+    }
+
+    #[test]
+    fn git_reftable_windows_child_share_mode_allows_read_and_delete_but_not_write() {
+        let share_mode = windows_git_metadata_child_share_mode();
+
+        assert_ne!(share_mode & 0x0001, 0, "read sharing must remain enabled");
+        assert_eq!(share_mode & 0x0002, 0, "write sharing must be disabled");
+        assert_ne!(share_mode & 0x0004, 0, "delete sharing must remain enabled");
+    }
+
+    #[test]
+    fn git_reftable_windows_sharing_violation_reports_change() {
+        assert_eq!(
+            windows_git_metadata_open_error("Git reftable table list", 32),
+            "Git reftable table list changed while being read"
+        );
+    }
+
+    #[test]
+    fn git_metadata_windows_directory_state_ignores_mutable_size_and_time() {
+        let before = WindowsGitMetadataState {
+            volume_serial_number: 7,
+            file_index: 11,
+            file_attributes: FILE_ATTRIBUTE_DIRECTORY,
+            file_size: 23,
+            last_write_time: 29,
+        };
+        let after = WindowsGitMetadataState {
+            file_size: 31,
+            last_write_time: 37,
+            ..before
+        };
+
+        assert!(windows_git_metadata_directory_state_matches(before, after));
+    }
+
+    #[test]
+    fn git_metadata_windows_directory_state_rejects_identity_reparse_and_type_changes() {
+        let directory = WindowsGitMetadataState {
+            volume_serial_number: 7,
+            file_index: 11,
+            file_attributes: FILE_ATTRIBUTE_DIRECTORY,
+            file_size: 23,
+            last_write_time: 29,
+        };
+
+        assert!(!windows_git_metadata_directory_state_matches(
+            directory,
+            WindowsGitMetadataState {
+                volume_serial_number: 13,
+                ..directory
+            }
+        ));
+        assert!(!windows_git_metadata_directory_state_matches(
+            directory,
+            WindowsGitMetadataState {
+                file_index: 17,
+                ..directory
+            }
+        ));
+        assert!(!windows_git_metadata_directory_state_matches(
+            directory,
+            WindowsGitMetadataState {
+                file_attributes: FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT,
+                ..directory
+            }
+        ));
+        assert!(!windows_git_metadata_directory_state_matches(
+            directory,
+            WindowsGitMetadataState {
+                file_attributes: 0,
+                ..directory
+            }
+        ));
+    }
+
+    #[test]
+    fn git_metadata_windows_file_state_compares_size_and_time() {
+        let file = WindowsGitMetadataState {
+            volume_serial_number: 7,
+            file_index: 11,
+            file_attributes: 0,
+            file_size: 23,
+            last_write_time: 29,
+        };
+
+        assert!(windows_git_metadata_file_state_matches(file, file));
+        assert!(!windows_git_metadata_file_state_matches(
+            file,
+            WindowsGitMetadataState {
+                file_size: 31,
+                ..file
+            }
+        ));
+        assert!(!windows_git_metadata_file_state_matches(
+            file,
+            WindowsGitMetadataState {
+                last_write_time: 37,
+                ..file
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    struct ReftableSourceSwapGuard {
+        source: PathBuf,
+        parked: PathBuf,
+        replacement: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl Drop for ReftableSourceSwapGuard {
+        fn drop(&mut self) {
+            std::fs::rename(&self.source, &self.replacement).unwrap();
+            std::fs::rename(&self.parked, &self.source).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_reftable_snapshot_anchors_children_to_open_directory() {
+        let tree = TempTree::new("git-reftable-anchored-directory");
+        let source = tree.root.join("source");
+        let parked = tree.root.join("parked");
+        let replacement = tree.root.join("replacement");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&replacement).unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"orig").unwrap();
+        write_test_reftable_table_list(&replacement, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(replacement.join(TEST_REFTABLE_TABLE_ONE), b"evil").unwrap();
+
+        snapshot_git_reftable_with_limits_and_hook(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+            || {
+                std::fs::rename(&source, &parked).unwrap();
+                std::fs::rename(&replacement, &source).unwrap();
+                ReftableSourceSwapGuard {
+                    source: source.clone(),
+                    parked: parked.clone(),
+                    replacement: replacement.clone(),
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(destination.join(TEST_REFTABLE_TABLE_ONE)).unwrap(),
+            b"orig"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_reftable_snapshot_rejects_fifo_table_promptly() {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let tree = TempTree::new("git-reftable-fifo-table");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        let fifo = source.join(TEST_REFTABLE_TABLE_ONE);
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
+        let fifo_path = c_path(&fifo).unwrap();
+        let created = unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) };
+        assert_eq!(
+            created,
+            0,
+            "create test FIFO: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let result = snapshot_git_reftable_with_limits(
+                &source,
+                &destination,
+                tiny_git_reftable_snapshot_limits(),
+            );
+            sender.send(result).unwrap();
+        });
+
+        let result = match receiver.recv_timeout(Duration::from_secs(1)) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let unblock = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&fifo)
+                    .unwrap();
+                let _ = receiver
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("FIFO reader must unblock for test cleanup");
+                drop(unblock);
+                worker.join().unwrap();
+                panic!("Git reftable FIFO open blocked instead of failing promptly");
+            }
+            Err(error) => panic!("Git reftable FIFO worker disconnected: {error}"),
+        };
+        worker.join().unwrap();
+
+        let error = result.unwrap_err();
+        assert!(error.contains("not a regular file"));
+    }
+
+    #[test]
+    fn git_reftable_snapshot_copies_valid_bounded_files() {
+        let tree = TempTree::new("git-reftable-valid-snapshot");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"table").unwrap();
+
+        snapshot_git_reftable_with_limits(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(destination.join(TEST_REFTABLE_TABLE_ONE)).unwrap(),
+            b"table"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("tables.list")).unwrap(),
+            format!("{TEST_REFTABLE_TABLE_ONE}\n").as_bytes()
+        );
+    }
+
+    #[test]
+    fn git_reftable_snapshot_rejects_oversized_table_list() {
+        let tree = TempTree::new("git-reftable-large-list");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("tables.list"), vec![b'x'; 33]).unwrap();
+
+        let error = snapshot_git_reftable_with_limits(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("table list is too large"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn git_reftable_snapshot_rejects_excessive_table_count() {
+        let tree = TempTree::new("git-reftable-table-count");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(
+            &source,
+            &[
+                TEST_REFTABLE_TABLE_ONE,
+                TEST_REFTABLE_TABLE_TWO,
+                TEST_REFTABLE_TABLE_THREE,
+            ],
+        );
+        let limits = GitReftableSnapshotLimits {
+            list_bytes: 64,
+            ..tiny_git_reftable_snapshot_limits()
+        };
+
+        let error = snapshot_git_reftable_with_limits(&source, &destination, limits).unwrap_err();
+
+        assert!(error.contains("too many tables"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn git_reftable_snapshot_rejects_oversized_table() {
+        let tree = TempTree::new("git-reftable-large-table");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"123456789").unwrap();
+
+        let error = snapshot_git_reftable_with_limits(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains(&format!("table {TEST_REFTABLE_TABLE_ONE} is too large")));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn git_reftable_snapshot_rejects_aggregate_overflow() {
+        let tree = TempTree::new("git-reftable-aggregate-size");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(
+            &source,
+            &[TEST_REFTABLE_TABLE_ONE, TEST_REFTABLE_TABLE_TWO],
+        );
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"12345678").unwrap();
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_TWO), b"12345678").unwrap();
+
+        let error = snapshot_git_reftable_with_limits(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("aggregate size"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn git_reftable_snapshot_caps_reads_to_remaining_aggregate_budget() {
+        let tree = TempTree::new("git-reftable-remaining-budget");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(
+            &source,
+            &[TEST_REFTABLE_TABLE_ONE, TEST_REFTABLE_TABLE_TWO],
+        );
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"12345678").unwrap();
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_TWO), b"12345").unwrap();
+        TEST_GIT_METADATA_READ_LIMITS.with(|limits| limits.borrow_mut().clear());
+
+        let error = snapshot_git_reftable_with_limits(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+        )
+        .unwrap_err();
+
+        let read_limits =
+            TEST_GIT_METADATA_READ_LIMITS.with(|limits| std::mem::take(&mut *limits.borrow_mut()));
+        assert_eq!(read_limits, vec![32, 8, 4]);
+        assert_eq!(error, "Git reftable aggregate size is too large");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn git_reftable_snapshot_rejects_linked_tables_when_supported() {
+        let tree = TempTree::new("git-reftable-linked-table");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        let linked = tree.root.join("linked.ref");
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(&linked, b"linked").unwrap();
+        if !create_test_symlink(
+            TestSymlinkKind::File,
+            &linked,
+            &source.join(TEST_REFTABLE_TABLE_ONE),
+        ) {
+            return;
+        }
+
+        let error = snapshot_git_reftable_with_limits(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("not a regular file"));
+        assert!(!destination.exists());
     }
 
     #[test]
