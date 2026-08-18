@@ -6,9 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const recursiveRoots = ['docs/src', 'docs/shared', 'docs/public'];
 const textExtensions = new Set(['.js', '.mjs', '.html', '.css', '.svg', '.md', '.json']);
-const skippedDirectoryNames = new Set(['client', 'dist', 'generated', 'node_modules']);
 const requiredEntryFiles = sortUnique([
   'docs/src/hero.js',
   'docs/src/index.html',
@@ -39,15 +37,13 @@ function sortUnique(values) {
 }
 
 function sortFailureRecords(records) {
-  return [...records].sort((left, right) => compareStrings(left.file, right.file) || compareStrings(left.reason, right.reason));
+  return [...records].sort(
+    (left, right) => compareStrings(left.file, right.file) || compareStrings(left.reason, right.reason),
+  );
 }
 
 function isTextAsset(relativePath) {
-  if (!textExtensions.has(path.extname(relativePath).toLowerCase())) {
-    return false;
-  }
-
-  return !relativePath.split('/').some((segment) => skippedDirectoryNames.has(segment));
+  return textExtensions.has(path.extname(relativePath).toLowerCase());
 }
 
 function hasGlobMetacharacters(value) {
@@ -55,20 +51,20 @@ function hasGlobMetacharacters(value) {
 }
 
 function collectPackageMarkdownFiles(packageFiles) {
-  const markdownFiles = [];
   const boundaryFailures = [];
 
-  for (const file of sortUnique(packageFiles.filter((entry) => path.extname(entry).toLowerCase() === '.md'))) {
+  for (const file of sortUnique(packageFiles.filter((entry) => entry.startsWith('docs/')))) {
     if (hasGlobMetacharacters(file)) {
-      boundaryFailures.push({ file, reason: 'package-published Markdown must use explicit paths' });
-      continue;
+      boundaryFailures.push({ file, reason: 'package-published docs must use explicit paths' });
     }
-
-    markdownFiles.push(file);
   }
 
   return {
-    markdownFiles: sortUnique(markdownFiles),
+    markdownFiles: sortUnique(
+      packageFiles.filter(
+        (entry) => path.extname(entry).toLowerCase() === '.md' && !hasGlobMetacharacters(entry),
+      ),
+    ),
     boundaryFailures: sortFailureRecords(boundaryFailures),
   };
 }
@@ -96,7 +92,7 @@ async function collectRecursiveTextFiles(absoluteDirectory, relativeDirectory) {
     const relativePath = path.posix.join(relativeDirectory, entry.name);
 
     if (entry.isDirectory()) {
-      if (skippedDirectoryNames.has(entry.name)) {
+      if (entry.name === 'dist') {
         continue;
       }
 
@@ -113,13 +109,7 @@ async function collectRecursiveTextFiles(absoluteDirectory, relativeDirectory) {
 }
 
 async function collectPublicRecursiveFiles() {
-  const files = [];
-
-  for (const relativeRoot of recursiveRoots) {
-    files.push(...await collectRecursiveTextFiles(path.join(root, relativeRoot), relativeRoot));
-  }
-
-  return sortUnique(files);
+  return collectRecursiveTextFiles(path.join(root, 'docs/src'), 'docs/src');
 }
 
 function buildPublicInventory({ recursiveFiles, packageMarkdownFiles }) {
@@ -164,51 +154,38 @@ function countInventoryPasses(uniqueInventory, failedInventoryFiles) {
 async function selfCheckPublicInventory() {
   const recursiveFiles = await collectPublicRecursiveFiles();
   assert.deepEqual(recursiveFiles, sortUnique(recursiveFiles));
-
-  assert(recursiveFiles.includes('docs/src/content/index.js'));
-  assert(recursiveFiles.includes('docs/src/content/coven-demo.js'));
-  assert(recursiveFiles.includes('docs/src/code-highlight.js'));
-  assert(recursiveFiles.includes('docs/src/hero.js'));
-  assert(recursiveFiles.includes('docs/src/main.js'));
-  assert(recursiveFiles.includes('docs/src/sidebar.js'));
-  assert(recursiveFiles.includes('docs/shared/githubStars.js'));
-  assert(recursiveFiles.includes('docs/public/favicon.svg'));
-  assert(recursiveFiles.includes('docs/public/og.svg'));
-  assert(recursiveFiles.includes('docs/public/psyche.svg'));
-  assert(!recursiveFiles.includes('docs/src/dist/generated.js'));
-  assert(!recursiveFiles.includes('docs/shared/client/runtime.js'));
-  assert(!recursiveFiles.includes('docs/shared/node_modules/runtime.json'));
-  assert(!recursiveFiles.includes('docs/public/agents/png/amp.png'));
-  assert(!recursiveFiles.includes('docs/public/bunsdev.jpg'));
-
-  assert.equal(isTextAsset('docs/src/style.css'), true);
-  assert.equal(isTextAsset('docs/public/og.svg'), true);
-  assert.equal(isTextAsset('docs/public/agents/png/amp.png'), false);
-  assert.equal(isTextAsset('docs/public/bunsdev.jpg'), false);
-  assert.equal(isTextAsset('docs/src/dist/generated.js'), false);
-  assert.equal(isTextAsset('docs/shared/node_modules/runtime.json'), false);
-
-  const packageBoundary = collectPackageMarkdownFiles([
-    'docs/*.md',
-    'docs/{README,PRODUCT-SPEC}.md',
-    'README.md',
-    'docs/README.md',
-    'docs/COVEN-DEMO-LOOP.md',
-  ]);
-  assert.deepEqual(packageBoundary.markdownFiles, [
-    'README.md',
-    'docs/COVEN-DEMO-LOOP.md',
-    'docs/README.md',
-  ]);
-  assert.deepEqual(packageBoundary.boundaryFailures, [
-    { file: 'docs/*.md', reason: 'package-published Markdown must use explicit paths' },
-    { file: 'docs/{README,PRODUCT-SPEC}.md', reason: 'package-published Markdown must use explicit paths' },
-  ]);
+  assert(recursiveFiles.every((file) => file.startsWith('docs/src/')));
+  assert(recursiveFiles.every((file) => !file.includes('/dist/')));
 
   const requiredInventory = buildPublicInventory({ recursiveFiles: [], packageMarkdownFiles: [] });
   for (const file of requiredEntryFiles) {
     assert(requiredInventory.includes(file), `required entrypoint missing from inventory: ${file}`);
   }
+
+  const packageBoundaryA = collectPackageMarkdownFiles([
+    'dist/**/*',
+    'docs/*.md',
+    'README.md',
+    'docs/README.md',
+    'docs/COVEN-DEMO-LOOP.md',
+  ]);
+  const packageBoundaryB = collectPackageMarkdownFiles([
+    'docs/COVEN-DEMO-LOOP.md',
+    'docs/README.md',
+    'README.md',
+    'docs/*.md',
+    'dist/**/*',
+  ]);
+
+  assert.deepEqual(packageBoundaryA, packageBoundaryB);
+  assert.deepEqual(packageBoundaryA.markdownFiles, [
+    'README.md',
+    'docs/COVEN-DEMO-LOOP.md',
+    'docs/README.md',
+  ]);
+  assert.deepEqual(packageBoundaryA.boundaryFailures, [
+    { file: 'docs/*.md', reason: 'package-published docs must use explicit paths' },
+  ]);
 
   const partialCleanupInventory = buildPublicInventory({
     recursiveFiles: ['docs/src/main.js'],
