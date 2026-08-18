@@ -2365,17 +2365,24 @@
   }
 
   async function createBrowserPane(project) {
+    var options = arguments[1] || {};
     project = project || activeProject();
     if (!project) return null;
+    var worktreePath = options.worktreePath || activeWorkspaceRoot(project);
+    var isCurrent = typeof options.isCurrent === "function"
+      ? options.isCurrent
+      : function () { return true; };
+    if (!worktreePath || !isCurrent()) return null;
     if (!(await showTerminalView())) return null;
-    var worktreePath = activeWorkspaceRoot(project);
+    if (!isCurrent()) return null;
     var existing = findBrowserPane(project.id, worktreePath);
     if (existing) {
       if (browserPaneIsClosing(existing)) return null;
       await focusThread(existing.id);
-      return browserPaneIsClosing(existing) ? null : existing;
+      return !isCurrent() || browserPaneIsClosing(existing) ? null : existing;
     }
     await new Promise(function (resolve) { requestAnimationFrame(resolve); });
+    if (!isCurrent()) return null;
     var id = makeThreadId();
     var placement = preparePanePlacement(id, project.id, worktreePath);
     if (!placement) {
@@ -2405,7 +2412,7 @@
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountBrowserPane(pane);
     await focusThread(id);
-    if (browserPaneIsClosing(pane)) return null;
+    if (!isCurrent() || browserPaneIsClosing(pane)) return null;
     refreshSidebar();
     refreshTabs();
     return pane;
@@ -2765,7 +2772,27 @@
   }
 
   async function navigateProjectBrowserLink(thread, normalised) {
-    return navigateBrowser(normalised);
+    if (!thread) return false;
+    var threadId = thread.id;
+    var projectId = thread.projectId;
+    var worktreePath = thread.worktreePath;
+    if (!threadId || !projectId || !worktreePath || findThread(threadId) !== thread) return false;
+    var project = findProject(projectId);
+    if (!project) return false;
+    if (!(await focusThread(threadId, { focusTerminal: false }))) return false;
+    if (findThread(threadId) !== thread ||
+        thread.id !== threadId ||
+        thread.projectId !== projectId ||
+        thread.worktreePath !== worktreePath ||
+        findProject(projectId) !== project ||
+        activeProject() !== project ||
+        activeWorkspaceRoot(project) !== worktreePath) return false;
+    return navigateBrowserForContext(normalised, {
+      project: project,
+      projectId: projectId,
+      worktreePath: worktreePath,
+      sourceThread: thread,
+    });
   }
 
   async function openTerminalLink(thread, url, event) {
@@ -10831,9 +10858,9 @@
     var tab = browser.tabs.find(function (t) { return t.id === browser.activeTabId; });
     return tab || browser.tabs[0] || null;
   }
-  function createBrowserTab(project, url, activate) {
+  function createBrowserTab(project, url, activate, worktreePath) {
     project = project || activeProject();
-    var worktreePath = activeWorkspaceRoot(project);
+    worktreePath = worktreePath || activeWorkspaceRoot(project);
     var pane = project && findBrowserPane(project.id, worktreePath);
     if (browserPaneIsClosing(pane)) return null;
     var browser = ensureBrowserModel(project, worktreePath);
@@ -11025,16 +11052,60 @@
     });
   }
   async function navigateBrowser(rawUrl, opts) {
-    opts = opts || {}; var project = activeProject(); if (!project) return false;
-    var projectId = project.id;
-    var worktreePath = activeWorkspaceRoot(project) || project.root;
-    var browser = ensureBrowserModel(project, worktreePath); var hasRequestedTab = opts.tabId != null; var tab = hasRequestedTab ? browser.tabs.find(function (t) { return t.id === opts.tabId; }) : currentBrowserTab(project);
+    opts = opts || {};
+    var project = activeProject();
+    if (!project) return false;
+    return navigateBrowserForContext(rawUrl, {
+      project: project,
+      projectId: project.id,
+      worktreePath: activeWorkspaceRoot(project) || project.root,
+      tabId: opts.tabId,
+      replace: opts.replace,
+      preserveHistory: opts.preserveHistory,
+      fromHistory: opts.fromHistory,
+      historyIndex: opts.historyIndex,
+    });
+  }
+  async function navigateBrowserForContext(rawUrl, context) {
+    context = context || {};
+    var project = context.project;
+    var projectId = context.projectId;
+    var worktreePath = context.worktreePath;
+    if (!project || !projectId || project.id !== projectId || !worktreePath) return false;
+    var normalised = normaliseUrl(rawUrl);
+    if (!normalised) return false;
+    var sourceThread = context.sourceThread || null;
+    var sourceThreadId = sourceThread && sourceThread.id;
+    var sourceProjectId = sourceThread && sourceThread.projectId;
+    var sourceWorktreePath = sourceThread && sourceThread.worktreePath;
+    var scopeIsCurrent = function () {
+      if (project.id !== projectId ||
+          (typeof findProject === "function" && findProject(projectId) !== project) ||
+          state.activeProjectId !== projectId ||
+          activeProject() !== project ||
+          activeWorkspaceRoot(project) !== worktreePath) return false;
+      if (sourceThread && (
+        sourceThread.id !== sourceThreadId ||
+        sourceThread.projectId !== sourceProjectId ||
+        sourceThread.worktreePath !== sourceWorktreePath ||
+        sourceProjectId !== projectId ||
+        sourceWorktreePath !== worktreePath ||
+        findThread(sourceThreadId) !== sourceThread
+      )) return false;
+      return true;
+    };
+    if (!scopeIsCurrent()) return false;
+    var browser = ensureBrowserModel(project, worktreePath);
+    var hasRequestedTab = context.tabId != null;
+    var tab = hasRequestedTab
+      ? browser.tabs.find(function (t) { return t.id === context.tabId; })
+      : browser.tabs.find(function (t) { return t.id === browser.activeTabId; }) ||
+        browser.tabs[0] || null;
     var browsersByWorktree = project.browsersByWorktree || null;
     if ((hasRequestedTab && !tab) || browserTabIsClosing(tab)) return false;
     var pane = findBrowserPane(projectId, worktreePath);
     var requestIsCurrent = function () {
-      if (project.id !== projectId || state.activeProjectId !== projectId ||
-          activeProject() !== project || activeWorkspaceRoot(project) !== worktreePath ||
+      if (!scopeIsCurrent() ||
           (browsersByWorktree
             ? (project.browsersByWorktree !== browsersByWorktree ||
               browsersByWorktree[worktreePath] !== browser)
@@ -11047,15 +11118,17 @@
     };
     if (!requestIsCurrent()) return false;
     if (!pane) {
-      pane = await createBrowserPane(project);
+      pane = await createBrowserPane(project, {
+        worktreePath: worktreePath,
+        isCurrent: scopeIsCurrent,
+      });
       if (!pane || !requestIsCurrent()) return false;
     }
     if (!tab) {
       if (!requestIsCurrent()) return false;
-      tab = createBrowserTab(project, rawUrl || "about:blank", true);
+      tab = createBrowserTab(project, "about:blank", true, worktreePath);
       if (!tab || !requestIsCurrent()) return false;
     }
-    var normalised = normaliseUrl(rawUrl); if (!normalised) return false;
     var lifecycle = browserTabLifecycle(tab);
     var invalidationGeneration = lifecycle.invalidationGeneration;
     var runNavigation = async function () {
@@ -11099,7 +11172,7 @@
         history: Array.isArray(tab.history) ? tab.history.slice() : [],
         historyIndex: tab.historyIndex,
       };
-      var context = {
+      var navigationContext = {
         project: project,
         worktreePath: worktreePath,
         browser: browser,
@@ -11112,8 +11185,9 @@
       tab.loading = true; tab.title = tabTitle(normalised); renderBrowserTabs(); updateBrowserControls();
       try {
         var nativeNavigation = await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h, navigationToken: navigationToken, automationSource: lifecycle.automationSource });
-        if (!browserNavigationIsCurrent(context)) {
-          await discardObsoleteBrowserNavigation(context);
+        if ((sourceThread && !scopeIsCurrent()) ||
+            !browserNavigationIsCurrent(navigationContext)) {
+          await discardObsoleteBrowserNavigation(navigationContext);
           return false;
         }
         var terminalUrl = nativeNavigation && nativeNavigation.terminalUrl
@@ -11132,14 +11206,14 @@
         lifecycle.navigationSnapshot = null;
         lifecycle.viewLive = true;
         if (!browserUrlsMatch(terminalUrl, normalised)) tab.title = tabTitle(terminalUrl);
-        if (opts.fromHistory && typeof opts.historyIndex === "number") {
-          tab.historyIndex = opts.historyIndex;
-        } else if (!opts.fromHistory && !opts.preserveHistory) {
-          tab.history = opts.replace ? [] : tab.history.slice(0, tab.historyIndex + 1);
+        if (context.fromHistory && typeof context.historyIndex === "number") {
+          tab.historyIndex = context.historyIndex;
+        } else if (!context.fromHistory && !context.preserveHistory) {
+          tab.history = context.replace ? [] : tab.history.slice(0, tab.historyIndex + 1);
           tab.history.push(terminalUrl);
           tab.historyIndex = tab.history.length - 1;
         }
-        if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
+        if (browserNavigationOwnsVisiblePane(navigationContext)) syncProjectBrowser();
         else scheduleBrowserBounds();
         var automationInstalled = await Promise.resolve(
           installBrowserAutomationForPair(navigationPair)
@@ -11150,8 +11224,8 @@
         saveWorkspaceSoon();
         return true;
       } catch (err) {
-        if (!browserNavigationIsCurrent(context)) {
-          await discardObsoleteBrowserNavigation(context);
+        if (!browserNavigationIsCurrent(navigationContext)) {
+          await discardObsoleteBrowserNavigation(navigationContext);
           return false;
         }
         var navigationTimedOut = String(err).indexOf("browser navigation timed out") !== -1;
@@ -11167,7 +11241,7 @@
           lifecycle.navigationSnapshot = null;
           tab.created = false;
           tab.loading = false;
-          if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
+          if (browserNavigationOwnsVisiblePane(navigationContext)) syncProjectBrowser();
           else scheduleBrowserBounds();
           writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
           return false;
@@ -11185,7 +11259,7 @@
         tab.loading = false;
         tab.title = previousTitle;
         tab.url = previousUrl;
-        if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
+        if (browserNavigationOwnsVisiblePane(navigationContext)) syncProjectBrowser();
         else scheduleBrowserBounds();
         writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
         return false;
