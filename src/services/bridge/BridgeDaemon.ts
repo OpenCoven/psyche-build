@@ -224,6 +224,7 @@ export class BridgeDaemon {
     const invite = this.mobileInvites.issue({ endpoint: this.mobileInviteEndpoint });
     const url = new URL("psyche://connect");
     url.searchParams.set("host", this.mobileInviteEndpoint);
+    url.searchParams.set("fingerprint", this.tls!.fingerprint);
     url.searchParams.set("psyche_invite", invite.token);
     return url.toString();
   }

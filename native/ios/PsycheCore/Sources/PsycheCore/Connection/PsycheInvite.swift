@@ -6,10 +6,12 @@ public struct PsycheInvite: Sendable, Equatable {
     public struct Endpoint: Sendable, Equatable {
         public let host: String
         public let port: Int
+        public let certificateFingerprint: String
 
-        public init(host: String, port: Int) {
+        public init(host: String, port: Int, certificateFingerprint: String) {
             self.host = host
             self.port = port
+            self.certificateFingerprint = certificateFingerprint
         }
     }
 
@@ -26,11 +28,13 @@ public struct PsycheInvite: Sendable, Equatable {
               let token = Self.singleValue(named: "psyche_invite", in: query),
               !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let endpointValue = Self.singleValue(named: "host", in: query),
+              let fingerprint = Self.singleValue(named: "fingerprint", in: query),
+              let normalizedFingerprint = try? PinnedCertificateDelegate.normalizeFingerprint(fingerprint),
               let endpoint = Self.endpoint(from: endpointValue) else {
             return nil
         }
 
-        self.endpoint = endpoint
+        self.endpoint = Endpoint(host: endpoint.host, port: endpoint.port, certificateFingerprint: normalizedFingerprint)
         self.token = token
     }
 
@@ -67,6 +71,6 @@ public struct PsycheInvite: Sendable, Equatable {
         let host = rawHost.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
         let port = url.port ?? 443
         guard !host.isEmpty, (1...65_535).contains(port) else { return nil }
-        return Endpoint(host: host, port: port)
+        return Endpoint(host: host, port: port, certificateFingerprint: "")
     }
 }

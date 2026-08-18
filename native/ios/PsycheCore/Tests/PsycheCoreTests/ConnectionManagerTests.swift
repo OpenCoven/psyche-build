@@ -840,7 +840,7 @@ final class ConnectionManagerTests: XCTestCase {
             credentialStore: credentialStore
         )
         let invite = try XCTUnwrap(PsycheInvite.parse(URL(string:
-            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&psyche_invite=one-time-invite"
+            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&fingerprint='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'&psyche_invite=one-time-invite"
         )!))
 
         let redemption = Task { await manager.connect(using: invite) }
@@ -888,7 +888,7 @@ final class ConnectionManagerTests: XCTestCase {
             credentialStore: credentialStore
         )
         let invite = try XCTUnwrap(PsycheInvite.parse(URL(string:
-            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&psyche_invite=one-time-invite"
+            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&fingerprint='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'&psyche_invite=one-time-invite"
         )!))
 
         let redemption = Task { await manager.connect(using: invite) }
@@ -919,7 +919,7 @@ final class ConnectionManagerTests: XCTestCase {
             credentialPersistenceStart: { await gate.wait() }
         )
         let invite = try XCTUnwrap(PsycheInvite.parse(URL(string:
-            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&psyche_invite=one-time-invite"
+            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&fingerprint='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'&psyche_invite=one-time-invite"
         )!))
 
         let redemption = Task { await manager.connect(using: invite) }
@@ -951,10 +951,10 @@ final class ConnectionManagerTests: XCTestCase {
             credentialStore: credentialStore
         )
         let firstInvite = try XCTUnwrap(PsycheInvite.parse(URL(string:
-            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&psyche_invite=first-invite"
+            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&fingerprint='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'&psyche_invite=first-invite"
         )!))
         let latestInvite = try XCTUnwrap(PsycheInvite.parse(URL(string:
-            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&psyche_invite=latest-invite"
+            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&fingerprint='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'&psyche_invite=latest-invite"
         )!))
 
         let first = Task { await manager.connect(using: firstInvite) }

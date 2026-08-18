@@ -261,14 +261,20 @@ public actor ConnectionManager {
         pendingInvite = nil
         do {
             let hosts = try await pairedHostStore.hosts()
-            guard let host = hosts.first(where: { Self.matches(invite.endpoint, $0.endpoint) }) else {
+            let endpoint = HostEndpoint(
+                host: invite.endpoint.host,
+                port: invite.endpoint.port,
+                certificateFingerprint: invite.endpoint.certificateFingerprint
+            )
+            if let knownHost = hosts.first(where: { Self.matches(invite.endpoint, $0.endpoint) }),
+               knownHost.endpoint.certificateFingerprint != endpoint.certificateFingerprint {
                 throw ConnectionManagerError.untrustedInviteEndpoint
             }
             guard lifecycleIntentEpoch == intentEpoch else { return }
             await connect(
                 using: ConnectionConfiguration(
-                    endpoint: host.endpoint,
-                    credentials: ConnectionCredentials(clientID: host.clientID, token: nil),
+                    endpoint: endpoint,
+                    credentials: ConnectionCredentials(clientID: manualCredentials.clientID, token: nil),
                     invite: invite.token
                 ),
                 intentEpoch: intentEpoch
