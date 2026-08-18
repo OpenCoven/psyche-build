@@ -56,6 +56,7 @@ public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
     case messageProcessorEndedBeforeReady
     case connectionCancelled
     case unexpectedSnapshotResponse(String)
+    case untrustedInviteEndpoint
 
     public var errorDescription: String? {
         switch self {
@@ -69,6 +70,8 @@ public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
             "The connection was cancelled before its message processor became ready."
         case .unexpectedSnapshotResponse(let requestID):
             "The host returned an unexpected response to snapshot request \(requestID)."
+        case .untrustedInviteEndpoint:
+            "This invite does not match a trusted host. Pair with the host again before redeeming it."
         }
     }
 }
@@ -110,6 +113,7 @@ public actor ConnectionManager {
     private let transport: any PsycheTransport
     private let workspaceStore: WorkspaceStore
     private let pairedHostStore: PairedHostStore
+    private let mobileCredentialStore: MobileCredentialStore
     private let messageProcessorStart: @Sendable () async -> Void
     private let snapshotRequestFailureStart: @Sendable () async -> Void
     private let manualCredentials: ConnectionCredentials
@@ -149,6 +153,7 @@ public actor ConnectionManager {
         workspaceStore: WorkspaceStore,
         requestClient: ControlRequestClient,
         pairedHostStore: PairedHostStore,
+        mobileCredentialStore: MobileCredentialStore = MobileCredentialStore(),
         clientID: String = UUID().uuidString,
         clientName: String = "Psyche iOS",
         token: String? = nil,
@@ -159,6 +164,7 @@ public actor ConnectionManager {
         self.workspaceStore = workspaceStore
         self.requestClient = requestClient
         self.pairedHostStore = pairedHostStore
+        self.mobileCredentialStore = mobileCredentialStore
         self.manualCredentials = ConnectionCredentials(
             clientID: clientID,
             token: token
@@ -194,12 +200,13 @@ public actor ConnectionManager {
         do {
             guard let host = try await pairedHostStore.hosts().first else { return }
             guard canStartStoredReconnect(intentEpoch: intentEpoch) else { return }
+            let credential = try await mobileCredentialStore.credential(for: host.endpoint)
             await connect(
                 using: ConnectionConfiguration(
                     endpoint: host.endpoint,
                     credentials: ConnectionCredentials(
                         clientID: host.clientID,
-                        token: host.token
+                        token: credential?.token ?? host.token
                     )
                 ),
                 intentEpoch: intentEpoch
@@ -220,6 +227,33 @@ public actor ConnectionManager {
             ),
             intentEpoch: intentEpoch
         )
+    }
+
+    /// Redeems a one-time invite only against an existing pinned host record.
+    /// The link supplies routing, never certificate identity, so it cannot
+    /// authorize a connection to an endpoint the device has not already
+    /// verified.
+    public func connect(using invite: PsycheInvite) async {
+        lifecycleIntentEpoch &+= 1
+        let intentEpoch = lifecycleIntentEpoch
+        do {
+            let hosts = try await pairedHostStore.hosts()
+            guard let host = hosts.first(where: { Self.matches(invite.endpoint, $0.endpoint) }) else {
+                throw ConnectionManagerError.untrustedInviteEndpoint
+            }
+            guard lifecycleIntentEpoch == intentEpoch else { return }
+            await connect(
+                using: ConnectionConfiguration(
+                    endpoint: host.endpoint,
+                    credentials: ConnectionCredentials(clientID: host.clientID, token: nil),
+                    invite: invite.token
+                ),
+                intentEpoch: intentEpoch
+            )
+        } catch {
+            guard lifecycleIntentEpoch == intentEpoch else { return }
+            transition(to: .failed(error.localizedDescription))
+        }
     }
 
     private func connect(
@@ -318,7 +352,8 @@ public actor ConnectionManager {
                     clientID: configuration.credentials.clientID,
                     clientName: clientName,
                     protocolVersion: PsycheProtocolVersion.current,
-                    token: configuration.credentials.token
+                    token: configuration.credentials.token,
+                    invite: configuration.invite
                 ))))
                 try Task.checkCancellation()
                 try await waitForV3Negotiation(
@@ -608,6 +643,28 @@ public actor ConnectionManager {
             latestOutputByPane[output.paneID] = output
         case .error(let error):
             return .failed(error.message)
+        case .authAccepted(let payload):
+            guard let activeConnection,
+                  activeConnection.invite != nil,
+                  isActive(session: session, generation: generation),
+                  !Task.isCancelled else {
+                return .ignored
+            }
+            do {
+                let committed = try await mobileCredentialStore.save(
+                    endpoint: activeConnection.endpoint,
+                    token: payload.token,
+                    for: generation
+                )
+                guard committed,
+                      isActive(session: session, generation: generation),
+                      !Task.isCancelled else {
+                    return .ignored
+                }
+                self.activeConnection = activeConnection.withDurableCredential(payload.token)
+            } catch {
+                return .failed(error.localizedDescription)
+            }
         case .pairAccepted(let payload):
             guard let pairingWaiter,
                   pairingWaiter.generation === generation,
@@ -1127,6 +1184,17 @@ public actor ConnectionManager {
     private struct ConnectionConfiguration {
         let endpoint: HostEndpoint
         let credentials: ConnectionCredentials
+        let invite: String?
+
+        init(
+            endpoint: HostEndpoint,
+            credentials: ConnectionCredentials,
+            invite: String? = nil
+        ) {
+            self.endpoint = endpoint
+            self.credentials = credentials
+            self.invite = invite
+        }
 
         func withPairingCredentials(
             clientID: String,
@@ -1137,9 +1205,22 @@ public actor ConnectionManager {
                 credentials: ConnectionCredentials(
                     clientID: clientID,
                     token: token
-                )
+                ),
+                invite: nil
             )
         }
+
+        func withDurableCredential(_ token: String) -> ConnectionConfiguration {
+            ConnectionConfiguration(
+                endpoint: endpoint,
+                credentials: ConnectionCredentials(clientID: credentials.clientID, token: token)
+            )
+        }
+    }
+
+    private static func matches(_ inviteEndpoint: PsycheInvite.Endpoint, _ endpoint: HostEndpoint) -> Bool {
+        inviteEndpoint.host == endpoint.host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) &&
+            inviteEndpoint.port == endpoint.port
     }
 
     private enum MessageHandlingResult: Equatable {

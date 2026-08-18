@@ -59,6 +59,24 @@ public actor MobileCredentialStore {
         try secureStore.set(JSONEncoder().encode(credential), forKey: key)
     }
 
+    /// A connection generation must still be current at the exact point the
+    /// keychain is written. A retired invite must never leave credentials
+    /// behind for a connection the user has already replaced or cancelled.
+    func save(
+        endpoint: HostEndpoint,
+        token: String,
+        for generation: ConnectionGeneration
+    ) throws -> Bool {
+        let credential = try MobileCredential(endpoint: normalize(endpoint), token: token)
+        guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw MobileCredentialStoreError.invalidToken
+        }
+        return try generation.withValidity {
+            try secureStore.set(JSONEncoder().encode(credential), forKey: key)
+            return true
+        } ?? false
+    }
+
     public func credential(for endpoint: HostEndpoint) throws -> MobileCredential? {
         let requested = try normalize(endpoint)
         guard let data = try secureStore.data(forKey: key) else { return nil }

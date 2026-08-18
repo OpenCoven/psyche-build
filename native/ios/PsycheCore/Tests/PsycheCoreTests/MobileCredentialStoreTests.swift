@@ -73,6 +73,23 @@ final class MobileCredentialStoreTests: XCTestCase {
         XCTAssertFalse(data.contains(Data("one-time".utf8)))
     }
 
+    func testRetiredConnectionGenerationCannotSaveCredential() async throws {
+        let secureStore = InMemorySecureStore()
+        let store = MobileCredentialStore(secureStore: secureStore)
+        let generation = ConnectionGeneration(id: 1)
+        generation.invalidate()
+
+        let committed = try await store.save(
+            endpoint: makeEndpoint(),
+            token: "durable-token",
+            for: generation
+        )
+
+        XCTAssertFalse(committed)
+        let credential = try await store.credential(for: makeEndpoint())
+        XCTAssertNil(credential)
+    }
+
     func testProductionKeychainUsesDeviceOnlyAfterFirstUnlock() {
         let attributes = KeychainSecureStore.insertAttributes(
             service: MobileCredentialStore.keychainService,

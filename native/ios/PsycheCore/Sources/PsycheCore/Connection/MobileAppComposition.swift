@@ -7,6 +7,7 @@ public final class MobileAppComposition: ObservableObject {
     public let requestClient: ControlRequestClient
     public let workspaceStore: WorkspaceStore
     public let pairedHostStore: PairedHostStore
+    public let mobileCredentialStore: MobileCredentialStore
     public let connectionManager: ConnectionManager
     public let terminalRegistry: TerminalSessionRegistry
 
@@ -15,11 +16,13 @@ public final class MobileAppComposition: ObservableObject {
     public init(
         transport: any PsycheTransport,
         pairedHostStore: PairedHostStore,
+        mobileCredentialStore: MobileCredentialStore = MobileCredentialStore(),
         clientID: String = UUID().uuidString,
         clientName: String = "Psyche iOS"
     ) {
         self.transport = transport
         self.pairedHostStore = pairedHostStore
+        self.mobileCredentialStore = mobileCredentialStore
 
         let requestClient = ControlRequestClient(transport: transport)
         let workspaceStore = WorkspaceStore(controlRequests: requestClient)
@@ -30,6 +33,7 @@ public final class MobileAppComposition: ObservableObject {
             workspaceStore: workspaceStore,
             requestClient: requestClient,
             pairedHostStore: pairedHostStore,
+            mobileCredentialStore: mobileCredentialStore,
             clientID: clientID,
             clientName: clientName
         )
@@ -41,7 +45,8 @@ public final class MobileAppComposition: ObservableObject {
     public static func production() -> MobileAppComposition {
         MobileAppComposition(
             transport: URLSessionControlTransport(),
-            pairedHostStore: PairedHostStore(secureStore: KeychainSecureStore())
+            pairedHostStore: PairedHostStore(secureStore: KeychainSecureStore()),
+            mobileCredentialStore: MobileCredentialStore()
         )
     }
 

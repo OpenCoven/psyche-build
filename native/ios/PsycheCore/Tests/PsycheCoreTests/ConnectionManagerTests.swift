@@ -794,6 +794,87 @@ final class ConnectionManagerTests: XCTestCase {
         await connectTask.value
     }
 
+    func testInviteRedemptionPersistsDurableCredentialAndReconnectsWithoutInvite() async throws {
+        let fake = FakeTransport()
+        let secureStore = InMemorySecureStore()
+        let credentialStore = MobileCredentialStore(secureStore: secureStore)
+        let pairedHostStore = PairedHostStore(secureStore: InMemorySecureStore())
+        let endpoint = testEndpoint()
+        try await pairedHostStore.save(PairedHost(
+            serverID: "host",
+            serverName: "Host",
+            endpoint: endpoint,
+            clientID: "legacy-client",
+            token: "legacy-token"
+        ))
+        let manager = makeManager(
+            transport: fake,
+            pairedHostStore: pairedHostStore,
+            credentialStore: credentialStore
+        )
+        let invite = try XCTUnwrap(PsycheInvite.parse(URL(string:
+            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&psyche_invite=one-time-invite"
+        )!))
+
+        let redemption = Task { await manager.connect(using: invite) }
+        try await waitForHello(on: fake)
+        let initialMessages = await fake.sentMessages
+        let inviteHello = try XCTUnwrap(initialMessages.compactMap { message -> HelloPayload? in
+            guard case let .legacy(.hello(payload)) = message else { return nil }
+            return payload
+        }.first)
+        XCTAssertEqual(inviteHello.invite, "one-time-invite")
+        XCTAssertNil(inviteHello.token)
+
+        await fake.emit(.legacy(.authAccepted(AuthAcceptedPayload(token: "durable-token"))))
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await redemption.value
+        let storedCredential = try await credentialStore.credential(for: endpoint)
+        XCTAssertEqual(storedCredential?.token, "durable-token")
+
+        await manager.disconnect()
+        let reconnect = Task { await manager.connectToStoredHost() }
+        try await waitForHello(on: fake, occurrence: 2)
+        let reconnectMessages = await fake.sentMessages
+        let reconnectHello = try XCTUnwrap(reconnectMessages.compactMap { message -> HelloPayload? in
+            guard case let .legacy(.hello(payload)) = message else { return nil }
+            return payload
+        }.last)
+        XCTAssertEqual(reconnectHello.token, "durable-token")
+        XCTAssertNil(reconnectHello.invite)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await reconnect.value
+    }
+
+    func testInvalidInviteDoesNotPersistCredentialOrAuthenticate() async throws {
+        let fake = FakeTransport()
+        let credentialStore = MobileCredentialStore(secureStore: InMemorySecureStore())
+        let pairedHostStore = PairedHostStore(secureStore: InMemorySecureStore())
+        let endpoint = testEndpoint()
+        try await pairedHostStore.save(PairedHost(
+            serverID: "host", serverName: "Host", endpoint: endpoint,
+            clientID: "legacy-client", token: "legacy-token"
+        ))
+        let manager = makeManager(
+            transport: fake,
+            pairedHostStore: pairedHostStore,
+            credentialStore: credentialStore
+        )
+        let invite = try XCTUnwrap(PsycheInvite.parse(URL(string:
+            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&psyche_invite=one-time-invite"
+        )!))
+
+        let redemption = Task { await manager.connect(using: invite) }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.error(ProtocolError(code: "invalid_invite", message: "Invite expired"))))
+        await redemption.value
+
+        let storedCredential = try await credentialStore.credential(for: endpoint)
+        let state = await manager.state
+        XCTAssertNil(storedCredential)
+        XCTAssertEqual(state, .failed("Invite expired"))
+    }
+
     func testPairOverridePersistsAndReconnectsWithRequestIdentityAndToken() async throws {
         let fake = FakeTransport()
         let composition = makeComposition(
@@ -2117,6 +2198,23 @@ final class ConnectionManagerTests: XCTestCase {
             workspaceStore: workspaceStore,
             requestClient: requestClient,
             pairedHostStore: pairedHostStore
+        )
+    }
+
+    private func makeManager(
+        transport: any PsycheTransport,
+        pairedHostStore: PairedHostStore,
+        credentialStore: MobileCredentialStore
+    ) -> ConnectionManager {
+        let requestClient = ControlRequestClient(transport: transport)
+        return ConnectionManager(
+            transport: transport,
+            workspaceStore: WorkspaceStore(controlRequests: requestClient),
+            requestClient: requestClient,
+            pairedHostStore: pairedHostStore,
+            mobileCredentialStore: credentialStore,
+            clientID: "test-client",
+            clientName: "Psyche Tests"
         )
     }
 

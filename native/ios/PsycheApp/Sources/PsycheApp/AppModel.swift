@@ -71,6 +71,9 @@ final class AppModel: ObservableObject {
     func receive(url: URL) {
         guard let invite = PsycheInvite.parse(url) else { return }
         pendingInvite = invite
+        guard hasStarted, let composition else { return }
+        pendingInvite = nil
+        Task { await composition.connectionManager.connect(using: invite) }
     }
 
     /// Reads the launch arguments once so the decision cannot drift between
@@ -98,6 +101,10 @@ final class AppModel: ObservableObject {
         guard let composition else { return }
 
         await composition.start()
+        if let invite = pendingInvite {
+            pendingInvite = nil
+            await composition.connectionManager.connect(using: invite)
+        }
 
         // Read the stored identity rather than waiting on a welcome: it is
         // what auto-connect just used, and it lets Settings and VoiceOver name
