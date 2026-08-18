@@ -223,7 +223,12 @@ is authoritative. Because surface journal events are redacted, a missing exact
 surface sidecar fails closed instead of being reconstructed approximately.
 Retained terminal records carry only a digest of the exact outcome, so
 compaction and retained replay can verify the sidecar without exposing exact
-surface values in the journal.
+surface values in the journal. Legacy retained surface terminals created before
+those digests can append a later bounded attestation keyed by the full
+transaction once their exact sidecar is loaded. Dirty exact-outcome
+persistence failures are capped at 256 keys; once that backlog is full, fresh
+commands fail with `durability_unavailable` until persistence drains, but
+existing hot/tail/sidecar retries still deduplicate.
 
 There is deliberately no accessibility, coordinate, screenshot-click, shell,
 raw tmux command, XPath, selector, or whole-desktop fallback.

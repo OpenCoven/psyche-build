@@ -13,13 +13,10 @@ PR #165 bounds host memory, but three bounds still threaten runtime safety:
 Commit `b3899e0e` already established
 `.psyche/runtime/outcomes/<sha256(idempotencyKey)>` plus
 `ControlJournal.loadOutcome()` and `storeOutcome()`. Upgrade safety therefore
-requires evolving that store in place. A second completed-key directory would
-make an existing b389-format compacted outcome invisible and could re-execute
-its command.
-
-The current sidecar write fsyncs the temporary file and renames it, but does
-not fsync the containing directory. Rename alone is not a durability
-acknowledgement.
+requires keeping that exact-outcome store authoritative in place. Task 1 does
+not redesign snapshots or introduce compact tombstones; instead it adds digest
+integrity, bounded dirty-durability tracking, and a compatibility attestation
+path for retained pre-digest surface terminals.
 
 ## Decision
 
@@ -31,47 +28,37 @@ Keep the existing path and hash:
 .psyche/runtime/outcomes/<sha256(idempotencyKey)>
 ```
 
-`loadOutcome()` accepts a strict union:
+`loadOutcome()` accepts only the exact b389 record,
+`{ idempotencyKey, outcome }`. `storeOutcome()` continues to publish that exact
+record. Existing b389 records need no migration and remain authoritative
+immediately after upgrade. Corrupt, mismatched, unreadable, or unknown records
+fail closed before a fresh effect can run.
 
-- the exact b389 record, `{ idempotencyKey, outcome }`; or
-- a versioned compact record containing the key digest, terminal sequence, and
-  the fixed `unknown` outcome with code `idempotency_outcome_compacted`.
+The hot exact cache remains capped at 1,000. Dirty exact-outcome persistence is
+bounded to 256 keys; once that budget is exhausted, fresh effects reject with
+`durability_unavailable` until a later successful flush drains the dirty set.
+Retained pre-digest surface terminals can append a later digest attestation
+keyed by `(commandId, idempotencyKey)` so they restart safely and become
+compactable without exposing exact surface values in the journal.
 
-`storeOutcome()` continues to publish exact outcomes. Compaction rewrites an
-exact record at the same path to the compact record before removing its
-terminal event. Existing b389 records need no migration and remain
-authoritative immediately after upgrade. Corrupt, mismatched, unreadable, or
-unknown records fail closed before a fresh effect can run.
+### Keep exact sidecar publication fail-closed
 
-The hot exact cache remains capped at 1,000. Exact sidecar records are bounded
-by the fixed 2,000-event compaction trigger plus at most 256 dirty or reserved
-publications; after successful compaction, only the retained 1,000-event tail
-remains exact. Older keys retain only compact outcomes.
+Publication keeps the existing exact sidecar path and writes only
+`{ idempotencyKey, outcome }`. The helper first validates `.psyche`, `runtime`,
+and `outcomes` component-by-component with `lstat`, rejecting symlinks,
+junctions, and non-directories. It then writes a unique same-directory
+temporary file, fsyncs and closes it, and atomically renames it over the
+hashed destination.
 
-### Make atomic publication crash durable
+To narrow directory-swap races, publication captures a stable outcomes
+directory identity (real path plus available device/inode metadata) and
+revalidates it before temp-file creation, after temp-file creation, before the
+destination rename, and after the rename. Reads use the same identity checks,
+plus bounded size checks and bounded handle reads, so oversized or swapped
+files fail closed without unbounded allocation.
 
-One injected publication helper serves exact outcomes and compact rewrites. It
-does not resolve until:
-
-1. required directories exist;
-2. each newly created directory entry has been published by fsyncing its
-   parent;
-3. a unique same-directory temporary file is written completely;
-4. the temporary file is fsynced and closed;
-5. it is atomically renamed over the hashed destination; and
-6. the outcomes directory is fsynced.
-
-A rename followed by directory-fsync failure remains a failed publication.
-The runtime keeps the terminal record dirty and compaction cannot cover it.
-Tests use an injectable recording seam to verify ordering without depending on
-whether the test platform supports opening directories. Production uses the
-repository/platform directory-sync implementation; an unsupported platform
-returns an error rather than silently weakening durability.
-
-The same durable-replacement primitive publishes `snapshot.json` and compacted
-`events.ndjson`. Snapshot publication fsyncs the runtime directory before
-journal compaction starts. Journal replacement fsyncs it before retained
-in-memory state changes or compaction reports success.
+The same fail-closed identity validation also guards the existing snapshot and
+journal replacement paths used during compaction.
 
 ### Gate compaction without changing the completed outcome
 
@@ -86,63 +73,77 @@ Terminal handling is:
 
 Persistence failure is operator-visible but does not replace or reject an
 effect that already completed. The real exact outcome remains retryable from
-the hot cache or retained terminal event.
+the hot cache or retained terminal event. Dirty exact outcomes are bounded to
+the same 256-command durability budget as pending executions; once that budget
+is exhausted, only already-known retries remain available and fresh effects
+fail closed with `durability_unavailable` until a later flush succeeds.
 
 Before compaction covers a terminal event, the runtime:
 
 1. flushes dirty exact records through the proposed cutoff;
-2. rewrites each covered exact record to a compact outcome at the same path;
-3. durably writes the redacted snapshot; and
-4. compacts the journal.
+2. verifies that every covered terminal key still has an exact sidecar whose
+   SHA-256 digest matches either the terminal event itself or a later digest
+   attestation keyed by `(commandId, idempotencyKey)`; and
+3. only then compacts the journal.
 
-Any failed flush or rewrite aborts the whole attempt, retains the terminal
+Any failed flush, digest verification, or attestation lookup aborts the whole attempt, retains the terminal
 event, sets `compactionBlockedByDurability`, and rejects new effects with
 `durability_unavailable` until a later reservation successfully flushes the
 dirty work. Retries already answerable from hot state, the journal tail, or
 the sidecar remain available.
 
-Startup scans retained terminal events. A missing sidecar becomes dirty and is
-reconstructed from the retained event; lookup corruption aborts startup.
+Startup scans retained terminal events. A missing sidecar becomes dirty only
+when the retained event can be reconstructed exactly; otherwise startup fails
+closed. A
+retained pre-digest surface terminal with a valid exact sidecar appends a
+bounded digest attestation before later compaction may cover it. Legacy
+`snapshot.outcomes` keys no longer warm the hot cache: without the exact
+sidecar they fail closed.
 Existing b389 records load directly even when their terminal journal events
 were already compacted.
 
-### Keep snapshots redacted while preserving open transactions
+### Task 2 will keep snapshots redacted while preserving open transactions
 
-Snapshots contain only owner epoch, covered sequence, bounded redacted receipt
-records, and bounded open transactions. They omit exact outcomes, command
-envelopes, live resources, effect data, messages, typed values, and scripts.
+Task 2 will reduce snapshots to owner epoch, covered sequence, bounded
+redacted receipt records, and bounded open transactions. It will omit exact
+outcomes, command envelopes, live resources, effect data, messages, typed
+values, and scripts.
 
-An open transaction contains only sequence, command ID, raw idempotency key,
-and latest nonterminal kind. The raw key is the narrow exception needed for
-restart matching. Tail terminal events override snapshot records. Otherwise
-startup appends exactly one `command.unknown` before accepting new commands.
-Open transactions remain bounded by the 256 pending-command cap, and
-recovery-generated terminal events use the same sidecar durability gate.
+Task 2 open transactions will contain only sequence, command ID, raw
+idempotency key, and latest nonterminal kind. The raw key will remain the
+narrow exception needed for restart matching. Tail terminal events will
+override snapshot records. Otherwise startup will append exactly one
+`command.unknown` before accepting new commands. Open transactions will remain
+bounded by the 256 pending-command cap, and recovery-generated terminal events
+will use the same sidecar durability gate.
 
-### Reclaim retired pane buffers
+### Task 3 will reclaim retired pane buffers
 
-When a workspace no longer publishes a pane with active streams, mark it
-retired and retain its buffer. Detach, legacy unsubscribe, and session-close
-paths call one final-release check after removing their references. The final
-release calls `forgetPane` and clears retirement. Republishing clears
-retirement without discarding the live buffer.
+Task 3 will mark a pane retired once a workspace no longer publishes it but
+streams still reference its buffer. Detach, legacy unsubscribe, and
+session-close paths will call one final-release check after removing their
+references. The final release will call `forgetPane` and clear retirement.
+Republishing will clear retirement without discarding the live buffer.
 
 ## Error Handling
 
 - Outcome lookup errors reject fresh execution.
 - Outcome persistence errors preserve the exact completed outcome and terminal
   evidence, remain dirty, log clearly, and defer compaction.
-- Directory-sync failure is persistence failure even after rename.
+- Sidecar identity, permission, or bounded-read validation failures are treated
+  as persistence/replay failures.
 - Invalid open-transaction snapshot data is journal corruption.
 - Pane cleanup is idempotent.
 
 ## Rejected Alternatives
 
 - A separate `.psyche/runtime/completed-keys` store is upgrade-unsafe.
-- Bulk migration is unnecessary when the existing path can parse both shapes.
-- Indefinite exact outcomes violate bounded exact retention.
-- Clearing dirty state before directory fsync can erase the only durable
-  idempotency evidence.
+- Bulk migration is unnecessary when the existing hashed path already names the
+  authoritative exact record.
+- Replacing exact sidecars with compact/tombstone records would silently weaken
+  retry semantics for commands whose exact prior result must remain replayable.
+- Clearing dirty state before exact sidecar publication completes can erase the
+  only authoritative replay evidence.
 - Reporting metadata failure as command failure misstates an effect that
   already happened and encourages unsafe retries.
 - Expiring keys changes the no-double-execution contract.
@@ -155,28 +156,35 @@ Regressions prove:
 
 - a manually written b389-format sidecar with no retained terminal event is
   loaded after upgrade and a real `pane.terminal.open` handler is not invoked;
-- exact and compact records share one hashed path and corrupt variants fail
-  closed;
-- temp write, temp fsync, close, rename, and directory fsync occur in order,
-  including parent fsync for a newly created outcomes directory;
-- directory-fsync failure leaves terminal evidence ineligible for compaction;
+- exact records share one hashed path, bounded reads reject oversized files,
+  and corrupt variants fail closed;
+- temp write, temp fsync, close, rename, and directory-identity checks occur
+  in order, including fail-closed behavior for symlink swaps and non-regular
+  files;
 - the sidecar-failing dirty command runs first and reaches terminal sequence 2,
   then 999 successful fillers reach sequence 2,000 without compaction;
 - one successful trigger reaches sequence 2,002, computes cutoff 1,002, fails
-  while flushing the covered dirty key, retains its terminal evidence, and
-  blocks only subsequent fresh effects;
+  while flushing or verifying a covered terminal key, retains its terminal
+  evidence, and blocks only subsequent fresh effects;
 - after persistence is restored, the blocked-state reservation retry flushes
   the dirty outcome and the recovery trigger requests compaction; restart
-  returns the original key's compact tombstone and its effect count remains
-  one;
+  replays the original exact outcome and its effect count remains one;
+- retained pre-digest surface terminals append a digest attestation before they
+  can be compacted, while missing sidecars or unverifiable digests stay
+  fail-closed;
+- legacy `snapshot.outcomes` entries do not warm the hot cache and require the
+  exact sidecar for replay;
+- dirty durability backlog is capped at 256 keys, so fresh effects reject with
+  `durability_unavailable` once exact replay can no longer be kept
+  authoritative, but known retries still replay;
 - unresolved commands recover exactly once;
-- snapshots contain no exact or sensitive values except raw keys in bounded
-  open transactions; and
+- Task 2 will bound unresolved-command snapshot state without changing this
+  Task 1 exact-outcome model; and
 - retired buffers release only after the final stream or subscription.
 
 ## Scope
 
-This repair changes idempotency durability, journal recovery metadata, redacted
-snapshot persistence, and closed-pane buffer ownership. It does not change
-command protocol shapes, key expiration semantics, workspace publication, or
-live pane-stream behavior.
+This repair changes idempotency durability, journal recovery metadata, and
+closed-pane buffer ownership. Task 2 will address unresolved-command snapshot
+persistence separately. It does not change command protocol shapes, key
+expiration semantics, workspace publication, or live pane-stream behavior.

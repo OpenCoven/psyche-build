@@ -202,6 +202,59 @@ describe('control journal compaction', () => {
     expect(reopened.sequence).toBe(sequenceBefore);
   }, 90_000);
 
+  it('attests a retained pre-digest surface terminal before compacting it away', async () => {
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 4);
+    const command = providerUpsert('legacy-surface-attestation') as Extract<ControlCommand, { kind: 'provider.resource.upsert' }>;
+    const outcome = {
+      status: 'succeeded',
+      value: { resource: command.payload.resource },
+    } as const;
+    await journal.append('command.requested', {
+      commandId: command.id,
+      idempotencyKey: command.idempotencyKey,
+      kind: command.kind,
+      ownerEpoch: command.ownerEpoch,
+    });
+    await journal.append('command.succeeded', {
+      commandId: command.id,
+      idempotencyKey: command.idempotencyKey,
+      status: 'succeeded',
+    });
+    await journal.storeOutcome(command.idempotencyKey, outcome);
+
+    const restarted = await ControlRuntime.create({
+      ownerEpoch: 5, handlers: makeHandlers(), journal,
+    });
+    const attestation = journal.read(0).find((event) => (
+      event.kind === 'command.outcome.attested'
+      && event.payload.commandId === command.id
+      && event.payload.idempotencyKey === command.idempotencyKey
+    ));
+    expect(attestation?.payload.outcomeDigest).toMatch(/^[0-9a-f]{64}$/u);
+    expect(attestation?.payload.value).toBeUndefined();
+
+    const sequenceBeforeRetry = journal.sequence;
+    await expect(restarted.submit({ ...command, id: 'legacy-surface-attestation-retry' }))
+      .resolves.toEqual(outcome);
+    expect(journal.sequence).toBe(sequenceBeforeRetry);
+
+    for (let index = 0; index < 500; index += 1) {
+      await restarted.submit(takeover(`legacy-surface-attestation-later-${index}`));
+    }
+    await (restarted as any).compactJournal(journal);
+    expect(journal.firstSequence).toBeGreaterThan(2);
+
+    const reopened = await ControlJournal.open(root, 6);
+    const restartedAgain = await ControlRuntime.create({
+      ownerEpoch: 6, handlers: makeHandlers(), journal: reopened,
+    });
+    const sequenceBeforeRestartRetry = reopened.sequence;
+    await expect(restartedAgain.submit({ ...command, id: 'legacy-surface-attestation-restart-retry' }))
+      .resolves.toEqual(outcome);
+    expect(reopened.sequence).toBe(sequenceBeforeRestartRetry);
+  }, 90_000);
+
   it('aborts compaction when a covered replay hits a retained outcome read error', async () => {
     const root = await newRoot();
     const journal = await ControlJournal.open(root, 4);

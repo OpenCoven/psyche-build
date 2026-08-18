@@ -16,6 +16,8 @@ export type AgentControlJournalKind =
   | 'command.requested' | 'command.succeeded' | 'command.failed'
   | 'command.unknown' | 'command.rejected' | 'approval.requested';
 
+export const COMMAND_OUTCOME_ATTESTED_KIND = 'command.outcome.attested';
+
 interface ForbiddenAgentControlJournalData {
   readonly outcome?: never;
   readonly transcript?: never;
@@ -170,6 +172,16 @@ export interface ControlEvent {
 }
 
 type EventListener = (event: ControlEvent) => void;
+
+const IDEMPOTENCY_INDEXED_KINDS = new Set([
+  'command.requested',
+  'command.accepted',
+  'command.running',
+  'command.succeeded',
+  'command.failed',
+  'command.unknown',
+  'command.rejected',
+]);
 
 /**
  * Marks a journal whose head has been compacted away.
@@ -763,7 +775,7 @@ export class ControlJournal {
 
   private indexIdempotency(event: ControlEvent): void {
     const key = event.payload.idempotencyKey as string | undefined;
-    if (key) this.idempotencyIndex.set(key, event);
+    if (key && IDEMPOTENCY_INDEXED_KINDS.has(event.kind)) this.idempotencyIndex.set(key, event);
   }
 
   private outcomePath(idempotencyKey: string): string {

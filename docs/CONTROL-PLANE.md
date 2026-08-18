@@ -98,7 +98,13 @@ through the identical authority checks and lands in the same journal.
    `CommandOutcome`, and compaction verifies the retained event digest against
    the durable sidecar before dropping older evidence. Non-surface tail events
    can be reconstructed while they remain retained; surface tail events fail
-   closed when their exact sidecar is missing or unverifiable.
+   closed when their exact sidecar is missing or unverifiable. Legacy
+   pre-digest surface terminals can append a later digest attestation keyed by
+   `(commandId, idempotencyKey)` once the exact sidecar is loaded, after which
+   compaction may treat that attestation as the integrity source. Dirty
+   sidecar-failure state is capped at 256 keys; once full, new fresh commands
+   are rejected with `durability_unavailable` until a later flush succeeds,
+   while hot/tail/sidecar retries remain available.
 6. **Handler dispatch** — only then does it call the matching `ControlHandlers`
    method to perform the effect and shape the `CommandOutcome`.
 

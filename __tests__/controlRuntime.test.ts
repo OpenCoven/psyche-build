@@ -422,6 +422,50 @@ describe('ControlRuntime', () => {
     });
   }, 90_000);
 
+  it('bounds dirty durability failures without blocking retries and reopens fresh capacity after a flush', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    const persist = journal.storeOutcome.bind(journal);
+    let failDirty = true;
+    vi.spyOn(journal, 'storeOutcome').mockImplementation(async (idempotencyKey, outcome) => {
+      if (idempotencyKey.startsWith('idem-backlog-') && failDirty) {
+        throw new Error('sidecar write failed');
+      }
+      await persist(idempotencyKey, outcome);
+    });
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    for (let index = 0; index < 256; index += 1) {
+      await expect(submit(runtime, openTerminalCommand(`idem-backlog-${index}`, `cmd-backlog-${index}`)))
+        .rejects.toThrow('sidecar write failed');
+    }
+
+    const retrySequenceBefore = journal.sequence;
+    const retryCallsBefore = invocations;
+    await expect(submit(runtime, openTerminalCommand('idem-backlog-0', 'cmd-backlog-retry')))
+      .resolves.toMatchObject({ status: 'succeeded', value: { paneId: 'pane-1' } });
+    expect(journal.sequence).toBe(retrySequenceBefore);
+    expect(invocations).toBe(retryCallsBefore);
+
+    const blockedSequenceBefore = journal.sequence;
+    const blockedCallsBefore = invocations;
+    await expect(submit(runtime, openTerminalCommand('idem-backlog-overflow', 'cmd-backlog-overflow')))
+      .resolves.toMatchObject({ status: 'rejected', code: 'durability_unavailable' });
+    expect(journal.sequence).toBe(blockedSequenceBefore);
+    expect(invocations).toBe(blockedCallsBefore);
+
+    failDirty = false;
+    await expect(submit(runtime, openTerminalCommand('idem-backlog-recovered', 'cmd-backlog-recovered')))
+      .resolves.toMatchObject({ status: 'succeeded', value: { paneId: 'pane-257' } });
+    expect(await journal.loadOutcome('idem-backlog-255')).toMatchObject({
+      status: 'succeeded',
+      value: { paneId: 'pane-256' },
+    });
+    expect((runtime as any).dirtyTerminalOutcomes.size).toBe(0);
+  }, 90_000);
+
   it('persists a recovery-generated unknown outcome to the durable sidecar', async () => {
     const root = await newJournalRoot('control-runtime');
     const journal = await ControlJournal.open(root, 4);
@@ -572,6 +616,63 @@ describe('ControlRuntime', () => {
       .rejects.toThrow('durable outcome sidecar is required for retained surface or unknown terminal events');
     expect(reopened.sequence).toBe(sequenceBefore);
     await expect(reopened.loadOutcome(idempotencyKey)).resolves.toBeUndefined();
+  });
+
+  it('fails closed when a legacy snapshot outcome exists without retained evidence or an exact sidecar', async () => {
+    const root = await newJournalRoot('control-runtime');
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    const idempotencyKey = 'legacy-snapshot-sidecar-missing';
+    const first = await submit(runtime, openTerminalCommand(idempotencyKey));
+
+    await journal.writeSnapshot({
+      snapshot: runtime.snapshot(),
+      coveredSequence: journal.sequence,
+      outcomes: { [idempotencyKey]: first },
+      receiptRecords: [],
+    });
+    await journal.compact(journal.sequence);
+    await rm(storedOutcomePath(root, idempotencyKey), { force: true });
+
+    const reopened = await ControlJournal.open(root, 8);
+    const restarted = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened });
+    const sequenceBefore = reopened.sequence;
+    const callsBefore = invocations;
+
+    await expect(submit(restarted, openTerminalCommand(idempotencyKey, 'legacy-snapshot-sidecar-missing-retry')))
+      .rejects.toThrow('durable outcome sidecar is required for compacted snapshot outcomes');
+    expect(reopened.sequence).toBe(sequenceBefore);
+    expect(invocations).toBe(callsBefore);
+  });
+
+  it('replays a compacted legacy snapshot key from the exact sidecar rather than snapshot hot cache data', async () => {
+    const root = await newJournalRoot('control-runtime');
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    const idempotencyKey = 'legacy-snapshot-sidecar-present';
+    const first = await submit(runtime, openTerminalCommand(idempotencyKey));
+
+    await journal.writeSnapshot({
+      snapshot: runtime.snapshot(),
+      coveredSequence: journal.sequence,
+      outcomes: { [idempotencyKey]: { status: 'succeeded', value: { paneId: '%stale-snapshot' } } },
+      receiptRecords: [],
+    });
+    await journal.compact(journal.sequence);
+
+    const reopened = await ControlJournal.open(root, 8);
+    const restarted = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened });
+    const sequenceBefore = reopened.sequence;
+    const callsBefore = invocations;
+
+    await expect(submit(restarted, openTerminalCommand(idempotencyKey, 'legacy-snapshot-sidecar-present-retry')))
+      .resolves.toEqual(first);
+    expect(reopened.sequence).toBe(sequenceBefore);
+    expect(invocations).toBe(callsBefore);
   });
 
   it('matches retained replay kinds by commandId and idempotencyKey for non-surface reconstruction', async () => {
