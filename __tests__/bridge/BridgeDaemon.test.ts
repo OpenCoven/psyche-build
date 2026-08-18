@@ -65,7 +65,10 @@ describe("BridgeDaemon", () => {
     const invite = inviteUrl.searchParams.get("psyche_invite");
     const onRedeemed = vi.fn<(inviteId: string) => void>();
     daemon.mobileInviteEvents.on("redeemed", onRedeemed);
-    expect(inviteUrl.searchParams.get("endpoint")).toBe(`wss://test-host:${port}`);
+    expect(inviteUrl.protocol).toBe("psyche:");
+    expect(inviteUrl.host).toBe("connect");
+    expect(inviteUrl.searchParams.get("host")).toBe(`wss://test-host:${port}`);
+    expect(inviteUrl.searchParams.get("endpoint")).toBeNull();
     expect(invite).toBeTruthy();
 
     const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });

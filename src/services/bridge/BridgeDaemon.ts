@@ -222,8 +222,8 @@ export class BridgeDaemon {
       throw new Error("bridge must be started before opening a mobile invite");
     }
     const invite = this.mobileInvites.issue({ endpoint: this.mobileInviteEndpoint });
-    const url = new URL("psyche://invite");
-    url.searchParams.set("endpoint", this.mobileInviteEndpoint);
+    const url = new URL("psyche://connect");
+    url.searchParams.set("host", this.mobileInviteEndpoint);
     url.searchParams.set("psyche_invite", invite.token);
     return url.toString();
   }

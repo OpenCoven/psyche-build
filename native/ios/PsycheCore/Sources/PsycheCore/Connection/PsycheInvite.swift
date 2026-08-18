@@ -21,7 +21,7 @@ public struct PsycheInvite: Sendable, Equatable {
               let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
               let token = Self.singleValue(named: "psyche_invite", in: query),
               !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let endpointValue = Self.singleValue(named: "endpoint", in: query),
+              let endpointValue = Self.singleValue(named: "host", in: query),
               let endpoint = Self.endpoint(from: endpointValue) else {
             return nil
         }
