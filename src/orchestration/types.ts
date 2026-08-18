@@ -65,10 +65,16 @@ export interface OrchestrationLaneResultBase {
   completedAt: string;
 }
 
+export interface OrchestrationWarning {
+  code: 'orchestration_persistence_failed';
+  message: string;
+}
+
 export interface OrchestrationLaneSuccess extends OrchestrationLaneResultBase {
   status: 'completed';
   pane?: PsychePane;
   sessionId?: string;
+  warnings?: readonly OrchestrationWarning[];
 }
 
 export interface OrchestrationLaneFailure extends OrchestrationLaneResultBase {

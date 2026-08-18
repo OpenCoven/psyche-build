@@ -341,6 +341,33 @@ describe('localPaneBackend', () => {
 
       expect(output.pane?.orchestration?.mode).toBe('shared-worktree');
     });
+
+    it('returns and records the launched pane when orchestration metadata persistence fails', async () => {
+      const launchedPane = pane('psyche-launched');
+      const createPaneFn = vi.fn(async () => ({
+        pane: launchedPane,
+        needsAgentChoice: false,
+      }));
+      const backend = backendWith(createPaneFn, {
+        persistOrchestrationMetadata: async () => {
+          throw new Error(`disk full\n${'x'.repeat(2_000)}`);
+        },
+      });
+
+      const output = await backend.execute(lane({ mode: 'shared-worktree' }));
+
+      expect(output.pane).toEqual(launchedPane);
+      expect(backend.createdPanes()).toEqual([launchedPane]);
+      expect(output.warnings).toHaveLength(1);
+      expect(output.warnings?.[0]).toMatchObject({
+        code: 'orchestration_persistence_failed',
+      });
+      expect(output.warnings?.[0].message).toMatch(
+        /^Pane launched, but orchestration metadata persistence failed: disk full /,
+      );
+      expect(output.warnings?.[0].message).not.toContain('\n');
+      expect(output.warnings?.[0].message.length).toBeLessThanOrEqual(1_024);
+    });
   });
 
   describe('pane accumulation', () => {
@@ -402,6 +429,7 @@ describe('localPaneBackend', () => {
       const backend = backendWith(createPaneFn);
 
       await expect(backend.execute(lane())).rejects.toThrow('tmux split failed');
+      expect(backend.createdPanes()).toEqual([]);
     });
   });
 

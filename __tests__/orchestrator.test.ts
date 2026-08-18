@@ -160,6 +160,26 @@ describe('Orchestrator', () => {
       expect(result.status).toBe('completed');
     });
 
+    it('counts a warning lane as completed and preserves its warning', async () => {
+      const pane = { id: 'pane-a', slug: 'pane-a' } as never;
+      const warning = {
+        code: 'orchestration_persistence_failed' as const,
+        message: 'Pane launched, but orchestration metadata persistence failed: disk full',
+      };
+      const orchestrator = new Orchestrator({
+        executeLane: async () => ({ pane, warnings: [warning] }),
+      });
+
+      const result = await orchestrator.execute(task());
+      const completed = result.lanes.filter((lane) => lane.status === 'completed');
+      const failed = result.lanes.filter((lane) => lane.status === 'failed');
+
+      expect(result.status).toBe('completed');
+      expect(completed).toHaveLength(1);
+      expect(failed).toHaveLength(0);
+      expect(completed[0]).toMatchObject({ pane, warnings: [warning] });
+    });
+
     it('reports partial when some lanes fail, keeping the successes usable', async () => {
       const orchestrator = new Orchestrator({
         executeLane: async (lane) => {

@@ -11,6 +11,22 @@ import { OrchestrationError, type OrchestrationLanePlan } from './types.js';
 import { persistProjectPaneConfigPaneDelta } from '../services/ProjectPaneConfig.js';
 import { generateSiblingSlugForTargetPane } from '../utils/attachAgent.js';
 
+const MAX_ORCHESTRATION_WARNING_LENGTH = 1_024;
+const ORCHESTRATION_PERSISTENCE_WARNING_PREFIX =
+  'Pane launched, but orchestration metadata persistence failed: ';
+
+function orchestrationPersistenceWarningMessage(error: unknown): string {
+  let detail: string;
+  try {
+    detail = error instanceof Error ? error.message : String(error);
+  } catch {
+    detail = 'unknown error';
+  }
+  const safeDetail = detail.replace(/[\r\n\0]/g, ' ').trim() || 'unknown error';
+  return `${ORCHESTRATION_PERSISTENCE_WARNING_PREFIX}${safeDetail}`
+    .slice(0, MAX_ORCHESTRATION_WARNING_LENGTH);
+}
+
 export interface LocalPaneBackendOptions {
   projectName: string;
   sessionProjectRoot: string;
@@ -172,6 +188,7 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
     const persistedPane = {
       ...result.pane,
     };
+    const createdIndex = created.push(persistedPane) - 1;
     const paneWithOrchestration: PsychePane = {
       ...persistedPane,
       orchestration: {
@@ -181,13 +198,22 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
         mode: lane.mode,
       },
     };
-    result.pane = await persistOrchestrationMetadata(
-      persistedPane,
-      paneWithOrchestration,
-    );
-    created.push(result.pane);
-
-    return { pane: result.pane };
+    try {
+      const enrichedPane = await persistOrchestrationMetadata(
+        persistedPane,
+        paneWithOrchestration,
+      );
+      created[createdIndex] = enrichedPane;
+      return { pane: enrichedPane };
+    } catch (error) {
+      return {
+        pane: persistedPane,
+        warnings: [{
+          code: 'orchestration_persistence_failed',
+          message: orchestrationPersistenceWarningMessage(error),
+        }],
+      };
+    }
   };
 
   const execute: LaneBackend = (lane) => {

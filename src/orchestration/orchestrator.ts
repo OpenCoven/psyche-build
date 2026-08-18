@@ -6,11 +6,13 @@ import {
   type OrchestrationLaneResult,
   type OrchestrationTaskRequest,
   type OrchestrationTaskResult,
+  type OrchestrationWarning,
 } from './types.js';
 
 export interface LaneExecutionOutput {
   pane?: PsychePane;
   sessionId?: string;
+  warnings?: readonly OrchestrationWarning[];
 }
 
 /**
@@ -124,6 +126,7 @@ export class Orchestrator {
         status: 'completed',
         ...(output.pane ? { pane: output.pane } : {}),
         ...(output.sessionId ? { sessionId: output.sessionId } : {}),
+        ...(output.warnings ? { warnings: output.warnings } : {}),
         startedAt,
         completedAt: this.clock(),
       };
