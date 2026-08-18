@@ -200,7 +200,7 @@ interface UseInputHandlingParams {
 
   // Bridge daemon (optional, progressive enhancement)
   bridgeDaemon?: any
-  showPairBanner?: (opts: { code: string; expiresAt: Date }) => void
+  showPairBanner?: (opts: { qrPayload: string }) => void
   sidePanelCollapsed?: boolean
   sidePanelWidth?: number
   onToggleSidePanel?: () => void

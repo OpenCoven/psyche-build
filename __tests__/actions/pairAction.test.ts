@@ -2,20 +2,18 @@ import { describe, expect, it, vi } from "vitest";
 import { runPairAction } from "../../src/actions/implementations/pairAction";
 
 describe("pairAction", () => {
-  it("opens a pair window via the daemon and shows the banner", async () => {
-    const expiresAt = new Date(Date.now() + 300000);
+  it("opens a mobile invite via the daemon and shows its QR payload", async () => {
     const showBanner = vi.fn();
     const fakeDaemon = {
-      openPairWindow: vi.fn(async () => ({ code: "012345", expiresAt })),
+      openMobileInvite: vi.fn(() => "psyche://invite?psyche_invite=secret"),
     };
     await runPairAction({
       bridgeDaemon: fakeDaemon,
       showPairBanner: showBanner,
     });
-    expect(fakeDaemon.openPairWindow).toHaveBeenCalled();
+    expect(fakeDaemon.openMobileInvite).toHaveBeenCalled();
     expect(showBanner).toHaveBeenCalledWith({
-      code: "012345",
-      expiresAt,
+      qrPayload: "psyche://invite?psyche_invite=secret",
     });
   });
 
@@ -33,10 +31,7 @@ describe("pairAction", () => {
 
   it("does not throw when showPairBanner is omitted", async () => {
     const fakeDaemon = {
-      openPairWindow: vi.fn(async () => ({
-        code: "999999",
-        expiresAt: new Date(Date.now() + 300000),
-      })),
+      openMobileInvite: vi.fn(() => "psyche://invite?psyche_invite=secret"),
     };
     await expect(runPairAction({ bridgeDaemon: fakeDaemon })).resolves.toBeUndefined();
   });

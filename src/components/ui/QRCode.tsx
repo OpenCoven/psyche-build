@@ -19,9 +19,8 @@ const QRCode: React.FC<QRCodeProps> = ({ url }) => {
 
   return (
     <Box flexDirection="column" marginTop={1}>
-      <Text dimColor>Scan to access dashboard:</Text>
+      <Text dimColor>Scan with Psyche on your phone:</Text>
       <Text>{qrString}</Text>
-      <Text dimColor>{url}</Text>
     </Box>
   );
 };

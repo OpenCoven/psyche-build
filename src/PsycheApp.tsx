@@ -1923,7 +1923,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     inlineRename,
     setInlineRename,
     bridgeDaemon,
-    showPairBanner: (opts: { code: string; expiresAt: Date }) => setPairBanner(opts),
+    showPairBanner: (opts: { qrPayload: string }) => setPairBanner(opts),
     sidePanelCollapsed,
     sidePanelWidth,
     onToggleSidePanel: toggleSidePanel,
@@ -2026,8 +2026,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
 
         {pairBanner && (
           <PairBanner
-            code={pairBanner.code}
-            expiresAt={pairBanner.expiresAt}
+            qrPayload={pairBanner.qrPayload}
             onDismiss={() => {
               setPairBanner(null);
               if (bridgeDaemon) {
