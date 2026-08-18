@@ -18,6 +18,7 @@ const requiredSourceFiles = sortUnique([
   'docs/shared/githubStars.js',
   'docs/vite.config.js',
 ]);
+const allowedNonDocumentPublicationEntries = new Set(['dist/**/*', 'psyche', 'LICENSE']);
 const prohibitedFiles = new Set(['docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md']);
 const prohibitedText = [
   ['Coven Demo Loop', 'standalone Coven demo positioning'],
@@ -53,40 +54,63 @@ function hasGlobMetacharacters(value) {
   return globMetacharacters.test(value);
 }
 
-function collectPackageMarkdownFiles(packageFiles) {
+function collectPackageMarkdownFiles(packageFilesValue) {
   const markdownFiles = [];
   const boundaryFailures = [];
+  const packageFiles = [];
+
+  if (!Array.isArray(packageFilesValue)) {
+    boundaryFailures.push({ file: 'package.json#files', reason: 'package.json.files must be an array of strings' });
+    return {
+      packageFiles,
+      markdownFiles,
+      boundaryFailures: sortFailureRecords(boundaryFailures),
+    };
+  }
+
+  let sawMalformedEntry = false;
+  for (const entry of packageFilesValue) {
+    if (typeof entry !== 'string') {
+      sawMalformedEntry = true;
+      continue;
+    }
+
+    packageFiles.push(entry);
+  }
+
+  if (sawMalformedEntry) {
+    boundaryFailures.push({ file: 'package.json#files', reason: 'package.json.files must be an array of strings' });
+  }
 
   for (const file of sortUnique(packageFiles)) {
-    const isDocsEntry = file === 'docs' || file === 'docs/' || file.startsWith('docs/');
-    const isMarkdown = path.extname(file).toLowerCase() === '.md';
+    if (allowedNonDocumentPublicationEntries.has(file)) {
+      continue;
+    }
 
+    const isDocsEntry = file === 'docs' || file === 'docs/' || file.startsWith('docs/');
     if (isDocsEntry) {
-      if (hasGlobMetacharacters(file) || !/^docs\/[^/]+\.md$/.test(file)) {
+      if (!hasGlobMetacharacters(file) && /^docs\/[^/]+\.md$/.test(file)) {
+        markdownFiles.push(file);
+      } else {
         boundaryFailures.push({
           file,
           reason: 'package-published docs must use explicit top-level Markdown file paths',
         });
-        continue;
       }
 
+      continue;
+    }
+
+    if (!hasGlobMetacharacters(file) && !file.endsWith('/') && /^[^/]+\.md$/.test(file)) {
       markdownFiles.push(file);
       continue;
     }
 
-    if (!isMarkdown) {
-      continue;
-    }
-
-    if (hasGlobMetacharacters(file) || file.endsWith('/')) {
-      boundaryFailures.push({ file, reason: 'package-published Markdown must use explicit file paths' });
-      continue;
-    }
-
-    markdownFiles.push(file);
+    boundaryFailures.push({ file, reason: 'package-published Markdown must use explicit file paths' });
   }
 
   return {
+    packageFiles: sortUnique(packageFiles),
     markdownFiles: sortUnique(markdownFiles),
     boundaryFailures: sortFailureRecords(boundaryFailures),
   };
@@ -198,49 +222,99 @@ async function selfCheckPublicInventory() {
     /required docs source file missing: docs\/shared\/githubStars\.js/,
   );
 
+  const allowlistedPublicationEntries = collectPackageMarkdownFiles(['dist/**/*', 'psyche', 'LICENSE']);
+  assert.deepEqual(allowlistedPublicationEntries.packageFiles, sortUnique(['dist/**/*', 'psyche', 'LICENSE']));
+  assert.deepEqual(allowlistedPublicationEntries.markdownFiles, []);
+  assert.deepEqual(allowlistedPublicationEntries.boundaryFailures, []);
+
+  const malformedPackageFiles = collectPackageMarkdownFiles([null, 'README.md']);
+  assert(malformedPackageFiles.markdownFiles.includes('README.md'));
+  assert.deepEqual(
+    malformedPackageFiles.boundaryFailures,
+    [{ file: 'package.json#files', reason: 'package.json.files must be an array of strings' }],
+  );
+
+  const missingPackageFiles = collectPackageMarkdownFiles(undefined);
+  assert.deepEqual(
+    missingPackageFiles.boundaryFailures,
+    [{ file: 'package.json#files', reason: 'package.json.files must be an array of strings' }],
+  );
+
   const packageBoundaryA = collectPackageMarkdownFiles([
     'dist/**/*',
+    'psyche',
+    'LICENSE',
     'CHANGELOG*.md',
-    'docs',
     'CHANGELOG.md',
-    'CONTRIBUTING.md',
     'README.md',
+    'CONTRIBUTING.md',
+    'docs',
     'docs/',
     'docs/**/*',
-    'docs/COVEN-DEMO-LOOP.md',
     'docs/AGENT-SURFACE-CONTROL.md',
-    'docs/README.md',
+    'docs/BREAKING-CHANGES.md',
+    'docs/BRIDGE-SECURITY.md',
+    'docs/COVEN-DEMO-LOOP.md',
     'docs/COVEN-SESSIONS.md',
+    'docs/PRODUCT-SPEC.md',
+    'docs/README.md',
+    'docs/RELEASE.md',
+    'docs/SMOKE.md',
     'docs/not-md.txt',
     'docs/superpowers',
     'docs/superpowers/x.md',
+    'guides',
+    'guides/**/*',
+    'nested/README.md',
+    'src/',
   ]);
   const packageBoundaryB = collectPackageMarkdownFiles([
-    'dist/**/*',
-    'README.md',
-    'CONTRIBUTING.md',
-    'CHANGELOG.md',
-    'CHANGELOG*.md',
-    'docs',
+    'src/',
+    'nested/README.md',
+    'guides/**/*',
+    'guides',
     'docs/superpowers/x.md',
-    'docs/not-md.txt',
     'docs/superpowers',
-    'docs/COVEN-SESSIONS.md',
+    'docs/not-md.txt',
+    'docs/SMOKE.md',
+    'docs/RELEASE.md',
     'docs/README.md',
-    'docs/AGENT-SURFACE-CONTROL.md',
+    'docs/PRODUCT-SPEC.md',
+    'docs/COVEN-SESSIONS.md',
     'docs/COVEN-DEMO-LOOP.md',
+    'docs/BRIDGE-SECURITY.md',
+    'docs/BREAKING-CHANGES.md',
+    'docs/AGENT-SURFACE-CONTROL.md',
     'docs/**/*',
     'docs/',
+    'docs',
+    'CONTRIBUTING.md',
+    'README.md',
+    'CHANGELOG*.md',
+    'CHANGELOG.md',
+    'LICENSE',
+    'psyche',
+    'dist/**/*',
   ]);
 
   assert.deepEqual(packageBoundaryA, packageBoundaryB);
-  assert(packageBoundaryA.markdownFiles.includes('CHANGELOG.md'));
-  assert(packageBoundaryA.markdownFiles.includes('CONTRIBUTING.md'));
-  assert(packageBoundaryA.markdownFiles.includes('README.md'));
-  assert(packageBoundaryA.markdownFiles.includes('docs/AGENT-SURFACE-CONTROL.md'));
-  assert(packageBoundaryA.markdownFiles.includes('docs/COVEN-DEMO-LOOP.md'));
-  assert(packageBoundaryA.markdownFiles.includes('docs/COVEN-SESSIONS.md'));
-  assert(packageBoundaryA.markdownFiles.includes('docs/README.md'));
+  assert.deepEqual(
+    packageBoundaryA.markdownFiles,
+    sortUnique([
+      'CHANGELOG.md',
+      'CONTRIBUTING.md',
+      'README.md',
+      'docs/AGENT-SURFACE-CONTROL.md',
+      'docs/BREAKING-CHANGES.md',
+      'docs/BRIDGE-SECURITY.md',
+      'docs/COVEN-DEMO-LOOP.md',
+      'docs/COVEN-SESSIONS.md',
+      'docs/PRODUCT-SPEC.md',
+      'docs/README.md',
+      'docs/RELEASE.md',
+      'docs/SMOKE.md',
+    ]),
+  );
   assert.deepEqual(
     packageBoundaryA.boundaryFailures,
     sortFailureRecords([
@@ -251,6 +325,10 @@ async function selfCheckPublicInventory() {
       { file: 'docs/not-md.txt', reason: 'package-published docs must use explicit top-level Markdown file paths' },
       { file: 'docs/superpowers', reason: 'package-published docs must use explicit top-level Markdown file paths' },
       { file: 'docs/superpowers/x.md', reason: 'package-published docs must use explicit top-level Markdown file paths' },
+      { file: 'guides', reason: 'package-published Markdown must use explicit file paths' },
+      { file: 'guides/**/*', reason: 'package-published Markdown must use explicit file paths' },
+      { file: 'nested/README.md', reason: 'package-published Markdown must use explicit file paths' },
+      { file: 'src/', reason: 'package-published Markdown must use explicit file paths' },
     ]),
   );
 
@@ -263,12 +341,6 @@ async function selfCheckPublicInventory() {
   assert(packageInventory.includes('README.md'));
   assert(packageInventory.includes('docs/COVEN-DEMO-LOOP.md'));
   assert(packageInventory.includes('docs/COVEN-SESSIONS.md'));
-
-  const overlappingBoundaryFailures = sortFailureRecords([
-    { file: 'docs/superpowers/x.md', reason: 'package-published docs must use explicit top-level Markdown file paths' },
-  ]);
-  const overlappingInventory = new Set(['docs/superpowers/x.md']);
-  assert(overlappingInventory.has(overlappingBoundaryFailures[0].file));
 
   const partialCleanupInventory = buildPublicInventory({
     recursiveFiles: ['docs/src/main.js'],
@@ -290,10 +362,8 @@ async function main() {
     return 1;
   }
 
-  const packageFiles = Array.isArray(packageJson.files)
-    ? packageJson.files.filter((file) => typeof file === 'string')
-    : [];
-  const packageMarkdownResult = collectPackageMarkdownFiles(packageFiles);
+  const packageMarkdownResult = collectPackageMarkdownFiles(packageJson.files);
+  const packageFiles = packageMarkdownResult.packageFiles;
   const recursiveFiles = await collectPublicRecursiveFiles();
   const uniqueInventory = buildPublicInventory({
     recursiveFiles,
