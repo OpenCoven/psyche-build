@@ -575,6 +575,7 @@ function browserLifecycleHarness() {
     pendingUrl: string | null;
     pendingNavigationToken: string | null;
     liveGeneration: number;
+    controlGeneration: number;
     liveUrl: string | null;
     liveNavigationToken: string | null;
     eventUrl: string | null;
@@ -599,6 +600,7 @@ function browserLifecycleHarness() {
         pendingUrl: null,
         pendingNavigationToken: null,
         liveGeneration: 0,
+        controlGeneration: 0,
         liveUrl: null,
         liveNavigationToken: null,
         eventUrl: null,
@@ -618,6 +620,7 @@ function browserLifecycleHarness() {
         pendingUrl: null,
         pendingNavigationToken: null,
         liveGeneration: 0,
+        controlGeneration: 0,
         liveUrl: null,
         liveNavigationToken: null,
         eventUrl: null,
@@ -743,8 +746,27 @@ function browserNavigationDependencies(
       previousUrl: string;
       previousHistory: string[];
       previousHistoryIndex: number;
+      ambiguousAfterDispatch?: boolean;
+      preserveQueuedNavigation?: boolean;
     }) => {
-      lifecycle.invalidateBrowserNavigation(context.tab);
+      const state = lifecycle.browserTabLifecycle(context.tab);
+      if (context.preserveQueuedNavigation) {
+        state.generation += 1;
+        state.pendingGeneration = 0;
+        state.pendingUrl = null;
+        state.pendingNavigationToken = null;
+        state.eventUrl = null;
+        state.navigationSnapshot = null;
+      } else {
+        lifecycle.invalidateBrowserNavigation(context.tab);
+      }
+      state.nativeLabel = null;
+      state.liveGeneration = 0;
+      state.controlGeneration = 0;
+      state.liveUrl = null;
+      state.liveNavigationToken = null;
+      state.eventUrl = null;
+      state.viewLive = false;
       await invoke('browser_destroy', { label: context.label });
       if (context.browser.tabs.includes(context.tab)) {
         context.tab.created = false;
@@ -2740,6 +2762,184 @@ describe('Tauri native browser lifecycle', () => {
     });
   });
 
+  it('retires a completed native view after a generic invoke rejection and recreates it safely', async () => {
+    const project = {
+      id: 'project-a',
+      browsersByWorktree: {} as Record<string, unknown>,
+    };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old.example/current',
+      created: true,
+      loading: false,
+      title: 'Saved title',
+      history: ['https://old.example', 'https://old.example/current'],
+      historyIndex: 1,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    project.browsersByWorktree['/workspace'] = browser;
+    const lifecycle = browserLifecycleHarness();
+    Object.assign(lifecycle.browserTabLifecycle(tab), {
+      nativeLabel: 'project-a:tab-a',
+      liveGeneration: 1,
+      controlGeneration: 1,
+      liveUrl: tab.url,
+      liveNavigationToken: 'old-token',
+      eventUrl: tab.url,
+      viewLive: true,
+    });
+    const nativeCalls: Array<[string, Record<string, unknown>]> = [];
+    const statuses: Array<[string, string]> = [];
+    let handlers: ReturnType<typeof browserNativeEventHandlers>;
+    let navigationAttempts = 0;
+    const invoke = async (command: string, args: Record<string, unknown>) => {
+      nativeCalls.push([command, args]);
+      if (command !== 'browser_navigate') return;
+      navigationAttempts += 1;
+      if (navigationAttempts !== 1) return;
+      expect(handlers.handleBrowserPageLoad({
+        payload: {
+          label: String(args.label),
+          url: String(args.url),
+          phase: 'finished',
+          navigationToken: String(args.navigationToken),
+        },
+      })).toBe(true);
+      throw new Error('native rejected after completion');
+    };
+    const dependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      invoke,
+      lifecycle,
+    );
+    handlers = browserNativeEventHandlers({
+      lifecycle,
+      project,
+      worktreePath: '/workspace',
+      browser,
+      tab,
+      pane: dependencies.findBrowserPane(),
+      nativeLabel: 'project-a:tab-a',
+    });
+    Object.assign(dependencies, {
+      invalidateBrowserAutomation: async () => true,
+      removeBrowserControlResource: async () => true,
+      setStatus: (message: string, level: string) => statuses.push([message, level]),
+      discardObsoleteBrowserNavigation: compileFunction<
+        (context: Record<string, unknown>) => Promise<boolean>
+      >(functionSource(mainJs, 'discardObsoleteBrowserNavigation'), {
+        ...lifecycle,
+        invalidateBrowserAutomation: async () => true,
+        removeBrowserControlResource: async () => true,
+        invoke,
+        syncProjectBrowser: () => {},
+        saveWorkspaceSoon: () => {},
+        setStatus: (message: string, level: string) => statuses.push([message, level]),
+        boundedBrowserError: dependencies.boundedBrowserError,
+      }),
+    });
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), dependencies);
+
+    await expect(
+      navigateBrowser('https://attempted.example', { tabId: tab.id }),
+    ).resolves.toBe(false);
+
+    expect(tab).toEqual({
+      id: 'tab-a',
+      url: 'https://old.example/current',
+      created: false,
+      loading: false,
+      title: 'Saved title',
+      history: ['https://old.example', 'https://old.example/current'],
+      historyIndex: 1,
+    });
+    expect(lifecycle.browserTabLifecycle(tab)).toMatchObject({
+      nativeLabel: null,
+      pendingGeneration: 0,
+      pendingUrl: null,
+      pendingNavigationToken: null,
+      liveGeneration: 0,
+      controlGeneration: 0,
+      liveUrl: null,
+      liveNavigationToken: null,
+      eventUrl: null,
+      viewLive: false,
+      navigationSnapshot: null,
+    });
+    expect(handlers.handleBrowserPageLoad({
+      payload: {
+        label: 'project-a:tab-a',
+        url: 'https://attempted.example/late',
+        phase: 'finished',
+      },
+    })).toBe(false);
+    expect(handlers.handleBrowserTitle({
+      payload: {
+        label: 'project-a:tab-a',
+        url: 'https://attempted.example/late',
+        title: 'Late native title',
+      },
+    })).toBe(false);
+    expect(tab).toMatchObject({
+      url: 'https://old.example/current',
+      title: 'Saved title',
+      history: ['https://old.example', 'https://old.example/current'],
+      historyIndex: 1,
+    });
+    expect(nativeCalls.map(([command]) => command)).toEqual([
+      'browser_navigate',
+      'browser_destroy',
+    ]);
+    expect(statuses).toEqual([
+      ['browser navigation failed: native rejected after completion', 'error'],
+    ]);
+
+    const restoreDormantBrowserTab = compileFunction<
+      (value: typeof project, valueTab: BrowserNavigationTab) => Promise<boolean>
+    >(functionSource(mainJs, 'restoreDormantBrowserTab'), {
+      ...lifecycle,
+      activeWorkspaceRoot: () => '/workspace',
+      findBrowserPane: dependencies.findBrowserPane,
+      navigateBrowser,
+    });
+    const activateBrowserTab = compileFunction<
+      (value: typeof project, tabId: string) => Promise<boolean>
+    >(functionSource(mainJs, 'activateBrowserTab'), {
+      ...lifecycle,
+      activeProject: () => project,
+      activeWorkspaceRoot: () => '/workspace',
+      findBrowserPane: dependencies.findBrowserPane,
+      ensureBrowserModel: () => browser,
+      markActiveSurface: () => {},
+      renderBrowserTabs: () => {},
+      syncProjectBrowser: () => {},
+      saveWorkspaceSoon: () => {},
+      restoreDormantBrowserTab,
+    });
+
+    await expect(activateBrowserTab(project, tab.id)).resolves.toBe(true);
+    expect(nativeCalls.filter(([command]) => command === 'browser_navigate').map(([, args]) => args.url))
+      .toEqual(['https://attempted.example', 'https://old.example/current']);
+    expect(tab).toEqual({
+      id: 'tab-a',
+      url: 'https://old.example/current',
+      created: true,
+      loading: false,
+      title: 'Saved title',
+      history: ['https://old.example', 'https://old.example/current'],
+      historyIndex: 1,
+    });
+    expect(lifecycle.browserTabLifecycle(tab)).toMatchObject({
+      nativeLabel: 'project-a:tab-a',
+      liveUrl: 'https://old.example/current',
+      viewLive: true,
+    });
+  });
+
   it('aborts native navigation when semantic invalidation fails', async () => {
     const calls: string[] = [];
     const project = { id: 'project-a' };
@@ -3639,7 +3839,7 @@ describe('Tauri native browser lifecycle', () => {
     rejectSecond(new Error('second navigation failed'));
     await expect(second).resolves.toBe(false);
     expect(tab).toMatchObject({
-      created: true,
+      created: false,
       loading: false,
       url: 'https://first.example',
       title: 'https://first.example',
@@ -3651,7 +3851,7 @@ describe('Tauri native browser lifecycle', () => {
     await Promise.resolve();
     expect(tab.loading).toBe(false);
     expect(loadedCalls).toBe(0);
-    expect(commands).not.toContain('browser_destroy');
+    expect(commands).toContain('browser_destroy');
     expect(tab).not.toHaveProperty('generation');
     expect(tab).not.toHaveProperty('invalidationGeneration');
     expect(tab).not.toHaveProperty('navigationTail');
@@ -3704,6 +3904,8 @@ describe('Tauri native browser lifecycle', () => {
     rejectFirst(new Error('first navigation failed'));
     await expect(first).resolves.toBe(false);
     await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(nativeCalls).toEqual([
       { command: 'browser_navigate', url: 'https://first.example' },
       { command: 'browser_navigate', url: 'https://second.example' },
@@ -3718,7 +3920,7 @@ describe('Tauri native browser lifecycle', () => {
       history: ['https://old.example', 'https://second.example'],
       historyIndex: 1,
     });
-    expect(commands).not.toContain('browser_destroy');
+    expect(commands).toContain('browser_destroy');
     expect(tab).not.toHaveProperty('generation');
     expect(tab).not.toHaveProperty('invalidationGeneration');
     expect(tab).not.toHaveProperty('navigationTail');
@@ -3933,7 +4135,7 @@ describe('Tauri native browser lifecycle', () => {
         tabId: tab.id,
       })).resolves.toBe(false);
       expect(tab).toMatchObject({
-        created: true,
+        created: false,
         loading: false,
         title: 'Saved title',
         url: 'https://old.example',

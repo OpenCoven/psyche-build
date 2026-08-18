@@ -10126,7 +10126,16 @@
   async function discardObsoleteBrowserNavigation(context) {
     var lifecycle = browserTabLifecycle(context.tab);
     var retireNavigationView = function () {
-      invalidateBrowserNavigation(context.tab);
+      if (context.preserveQueuedNavigation) {
+        lifecycle.generation += 1;
+        lifecycle.pendingGeneration = 0;
+        lifecycle.pendingUrl = null;
+        lifecycle.pendingNavigationToken = null;
+        lifecycle.eventUrl = null;
+        lifecycle.navigationSnapshot = null;
+      } else {
+        invalidateBrowserNavigation(context.tab);
+      }
       lifecycle.nativeLabel = null;
       lifecycle.liveGeneration = 0;
       lifecycle.controlGeneration = 0;
@@ -10153,13 +10162,29 @@
         browser: context.browser,
         tab: context.tab,
       };
-      if (!(await invalidateBrowserAutomation(pair))) {
-        retireNavigationView();
-        restoreTab(true);
-        setStatus("browser automation invalidation failed", "error");
-        return false;
+      var automationInvalidated = false;
+      var automationInvalidationError = null;
+      try {
+        automationInvalidated = await invalidateBrowserAutomation(pair);
+      } catch (error) {
+        automationInvalidationError = error;
+        setStatus("browser automation invalidation failed: " + boundedBrowserError(error), "error");
       }
-      await removeBrowserControlResource(pair);
+      if (!automationInvalidated) {
+        if (!context.ambiguousAfterDispatch) {
+          retireNavigationView();
+          restoreTab(true);
+        }
+        if (!automationInvalidationError) setStatus("browser automation invalidation failed", "error");
+        if (!context.ambiguousAfterDispatch) return false;
+      } else {
+        try {
+          await removeBrowserControlResource(pair);
+        } catch (error) {
+          if (!context.ambiguousAfterDispatch) throw error;
+          setStatus("browser automation cleanup failed: " + boundedBrowserError(error), "error");
+        }
+      }
     }
     retireNavigationView();
     var destroyed = true;
@@ -10168,6 +10193,11 @@
     } catch (error) {
       destroyed = false;
       setStatus("obsolete browser navigation cleanup failed for " + context.label + ": " + boundedBrowserError(error), "error");
+      if (context.ambiguousAfterDispatch) {
+        try {
+          await invoke("browser_hide", { label: context.label });
+        } catch (_) {}
+      }
     }
     restoreTab(true);
     return destroyed;
@@ -11301,22 +11331,25 @@
       var previousUrl = tab.url;
       var previousHistory = Array.isArray(tab.history) ? tab.history.slice() : [];
       var previousHistoryIndex = tab.historyIndex;
-      var previousView = {
-        nativeLabel: lifecycle.nativeLabel,
-        liveGeneration: lifecycle.liveGeneration,
-        controlGeneration: lifecycle.controlGeneration,
-        liveUrl: lifecycle.liveUrl,
-        liveNavigationToken: lifecycle.liveNavigationToken,
-        eventUrl: lifecycle.eventUrl,
-        viewLive: lifecycle.viewLive,
-      };
       var navigationPair = { project: project, worktreePath: worktreePath, browser: browser, tab: tab };
       if (lifecycle.nativeLabel) {
-        if (!(await invalidateBrowserAutomation(navigationPair))) {
+        var automationInvalidated = false;
+        try {
+          automationInvalidated = await invalidateBrowserAutomation(navigationPair);
+        } catch (error) {
+          setStatus("browser navigation failed before dispatch: " + boundedBrowserError(error), "error");
+          return false;
+        }
+        if (!automationInvalidated) {
           setStatus("browser automation invalidation failed", "error");
           return false;
         }
-        await removeBrowserControlResource(navigationPair);
+        try {
+          await removeBrowserControlResource(navigationPair);
+        } catch (error) {
+          setStatus("browser navigation failed before dispatch: " + boundedBrowserError(error), "error");
+          return false;
+        }
       }
       if (lifecycle.invalidationGeneration !== invalidationGeneration || !requestIsCurrent()) return false;
       var generation = beginBrowserNavigation(tab);
@@ -11352,7 +11385,9 @@
         previousHistory: previousHistory,
         previousHistoryIndex: previousHistoryIndex,
       };
-      tab.loading = true; tab.title = tabTitle(normalised); renderBrowserTabs(); updateBrowserControls();
+      tab.loading = true;
+      if (!context.preserveHistory) tab.title = tabTitle(normalised);
+      renderBrowserTabs(); updateBrowserControls();
       try {
         var nativeNavigation = await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h, navigationToken: navigationToken, automationSource: lifecycle.automationSource });
         if ((sourceThread && !scopeIsCurrent()) ||
@@ -11395,53 +11430,19 @@
         return true;
       } catch (err) {
         if (!browserNavigationIsCurrent(navigationContext)) {
-          await discardObsoleteBrowserNavigation(navigationContext);
+          await discardObsoleteBrowserNavigation(Object.assign(
+            { ambiguousAfterDispatch: true },
+            navigationContext
+          ));
           return false;
         }
-        var navigationTimedOut = String(err).indexOf("browser navigation timed out") !== -1;
-        if (navigationTimedOut) {
-          await removeBrowserControlResource(navigationPair);
-          invalidateBrowserNavigation(tab);
-          lifecycle.nativeLabel = null;
-          lifecycle.liveGeneration = 0;
-          lifecycle.liveUrl = null;
-          lifecycle.liveNavigationToken = null;
-          lifecycle.eventUrl = null;
-          lifecycle.viewLive = false;
-          lifecycle.navigationSnapshot = null;
-          tab.created = false;
-          tab.loading = false;
-          tab.title = previousTitle;
-          tab.url = previousUrl;
-          tab.history = previousHistory.slice();
-          tab.historyIndex = previousHistoryIndex;
-          if (browserNavigationOwnsVisiblePane(navigationContext)) syncProjectBrowser();
-          else scheduleBrowserBounds();
-          setStatus(
-            "browser navigation failed: " + boundedBrowserError(err),
-            "error"
-          );
-          return false;
-        }
-        lifecycle.nativeLabel = previousView.nativeLabel;
-        lifecycle.pendingGeneration = 0;
-        lifecycle.pendingUrl = null;
-        lifecycle.pendingNavigationToken = null;
-        lifecycle.liveGeneration = previousView.liveGeneration;
-        lifecycle.controlGeneration = previousView.controlGeneration;
-        lifecycle.liveUrl = previousView.liveUrl;
-        lifecycle.liveNavigationToken = previousView.liveNavigationToken;
-        lifecycle.eventUrl = previousView.eventUrl;
-        lifecycle.viewLive = previousView.viewLive;
-        lifecycle.navigationSnapshot = null;
-        tab.created = previousCreated;
-        tab.loading = previousLoading;
-        tab.title = previousTitle;
-        tab.url = previousUrl;
-        tab.history = previousHistory.slice();
-        tab.historyIndex = previousHistoryIndex;
-        if (browserNavigationOwnsVisiblePane(navigationContext)) syncProjectBrowser();
-        else scheduleBrowserBounds();
+        await discardObsoleteBrowserNavigation(Object.assign(
+          {
+            ambiguousAfterDispatch: true,
+            preserveQueuedNavigation: true,
+          },
+          navigationContext
+        ));
         setStatus(
           "browser navigation failed: " + boundedBrowserError(err),
           "error"
