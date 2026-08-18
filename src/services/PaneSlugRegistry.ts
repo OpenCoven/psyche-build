@@ -64,6 +64,10 @@ export interface PaneSlugCandidate {
   worktreePath: string;
 }
 
+export interface PaneSlugSettlementResult {
+  cleanupWarning?: string;
+}
+
 export interface PaneSlugReservation {
   readonly recoveryId: string;
   readonly sessionProjectRoot: string;
@@ -83,9 +87,9 @@ export interface PaneSlugReservation {
     id: string;
     paneId: string;
     slug: string;
-  }) => Promise<void>;
-  clearBeforeEffect: () => Promise<void>;
-  clearAfterConfirmedTeardown: (presence: TmuxPanePresence) => Promise<void>;
+  }) => Promise<PaneSlugSettlementResult>;
+  clearBeforeEffect: () => Promise<PaneSlugSettlementResult>;
+  clearAfterConfirmedTeardown: (presence: TmuxPanePresence) => Promise<PaneSlugSettlementResult>;
 }
 
 export interface PaneSlugRegistryOwnerProbe {
@@ -210,7 +214,7 @@ function createReservation(
         if (currentRecord.state === 'quarantined') {
           return;
         }
-        throw new Error(
+        throw new PaneSlugOwnershipMissingError(
           `Pane slug ownership ${currentRecord.recoveryId} disappeared before settlement`,
         );
       }
@@ -283,33 +287,33 @@ function createReservation(
       await writePaneSlugOwnershipRecord(currentRecord);
     },
     completeAfterPanePersisted: async (pane) => {
-      await withOwnedRecord(async (record) => {
-        const config = await readProjectPaneConfigUnderLock(
-          record.sessionProjectRoot,
-        );
-        const exact = (Array.isArray(config.panes) ? config.panes : []).some(
-          (candidate) => {
-            if (!candidate || typeof candidate !== 'object') {
-              return false;
-            }
-            const value = candidate as Record<string, unknown>;
-            return (
-              value.id === pane.id
-              && value.paneId === pane.paneId
-              && value.slug === pane.slug
-            );
-          },
-        );
-        if (!exact) {
-          throw new Error(
-            `Pane slug "${record.slug}" cannot be released before its exact pane record is durable`,
+      try {
+        await withOwnedRecord(async (record) => {
+          const config = await readProjectPaneConfigUnderLock(
+            record.sessionProjectRoot,
           );
+          if (!hasExactPersistedPane(config, pane)) {
+            throw new Error(
+              `Pane slug "${record.slug}" cannot be released before its exact pane record is durable`,
+            );
+          }
+          await removePaneSlugOwnershipRecord(
+            record.sessionProjectRoot,
+            record.recoveryId,
+          );
+        });
+      } catch (error) {
+        if (!(error instanceof PaneSlugOwnershipMissingError)) {
+          throw error;
         }
-        await removePaneSlugOwnershipRecord(
-          record.sessionProjectRoot,
-          record.recoveryId,
+        const config = await readProjectPaneConfigUnderLock(
+          currentRecord.sessionProjectRoot,
         );
-      });
+        if (!hasExactPersistedPane(config, pane)) {
+          throw error;
+        }
+      }
+      return {};
     },
     clearBeforeEffect: async () => {
       if (currentEffect) {
@@ -328,6 +332,7 @@ function createReservation(
           record.recoveryId,
         );
       });
+      return {};
     },
     clearAfterConfirmedTeardown: async (presence) => {
       if (presence !== 'absent') {
@@ -341,8 +346,28 @@ function createReservation(
           record.recoveryId,
         );
       });
+      return {};
     },
   };
+}
+
+class PaneSlugOwnershipMissingError extends Error {}
+
+function hasExactPersistedPane(
+  config: Pick<ProjectPaneConfig, 'panes'>,
+  pane: { id: string; paneId: string; slug: string },
+): boolean {
+  return (Array.isArray(config.panes) ? config.panes : []).some((candidate) => {
+    if (!candidate || typeof candidate !== 'object') {
+      return false;
+    }
+    const value = candidate as Record<string, unknown>;
+    return (
+      value.id === pane.id
+      && value.paneId === pane.paneId
+      && value.slug === pane.slug
+    );
+  });
 }
 
 export function allocateUniquePaneSlug(

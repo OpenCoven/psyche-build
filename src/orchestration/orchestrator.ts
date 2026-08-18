@@ -100,7 +100,23 @@ export class Orchestrator {
         authorizationFailure ??= { error };
       })),
     );
-    if (authorizationFailure) throw authorizationFailure.error;
+    if (authorizationFailure) {
+      if (!results.some((result) => result !== undefined)) {
+        throw authorizationFailure.error;
+      }
+      const failure = normalizeAuthorizationFailure(authorizationFailure.error);
+      for (let index = 0; index < results.length; index += 1) {
+        if (results[index]) continue;
+        const timestamp = this.clock();
+        results[index] = {
+          id: plan.lanes[index].id,
+          status: 'failed',
+          error: failure,
+          startedAt: timestamp,
+          completedAt: timestamp,
+        };
+      }
+    }
 
     const lanes = results as OrchestrationLaneResult[];
     const completed = lanes.filter((lane) => lane.status === 'completed').length;
@@ -147,4 +163,21 @@ export class Orchestrator {
       };
     }
   }
+}
+
+function normalizeAuthorizationFailure(
+  error: unknown,
+): { code: 'lease_missing' | 'lease_expired' | 'lease_revision_mismatch' | 'effect_unknown'; message: string } {
+  const code = error && typeof error === 'object'
+    && typeof (error as { code?: unknown }).code === 'string'
+    ? (error as { code: string }).code
+    : '';
+  return {
+    code: code === 'lease_missing'
+      || code === 'lease_expired'
+      || code === 'lease_revision_mismatch'
+      ? code
+      : 'effect_unknown',
+    message: error instanceof Error ? error.message : String(error),
+  };
 }

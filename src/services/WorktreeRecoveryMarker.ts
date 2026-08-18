@@ -253,22 +253,48 @@ export async function removePaneSlugCleanupBlocker(
 
 export async function ensurePaneSlugCleanupBlocker(
   record: PaneSlugOwnershipRecord,
+  options: {
+    lockOptions?: Parameters<typeof acquireProjectWorktreeRecoveryLock>[1];
+  } = {},
 ): Promise<void> {
-  const expectedId = recoveryMarkerId(
+  const targetLock = await acquireProjectWorktreeRecoveryLock(
     record.projectRoot,
-    record.worktreePath,
-    record.recoveryId,
+    options.lockOptions,
   );
-  const targetLock = await acquireProjectWorktreeRecoveryLock(record.projectRoot);
   try {
-    const existing = await readMarkerIfPresent(record.projectRoot, expectedId);
-    if (existing?.recoveryId === record.recoveryId) {
-      return;
+    const slugLock = await acquireProjectPaneSlugAllocationLock(
+      record.sessionProjectRoot,
+      options.lockOptions,
+    );
+    try {
+      const current = await readPaneSlugOwnershipRecord(
+        record.sessionProjectRoot,
+        record.recoveryId,
+      );
+      if (
+        !current
+        || current.owner.nonce !== record.owner.nonce
+        || current.projectRoot !== record.projectRoot
+        || current.worktreePath !== record.worktreePath
+      ) {
+        return;
+      }
+      const expectedId = recoveryMarkerId(
+        current.projectRoot,
+        current.worktreePath,
+        current.recoveryId,
+      );
+      const existing = await readMarkerIfPresent(current.projectRoot, expectedId);
+      if (existing?.recoveryId === current.recoveryId) {
+        return;
+      }
+      const marker = buildPaneSlugCleanupMarker(current, current.state);
+      const directory = worktreeRecoveryMarkerDirectory(current.projectRoot);
+      await mkdir(directory, { recursive: true });
+      await atomicWriteJson(path.join(directory, `${marker.id}.json`), marker);
+    } finally {
+      await slugLock.release();
     }
-    const marker = buildPaneSlugCleanupMarker(record, record.state);
-    const directory = worktreeRecoveryMarkerDirectory(record.projectRoot);
-    await mkdir(directory, { recursive: true });
-    await atomicWriteJson(path.join(directory, `${marker.id}.json`), marker);
   } finally {
     await targetLock.release();
   }

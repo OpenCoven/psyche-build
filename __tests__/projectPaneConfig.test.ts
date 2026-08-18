@@ -1,4 +1,11 @@
-import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -140,6 +147,63 @@ describe('project pane config mutation', () => {
     }])).rejects.toThrow(/Duplicate pane ID/);
 
     expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([original]);
+  });
+
+  it('loads and atomically migrates legacy sidebar panes with duplicate slugs', async () => {
+    const projectRoot = createProject();
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    const fixturePath = join(
+      process.cwd(),
+      '__tests__',
+      'fixtures',
+      'sidebar-duplicate-slugs.json',
+    );
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'));
+    mkdirSync(join(projectRoot, '.psyche'), { recursive: true });
+    writeFileSync(configPath, `${JSON.stringify(fixture, null, 2)}\n`);
+
+    const loaded = await readProjectPaneConfigUnderLock(projectRoot);
+    expect(loaded.panes).toMatchObject([
+      {
+        id: 'pane-primary',
+        slug: 'fix-auth',
+        displayName: 'Fix auth',
+      },
+      {
+        id: 'pane-api',
+        slug: 'fix-auth-api-service',
+        branchName: 'fix-auth',
+        displayName: 'Fix auth · fix-auth-api-service',
+      },
+      {
+        id: 'pane-web',
+        slug: 'fix-auth-web-client',
+        branchName: 'fix-auth',
+        displayName: 'Fix auth · fix-auth-web-client',
+      },
+    ]);
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).panes.map(
+      (pane: { slug: string }) => pane.slug,
+    )).toEqual(['fix-auth', 'fix-auth', 'fix-auth']);
+
+    await upsertProjectPaneConfigPanes(projectRoot, [{
+      id: 'pane-created-after-migration',
+      paneId: '%4',
+      slug: 'follow-up',
+      displayName: 'Follow up',
+      prompt: '',
+    }]);
+
+    const persisted = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(persisted.panes.map((pane: { id: string }) => pane.id)).toEqual([
+      'pane-primary',
+      'pane-api',
+      'pane-web',
+      'pane-created-after-migration',
+    ]);
+    expect(new Set(persisted.panes.map(
+      (pane: { slug: string }) => pane.slug,
+    )).size).toBe(4);
   });
 
   it('removes a pane only when its exact tmux identity remains current', async () => {

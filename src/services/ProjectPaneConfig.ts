@@ -12,6 +12,7 @@ import { atomicWriteJson } from '../utils/atomicWrite.js';
 import type { PsychePane } from '../types.js';
 import type { PaneLayout } from '../types.js';
 import { reconcilePaneLayout, seedPaneLayout } from '../layout/PaneLayoutTree.js';
+import { buildManagedPaneTitle } from '../utils/paneTitle.js';
 import {
   getProcessStartIdentity,
   isProcessAlive,
@@ -856,6 +857,8 @@ export async function readProjectPaneConfig(
     );
   }
   assertUniquePaneIds(config.panes, configPath);
+  migrateLegacyDuplicatePaneSlugs(config, canonicalProjectRoot);
+  assertUniquePaneSlugs(config.panes, configPath);
   for (const key of ['settings', 'updateSettings'] as const) {
     const value = config[key];
     if (value !== undefined && (!value || typeof value !== 'object' || Array.isArray(value))) {
@@ -1064,6 +1067,121 @@ function assertUniquePaneSlugs(
     }
     seen.add(slug);
   }
+}
+
+function migrateLegacyDuplicatePaneSlugs(
+  config: ProjectPaneConfig,
+  canonicalProjectRoot: string,
+): void {
+  const panes = Array.isArray(config.panes) ? config.panes : [];
+  const reservedLegacySlugs = new Set(
+    panes
+      .map((pane) => asRecord(pane).slug)
+      .filter((slug): slug is string => typeof slug === 'string' && slug.length > 0),
+  );
+  const assigned = new Set<string>();
+
+  for (const pane of panes) {
+    const record = asRecord(pane);
+    const slug = typeof record.slug === 'string' ? record.slug : undefined;
+    if (!slug || !assigned.has(slug)) {
+      if (slug) assigned.add(slug);
+      continue;
+    }
+
+    const context = legacyPaneMigrationContext(
+      record,
+      config,
+      canonicalProjectRoot,
+    );
+    const contextSlug = slugContextSegment(context);
+    const candidateBase = `${slug}-${contextSlug || 'pane'}`;
+    let migratedSlug: string | undefined;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const candidate = attempt === 0
+        ? candidateBase
+        : `${candidateBase}-${attempt + 1}`;
+      if (!assigned.has(candidate) && !reservedLegacySlugs.has(candidate)) {
+        migratedSlug = candidate;
+        break;
+      }
+    }
+    if (!migratedSlug) {
+      throw new ProjectPaneConfigError(
+        'config_corrupt',
+        `Could not deterministically migrate duplicate pane slug "${slug}" in ${
+          projectPaneConfigPath(canonicalProjectRoot)
+        }`,
+      );
+    }
+
+    const displayName = typeof record.displayName === 'string'
+      && record.displayName.trim()
+      ? record.displayName
+      : slug;
+    if (
+      record.type !== 'shell'
+      && record.type !== 'desktop-use'
+      && typeof record.branchName !== 'string'
+    ) {
+      record.branchName = slug;
+    }
+    record.slug = migratedSlug;
+    record.displayName = buildManagedPaneTitle(displayName, migratedSlug);
+    assigned.add(migratedSlug);
+  }
+}
+
+function legacyPaneMigrationContext(
+  pane: Record<string, unknown>,
+  config: ProjectPaneConfig,
+  canonicalProjectRoot: string,
+): string {
+  const configName = typeof config.projectName === 'string'
+    ? config.projectName.trim()
+    : '';
+  const sessionName = path.basename(canonicalProjectRoot);
+  const paneProjectName = typeof pane.projectName === 'string'
+    ? pane.projectName.trim()
+    : '';
+  if (
+    paneProjectName
+    && paneProjectName !== configName
+    && paneProjectName !== sessionName
+  ) {
+    return paneProjectName;
+  }
+  if (typeof pane.projectRoot === 'string') {
+    const paneProjectRootName = path.basename(pane.projectRoot);
+    if (
+      paneProjectRootName
+      && paneProjectRootName !== configName
+      && paneProjectRootName !== sessionName
+    ) {
+      return paneProjectRootName;
+    }
+  }
+  const covenSession = pane.covenSession;
+  if (covenSession && typeof covenSession === 'object' && !Array.isArray(covenSession)) {
+    const session = covenSession as Record<string, unknown>;
+    const harness = typeof session.harness === 'string' ? session.harness.trim() : '';
+    const id = typeof session.id === 'string' ? session.id.trim() : '';
+    if (harness || id) return [harness, id].filter(Boolean).join('-');
+  }
+  return typeof pane.id === 'string' && pane.id.trim()
+    ? pane.id.trim()
+    : configName || sessionName;
+}
+
+function slugContextSegment(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^[._-]+|[._-]+$/g, '')
+    .slice(0, 48)
+    .replace(/[._-]+$/g, '');
 }
 
 interface PanePropertyDelta {

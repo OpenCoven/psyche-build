@@ -10,6 +10,7 @@ import {
   findBlockingWorktreeRecoveryMarker,
   listQuarantinedPaneSlugs,
   listWorktreeRecoveryMarkers,
+  removePaneSlugCleanupBlocker,
   writeWorktreeRecoveryMarker,
 } from '../src/services/WorktreeRecoveryMarker.js';
 import {
@@ -23,7 +24,10 @@ import {
   reserveCrashSafePaneSlug,
   settlePaneSlugReservationAfterFailure,
 } from '../src/services/PaneSlugReservation.js';
-import { mutateProjectPaneConfig } from '../src/services/ProjectPaneConfig.js';
+import {
+  acquireProjectWorktreeRecoveryLock,
+  mutateProjectPaneConfig,
+} from '../src/services/ProjectPaneConfig.js';
 
 describe('crash-safe pane slug ownership', () => {
   const roots: string[] = [];
@@ -241,6 +245,64 @@ describe('crash-safe pane slug ownership', () => {
     ]);
   });
 
+  it('treats durable pane ownership as settled when cleanup marker removal fails', async () => {
+    const sessionRoot = project('.psyche-slug-settle-');
+    const cleanupFailure = new Error(`cleanup lock failed ${'x'.repeat(500)}`);
+    const reservation = await reserveCrashSafePaneSlug({
+      sessionProjectRoot: sessionRoot,
+      projectRoot: sessionRoot,
+      paneId: 'pane-settled',
+      operation: 'settlement-cleanup-failure',
+      allocate: () => ({
+        slug: 'settled',
+        worktreePath: path.join(sessionRoot, '.psyche', 'worktrees', 'settled'),
+      }),
+      removeCleanupBlocker: async () => {
+        throw cleanupFailure;
+      },
+    });
+    await reservation.recordPaneEffect('%81');
+    await mutateProjectPaneConfig(sessionRoot, (config) => {
+      config.panes = [{
+        id: reservation.paneId,
+        paneId: '%81',
+        slug: reservation.slug,
+      }];
+    });
+
+    const first = await settlePaneSlugReservationAfterFailure(reservation, {
+      operation: 'settlement-retry',
+      reason: 'caller observed an ambiguous completion',
+    });
+    const retry = await settlePaneSlugReservationAfterFailure(reservation, {
+      operation: 'settlement-retry',
+      reason: 'caller retried the same completion',
+    });
+
+    expect(first).toMatchObject({
+      released: true,
+      quarantined: false,
+      message: expect.stringContaining('cleanup marker removal requires repair'),
+    });
+    expect(first.message!.length).toBeLessThan(500);
+    expect(retry).toMatchObject({
+      released: true,
+      quarantined: false,
+    });
+    expect(await listPaneSlugOwnershipRecords(sessionRoot)).toEqual([]);
+    expect(await listWorktreeRecoveryMarkers(sessionRoot)).toHaveLength(1);
+    await expect(reserveCrashSafePaneSlug({
+      sessionProjectRoot: sessionRoot,
+      projectRoot: sessionRoot,
+      paneId: 'duplicate-pane',
+      operation: 'settlement-duplicate-retry',
+      allocate: () => ({
+        slug: 'settled',
+        worktreePath: path.join(sessionRoot, '.psyche', 'worktrees', 'settled'),
+      }),
+    })).rejects.toThrow(/already owned/);
+  });
+
   it('reconciles stale-process provisional records against tmux state on restart', async () => {
     const sessionRoot = project('.psyche-slug-restart-');
     const absent = await reservePaneSlug({
@@ -326,6 +388,60 @@ describe('crash-safe pane slug ownership', () => {
         paneOwnershipState: 'quarantined',
       }),
     ]);
+  });
+
+  it('does not recreate a cleanup marker after the producer settles ownership', async () => {
+    const sessionRoot = project('.psyche-slug-interleave-');
+    let ownershipSettled!: () => void;
+    const ownershipWasSettled = new Promise<void>((resolve) => {
+      ownershipSettled = resolve;
+    });
+    const reservation = await reserveCrashSafePaneSlug({
+      sessionProjectRoot: sessionRoot,
+      projectRoot: sessionRoot,
+      paneId: 'interleaved-pane',
+      operation: 'interleaved-reconciliation',
+      allocate: () => ({
+        slug: 'interleaved',
+        worktreePath: path.join(sessionRoot, '.psyche', 'worktrees', 'interleaved'),
+      }),
+      removeCleanupBlocker: async (record) => {
+        ownershipSettled();
+        return removePaneSlugCleanupBlocker(record);
+      },
+    });
+    const [snapshot] = await listPaneSlugOwnershipRecords(sessionRoot);
+    await removePaneSlugCleanupBlocker(snapshot);
+
+    const targetLock = await acquireProjectWorktreeRecoveryLock(sessionRoot);
+    let reconciliationBlocked!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      reconciliationBlocked = resolve;
+    });
+    let retryReconciliation!: () => void;
+    const canRetry = new Promise<void>((resolve) => {
+      retryReconciliation = resolve;
+    });
+    const reconciliation = reconcileStalePaneSlugReservations({
+      sessionProjectRoot: sessionRoot,
+      lockOptions: {
+        pollIntervalMs: 1,
+        sleep: async () => {
+          reconciliationBlocked();
+          await canRetry;
+        },
+      },
+    });
+    await blocked;
+
+    const settlement = reservation.clearBeforeEffect();
+    await ownershipWasSettled;
+    await targetLock.release();
+    retryReconciliation();
+
+    await Promise.all([reconciliation, settlement]);
+    expect(await listPaneSlugOwnershipRecords(sessionRoot)).toEqual([]);
+    expect(await listWorktreeRecoveryMarkers(sessionRoot)).toEqual([]);
   });
 
   it('makes target cleanup visible cross-session and acknowledges both records once', async () => {

@@ -39,6 +39,7 @@ export interface CrashSafePaneSlugReservationOptions {
   ownerProbe?: PaneSlugRegistryOwnerProbe;
   lockOptions?: ProjectPaneConfigLockOptions;
   writeOwnershipRecord?: Parameters<typeof reservePaneSlug>[0]['writeOwnershipRecord'];
+  removeCleanupBlocker?: typeof removePaneSlugCleanupBlocker;
 }
 
 export async function reserveCrashSafePaneSlug(
@@ -73,7 +74,11 @@ export async function reserveCrashSafePaneSlug(
     if (!cleanupRecord) {
       throw new Error('Pane slug cleanup blocker was not published');
     }
-    return wrapCrashSafeReservation(reservation, cleanupRecord);
+    return wrapCrashSafeReservation(
+      reservation,
+      cleanupRecord,
+      options.removeCleanupBlocker,
+    );
   } finally {
     await targetLock.release();
   }
@@ -94,7 +99,9 @@ export async function reconcileStalePaneSlugReservations(
 ): Promise<void> {
   const records = await listPaneSlugOwnershipRecords(options.sessionProjectRoot);
   for (const snapshot of records) {
-    await ensurePaneSlugCleanupBlocker(snapshot);
+    await ensurePaneSlugCleanupBlocker(snapshot, {
+      lockOptions: options.lockOptions,
+    });
     if (
       snapshot.state !== 'provisional'
       || !isPaneSlugOwnerStale(snapshot, options.ownerProbe)
@@ -166,21 +173,29 @@ export async function settlePaneSlugReservationAfterFailure(
     };
   }
 
+  let config: Awaited<ReturnType<typeof readProjectPaneConfigUnderLock>>
+    | undefined;
   let configReadFailure: string | undefined;
   try {
-    const config = await readProjectPaneConfigUnderLock(
+    config = await readProjectPaneConfigUnderLock(
       reservation.sessionProjectRoot,
     );
-    if (hasExactPersistedPane(config, record)) {
-      await reservation.completeAfterPanePersisted({
-        id: record.pane.id,
-        paneId: record.pane.paneId!,
-        slug: record.slug,
-      });
-      return { released: true, quarantined: false };
-    }
   } catch (error) {
     configReadFailure = error instanceof Error ? error.message : String(error);
+  }
+  if (config && hasExactPersistedPane(config, record)) {
+    const settlement = await reservation.completeAfterPanePersisted({
+      id: record.pane.id,
+      paneId: record.pane.paneId!,
+      slug: record.slug,
+    });
+    return {
+      released: true,
+      quarantined: false,
+      ...(settlement.cleanupWarning
+        ? { message: settlement.cleanupWarning }
+        : {}),
+    };
   }
 
   if (!reservation.effect && !record.pane.paneId) {
@@ -266,12 +281,22 @@ async function clearExactOwnershipRecord(
 function wrapCrashSafeReservation(
   reservation: PaneSlugReservation,
   cleanupRecord: Parameters<typeof ensurePaneSlugCleanupBlocker>[0],
+  removeCleanupBlocker: typeof removePaneSlugCleanupBlocker
+    = removePaneSlugCleanupBlocker,
 ): PaneSlugReservation {
   const clearCleanupBlocker = async (
-    settle: () => Promise<void>,
-  ): Promise<void> => {
-    await settle();
-    await removePaneSlugCleanupBlocker(cleanupRecord);
+    settle: () => ReturnType<PaneSlugReservation['clearBeforeEffect']>,
+  ): ReturnType<PaneSlugReservation['clearBeforeEffect']> => {
+    const result = await settle();
+    try {
+      await removeCleanupBlocker(cleanupRecord);
+      return result;
+    } catch (error) {
+      return {
+        ...result,
+        cleanupWarning: boundedCleanupWarning(error),
+      };
+    }
   };
   return {
     get recoveryId() {
@@ -308,6 +333,12 @@ function wrapCrashSafeReservation(
       () => reservation.clearAfterConfirmedTeardown(presence),
     ),
   };
+}
+
+function boundedCleanupWarning(error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  const bounded = detail.length > 400 ? `${detail.slice(0, 397)}...` : detail;
+  return `Pane ownership settled, but cleanup marker removal requires repair: ${bounded}`;
 }
 
 function hasExactPersistedPane(

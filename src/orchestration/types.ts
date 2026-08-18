@@ -106,6 +106,10 @@ export const ORCHESTRATION_ERROR_CODES = [
   'capability_not_supported',
   'capability_contract_violation',
   'lane_execution_failed',
+  'lease_missing',
+  'lease_expired',
+  'lease_revision_mismatch',
+  'effect_unknown',
   'orchestration_persistence_failed',
 ] as const;
 
