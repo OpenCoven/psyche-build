@@ -2757,6 +2757,20 @@
     return count;
   }
 
+  function boundedBrowserError(error) {
+    var value;
+    try {
+      value = error && typeof error.message === "string"
+        ? error.message
+        : String(error);
+    } catch (_) {
+      value = "unknown error";
+    }
+    value = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
+    if (!value) value = "unknown error";
+    return value.length > 240 ? value.slice(0, 237) + "..." : value;
+  }
+
   function terminalLinksForLine(thread, text, y) {
     var links = [];
     var match;
@@ -2779,7 +2793,7 @@
       },
       activate: function (event) {
         openTerminalLink(thread, url, event).catch(function (error) {
-          setStatus("link open failed: " + String(error), "error");
+          setStatus("link open failed: " + boundedBrowserError(error), "error");
         });
       },
     };
@@ -2855,7 +2869,7 @@
       event.preventDefault();
       event.stopPropagation();
       openTerminalLink(thread, url, event).catch(function (error) {
-        setStatus("link open failed: " + String(error), "error");
+        setStatus("link open failed: " + boundedBrowserError(error), "error");
       });
     }
     container.addEventListener("contextmenu", handleContextMenu, true);
@@ -11375,7 +11389,10 @@
           tab.loading = false;
           if (browserNavigationOwnsVisiblePane(navigationContext)) syncProjectBrowser();
           else scheduleBrowserBounds();
-          writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
+          setStatus(
+            "browser navigation failed: " + boundedBrowserError(err),
+            "error"
+          );
           return false;
         }
         lifecycle.nativeLabel = previousView.nativeLabel;
@@ -11393,7 +11410,10 @@
         tab.url = previousUrl;
         if (browserNavigationOwnsVisiblePane(navigationContext)) syncProjectBrowser();
         else scheduleBrowserBounds();
-        writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
+        setStatus(
+          "browser navigation failed: " + boundedBrowserError(err),
+          "error"
+        );
         return false;
       }
     };

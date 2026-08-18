@@ -89,33 +89,48 @@ describe('terminal project browser links', () => {
     ).resolves.toBe(false);
   });
 
-  it('owns the terminal link activation promise', () => {
-    let caught = false;
+  it.each([
+    ['CLI', 'psyche'],
+    ['agent', 'agent-copilot'],
+  ])('catches %s terminal link navigation rejection', async (_label, kind) => {
+    const source = { ...thread, kind };
+    const statuses: Array<[string, string]> = [];
     const link = compileFunction<
       (
-        source: typeof thread,
+        linkSource: typeof source,
         url: string,
         x: number,
         y: number,
       ) => { activate: (event: { button: number }) => void }
     >(functionSource(mainJs, 'createTerminalLink'), {
-      openTerminalLink: (source: unknown, url: string, event: unknown) => {
-        expect([source, url, event]).toEqual([
-          thread,
+      openTerminalLink: async (linkSource: unknown, url: string, event: unknown) => {
+        expect([linkSource, url, event]).toEqual([
+          source,
           'https://example.test/docs',
           { button: 0 },
         ]);
-        return {
-          catch: () => {
-            caught = true;
-          },
-        };
+        throw new Error('ipc\tdisconnected\n' + 'x'.repeat(400));
       },
-      setStatus: () => {},
-    })(thread, 'https://example.test/docs', 4, 7);
+      boundedBrowserError: compileFunction<
+        (error: unknown) => string
+      >(
+        functionSource(mainJs, 'boundedBrowserError'),
+        {},
+      ),
+      setStatus: (message: string, level: string) => {
+        statuses.push([message, level]);
+      },
+    })(source, 'https://example.test/docs', 4, 7);
 
     link.activate({ button: 0 });
-    expect(caught).toBe(true);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]?.[0]).toMatch(/^link open failed: ipc disconnected x+\.\.\.$/);
+    expect(statuses[0]?.[0]).not.toMatch(/[\r\n\t\u0000-\u001f\u007f-\u009f\u2028\u2029]/);
+    expect(statuses[0]?.[0].length).toBeLessThanOrEqual('link open failed: '.length + 240);
+    expect(statuses[0]?.[1]).toBe('error');
   });
 
   it('threads pane context through provider and context-menu URL paths', async () => {
@@ -698,7 +713,10 @@ function browserNavigationDependencies(
     markBrowserTabLoaded: () => {},
     writeToActive: (_text: string) => {},
     setTimeout: (_callback: () => void) => 0,
-    setStatus: () => {},
+    setStatus: (_message: string, _level: string) => {},
+    boundedBrowserError: compileFunction<
+      (error: unknown) => string
+    >(functionSource(mainJs, 'boundedBrowserError'), {}),
     browserNavigationOwnsVisiblePane: () => true,
     browserNavigationIsCurrent: (context: {
       tab: BrowserNavigationTab;
@@ -3554,8 +3572,78 @@ describe('Tauri native browser lifecycle', () => {
     await expectLatestDormantSelectionWins(['tab-b', 'tab-a']);
   });
 
-  it('preserves title, URL, history, and created state after native navigation failure', async () => {
+  it.each([
+    ['CLI', 'psyche'],
+    ['agent', 'agent-copilot'],
+  ])(
+    'reports %s native navigation failure without writing into terminal output',
+    async (_label, kind) => {
+      const writes: string[] = [];
+      const statuses: Array<[string, string]> = [];
+      const project = { id: 'project-a' };
+      const sourceThread = {
+        id: `${kind}-a`,
+        kind,
+        projectId: project.id,
+        worktreePath: '/workspace',
+      };
+      const tab: BrowserNavigationTab = {
+        id: 'tab-a',
+        url: 'https://old.example',
+        created: true,
+        loading: false,
+        title: 'Saved title',
+        history: ['https://old.example', 'https://older.example'],
+        historyIndex: 1,
+      };
+      const browser = { activeTabId: tab.id, tabs: [tab] };
+      const dependencies = browserNavigationDependencies(
+        project,
+        browser,
+        tab,
+        async (command) => {
+          if (command === 'browser_navigate') throw new Error('native unavailable');
+        },
+      );
+      const findBrowserPane = dependencies.findBrowserPane;
+      dependencies.writeToActive = (text: string) => writes.push(text);
+      dependencies.setStatus = (message: string, level: string) => {
+        statuses.push([message, level]);
+      };
+      const navigateBrowserForContext = compileFunction<
+        (url: string, context: Record<string, unknown>) => Promise<boolean>
+      >(functionSource(mainJs, 'navigateBrowserForContext'), {
+        ...dependencies,
+        findThread: (id: string) => (
+          id === sourceThread.id ? sourceThread : findBrowserPane()
+        ),
+      });
+
+      await expect(navigateBrowserForContext('https://example.com', {
+        project,
+        projectId: project.id,
+        worktreePath: '/workspace',
+        sourceThread,
+        tabId: tab.id,
+      })).resolves.toBe(false);
+      expect(tab).toMatchObject({
+        created: true,
+        loading: false,
+        title: 'Saved title',
+        url: 'https://old.example',
+        history: ['https://old.example', 'https://older.example'],
+        historyIndex: 1,
+      });
+      expect(writes).toEqual([]);
+      expect(statuses).toEqual([
+        ['browser navigation failed: native unavailable', 'error'],
+      ]);
+    },
+  );
+
+  it('bounds and sanitizes native navigation failure status text', async () => {
     const writes: string[] = [];
+    const statuses: Array<[string, string]> = [];
     const project = { id: 'project-a' };
     const tab: BrowserNavigationTab = {
       id: 'tab-a',
@@ -3563,33 +3651,70 @@ describe('Tauri native browser lifecycle', () => {
       created: true,
       loading: false,
       title: 'Saved title',
-      history: ['https://old.example', 'https://older.example'],
-      historyIndex: 1,
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    const nativeMessage = 'native\r\n\t\u0000\u0085\u2028failure ' + 'x'.repeat(500);
+    const dependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      async (command) => {
+        if (command === 'browser_navigate') throw new Error(nativeMessage);
+      },
+    );
+    dependencies.writeToActive = (text: string) => writes.push(text);
+    dependencies.setStatus = (message: string, level: string) => {
+      statuses.push([message, level]);
+    };
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), dependencies);
+
+    await expect(navigateBrowser('https://example.com', { tabId: tab.id })).resolves.toBe(false);
+
+    expect(writes).toEqual([]);
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]?.[0]).toMatch(/^browser navigation failed: native failure x+\.\.\.$/);
+    expect(statuses[0]?.[0]).not.toMatch(/[\r\n\t\u0000-\u001f\u007f-\u009f\u2028\u2029]/);
+    expect(statuses[0]?.[0].length).toBeLessThanOrEqual(
+      'browser navigation failed: '.length + 240,
+    );
+    expect(statuses[0]?.[1]).toBe('error');
+  });
+
+  it('does not report an error after successful native navigation', async () => {
+    const writes: string[] = [];
+    const statuses: Array<[string, string]> = [];
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'about:blank',
+      created: false,
+      loading: false,
+      title: 'New tab',
+      history: [],
+      historyIndex: -1,
     };
     const browser = { activeTabId: tab.id, tabs: [tab] };
     const dependencies = browserNavigationDependencies(
       project,
       browser,
       tab,
-      async (command) => {
-        if (command === 'browser_navigate') throw new Error('native unavailable');
-      },
+      async () => {},
     );
     dependencies.writeToActive = (text: string) => writes.push(text);
+    dependencies.setStatus = (message: string, level: string) => {
+      statuses.push([message, level]);
+    };
     const navigateBrowser = compileFunction<
       (url: string, options: Record<string, unknown>) => Promise<boolean>
     >(functionSource(mainJs, 'navigateBrowser'), dependencies);
 
-    await expect(navigateBrowser('https://example.com', { tabId: tab.id })).resolves.toBe(false);
-    expect(tab).toMatchObject({
-      created: true,
-      loading: false,
-      title: 'Saved title',
-      url: 'https://old.example',
-      history: ['https://old.example', 'https://older.example'],
-      historyIndex: 1,
-    });
-    expect(writes).toEqual(['\r\n\x1b[31m[browser_navigate]\x1b[0m Error: native unavailable\r\n']);
+    await expect(navigateBrowser('https://example.com', { tabId: tab.id })).resolves.toBe(true);
+    expect(writes).toEqual([]);
+    expect(statuses).toEqual([]);
   });
 
   it('does not create or mutate tabs for an explicitly requested missing tab', async () => {
