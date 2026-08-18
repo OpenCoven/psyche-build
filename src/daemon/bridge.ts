@@ -32,6 +32,7 @@ import {
   projectPaneConfigPath,
   readProjectPaneConfig,
   transactProjectPaneConfig,
+  withProjectPaneSlugAllocationLock,
 } from '../services/ProjectPaneConfig.js';
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
 import {
@@ -1463,7 +1464,7 @@ export async function spawnBridgePane(
     paneWorktreePath: string,
     recoveryReservation?: RetainableWorktreeReservation,
   ): Promise<BridgeSpawnResult> {
-    const transaction = await transactProjectPaneConfig(
+    const persistPane = () => transactProjectPaneConfig(
       scoped.projectRoot,
       async ({ config, persist }) => {
         const freshPanes = Array.isArray(config.panes)
@@ -1631,6 +1632,12 @@ export async function spawnBridgePane(
         };
       },
     );
+    // Attach lock order matches local pane creation: reuse reservation ->
+    // project slug allocation -> pane config transaction. The namespace lease
+    // is released immediately after the sibling record is durable.
+    const transaction = attaching
+      ? await withProjectPaneSlugAllocationLock(scoped.projectRoot, persistPane)
+      : await persistPane();
     const { pane, paneSlug, settings } = transaction.result;
     const persistedPaneId = String(pane.paneId);
 

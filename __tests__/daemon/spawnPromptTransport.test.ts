@@ -8,6 +8,12 @@ import {
   type BridgeSpawnDeps,
   type BridgeSpawnPromptKeysRequest,
 } from '../../src/daemon/bridge.js';
+import { generateSiblingSlugForTargetPane } from '../../src/utils/attachAgent.js';
+import {
+  mutateProjectPaneConfig,
+  readProjectPaneConfigUnderLock,
+  withProjectPaneSlugAllocationLock,
+} from '../../src/services/ProjectPaneConfig.js';
 
 let root: string;
 let nextMockPaneId = 9;
@@ -77,6 +83,20 @@ async function spawn(
 function promptFiles(): string[] {
   const dir = path.join(root, '.psyche', 'prompts');
   return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+}
+
+async function waitForSlugAllocationWaiter(): Promise<void> {
+  const runtimeDir = path.join(root, '.psyche', 'runtime');
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const entries = fs.existsSync(runtimeDir) ? fs.readdirSync(runtimeDir) : [];
+    if (entries.some((entry) => (
+      entry.startsWith('pane-slug-allocation.lock.candidate.')
+    ))) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('daemon did not wait for the shared pane slug allocation lock');
 }
 
 describe('spawnBridgePane prompt transports', () => {
@@ -545,5 +565,91 @@ describe('concurrent shared-worktree attach', () => {
     const slugs = config.panes.map((p: any) => p.slug);
     expect(new Set(slugs).size).toBe(slugs.length);
     expect(slugs).toHaveLength(4);
+  });
+
+  it('serializes mixed daemon and local sibling allocation through persistence', async () => {
+    const seed = await spawnBridgePane(
+      root,
+      'psyche-test',
+      { requestId: 'seed', cwd: root, agent: 'coven-code', prompt: 'Fix auth' },
+      harness().deps,
+    );
+    const targetPane = {
+      slug: path.basename(seed.worktreePath),
+      worktreePath: seed.worktreePath,
+    };
+    const existingWorktree = {
+      ...targetPane,
+      branchName: seed.branch,
+    };
+
+    let releaseLocalPersistence!: () => void;
+    const localMayPersist = new Promise<void>((resolve) => {
+      releaseLocalPersistence = resolve;
+    });
+    let localAllocated!: () => void;
+    const localHasAllocated = new Promise<void>((resolve) => {
+      localAllocated = resolve;
+    });
+
+    let localSlug = '';
+    const localAttach = withProjectPaneSlugAllocationLock(root, async () => {
+      const config = await readProjectPaneConfigUnderLock(root);
+      const freshPanes = Array.isArray(config.panes)
+        ? config.panes.map((pane) => ({ slug: String(pane.slug ?? '') }))
+        : [];
+      localSlug = generateSiblingSlugForTargetPane(targetPane, freshPanes);
+      localAllocated();
+      await localMayPersist;
+      await mutateProjectPaneConfig(root, (freshConfig) => {
+        const panes = Array.isArray(freshConfig.panes) ? freshConfig.panes : [];
+        freshConfig.panes = [
+          ...panes,
+          {
+            id: 'local-sibling',
+            paneId: '%local',
+            slug: localSlug,
+            worktreePath: seed.worktreePath,
+            branchName: seed.branch,
+          },
+        ];
+      });
+    });
+
+    await localHasAllocated;
+    let daemonReachedPersistence = false;
+    const daemonAttach = spawnBridgePane(
+      root,
+      'psyche-test',
+      {
+        requestId: 'daemon-sibling',
+        cwd: root,
+        agent: 'claude',
+        prompt: 'Review',
+        existingWorktree,
+      },
+      {
+        ...harness().deps,
+        beforeExistingWorktreePersist: () => {
+          daemonReachedPersistence = true;
+        },
+      },
+    );
+
+    await waitForSlugAllocationWaiter();
+    expect(daemonReachedPersistence).toBe(false);
+
+    releaseLocalPersistence();
+    const [, daemonResult] = await Promise.all([localAttach, daemonAttach]);
+
+    expect(localSlug).toBe(`${targetPane.slug}-a2`);
+    expect(daemonResult.persistedPane?.slug).toBe(`${targetPane.slug}-a3`);
+    const config = JSON.parse(
+      fs.readFileSync(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+    const siblingSlugs = config.panes
+      .map((pane: any) => pane.slug)
+      .filter((slug: string) => slug.startsWith(`${targetPane.slug}-a`));
+    expect(siblingSlugs).toEqual([localSlug, daemonResult.persistedPane?.slug]);
   });
 });

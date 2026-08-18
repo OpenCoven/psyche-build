@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { PsychePane } from '../src/types.js';
 
 const beginWorktreeReuseReservationMock = vi.hoisted(() => vi.fn());
-const acquireProjectPaneSlugAllocationLockMock = vi.hoisted(() => vi.fn());
+const withProjectPaneSlugAllocationLockMock = vi.hoisted(() => vi.fn());
 const readProjectPaneConfigUnderLockMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../src/services/WorktreeCleanupService.js', () => ({
@@ -14,13 +14,13 @@ vi.mock('../src/services/WorktreeCleanupService.js', () => ({
 }));
 
 vi.mock('../src/services/ProjectPaneConfig.js', () => ({
-  acquireProjectPaneSlugAllocationLock: acquireProjectPaneSlugAllocationLockMock,
   ensureProjectPaneConfigPane: vi.fn(),
   mutateProjectPaneConfig: vi.fn(),
   projectPaneConfigPath: (projectRoot: string) => (
     `${projectRoot}/.psyche/psyche.config.json`
   ),
   readProjectPaneConfigUnderLock: readProjectPaneConfigUnderLockMock,
+  withProjectPaneSlugAllocationLock: withProjectPaneSlugAllocationLockMock,
 }));
 
 describe('worktree pane creation reservation', () => {
@@ -92,16 +92,16 @@ describe('worktree pane creation reservation', () => {
         retain: vi.fn(),
       };
     });
-    acquireProjectPaneSlugAllocationLockMock.mockImplementationOnce(async () => {
+    withProjectPaneSlugAllocationLockMock.mockImplementationOnce(async (
+      _projectRoot: string,
+      operation: () => Promise<unknown>,
+    ) => {
       order.push('acquire-slug-lock');
-      return {
-        canonicalProjectRoot: process.cwd(),
-        lockDir: `${process.cwd()}/.psyche/runtime/pane-slug-allocation.lock`,
-        nonce: 'slug-lock',
-        release: async () => {
-          order.push('release-slug-lock');
-        },
-      };
+      try {
+        return await operation();
+      } finally {
+        order.push('release-slug-lock');
+      }
     });
     readProjectPaneConfigUnderLockMock.mockImplementationOnce(async () => {
       order.push('load-fresh-panes');
@@ -159,14 +159,16 @@ describe('worktree pane creation reservation', () => {
       },
       retain: vi.fn(),
     }));
-    acquireProjectPaneSlugAllocationLockMock.mockImplementationOnce(async () => ({
-      canonicalProjectRoot: process.cwd(),
-      lockDir: `${process.cwd()}/.psyche/runtime/pane-slug-allocation.lock`,
-      nonce: 'slug-lock-failure',
-      release: async () => {
+    withProjectPaneSlugAllocationLockMock.mockImplementationOnce(async (
+      _projectRoot: string,
+      operation: () => Promise<unknown>,
+    ) => {
+      try {
+        return await operation();
+      } finally {
         order.push('release-slug-lock');
-      },
-    }));
+      }
+    });
     readProjectPaneConfigUnderLockMock.mockImplementationOnce(async () => {
       order.push('load-fresh-panes');
       return { panes: [{ slug: 'feature' }] };

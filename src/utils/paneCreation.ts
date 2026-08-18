@@ -36,11 +36,11 @@ import {
 } from '../services/WorktreeCleanupService.js';
 import type { ProjectWorktreeLifecycleLease } from '../services/WorktreeOperationLease.js';
 import {
-  acquireProjectPaneSlugAllocationLock,
   ensureProjectPaneConfigPane,
   mutateProjectPaneConfig,
   projectPaneConfigPath,
   readProjectPaneConfigUnderLock,
+  withProjectPaneSlugAllocationLock,
 } from '../services/ProjectPaneConfig.js';
 import {
   appendSlugSuffix,
@@ -332,12 +332,10 @@ export async function createPane(
       // Lock order is reuse reservation -> project slug allocation -> pane
       // config read/write. Release the slug lock before completing or
       // cancelling reuse so cleanup never waits while holding this namespace.
-      const slugLock = await acquireProjectPaneSlugAllocationLock(sessionProjectRoot);
-      try {
-        result = await createReservedPane();
-      } finally {
-        await slugLock.release();
-      }
+      result = await withProjectPaneSlugAllocationLock(
+        sessionProjectRoot,
+        createReservedPane,
+      );
     } else {
       result = await createReservedPane();
     }

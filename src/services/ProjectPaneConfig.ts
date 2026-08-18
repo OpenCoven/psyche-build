@@ -150,6 +150,23 @@ export async function acquireProjectPaneSlugAllocationLock(
   );
 }
 
+/**
+ * Runs one sibling-slug allocation transaction while holding the shared
+ * project namespace lease through durable pane persistence.
+ */
+export async function withProjectPaneSlugAllocationLock<T>(
+  projectRoot: string,
+  operation: () => Promise<T>,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<T> {
+  const lock = await acquireProjectPaneSlugAllocationLock(projectRoot, options);
+  try {
+    return await operation();
+  } finally {
+    await lock.release();
+  }
+}
+
 async function acquireProjectScopedLock(
   projectRoot: string,
   lockDirectoryName: string,
