@@ -23,6 +23,16 @@ async function newRoot(prefix: string): Promise<string> {
   return root;
 }
 
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await stat(targetPath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
 function storedOutcomePath(root: string, idempotencyKey: string): string {
   return path.join(
     root,
@@ -149,6 +159,46 @@ describe('ControlJournal', () => {
     const journal = await ControlJournal.open(root, 7);
 
     await expect(journal.loadOutcome('missing/結果/☕️')).resolves.toBeUndefined();
+  });
+
+  it('rejects a symlinked .psyche directory during runtime setup without mutating the target', async () => {
+    const root = await newRoot('psyche-journal');
+    const externalPsyche = path.join(root, 'external-psyche');
+    await mkdir(externalPsyche, { recursive: true, mode: 0o755 });
+    const externalModeBefore = (await stat(externalPsyche)).mode & 0o777;
+    await symlink(
+      externalPsyche,
+      path.join(root, '.psyche'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    await expect(ControlJournal.open(root, 7)).rejects.toThrow('durable outcome path is unsafe');
+
+    expect(await pathExists(path.join(externalPsyche, 'runtime'))).toBe(false);
+    expect(await pathExists(path.join(externalPsyche, 'runtime', 'events.ndjson'))).toBe(false);
+    expect(await pathExists(path.join(externalPsyche, 'runtime', 'snapshot.json'))).toBe(false);
+    expect(await pathExists(path.join(externalPsyche, 'runtime', 'outcomes'))).toBe(false);
+    expect((await stat(externalPsyche)).mode & 0o777).toBe(externalModeBefore);
+  });
+
+  it('rejects a symlinked runtime directory during setup without mutating the target', async () => {
+    const root = await newRoot('psyche-journal');
+    const externalRuntime = path.join(root, 'external-runtime');
+    await mkdir(path.join(root, '.psyche'), { recursive: true, mode: 0o700 });
+    await mkdir(externalRuntime, { recursive: true, mode: 0o755 });
+    const externalModeBefore = (await stat(externalRuntime)).mode & 0o777;
+    await symlink(
+      externalRuntime,
+      path.join(root, '.psyche', 'runtime'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    await expect(ControlJournal.open(root, 7)).rejects.toThrow('durable outcome path is unsafe');
+
+    expect(await pathExists(path.join(externalRuntime, 'events.ndjson'))).toBe(false);
+    expect(await pathExists(path.join(externalRuntime, 'snapshot.json'))).toBe(false);
+    expect(await pathExists(path.join(externalRuntime, 'outcomes'))).toBe(false);
+    expect((await stat(externalRuntime)).mode & 0o777).toBe(externalModeBefore);
   });
 
   it('rejects malformed durable outcome JSON', async () => {

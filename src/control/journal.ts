@@ -263,7 +263,7 @@ export class ControlJournal {
 
   static async open(projectRoot: string, ownerEpoch: number): Promise<ControlJournal> {
     const runtimeDir = path.join(projectRoot, '.psyche', 'runtime');
-    await mkdir(runtimeDir, { recursive: true });
+    await ensurePrivateDirectoryChain(runtimeDirectoryComponents(runtimeDir));
     const journalPath = path.join(runtimeDir, 'events.ndjson');
     const snapshotPath = path.join(runtimeDir, 'snapshot.json');
     const outcomeDirectoryPath = path.join(runtimeDir, 'outcomes');
@@ -616,33 +616,45 @@ function isSafeDurableOutcomeDirectoryStats(stats: BigIntStats): boolean {
 }
 
 async function durableOutcomeDirectoryExists(directoryPath: string): Promise<boolean> {
-  for (const component of durableOutcomeDirectoryComponents(directoryPath)) {
-    const stats = await readDurableOutcomeDirectoryStats(component);
+  return privateDirectoryChainExists(durableOutcomeDirectoryComponents(directoryPath));
+}
+
+async function ensureDurableOutcomeDirectory(directoryPath: string): Promise<void> {
+  await ensurePrivateDirectoryChain(durableOutcomeDirectoryComponents(directoryPath));
+  await chmod(directoryPath, 0o700);
+}
+
+function runtimeDirectoryComponents(runtimeDirectoryPath: string): string[] {
+  return [path.dirname(runtimeDirectoryPath), runtimeDirectoryPath];
+}
+
+function durableOutcomeDirectoryComponents(directoryPath: string): string[] {
+  const runtimeDirectory = path.dirname(directoryPath);
+  return [...runtimeDirectoryComponents(runtimeDirectory), directoryPath];
+}
+
+async function privateDirectoryChainExists(directoryPaths: readonly string[]): Promise<boolean> {
+  for (const directoryPath of directoryPaths) {
+    const stats = await readDurableOutcomeDirectoryStats(directoryPath);
     if (!stats) return false;
     if (!isSafeDurableOutcomeDirectoryStats(stats)) throw unsafeDurableOutcomePath();
   }
   return true;
 }
 
-async function ensureDurableOutcomeDirectory(directoryPath: string): Promise<void> {
-  for (const component of durableOutcomeDirectoryComponents(directoryPath)) {
-    let stats = await readDurableOutcomeDirectoryStats(component);
+async function ensurePrivateDirectoryChain(directoryPaths: readonly string[]): Promise<void> {
+  for (const directoryPath of directoryPaths) {
+    let stats = await readDurableOutcomeDirectoryStats(directoryPath);
     if (!stats) {
       try {
-        await mkdir(component, { mode: 0o700 });
+        await mkdir(directoryPath, { mode: 0o700 });
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
-      stats = await readDurableOutcomeDirectoryStats(component);
+      stats = await readDurableOutcomeDirectoryStats(directoryPath);
     }
     if (!stats || !isSafeDurableOutcomeDirectoryStats(stats)) throw unsafeDurableOutcomePath();
   }
-  await chmod(directoryPath, 0o700);
-}
-
-function durableOutcomeDirectoryComponents(directoryPath: string): string[] {
-  const runtimeDirectory = path.dirname(directoryPath);
-  return [path.dirname(runtimeDirectory), runtimeDirectory, directoryPath];
 }
 
 async function readDurableOutcomeDirectoryStats(directoryPath: string): Promise<BigIntStats | undefined> {
