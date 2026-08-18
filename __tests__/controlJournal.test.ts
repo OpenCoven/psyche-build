@@ -350,6 +350,46 @@ describe('ControlJournal', () => {
     expect(await readdir(quarantinedDirectory)).toEqual([]);
   });
 
+  it('fails closed if the outcomes directory identity changes during read', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const idempotencyKey = 'swapped-during-read';
+    const trustedOutcome = { status: 'succeeded', value: { paneId: '%trusted' } } as const;
+    const forgedOutcome = { status: 'succeeded', value: { paneId: '%forged' } } as const;
+    const runtimeDirectory = path.join(root, '.psyche', 'runtime');
+    const trustedDirectory = path.join(runtimeDirectory, 'outcomes-private');
+    const externalDirectory = path.join(root, 'external-read-outcomes');
+    const forgedPath = path.join(externalDirectory, path.basename(storedOutcomePath(root, idempotencyKey)));
+
+    await journal.storeOutcome(idempotencyKey, trustedOutcome);
+    await mkdir(externalDirectory, { recursive: true, mode: 0o755 });
+    await writeFile(forgedPath, JSON.stringify({
+      idempotencyKey,
+      outcome: forgedOutcome,
+    }), 'utf8');
+    const forgedBefore = await readFile(forgedPath, 'utf8');
+
+    let swapped = false;
+    setDurableOutcomePublicationTestHooksForTesting({
+      beforeOutcomePathRead: async ({ directoryPath }) => {
+        if (swapped || directoryPath !== path.join(runtimeDirectory, 'outcomes')) return;
+        swapped = true;
+        await rename(directoryPath, trustedDirectory);
+        await symlink(
+          externalDirectory,
+          directoryPath,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      },
+    });
+
+    await expect(journal.loadOutcome(idempotencyKey))
+      .rejects.toThrow('durable outcome directory changed during read');
+    expect(await readFile(forgedPath, 'utf8')).toBe(forgedBefore);
+    await expect(readFile(path.join(trustedDirectory, path.basename(forgedPath)), 'utf8'))
+      .resolves.toContain('%trusted');
+  });
+
   it('persists optional approval ownership metadata across journal replay', async () => {
     const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 7);

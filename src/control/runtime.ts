@@ -27,6 +27,7 @@ import {
   createAgentControlJournalResource,
   type AgentControlJournalReceipt,
   type DurableReceiptRecord,
+  type JournalMutationGuard,
   type JournalSnapshotFile,
 } from './journal.js';
 import { canonicalizeBoundedJson } from './boundedJson.js';
@@ -121,8 +122,8 @@ export interface CompactableJournal extends RuntimeJournal {
   loadOutcome(key: string): Promise<CommandOutcome | undefined>;
   storeOutcome(key: string, outcome: CommandOutcome): Promise<void>;
   loadSnapshot(): Promise<JournalSnapshotFile | undefined>;
-  writeSnapshot(file: JournalSnapshotFile): Promise<void>;
-  compact(coveredSequence: number): Promise<void>;
+  writeSnapshot(file: JournalSnapshotFile, guard?: JournalMutationGuard): Promise<void>;
+  compact(coveredSequence: number, guard?: JournalMutationGuard): Promise<void>;
 }
 
 function asCompactable(journal: RuntimeJournal): CompactableJournal | undefined {
@@ -173,6 +174,11 @@ interface RetainedReceipt {
 interface DirtyTerminalOutcome {
   sequence: number;
   outcome?: CommandOutcome;
+}
+
+interface ActiveCompactionAttempt {
+  coveredSequence: number;
+  invalidated: boolean;
 }
 
 interface SurfaceActionContext {
@@ -270,6 +276,7 @@ export class ControlRuntime {
   private readonly approvalTerminalizations = new Map<string, Promise<void>>();
   private readonly readActiveTaskCredential?: ControlRuntimeOptions['readActiveTaskCredential'];
   private readonly compactable?: CompactableJournal;
+  private activeCompaction?: ActiveCompactionAttempt;
   private compactionInFlight = false;
 
   private constructor(
@@ -1722,6 +1729,7 @@ export class ControlRuntime {
     outcome?: CommandOutcome,
   ): void {
     if (!this.compactable) return;
+    this.invalidateActiveCompactionForSequence(sequence);
     const prior = this.dirtyTerminalOutcomes.get(idempotencyKey);
     if (!prior || sequence >= prior.sequence) {
       this.dirtyTerminalOutcomes.set(idempotencyKey, { sequence, outcome: outcome ?? prior?.outcome });
@@ -1770,6 +1778,28 @@ export class ControlRuntime {
     return false;
   }
 
+  private beginCompactionAttempt(coveredSequence: number): ActiveCompactionAttempt {
+    const attempt = { coveredSequence, invalidated: false };
+    this.activeCompaction = attempt;
+    return attempt;
+  }
+
+  private finishCompactionAttempt(attempt: ActiveCompactionAttempt): void {
+    if (this.activeCompaction === attempt) this.activeCompaction = undefined;
+  }
+
+  private invalidateActiveCompactionForSequence(sequence: number): void {
+    const active = this.activeCompaction;
+    if (!active || sequence > active.coveredSequence) return;
+    active.invalidated = true;
+  }
+
+  private compactionShouldAbort(attempt: ActiveCompactionAttempt): boolean {
+    return this.activeCompaction !== attempt
+      || attempt.invalidated
+      || this.hasDirtyTerminalOutcomesThrough(attempt.coveredSequence);
+  }
+
   /**
    * Compacts once the journal has grown well past the window the runtime can
    * actually use, so the rewrite cost is amortised rather than paid per append.
@@ -1792,28 +1822,37 @@ export class ControlRuntime {
   private async compactJournal(journal: CompactableJournal): Promise<void> {
     const coveredSequence = journal.sequence - JOURNAL_RETAINED_EVENTS;
     if (coveredSequence < journal.firstSequence) return;
-    await this.flushDirtyTerminalOutcomesThrough(coveredSequence);
-    if (this.hasDirtyTerminalOutcomesThrough(coveredSequence)) return;
+    const attempt = this.beginCompactionAttempt(coveredSequence);
+    const guard: JournalMutationGuard = {
+      shouldAbort: () => this.compactionShouldAbort(attempt),
+    };
+    try {
+      await this.flushDirtyTerminalOutcomesThrough(coveredSequence);
+      if (this.compactionShouldAbort(attempt)) return;
 
-    // Records older than the retained window survive only in the previous
-    // snapshot, so the new one is the union rather than a fresh projection.
-    // Exact outcomes still remain authoritative in the sidecar store.
-    const previous = await journal.loadSnapshot();
-    const records = mergeDurableReceiptRecords(
-      previous?.receiptRecords ?? [],
-      latestDurableReceiptRecords(journal.read(previous?.coveredSequence ?? 0)),
-    ).slice(-MAX_COMMAND_RECORDS);
+      // Records older than the retained window survive only in the previous
+      // snapshot, so the new one is the union rather than a fresh projection.
+      // Exact outcomes still remain authoritative in the sidecar store.
+      const previous = await journal.loadSnapshot();
+      const records = mergeDurableReceiptRecords(
+        previous?.receiptRecords ?? [],
+        latestDurableReceiptRecords(journal.read(previous?.coveredSequence ?? 0)),
+      ).slice(-MAX_COMMAND_RECORDS);
 
-    // The snapshot must be durable before the events it covers are dropped.
-    // Exact outcomes stay in the sidecar, so new snapshots no longer duplicate
-    // them.
-    await journal.writeSnapshot({
-      snapshot: this.snapshot(),
-      coveredSequence,
-      outcomes: {},
-      receiptRecords: records,
-    });
-    await journal.compact(coveredSequence);
+      // The snapshot must be durable before the events it covers are dropped.
+      // Exact outcomes stay in the sidecar, so new snapshots no longer duplicate
+      // them.
+      await journal.writeSnapshot({
+        snapshot: this.snapshot(),
+        coveredSequence,
+        outcomes: {},
+        receiptRecords: records,
+      }, guard);
+      if (this.compactionShouldAbort(attempt)) return;
+      await journal.compact(coveredSequence, guard);
+    } finally {
+      this.finishCompactionAttempt(attempt);
+    }
   }
 
   private queueForPane(paneId: string): PaneQueueState {

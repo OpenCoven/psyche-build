@@ -1,13 +1,15 @@
-import { mkdir, rm } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { mkdir, rm, unlink } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ControlJournal } from '../src/control/journal.js';
+import { createDeferred } from './utils/deferred.js';
+import { ControlJournal, setDurableOutcomePublicationTestHooksForTesting } from '../src/control/journal.js';
 import { ControlRuntime, type ControlHandlers } from '../src/control/runtime.js';
 import type { ControlCommand } from '../src/control/types.js';
 
 const roots: string[] = [];
 afterEach(async () => {
+  setDurableOutcomePublicationTestHooksForTesting(undefined);
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -41,6 +43,16 @@ async function newRoot(): Promise<string> {
   await mkdir(root, { recursive: true, mode: 0o700 });
   roots.push(root);
   return root;
+}
+
+function storedOutcomePath(root: string, idempotencyKey: string): string {
+  return path.join(
+    root,
+    '.psyche',
+    'runtime',
+    'outcomes',
+    createHash('sha256').update(idempotencyKey, 'utf8').digest('hex'),
+  );
 }
 
 describe('control journal compaction', () => {
@@ -110,6 +122,58 @@ describe('control journal compaction', () => {
     const replayed = await restarted.submit(takeover('idem-dropped'));
 
     expect(replayed).toEqual(first);
+    expect(reopened.sequence).toBe(sequenceBefore);
+  }, 90_000);
+
+  it('aborts compaction when a covered replay discovers a missing sidecar', async () => {
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 4);
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 4, handlers: makeHandlers(), journal,
+    });
+
+    const first = await runtime.submit(takeover('idem-race'));
+    for (let index = 0; index < 500; index += 1) {
+      await runtime.submit(takeover(`idem-race-later-${index}`));
+    }
+    const coveredSequence = journal.sequence - 1_000;
+    expect(coveredSequence).toBeGreaterThanOrEqual(2);
+    (runtime as any).outcomesByIdempotencyKey.delete('idem-race');
+    await unlink(storedOutcomePath(root, 'idem-race'));
+
+    const compactReady = createDeferred<void>();
+    const releaseCompact = createDeferred<void>();
+    setDurableOutcomePublicationTestHooksForTesting({
+      beforeCompactRename: async ({ coveredSequence: hookCoveredSequence }) => {
+        expect(hookCoveredSequence).toBe(coveredSequence);
+        compactReady.resolve();
+        await releaseCompact.promise;
+      },
+    });
+
+    const compacting = (runtime as any).compactJournal(journal);
+    await compactReady.promise;
+
+    const replayed = await runtime.submit(takeover('idem-race'));
+    expect(replayed).toEqual(first);
+    releaseCompact.resolve();
+    await compacting;
+
+    expect(journal.firstSequence).toBe(1);
+    expect(journal.read(0).filter((event) => (
+      event.kind === 'command.succeeded' && event.payload.idempotencyKey === 'idem-race'
+    ))).toHaveLength(1);
+
+    setDurableOutcomePublicationTestHooksForTesting(undefined);
+    await (runtime as any).compactJournal(journal);
+    expect(journal.firstSequence).toBeGreaterThan(2);
+
+    const reopened = await ControlJournal.open(root, 5);
+    const restarted = await ControlRuntime.create({
+      ownerEpoch: 5, handlers: makeHandlers(), journal: reopened,
+    });
+    const sequenceBefore = reopened.sequence;
+    await expect(restarted.submit(takeover('idem-race'))).resolves.toEqual(first);
     expect(reopened.sequence).toBe(sequenceBefore);
   }, 90_000);
 

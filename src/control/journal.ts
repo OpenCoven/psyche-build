@@ -226,10 +226,41 @@ interface DurableOutcomePublicationContext {
   readonly temporaryPath: string;
 }
 
-interface DurableOutcomePublicationTestHooks {
-  readonly beforeTemporaryOpen?: (context: DurableOutcomePublicationContext) => Promise<void> | void;
-  readonly beforeDestinationRename?: (context: DurableOutcomePublicationContext) => Promise<void> | void;
+interface DurableOutcomeReadContext {
+  readonly directoryPath: string;
+  readonly outcomePath: string;
 }
+
+interface SnapshotWriteContext {
+  readonly snapshotPath: string;
+  readonly temporaryPath: string;
+  readonly coveredSequence: number;
+}
+
+interface JournalCompactionContext {
+  readonly journalPath: string;
+  readonly temporaryPath: string;
+  readonly coveredSequence: number;
+  readonly firstSequence: number;
+}
+
+export interface JournalMutationGuard {
+  readonly shouldAbort?: () => boolean;
+}
+
+interface JournalTestHookContexts {
+  readonly beforeTemporaryOpen: DurableOutcomePublicationContext;
+  readonly beforeDestinationRename: DurableOutcomePublicationContext;
+  readonly beforeOutcomePathRead: DurableOutcomeReadContext;
+  readonly beforeSnapshotRename: SnapshotWriteContext;
+  readonly beforeCompactRename: JournalCompactionContext;
+}
+
+type DurableOutcomePublicationTestHooks = {
+  [K in keyof JournalTestHookContexts]?: (
+    context: JournalTestHookContexts[K],
+  ) => Promise<void> | void;
+};
 
 let durableOutcomePublicationTestHooks: DurableOutcomePublicationTestHooks | undefined;
 
@@ -434,13 +465,35 @@ export class ControlJournal {
 
   async loadOutcome(idempotencyKey: string): Promise<CommandOutcome | undefined> {
     if (!await durableOutcomeDirectoryExists(this.outcomeDirectoryPath)) return undefined;
+    const directoryIdentity = await snapshotDurableOutcomeDirectoryIdentity(this.outcomeDirectoryPath);
+    if (!directoryIdentity) return undefined;
     const outcomePath = this.outcomePath(idempotencyKey);
+    const readContext = {
+      directoryPath: this.outcomeDirectoryPath,
+      outcomePath,
+    } satisfies DurableOutcomeReadContext;
+    await assertDurableOutcomeDirectoryIdentity(
+      this.outcomeDirectoryPath,
+      directoryIdentity,
+      durableOutcomeDirectoryChangedDuringRead,
+    );
+    await invokeDurableOutcomePublicationHook('beforeOutcomePathRead', readContext);
+    await assertDurableOutcomeDirectoryIdentity(
+      this.outcomeDirectoryPath,
+      directoryIdentity,
+      durableOutcomeDirectoryChangedDuringRead,
+    );
     const preOpenPath = await readDurableOutcomeFilePathSnapshot(outcomePath);
     if (preOpenPath.missing) return undefined;
     if (preOpenPath.invalid || !preOpenPath.snapshot) {
       throw unsafeDurableOutcomePath();
     }
     const preOpenSnapshot = preOpenPath.snapshot;
+    await assertDurableOutcomeDirectoryIdentity(
+      this.outcomeDirectoryPath,
+      directoryIdentity,
+      durableOutcomeDirectoryChangedDuringRead,
+    );
     let handle: FileHandle;
     try {
       handle = await open(outcomePath, durableOutcomeFileReadFlags());
@@ -456,7 +509,17 @@ export class ControlJournal {
       if (!sameDurableOutcomeFileSnapshot(preOpenSnapshot, openedSnapshot)) {
         throw new Error('durable outcome file changed while reading');
       }
+      await assertDurableOutcomeDirectoryIdentity(
+        this.outcomeDirectoryPath,
+        directoryIdentity,
+        durableOutcomeDirectoryChangedDuringRead,
+      );
       const raw = await readBoundedStoredOutcome(handle);
+      await assertDurableOutcomeDirectoryIdentity(
+        this.outcomeDirectoryPath,
+        directoryIdentity,
+        durableOutcomeDirectoryChangedDuringRead,
+      );
       const currentPath = await readDurableOutcomeFilePathSnapshot(outcomePath);
       if (currentPath.missing || currentPath.invalid || !currentPath.snapshot) {
         throw new Error('durable outcome file changed while reading');
@@ -551,7 +614,7 @@ export class ControlJournal {
     }
   }
 
-  async writeSnapshot(file: JournalSnapshotFile): Promise<void> {
+  async writeSnapshot(file: JournalSnapshotFile, guard?: JournalMutationGuard): Promise<void> {
     const temporary = `${this.snapshotPath}.${process.pid}.tmp`;
     const handle = await open(temporary, 'w');
     try {
@@ -559,6 +622,16 @@ export class ControlJournal {
       await handle.sync();
     } finally {
       await handle.close();
+    }
+    const context = {
+      snapshotPath: this.snapshotPath,
+      temporaryPath: temporary,
+      coveredSequence: file.coveredSequence,
+    } satisfies SnapshotWriteContext;
+    await invokeDurableOutcomePublicationHook('beforeSnapshotRename', context);
+    if (guard?.shouldAbort?.()) {
+      await unlink(temporary).catch(() => undefined);
+      return;
     }
     await rename(temporary, this.snapshotPath);
   }
@@ -572,7 +645,7 @@ export class ControlJournal {
    * rewrite, and replaces the file by atomic rename so a crash mid-compaction
    * leaves the previous journal intact.
    */
-  compact(coveredSequence: number): Promise<void> {
+  compact(coveredSequence: number, guard?: JournalMutationGuard): Promise<void> {
     let resolveDone!: () => void;
     let rejectDone!: (error: unknown) => void;
     const result = new Promise<void>((resolve, reject) => {
@@ -602,6 +675,18 @@ export class ControlJournal {
         await handle.sync();
       } finally {
         await handle.close();
+      }
+      const context = {
+        journalPath: this.path,
+        temporaryPath: temporary,
+        coveredSequence,
+        firstSequence,
+      } satisfies JournalCompactionContext;
+      await invokeDurableOutcomePublicationHook('beforeCompactRename', context);
+      if (guard?.shouldAbort?.()) {
+        await unlink(temporary).catch(() => undefined);
+        resolveDone();
+        return;
       }
       await rename(temporary, this.path);
 
@@ -697,11 +782,14 @@ async function ensureDurableOutcomeDirectory(directoryPath: string): Promise<Dur
   return identity;
 }
 
-async function invokeDurableOutcomePublicationHook(
-  step: keyof DurableOutcomePublicationTestHooks,
-  context: DurableOutcomePublicationContext,
+async function invokeDurableOutcomePublicationHook<K extends keyof JournalTestHookContexts>(
+  step: K,
+  context: JournalTestHookContexts[K],
 ): Promise<void> {
-  await durableOutcomePublicationTestHooks?.[step]?.(context);
+  const hook = durableOutcomePublicationTestHooks?.[step] as (
+    (value: JournalTestHookContexts[K]) => Promise<void> | void
+  ) | undefined;
+  await hook?.(context);
 }
 
 function normalizeDurableOutcomeRealPath(value: string): string {
@@ -742,18 +830,19 @@ function sameDurableOutcomeDirectoryIdentity(
 async function assertDurableOutcomeDirectoryIdentity(
   directoryPath: string,
   expected: DurableOutcomeDirectoryIdentity,
+  mismatchError: () => Error = durableOutcomeDirectoryChangedDuringPublication,
 ): Promise<void> {
   let current: DurableOutcomeDirectoryIdentity | undefined;
   try {
     current = await snapshotDurableOutcomeDirectoryIdentity(directoryPath);
   } catch (error) {
     if (error instanceof Error && error.message === unsafeDurableOutcomePath().message) {
-      throw durableOutcomeDirectoryChangedDuringPublication();
+      throw mismatchError();
     }
     throw error;
   }
   if (!current || !sameDurableOutcomeDirectoryIdentity(expected, current)) {
-    throw durableOutcomeDirectoryChangedDuringPublication();
+    throw mismatchError();
   }
 }
 
@@ -834,6 +923,10 @@ function unsafeDurableOutcomePath(): Error {
 
 function durableOutcomeDirectoryChangedDuringPublication(): Error {
   return new Error('durable outcome directory changed during publication');
+}
+
+function durableOutcomeDirectoryChangedDuringRead(): Error {
+  return new Error('durable outcome directory changed during read');
 }
 
 function snapshotDurableOutcomeFile(stats: BigIntStats): DurableOutcomeFileSnapshot {
