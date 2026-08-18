@@ -61,7 +61,13 @@ function requestWithLaneMode(mode: OrchestrationLaneMode): OrchestrationTaskRequ
 function spawnResult() {
   return {
     id: '%1',
-    pane: {} as never,
+    pane: {
+      id: '%1',
+      cwd: root,
+      branch: BRANCH,
+      agent: 'codex',
+      title: 'Fix the failing tests',
+    },
     worktreePath: root,
     branch: BRANCH,
   };
@@ -104,6 +110,27 @@ describe('createDaemonOrchestrator', () => {
     ]);
     expect(spawnPane).toHaveBeenCalledTimes(1);
     expect(launchSession).not.toHaveBeenCalled();
+  });
+
+  it('preserves bridge pane correlation identity in the lane result', async () => {
+    const orchestrator = createDaemonOrchestrator({
+      sessionName: 'psyche-repo',
+      spawnPane: vi.fn(async () => spawnResult()),
+      covenClient: { listSessions: async () => [] },
+    });
+
+    const result = await orchestrator.execute(requestWithLaneMode('isolated-worktree'));
+
+    expect(result.lanes[0]).toMatchObject({
+      id: 'lane-isolated-worktree',
+      status: 'completed',
+      pane: {
+        id: '%1',
+        paneId: '%1',
+        worktreePath: root,
+        branchName: BRANCH,
+      },
+    });
   });
 
   it('routes coven-session lanes through the Coven backend', async () => {

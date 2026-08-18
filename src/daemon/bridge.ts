@@ -17,6 +17,7 @@ import {
   getSendKeysReadyDelayMs,
   getSendKeysSubmit,
   type AgentName,
+  type PermissionMode,
 } from '../utils/agentLaunch.js';
 import { sendPromptViaTmux } from '../utils/agentPromptDispatch.js';
 import { TmuxService } from '../services/TmuxService.js';
@@ -88,6 +89,7 @@ export interface BridgeSpawnRequest {
   agent?: string;
   title?: string;
   prompt?: string;
+  permissionMode?: PermissionMode;
   /** Existing branch or ref from which to create the generated pane branch. */
   startPointBranch?: string;
   branch?: string;
@@ -1562,6 +1564,7 @@ export async function spawnBridgePane(
             }
             : {}),
           agent,
+          ...(request.permissionMode ? { permissionMode: request.permissionMode } : {}),
           agentStatus: agent ? 'working' : 'idle',
           lastUpdated: now,
         };
@@ -1636,7 +1639,8 @@ export async function spawnBridgePane(
         paneSlug,
         agent,
         request.prompt,
-        (settings as PsycheConfig['settings'] | undefined)?.permissionMode,
+        request.permissionMode
+          ?? (settings as PsycheConfig['settings'] | undefined)?.permissionMode,
       );
       deps.sendTmuxCommand(persistedPaneId, launchCommand);
 

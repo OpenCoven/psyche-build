@@ -14,6 +14,8 @@ export interface BridgePaneBackendOptions {
     sessionName: string,
     request: BridgeSpawnRequest,
   ) => Promise<BridgeSpawnResult>;
+  /** Defaults to true for callers that inspect spawned(). */
+  retainResults?: boolean;
 }
 
 export interface BridgePaneBackend {
@@ -58,13 +60,36 @@ export function createBridgePaneBackend(options: BridgePaneBackendOptions): Brid
       cwd: lane.cwd,
       ...(lane.agent ? { agent: lane.agent } : {}),
       prompt: lane.prompt,
+      ...(lane.permissionMode ? { permissionMode: lane.permissionMode } : {}),
       ...(lane.startPointBranch ? { startPointBranch: lane.startPointBranch } : {}),
       ...(lane.title ? { title: lane.title } : {}),
       ...(lane.existingWorktree ? { existingWorktree: lane.existingWorktree } : {}),
     });
 
-    spawned.set(lane.id, result);
-    return {};
+    if (options.retainResults !== false) {
+      spawned.set(lane.id, result);
+    }
+    return {
+      pane: {
+        id: result.pane.id || result.id,
+        slug: lane.existingWorktree?.slug ?? lane.id,
+        ...(result.pane.title ? { displayName: result.pane.title } : {}),
+        branchName: result.branch,
+        prompt: lane.prompt,
+        paneId: result.id,
+        projectRoot: lane.projectRoot,
+        type: 'worktree',
+        worktreePath: result.worktreePath,
+        ...(lane.agent ? { agent: lane.agent } : {}),
+        ...(lane.permissionMode ? { permissionMode: lane.permissionMode } : {}),
+        orchestration: {
+          taskId: lane.taskId,
+          laneId: lane.id,
+          traceId: lane.traceId,
+          mode: lane.mode,
+        },
+      },
+    };
   };
 
   return { execute, spawned: () => new Map(spawned) };

@@ -10,6 +10,8 @@ import { OrchestrationError, type OrchestrationLanePlan } from './types.js';
 export interface CovenSessionBackendOptions {
   /** Injectable for tests; defaults to the local Coven daemon. */
   client?: CovenClient;
+  /** Defaults to true for callers that inspect sessions(). */
+  retainResults?: boolean;
 }
 
 export interface CovenSessionBackend {
@@ -77,7 +79,9 @@ export function createCovenSessionBackend(
       );
     }
 
-    sessions.set(lane.id, session);
+    if (options.retainResults !== false) {
+      sessions.set(lane.id, session);
+    }
     return { sessionId: session.id };
   };
 

@@ -54,6 +54,21 @@ describe('createCovenSessionBackend', () => {
     expect(backend.sessions().get('coven')?.id).toBe('session-9');
   });
 
+  it('can execute without retaining completed session summaries', async () => {
+    const launchSession = vi.fn(async () => session('session-9'));
+    const backend = createCovenSessionBackend({
+      client: clientWith(launchSession),
+      retainResults: false,
+    });
+
+    await Promise.all(
+      Array.from({ length: 25 }, (_, index) =>
+        backend.execute(lane({ id: `lane-${index}` }))),
+    );
+
+    expect(backend.sessions().size).toBe(0);
+  });
+
   it('passes the lane harness, prompt, and cwd to Coven', async () => {
     const launchSession = vi.fn(async (_request: Record<string, unknown>) => session('s'));
     const backend = createCovenSessionBackend({ client: clientWith(launchSession) });

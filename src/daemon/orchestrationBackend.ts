@@ -23,9 +23,11 @@ export function createDaemonOrchestrator(
   const paneBackend = createBridgePaneBackend({
     sessionName: options.sessionName,
     ...(options.spawnPane ? { spawnPane: options.spawnPane } : {}),
+    retainResults: false,
   });
   const covenBackend = createCovenSessionBackend({
     ...(options.covenClient ? { client: options.covenClient } : {}),
+    retainResults: false,
   });
 
   return new Orchestrator({

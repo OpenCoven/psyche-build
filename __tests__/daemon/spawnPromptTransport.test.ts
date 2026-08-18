@@ -51,11 +51,23 @@ function harness() {
   };
 }
 
-async function spawn(agent: string, prompt: string | undefined, h = harness()) {
+async function spawn(
+  agent: string,
+  prompt: string | undefined,
+  h = harness(),
+  permissionMode?: 'plan' | 'acceptEdits' | 'bypassPermissions',
+) {
   const result = await spawnBridgePane(
     root,
     'psyche-test',
-    { requestId: 'req-1', cwd: root, agent, prompt, title: `${agent}-lane` },
+    {
+      requestId: 'req-1',
+      cwd: root,
+      agent,
+      prompt,
+      title: `${agent}-lane`,
+      ...(permissionMode ? { permissionMode } : {}),
+    },
     h.deps,
   );
   return { ...h, result };
@@ -130,6 +142,23 @@ describe('spawnBridgePane prompt transports', () => {
     await spawn('cline', 'Fix it', h);
 
     expect(order).toEqual(['launch:cline', 'keys']);
+  });
+
+  it('uses the request permission mode instead of broader project settings', async () => {
+    fs.mkdirSync(path.join(root, '.psyche'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, '.psyche', 'psyche.config.json'),
+      JSON.stringify({ settings: { permissionMode: 'bypassPermissions' }, panes: [] }),
+    );
+
+    const h = await spawn('claude', 'Fix it', harness(), 'plan');
+    const config = JSON.parse(
+      fs.readFileSync(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+
+    expect(h.commands[0]).toContain('--permission-mode plan');
+    expect(h.commands[0]).not.toContain('--dangerously-skip-permissions');
+    expect(config.panes[0].permissionMode).toBe('plan');
   });
 });
 

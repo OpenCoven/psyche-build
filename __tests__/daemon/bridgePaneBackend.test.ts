@@ -22,7 +22,13 @@ function lane(overrides: Record<string, unknown> = {}) {
 function spawnResult(id: string) {
   return {
     id: `%${id}`,
-    pane: {} as never,
+    pane: {
+      id: `%${id}`,
+      cwd: `/w/${id}`,
+      branch: `psyche/${id}`,
+      agent: 'codex',
+      title: `${id} lane`,
+    },
     worktreePath: `/w/${id}`,
     branch: `psyche/${id}`,
   };
@@ -45,6 +51,46 @@ describe('createBridgePaneBackend', () => {
       prompt: 'Fix the failing tests',
     });
     expect(backend.spawned().get('codex')).toMatchObject({ id: '%codex' });
+  });
+
+  it('forwards the lane permission mode to the bridge spawn request', async () => {
+    const spawnPane = vi.fn(async () => spawnResult('codex'));
+    const backend = createBridgePaneBackend({ sessionName: 's', spawnPane });
+
+    await backend.execute(lane({ permissionMode: 'plan' }));
+
+    expect((spawnPane.mock.calls[0] as any[])[2].permissionMode).toBe('plan');
+  });
+
+  it('returns the created pane, worktree, and branch identity', async () => {
+    const backend = createBridgePaneBackend({
+      sessionName: 's',
+      spawnPane: vi.fn(async () => spawnResult('codex')),
+    });
+
+    const output = await backend.execute(lane());
+
+    expect(output.pane).toMatchObject({
+      id: '%codex',
+      paneId: '%codex',
+      worktreePath: '/w/codex',
+      branchName: 'psyche/codex',
+    });
+  });
+
+  it('can execute without retaining completed spawn summaries', async () => {
+    const backend = createBridgePaneBackend({
+      sessionName: 's',
+      spawnPane: vi.fn(async () => spawnResult('codex')),
+      retainResults: false,
+    });
+
+    await Promise.all(
+      Array.from({ length: 25 }, (_, index) =>
+        backend.execute(lane({ id: `lane-${index}` }))),
+    );
+
+    expect(backend.spawned().size).toBe(0);
   });
 
   it('omits the agent for terminal lanes', async () => {
