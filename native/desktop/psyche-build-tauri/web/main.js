@@ -10125,6 +10125,17 @@
   }
   async function discardObsoleteBrowserNavigation(context) {
     var lifecycle = browserTabLifecycle(context.tab);
+    var restoreTab = function (viewIsDead) {
+      if (context.browser.tabs.indexOf(context.tab) === -1) return;
+      context.tab.created = viewIsDead ? false : context.previousCreated;
+      context.tab.loading = viewIsDead ? false : context.previousLoading;
+      context.tab.title = context.previousTitle;
+      context.tab.url = context.previousUrl;
+      context.tab.history = context.previousHistory.slice();
+      context.tab.historyIndex = context.previousHistoryIndex;
+      syncProjectBrowser();
+      saveWorkspaceSoon();
+    };
     if (lifecycle.nativeLabel) {
       var pair = {
         project: context.project,
@@ -10133,6 +10144,7 @@
         tab: context.tab,
       };
       if (!(await invalidateBrowserAutomation(pair))) {
+        restoreTab(false);
         setStatus("browser automation invalidation failed", "error");
         return false;
       }
@@ -10141,22 +10153,20 @@
     invalidateBrowserNavigation(context.tab);
     lifecycle.nativeLabel = null;
     lifecycle.liveGeneration = 0;
+    lifecycle.controlGeneration = 0;
     lifecycle.liveUrl = null;
+    lifecycle.liveNavigationToken = null;
+    lifecycle.eventUrl = null;
     lifecycle.viewLive = false;
+    var destroyed = true;
     try {
       await invoke("browser_destroy", { label: context.label });
     } catch (error) {
+      destroyed = false;
       setStatus("obsolete browser navigation cleanup failed for " + context.label + ": " + String(error), "error");
-      return false;
     }
-    if (context.browser.tabs.indexOf(context.tab) !== -1) {
-      context.tab.created = false;
-      context.tab.loading = false;
-      context.tab.title = context.previousTitle;
-      syncProjectBrowser();
-      saveWorkspaceSoon();
-    }
-    return true;
+    restoreTab(true);
+    return destroyed;
   }
   function nativeBrowserLabel(raw) {
     var safe = String(raw || "default").split("").filter(function (c) {
@@ -11281,13 +11291,18 @@
       if (lifecycle.invalidationGeneration !== invalidationGeneration ||
           !requestIsCurrent()) return false;
       var b = visibleBrowserBounds(); if (!b) return false;
+      var previousCreated = tab.created;
+      var previousLoading = tab.loading;
       var previousTitle = tab.title;
       var previousUrl = tab.url;
+      var previousHistory = Array.isArray(tab.history) ? tab.history.slice() : [];
+      var previousHistoryIndex = tab.historyIndex;
       var previousView = {
         nativeLabel: lifecycle.nativeLabel,
         liveGeneration: lifecycle.liveGeneration,
         controlGeneration: lifecycle.controlGeneration,
         liveUrl: lifecycle.liveUrl,
+        liveNavigationToken: lifecycle.liveNavigationToken,
         eventUrl: lifecycle.eventUrl,
         viewLive: lifecycle.viewLive,
       };
@@ -11315,8 +11330,8 @@
       lifecycle.navigationSnapshot = {
         url: previousUrl,
         title: previousTitle,
-        history: Array.isArray(tab.history) ? tab.history.slice() : [],
-        historyIndex: tab.historyIndex,
+        history: previousHistory.slice(),
+        historyIndex: previousHistoryIndex,
       };
       var navigationContext = {
         project: project,
@@ -11326,7 +11341,12 @@
         tab: tab,
         generation: generation,
         label: label,
+        previousCreated: previousCreated,
+        previousLoading: previousLoading,
         previousTitle: previousTitle,
+        previousUrl: previousUrl,
+        previousHistory: previousHistory,
+        previousHistoryIndex: previousHistoryIndex,
       };
       tab.loading = true; tab.title = tabTitle(normalised); renderBrowserTabs(); updateBrowserControls();
       try {
@@ -11387,6 +11407,10 @@
           lifecycle.navigationSnapshot = null;
           tab.created = false;
           tab.loading = false;
+          tab.title = previousTitle;
+          tab.url = previousUrl;
+          tab.history = previousHistory.slice();
+          tab.historyIndex = previousHistoryIndex;
           if (browserNavigationOwnsVisiblePane(navigationContext)) syncProjectBrowser();
           else scheduleBrowserBounds();
           setStatus(
@@ -11402,12 +11426,16 @@
         lifecycle.liveGeneration = previousView.liveGeneration;
         lifecycle.controlGeneration = previousView.controlGeneration;
         lifecycle.liveUrl = previousView.liveUrl;
+        lifecycle.liveNavigationToken = previousView.liveNavigationToken;
         lifecycle.eventUrl = previousView.eventUrl;
         lifecycle.viewLive = previousView.viewLive;
         lifecycle.navigationSnapshot = null;
-        tab.loading = false;
+        tab.created = previousCreated;
+        tab.loading = previousLoading;
         tab.title = previousTitle;
         tab.url = previousUrl;
+        tab.history = previousHistory.slice();
+        tab.historyIndex = previousHistoryIndex;
         if (browserNavigationOwnsVisiblePane(navigationContext)) syncProjectBrowser();
         else scheduleBrowserBounds();
         setStatus(
