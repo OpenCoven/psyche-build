@@ -7,7 +7,6 @@ import * as gettingStarted from './getting-started.js';
 import * as features from './features.js';
 import * as coreConcepts from './core-concepts.js';
 import * as workflows from './workflows.js';
-import * as covenDemo from './coven-demo.js';
 import * as keyboardShortcuts from './keyboard-shortcuts.js';
 import * as merging from './merging.js';
 import * as hooks from './hooks.js';
@@ -24,7 +23,6 @@ const modules = {
   features,
   'core-concepts': coreConcepts,
   workflows,
-  'coven-demo': covenDemo,
   'keyboard-shortcuts': keyboardShortcuts,
   merging,
   hooks,
@@ -50,7 +48,6 @@ export const sections = [
     pages: [
       { path: '/core-concepts', title: 'Core Concepts' },
       { path: '/workflows', title: 'Workflows' },
-      { path: '/coven-demo', title: 'Coven Demo Loop' },
       { path: '/keyboard-shortcuts', title: 'Keyboard Shortcuts' },
       { path: '/merging', title: 'Merging' },
     ],
