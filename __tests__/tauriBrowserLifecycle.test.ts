@@ -219,7 +219,7 @@ describe('terminal project browser links', () => {
   it('separates active browser navigation from explicit project context navigation', () => {
     expect(mainJs).toContain('async function navigateBrowserForContext(rawUrl, context)');
     expect(functionSource(mainJs, 'navigateBrowser')).toContain(
-      'return navigateBrowserForContext(rawUrl, {',
+      'return navigateBrowserForContext(normalised, {',
     );
   });
 });
@@ -262,17 +262,68 @@ describe('agent browser action lifecycle', () => {
     const project = { id: 'project' };
     const tab = { id: 'tab', url: 'https://b.test', title: 'B', history: ['https://a.test', 'https://b.test', 'https://c.test'], historyIndex: 1 };
     const ambiguous = Function(`return (${functionSource(mainJs, 'ambiguousBrowserLifecycle')});`)();
-    const run = Function(
-      'state', 'activeProject', 'activeWorkspaceRoot', 'navigateBrowser', 'browserTabLifecycle',
-      'closeBrowserTab', 'invoke', 'ambiguousBrowserLifecycle',
-      `return (${functionSource(mainJs, 'runBrowserLifecycleOperation')});`,
-    )(
-      { activeProjectId: 'project' }, () => project, () => '/repo',
-      async () => { throw new Error('transport dropped'); }, () => ({ navigationTail: null }),
-      async () => { throw new Error('transport dropped'); }, async () => ({}), ambiguous,
-    );
+    const run = compileFunction<
+      (pair: Record<string, unknown>, effect: Record<string, unknown>) => Promise<unknown>
+    >(functionSource(mainJs, 'runBrowserLifecycleOperation'), {
+      state: { activeProjectId: 'project' },
+      activeProject: () => project,
+      activeWorkspaceRoot: () => '/repo',
+      navigateBrowser: async () => { throw new Error('transport dropped'); },
+      browserTabLifecycle: () => ({ navigationTail: null }),
+      closeBrowserTab: async () => { throw new Error('transport dropped'); },
+      invoke: async () => ({}),
+      ambiguousBrowserLifecycle: ambiguous,
+    });
     await expect(run({ project, worktreePath: '/repo', tab }, { operation: { action: { kind, url: 'https://new.test' } } }))
       .rejects.toMatchObject({ code: 'effect_unknown', ambiguous: true });
+  });
+
+  it('allows the exact focused context and rejects a later project switch', async () => {
+    const projectA = { id: 'project-a' };
+    const projectB = { id: 'project-b' };
+    const state = { activeProjectId: projectA.id };
+    let active = projectA;
+    let navigations = 0;
+    const run = compileFunction<
+      (pair: Record<string, unknown>, effect: Record<string, unknown>) => Promise<unknown>
+    >(functionSource(mainJs, 'runBrowserLifecycleOperation'), {
+      state,
+      activeProject: () => active,
+      activeWorkspaceRoot: () => '/repo-b',
+      navigateBrowser: async () => {
+        navigations += 1;
+        return true;
+      },
+      browserTabLifecycle: () => ({ navigationTail: null }),
+      closeBrowserTab: async () => true,
+      invoke: async () => ({}),
+      ambiguousBrowserLifecycle: Function(
+        `return (${functionSource(mainJs, 'ambiguousBrowserLifecycle')});`,
+      )(),
+    });
+    const pair = {
+      project: projectB,
+      worktreePath: '/repo-b',
+      tab: { id: 'tab-b', url: 'https://old.test', title: 'Old' },
+    };
+    const effect = {
+      operation: { action: { kind: 'navigate', url: 'https://new.test' } },
+    };
+
+    active = projectB;
+    state.activeProjectId = projectB.id;
+    await expect(run(pair, effect)).resolves.toEqual({
+      url: 'https://old.test',
+      title: 'Old',
+    });
+    expect(navigations).toBe(1);
+
+    active = projectA;
+    state.activeProjectId = projectA.id;
+    await expect(run(pair, effect)).rejects.toMatchObject({
+      code: 'backend_unavailable',
+    });
+    expect(navigations).toBe(1);
   });
 });
 
@@ -412,11 +463,32 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     ...dependencies,
   } as Record<string, unknown>;
   if (
+    source.startsWith('async function navigateProjectBrowserLink(') &&
+    typeof completeDependencies.normaliseUrl !== 'function'
+  ) {
+    completeDependencies.normaliseUrl = compileFunction(
+      functionSource(mainJs, 'normaliseUrl'),
+      completeDependencies,
+    );
+  }
+  if (
     source.startsWith('async function navigateBrowser(') &&
     typeof completeDependencies.navigateBrowserForContext !== 'function'
   ) {
     completeDependencies.navigateBrowserForContext = compileFunction(
       functionSource(mainJs, 'navigateBrowserForContext'),
+      completeDependencies,
+    );
+  }
+  if (
+    (
+      source.startsWith('async function navigateBrowserForContext(') ||
+      source.startsWith('async function runBrowserLifecycleOperation(')
+    ) &&
+    typeof completeDependencies.browserProjectContextIsCurrent !== 'function'
+  ) {
+    completeDependencies.browserProjectContextIsCurrent = compileFunction(
+      functionSource(mainJs, 'browserProjectContextIsCurrent'),
       completeDependencies,
     );
   }
@@ -916,37 +988,84 @@ describe('project browser URL routing', () => {
     expect(nativeCalls).toHaveLength(1);
   });
 
-  it('normalizes before creating browser UI', async () => {
-    const calls: string[] = [];
-    const navigateBrowserForContext = compileFunction<
-      (url: string, context: Record<string, unknown>) => Promise<boolean>
-    >(functionSource(mainJs, 'navigateBrowserForContext'), {
-      normaliseUrl: () => '',
-      ensureBrowserModel: () => {
-        calls.push('model');
-        return { activeTabId: null, tabs: [] };
-      },
-      findBrowserPane: () => {
-        calls.push('pane');
-        return null;
-      },
-      createBrowserPane: async () => {
-        calls.push('create-pane');
-        return null;
-      },
-      createBrowserTab: () => {
-        calls.push('create-tab');
-        return null;
-      },
-    });
+  it.each(['', '   ', 'not a URL'])(
+    'rejects %j before pane, tab, focus, or native side effects',
+    async (rawUrl) => {
+      const calls: string[] = [];
+      const normaliseUrl = compileFunction<
+        (value: string) => string
+      >(functionSource(mainJs, 'normaliseUrl'), {});
+      const navigateBrowser = compileFunction<
+        (url: string) => Promise<boolean>
+      >(functionSource(mainJs, 'navigateBrowser'), {
+        normaliseUrl,
+        activeProject: () => {
+          calls.push('active-project');
+          return projectB;
+        },
+        navigateBrowserForContext: async () => {
+          calls.push('active-navigation');
+          return true;
+        },
+      });
+      const navigateProjectBrowserLink = compileFunction<
+        (thread: typeof sourceThread, url: string) => Promise<boolean>
+      >(functionSource(mainJs, 'navigateProjectBrowserLink'), {
+        normaliseUrl,
+        findThread: () => {
+          calls.push('thread');
+          return sourceThread;
+        },
+        findProject: () => {
+          calls.push('project');
+          return projectB;
+        },
+        focusThread: async () => {
+          calls.push('focus');
+          return true;
+        },
+        navigateBrowserForContext: async () => {
+          calls.push('project-navigation');
+          return true;
+        },
+      });
+      const navigateBrowserForContext = compileFunction<
+        (url: string, context: Record<string, unknown>) => Promise<boolean>
+      >(functionSource(mainJs, 'navigateBrowserForContext'), {
+        normaliseUrl,
+        ensureBrowserModel: () => {
+          calls.push('model');
+          return { activeTabId: null, tabs: [] };
+        },
+        findBrowserPane: () => {
+          calls.push('pane');
+          return null;
+        },
+        createBrowserPane: async () => {
+          calls.push('create-pane');
+          return null;
+        },
+        createBrowserTab: () => {
+          calls.push('create-tab');
+          return null;
+        },
+        invoke: async () => {
+          calls.push('native');
+        },
+      });
 
-    await expect(navigateBrowserForContext('not a URL', {
-      project: projectB,
-      projectId: projectB.id,
-      worktreePath,
-    })).resolves.toBe(false);
-    expect(calls).toEqual([]);
-  });
+      await expect(navigateBrowser(rawUrl)).resolves.toBe(false);
+      await expect(
+        navigateProjectBrowserLink(sourceThread, rawUrl),
+      ).resolves.toBe(false);
+      await expect(navigateBrowserForContext(rawUrl, {
+        project: projectB,
+        projectId: projectB.id,
+        worktreePath,
+      })).resolves.toBe(false);
+      expect(calls).toEqual([]);
+    },
+  );
 
   it('cancels after pane creation when the source is replaced or scope switches', async () => {
     const lifecycle = browserLifecycleHarness();
@@ -1015,74 +1134,84 @@ describe('project browser URL routing', () => {
     expect(nativeNavigations).toBe(0);
   });
 
-  it('discards native navigation when the source is replaced in flight', async () => {
-    const lifecycle = browserLifecycleHarness();
-    const tab: BrowserNavigationTab = {
-      id: 'tab-b',
-      url: 'https://old.example',
-      created: true,
-      loading: false,
-      title: 'Old',
-      history: ['https://old.example'],
-      historyIndex: 0,
-    };
-    const browser = { activeTabId: tab.id, tabs: [tab] };
-    const pane = {
-      id: 'web-b',
-      kind: 'web',
-      projectId: projectB.id,
-      worktreePath,
-    };
-    let liveSource: typeof sourceThread | null = sourceThread;
-    let resolveNavigation!: () => void;
-    const nativeCalls: string[] = [];
-    const dependencies = browserNavigationDependencies(
-      projectB,
-      browser,
-      tab,
-      async (command) => {
-        nativeCalls.push(command);
-        if (command === 'browser_navigate') {
-          await new Promise<void>((resolve) => {
-            resolveNavigation = resolve;
-          });
-        }
-      },
-      lifecycle,
-    );
-    Object.assign(dependencies, {
-      state: { activeProjectId: projectB.id },
-      findProject: () => projectB,
-      activeProject: () => projectB,
-      activeWorkspaceRoot: () => worktreePath,
-      ensureBrowserModel: () => browser,
-      findBrowserPane: () => pane,
-      findThread: (id: string) => id === sourceThread.id ? liveSource : pane,
-    });
-    const navigateBrowserForContext = compileFunction<
-      (url: string, context: Record<string, unknown>) => Promise<boolean>
-    >(functionSource(mainJs, 'navigateBrowserForContext'), dependencies);
+  it.each(['source replacement', 'project switch'])(
+    'discards native navigation after an in-flight %s',
+    async (staleReason) => {
+      const lifecycle = browserLifecycleHarness();
+      const tab: BrowserNavigationTab = {
+        id: 'tab-b',
+        url: 'https://old.example',
+        created: true,
+        loading: false,
+        title: 'Old',
+        history: ['https://old.example'],
+        historyIndex: 0,
+      };
+      const browser = { activeTabId: tab.id, tabs: [tab] };
+      const pane = {
+        id: 'web-b',
+        kind: 'web',
+        projectId: projectB.id,
+        worktreePath,
+      };
+      let liveSource: typeof sourceThread | null = sourceThread;
+      let active = projectB;
+      const state = { activeProjectId: projectB.id };
+      let resolveNavigation!: () => void;
+      const nativeCalls: string[] = [];
+      const dependencies = browserNavigationDependencies(
+        projectB,
+        browser,
+        tab,
+        async (command) => {
+          nativeCalls.push(command);
+          if (command === 'browser_navigate') {
+            await new Promise<void>((resolve) => {
+              resolveNavigation = resolve;
+            });
+          }
+        },
+        lifecycle,
+      );
+      Object.assign(dependencies, {
+        state,
+        findProject: () => projectB,
+        activeProject: () => active,
+        activeWorkspaceRoot: () => worktreePath,
+        ensureBrowserModel: () => browser,
+        findBrowserPane: () => pane,
+        findThread: (id: string) => id === sourceThread.id ? liveSource : pane,
+      });
+      const navigateBrowserForContext = compileFunction<
+        (url: string, context: Record<string, unknown>) => Promise<boolean>
+      >(functionSource(mainJs, 'navigateBrowserForContext'), dependencies);
 
-    const navigation = navigateBrowserForContext('https://example.test', {
-      project: projectB,
-      projectId: projectB.id,
-      worktreePath,
-      sourceThread,
-    });
-    await Promise.resolve();
-    await Promise.resolve();
-    liveSource = { ...sourceThread };
-    resolveNavigation();
+      const navigation = navigateBrowserForContext('https://example.test', {
+        project: projectB,
+        projectId: projectB.id,
+        worktreePath,
+        sourceThread,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      if (staleReason === 'source replacement') {
+        liveSource = { ...sourceThread };
+      } else {
+        active = projectA;
+        state.activeProjectId = projectA.id;
+      }
+      resolveNavigation();
 
-    await expect(navigation).resolves.toBe(false);
-    expect(nativeCalls).toEqual(['browser_navigate', 'browser_destroy']);
-    expect(tab).toMatchObject({
-      created: false,
-      loading: false,
-      url: 'https://old.example',
-      title: 'Old',
-    });
-  });
+      await expect(navigation).resolves.toBe(false);
+      expect(nativeCalls).toEqual(['browser_navigate', 'browser_destroy']);
+      expect(tab).toMatchObject({
+        created: false,
+        loading: false,
+        url: 'https://old.example',
+        title: 'Old',
+      });
+    },
+  );
 
   it('does not navigate a closing pane or active tab', async () => {
     const lifecycle = browserLifecycleHarness();

@@ -2771,7 +2771,9 @@
     };
   }
 
-  async function navigateProjectBrowserLink(thread, normalised) {
+  async function navigateProjectBrowserLink(thread, rawUrl) {
+    var normalised = normaliseUrl(rawUrl);
+    if (!normalised) return false;
     if (!thread) return false;
     var threadId = thread.id;
     var projectId = thread.projectId;
@@ -10523,10 +10525,14 @@
   function ambiguousBrowserLifecycle(message) {
     return Object.assign(new Error(message), { code: "effect_unknown", ambiguous: true });
   }
+  function browserProjectContextIsCurrent(project, projectId, worktreePath) {
+    return !!project && !!projectId && project.id === projectId &&
+      state.activeProjectId === projectId && activeProject() === project &&
+      activeWorkspaceRoot(project) === worktreePath;
+  }
   async function runBrowserLifecycleOperation(pair, effect) {
     var action = effect.operation.action;
-    if (state.activeProjectId !== pair.project.id || activeProject() !== pair.project ||
-        activeWorkspaceRoot(pair.project) !== pair.worktreePath) {
+    if (!browserProjectContextIsCurrent(pair.project, pair.project.id, pair.worktreePath)) {
       throw Object.assign(new Error("backend_unavailable: exact browser tab is not active"), { code: "backend_unavailable" });
     }
     if (action.kind === "navigate") {
@@ -11053,9 +11059,11 @@
   }
   async function navigateBrowser(rawUrl, opts) {
     opts = opts || {};
+    var normalised = normaliseUrl(rawUrl);
+    if (!normalised) return false;
     var project = activeProject();
     if (!project) return false;
-    return navigateBrowserForContext(rawUrl, {
+    return navigateBrowserForContext(normalised, {
       project: project,
       projectId: project.id,
       worktreePath: activeWorkspaceRoot(project) || project.root,
@@ -11079,11 +11087,8 @@
     var sourceProjectId = sourceThread && sourceThread.projectId;
     var sourceWorktreePath = sourceThread && sourceThread.worktreePath;
     var scopeIsCurrent = function () {
-      if (project.id !== projectId ||
-          (typeof findProject === "function" && findProject(projectId) !== project) ||
-          state.activeProjectId !== projectId ||
-          activeProject() !== project ||
-          activeWorkspaceRoot(project) !== worktreePath) return false;
+      if (!browserProjectContextIsCurrent(project, projectId, worktreePath) ||
+          (typeof findProject === "function" && findProject(projectId) !== project)) return false;
       if (sourceThread && (
         sourceThread.id !== sourceThreadId ||
         sourceThread.projectId !== sourceProjectId ||
