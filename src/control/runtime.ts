@@ -25,8 +25,10 @@ import {
   COMMAND_OUTCOME_ATTESTED_KIND,
   agentControlJournalPayload,
   commandTransactionKey,
+  compactedCommandOutcome,
   createAgentControlJournalResource,
   exactCommandOutcomeDigest,
+  isCompactedCommandOutcome,
   type AgentControlJournalReceipt,
   type DurableCompletedTransaction,
   type DurableControlSnapshot,
@@ -186,6 +188,13 @@ interface ActiveCompactionAttempt {
   coveredSequence: number;
   invalidated: boolean;
 }
+
+type CoveredTerminalOutcome = {
+  sequence: number;
+  event: RuntimeEvent;
+  commandKind?: ControlCommand['kind'] | string;
+  attestedDigest?: string;
+};
 
 interface SurfaceActionContext {
   command: Extract<ControlCommand, { kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script' }>;
@@ -1768,6 +1777,7 @@ export class ControlRuntime {
   ): Promise<CommandOutcome | undefined> {
     const stored = await this.loadRetainedOutcomeSidecar(terminalEvent);
     if (!stored) return undefined;
+    if (isCompactedCommandOutcome(stored)) return stored;
     const verification = verifyExactOutcomeAgainstTerminalEvent(
       stored,
       terminalEvent,
@@ -1778,7 +1788,13 @@ export class ControlRuntime {
       this.invalidateActiveCompactionForSequence(terminalEvent.sequence);
       throw verification.error;
     }
-    return stored;
+    // Exact sidecars retain the original terminal value for integrity and
+    // idempotency, but surface replies have always replayed the journal-safe
+    // projection. Do not re-expose a receipt's private resource/value fields
+    // merely because the retry happens after a restart.
+    return isSurfaceControlCommandKind(commandKind)
+      ? outcomeFromEvent(terminalEvent)
+      : stored;
   }
 
   private async restoreRetainedOutcomes(events: RuntimeEvent[]): Promise<void> {
@@ -1801,7 +1817,7 @@ export class ControlRuntime {
       let stored: CommandOutcome | undefined;
       if (legacyRetainedOutcomeNeedsAttestation(event, commandKind, attestedDigest)) {
         stored = await this.loadRetainedOutcomeSidecar(event);
-        if (stored) {
+        if (stored && !isCompactedCommandOutcome(stored)) {
           const digest = await this.attestRetainedOutcome(event, stored);
           if (transactionKey) attestations.set(transactionKey, digest);
         }
@@ -1968,18 +1984,8 @@ export class ControlRuntime {
   private coveredTerminalSequences(
     journal: CompactableJournal,
     coveredSequence: number,
-  ): Map<string, {
-    sequence: number;
-    event: RuntimeEvent;
-    commandKind?: ControlCommand['kind'] | string;
-    attestedDigest?: string;
-  }> {
-    const covered = new Map<string, {
-      sequence: number;
-      event: RuntimeEvent;
-      commandKind?: ControlCommand['kind'] | string;
-      attestedDigest?: string;
-    }>();
+  ): Map<string, CoveredTerminalOutcome> {
+    const covered = new Map<string, CoveredTerminalOutcome>();
     const events = journal.read(0);
     const commandKinds = retainedCommandKinds(events);
     const attestations = retainedOutcomeAttestations(events);
@@ -2010,15 +2016,16 @@ export class ControlRuntime {
   }
 
   private async verifyCoveredTerminalOutcomes(
-    journal: CompactableJournal,
+    coveredTerminals: ReadonlyMap<string, CoveredTerminalOutcome>,
     attempt: ActiveCompactionAttempt,
   ): Promise<boolean> {
     if (!this.compactable) return true;
-    for (const [idempotencyKey, covered] of this.coveredTerminalSequences(journal, attempt.coveredSequence)) {
+    for (const [idempotencyKey, covered] of coveredTerminals) {
       if (this.compactionShouldAbort(attempt)) return false;
       try {
         const stored = await this.compactable.loadOutcome(idempotencyKey);
         if (stored) {
+          if (isCompactedCommandOutcome(stored)) continue;
           const verification = verifyExactOutcomeAgainstTerminalEvent(
             stored,
             covered.event,
@@ -2034,6 +2041,20 @@ export class ControlRuntime {
       return false;
     }
     return !this.compactionShouldAbort(attempt);
+  }
+
+  private async compactCoveredTerminalOutcomes(
+    coveredTerminals: ReadonlyMap<string, CoveredTerminalOutcome>,
+    attempt: ActiveCompactionAttempt,
+  ): Promise<boolean> {
+    if (!this.compactable) return true;
+    const marker = compactedCommandOutcome();
+    for (const [idempotencyKey] of coveredTerminals) {
+      if (this.compactionShouldAbort(attempt)) return false;
+      await this.compactable.storeOutcome(idempotencyKey, marker);
+      if (this.compactionShouldAbort(attempt)) return false;
+    }
+    return true;
   }
 
   /**
@@ -2078,7 +2099,8 @@ export class ControlRuntime {
         this.markCompactionBlockedByDurability();
         return;
       }
-      if (!await this.verifyCoveredTerminalOutcomes(journal, attempt)) {
+      const coveredTerminals = this.coveredTerminalSequences(journal, coveredSequence);
+      if (!await this.verifyCoveredTerminalOutcomes(coveredTerminals, attempt)) {
         this.markCompactionBlockedByDurability();
         return;
       }
@@ -2111,6 +2133,10 @@ export class ControlRuntime {
         completedTransactions,
       }, guard);
       if (this.compactionShouldAbort(attempt)) {
+        this.markCompactionBlockedByDurability();
+        return;
+      }
+      if (!await this.compactCoveredTerminalOutcomes(coveredTerminals, attempt)) {
         this.markCompactionBlockedByDurability();
         return;
       }
@@ -2325,6 +2351,21 @@ function isSurfaceControlCommand(command: ControlCommand): command is Extract<Co
     || command.kind === 'approval.resolve'
     || command.kind === 'provider.resource.upsert'
     || command.kind === 'provider.resource.remove';
+}
+
+function isSurfaceControlCommandKind(kind: string | undefined): boolean {
+  return kind === 'lease.request'
+    || kind === 'lease.grant'
+    || kind === 'lease.release'
+    || kind === 'lease.revoke'
+    || kind === 'pane.observe'
+    || kind === 'pane.action'
+    || kind === 'browser.inspect'
+    || kind === 'browser.action'
+    || kind === 'browser.script'
+    || kind === 'approval.resolve'
+    || kind === 'provider.resource.upsert'
+    || kind === 'provider.resource.remove';
 }
 
 function isSurfaceActionCommand(command: ControlCommand): command is SurfaceActionContext['command'] {
