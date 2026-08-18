@@ -10109,6 +10109,7 @@
     if (!context || browserTabIsClosing(context.tab) || browserPaneIsClosing(context.pane)) return false;
     if (browserTabLifecycle(context.tab).generation !== context.generation) return false;
     if (context.browser.tabs.indexOf(context.tab) === -1) return false;
+    if (context.activeTabReuse && context.browser.activeTabId !== context.tab.id) return false;
     if (ensureBrowserModel(context.project, context.worktreePath) !== context.browser) return false;
     if (findThread(context.pane.id) !== context.pane) return false;
     return findBrowserPane(context.project.id, context.worktreePath) === context.pane;
@@ -10834,6 +10835,16 @@
     try { return new URL(String(left)).href === new URL(String(right)).href; }
     catch (_) { return String(left) === String(right); }
   }
+  function browserUrlsShareOrigin(left, right) {
+    if (!left || !right) return false;
+    try {
+      var leftUrl = new URL(String(left));
+      var rightUrl = new URL(String(right));
+      return leftUrl.origin !== "null" && leftUrl.origin === rightUrl.origin;
+    } catch (_) {
+      return false;
+    }
+  }
   function browserNativeEventContext(nativeLabel, url, navigationToken) {
     var pair = browserTabForNativeLabel(nativeLabel);
     if (!pair || findProject(pair.project.id) !== pair.project) return null;
@@ -10950,14 +10961,29 @@
         payload.generation !== lifecycle.liveGeneration) return null;
     if (payload.navigationToken != null &&
         payload.navigationToken !== lifecycle.liveNavigationToken) return null;
+    var liveUrl = null;
     if (payload.url && lifecycle.liveUrl &&
         !browserUrlsMatch(payload.url, lifecycle.liveUrl) &&
-        (!lifecycle.eventUrl || !browserUrlsMatch(payload.url, lifecycle.eventUrl))) return null;
-    return { pair: pair, pane: pane };
+        (!lifecycle.eventUrl || !browserUrlsMatch(payload.url, lifecycle.eventUrl))) {
+      if (!payload.navigationToken ||
+          payload.navigationToken !== lifecycle.liveNavigationToken ||
+          !browserUrlsShareOrigin(payload.url, lifecycle.liveUrl)) return null;
+      liveUrl = String(payload.url);
+    }
+    return { pair: pair, pane: pane, liveUrl: liveUrl };
   }
   function handleBrowserFocus(event) {
     var context = browserFocusEventContext(event && event.payload || {});
     if (!context) return false;
+    if (context.liveUrl) {
+      var lifecycle = browserTabLifecycle(context.pair.tab);
+      lifecycle.liveUrl = context.liveUrl;
+      lifecycle.eventUrl = context.liveUrl;
+      context.pair.tab.url = context.liveUrl;
+      renderBrowserTabs();
+      syncUrlInput();
+      saveWorkspaceSoon();
+    }
     markActiveSurface("browser");
     if (state.activeThreadId !== context.pane.id) focusThread(context.pane.id);
     if (typeof publishBrowserControlResource === "function") {
@@ -11412,6 +11438,7 @@
         browser: browser,
         pane: pane,
         tab: tab,
+        activeTabReuse: !hasRequestedTab,
         generation: generation,
         label: label,
         previousCreated: previousCreated,
@@ -11504,8 +11531,8 @@
       navigateBrowser(tab.url, { tabId: tab.id, replace: true, preserveHistory: true }).catch(function () {});
     }
   });
-  document.getElementById("back").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex > 0) { var index = tab.historyIndex - 1; navigateBrowser(tab.history[index], { fromHistory: true, historyIndex: index }); } });
-  document.getElementById("forward").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex < tab.history.length - 1) { var index = tab.historyIndex + 1; navigateBrowser(tab.history[index], { fromHistory: true, historyIndex: index }); } });
+  document.getElementById("back").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex > 0) { var index = tab.historyIndex - 1; navigateBrowser(tab.history[index], { tabId: tab.id, fromHistory: true, historyIndex: index }); } });
+  document.getElementById("forward").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex < tab.history.length - 1) { var index = tab.historyIndex + 1; navigateBrowser(tab.history[index], { tabId: tab.id, fromHistory: true, historyIndex: index }); } });
   document.getElementById("open-surprise").addEventListener("click", openDiceBrowserTab);
   document.getElementById("open-external").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.url && tab.url !== "about:blank" && openUrl) openUrl(tab.url).catch(function () {}); });
   if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { scheduleBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }

@@ -236,6 +236,12 @@ describe('terminal project browser links', () => {
     expect(functionSource(mainJs, 'navigateBrowser')).toContain(
       'return navigateBrowserForContext(normalised, {',
     );
+    expect(functionSource(mainJs, 'browserNavigationIsCurrent')).toContain(
+      'context.activeTabReuse && context.browser.activeTabId !== context.tab.id',
+    );
+    expect(mainJs).toContain(
+      'navigateBrowser(tab.history[index], { tabId: tab.id, fromHistory: true, historyIndex: index })',
+    );
   });
 });
 
@@ -731,11 +737,13 @@ function browserNavigationDependencies(
       pane: typeof pane;
       browser: typeof browser;
       generation: number;
+      activeTabReuse?: boolean;
     }) => (
       !lifecycle.browserTabIsClosing(context.tab) &&
       !lifecycle.browserPaneIsClosing(context.pane) &&
       lifecycle.browserTabLifecycle(context.tab).generation === context.generation &&
-      context.browser.tabs.includes(context.tab)
+      context.browser.tabs.includes(context.tab) &&
+      (!context.activeTabReuse || context.browser.activeTabId === context.tab.id)
     ),
     discardObsoleteBrowserNavigation: async (context: {
       tab: BrowserNavigationTab;
@@ -1849,6 +1857,9 @@ function browserNativeEventHandlers(options: {
   const browserUrlsMatch = compileFunction<
     (left: string, right: string) => boolean
   >(functionSource(mainJs, 'browserUrlsMatch'), {});
+  const browserUrlsShareOrigin = compileFunction<
+    (left: string, right: string) => boolean
+  >(functionSource(mainJs, 'browserUrlsShareOrigin'), {});
   const browserNativeEventContext = compileFunction<
     (nativeLabel: string, url: string) => {
       project: typeof project;
@@ -1922,6 +1933,7 @@ function browserNativeEventHandlers(options: {
     findThread: (threadId: string) => pane?.id === threadId ? pane : null,
     activeWorkspaceRoot: () => worktreePath,
     browserUrlsMatch,
+    browserUrlsShareOrigin,
     state,
   });
   const handleBrowserFocus = compileFunction<
@@ -1939,6 +1951,10 @@ function browserNativeEventHandlers(options: {
     state,
     focusThread: (threadId: string) => calls.push(`focus:${threadId}`),
     publishBrowserControlResource: async () => { calls.push('publish'); },
+    browserTabLifecycle: lifecycle.browserTabLifecycle,
+    renderBrowserTabs: () => calls.push('render'),
+    syncUrlInput: () => calls.push('sync-url'),
+    saveWorkspaceSoon: () => calls.push('save'),
   });
   return {
     calls,
@@ -2196,6 +2212,54 @@ describe('Tauri native browser lifecycle', () => {
       'focus:web-pane',
       'publish',
     ]);
+  });
+
+  it.each([
+    ['pushState', 'https://current.example/account?view=details'],
+    ['hash', 'https://current.example/#details'],
+  ])('focuses a current same-document %s URL and adopts it as live', (_kind, url) => {
+    const fixture = browserFocusFixture();
+
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url,
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    expect(fixture.tab.url).toBe(url);
+    expect(fixture.lifecycle.browserTabLifecycle(fixture.tab)).toMatchObject({
+      liveUrl: url,
+      eventUrl: url,
+    });
+    expect(fixture.handlers.calls).toEqual([
+      'render',
+      'sync-url',
+      'save',
+      'surface:browser',
+      'focus:web-pane',
+      'publish',
+    ]);
+  });
+
+  it('rejects a same-document focus URL carrying a stale navigation token', () => {
+    const fixture = browserFocusFixture();
+
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example/#stale',
+        generation: 3,
+        navigationToken: 'stale-token',
+      },
+    })).toBe(false);
+    expect(fixture.tab.url).toBe('https://current.example');
+    expect(fixture.lifecycle.browserTabLifecycle(fixture.tab)).toMatchObject({
+      liveUrl: 'https://current.example',
+      eventUrl: 'https://current.example',
+    });
+    expect(fixture.handlers.calls).toEqual([]);
   });
 
   it('documents the browser lifecycle source contract', () => {
@@ -2907,6 +2971,128 @@ describe('Tauri native browser lifecycle', () => {
     await expect(navigation).resolves.toBe(true);
     expect(tab).toMatchObject({ created: true, url: 'https://example.com' });
     expect(tab.history).toEqual(['https://old.example', 'https://example.com']);
+  });
+
+  it('retires delayed active-tab reuse when the user switches tabs before completion', async () => {
+    let resolveNavigation!: () => void;
+    const calls: string[] = [];
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old.example',
+      created: false,
+      loading: false,
+      title: 'Old title',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const successor: BrowserNavigationTab = {
+      id: 'tab-b',
+      url: 'https://successor.example',
+      created: true,
+      loading: false,
+      title: 'Successor',
+      history: ['https://successor.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab, successor] };
+    const dependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      (command) => {
+        calls.push(command);
+        return command === 'browser_navigate'
+          ? new Promise<void>((resolve) => { resolveNavigation = resolve; })
+          : Promise.resolve();
+      },
+    );
+    dependencies.browserNavigationIsCurrent = compileFunction(
+      functionSource(mainJs, 'browserNavigationIsCurrent'),
+      dependencies,
+    );
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), dependencies);
+
+    const navigation = navigateBrowser('https://new.example', {});
+    await Promise.resolve();
+    await Promise.resolve();
+    browser.activeTabId = successor.id;
+    resolveNavigation();
+
+    await expect(navigation).resolves.toBe(false);
+    expect(browser.activeTabId).toBe(successor.id);
+    expect(tab).toMatchObject({
+      created: false,
+      loading: false,
+      url: 'https://old.example',
+      title: 'Old title',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    });
+    expect(successor).toMatchObject({
+      created: true,
+      url: 'https://successor.example',
+      title: 'Successor',
+    });
+    expect(calls).toEqual(['browser_navigate', 'browser_destroy']);
+  });
+
+  it('keeps explicit tab navigation semantics after a delayed tab switch', async () => {
+    let resolveNavigation!: () => void;
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old.example',
+      created: false,
+      loading: false,
+      title: 'Old title',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const successor: BrowserNavigationTab = {
+      id: 'tab-b',
+      url: 'https://successor.example',
+      created: true,
+      loading: false,
+      title: 'Successor',
+      history: ['https://successor.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab, successor] };
+    const dependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      (command) => command === 'browser_navigate'
+        ? new Promise<void>((resolve) => { resolveNavigation = resolve; })
+        : Promise.resolve(),
+    );
+    dependencies.browserNavigationIsCurrent = compileFunction(
+      functionSource(mainJs, 'browserNavigationIsCurrent'),
+      dependencies,
+    );
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), dependencies);
+
+    const navigation = navigateBrowser('https://new.example', { tabId: tab.id });
+    await Promise.resolve();
+    await Promise.resolve();
+    browser.activeTabId = successor.id;
+    resolveNavigation();
+
+    await expect(navigation).resolves.toBe(true);
+    expect(browser.activeTabId).toBe(successor.id);
+    expect(tab).toMatchObject({
+      created: true,
+      loading: false,
+      url: 'https://new.example',
+      title: 'https://new.example',
+      history: ['https://old.example', 'https://new.example'],
+      historyIndex: 1,
+    });
   });
 
   it('activates the terminal redirect URL returned by the exact native navigation', async () => {
