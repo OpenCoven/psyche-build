@@ -156,13 +156,19 @@ export class PaneWorkerManager {
       } else if (existing.tmuxPaneId !== pane.paneId) {
         // The tmux pane behind this psyche pane changed, so its accumulated
         // comparison history describes a pane that is no longer there.
-        await this.destroyWorker(pane.id);
+        await this.releaseWorker(pane.id, 'Pane was replaced');
         this.createWorker(pane);
       }
     }
 
     const removed = [...this.panes.keys()].filter((paneId) => !currentPaneIds.has(paneId));
-    await Promise.all(removed.map(id => this.destroyWorker(id)));
+    await Promise.all(removed.map(id => this.releaseWorker(id, 'Pane no longer monitored')));
+  }
+
+  private async releaseWorker(paneId: string, reason: string): Promise<void> {
+    if (!this.panes.has(paneId)) return;
+    this.dispatch(paneId, 'pane-removed', { reason });
+    await this.destroyWorker(paneId);
   }
 
   private async handleRequest(

@@ -108,15 +108,15 @@ export class StatusDetector extends EventEmitter {
   async monitorPanes(panes: PsychePane[]): Promise<void> {
     if (this.isShuttingDown) return;
 
-    // Update pane ID mappings
+    // Update workers first so a same-ID replacement releases the old
+    // lifecycle before the replacement mapping becomes authoritative.
+    await this.workerManager.updateWorkers(panes);
+
     panes.forEach(pane => {
       if (pane.id && pane.paneId) {
         this.paneIdMap.set(pane.id, pane.paneId);
       }
     });
-
-    // Update workers based on current panes
-    await this.workerManager.updateWorkers(panes);
   }
 
   /**
