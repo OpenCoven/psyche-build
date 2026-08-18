@@ -128,6 +128,30 @@ describe('dispatchOrchestrationRequest', () => {
     });
   });
 
+  it('classifies a nonexistent task cwd as an invalid orchestration request', async () => {
+    const root = await tempDir('psyche-orch-missing-cwd-');
+    const orchestrator = createMockOrchestrator();
+
+    const request = {
+      type: 'orchestration.execute' as const,
+      requestId: 'request-missing-cwd',
+      task: {
+        taskId: 'task-missing-cwd',
+        projectRoot: root,
+        cwd: 'missing',
+        prompt: 'Work in missing directory',
+        lanes: [{ id: 'bad', mode: 'terminal' as const }],
+      },
+    };
+
+    await expect(
+      dispatchOrchestrationRequest(root, request, orchestrator),
+    ).rejects.toMatchObject({
+      code: 'invalid_orchestration_request',
+      message: expect.stringMatching(/cwd .*does not exist/i),
+    });
+  });
+
   it('rejects task projectRoot outside the daemon project root', async () => {
     const root = await tempDir('psyche-orch-scope-');
     const outside = await tempDir('psyche-orch-outside-');
@@ -146,7 +170,10 @@ describe('dispatchOrchestrationRequest', () => {
 
     await expect(
       dispatchOrchestrationRequest(root, request, orchestrator),
-    ).rejects.toThrow(/outside the psyche project root/);
+    ).rejects.toMatchObject({
+      code: 'project_scope_violation',
+      message: expect.stringMatching(/projectRoot .*outside the project root/i),
+    });
   });
 
   it('rejects task cwd symlink escapes from the claimed path', async () => {
@@ -171,7 +198,10 @@ describe('dispatchOrchestrationRequest', () => {
 
     await expect(
       dispatchOrchestrationRequest(root, request, orchestrator),
-    ).rejects.toThrow(/outside the psyche project root/);
+    ).rejects.toMatchObject({
+      code: 'project_scope_violation',
+      message: expect.stringMatching(/cwd .*outside the project root/i),
+    });
   });
 
   it('reports partial failure when one lane fails', async () => {

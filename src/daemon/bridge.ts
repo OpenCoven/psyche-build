@@ -64,6 +64,7 @@ import {
   type AgenticCapabilityExecution,
   type CapabilityProviderId,
 } from '../orchestration/capabilityRouter.js';
+import { OrchestrationError } from '../orchestration/types.js';
 import type {
   CovenSessionEvent,
   CovenSessionLaunchRequest,
@@ -245,6 +246,15 @@ class BridgePaneReservationRetainedError extends Error {
   readonly reservationRetained = true;
 }
 
+class ScopedCwdError extends Error {
+  constructor(
+    readonly reason: 'missing' | 'outside',
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 export function isPathInsideOrEqual(parent: string, candidate: string): boolean {
   const rel = path.relative(parent, candidate);
   return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
@@ -257,11 +267,11 @@ export async function resolveScopedCwd(projectRoot: string, cwd?: string): Promi
   try {
     requestedReal = await realpath(requestedPath);
   } catch {
-    throw new Error(`cwd does not exist inside the psyche project root`);
+    throw new ScopedCwdError('missing', `cwd does not exist inside the psyche project root`);
   }
 
   if (!isPathInsideOrEqual(rootReal, requestedReal)) {
-    throw new Error(`cwd is outside the psyche project root`);
+    throw new ScopedCwdError('outside', `cwd is outside the psyche project root`);
   }
 
   return { projectRoot: rootReal, requestedCwd: requestedReal };
@@ -2386,6 +2396,29 @@ function bridgeError(code: string, message: string): Error & BridgeError {
   return error;
 }
 
+async function resolveOrchestrationScopedCwd(
+  projectRoot: string,
+  cwd: string | undefined,
+  fieldName: 'projectRoot' | 'cwd',
+): Promise<ScopeCheckResult> {
+  try {
+    return await resolveScopedCwd(projectRoot, cwd);
+  } catch (error) {
+    if (!(error instanceof ScopedCwdError)) throw error;
+    const requestedPath = cwd ? path.resolve(projectRoot, cwd) : projectRoot;
+
+    throw new OrchestrationError(
+      error.reason === 'outside'
+        ? 'project_scope_violation'
+        : 'invalid_orchestration_request',
+      error.reason === 'outside'
+        ? `${fieldName} "${requestedPath}" resolves outside the project root`
+        : `${fieldName} "${requestedPath}" does not exist`,
+      error,
+    );
+  }
+}
+
 /**
  * Execute an orchestration task through the injected orchestrator.
  *
@@ -2407,13 +2440,15 @@ export async function dispatchOrchestrationRequest(
   result: import('../orchestration/types.js').OrchestrationTaskResult;
 }> {
   const scoped = await resolveScopedCwd(daemonProjectRoot);
-  const claimed = await resolveScopedCwd(
+  const claimed = await resolveOrchestrationScopedCwd(
     scoped.projectRoot,
     request.task.projectRoot,
+    'projectRoot',
   );
-  const cwd = await resolveScopedCwd(
+  const cwd = await resolveOrchestrationScopedCwd(
     claimed.requestedCwd,
     request.task.cwd,
+    'cwd',
   );
 
   const task: import('../orchestration/types.js').OrchestrationTaskRequest = {
