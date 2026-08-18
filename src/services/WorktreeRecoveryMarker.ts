@@ -10,7 +10,7 @@ import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 
 const RECOVERY_DIRECTORY_NAME = 'worktree-recovery';
-const RECOVERY_MARKER_VERSION = 2;
+const RECOVERY_MARKER_VERSION = 3;
 
 export interface WorktreeRecoveryMarker {
   version: number;
@@ -21,7 +21,9 @@ export interface WorktreeRecoveryMarker {
   pane: {
     id: string;
     paneId: string;
+    slug?: string;
   };
+  allowWorktreeReuse?: boolean;
   operation: string;
   reason: string;
   createdAt: string;
@@ -34,7 +36,9 @@ export interface WorktreeRecoveryMarkerRequest {
   pane: {
     id: string;
     paneId: string;
+    slug?: string;
   };
+  allowWorktreeReuse?: boolean;
   operation: string;
   reason: string;
 }
@@ -53,6 +57,9 @@ export interface BlockingWorktreeRecoveryMarker {
 export async function writeWorktreeRecoveryMarker(
   request: WorktreeRecoveryMarkerRequest,
 ): Promise<{ marker: WorktreeRecoveryMarker; path: string }> {
+  if (request.allowWorktreeReuse && !request.pane.slug) {
+    throw new Error('Reusable recovery quarantine requires a pane slug');
+  }
   const projectRoot = canonicalizePathWithExistingAncestor(request.projectRoot);
   const worktreePath = canonicalizePathWithExistingAncestor(request.worktreePath);
   const generation = randomUUID();
@@ -66,12 +73,17 @@ export async function writeWorktreeRecoveryMarker(
     pane: {
       id: request.pane.id,
       paneId: request.pane.paneId,
+      ...(request.pane.slug ? { slug: request.pane.slug } : {}),
     },
+    ...(request.allowWorktreeReuse ? { allowWorktreeReuse: true } : {}),
     operation: request.operation,
     reason: request.reason,
     createdAt: new Date().toISOString(),
     operatorInstructions: [
       `Inspect tmux pane ${request.pane.paneId} before changing ${worktreePath}.`,
+      ...(request.pane.slug
+        ? [`Treat pane slug ${request.pane.slug} as occupied until reconciliation completes.`]
+        : []),
       `After reconciling the pane registry, run \`psyche recover --project "${projectRoot}" --acknowledge ${id}\`.`,
       'Until that explicit acknowledgement, Psyche will refuse destructive worktree cleanup.',
     ].join(' '),
@@ -115,6 +127,15 @@ export async function listWorktreeRecoveryMarkers(
   return markers.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 }
 
+export async function listQuarantinedPaneSlugs(
+  projectRoot: string,
+): Promise<string[]> {
+  const markers = await listWorktreeRecoveryMarkers(projectRoot);
+  return Array.from(new Set(markers.flatMap((marker) => (
+    marker.pane.slug ? [marker.pane.slug] : []
+  )))).sort();
+}
+
 /**
  * Acknowledge is intentionally explicit and does not attempt to kill panes,
  * edit pane config, or release a live process's lease. It only removes the
@@ -150,6 +171,21 @@ export async function acknowledgeWorktreeRecoveryMarker(
 export function findBlockingWorktreeRecoveryMarker(
   projectRoot: string,
   targetWorktreePath: string,
+): BlockingWorktreeRecoveryMarker {
+  return findBlockingRecoveryMarker(projectRoot, targetWorktreePath, false);
+}
+
+export function findBlockingWorktreeReuseRecoveryMarker(
+  projectRoot: string,
+  targetWorktreePath: string,
+): BlockingWorktreeRecoveryMarker {
+  return findBlockingRecoveryMarker(projectRoot, targetWorktreePath, true);
+}
+
+function findBlockingRecoveryMarker(
+  projectRoot: string,
+  targetWorktreePath: string,
+  allowReusablePaneQuarantines: boolean,
 ): BlockingWorktreeRecoveryMarker {
   const directory = worktreeRecoveryMarkerDirectory(projectRoot);
   if (!existsSync(directory)) {
@@ -187,7 +223,10 @@ export function findBlockingWorktreeRecoveryMarker(
         reason: `invalid recovery marker ${markerPath}`,
       };
     }
-    if (pathsOverlap(marker.worktreePath, target)) {
+    if (
+      pathsOverlap(marker.worktreePath, target)
+      && !(allowReusablePaneQuarantines && marker.allowWorktreeReuse === true)
+    ) {
       return {
         blocked: true,
         marker,
@@ -225,7 +264,7 @@ function isWorktreeRecoveryMarker(value: unknown): value is WorktreeRecoveryMark
   }
   const marker = value as Partial<WorktreeRecoveryMarker>;
   return (
-    (marker.version === 1 || marker.version === RECOVERY_MARKER_VERSION)
+    (marker.version === 1 || marker.version === 2 || marker.version === RECOVERY_MARKER_VERSION)
     && typeof marker.id === 'string'
     && /^[a-f0-9]{64}$/.test(marker.id)
     && (
@@ -239,6 +278,23 @@ function isWorktreeRecoveryMarker(value: unknown): value is WorktreeRecoveryMark
     && typeof marker.worktreePath === 'string'
     && typeof marker.pane?.id === 'string'
     && typeof marker.pane?.paneId === 'string'
+    && (
+      marker.version !== RECOVERY_MARKER_VERSION
+      || marker.pane.slug === undefined
+      || typeof marker.pane.slug === 'string'
+    )
+    && (
+      marker.version !== RECOVERY_MARKER_VERSION
+      || marker.allowWorktreeReuse === undefined
+      || typeof marker.allowWorktreeReuse === 'boolean'
+    )
+    && (
+      marker.allowWorktreeReuse !== true
+      || (
+        typeof marker.pane.slug === 'string'
+        && marker.pane.slug.length > 0
+      )
+    )
     && typeof marker.operation === 'string'
     && typeof marker.reason === 'string'
     && typeof marker.createdAt === 'string'

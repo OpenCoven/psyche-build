@@ -14,6 +14,10 @@ import {
   readProjectPaneConfigUnderLock,
   withProjectPaneSlugAllocationLock,
 } from '../../src/services/ProjectPaneConfig.js';
+import {
+  acknowledgeWorktreeRecoveryMarker,
+  listWorktreeRecoveryMarkers,
+} from '../../src/services/WorktreeRecoveryMarker.js';
 
 let root: string;
 let nextMockPaneId = 9;
@@ -407,6 +411,126 @@ describe('shared-worktree attach', () => {
 
     const config = JSON.parse(fs.readFileSync(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'));
     expect(config.panes.map((p: any) => p.slug)).toEqual([base, `${base}-a2`]);
+  });
+
+  it('quarantines an unrecorded pane slug before another daemon attach allocates', async () => {
+    const first = await seedWorktree();
+    const base = path.basename(first.worktreePath);
+    const configPath = path.join(root, '.psyche', 'psyche.config.json');
+    const stableConfig = fs.readFileSync(configPath, 'utf8');
+    const failed = harness();
+    failed.deps.beforeExistingWorktreePersist = () => {
+      fs.rmSync(configPath);
+      fs.mkdirSync(configPath);
+    };
+    failed.deps.killTmuxPane = vi.fn();
+    failed.deps.probeTmuxPane = () => 'present';
+
+    await expect(spawnBridgePane(
+      root,
+      'psyche-test',
+      {
+        requestId: 'uncertain',
+        cwd: root,
+        agent: 'claude',
+        prompt: 'Review it',
+        existingWorktree: {
+          slug: base,
+          worktreePath: first.worktreePath,
+          branchName: first.branch,
+        },
+      },
+      failed.deps,
+    )).rejects.toThrow(/recovery persist failed/);
+
+    const markers = await listWorktreeRecoveryMarkers(root);
+    expect(markers).toEqual([
+      expect.objectContaining({
+        worktreePath: first.worktreePath,
+        pane: expect.objectContaining({
+          paneId: '%10',
+          slug: `${base}-a2`,
+        }),
+        allowWorktreeReuse: true,
+      }),
+    ]);
+
+    fs.rmSync(configPath, { recursive: true });
+    fs.writeFileSync(configPath, stableConfig);
+    const next = await spawnBridgePane(
+      root,
+      'psyche-test',
+      {
+        requestId: 'next',
+        cwd: root,
+        agent: 'claude',
+        prompt: 'Review it safely',
+        existingWorktree: {
+          slug: base,
+          worktreePath: first.worktreePath,
+          branchName: first.branch,
+        },
+      },
+      harness().deps,
+    );
+    expect(next.persistedPane?.slug).toBe(`${base}-a3`);
+
+    await acknowledgeWorktreeRecoveryMarker(root, markers[0].id);
+  });
+
+  it('releases the failed sibling slug after teardown is confirmed absent', async () => {
+    const first = await seedWorktree();
+    const base = path.basename(first.worktreePath);
+    const configPath = path.join(root, '.psyche', 'psyche.config.json');
+    const stableConfig = fs.readFileSync(configPath, 'utf8');
+    const failed = harness();
+    let panePresent = true;
+    failed.deps.beforeExistingWorktreePersist = () => {
+      fs.rmSync(configPath);
+      fs.mkdirSync(configPath);
+    };
+    failed.deps.killTmuxPane = () => {
+      panePresent = false;
+    };
+    failed.deps.probeTmuxPane = () => panePresent ? 'present' : 'absent';
+
+    await expect(spawnBridgePane(
+      root,
+      'psyche-test',
+      {
+        requestId: 'closed',
+        cwd: root,
+        agent: 'claude',
+        prompt: 'Review it',
+        existingWorktree: {
+          slug: base,
+          worktreePath: first.worktreePath,
+          branchName: first.branch,
+        },
+      },
+      failed.deps,
+    )).rejects.toThrow();
+    expect(await listWorktreeRecoveryMarkers(root)).toEqual([]);
+
+    fs.rmSync(configPath, { recursive: true });
+    fs.writeFileSync(configPath, stableConfig);
+    const retry = await spawnBridgePane(
+      root,
+      'psyche-test',
+      {
+        requestId: 'retry',
+        cwd: root,
+        agent: 'claude',
+        prompt: 'Review it',
+        existingWorktree: {
+          slug: base,
+          worktreePath: first.worktreePath,
+          branchName: first.branch,
+        },
+      },
+      harness().deps,
+    );
+    expect(retry.persistedPane?.slug).toBe(`${base}-a2`);
   });
 
   // The property that matters most: a shared worktree belongs to other panes.

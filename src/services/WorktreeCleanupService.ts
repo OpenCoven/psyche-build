@@ -32,6 +32,7 @@ import {
 } from './LiveTmuxWorktreeGuard.js';
 import {
   findBlockingWorktreeRecoveryMarker,
+  findBlockingWorktreeReuseRecoveryMarker,
 } from './WorktreeRecoveryMarker.js';
 
 export interface WorktreeCleanupJob {
@@ -258,7 +259,7 @@ export class WorktreeCleanupService {
         operation: 'reuse',
       });
       const generation = this.incrementCleanupGeneration(canonicalWorktreePath);
-      const recoveryMarker = findBlockingWorktreeRecoveryMarker(
+      const recoveryMarker = findBlockingWorktreeReuseRecoveryMarker(
         projectRoot || operationLease.canonicalProjectRoot,
         canonicalWorktreePath,
       );

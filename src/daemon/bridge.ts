@@ -52,7 +52,10 @@ import {
 import {
   assessTmuxTeardownOwnership,
 } from '../services/TmuxResourceOwnership.js';
-import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.js';
+import {
+  listQuarantinedPaneSlugs,
+  writeWorktreeRecoveryMarker,
+} from '../services/WorktreeRecoveryMarker.js';
 import {
   retainReservationWithRecoveryMarker,
   type RetainableWorktreeReservation,
@@ -1271,6 +1274,7 @@ export async function spawnBridgePane(
   let paneId: string | undefined;
   let panePersisted = false;
   let rollbackBlockedByUnconfirmedPane = false;
+  let durableRecoveryOwnership = false;
 
   let slug = '';
   let branch = '';
@@ -1402,7 +1406,6 @@ export async function spawnBridgePane(
         return result;
       } catch (error) {
         if (error instanceof BridgePaneReservationRetainedError) {
-          reservation.retain();
           retained = true;
         }
         throw error;
@@ -1444,7 +1447,10 @@ export async function spawnBridgePane(
       );
     }
 
-    if (creationReservation && !rollbackBlockedByUnconfirmedPane) {
+    if (
+      creationReservation
+      && (!rollbackBlockedByUnconfirmedPane || durableRecoveryOwnership)
+    ) {
       await creationReservation.cancel();
     }
     if (rollbackFailure || ownershipRecovery) {
@@ -1489,12 +1495,18 @@ export async function spawnBridgePane(
         const effectiveWorktreePath = sharedIdentity?.worktreePath || paneWorktreePath;
         const effectiveBranch = sharedIdentity?.branch || branch;
         const effectiveSlug = sharedIdentity?.slug || slug;
+        const quarantinedSlugs = attaching
+          ? await listQuarantinedPaneSlugs(scoped.projectRoot)
+          : [];
         // Existing-worktree attachments make no filesystem claim, so their
         // sibling slug must be allocated from the fresh locked registry.
         const paneSlug = attaching
           ? generateSiblingSlugForTargetPane(
             { slug: effectiveSlug, worktreePath: effectiveWorktreePath },
-            freshPanes.map((candidate) => ({ slug: String(candidate.slug ?? '') })),
+            [
+              ...freshPanes.map((candidate) => ({ slug: String(candidate.slug ?? '') })),
+              ...quarantinedSlugs.map((quarantinedSlug) => ({ slug: quarantinedSlug })),
+            ],
           )
           : effectiveSlug;
         // A sibling's visible title must carry the reserved slug as well;
@@ -1522,7 +1534,8 @@ export async function spawnBridgePane(
                 {
                 projectRoot: scoped.projectRoot,
                 worktreePath: effectiveWorktreePath,
-                pane: { id: psychePaneId, paneId },
+                pane: { id: psychePaneId, paneId, slug: paneSlug },
+                allowWorktreeReuse: true,
                 operation: 'bridge-pane-generation',
                 reason: `could not capture tmux server generation; pane teardown is ${teardown.presence}`,
                 },
@@ -1609,6 +1622,37 @@ export async function spawnBridgePane(
             } catch (recoveryError) {
               rollbackBlockedByUnconfirmedPane = true;
               recoveryFailure = bridgeErrorMessage(recoveryError);
+              try {
+                const marker = await writeWorktreeRecoveryMarker({
+                  projectRoot: scoped.projectRoot,
+                  worktreePath: effectiveWorktreePath,
+                  pane: {
+                    id: psychePaneId,
+                    paneId,
+                    slug: paneSlug,
+                  },
+                  allowWorktreeReuse: true,
+                  operation: 'bridge-pane-persistence',
+                  reason: `${bridgeErrorMessage(error)}; pane teardown is ${
+                    teardown.presence
+                  }; recovery persistence failed: ${recoveryFailure}`,
+                });
+                durableRecoveryOwnership = true;
+                recoveryFailure = `${recoveryFailure}; quarantined slug ${paneSlug} in ${
+                  marker.path
+                }`;
+              } catch (markerError) {
+                recoveryReservation?.retain();
+                const message = `${bridgeErrorMessage(error)}; pane teardown is ${
+                  teardown.presence
+                }; could not persist recovery record ${pane.id}; recovery persist failed: ${
+                  recoveryFailure
+                }; could not quarantine slug ${paneSlug}: ${bridgeErrorMessage(markerError)}`;
+                if (attaching) {
+                  throw new BridgePaneReservationRetainedError(message);
+                }
+                throw bridgeError('config_persist_failed', message);
+              }
             }
             throw bridgeError(
               bridgeErrorCode(error, 'config_persist_failed'),

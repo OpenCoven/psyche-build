@@ -4,6 +4,9 @@ import type { PsychePane } from '../src/types.js';
 const beginWorktreeReuseReservationMock = vi.hoisted(() => vi.fn());
 const withProjectPaneSlugAllocationLockMock = vi.hoisted(() => vi.fn());
 const readProjectPaneConfigUnderLockMock = vi.hoisted(() => vi.fn());
+const listQuarantinedPaneSlugsMock = vi.hoisted(() => (
+  vi.fn<() => Promise<string[]>>(async () => [])
+));
 
 vi.mock('../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
@@ -21,6 +24,11 @@ vi.mock('../src/services/ProjectPaneConfig.js', () => ({
   ),
   readProjectPaneConfigUnderLock: readProjectPaneConfigUnderLockMock,
   withProjectPaneSlugAllocationLock: withProjectPaneSlugAllocationLockMock,
+}));
+
+vi.mock('../src/services/WorktreeRecoveryMarker.js', () => ({
+  listQuarantinedPaneSlugs: listQuarantinedPaneSlugsMock,
+  writeWorktreeRecoveryMarker: vi.fn(),
 }));
 
 describe('worktree pane creation reservation', () => {
@@ -145,6 +153,48 @@ describe('worktree pane creation reservation', () => {
       'release-slug-lock',
       'complete-reservation',
     ]);
+  });
+
+  it('treats durable recovery pane slugs as occupied during local sibling allocation', async () => {
+    beginWorktreeReuseReservationMock.mockResolvedValueOnce({
+      canonicalWorktreePath: `${process.cwd()}/.psyche/worktrees/feature`,
+      complete: vi.fn(async () => {}),
+      cancel: vi.fn(async () => {}),
+      retain: vi.fn(),
+    });
+    withProjectPaneSlugAllocationLockMock.mockImplementationOnce(async (
+      _projectRoot: string,
+      operation: () => Promise<unknown>,
+    ) => operation());
+    readProjectPaneConfigUnderLockMock.mockResolvedValueOnce({
+      panes: [{ slug: 'feature' }],
+    });
+    listQuarantinedPaneSlugsMock.mockResolvedValueOnce(['feature-a2']);
+
+    const { createPane } = await import('../src/utils/paneCreation.js');
+    const resolveExistingWorktreeSlug = vi.fn((freshPanes: readonly PsychePane[]) => {
+      expect(freshPanes.map((pane) => pane.slug)).toEqual([
+        'feature',
+        'feature-a2',
+      ]);
+      return 'feature-a3';
+    });
+    await createPane({
+      prompt: 'review',
+      projectName: 'repo',
+      projectRoot: process.cwd(),
+      sessionProjectRoot: process.cwd(),
+      existingPanes: [{ slug: 'feature' } as PsychePane],
+      existingWorktree: {
+        slug: 'feature',
+        worktreePath: `${process.cwd()}/.psyche/worktrees/feature`,
+        branchName: 'feature',
+      },
+      persistReusedPane: vi.fn(async () => {}),
+      resolveExistingWorktreeSlug,
+    }, ['claude', 'codex']);
+
+    expect(resolveExistingWorktreeSlug).toHaveBeenCalledOnce();
   });
 
   it('releases the slug lock before cancelling reuse after allocation failure', async () => {

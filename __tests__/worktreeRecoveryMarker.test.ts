@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -76,5 +76,42 @@ describe('worktree recovery markers', () => {
     ]);
     expect(findBlockingWorktreeRecoveryMarker(projectRoot, worktreePath))
       .toMatchObject({ blocked: true, marker: { id: newer.marker.id } });
+  });
+
+  it('persists pane slug quarantine across reload while allowing guarded worktree reuse', async () => {
+    const projectRoot = mkdtempSync(path.join(process.cwd(), '.psyche-recovery-marker-'));
+    directories.push(projectRoot);
+    const worktreePath = path.join(projectRoot, '.psyche', 'worktrees', 'feature');
+    mkdirSync(worktreePath, { recursive: true });
+
+    const written = await writeWorktreeRecoveryMarker({
+      projectRoot,
+      worktreePath,
+      pane: { id: 'pane-2', paneId: '%10', slug: 'feature-a2' },
+      operation: 'bridge-pane-persistence',
+      reason: 'pane config persistence and teardown could not be confirmed',
+      allowWorktreeReuse: true,
+    });
+
+    vi.resetModules();
+    const restartedRecovery = await import('../src/services/WorktreeRecoveryMarker.js');
+    expect(await restartedRecovery.listQuarantinedPaneSlugs(projectRoot))
+      .toEqual(['feature-a2']);
+    expect(restartedRecovery.findBlockingWorktreeRecoveryMarker(
+      projectRoot,
+      worktreePath,
+    ).blocked).toBe(true);
+    expect(restartedRecovery.findBlockingWorktreeReuseRecoveryMarker(
+      projectRoot,
+      worktreePath,
+    ))
+      .toEqual({ blocked: false });
+
+    await expect(restartedRecovery.acknowledgeWorktreeRecoveryMarker(
+      projectRoot,
+      written.marker.id,
+    ))
+      .resolves.toBe(true);
+    expect(await restartedRecovery.listQuarantinedPaneSlugs(projectRoot)).toEqual([]);
   });
 });

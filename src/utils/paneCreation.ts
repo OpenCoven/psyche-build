@@ -63,7 +63,10 @@ import {
 } from './paneTeardown.js';
 import { createPsychePaneId } from './paneIdentity.js';
 import { runGitProcess } from './gitProcess.js';
-import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.js';
+import {
+  listQuarantinedPaneSlugs,
+  writeWorktreeRecoveryMarker,
+} from '../services/WorktreeRecoveryMarker.js';
 import {
   isPaneLifecycleReservationRetainedError,
   PaneLifecycleReservationRetainedError,
@@ -345,7 +348,6 @@ export async function createPane(
     return result;
   } catch (error) {
     if (isPaneLifecycleReservationRetainedError(error)) {
-      reservation.retain();
       settled = true;
     }
     throw error;
@@ -393,9 +395,13 @@ async function createPaneWithReuseReservation(
         && typeof (pane as Partial<PsychePane>).slug === 'string'
       ))
       : [];
+    const quarantinedSlugs = await listQuarantinedPaneSlugs(sessionProjectRoot);
     existingWorktree = {
       ...existingWorktree,
-      slug: options.resolveExistingWorktreeSlug(freshPanes),
+      slug: options.resolveExistingWorktreeSlug([
+        ...freshPanes,
+        ...quarantinedSlugs.map((slug) => ({ slug } as PsychePane)),
+      ]),
     };
   }
 

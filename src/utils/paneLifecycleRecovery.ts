@@ -95,7 +95,9 @@ export async function retainPaneRecovery(
       pane: {
         id: options.pane.id,
         paneId: options.pane.paneId,
+        slug: options.pane.slug,
       },
+      allowWorktreeReuse: true,
       operation: options.operation,
       reason: `${options.reason}; ${configRecovery.message}`,
     });
