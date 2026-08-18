@@ -1705,9 +1705,20 @@ struct BrowserNavigationResult {
 }
 
 struct BrowserNavigationWaiter {
+    generation: u64,
     token: String,
     navigation_identity: Option<usize>,
     completion: Option<tokio::sync::oneshot::Sender<Result<BrowserNavigationResult, String>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BrowserFocusIdentity {
+    generation: u64,
+    navigation_token: String,
+}
+
+fn browser_focus_identity(label: &str) -> Option<BrowserFocusIdentity> {
+    BROWSER_LIVE_FOCUS_IDENTITIES.lock().get(label).cloned()
 }
 
 struct BrowserNavigationWaiterGuard {
@@ -1729,23 +1740,31 @@ impl Drop for BrowserNavigationWaiterGuard {
 
 static BROWSER_NAVIGATION_WAITERS: Lazy<Mutex<HashMap<String, BrowserNavigationWaiter>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+static BROWSER_LIVE_FOCUS_IDENTITIES: Lazy<Mutex<HashMap<String, BrowserFocusIdentity>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn complete_browser_navigation(navigation_identity: usize, terminal_url: &str) -> bool {
-    let completion = {
+    let completed = {
         let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
         let label = waiters.iter().find_map(|(label, waiter)| {
             (waiter.navigation_identity == Some(navigation_identity)).then(|| label.clone())
         });
-        label.and_then(|label| {
-            waiters
-                .remove(&label)
-                .and_then(|mut waiter| waiter.completion.take())
-        })
+        label.and_then(|label| waiters.remove(&label).map(|waiter| (label, waiter)))
     };
-    if let Some(completion) = completion {
+    if let Some((label, mut waiter)) = completed {
+        let Some(completion) = waiter.completion.take() else {
+            return false;
+        };
         let result = if terminal_url.is_empty() {
             Err("browser navigation terminal URL is unavailable".to_string())
         } else {
+            BROWSER_LIVE_FOCUS_IDENTITIES.lock().insert(
+                label,
+                BrowserFocusIdentity {
+                    generation: waiter.generation,
+                    navigation_token: waiter.token.clone(),
+                },
+            );
             Ok(BrowserNavigationResult {
                 terminal_url: terminal_url.to_string(),
             })
@@ -3255,6 +3274,47 @@ fn browser_automation_result(
         .map_err(|error| error.to_string())
 }
 
+fn browser_page_event_script(
+    label: &str,
+    focus_identity: Option<&BrowserFocusIdentity>,
+) -> Result<String, String> {
+    let label_json = serde_json::to_string(label).map_err(|error| error.to_string())?;
+    let focus_navigation_token = focus_identity
+        .map(|identity| serde_json::to_string(&identity.navigation_token))
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|| "null".to_string());
+    let focus_generation = focus_identity
+        .map(|identity| identity.generation.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    Ok(format!(
+        r#"(function(browserLabel, focusGeneration, focusNavigationToken) {{
+          try {{
+            var emit = function(name, payload) {{
+              if (window.__TAURI__ && window.__TAURI__.event) {{
+                window.__TAURI__.event.emit(name, payload);
+              }}
+            }};
+            var title = document.title || location.hostname || location.href;
+            emit("browser:title", {{ label: browserLabel, title: title, url: location.href }});
+            var focusIdentity = focusGeneration && focusNavigationToken
+              ? String(focusGeneration) + ":" + focusNavigationToken
+              : null;
+            if (focusIdentity && window.__PSYCHE_BROWSER_FOCUS_IDENTITY__ !== focusIdentity) {{
+              window.__PSYCHE_BROWSER_FOCUS_IDENTITY__ = focusIdentity;
+              window.addEventListener("pointerdown", function() {{
+                emit("browser:focus", {{ label: browserLabel, url: location.href, generation: focusGeneration, navigationToken: focusNavigationToken }});
+              }}, true);
+              window.addEventListener("focusin", function() {{
+                emit("browser:focus", {{ label: browserLabel, url: location.href, generation: focusGeneration, navigationToken: focusNavigationToken }});
+              }}, true);
+            }}
+          }} catch (_) {{}}
+        }})({}, {}, {});"#,
+        label_json, focus_generation, focus_navigation_token
+    ))
+}
+
 fn ensure_browser(
     app: &AppHandle,
     label: &str,
@@ -3310,31 +3370,12 @@ fn ensure_browser(
                 },
             );
             if matches!(payload.event(), PageLoadEvent::Finished) {
-                let label_json = serde_json::to_string(&browser_label).unwrap_or_else(|_| "null".to_string());
-                let script = format!(
-                    r#"(function(browserLabel) {{
-                      try {{
-                        var emit = function(name, payload) {{
-                          if (window.__TAURI__ && window.__TAURI__.event) {{
-                            window.__TAURI__.event.emit(name, payload);
-                          }}
-                        }};
-                        var title = document.title || location.hostname || location.href;
-                        emit("browser:title", {{ label: browserLabel, title: title, url: location.href }});
-                        if (!window.__PSYCHE_BROWSER_FOCUS_INSTALLED__) {{
-                          window.__PSYCHE_BROWSER_FOCUS_INSTALLED__ = true;
-                          window.addEventListener("pointerdown", function() {{
-                            emit("browser:focus", {{ label: browserLabel, url: location.href, navigationToken: window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ || null }});
-                          }}, true);
-                          window.addEventListener("focusin", function() {{
-                            emit("browser:focus", {{ label: browserLabel, url: location.href, navigationToken: window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ || null }});
-                          }}, true);
-                        }}
-                      }} catch (_) {{}}
-                    }})({});"#,
-                    label_json
-                );
-                let _ = webview.eval(&script);
+                let focus_identity = browser_focus_identity(&browser_label);
+                if let Ok(script) =
+                    browser_page_event_script(&browser_label, focus_identity.as_ref())
+                {
+                    let _ = webview.eval(&script);
+                }
             }
         });
 
@@ -3429,10 +3470,14 @@ async fn browser_navigate(
     y: f64,
     w: f64,
     h: f64,
+    generation: u64,
     navigation_token: String,
     automation_source: String,
 ) -> Result<BrowserNavigationResult, String> {
     ensure_trusted_browser_caller(webview.label())?;
+    if generation == 0 {
+        return Err("browser navigation generation is invalid".to_string());
+    }
     if navigation_token.is_empty() || navigation_token.len() > 128 {
         return Err("browser navigation token is invalid".to_string());
     }
@@ -3450,6 +3495,7 @@ async fn browser_navigate(
         waiters.insert(
             label.clone(),
             BrowserNavigationWaiter {
+                generation,
                 token: navigation_token.clone(),
                 navigation_identity: None,
                 completion: Some(completion),
@@ -3489,13 +3535,20 @@ async fn browser_navigate(
                     "window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ = {navigation_token_json};"
                 ))
                 .map_err(|error| error.to_string())?;
+            let focus_identity = browser_focus_identity(&label)
+                .ok_or_else(|| "browser focus identity is unavailable".to_string())?;
+            webview
+                .eval(&browser_page_event_script(&label, Some(&focus_identity))?)
+                .map_err(|error| error.to_string())?;
             Ok(result)
         }
         Ok(Ok(Err(error))) => Err(error),
         Ok(Err(_)) => Err("browser navigation was cancelled".to_string()),
         Err(_) => {
             if let Some(webview) = app.get_webview(&label) {
-                let _ = webview.close();
+                if webview.close().is_ok() {
+                    BROWSER_LIVE_FOCUS_IDENTITIES.lock().remove(&label);
+                }
             }
             Err("browser navigation timed out".to_string())
         }
@@ -3562,6 +3615,7 @@ fn destroy_browser_webview(app: &AppHandle, label: Option<String>) -> Result<(),
     if let Some(webview) = app.get_webview(&label) {
         webview.close().map_err(|error| error.to_string())?;
     }
+    BROWSER_LIVE_FOCUS_IDENTITIES.lock().remove(&label);
     app.state::<BrowserShortcutAuthorizations>().remove(&label);
     app.state::<BrowserAutomationAuthorizations>()
         .remove(&label);
@@ -7976,10 +8030,50 @@ mod pty_runtime_tests {
     fn browser_navigation_waiter(_url: &str) -> BrowserNavigationWaiter {
         let (completion, _receiver) = tokio::sync::oneshot::channel();
         BrowserNavigationWaiter {
+            generation: 1,
             token: "requested-token".to_string(),
             navigation_identity: None,
             completion: Some(completion),
         }
+    }
+
+    #[test]
+    fn browser_focus_identity_comes_from_the_native_live_registry() {
+        let label = "browser-focus-identity";
+        BROWSER_LIVE_FOCUS_IDENTITIES.lock().insert(
+            label.to_string(),
+            BrowserFocusIdentity {
+                generation: 7,
+                navigation_token: "native-token".to_string(),
+            },
+        );
+
+        assert_eq!(
+            browser_focus_identity(label),
+            Some(BrowserFocusIdentity {
+                generation: 7,
+                navigation_token: "native-token".to_string(),
+            })
+        );
+        BROWSER_LIVE_FOCUS_IDENTITIES.lock().remove(label);
+    }
+
+    #[test]
+    fn browser_page_focus_script_captures_the_exact_live_identity() {
+        let script = browser_page_event_script(
+            "psyche-browser-project-a",
+            Some(&BrowserFocusIdentity {
+                generation: 7,
+                navigation_token: "native-token".to_string(),
+            }),
+        )
+        .unwrap();
+
+        assert!(script.contains(
+            "emit(\"browser:focus\", { label: browserLabel, url: location.href, generation: focusGeneration, navigationToken: focusNavigationToken });"
+        ));
+        assert!(script.ends_with("})(\"psyche-browser-project-a\", 7, \"native-token\");"));
+        assert!(script.contains("window.__PSYCHE_BROWSER_FOCUS_IDENTITY__ !== focusIdentity"));
     }
 
     #[test]
@@ -7991,6 +8085,7 @@ mod pty_runtime_tests {
         BROWSER_NAVIGATION_WAITERS.lock().insert(
             requested_label.clone(),
             BrowserNavigationWaiter {
+                generation: 41,
                 token: "requested".to_string(),
                 navigation_identity: Some(41),
                 completion: Some(requested_sender),
@@ -7999,6 +8094,7 @@ mod pty_runtime_tests {
         BROWSER_NAVIGATION_WAITERS.lock().insert(
             unrelated_label.clone(),
             BrowserNavigationWaiter {
+                generation: 42,
                 token: "unrelated".to_string(),
                 navigation_identity: Some(42),
                 completion: Some(unrelated_sender),
@@ -8013,7 +8109,18 @@ mod pty_runtime_tests {
             requested_receiver.try_recv().unwrap().unwrap().terminal_url,
             "https://terminal.example"
         );
+        assert_eq!(
+            browser_focus_identity(&requested_label),
+            Some(BrowserFocusIdentity {
+                generation: 41,
+                navigation_token: "requested".to_string(),
+            })
+        );
+        assert_eq!(browser_focus_identity(&unrelated_label), None);
         assert!(unrelated_receiver.try_recv().is_err());
+        BROWSER_LIVE_FOCUS_IDENTITIES
+            .lock()
+            .remove(&requested_label);
         BROWSER_NAVIGATION_WAITERS.lock().remove(&unrelated_label);
     }
 

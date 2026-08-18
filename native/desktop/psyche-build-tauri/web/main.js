@@ -10951,6 +10951,10 @@
   function browserFocusEventContext(payload) {
     payload = payload || {};
     var nativeLabel = payload.label;
+    if (typeof nativeLabel !== "string" || !nativeLabel ||
+        typeof payload.url !== "string" || !payload.url ||
+        !Number.isSafeInteger(payload.generation) || payload.generation <= 0 ||
+        typeof payload.navigationToken !== "string" || !payload.navigationToken) return null;
     var pair = browserTabForNativeLabel(nativeLabel);
     if (!pair || findProject(pair.project.id) !== pair.project) return null;
     if (!pair.project.browsersByWorktree ||
@@ -10971,10 +10975,9 @@
     if (!lifecycle.viewLive ||
         lifecycle.nativeLabel !== nativeLabel ||
         !lifecycle.liveGeneration ||
-        lifecycle.liveGeneration !== lifecycle.generation) return null;
-    if (payload.generation != null &&
-        payload.generation !== lifecycle.liveGeneration) return null;
-    if (payload.navigationToken != null &&
+        lifecycle.liveGeneration !== lifecycle.generation ||
+        payload.generation !== lifecycle.liveGeneration ||
+        !lifecycle.liveNavigationToken ||
         payload.navigationToken !== lifecycle.liveNavigationToken) return null;
     var liveUrl = null;
     if (payload.url && lifecycle.liveUrl &&
@@ -11504,7 +11507,7 @@
       if (!context.preserveHistory) tab.title = tabTitle(normalised);
       renderBrowserTabs(); updateBrowserControls();
       try {
-        var nativeNavigation = await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h, navigationToken: navigationToken, automationSource: lifecycle.automationSource });
+        var nativeNavigation = await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h, generation: generation, navigationToken: navigationToken, automationSource: lifecycle.automationSource });
         if ((sourceThread && !scopeIsCurrent()) ||
             !browserNavigationIsCurrent(navigationContext)) {
           await discardObsoleteBrowserNavigation(navigationContext);

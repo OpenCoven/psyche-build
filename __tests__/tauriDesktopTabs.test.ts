@@ -162,7 +162,14 @@ describe('Tauri desktop tab shortcuts', () => {
       /emit\("browser:title", \{\{ label: browserLabel, title: title, url: location\.href \}\}\);/,
     );
     expect(tauriLib).toMatch(
-      /emit\("browser:focus", \{\{ label: browserLabel, url: location\.href \}\}\);/,
+      /emit\("browser:focus", \{\{ label: browserLabel, url: location\.href, generation: focusGeneration, navigationToken: focusNavigationToken \}\}\);/,
+    );
+    expect(tauriLib).toContain(
+      'r#"(function(browserLabel, focusGeneration, focusNavigationToken) {{',
+    );
+    expect(tauriLib).toContain('let focus_identity = browser_focus_identity(&browser_label);');
+    expect(tauriLib).not.toContain(
+      'navigationToken: window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ || null',
     );
     expect(tauriLib).not.toMatch(forbiddenBrowserNewTabShortcut);
     expect(injection).toContain(

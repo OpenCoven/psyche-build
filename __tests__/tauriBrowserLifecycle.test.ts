@@ -2208,6 +2208,8 @@ describe('Tauri native browser lifecycle', () => {
       payload: {
         label: 'native-tab-a',
         url: 'https://current.example',
+        generation: 3,
+        navigationToken: 'current-token',
       },
     })).toBe(false);
     expect(fixture.handlers.calls).toEqual([]);
@@ -2263,6 +2265,7 @@ describe('Tauri native browser lifecycle', () => {
       payload: {
         label: 'native-tab-a',
         url: 'https://current.example',
+        generation: 3,
         navigationToken: 'current-token',
       },
     })).toBe(false);
@@ -2271,6 +2274,14 @@ describe('Tauri native browser lifecycle', () => {
 
   it('focuses only the valid live current native browser view', () => {
     const fixture = browserFocusFixture();
+    const validFocusEvent = () => ({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    });
 
     expect(fixture.handlers.handleBrowserFocus({
       payload: {
@@ -2296,7 +2307,6 @@ describe('Tauri native browser lifecycle', () => {
         navigationToken: 'stale-token',
       },
     })).toBe(false);
-    fixture.tab.created = false;
     expect(fixture.handlers.handleBrowserFocus({
       payload: {
         label: 'native-tab-a',
@@ -2304,52 +2314,38 @@ describe('Tauri native browser lifecycle', () => {
         navigationToken: 'current-token',
       },
     })).toBe(false);
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        generation: 3,
+      },
+    })).toBe(false);
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(false);
+    fixture.tab.created = false;
+    expect(fixture.handlers.handleBrowserFocus(validFocusEvent())).toBe(false);
     fixture.tab.created = true;
     fixture.lifecycle.browserTabLifecycle(fixture.tab).viewLive = false;
-    expect(fixture.handlers.handleBrowserFocus({
-      payload: {
-        label: 'native-tab-a',
-        url: 'https://current.example',
-        navigationToken: 'current-token',
-      },
-    })).toBe(false);
+    expect(fixture.handlers.handleBrowserFocus(validFocusEvent())).toBe(false);
     fixture.lifecycle.browserTabLifecycle(fixture.tab).viewLive = true;
     fixture.lifecycle.browserTabLifecycle(fixture.tab).closing = true;
-    expect(fixture.handlers.handleBrowserFocus({
-      payload: {
-        label: 'native-tab-a',
-        url: 'https://current.example',
-        navigationToken: 'current-token',
-      },
-    })).toBe(false);
+    expect(fixture.handlers.handleBrowserFocus(validFocusEvent())).toBe(false);
     fixture.lifecycle.browserTabLifecycle(fixture.tab).closing = false;
     fixture.pane.hidden = true;
-    expect(fixture.handlers.handleBrowserFocus({
-      payload: {
-        label: 'native-tab-a',
-        url: 'https://current.example',
-        navigationToken: 'current-token',
-      },
-    })).toBe(false);
+    expect(fixture.handlers.handleBrowserFocus(validFocusEvent())).toBe(false);
     fixture.pane.hidden = false;
     fixture.browser.tabs = [{ ...fixture.tab }];
-    expect(fixture.handlers.handleBrowserFocus({
-      payload: {
-        label: 'native-tab-a',
-        url: 'https://current.example',
-        navigationToken: 'current-token',
-      },
-    })).toBe(false);
+    expect(fixture.handlers.handleBrowserFocus(validFocusEvent())).toBe(false);
     fixture.browser.tabs = [fixture.tab];
     expect(fixture.handlers.calls).toEqual([]);
 
-    expect(fixture.handlers.handleBrowserFocus({
-      payload: {
-        label: 'native-tab-a',
-        url: 'https://current.example',
-        navigationToken: 'current-token',
-      },
-    })).toBe(true);
+    expect(fixture.handlers.handleBrowserFocus(validFocusEvent())).toBe(true);
     expect(fixture.handlers.calls).toEqual([
       'surface:browser',
       'focus:web-pane',
@@ -2407,13 +2403,23 @@ describe('Tauri native browser lifecycle', () => {
 
   it('documents the browser lifecycle source contract', () => {
     expect(nativeLib).toContain(
-      'navigationToken: window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ || null',
+      'let focus_identity = browser_focus_identity(&browser_label);',
+    );
+    expect(nativeLib).toContain(
+      '.eval(&browser_page_event_script(&label, Some(&focus_identity))?)',
+    );
+    expect(nativeLib).toContain(
+      'emit("browser:focus", {{ label: browserLabel, url: location.href, generation: focusGeneration, navigationToken: focusNavigationToken }});',
     );
     expect(nativeLib).toContain(
       'window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ = {navigation_token_json};',
     );
+    expect(mainJs).toContain(
+      'generation: generation, navigationToken: navigationToken',
+    );
     const destroyBrowserWebview = rustFunctionSource(nativeLib, 'destroy_browser_webview');
     expect(destroyBrowserWebview).toContain('BROWSER_NAVIGATION_WAITERS.lock().remove(&label);');
+    expect(destroyBrowserWebview).toContain('BROWSER_LIVE_FOCUS_IDENTITIES.lock().remove(&label);');
     expect(destroyBrowserWebview).toContain('webview.close().map_err(|error| error.to_string())?;');
     expect(destroyBrowserWebview).toContain('app.state::<BrowserShortcutAuthorizations>().remove(&label);');
 

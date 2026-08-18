@@ -13,6 +13,10 @@ const lib = readFileSync(new URL(
   '../native/desktop/psyche-build-tauri/src-tauri/src/lib.rs',
   import.meta.url,
 ), 'utf8');
+const mainJs = readFileSync(new URL(
+  '../native/desktop/psyche-build-tauri/web/main.js',
+  import.meta.url,
+), 'utf8');
 const cargo = readFileSync(new URL(
   '../native/desktop/psyche-build-tauri/src-tauri/Cargo.toml',
   import.meta.url,
@@ -184,12 +188,30 @@ describe('Tauri browser control provider contract', () => {
       'browser_snapshot',
     ]) {
       expect(lib).toMatch(new RegExp(
-        `fn ${command}\\([\\s\\S]{0,300}webview: tauri::Webview[\\s\\S]{0,220}\\{\\n\\s*ensure_trusted_browser_caller\\(webview.label\\(\\)\\)\\?;`,
+        `fn ${command}\\([\\s\\S]{0,380}webview: tauri::Webview[\\s\\S]{0,320}\\{\\n\\s*ensure_trusted_browser_caller\\(webview.label\\(\\)\\)\\?;`,
       ));
     }
     expect(lib).toContain('ensure_trusted_browser_caller("psyche-browser-untrusted")');
     expect(capability.permissions).toContain('allow-browser-script');
     expect(browserScriptPermission).toContain('commands.allow = ["browser_script"]');
+  });
+
+  it('keeps browser focus correlation under trusted native navigation authority', () => {
+    expect(lib).toMatch(
+      /async fn browser_navigate\([\s\S]*generation: u64,[\s\S]*navigation_token: String,[\s\S]*ensure_trusted_browser_caller\(webview\.label\(\)\)\?;/,
+    );
+    expect(lib).toMatch(
+      /BrowserNavigationWaiter \{\s*generation,\s*token: navigation_token\.clone\(\),/,
+    );
+    expect(lib).toMatch(
+      /fn browser_focus_identity\(label: &str\)[\s\S]*BROWSER_LIVE_FOCUS_IDENTITIES\.lock\(\)\.get\(label\)\.cloned\(\)/,
+    );
+    expect(lib).toMatch(
+      /complete_browser_navigation[\s\S]*BROWSER_LIVE_FOCUS_IDENTITIES\.lock\(\)\.insert\([\s\S]*generation: waiter\.generation,[\s\S]*navigation_token: waiter\.token\.clone\(\),/,
+    );
+    expect(mainJs).toContain(
+      'generation: generation, navigationToken: navigationToken',
+    );
   });
 
   it('pre-bounds screenshot pixels and reserves base64 JSON wire overhead', () => {
