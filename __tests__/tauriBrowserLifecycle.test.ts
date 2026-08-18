@@ -577,6 +577,12 @@ function browserLifecycleHarness() {
     generation: number;
     invalidationGeneration: number;
     navigationTail: Promise<void> | null;
+    operationGeneration: number;
+    pendingOperation: {
+      id: number;
+      promise: Promise<void>;
+    } | null;
+    activationOperation: Promise<boolean> | null;
     cleanupGeneration: number;
     cleanupOperation: {
       id: number;
@@ -607,6 +613,9 @@ function browserLifecycleHarness() {
         generation: 0,
         invalidationGeneration: 0,
         navigationTail: null,
+        operationGeneration: 0,
+        pendingOperation: null,
+        activationOperation: null,
         cleanupGeneration: 0,
         cleanupOperation: null,
         nativeLabel: null,
@@ -629,6 +638,9 @@ function browserLifecycleHarness() {
         generation: 0,
         invalidationGeneration: 0,
         navigationTail: null,
+        operationGeneration: 0,
+        pendingOperation: null,
+        activationOperation: null,
         cleanupGeneration: 0,
         cleanupOperation: null,
         nativeLabel: null,
@@ -800,6 +812,124 @@ function browserNavigationDependencies(
       }
       return true;
     },
+  };
+}
+
+function pendingSelectedTabLifecycleHarness() {
+  let resolveNavigation!: () => void;
+  let rejectNavigation!: (error: Error) => void;
+  let resolveCleanup!: () => void;
+  let signalCleanupStarted!: () => void;
+  const cleanupStarted = new Promise<void>((resolve) => { signalCleanupStarted = resolve; });
+  let deferCleanup = false;
+  let destroyCalls = 0;
+  const project = { id: 'project-a' };
+  const tab: BrowserNavigationTab = {
+    id: 'tab-a',
+    url: 'https://old.example',
+    created: true,
+    loading: false,
+    title: 'Old title',
+    history: ['https://old.example'],
+    historyIndex: 0,
+  };
+  const successor: BrowserNavigationTab = {
+    id: 'tab-b',
+    url: 'https://successor.example',
+    created: true,
+    loading: false,
+    title: 'Successor',
+    history: ['https://successor.example'],
+    historyIndex: 0,
+  };
+  const browser = { activeTabId: tab.id, tabs: [tab, successor] };
+  const lifecycle = browserLifecycleHarness();
+  const calls: string[] = [];
+  const invoke = (command: string) => {
+    calls.push(command);
+    if (command === 'browser_navigate') {
+      return new Promise<void>((resolve, reject) => {
+        resolveNavigation = resolve;
+        rejectNavigation = reject;
+      });
+    }
+    if (command === 'browser_destroy') {
+      destroyCalls += 1;
+      if (deferCleanup && destroyCalls === 1) {
+        signalCleanupStarted();
+        return new Promise<void>((resolve) => { resolveCleanup = resolve; });
+      }
+    }
+    return Promise.resolve();
+  };
+  const dependencies = browserNavigationDependencies(
+    project,
+    browser,
+    tab,
+    invoke,
+    lifecycle,
+  );
+  dependencies.browserNavigationIsCurrent = compileFunction(
+    functionSource(mainJs, 'browserNavigationIsCurrent'),
+    dependencies,
+  );
+  dependencies.discardObsoleteBrowserNavigation = compileFunction(
+    functionSource(mainJs, 'discardObsoleteBrowserNavigation'),
+    dependencies,
+  );
+  const navigateBrowser = compileFunction<
+    (url: string, options: Record<string, unknown>) => Promise<boolean>
+  >(functionSource(mainJs, 'navigateBrowser'), dependencies);
+  let restorations = 0;
+  const activateBrowserTab = compileFunction<
+    (value: typeof project, tabId: string) => Promise<boolean>
+  >(functionSource(mainJs, 'activateBrowserTab'), {
+    ...lifecycle,
+    activeProject: () => project,
+    activeWorkspaceRoot: () => '/workspace',
+    ensureBrowserModel: () => browser,
+    findBrowserPane: dependencies.findBrowserPane,
+    markActiveSurface: () => {},
+    renderBrowserTabs: () => {},
+    syncProjectBrowser: () => {},
+    saveWorkspaceSoon: () => {},
+    restoreDormantBrowserTab: async (_value: typeof project, valueTab: BrowserNavigationTab) => {
+      restorations += 1;
+      valueTab.created = true;
+      return true;
+    },
+  });
+  const closeBrowserTab = compileFunction<
+    (value: typeof project, tabId: string) => Promise<boolean>
+  >(functionSource(mainJs, 'closeBrowserTab'), {
+    ...lifecycle,
+    activeProject: () => project,
+    activeWorkspaceRoot: () => '/workspace',
+    ensureBrowserModel: () => browser,
+    invoke,
+    browserLabelForTab: () => 'project-a:tab-a',
+    setStatus: () => {},
+    renderBrowserTabs: () => {},
+    syncProjectBrowser: () => {},
+    saveWorkspaceSoon: () => {},
+    restoreDormantBrowserTab: async () => false,
+  });
+  return {
+    project,
+    tab,
+    successor,
+    browser,
+    lifecycle,
+    calls,
+    navigateBrowser,
+    activateBrowserTab,
+    closeBrowserTab,
+    cleanupStarted,
+    resolveNavigation: () => resolveNavigation(),
+    rejectNavigation: () => rejectNavigation(new Error('navigation failed')),
+    deferCleanup: () => { deferCleanup = true; },
+    resolveCleanup: () => resolveCleanup(),
+    restorationCount: () => restorations,
   };
 }
 
@@ -3271,6 +3401,102 @@ describe('Tauri native browser lifecycle', () => {
     });
     expect(calls).toContain('restore:tab-a');
     expect(lifecycle.browserTabLifecycle(tab).cleanupOperation).toBeNull();
+  });
+
+  it('restores a selected tab once when navigation fails after selection but before cleanup starts', async () => {
+    const harness = pendingSelectedTabLifecycleHarness();
+    const navigation = harness.navigateBrowser('https://new.example', { tabId: harness.tab.id });
+    await Promise.resolve();
+    harness.browser.activeTabId = harness.successor.id;
+
+    const activations = [
+      harness.activateBrowserTab(harness.project, harness.tab.id),
+      harness.activateBrowserTab(harness.project, harness.tab.id),
+    ];
+    let activationSettled = false;
+    Promise.all(activations).then(() => { activationSettled = true; });
+    await Promise.resolve();
+
+    expect(harness.browser.activeTabId).toBe(harness.tab.id);
+    expect(activationSettled).toBe(false);
+    expect(harness.lifecycle.browserTabLifecycle(harness.tab).cleanupOperation).toBeNull();
+
+    harness.rejectNavigation();
+    await expect(navigation).resolves.toBe(false);
+    await expect(Promise.all(activations)).resolves.toEqual([true, true]);
+
+    expect(harness.tab).toMatchObject({
+      created: true,
+      loading: false,
+      url: 'https://old.example',
+      title: 'Old title',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    });
+    expect(harness.restorationCount()).toBe(1);
+  });
+
+  it('settles selected-tab activation without restoration after pending navigation succeeds', async () => {
+    const harness = pendingSelectedTabLifecycleHarness();
+    const navigation = harness.navigateBrowser('https://new.example', { tabId: harness.tab.id });
+    await Promise.resolve();
+    harness.browser.activeTabId = harness.successor.id;
+
+    const activation = harness.activateBrowserTab(harness.project, harness.tab.id);
+    let activationSettled = false;
+    activation.then(() => { activationSettled = true; });
+    await Promise.resolve();
+
+    expect(activationSettled).toBe(false);
+    harness.resolveNavigation();
+
+    await expect(navigation).resolves.toBe(true);
+    await expect(activation).resolves.toBe(true);
+    expect(harness.tab).toMatchObject({ created: true, url: 'https://new.example' });
+    expect(harness.restorationCount()).toBe(0);
+  });
+
+  it('does not restore a selected tab switched away from before pending navigation settles', async () => {
+    const harness = pendingSelectedTabLifecycleHarness();
+    const navigation = harness.navigateBrowser('https://new.example', { tabId: harness.tab.id });
+    await Promise.resolve();
+    harness.browser.activeTabId = harness.successor.id;
+
+    const activation = harness.activateBrowserTab(harness.project, harness.tab.id);
+    let activationSettled = false;
+    activation.then(() => { activationSettled = true; });
+    await Promise.resolve();
+    expect(activationSettled).toBe(false);
+    harness.browser.activeTabId = harness.successor.id;
+    harness.rejectNavigation();
+
+    await expect(navigation).resolves.toBe(false);
+    await expect(activation).resolves.toBe(true);
+    expect(harness.browser.activeTabId).toBe(harness.successor.id);
+    expect(harness.tab.created).toBe(false);
+    expect(harness.restorationCount()).toBe(0);
+  });
+
+  it('does not restore a selected tab closed while failed navigation cleanup settles', async () => {
+    const harness = pendingSelectedTabLifecycleHarness();
+    harness.deferCleanup();
+    const navigation = harness.navigateBrowser('https://new.example', { tabId: harness.tab.id });
+    await Promise.resolve();
+    harness.browser.activeTabId = harness.successor.id;
+
+    const activation = harness.activateBrowserTab(harness.project, harness.tab.id);
+    harness.rejectNavigation();
+    await harness.cleanupStarted;
+
+    const closing = harness.closeBrowserTab(harness.project, harness.tab.id);
+    await expect(closing).resolves.toBe(true);
+    harness.resolveCleanup();
+
+    await expect(navigation).resolves.toBe(false);
+    await expect(activation).resolves.toBe(false);
+    expect(harness.browser.tabs).not.toContain(harness.tab);
+    expect(harness.browser.activeTabId).toBe(harness.successor.id);
+    expect(harness.restorationCount()).toBe(0);
   });
 
   it('activates the terminal redirect URL returned by the exact native navigation', async () => {

@@ -10062,10 +10062,10 @@
     return projectId + "__" + tabId;
   }
   function browserTabLifecycle(tab) {
-    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
+    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
     var lifecycle = browserTabLifecycleStates.get(tab);
     if (!lifecycle) {
-      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
+      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
       browserTabLifecycleStates.set(tab, lifecycle);
     }
     return lifecycle;
@@ -11112,16 +11112,32 @@
     markActiveSurface("browser");
     browser.activeTabId = tabId;
     renderBrowserTabs(); syncProjectBrowser(); saveWorkspaceSoon();
-    while (lifecycle.cleanupOperation) {
-      await lifecycle.cleanupOperation.promise;
+    var activationOperation = lifecycle.activationOperation;
+    if (!activationOperation) {
+      activationOperation = (async function () {
+        while (lifecycle.pendingOperation || lifecycle.cleanupOperation) {
+          var pending = lifecycle.pendingOperation || lifecycle.cleanupOperation;
+          await pending.promise;
+        }
+        pane = findBrowserPane(project.id, activeWorkspaceRoot(project));
+        if (browser.tabs.indexOf(tab) === -1 || browserTabIsClosing(tab) ||
+            browserPaneIsClosing(pane)) return false;
+        if (browser.activeTabId === tab.id && !tab.created) {
+          await restoreDormantBrowserTab(project, tab);
+        }
+        pane = findBrowserPane(project.id, activeWorkspaceRoot(project));
+        return browser.tabs.indexOf(tab) !== -1 && !browserTabIsClosing(tab) &&
+          !browserPaneIsClosing(pane);
+      })();
+      lifecycle.activationOperation = activationOperation;
     }
-    pane = findBrowserPane(project.id, activeWorkspaceRoot(project));
-    if (browser.tabs.indexOf(tab) === -1 || browserTabIsClosing(tab) ||
-        browserPaneIsClosing(pane)) return false;
-    if (!tab.created) await restoreDormantBrowserTab(project, tab);
-    pane = findBrowserPane(project.id, activeWorkspaceRoot(project));
-    return browser.tabs.indexOf(tab) !== -1 && !browserTabIsClosing(tab) &&
-      !browserPaneIsClosing(pane);
+    try {
+      return await activationOperation;
+    } finally {
+      if (lifecycle.activationOperation === activationOperation) {
+        lifecycle.activationOperation = null;
+      }
+    }
   }
   async function openBlankBrowserTab(options) {
     options = options || {};
@@ -11549,10 +11565,22 @@
         return false;
       }
     };
+    var operation = {
+      id: lifecycle.operationGeneration + 1,
+      promise: null,
+    };
+    lifecycle.operationGeneration = operation.id;
     var navigation = lifecycle.navigationTail
       ? lifecycle.navigationTail.then(runNavigation, runNavigation)
       : runNavigation();
-    lifecycle.navigationTail = navigation.then(function () {}, function () {});
+    var navigationSettlement = navigation.then(function () {
+      if (lifecycle.pendingOperation === operation) lifecycle.pendingOperation = null;
+    }, function () {
+      if (lifecycle.pendingOperation === operation) lifecycle.pendingOperation = null;
+    });
+    operation.promise = navigationSettlement;
+    lifecycle.pendingOperation = operation;
+    lifecycle.navigationTail = navigationSettlement;
     return navigation;
   }
   function normaliseUrl(value) {
