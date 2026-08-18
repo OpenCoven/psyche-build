@@ -596,6 +596,7 @@ function browserLifecycleHarness() {
     controlGeneration: number;
     liveUrl: string | null;
     liveNavigationToken: string | null;
+    liveFocusNonce: string | null;
     eventUrl: string | null;
     viewLive: boolean;
     navigationSnapshot: {
@@ -626,6 +627,7 @@ function browserLifecycleHarness() {
         controlGeneration: 0,
         liveUrl: null,
         liveNavigationToken: null,
+        liveFocusNonce: null,
         eventUrl: null,
         viewLive: false,
         navigationSnapshot: null,
@@ -651,6 +653,7 @@ function browserLifecycleHarness() {
         controlGeneration: 0,
         liveUrl: null,
         liveNavigationToken: null,
+        liveFocusNonce: null,
         eventUrl: null,
         viewLive: (tab as { created?: boolean }).created === true,
         navigationSnapshot: null,
@@ -704,7 +707,7 @@ function browserNavigationDependencies(
   project: { id: string },
   browser: { activeTabId: string; tabs: BrowserNavigationTab[] },
   tab: BrowserNavigationTab,
-  invoke: (command: string, args: Record<string, unknown>) => Promise<void>,
+  invoke: (command: string, args: Record<string, unknown>) => Promise<unknown>,
   lifecycle = browserLifecycleHarness(),
 ) {
   const pane = {
@@ -738,7 +741,19 @@ function browserNavigationDependencies(
     updateBrowserControls: () => {},
     browserLabelForTab: (value: typeof project, browserTab: BrowserNavigationTab) =>
       `${value.id}:${browserTab.id}`,
-    invoke,
+    invoke: async (command: string, args: Record<string, unknown>) => {
+      const result = await invoke(command, args);
+      if (command !== 'browser_navigate') return result;
+      return {
+        ...(result && typeof result === 'object' ? result : {}),
+        focusNonce: (
+          result &&
+          typeof result === 'object' &&
+          'focusNonce' in result &&
+          result.focusNonce
+        ) || `focus-nonce:${String(args.navigationToken || '')}`,
+      };
+    },
     previewEmpty: { hidden: false },
     syncUrlInput: () => {},
     syncProjectBrowser: () => {},
@@ -799,6 +814,7 @@ function browserNavigationDependencies(
       state.controlGeneration = 0;
       state.liveUrl = null;
       state.liveNavigationToken = null;
+      state.liveFocusNonce = null;
       state.eventUrl = null;
       state.viewLive = false;
       await invoke('browser_destroy', { label: context.label });
@@ -2055,6 +2071,7 @@ function browserNativeEventHandlers(options: {
       url?: string;
       generation?: number;
       navigationToken?: string;
+      focusNonce?: string;
     }) => {
       pair: {
         project: typeof project;
@@ -2086,6 +2103,7 @@ function browserNativeEventHandlers(options: {
         url?: string;
         generation?: number;
         navigationToken?: string;
+        focusNonce?: string;
       };
     }) => boolean
   >(functionSource(mainJs, 'handleBrowserFocus'), {
@@ -2143,6 +2161,7 @@ function browserFocusFixture() {
     liveGeneration: 3,
     liveUrl: tab.url,
     liveNavigationToken: 'current-token',
+    liveFocusNonce: 'current-focus-nonce',
     eventUrl: tab.url,
     viewLive: true,
   });
@@ -2210,6 +2229,7 @@ describe('Tauri native browser lifecycle', () => {
         url: 'https://current.example',
         generation: 3,
         navigationToken: 'current-token',
+        focusNonce: 'current-focus-nonce',
       },
     })).toBe(false);
     expect(fixture.handlers.calls).toEqual([]);
@@ -2258,6 +2278,7 @@ describe('Tauri native browser lifecycle', () => {
       liveGeneration: 4,
       liveUrl: 'https://current.example',
       liveNavigationToken: 'replacement-token',
+      liveFocusNonce: 'replacement-focus-nonce',
       eventUrl: 'https://current.example',
       viewLive: true,
     });
@@ -2267,6 +2288,7 @@ describe('Tauri native browser lifecycle', () => {
         url: 'https://current.example',
         generation: 3,
         navigationToken: 'current-token',
+        focusNonce: 'current-focus-nonce',
       },
     })).toBe(false);
     expect(fixture.handlers.calls).toEqual([]);
@@ -2280,6 +2302,7 @@ describe('Tauri native browser lifecycle', () => {
         url: 'https://current.example',
         generation: 3,
         navigationToken: 'current-token',
+        focusNonce: 'current-focus-nonce',
       },
     });
 
@@ -2289,6 +2312,7 @@ describe('Tauri native browser lifecycle', () => {
         url: 'https://current.example',
         generation: 3,
         navigationToken: 'current-token',
+        focusNonce: 'current-focus-nonce',
       },
     })).toBe(false);
     expect(fixture.handlers.handleBrowserFocus({
@@ -2297,6 +2321,7 @@ describe('Tauri native browser lifecycle', () => {
         url: 'https://current.example',
         generation: 2,
         navigationToken: 'current-token',
+        focusNonce: 'current-focus-nonce',
       },
     })).toBe(false);
     expect(fixture.handlers.handleBrowserFocus({
@@ -2305,6 +2330,7 @@ describe('Tauri native browser lifecycle', () => {
         url: 'https://current.example',
         generation: 3,
         navigationToken: 'stale-token',
+        focusNonce: 'current-focus-nonce',
       },
     })).toBe(false);
     expect(fixture.handlers.handleBrowserFocus({
@@ -2312,6 +2338,7 @@ describe('Tauri native browser lifecycle', () => {
         label: 'native-tab-a',
         url: 'https://current.example',
         navigationToken: 'current-token',
+        focusNonce: 'current-focus-nonce',
       },
     })).toBe(false);
     expect(fixture.handlers.handleBrowserFocus({
@@ -2319,11 +2346,30 @@ describe('Tauri native browser lifecycle', () => {
         label: 'native-tab-a',
         url: 'https://current.example',
         generation: 3,
+        focusNonce: 'current-focus-nonce',
       },
     })).toBe(false);
     expect(fixture.handlers.handleBrowserFocus({
       payload: {
         label: 'native-tab-a',
+        generation: 3,
+        navigationToken: 'current-token',
+        focusNonce: 'current-focus-nonce',
+      },
+    })).toBe(false);
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        generation: 3,
+        navigationToken: 'current-token',
+        focusNonce: 'stale-focus-nonce',
+      },
+    })).toBe(false);
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
         generation: 3,
         navigationToken: 'current-token',
       },
@@ -2365,6 +2411,7 @@ describe('Tauri native browser lifecycle', () => {
         url,
         generation: 3,
         navigationToken: 'current-token',
+        focusNonce: 'current-focus-nonce',
       },
     })).toBe(true);
     expect(fixture.tab.url).toBe(url);
@@ -2391,6 +2438,7 @@ describe('Tauri native browser lifecycle', () => {
         url: 'https://current.example/#stale',
         generation: 3,
         navigationToken: 'stale-token',
+        focusNonce: 'current-focus-nonce',
       },
     })).toBe(false);
     expect(fixture.tab.url).toBe('https://current.example');
@@ -2403,19 +2451,22 @@ describe('Tauri native browser lifecycle', () => {
 
   it('documents the browser lifecycle source contract', () => {
     expect(nativeLib).toContain(
-      'let focus_identity = browser_focus_identity(&browser_label);',
+      'let focus_script = browser_focus_initialization_script(label, focus_identity)?;',
     );
     expect(nativeLib).toContain(
-      '.eval(&browser_page_event_script(&label, Some(&focus_identity))?)',
+      '.initialization_script(focus_script)',
     );
     expect(nativeLib).toContain(
-      'emit("browser:focus", {{ label: browserLabel, url: location.href, generation: focusGeneration, navigationToken: focusNavigationToken }});',
+      'focusNonce: focusNonce',
     );
-    expect(nativeLib).toContain(
-      'window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ = {navigation_token_json};',
-    );
+    expect(nativeLib).not.toContain('__PSYCHE_BROWSER_FOCUS_IDENTITY__');
+    expect(nativeLib).not.toContain('__PSYCHE_BROWSER_NAVIGATION_TOKEN__');
+    expect(nativeLib).toContain('retire_browser_webview_for_navigation(&app, &label)?;');
     expect(mainJs).toContain(
       'generation: generation, navigationToken: navigationToken',
+    );
+    expect(mainJs).toContain(
+      'payload.focusNonce !== lifecycle.liveFocusNonce',
     );
     const destroyBrowserWebview = rustFunctionSource(nativeLib, 'destroy_browser_webview');
     expect(destroyBrowserWebview).toContain('BROWSER_NAVIGATION_WAITERS.lock().remove(&label);');
@@ -3514,7 +3565,10 @@ describe('Tauri native browser lifecycle', () => {
     const browser = { activeTabId: tab.id, tabs: [tab] };
     const dependencies = browserNavigationDependencies(project, browser, tab, async () => undefined);
     dependencies.invoke = (async (command: string) => command === 'browser_navigate'
-      ? { terminalUrl: 'https://terminal.example/account' }
+      ? {
+        terminalUrl: 'https://terminal.example/account',
+        focusNonce: 'terminal-focus-nonce',
+      }
       : undefined) as any;
     const navigateBrowser = compileFunction<(url: string, options: Record<string, unknown>) => Promise<boolean>>(
       functionSource(mainJs, 'navigateBrowser'), dependencies,
@@ -5485,7 +5539,7 @@ describe('Tauri native browser lifecycle', () => {
       if (command === 'browser_navigate') {
         calls.push(`recover:${args.label}`);
         nativeViews.add(String(args.label));
-        return Promise.resolve();
+        return Promise.resolve({ focusNonce: `focus:${String(args.label)}` });
       }
       throw new Error(`unexpected command ${command}`);
     };
@@ -5625,7 +5679,7 @@ describe('Tauri native browser lifecycle', () => {
       if (command === 'browser_navigate') {
         calls.push(`recover:${args.label}:${args.url}`);
         nativeViews.add(String(args.label));
-        return Promise.resolve();
+        return Promise.resolve({ focusNonce: `focus:${String(args.label)}` });
       }
       throw new Error(`unexpected command ${command}`);
     };
@@ -5866,7 +5920,7 @@ describe('Tauri native browser lifecycle', () => {
             throw new Error('tab-a restore unavailable');
           }
           nativeViews.add(String(args.label));
-          return;
+          return { focusNonce: `focus:${String(args.label)}` };
         }
         throw new Error(`unexpected command ${command}`);
       },
@@ -5978,7 +6032,7 @@ describe('Tauri native browser lifecycle', () => {
         if (command === 'browser_navigate') {
           calls.push(`${command}:${args.label}`);
           nativeViews.add(String(args.label));
-          return;
+          return { focusNonce: `focus:${String(args.label)}` };
         }
         throw new Error(`unexpected command ${command}`);
       },

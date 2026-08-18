@@ -1702,11 +1702,13 @@ pub struct BrowserPageLoadEvent {
 #[serde(rename_all = "camelCase")]
 struct BrowserNavigationResult {
     terminal_url: String,
+    focus_nonce: String,
 }
 
 struct BrowserNavigationWaiter {
     generation: u64,
     token: String,
+    focus_nonce: String,
     navigation_identity: Option<usize>,
     completion: Option<tokio::sync::oneshot::Sender<Result<BrowserNavigationResult, String>>>,
 }
@@ -1715,6 +1717,7 @@ struct BrowserNavigationWaiter {
 struct BrowserFocusIdentity {
     generation: u64,
     navigation_token: String,
+    focus_nonce: String,
 }
 
 fn browser_focus_identity(label: &str) -> Option<BrowserFocusIdentity> {
@@ -1758,15 +1761,17 @@ fn complete_browser_navigation(navigation_identity: usize, terminal_url: &str) -
         let result = if terminal_url.is_empty() {
             Err("browser navigation terminal URL is unavailable".to_string())
         } else {
-            BROWSER_LIVE_FOCUS_IDENTITIES.lock().insert(
-                label,
-                BrowserFocusIdentity {
-                    generation: waiter.generation,
-                    navigation_token: waiter.token.clone(),
-                },
-            );
+            let focus_identity = BrowserFocusIdentity {
+                generation: waiter.generation,
+                navigation_token: waiter.token.clone(),
+                focus_nonce: waiter.focus_nonce.clone(),
+            };
+            BROWSER_LIVE_FOCUS_IDENTITIES
+                .lock()
+                .insert(label, focus_identity.clone());
             Ok(BrowserNavigationResult {
                 terminal_url: terminal_url.to_string(),
+                focus_nonce: focus_identity.focus_nonce,
             })
         };
         let _ = completion.send(result);
@@ -3157,6 +3162,10 @@ fn random_browser_shortcut_secret() -> Result<String, String> {
     Ok(secret)
 }
 
+fn random_browser_focus_nonce() -> Result<String, String> {
+    random_browser_shortcut_secret()
+}
+
 fn browser_shortcut_initialization_script(initial_secret: &str) -> Result<String, String> {
     let secret_json = serde_json::to_string(initial_secret).map_err(|error| error.to_string())?;
     Ok(r#"(function(initialSecret) {
@@ -3274,44 +3283,65 @@ fn browser_automation_result(
         .map_err(|error| error.to_string())
 }
 
-fn browser_page_event_script(
+fn browser_focus_initialization_script(
     label: &str,
-    focus_identity: Option<&BrowserFocusIdentity>,
+    focus_identity: &BrowserFocusIdentity,
 ) -> Result<String, String> {
     let label_json = serde_json::to_string(label).map_err(|error| error.to_string())?;
-    let focus_navigation_token = focus_identity
-        .map(|identity| serde_json::to_string(&identity.navigation_token))
-        .transpose()
-        .map_err(|error| error.to_string())?
-        .unwrap_or_else(|| "null".to_string());
-    let focus_generation = focus_identity
-        .map(|identity| identity.generation.to_string())
-        .unwrap_or_else(|| "null".to_string());
+    let focus_navigation_token = serde_json::to_string(&focus_identity.navigation_token)
+        .map_err(|error| error.to_string())?;
+    let focus_generation = focus_identity.generation.to_string();
+    let focus_nonce =
+        serde_json::to_string(&focus_identity.focus_nonce).map_err(|error| error.to_string())?;
     Ok(format!(
-        r#"(function(browserLabel, focusGeneration, focusNavigationToken) {{
+        r#"(function(browserLabel, focusGeneration, focusNavigationToken, focusNonce) {{
           try {{
-            var emit = function(name, payload) {{
-              if (window.__TAURI__ && window.__TAURI__.event) {{
-                window.__TAURI__.event.emit(name, payload);
-              }}
-            }};
-            var title = document.title || location.hostname || location.href;
-            emit("browser:title", {{ label: browserLabel, title: title, url: location.href }});
-            var focusIdentity = focusGeneration && focusNavigationToken
-              ? String(focusGeneration) + ":" + focusNavigationToken
+            if (window.top !== window) return;
+            var eventApi = window.__TAURI__ && window.__TAURI__.event;
+            if (!eventApi || typeof eventApi.emitTo !== "function") return;
+            var emitTo = eventApi.emitTo;
+            var reflectApply = Reflect.apply;
+            var documentHasFocus = typeof document.hasFocus === "function"
+              ? document.hasFocus
               : null;
-            if (focusIdentity && window.__PSYCHE_BROWSER_FOCUS_IDENTITY__ !== focusIdentity) {{
-              window.__PSYCHE_BROWSER_FOCUS_IDENTITY__ = focusIdentity;
-              window.addEventListener("pointerdown", function() {{
-                emit("browser:focus", {{ label: browserLabel, url: location.href, generation: focusGeneration, navigationToken: focusNavigationToken }});
-              }}, true);
-              window.addEventListener("focusin", function() {{
-                emit("browser:focus", {{ label: browserLabel, url: location.href, generation: focusGeneration, navigationToken: focusNavigationToken }});
-              }}, true);
+            var reportTitle = function() {{
+              try {{
+                var title = document.title || location.hostname || location.href;
+                reflectApply(emitTo, eventApi, [
+                  "main",
+                  "browser:title",
+                  {{ label: browserLabel, title: title, url: location.href }}
+                ]);
+              }} catch (_) {{}}
+            }};
+            var reportFocus = function(event) {{
+              try {{
+                if (!event || event.isTrusted !== true) return;
+                if (documentHasFocus && !reflectApply(documentHasFocus, document, [])) return;
+                if (document.visibilityState === "hidden") return;
+                reflectApply(emitTo, eventApi, [
+                  "main",
+                  "browser:focus",
+                  {{
+                    label: browserLabel,
+                    url: location.href,
+                    generation: focusGeneration,
+                    navigationToken: focusNavigationToken,
+                    focusNonce: focusNonce
+                  }}
+                ]);
+              }} catch (_) {{}}
+            }};
+            if (document.readyState === "loading") {{
+              document.addEventListener("DOMContentLoaded", reportTitle, {{ once: true }});
+            }} else {{
+              reportTitle();
             }}
+            window.addEventListener("focus", reportFocus, true);
+            document.addEventListener("focusin", reportFocus, true);
           }} catch (_) {{}}
-        }})({}, {}, {});"#,
-        label_json, focus_generation, focus_navigation_token
+        }})({}, {}, {}, {});"#,
+        label_json, focus_generation, focus_navigation_token, focus_nonce
     ))
 }
 
@@ -3324,6 +3354,7 @@ fn ensure_browser(
     h: f64,
     url: &str,
     automation_source: &str,
+    focus_identity: &BrowserFocusIdentity,
 ) -> Result<bool, String> {
     if app.webviews().keys().any(|existing| existing == label) {
         return Ok(false);
@@ -3336,14 +3367,16 @@ fn ensure_browser(
     let parsed_url = Url::parse(url).map_err(|e| e.to_string())?;
     let initial_secret = random_browser_shortcut_secret()?;
     let shortcut_script = browser_shortcut_initialization_script(&initial_secret)?;
+    let focus_script = browser_focus_initialization_script(label, focus_identity)?;
     app.state::<BrowserShortcutAuthorizations>()
         .install(label, initial_secret.clone());
     let browser_label = label.to_string();
     let app_for_load = app.clone();
     let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url))
         .initialization_script(shortcut_script)
+        .initialization_script(focus_script)
         .initialization_script(automation_source)
-        .on_page_load(move |webview, payload| {
+        .on_page_load(move |_webview, payload| {
             if matches!(payload.event(), PageLoadEvent::Started) {
                 app_for_load
                     .state::<BrowserShortcutAuthorizations>()
@@ -3369,14 +3402,6 @@ fn ensure_browser(
                     navigation_token,
                 },
             );
-            if matches!(payload.event(), PageLoadEvent::Finished) {
-                let focus_identity = browser_focus_identity(&browser_label);
-                if let Ok(script) =
-                    browser_page_event_script(&browser_label, focus_identity.as_ref())
-                {
-                    let _ = webview.eval(&script);
-                }
-            }
         });
 
     if let Err(error) = main.add_child(
@@ -3408,6 +3433,16 @@ fn cleanup_created_browser_after_setup_failure(
     if created {
         let _ = close();
     }
+}
+
+fn retire_browser_webview_for_navigation(app: &AppHandle, label: &str) -> Result<(), String> {
+    if let Some(webview) = app.get_webview(label) {
+        webview.close().map_err(|error| error.to_string())?;
+    }
+    BROWSER_LIVE_FOCUS_IDENTITIES.lock().remove(label);
+    app.state::<BrowserShortcutAuthorizations>().remove(label);
+    app.state::<BrowserAutomationAuthorizations>().remove(label);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -3486,6 +3521,7 @@ async fn browser_navigate(
     }
     let label = safe_browser_label(label);
     Url::parse(&url).map_err(|error| error.to_string())?;
+    let focus_nonce = random_browser_focus_nonce()?;
     let (completion, receiver) = tokio::sync::oneshot::channel();
     {
         let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
@@ -3497,6 +3533,7 @@ async fn browser_navigate(
             BrowserNavigationWaiter {
                 generation,
                 token: navigation_token.clone(),
+                focus_nonce: focus_nonce.clone(),
                 navigation_identity: None,
                 completion: Some(completion),
             },
@@ -3506,7 +3543,23 @@ async fn browser_navigate(
         label: label.clone(),
         token: navigation_token.clone(),
     };
-    let created = ensure_browser(&app, &label, x, y, w, h, &url, &automation_source)?;
+    retire_browser_webview_for_navigation(&app, &label)?;
+    let focus_identity = BrowserFocusIdentity {
+        generation,
+        navigation_token: navigation_token.clone(),
+        focus_nonce,
+    };
+    let created = ensure_browser(
+        &app,
+        &label,
+        x,
+        y,
+        w,
+        h,
+        &url,
+        &automation_source,
+        &focus_identity,
+    )?;
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| "browser webview missing".to_string())?;
@@ -3520,36 +3573,28 @@ async fn browser_navigate(
     }
     if let Err(error) = start_browser_navigation(&webview, &label, &url).await {
         cleanup_created_browser_after_setup_failure(created, || {
-            webview
-                .close()
-                .map_err(|close_error| close_error.to_string())
+            retire_browser_webview_for_navigation(&app, &label)
         });
         return Err(error);
     }
     match tokio::time::timeout(std::time::Duration::from_secs(30), receiver).await {
         Ok(Ok(Ok(result))) => {
-            let navigation_token_json =
-                serde_json::to_string(&navigation_token).map_err(|error| error.to_string())?;
-            webview
-                .eval(&format!(
-                    "window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ = {navigation_token_json};"
-                ))
-                .map_err(|error| error.to_string())?;
-            let focus_identity = browser_focus_identity(&label)
+            let live_focus_identity = browser_focus_identity(&label)
                 .ok_or_else(|| "browser focus identity is unavailable".to_string())?;
-            webview
-                .eval(&browser_page_event_script(&label, Some(&focus_identity))?)
-                .map_err(|error| error.to_string())?;
+            if live_focus_identity.generation != generation
+                || live_focus_identity.navigation_token != navigation_token
+                || live_focus_identity.focus_nonce != result.focus_nonce
+            {
+                return Err(
+                    "browser focus identity does not match completed navigation".to_string()
+                );
+            }
             Ok(result)
         }
         Ok(Ok(Err(error))) => Err(error),
         Ok(Err(_)) => Err("browser navigation was cancelled".to_string()),
         Err(_) => {
-            if let Some(webview) = app.get_webview(&label) {
-                if webview.close().is_ok() {
-                    BROWSER_LIVE_FOCUS_IDENTITIES.lock().remove(&label);
-                }
-            }
+            let _ = retire_browser_webview_for_navigation(&app, &label);
             Err("browser navigation timed out".to_string())
         }
     }
@@ -8032,6 +8077,7 @@ mod pty_runtime_tests {
         BrowserNavigationWaiter {
             generation: 1,
             token: "requested-token".to_string(),
+            focus_nonce: "requested-focus-nonce".to_string(),
             navigation_identity: None,
             completion: Some(completion),
         }
@@ -8045,6 +8091,7 @@ mod pty_runtime_tests {
             BrowserFocusIdentity {
                 generation: 7,
                 navigation_token: "native-token".to_string(),
+                focus_nonce: "native-focus-nonce".to_string(),
             },
         );
 
@@ -8053,27 +8100,33 @@ mod pty_runtime_tests {
             Some(BrowserFocusIdentity {
                 generation: 7,
                 navigation_token: "native-token".to_string(),
+                focus_nonce: "native-focus-nonce".to_string(),
             })
         );
         BROWSER_LIVE_FOCUS_IDENTITIES.lock().remove(label);
     }
 
     #[test]
-    fn browser_page_focus_script_captures_the_exact_live_identity() {
-        let script = browser_page_event_script(
+    fn browser_focus_initialization_script_seals_the_exact_live_identity() {
+        let script = browser_focus_initialization_script(
             "psyche-browser-project-a",
-            Some(&BrowserFocusIdentity {
+            &BrowserFocusIdentity {
                 generation: 7,
                 navigation_token: "native-token".to_string(),
-            }),
+                focus_nonce: "native-focus-nonce".to_string(),
+            },
         )
         .unwrap();
 
-        assert!(script.contains(
-            "emit(\"browser:focus\", { label: browserLabel, url: location.href, generation: focusGeneration, navigationToken: focusNavigationToken });"
+        assert!(script.contains("event.isTrusted !== true"));
+        assert!(script.contains("reflectApply(documentHasFocus, document, [])"));
+        assert!(script.contains("reflectApply(emitTo, eventApi, ["));
+        assert!(script.contains("focusNonce: focusNonce"));
+        assert!(script.ends_with(
+            "})(\"psyche-browser-project-a\", 7, \"native-token\", \"native-focus-nonce\");"
         ));
-        assert!(script.ends_with("})(\"psyche-browser-project-a\", 7, \"native-token\");"));
-        assert!(script.contains("window.__PSYCHE_BROWSER_FOCUS_IDENTITY__ !== focusIdentity"));
+        assert!(!script.contains("__PSYCHE_BROWSER_FOCUS"));
+        assert!(!script.contains("__PSYCHE_BROWSER_NAVIGATION_TOKEN"));
     }
 
     #[test]
@@ -8087,6 +8140,7 @@ mod pty_runtime_tests {
             BrowserNavigationWaiter {
                 generation: 41,
                 token: "requested".to_string(),
+                focus_nonce: "requested-focus-nonce".to_string(),
                 navigation_identity: Some(41),
                 completion: Some(requested_sender),
             },
@@ -8096,6 +8150,7 @@ mod pty_runtime_tests {
             BrowserNavigationWaiter {
                 generation: 42,
                 token: "unrelated".to_string(),
+                focus_nonce: "unrelated-focus-nonce".to_string(),
                 navigation_identity: Some(42),
                 completion: Some(unrelated_sender),
             },
@@ -8105,15 +8160,15 @@ mod pty_runtime_tests {
         assert!(requested_receiver.try_recv().is_err());
         assert!(unrelated_receiver.try_recv().is_err());
         assert!(complete_browser_navigation(41, "https://terminal.example"));
-        assert_eq!(
-            requested_receiver.try_recv().unwrap().unwrap().terminal_url,
-            "https://terminal.example"
-        );
+        let requested_result = requested_receiver.try_recv().unwrap().unwrap();
+        assert_eq!(requested_result.terminal_url, "https://terminal.example");
+        assert_eq!(requested_result.focus_nonce, "requested-focus-nonce");
         assert_eq!(
             browser_focus_identity(&requested_label),
             Some(BrowserFocusIdentity {
                 generation: 41,
                 navigation_token: "requested".to_string(),
+                focus_nonce: "requested-focus-nonce".to_string(),
             })
         );
         assert_eq!(browser_focus_identity(&unrelated_label), None);

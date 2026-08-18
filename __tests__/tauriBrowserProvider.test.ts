@@ -207,11 +207,12 @@ describe('Tauri browser control provider contract', () => {
       /fn browser_focus_identity\(label: &str\)[\s\S]*BROWSER_LIVE_FOCUS_IDENTITIES\.lock\(\)\.get\(label\)\.cloned\(\)/,
     );
     expect(lib).toMatch(
-      /complete_browser_navigation[\s\S]*BROWSER_LIVE_FOCUS_IDENTITIES\.lock\(\)\.insert\([\s\S]*generation: waiter\.generation,[\s\S]*navigation_token: waiter\.token\.clone\(\),/,
+      /complete_browser_navigation[\s\S]*generation: waiter\.generation,[\s\S]*navigation_token: waiter\.token\.clone\(\),[\s\S]*focus_nonce: waiter\.focus_nonce\.clone\(\),/,
     );
     expect(mainJs).toContain(
       'generation: generation, navigationToken: navigationToken',
     );
+    expect(mainJs).toContain('payload.focusNonce !== lifecycle.liveFocusNonce');
   });
 
   it('pre-bounds screenshot pixels and reserves base64 JSON wire overhead', () => {

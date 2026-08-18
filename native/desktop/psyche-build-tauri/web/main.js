@@ -4899,6 +4899,8 @@
         tabLifecycle.pendingUrl = null;
         tabLifecycle.liveGeneration = 0;
         tabLifecycle.liveUrl = null;
+        tabLifecycle.liveNavigationToken = null;
+        tabLifecycle.liveFocusNonce = null;
         tabLifecycle.eventUrl = null;
         tabLifecycle.viewLive = false;
         tabLifecycle.navigationSnapshot = null;
@@ -4906,24 +4908,30 @@
         if (!savedTab) continue;
         try {
           var recoveryNavigationToken = "recovery:" + Date.now() + ":" + index;
+          var recoveryGeneration = tabLifecycle.generation + 1;
           if (!tabLifecycle.automationSource) tabLifecycle.automationSource = PsycheControl.browserAutomationSource();
-          await invoke("browser_navigate", {
+          var recoveryNavigation = await invoke("browser_navigate", {
             label: savedTab.label,
             url: savedTab.url,
             x: -10000,
             y: -10000,
             w: 1,
             h: 1,
+            generation: recoveryGeneration,
             navigationToken: recoveryNavigationToken,
             automationSource: tabLifecycle.automationSource,
           });
+          if (!recoveryNavigation || !recoveryNavigation.focusNonce) {
+            throw new Error("native browser focus nonce missing");
+          }
           currentTab.created = true;
           currentTab.loading = false;
-          tabLifecycle.generation += 1;
+          tabLifecycle.generation = recoveryGeneration;
           tabLifecycle.nativeLabel = nativeBrowserLabel(savedTab.label);
           tabLifecycle.liveGeneration = tabLifecycle.generation;
           tabLifecycle.liveUrl = savedTab.url;
           tabLifecycle.liveNavigationToken = recoveryNavigationToken;
+          tabLifecycle.liveFocusNonce = String(recoveryNavigation.focusNonce);
           tabLifecycle.viewLive = true;
           recreated += 1;
         } catch (recoveryError) {
@@ -5035,6 +5043,8 @@
       lifecycle.pendingUrl = null;
       lifecycle.liveGeneration = 0;
       lifecycle.liveUrl = null;
+      lifecycle.liveNavigationToken = null;
+      lifecycle.liveFocusNonce = null;
       lifecycle.eventUrl = null;
       lifecycle.viewLive = false;
       lifecycle.navigationSnapshot = null;
@@ -10062,10 +10072,10 @@
     return projectId + "__" + tabId;
   }
   function browserTabLifecycle(tab) {
-    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
+    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, liveFocusNonce: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
     var lifecycle = browserTabLifecycleStates.get(tab);
     if (!lifecycle) {
-      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
+      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, liveFocusNonce: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
       browserTabLifecycleStates.set(tab, lifecycle);
     }
     return lifecycle;
@@ -10150,6 +10160,7 @@
       lifecycle.controlGeneration = 0;
       lifecycle.liveUrl = null;
       lifecycle.liveNavigationToken = null;
+      lifecycle.liveFocusNonce = null;
       lifecycle.eventUrl = null;
       lifecycle.viewLive = false;
     };
@@ -10340,6 +10351,7 @@
     lifecycle.controlGeneration = 0;
     lifecycle.liveGeneration = 0;
     lifecycle.nativeLabel = null;
+    lifecycle.liveFocusNonce = null;
     lifecycle.automationSource = null;
     var destroyFlight = destroyChild && label
       ? invoke("browser_destroy", { label: label }).catch(function () { return false; })
@@ -10978,7 +10990,9 @@
         lifecycle.liveGeneration !== lifecycle.generation ||
         payload.generation !== lifecycle.liveGeneration ||
         !lifecycle.liveNavigationToken ||
-        payload.navigationToken !== lifecycle.liveNavigationToken) return null;
+        payload.navigationToken !== lifecycle.liveNavigationToken ||
+        !lifecycle.liveFocusNonce ||
+        payload.focusNonce !== lifecycle.liveFocusNonce) return null;
     var liveUrl = null;
     if (payload.url && lifecycle.liveUrl &&
         !browserUrlsMatch(payload.url, lifecycle.liveUrl) &&
@@ -11516,12 +11530,16 @@
         var terminalUrl = nativeNavigation && nativeNavigation.terminalUrl
           ? String(nativeNavigation.terminalUrl)
           : normalised;
+        if (!nativeNavigation || !nativeNavigation.focusNonce) {
+          throw new Error("native browser focus nonce missing");
+        }
         tab.created = true;
         tab.url = terminalUrl;
         tab.loading = false;
         lifecycle.liveGeneration = generation;
         lifecycle.liveUrl = terminalUrl;
         lifecycle.liveNavigationToken = navigationToken;
+        lifecycle.liveFocusNonce = String(nativeNavigation.focusNonce);
         lifecycle.pendingGeneration = 0;
         lifecycle.pendingUrl = null;
         lifecycle.pendingNavigationToken = null;
