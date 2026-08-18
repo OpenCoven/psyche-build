@@ -129,6 +129,32 @@ describe('PaneStatusPoller', () => {
     expect(capture).not.toHaveBeenCalled();
   });
 
+  it('drops an in-flight capture when the pane id is rebound to another tmux pane', async () => {
+    let calls = 0;
+    let resolveThirdCapture: ((output: string) => void) | undefined;
+    const { poller, events } = harness(async () => {
+      calls += 1;
+      if (calls < 3) return 'screen';
+      return new Promise<string>((resolve) => {
+        resolveThirdCapture = resolve;
+      });
+    });
+    poller.add({ paneId: 'a', tmuxPaneId: '%1' });
+
+    // The third identical capture would make the old tracker request analysis.
+    await tickTimes(poller, 2);
+    const inFlightTick = poller.tick();
+    await Promise.resolve();
+
+    poller.remove('a');
+    poller.add({ paneId: 'a', tmuxPaneId: '%2' });
+    resolveThirdCapture?.('screen');
+    await inFlightTick;
+
+    expect(events).toEqual([]);
+    expect(poller.tmuxPaneIdFor('a')).toBe('%2');
+  });
+
   it('reads codex events only for codex panes', async () => {
     const readCodexEvent = vi.fn(async (_file: string) => undefined);
     const events: Array<{ paneId: string; event: PaneStatusEvent }> = [];

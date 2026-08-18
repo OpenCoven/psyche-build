@@ -151,8 +151,12 @@ export class PaneStatusPoller {
       const codexEvent = entry.tracker.codexEventFile
         ? await this.readCodexEvent(entry.tracker.codexEventFile)
         : undefined;
-      // The pane may have been dropped while its capture was in flight.
-      if (!this.panes.has(paneId)) return;
+      // The pane may have been dropped or rebound while its capture was in
+      // flight. A replacement can retain the same Psyche pane id while
+      // pointing at a different tmux pane, so presence alone is insufficient:
+      // only the exact tracker that started this capture may publish its
+      // result.
+      if (this.panes.get(paneId) !== entry) return;
       this.emit(paneId, entry.tracker.observe(output, now, codexEvent));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
