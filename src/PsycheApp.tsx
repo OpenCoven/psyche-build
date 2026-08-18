@@ -349,15 +349,17 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     }
   }, [])
 
-  // Subscribe to bridge daemon pairing events for banner auto-dismiss
+  // Subscribe to bridge pairing completion events for banner auto-dismiss.
   useEffect(() => {
     if (!bridgeDaemon) return;
-    const events = bridgeDaemon.pairingEvents;
-    if (!events) return;
+    const pairingEvents = bridgeDaemon.pairingEvents;
+    const mobileInviteEvents = bridgeDaemon.mobileInviteEvents;
     const onClose = () => setPairBanner(null);
-    events.on("close", onClose);
+    pairingEvents?.on("close", onClose);
+    mobileInviteEvents?.on("redeemed", onClose);
     return () => {
-      events.off("close", onClose);
+      pairingEvents?.off("close", onClose);
+      mobileInviteEvents?.off("redeemed", onClose);
     };
   }, [bridgeDaemon]);
 

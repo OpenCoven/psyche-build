@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { hostname } from "node:os";
 import { loadOrCreateTLS, TLSMaterial } from "./TLSCertificate.js";
 import { WSSListener } from "./WSSListener.js";
@@ -81,6 +82,8 @@ export interface BridgeDaemonOptions {
 }
 
 export class BridgeDaemon {
+  /** Emits `redeemed` after a mobile invite completes authentication. */
+  readonly mobileInviteEvents = new EventEmitter();
   private listener?: WSSListener;
   private tls?: TLSMaterial;
   private hub?: PaneStreamHub;
@@ -315,6 +318,7 @@ export class BridgeDaemon {
           s.state = "authenticated";
           s.token = rec.token;
           s.send({ type: "authAccepted", payload: { token: rec.token } });
+          this.mobileInviteEvents.emit("redeemed");
           return;
         }
         if (m.payload.token) {

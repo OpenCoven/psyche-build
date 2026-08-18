@@ -63,6 +63,8 @@ describe("BridgeDaemon", () => {
     const { port } = await daemon.start();
     const inviteUrl = new URL(daemon.openMobileInvite());
     const invite = inviteUrl.searchParams.get("psyche_invite");
+    const onRedeemed = vi.fn();
+    daemon.mobileInviteEvents.on("redeemed", onRedeemed);
     expect(inviteUrl.searchParams.get("endpoint")).toBe(`wss://test-host:${port}`);
     expect(invite).toBeTruthy();
 
@@ -82,6 +84,8 @@ describe("BridgeDaemon", () => {
 
     expect(accepted).toEqual({ type: "authAccepted", payload: { token: "test-token-0" } });
     expect(await tokenStore.validate(accepted.payload.token)).toMatchObject({ clientId: "ios-1", clientName: "iPhone" });
+    expect(onRedeemed).toHaveBeenCalledOnce();
+    expect(onRedeemed).toHaveBeenCalledWith();
     client.close();
     await daemon.stop();
   });
