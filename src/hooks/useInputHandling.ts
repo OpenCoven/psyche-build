@@ -1746,46 +1746,82 @@ export function useInputHandling(params: UseInputHandlingParams) {
           : "Attaching agent..."
       )
 
-      const { attachAgentToWorktree } = await import("../utils/attachAgent.js")
-      const createdPanes: PsychePane[] = []
-      const failedAgents: AgentName[] = []
+      const { generateSiblingSlugForTargetPane } = await import("../utils/attachAgent.js")
+      const { Orchestrator } = await import("../orchestration/orchestrator.js")
+      const { createLocalPaneBackend } = await import("../orchestration/localPaneBackend.js")
 
-      for (const agent of selectedAgents) {
-        try {
-          const result = await attachAgentToWorktree({
-            targetPane: selectedPane,
-            prompt: promptValue,
-            agent,
-            existingPanes: [...panes, ...createdPanes],
-            sessionProjectRoot: projectRoot,
-          })
-          createdPanes.push(result.pane)
-        } catch {
-          failedAgents.push(agent)
-        }
+      // Compute sibling slugs so each agent gets a unique slug while sharing
+      // the same worktree.  The slugs are pre-computed against the current
+      // pane list and then injected into per-agent existingWorktree refs so
+      // that createPane (inside the local backend) uses them directly.
+      const existingWorktreeBase = {
+        worktreePath: selectedPane.worktreePath!,
+        branchName: selectedPane.branchName || selectedPane.slug,
       }
 
-      if (createdPanes.length > 0 || failedAgents.length > 0) {
-        // attachAgentToWorktree makes each pane durable while its reuse
-        // reservation is held. Failed exact-identity cleanup can also mean a
-        // concurrent pane rebind won, so reload rather than replaying this
-        // stale React snapshot over the cross-process registry.
+      // Build per-agent lane requests with unique sibling slugs
+      const allPanes = [...panes]
+      const lanes = selectedAgents.map((agent) => {
+        const slug = generateSiblingSlugForTargetPane(selectedPane, allPanes)
+        // Add a synthetic pane entry so subsequent sibling slug computations
+        // see this lane's slug and produce a distinct suffix.
+        allPanes.push({ slug } as PsychePane)
+        return {
+          id: `${agent}-attach`,
+          mode: "shared-worktree" as const,
+          agent,
+          existingWorktree: { ...existingWorktreeBase, slug },
+        }
+      })
+
+      const backend = createLocalPaneBackend({
+        projectName: selectedPane.projectName || path.basename(targetProjectRoot),
+        sessionProjectRoot: projectRoot,
+        sessionConfigPath: panesFile,
+        basePanes: panes,
+        availableAgents: targetAvailableAgents,
+        persistReusedPane: async (_pane, previousPanes, panesToPersist) => {
+          await savePanes(panesToPersist, previousPanes)
+        },
+        persistOrchestrationMetadata: async (originatingPane, nextPane) => {
+          await savePanes([nextPane], [originatingPane])
+          return nextPane
+        },
+      })
+      const orchestrator = new Orchestrator({ executeLane: backend.execute })
+
+      const result = await orchestrator.execute({
+        taskId: `attach-${Date.now()}`,
+        projectRoot: targetProjectRoot,
+        prompt: promptValue,
+        lanes,
+      })
+
+      const createdPanes = result.lanes.flatMap((lane) =>
+        lane.status === "completed" && lane.pane ? [lane.pane] : []
+      )
+      const failures = result.lanes.filter((lane) => lane.status === "failed")
+
+      if (createdPanes.length > 0 || failures.length > 0) {
+        // createPane makes each pane durable while its reuse reservation is
+        // held. Reload rather than replaying this stale React snapshot over
+        // the cross-process registry.
         await loadPanes()
       }
 
-      if (failedAgents.length === 0) {
+      if (failures.length === 0) {
         setStatusMessage(
           `Attached ${createdPanes.length} agent${createdPanes.length === 1 ? "" : "s"} to ${getPaneDisplayName(selectedPane)}`
         )
         setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
       } else if (createdPanes.length === 0) {
         setStatusMessage(
-          `Failed to attach agents: ${failedAgents.join(", ")}`
+          `Failed to attach agents: ${failures.map((f) => f.id).join(", ")}`
         )
         setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)
       } else {
         setStatusMessage(
-          `Attached ${createdPanes.length}/${selectedAgents.length} agents to ${getPaneDisplayName(selectedPane)} (${failedAgents.length} failed)`
+          `Attached ${createdPanes.length}/${selectedAgents.length} agents to ${getPaneDisplayName(selectedPane)} (${failures.length} failed)`
         )
         setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)
       }

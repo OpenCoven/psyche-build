@@ -2386,6 +2386,49 @@ function bridgeError(code: string, message: string): Error & BridgeError {
   return error;
 }
 
+/**
+ * Execute an orchestration task through the injected orchestrator.
+ *
+ * Validates that the task's project root falls inside the daemon's own project
+ * root, then delegates to `orchestrator.execute`. The response mirrors the
+ * `orchestration.execute.result` protocol frame shape.
+ */
+export async function dispatchOrchestrationRequest(
+  daemonProjectRoot: string,
+  request: {
+    type: 'orchestration.execute';
+    requestId: string;
+    task: import('../orchestration/types.js').OrchestrationTaskRequest;
+  },
+  orchestrator: import('../orchestration/orchestrator.js').Orchestrator,
+): Promise<{
+  type: 'orchestration.execute.result';
+  requestId: string;
+  result: import('../orchestration/types.js').OrchestrationTaskResult;
+}> {
+  const scoped = await resolveScopedCwd(
+    daemonProjectRoot,
+    request.task.projectRoot,
+  );
+
+  // Override the task's projectRoot with the resolved, scope-validated path
+  // so the orchestrator (and downstream backends) always use the canonical path.
+  // `requestedCwd` is the realpath of the task's claimed projectRoot, which
+  // has been validated to be inside the daemon's project root.
+  const task: import('../orchestration/types.js').OrchestrationTaskRequest = {
+    ...request.task,
+    projectRoot: scoped.requestedCwd,
+  };
+
+  const result = await orchestrator.execute(task);
+
+  return {
+    type: 'orchestration.execute.result',
+    requestId: request.requestId,
+    result,
+  };
+}
+
 export function bridgeErrorCode(error: unknown, fallback: string): string {
   return typeof error === 'object' && error !== null && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
     ? (error as { code: string }).code
