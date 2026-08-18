@@ -19,6 +19,8 @@ const requiredSourceFiles = sortUnique([
   'docs/vite.config.js',
 ]);
 const allowedNonDocumentPublicationEntries = new Set(['dist/**/*', 'psyche', 'LICENSE']);
+const ROOT_MARKDOWN_RE = /^[A-Za-z0-9._-]+\.md$/;
+const DOCS_MARKDOWN_RE = /^docs\/[A-Za-z0-9._-]+\.md$/;
 const prohibitedFiles = new Set(['docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md']);
 const prohibitedText = [
   ['Coven Demo Loop', 'standalone Coven demo positioning'],
@@ -26,7 +28,6 @@ const prohibitedText = [
   ['OpenCoven public roadmap', 'external ecosystem roadmap promotion'],
   ['led by <strong>Coven Code</strong>', 'agent catalog product favoritism'],
 ];
-const globMetacharacters = /[*?\[\]{}]/;
 
 function isEnoent(error) {
   return Boolean(error && typeof error === 'object' && error.code === 'ENOENT');
@@ -48,10 +49,6 @@ function sortFailureRecords(records) {
 
 function isTextAsset(relativePath) {
   return textExtensions.has(path.extname(relativePath).toLowerCase());
-}
-
-function hasGlobMetacharacters(value) {
-  return globMetacharacters.test(value);
 }
 
 function collectPackageMarkdownFiles(packageFilesValue) {
@@ -81,27 +78,25 @@ function collectPackageMarkdownFiles(packageFilesValue) {
   if (sawMalformedEntry) {
     boundaryFailures.push({ file: 'package.json#files', reason: 'package.json.files must be an array of strings' });
   }
-
   for (const file of sortUnique(packageFiles)) {
     if (allowedNonDocumentPublicationEntries.has(file)) {
       continue;
     }
 
-    const isDocsEntry = file === 'docs' || file === 'docs/' || file.startsWith('docs/');
-    if (isDocsEntry) {
-      if (!hasGlobMetacharacters(file) && /^docs\/[^/]+\.md$/.test(file)) {
-        markdownFiles.push(file);
-      } else {
-        boundaryFailures.push({
-          file,
-          reason: 'package-published docs must use explicit top-level Markdown file paths',
-        });
-      }
-
+    if (DOCS_MARKDOWN_RE.test(file)) {
+      markdownFiles.push(file);
       continue;
     }
 
-    if (!hasGlobMetacharacters(file) && !file.endsWith('/') && /^[^/]+\.md$/.test(file)) {
+    if (file === 'docs' || file === 'docs/' || file.startsWith('docs/')) {
+      boundaryFailures.push({
+        file,
+        reason: 'package-published docs must use explicit top-level Markdown file paths',
+      });
+      continue;
+    }
+
+    if (ROOT_MARKDOWN_RE.test(file)) {
       markdownFiles.push(file);
       continue;
     }
@@ -129,13 +124,28 @@ async function loadPackageJson() {
   }
 }
 
-async function collectRecursiveTextFiles(absoluteDirectory, relativeDirectory) {
-  const entries = await readdir(absoluteDirectory, { withFileTypes: true });
+async function collectRecursiveTextFiles(relativeDirectory, readDirectory) {
+  let entries;
+  try {
+    entries = await readDirectory(relativeDirectory);
+  } catch (error) {
+    if (isEnoent(error)) {
+      return {
+        files: [],
+        missingRootFailure: {
+          file: relativeDirectory,
+          reason: 'public documentation source root is missing',
+        },
+      };
+    }
+
+    throw error;
+  }
+
   const sortedEntries = [...entries].sort((left, right) => compareStrings(left.name, right.name));
   const files = [];
 
   for (const entry of sortedEntries) {
-    const absolutePath = path.join(absoluteDirectory, entry.name);
     const relativePath = path.posix.join(relativeDirectory, entry.name);
 
     if (entry.isDirectory()) {
@@ -143,7 +153,12 @@ async function collectRecursiveTextFiles(absoluteDirectory, relativeDirectory) {
         continue;
       }
 
-      files.push(...await collectRecursiveTextFiles(absolutePath, relativePath));
+      const nested = await collectRecursiveTextFiles(relativePath, readDirectory);
+      if (nested.missingRootFailure) {
+        return nested;
+      }
+
+      files.push(...nested.files);
       continue;
     }
 
@@ -152,11 +167,15 @@ async function collectRecursiveTextFiles(absoluteDirectory, relativeDirectory) {
     }
   }
 
-  return sortUnique(files);
+  return { files: sortUnique(files), missingRootFailure: null };
+}
+
+async function readDirectoryFromFilesystem(relativeDirectory) {
+  return readdir(path.join(root, relativeDirectory), { withFileTypes: true });
 }
 
 async function collectPublicRecursiveFiles() {
-  return collectRecursiveTextFiles(path.join(root, 'docs/src'), 'docs/src');
+  return collectRecursiveTextFiles('docs/src', readDirectoryFromFilesystem);
 }
 
 function buildPublicInventory({ recursiveFiles, packageMarkdownFiles }) {
@@ -204,11 +223,64 @@ function assertRequiredInventoryFiles(inventory) {
   }
 }
 
+function createSyntheticDirEntry(name, type) {
+  return {
+    name,
+    isDirectory: () => type === 'dir',
+    isFile: () => type === 'file',
+  };
+}
+
+function createSyntheticDirectoryReader(tree, missingPaths = new Set()) {
+  return async (relativeDirectory) => {
+    if (missingPaths.has(relativeDirectory)) {
+      const error = new Error(`ENOENT: ${relativeDirectory}`);
+      error.code = 'ENOENT';
+      throw error;
+    }
+
+    if (!tree.has(relativeDirectory)) {
+      const error = new Error(`ENOENT: ${relativeDirectory}`);
+      error.code = 'ENOENT';
+      throw error;
+    }
+
+    return tree.get(relativeDirectory);
+  };
+}
+
 async function selfCheckPublicInventory() {
-  const recursiveFiles = await collectPublicRecursiveFiles();
-  assert.deepEqual(recursiveFiles, sortUnique(recursiveFiles));
-  assert(recursiveFiles.every((file) => file.startsWith('docs/src/')));
-  assert(recursiveFiles.every((file) => !file.includes('/dist/')));
+  const syntheticTree = new Map([
+    [
+      'docs/src',
+      [
+        createSyntheticDirEntry('b.js', 'file'),
+        createSyntheticDirEntry('a.md', 'file'),
+        createSyntheticDirEntry('dist', 'dir'),
+        createSyntheticDirEntry('nested', 'dir'),
+      ],
+    ],
+    [
+      'docs/src/nested',
+      [
+        createSyntheticDirEntry('c.css', 'file'),
+        createSyntheticDirEntry('ignored.png', 'file'),
+      ],
+    ],
+    [
+      'docs/src/dist',
+      [createSyntheticDirEntry('ignored.js', 'file')],
+    ],
+  ]);
+  const recursiveResult = await collectRecursiveTextFiles(
+    'docs/src',
+    createSyntheticDirectoryReader(syntheticTree),
+  );
+  assert.deepEqual(recursiveResult.files, ['docs/src/a.md', 'docs/src/b.js', 'docs/src/nested/c.css']);
+  assert.deepEqual(recursiveResult.files, sortUnique(recursiveResult.files));
+  assert(recursiveResult.files.every((file) => file.startsWith('docs/src/')));
+  assert(recursiveResult.files.every((file) => !file.includes('/dist/')));
+  assert.deepEqual(recursiveResult.missingRootFailure, null);
 
   const requiredInventory = buildPublicInventory({ recursiveFiles: [], packageMarkdownFiles: [] });
   assert(requiredInventory.includes('README.md'));
@@ -239,6 +311,18 @@ async function selfCheckPublicInventory() {
     missingPackageFiles.boundaryFailures,
     [{ file: 'package.json#files', reason: 'package.json.files must be an array of strings' }],
   );
+
+  const missingRecursiveResult = await collectRecursiveTextFiles(
+    'docs/src',
+    createSyntheticDirectoryReader(new Map(), new Set(['docs/src'])),
+  );
+  assert.deepEqual(missingRecursiveResult, {
+    files: [],
+    missingRootFailure: {
+      file: 'docs/src',
+      reason: 'public documentation source root is missing',
+    },
+  });
 
   const packageBoundaryA = collectPackageMarkdownFiles([
     'dist/**/*',
@@ -342,6 +426,25 @@ async function selfCheckPublicInventory() {
   assert(packageInventory.includes('docs/COVEN-DEMO-LOOP.md'));
   assert(packageInventory.includes('docs/COVEN-SESSIONS.md'));
 
+  const syntheticInventory = ['README.md', 'docs/COVEN-DEMO-LOOP.md', 'docs/README.md'];
+  const syntheticFailedInventoryFiles = new Set();
+  const syntheticGlobalFailures = [];
+  const syntheticRecordGlobalFailure = (file, reason) => {
+    if (syntheticInventory.includes(file)) {
+      syntheticFailedInventoryFiles.add(file);
+    }
+    syntheticGlobalFailures.push({ file, reason });
+  };
+
+  syntheticRecordGlobalFailure('docs/COVEN-DEMO-LOOP.md', 'must not be package-published');
+  syntheticRecordGlobalFailure('docs/external-note.md', 'standalone public document must be removed');
+  assert(syntheticFailedInventoryFiles.has('docs/COVEN-DEMO-LOOP.md'));
+  assert.equal(countInventoryPasses(syntheticInventory, syntheticFailedInventoryFiles), 2);
+  assert.deepEqual(syntheticGlobalFailures, [
+    { file: 'docs/COVEN-DEMO-LOOP.md', reason: 'must not be package-published' },
+    { file: 'docs/external-note.md', reason: 'standalone public document must be removed' },
+  ]);
+
   const partialCleanupInventory = buildPublicInventory({
     recursiveFiles: ['docs/src/main.js'],
     packageMarkdownFiles: ['README.md', 'docs/README.md', 'docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md'],
@@ -364,7 +467,8 @@ async function main() {
 
   const packageMarkdownResult = collectPackageMarkdownFiles(packageJson.files);
   const packageFiles = packageMarkdownResult.packageFiles;
-  const recursiveFiles = await collectPublicRecursiveFiles();
+  const recursiveResult = await collectPublicRecursiveFiles();
+  const recursiveFiles = recursiveResult.files;
   const uniqueInventory = buildPublicInventory({
     recursiveFiles,
     packageMarkdownFiles: packageMarkdownResult.markdownFiles,
@@ -373,6 +477,7 @@ async function main() {
 
   const inventoryFailures = [];
   const packageBoundaryFailures = [...packageMarkdownResult.boundaryFailures];
+  const sourceRootFailures = recursiveResult.missingRootFailure ? [recursiveResult.missingRootFailure] : [];
   const globalFailures = [];
   const failedInventoryFiles = new Set();
 
@@ -383,6 +488,9 @@ async function main() {
   };
 
   const recordGlobalFailure = (file, reason) => {
+    if (inventorySet.has(file)) {
+      failedInventoryFiles.add(file);
+    }
     globalFailures.push({ file, reason });
   };
 
@@ -426,9 +534,15 @@ async function main() {
   const passCount = countInventoryPasses(uniqueInventory, failedInventoryFiles);
   const sortedInventoryFailures = sortFailureRecords(inventoryFailures);
   const sortedPackageBoundaryFailures = sortFailureRecords(packageBoundaryFailures);
+  const sortedSourceRootFailures = sortFailureRecords(sourceRootFailures);
   const sortedGlobalFailures = sortFailureRecords(globalFailures);
 
-  if (sortedInventoryFailures.length > 0 || sortedPackageBoundaryFailures.length > 0 || sortedGlobalFailures.length > 0) {
+  if (
+    sortedInventoryFailures.length > 0
+    || sortedPackageBoundaryFailures.length > 0
+    || sortedSourceRootFailures.length > 0
+    || sortedGlobalFailures.length > 0
+  ) {
     console.error(`Passed ${passCount}/${uniqueInventory.length} public documentation source files.`);
 
     if (sortedInventoryFailures.length > 0) {
@@ -441,6 +555,13 @@ async function main() {
     if (sortedPackageBoundaryFailures.length > 0) {
       console.error('Package boundary failures:');
       for (const failure of sortedPackageBoundaryFailures) {
+        console.error(`${failure.file}: ${failure.reason}`);
+      }
+    }
+
+    if (sortedSourceRootFailures.length > 0) {
+      console.error('Source root failures:');
+      for (const failure of sortedSourceRootFailures) {
         console.error(`${failure.file}: ${failure.reason}`);
       }
     }
