@@ -7,6 +7,21 @@ count missed presentation slots. A `240 Hz` cadence in diagnostics is evidence
 that the WebView delivered callbacks at that rate, not a claim that the display
 is configured to 240 Hz.
 
+## Terminal output cadence
+
+`requestAnimationFrame` is not the only thing pacing a terminal pane. Native PTY
+output is batched by the Rust pump in `src-tauri/src/pty_transport.rs`, and until
+recently a visible pane held a fixed `16 ms` floor between batches — a hard
+62.5 Hz ceiling on terminal content regardless of the display or the reported rAF
+cadence. A visible pane is now paced by acknowledgement credit instead: up to
+`MAX_IN_FLIGHT` batches may be outstanding, and the next one leaves as soon as
+the client acknowledges. Hidden panes keep their `100 ms` floor, because trading
+latency for idle CPU is the right bargain for a pane nobody is looking at.
+
+The remaining per-batch cost is the client's own round trip — one frame plus the
+`pty_ack` IPC — so a measured rAF cadence still over-reports what the terminals
+achieve.
+
 ## Platform boundary
 
 - **Windows:** Tauri uses WebView2 (Chromium). Psyche Build follows the active
