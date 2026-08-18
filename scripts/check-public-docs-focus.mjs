@@ -14,7 +14,6 @@ const requiredSourceFiles = sortUnique([
   'docs/src/content/agents.js',
   'docs/src/content/configuration.js',
   'docs/src/content/core-concepts.js',
-  'docs/src/content/coven-demo.js',
   'docs/src/content/features.js',
   'docs/src/content/getting-started.js',
   'docs/src/content/hooks.js',
