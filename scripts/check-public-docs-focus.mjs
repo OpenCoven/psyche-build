@@ -11,6 +11,21 @@ const requiredSourceFiles = sortUnique([
   'docs/src/hero.js',
   'docs/src/index.html',
   'docs/src/content/index.js',
+  'docs/src/content/agents.js',
+  'docs/src/content/configuration.js',
+  'docs/src/content/core-concepts.js',
+  'docs/src/content/coven-demo.js',
+  'docs/src/content/features.js',
+  'docs/src/content/getting-started.js',
+  'docs/src/content/hooks.js',
+  'docs/src/content/introduction.js',
+  'docs/src/content/keyboard-shortcuts.js',
+  'docs/src/content/merging.js',
+  'docs/src/content/multi-agent.js',
+  'docs/src/content/multi-project.js',
+  'docs/src/content/remote-access.js',
+  'docs/src/content/troubleshooting.js',
+  'docs/src/content/workflows.js',
   'docs/src/code-highlight.js',
   'docs/src/main.js',
   'docs/src/sidebar.js',
@@ -31,7 +46,9 @@ const prohibitedPositionPatterns = [
   [/opencoven public roadmap/i, 'external ecosystem roadmap promotion'],
   [/led by\s*<strong>\s*coven code\s*<\/strong>/i, 'agent catalog product favoritism'],
 ];
-const prohibitedFiles = new Set(['docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md']);
+const prohibitedFiles = new Map(
+  ['docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md'].map((file) => [normalizePublicPath(file), file]),
+);
 
 function isEnoent(error) {
   return Boolean(error && typeof error === 'object' && error.code === 'ENOENT');
@@ -43,6 +60,10 @@ function compareStrings(left, right) {
 
 function sortUnique(values) {
   return [...new Set(values)].sort(compareStrings);
+}
+
+function normalizePublicPath(file) {
+  return file.toLowerCase();
 }
 
 function sortFailureRecords(records) {
@@ -476,6 +497,8 @@ async function selfCheckPublicInventory() {
     },
     /required docs source file missing: docs\/shared\/githubStars\.js/,
   );
+  assert(requiredInventory.includes('docs/src/content/agents.js'));
+  assert(requiredInventory.includes('docs/src/content/troubleshooting.js'));
 
   const allowlistedPublicationEntries = collectPackageMarkdownFiles(['dist/**/*', 'psyche', 'LICENSE']);
   assert.deepEqual(allowlistedPublicationEntries.packageFiles, sortUnique(['dist/**/*', 'psyche', 'LICENSE']));
@@ -598,6 +621,8 @@ async function selfCheckPublicInventory() {
       { file: 'src/', reason: 'package-published Markdown must use explicit file paths' },
     ]),
   );
+  assert(prohibitedFiles.has(normalizePublicPath('docs/coven-demo-loop.md')));
+  assert(prohibitedFiles.has(normalizePublicPath('DOCS/COVEN-SESSIONS.MD')));
 
   const packageInventory = buildPublicInventory({
     rootMarkdownFiles: rootResult.files,
@@ -699,20 +724,15 @@ async function main() {
     globalFailures.push({ file, reason });
   };
 
-  for (const file of prohibitedFiles) {
-    if (packageFiles.includes(file)) {
+  for (const file of packageFiles) {
+    if (prohibitedFiles.has(normalizePublicPath(file))) {
       recordGlobalFailure(file, 'must not be package-published');
     }
+  }
 
-    try {
-      const info = await stat(path.join(root, file));
-      if (info) {
-        recordGlobalFailure(file, 'standalone public document must be removed');
-      }
-    } catch (error) {
-      if (!isEnoent(error)) {
-        throw error;
-      }
+  for (const file of uniqueInventory) {
+    if (prohibitedFiles.has(normalizePublicPath(file))) {
+      recordGlobalFailure(file, 'standalone public document must be removed');
     }
   }
 
