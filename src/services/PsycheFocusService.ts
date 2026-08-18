@@ -911,10 +911,14 @@ export class PsycheFocusService extends EventEmitter {
     const flashStyle = buildAttentionFlashWindowStyle(baseStyle);
 
     const restorePaneStyle = () => {
-      if (existingPaneStyle) {
-        this.tmuxService.setPaneOptionSync(tmuxPaneId, 'window-style', existingPaneStyle);
-      } else {
-        this.tmuxService.unsetPaneOptionSync(tmuxPaneId, 'window-style');
+      try {
+        if (existingPaneStyle) {
+          this.tmuxService.setPaneOptionSync(tmuxPaneId, 'window-style', existingPaneStyle);
+        } else {
+          this.tmuxService.unsetPaneOptionSync(tmuxPaneId, 'window-style');
+        }
+      } catch {
+        // The captured pane may already be gone; restoration is best effort.
       }
     };
     const timers = new Set<NodeJS.Timeout>();
@@ -925,7 +929,7 @@ export class PsycheFocusService extends EventEmitter {
       for (const timer of timers) clearTimeout(timer);
       timers.clear();
       ownership?.signal.removeEventListener('abort', handleAbort);
-      if (restore && (!ownership || ownership.isCurrent())) {
+      if (restore) {
         restorePaneStyle();
       }
       this.flashingTmuxPaneIds.delete(tmuxPaneId);

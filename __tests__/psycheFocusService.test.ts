@@ -34,7 +34,7 @@ describe('PsycheFocusService helper restart', () => {
     expect(parseHelperSocketOwnerProcessIds(lsofOutput, socketPath, 12345)).toEqual([]);
   });
 
-  it('cancels pending flash timers and does not mutate a replacement pane', async () => {
+  it('restores the captured pane style when a flash is canceled without mutating a replacement', async () => {
     vi.useFakeTimers();
     const service = new PsycheFocusService({ projectName: 'test' });
     const tmux = (service as any).tmuxService;
@@ -46,21 +46,52 @@ describe('PsycheFocusService helper restart', () => {
     const controller = new AbortController();
     let current = true;
 
-    await service.flashPaneAttention('%70', {
+    await service.flashPaneAttention('%old', {
       signal: controller.signal,
       isCurrent: () => current,
     });
     await vi.advanceTimersByTimeAsync(0);
-    expect(setOption).toHaveBeenCalled();
+    expect(setOption).toHaveBeenCalledWith('%old', 'window-style', 'bg=colour21');
 
     current = false;
     setOption.mockClear();
     controller.abort();
     await vi.runAllTimersAsync();
 
-    expect(setOption).not.toHaveBeenCalled();
+    expect(setOption).toHaveBeenCalledOnce();
+    expect(setOption).toHaveBeenCalledWith('%old', 'window-style', 'bg=colour20');
+    expect(setOption).not.toHaveBeenCalledWith('%new', 'window-style', expect.anything());
     expect(vi.getTimerCount()).toBe(0);
-    expect((service as any).flashingTmuxPaneIds.has('%70')).toBe(false);
+    expect((service as any).flashingTmuxPaneIds.has('%old')).toBe(false);
+  });
+
+  it('tolerates a captured pane vanishing before cancellation restores its style', async () => {
+    vi.useFakeTimers();
+    const service = new PsycheFocusService({ projectName: 'test' });
+    const tmux = (service as any).tmuxService;
+    const setOption = vi.spyOn(tmux, 'setPaneOptionSync')
+      .mockReturnValueOnce(true)
+      .mockImplementationOnce(() => {
+        throw new Error("can't find pane: %old");
+      });
+    vi.spyOn(tmux, 'unsetPaneOptionSync').mockReturnValue(undefined);
+    vi.spyOn(tmux, 'getPaneOptionSync').mockReturnValue('bg=colour20');
+    vi.spyOn(tmux, 'getGlobalOptionSync').mockReturnValue('bg=colour20');
+    (service as any).active = true;
+    const controller = new AbortController();
+
+    await service.flashPaneAttention('%old', {
+      signal: controller.signal,
+      isCurrent: () => !controller.signal.aborted,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(() => controller.abort()).not.toThrow();
+    await vi.runAllTimersAsync();
+
+    expect(setOption).toHaveBeenLastCalledWith('%old', 'window-style', 'bg=colour20');
+    expect(vi.getTimerCount()).toBe(0);
+    expect((service as any).flashingTmuxPaneIds.has('%old')).toBe(false);
   });
 
   it('keeps normal pane flash behavior and restores the original style', async () => {

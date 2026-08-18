@@ -775,12 +775,19 @@ export class StatusDetector extends EventEmitter {
       )) {
         return;
       }
-      return this.workerManager.sendKeysToExpectedPane(
+      await this.workerManager.sendKeysToExpectedPane(
         paneId,
         ownership.tmuxPaneId,
         keys,
         ownership.controller.signal,
+        () => this.isAnalysisCurrent(
+          paneId,
+          ownership.controller,
+          ownership.tmuxPaneId,
+          ownership.lifecycle,
+        ),
       );
+      return;
     }
 
     return this.workerManager.sendToWorker(paneId, {
