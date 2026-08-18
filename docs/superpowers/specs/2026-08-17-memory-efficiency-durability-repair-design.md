@@ -2,168 +2,162 @@
 
 ## Problem
 
-PR #165 bounds several host data structures, but three limits currently break
-runtime guarantees:
+PR #165 bounds host memory, but three bounds still threaten runtime safety:
 
-1. evicting an idempotency outcome permits an old retry to execute again;
-2. journal compaction can discard an unresolved command before restart
-   recovery marks its effect unknown;
-3. a closed pane buffer retained for an active stream is not reclaimed when
-   the final stream later detaches.
+1. an old idempotency key can execute again after its exact outcome ages out;
+2. compaction can discard unresolved or insufficiently durable terminal
+   evidence; and
+3. a closed pane buffer retained for a stream is not reclaimed on final
+   release.
 
-The initial repair plan also ordered terminal handling unsafely: it appended a
-terminal event, persisted completed-key metadata, and only then updated the hot
-outcome map. If metadata persistence failed, a later compaction could snapshot
-the hot map without that outcome and discard the only terminal evidence.
+Task 1 is now implemented around exact durable `CommandOutcome` sidecars. The
+earlier compact-marker draft drifted from the approved retry contract by
+weakening old-key replay and by treating a terminal outcome as usable only
+after sidecar persistence succeeded. The implemented repair instead preserves
+exact replay, keeps immediate dirty in-memory replay after a failed sidecar
+write, and blocks compaction until the same terminal key has authoritative
+durable replay data.
 
-The repair must preserve retry and recovery safety without restoring unbounded
-heap growth or persisting unredacted command results in snapshots.
+Tasks 2 and 3 remain future work: unresolved-command snapshot recovery and
+retired-pane reclamation are still planned separately.
 
 ## Decision
 
-### Keep exact outcomes bounded and completed keys durable
+### Keep exact outcomes bounded and durable
 
-Retain the 1,000-entry in-memory outcome map as the bounded exact-result cache.
-Persist a compact, redacted completed-key tombstone for every terminal
-idempotency key in an atomic hash-addressed sidecar. Tombstones contain only
-the schema version, key digest, and terminal journal sequence; they do not
-contain command payloads, result values, error messages, receipts, or raw
-idempotency keys.
+Retain the 1,000-entry in-memory outcome map as the hot exact-result cache.
+Persist every terminal idempotency outcome as an exact JSON sidecar at:
 
-On a hot-cache miss, first consult the retained journal tail. A terminal tail
-event remains authoritative and reconstructs the exact outcome. If the tail no
-longer contains the event, consult the completed-key tombstone. A tombstone
-prevents re-execution and returns a stable `unknown` outcome with code
-`idempotency_outcome_compacted`, explaining that the command completed but its
-exact result aged out of bounded retention. An absent tombstone is a normal
-cold miss; corrupt or unreadable tombstone state fails closed before a fresh
-effect can execute.
+```text
+.psyche/runtime/outcomes/<sha256(idempotencyKey)>
+```
 
-Snapshots use a dedicated redacted durable projection containing only owner
-epoch, covered sequence, bounded redacted receipt records, and bounded open
-transactions. They never serialize the hot exact-outcome map, command
-envelopes, live resource state, or effect data. Durable compact tombstones
-provide old-key replay protection; the retained journal tail provides recent
-exact outcomes.
+Each sidecar stores the original `idempotencyKey` plus the exact
+`CommandOutcome`, so hash collisions or mismatched files are detected
+explicitly. Hash-addressed filenames keep keys from escaping the directory; the
+outcomes directory is created or repaired as `0700`, temporary files are opened
+as `0600`, and publication remains `write -> fsync -> close -> atomic rename`.
+
+Exact outcomes are accepted durably, but one file still needs a hard ceiling so
+one retry record cannot grow without bound. The serialized sidecar limit is
+`8_781_824` bytes (`DURABLE_OUTCOME_RECORD_MAX_BYTES`), derived from the
+largest bounded screenshot, script-result, and pane-output payloads plus JSON
+overhead. `loadOutcome()` returns `undefined` only for `ENOENT`; oversized
+files, JSON corruption, original-key mismatch, and invalid `CommandOutcome`
+shapes all throw explicitly.
+
+On a hot-cache miss, the runtime installs one pending promise before async
+lookup, then checks the retained terminal journal tail and the exact sidecar
+before executing anything fresh. Non-surface terminal tail events may
+reconstruct from complete journal payloads while they remain retained. Surface
+terminal events are redacted and therefore never reconstruct approximately: if
+their exact sidecar is missing, the retry fails closed.
+
+New compaction writes leave the legacy top-level snapshot `outcomes` field
+empty. Older snapshots may still warm the hot cache during upgrade, but
+authoritative exact replay now lives in the sidecars.
 
 ### Couple terminal publication to compaction eligibility
 
-Terminal completion follows this crash-safe, retryable order:
+Terminal completion now follows this crash-safe order:
 
 1. append and fsync the terminal journal event;
 2. immediately remember the exact outcome in the bounded hot map;
-3. add `{ idempotencyKey, terminalSequence }` to an in-memory
-   `dirtyCompletedKeys` map;
-4. atomically persist the compact completed-key tombstone;
-5. remove the dirty entry only after persistence succeeds for the same
-   terminal sequence.
+3. add `{ idempotencyKey, sequence, outcome? }` to `dirtyTerminalOutcomes`;
+4. atomically persist the exact sidecar; and
+5. clear the dirty entry only after persistence succeeds for that sequence.
 
-The dirty map stores only compact metadata, not another unbounded copy of exact
-outcomes. Later commands may continue while a small number of keys are dirty,
-so a transient per-key failure does not stop the runtime before compaction is
-needed. Before starting a fresh effect, the runtime reserves one completed-key
-slot; terminal append atomically transfers that reservation into the dirty
-map. Dirty entries plus reservations are capped at the existing 256
-pending-command limit, including concurrent submissions. At the cap, or after
-compaction is first deferred by a covered dirty key, the runtime retries
-pending writes and fails closed for new effects until durability recovers.
-This prevents a persistent metadata failure from making the journal grow
-without bound. Retries that can be answered from the hot map, terminal journal
-tail, or durable tombstone remain available. A tombstone write failure is
-logged through the existing operator-visible error path; it does not replace
-an already completed command's outcome with a failed submission.
+If the sidecar write fails, the original submit surfaces that durability error,
+but the runtime keeps the exact outcome dirty in memory so an immediate retry
+still deduplicates without re-executing. Startup applies the same rule to
+retained terminal events: it loads exact sidecars when present, reconstructs
+only non-surface outcomes from complete retained payloads, and marks missing
+entries dirty until authoritative sidecar data exists. Recovery-generated
+`command.unknown` terminals are then persisted through the same exact-sidecar
+path.
 
-Compaction must call `flushDirtyCompletedKeysThrough(coveredSequence)` before
-writing a snapshot or dropping events. It retries every dirty tombstone whose
-terminal sequence is at or below the proposed cutoff and aborts or defers the
-entire compaction if any remains dirty. Therefore no terminal event is eligible
-for compaction until its completed-key tombstone is confirmed durable.
-
-After restart, journal replay is authoritative. Every retained terminal event
-repopulates the bounded hot cache and is checked against the tombstone store;
-a missing tombstone is reconstructed as dirty and retried before that event
-can be covered by compaction. A crash at any point therefore leaves either a
-durable tombstone or a retained terminal journal event that compaction cannot
-erase.
+Before compaction covers a sequence, the runtime retries every dirty exact
+outcome at or below the cutoff. If any covered key still lacks authoritative
+durable replay data, compaction returns early and preserves the retained
+journal event. A crash at any point therefore leaves either a durable exact
+sidecar or a retained terminal journal event that compaction cannot erase.
 
 ### Preserve unresolved transactions through compaction
 
-Extend the redacted journal snapshot with open transaction records containing
-only the command identity, raw idempotency key required for retry matching,
-request sequence, and latest nonterminal state required by recovery.
-Compaction derives this bounded set from the previous snapshot and the journal
-prefix being covered; no command payload or effect data is copied.
+Extend the durable snapshot with bounded open transactions containing only the
+sequence, command ID, raw idempotency key, and latest nonterminal kind needed
+for restart matching. Tail terminal events override snapshot records. Otherwise
+startup appends exactly one `command.unknown` before accepting new commands.
+Open transactions remain bounded by the 256 pending-command cap.
 
-During replay, retained tail events override snapshot state. A terminal tail
-event removes the matching open transaction; otherwise startup appends exactly
-one `command.unknown` before accepting new commands. This state remains bounded
-by the runtime's existing 256 pending-command limit.
+This is still Task 2. When it lands, recovery-generated terminal events must
+continue using Task 1's exact-sidecar durability path before later compaction
+may cover them.
 
-### Reclaim retired pane buffers on final release
+### Reclaim retired pane buffers
 
-When a workspace snapshot no longer publishes a pane that still has active
-streams, mark the pane as retired and retain its buffer. Every detach,
-unsubscribe, and session-close path then checks whether a retired pane has any
-remaining subscribers. The final release calls `forgetPane` and removes the
-retired marker. Republishing the pane clears retirement without discarding its
-live buffer.
+When a workspace no longer publishes a pane with active streams, mark it
+retired and retain its buffer. Detach, legacy unsubscribe, and session-close
+paths call one final-release check after removing their references. The final
+release calls `forgetPane` and clears retirement. Republishing clears
+retirement without discarding the live buffer.
+
+This remains Task 3.
 
 ## Error Handling
 
-- Completed-key lookup failures reject fresh execution explicitly.
-- Completed-key persistence failures preserve the appended terminal event and
-  exact hot outcome, keep the key dirty, log an operator-visible durability
-  error, and defer compaction; they do not report the completed effect as a
-  command failure.
-- Snapshot files contain only allowlisted redacted state and bounded
-  open-transaction evidence; completed-key tombstones remain in their separate
-  compact sidecar.
-- Invalid snapshot open-transaction data is treated as journal corruption.
-- Pane cleanup remains idempotent so duplicate detach and close events are
-  harmless.
+- Exact sidecar lookup failures reject fresh execution explicitly; only
+  `ENOENT` is treated as absence.
+- Exact sidecar persistence failures preserve the appended terminal event and
+  exact hot outcome, keep the key dirty, and defer compaction; they do not
+  authorize re-execution.
+- Oversized, malformed, key-mismatched, or invalid exact sidecars throw
+  explicitly.
+- A retained surface terminal event without an exact sidecar fails closed
+  rather than reconstructing a generic result from redacted journal data.
+- Task 1 keeps exact durable replay outside the snapshot sidecar field: new
+  snapshots write `outcomes: {}` while Task 2 still adds bounded
+  open-transaction evidence.
+- Invalid open-transaction snapshot data is journal corruption.
+- Pane cleanup is idempotent.
 
 ## Rejected Alternatives
 
-- Persisting exact outcomes indefinitely in sidecars or snapshots violates the
-  bounded exact-outcome and redacted-snapshot requirements.
-- Clearing a dirty completed key after a failed write permits compaction to
-  erase the sole idempotency evidence.
-- Returning a command failure after its effect and terminal event completed
-  misreports reality and encourages unsafe retries.
-- Defining an expiration window changes the published no-double-execution
-  contract.
-- Pinning compaction behind the oldest unresolved in-flight command allows one
-  stalled effect to make the journal unbounded; bounded open-transaction
-  snapshot records preserve that evidence instead.
-- Re-reading the workspace on every stream teardown adds provider races and
-  unnecessary work when retirement can be tracked deterministically.
+- Compact markers or generic unknown placeholders for old keys weaken the
+  approved exact-replay contract.
+- Reconstructing surface outcomes from redacted terminal journal events can
+  silently change user-visible results.
+- Clearing a dirty exact outcome after a failed sidecar write permits
+  compaction to erase the sole authoritative replay source.
+- Persisting exact sidecars with no per-record size cap lets one command create
+  an unbounded file.
+- Expiring keys changes the no-double-execution contract.
+- Pinning compaction behind one unresolved effect allows unbounded journal
+  growth; bounded open-transaction records preserve the evidence instead.
 
 ## Validation
 
-Add regressions proving:
+Regressions prove:
 
-- an idempotency key older than 1,000 exact outcomes is blocked by its compact
-  tombstone before and after restart and compaction;
-- after a terminal append, injected tombstone persistence failure keeps the
-  exact outcome retryable, makes later compaction defer without deleting the
-  event, and succeeds after persistence is restored; after restart,
-  resubmitting the original key does not execute the effect again;
-- compaction across an unresolved request produces exactly one
-  `command.unknown` after restart, while a retained terminal event wins;
-- durable snapshots contain no exact outcome values, command envelopes, or
-  unredacted receipt data; raw idempotency keys appear only in the bounded
-  open-transaction records needed for recovery;
-- closed pane buffers survive while subscribed and are released after the
-  final detach, legacy unsubscribe, or session close;
-- multiple subscribers do not trigger early release and republishing cancels
-  retirement.
-
-Run the focused control-runtime, journal-compaction, bridge, and pane-stream
-tests, then TypeScript source/test type checks and the repository CI matrix.
+- an idempotency key older than 1,000 exact outcomes still deduplicates from
+  its exact sidecar before and after restart and compaction;
+- after a terminal append, injected sidecar persistence failure surfaces
+  immediately, leaves dirty exact replay available without a second effect,
+  makes later compaction defer without deleting the event, and succeeds after
+  persistence is restored;
+- a retained recovery-generated `command.unknown` is written to an exact
+  sidecar before later compaction may cover it;
+- a retained surface terminal event with no exact sidecar fails closed instead
+  of reconstructing a generic outcome from redacted journal data;
+- sidecars use `0700`/`0600` permissions, reject records larger than
+  `8_781_824` bytes, and throw on malformed, mismatched, or invalid exact
+  outcomes;
+- unresolved commands recover exactly once; and
+- retired buffers release only after the final stream or subscription.
 
 ## Scope
 
-This repair changes only idempotency durability, journal recovery metadata,
-redacted snapshot persistence, and closed-pane buffer ownership. It does not
-change command protocol shapes, idempotency expiration semantics, workspace
-publication, or live pane stream behavior.
+This repair changes idempotency durability, journal recovery metadata, redacted
+snapshot persistence, and closed-pane buffer ownership. It does not change
+command protocol shapes, key expiration semantics, workspace publication, or
+live pane-stream behavior.
