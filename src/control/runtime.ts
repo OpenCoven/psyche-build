@@ -247,8 +247,8 @@ const TERMINAL_EVENT_KINDS = new Set([
  * A long-running owner drives high-volume pane I/O, and some command payloads
  * (`pane.input` data, `pane.prompt` text) are large. Retaining every envelope
  * forever would grow without bound, so the map keeps only the most recent
- * transactions. Exact terminal outcomes still live durably in the journal's
- * disk-backed sidecar store and are reloaded on cold misses.
+ * transactions. Terminal outcomes live durably in the journal's disk-backed
+ * sidecar store, exactly until compaction and then as per-key markers.
  */
 const MAX_COMMAND_RECORDS = 1000;
 
@@ -265,6 +265,7 @@ const JOURNAL_RETAINED_EVENTS = MAX_COMMAND_RECORDS;
 const JOURNAL_COMPACTION_TRIGGER = MAX_COMMAND_RECORDS * 2;
 
 const DIRTY_TERMINAL_OUTCOME_LIMIT = AGENT_CONTROL_LIMITS.pendingCommands;
+const OUTCOME_COMPACTION_BATCH_SIZE = 32;
 
 export class ControlRuntime {
   public readonly leases = new LaneLeaseStore();
@@ -2049,9 +2050,15 @@ export class ControlRuntime {
   ): Promise<boolean> {
     if (!this.compactable) return true;
     const marker = compactedCommandOutcome();
-    for (const [idempotencyKey] of coveredTerminals) {
+    const idempotencyKeys = [...coveredTerminals.keys()];
+    for (let offset = 0; offset < idempotencyKeys.length; offset += OUTCOME_COMPACTION_BATCH_SIZE) {
       if (this.compactionShouldAbort(attempt)) return false;
-      await this.compactable.storeOutcome(idempotencyKey, marker);
+      const results = await Promise.allSettled(
+        idempotencyKeys
+          .slice(offset, offset + OUTCOME_COMPACTION_BATCH_SIZE)
+          .map((idempotencyKey) => this.compactable!.storeOutcome(idempotencyKey, marker)),
+      );
+      if (results.some((result) => result.status === 'rejected')) return false;
       if (this.compactionShouldAbort(attempt)) return false;
     }
     return true;
@@ -2122,8 +2129,8 @@ export class ControlRuntime {
       );
 
       // The snapshot must be durable before the events it covers are dropped.
-      // Exact outcomes stay in the sidecar, so new snapshots no longer duplicate
-      // them.
+      // Outcome evidence stays at the hashed sidecar path, so snapshots do not
+      // duplicate either exact values or later compact markers.
       await journal.writeSnapshot({
         snapshot: this.durableSnapshot(),
         coveredSequence,

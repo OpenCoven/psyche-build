@@ -112,6 +112,13 @@ through the identical authority checks and lands in the same journal.
    or compaction is already blocked on durability, new fresh commands are
    rejected with `durability_unavailable` until a later repair/flush succeeds,
    while hot/tail/sidecar retries remain available.
+   After the redacted snapshot is durable, every covered exact sidecar is
+   atomically downgraded at the same hashed path to
+   `idempotency_outcome_compacted`; only after all marker publications succeed
+   may the journal prefix be removed. The exact payload retention window is
+   therefore bounded, while non-expiring idempotency still requires one small
+   durable fact per unique key. Total sidecar count is intentionally not
+   constant-bounded without an expiry policy.
    Compaction persists a separate redacted durable projection rather than the
    operator-facing `snapshot()`: owner/sequence metadata, bounded redacted
    receipts, bounded completed-key markers, and at most 256 open transaction

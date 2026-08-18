@@ -7,8 +7,9 @@
 release retired pane buffers after their final subscriber.
 
 **Architecture:** Keep the existing
-`.psyche/runtime/outcomes/<sha256>` files as authoritative exact-outcome
-records. `ControlRuntime` retains exact outcomes in its bounded hot cache,
+`.psyche/runtime/outcomes/<sha256>` files as authoritative outcome records:
+exact until safely covered, then compact per-key tombstones. `ControlRuntime`
+retains exact outcomes in its bounded hot cache,
 caps one shared 256-slot durability budget across dirty outcomes and active
 fresh reservations, appends bounded digest
 attestations for retained pre-digest surface terminals, and prevents
@@ -192,13 +193,16 @@ rejectedOutcome(
    a matching later attestation;
 5. on any failure, set `compactionBlockedByDurability`, log deferred
    compaction, and return without writing a snapshot or journal;
-6. durably write the current snapshot representation; and
-7. compact only after all earlier steps succeed.
+6. durably write the current snapshot representation;
+7. rewrite every covered sidecar to the compact
+   `idempotency_outcome_compacted` outcome marker through the same atomic,
+   file-fsync, rename, and directory-fsync path; and
+8. compact only after all earlier steps succeed.
 
-This bounds exact disk outcomes by the fixed 2,000-event trigger plus at most
-256 combined dirty-or-reserved durability slots. After compaction,
-authoritative exact sidecars still replay old keys while the retained
-1,000-event tail remains available for cold lookup compatibility.
+This bounds exact payload retention by the fixed compaction window plus at
+most 256 combined dirty-or-reserved durability slots. Non-expiring idempotency
+still requires one compact durable fact per unique key, so total sidecar count
+is intentionally not constant-bounded without an explicit expiry policy.
 
 ### Step 6: Add the deterministic fail-closed regression
 
@@ -217,7 +221,7 @@ In `controlJournalCompaction.test.ts`, cover:
 
 Task 1 keeps the current snapshot structure. The only compatibility change here
 is that legacy `snapshot.outcomes` values no longer seed the runtime hot cache;
-exact sidecars and retained journal verification remain authoritative.
+outcome sidecars and retained journal verification remain authoritative.
 
 ### Step 8: Validate Task 1
 
@@ -258,7 +262,8 @@ integer sequence, nonempty IDs, and an allowed kind.
 
 The persisted `snapshot` is a separate `ownerEpoch`/`sequence` durable
 projection, not `ControlRuntime.snapshot()`. It also retains at most 1,000
-redacted completed transaction identities; exact outcomes remain in sidecars.
+redacted completed transaction identities. Covered exact sidecars are
+downgraded to compact per-key markers before their journal evidence is removed.
 
 Change both journal interfaces to:
 

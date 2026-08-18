@@ -6,7 +6,7 @@ import { ControlRuntime, type ControlHandlers, type RuntimeJournal } from '../sr
 import { ApprovalStore } from '../src/control/approvals.js';
 import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
 import type { ControlTaskCredentialReference } from '../src/control/credentials.js';
-import { ControlJournal, exactCommandOutcomeDigest } from '../src/control/journal.js';
+import { COMPACTED_OUTCOME_CODE, ControlJournal, exactCommandOutcomeDigest } from '../src/control/journal.js';
 import { createCanonicalElementSemantics } from '../src/control/policy.js';
 import { SurfaceRegistry } from '../src/control/surfaces.js';
 import type { ControlCommand } from '../src/control/types.js';
@@ -71,6 +71,12 @@ async function newJournalRoot(prefix: string): Promise<string> {
   await mkdir(root, { recursive: true, mode: 0o700 });
   roots.push(root);
   return root;
+}
+
+async function appendCompactionPressure(journal: ControlJournal, prefix: string): Promise<void> {
+  for (let index = 0; index < 1_001; index += 1) {
+    await journal.append('unrelated.event', { id: `${prefix}-${index}` });
+  }
 }
 
 function storedOutcomePath(root: string, idempotencyKey: string): string {
@@ -286,9 +292,7 @@ describe('ControlRuntime', () => {
     const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
 
     const first = await submit(runtime, openTerminalCommand('idem-old', 'old-1'));
-    for (let index = 0; index < 1_001; index += 1) {
-      await submit(runtime, openTerminalCommand(`idem-later-${index}`, `later-${index}`));
-    }
+    (runtime as any).outcomesByIdempotencyKey.delete('idem-old');
 
     const sequenceBefore = journal.sequence;
     const callsBefore = invocations;
@@ -336,9 +340,7 @@ describe('ControlRuntime', () => {
     const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
 
     const first = await submit(runtime, openTerminalCommand('idem-durable', 'durable-1'));
-    for (let index = 0; index < 1_001; index += 1) {
-      await submit(runtime, openTerminalCommand(`idem-later-${index}`, `later-${index}`));
-    }
+    (runtime as any).outcomesByIdempotencyKey.delete('idem-durable');
 
     const covered = journal.sequence;
     await journal.writeSnapshot({
@@ -473,9 +475,7 @@ describe('ControlRuntime', () => {
     const terminal = journal.findByIdempotencyKey('idem-blocked-dirty');
     expect(terminal?.sequence).toBeDefined();
 
-    for (let index = 0; index < 1_001; index += 1) {
-      await submit(runtime, command({ id: `later-${index}`, idempotencyKey: `idem-later-${index}` }));
-    }
+    await appendCompactionPressure(journal, 'blocked-later');
 
     await (runtime as any).compactJournal(journal);
     expect((runtime as any).compactionBlockedByDurability).toBe(true);
@@ -503,14 +503,17 @@ describe('ControlRuntime', () => {
       .resolves.toEqual({ status: 'succeeded', value: { paneId: 'pane-2' } });
     expect((runtime as any).compactionBlockedByDurability).toBe(false);
     expect(journal.firstSequence).toBeGreaterThan(terminal?.sequence ?? 0);
-    await expect(journal.loadOutcome('idem-blocked-dirty')).resolves.toEqual(first);
+    await expect(journal.loadOutcome('idem-blocked-dirty')).resolves.toMatchObject({
+      status: 'unknown',
+      code: COMPACTED_OUTCOME_CODE,
+    });
     expect(invocations).toBe(2);
     const reopened = await ControlJournal.open(root, 5);
     const restarted = await ControlRuntime.create({ ownerEpoch: 5, handlers, journal: reopened });
     const sequenceBeforeRestartRetry = reopened.sequence;
     await expect(submit(restarted, {
       ...openTerminalCommand('idem-blocked-dirty', 'blocked-dirty-restart'), ownerEpoch: 5,
-    })).resolves.toEqual(first);
+    })).resolves.toMatchObject({ status: 'unknown', code: COMPACTED_OUTCOME_CODE });
     expect(reopened.sequence).toBe(sequenceBeforeRestartRetry);
     expect(invocations).toBe(2);
   }, 90_000);

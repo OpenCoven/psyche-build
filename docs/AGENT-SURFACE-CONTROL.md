@@ -193,11 +193,15 @@ operational resource IDs until owner restart. Pane reads, semantic trees,
 screenshots, and script return values are bounded response data, not journal
 payloads.
 The runtime's `outcomesByIdempotencyKey` map is only a bounded 1,000-entry hot
-cache. Exact terminal outcomes remain authoritative in `ControlJournal`'s
+cache. Terminal outcome evidence remains authoritative in `ControlJournal`'s
 hash-addressed durable outcome sidecar, and cold retries consult the retained
-journal tail before that store. Those sidecars keep the exact prior result on
-disk with restrictive permissions and a bounded per-record size, while
-snapshots no longer duplicate exact outcomes once the sidecar is durable.
+journal tail before that store. Those sidecars initially keep the exact prior
+result with restrictive permissions and a bounded per-record size. Once compaction has durably
+published its redacted snapshot, covered sidecars are atomically replaced by a
+small `idempotency_outcome_compacted` marker before journal evidence is
+removed. Exact payload retention is bounded, but non-expiring idempotency
+intentionally retains one durable marker per unique key; total disk usage is
+not constant-bounded without an explicit expiry policy.
 Sidecar lookup or write failures, JSON corruption, or key/outcome mismatches
 fail closed instead of silently re-executing a mutation.
 Task-scoped reads may expose only resources named by persisted capability-lease

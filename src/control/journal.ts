@@ -16,6 +16,19 @@ export type AgentControlJournalKind =
   | 'command.unknown' | 'command.rejected' | 'approval.requested';
 
 export const COMMAND_OUTCOME_ATTESTED_KIND = 'command.outcome.attested';
+export const COMPACTED_OUTCOME_CODE = 'idempotency_outcome_compacted';
+
+export function compactedCommandOutcome(): CommandOutcome {
+  return {
+    status: 'unknown',
+    code: COMPACTED_OUTCOME_CODE,
+    message: 'command completed; exact outcome was compacted',
+  };
+}
+
+export function isCompactedCommandOutcome(outcome: CommandOutcome): boolean {
+  return outcome.status === 'unknown' && outcome.code === COMPACTED_OUTCOME_CODE;
+}
 
 interface ForbiddenAgentControlJournalData {
   readonly outcome?: never;

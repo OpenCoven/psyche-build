@@ -94,13 +94,19 @@ Before compaction covers a terminal event, the runtime:
 2. verifies that every covered terminal key still has an exact sidecar whose
    SHA-256 digest matches either the terminal event itself or a later digest
    attestation keyed by `(commandId, idempotencyKey)`; and
-3. only then compacts the journal.
+3. durably publishes the redacted snapshot;
+4. rewrites every covered sidecar at the same hashed path to the compact
+   `idempotency_outcome_compacted` outcome marker; and
+5. only after every marker rewrite succeeds compacts the journal.
 
 Any failed flush, digest verification, or attestation lookup aborts the whole attempt, retains the terminal
 event, sets `compactionBlockedByDurability`, and rejects new effects with
 `durability_unavailable` until a later reservation successfully flushes the
 dirty work. Retries already answerable from hot state, the journal tail, or
 the sidecar remain available.
+If a compact-marker rewrite fails after snapshot publication, the durable
+snapshot may remain, but the journal prefix is retained and fresh effects stay
+blocked until every covered marker is durable and compaction succeeds.
 
 Startup scans retained terminal events. A missing sidecar becomes dirty only
 when the retained event can be reconstructed exactly; otherwise startup fails
@@ -114,8 +120,8 @@ Retained pre-digest surface terminals with a valid exact sidecar append a
 bounded digest attestation before later compaction may cover them. Legacy
 `snapshot.outcomes` keys no longer warm the hot cache: without the exact
 sidecar they fail closed.
-Existing b389 records load directly even when their terminal journal events
-were already compacted.
+Existing b389 records load directly. Once successful compaction covers their
+terminal evidence, they are downgraded in place to the compact marker.
 
 ### Keep snapshots redacted while preserving open transactions
 
@@ -133,8 +139,9 @@ bounded by the 256 pending-command cap, and recovery-generated terminal events
 will use the same sidecar durability gate.
 
 The durable projection also retains at most 1,000 completed transaction
-identities as fail-closed compacted-key markers. Exact outcomes remain in the
-existing hashed sidecars; markers contain no outcome value.
+identities as fail-closed compacted-key markers. Before covered journal
+evidence is removed, the existing hashed sidecars are downgraded to the same
+outcome marker.
 
 ### Task 3 will reclaim retired pane buffers
 
@@ -161,8 +168,11 @@ Republishing will clear retirement without discarding the live buffer.
 - A separate `.psyche/runtime/completed-keys` store is upgrade-unsafe.
 - Bulk migration is unnecessary when the existing hashed path already names the
   authoritative exact record.
-- Replacing exact sidecars with a lossy compact record would silently weaken
-  retry semantics for commands whose exact prior result must remain replayable.
+- Deleting covered sidecars would make an old key indistinguishable from a
+  never-seen key. A compact per-key marker preserves no-reexecution semantics
+  without retaining sensitive exact payloads. Non-expiring idempotency still
+  requires one durable fact per unique key, so total sidecar count is not
+  constant-bounded without an expiry policy.
 - Clearing dirty state or advancing compaction before post-rename
   containing-directory fsync completes can erase the only authoritative replay
   evidence.
@@ -193,7 +203,8 @@ Regressions prove:
   evidence, and blocks only subsequent fresh effects;
 - after persistence is restored, the blocked-state reservation retry flushes
   the dirty outcome and the recovery trigger requests compaction; restart
-  replays the original exact outcome and its effect count remains one;
+  replays authoritative completed-key evidence and its effect count remains
+  one;
 - retained pre-digest surface terminals append a digest attestation before they
   can be compacted, while missing sidecars or unverifiable digests stay
   fail-closed;
