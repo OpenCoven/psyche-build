@@ -1,4 +1,5 @@
 import { spawn, type SpawnOptions } from 'child_process';
+import { EXEC_MAX_BYTES_CODE } from './execBuffers.js';
 
 export interface ExecAsyncOptions extends Omit<SpawnOptions, 'stdio'> {
   /** Timeout in milliseconds. Default: 30000 (30s) */
@@ -117,7 +118,12 @@ export function execAsync(
         if (silent) {
           resolve('');
         } else {
-          reject(new Error(`Command exceeded ${maxBytes} bytes of output: ${command}`));
+          // Tagged so callers can tell "too much output" from "command failed"
+          // and decide what an overflow means for them.
+          reject(Object.assign(
+            new Error(`Command exceeded ${maxBytes} bytes of output: ${command}`),
+            { code: EXEC_MAX_BYTES_CODE },
+          ));
         }
         return;
       }
