@@ -39,6 +39,7 @@ export interface PaneUserInteractionEvent {
 
 const LLM_ABORT_REASON_TIMEOUT = 'timeout';
 const LLM_ABORT_REASON_SUPERSEDED = 'superseded';
+const LLM_ABORT_REASON_PANE_REMOVED = 'pane-removed';
 
 /**
  * High-level service coordinating status detection via workers and LLM
@@ -87,6 +88,7 @@ export class StatusDetector extends EventEmitter {
 
     // Handle pane removal (when pane no longer exists in tmux)
     this.messageBus.subscribe('pane-removed', (paneId, message) => {
+      this.forgetPane(paneId);
       this.emit('pane-removed', { paneId, reason: message.payload?.reason });
     });
 
@@ -418,6 +420,19 @@ export class StatusDetector extends EventEmitter {
     } finally {
       this.llmRequests.delete(paneId);
     }
+  }
+
+  /**
+   * Release every per-pane entry once a pane is gone.
+   *
+   * These maps were only cleared at shutdown, so a long session accumulated an
+   * entry per pane it had ever monitored. Cancelling the analyzer request also
+   * stops an in-flight LLM call for a pane whose answer can no longer be used.
+   */
+  private forgetPane(paneId: string): void {
+    this.cancelLLMRequest(paneId, LLM_ABORT_REASON_PANE_REMOVED);
+    this.paneStatuses.delete(paneId);
+    this.paneIdMap.delete(paneId);
   }
 
   /**

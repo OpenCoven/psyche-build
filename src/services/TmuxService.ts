@@ -1405,6 +1405,37 @@ export class TmuxService {
   }
 
   /**
+   * Set several pane options in one tmux invocation.
+   *
+   * The title spinner rewrites an option per busy pane on every animation
+   * frame; one process for the whole frame instead of one per option keeps
+   * that from dominating process spawns.
+   */
+  setPaneOptionsSync(
+    updates: ReadonlyArray<{ paneId: string; option: string; value: string }>
+  ): void {
+    if (updates.length === 0) return;
+    if (updates.length === 1) {
+      const [only] = updates;
+      this.setPaneOptionSync(only.paneId, only.option, only.value);
+      return;
+    }
+
+    const command = updates
+      .map(({ paneId, option, value }) => {
+        const escapedValue = value.replace(/'/g, `'\\''`);
+        return `set-option -p -t '${paneId}' ${option} '${escapedValue}'`;
+      })
+      .join(' \\; ');
+
+    try {
+      this.execute(`tmux ${command}`, { silent: true });
+    } catch (error) {
+      this.logger.warn(`Failed to set ${updates.length} pane options`, 'TmuxService');
+    }
+  }
+
+  /**
    * Unset a pane option (sync version for compatibility)
    */
   unsetPaneOptionSync(paneId: string, option: string): void {

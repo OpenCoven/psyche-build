@@ -53,6 +53,11 @@ export class PaneStreamHub {
     this.tmux.resizePane(paneId, cols, rows);
   }
 
+  /** Pane ids currently holding a buffer. Callers use this to reclaim. */
+  bufferedPaneIds(): string[] {
+    return [...this.buffers.keys()];
+  }
+
   forgetPane(paneId: string): void {
     this.buffers.delete(paneId);
   }
