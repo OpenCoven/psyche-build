@@ -313,6 +313,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     projectRoot: canonicalProjectRoot,
     sessionName,
     capabilityRouter,
+    orchestrator,
     paneObservations,
     surfaces,
     refreshPaneSurfaces: () => paneRefresh.run(),

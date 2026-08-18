@@ -4,11 +4,17 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ControlClient } from '../src/control/client.js';
 import {
+  createControlCredentialStore,
   issueControlTaskCredential,
   issueControlTaskToken,
   revokeControlTaskCredential,
 } from '../src/control/credentials.js';
 import { controlEndpointForProject } from '../src/control/endpoint.js';
+import { createHostControlPlane } from '../src/control/host.js';
+import { ControlServer } from '../src/control/server.js';
+import { createDaemonControlHandlers } from '../src/daemon/controlHandlers.js';
+import { AgenticCapabilityRouter } from '../src/orchestration/capabilityRouter.js';
+import { TmuxControl } from '../src/services/tmuxControl.js';
 import {
   MCP_CONTROL_ERROR_CODE,
   TOOLS,
@@ -24,6 +30,7 @@ import type { ControlCommand } from '../src/control/types.js';
 import {
   cleanupTestControlStatePaths,
   createWorktreeTestControlStatePaths,
+  testControlStateRoot,
   type TestControlStatePaths,
 } from './helpers/controlCredentialPaths.js';
 import { createRestartActionStatusHarness } from './helpers/restartActionStatusHarness.js';
@@ -1444,7 +1451,7 @@ describe('agent surface MCP tools', () => {
     const projectRoot = await scratchProject();
     const harness = await createTaskScopedControlHarness({
       projectRoot,
-      endpoint: path.join(projectRoot, 's'),
+      endpoint: controlEndpointForProject(projectRoot),
     });
     integrationCleanups.push(() => harness.server.close());
     inject({
@@ -1557,6 +1564,102 @@ describe('agent surface MCP tools', () => {
       code: -32602,
       message: expect.stringContaining('task_binding_mismatch'),
     });
+  });
+
+  it('executes leased MCP orchestration through the daemon handler and rejects a stale lease first', async () => {
+    const projectRoot = await scratchProject();
+    const taskId = 'task-orchestration';
+    const credentialPath = path.join(projectRoot, 'control-credentials.json');
+    const stateRoot = testControlStateRoot(projectRoot);
+    const credential = await issueControlTaskCredential({
+      projectRoot,
+      filePath: credentialPath,
+      stateRoot,
+      taskId,
+    });
+    const credentials = await createControlCredentialStore({
+      projectRoot,
+      filePath: credentialPath,
+      stateRoot,
+    });
+    const completed = {
+      taskId,
+      traceId: 'trace-mcp',
+      status: 'completed' as const,
+      startedAt: '2026-08-17T12:00:00.000Z',
+      completedAt: '2026-08-17T12:00:01.000Z',
+      lanes: [],
+    };
+    const execute = vi.fn(async () => completed);
+    const handlers = createDaemonControlHandlers({
+      tmux: new TmuxControl('psyche-mcp-orchestration'),
+      projectRoot,
+      sessionName: 'psyche-mcp-orchestration',
+      capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+      orchestrator: { execute },
+    });
+    const host = await createHostControlPlane(projectRoot, {
+      handlers,
+      bootstrap: async () => undefined,
+      readActiveTaskCredential: credentials.currentTaskCredential,
+    });
+    const endpoint = controlEndpointForProject(projectRoot);
+    const server = await ControlServer.start({
+      endpoint,
+      projectRoot,
+      ownerEpoch: host.epoch,
+      runtime: host.runtime,
+      credentials,
+    });
+    integrationCleanups.push(async () => {
+      await server.close();
+      await host.close();
+    });
+    inject({
+      controlClientForRoot: vi.fn(async (root) => ControlClient.connect({
+        projectRoot: root,
+        endpoint,
+        token: credential.token,
+        clientName: 'psyche-mcp-orchestration',
+        taskBinding: credential.taskBinding,
+      })),
+    });
+
+    const grant = {
+      requestId: 'request-orchestration',
+      actorId: credential.principalId,
+      taskId,
+      grantedBy: 'operator-1',
+      ttlMs: 60_000,
+      grants: [{
+        target: { kind: 'project' as const, id: projectRoot },
+        capabilities: ['pane.create' as const],
+      }],
+    };
+    const lease = host.runtime.capabilityLeases.grant(grant);
+    const response = payload(await call('psyche_execute_task', {
+      project_root: projectRoot,
+      lease_id: lease.id,
+      lease_revision: lease.revision,
+      prompt: 'test',
+      lanes: [{ id: 'one', mode: 'terminal' }],
+    }));
+
+    expect(response).toMatchObject({ status: 'succeeded', value: completed });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ taskId, projectRoot }));
+
+    host.runtime.capabilityLeases.grant(grant);
+    const stale = payload(await call('psyche_execute_task', {
+      project_root: projectRoot,
+      lease_id: lease.id,
+      lease_revision: lease.revision,
+      prompt: 'stale',
+      lanes: [{ id: 'stale', mode: 'terminal' }],
+    }));
+
+    expect(stale).toMatchObject({ status: 'failed', code: 'lease_revision_mismatch' });
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it('reports restart-invalidated action status through operator and task-bound MCP clients', async () => {

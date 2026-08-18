@@ -14,10 +14,12 @@ import { randomUUID } from 'node:crypto';
 import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
 import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
 import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
+import type { Orchestrator } from '../orchestration/orchestrator.js';
 import {
   spawnBridgePane,
   killBridgePane,
   createCovenClient,
+  dispatchOrchestrationRequest,
   getProjectCovenSession,
   launchProjectCovenSession,
   openProjectCovenSession,
@@ -44,6 +46,8 @@ export interface DaemonControlHandlerDeps {
   ) => Promise<BridgeSpawnResult>;
   /** Router used to execute Coven session capabilities. */
   capabilityRouter: AgenticCapabilityRouter;
+  /** Production orchestration executor shared with the WebSocket bridge. */
+  orchestrator?: Pick<Orchestrator, 'execute'>;
   /** Coven client factory; defaults to the real bridge client. */
   createCovenClient?: () => CovenClient;
   /** Spawn deps used when opening a Coven session pane; defaults to the real bridge deps. */
@@ -123,7 +127,24 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       await deps.tmux.killPane(await resolvePaneId(payload.paneId));
     },
 
-    executeOrchestration: notSupported('orchestration.execute'),
+    async executeOrchestration(payload) {
+      if (!deps.orchestrator) {
+        throw codedHandlerError('backend_unavailable', 'orchestration executor is unavailable');
+      }
+      const response = await dispatchOrchestrationRequest(
+        deps.projectRoot,
+        {
+          type: 'orchestration.execute',
+          requestId: `control:${payload.taskId}`,
+          task: {
+            ...payload.request,
+            taskId: payload.taskId,
+          },
+        },
+        deps.orchestrator as Orchestrator,
+      );
+      return response.result;
+    },
     sendPrompt: notSupported('pane.prompt'),
     interruptPane: notSupported('pane.interrupt'),
     openTerminal: notSupported('pane.terminal.open'),
