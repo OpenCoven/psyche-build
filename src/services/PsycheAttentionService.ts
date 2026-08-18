@@ -3,6 +3,7 @@ import type { AgentStatus } from '../types.js';
 import {
   getStatusDetector,
   type AttentionNeededEvent,
+  type PaneLifecycleEvent,
   type PaneUserInteractionEvent,
   type StatusUpdateEvent,
 } from './StatusDetector.js';
@@ -56,6 +57,8 @@ export class PsycheAttentionService extends EventEmitter {
     this.statusDetector.on('status-updated', this.handleStatusUpdate);
     this.statusDetector.on('attention-needed', this.handleAttentionNeeded);
     this.statusDetector.on('pane-user-interaction', this.handleUserInteraction);
+    this.statusDetector.on('pane-reset', this.handlePaneLifecycleEnd);
+    this.statusDetector.on('pane-removed', this.handlePaneLifecycleEnd);
     this.options.focusService.on('focus-changed', this.handleFocusChanged);
   }
 
@@ -68,6 +71,8 @@ export class PsycheAttentionService extends EventEmitter {
     this.statusDetector.off('status-updated', this.handleStatusUpdate);
     this.statusDetector.off('attention-needed', this.handleAttentionNeeded);
     this.statusDetector.off('pane-user-interaction', this.handleUserInteraction);
+    this.statusDetector.off('pane-reset', this.handlePaneLifecycleEnd);
+    this.statusDetector.off('pane-removed', this.handlePaneLifecycleEnd);
     this.options.focusService.off('focus-changed', this.handleFocusChanged);
     for (const [paneId, tmuxPaneId] of this.activeAttentionPanes) {
       this.options.focusService.setPaneAttentionIndicator(tmuxPaneId, false);
@@ -98,6 +103,10 @@ export class PsycheAttentionService extends EventEmitter {
   };
 
   private readonly handleUserInteraction = (event: PaneUserInteractionEvent): void => {
+    this.resetPaneAttention(event.paneId);
+  };
+
+  private readonly handlePaneLifecycleEnd = (event: PaneLifecycleEvent): void => {
     this.resetPaneAttention(event.paneId);
   };
 

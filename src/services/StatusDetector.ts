@@ -37,6 +37,11 @@ export interface PaneUserInteractionEvent {
   paneId: string;
 }
 
+export interface PaneLifecycleEvent {
+  paneId: string;
+  reason?: string;
+}
+
 const LLM_ABORT_REASON_TIMEOUT = 'timeout';
 const LLM_ABORT_REASON_SUPERSEDED = 'superseded';
 const LLM_ABORT_REASON_PANE_REMOVED = 'pane-removed';
@@ -51,6 +56,7 @@ export class StatusDetector extends EventEmitter {
   private paneStatuses = new Map<string, AgentStatus>();
   private llmRequests = new Map<string, AbortController>();
   private paneIdMap = new Map<string, string>(); // psyche pane ID -> tmux pane ID
+  private paneLifecycles = new Map<string, symbol>();
   private isShuttingDown = false;
 
   constructor() {
@@ -92,6 +98,14 @@ export class StatusDetector extends EventEmitter {
       this.emit('pane-removed', { paneId, reason: message.payload?.reason });
     });
 
+    this.messageBus.subscribe('pane-reset', (paneId, message) => {
+      this.forgetPane(paneId);
+      this.emit('pane-reset', {
+        paneId,
+        reason: message.payload?.reason,
+      } satisfies PaneLifecycleEvent);
+    });
+
     // Handle worker ready events
     this.messageBus.subscribe('ready', (paneId) => {
       // Worker ready, no action needed
@@ -114,6 +128,9 @@ export class StatusDetector extends EventEmitter {
 
     panes.forEach(pane => {
       if (pane.id && pane.paneId) {
+        if (this.paneIdMap.get(pane.id) !== pane.paneId) {
+          this.paneLifecycles.set(pane.id, Symbol(pane.id));
+        }
         this.paneIdMap.set(pane.id, pane.paneId);
       }
     });
@@ -161,17 +178,16 @@ export class StatusDetector extends EventEmitter {
   ): Promise<void> {
     const payload = (message.payload || {}) as CodexTurnStoppedPayload;
     const captureSnapshot = payload.captureSnapshot || '';
+    const lifecycle = this.paneLifecycles.get(paneId);
+    const tmuxPaneId = this.paneIdMap.get(paneId);
 
-    this.cancelLLMRequest(paneId, LLM_ABORT_REASON_SUPERSEDED);
-
-    const tmuxPaneId = await this.getTmuxPaneId(paneId);
-    if (!tmuxPaneId) {
+    if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
       return;
     }
+    this.cancelLLMRequest(paneId, LLM_ABORT_REASON_SUPERSEDED);
 
     const previousStatus = this.paneStatuses.get(paneId);
     const finalStatus: AgentStatus = 'idle';
-    this.paneStatuses.set(paneId, finalStatus);
 
     let summaryDetails: Pick<PaneAnalysis, 'summary' | 'attentionTitle' | 'attentionBody'> = {};
     try {
@@ -184,7 +200,13 @@ export class StatusDetector extends EventEmitter {
           agentLabel: pane?.agent,
         }
       );
+      if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+        return;
+      }
     } catch (error) {
+      if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+        return;
+      }
       LogService.getInstance().debug(
         `Codex hook summary extraction failed for pane ${paneId}: ${error instanceof Error ? error.message : String(error)}`,
         'statusDetector',
@@ -207,14 +229,27 @@ export class StatusDetector extends EventEmitter {
       source: payload.source,
       timestamp: payload.timestamp,
     });
+    if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+      return;
+    }
 
     try {
       await persistPaneAgentSessionReference(
         StateManager.getInstance().getState().panesFile,
         paneId,
         agentSession,
+        {
+          expectedTmuxPaneId: tmuxPaneId,
+          isCurrent: () => this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle),
+        },
       );
+      if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+        return;
+      }
     } catch (error) {
+      if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+        return;
+      }
       LogService.getInstance().debug(
         `Failed to persist Codex session reference for pane ${paneId}: ${error instanceof Error ? error.message : String(error)}`,
         'statusDetector',
@@ -222,6 +257,14 @@ export class StatusDetector extends EventEmitter {
       );
     }
 
+    if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+      return;
+    }
+    this.paneStatuses.set(paneId, finalStatus);
+
+    if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+      return;
+    }
     this.emit('status-updated', {
       paneId,
       status: finalStatus,
@@ -231,10 +274,29 @@ export class StatusDetector extends EventEmitter {
       agentSession,
     } satisfies StatusUpdateEvent);
 
+    if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+      return;
+    }
     const attentionEvent = this.buildAttentionEvent(paneId, tmuxPaneId, finalStatus, analysis);
     if (attentionEvent) {
+      if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
+        return;
+      }
       this.emit('attention-needed', attentionEvent);
     }
+  }
+
+  private isPaneLifecycleCurrent(
+    paneId: string,
+    tmuxPaneId: string | undefined,
+    lifecycle: symbol | undefined
+  ): tmuxPaneId is string {
+    return (
+      tmuxPaneId !== undefined
+      && lifecycle !== undefined
+      && this.paneIdMap.get(paneId) === tmuxPaneId
+      && this.paneLifecycles.get(paneId) === lifecycle
+    );
   }
 
   /**
@@ -258,9 +320,12 @@ export class StatusDetector extends EventEmitter {
       status: 'analyzing'
     } as StatusUpdateEvent);
 
+    const controller = new AbortController();
+    let tmuxPaneId: string | null = null;
+    const lifecycle = this.paneLifecycles.get(paneId);
+
     try {
       // Create abort controller for this request with 10 second timeout
-      const controller = new AbortController();
       this.llmRequests.set(paneId, controller);
 
       // Set a timeout to abort if LLM takes too long
@@ -270,7 +335,7 @@ export class StatusDetector extends EventEmitter {
 
       try {
         // Get the tmux pane ID (we need to track this better)
-        const tmuxPaneId = await this.getTmuxPaneId(paneId);
+        tmuxPaneId = await this.getTmuxPaneId(paneId);
         if (!tmuxPaneId) {
           throw new Error(`No tmux pane ID found for ${paneId}`);
         }
@@ -287,7 +352,7 @@ export class StatusDetector extends EventEmitter {
         clearTimeout(timeoutId);
 
         // Check if request was cancelled
-        if (controller.signal.aborted) {
+        if (!this.isAnalysisCurrent(paneId, controller, tmuxPaneId, lifecycle)) {
           return;
         }
 
@@ -300,11 +365,15 @@ export class StatusDetector extends EventEmitter {
         // after the user selects an option.
         const delayBeforeNextCheck = analysis.state === 'option_dialog' ? 2000 : 0;
 
-        // Update status
-        this.paneStatuses.set(paneId, finalStatus);
-
         // Check if autopilot should handle this automatically
         await this.handleAutopilot(paneId, analysis, finalStatus);
+
+        if (!this.isAnalysisCurrent(paneId, controller, tmuxPaneId, lifecycle)) {
+          return;
+        }
+
+        // Update status
+        this.paneStatuses.set(paneId, finalStatus);
 
         // Notify worker of analysis result (fire and forget)
         this.workerManager.notifyWorker(paneId, {
@@ -343,6 +412,10 @@ export class StatusDetector extends EventEmitter {
             return;
           }
 
+          if (!this.isAnalysisOwnedByLifecycle(paneId, controller, tmuxPaneId, lifecycle)) {
+            return;
+          }
+
           // Request was aborted due to timeout
           LogService.getInstance().warn(`LLM analysis timeout for pane ${paneId} after 10 seconds`, 'statusDetector', paneId);
 
@@ -371,6 +444,10 @@ export class StatusDetector extends EventEmitter {
         throw error; // Re-throw other errors to outer catch
       }
     } catch (error: any) {
+      if (!this.isAnalysisCurrent(paneId, controller, tmuxPaneId, lifecycle)) {
+        return;
+      }
+
       LogService.getInstance().error(`LLM analysis error for pane ${paneId}: ${error.message || error}`, 'statusDetector', paneId, error instanceof Error ? error : undefined);
 
       // Extract detailed error message
@@ -418,8 +495,37 @@ export class StatusDetector extends EventEmitter {
         analyzerError: errorMessage
       } as StatusUpdateEvent);
     } finally {
-      this.llmRequests.delete(paneId);
+      if (this.llmRequests.get(paneId) === controller) {
+        this.llmRequests.delete(paneId);
+      }
     }
+  }
+
+  private isAnalysisCurrent(
+    paneId: string,
+    controller: AbortController,
+    tmuxPaneId: string | null,
+    lifecycle: symbol | undefined
+  ): boolean {
+    return (
+      !controller.signal.aborted &&
+      this.isAnalysisOwnedByLifecycle(paneId, controller, tmuxPaneId, lifecycle)
+    );
+  }
+
+  private isAnalysisOwnedByLifecycle(
+    paneId: string,
+    controller: AbortController,
+    tmuxPaneId: string | null,
+    lifecycle: symbol | undefined
+  ): boolean {
+    return (
+      this.llmRequests.get(paneId) === controller &&
+      tmuxPaneId !== null &&
+      this.paneIdMap.get(paneId) === tmuxPaneId &&
+      lifecycle !== undefined &&
+      this.paneLifecycles.get(paneId) === lifecycle
+    );
   }
 
   /**
@@ -433,6 +539,7 @@ export class StatusDetector extends EventEmitter {
     this.cancelLLMRequest(paneId, LLM_ABORT_REASON_PANE_REMOVED);
     this.paneStatuses.delete(paneId);
     this.paneIdMap.delete(paneId);
+    this.paneLifecycles.delete(paneId);
   }
 
   /**
@@ -675,6 +782,7 @@ export class StatusDetector extends EventEmitter {
     // Clear state
     this.paneStatuses.clear();
     this.paneIdMap.clear();
+    this.paneLifecycles.clear();
 
     // Remove all listeners
     this.removeAllListeners();

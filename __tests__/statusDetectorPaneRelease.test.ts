@@ -1,9 +1,14 @@
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { describe, it, expect, vi } from 'vitest';
 import { PaneWorkerManager } from '../src/services/PaneWorkerManager.js';
 import { StatusDetector } from '../src/services/StatusDetector.js';
 import { WorkerMessageBus } from '../src/services/WorkerMessageBus.js';
 import type { PsychePane } from '../src/types.js';
 import { createDeferred } from './utils/deferred.js';
+import { StateManager } from '../src/shared/StateManager.js';
+import { acquireProjectPaneConfigLock } from '../src/services/ProjectPaneConfig.js';
 
 function pane(paneId: string): PsychePane {
   return {
@@ -91,20 +96,24 @@ describe('StatusDetector pane release', () => {
     }
   });
 
-  it('clears the old lifecycle before publishing replacement worker events', async () => {
+  it('resets a same-id rebind internally without publishing pane removal', async () => {
     const detector = new StatusDetector();
     const statuses: Map<string, string> = (detector as any).paneStatuses;
     const requests: Map<string, AbortController> = (detector as any).llmRequests;
     const paneIds: Map<string, string> = (detector as any).paneIdMap;
     const messageBus = (detector as any).messageBus;
     const lifecycle: string[] = [];
+    const reset: string[] = [];
+    const removed: string[] = [];
 
-    detector.on('pane-removed', () => {
+    messageBus.subscribe('pane-reset', () => {
       expect(statuses.has('pane-a')).toBe(false);
       expect(requests.has('pane-a')).toBe(false);
       expect(paneIds.has('pane-a')).toBe(false);
-      lifecycle.push('removed');
+      lifecycle.push('reset');
     });
+    detector.on('pane-reset', (event: { paneId: string }) => reset.push(event.paneId));
+    detector.on('pane-removed', (event: { paneId: string }) => removed.push(event.paneId));
     messageBus.on('worker:ready', () => lifecycle.push('ready'));
 
     try {
@@ -117,10 +126,223 @@ describe('StatusDetector pane release', () => {
       await detector.monitorPanes([pane('%2')]);
 
       expect(controller.signal.aborted).toBe(true);
-      expect(lifecycle).toEqual(['removed', 'ready']);
+      expect(lifecycle).toEqual(['reset', 'ready']);
+      expect(reset).toEqual(['pane-a']);
+      expect(removed).toEqual([]);
       expect(statuses.has('pane-a')).toBe(false);
       expect(paneIds.get('pane-a')).toBe('%2');
+      expect((detector as any).workerManager.getStats().workerCount).toBe(1);
     } finally {
+      await detector.shutdown();
+    }
+  });
+
+  it('publishes nothing from a Codex stop after a rebind during summary extraction', async () => {
+    const detector = new StatusDetector();
+    const summary = createDeferred<{
+      summary: string;
+      attentionTitle: string;
+      attentionBody: string;
+    }>();
+    (detector as any).paneAnalyzer.extractSummary = vi.fn(() => summary.promise);
+    const updates: Array<{ paneId: string; summary?: string }> = [];
+    const attention: Array<{ paneId: string }> = [];
+    detector.on('status-updated', (event) => updates.push(event));
+    detector.on('attention-needed', (event) => attention.push(event));
+
+    try {
+      await detector.monitorPanes([pane('%1')]);
+      const completion = (detector as any).handleCodexTurnStopped('pane-a', {
+        id: 'codex-stop-1',
+        type: 'codex-turn-stopped',
+        timestamp: Date.now(),
+        paneId: 'pane-a',
+        payload: {
+          sessionId: 'old-session',
+          lastAssistantMessage: 'old completion',
+        },
+      });
+      await vi.waitFor(() => expect((detector as any).paneAnalyzer.extractSummary).toHaveBeenCalledOnce());
+
+      await detector.monitorPanes([pane('%2')]);
+      summary.resolve({
+        summary: 'old summary',
+        attentionTitle: 'Old title',
+        attentionBody: 'Old body',
+      });
+      await completion;
+
+      expect(updates.some((event) => event.summary === 'old summary')).toBe(false);
+      expect(attention).toEqual([]);
+      expect((detector as any).paneStatuses.has('pane-a')).toBe(false);
+      expect((detector as any).paneIdMap.get('pane-a')).toBe('%2');
+    } finally {
+      summary.resolve({
+        summary: 'old summary',
+        attentionTitle: 'Old title',
+        attentionBody: 'Old body',
+      });
+      await detector.shutdown();
+    }
+  });
+
+  it('does not persist an old Codex reference onto a replacement while persistence is deferred', async () => {
+    const detector = new StatusDetector();
+    const root = path.join(process.cwd(), '.test-artifacts', `codex-lifecycle-${randomUUID()}`);
+    const projectRoot = path.join(root, 'project');
+    const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
+    await mkdir(path.dirname(configPath), { recursive: true });
+    const config = (tmuxPaneId: string) => ({
+      projectName: 'repo',
+      projectRoot,
+      panes: [
+        { id: 'pane-a', slug: 'pane-a', prompt: '', paneId: tmuxPaneId, agent: 'codex' },
+      ],
+      settings: {},
+      lastUpdated: '2026-08-18T00:00:00.000Z',
+    });
+    await writeFile(configPath, JSON.stringify(config('%1'), null, 2), 'utf8');
+    const stateManager = StateManager.getInstance();
+    const previousState = (stateManager as any).state;
+    (stateManager as any).state = {
+      ...previousState,
+      panes: [pane('%1')],
+      panesFile: configPath,
+    };
+    const lock = await acquireProjectPaneConfigLock(projectRoot);
+    (detector as any).paneAnalyzer.extractSummary = vi.fn(async () => ({
+      summary: 'old summary',
+    }));
+    const updates: Array<{ paneId: string }> = [];
+    const attention: Array<{ paneId: string }> = [];
+    detector.on('status-updated', (event) => updates.push(event));
+    detector.on('attention-needed', (event) => attention.push(event));
+
+    try {
+      await detector.monitorPanes([pane('%1')]);
+      const completion = (detector as any).handleCodexTurnStopped('pane-a', {
+        id: 'codex-stop-2',
+        type: 'codex-turn-stopped',
+        timestamp: Date.now(),
+        paneId: 'pane-a',
+        payload: {
+          sessionId: 'old-session',
+          lastAssistantMessage: 'old completion',
+        },
+      });
+      await vi.waitFor(() => expect((detector as any).paneAnalyzer.extractSummary).toHaveBeenCalledOnce());
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      await writeFile(configPath, JSON.stringify(config('%2'), null, 2), 'utf8');
+      (stateManager as any).state = {
+        ...(stateManager as any).state,
+        panes: [pane('%2')],
+      };
+      await detector.monitorPanes([pane('%2')]);
+      await lock.release();
+      await completion;
+      const saved = JSON.parse(await readFile(configPath, 'utf8'));
+      expect(saved.panes[0].agentSession).toBeUndefined();
+      expect(updates).toEqual([]);
+      expect(attention).toEqual([]);
+      expect((detector as any).paneStatuses.has('pane-a')).toBe(false);
+    } finally {
+      await lock.release().catch(() => undefined);
+      (stateManager as any).state = previousState;
+      await detector.shutdown();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a newer analysis controller when an older request settles', async () => {
+    const detector = new StatusDetector();
+    const analysisA = createDeferred<{ state: 'open_prompt'; summary: string }>();
+    const analysisB = createDeferred<{ state: 'open_prompt'; summary: string }>();
+    const controllers: AbortController[] = [];
+    (detector as any).paneAnalyzer.analyzePane = vi.fn((
+      _tmuxPaneId: string,
+      signal: AbortSignal,
+      _paneId: string,
+      captureSnapshot: string,
+    ) => {
+      controllers.push((detector as any).llmRequests.get('pane-a'));
+      return captureSnapshot === 'analysis-a' ? analysisA.promise : analysisB.promise;
+    });
+    const messageBus = (detector as any).messageBus;
+
+    try {
+      await detector.monitorPanes([pane('%1')]);
+      messageBus.handleWorkerMessage('pane-a', {
+        id: 'analysis-a',
+        type: 'analysis-needed',
+        timestamp: Date.now(),
+        paneId: 'pane-a',
+        payload: { captureSnapshot: 'analysis-a', reason: 'static' },
+      });
+      await vi.waitFor(() => expect(controllers).toHaveLength(1));
+
+      messageBus.handleWorkerMessage('pane-a', {
+        id: 'analysis-b',
+        type: 'analysis-needed',
+        timestamp: Date.now(),
+        paneId: 'pane-a',
+        payload: { captureSnapshot: 'analysis-b', reason: 'static' },
+      });
+      await vi.waitFor(() => expect(controllers).toHaveLength(2));
+
+      analysisA.resolve({ state: 'open_prompt', summary: 'old' });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect((detector as any).llmRequests.get('pane-a')).toBe(controllers[1]);
+      expect(controllers[1].signal.aborted).toBe(false);
+
+      await detector.monitorPanes([pane('%2')]);
+      expect(controllers[1].signal.aborted).toBe(true);
+      expect((detector as any).llmRequests.has('pane-a')).toBe(false);
+    } finally {
+      analysisB.resolve({ state: 'open_prompt', summary: 'new' });
+      await detector.shutdown();
+    }
+  });
+
+  it('publishes nothing from an old analysis after a rebind during autopilot', async () => {
+    const detector = new StatusDetector();
+    const autopilot = createDeferred<void>();
+    (detector as any).paneAnalyzer.analyzePane = vi.fn(async () => ({
+      state: 'option_dialog',
+      summary: 'old verdict',
+      options: [{ action: 'Continue', keys: ['Enter'] }],
+    }));
+    (detector as any).handleAutopilot = vi.fn(() => autopilot.promise);
+    const notifyWorker = vi.spyOn((detector as any).workerManager, 'notifyWorker');
+    const updates: Array<{ status: string; summary?: string }> = [];
+    detector.on('status-updated', (event) => updates.push(event));
+    const messageBus = (detector as any).messageBus;
+
+    try {
+      await detector.monitorPanes([pane('%1')]);
+      messageBus.handleWorkerMessage('pane-a', {
+        id: 'analysis-1',
+        type: 'analysis-needed',
+        timestamp: Date.now(),
+        paneId: 'pane-a',
+        payload: { captureSnapshot: 'old pane', reason: 'static' },
+      });
+      await vi.waitFor(() => expect((detector as any).handleAutopilot).toHaveBeenCalledOnce());
+
+      await detector.monitorPanes([pane('%2')]);
+      autopilot.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(updates.some((event) => event.summary === 'old verdict')).toBe(false);
+      expect(notifyWorker).not.toHaveBeenCalledWith(
+        'pane-a',
+        expect.objectContaining({ type: 'analyze-complete' }),
+      );
+      expect((detector as any).paneStatuses.has('pane-a')).toBe(false);
+      expect((detector as any).paneIdMap.get('pane-a')).toBe('%2');
+    } finally {
+      autopilot.resolve();
       await detector.shutdown();
     }
   });

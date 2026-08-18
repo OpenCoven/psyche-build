@@ -156,7 +156,8 @@ export class PaneWorkerManager {
       } else if (existing.tmuxPaneId !== pane.paneId) {
         // The tmux pane behind this psyche pane changed, so its accumulated
         // comparison history describes a pane that is no longer there.
-        await this.releaseWorker(pane.id, 'Pane was replaced');
+        this.dispatch(pane.id, 'pane-reset', { reason: 'Pane was replaced' });
+        await this.destroyWorker(pane.id);
         this.createWorker(pane);
       }
     }
