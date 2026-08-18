@@ -1,3 +1,5 @@
+import { mobileInviteId } from "../../services/bridge/MobileInviteStore.js";
+
 /**
  * PAIR Action - Open a mobile invite on the bridge daemon and show a TUI banner.
  *
@@ -10,7 +12,7 @@ export interface PairActionContext {
     openMobileInvite(): string;
   } | null | undefined;
   setStatusMessage?: (msg: string) => void;
-  showPairBanner?: (opts: { qrPayload: string }) => void;
+  showPairBanner?: (opts: { qrPayload: string; inviteId: string }) => void;
 }
 
 export async function runPairAction(ctx: PairActionContext): Promise<void> {
@@ -19,5 +21,7 @@ export async function runPairAction(ctx: PairActionContext): Promise<void> {
     return;
   }
   const qrPayload = ctx.bridgeDaemon.openMobileInvite();
-  ctx.showPairBanner?.({ qrPayload });
+  const inviteToken = new URL(qrPayload).searchParams.get("psyche_invite");
+  if (!inviteToken) throw new Error("bridge returned an invalid mobile invite");
+  ctx.showPairBanner?.({ qrPayload, inviteId: mobileInviteId(inviteToken) });
 }

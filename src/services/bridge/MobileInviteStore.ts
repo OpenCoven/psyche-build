@@ -13,6 +13,16 @@ export interface MobileInvite {
   expiresAt: Date;
 }
 
+export interface RedeemedMobileInvite {
+  endpoint: string;
+  inviteId: string;
+}
+
+/** A non-reversible identifier for matching an invite without exposing it. */
+export function mobileInviteId(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
 interface InviteRecord {
   endpoint: string;
   expiresAt: number;
@@ -41,7 +51,8 @@ export class MobileInviteStore {
     return { token, expiresAt: new Date(expiresAt) };
   }
 
-  redeem(token: unknown): { endpoint: string } | null {
+  redeem(token: unknown): RedeemedMobileInvite | null {
+    if (typeof token !== "string") return null;
     const parsed = this.parse(token);
     if (!parsed) return null;
 
@@ -54,7 +65,7 @@ export class MobileInviteStore {
     if (!record || record.expiresAt !== parsed.expiresAt || record.expiresAt <= now) return null;
 
     this.invites.delete(nonceHash);
-    return { endpoint: record.endpoint };
+    return { endpoint: record.endpoint, inviteId: mobileInviteId(token) };
   }
 
   private parse(token: unknown): { nonce: string; expiresAt: number; signature: string } | null {

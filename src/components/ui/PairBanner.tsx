@@ -4,6 +4,14 @@ import QRCode from "./QRCode.js";
 
 export interface PairBannerState {
   qrPayload: string;
+  inviteId: string;
+}
+
+export function shouldDismissPairBanner(
+  banner: PairBannerState | null,
+  redeemedInviteId: string,
+): boolean {
+  return banner?.inviteId === redeemedInviteId;
 }
 
 interface Props {

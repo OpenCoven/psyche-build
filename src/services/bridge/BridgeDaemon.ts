@@ -318,7 +318,7 @@ export class BridgeDaemon {
           s.state = "authenticated";
           s.token = rec.token;
           s.send({ type: "authAccepted", payload: { token: rec.token } });
-          this.mobileInviteEvents.emit("redeemed");
+          this.mobileInviteEvents.emit("redeemed", redeemed.inviteId);
           return;
         }
         if (m.payload.token) {

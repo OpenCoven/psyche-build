@@ -95,7 +95,7 @@ import CommandPromptDialog from "./components/dialogs/CommandPromptDialog.js"
 import FileCopyPrompt from "./components/ui/FileCopyPrompt.js"
 import FooterHelp from "./components/ui/FooterHelp.js"
 import StartupPrimer from "./components/ui/StartupPrimer.js"
-import PairBanner, { type PairBannerState } from "./components/ui/PairBanner.js"
+import PairBanner, { shouldDismissPairBanner, type PairBannerState } from "./components/ui/PairBanner.js"
 import TmuxHooksPromptDialog from "./components/dialogs/TmuxHooksPromptDialog.js"
 import { PaneEventService } from "./services/PaneEventService.js"
 import {
@@ -355,11 +355,14 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     const pairingEvents = bridgeDaemon.pairingEvents;
     const mobileInviteEvents = bridgeDaemon.mobileInviteEvents;
     const onClose = () => setPairBanner(null);
+    const onMobileInviteRedeemed = (inviteId: string) => {
+      setPairBanner((banner) => shouldDismissPairBanner(banner, inviteId) ? null : banner);
+    };
     pairingEvents?.on("close", onClose);
-    mobileInviteEvents?.on("redeemed", onClose);
+    mobileInviteEvents?.on("redeemed", onMobileInviteRedeemed);
     return () => {
       pairingEvents?.off("close", onClose);
-      mobileInviteEvents?.off("redeemed", onClose);
+      mobileInviteEvents?.off("redeemed", onMobileInviteRedeemed);
     };
   }, [bridgeDaemon]);
 
@@ -1925,7 +1928,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     inlineRename,
     setInlineRename,
     bridgeDaemon,
-    showPairBanner: (opts: { qrPayload: string }) => setPairBanner(opts),
+    showPairBanner: (opts: { qrPayload: string; inviteId: string }) => setPairBanner(opts),
     sidePanelCollapsed,
     sidePanelWidth,
     onToggleSidePanel: toggleSidePanel,
@@ -2031,9 +2034,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
             qrPayload={pairBanner.qrPayload}
             onDismiss={() => {
               setPairBanner(null);
-              if (bridgeDaemon) {
-                bridgeDaemon.pairingEvents?.close?.("manual");
-              }
             }}
           />
         )}
