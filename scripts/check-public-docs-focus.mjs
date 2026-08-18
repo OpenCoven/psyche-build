@@ -52,19 +52,22 @@ function hasGlobMetacharacters(value) {
 
 function collectPackageMarkdownFiles(packageFiles) {
   const boundaryFailures = [];
+  const markdownFiles = [];
 
   for (const file of sortUnique(packageFiles.filter((entry) => entry.startsWith('docs/')))) {
-    if (hasGlobMetacharacters(file)) {
-      boundaryFailures.push({ file, reason: 'package-published docs must use explicit paths' });
+    const isExplicitMarkdownPath =
+      !hasGlobMetacharacters(file) && !file.endsWith('/') && path.extname(file).toLowerCase() === '.md';
+
+    if (!isExplicitMarkdownPath) {
+      boundaryFailures.push({ file, reason: 'package-published docs must use explicit Markdown file paths' });
+      continue;
     }
+
+    markdownFiles.push(file);
   }
 
   return {
-    markdownFiles: sortUnique(
-      packageFiles.filter(
-        (entry) => path.extname(entry).toLowerCase() === '.md' && !hasGlobMetacharacters(entry),
-      ),
-    ),
+    markdownFiles: sortUnique(markdownFiles),
     boundaryFailures: sortFailureRecords(boundaryFailures),
   };
 }
@@ -158,33 +161,43 @@ async function selfCheckPublicInventory() {
   assert(recursiveFiles.every((file) => !file.includes('/dist/')));
 
   const requiredInventory = buildPublicInventory({ recursiveFiles: [], packageMarkdownFiles: [] });
+  assert(requiredInventory.includes('README.md'));
+  assert(requiredInventory.includes('docs/README.md'));
   for (const file of requiredEntryFiles) {
     assert(requiredInventory.includes(file), `required entrypoint missing from inventory: ${file}`);
   }
 
   const packageBoundaryA = collectPackageMarkdownFiles([
     'dist/**/*',
-    'docs/*.md',
+    'docs/',
+    'docs/superpowers',
+    'docs/**/*',
     'README.md',
     'docs/README.md',
     'docs/COVEN-DEMO-LOOP.md',
+    'docs/AGENT-SURFACE-CONTROL.md',
   ]);
   const packageBoundaryB = collectPackageMarkdownFiles([
+    'docs/**/*',
     'docs/COVEN-DEMO-LOOP.md',
+    'docs/AGENT-SURFACE-CONTROL.md',
     'docs/README.md',
+    'docs/superpowers',
+    'docs/',
     'README.md',
-    'docs/*.md',
     'dist/**/*',
   ]);
 
   assert.deepEqual(packageBoundaryA, packageBoundaryB);
   assert.deepEqual(packageBoundaryA.markdownFiles, [
-    'README.md',
+    'docs/AGENT-SURFACE-CONTROL.md',
     'docs/COVEN-DEMO-LOOP.md',
     'docs/README.md',
   ]);
   assert.deepEqual(packageBoundaryA.boundaryFailures, [
-    { file: 'docs/*.md', reason: 'package-published docs must use explicit paths' },
+    { file: 'docs/', reason: 'package-published docs must use explicit Markdown file paths' },
+    { file: 'docs/**/*', reason: 'package-published docs must use explicit Markdown file paths' },
+    { file: 'docs/superpowers', reason: 'package-published docs must use explicit Markdown file paths' },
   ]);
 
   const partialCleanupInventory = buildPublicInventory({
