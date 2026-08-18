@@ -3,13 +3,19 @@ import XCTest
 @testable import PsycheCore
 
 final class PsycheInviteTests: XCTestCase {
-    func testParsesPsycheConnectIntoANormalizedEndpoint() throws {
+    /// Mirrors the desktop Open on phone URL shape without coupling this
+    /// target to desktop runtime code.
+    func testParsesDesktopEmittedPsycheConnectIntoANormalizedEndpoint() throws {
         let invite = try XCTUnwrap(PsycheInvite.parse(URL(string:
             "psyche://connect?host=wss%3A%2F%2FStudio.EXAMPLE.%3A4242&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&psyche_invite=one-time-token"
         )!))
 
         XCTAssertEqual(invite.endpoint.host, "studio.example")
         XCTAssertEqual(invite.endpoint.port, 4242)
+        XCTAssertEqual(
+            invite.endpoint.certificateFingerprint,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
         XCTAssertEqual(invite.token, "one-time-token")
     }
 

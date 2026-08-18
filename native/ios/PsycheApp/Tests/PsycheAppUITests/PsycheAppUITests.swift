@@ -392,7 +392,7 @@ final class PsycheAppUITests: XCTestCase {
         let invite = app.textFields["connect-psyche-invite"]
         XCTAssertTrue(invite.waitForExistence(timeout: 10))
         invite.tap()
-        invite.typeText("psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&psyche_invite=one-time-token")
+        invite.typeText("psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&psyche_invite=one-time-token&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         app.buttons["Connect"].tap()
         XCTAssertFalse(invite.waitForExistence(timeout: 3))
     }
