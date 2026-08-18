@@ -15,7 +15,33 @@ interface CacheEntry {
 
 const CACHE_TTL_MS = 500
 const MAX_ENTRIES = 50
+// Entries live 500ms, so the cache only ever needs the handful of directories
+// touched by the keystrokes in flight. Without a bound it retains the full
+// DirEntry[] of every directory the user has ever typed through.
+const MAX_CACHED_DIRS = 32
 const dirCache = new Map<string, CacheEntry>()
+
+/** Number of directories currently cached. Exposed for tests. */
+export function dirCacheSize(): number {
+  return dirCache.size
+}
+
+/** Empties the cache. Exposed for tests that need a clean slate. */
+export function resetDirCache(): void {
+  dirCache.clear()
+}
+
+/** Drops expired entries, then evicts oldest-first until the cache fits. */
+function pruneCache(now: number): void {
+  for (const [dir, entry] of dirCache) {
+    if (now - entry.timestamp >= CACHE_TTL_MS) dirCache.delete(dir)
+  }
+  while (dirCache.size > MAX_CACHED_DIRS) {
+    const oldest = dirCache.keys().next().value
+    if (oldest === undefined) break
+    dirCache.delete(oldest)
+  }
+}
 
 /**
  * Expand ~ to the user's home directory
@@ -77,7 +103,11 @@ export function scanDirectories(
     allEntries = cached.entries
   } else {
     allEntries = readDirectoryEntries(parentDir)
+    // Re-insert so Map iteration order stays youngest-last and eviction below
+    // is genuinely oldest-first.
+    dirCache.delete(parentDir)
     dirCache.set(parentDir, { entries: allEntries, timestamp: now })
+    pruneCache(now)
   }
 
   // Filter by prefix (case-insensitive)
