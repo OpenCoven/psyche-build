@@ -211,16 +211,24 @@ public struct HelloPayload: Codable, Sendable, Equatable {
     public let clientName: String
     public let protocolVersion: Int
     public let token: String?
+    public let invite: String?
 
-    public init(clientID: String, clientName: String, protocolVersion: Int = 2, token: String?) {
+    public init(
+        clientID: String,
+        clientName: String,
+        protocolVersion: Int = 2,
+        token: String?,
+        invite: String? = nil
+    ) {
         self.clientID = clientID
         self.clientName = clientName
         self.protocolVersion = protocolVersion
         self.token = token
+        self.invite = invite
     }
 
     enum CodingKeys: String, CodingKey {
-        case clientID = "clientId", clientName, protocolVersion, token
+        case clientID = "clientId", clientName, protocolVersion, token, invite
     }
 }
 
@@ -458,6 +466,11 @@ public struct PairAcceptedPayload: Codable, Sendable, Equatable {
     public init(token: String) { self.token = token }
 }
 
+public struct AuthAcceptedPayload: Codable, Sendable, Equatable {
+    public let token: String
+    public init(token: String) { self.token = token }
+}
+
 public struct PairRejectedPayload: Codable, Sendable, Equatable {
     public let reason: String
     public init(reason: String) { self.reason = reason }
@@ -478,13 +491,14 @@ public enum ServerMessage: Codable, Sendable, Equatable {
     case attention(AttentionEvent)
     case pairChallenge(PairChallengePayload)
     case pairAccepted(PairAcceptedPayload)
+    case authAccepted(AuthAcceptedPayload)
     case pairRejected(PairRejectedPayload)
     case pong(TokenPayload)
     case error(ProtocolError)
 
     private enum CodingKeys: String, CodingKey { case type, payload }
     private enum MessageType: String, Codable, CaseIterable {
-        case welcome, paneList, paneListChanged, projectList, paneOutput, ritualList, attention, pairChallenge, pairAccepted, pairRejected, pong, error
+        case welcome, paneList, paneListChanged, projectList, paneOutput, ritualList, attention, pairChallenge, pairAccepted, authAccepted, pairRejected, pong, error
     }
 
     public init(from decoder: Decoder) throws {
@@ -500,6 +514,7 @@ public enum ServerMessage: Codable, Sendable, Equatable {
         case .attention: self = .attention(try container.decode(AttentionEvent.self, forKey: .payload))
         case .pairChallenge: self = .pairChallenge(try container.decode(PairChallengePayload.self, forKey: .payload))
         case .pairAccepted: self = .pairAccepted(try container.decode(PairAcceptedPayload.self, forKey: .payload))
+        case .authAccepted: self = .authAccepted(try container.decode(AuthAcceptedPayload.self, forKey: .payload))
         case .pairRejected: self = .pairRejected(try container.decode(PairRejectedPayload.self, forKey: .payload))
         case .pong: self = .pong(try container.decode(TokenPayload.self, forKey: .payload))
         case .error: self = .error(try container.decode(ProtocolError.self, forKey: .payload))
@@ -518,6 +533,7 @@ public enum ServerMessage: Codable, Sendable, Equatable {
         case .attention(let payload): try encode(.attention, payload, into: &container)
         case .pairChallenge(let payload): try encode(.pairChallenge, payload, into: &container)
         case .pairAccepted(let payload): try encode(.pairAccepted, payload, into: &container)
+        case .authAccepted(let payload): try encode(.authAccepted, payload, into: &container)
         case .pairRejected(let payload): try encode(.pairRejected, payload, into: &container)
         case .pong(let payload): try encode(.pong, payload, into: &container)
         case .error(let payload): try encode(.error, payload, into: &container)

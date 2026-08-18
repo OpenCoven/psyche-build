@@ -122,6 +122,90 @@ describe("BridgeDaemon", () => {
     await daemon.stop();
   });
 
+  it("rejects hello carrying both a durable token and a mobile invite", async () => {
+    const tokenStore = new FakeTokenStore() as any;
+    const durableToken = "existing-durable-token";
+    tokenStore.records = [{
+      token: durableToken, clientId: "ios-1", clientName: "iPhone",
+      pairedAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
+    }];
+    const daemon = new BridgeDaemon({
+      paneProvider: () => [], projectProvider: () => [], sessionName: "test-session",
+      hubFactory: noopHubFactory, ...noopRituals, tokenStore,
+    });
+    const { port } = await daemon.start();
+    const invite = new URL(daemon.openMobileInvite()).searchParams.get("psyche_invite");
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const received = await new Promise<any[]>((resolve, reject) => {
+      const messages: any[] = [];
+      client.on("open", () => client.send(JSON.stringify({
+        type: "hello",
+        payload: { clientId: "ios-1", clientName: "iPhone", protocolVersion: PROTOCOL_VERSION, token: durableToken, invite },
+      })));
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        messages.push(message);
+        if (message.payload?.code === "invalid_invite") {
+          client.send(JSON.stringify({ type: "listPanes", payload: {} }));
+        }
+        if (message.payload?.code === "not_authenticated") resolve(messages);
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(received).toContainEqual({
+      type: "error",
+      payload: { code: "invalid_invite", message: "token and invite cannot be used together" },
+    });
+    expect(received).toContainEqual({
+      type: "error",
+      payload: { code: "not_authenticated", message: "pair first" },
+    });
+    client.close();
+    await daemon.stop();
+  });
+
+  it("keeps an expired mobile invite unauthenticated", async () => {
+    const { MobileInviteStore } = await import("../../src/services/bridge/MobileInviteStore");
+    const mobileInviteStore = new MobileInviteStore();
+    const expiredInvite = mobileInviteStore.issue({ endpoint: "wss://expired.example:443", ttlMs: -1 }).token;
+    const daemon = new BridgeDaemon({
+      paneProvider: () => [], projectProvider: () => [], sessionName: "test-session",
+      hubFactory: noopHubFactory, ...noopRituals, tokenStore: new FakeTokenStore() as any, mobileInviteStore,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const received = await new Promise<any[]>((resolve, reject) => {
+      const messages: any[] = [];
+      client.on("open", () => client.send(JSON.stringify({
+        type: "hello",
+        payload: { clientId: "ios-1", clientName: "iPhone", protocolVersion: PROTOCOL_VERSION, token: null, invite: expiredInvite },
+      })));
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        messages.push(message);
+        if (message.payload?.code === "invalid_invite") {
+          client.send(JSON.stringify({ type: "listPanes", payload: {} }));
+        }
+        if (message.payload?.code === "not_authenticated") resolve(messages);
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(received).toContainEqual({
+      type: "error",
+      payload: { code: "invalid_invite", message: "invite is invalid, expired, or already used" },
+    });
+    expect(received).toContainEqual({
+      type: "error",
+      payload: { code: "not_authenticated", message: "pair first" },
+    });
+    client.close();
+    await daemon.stop();
+  });
+
   it("passes the active TLS fingerprint to Bonjour publication", async () => {
     const bonjour = {
       publish: vi.fn(),
