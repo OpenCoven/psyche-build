@@ -1,5 +1,5 @@
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -14,6 +14,23 @@ const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
+
+async function newRoot(prefix: string): Promise<string> {
+  const root = path.join(process.cwd(), '.test-artifacts', `${prefix}-${randomUUID()}`);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  roots.push(root);
+  return root;
+}
+
+function storedOutcomePath(root: string, idempotencyKey: string): string {
+  return path.join(
+    root,
+    '.psyche',
+    'runtime',
+    'outcomes',
+    createHash('sha256').update(idempotencyKey, 'utf8').digest('hex'),
+  );
+}
 
 describe('ControlJournal', () => {
   it('constructs agent-control records from allowlisted metadata only', () => {
@@ -33,8 +50,7 @@ describe('ControlJournal', () => {
   });
 
   it('persists optional receipt ownership metadata across journal replay', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 7);
     const event = agentControlJournalPayload({
       kind: 'command.failed',
@@ -73,8 +89,7 @@ describe('ControlJournal', () => {
   });
 
   it('persists task-bound receipt ownership without a lease tuple across journal replay', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 7);
     const event = agentControlJournalPayload({
       kind: 'command.failed',
@@ -109,9 +124,72 @@ describe('ControlJournal', () => {
     }));
   });
 
+  it('stores and reloads hashed outcomes for separator-heavy unicode keys', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const idempotencyKey = 'panes/漢字/../☕️/retry:key';
+    const outcome = { status: 'succeeded', value: { paneId: '%3', ok: true } } as const;
+
+    await journal.storeOutcome(idempotencyKey, outcome);
+
+    const filePath = storedOutcomePath(root, idempotencyKey);
+    expect(path.basename(filePath)).toBe(
+      createHash('sha256').update(idempotencyKey, 'utf8').digest('hex'),
+    );
+    await expect(journal.loadOutcome(idempotencyKey)).resolves.toEqual(outcome);
+  });
+
+  it('returns undefined for a missing durable outcome', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+
+    await expect(journal.loadOutcome('missing/結果/☕️')).resolves.toBeUndefined();
+  });
+
+  it('rejects malformed durable outcome JSON', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const idempotencyKey = 'bad-json';
+    const filePath = storedOutcomePath(root, idempotencyKey);
+
+    await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    await writeFile(filePath, '{not json', 'utf8');
+
+    await expect(journal.loadOutcome(idempotencyKey)).rejects.toThrow('durable outcome JSON corruption');
+  });
+
+  it('rejects a durable outcome whose original key does not match the hash lookup', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const idempotencyKey = 'expected-key';
+    const filePath = storedOutcomePath(root, idempotencyKey);
+
+    await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    await writeFile(filePath, JSON.stringify({
+      idempotencyKey: 'other-key',
+      outcome: { status: 'succeeded' },
+    }), 'utf8');
+
+    await expect(journal.loadOutcome(idempotencyKey)).rejects.toThrow('durable outcome key mismatch');
+  });
+
+  it('rejects a durable outcome whose shape is invalid', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+    const idempotencyKey = 'invalid-outcome';
+    const filePath = storedOutcomePath(root, idempotencyKey);
+
+    await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    await writeFile(filePath, JSON.stringify({
+      idempotencyKey,
+      outcome: { status: 'failed', code: 7, message: 'not-a-valid-outcome' },
+    }), 'utf8');
+
+    await expect(journal.loadOutcome(idempotencyKey)).rejects.toThrow('invalid durable outcome shape');
+  });
+
   it('persists optional approval ownership metadata across journal replay', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 7);
     const event = agentControlJournalPayload({
       kind: 'approval.requested',
@@ -208,8 +286,7 @@ describe('ControlJournal', () => {
   });
 
   it('assigns monotonic sequences and restores idempotency records', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 3);
     await journal.append('command.requested', { commandId: 'c1', idempotencyKey: 'i1' });
     await journal.append('command.succeeded', { commandId: 'c1', idempotencyKey: 'i1' });
@@ -219,8 +296,7 @@ describe('ControlJournal', () => {
   });
 
   it('recovers a reused command id by the nonterminal idempotency key', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 7);
     await journal.append('command.requested', { commandId: 'reused', idempotencyKey: 'old-key' });
     await journal.append('command.succeeded', { commandId: 'reused', idempotencyKey: 'old-key' });
@@ -236,8 +312,7 @@ describe('ControlJournal', () => {
   });
 
   it('truncates only an incomplete final line', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 1);
     await journal.append('command.requested', { commandId: 'c1' });
     await appendFile(journal.path, '{"sequence":2');
@@ -247,8 +322,7 @@ describe('ControlJournal', () => {
   });
 
   it('rejects corruption before the final line', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const runtime = path.join(root, '.psyche', 'runtime');
     await mkdir(runtime, { recursive: true });
     await writeFile(path.join(runtime, 'events.ndjson'), '{"sequence":1}\nnot-json\n');
@@ -256,8 +330,7 @@ describe('ControlJournal', () => {
   });
 
   it('preserves a committed multibyte event when truncating an incomplete final line', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 1);
     await journal.append('command.requested', { commandId: 'c1', note: 'café ☕ 日本語' });
     await appendFile(journal.path, '{"sequence":2');
@@ -271,8 +344,7 @@ describe('ControlJournal', () => {
   });
 
   it('resolves append and keeps the event durable even if a subscriber throws', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 1);
     journal.subscribe(() => { throw new Error('listener boom'); });
     await expect(journal.append('command.requested', { commandId: 'c1' }))
@@ -282,8 +354,7 @@ describe('ControlJournal', () => {
   });
 
   it('drops covered events from the file and from memory', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 3);
     for (let index = 1; index <= 6; index += 1) {
       await journal.append('command.succeeded', { commandId: `c${index}`, idempotencyKey: `i${index}` });
@@ -300,8 +371,7 @@ describe('ControlJournal', () => {
   });
 
   it('reopens a compacted journal and keeps appending contiguously', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 3);
     for (let index = 1; index <= 6; index += 1) {
       await journal.append('command.succeeded', { commandId: `c${index}`, idempotencyKey: `i${index}` });
@@ -321,8 +391,7 @@ describe('ControlJournal', () => {
   });
 
   it('reopens a fully compacted journal at the right head', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 3);
     await journal.append('command.succeeded', { commandId: 'c1', idempotencyKey: 'i1' });
     await journal.append('command.succeeded', { commandId: 'c2', idempotencyKey: 'i2' });
@@ -336,8 +405,7 @@ describe('ControlJournal', () => {
   });
 
   it('still rejects a hole in the middle of a compacted journal', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const runtime = path.join(root, '.psyche', 'runtime');
     await mkdir(runtime, { recursive: true });
     await writeFile(
@@ -348,8 +416,7 @@ describe('ControlJournal', () => {
   });
 
   it('rejects a journal whose head does not match its declared first sequence', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const runtime = path.join(root, '.psyche', 'runtime');
     await mkdir(runtime, { recursive: true });
     await writeFile(
@@ -360,8 +427,7 @@ describe('ControlJournal', () => {
   });
 
   it('ignores a repeated or already-covered compaction', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 3);
     for (let index = 1; index <= 4; index += 1) {
       await journal.append('command.succeeded', { commandId: `c${index}`, idempotencyKey: `i${index}` });
@@ -380,8 +446,7 @@ describe('ControlJournal', () => {
   });
 
   it('serialises compaction against concurrent appends', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 3);
     for (let index = 1; index <= 4; index += 1) {
       await journal.append('command.succeeded', { commandId: `c${index}`, idempotencyKey: `i${index}` });
@@ -398,8 +463,7 @@ describe('ControlJournal', () => {
   });
 
   it('round-trips a snapshot file with its durable extras', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 3);
     expect(await journal.loadSnapshot()).toBeUndefined();
 
@@ -417,8 +481,7 @@ describe('ControlJournal', () => {
   });
 
   it('tolerates trailing blank lines in the journal file', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
-    roots.push(root);
+    const root = await newRoot('psyche-journal');
     const journal = await ControlJournal.open(root, 1);
     await journal.append('command.requested', { commandId: 'c1' });
     await appendFile(journal.path, '\n');

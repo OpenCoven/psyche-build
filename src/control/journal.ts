@@ -176,10 +176,11 @@ function parseJournalHeader(value: unknown): JournalHeader | undefined {
 
 /**
  * What `snapshot.json` holds. It is a superset of the client-facing
- * ControlSnapshot: `outcomes` and `receiptRecords` are the durable half of the
- * runtime's bounded in-memory state, which the wire type does not carry
- * (`ControlSnapshot.commands` is scoped to the current owner epoch) and which
- * a compacted journal can therefore no longer rebuild by replay.
+ * ControlSnapshot: `receiptRecords` are the durable half of the runtime's
+ * bounded receipt cache, while `outcomes` are only a warm-start seed for the
+ * bounded in-memory hot cache. Exact command outcomes remain authoritative in
+ * the hash-addressed durable outcome sidecar because a compacted journal can no
+ * longer rebuild them by replay.
  */
 export interface JournalSnapshotFile {
   snapshot: ControlSnapshot;
@@ -195,9 +196,15 @@ export interface DurableReceiptRecord {
   readonly receipt: JournalActionReceipt;
 }
 
+interface StoredOutcomeRecord {
+  readonly idempotencyKey: string;
+  readonly outcome: CommandOutcome;
+}
+
 export class ControlJournal {
   readonly path: string;
   private readonly snapshotPath: string;
+  private readonly outcomeDirectoryPath: string;
   private currentSequence: number;
   private firstRetainedSequence: number;
   private readonly ownerEpoch: number;
@@ -209,12 +216,14 @@ export class ControlJournal {
   private constructor(
     journalPath: string,
     snapshotPath: string,
+    outcomeDirectoryPath: string,
     ownerEpoch: number,
     events: ControlEvent[],
     firstSequence: number,
   ) {
     this.path = journalPath;
     this.snapshotPath = snapshotPath;
+    this.outcomeDirectoryPath = outcomeDirectoryPath;
     this.ownerEpoch = ownerEpoch;
     this.events = events;
     this.firstRetainedSequence = firstSequence;
@@ -231,8 +240,16 @@ export class ControlJournal {
     await mkdir(runtimeDir, { recursive: true });
     const journalPath = path.join(runtimeDir, 'events.ndjson');
     const snapshotPath = path.join(runtimeDir, 'snapshot.json');
+    const outcomeDirectoryPath = path.join(runtimeDir, 'outcomes');
     const { events, firstSequence } = await ControlJournal.replay(journalPath);
-    return new ControlJournal(journalPath, snapshotPath, ownerEpoch, events, firstSequence);
+    return new ControlJournal(
+      journalPath,
+      snapshotPath,
+      outcomeDirectoryPath,
+      ownerEpoch,
+      events,
+      firstSequence,
+    );
   }
 
   private static async replay(
@@ -364,6 +381,36 @@ export class ControlJournal {
     return () => this.listeners.delete(listener);
   }
 
+  async loadOutcome(idempotencyKey: string): Promise<CommandOutcome | undefined> {
+    const outcomePath = this.outcomePath(idempotencyKey);
+    let raw: string;
+    try {
+      raw = await readFile(outcomePath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+    return parseStoredOutcome(raw, idempotencyKey);
+  }
+
+  async storeOutcome(idempotencyKey: string, outcome: CommandOutcome): Promise<void> {
+    assertStoredOutcomeRecord({ idempotencyKey, outcome }, idempotencyKey);
+    await mkdir(this.outcomeDirectoryPath, { recursive: true, mode: 0o700 });
+    const destination = this.outcomePath(idempotencyKey);
+    const temporary = path.join(
+      this.outcomeDirectoryPath,
+      `${path.basename(destination)}.${process.pid}.${randomUUID()}.tmp`,
+    );
+    const handle = await open(temporary, 'wx', 0o600);
+    try {
+      await handle.writeFile(JSON.stringify({ idempotencyKey, outcome }), 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, destination);
+  }
+
   async loadSnapshot(): Promise<JournalSnapshotFile | undefined> {
     try {
       const raw = await readFile(this.snapshotPath, 'utf8');
@@ -486,8 +533,73 @@ export class ControlJournal {
     const key = event.payload.idempotencyKey as string | undefined;
     if (key) this.idempotencyIndex.set(key, event);
   }
+
+  private outcomePath(idempotencyKey: string): string {
+    return path.join(
+      this.outcomeDirectoryPath,
+      createHash('sha256').update(idempotencyKey, 'utf8').digest('hex'),
+    );
+  }
 }
 
 function commandTransactionKey(commandId: string, idempotencyKey: unknown): string {
   return JSON.stringify([commandId, typeof idempotencyKey === 'string' ? idempotencyKey : '']);
+}
+
+function parseStoredOutcome(raw: string, expectedKey: string): CommandOutcome {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('durable outcome JSON corruption');
+  }
+  return assertStoredOutcomeRecord(parsed, expectedKey).outcome;
+}
+
+function assertStoredOutcomeRecord(value: unknown, expectedKey: string): StoredOutcomeRecord {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('invalid durable outcome record');
+  }
+  const candidate = value as { idempotencyKey?: unknown; outcome?: unknown };
+  if (typeof candidate.idempotencyKey !== 'string') {
+    throw new Error('invalid durable outcome record');
+  }
+  if (candidate.idempotencyKey !== expectedKey) {
+    throw new Error('durable outcome key mismatch');
+  }
+  if (!isStoredCommandOutcome(candidate.outcome)) {
+    throw new Error('invalid durable outcome shape');
+  }
+  return {
+    idempotencyKey: candidate.idempotencyKey,
+    outcome: candidate.outcome,
+  };
+}
+
+function isStoredCommandOutcome(value: unknown): value is CommandOutcome {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  switch (candidate.status) {
+    case 'succeeded':
+      return hasOnlyKeys(candidate, ['status', 'value'])
+        && !Object.prototype.hasOwnProperty.call(candidate, 'code')
+        && !Object.prototype.hasOwnProperty.call(candidate, 'message');
+    case 'failed':
+    case 'unknown':
+    case 'rejected':
+      return hasOnlyKeys(candidate, ['status', 'code', 'message'])
+        && typeof candidate.code === 'string'
+        && typeof candidate.message === 'string'
+        && !Object.prototype.hasOwnProperty.call(candidate, 'value');
+    default:
+      return false;
+  }
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
+  const allowedKeys = new Set(allowed);
+  return Object.keys(value).every((key) => allowedKeys.has(key));
 }

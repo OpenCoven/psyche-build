@@ -192,6 +192,12 @@ identify the requested effect. Live in-memory control state may retain exact
 operational resource IDs until owner restart. Pane reads, semantic trees,
 screenshots, and script return values are bounded response data, not journal
 payloads.
+The runtime's `outcomesByIdempotencyKey` map is only a bounded 1,000-entry hot
+cache. Exact terminal outcomes remain authoritative in `ControlJournal`'s
+hash-addressed durable outcome sidecar, and cold retries consult the retained
+journal tail before that store. Sidecar lookup or write failures, JSON
+corruption, or key/outcome mismatches fail closed instead of silently
+re-executing a mutation.
 Task-scoped reads may expose only resources named by persisted capability-lease
 grants or pending lease requests for the authenticated subject, active
 approvals whose durable task/actor ownership matches that subject (with a
@@ -207,7 +213,9 @@ view.
 Psyche Build never retries a mutation whose delivery may have occurred. A
 timeout, provider disconnect after dispatch, navigation during script
 evaluation, or owner recovery reports `effect_unknown`; inspect state before
-deciding what to do next.
+deciding what to do next. Evicting a key from the 1,000-entry hot cache or
+restarting the owner does not authorize re-execution: terminal retries still
+dedupe from the retained journal tail or the durable outcome store.
 
 There is deliberately no accessibility, coordinate, screenshot-click, shell,
 raw tmux command, XPath, selector, or whole-desktop fallback.

@@ -1,8 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdir, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import { ControlRuntime, type ControlHandlers } from '../src/control/runtime.js';
 import { ApprovalStore } from '../src/control/approvals.js';
 import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
 import type { ControlTaskCredentialReference } from '../src/control/credentials.js';
+import { ControlJournal } from '../src/control/journal.js';
 import { createCanonicalElementSemantics } from '../src/control/policy.js';
 import { SurfaceRegistry } from '../src/control/surfaces.js';
 import type { ControlCommand } from '../src/control/types.js';
@@ -33,6 +37,11 @@ const handlers: ControlHandlers = {
   runBrowserScript: vi.fn(),
 };
 
+const roots: string[] = [];
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
 function command(overrides: Record<string, unknown> = {}) {
   return {
     id: 'cmd-1',
@@ -45,6 +54,22 @@ function command(overrides: Record<string, unknown> = {}) {
     payload: { paneId: '%3' },
     ...overrides,
   } as const;
+}
+
+function openTerminalCommand(idempotencyKey: string, id = `cmd-${idempotencyKey}`): ControlCommand {
+  return command({
+    id,
+    idempotencyKey,
+    kind: 'pane.terminal.open',
+    payload: { cwd: '/repo', title: 'durable-idempotency-test' },
+  }) as ControlCommand;
+}
+
+async function newJournalRoot(prefix: string): Promise<string> {
+  const root = path.join(process.cwd(), '.test-artifacts', `${prefix}-${randomUUID()}`);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  roots.push(root);
+  return root;
 }
 
 function createMemoryJournal() {
@@ -178,6 +203,80 @@ describe('ControlRuntime', () => {
     expect(second).toEqual(first);
     expect(runtime.events().filter((event) => event.kind === 'command.requested'))
       .toHaveLength(1);
+  });
+
+  it('deduplicates an evicted hot-cache key without changing journal sequence', async () => {
+    const root = await newJournalRoot('control-runtime');
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const journal = await ControlJournal.open(root, 4);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    const first = await submit(runtime, openTerminalCommand('idem-old', 'old-1'));
+    for (let index = 0; index < 1_001; index += 1) {
+      await submit(runtime, openTerminalCommand(`idem-later-${index}`, `later-${index}`));
+    }
+
+    const sequenceBefore = journal.sequence;
+    const callsBefore = invocations;
+    const replayed = await submit(runtime, openTerminalCommand('idem-old', 'old-2'));
+
+    expect(replayed).toEqual(first);
+    expect(invocations).toBe(callsBefore);
+    expect(journal.sequence).toBe(sequenceBefore);
+  }, 90_000);
+
+  it('installs one pending promise before an async cold-miss lookup', async () => {
+    const root = await newJournalRoot('control-runtime');
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const journal = await ControlJournal.open(root, 4);
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const loadOutcome = vi.spyOn(journal, 'loadOutcome').mockImplementation(async () => {
+      await lookupGate;
+      return undefined;
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    const first = submit(runtime, openTerminalCommand('idem-race', 'race-1'));
+    const second = submit(runtime, openTerminalCommand('idem-race', 'race-2'));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(loadOutcome).toHaveBeenCalledTimes(1);
+
+    releaseLookup();
+    const [left, right] = await Promise.all([first, second]);
+
+    expect(left).toEqual(right);
+    expect(handlers.openTerminal).toHaveBeenCalledTimes(1);
+    expect(journal.read(0).filter((event) => (
+      event.kind === 'command.requested' && event.payload.idempotencyKey === 'idem-race'
+    ))).toHaveLength(1);
+  });
+
+  it('deduplicates from the retained terminal tail when sidecar persistence fails', async () => {
+    const root = await newJournalRoot('control-runtime');
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const journal = await ControlJournal.open(root, 4);
+    vi.spyOn(journal, 'storeOutcome').mockImplementation(async (idempotencyKey) => {
+      if (idempotencyKey === 'idem-sidecar-failure') {
+        throw new Error('sidecar write failed');
+      }
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    await expect(submit(runtime, openTerminalCommand('idem-sidecar-failure', 'sidecar-1')))
+      .rejects.toThrow('sidecar write failed');
+    expect(handlers.openTerminal).toHaveBeenCalledTimes(1);
+    expect(journal.findByIdempotencyKey('idem-sidecar-failure')?.kind).toBe('command.succeeded');
+
+    const sequenceBefore = journal.sequence;
+    await expect(submit(runtime, openTerminalCommand('idem-sidecar-failure', 'sidecar-2')))
+      .resolves.toEqual({ status: 'succeeded', value: { paneId: 'pane-1' } });
+    expect(handlers.openTerminal).toHaveBeenCalledTimes(1);
+    expect(journal.sequence).toBe(sequenceBefore);
   });
 
   it('rejects a stale owner epoch before side effects', async () => {

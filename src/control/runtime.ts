@@ -117,6 +117,8 @@ export interface RuntimeJournal {
 export interface CompactableJournal extends RuntimeJournal {
   readonly sequence: number;
   readonly firstSequence: number;
+  loadOutcome(key: string): Promise<CommandOutcome | undefined>;
+  storeOutcome(key: string, outcome: CommandOutcome): Promise<void>;
   loadSnapshot(): Promise<JournalSnapshotFile | undefined>;
   writeSnapshot(file: JournalSnapshotFile): Promise<void>;
   compact(coveredSequence: number): Promise<void>;
@@ -125,6 +127,8 @@ export interface CompactableJournal extends RuntimeJournal {
 function asCompactable(journal: RuntimeJournal): CompactableJournal | undefined {
   const candidate = journal as Partial<CompactableJournal>;
   return typeof candidate.compact === 'function'
+    && typeof candidate.loadOutcome === 'function'
+    && typeof candidate.storeOutcome === 'function'
     && typeof candidate.loadSnapshot === 'function'
     && typeof candidate.writeSnapshot === 'function'
     && typeof candidate.sequence === 'number'
@@ -216,16 +220,17 @@ const TERMINAL_EVENT_KINDS = new Set([
  * A long-running owner drives high-volume pane I/O, and some command payloads
  * (`pane.input` data, `pane.prompt` text) are large. Retaining every envelope
  * forever would grow without bound, so the map keeps only the most recent
- * transactions; the durable record of what happened is the journal.
+ * transactions. Exact terminal outcomes still live durably in the journal's
+ * disk-backed sidecar store and are reloaded on cold misses.
  */
 const MAX_COMMAND_RECORDS = 1000;
 
 /**
  * Events kept in the journal after compaction.
  *
- * Deliberately equal to MAX_COMMAND_RECORDS: that is the size of the in-memory
- * idempotency window, so retaining the same number of events means compaction
- * discards only what a restart would have discarded anyway.
+ * Deliberately equal to MAX_COMMAND_RECORDS: recent events can still satisfy
+ * cold retries from the retained journal tail, while older keys fall back to
+ * the durable outcome sidecar.
  */
 const JOURNAL_RETAINED_EVENTS = MAX_COMMAND_RECORDS;
 
@@ -281,7 +286,9 @@ export class ControlRuntime {
     const runtime = new ControlRuntime(opts.ownerEpoch, opts.handlers, opts.journal, opts);
 
     // A compacted journal no longer holds the whole history, so the durable
-    // state it dropped comes from the snapshot and only the tail is replayed.
+    // receipt state it dropped comes from the snapshot and only the tail is
+    // replayed. Snapshot outcomes still warm the bounded hot cache; the
+    // disk-backed outcome store remains authoritative for cold misses.
     const snapshot = await runtime.compactable?.loadSnapshot();
     const covered = snapshot?.coveredSequence ?? 0;
     const restored = snapshot?.receiptRecords ?? [];
@@ -313,7 +320,7 @@ export class ControlRuntime {
       return Promise.resolve(rejectedOutcome('runtime_busy', 'control runtime pending command capacity exceeded'));
     }
 
-    const execution = this.submitFresh(command).finally(() => {
+    const execution = this.lookupOutcomeOrSubmitFresh(command).finally(() => {
       this.pendingByIdempotencyKey.delete(command.idempotencyKey);
     });
     this.pendingByIdempotencyKey.set(command.idempotencyKey, execution);
@@ -426,6 +433,24 @@ export class ControlRuntime {
     }
 
     return this.executeImmediateCommand(command);
+  }
+
+  private async lookupOutcomeOrSubmitFresh(command: ControlCommand): Promise<CommandOutcome> {
+    const retained = this.journal.findByIdempotencyKey(command.idempotencyKey);
+    if (retained && TERMINAL_EVENT_KINDS.has(retained.kind)) {
+      const stored = await this.compactable?.loadOutcome(command.idempotencyKey);
+      const outcome = stored ?? outcomeFromEvent(retained);
+      this.rememberOutcome(command.idempotencyKey, outcome);
+      return outcome;
+    }
+
+    const stored = await this.compactable?.loadOutcome(command.idempotencyKey);
+    if (stored) {
+      this.rememberOutcome(command.idempotencyKey, stored);
+      return stored;
+    }
+
+    return this.submitFresh(command);
   }
 
   private async rejectStaleOwnerEpoch(command: ControlCommand): Promise<CommandOutcome> {
@@ -1540,6 +1565,7 @@ export class ControlRuntime {
         ...(receipt ? { receipt: journalReceiptMetadata(receipt) } : {}),
       });
       await this.journal.append(built.kind, built.payload);
+      await this.compactable?.storeOutcome(command.idempotencyKey, outcome);
       this.rememberOutcome(command.idempotencyKey, outcome);
       this.maybeCompact();
       return outcome;
@@ -1549,7 +1575,6 @@ export class ControlRuntime {
       idempotencyKey: command.idempotencyKey,
       ...payloadForOutcome(outcome),
     });
-    this.rememberOutcome(command.idempotencyKey, outcome);
     const record = this.commandRecords.get(command.id);
     if (record) {
       record.outcome = outcome;
@@ -1557,6 +1582,8 @@ export class ControlRuntime {
     } else if (!isSurfaceControlCommand(command)) {
       this.retainCommandRecord(command.id, { command, outcome, sequence: event.sequence });
     }
+    await this.compactable?.storeOutcome(command.idempotencyKey, outcome);
+    this.rememberOutcome(command.idempotencyKey, outcome);
     this.maybeCompact();
     return outcome;
   }
@@ -1575,11 +1602,11 @@ export class ControlRuntime {
   }
 
   /**
-   * Replay protection for idempotency keys, bounded like commandRecords: an
-   * outcome carries the command's result payload, so retaining one per key for
-   * the owner's lifetime grows without limit. Keys evicted past the window
-   * re-execute rather than replay, which is the same behaviour a key gets
-   * after an owner restart.
+   * Bounded hot-cache replay protection for idempotency keys.
+   *
+   * Exact outcomes are also written to the journal's disk-backed sidecar, so
+   * evicted or restarted keys still replay on a cold lookup instead of
+   * executing again.
    */
   private rememberOutcome(idempotencyKey: string, outcome: CommandOutcome): void {
     this.outcomesByIdempotencyKey.delete(idempotencyKey);
@@ -1607,7 +1634,7 @@ export class ControlRuntime {
     }
   }
 
-  /** Seeds the dedup window from a snapshot before the tail is replayed over it. */
+  /** Warms the bounded hot cache from a snapshot before the tail is replayed over it. */
   private restoreOutcomes(outcomes: Record<string, CommandOutcome>): void {
     for (const [idempotencyKey, outcome] of Object.entries(outcomes)) {
       this.rememberOutcome(idempotencyKey, outcome);
@@ -1639,6 +1666,7 @@ export class ControlRuntime {
 
     // Records older than the retained window survive only in the previous
     // snapshot, so the new one is the union rather than a fresh projection.
+    // Exact outcomes still remain authoritative in the sidecar store.
     const previous = await journal.loadSnapshot();
     const records = mergeDurableReceiptRecords(
       previous?.receiptRecords ?? [],

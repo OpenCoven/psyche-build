@@ -1,5 +1,5 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ControlJournal } from '../src/control/journal.js';
@@ -37,7 +37,8 @@ function takeover(idempotencyKey: string): ControlCommand {
 }
 
 async function newRoot(): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), 'psyche-compaction-'));
+  const root = path.join(process.cwd(), '.test-artifacts', `psyche-compaction-${randomUUID()}`);
+  await mkdir(root, { recursive: true, mode: 0o700 });
   roots.push(root);
   return root;
 }
@@ -78,21 +79,26 @@ describe('control journal compaction', () => {
     expect(reopened.sequence).toBe(sequenceBefore);
   });
 
-  it('re-executes a key that fell outside the retained window', async () => {
+  it('deduplicates a key after hot eviction, compaction, and restart', async () => {
     const root = await newRoot();
     const journal = await ControlJournal.open(root, 4);
     const runtime = await ControlRuntime.create({
       ownerEpoch: 4, handlers: makeHandlers(), journal,
     });
-    await runtime.submit(takeover('idem-dropped'));
+    const first = await runtime.submit(takeover('idem-dropped'));
 
-    // Compaction without the key in the snapshot is the same loss a restart
-    // past the dedup window already produced.
+    for (let index = 0; index < 1_001; index += 1) {
+      await runtime.submit(takeover(`idem-later-${index}`));
+    }
+
+    // Compact away the whole tail and omit the evicted key from the snapshot:
+    // the durable sidecar outcome is now the only authoritative record.
     const covered = journal.sequence;
     await journal.writeSnapshot({
       snapshot: runtime.snapshot(), coveredSequence: covered, outcomes: {}, receiptRecords: [],
     });
     await journal.compact(covered);
+    expect(journal.read(0)).toEqual([]);
 
     const reopened = await ControlJournal.open(root, 5);
     const restarted = await ControlRuntime.create({
@@ -100,10 +106,11 @@ describe('control journal compaction', () => {
     });
     const sequenceBefore = reopened.sequence;
 
-    await restarted.submit(takeover('idem-dropped'));
+    const replayed = await restarted.submit(takeover('idem-dropped'));
 
-    expect(reopened.sequence).toBeGreaterThan(sequenceBefore);
-  });
+    expect(replayed).toEqual(first);
+    expect(reopened.sequence).toBe(sequenceBefore);
+  }, 90_000);
 
   it('reports a gap to a reader resuming below the retained window', async () => {
     const root = await newRoot();
