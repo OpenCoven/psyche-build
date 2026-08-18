@@ -10062,10 +10062,10 @@
     return projectId + "__" + tabId;
   }
   function browserTabLifecycle(tab) {
-    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
+    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
     var lifecycle = browserTabLifecycleStates.get(tab);
     if (!lifecycle) {
-      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
+      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
       browserTabLifecycleStates.set(tab, lifecycle);
     }
     return lifecycle;
@@ -10116,6 +10116,7 @@
   }
   function browserNavigationOwnsVisiblePane(context) {
     if (!context || !context.project || state.activeProjectId !== context.project.id) return false;
+    if (!context.browser || !context.tab || context.browser.activeTabId !== context.tab.id) return false;
     var project = activeProject();
     if (!project || project !== context.project || project.id !== context.project.id ||
         activeWorkspaceRoot(project) !== context.worktreePath) return false;
@@ -10126,6 +10127,13 @@
   }
   async function discardObsoleteBrowserNavigation(context) {
     var lifecycle = browserTabLifecycle(context.tab);
+    var cleanupResolve;
+    var cleanupOperation = {
+      id: lifecycle.cleanupGeneration + 1,
+      promise: new Promise(function (resolve) { cleanupResolve = resolve; }),
+    };
+    lifecycle.cleanupGeneration = cleanupOperation.id;
+    lifecycle.cleanupOperation = cleanupOperation;
     var retireNavigationView = function () {
       if (context.preserveQueuedNavigation) {
         lifecycle.generation += 1;
@@ -10156,52 +10164,59 @@
       syncProjectBrowser();
       saveWorkspaceSoon();
     };
-    if (lifecycle.nativeLabel) {
-      var pair = {
-        project: context.project,
-        worktreePath: context.worktreePath,
-        browser: context.browser,
-        tab: context.tab,
-      };
-      var automationInvalidated = false;
-      var automationInvalidationError = null;
-      try {
-        automationInvalidated = await invalidateBrowserAutomation(pair);
-      } catch (error) {
-        automationInvalidationError = error;
-        setStatus("browser automation invalidation failed: " + boundedBrowserError(error), "error");
-      }
-      if (!automationInvalidated) {
-        if (!context.ambiguousAfterDispatch) {
-          retireNavigationView();
-          restoreTab(true);
-        }
-        if (!automationInvalidationError) setStatus("browser automation invalidation failed", "error");
-        if (!context.ambiguousAfterDispatch) return false;
-      } else {
-        try {
-          await removeBrowserControlResource(pair);
-        } catch (error) {
-          if (!context.ambiguousAfterDispatch) throw error;
-          setStatus("browser automation cleanup failed: " + boundedBrowserError(error), "error");
-        }
-      }
-    }
-    retireNavigationView();
-    var destroyed = true;
     try {
-      await invoke("browser_destroy", { label: context.label });
-    } catch (error) {
-      destroyed = false;
-      setStatus("obsolete browser navigation cleanup failed for " + context.label + ": " + boundedBrowserError(error), "error");
-      if (context.ambiguousAfterDispatch) {
+      if (lifecycle.nativeLabel) {
+        var pair = {
+          project: context.project,
+          worktreePath: context.worktreePath,
+          browser: context.browser,
+          tab: context.tab,
+        };
+        var automationInvalidated = false;
+        var automationInvalidationError = null;
         try {
-          await invoke("browser_hide", { label: context.label });
-        } catch (_) {}
+          automationInvalidated = await invalidateBrowserAutomation(pair);
+        } catch (error) {
+          automationInvalidationError = error;
+          setStatus("browser automation invalidation failed: " + boundedBrowserError(error), "error");
+        }
+        if (!automationInvalidated) {
+          if (!context.ambiguousAfterDispatch) {
+            retireNavigationView();
+            restoreTab(true);
+          }
+          if (!automationInvalidationError) setStatus("browser automation invalidation failed", "error");
+          if (!context.ambiguousAfterDispatch) return false;
+        } else {
+          try {
+            await removeBrowserControlResource(pair);
+          } catch (error) {
+            if (!context.ambiguousAfterDispatch) throw error;
+            setStatus("browser automation cleanup failed: " + boundedBrowserError(error), "error");
+          }
+        }
       }
+      retireNavigationView();
+      var destroyed = true;
+      try {
+        await invoke("browser_destroy", { label: context.label });
+      } catch (error) {
+        destroyed = false;
+        setStatus("obsolete browser navigation cleanup failed for " + context.label + ": " + boundedBrowserError(error), "error");
+        if (context.ambiguousAfterDispatch) {
+          try {
+            await invoke("browser_hide", { label: context.label });
+          } catch (_) {}
+        }
+      }
+      restoreTab(true);
+      return destroyed;
+    } finally {
+      if (lifecycle.cleanupOperation === cleanupOperation) {
+        lifecycle.cleanupOperation = null;
+      }
+      cleanupResolve();
     }
-    restoreTab(true);
-    return destroyed;
   }
   function nativeBrowserLabel(raw) {
     var safe = String(raw || "default").split("").filter(function (c) {
@@ -11089,9 +11104,20 @@
     var tab = browser.tabs.find(function (t) { return t.id === tabId; });
     var pane = findBrowserPane(project.id, activeWorkspaceRoot(project));
     if (!tab || browserTabIsClosing(tab) || browserPaneIsClosing(pane)) return false;
+    var lifecycle = browserTabLifecycle(tab);
+    if (lifecycle.cleanupOperation) {
+      tab.created = false;
+      tab.loading = false;
+    }
     markActiveSurface("browser");
     browser.activeTabId = tabId;
     renderBrowserTabs(); syncProjectBrowser(); saveWorkspaceSoon();
+    while (lifecycle.cleanupOperation) {
+      await lifecycle.cleanupOperation.promise;
+    }
+    pane = findBrowserPane(project.id, activeWorkspaceRoot(project));
+    if (browser.tabs.indexOf(tab) === -1 || browserTabIsClosing(tab) ||
+        browserPaneIsClosing(pane)) return false;
     if (!tab.created) await restoreDormantBrowserTab(project, tab);
     pane = findBrowserPane(project.id, activeWorkspaceRoot(project));
     return browser.tabs.indexOf(tab) !== -1 && !browserTabIsClosing(tab) &&
@@ -11386,7 +11412,6 @@
     var runNavigation = async function () {
       if (lifecycle.invalidationGeneration !== invalidationGeneration ||
           !requestIsCurrent()) return false;
-      var b = visibleBrowserBounds(); if (!b) return false;
       var previousCreated = tab.created;
       var previousLoading = tab.loading;
       var previousTitle = tab.title;
@@ -11414,6 +11439,17 @@
         }
       }
       if (lifecycle.invalidationGeneration !== invalidationGeneration || !requestIsCurrent()) return false;
+      var navigationVisible = browserNavigationOwnsVisiblePane({
+        project: project,
+        worktreePath: worktreePath,
+        browser: browser,
+        pane: pane,
+        tab: tab,
+      });
+      var b = navigationVisible
+        ? visibleBrowserBounds()
+        : { x: -10000, y: -10000, w: 1, h: 1 };
+      if (!b) return false;
       var generation = beginBrowserNavigation(tab);
       lifecycle.controlGeneration = 0;
       var navigationToken = generation + ":" + (globalThis.crypto && globalThis.crypto.randomUUID ? globalThis.crypto.randomUUID() : Date.now() + ":" + Math.random());

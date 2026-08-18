@@ -577,6 +577,11 @@ function browserLifecycleHarness() {
     generation: number;
     invalidationGeneration: number;
     navigationTail: Promise<void> | null;
+    cleanupGeneration: number;
+    cleanupOperation: {
+      id: number;
+      promise: Promise<void>;
+    } | null;
     nativeLabel: string | null;
     pendingGeneration: number;
     pendingUrl: string | null;
@@ -602,6 +607,8 @@ function browserLifecycleHarness() {
         generation: 0,
         invalidationGeneration: 0,
         navigationTail: null,
+        cleanupGeneration: 0,
+        cleanupOperation: null,
         nativeLabel: null,
         pendingGeneration: 0,
         pendingUrl: null,
@@ -622,6 +629,8 @@ function browserLifecycleHarness() {
         generation: 0,
         invalidationGeneration: 0,
         navigationTail: null,
+        cleanupGeneration: 0,
+        cleanupOperation: null,
         nativeLabel: null,
         pendingGeneration: 0,
         pendingUrl: null,
@@ -722,6 +731,7 @@ function browserNavigationDependencies(
     syncUrlInput: () => {},
     syncProjectBrowser: () => {},
     syncBrowserBounds: () => {},
+    scheduleBrowserBounds: () => {},
     saveWorkspaceSoon: () => {},
     nativeBrowserLabel: (label: string) => label,
     markBrowserTabLoaded: () => {},
@@ -731,7 +741,10 @@ function browserNavigationDependencies(
     boundedBrowserError: compileFunction<
       (error: unknown) => string
     >(functionSource(mainJs, 'boundedBrowserError'), {}),
-    browserNavigationOwnsVisiblePane: () => true,
+    browserNavigationOwnsVisiblePane: (context: {
+      tab: BrowserNavigationTab;
+      browser: typeof browser;
+    }) => context.browser.activeTabId === context.tab.id,
     browserNavigationIsCurrent: (context: {
       tab: BrowserNavigationTab;
       pane: typeof pane;
@@ -3093,6 +3106,171 @@ describe('Tauri native browser lifecycle', () => {
       history: ['https://old.example', 'https://new.example'],
       historyIndex: 1,
     });
+  });
+
+  it('dispatches queued explicit navigation offscreen after its tab becomes inactive', async () => {
+    let releaseQueue!: () => void;
+    const queuedBehind = new Promise<void>((resolve) => { releaseQueue = resolve; });
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old.example',
+      created: false,
+      loading: false,
+      title: 'Old title',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const successor: BrowserNavigationTab = {
+      id: 'tab-b',
+      url: 'https://successor.example',
+      created: true,
+      loading: false,
+      title: 'Successor',
+      history: ['https://successor.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab, successor] };
+    const lifecycle = browserLifecycleHarness();
+    lifecycle.browserTabLifecycle(tab).navigationTail = queuedBehind;
+    const navigations: Record<string, unknown>[] = [];
+    const dependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      async (command, args) => {
+        if (command === 'browser_navigate') navigations.push(args);
+      },
+      lifecycle,
+    );
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), dependencies);
+
+    const navigation = navigateBrowser('https://queued.example', { tabId: tab.id });
+    browser.activeTabId = successor.id;
+    releaseQueue();
+
+    await expect(navigation).resolves.toBe(true);
+    expect(browser.activeTabId).toBe(successor.id);
+    expect(navigations).toEqual([
+      expect.objectContaining({
+        label: 'project-a:tab-a',
+        url: 'https://queued.example',
+        x: -10000,
+        y: -10000,
+        w: 1,
+        h: 1,
+      }),
+    ]);
+    expect(tab).toMatchObject({ created: true, url: 'https://queued.example' });
+  });
+
+  it('restores an active tab reselected while stale navigation cleanup destroys its view', async () => {
+    let resolveNavigation!: () => void;
+    let resolveDestroy!: () => void;
+    let signalDestroyStarted!: () => void;
+    const destroyStarted = new Promise<void>((resolve) => { signalDestroyStarted = resolve; });
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old.example',
+      created: true,
+      loading: false,
+      title: 'Old title',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const successor: BrowserNavigationTab = {
+      id: 'tab-b',
+      url: 'https://successor.example',
+      created: true,
+      loading: false,
+      title: 'Successor',
+      history: ['https://successor.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab, successor] };
+    const lifecycle = browserLifecycleHarness();
+    const calls: string[] = [];
+    const dependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      async (command) => {
+        calls.push(command);
+        if (command === 'browser_navigate') {
+          return new Promise<void>((resolve) => { resolveNavigation = resolve; });
+        }
+        if (command === 'browser_destroy') {
+          signalDestroyStarted();
+          return new Promise<void>((resolve) => { resolveDestroy = resolve; });
+        }
+      },
+      lifecycle,
+    );
+    dependencies.browserNavigationIsCurrent = compileFunction(
+      functionSource(mainJs, 'browserNavigationIsCurrent'),
+      dependencies,
+    );
+    dependencies.discardObsoleteBrowserNavigation = compileFunction(
+      functionSource(mainJs, 'discardObsoleteBrowserNavigation'),
+      dependencies,
+    );
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), dependencies);
+    const activateBrowserTab = compileFunction<
+      (value: typeof project, tabId: string) => Promise<boolean>
+    >(functionSource(mainJs, 'activateBrowserTab'), {
+      ...lifecycle,
+      activeProject: () => project,
+      activeWorkspaceRoot: () => '/workspace',
+      ensureBrowserModel: () => browser,
+      findBrowserPane: dependencies.findBrowserPane,
+      markActiveSurface: () => calls.push('surface'),
+      renderBrowserTabs: () => calls.push('render'),
+      syncProjectBrowser: () => calls.push('sync'),
+      saveWorkspaceSoon: () => calls.push('save'),
+      restoreDormantBrowserTab: async (_value: typeof project, valueTab: BrowserNavigationTab) => {
+        calls.push(`restore:${valueTab.id}`);
+        expect(valueTab.created).toBe(false);
+        valueTab.created = true;
+        return true;
+      },
+    });
+
+    const navigation = navigateBrowser('https://new.example', {});
+    await Promise.resolve();
+    browser.activeTabId = successor.id;
+    resolveNavigation();
+    await destroyStarted;
+
+    const activation = activateBrowserTab(project, tab.id);
+    let activationSettled = false;
+    activation.then(() => { activationSettled = true; });
+    await Promise.resolve();
+
+    expect(browser.activeTabId).toBe(tab.id);
+    expect(tab.created).toBe(false);
+    expect(activationSettled).toBe(false);
+    expect(calls).not.toContain('restore:tab-a');
+
+    resolveDestroy();
+    await expect(navigation).resolves.toBe(false);
+    await expect(activation).resolves.toBe(true);
+
+    expect(browser.activeTabId).toBe(tab.id);
+    expect(tab).toMatchObject({
+      created: true,
+      loading: false,
+      url: 'https://old.example',
+      title: 'Old title',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    });
+    expect(calls).toContain('restore:tab-a');
+    expect(lifecycle.browserTabLifecycle(tab).cleanupOperation).toBeNull();
   });
 
   it('activates the terminal redirect URL returned by the exact native navigation', async () => {
