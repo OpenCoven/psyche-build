@@ -1813,6 +1813,49 @@ export class ControlRuntime {
       || this.hasDirtyTerminalOutcomesThrough(attempt.coveredSequence);
   }
 
+  private coveredTerminalSequences(
+    journal: CompactableJournal,
+    coveredSequence: number,
+  ): Map<string, number> {
+    const covered = new Map<string, number>();
+    let afterSequence = journal.firstSequence - 1;
+    while (afterSequence < coveredSequence) {
+      const batch = journal.read(
+        afterSequence,
+        Math.min(JOURNAL_RETAINED_EVENTS, coveredSequence - afterSequence),
+      );
+      if (batch.length === 0) break;
+      for (const event of batch) {
+        afterSequence = event.sequence;
+        if (event.sequence > coveredSequence) return covered;
+        if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
+        const idempotencyKey = stringPayload(event, 'idempotencyKey');
+        if (!idempotencyKey) continue;
+        covered.set(idempotencyKey, event.sequence);
+      }
+    }
+    return covered;
+  }
+
+  private async verifyCoveredTerminalOutcomes(
+    journal: CompactableJournal,
+    attempt: ActiveCompactionAttempt,
+  ): Promise<boolean> {
+    if (!this.compactable) return true;
+    for (const [idempotencyKey, sequence] of this.coveredTerminalSequences(journal, attempt.coveredSequence)) {
+      if (this.compactionShouldAbort(attempt)) return false;
+      try {
+        const stored = await this.compactable.loadOutcome(idempotencyKey);
+        if (stored) continue;
+      } catch {
+        // Compaction fails closed: unreadable exact replay keeps the journal.
+      }
+      this.invalidateActiveCompactionForSequence(sequence);
+      return false;
+    }
+    return !this.compactionShouldAbort(attempt);
+  }
+
   /**
    * Compacts once the journal has grown well past the window the runtime can
    * actually use, so the rewrite cost is amortised rather than paid per append.
@@ -1842,6 +1885,7 @@ export class ControlRuntime {
     try {
       await this.flushDirtyTerminalOutcomesThrough(coveredSequence);
       if (this.compactionShouldAbort(attempt)) return;
+      if (!await this.verifyCoveredTerminalOutcomes(journal, attempt)) return;
 
       // Records older than the retained window survive only in the previous
       // snapshot, so the new one is the union rather than a fresh projection.

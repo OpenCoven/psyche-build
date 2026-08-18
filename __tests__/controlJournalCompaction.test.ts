@@ -55,6 +55,31 @@ function storedOutcomePath(root: string, idempotencyKey: string): string {
   );
 }
 
+function providerUpsert(idempotencyKey: string): ControlCommand {
+  return {
+    id: `provider-${idempotencyKey}`,
+    idempotencyKey,
+    kind: 'provider.resource.upsert',
+    projectRoot: '/repo',
+    actor: { id: 'human-1', kind: 'human' },
+    ownerEpoch: 4,
+    createdAt: '2026-08-03T20:00:00.000Z',
+    payload: {
+      resource: {
+        id: `provider-tab-${idempotencyKey}`,
+        projectRoot: '/repo',
+        worktreeRoot: '/repo',
+        providerId: 'provider-test',
+        webviewLabel: 'Provider Tab',
+        url: 'https://example.test',
+        title: 'Example',
+        loading: false,
+        viewport: { width: 800, height: 600 },
+      },
+    },
+  } as ControlCommand;
+}
+
 describe('control journal compaction', () => {
   it('keeps idempotency dedup across a compaction and restart', async () => {
     const root = await newRoot();
@@ -138,8 +163,6 @@ describe('control journal compaction', () => {
     }
     const coveredSequence = journal.sequence - 1_000;
     expect(coveredSequence).toBeGreaterThanOrEqual(2);
-    (runtime as any).outcomesByIdempotencyKey.delete('idem-race');
-    await unlink(storedOutcomePath(root, 'idem-race'));
 
     const compactReady = createDeferred<void>();
     const releaseCompact = createDeferred<void>();
@@ -154,6 +177,8 @@ describe('control journal compaction', () => {
     const compacting = (runtime as any).compactJournal(journal);
     await compactReady.promise;
 
+    (runtime as any).outcomesByIdempotencyKey.delete('idem-race');
+    await unlink(storedOutcomePath(root, 'idem-race'));
     const replayed = await runtime.submit(takeover('idem-race'));
     expect(replayed).toEqual(first);
     releaseCompact.resolve();
@@ -190,7 +215,6 @@ describe('control journal compaction', () => {
     }
     const coveredSequence = journal.sequence - 1_000;
     expect(coveredSequence).toBeGreaterThanOrEqual(2);
-    (runtime as any).outcomesByIdempotencyKey.delete('idem-read-race');
 
     const runtimeDirectory = path.join(root, '.psyche', 'runtime');
     const outcomesDirectory = path.join(runtimeDirectory, 'outcomes');
@@ -200,6 +224,7 @@ describe('control journal compaction', () => {
 
     const compactReady = createDeferred<void>();
     const releaseCompact = createDeferred<void>();
+    let allowSwap = false;
     let swapped = false;
     setDurableOutcomePublicationTestHooksForTesting({
       beforeCompactRename: async ({ coveredSequence: hookCoveredSequence }) => {
@@ -208,7 +233,7 @@ describe('control journal compaction', () => {
         await releaseCompact.promise;
       },
       beforeOutcomePathRead: async ({ directoryPath }) => {
-        if (swapped || directoryPath !== outcomesDirectory) return;
+        if (!allowSwap || swapped || directoryPath !== outcomesDirectory) return;
         swapped = true;
         await rename(outcomesDirectory, trustedDirectory);
         await symlink(
@@ -222,6 +247,8 @@ describe('control journal compaction', () => {
     const compacting = (runtime as any).compactJournal(journal);
     await compactReady.promise;
 
+    allowSwap = true;
+    (runtime as any).outcomesByIdempotencyKey.delete('idem-read-race');
     await expect(runtime.submit(takeover('idem-read-race')))
       .rejects.toThrow('durable outcome directory changed during read');
     releaseCompact.resolve();
@@ -247,6 +274,42 @@ describe('control journal compaction', () => {
     const sequenceBeforeRestart = reopened.sequence;
     await expect(restarted.submit(takeover('idem-read-race'))).resolves.toEqual(first);
     expect(reopened.sequence).toBe(sequenceBeforeRestart);
+  }, 90_000);
+
+  it('verifies exact sidecars for covered surface terminals before compaction drops them', async () => {
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 4);
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 4, handlers: makeHandlers(), journal,
+    });
+    const idempotencyKey = 'surface-compaction-precondition';
+    const first = await runtime.submit(providerUpsert(idempotencyKey));
+
+    for (let index = 0; index < 500; index += 1) {
+      await runtime.submit(takeover(`surface-compaction-later-${index}`));
+    }
+
+    const terminalSequence = journal.read(0).find((event) => (
+      event.kind === 'command.succeeded' && event.payload.idempotencyKey === idempotencyKey
+    ))?.sequence;
+    expect(terminalSequence).toBeDefined();
+    await unlink(storedOutcomePath(root, idempotencyKey));
+
+    await (runtime as any).compactJournal(journal);
+
+    expect(journal.firstSequence).toBeLessThanOrEqual(terminalSequence as number);
+    (runtime as any).outcomesByIdempotencyKey.delete(idempotencyKey);
+    const sequenceBeforeRetry = journal.sequence;
+    await expect(runtime.submit(providerUpsert(idempotencyKey)))
+      .rejects.toThrow('durable outcome sidecar is required');
+    expect(journal.sequence).toBe(sequenceBeforeRetry);
+
+    const reopened = await ControlJournal.open(root, 5);
+    await expect(ControlRuntime.create({
+      ownerEpoch: 5, handlers: makeHandlers(), journal: reopened,
+    })).rejects.toThrow('durable outcome sidecar is required');
+    expect(reopened.sequence).toBe(sequenceBeforeRetry);
+    expect(first).toMatchObject({ status: 'succeeded' });
   }, 90_000);
 
   it('reports a gap to a reader resuming below the retained window', async () => {
