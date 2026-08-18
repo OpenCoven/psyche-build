@@ -69,8 +69,7 @@ describe("BridgeDaemon", () => {
     expect(inviteUrl.host).toBe("connect");
     expect(inviteUrl.searchParams.get("host")).toBe(`wss://test-host:${port}`);
     expect(inviteUrl.searchParams.get("endpoint")).toBeNull();
-    expect(inviteUrl.searchParams.get("fingerprint")).toMatch(/^[A-F0-9:]+
-);
+    expect(inviteUrl.searchParams.get("fingerprint")).toMatch(/^[A-F0-9:]+$/);
     expect(invite).toBeTruthy();
 
     const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
