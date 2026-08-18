@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { readFile, stat } from 'node:fs/promises';
+import { strict as assert } from 'node:assert';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -71,17 +72,21 @@ async function main() {
   const uniqueInventory = [...new Set(inventory)];
 
   const failures = [];
-  let passCount = 0;
+  const failedFiles = new Set();
+  const recordFailure = (file, reason) => {
+    failedFiles.add(file);
+    failures.push(`${file}: ${reason}`);
+  };
 
   for (const file of prohibitedFiles) {
     if (packageFiles.includes(file)) {
-      failures.push(`${file}: must not be package-published`);
+      recordFailure(file, 'must not be package-published');
     }
 
     try {
       const info = await stat(path.join(root, file));
       if (info) {
-        failures.push(`${file}: standalone public document must be removed`);
+        recordFailure(file, 'standalone public document must be removed');
       }
     } catch (error) {
       if (!isEnoent(error)) {
@@ -94,27 +99,24 @@ async function main() {
     const entry = await inspectFile(file);
 
     if (entry.state === 'missing') {
-      failures.push(`${file}: public documentation entry is missing`);
+      recordFailure(file, 'public documentation entry is missing');
       continue;
     }
 
     if (entry.state === 'non-file') {
-      failures.push(`${file}: public documentation entry is not a file`);
+      recordFailure(file, 'public documentation entry is not a file');
       continue;
     }
 
-    let filePassed = true;
     for (const [needle, reason] of prohibitedText) {
       if (entry.source.includes(needle)) {
-        failures.push(`${file}: ${reason}`);
-        filePassed = false;
+        recordFailure(file, reason);
       }
     }
-
-    if (filePassed) {
-      passCount += 1;
-    }
   }
+
+  const passCount = uniqueInventory.filter((file) => !failedFiles.has(file)).length;
+  assert.equal(passCount + failedFiles.size, uniqueInventory.length);
 
   if (failures.length > 0) {
     console.error(`Passed ${passCount}/${uniqueInventory.length} public docs files.`);
