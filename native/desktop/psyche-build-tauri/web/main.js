@@ -4929,7 +4929,7 @@
         } catch (recoveryError) {
           currentTab.created = false;
           currentTab.loading = false;
-          recoveryErrors.push(savedTab.id + ": " + String(recoveryError));
+          recoveryErrors.push(savedTab.id + ": " + boundedBrowserError(recoveryError));
         }
       }
       if (browser.tabs.some(function (tab) { return tab.id === originalActiveTabId; })) {
@@ -4986,7 +4986,7 @@
           missingLiveLabels.add(savedTab.label);
         }
       });
-      var transportStatus = "browser pane close failed before structured teardown outcome: " + String(error);
+      var transportStatus = "browser pane close failed before structured teardown outcome: " + boundedBrowserError(error);
       if (missingLiveLabels.size) {
         var transportRecovery = await recoverAffectedLiveTabs(missingLiveLabels, new Set());
         transportStatus += "; recreated " + transportRecovery.recreated + "/" +
@@ -5003,7 +5003,7 @@
       ? outcome.failures.map(function (failure) {
           return {
             label: failure && typeof failure.label === "string" ? failure.label : "",
-            error: failure && failure.error != null ? String(failure.error) : "unknown close error",
+            error: failure && failure.error != null ? boundedBrowserError(failure.error) : "unknown close error",
           };
         })
       : [];
@@ -10125,6 +10125,16 @@
   }
   async function discardObsoleteBrowserNavigation(context) {
     var lifecycle = browserTabLifecycle(context.tab);
+    var retireNavigationView = function () {
+      invalidateBrowserNavigation(context.tab);
+      lifecycle.nativeLabel = null;
+      lifecycle.liveGeneration = 0;
+      lifecycle.controlGeneration = 0;
+      lifecycle.liveUrl = null;
+      lifecycle.liveNavigationToken = null;
+      lifecycle.eventUrl = null;
+      lifecycle.viewLive = false;
+    };
     var restoreTab = function (viewIsDead) {
       if (context.browser.tabs.indexOf(context.tab) === -1) return;
       context.tab.created = viewIsDead ? false : context.previousCreated;
@@ -10144,26 +10154,20 @@
         tab: context.tab,
       };
       if (!(await invalidateBrowserAutomation(pair))) {
-        restoreTab(false);
+        retireNavigationView();
+        restoreTab(true);
         setStatus("browser automation invalidation failed", "error");
         return false;
       }
       await removeBrowserControlResource(pair);
     }
-    invalidateBrowserNavigation(context.tab);
-    lifecycle.nativeLabel = null;
-    lifecycle.liveGeneration = 0;
-    lifecycle.controlGeneration = 0;
-    lifecycle.liveUrl = null;
-    lifecycle.liveNavigationToken = null;
-    lifecycle.eventUrl = null;
-    lifecycle.viewLive = false;
+    retireNavigationView();
     var destroyed = true;
     try {
       await invoke("browser_destroy", { label: context.label });
     } catch (error) {
       destroyed = false;
-      setStatus("obsolete browser navigation cleanup failed for " + context.label + ": " + String(error), "error");
+      setStatus("obsolete browser navigation cleanup failed for " + context.label + ": " + boundedBrowserError(error), "error");
     }
     restoreTab(true);
     return destroyed;
@@ -10960,7 +10964,7 @@
       await invoke("browser_destroy", { label: browserLabelForTab(project, tab) });
     } catch (error) {
       lifecycle.closing = false;
-      setStatus("browser tab close failed: " + String(error), "error");
+      setStatus("browser tab close failed: " + boundedBrowserError(error), "error");
       return false;
     }
     idx = browser.tabs.findIndex(function (t) { return t === tab; });

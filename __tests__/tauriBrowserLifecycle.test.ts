@@ -658,10 +658,14 @@ function browserLifecycleHarness() {
       lifecycle.invalidationGeneration += 1;
       lifecycle.pendingGeneration = 0;
       lifecycle.pendingUrl = null;
+      lifecycle.pendingNavigationToken = null;
       lifecycle.eventUrl = null;
       lifecycle.navigationSnapshot = null;
       return lifecycle.generation;
     },
+    boundedBrowserError: compileFunction<
+      (error: unknown) => string
+    >(functionSource(mainJs, 'boundedBrowserError'), {}),
   };
 }
 
@@ -2070,7 +2074,7 @@ describe('Tauri native browser lifecycle', () => {
       tabs: [{ id: 'tab-a', created: true }],
     });
     expect(statuses).toEqual([[
-      'browser tab close failed: Error: native unavailable',
+      'browser tab close failed: native unavailable',
       'error',
     ]]);
   });
@@ -3200,6 +3204,202 @@ describe('Tauri native browser lifecycle', () => {
       'url',
       'save',
     ]);
+  });
+
+  it('retires an obsolete navigation when automation invalidation fails', async () => {
+    const lifecycle = browserLifecycleHarness();
+    const project = {
+      id: 'project-a',
+      browsersByWorktree: {} as Record<string, unknown>,
+    };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://attempted.example',
+      created: true,
+      loading: true,
+      title: 'Attempted title',
+      history: ['https://saved.example', 'https://attempted.example'],
+      historyIndex: 1,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    project.browsersByWorktree['/workspace'] = browser;
+    const pane: BrowserPaneThreadFixture = {
+      id: 'web-pane',
+      kind: 'web',
+      projectId: project.id,
+      worktreePath: '/workspace',
+    };
+    Object.assign(lifecycle.browserTabLifecycle(tab), {
+      generation: 3,
+      invalidationGeneration: 1,
+      nativeLabel: 'native-tab-a',
+      pendingGeneration: 3,
+      pendingUrl: 'https://attempted.example',
+      pendingNavigationToken: 'failed-token',
+      liveGeneration: 3,
+      controlGeneration: 3,
+      liveUrl: 'https://attempted.example',
+      liveNavigationToken: 'failed-token',
+      eventUrl: 'https://attempted.example',
+      viewLive: true,
+      navigationSnapshot: {
+        url: 'https://saved.example',
+        title: 'Saved title',
+        history: ['https://saved.example'],
+        historyIndex: 0,
+      },
+    });
+    const handlers = browserNativeEventHandlers({
+      lifecycle,
+      project,
+      worktreePath: '/workspace',
+      browser,
+      tab,
+      pane,
+    });
+    const nativeCalls: string[] = [];
+    const statuses: Array<[string, string]> = [];
+    const discardObsoleteBrowserNavigation = compileFunction<
+      (context: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'discardObsoleteBrowserNavigation'), {
+      ...lifecycle,
+      invalidateBrowserAutomation: async () => false,
+      removeBrowserControlResource: async () => {
+        throw new Error('control resource must remain after failed invalidation');
+      },
+      invoke: async (command: string) => {
+        nativeCalls.push(command);
+      },
+      syncProjectBrowser: () => handlers.calls.push('sync'),
+      saveWorkspaceSoon: () => handlers.calls.push('save'),
+      setStatus: (message: string, level: string) => statuses.push([message, level]),
+      boundedBrowserError: compileFunction<
+        (error: unknown) => string
+      >(functionSource(mainJs, 'boundedBrowserError'), {}),
+    });
+
+    await expect(discardObsoleteBrowserNavigation({
+      project,
+      worktreePath: '/workspace',
+      browser,
+      pane,
+      tab,
+      generation: 3,
+      label: 'project-a:tab-a',
+      previousCreated: true,
+      previousLoading: false,
+      previousTitle: 'Saved title',
+      previousUrl: 'https://saved.example',
+      previousHistory: ['https://saved.example'],
+      previousHistoryIndex: 0,
+    })).resolves.toBe(false);
+
+    expect(tab).toEqual({
+      id: 'tab-a',
+      url: 'https://saved.example',
+      created: false,
+      loading: false,
+      title: 'Saved title',
+      history: ['https://saved.example'],
+      historyIndex: 0,
+    });
+    expect(lifecycle.browserTabLifecycle(tab)).toMatchObject({
+      generation: 4,
+      invalidationGeneration: 2,
+      nativeLabel: null,
+      pendingGeneration: 0,
+      pendingUrl: null,
+      pendingNavigationToken: null,
+      liveGeneration: 0,
+      controlGeneration: 0,
+      liveUrl: null,
+      liveNavigationToken: null,
+      eventUrl: null,
+      viewLive: false,
+      navigationSnapshot: null,
+    });
+    expect(handlers.handleBrowserPageLoad({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://attempted.example',
+        phase: 'finished',
+        navigationToken: 'failed-token',
+      },
+    })).toBe(false);
+    expect(handlers.handleBrowserTitle({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://attempted.example',
+        title: 'Late attempted title',
+      },
+    })).toBe(false);
+    expect(tab.title).toBe('Saved title');
+    expect(nativeCalls).toEqual([]);
+    expect(handlers.calls).toEqual(['sync', 'save']);
+    expect(statuses).toEqual([['browser automation invalidation failed', 'error']]);
+  });
+
+  it('bounds obsolete native navigation cleanup failure status text', async () => {
+    const lifecycle = browserLifecycleHarness();
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://attempted.example',
+      created: true,
+      loading: true,
+      title: 'Attempted title',
+      history: ['https://attempted.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    Object.assign(lifecycle.browserTabLifecycle(tab), {
+      nativeLabel: 'native-tab-a',
+      pendingGeneration: 1,
+      pendingUrl: tab.url,
+      pendingNavigationToken: 'attempted-token',
+      viewLive: true,
+    });
+    const statuses: Array<[string, string]> = [];
+    const nativeMessage = 'destroy\r\n\t\u0000\u0085\u2028failure ' + 'x'.repeat(500);
+    const discardObsoleteBrowserNavigation = compileFunction<
+      (context: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'discardObsoleteBrowserNavigation'), {
+      ...lifecycle,
+      invalidateBrowserAutomation: async () => true,
+      removeBrowserControlResource: async () => true,
+      invoke: async () => {
+        throw new Error(nativeMessage);
+      },
+      syncProjectBrowser: () => {},
+      saveWorkspaceSoon: () => {},
+      setStatus: (message: string, level: string) => statuses.push([message, level]),
+    });
+
+    await expect(discardObsoleteBrowserNavigation({
+      project,
+      worktreePath: '/workspace',
+      browser,
+      tab,
+      label: 'project-a:tab-a',
+      previousCreated: true,
+      previousLoading: false,
+      previousTitle: 'Saved title',
+      previousUrl: 'https://saved.example',
+      previousHistory: ['https://saved.example'],
+      previousHistoryIndex: 0,
+    })).resolves.toBe(false);
+
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]?.[0]).toMatch(
+      /^obsolete browser navigation cleanup failed for project-a:tab-a: destroy failure x+\.\.\.$/,
+    );
+    expect(statuses[0]?.[0]).not.toMatch(
+      /[\r\n\t\u0000-\u001f\u007f-\u009f\u2028\u2029]/,
+    );
+    expect(statuses[0]?.[0].length).toBeLessThanOrEqual(
+      'obsolete browser navigation cleanup failed for project-a:tab-a: '.length + 240,
+    );
+    expect(statuses[0]?.[1]).toBe('error');
   });
 
   it('ignores native events for dormant tabs and destroyed pane views', () => {
@@ -4420,7 +4620,7 @@ describe('Tauri native browser lifecycle', () => {
       'save',
     ]);
     expect(statuses).toEqual([[
-      'browser pane close failed before structured teardown outcome: Error: ipc disconnected; recreated 1/1 missing live tabs',
+      'browser pane close failed before structured teardown outcome: ipc disconnected; recreated 1/1 missing live tabs',
       'error',
     ]]);
   });
@@ -4516,7 +4716,7 @@ describe('Tauri native browser lifecycle', () => {
     expect(failureCalls).toEqual(['browser_destroy_many']);
     expect(lifecycle.browserPaneLifecycle(thread).tearingDown).toBe(false);
     expect(statuses).toEqual([[
-      'browser pane close failed before structured teardown outcome: Error: native unavailable',
+      'browser pane close failed before structured teardown outcome: native unavailable',
       'error',
     ]]);
   });
@@ -4622,7 +4822,7 @@ describe('Tauri native browser lifecycle', () => {
       'save',
     ]);
     expect(statuses).toEqual([[
-      'browser pane close failed; native close failures: project-a:tab-b: destroy failed at project-a:tab-b; recreated 0/1 confirmed-destroyed live tabs; recreation failures: tab-a: Error: tab-a restore unavailable',
+      'browser pane close failed; native close failures: project-a:tab-b: destroy failed at project-a:tab-b; recreated 0/1 confirmed-destroyed live tabs; recreation failures: tab-a: tab-a restore unavailable',
       'error',
     ]]);
   });
