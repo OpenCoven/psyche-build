@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, rm } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { ControlRuntime, type ControlHandlers } from '../src/control/runtime.js';
 import { ApprovalStore } from '../src/control/approvals.js';
@@ -72,6 +72,16 @@ async function newJournalRoot(prefix: string): Promise<string> {
   return root;
 }
 
+function storedOutcomePath(root: string, idempotencyKey: string): string {
+  return path.join(
+    root,
+    '.psyche',
+    'runtime',
+    'outcomes',
+    createHash('sha256').update(idempotencyKey, 'utf8').digest('hex'),
+  );
+}
+
 function createMemoryJournal() {
   const events: Array<{ sequence: number; kind: string; payload: Record<string, unknown> }> = [];
   return {
@@ -87,6 +97,29 @@ function createMemoryJournal() {
       async (): Promise<Array<{ sequence: number; kind: string; payload: Record<string, unknown> }>> => [],
     ),
   };
+}
+
+function providerUpsertCommand(idempotencyKey: string): ControlCommand {
+  return command({
+    id: `provider-${idempotencyKey}`,
+    idempotencyKey,
+    kind: 'provider.resource.upsert',
+    ownerEpoch: 7,
+    actor: { id: 'human-1', kind: 'human' },
+    payload: {
+      resource: {
+        id: 'provider-tab',
+        projectRoot: '/repo',
+        worktreeRoot: '/repo',
+        providerId: 'provider',
+        webviewLabel: 'Provider Tab',
+        url: 'https://example.test',
+        title: 'Example',
+        loading: false,
+        viewport: { width: 800, height: 600 },
+      },
+    },
+  }) as ControlCommand;
 }
 
 async function submit(runtime: ControlRuntime, input: ControlCommand) {
@@ -255,28 +288,81 @@ describe('ControlRuntime', () => {
     ))).toHaveLength(1);
   });
 
-  it('deduplicates from the retained terminal tail when sidecar persistence fails', async () => {
+  it('keeps a dirty terminal outcome replayable and blocks compaction until persistence recovers', async () => {
     const root = await newJournalRoot('control-runtime');
-    let invocations = 0;
-    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
     const journal = await ControlJournal.open(root, 4);
-    vi.spyOn(journal, 'storeOutcome').mockImplementation(async (idempotencyKey) => {
-      if (idempotencyKey === 'idem-sidecar-failure') {
+    const persist = journal.storeOutcome.bind(journal);
+    let failDirty = true;
+    vi.spyOn(journal, 'storeOutcome').mockImplementation(async (idempotencyKey, outcome) => {
+      if (idempotencyKey === 'idem-dirty' && failDirty) {
         throw new Error('sidecar write failed');
       }
+      await persist(idempotencyKey, outcome);
     });
     const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
 
-    await expect(submit(runtime, openTerminalCommand('idem-sidecar-failure', 'sidecar-1')))
+    await expect(submit(runtime, command({ id: 'dirty-1', idempotencyKey: 'idem-dirty' })))
       .rejects.toThrow('sidecar write failed');
-    expect(handlers.openTerminal).toHaveBeenCalledTimes(1);
-    expect(journal.findByIdempotencyKey('idem-sidecar-failure')?.kind).toBe('command.succeeded');
+    const terminal = journal.findByIdempotencyKey('idem-dirty');
+    expect(terminal?.kind).toBe('command.succeeded');
+
+    for (let index = 0; index < 1_001; index += 1) {
+      await submit(runtime, command({ id: `later-${index}`, idempotencyKey: `idem-later-${index}` }));
+    }
+    expect(journal.firstSequence).toBeLessThanOrEqual(terminal?.sequence ?? 0);
 
     const sequenceBefore = journal.sequence;
-    await expect(submit(runtime, openTerminalCommand('idem-sidecar-failure', 'sidecar-2')))
-      .resolves.toEqual({ status: 'succeeded', value: { paneId: 'pane-1' } });
-    expect(handlers.openTerminal).toHaveBeenCalledTimes(1);
+    await expect(submit(runtime, command({ id: 'dirty-2', idempotencyKey: 'idem-dirty' })))
+      .resolves.toEqual({ status: 'succeeded', value: { actorId: 'human-1', revision: 1 } });
     expect(journal.sequence).toBe(sequenceBefore);
+    expect(await journal.loadOutcome('idem-dirty')).toBeUndefined();
+
+    failDirty = false;
+    await submit(runtime, command({ id: 'compaction-trigger', idempotencyKey: 'idem-compaction-trigger' }));
+    await vi.waitFor(() => expect(journal.firstSequence).toBeGreaterThan(terminal?.sequence ?? 0));
+    await expect(journal.loadOutcome('idem-dirty')).resolves.toEqual({
+      status: 'succeeded',
+      value: { actorId: 'human-1', revision: 1 },
+    });
+  }, 90_000);
+
+  it('persists a recovery-generated unknown outcome to the durable sidecar', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    await journal.append('command.requested', {
+      commandId: 'cmd-crash',
+      idempotencyKey: 'idem-crash-recovered',
+      kind: 'pane.takeover',
+      ownerEpoch: 4,
+    });
+    await journal.append('command.accepted', {
+      commandId: 'cmd-crash',
+      idempotencyKey: 'idem-crash-recovered',
+    });
+
+    await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    await expect(journal.loadOutcome('idem-crash-recovered')).resolves.toEqual({
+      status: 'unknown',
+      code: 'recovered-nonterminal',
+      message: 'command outcome is unknown',
+    });
+  });
+
+  it('fails closed when a retained surface terminal event has no exact sidecar', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    await submit(runtime, providerUpsertCommand('surface-missing-sidecar'));
+    await rm(storedOutcomePath(root, 'surface-missing-sidecar'), { force: true });
+
+    const reopened = await ControlJournal.open(root, 8);
+    const restarted = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened });
+    const sequenceBefore = reopened.sequence;
+
+    await expect(submit(restarted, providerUpsertCommand('surface-missing-sidecar')))
+      .rejects.toThrow('durable outcome sidecar is required for retained surface terminal events');
+    expect(reopened.sequence).toBe(sequenceBefore);
   });
 
   it('rejects a stale owner epoch before side effects', async () => {

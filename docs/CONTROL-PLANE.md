@@ -80,7 +80,7 @@ through the identical authority checks and lands in the same journal.
    retried command never double-executes. The in-memory
    `outcomesByIdempotencyKey` map is a bounded 1,000-entry hot cache; cold
    retries fall back to the retained journal tail and the journal's durable
-   hash-addressed outcome sidecar.
+   hash-addressed exact-outcome sidecar.
 2. **Owner epoch** — rejects any command whose `ownerEpoch` is older than the
    current owner (`rejectStaleOwnerEpoch`), fencing out a superseded daemon.
 3. **Lease + scope** — validates lane leases (`LaneLeaseStore`,
@@ -91,10 +91,12 @@ through the identical authority checks and lands in the same journal.
 5. **Durable journal** — the transaction is appended to the `ControlJournal`
    (`src/control/journal.ts`) *before* the effect is considered committed, so a
    crash mid-flight is recoverable (`recoverNonterminalCommands` on startup).
-   After a terminal append, the exact `CommandOutcome` is persisted to the
-   journal's disk-backed sidecar before the runtime remembers or returns it; if
-   that lookup or write path fails, the runtime fails closed instead of
-   speculatively re-executing the command.
+   After a terminal append, the runtime remembers the exact outcome in memory,
+   tracks it as dirty until the disk-backed sidecar fsync succeeds, and refuses
+   to compact that terminal key away until authoritative durable replay data
+   exists. Non-surface tail events can be reconstructed while they remain
+   retained; surface tail events fail closed when their exact sidecar is
+   missing.
 6. **Handler dispatch** — only then does it call the matching `ControlHandlers`
    method to perform the effect and shape the `CommandOutcome`.
 

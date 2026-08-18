@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -6,6 +6,7 @@ import {
   agentControlJournalPayload,
   ControlJournal,
   createAgentControlJournalResource,
+  DURABLE_OUTCOME_RECORD_MAX_BYTES,
 } from '../src/control/journal.js';
 import { createRedactedApprovalEffect } from '../src/control/approvals.js';
 import type { ActionReceipt } from '../src/control/types.js';
@@ -136,6 +137,10 @@ describe('ControlJournal', () => {
     expect(path.basename(filePath)).toBe(
       createHash('sha256').update(idempotencyKey, 'utf8').digest('hex'),
     );
+    expect(path.dirname(filePath)).toBe(path.join(root, '.psyche', 'runtime', 'outcomes'));
+    const [directory, file] = await Promise.all([stat(path.dirname(filePath)), stat(filePath)]);
+    expect(directory.mode & 0o777).toBe(0o700);
+    expect(file.mode & 0o777).toBe(0o600);
     await expect(journal.loadOutcome(idempotencyKey)).resolves.toEqual(outcome);
   });
 
@@ -186,6 +191,16 @@ describe('ControlJournal', () => {
     }), 'utf8');
 
     await expect(journal.loadOutcome(idempotencyKey)).rejects.toThrow('invalid durable outcome shape');
+  });
+
+  it('rejects an oversized durable outcome record', async () => {
+    const root = await newRoot('psyche-journal');
+    const journal = await ControlJournal.open(root, 7);
+
+    await expect(journal.storeOutcome('oversized-outcome', {
+      status: 'succeeded',
+      value: 'x'.repeat(DURABLE_OUTCOME_RECORD_MAX_BYTES),
+    })).rejects.toThrow('durable outcome file exceeds the maximum size');
   });
 
   it('persists optional approval ownership metadata across journal replay', async () => {

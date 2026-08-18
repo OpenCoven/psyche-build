@@ -195,9 +195,11 @@ payloads.
 The runtime's `outcomesByIdempotencyKey` map is only a bounded 1,000-entry hot
 cache. Exact terminal outcomes remain authoritative in `ControlJournal`'s
 hash-addressed durable outcome sidecar, and cold retries consult the retained
-journal tail before that store. Sidecar lookup or write failures, JSON
-corruption, or key/outcome mismatches fail closed instead of silently
-re-executing a mutation.
+journal tail before that store. Those sidecars keep the exact prior result on
+disk with restrictive permissions and a bounded per-record size, while
+snapshots no longer duplicate exact outcomes once the sidecar is durable.
+Sidecar lookup or write failures, JSON corruption, or key/outcome mismatches
+fail closed instead of silently re-executing a mutation.
 Task-scoped reads may expose only resources named by persisted capability-lease
 grants or pending lease requests for the authenticated subject, active
 approvals whose durable task/actor ownership matches that subject (with a
@@ -215,7 +217,10 @@ timeout, provider disconnect after dispatch, navigation during script
 evaluation, or owner recovery reports `effect_unknown`; inspect state before
 deciding what to do next. Evicting a key from the 1,000-entry hot cache or
 restarting the owner does not authorize re-execution: terminal retries still
-dedupe from the retained journal tail or the durable outcome store.
+dedupe from the retained journal tail or the durable outcome store, and
+compaction will not cover a terminal key until one of those exact replay paths
+is authoritative. Because surface journal events are redacted, a missing exact
+surface sidecar fails closed instead of being reconstructed approximately.
 
 There is deliberately no accessibility, coordinate, screenshot-click, shell,
 raw tmux command, XPath, selector, or whole-desktop fallback.

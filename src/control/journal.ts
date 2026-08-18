@@ -1,6 +1,7 @@
-import { mkdir, open, readFile, rename, truncate } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, rename, truncate } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { AGENT_CONTROL_LIMITS } from './limits.js';
 import type { ControlSnapshot } from './types.js';
 import type {
   ActionReceipt,
@@ -177,10 +178,11 @@ function parseJournalHeader(value: unknown): JournalHeader | undefined {
 /**
  * What `snapshot.json` holds. It is a superset of the client-facing
  * ControlSnapshot: `receiptRecords` are the durable half of the runtime's
- * bounded receipt cache, while `outcomes` are only a warm-start seed for the
- * bounded in-memory hot cache. Exact command outcomes remain authoritative in
- * the hash-addressed durable outcome sidecar because a compacted journal can no
- * longer rebuild them by replay.
+ * bounded receipt cache, while `outcomes` is kept only as a backward-compatible
+ * warm-start seed for snapshots written before exact outcomes moved fully into
+ * the hash-addressed durable sidecar. Exact command outcomes remain
+ * authoritative in that sidecar because a compacted journal can no longer
+ * rebuild them by replay.
  */
 export interface JournalSnapshotFile {
   snapshot: ControlSnapshot;
@@ -200,6 +202,19 @@ interface StoredOutcomeRecord {
   readonly idempotencyKey: string;
   readonly outcome: CommandOutcome;
 }
+
+/**
+ * Large exact outcomes are accepted durably, but one file still needs a hard
+ * ceiling so a single retry record cannot grow without bound. The cap is sized
+ * for the largest existing bounded surfaces: a base64-encoded 4 MiB screenshot
+ * plus the largest script result, pane capture payload, and small JSON
+ * overhead.
+ */
+export const DURABLE_OUTCOME_RECORD_MAX_BYTES =
+  (AGENT_CONTROL_LIMITS.screenshotBytes * 2)
+  + AGENT_CONTROL_LIMITS.scriptResultBytes
+  + AGENT_CONTROL_LIMITS.paneOutputBytes
+  + (64 * 1024);
 
 export class ControlJournal {
   readonly path: string;
@@ -383,19 +398,23 @@ export class ControlJournal {
 
   async loadOutcome(idempotencyKey: string): Promise<CommandOutcome | undefined> {
     const outcomePath = this.outcomePath(idempotencyKey);
-    let raw: string;
+    let raw: Buffer;
     try {
-      raw = await readFile(outcomePath, 'utf8');
+      raw = await readFile(outcomePath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
     }
-    return parseStoredOutcome(raw, idempotencyKey);
+    if (raw.byteLength > DURABLE_OUTCOME_RECORD_MAX_BYTES) {
+      throw new Error('durable outcome file exceeds the maximum size');
+    }
+    return parseStoredOutcome(raw.toString('utf8'), idempotencyKey);
   }
 
   async storeOutcome(idempotencyKey: string, outcome: CommandOutcome): Promise<void> {
-    assertStoredOutcomeRecord({ idempotencyKey, outcome }, idempotencyKey);
+    const serialized = serializeStoredOutcomeRecord({ idempotencyKey, outcome }, idempotencyKey);
     await mkdir(this.outcomeDirectoryPath, { recursive: true, mode: 0o700 });
+    await chmod(this.outcomeDirectoryPath, 0o700);
     const destination = this.outcomePath(idempotencyKey);
     const temporary = path.join(
       this.outcomeDirectoryPath,
@@ -403,7 +422,7 @@ export class ControlJournal {
     );
     const handle = await open(temporary, 'wx', 0o600);
     try {
-      await handle.writeFile(JSON.stringify({ idempotencyKey, outcome }), 'utf8');
+      await handle.writeFile(serialized, 'utf8');
       await handle.sync();
     } finally {
       await handle.close();
@@ -554,6 +573,16 @@ function parseStoredOutcome(raw: string, expectedKey: string): CommandOutcome {
     throw new Error('durable outcome JSON corruption');
   }
   return assertStoredOutcomeRecord(parsed, expectedKey).outcome;
+}
+
+function serializeStoredOutcomeRecord(value: unknown, expectedKey: string): string {
+  const record = assertStoredOutcomeRecord(value, expectedKey);
+  const serialized = JSON.stringify(record);
+  const bytes = Buffer.byteLength(serialized, 'utf8');
+  if (bytes > DURABLE_OUTCOME_RECORD_MAX_BYTES) {
+    throw new Error('durable outcome file exceeds the maximum size');
+  }
+  return serialized;
 }
 
 function assertStoredOutcomeRecord(value: unknown, expectedKey: string): StoredOutcomeRecord {
