@@ -420,7 +420,7 @@ describe('daemon bridge Coven helpers', () => {
         tmuxSessionExists: () => true,
         createTmuxPane: (_sessionName, cwd, title) => {
           expect(cwd).toBe(root);
-          expect(title).toBe('coven:Fix tests · coven-session');
+          expect(title).toBe('coven:Fix tests · coven-session-1');
           return '%42';
         },
         getTmuxServerIdentity: () => mockTmuxServerIdentity,
@@ -432,17 +432,60 @@ describe('daemon bridge Coven helpers', () => {
 
     const config = JSON.parse(await readFile(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'));
     expect(result.id).toBe('%42');
-    expect(result.pane.title).toBe('coven:Fix tests · coven-session');
+    expect(result.pane.title).toBe('coven:Fix tests · coven-session-1');
     expect(commands).toEqual(['%42:coven attach session-1']);
     expect(config.panes[0]).toMatchObject({
       paneId: '%42',
       shellType: 'coven',
       type: 'shell',
       covenSession: { id: 'session-1', harness: 'codex', status: 'running' },
-      slug: 'coven-session',
-      title: 'coven:Fix tests · coven-session',
-      displayName: 'coven:Fix tests · coven-session',
+      slug: 'coven-session-1',
+      title: 'coven:Fix tests · coven-session-1',
+      displayName: 'coven:Fix tests · coven-session-1',
     });
+  });
+
+  it('opens a colon-bearing Coven session with a valid full-id pane slug', async () => {
+    const root = await tempDir('psyche-bridge-coven-colon-');
+    const commands: string[] = [];
+    const sessionId = 'owner:session.one';
+
+    const result = await openProjectCovenSession(
+      root,
+      'psyche-test',
+      sessionId,
+      {
+        listSessions: async () => [{
+          id: sessionId,
+          projectRoot: root,
+          harness: 'codex',
+          title: 'Colon session',
+          status: 'running',
+          createdAt: '2026-04-27T10:00:00Z',
+          updatedAt: '2026-04-27T10:01:00Z',
+        }],
+      },
+      {
+        tmuxSessionExists: () => true,
+        createTmuxPane: () => '%colon',
+        getTmuxServerIdentity: () => mockTmuxServerIdentity,
+        sendTmuxCommand: (paneId, command) => {
+          commands.push(`${paneId}:${command}`);
+        },
+      },
+    );
+
+    expect(result.pane).toMatchObject({
+      title: 'coven:Colon session · coven-owner-session.one',
+    });
+    const config = JSON.parse(
+      await readFile(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+    expect(config.panes[0]).toMatchObject({
+      slug: 'coven-owner-session.one',
+      title: 'coven:Colon session · coven-owner-session.one',
+    });
+    expect(commands).toEqual([`%colon:coven attach ${sessionId}`]);
   });
 
   it('gives repeated Coven opens distinct persisted and tmux titles', async () => {
@@ -478,12 +521,12 @@ describe('daemon bridge Coven helpers', () => {
       await readFile(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
     );
     expect(config.panes.map((pane: { slug: string }) => pane.slug)).toEqual([
-      'coven-session',
-      'coven-session-2',
+      'coven-session-1',
+      'coven-session-1-2',
     ]);
     expect(titles).toEqual([
-      'coven:Fix tests · coven-session',
-      'coven:Fix tests · coven-session-2',
+      'coven:Fix tests · coven-session-1',
+      'coven:Fix tests · coven-session-1-2',
     ]);
     expect(config.panes.map((pane: { title: string }) => pane.title)).toEqual(titles);
   });

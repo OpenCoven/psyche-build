@@ -340,6 +340,61 @@ describe('project config concurrent mutation', () => {
     });
   });
 
+  it('derives the same full-id base slug when a colon-bearing session is reopened after reload', async () => {
+    const root = await tempProject({ panes: [] });
+    const session = covenSession(root, 'owner:session.one');
+    const deps = fakeDeps();
+
+    await openProjectCovenSession(
+      root,
+      'psyche-test',
+      session.id,
+      fakeClient([session]),
+      deps,
+    );
+    expect((await readConfig(root)).panes.map((pane: any) => pane.slug)).toEqual([
+      'coven-owner-session.one',
+    ]);
+
+    await openProjectCovenSession({
+      sessionProjectRoot: root,
+      targetProjectRoot: root,
+      sessionName: 'psyche-test',
+      sessionId: session.id,
+    }, fakeClient([session]), deps);
+
+    expect((await readConfig(root)).panes.map((pane: any) => pane.slug)).toEqual([
+      'coven-owner-session.one',
+      'coven-owner-session.one-2',
+    ]);
+  });
+
+  it('keeps distinct Coven sessions collision-safe when their full ids sanitize alike', async () => {
+    const root = await tempProject({ panes: [] });
+    const sessions = [
+      covenSession(root, 'owner:session'),
+      covenSession(root, 'owner-session'),
+    ];
+    const deps = fakeDeps();
+
+    await Promise.all(sessions.map((session) => openProjectCovenSession({
+      sessionProjectRoot: root,
+      targetProjectRoot: root,
+      sessionName: 'psyche-test',
+      sessionId: session.id,
+    }, fakeClient(sessions), deps)));
+
+    const panes = (await readConfig(root)).panes;
+    expect(panes.map((pane: any) => pane.covenSession.id).sort()).toEqual([
+      'owner-session',
+      'owner:session',
+    ]);
+    expect(panes.map((pane: any) => pane.slug).sort()).toEqual([
+      'coven-owner-session',
+      'coven-owner-session-2',
+    ]);
+  });
+
   it('does not lose a metadata patch racing a pane open', async () => {
     const root = await tempProject({ panes: [{ id: 'psyche-0', paneId: '%99', title: 'original' }] });
     const client = fakeClient([covenSession(root, 's1')]);

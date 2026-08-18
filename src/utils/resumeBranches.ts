@@ -10,6 +10,7 @@ import { createPane } from './paneCreation.js';
 import { shellQuote } from './promptStore.js';
 import { SettingsManager } from './settingsManager.js';
 import { writeWorktreeMetadata } from './worktreeMetadata.js';
+import { derivePaneSlug } from './slug.js';
 import { acquireProjectWorktreeLifecycleLease } from '../services/WorktreeOperationLease.js';
 import {
   runGitMutationWithSupervisor,
@@ -420,17 +421,6 @@ async function refreshRemoteBranchStateAsync(
   ).has(branchName);
 }
 
-function deriveBaseSlug(branchName: string): string {
-  const segment = branchName.split('/').pop() || branchName;
-  const normalized = segment
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '');
-
-  return normalized || 'branch';
-}
-
 function shortHash(input: string): string {
   return createHash('sha1').update(input).digest('hex').slice(0, 6);
 }
@@ -493,7 +483,7 @@ function getAvailableSlug(
 ): string {
   const worktreesDir = path.join(projectRoot, '.psyche', 'worktrees');
   const reserved = new Set(existingPanes.map((pane) => pane.slug));
-  const baseSlug = deriveBaseSlug(branchName);
+  const baseSlug = derivePaneSlug(branchName, 'branch');
   let candidate = baseSlug;
   let attempt = 0;
 

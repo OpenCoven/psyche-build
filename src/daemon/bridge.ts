@@ -42,6 +42,7 @@ import {
   settlePaneSlugReservationAfterFailure,
 } from '../services/PaneSlugReservation.js';
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
+import { derivePaneSlug } from '../utils/slug.js';
 import {
   paneRecoveryInstructions,
   tearDownFullPaneWithVerification,
@@ -536,8 +537,7 @@ export async function openProjectCovenSession(
   }
 
   const titleLabel = `coven:${session.title || session.id.slice(0, 8)}`;
-  const sessionSlug = session.id.slice(0, 8).replace(/[^a-zA-Z0-9]+$/g, '')
-    || 'session';
+  const baseSlug = derivePaneSlug(`coven-${session.id}`);
   const psychePaneId = nextBridgePaneId();
   const paneSlugReservation = await reserveCrashSafePaneSlug({
     sessionProjectRoot,
@@ -546,7 +546,7 @@ export async function openProjectCovenSession(
     operation: 'daemon-coven-session-pane',
     allocate: async ({ occupiedSlugs }) => {
       const slug = await allocateUniquePaneSlug(
-        `coven-${sessionSlug}`,
+        baseSlug,
         occupiedSlugs,
       );
       return { slug, worktreePath: session.projectRoot };
