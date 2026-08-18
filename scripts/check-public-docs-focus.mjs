@@ -170,6 +170,41 @@ async function collectRecursiveTextFiles(relativeDirectory, readDirectory) {
   return { files: sortUnique(files), missingRootFailure: null };
 }
 
+async function collectTopLevelMarkdownFiles(relativeDirectory, readDirectory) {
+  let entries;
+  try {
+    entries = await readDirectory(relativeDirectory);
+  } catch (error) {
+    if (isEnoent(error)) {
+      return {
+        files: [],
+        missingRootFailure: {
+          file: relativeDirectory,
+          reason: 'public documentation top-level docs directory is missing',
+        },
+      };
+    }
+
+    throw error;
+  }
+
+  const sortedEntries = [...entries].sort((left, right) => compareStrings(left.name, right.name));
+  const files = [];
+
+  for (const entry of sortedEntries) {
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    const relativePath = path.posix.join(relativeDirectory, entry.name);
+    if (path.extname(entry.name).toLowerCase() === '.md') {
+      files.push(relativePath);
+    }
+  }
+
+  return { files: sortUnique(files), missingRootFailure: null };
+}
+
 async function readDirectoryFromFilesystem(relativeDirectory) {
   return readdir(path.join(root, relativeDirectory), { withFileTypes: true });
 }
@@ -178,12 +213,17 @@ async function collectPublicRecursiveFiles() {
   return collectRecursiveTextFiles('docs/src', readDirectoryFromFilesystem);
 }
 
-function buildPublicInventory({ recursiveFiles, packageMarkdownFiles }) {
+async function collectPublicTopLevelDocsFiles() {
+  return collectTopLevelMarkdownFiles('docs', readDirectoryFromFilesystem);
+}
+
+function buildPublicInventory({ recursiveFiles, topLevelDocsFiles, packageMarkdownFiles }) {
   return sortUnique([
     'README.md',
     'docs/README.md',
     ...requiredSourceFiles,
     ...recursiveFiles,
+    ...topLevelDocsFiles,
     ...packageMarkdownFiles,
   ]);
 }
@@ -282,7 +322,53 @@ async function selfCheckPublicInventory() {
   assert(recursiveResult.files.every((file) => !file.includes('/dist/')));
   assert.deepEqual(recursiveResult.missingRootFailure, null);
 
-  const requiredInventory = buildPublicInventory({ recursiveFiles: [], packageMarkdownFiles: [] });
+  const topLevelDocsTree = new Map([
+    [
+      'docs',
+      [
+        createSyntheticDirEntry('CONTROL-PLANE.md', 'file'),
+        createSyntheticDirEntry('HIGH_REFRESH.md', 'file'),
+        createSyntheticDirEntry('COVEN-DEMO-LOOP.md', 'file'),
+        createSyntheticDirEntry('COVEN-SESSIONS.md', 'file'),
+        createSyntheticDirEntry('README.md', 'file'),
+        createSyntheticDirEntry('superpowers', 'dir'),
+        createSyntheticDirEntry('notes.txt', 'file'),
+      ],
+    ],
+    [
+      'docs/superpowers',
+      [createSyntheticDirEntry('ignored.md', 'file')],
+    ],
+  ]);
+  const topLevelDocsResult = await collectTopLevelMarkdownFiles(
+    'docs',
+    createSyntheticDirectoryReader(topLevelDocsTree),
+  );
+  assert.deepEqual(topLevelDocsResult.files, [
+    'docs/CONTROL-PLANE.md',
+    'docs/COVEN-DEMO-LOOP.md',
+    'docs/COVEN-SESSIONS.md',
+    'docs/HIGH_REFRESH.md',
+    'docs/README.md',
+  ]);
+  assert.deepEqual(topLevelDocsResult.files, sortUnique(topLevelDocsResult.files));
+  assert(topLevelDocsResult.files.every((file) => file.startsWith('docs/')));
+  assert(!topLevelDocsResult.files.some((file) => file.includes('/superpowers/')));
+  assert.deepEqual(topLevelDocsResult.missingRootFailure, null);
+
+  const missingTopLevelDocsResult = await collectTopLevelMarkdownFiles(
+    'docs',
+    createSyntheticDirectoryReader(new Map(), new Set(['docs'])),
+  );
+  assert.deepEqual(missingTopLevelDocsResult, {
+    files: [],
+    missingRootFailure: {
+      file: 'docs',
+      reason: 'public documentation top-level docs directory is missing',
+    },
+  });
+
+  const requiredInventory = buildPublicInventory({ recursiveFiles: [], topLevelDocsFiles: [], packageMarkdownFiles: [] });
   assert(requiredInventory.includes('README.md'));
   assert(requiredInventory.includes('docs/README.md'));
   assertRequiredInventoryFiles(requiredInventory);
@@ -418,6 +504,7 @@ async function selfCheckPublicInventory() {
 
   const packageInventory = buildPublicInventory({
     recursiveFiles: [],
+    topLevelDocsFiles: topLevelDocsResult.files,
     packageMarkdownFiles: packageBoundaryA.markdownFiles,
   });
   assert(packageInventory.includes('CHANGELOG.md'));
@@ -425,6 +512,8 @@ async function selfCheckPublicInventory() {
   assert(packageInventory.includes('README.md'));
   assert(packageInventory.includes('docs/COVEN-DEMO-LOOP.md'));
   assert(packageInventory.includes('docs/COVEN-SESSIONS.md'));
+  assert(packageInventory.includes('docs/CONTROL-PLANE.md'));
+  assert(packageInventory.includes('docs/HIGH_REFRESH.md'));
 
   const syntheticInventory = ['README.md', 'docs/COVEN-DEMO-LOOP.md', 'docs/README.md'];
   const syntheticFailedInventoryFiles = new Set();
@@ -447,10 +536,12 @@ async function selfCheckPublicInventory() {
 
   const partialCleanupInventory = buildPublicInventory({
     recursiveFiles: ['docs/src/main.js'],
+    topLevelDocsFiles: ['docs/CONTROL-PLANE.md', 'docs/COVEN-DEMO-LOOP.md'],
     packageMarkdownFiles: ['README.md', 'docs/README.md', 'docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md'],
   });
   assert(partialCleanupInventory.includes('docs/COVEN-DEMO-LOOP.md'));
   assert(partialCleanupInventory.includes('docs/COVEN-SESSIONS.md'));
+  assert(partialCleanupInventory.includes('docs/CONTROL-PLANE.md'));
   assert.equal(
     countInventoryPasses(partialCleanupInventory, new Set(['docs/src/main.js'])),
     partialCleanupInventory.length - 1,
@@ -469,8 +560,11 @@ async function main() {
   const packageFiles = packageMarkdownResult.packageFiles;
   const recursiveResult = await collectPublicRecursiveFiles();
   const recursiveFiles = recursiveResult.files;
+  const topLevelDocsResult = await collectPublicTopLevelDocsFiles();
+  const topLevelDocsFiles = topLevelDocsResult.files;
   const uniqueInventory = buildPublicInventory({
     recursiveFiles,
+    topLevelDocsFiles,
     packageMarkdownFiles: packageMarkdownResult.markdownFiles,
   });
   const inventorySet = new Set(uniqueInventory);
@@ -478,6 +572,9 @@ async function main() {
   const inventoryFailures = [];
   const packageBoundaryFailures = [...packageMarkdownResult.boundaryFailures];
   const sourceRootFailures = recursiveResult.missingRootFailure ? [recursiveResult.missingRootFailure] : [];
+  if (topLevelDocsResult.missingRootFailure) {
+    sourceRootFailures.push(topLevelDocsResult.missingRootFailure);
+  }
   const globalFailures = [];
   const failedInventoryFiles = new Set();
 
