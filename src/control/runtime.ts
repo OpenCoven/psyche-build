@@ -22,9 +22,21 @@ import {
 import { SurfaceRegistry } from './surfaces.js';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
 import {
+  COMMAND_OUTCOME_ATTESTED_KIND,
   agentControlJournalPayload,
+  commandTransactionKey,
+  compactedCommandOutcome,
   createAgentControlJournalResource,
+  exactCommandOutcomeDigest,
+  isCompactedCommandOutcome,
   type AgentControlJournalReceipt,
+  type DurableCompletedTransaction,
+  type DurableControlSnapshot,
+  type DurableOpenTransaction,
+  type DurableOpenTransactionKind,
+  type DurableReceiptRecord,
+  type JournalMutationGuard,
+  type JournalSnapshotFile,
 } from './journal.js';
 import { canonicalizeBoundedJson } from './boundedJson.js';
 import { isActionReceipt, isJournalActionReceipt } from './types.js';
@@ -101,7 +113,44 @@ export interface RuntimeJournal {
   append(kind: string, payload: Record<string, unknown>): Promise<RuntimeEvent>;
   read(afterSequence: number, limit?: number): RuntimeEvent[];
   findByIdempotencyKey(key: string): RuntimeEvent | undefined;
-  recoverNonterminalCommands(): Promise<RuntimeEvent[]>;
+  recoverNonterminalCommands(restored?: readonly DurableOpenTransaction[]): Promise<RuntimeEvent[]>;
+}
+
+/**
+ * A journal that can drop its own history once a snapshot covers it.
+ *
+ * Kept separate from RuntimeJournal and feature-detected rather than folded
+ * into it: an in-memory journal has nothing to compact, and requiring every
+ * one to implement the durable half would be ceremony with no behaviour
+ * behind it.
+ */
+export interface CompactableJournal extends RuntimeJournal {
+  readonly sequence: number;
+  readonly firstSequence: number;
+  loadOutcome(key: string): Promise<CommandOutcome | undefined>;
+  storeOutcome(key: string, outcome: CommandOutcome): Promise<void>;
+  replaceOutcomeIfMatches(
+    key: string,
+    expectedOutcomeDigest: string,
+    replacement: CommandOutcome,
+  ): Promise<boolean>;
+  loadSnapshot(): Promise<JournalSnapshotFile | undefined>;
+  writeSnapshot(file: JournalSnapshotFile, guard?: JournalMutationGuard): Promise<void>;
+  compact(coveredSequence: number, guard?: JournalMutationGuard): Promise<void>;
+}
+
+function asCompactable(journal: RuntimeJournal): CompactableJournal | undefined {
+  const candidate = journal as Partial<CompactableJournal>;
+  return typeof candidate.compact === 'function'
+    && typeof candidate.loadOutcome === 'function'
+    && typeof candidate.storeOutcome === 'function'
+    && typeof candidate.replaceOutcomeIfMatches === 'function'
+    && typeof candidate.loadSnapshot === 'function'
+    && typeof candidate.writeSnapshot === 'function'
+    && typeof candidate.sequence === 'number'
+    && typeof candidate.firstSequence === 'number'
+    ? (journal as CompactableJournal)
+    : undefined;
 }
 
 interface ControlRuntimeOptions {
@@ -135,6 +184,23 @@ interface RetainedReceipt {
   taskId?: string;
   receipt: ActionStatusReceipt;
 }
+
+interface DirtyTerminalOutcome {
+  sequence: number;
+  outcome?: CommandOutcome;
+}
+
+interface ActiveCompactionAttempt {
+  coveredSequence: number;
+  invalidated: boolean;
+}
+
+type CoveredTerminalOutcome = {
+  event: RuntimeEvent;
+  commandKind?: ControlCommand['kind'] | string;
+  attestedDigest?: string;
+  verifiedOutcomeDigest?: string;
+};
 
 interface SurfaceActionContext {
   command: Extract<ControlCommand, { kind: 'pane.observe' | 'pane.action' | 'browser.inspect' | 'browser.action' | 'browser.script' }>;
@@ -187,9 +253,25 @@ const TERMINAL_EVENT_KINDS = new Set([
  * A long-running owner drives high-volume pane I/O, and some command payloads
  * (`pane.input` data, `pane.prompt` text) are large. Retaining every envelope
  * forever would grow without bound, so the map keeps only the most recent
- * transactions; the durable record of what happened is the journal.
+ * transactions. Terminal outcomes live durably in the journal's disk-backed
+ * sidecar store, exactly until compaction and then as per-key markers.
  */
 const MAX_COMMAND_RECORDS = 1000;
+
+/**
+ * Events kept in the journal after compaction.
+ *
+ * Deliberately equal to MAX_COMMAND_RECORDS: recent events can still satisfy
+ * cold retries from the retained journal tail, while older keys fall back to
+ * the durable outcome sidecar.
+ */
+const JOURNAL_RETAINED_EVENTS = MAX_COMMAND_RECORDS;
+
+/** Compact only once the journal is well past the retained window. */
+const JOURNAL_COMPACTION_TRIGGER = MAX_COMMAND_RECORDS * 2;
+
+const DIRTY_TERMINAL_OUTCOME_LIMIT = AGENT_CONTROL_LIMITS.pendingCommands;
+const OUTCOME_COMPACTION_BATCH_SIZE = 32;
 
 export class ControlRuntime {
   public readonly leases = new LaneLeaseStore();
@@ -198,7 +280,11 @@ export class ControlRuntime {
   public readonly approvals: ApprovalStore;
 
   private readonly outcomesByIdempotencyKey = new Map<string, CommandOutcome>();
+  private readonly legacySnapshotOutcomeKeys = new Set<string>();
   private readonly pendingByIdempotencyKey = new Map<string, Promise<CommandOutcome>>();
+  // Dedup lookups can exceed this; only cold misses that actually execute
+  // fresh work consume the bounded pending-command capacity.
+  private readonly activeFreshExecutions = new Set<string>();
   private readonly commandRecords = new Map<string, {
     command: ControlCommand;
     outcome?: CommandOutcome;
@@ -211,8 +297,14 @@ export class ControlRuntime {
   private readonly leaseRequestTombstones = new Set<string>();
   private readonly pendingApprovals = new Map<string, SurfaceActionContext>();
   private readonly receipts = new Map<string, RetainedReceipt>();
+  private readonly dirtyTerminalOutcomes = new Map<string, DirtyTerminalOutcome>();
   private readonly approvalTerminalizations = new Map<string, Promise<void>>();
   private readonly readActiveTaskCredential?: ControlRuntimeOptions['readActiveTaskCredential'];
+  private readonly compactable?: CompactableJournal;
+  private activeCompaction?: ActiveCompactionAttempt;
+  private compactionBlockedByDurability = false;
+  private compactionInFlight = false;
+  private compactionPromise?: Promise<void>;
 
   private constructor(
     private readonly ownerEpoch: number,
@@ -225,6 +317,7 @@ export class ControlRuntime {
     this.approvals = options.approvals ?? new ApprovalStore();
     this.readActiveTaskCredential = options.readActiveTaskCredential;
     this.resolveBrowserElementSemantics = options.resolveBrowserElementSemantics;
+    this.compactable = asCompactable(options.journal);
     this.promptDispatcher = new PromptDispatcher(async (envelope) => {
       const result = await this.handlers.sendPrompt(envelope);
       if (isReceiptResult(result)) return result;
@@ -233,12 +326,33 @@ export class ControlRuntime {
   }
 
   static async create(opts: ControlRuntimeOptions): Promise<ControlRuntime> {
-    await opts.journal.recoverNonterminalCommands();
+    const compactable = asCompactable(opts.journal);
+    const snapshot = await compactable?.loadSnapshot();
+    const recovered = await opts.journal.recoverNonterminalCommands(snapshot?.openTransactions);
     const runtime = new ControlRuntime(opts.ownerEpoch, opts.handlers, opts.journal, opts);
-    await runtime.recoverRestartedApprovalReceipts();
-    const events = opts.journal.read(0);
-    runtime.reduceOutcomes(events);
-    runtime.rehydrateReceipts(events);
+
+    // A compacted journal no longer holds the whole history, so the durable
+    // receipt state it dropped comes from the snapshot and only the tail is
+    // replayed. Legacy snapshot outcome keys remain only as fail-closed
+    // markers: exact replay now comes from the retained journal tail and the
+    // disk-backed outcome store, never from snapshot hot-cache seeding.
+    const covered = snapshot?.coveredSequence ?? 0;
+    const restored = snapshot?.receiptRecords ?? [];
+    const durableRecords = () => mergeDurableReceiptRecords(
+      restored,
+      latestDurableReceiptRecords(opts.journal.read(covered)),
+    );
+
+    await runtime.persistRecoveredTerminalOutcomes(recovered);
+    await runtime.recoverRestartedApprovalReceipts(durableRecords());
+    if (snapshot) {
+      runtime.rememberLegacySnapshotOutcomeKeys(snapshot.outcomes);
+      runtime.rememberCompletedTransactions(snapshot.completedTransactions ?? []);
+    }
+    // Read the tail again: recovery appends the invalidation events whose
+    // receipts must win over the approval_required ones they replace.
+    await runtime.restoreRetainedOutcomes(opts.journal.read(covered));
+    runtime.rehydrateReceipts(durableRecords());
     return runtime;
   }
 
@@ -248,15 +362,13 @@ export class ControlRuntime {
     this.pruneInactiveResourceQueues();
     const prior = this.outcomesByIdempotencyKey.get(command.idempotencyKey);
     if (prior) return Promise.resolve(prior);
+    const dirty = this.dirtyTerminalOutcomes.get(command.idempotencyKey)?.outcome;
+    if (dirty) return Promise.resolve(dirty);
 
     const pending = this.pendingByIdempotencyKey.get(command.idempotencyKey);
     if (pending) return pending;
 
-    if (this.pendingByIdempotencyKey.size >= AGENT_CONTROL_LIMITS.pendingCommands) {
-      return Promise.resolve(rejectedOutcome('runtime_busy', 'control runtime pending command capacity exceeded'));
-    }
-
-    const execution = this.submitFresh(command).finally(() => {
+    const execution = this.lookupOutcomeOrSubmitFresh(command).finally(() => {
       this.pendingByIdempotencyKey.delete(command.idempotencyKey);
     });
     this.pendingByIdempotencyKey.set(command.idempotencyKey, execution);
@@ -306,6 +418,13 @@ export class ControlRuntime {
     };
   }
 
+  private durableSnapshot(): DurableControlSnapshot {
+    return {
+      ownerEpoch: this.ownerEpoch,
+      sequence: this.compactable?.sequence ?? this.journal.read(0).at(-1)?.sequence ?? 0,
+    };
+  }
+
   receipt(actionId: string): ActionStatusReceipt | undefined {
     return this.receipts.get(actionId)?.receipt;
   }
@@ -324,7 +443,11 @@ export class ControlRuntime {
     const nextSequence = events.length > 0
       ? events[events.length - 1].sequence
       : afterSequence;
-    return { events, nextSequence, gap: false };
+    // Everything below the journal's first retained sequence has been
+    // compacted away. A reader resuming from there cannot be served the
+    // events it asked for, and has to be told rather than handed a short read.
+    const firstRetained = this.compactable?.firstSequence ?? 1;
+    return { events, nextSequence, gap: afterSequence < firstRetained - 1 };
   }
 
   blockPaneQueue(paneId: string): () => void {
@@ -365,6 +488,70 @@ export class ControlRuntime {
     }
 
     return this.executeImmediateCommand(command);
+  }
+
+  private async lookupOutcomeOrSubmitFresh(command: ControlCommand): Promise<CommandOutcome> {
+    const retained = this.journal.findByIdempotencyKey(command.idempotencyKey);
+    if (retained && TERMINAL_EVENT_KINDS.has(retained.kind)) {
+      if (!this.compactable) {
+        const outcome = outcomeFromEvent(retained);
+        this.rememberOutcome(command.idempotencyKey, outcome);
+        return outcome;
+      }
+      const currentEvents = this.journal.read(0);
+      const commandKind = retainedCommandKind(currentEvents, retained);
+      const transactionKey = transactionKeyForTerminalEvent(retained);
+      const attestedDigest = transactionKey
+        ? retainedOutcomeAttestations(currentEvents).get(transactionKey)
+        : undefined;
+      const stored = await this.loadRetainedReplayOutcome(retained, commandKind, attestedDigest);
+      if (stored) {
+        this.clearDirtyTerminalOutcome(command.idempotencyKey, retained.sequence);
+        this.rememberOutcome(command.idempotencyKey, stored);
+        return stored;
+      }
+      const outcome = reconstructRetainedOutcome(retained, commandKind);
+      if (!outcome) {
+        this.markDirtyTerminalOutcome(command.idempotencyKey, retained.sequence);
+        throw missingRetainedOutcomeSidecarError();
+      }
+      this.markDirtyTerminalOutcome(command.idempotencyKey, retained.sequence, outcome);
+      this.rememberOutcome(command.idempotencyKey, outcome);
+      return outcome;
+    }
+
+    const stored = await this.compactable?.loadOutcome(command.idempotencyKey);
+    if (stored) {
+      this.rememberOutcome(command.idempotencyKey, stored);
+      return stored;
+    }
+    if (this.legacySnapshotOutcomeKeys.has(command.idempotencyKey)) {
+      throw missingLegacySnapshotOutcomeSidecarError();
+    }
+
+    return this.submitFreshWhenCapacityAvailable(command);
+  }
+
+  private async submitFreshWhenCapacityAvailable(command: ControlCommand): Promise<CommandOutcome> {
+    if (!await this.ensureDurabilityReadyForFreshExecution()) {
+      return rejectedOutcome(
+        'durability_unavailable',
+        'durable outcome persistence is unavailable; refusing a new effect',
+      );
+    }
+    await this.flushDirtyTerminalOutcomesBeforeFreshReservation();
+    const reservation = this.tryReserveFreshExecution(command.idempotencyKey);
+    if (reservation === 'durability_unavailable') {
+      return rejectedOutcome('durability_unavailable', 'durable outcome persistence capacity is exhausted');
+    }
+    if (reservation === 'runtime_busy') {
+      return rejectedOutcome('runtime_busy', 'control runtime pending command capacity exceeded');
+    }
+    try {
+      return await this.submitFresh(command);
+    } finally {
+      this.activeFreshExecutions.delete(command.idempotencyKey);
+    }
   }
 
   private async rejectStaleOwnerEpoch(command: ControlCommand): Promise<CommandOutcome> {
@@ -1260,9 +1447,17 @@ export class ControlRuntime {
     await this.finalizeApprovals(this.approvals.revokeForLease(leaseId), 'action_invalidated');
   }
 
-  private async recoverRestartedApprovalReceipts(): Promise<void> {
-    for (const record of latestDurableReceiptRecords(this.journal.read(0))) {
+  private async recoverRestartedApprovalReceipts(
+    records: readonly DurableReceiptRecord[],
+  ): Promise<void> {
+    for (const record of records) {
       if (record.receipt.state !== 'approval_required') continue;
+      if (this.compactable) {
+        await this.compactable.storeOutcome(
+          record.idempotencyKey,
+          restartInvalidatedOutcome(),
+        );
+      }
       await this.journal.append('command.failed', restartInvalidatedPayload(record));
     }
     this.capabilityLeases.revokeAll();
@@ -1468,24 +1663,26 @@ export class ControlRuntime {
     outcome: CommandOutcome,
     receipt?: ActionReceipt,
   ): Promise<CommandOutcome> {
+    const outcomeDigest = exactCommandOutcomeDigest(outcome);
     if (isSurfaceControlCommand(command)) {
       const built = agentControlJournalPayload({
         kind: terminalKindForOutcome(outcome), commandId: command.id,
         idempotencyKey: command.idempotencyKey,
         status: outcome.status,
+        outcomeDigest,
         ...(outcome.status === 'succeeded' ? {} : { code: 'surface_command_failed' }),
         ...(receipt ? { receipt: journalReceiptMetadata(receipt) } : {}),
       });
-      await this.journal.append(built.kind, built.payload);
-      this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
+      const event = await this.journal.append(built.kind, built.payload);
+      this.rememberOutcome(command.idempotencyKey, outcome);
+      await this.persistTerminalOutcomeOrLeaveDirty(command.idempotencyKey, event.sequence, outcome);
       return outcome;
     }
     const event = await this.journal.append(terminalKindForOutcome(outcome), {
       commandId: command.id,
       idempotencyKey: command.idempotencyKey,
-      ...payloadForOutcome(outcome),
+      ...payloadForOutcome(outcome, outcomeDigest),
     });
-    this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
     const record = this.commandRecords.get(command.id);
     if (record) {
       record.outcome = outcome;
@@ -1493,6 +1690,8 @@ export class ControlRuntime {
     } else if (!isSurfaceControlCommand(command)) {
       this.retainCommandRecord(command.id, { command, outcome, sequence: event.sequence });
     }
+    this.rememberOutcome(command.idempotencyKey, outcome);
+    await this.persistTerminalOutcomeOrLeaveDirty(command.idempotencyKey, event.sequence, outcome);
     return outcome;
   }
 
@@ -1509,20 +1708,483 @@ export class ControlRuntime {
     }
   }
 
+  /**
+   * Bounded hot-cache replay protection for idempotency keys.
+   *
+   * Exact outcomes are also written to the journal's disk-backed sidecar, so
+   * evicted or restarted keys still replay on a cold lookup instead of
+   * executing again.
+   */
+  private rememberOutcome(idempotencyKey: string, outcome: CommandOutcome): void {
+    this.outcomesByIdempotencyKey.delete(idempotencyKey);
+    this.outcomesByIdempotencyKey.set(idempotencyKey, outcome);
+    while (this.outcomesByIdempotencyKey.size > MAX_COMMAND_RECORDS) {
+      const oldest = this.outcomesByIdempotencyKey.keys().next().value;
+      if (oldest === undefined) break;
+      this.outcomesByIdempotencyKey.delete(oldest);
+    }
+  }
+
   private reduceOutcomes(events: RuntimeEvent[]): void {
     for (const event of events) {
       if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
       const idempotencyKey = stringPayload(event, 'idempotencyKey');
       if (!idempotencyKey) continue;
-      this.outcomesByIdempotencyKey.set(idempotencyKey, outcomeFromEvent(event));
+      this.rememberOutcome(idempotencyKey, outcomeFromEvent(event));
     }
   }
 
-  private rehydrateReceipts(events: readonly RuntimeEvent[]): void {
+  private rehydrateReceipts(records: readonly DurableReceiptRecord[]): void {
     this.receipts.clear();
-    for (const record of latestDurableReceiptRecords(events)) {
+    for (const record of records) {
       this.rememberReceipt(record.receipt, record.receipt.taskId);
     }
+  }
+
+  private rememberLegacySnapshotOutcomeKeys(outcomes: Record<string, CommandOutcome>): void {
+    for (const idempotencyKey of Object.keys(outcomes)) {
+      this.legacySnapshotOutcomeKeys.add(idempotencyKey);
+    }
+  }
+
+  private rememberCompletedTransactions(transactions: readonly DurableCompletedTransaction[]): void {
+    for (const transaction of transactions) this.legacySnapshotOutcomeKeys.add(transaction.idempotencyKey);
+  }
+
+  private async persistRecoveredTerminalOutcomes(events: readonly RuntimeEvent[]): Promise<void> {
+    if (!this.compactable) return;
+    for (const event of events) {
+      if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
+      const idempotencyKey = stringPayload(event, 'idempotencyKey');
+      if (!idempotencyKey) continue;
+      const outcome = outcomeFromEvent(event);
+      this.rememberOutcome(idempotencyKey, outcome);
+      await this.persistTerminalOutcomeOrLeaveDirty(idempotencyKey, event.sequence, outcome);
+    }
+  }
+
+  private async loadRetainedOutcomeSidecar(
+    terminalEvent: RuntimeEvent,
+  ): Promise<CommandOutcome | undefined> {
+    if (!this.compactable) return undefined;
+    const idempotencyKey = stringPayload(terminalEvent, 'idempotencyKey');
+    if (!idempotencyKey) return undefined;
+    try {
+      return await this.compactable.loadOutcome(idempotencyKey);
+    } catch (error) {
+      this.invalidateActiveCompaction();
+      throw error;
+    }
+  }
+
+  private async loadRetainedReplayOutcome(
+    terminalEvent: RuntimeEvent,
+    commandKind?: ControlCommand['kind'] | string,
+    attestedDigest?: string,
+  ): Promise<CommandOutcome | undefined> {
+    const stored = await this.loadRetainedOutcomeSidecar(terminalEvent);
+    if (!stored) return undefined;
+    if (isCompactedCommandOutcome(stored)) return stored;
+    const verification = verifyExactOutcomeAgainstTerminalEvent(
+      stored,
+      terminalEvent,
+      commandKind,
+      attestedDigest,
+    );
+    if (!verification.ok) {
+      this.invalidateActiveCompaction();
+      throw verification.error;
+    }
+    // Exact sidecars retain the original terminal value for integrity and
+    // idempotency, but surface replies have always replayed the journal-safe
+    // projection. Do not re-expose a receipt's private resource/value fields
+    // merely because the retry happens after a restart.
+    return isSurfaceControlCommandKind(commandKind)
+      ? outcomeFromEvent(terminalEvent)
+      : stored;
+  }
+
+  private async restoreRetainedOutcomes(events: RuntimeEvent[]): Promise<void> {
+    if (!this.compactable) {
+      this.reduceOutcomes(events);
+      return;
+    }
+    const currentEvents = this.journal.read(0);
+    const commandKinds = retainedCommandKinds(currentEvents);
+    const attestations = retainedOutcomeAttestations(currentEvents);
+    for (const event of latestTerminalEvents(events)) {
+      const idempotencyKey = stringPayload(event, 'idempotencyKey');
+      if (!idempotencyKey) continue;
+      const commandId = stringPayload(event, 'commandId');
+      const transactionKey = commandId ? commandTransactionKey(commandId, idempotencyKey) : undefined;
+      const commandKind = commandId
+        ? commandKinds.get(commandTransactionKey(commandId, idempotencyKey))
+        : undefined;
+      const attestedDigest = transactionKey ? attestations.get(transactionKey) : undefined;
+      let stored: CommandOutcome | undefined;
+      if (legacyRetainedOutcomeNeedsAttestation(event, commandKind, attestedDigest)) {
+        stored = await this.loadRetainedOutcomeSidecar(event);
+        if (stored && !isCompactedCommandOutcome(stored)) {
+          const digest = await this.attestRetainedOutcome(event, stored);
+          if (transactionKey) attestations.set(transactionKey, digest);
+        }
+      } else {
+        stored = await this.loadRetainedReplayOutcome(event, commandKind, attestedDigest);
+      }
+      if (stored) {
+        this.clearDirtyTerminalOutcome(idempotencyKey, event.sequence);
+        this.rememberOutcome(idempotencyKey, stored);
+        continue;
+      }
+      const reconstructed = reconstructRetainedOutcome(event, commandKind);
+      if (!reconstructed) {
+        this.markDirtyTerminalOutcome(idempotencyKey, event.sequence);
+        throw missingRetainedOutcomeSidecarError();
+      }
+      this.markDirtyTerminalOutcome(idempotencyKey, event.sequence, reconstructed);
+      this.rememberOutcome(idempotencyKey, reconstructed);
+    }
+    await this.flushDirtyTerminalOutcomesThrough(Number.POSITIVE_INFINITY);
+  }
+
+  private async attestRetainedOutcome(
+    event: RuntimeEvent,
+    outcome: CommandOutcome,
+  ): Promise<string> {
+    const commandId = stringPayload(event, 'commandId');
+    const idempotencyKey = stringPayload(event, 'idempotencyKey');
+    if (!commandId || !idempotencyKey) throw missingRetainedOutcomeDigestError();
+    const outcomeDigest = exactCommandOutcomeDigest(outcome);
+    await this.journal.append(COMMAND_OUTCOME_ATTESTED_KIND, {
+      commandId,
+      idempotencyKey,
+      outcomeDigest,
+    });
+    return outcomeDigest;
+  }
+
+  private async flushDirtyTerminalOutcomesBeforeFreshReservation(): Promise<void> {
+    if (!this.compactable) return;
+    if (this.dirtyTerminalOutcomes.size + this.activeFreshExecutions.size < DIRTY_TERMINAL_OUTCOME_LIMIT) {
+      return;
+    }
+    await this.flushDirtyTerminalOutcomesThrough(Number.POSITIVE_INFINITY);
+  }
+
+  private tryReserveFreshExecution(
+    idempotencyKey: string,
+  ): 'reserved' | 'durability_unavailable' | 'runtime_busy' {
+    if (
+      this.compactable
+      && this.dirtyTerminalOutcomes.size + this.activeFreshExecutions.size >= DIRTY_TERMINAL_OUTCOME_LIMIT
+    ) {
+      return 'durability_unavailable';
+    }
+    if (this.activeFreshExecutions.size >= AGENT_CONTROL_LIMITS.pendingCommands) {
+      return 'runtime_busy';
+    }
+    this.activeFreshExecutions.add(idempotencyKey);
+    return 'reserved';
+  }
+
+  private markDirtyTerminalOutcome(
+    idempotencyKey: string,
+    sequence: number,
+    outcome?: CommandOutcome,
+  ): void {
+    if (!this.compactable) return;
+    this.invalidateActiveCompaction();
+    const prior = this.dirtyTerminalOutcomes.get(idempotencyKey);
+    if (!prior && this.dirtyTerminalOutcomes.size >= DIRTY_TERMINAL_OUTCOME_LIMIT) {
+      throw codedRuntimeError(
+        'durability_unavailable',
+        'durable outcome persistence capacity is exhausted',
+      );
+    }
+    if (!prior || sequence >= prior.sequence) {
+      this.dirtyTerminalOutcomes.set(idempotencyKey, { sequence, outcome: outcome ?? prior?.outcome });
+      return;
+    }
+    if (prior.outcome === undefined && outcome !== undefined) {
+      this.dirtyTerminalOutcomes.set(idempotencyKey, { sequence: prior.sequence, outcome });
+    }
+  }
+
+  private clearDirtyTerminalOutcome(idempotencyKey: string, sequence?: number): void {
+    if (!this.compactable) return;
+    const prior = this.dirtyTerminalOutcomes.get(idempotencyKey);
+    if (!prior) return;
+    if (sequence === undefined || prior.sequence <= sequence) {
+      this.dirtyTerminalOutcomes.delete(idempotencyKey);
+    }
+  }
+
+  private async persistTerminalOutcome(
+    idempotencyKey: string,
+    sequence: number,
+    outcome: CommandOutcome,
+  ): Promise<void> {
+    if (!this.compactable) return;
+    await this.compactable.storeOutcome(idempotencyKey, outcome);
+    this.clearDirtyTerminalOutcome(idempotencyKey, sequence);
+  }
+
+  private async persistTerminalOutcomeOrLeaveDirty(
+    idempotencyKey: string,
+    sequence: number,
+    outcome: CommandOutcome,
+  ): Promise<void> {
+    this.markDirtyTerminalOutcome(idempotencyKey, sequence, outcome);
+    try {
+      await this.persistTerminalOutcome(idempotencyKey, sequence, outcome);
+    } catch (error) {
+      console.error(
+        `[control-runtime] durable outcome persistence failed for ${idempotencyKey}`,
+        error,
+      );
+    } finally {
+      this.maybeCompact();
+    }
+  }
+
+  private async flushDirtyTerminalOutcomesThrough(coveredSequence: number): Promise<void> {
+    if (!this.compactable) return;
+    for (const [idempotencyKey, dirty] of this.dirtyTerminalOutcomes) {
+      if (dirty.sequence > coveredSequence || dirty.outcome === undefined) continue;
+      try {
+        await this.persistTerminalOutcome(idempotencyKey, dirty.sequence, dirty.outcome);
+      } catch {
+        // Fail closed: compaction checks the dirty map after the retry pass.
+      }
+    }
+  }
+
+  private hasDirtyTerminalOutcomesThrough(coveredSequence: number): boolean {
+    for (const dirty of this.dirtyTerminalOutcomes.values()) {
+      if (dirty.sequence <= coveredSequence) return true;
+    }
+    return false;
+  }
+
+  private beginCompactionAttempt(coveredSequence: number): ActiveCompactionAttempt {
+    const attempt = { coveredSequence, invalidated: false };
+    this.activeCompaction = attempt;
+    return attempt;
+  }
+
+  private finishCompactionAttempt(attempt: ActiveCompactionAttempt): void {
+    if (this.activeCompaction === attempt) this.activeCompaction = undefined;
+  }
+
+  private invalidateActiveCompaction(): void {
+    const active = this.activeCompaction;
+    if (!active) return;
+    active.invalidated = true;
+  }
+
+  private compactionShouldAbort(attempt: ActiveCompactionAttempt): boolean {
+    return this.activeCompaction !== attempt
+      || attempt.invalidated
+      || this.hasDirtyTerminalOutcomesThrough(attempt.coveredSequence);
+  }
+
+  private coveredTerminalSequences(
+    journal: CompactableJournal,
+    coveredSequence: number,
+  ): Map<string, CoveredTerminalOutcome> {
+    const covered = new Map<string, CoveredTerminalOutcome>();
+    const events = journal.read(0);
+    const commandKinds = retainedCommandKinds(events);
+    const attestations = retainedOutcomeAttestations(events);
+    const latestByIdempotencyKey = new Map<string, RuntimeEvent>();
+    for (const event of events) {
+      if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
+      const idempotencyKey = stringPayload(event, 'idempotencyKey');
+      if (!idempotencyKey) continue;
+      latestByIdempotencyKey.set(idempotencyKey, event);
+    }
+    for (const [idempotencyKey, latest] of latestByIdempotencyKey) {
+      if (latest.sequence > coveredSequence) continue;
+      const commandId = stringPayload(latest, 'commandId');
+      const transactionKey = commandId ? commandTransactionKey(commandId, idempotencyKey) : undefined;
+      covered.set(idempotencyKey, {
+        event: latest,
+        commandKind: transactionKey ? commandKinds.get(transactionKey) : undefined,
+        attestedDigest: transactionKey ? attestations.get(transactionKey) : undefined,
+      });
+    }
+    return covered;
+  }
+
+  private async verifyCoveredTerminalOutcomes(
+    coveredTerminals: ReadonlyMap<string, CoveredTerminalOutcome>,
+    attempt: ActiveCompactionAttempt,
+  ): Promise<boolean> {
+    if (!this.compactable) return true;
+    for (const [idempotencyKey, covered] of coveredTerminals) {
+      if (this.compactionShouldAbort(attempt)) return false;
+      try {
+        const stored = await this.compactable.loadOutcome(idempotencyKey);
+        if (stored) {
+          if (isCompactedCommandOutcome(stored)) {
+            covered.verifiedOutcomeDigest = exactCommandOutcomeDigest(stored);
+            continue;
+          }
+          const verification = verifyExactOutcomeAgainstTerminalEvent(
+            stored,
+            covered.event,
+            covered.commandKind,
+            covered.attestedDigest,
+          );
+          if (verification.ok) {
+            covered.verifiedOutcomeDigest = exactCommandOutcomeDigest(stored);
+            continue;
+          }
+        }
+      } catch {
+        // Compaction fails closed: unreadable exact replay keeps the journal.
+      }
+      this.invalidateActiveCompaction();
+      return false;
+    }
+    return !this.compactionShouldAbort(attempt);
+  }
+
+  private async compactCoveredTerminalOutcomes(
+    coveredTerminals: ReadonlyMap<string, CoveredTerminalOutcome>,
+    attempt: ActiveCompactionAttempt,
+  ): Promise<boolean> {
+    if (!this.compactable) return true;
+    const marker = compactedCommandOutcome();
+    const idempotencyKeys = [...coveredTerminals.keys()];
+    for (let offset = 0; offset < idempotencyKeys.length; offset += OUTCOME_COMPACTION_BATCH_SIZE) {
+      if (this.compactionShouldAbort(attempt)) return false;
+      const results = await Promise.allSettled(
+        idempotencyKeys
+          .slice(offset, offset + OUTCOME_COMPACTION_BATCH_SIZE)
+          .map((idempotencyKey) => {
+            const expectedDigest = coveredTerminals.get(idempotencyKey)?.verifiedOutcomeDigest;
+            if (!expectedDigest) return Promise.resolve(false);
+            return this.compactable!.replaceOutcomeIfMatches(idempotencyKey, expectedDigest, marker);
+          }),
+      );
+      if (results.some((result) => result.status === 'rejected' || !result.value)) return false;
+      if (this.compactionShouldAbort(attempt)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Compacts once the journal has grown well past the window the runtime can
+   * actually use, so the rewrite cost is amortised rather than paid per append.
+   */
+  private maybeCompact(): void {
+    const journal = this.compactable;
+    if (!journal) return;
+    if (journal.sequence - journal.firstSequence + 1 <= JOURNAL_COMPACTION_TRIGGER) return;
+    void this.compactJournal(journal);
+  }
+
+  private async compactJournal(journal: CompactableJournal): Promise<void> {
+    if (this.compactionPromise) return this.compactionPromise;
+    this.compactionInFlight = true;
+    const running = this.performCompaction(journal)
+      .catch((error) => {
+        this.markCompactionBlockedByDurability(error);
+      })
+      .finally(() => {
+        this.compactionInFlight = false;
+        this.compactionPromise = undefined;
+      });
+    this.compactionPromise = running;
+    return running;
+  }
+
+  private async performCompaction(journal: CompactableJournal): Promise<void> {
+    const coveredSequence = journal.sequence - JOURNAL_RETAINED_EVENTS;
+    if (coveredSequence < journal.firstSequence) {
+      this.compactionBlockedByDurability = false;
+      return;
+    }
+    const attempt = this.beginCompactionAttempt(coveredSequence);
+    const guard: JournalMutationGuard = {
+      shouldAbort: () => this.compactionShouldAbort(attempt),
+    };
+    try {
+      await this.flushDirtyTerminalOutcomesThrough(coveredSequence);
+      if (this.compactionShouldAbort(attempt)) {
+        this.markCompactionBlockedByDurability();
+        return;
+      }
+      const coveredTerminals = this.coveredTerminalSequences(journal, coveredSequence);
+      if (!await this.verifyCoveredTerminalOutcomes(coveredTerminals, attempt)) {
+        this.markCompactionBlockedByDurability();
+        return;
+      }
+
+      // Records older than the retained window survive only in the previous
+      // snapshot, so the new one is the union rather than a fresh projection.
+      // Exact outcomes still remain authoritative in the sidecar store.
+      const previous = await journal.loadSnapshot();
+      const eventsSincePreviousSnapshot = journal.read(previous?.coveredSequence ?? 0)
+        .filter((event) => event.sequence <= coveredSequence);
+      const records = mergeDurableReceiptRecords(
+        previous?.receiptRecords ?? [],
+        latestDurableReceiptRecords(eventsSincePreviousSnapshot),
+      ).slice(-MAX_COMMAND_RECORDS);
+      const openTransactions = durableOpenTransactions(previous?.openTransactions ?? [], eventsSincePreviousSnapshot);
+      const completedTransactions = durableCompletedTransactions(
+        previous?.completedTransactions ?? [],
+        eventsSincePreviousSnapshot,
+      );
+
+      // The snapshot must be durable before the events it covers are dropped.
+      // Outcome evidence stays at the hashed sidecar path, so snapshots do not
+      // duplicate either exact values or later compact markers.
+      await journal.writeSnapshot({
+        snapshot: this.durableSnapshot(),
+        coveredSequence,
+        outcomes: {},
+        receiptRecords: records,
+        openTransactions,
+        completedTransactions,
+      }, guard);
+      if (this.compactionShouldAbort(attempt)) {
+        this.markCompactionBlockedByDurability();
+        return;
+      }
+      if (!await this.compactCoveredTerminalOutcomes(coveredTerminals, attempt)) {
+        this.markCompactionBlockedByDurability();
+        return;
+      }
+      await journal.compact(coveredSequence, guard);
+      if (this.compactionShouldAbort(attempt)) {
+        this.markCompactionBlockedByDurability();
+        return;
+      }
+      this.compactionBlockedByDurability = false;
+    } finally {
+      this.finishCompactionAttempt(attempt);
+    }
+  }
+
+  private async ensureDurabilityReadyForFreshExecution(): Promise<boolean> {
+    if (!this.compactionBlockedByDurability) return true;
+    const journal = this.compactable;
+    if (!journal) return false;
+    await this.compactJournal(journal);
+    return !this.compactionBlockedByDurability;
+  }
+
+  private markCompactionBlockedByDurability(error?: unknown): void {
+    if (!this.compactionBlockedByDurability) {
+      if (error === undefined) {
+        console.error('[control-runtime] deferred compaction until durable outcomes are repaired');
+      } else {
+        console.error('[control-runtime] deferred compaction until durable outcomes are repaired', error);
+      }
+    }
+    this.compactionBlockedByDurability = true;
   }
 
   private queueForPane(paneId: string): PaneQueueState {
@@ -1552,6 +2214,32 @@ export class ControlRuntime {
       if (!current || current.kind !== queue.target.kind || current.generation !== queue.target.generation) {
         this.resourceQueues.delete(key);
       }
+    }
+    this.pruneRetiredPaneBarriers();
+  }
+
+  /**
+   * Drop the takeover barrier of a pane that has no surface and no queue.
+   *
+   * Queued automation is compared against these generations, so a pane with
+   * work still parked on it must keep its counter: resetting it would make
+   * that work read as preempted. Both conditions together mean nothing is left
+   * to compare, and a pane that returns starts from 0 exactly as a pane the
+   * runtime has never seen does.
+   */
+  private pruneRetiredPaneBarriers(): void {
+    if (this.paneBarrierGenerations.size === 0) return;
+    // Queues are keyed by surface generation, and a retired pane reports
+    // generation 0, so a queue must be matched on pane id rather than by
+    // rebuilding its key.
+    const queuedPaneIds = new Set<string>();
+    for (const queue of this.resourceQueues.values()) {
+      if (queue.target.kind === 'pane') queuedPaneIds.add(queue.target.id);
+    }
+    for (const paneId of [...this.paneBarrierGenerations.keys()]) {
+      if (this.surfaces.get(paneId)) continue;
+      if (queuedPaneIds.has(paneId)) continue;
+      this.paneBarrierGenerations.delete(paneId);
     }
   }
 
@@ -1680,6 +2368,21 @@ function isSurfaceControlCommand(command: ControlCommand): command is Extract<Co
     || command.kind === 'approval.resolve'
     || command.kind === 'provider.resource.upsert'
     || command.kind === 'provider.resource.remove';
+}
+
+function isSurfaceControlCommandKind(kind: string | undefined): boolean {
+  return kind === 'lease.request'
+    || kind === 'lease.grant'
+    || kind === 'lease.release'
+    || kind === 'lease.revoke'
+    || kind === 'pane.observe'
+    || kind === 'pane.action'
+    || kind === 'browser.inspect'
+    || kind === 'browser.action'
+    || kind === 'browser.script'
+    || kind === 'approval.resolve'
+    || kind === 'provider.resource.upsert'
+    || kind === 'provider.resource.remove';
 }
 
 function isSurfaceActionCommand(command: ControlCommand): command is SurfaceActionContext['command'] {
@@ -1985,13 +2688,15 @@ function redactedPayloadForOutcome(
   outcome: CommandOutcome,
   explicitReceipt?: ActionReceipt,
 ): Record<string, unknown> {
+  const outcomeDigest = exactCommandOutcomeDigest(outcome);
   const receipt = explicitReceipt
     ?? (outcome.status === 'succeeded' && 'value' in outcome && isActionReceipt(outcome.value)
       ? outcome.value
       : undefined);
-  if (receipt) return { status: outcome.status, receipt: redactReceipt(receipt) };
+  if (receipt) return { status: outcome.status, outcomeDigest, receipt: redactReceipt(receipt) };
   return {
     status: outcome.status,
+    outcomeDigest,
     ...(outcome.status === 'succeeded' ? {} : { code: 'surface_command_failed' }),
   };
 }
@@ -2058,11 +2763,26 @@ function terminalKindForOutcome(outcome: CommandOutcome):
   }
 }
 
-function payloadForOutcome(outcome: CommandOutcome): Record<string, unknown> {
+function payloadForOutcome(outcome: CommandOutcome, outcomeDigest = exactCommandOutcomeDigest(outcome)): Record<string, unknown> {
   if (outcome.status === 'succeeded') {
-    return 'value' in outcome ? { status: outcome.status, value: outcome.value } : { status: outcome.status };
+    return 'value' in outcome
+      ? { status: outcome.status, outcomeDigest, value: outcome.value }
+      : { status: outcome.status, outcomeDigest };
   }
-  return { status: outcome.status, code: outcome.code, message: outcome.message };
+  return { status: outcome.status, outcomeDigest, code: outcome.code, message: outcome.message };
+}
+
+function verifyExactOutcomeAgainstTerminalEvent(
+  outcome: CommandOutcome,
+  event: RuntimeEvent,
+  commandKind?: ControlCommand['kind'] | string,
+  attestedDigest?: string,
+): { ok: true } | { ok: false; error: Error } {
+  const expected = terminalOutcomeDigestForVerification(event, commandKind, attestedDigest);
+  if (!expected.ok) return expected;
+  return exactCommandOutcomeDigest(outcome) === expected.digest
+    ? { ok: true }
+    : { ok: false, error: retainedOutcomeDigestMismatchError() };
 }
 
 function outcomeFromEvent(event: RuntimeEvent): CommandOutcome {
@@ -2097,12 +2817,72 @@ function outcomeFromEvent(event: RuntimeEvent): CommandOutcome {
   }
 }
 
-interface DurableReceiptRecord {
-  readonly sequence: number;
-  readonly commandId: string;
-  readonly idempotencyKey: string;
-  readonly receipt: JournalActionReceipt;
+function reconstructRetainedOutcome(
+  event: RuntimeEvent,
+  commandKind?: ControlCommand['kind'] | string,
+): CommandOutcome | undefined {
+  if (isRecoveredNonterminalRetainedOutcome(event)) return outcomeFromEvent(event);
+  if (!isRetainedNonSurfaceCommandKind(commandKind) || durableJournalReceiptPayload(event)) return undefined;
+  return outcomeFromEvent(event);
 }
+
+function missingRetainedOutcomeSidecarError(): Error {
+  return new Error('durable outcome sidecar is required for retained surface or unknown terminal events');
+}
+
+function terminalOutcomeDigestForVerification(
+  event: RuntimeEvent,
+  commandKind?: ControlCommand['kind'] | string,
+  attestedDigest?: string,
+): { ok: true; digest: string } | { ok: false; error: Error } {
+  const digest = event.payload.outcomeDigest;
+  if (digest !== undefined) {
+    return typeof digest === 'string' && isSha256Digest(digest)
+      ? { ok: true, digest }
+      : { ok: false, error: invalidRetainedOutcomeDigestError() };
+  }
+  if (attestedDigest !== undefined) {
+    return isSha256Digest(attestedDigest)
+      ? { ok: true, digest: attestedDigest }
+      : { ok: false, error: invalidRetainedOutcomeDigestError() };
+  }
+  const reconstructed = reconstructRetainedOutcome(event, commandKind);
+  if (!reconstructed) {
+    return { ok: false, error: missingRetainedOutcomeDigestError() };
+  }
+  return { ok: true, digest: exactCommandOutcomeDigest(reconstructed) };
+}
+
+function isSha256Digest(value: string): boolean {
+  return /^[0-9a-f]{64}$/u.test(value);
+}
+
+function missingRetainedOutcomeDigestError(): Error {
+  return new Error('retained surface or unknown terminal events require an exact outcome digest');
+}
+
+function invalidRetainedOutcomeDigestError(): Error {
+  return new Error('retained terminal outcome digest is invalid');
+}
+
+function retainedOutcomeDigestMismatchError(): Error {
+  return new Error('durable outcome sidecar does not match retained terminal event');
+}
+
+function isRecoveredNonterminalRetainedOutcome(event: RuntimeEvent): boolean {
+  return event.kind === 'command.unknown'
+    && stringPayload(event, 'reason') === 'recovered-nonterminal'
+    && typeof event.payload.outcomeDigest === 'string'
+    && isSha256Digest(event.payload.outcomeDigest)
+    && durableJournalReceiptPayload(event) === undefined;
+}
+
+function missingLegacySnapshotOutcomeSidecarError(): Error {
+  return new Error('durable outcome sidecar is required for compacted snapshot outcomes');
+}
+
+// DurableReceiptRecord now lives in journal.ts: it is the durable shape the
+// snapshot file persists, not just an in-flight projection of journal events.
 
 function durableJournalReceiptPayload(event: RuntimeEvent): JournalActionReceipt | undefined {
   const receipt = event.payload.receipt;
@@ -2125,9 +2905,143 @@ function stringPayload(event: RuntimeEvent, key: string): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+function retainedCommandKinds(events: readonly RuntimeEvent[]): Map<string, ControlCommand['kind'] | string> {
+  const kinds = new Map<string, ControlCommand['kind'] | string>();
+  for (const event of events) {
+    if (event.kind !== 'command.requested') continue;
+    const commandId = stringPayload(event, 'commandId');
+    const idempotencyKey = stringPayload(event, 'idempotencyKey');
+    const kind = stringPayload(event, 'kind');
+    if (!commandId || !idempotencyKey || !kind) continue;
+    kinds.set(commandTransactionKey(commandId, idempotencyKey), kind);
+  }
+  return kinds;
+}
+
+function retainedOutcomeAttestations(events: readonly RuntimeEvent[]): Map<string, string> {
+  const attestations = new Map<string, string>();
+  for (const event of events) {
+    if (event.kind !== COMMAND_OUTCOME_ATTESTED_KIND) continue;
+    const transactionKey = transactionKeyForTerminalEvent(event);
+    const digest = event.payload.outcomeDigest;
+    if (!transactionKey || typeof digest !== 'string' || !isSha256Digest(digest)) continue;
+    attestations.set(transactionKey, digest);
+  }
+  return attestations;
+}
+
+function transactionKeyForTerminalEvent(event: RuntimeEvent): string | undefined {
+  const commandId = stringPayload(event, 'commandId');
+  const idempotencyKey = stringPayload(event, 'idempotencyKey');
+  return commandId && idempotencyKey ? commandTransactionKey(commandId, idempotencyKey) : undefined;
+}
+
+function legacyRetainedOutcomeNeedsAttestation(
+  event: RuntimeEvent,
+  commandKind?: ControlCommand['kind'] | string,
+  attestedDigest?: string,
+): boolean {
+  return event.payload.outcomeDigest === undefined
+    && attestedDigest === undefined
+    && reconstructRetainedOutcome(event, commandKind) === undefined;
+}
+
+function latestTerminalEvents(events: readonly RuntimeEvent[]): RuntimeEvent[] {
+  const latest = new Map<string, RuntimeEvent>();
+  for (const event of events) {
+    if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
+    const idempotencyKey = stringPayload(event, 'idempotencyKey');
+    if (!idempotencyKey) continue;
+    latest.set(idempotencyKey, event);
+  }
+  return [...latest.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
+function retainedCommandKind(
+  events: readonly RuntimeEvent[],
+  terminalEvent: RuntimeEvent,
+): ControlCommand['kind'] | string | undefined {
+  const commandId = stringPayload(terminalEvent, 'commandId');
+  const idempotencyKey = stringPayload(terminalEvent, 'idempotencyKey');
+  if (!commandId || !idempotencyKey) return undefined;
+  return retainedCommandKinds(events).get(commandTransactionKey(commandId, idempotencyKey));
+}
+
+function isRetainedNonSurfaceCommandKind(kind?: ControlCommand['kind'] | string): kind is ControlCommand['kind'] {
+  switch (kind) {
+    case 'orchestration.execute':
+    case 'pane.spawn':
+    case 'pane.prompt':
+    case 'pane.interrupt':
+    case 'pane.delegate':
+    case 'pane.takeover':
+    case 'pane.input':
+    case 'pane.terminal.open':
+    case 'pane.resize':
+    case 'pane.focus':
+    case 'pane.kill':
+    case 'pane.respawn':
+    case 'pane.conflict.open':
+    case 'pane.option.update':
+    case 'pane.meta.update':
+    case 'ritual.launch':
+    case 'coven.session.launch':
+    case 'coven.session.open':
+    case 'coven.desktop.action':
+    case 'coven.capability.execute':
+      return true;
+    default:
+      return false;
+  }
+}
+
 function isReceiptResult(value: unknown): value is { receiptId?: string } {
   return typeof value === 'object' && value !== null &&
     (!('receiptId' in value) || typeof (value as { receiptId?: unknown }).receiptId === 'string');
+}
+
+function durableOpenTransactions(
+  restored: readonly DurableOpenTransaction[],
+  events: readonly RuntimeEvent[],
+): DurableOpenTransaction[] {
+  const open = new Map<string, DurableOpenTransaction>();
+  for (const item of restored) open.set(commandTransactionKey(item.commandId, item.idempotencyKey), item);
+  for (const event of events) {
+    const commandId = stringPayload(event, 'commandId');
+    const idempotencyKey = stringPayload(event, 'idempotencyKey');
+    if (!commandId || !idempotencyKey) continue;
+    const key = commandTransactionKey(commandId, idempotencyKey);
+    if (TERMINAL_EVENT_KINDS.has(event.kind)) open.delete(key);
+    else if (isDurableOpenTransactionKind(event.kind)) {
+      open.set(key, { sequence: event.sequence, commandId, idempotencyKey, kind: event.kind });
+    }
+  }
+  if (open.size > AGENT_CONTROL_LIMITS.pendingCommands) {
+    throw codedRuntimeError('durability_unavailable', 'durable open transaction capacity is exhausted');
+  }
+  return [...open.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
+function durableCompletedTransactions(
+  restored: readonly DurableCompletedTransaction[],
+  events: readonly RuntimeEvent[],
+): DurableCompletedTransaction[] {
+  const completed = new Map<string, DurableCompletedTransaction>();
+  for (const item of restored) completed.set(commandTransactionKey(item.commandId, item.idempotencyKey), item);
+  for (const event of events) {
+    if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
+    const commandId = stringPayload(event, 'commandId');
+    const idempotencyKey = stringPayload(event, 'idempotencyKey');
+    if (!commandId || !idempotencyKey) continue;
+    completed.set(commandTransactionKey(commandId, idempotencyKey), {
+      sequence: event.sequence, commandId, idempotencyKey,
+    });
+  }
+  return [...completed.values()].sort((left, right) => left.sequence - right.sequence).slice(-MAX_COMMAND_RECORDS);
+}
+
+function isDurableOpenTransactionKind(value: string): value is DurableOpenTransactionKind {
+  return value === 'command.requested' || value === 'command.accepted' || value === 'command.running';
 }
 
 function latestDurableReceiptRecords(events: readonly RuntimeEvent[]): DurableReceiptRecord[] {
@@ -2148,11 +3062,27 @@ function latestDurableReceiptRecords(events: readonly RuntimeEvent[]): DurableRe
   return [...latest.values()].sort((left, right) => left.sequence - right.sequence);
 }
 
+/**
+ * Latest-wins union of the receipts a snapshot preserved and those still in
+ * the journal tail. The tail is newer by construction, so it overwrites.
+ */
+function mergeDurableReceiptRecords(
+  restored: readonly DurableReceiptRecord[],
+  replayed: readonly DurableReceiptRecord[],
+): DurableReceiptRecord[] {
+  const latest = new Map<string, DurableReceiptRecord>();
+  for (const record of restored) latest.set(record.receipt.actionId, record);
+  for (const record of replayed) latest.set(record.receipt.actionId, record);
+  return [...latest.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
 function restartInvalidatedPayload(record: DurableReceiptRecord): Record<string, unknown> {
+  const outcomeDigest = exactCommandOutcomeDigest(restartInvalidatedOutcome());
   return {
     commandId: record.commandId,
     idempotencyKey: record.idempotencyKey,
     status: 'failed',
+    outcomeDigest,
     receipt: {
       schema: record.receipt.schema,
       actionId: record.receipt.actionId,
@@ -2174,5 +3104,13 @@ function restartInvalidatedPayload(record: DurableReceiptRecord): Record<string,
       completedAt: new Date().toISOString(),
       code: 'action_invalidated',
     },
+  };
+}
+
+function restartInvalidatedOutcome(): CommandOutcome {
+  return {
+    status: 'failed',
+    code: 'action_invalidated',
+    message: 'surface effect failed',
   };
 }

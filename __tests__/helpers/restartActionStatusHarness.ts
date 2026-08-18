@@ -149,6 +149,7 @@ export async function createRestartActionStatusHarness(
     commandId: legacyActionId,
     idempotencyKey: legacyActionId,
     status: 'succeeded',
+    outcomeDigest: 'd'.repeat(64),
     receipt: {
       schema: 'psyche.control.receipt/v1',
       actionId: legacyActionId,
