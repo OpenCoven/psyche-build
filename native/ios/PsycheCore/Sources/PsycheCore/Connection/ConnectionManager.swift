@@ -266,6 +266,23 @@ public actor ConnectionManager {
         return true
     }
 
+    /// Starts an invite redemption, then reports its terminal authentication
+    /// outcome. UI uses this; the legacy enqueue API above stays nonblocking
+    /// so a newer invite can supersede an in-flight connection.
+    public func connectAndAwaitOutcome(using invite: PsycheInvite) async -> Bool {
+        guard await connect(using: invite) else { return false }
+        while true {
+            switch state {
+            case .connected:
+                return true
+            case .failed, .disconnected:
+                return false
+            case .connecting, .authenticating, .disconnecting:
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+        }
+    }
+
     private func startPendingInviteIfIdle(intentEpoch: UInt64) async {
         guard connectExecutionOwner == nil,
               let invite = pendingInvite else { return }

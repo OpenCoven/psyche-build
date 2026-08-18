@@ -143,6 +143,47 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.pendingInvite?.token, "one-time-token")
     }
 
+    func testLiveInviteWaitsForAuthenticationBeforePublishingHost() async throws {
+        let transport = AppModelFakeTransport()
+        let model = AppModel(composition: MobileAppComposition(
+            transport: transport,
+            pairedHostStore: PairedHostStore(secureStore: InMemorySecureStore()),
+            mobileCredentialStore: MobileCredentialStore(secureStore: InMemorySecureStore())
+        ))
+        await model.start()
+        let invite = try XCTUnwrap(PsycheInvite.parse(URL(string:
+            "psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&psyche_invite=one-time-token"
+        )!))
+
+        let result = Task { await model.connect(using: invite) }
+        _ = try await transport.waitForHello()
+        XCTAssertNil(model.hostName)
+        await transport.emit(.legacy(.welcome(WelcomePayload(
+            serverID: "studio", serverName: "Studio", protocolVersion: 3, projectName: nil
+        ))))
+
+        let connected = await result.value
+        XCTAssertTrue(connected)
+        XCTAssertEqual(model.hostName, "studio.example")
+    }
+
+    func testLiveInviteRejectionKeepsHostEmptyAndUsesSafeRecovery() async throws {
+        let model = AppModel(composition: MobileAppComposition(
+            transport: AppModelRejectingTransport(),
+            pairedHostStore: PairedHostStore(secureStore: InMemorySecureStore()),
+            mobileCredentialStore: MobileCredentialStore(secureStore: InMemorySecureStore())
+        ))
+        await model.start()
+        let invite = try XCTUnwrap(PsycheInvite.parse(URL(string:
+            "psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&psyche_invite=one-time-token"
+        )!))
+
+        let connected = await model.connect(using: invite)
+        XCTAssertFalse(connected)
+        XCTAssertNil(model.hostName)
+        XCTAssertEqual(model.connectionError, "Could not connect. Create a fresh Open on phone invite and try again.")
+    }
+
     func testPendingLaunchInviteConnectsBeforeStoredHostReconnect() async throws {
         let transport = AppModelFakeTransport()
         let pairedHostStore = PairedHostStore(secureStore: InMemorySecureStore())
@@ -216,6 +257,10 @@ private actor AppModelFakeTransport: PsycheTransport {
         stream = nil
     }
 
+    func emit(_ message: MobileServerMessage) {
+        continuation?.yield(message)
+    }
+
     func send(_ message: MobileClientMessage) async throws {
         guard case let .legacy(.hello(payload)) = message else { return }
         lastHello = payload
@@ -242,4 +287,12 @@ private actor AppModelFakeTransport: PsycheTransport {
             helloWaiters.append(continuation)
         }
     }
+}
+
+private actor AppModelRejectingTransport: PsycheTransport {
+    func connect(to endpoint: HostEndpoint) async throws { throw URLError(.cannotConnectToHost) }
+    func disconnect() async {}
+    func send(_ message: MobileClientMessage) async throws {}
+    func incomingMessages() async -> AsyncStream<MobileServerMessage> { AsyncStream { $0.finish() } }
+    func incomingBinaryFrames() async -> AsyncStream<TerminalBinaryFrame> { AsyncStream { $0.finish() } }
 }

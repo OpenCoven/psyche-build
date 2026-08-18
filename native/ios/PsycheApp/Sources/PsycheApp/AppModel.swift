@@ -73,19 +73,35 @@ final class AppModel: ObservableObject {
 
     func receive(url: URL) {
         guard let invite = PsycheInvite.parse(url) else { return }
-        accept(invite: invite)
+        pendingInvite = invite
+        guard hasStarted else { return }
+        Task { _ = await connect(using: invite) }
     }
 
     /// Accepts an already-validated invite without ever publishing its token.
     /// Only the endpoint host may be used as visible connection context.
-    func accept(invite: PsycheInvite) {
+    func connect(using invite: PsycheInvite) async -> Bool {
         pendingInvite = invite
-        hostName = invite.endpoint.host
-        guard hasStarted, let composition else { return }
-        Task { [weak self] in
-            guard await composition.connectionManager.connect(using: invite) else { return }
-            self?.pendingInvite = nil
+        connectionError = nil
+        guard let composition else { return false }
+        if !hasStarted {
+            await start()
+            guard await composition.connectionManager.state == .connected else {
+                pendingInvite = nil
+                connectionError = "Could not connect. Create a fresh Open on phone invite and try again."
+                return false
+            }
+            hostName = invite.endpoint.host
+            return true
         }
+        guard await composition.connectionManager.connectAndAwaitOutcome(using: invite) else {
+            pendingInvite = nil
+            connectionError = "Could not connect. Create a fresh Open on phone invite and try again."
+            return false
+        }
+        pendingInvite = nil
+        hostName = invite.endpoint.host
+        return true
     }
 
     /// Disconnects first, then removes every durable record that could

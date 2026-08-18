@@ -8,9 +8,10 @@ struct ConnectPsycheSheet: View {
     @State private var inviteText = ""
     @State private var validationError: String?
 
-    private let onAccept: (PsycheInvite) -> Void
+    @State private var isConnecting = false
+    private let onAccept: (PsycheInvite) async -> Bool
 
-    init(onAccept: @escaping (PsycheInvite) -> Void) {
+    init(onAccept: @escaping (PsycheInvite) async -> Bool) {
         self.onAccept = onAccept
     }
 
@@ -25,7 +26,7 @@ struct ConnectPsycheSheet: View {
                 Text("On your Mac, open Psyche and choose Open on phone. Paste the invite here.")
                     .foregroundStyle(.secondary)
 
-                TextField("Open on phone invite", text: $inviteText, axis: .vertical)
+                SecureField("Open on phone invite", text: $inviteText)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .textContentType(.URL)
@@ -38,6 +39,13 @@ struct ConnectPsycheSheet: View {
                 }
                 .accessibilityIdentifier("connect-psyche-paste")
 
+                Button("Scan unavailable") { }
+                    .disabled(true)
+                    .accessibilityIdentifier("connect-psyche-scan-unavailable")
+                Text("Scanning is not available on this device. Paste an Open on phone invite instead.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
                 if let validationError {
                     Label(validationError, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(PsycheTheme.amber)
@@ -49,7 +57,8 @@ struct ConnectPsycheSheet: View {
             .navigationTitle("New connection")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Connect", action: connect)
+                    Button(isConnecting ? "Connecting…" : "Connect", action: connect)
+                        .disabled(isConnecting)
                 }
             }
         }
@@ -62,7 +71,14 @@ struct ConnectPsycheSheet: View {
             validationError = "That invite is not valid. Create a fresh Open on phone invite from Psyche."
             return
         }
-        onAccept(invite)
-        dismiss()
+        isConnecting = true
+        Task {
+            if await onAccept(invite) {
+                dismiss()
+            } else {
+                validationError = "Could not connect. Create a fresh Open on phone invite and try again."
+                isConnecting = false
+            }
+        }
     }
 }

@@ -83,7 +83,7 @@ struct SettingsView: View {
         .accessibilityIdentifier("settings-view")
         .sheet(isPresented: $isConnectSheetPresented) {
             ConnectPsycheSheet { invite in
-                model.accept(invite: invite)
+                await model.connect(using: invite)
             }
         }
     }

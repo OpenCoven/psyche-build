@@ -362,7 +362,7 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Pair a host"].exists)
         connect.tap()
 
-        let invite = app.textFields["connect-psyche-invite"]
+        let invite = app.secureTextFields["connect-psyche-invite"]
         XCTAssertTrue(invite.waitForExistence(timeout: 10))
         XCTAssertFalse(app.textFields["pair-code-field"].exists)
         XCTAssertTrue(app.buttons["Paste"].exists)
@@ -373,7 +373,7 @@ final class PsycheAppUITests: XCTestCase {
         try openSettings(in: app)
         app.buttons["settings-connect-psyche"].tap()
 
-        let invite = app.textFields["connect-psyche-invite"]
+        let invite = app.secureTextFields["connect-psyche-invite"]
         XCTAssertTrue(invite.waitForExistence(timeout: 10))
         invite.tap()
         invite.typeText("not-an-invite")
@@ -384,17 +384,22 @@ final class PsycheAppUITests: XCTestCase {
 
     }
 
-    func testInviteSheetAcceptsAValidInvite() throws {
+    func testFixtureInviteRemainsInRecoveryUntilLiveAuthentication() throws {
         let app = launchApp()
         try openSettings(in: app)
         app.buttons["settings-connect-psyche"].tap()
 
-        let invite = app.textFields["connect-psyche-invite"]
+        let invite = app.secureTextFields["connect-psyche-invite"]
         XCTAssertTrue(invite.waitForExistence(timeout: 10))
         invite.tap()
         invite.typeText("psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&psyche_invite=one-time-token&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         app.buttons["Connect"].tap()
-        XCTAssertFalse(invite.waitForExistence(timeout: 3))
+        XCTAssertTrue(invite.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Could not connect. Create a fresh Open on phone invite and try again."].exists)
+        XCTAssertFalse(invite.label.contains("one-time-token"))
+        XCTAssertFalse((invite.value as? String ?? "").contains("one-time-token"))
+        XCTAssertTrue(app.buttons["connect-psyche-scan-unavailable"].exists)
+        XCTAssertTrue(app.staticTexts["Scanning is not available on this device. Paste an Open on phone invite instead."].exists)
     }
 
     func testSettingsCanClearTheVisibleFixtureConnection() throws {
