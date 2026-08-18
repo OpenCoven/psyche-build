@@ -6,175 +6,419 @@
 **Goal:** Preserve idempotency and recovery while bounding exact outcomes, and
 release retired pane buffers after their final subscriber.
 
-**Architecture:** `ControlJournal` owns an atomic hash-addressed exact
-`CommandOutcome` sidecar store plus snapshot recovery metadata. `ControlRuntime`
-keeps exact outcomes in its bounded 1,000-entry hot cache, tracks dirty exact
-outcomes in-process for immediate replay, persists recovery-generated
-`command.unknown` outcomes back into the same sidecar path, and forbids
-compaction from covering a terminal event until its exact sidecar is durable.
-New compaction writes leave the legacy top-level `outcomes` snapshot field
-empty while future Task 2 still adds the bounded unresolved-transaction
-records. `BridgeDaemon` tracks unpublished streamed panes as retired until the
-final stream or subscription detaches.
+**Architecture:** Evolve the existing
+`.psyche/runtime/outcomes/<sha256>` files to hold either b389 exact outcomes or
+compact outcomes. All replacement writes use temp-file fsync, atomic rename,
+and containing-directory fsync. `ControlRuntime` retains exact outcomes in its
+bounded cache, keeps failed publications dirty, and prevents compaction from
+covering a terminal event until the same sidecar path is durable. Redacted
+snapshots preserve only receipts and unresolved transactions. `BridgeDaemon`
+tracks unpublished streamed panes until final release.
 
 ## File Map
 
-- `src/control/journal.ts`: exact bounded outcome sidecars, strict parsing,
-  size and permission validation, and snapshot compatibility.
-- `src/control/runtime.ts`: asynchronous cold lookup, dirty exact replay,
-  recovery-unknown persistence, surface fail-closed fallback, and compaction
-  gating.
+- `src/control/journal.ts`: compatible outcome records, durable publication,
+  redacted snapshots, and open transactions.
+- `src/control/runtime.ts`: dirty outcome retry, compaction gate, compact
+  outcomes, and recovery.
 - `src/services/bridge/BridgeDaemon.ts`: retired pane ownership.
-- `__tests__/controlJournal.test.ts`: exact sidecar hashing, permissions, size
-  bounds, and strict parsing.
-- `__tests__/controlRuntime.test.ts`: hot-cache eviction deduplication, dirty
-  replay, retained-recovery persistence, and missing-sidecar fail-closed
-  behavior.
-- `__tests__/controlJournalCompaction.test.ts`: restart deduplication after
-  eviction and compaction, plus unresolved-command recovery.
+- `__tests__/controlJournal.test.ts`: compatibility and fsync ordering.
+- `__tests__/controlRuntime.test.ts`: terminal outcome behavior.
+- `__tests__/controlJournalCompaction.test.ts`: upgrade and fail-closed
+  regressions.
 - Bridge stream tests and the three related contract documents.
 
-## Task 1: Make exact outcome sidecars gate terminal compaction
+## Task 1: Evolve the existing outcome sidecar
 
-### Step 1: Write failing exact-sidecar journal tests
+### Step 1: Add a b389 upgrade regression
 
-Add journal tests for a separator-heavy Unicode idempotency key that round-trip
-through `storeOutcome()` and `loadOutcome()`. Verify the sidecar path is
-`.psyche/runtime/outcomes/<sha256(idempotencyKey)>`, the outcomes directory is
-`0700`, the final sidecar file is `0600`, and a missing key returns
-`undefined`.
+In `__tests__/controlJournalCompaction.test.ts`, keep the existing no-argument
+`makeHandlers(): ControlHandlers`. Add this supported command helper:
 
-Add failing coverage for malformed JSON, original-key mismatch, invalid
-`CommandOutcome` shape, and a serialized record larger than
-`DURABLE_OUTCOME_RECORD_MAX_BYTES` (`8_781_824` bytes). Those cases must throw
-explicitly rather than becoming cache misses.
-
-### Step 2: Write failing runtime durability regressions
-
-In `controlRuntime.test.ts`, add regressions proving:
-
-- a key evicted from the 1,000-entry hot cache still deduplicates from its
-  exact sidecar after more than 1,000 later keys;
-- a `storeOutcome()` failure after terminal append leaves the exact outcome
-  immediately replayable from in-process dirty state, and later compaction may
-  not cover that sequence until persistence recovers;
-- startup persists a recovery-generated `command.unknown` exact sidecar for a
-  retained nonterminal crash-window command; and
-- a retained surface terminal event with no exact sidecar fails closed instead
-  of reconstructing a generic outcome from redacted journal data.
-
-Keep `controlJournalCompaction.test.ts` focused on the restart and compaction
-path: a key older than the hot window must still deduplicate exactly after
-compaction and restart.
-
-### Step 3: Run the focused tests and verify the new assertions fail
-
-```bash
-pnpm vitest --run __tests__/controlJournal.test.ts __tests__/controlRuntime.test.ts __tests__/controlJournalCompaction.test.ts
+```ts
+function openTerminalCommand(
+  idempotencyKey: string,
+  ownerEpoch = 4,
+): ControlCommand {
+  return {
+    id: `cmd-${idempotencyKey}-${ownerEpoch}`,
+    idempotencyKey,
+    kind: 'pane.terminal.open',
+    projectRoot: '/repo',
+    actor: { id: 'human-1', kind: 'human' },
+    ownerEpoch,
+    createdAt: '2026-08-17T20:00:00.000Z',
+    payload: { cwd: '/repo', title: idempotencyKey },
+  };
+}
 ```
 
-Expected: FAIL because exact sidecars, dirty replay, recovery persistence, and
-surface fail-closed lookup are not wired yet.
+Extend the file's imports with `writeFile` and `createHash`. Write the exact
+unversioned record produced by `b3899e0e` to the existing hash path:
 
-### Step 4: Add the atomic hash-addressed exact outcome store
+```ts
+it('loads a compacted b389 outcome without re-executing its key', async () => {
+  const root = await newRoot();
+  const key = 'idem-b389-upgrade';
+  const outcome = {
+    status: 'succeeded',
+    value: { paneId: '%legacy' },
+  } as const;
+  const digest = createHash('sha256').update(key, 'utf8').digest('hex');
+  const outcomes = path.join(root, '.psyche', 'runtime', 'outcomes');
+  await mkdir(outcomes, { recursive: true, mode: 0o700 });
+  await writeFile(
+    path.join(outcomes, digest),
+    JSON.stringify({ idempotencyKey: key, outcome }),
+    { encoding: 'utf8', mode: 0o600 },
+  );
 
-In `src/control/journal.ts`, add a sidecar directory beside `snapshot.json`
-called `outcomes`. Filenames are `sha256(idempotencyKey)` so keys cannot escape
-the directory, but each JSON payload still stores both the original
-`idempotencyKey` and the exact `CommandOutcome` for collision detection and
-replay.
+  const journal = await ControlJournal.open(root, 5);
+  const handlers = makeHandlers();
+  const effect = vi.fn(async () => ({ paneId: '%executed-again' }));
+  handlers.openTerminal = effect;
+  const runtime = await ControlRuntime.create({
+    ownerEpoch: 5,
+    handlers,
+    journal,
+  });
 
-Add `loadOutcome(key): Promise<CommandOutcome | undefined>` and
-`storeOutcome(key, outcome): Promise<void>` to both `ControlJournal` and
-`CompactableJournal`, and require them in `asCompactable()`.
+  await expect(runtime.submit(openTerminalCommand(key, 5))).resolves.toEqual(outcome);
+  expect(effect).not.toHaveBeenCalled();
+  expect(journal.sequence).toBe(0);
+});
+```
 
-`storeOutcome()` must:
+This test starts with no retained terminal event, so it proves the existing
+b389 sidecar alone prevents re-execution. Do not add another completed-key
+directory or lookup.
 
-- create or repair the outcomes directory with `0700` permissions;
-- reject any serialized record larger than `DURABLE_OUTCOME_RECORD_MAX_BYTES`
-  (`8_781_824` bytes);
-- write through a unique temporary file opened with `0600`;
-- `fsync()` and close the handle; and
-- atomically rename into place.
+### Step 2: Parse exact and compact records at the same path
 
-`loadOutcome()` must return `undefined` only for `ENOENT`. JSON corruption,
-key mismatch/hash collision, invalid exact-outcome shape, or an oversized file
-must throw explicitly.
+Keep the current b389 `StoredOutcomeRecord`. Add:
 
-### Step 5: Serialize cold lookup and fail closed on unsafe surface fallback
+```ts
+const COMPACTED_OUTCOME = Object.freeze({
+  status: 'unknown',
+  code: 'idempotency_outcome_compacted',
+  message: 'command completed previously; its exact outcome is no longer retained',
+}) satisfies CommandOutcome;
 
-Keep `submit()` returning a `Promise`, but install one pending promise in
-`pendingByIdempotencyKey` before awaiting any I/O. The cold path should check
-sources in this order:
+const COMPACTED_OUTCOME_SCHEMA = 'psyche.control.outcome/v2' as const;
 
-1. bounded hot exact-outcome cache;
-2. dirty in-process exact replay for a just-appended terminal outcome;
-3. existing `pendingByIdempotencyKey` entry;
-4. retained terminal journal tail;
-5. durable exact sidecar; then
-6. fresh execution.
+interface StoredCompactedOutcomeRecord {
+  readonly schema: typeof COMPACTED_OUTCOME_SCHEMA;
+  readonly keyDigest: string;
+  readonly terminalSequence: number;
+  readonly outcome: typeof COMPACTED_OUTCOME;
+}
+```
 
-Retained non-surface terminal events may reconstruct from complete journal
-payloads while they remain retained. Retained surface terminal events are
-redacted, so they must load an exact sidecar or fail closed. Any authoritative
-hit should repopulate the hot cache before returning.
+`loadOutcome(key)` accepts either the exact b389 record or this compact record.
+Validate the raw key for exact records and the SHA-256 digest for compact
+records. Unknown schemas, invalid sequences, mismatches, malformed JSON, and
+oversized files throw.
 
-### Step 6: Publish terminal outcomes crash-safely
+Keep `storeOutcome(key, outcome)` for exact records. Add:
 
-For both surface and non-surface terminal paths, enforce this order:
+```ts
+compactOutcome(
+  idempotencyKey: string,
+  terminalSequence: number,
+): Promise<void>;
+```
 
-1. append and fsync the terminal journal event;
-2. remember the exact outcome in the bounded hot cache immediately;
-3. record `{ idempotencyKey, sequence, outcome? }` in `dirtyTerminalOutcomes`;
-4. attempt `storeOutcome()`; and
-5. clear the dirty entry only after the matching sidecar write succeeds.
+It reads and validates the current file, then replaces that same path with the
+compact record. Missing or corrupt source state fails closed. Repeating a valid
+compact rewrite is idempotent. Add the method to `CompactableJournal` and
+`asCompactable`.
 
-If the exact sidecar write fails, surface that error to the caller, but keep the
-exact outcome dirty in memory so the next identical retry returns the real prior
-result without executing again. Recovery-generated `command.unknown` outcomes
-must be persisted through the same exact-sidecar path.
+### Step 3: Add a durable publication seam
 
-### Step 7: Block compaction until exact sidecars are durable
+Use a narrow seam that can record ordering in tests:
 
-At startup, retained terminal events should populate hot cache entries from
-exact sidecars when available and mark missing sidecars dirty. Before
-compaction covers any sequence, call `flushDirtyTerminalOutcomesThrough()` for
-that cutoff. If any covered key still lacks authoritative durable replay data,
-return early and keep the retained journal event in place.
+```ts
+export interface OutcomePublicationHandle {
+  writeFile(data: string, encoding: 'utf8'): Promise<void>;
+  sync(): Promise<void>;
+  close(): Promise<void>;
+}
 
-New compaction writes should also leave the legacy top-level snapshot
-`outcomes` field empty. Exact replay is now owned by the sidecars; Task 2 still
-adds bounded `openTransactions` without reintroducing exact outcomes as the
-authoritative durable source.
+export interface OutcomeDirectoryHandle {
+  sync(): Promise<void>;
+  close(): Promise<void>;
+}
 
-### Step 8: Validate Task 1 and update contract docs
+export interface OutcomeFileOperations {
+  createDirectory(directoryPath: string, mode: number): Promise<boolean>;
+  openTemporary(filePath: string, mode: number): Promise<OutcomePublicationHandle>;
+  openDirectory(directoryPath: string): Promise<OutcomeDirectoryHandle>;
+  rename(sourcePath: string, destinationPath: string): Promise<void>;
+  unlink(filePath: string): Promise<void>;
+}
+```
+
+The Node implementation creates `.psyche`, `runtime`, and `outcomes` one
+component at a time. `createDirectory` returns whether it created the entry.
+After creating a component, fsync its parent directory before using the child.
+
+Both exact and compact publication must perform:
+
+```text
+open temporary
+write complete JSON
+sync temporary
+close temporary
+rename temporary -> hashed destination
+open outcomes directory
+sync outcomes directory
+close outcomes directory
+resolve
+```
+
+Do not swallow an unsupported directory-open or directory-sync error. The
+runtime must fail closed rather than acknowledge weaker persistence.
+
+Recording tests assert the exact order, parent sync when `outcomes` is new,
+rejection after a post-rename directory-sync failure, same destination for
+exact and compact records, and best-effort temp cleanup without masking the
+primary error.
+
+Use the same replacement primitive in `writeSnapshot()` and `compact()`.
+Their rename is not successful until `.psyche/runtime` is fsynced.
+`compact()` updates `events`, `firstRetainedSequence`, and the index only after
+that sync.
+
+### Step 4: Preserve the completed result when metadata persistence fails
+
+Add bounded state in `ControlRuntime`:
+
+```ts
+interface DirtyOutcome {
+  readonly terminalSequence: number;
+  readonly outcome: CommandOutcome;
+}
+
+private readonly dirtyOutcomes = new Map<string, DirtyOutcome>();
+private readonly outcomeReservations = new Set<string>();
+private compactionBlockedByDurability = false;
+```
+
+Dirty entries plus reservations cannot exceed
+`AGENT_CONTROL_LIMITS.pendingCommands`.
+
+For every terminal path:
+
+```text
+append and fsync terminal event
+remember exact hot outcome
+move reservation to dirtyOutcomes
+attempt storeOutcome
+clear the matching dirty entry only after storeOutcome resolves
+request compaction
+return the exact outcome
+```
+
+Catch `storeOutcome()` failure after the terminal append. Log the durability
+failure, retain dirty state, and return the exact outcome. Do not reject the
+submission or replace its outcome with a metadata error.
+
+Update the existing runtime regression using its real module-level
+`handlers.openTerminal` and `openTerminalCommand()`:
+
+```ts
+it('preserves a completed outcome when sidecar persistence fails', async () => {
+  const root = await newJournalRoot('control-runtime');
+  const effect = vi.fn(async () => ({ paneId: '%7' }));
+  handlers.openTerminal = effect;
+  const journal = await ControlJournal.open(root, 4);
+  vi.spyOn(journal, 'storeOutcome').mockRejectedValue(new Error('disk full'));
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+  await expect(submit(runtime, openTerminalCommand('idem-dirty', 'dirty-1')))
+    .resolves.toEqual({ status: 'succeeded', value: { paneId: '%7' } });
+  await expect(submit(runtime, openTerminalCommand('idem-dirty', 'dirty-2')))
+    .resolves.toEqual({ status: 'succeeded', value: { paneId: '%7' } });
+  expect(effect).toHaveBeenCalledTimes(1);
+  expect(error.mock.calls.some(([message]) => (
+    String(message).includes('outcome durability')
+  ))).toBe(true);
+});
+```
+
+### Step 5: Gate compaction and bound exact records
+
+`flushDirtyOutcomesThrough(cutoff)` retries dirty exact records at or below the
+cutoff. Startup scans retained terminal events after recovery. A missing
+sidecar becomes dirty using `outcomeFromEvent(event)` and its sequence; lookup
+errors abort startup.
+
+Before a fresh effect, reservation checks retry dirty records whenever
+`compactionBlockedByDurability` is set. If they remain dirty, return:
+
+```ts
+rejectedOutcome(
+  'durability_unavailable',
+  'outcome durability is unavailable; refusing a new effect',
+);
+```
+
+`compactJournal()` must:
+
+1. compute the cutoff;
+2. flush dirty exact records through it;
+3. derive terminal keys from retained events after previous snapshot coverage
+   through the cutoff;
+4. call `compactOutcome(key, terminalSequence)` for each;
+5. on any failure, set `compactionBlockedByDurability`, log deferred
+   compaction, and return without writing a snapshot or journal;
+6. durably write the redacted snapshot; and
+7. compact only after all earlier steps succeed.
+
+This bounds exact disk outcomes by the fixed 2,000-event trigger plus at most
+256 dirty/reserved publications. After compaction, only the retained
+1,000-event tail remains exact.
+
+### Step 6: Add the deterministic fail-closed regression
+
+In `controlJournalCompaction.test.ts`, use `makeHandlers()` and the supported
+`pane.terminal.open` handler:
+
+```ts
+it('blocks new effects while a covered terminal outcome is not durable', async () => {
+  const root = await newRoot();
+  const journal = await ControlJournal.open(root, 4);
+  const originalStore = journal.storeOutcome.bind(journal);
+  let failDirty = false;
+  vi.spyOn(journal, 'storeOutcome').mockImplementation(async (key, outcome) => {
+    if (key === 'idem-dirty' && failDirty) {
+      throw new Error('injected outcome persistence failure');
+    }
+    await originalStore(key, outcome);
+  });
+
+  const dirtyEffect = vi.fn();
+  const handlers = makeHandlers();
+  const openTerminalEffect = vi.fn(async (
+    payload: Parameters<ControlHandlers['openTerminal']>[0],
+  ) => {
+    if (payload.title === 'idem-dirty') dirtyEffect();
+    return { paneId: `%${payload.title}` };
+  });
+  handlers.openTerminal = openTerminalEffect;
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const runtime = await ControlRuntime.create({
+    ownerEpoch: 4,
+    handlers,
+    journal,
+  });
+
+  for (let index = 0; index < 999; index += 1) {
+    await runtime.submit(openTerminalCommand(`idem-fill-${index}`));
+  }
+  expect(journal.sequence).toBe(1_998);
+
+  failDirty = true;
+  await expect(runtime.submit(openTerminalCommand('idem-dirty')))
+    .resolves.toMatchObject({ status: 'succeeded' });
+  const terminal = journal.findByIdempotencyKey('idem-dirty');
+  expect(terminal?.kind).toBe('command.succeeded');
+  expect(terminal?.sequence).toBe(2_000);
+  expect(dirtyEffect).toHaveBeenCalledTimes(1);
+
+  await runtime.submit(openTerminalCommand('idem-compaction-trigger'));
+  await vi.waitFor(() => expect(error.mock.calls.some(([message]) => (
+    String(message).includes('deferred compaction')
+  ))).toBe(true));
+
+  expect(journal.findByIdempotencyKey('idem-dirty')).toEqual(terminal);
+  expect(journal.firstSequence).toBeLessThanOrEqual(terminal!.sequence);
+  expect((runtime as unknown as {
+    compactionBlockedByDurability: boolean;
+  }).compactionBlockedByDurability).toBe(true);
+
+  const callsBeforeBlocked = openTerminalEffect.mock.calls.length;
+  await expect(runtime.submit(openTerminalCommand('idem-blocked'))).resolves.toMatchObject({
+    status: 'rejected',
+    code: 'durability_unavailable',
+  });
+  expect(openTerminalEffect).toHaveBeenCalledTimes(callsBeforeBlocked);
+  expect(dirtyEffect).toHaveBeenCalledTimes(1);
+
+  failDirty = false;
+  await expect(runtime.submit(openTerminalCommand('idem-recovery-trigger')))
+    .resolves.toMatchObject({ status: 'succeeded' });
+  await vi.waitFor(() => expect(
+    journal.firstSequence,
+  ).toBeGreaterThan(terminal!.sequence));
+
+  const reopened = await ControlJournal.open(root, 5);
+  const restartedHandlers = makeHandlers();
+  const restartedEffect = vi.fn(async (
+    payload: Parameters<ControlHandlers['openTerminal']>[0],
+  ) => {
+    if (payload.title === 'idem-dirty') dirtyEffect();
+    return { paneId: '%executed-after-restart' };
+  });
+  restartedHandlers.openTerminal = restartedEffect;
+  const restarted = await ControlRuntime.create({
+    ownerEpoch: 5,
+    handlers: restartedHandlers,
+    journal: reopened,
+  });
+
+  await expect(restarted.submit(openTerminalCommand('idem-dirty', 5))).resolves.toEqual({
+    status: 'unknown',
+    code: 'idempotency_outcome_compacted',
+    message: 'command completed previously; its exact outcome is no longer retained',
+  });
+  expect(restartedEffect).not.toHaveBeenCalled();
+  expect(dirtyEffect).toHaveBeenCalledTimes(1);
+}, 120_000);
+```
+
+Only one command crosses the compaction threshold. No filler loop continues
+after durability blocks compaction.
+
+### Step 7: Redact snapshots
+
+Replace the persisted client `ControlSnapshot` with:
+
+```ts
+export interface DurableControlSnapshot {
+  readonly ownerEpoch: number;
+  readonly sequence: number;
+}
+
+export interface JournalSnapshotFile {
+  readonly snapshot: DurableControlSnapshot;
+  readonly coveredSequence: number;
+  readonly receiptRecords: DurableReceiptRecord[];
+  readonly openTransactions: DurableOpenTransaction[];
+}
+```
+
+`loadSnapshot()` tolerates a legacy `outcomes` field but does not restore it;
+the next snapshot omits it. The existing sidecar is authoritative.
+
+Add sentinels for command value, message, typed value, script, and raw receipt
+resource. After compaction, none may appear in `snapshot.json`. Raw
+idempotency keys are allowed only in bounded `openTransactions`.
+
+### Step 8: Validate Task 1
 
 ```bash
-pnpm vitest --run __tests__/controlJournal.test.ts __tests__/controlRuntime.test.ts __tests__/controlJournalCompaction.test.ts
+pnpm vitest --run \
+  __tests__/controlJournal.test.ts \
+  __tests__/controlRuntime.test.ts \
+  __tests__/controlJournalCompaction.test.ts
 pnpm run typecheck:tests
 ```
 
-Update `docs/CONTROL-PLANE.md` and `docs/AGENT-SURFACE-CONTROL.md` to state:
-
-- exact terminal outcomes are durable in bounded-size sidecars and hot only in
-  the 1,000-entry cache;
-- sidecars use hash-addressed filenames, `0700` directories, and `0600` files;
-- a sidecar write failure leaves immediate dirty exact replay available and
-  blocks later compaction from covering that terminal key;
-- startup persists recovery-generated `command.unknown` exact outcomes; and
-- surface retries fail closed when the retained journal tail exists but the
-  exact sidecar is missing.
-
-### Step 9: Commit durable exact-outcome idempotency
-
-```bash
-git add src/control/journal.ts src/control/runtime.ts \
-  __tests__/controlJournal.test.ts __tests__/controlRuntime.test.ts \
-  __tests__/controlJournalCompaction.test.ts \
-  docs/CONTROL-PLANE.md docs/AGENT-SURFACE-CONTROL.md
-git commit -m "fix: preserve durable command idempotency" \
-  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
-```
+Update `docs/CONTROL-PLANE.md` and `docs/AGENT-SURFACE-CONTROL.md` with the
+single-path upgrade contract, full fsync sequence, bounded exact outcomes,
+compacted `unknown` result, and fail-closed compaction behavior.
 
 ## Task 2: Preserve unresolved commands through compaction
 
@@ -217,12 +461,6 @@ const runtime = new ControlRuntime(opts.ownerEpoch, opts.handlers, opts.journal,
 Reduce the prior snapshot and retained tail by `(commandId, idempotencyKey)`.
 Terminal tail events remove open records. Recovery rechecks the current tail
 before appending, so repeated calls add at most one `command.unknown`.
-
-Task 1 now leaves the legacy top-level snapshot `outcomes` field empty and uses
-exact sidecars for durable replay; do not reintroduce exact outcomes as the
-authoritative durable source or copy command envelopes here. Recovery-generated
-terminals must continue through the same exact-sidecar path before any later
-compaction may cover them.
 
 Tests cover a compacted request recovering once, terminal tail precedence,
 same command ID with different keys, invalid records, and durable sidecar
@@ -288,7 +526,6 @@ pnpm --filter @opencoven/psyche-vim-core typecheck \
   && pnpm run typecheck:tests
 git diff --check origin/main...HEAD
 git status --short
-git log --oneline origin/main..HEAD
 ```
 
-Do not push or merge from this plan. Publish only after human review.
+Publishing, merging, and PR-state changes are outside this plan.
