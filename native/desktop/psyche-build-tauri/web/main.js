@@ -3681,6 +3681,17 @@
         return;
       }
       var pointerId = event.pointerId;
+      var moved = false;
+      // The divider survives the whole gesture now that the drag no longer
+      // rebuilds the tree, so it can own the pointer instead of relying on the
+      // window listeners to outlive its own element.
+      if (typeof divider.setPointerCapture === "function") {
+        try { divider.setPointerCapture(pointerId); } catch (error) { void error; }
+      }
+      function releasePointer() {
+        if (typeof divider.releasePointerCapture !== "function") return;
+        try { divider.releasePointerCapture(pointerId); } catch (error) { void error; }
+      }
       function onPointerMove(moveEvent) {
         if (moveEvent.pointerId !== pointerId) return;
         if (activePaneLayout() !== dragLayout) {
@@ -3691,7 +3702,10 @@
         if (!Number.isFinite(position)) return;
         var nextRatio = (position - origin) / extent;
         if (!Number.isFinite(nextRatio)) return;
-        updateActiveSplit(node.id, nextRatio, dragLayout);
+        // Live: reflow the existing branches in place. Rebuilding the tree here
+        // would detach every terminal once per frame, which drops each pane to
+        // the hidden PTY cadence for as long as the drag lasts.
+        moved = updateActiveSplit(node.id, nextRatio, dragLayout, false, true) || moved;
       }
       function stopPointerResize(endEvent) {
         if (endEvent && endEvent.pointerId !== undefined && endEvent.pointerId !== pointerId) return;
@@ -3699,6 +3713,11 @@
         window.removeEventListener("pointerup", stopPointerResize);
         window.removeEventListener("pointercancel", stopPointerResize);
         window.removeEventListener("blur", stopPointerResize);
+        releasePointer();
+        // One authoritative render closes the gesture: it rebuilds the tree the
+        // live path only restyled, and persists the ratio nothing saved yet.
+        if (moved) schedulePaneTreeLayout(null);
+        moved = false;
       }
       window.addEventListener("pointermove", onPointerMove);
       window.addEventListener("pointerup", stopPointerResize);
@@ -3735,7 +3754,7 @@
     return false;
   }
 
-  function updateActiveSplit(splitId, ratio, expectedLayout, restoreFocus) {
+  function updateActiveSplit(splitId, ratio, expectedLayout, restoreFocus, live) {
     if (!Number.isFinite(ratio)) return false;
     var layout = activePaneLayout();
     if (!layout || !layout.root || (expectedLayout && layout !== expectedLayout)) return false;
@@ -3748,7 +3767,44 @@
     if (nextRoot === current) return false;
     if (spanning) layout.spanRoot = nextRoot;
     else layout.root = nextRoot;
+    // A live update restyles the branches already on screen. It falls through to
+    // a full render whenever the mounted tree no longer matches the model.
+    if (live && applyProjectedSplitRatios(layout)) return true;
     schedulePaneTreeLayout(restoreFocus ? splitId : null);
+    return true;
+  }
+
+  // The branch elements each mounted split flexes, keyed by split id. Held so a
+  // divider drag can restyle the tree it already built instead of building a new
+  // one — see applyProjectedSplitRatios.
+  var mountedSplitBranches = new Map();
+
+  /**
+   * Push the projected (minimum-clamped) ratios of every mounted split onto the
+   * elements renderPaneNode already created. Returns false when the mounted tree
+   * has drifted from the model, which is the caller's cue to render properly.
+   */
+  function applyProjectedSplitRatios(layout) {
+    if (!terminalHost || !mountedSplitBranches.size) return false;
+    var root = effectivePaneRoot(layout);
+    if (!root) return false;
+    var projected = PsychePanes.layoutRects(root, measuredTerminalHost(), PANE_MINIMUMS);
+    if (!projected.splits.length || projected.splits.length !== mountedSplitBranches.size) {
+      return false;
+    }
+    for (var index = 0; index < projected.splits.length; index++) {
+      if (!mountedSplitBranches.has(projected.splits[index].splitId)) return false;
+    }
+    projected.splits.forEach(function (split) {
+      var branches = mountedSplitBranches.get(split.splitId);
+      branches.first.style.flexGrow = String(split.ratio);
+      branches.second.style.flexGrow = String(1 - split.ratio);
+      branches.divider.setAttribute("aria-valuenow", String(Math.round(split.ratio * 100)));
+    });
+    // The containers changed size, so the terminals still have to re-measure —
+    // but against a DOM that stayed mounted, so fit() sees a real box and the
+    // pane keeps the visible PTY cadence throughout.
+    scheduleTerminalPaneFits();
     return true;
   }
 
@@ -4190,9 +4246,11 @@
     second.style.flexGrow = String(1 - ratio);
     second.appendChild(renderPaneNode(node.second, splitRatios));
     syncPaneBranchStatusChrome(second);
+    var divider = createPaneDivider(node, ratio);
     split.appendChild(first);
-    split.appendChild(createPaneDivider(node, ratio));
+    split.appendChild(divider);
     split.appendChild(second);
+    mountedSplitBranches.set(node.id, { first: first, second: second, divider: divider });
     return split;
   }
 
@@ -4216,6 +4274,9 @@
       stageBrowserSurface();
       stageGitSurface();
       terminalHost.replaceChildren();
+      // Everything renderPaneNode registered is about to be detached, so the
+      // live-resize registry is only ever as old as this render.
+      mountedSplitBranches.clear();
       var layout = activePaneLayout();
       if (!layout || !layout.root) {
         renderTerminalEmptyState();
