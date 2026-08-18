@@ -14,6 +14,16 @@
     },
     "type": "hello"
   },
+  "hello_invite": {
+    "payload": {
+      "clientId": "ios-device-1",
+      "clientName": "Psyche for iPhone",
+      "invite": "psyche-invite-abc123",
+      "protocolVersion": 3,
+      "token": null
+    },
+    "type": "hello"
+  },
   "hello_noToken": {
     "payload": {
       "clientId": "ios-device-1",

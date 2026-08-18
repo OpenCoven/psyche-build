@@ -53,6 +53,75 @@ class NoopPaneStreamHub extends PaneStreamHub {
 const noopHubFactory = (sessionName: string) => new NoopPaneStreamHub(sessionName);
 
 describe("BridgeDaemon", () => {
+  it("exchanges a mobile invite for a durable device token during hello", async () => {
+    const tokenStore = new FakeTokenStore() as any;
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv", serverName: "test-host", projectName: "psyche",
+      paneProvider: () => [], projectProvider: () => [], sessionName: "test-session",
+      hubFactory: noopHubFactory, ...noopRituals, tokenStore,
+    });
+    const { port } = await daemon.start();
+    const inviteUrl = new URL(daemon.openMobileInvite());
+    const invite = inviteUrl.searchParams.get("psyche_invite");
+    expect(inviteUrl.searchParams.get("endpoint")).toBe(`wss://test-host:${port}`);
+    expect(invite).toBeTruthy();
+
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const accepted = await new Promise<any>((resolve, reject) => {
+      client.on("open", () => client.send(JSON.stringify({
+        type: "hello",
+        payload: { clientId: "ios-1", clientName: "iPhone", protocolVersion: PROTOCOL_VERSION, token: null, invite },
+      })));
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        if (message.type === "authAccepted") resolve(message);
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(accepted).toEqual({ type: "authAccepted", payload: { token: "test-token-0" } });
+    expect(await tokenStore.validate(accepted.payload.token)).toMatchObject({ clientId: "ios-1", clientName: "iPhone" });
+    client.close();
+    await daemon.stop();
+  });
+
+  it("does not authenticate a consumed mobile invite", async () => {
+    const daemon = new BridgeDaemon({
+      paneProvider: () => [], projectProvider: () => [], sessionName: "test-session",
+      hubFactory: noopHubFactory, ...noopRituals, tokenStore: new FakeTokenStore() as any,
+    });
+    const { port } = await daemon.start();
+    const invite = new URL(daemon.openMobileInvite()).searchParams.get("psyche_invite");
+    const exchange = async (inviteToken = invite) => await new Promise<any>((resolve, reject) => {
+      const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+      client.on("open", () => client.send(JSON.stringify({
+        type: "hello",
+        payload: { clientId: "ios-1", clientName: "iPhone", protocolVersion: PROTOCOL_VERSION, token: null, invite: inviteToken },
+      })));
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        if (message.type === "authAccepted" || message.payload?.code === "invalid_invite") {
+          client.close();
+          resolve(message);
+        }
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect((await exchange()).type).toBe("authAccepted");
+    expect(await exchange()).toEqual({
+      type: "error",
+      payload: { code: "invalid_invite", message: "invite is invalid, expired, or already used" },
+    });
+    expect(await exchange("not-a-psyche-invite")).toEqual({
+      type: "error",
+      payload: { code: "invalid_invite", message: "invite is invalid, expired, or already used" },
+    });
+    await daemon.stop();
+  });
+
   it("passes the active TLS fingerprint to Bonjour publication", async () => {
     const bonjour = {
       publish: vi.fn(),

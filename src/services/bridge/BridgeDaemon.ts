@@ -24,6 +24,7 @@ import {
 import { PaneStreamHub } from "./PaneStreamHub.js";
 import { TokenStore, DeviceRecord } from "./TokenStore.js";
 import { PairingFlow } from "./PairingFlow.js";
+import { MobileInviteStore } from "./MobileInviteStore.js";
 import { BridgeBonjour } from "./BridgeBonjour.js";
 import { isTmuxPaneId } from "../../utils/tmuxTarget.js";
 import type { PaneSpawnResult } from "../../daemon/protocol.js";
@@ -75,6 +76,7 @@ export interface BridgeDaemonOptions {
   launchRitual: (projectId: string, ritualId: string, params: Record<string, string>) => Promise<void>;
   tokenStore?: TokenStore;       // for tests; production creates a fresh one
   pairingFlow?: PairingFlow;     // for tests; same
+  mobileInviteStore?: MobileInviteStore; // for tests; ephemeral only
   bonjourFactory?: () => Pick<BridgeBonjour, "publish" | "stop">;
 }
 
@@ -88,6 +90,8 @@ export class BridgeDaemon {
   private paneSubscribers = new Map<string, Set<Session>>();
   private tokens: TokenStore;
   private pairing: PairingFlow;
+  private mobileInvites: MobileInviteStore;
+  private mobileInviteEndpoint?: string;
   private ritualLauncher: ((projectId: string, ritualId: string, params: Record<string, string>) => Promise<void>) | null = null;
   private readonly mobileGateway?: MobileControlGateway;
   private workspaceSequence = 0;
@@ -103,6 +107,7 @@ export class BridgeDaemon {
     this.serverName = opts.serverName ?? hostname();
     this.tokens = opts.tokenStore ?? new TokenStore();
     this.pairing = opts.pairingFlow ?? new PairingFlow();
+    this.mobileInvites = opts.mobileInviteStore ?? new MobileInviteStore();
     this.mobileGateway = opts.workspaceProvider
       ? new MobileControlGateway({
         workspaceSnapshot: () => this.readWorkspaceSnapshot(),
@@ -177,6 +182,7 @@ export class BridgeDaemon {
       },
     });
     const { port } = await this.listener.start();
+    this.mobileInviteEndpoint = `wss://${this.serverName}:${port}`;
     try {
       this.bonjour = this.opts.bonjourFactory?.() ?? new BridgeBonjour();
       this.bonjour.publish({
@@ -205,6 +211,18 @@ export class BridgeDaemon {
 
   async openPairWindow(): Promise<{ code: string; expiresAt: Date }> {
     return this.pairing.open();
+  }
+
+  /** Create a one-time Psyche invite for the active bridge listener. */
+  openMobileInvite(): string {
+    if (!this.mobileInviteEndpoint) {
+      throw new Error("bridge must be started before opening a mobile invite");
+    }
+    const invite = this.mobileInvites.issue({ endpoint: this.mobileInviteEndpoint });
+    const url = new URL("psyche://invite");
+    url.searchParams.set("endpoint", this.mobileInviteEndpoint);
+    url.searchParams.set("psyche_invite", invite.token);
+    return url.toString();
   }
 
   async listDevices(): Promise<DeviceRecord[]> {
@@ -282,6 +300,22 @@ export class BridgeDaemon {
         s.protocolVersion = m.payload.protocolVersion;
         if (m.payload.protocolVersion === PROTOCOL_VERSION) {
           this.sendWelcome(s, PROTOCOL_VERSION);
+        }
+        if (m.payload.token !== null && m.payload.token !== undefined && m.payload.invite !== undefined) {
+          s.send({ type: "error", payload: { code: "invalid_invite", message: "token and invite cannot be used together" } });
+          return;
+        }
+        if (m.payload.invite !== undefined) {
+          const redeemed = this.mobileInvites.redeem(m.payload.invite);
+          if (!redeemed) {
+            s.send({ type: "error", payload: { code: "invalid_invite", message: "invite is invalid, expired, or already used" } });
+            return;
+          }
+          const rec = await this.tokens.issue(m.payload.clientId, m.payload.clientName);
+          s.state = "authenticated";
+          s.token = rec.token;
+          s.send({ type: "authAccepted", payload: { token: rec.token } });
+          return;
         }
         if (m.payload.token) {
           const rec = await this.tokens.validate(m.payload.token);

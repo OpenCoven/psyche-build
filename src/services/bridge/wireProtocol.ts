@@ -92,6 +92,7 @@ export interface HelloPayload {
   clientName: string;
   protocolVersion: SupportedProtocolVersion;
   token: string | null;
+  invite?: string;
 }
 
 export interface SendInputPayload {
@@ -181,6 +182,7 @@ export type LegacyServerMessage =
   | { type: "attention"; payload: AttentionEvent }
   | { type: "pairChallenge"; payload: PairChallengePayload }
   | { type: "pairAccepted"; payload: { token: string } }
+  | { type: "authAccepted"; payload: { token: string } }
   | { type: "pairRejected"; payload: { reason: string } }
   | { type: "pong"; payload: { token: string } }
   | { type: "error"; payload: BridgeError };
@@ -443,6 +445,7 @@ export const SERVER_MESSAGE_TYPES = [
   "attention",
   "pairChallenge",
   "pairAccepted",
+  "authAccepted",
   "pairRejected",
   "pong",
   "error",

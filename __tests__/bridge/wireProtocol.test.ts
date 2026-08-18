@@ -29,6 +29,22 @@ describe("wireProtocol", () => {
     if (msg.type === "hello") expect(msg.payload.token).toBe("tk");
   });
 
+  it("decodes a hello with a one-time mobile invite", () => {
+    const msg = decodeClientMessage(JSON.stringify({
+      type: "hello",
+      payload: { clientId: "ios-1", clientName: "iPad", protocolVersion: 3, token: null, invite: "invite-token" },
+    }));
+    expect(msg.type).toBe("hello");
+    if (msg.type === "hello") expect(msg.payload.invite).toBe("invite-token");
+  });
+
+  it("encodes the durable token returned by an invite exchange", () => {
+    expect(JSON.parse(encodeServerMessage({
+      type: "authAccepted",
+      payload: { token: "durable-token" },
+    }))).toEqual({ type: "authAccepted", payload: { token: "durable-token" } });
+  });
+
   it("decodes a subscribePane with sinceSeq", () => {
     const msg = decodeClientMessage(JSON.stringify({
       type: "subscribePane",

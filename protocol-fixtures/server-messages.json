@@ -17,6 +17,12 @@
     },
     "type": "attention"
   },
+  "authAccepted": {
+    "payload": {
+      "token": "tok_abc123"
+    },
+    "type": "authAccepted"
+  },
   "error": {
     "payload": {
       "code": "pane_not_found",

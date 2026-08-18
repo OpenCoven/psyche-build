@@ -73,6 +73,7 @@ export const CLIENT_FIXTURES = {
       clientName: 'Psyche for iPhone',
       protocolVersion: 2,
       token: 'tok_abc123',
+      invite: undefined,
     },
   },
   hello_noToken: {
@@ -82,6 +83,17 @@ export const CLIENT_FIXTURES = {
       clientName: 'Psyche for iPhone',
       protocolVersion: 2,
       token: null,
+      invite: undefined,
+    },
+  },
+  hello_invite: {
+    type: 'hello',
+    payload: {
+      clientId: 'ios-device-1',
+      clientName: 'Psyche for iPhone',
+      protocolVersion: 3,
+      token: null,
+      invite: 'psyche-invite-abc123',
     },
   },
   listPanes: { type: 'listPanes', payload: {} },
@@ -187,6 +199,7 @@ export const SERVER_FIXTURES = {
   },
   pairChallenge: { type: 'pairChallenge', payload: { expiresAt: '2026-08-03T02:22:18Z', codeLength: 6 } },
   pairAccepted: { type: 'pairAccepted', payload: { token: 'tok_abc123' } },
+  authAccepted: { type: 'authAccepted', payload: { token: 'tok_abc123' } },
   pairRejected: { type: 'pairRejected', payload: { reason: 'code expired' } },
   pong: { type: 'pong', payload: { token: 'tok_abc123' } },
   error: {
