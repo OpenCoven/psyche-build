@@ -454,6 +454,7 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   dependencies: Record<string, unknown>,
 ) {
   const completeDependencies = {
+    browserCreationFlights: new Map(),
     invalidateBrowserAutomation: async () => true,
     removeBrowserControlResource: async () => true,
     publishBrowserControlResource: async () => true,
@@ -1161,6 +1162,320 @@ describe('project browser URL routing', () => {
     expect(tabCreates).toBe(1);
     expect(browser.tabs).toHaveLength(1);
     expect(nativeCalls).toHaveLength(1);
+  });
+
+  it('serializes parallel URL clicks while creating a missing pane and tab', async () => {
+    const lifecycle = browserLifecycleHarness();
+    const browser: { activeTabId: string | null; tabs: BrowserNavigationTab[] } = {
+      activeTabId: null,
+      tabs: [],
+    };
+    const placeholder: BrowserNavigationTab = {
+      id: 'unused',
+      url: 'about:blank',
+      created: false,
+      loading: false,
+      title: 'New tab',
+      history: [],
+      historyIndex: -1,
+    };
+    const panes: BrowserPaneThreadFixture[] = [];
+    let paneCreationStarted!: () => void;
+    let releasePaneCreation!: () => void;
+    const paneCreationEntered = new Promise<void>((resolve) => {
+      paneCreationStarted = resolve;
+    });
+    const paneCreationGate = new Promise<void>((resolve) => {
+      releasePaneCreation = resolve;
+    });
+    let firstNavigationStarted!: () => void;
+    let releaseFirstNavigation!: () => void;
+    const firstNavigationEntered = new Promise<void>((resolve) => {
+      firstNavigationStarted = resolve;
+    });
+    const firstNavigationGate = new Promise<void>((resolve) => {
+      releaseFirstNavigation = resolve;
+    });
+    const nativeUrls: string[] = [];
+    let activeNavigations = 0;
+    let maxActiveNavigations = 0;
+    let tabCreates = 0;
+    const dependencies = browserNavigationDependencies(
+      projectB,
+      browser as { activeTabId: string; tabs: BrowserNavigationTab[] },
+      placeholder,
+      async (command, args) => {
+        if (command !== 'browser_navigate') return;
+        nativeUrls.push(String(args.url));
+        activeNavigations += 1;
+        maxActiveNavigations = Math.max(maxActiveNavigations, activeNavigations);
+        if (args.url === 'https://first.example') {
+          firstNavigationStarted();
+          await firstNavigationGate;
+        }
+        activeNavigations -= 1;
+      },
+      lifecycle,
+    );
+    Object.assign(dependencies, {
+      browserCreationFlights: new Map(),
+      state: { activeProjectId: projectB.id },
+      findProject: () => projectB,
+      activeProject: () => projectB,
+      activeWorkspaceRoot: () => worktreePath,
+      ensureBrowserModel: () => browser,
+      findBrowserPane: () => panes[0] || null,
+      findThread: (id: string) => panes.find((pane) => pane.id === id) || null,
+      focusBrowserPaneForNavigation: async () => true,
+      createBrowserPane: async () => {
+        paneCreationStarted();
+        await paneCreationGate;
+        const pane = {
+          id: `web-${panes.length + 1}`,
+          kind: 'web',
+          projectId: projectB.id,
+          worktreePath,
+        };
+        panes.push(pane);
+        return pane;
+      },
+      createBrowserTab: () => {
+        tabCreates += 1;
+        const tab: BrowserNavigationTab = {
+          id: `tab-${tabCreates}`,
+          url: 'about:blank',
+          created: false,
+          loading: false,
+          title: 'New tab',
+          history: [],
+          historyIndex: -1,
+        };
+        browser.tabs.push(tab);
+        browser.activeTabId = tab.id;
+        return tab;
+      },
+    });
+    const navigateBrowserForContext = compileFunction<
+      (url: string, context: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowserForContext'), dependencies);
+    const context = {
+      project: projectB,
+      projectId: projectB.id,
+      worktreePath,
+    };
+
+    const first = navigateBrowserForContext('https://first.example', context);
+    await paneCreationEntered;
+    const second = navigateBrowserForContext('https://second.example', context);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(panes).toHaveLength(0);
+    releasePaneCreation();
+    await firstNavigationEntered;
+    await Promise.resolve();
+    expect(nativeUrls).toEqual(['https://first.example']);
+    releaseFirstNavigation();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+    expect(panes).toHaveLength(1);
+    expect(browser.tabs).toHaveLength(1);
+    expect(tabCreates).toBe(1);
+    expect(maxActiveNavigations).toBe(1);
+    expect(nativeUrls).toEqual([
+      'https://first.example',
+      'https://second.example',
+    ]);
+  });
+
+  it('serializes parallel URL clicks while creating a tab in an empty pane', async () => {
+    const lifecycle = browserLifecycleHarness();
+    const browser: { activeTabId: string | null; tabs: BrowserNavigationTab[] } = {
+      activeTabId: null,
+      tabs: [],
+    };
+    const placeholder: BrowserNavigationTab = {
+      id: 'unused',
+      url: 'about:blank',
+      created: false,
+      loading: false,
+      title: 'New tab',
+      history: [],
+      historyIndex: -1,
+    };
+    const pane = {
+      id: 'web-b',
+      kind: 'web',
+      projectId: projectB.id,
+      worktreePath,
+    };
+    let focusStarted!: () => void;
+    let releaseFocus!: () => void;
+    const focusEntered = new Promise<void>((resolve) => {
+      focusStarted = resolve;
+    });
+    const focusGate = new Promise<void>((resolve) => {
+      releaseFocus = resolve;
+    });
+    let firstNavigationStarted!: () => void;
+    let releaseFirstNavigation!: () => void;
+    const firstNavigationEntered = new Promise<void>((resolve) => {
+      firstNavigationStarted = resolve;
+    });
+    const firstNavigationGate = new Promise<void>((resolve) => {
+      releaseFirstNavigation = resolve;
+    });
+    let focusCalls = 0;
+    let tabCreates = 0;
+    const nativeUrls: string[] = [];
+    let activeNavigations = 0;
+    let maxActiveNavigations = 0;
+    const dependencies = browserNavigationDependencies(
+      projectB,
+      browser as { activeTabId: string; tabs: BrowserNavigationTab[] },
+      placeholder,
+      async (command, args) => {
+        if (command !== 'browser_navigate') return;
+        nativeUrls.push(String(args.url));
+        activeNavigations += 1;
+        maxActiveNavigations = Math.max(maxActiveNavigations, activeNavigations);
+        if (args.url === 'https://first.example') {
+          firstNavigationStarted();
+          await firstNavigationGate;
+        }
+        activeNavigations -= 1;
+      },
+      lifecycle,
+    );
+    Object.assign(dependencies, {
+      browserCreationFlights: new Map(),
+      state: { activeProjectId: projectB.id },
+      findProject: () => projectB,
+      activeProject: () => projectB,
+      activeWorkspaceRoot: () => worktreePath,
+      ensureBrowserModel: () => browser,
+      findBrowserPane: () => pane,
+      findThread: () => pane,
+      focusBrowserPaneForNavigation: async () => {
+        focusCalls += 1;
+        focusStarted();
+        await focusGate;
+        return true;
+      },
+      createBrowserPane: async () => {
+        throw new Error('existing pane should be reused');
+      },
+      createBrowserTab: () => {
+        tabCreates += 1;
+        const tab: BrowserNavigationTab = {
+          id: `tab-${tabCreates}`,
+          url: 'about:blank',
+          created: false,
+          loading: false,
+          title: 'New tab',
+          history: [],
+          historyIndex: -1,
+        };
+        browser.tabs.push(tab);
+        browser.activeTabId = tab.id;
+        return tab;
+      },
+    });
+    const navigateBrowserForContext = compileFunction<
+      (url: string, context: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowserForContext'), dependencies);
+    const context = {
+      project: projectB,
+      projectId: projectB.id,
+      worktreePath,
+    };
+
+    const first = navigateBrowserForContext('https://first.example', context);
+    await focusEntered;
+    const second = navigateBrowserForContext('https://second.example', context);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(focusCalls).toBe(1);
+    releaseFocus();
+    await firstNavigationEntered;
+    await Promise.resolve();
+    expect(nativeUrls).toEqual(['https://first.example']);
+    releaseFirstNavigation();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+    expect(browser.tabs).toHaveLength(1);
+    expect(tabCreates).toBe(1);
+    expect(maxActiveNavigations).toBe(1);
+    expect(nativeUrls).toEqual([
+      'https://first.example',
+      'https://second.example',
+    ]);
+  });
+
+  it('keeps a newly created browser pane fullscreen when opened from fullscreen', async () => {
+    const project = { ...projectB };
+    let layout: {
+      root: Record<string, unknown>;
+      focusedLeafId: string;
+      maximizedLeafId?: string | null;
+    } = {
+      root: { terminal: true },
+      focusedLeafId: 'terminal-leaf',
+      maximizedLeafId: 'terminal-leaf',
+    };
+    let browserPane: BrowserPaneThreadFixture | null = null;
+    let focusOptions: Record<string, unknown> | undefined;
+    const createBrowserPane = compileFunction<
+      (
+        exactProject: typeof project,
+        options: { worktreePath: string },
+      ) => Promise<BrowserPaneThreadFixture | null>
+    >(functionSource(mainJs, 'createBrowserPane'), {
+      activeProject: () => project,
+      activeWorkspaceRoot: () => worktreePath,
+      showTerminalView: async () => true,
+      paneLayoutFor: () => layout,
+      findBrowserPane: () => browserPane,
+      browserPaneIsClosing: () => false,
+      requestAnimationFrame: (callback: () => void) => callback(),
+      makeThreadId: () => 'web-b',
+      preparePanePlacement: () => ({
+        key: 'layout',
+        value: {
+          root: { terminal: true, browser: true },
+          focusedLeafId: 'browser-leaf',
+        },
+      }),
+      commitPanePlacement: (placement: { value: typeof layout }) => {
+        layout = placement.value;
+      },
+      state: { threads: [] as BrowserPaneThreadFixture[] },
+      noteStatusActivity: () => {},
+      mountBrowserPane: (pane: BrowserPaneThreadFixture) => {
+        browserPane = pane;
+      },
+      focusThread: async (_id: string, options: Record<string, unknown>) => {
+        focusOptions = options;
+        layout.focusedLeafId = 'browser-leaf';
+        if (options.preserveFullscreenLeafId === 'terminal-leaf') {
+          layout.maximizedLeafId = 'browser-leaf';
+        }
+        return true;
+      },
+      refreshSidebar: () => {},
+      refreshTabs: () => {},
+      setStatus: () => {},
+    });
+
+    const createdPane = await createBrowserPane(project, { worktreePath });
+    expect(createdPane).toBe(browserPane);
+    expect(focusOptions).toEqual({
+      focusTerminal: false,
+      preserveFullscreenLeafId: 'terminal-leaf',
+    });
+    expect(layout.focusedLeafId).toBe('browser-leaf');
+    expect(layout.maximizedLeafId).toBe('browser-leaf');
   });
 
   it.each(['', '   ', 'not a URL'])(

@@ -157,6 +157,7 @@
   var projectAppearancePopoverRestoreKey = "";
   var browserTabLifecycleStates = new WeakMap();
   var browserPaneLifecycleStates = new WeakMap();
+  var browserCreationFlights = new Map();
   var browserControlProviders = new Map();
   var browserAutomationWaiters = new Map();
   var browserAutomationSnapshotRefs = new Map();
@@ -2373,6 +2374,8 @@
       ? options.isCurrent
       : function () { return true; };
     if (!worktreePath || !isCurrent()) return null;
+    var sourceLayout = paneLayoutFor(project.id, worktreePath);
+    var sourceMaximizedLeafId = sourceLayout && sourceLayout.maximizedLeafId;
     if (!(await showTerminalView())) return null;
     if (!isCurrent()) return null;
     var existing = findBrowserPane(project.id, worktreePath);
@@ -2383,6 +2386,12 @@
     }
     await new Promise(function (resolve) { requestAnimationFrame(resolve); });
     if (!isCurrent()) return null;
+    existing = findBrowserPane(project.id, worktreePath);
+    if (existing) {
+      if (browserPaneIsClosing(existing)) return null;
+      await focusThread(existing.id);
+      return !isCurrent() || browserPaneIsClosing(existing) ? null : existing;
+    }
     var id = makeThreadId();
     var placement = preparePanePlacement(id, project.id, worktreePath);
     if (!placement) {
@@ -2411,8 +2420,13 @@
     state.threads.push(pane);
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountBrowserPane(pane);
-    await focusThread(id);
-    if (!isCurrent() || browserPaneIsClosing(pane)) return null;
+    var focusOptions = { focusTerminal: false };
+    if (sourceMaximizedLeafId) {
+      focusOptions.preserveFullscreenLeafId = sourceMaximizedLeafId;
+    }
+    await focusThread(id, focusOptions);
+    if (!isCurrent() || browserPaneIsClosing(pane) ||
+        findBrowserPane(project.id, worktreePath) !== pane) return null;
     refreshSidebar();
     refreshTabs();
     return pane;
@@ -11118,13 +11132,13 @@
       return true;
     };
     if (!scopeIsCurrent()) return false;
-    var browser = ensureBrowserModel(project, worktreePath);
     var hasRequestedTab = context.tabId != null;
+    var browser = ensureBrowserModel(project, worktreePath);
+    var browsersByWorktree = project.browsersByWorktree || null;
     var tab = hasRequestedTab
       ? browser.tabs.find(function (t) { return t.id === context.tabId; })
       : browser.tabs.find(function (t) { return t.id === browser.activeTabId; }) ||
         browser.tabs[0] || null;
-    var browsersByWorktree = project.browsersByWorktree || null;
     if ((hasRequestedTab && !tab) || browserTabIsClosing(tab)) return false;
     var pane = findBrowserPane(projectId, worktreePath);
     var requestIsCurrent = function () {
@@ -11140,27 +11154,112 @@
           ))) return false;
       if (!pane) return findBrowserPane(projectId, worktreePath) === null;
       return pane.projectId === projectId && pane.worktreePath === worktreePath &&
-        findThread(pane.id) === pane && findBrowserPane(projectId, worktreePath) === pane &&
+        findThread(pane.id) === pane &&
+        findBrowserPane(projectId, worktreePath) === pane &&
         !browserPaneIsClosing(pane);
     };
     if (!requestIsCurrent()) return false;
-    var paneAlreadyFocused = false;
-    if (!pane) {
-      pane = await createBrowserPane(project, {
-        worktreePath: worktreePath,
-        isCurrent: scopeIsCurrent,
-      });
-      paneAlreadyFocused = true;
-      if (!pane || !requestIsCurrent()) return false;
-    }
-    if (!(await focusBrowserPaneForNavigation(pane, {
-      alreadyFocused: paneAlreadyFocused,
-      isCurrent: requestIsCurrent,
-    }))) return false;
-    if (!tab) {
-      if (!requestIsCurrent()) return false;
-      tab = createBrowserTab(project, "about:blank", true, worktreePath);
-      if (!tab || !requestIsCurrent()) return false;
+    if (pane && tab) {
+      if (!(await focusBrowserPaneForNavigation(pane, {
+        isCurrent: requestIsCurrent,
+      }))) return false;
+    } else {
+      var creationKey = projectId + "\0" + worktreePath;
+      var previousCreation = browserCreationFlights.get(creationKey) || Promise.resolve();
+      var resolveTarget = async function () {
+        if (!scopeIsCurrent()) return null;
+        var targetBrowser = ensureBrowserModel(project, worktreePath);
+        var targetBrowsersByWorktree = project.browsersByWorktree || null;
+        if (!targetBrowser || (targetBrowsersByWorktree &&
+            targetBrowsersByWorktree[worktreePath] !== targetBrowser)) return null;
+        var targetPane = findBrowserPane(projectId, worktreePath);
+        var resourcesAreCurrent = function () {
+          if (!scopeIsCurrent() ||
+              (targetBrowsersByWorktree
+                ? (project.browsersByWorktree !== targetBrowsersByWorktree ||
+                  targetBrowsersByWorktree[worktreePath] !== targetBrowser)
+                : ensureBrowserModel(project, worktreePath) !== targetBrowser)) return false;
+          if (!targetPane) return findBrowserPane(projectId, worktreePath) === null;
+          return targetPane.projectId === projectId &&
+            targetPane.worktreePath === worktreePath &&
+            findThread(targetPane.id) === targetPane &&
+            findBrowserPane(projectId, worktreePath) === targetPane &&
+            !browserPaneIsClosing(targetPane);
+        };
+        if (!resourcesAreCurrent()) return null;
+        var paneAlreadyFocused = false;
+        if (!targetPane) {
+          var createdPane = await createBrowserPane(project, {
+            worktreePath: worktreePath,
+            isCurrent: scopeIsCurrent,
+          });
+          if (!createdPane || !scopeIsCurrent()) return null;
+          targetBrowser = ensureBrowserModel(project, worktreePath);
+          targetBrowsersByWorktree = project.browsersByWorktree || null;
+          targetPane = findBrowserPane(projectId, worktreePath);
+          paneAlreadyFocused = targetPane === createdPane;
+          if (!targetBrowser || !targetPane || !resourcesAreCurrent()) return null;
+        }
+        if (!(await focusBrowserPaneForNavigation(targetPane, {
+          alreadyFocused: paneAlreadyFocused,
+          isCurrent: resourcesAreCurrent,
+        }))) return null;
+        if (!scopeIsCurrent()) return null;
+        targetBrowser = ensureBrowserModel(project, worktreePath);
+        targetBrowsersByWorktree = project.browsersByWorktree || null;
+        targetPane = findBrowserPane(projectId, worktreePath);
+        if (!targetBrowser || !targetPane || !resourcesAreCurrent()) return null;
+        var targetTab = hasRequestedTab
+          ? targetBrowser.tabs.find(function (t) { return t.id === context.tabId; })
+          : targetBrowser.tabs.find(function (t) {
+              return t.id === targetBrowser.activeTabId;
+            }) || targetBrowser.tabs[0] || null;
+        if ((hasRequestedTab && !targetTab) || browserTabIsClosing(targetTab)) return null;
+        if (!targetTab) {
+          targetTab = targetBrowser.tabs.find(function (t) {
+            return t.id === targetBrowser.activeTabId;
+          }) || targetBrowser.tabs[0] || null;
+          if (!targetTab) {
+            targetTab = createBrowserTab(
+              project,
+              "about:blank",
+              true,
+              worktreePath
+            );
+          }
+        }
+        if (!targetTab || browserTabIsClosing(targetTab) ||
+            targetBrowser.tabs.indexOf(targetTab) === -1 ||
+            (!hasRequestedTab && targetBrowser.activeTabId !== targetTab.id) ||
+            !resourcesAreCurrent()) return null;
+        return {
+          browser: targetBrowser,
+          pane: targetPane,
+          tab: targetTab,
+          requestIsCurrent: function () {
+            return resourcesAreCurrent() &&
+              targetBrowser.tabs.indexOf(targetTab) !== -1 &&
+              !browserTabIsClosing(targetTab) &&
+              (hasRequestedTab || targetBrowser.activeTabId === targetTab.id);
+          },
+        };
+      };
+      var targetPromise = previousCreation.then(resolveTarget, resolveTarget);
+      var creationTail = targetPromise.then(function () {}, function () {});
+      browserCreationFlights.set(creationKey, creationTail);
+      var target;
+      try {
+        target = await targetPromise;
+      } finally {
+        if (browserCreationFlights.get(creationKey) === creationTail) {
+          browserCreationFlights.delete(creationKey);
+        }
+      }
+      if (!target) return false;
+      browser = target.browser;
+      pane = target.pane;
+      tab = target.tab;
+      requestIsCurrent = target.requestIsCurrent;
     }
     var lifecycle = browserTabLifecycle(tab);
     var invalidationGeneration = lifecycle.invalidationGeneration;
