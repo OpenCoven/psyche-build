@@ -2736,7 +2736,7 @@
     return count;
   }
 
-  function terminalLinksForLine(text, y) {
+  function terminalLinksForLine(thread, text, y) {
     var links = [];
     var match;
     TERMINAL_URL_RE.lastIndex = 0;
@@ -2744,12 +2744,12 @@
       var raw = match[0];
       var url = trimTerminalUrl(raw);
       if (!normaliseUrl(url)) continue;
-      links.push(createTerminalLink(url, match.index + 1, y));
+      links.push(createTerminalLink(thread, url, match.index + 1, y));
     }
     return links;
   }
 
-  function createTerminalLink(url, x, y) {
+  function createTerminalLink(thread, url, x, y) {
     return {
       text: url,
       range: {
@@ -2757,23 +2757,30 @@
         end: { x: x + url.length - 1, y: y },
       },
       activate: function (event) {
-        openTerminalLink(url, event);
+        openTerminalLink(thread, url, event).catch(function (error) {
+          setStatus("link open failed: " + String(error), "error");
+        });
       },
     };
   }
 
-  function openTerminalLink(url, event) {
-    var normalised = normaliseUrl(url);
-    if (!normalised) return;
-    var external = event && (event.button === 2 || event.type === "contextmenu");
-    if (external) {
-      if (openUrl) openUrl(normalised).catch(function () {});
-      return;
-    }
-    navigateBrowser(normalised);
+  async function navigateProjectBrowserLink(thread, normalised) {
+    return navigateBrowser(normalised);
   }
 
-  function terminalUrlAtEvent(term, event) {
+  async function openTerminalLink(thread, url, event) {
+    var normalised = normaliseUrl(url);
+    if (!normalised) return false;
+    var external = event && (event.button === 2 || event.type === "contextmenu");
+    if (external) {
+      if (!openUrl) return false;
+      await openUrl(normalised);
+      return true;
+    }
+    return navigateProjectBrowserLink(thread, normalised);
+  }
+
+  function terminalUrlAtEvent(thread, term, event) {
     var screen = term.element && term.element.querySelector(".xterm-screen");
     var dimensions = term._core && term._core._renderService && term._core._renderService.dimensions;
     var cell = dimensions && dimensions.css && dimensions.css.cell;
@@ -2783,28 +2790,30 @@
     var screenY = Math.floor((event.clientY - rect.top) / cell.height) + 1;
     if (x < 1 || screenY < 1 || x > term.cols || screenY > term.rows) return "";
     var y = terminalViewportY(term) + screenY;
-    var links = terminalLinksForLine(terminalLineText(term, y), y);
+    var links = terminalLinksForLine(thread, terminalLineText(term, y), y);
     for (var i = 0; i < links.length; i++) {
       if (links[i].range.start.x <= x && links[i].range.end.x >= x) return links[i].text;
     }
     return "";
   }
 
-  function registerTerminalLinkHandling(term, container) {
+  function registerTerminalLinkHandling(thread, term, container) {
     var linkRegistration = null;
     if (typeof term.registerLinkProvider === "function") {
       linkRegistration = term.registerLinkProvider({
         provideLinks: function (y, callback) {
-          callback(terminalLinksForLine(terminalLineText(term, y), y));
+          callback(terminalLinksForLine(thread, terminalLineText(term, y), y));
         },
       });
     }
     function handleContextMenu(event) {
-      var url = terminalUrlAtEvent(term, event);
+      var url = terminalUrlAtEvent(thread, term, event);
       if (!url) return;
       event.preventDefault();
       event.stopPropagation();
-      openTerminalLink(url, event);
+      openTerminalLink(thread, url, event).catch(function (error) {
+        setStatus("link open failed: " + String(error), "error");
+      });
     }
     container.addEventListener("contextmenu", handleContextMenu, true);
     return {
@@ -3406,7 +3415,9 @@
         convertEol: false,
         allowProposedApi: true,
       },
-      registerLinks: registerTerminalLinkHandling,
+      registerLinks: function (term, container) {
+        return registerTerminalLinkHandling(thread, term, container);
+      },
       onData: function (data) {
         routeTerminalData(thread, data);
       },

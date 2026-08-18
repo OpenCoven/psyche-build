@@ -7,6 +7,216 @@ const webRoot = join(repoRoot, 'native/desktop/psyche-build-tauri');
 const mainJs = readFileSync(join(webRoot, 'web/main.js'), 'utf8');
 const nativeLib = readFileSync(join(webRoot, 'src-tauri/src/lib.rs'), 'utf8');
 
+describe('terminal project browser links', () => {
+  const thread = {
+    id: 'agent-a',
+    projectId: 'project-a',
+    worktreePath: '/repo-a/.worktrees/agent-a',
+  };
+
+  it('routes a left-clicked terminal URL with the owning thread context', async () => {
+    const calls: unknown[] = [];
+    const openTerminalLink = compileFunction<
+      (
+        source: typeof thread,
+        url: string,
+        event?: { button?: number; type?: string },
+      ) => Promise<boolean>
+    >(functionSource(mainJs, 'openTerminalLink'), {
+      normaliseUrl: (value: string) => value,
+      openUrl: async () => {
+        throw new Error('system browser should not open');
+      },
+      navigateProjectBrowserLink: async (source: unknown, url: string) => {
+        calls.push([source, url]);
+        return true;
+      },
+      navigateBrowser: async () => false,
+    });
+
+    await expect(
+      Promise.resolve(
+        openTerminalLink(thread, 'https://example.test/docs', { button: 0 }),
+      ),
+    ).resolves.toBe(true);
+    expect(calls).toEqual([[thread, 'https://example.test/docs']]);
+  });
+
+  it.each([
+    ['right click', { button: 2 }],
+    ['context menu', { type: 'contextmenu' }],
+  ] as const)('preserves explicit external open for %s', async (_label, event) => {
+    const external: string[] = [];
+    const openTerminalLink = compileFunction<
+      (
+        source: typeof thread,
+        url: string,
+        event?: { button?: number; type?: string },
+      ) => Promise<boolean>
+    >(functionSource(mainJs, 'openTerminalLink'), {
+      normaliseUrl: (value: string) => value,
+      openUrl: async (url: string) => {
+        external.push(url);
+      },
+      navigateProjectBrowserLink: async () => {
+        throw new Error('project browser should not navigate');
+      },
+      navigateBrowser: async () => false,
+    });
+
+    await expect(
+      Promise.resolve(openTerminalLink(thread, 'https://example.test', event)),
+    ).resolves.toBe(true);
+    expect(external).toEqual(['https://example.test']);
+  });
+
+  it('returns false for an invalid terminal URL', async () => {
+    const openTerminalLink = compileFunction<
+      (source: typeof thread, url: string) => Promise<boolean>
+    >(functionSource(mainJs, 'openTerminalLink'), {
+      normaliseUrl: () => '',
+      openUrl: async () => {
+        throw new Error('invalid URL should not open externally');
+      },
+      navigateProjectBrowserLink: async () => {
+        throw new Error('invalid URL should not navigate');
+      },
+      navigateBrowser: async () => false,
+    });
+
+    await expect(
+      Promise.resolve(openTerminalLink(thread, 'not a URL')),
+    ).resolves.toBe(false);
+  });
+
+  it('owns the terminal link activation promise', () => {
+    let caught = false;
+    const link = compileFunction<
+      (
+        source: typeof thread,
+        url: string,
+        x: number,
+        y: number,
+      ) => { activate: (event: { button: number }) => void }
+    >(functionSource(mainJs, 'createTerminalLink'), {
+      openTerminalLink: (source: unknown, url: string, event: unknown) => {
+        expect([source, url, event]).toEqual([
+          thread,
+          'https://example.test/docs',
+          { button: 0 },
+        ]);
+        return {
+          catch: () => {
+            caught = true;
+          },
+        };
+      },
+      setStatus: () => {},
+    })(thread, 'https://example.test/docs', 4, 7);
+
+    link.activate({ button: 0 });
+    expect(caught).toBe(true);
+  });
+
+  it('threads pane context through provider and context-menu URL paths', async () => {
+    const calls: unknown[] = [];
+    type LinkProvider = {
+      provideLinks: (y: number, callback: (links: unknown[]) => void) => void;
+    };
+    const captured: {
+      provider?: LinkProvider;
+      contextMenuHandler?: (event: Record<string, unknown>) => void;
+    } = {};
+    let providerDisposed = false;
+    let listenerRemoved = false;
+    const term = {
+      registerLinkProvider(value: LinkProvider) {
+        captured.provider = value;
+        return {
+          dispose() {
+            providerDisposed = true;
+          },
+        };
+      },
+    };
+    const container = {
+      addEventListener(
+        type: string,
+        handler: (event: Record<string, unknown>) => void,
+        capture: boolean,
+      ) {
+        expect([type, capture]).toEqual(['contextmenu', true]);
+        captured.contextMenuHandler = handler;
+      },
+      removeEventListener(
+        type: string,
+        handler: (event: Record<string, unknown>) => void,
+        capture: boolean,
+      ) {
+        listenerRemoved = (
+          type === 'contextmenu' &&
+          handler === captured.contextMenuHandler &&
+          capture === true
+        );
+      },
+    };
+    const registerTerminalLinkHandling = compileFunction<
+      (
+        source: typeof thread,
+        terminal: typeof term,
+        host: typeof container,
+      ) => { dispose: () => void }
+    >(functionSource(mainJs, 'registerTerminalLinkHandling'), {
+      terminalLineText: () => 'Open https://example.test',
+      terminalLinksForLine: (source: unknown, text: string, y: number) => {
+        calls.push(['provide', source, text, y]);
+        return [];
+      },
+      terminalUrlAtEvent: (source: unknown, terminal: unknown, event: unknown) => {
+        calls.push(['extract', source, terminal, event]);
+        return 'https://example.test';
+      },
+      openTerminalLink: (source: unknown, url: string, event: unknown) => {
+        calls.push(['open', source, url, event]);
+        return Promise.resolve(true);
+      },
+      setStatus: () => {},
+    });
+
+    const registration = registerTerminalLinkHandling(thread, term, container);
+    captured.provider?.provideLinks(7, () => {});
+    const contextEvent = {
+      type: 'contextmenu',
+      preventDefault() {},
+      stopPropagation() {},
+    };
+    captured.contextMenuHandler?.(contextEvent);
+    await Promise.resolve();
+
+    expect(calls).toEqual([
+      ['provide', thread, 'Open https://example.test', 7],
+      ['extract', thread, term, contextEvent],
+      ['open', thread, 'https://example.test', contextEvent],
+    ]);
+
+    registration.dispose();
+    expect(providerDisposed).toBe(true);
+    expect(listenerRemoved).toBe(true);
+
+    const linksSource = functionSource(mainJs, 'terminalLinksForLine');
+    const eventSource = functionSource(mainJs, 'terminalUrlAtEvent');
+    const mountSource = functionSource(mainJs, 'mountTerminal');
+
+    expect(linksSource).toContain('createTerminalLink(thread, url, match.index + 1, y)');
+    expect(eventSource).toContain(
+      'terminalLinksForLine(thread, terminalLineText(term, y), y)',
+    );
+    expect(mountSource).toMatch(
+      /registerLinks:\s*function \(term, container\) \{\s*return registerTerminalLinkHandling\(thread, term, container\);\s*\}/,
+    );
+  });
+});
+
 describe('agent browser action lifecycle', () => {
   it('serializes exact lifecycle actions and never falls back to the active tab', () => {
     const source = functionSource(mainJs, 'runBrowserLifecycleOperation');
