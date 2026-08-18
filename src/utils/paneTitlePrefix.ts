@@ -1,6 +1,14 @@
 import type { PsychePane, SidebarProject } from '../types.js';
+import type { PaneOptionMutation } from '../services/TmuxService.js';
 import { getPsycheThemeAccent } from '../theme/colors.js';
 import { getPaneColorTheme } from './paneColors.js';
+
+export type { PaneOptionMutation } from '../services/TmuxService.js';
+
+export interface PaneOptionCacheChange {
+  cache: Map<string, string>;
+  mutation: PaneOptionMutation;
+}
 
 export const PANE_TITLE_BUSY_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const;
 
@@ -36,4 +44,42 @@ export function getPaneTitlePrefixValue(
 
 export function paneNeedsAnimatedTitlePrefix(pane: PsychePane): boolean {
   return isBusyPane(pane);
+}
+
+export function flushPaneOptionCacheChanges(
+  changes: ReadonlyArray<PaneOptionCacheChange>,
+  writeBatch: (mutations: ReadonlyArray<PaneOptionMutation>) => boolean
+): boolean {
+  const pendingChanges = changes.filter(({ cache, mutation }) =>
+    'unset' in mutation
+      ? cache.has(mutation.paneId)
+      : cache.get(mutation.paneId) !== mutation.value
+  );
+
+  if (pendingChanges.length === 0) {
+    return true;
+  }
+
+  const mutations = [
+    ...pendingChanges
+      .filter(({ mutation }) => !('unset' in mutation))
+      .map(({ mutation }) => mutation),
+    ...pendingChanges
+      .filter(({ mutation }) => 'unset' in mutation)
+      .map(({ mutation }) => mutation),
+  ];
+
+  if (!writeBatch(mutations)) {
+    return false;
+  }
+
+  for (const { cache, mutation } of pendingChanges) {
+    if ('unset' in mutation) {
+      cache.delete(mutation.paneId);
+    } else {
+      cache.set(mutation.paneId, mutation.value);
+    }
+  }
+
+  return true;
 }

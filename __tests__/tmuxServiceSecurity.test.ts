@@ -11,7 +11,8 @@ import { TmuxService } from '../src/services/TmuxService.js';
 
 describe('TmuxService command construction', () => {
   beforeEach(() => {
-    execSyncMock.mockClear();
+    execSyncMock.mockReset();
+    execSyncMock.mockReturnValue('');
   });
 
   it('shell-quotes pane titles and pane IDs across async and sync title APIs', async () => {
@@ -71,6 +72,35 @@ describe('TmuxService command construction', () => {
     expect(execSyncMock).toHaveBeenNthCalledWith(
       2,
       expectedCommand,
+      expect.objectContaining({ encoding: 'utf-8', stdio: 'pipe' }),
+    );
+  });
+
+  it('reports aggregate pane option write failure instead of returning success-shaped output', () => {
+    execSyncMock.mockImplementation(() => {
+      throw new Error('invalid pane');
+    });
+
+    const success = TmuxService.getInstance().setPaneOptionsSync([
+      { paneId: '%1', option: '@psyche_title_prefix', value: 'first' },
+      { paneId: '%invalid', option: '@psyche_title_prefix', value: 'middle' },
+      { paneId: '%3', option: '@psyche_title_prefix', value: 'later' },
+    ]);
+
+    expect(success).toBe(false);
+    expect(execSyncMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('batches set and unset pane option mutations into one successful tmux call', () => {
+    const success = TmuxService.getInstance().updatePaneOptionsSync([
+      { paneId: '%1', option: '@psyche_title_prefix', value: "one's" },
+      { paneId: '%2', option: '@psyche_title_label', unset: true },
+    ]);
+
+    expect(success).toBe(true);
+    expect(execSyncMock).toHaveBeenCalledTimes(1);
+    expect(execSyncMock).toHaveBeenCalledWith(
+      "tmux set-option -p -t '%1' @psyche_title_prefix 'one'\\''s' \\; set-option -u -p -t '%2' @psyche_title_label",
       expect.objectContaining({ encoding: 'utf-8', stdio: 'pipe' }),
     );
   });

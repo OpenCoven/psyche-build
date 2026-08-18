@@ -11,6 +11,9 @@ import {
 import { assertTmuxPaneId } from '../utils/tmuxTarget.js';
 
 export type PaneListScope = 'window' | 'session';
+export type PaneOptionMutation =
+  | { paneId: string; option: string; value: string }
+  | { paneId: string; option: string; unset: true };
 
 /**
  * Comprehensive dimension info from a single tmux query
@@ -1392,15 +1395,17 @@ export class TmuxService {
   /**
    * Set a pane option (sync version for compatibility)
    */
-  setPaneOptionSync(paneId: string, option: string, value: string): void {
+  setPaneOptionSync(paneId: string, option: string, value: string): boolean {
     try {
       const escapedValue = value.replace(/'/g, `'\\''`);
       this.execute(
         `tmux set-option -p -t '${paneId}' ${option} '${escapedValue}'`,
         { silent: true }
       );
+      return true;
     } catch (error) {
       this.logger.warn(`Failed to set pane option ${option} for ${paneId}`, 'TmuxService');
+      return false;
     }
   }
 
@@ -1413,36 +1418,62 @@ export class TmuxService {
    */
   setPaneOptionsSync(
     updates: ReadonlyArray<{ paneId: string; option: string; value: string }>
-  ): void {
-    if (updates.length === 0) return;
+  ): boolean {
+    if (updates.length === 0) return true;
     if (updates.length === 1) {
       const [only] = updates;
-      this.setPaneOptionSync(only.paneId, only.option, only.value);
-      return;
+      return this.setPaneOptionSync(only.paneId, only.option, only.value);
     }
-
-    const command = updates
-      .map(({ paneId, option, value }) => {
-        const escapedValue = value.replace(/'/g, `'\\''`);
-        return `set-option -p -t '${paneId}' ${option} '${escapedValue}'`;
-      })
-      .join(' \\; ');
 
     try {
-      this.execute(`tmux ${command}`, { silent: true });
+      this.execute(`tmux ${this.buildPaneOptionMutationCommand(updates)}`, { silent: true });
+      return true;
     } catch (error) {
       this.logger.warn(`Failed to set ${updates.length} pane options`, 'TmuxService');
+      return false;
     }
+  }
+
+  /**
+   * Apply set and unset pane option mutations in one tmux invocation.
+   */
+  updatePaneOptionsSync(mutations: ReadonlyArray<PaneOptionMutation>): boolean {
+    if (mutations.length === 0) return true;
+
+    try {
+      this.execute(`tmux ${this.buildPaneOptionMutationCommand(mutations)}`, { silent: true });
+      return true;
+    } catch (error) {
+      this.logger.warn(`Failed to update ${mutations.length} pane options`, 'TmuxService');
+      return false;
+    }
+  }
+
+  private buildPaneOptionMutationCommand(
+    mutations: ReadonlyArray<PaneOptionMutation>
+  ): string {
+    return mutations
+      .map((mutation) => {
+        if ('unset' in mutation) {
+          return `set-option -u -p -t '${mutation.paneId}' ${mutation.option}`;
+        }
+
+        const escapedValue = mutation.value.replace(/'/g, `'\\''`);
+        return `set-option -p -t '${mutation.paneId}' ${mutation.option} '${escapedValue}'`;
+      })
+      .join(' \\; ');
   }
 
   /**
    * Unset a pane option (sync version for compatibility)
    */
-  unsetPaneOptionSync(paneId: string, option: string): void {
+  unsetPaneOptionSync(paneId: string, option: string): boolean {
     try {
       this.execute(`tmux set-option -u -p -t '${paneId}' ${option}`, { silent: true });
+      return true;
     } catch (error) {
       this.logger.warn(`Failed to unset pane option ${option} for ${paneId}`, 'TmuxService');
+      return false;
     }
   }
 
