@@ -3,6 +3,7 @@ import {
   LEGACY_PANE_TITLE_DELIMITERS,
   PANE_TITLE_DELIMITER,
   TMUX_PANE_TITLE_DISPLAY_FORMAT,
+  buildManagedPaneTitle,
   buildWorktreePaneTitle,
   getPaneDisplayName,
   getPaneTitleCandidates,
@@ -55,6 +56,20 @@ describe('pane title helpers', () => {
     expect(getPaneTitleCandidates(pane, '/tmp/project')).toContain(
       `Auth Review${LEGACY_PANE_TITLE_DELIMITERS[0]}fix-auth`
     );
+  });
+
+  it('keeps a managed label and final reserved slug as the exact rebindable title', () => {
+    const displayName = buildManagedPaneTitle('desktop-use', 'desktop-use-2');
+    const pane = createWorktreePane({
+      slug: 'desktop-use-2',
+      displayName,
+      type: 'desktop-use',
+      projectRoot: '/tmp/other-project',
+    });
+
+    expect(displayName).toBe('desktop-use · desktop-use-2');
+    expect(getPaneTmuxTitle(pane, '/tmp/session-project')).toBe(displayName);
+    expect(getPaneTitleCandidates(pane, '/tmp/session-project')).toContain(displayName);
   });
 
   it('keeps the legacy multi-project title when no custom name is set', () => {

@@ -68,6 +68,13 @@ export interface BlockingWorktreeRecoveryMarker {
   marker?: WorktreeRecoveryMarker;
 }
 
+export interface WorktreeRecoveryMarkerWriteResult {
+  marker: WorktreeRecoveryMarker;
+  path: string;
+  state: 'complete' | 'target-marker-only';
+  warning?: string;
+}
+
 /**
  * The destructive cleanup marker is target-project-wide. The linked slug
  * quarantine remains session-local, so unrelated sessions share cleanup
@@ -79,7 +86,10 @@ export interface BlockingWorktreeRecoveryMarker {
  */
 export async function writeWorktreeRecoveryMarker(
   request: WorktreeRecoveryMarkerRequest,
-): Promise<{ marker: WorktreeRecoveryMarker; path: string }> {
+  options: {
+    persistPaneQuarantine?: typeof quarantinePaneSlugOwnershipRecord;
+  } = {},
+): Promise<WorktreeRecoveryMarkerWriteResult> {
   if (request.allowWorktreeReuse && !request.pane.slug) {
     throw new Error('Reusable recovery quarantine requires a pane slug');
   }
@@ -108,7 +118,7 @@ export async function writeWorktreeRecoveryMarker(
     },
     ...(request.allowWorktreeReuse ? { allowWorktreeReuse: true } : {}),
     ...(request.pane.slug
-      ? { paneOwnershipState: 'quarantined' as const }
+      ? { paneOwnershipState: 'provisional' as const }
       : {}),
     operation: request.operation,
     reason: request.reason,
@@ -137,7 +147,9 @@ export async function writeWorktreeRecoveryMarker(
     try {
       if (request.pane.slug) {
         try {
-          await quarantinePaneSlugOwnershipRecord({
+          await (
+            options.persistPaneQuarantine ?? quarantinePaneSlugOwnershipRecord
+          )({
             sessionProjectRoot,
             recoveryId,
             projectRoot,
@@ -152,11 +164,38 @@ export async function writeWorktreeRecoveryMarker(
             targetMarkerId: id,
           });
         } catch (error) {
-          await rm(markerPath);
-          throw error;
+          return {
+            marker,
+            path: markerPath,
+            state: 'target-marker-only',
+            warning: `target cleanup remains blocked, but pane slug ${request.pane.slug} was not quarantined in session ${sessionProjectRoot}: ${errorMessage(error)}`,
+          };
         }
+        const completedMarker: WorktreeRecoveryMarker = {
+          ...marker,
+          paneOwnershipState: 'quarantined',
+        };
+        try {
+          await atomicWriteJson(markerPath, completedMarker);
+        } catch (error) {
+          return {
+            marker,
+            path: markerPath,
+            state: 'target-marker-only',
+            warning: `pane slug ${request.pane.slug} was quarantined, but target marker ${id} remains provisional until reconciliation rewrites it: ${errorMessage(error)}`,
+          };
+        }
+        return {
+          marker: completedMarker,
+          path: markerPath,
+          state: 'complete',
+        };
       }
-      return { marker, path: markerPath };
+      return {
+        marker,
+        path: markerPath,
+        state: 'complete',
+      };
     } finally {
       await slugLock?.release();
     }

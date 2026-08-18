@@ -37,6 +37,7 @@ export interface PaneRecoveryPersistenceResult {
 export interface RetainedPaneRecoveryResult {
   durable: boolean;
   retained: boolean;
+  partial?: boolean;
   message: string;
 }
 
@@ -104,7 +105,10 @@ export async function retainPaneRecovery(
     return {
       durable: true,
       retained: false,
-      message: `${configRecovery.message}; wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`,
+      ...(marker.state === 'target-marker-only' ? { partial: true } : {}),
+      message: `${configRecovery.message}; wrote recovery marker ${marker.path}. ${
+        marker.warning ? `${marker.warning}. ` : ''
+      }${marker.marker.operatorInstructions}`,
     };
   } catch (error) {
     options.reservation?.retain();

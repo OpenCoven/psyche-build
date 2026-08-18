@@ -183,7 +183,9 @@ export default function usePaneRunner({
             operation: 'background-window-launch',
             reason,
           });
-          return `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+          return `wrote recovery marker ${marker.path}. ${
+            marker.warning ? `${marker.warning}. ` : ''
+          }${marker.marker.operatorInstructions}`;
         } catch {
           return undefined;
         }
@@ -366,7 +368,9 @@ export default function usePaneRunner({
               operation: 'background-window-join',
               reason,
             });
-            return `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+            return `wrote recovery marker ${marker.path}. ${
+              marker.warning ? `${marker.warning}. ` : ''
+            }${marker.marker.operatorInstructions}`;
           } catch {
             return undefined;
           }

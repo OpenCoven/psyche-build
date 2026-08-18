@@ -420,7 +420,7 @@ describe('daemon bridge Coven helpers', () => {
         tmuxSessionExists: () => true,
         createTmuxPane: (_sessionName, cwd, title) => {
           expect(cwd).toBe(root);
-          expect(title).toBe('coven:Fix tests');
+          expect(title).toBe('coven:Fix tests · coven-session');
           return '%42';
         },
         getTmuxServerIdentity: () => mockTmuxServerIdentity,
@@ -432,14 +432,60 @@ describe('daemon bridge Coven helpers', () => {
 
     const config = JSON.parse(await readFile(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'));
     expect(result.id).toBe('%42');
-    expect(result.pane.title).toBe('coven:Fix tests');
+    expect(result.pane.title).toBe('coven:Fix tests · coven-session');
     expect(commands).toEqual(['%42:coven attach session-1']);
     expect(config.panes[0]).toMatchObject({
       paneId: '%42',
       shellType: 'coven',
       type: 'shell',
       covenSession: { id: 'session-1', harness: 'codex', status: 'running' },
+      slug: 'coven-session',
+      title: 'coven:Fix tests · coven-session',
+      displayName: 'coven:Fix tests · coven-session',
     });
+  });
+
+  it('gives repeated Coven opens distinct persisted and tmux titles', async () => {
+    const root = await tempDir('psyche-bridge-coven-repeat-');
+    const titles: string[] = [];
+    let paneNumber = 40;
+    const client = {
+      listSessions: async () => [{
+        id: 'session-1',
+        projectRoot: root,
+        harness: 'codex',
+        title: 'Fix tests',
+        status: 'running' as const,
+        createdAt: '2026-04-27T10:00:00Z',
+        updatedAt: '2026-04-27T10:01:00Z',
+      }],
+    };
+    const deps = {
+      tmuxSessionExists: () => true,
+      createTmuxPane: (_sessionName: string, _cwd: string, title?: string) => {
+        titles.push(title || '');
+        paneNumber += 1;
+        return `%${paneNumber}`;
+      },
+      getTmuxServerIdentity: () => mockTmuxServerIdentity,
+      sendTmuxCommand: vi.fn(),
+    };
+
+    await openProjectCovenSession(root, 'psyche-test', 'session-1', client, deps);
+    await openProjectCovenSession(root, 'psyche-test', 'session-1', client, deps);
+
+    const config = JSON.parse(
+      await readFile(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+    expect(config.panes.map((pane: { slug: string }) => pane.slug)).toEqual([
+      'coven-session',
+      'coven-session-2',
+    ]);
+    expect(titles).toEqual([
+      'coven:Fix tests · coven-session',
+      'coven:Fix tests · coven-session-2',
+    ]);
+    expect(config.panes.map((pane: { title: string }) => pane.title)).toEqual(titles);
   });
 
   it('owns a reused Coven pane ID in the new tmux generation only', async () => {
@@ -1103,7 +1149,7 @@ describe('daemon bridge pane helpers', () => {
       tmuxSessionExists: () => true,
       createTmuxPane: (_sessionName, cwd, title) => {
         expect(cwd).toMatch(/\.psyche\/worktrees\/fix-bug$/);
-        expect(title).toBe('Fix bug');
+        expect(title).toBe('Fix bug · fix-bug');
         return '%42';
       },
       sendTmuxCommand: (_paneId, command) => commands.push(command),
@@ -1118,7 +1164,7 @@ describe('daemon bridge pane helpers', () => {
         cwd: path.join(root, '.psyche', 'worktrees', 'fix-bug'),
         branch: 'psyche/fix-bug',
         agent: 'codex',
-        title: 'Fix bug',
+        title: 'Fix bug · fix-bug',
       },
     });
     expect(commands).toHaveLength(1);
@@ -1133,13 +1179,67 @@ describe('daemon bridge pane helpers', () => {
           paneId: '%42',
           tmuxServerIdentity,
           slug: 'fix-bug',
-          title: 'Fix bug',
+          title: 'Fix bug · fix-bug',
           worktreePath: path.join(root, '.psyche', 'worktrees', 'fix-bug'),
           branchName: 'psyche/fix-bug',
           agent: 'codex',
         },
       ],
     });
+
+  });
+
+  it('gives daemon panes with the same custom title distinct slug-bound titles', async () => {
+    const root = await tempDir('psyche-bridge-title-collision-');
+    execSync('git init', { cwd: root, stdio: 'ignore' });
+    execSync('git config user.email test@example.invalid', { cwd: root, stdio: 'ignore' });
+    execSync('git config user.name Test', { cwd: root, stdio: 'ignore' });
+    await writeFile(path.join(root, 'README.md'), 'demo\n');
+    execSync('git add README.md && git -c commit.gpgsign=false commit -m init', {
+      cwd: root,
+      stdio: 'ignore',
+    });
+    await writeConfig(root, {
+      projectName: 'demo',
+      projectRoot: root,
+      panes: [],
+      settings: {},
+      lastUpdated: '2026-04-27T00:00:00.000Z',
+    });
+    const titles: string[] = [];
+    let paneNumber = 50;
+    const deps = {
+      tmuxSessionExists: () => true,
+      createTmuxPane: (_sessionName: string, _cwd: string, title?: string) => {
+        titles.push(title || '');
+        paneNumber += 1;
+        return `%${paneNumber}`;
+      },
+      sendTmuxCommand: vi.fn(),
+      getTmuxServerIdentity: () => mockTmuxServerIdentity,
+    };
+
+    await spawnBridgePane(root, 'psyche-demo', {
+      requestId: 'req-title-1',
+      cwd: root,
+      title: 'Fix bug',
+    }, deps);
+    await spawnBridgePane(root, 'psyche-demo', {
+      requestId: 'req-title-2',
+      cwd: root,
+      title: 'Fix bug',
+    }, deps);
+
+    expect(titles).toEqual([
+      'Fix bug · fix-bug',
+      'Fix bug · fix-bug-2',
+    ]);
+    const config = JSON.parse(
+      await readFile(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+    expect(config.panes.map((pane: { title: string }) => pane.title)).toEqual(titles);
+    expect(new Set(config.panes.map((pane: { title: string }) => pane.title)).size)
+      .toBe(2);
   });
 
   it('creates a generated pane branch from the requested start-point branch', async () => {

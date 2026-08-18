@@ -5,6 +5,10 @@ import type { PsychePane } from '../src/types.js';
 import { listPaneSlugOwnershipRecords } from '../src/services/PaneSlugRegistry.js';
 import { mutateProjectPaneConfig } from '../src/services/ProjectPaneConfig.js';
 import { createTransactionalPane } from '../src/utils/transactionalPaneCreation.js';
+import {
+  buildManagedPaneTitle,
+  getPaneTmuxTitle,
+} from '../src/utils/paneTitle.js';
 
 const generation = {
   pid: 4242,
@@ -77,6 +81,45 @@ describe('transactional pane creation', () => {
     expect(pane.slug).toBe('shell-1-2');
     expect(pane.id).not.toBe('discarded-id');
     expect(await listPaneSlugOwnershipRecords(projectRoot)).toEqual([]);
+  });
+
+  it('derives a desktop-use title from the final collision-resolved slug', async () => {
+    const projectRoot = createProjectRoot();
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [{
+        id: 'existing',
+        paneId: '%1',
+        slug: 'desktop-use-1',
+        displayName: 'desktop-use · desktop-use-1',
+      }];
+    });
+
+    const pane = await createTransactionalPane({
+      projectRoot,
+      sessionProjectRoot: projectRoot,
+      operation: 'desktop-use-pane',
+      slugBase: 'desktop-use-1',
+      allocate: () => '%42',
+      getTmuxServerIdentity: () => generation,
+      createPane: ({ paneId, tmuxServerIdentity, slug }): PsychePane => ({
+        id: 'discarded-id',
+        slug,
+        displayName: buildManagedPaneTitle('desktop-use', slug),
+        prompt: '',
+        paneId,
+        tmuxServerIdentity,
+        type: 'desktop-use',
+      }),
+      persist: async (nextPane) => {
+        await mutateProjectPaneConfig(projectRoot, (config) => {
+          config.panes = [...(config.panes || []), nextPane];
+        });
+      },
+    });
+
+    expect(pane.slug).toBe('desktop-use-1-2');
+    expect(pane.displayName).toBe('desktop-use · desktop-use-1-2');
+    expect(getPaneTmuxTitle(pane, projectRoot)).toBe(pane.displayName);
   });
 
   it.each([

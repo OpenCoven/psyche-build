@@ -164,4 +164,75 @@ describe('worktree recovery markers', () => {
       worktreePath,
     )).toEqual({ blocked: false });
   });
+
+  it('keeps target cleanup fail-closed when session quarantine persistence fails', async () => {
+    const sessionProjectRoot = mkdtempSync(
+      path.join(process.cwd(), '.psyche-recovery-session-failure-'),
+    );
+    const otherSessionRoot = mkdtempSync(
+      path.join(process.cwd(), '.psyche-recovery-other-session-'),
+    );
+    const targetProjectRoot = mkdtempSync(
+      path.join(process.cwd(), '.psyche-recovery-target-failure-'),
+    );
+    directories.push(sessionProjectRoot, otherSessionRoot, targetProjectRoot);
+    const worktreePath = path.join(
+      targetProjectRoot,
+      '.psyche',
+      'worktrees',
+      'feature',
+    );
+    mkdirSync(worktreePath, { recursive: true });
+    const recoveryId = '11111111-2222-4333-8444-555555555555';
+    const request = {
+      recoveryId,
+      sessionProjectRoot,
+      projectRoot: targetProjectRoot,
+      worktreePath,
+      pane: { id: 'pane-3', paneId: '%11', slug: 'feature-a3' },
+      allowWorktreeReuse: true,
+      operation: 'bridge-pane-persistence',
+      reason: 'pane config persistence and teardown could not be confirmed',
+    };
+
+    const partial = await writeWorktreeRecoveryMarker(request, {
+      persistPaneQuarantine: async () => {
+        throw new Error('injected session registry write failure');
+      },
+    });
+
+    expect(partial).toMatchObject({
+      state: 'target-marker-only',
+      marker: { paneOwnershipState: 'provisional' },
+      warning: expect.stringContaining('injected session registry write failure'),
+    });
+    expect(findBlockingWorktreeRecoveryMarker(
+      otherSessionRoot,
+      targetProjectRoot,
+      worktreePath,
+    )).toMatchObject({
+      blocked: true,
+      marker: { id: partial.marker.id, paneOwnershipState: 'provisional' },
+    });
+
+    const reconciled = await writeWorktreeRecoveryMarker(request);
+    expect(reconciled).toMatchObject({
+      state: 'complete',
+      marker: {
+        id: partial.marker.id,
+        paneOwnershipState: 'quarantined',
+      },
+    });
+    expect(await listWorktreeRecoveryMarkers(targetProjectRoot)).toHaveLength(1);
+
+    await expect(acknowledgeWorktreeRecoveryMarker(
+      sessionProjectRoot,
+      reconciled.marker.id,
+    )).resolves.toBe(true);
+    expect(findBlockingWorktreeRecoveryMarker(
+      otherSessionRoot,
+      targetProjectRoot,
+      worktreePath,
+    )).toEqual({ blocked: false });
+  });
 });

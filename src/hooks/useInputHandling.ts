@@ -27,6 +27,7 @@ import { suggestCommand } from "../utils/commands.js"
 import type { PopupManager } from "../services/PopupManager.js"
 import { getPaneProjectName, getPaneProjectRoot } from "../utils/paneProject.js"
 import {
+  buildManagedPaneTitle,
   getPaneDisplayName,
   getPaneTmuxTitle,
   sanitizePaneDisplayName,
@@ -399,10 +400,10 @@ export function useInputHandling(params: UseInputHandlingParams) {
         slugBase: `desktop-use-${nextId}`,
         tmuxService,
         allocate: () => tmuxService.splitPane({ cwd: targetProjectRoot }),
-        createPane: ({ paneId, tmuxServerIdentity }) => ({
+        createPane: ({ paneId, tmuxServerIdentity, slug }) => ({
           id: createPsychePaneId(),
-          slug: `desktop-use-${nextId}`,
-          displayName: "desktop-use",
+          slug,
+          displayName: buildManagedPaneTitle(title, slug),
           prompt,
           paneId,
           ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
@@ -426,7 +427,10 @@ export function useInputHandling(params: UseInputHandlingParams) {
         }),
         persist: (pane) => savePanes([...panes, pane], panes),
         activate: async (pane) => {
-          await tmuxService.setPaneTitle(pane.paneId, "desktop-use")
+          await tmuxService.setPaneTitle(
+            pane.paneId,
+            getPaneTmuxTitle(pane, projectRoot),
+          )
           await tmuxService.sendShellCommand(
             pane.paneId,
             buildCovenAttachCommand(session.id),

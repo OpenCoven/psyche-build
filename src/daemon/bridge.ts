@@ -50,6 +50,7 @@ import {
   type TmuxPanePresence,
   type VerifiedPaneTeardownResult,
 } from '../utils/paneTeardown.js';
+import { buildManagedPaneTitle } from '../utils/paneTitle.js';
 import {
   getCurrentTmuxServerIdentity,
   isTmuxServerIdentity,
@@ -534,7 +535,9 @@ export async function openProjectCovenSession(
     throw bridgeError('tmux_session_missing', 'psyche tmux session is not running; start psyche for this project first');
   }
 
-  const title = `coven:${session.title || session.id.slice(0, 8)}`;
+  const titleLabel = `coven:${session.title || session.id.slice(0, 8)}`;
+  const sessionSlug = session.id.slice(0, 8).replace(/[^a-zA-Z0-9]+$/g, '')
+    || 'session';
   const psychePaneId = nextBridgePaneId();
   const paneSlugReservation = await reserveCrashSafePaneSlug({
     sessionProjectRoot,
@@ -543,7 +546,7 @@ export async function openProjectCovenSession(
     operation: 'daemon-coven-session-pane',
     allocate: async ({ occupiedSlugs }) => {
       const slug = await allocateUniquePaneSlug(
-        `coven-${session.id.slice(0, 8)}`,
+        `coven-${sessionSlug}`,
         occupiedSlugs,
       );
       return { slug, worktreePath: session.projectRoot };
@@ -557,6 +560,10 @@ export async function openProjectCovenSession(
     const transaction = await transactProjectPaneConfig(
       sessionProjectRoot,
       async ({ config, persist }) => {
+      const title = buildManagedPaneTitle(
+        titleLabel,
+        paneSlugReservation.slug,
+      );
       const paneId = deps.createTmuxPane(sessionName, session.projectRoot, title);
       const tmuxServerIdentity = (
         deps.getTmuxServerIdentity ?? getCurrentTmuxServerIdentity
@@ -1310,7 +1317,9 @@ async function preserveBridgeHookModifiedWorktree(
       operation: 'bridge-worktree-creation-ownership',
       reason,
     });
-    return `preserved hook-modified worktree and branch; recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+    return `preserved hook-modified worktree and branch; recovery marker ${marker.path}. ${
+      marker.warning ? `${marker.warning}. ` : ''
+    }${marker.marker.operatorInstructions}`;
   } catch (error) {
     return `preserved hook-modified worktree and branch, but could not write recovery marker: ${
       error instanceof Error ? error.message : String(error)
@@ -1693,12 +1702,7 @@ export async function spawnBridgePane(
         const effectiveWorktreePath = sharedIdentity?.worktreePath || paneWorktreePath;
         const effectiveBranch = sharedIdentity?.branch || branch;
         const paneSlug = paneSlugReservation?.slug || slug;
-        // A sibling's visible title must carry the reserved slug as well;
-        // otherwise concurrent attaches can create distinct records that
-        // rebind to the same tmux title.
-        const title = attaching
-          ? `${request.title || paneSlug} [${paneSlug}]`
-          : request.title || paneSlug;
+        const title = buildManagedPaneTitle(request.title, paneSlug);
         paneId = deps.createTmuxPane(sessionName, effectiveWorktreePath, title);
         const tmuxServerIdentity = (
           deps.getTmuxServerIdentity ?? getCurrentTmuxServerIdentity

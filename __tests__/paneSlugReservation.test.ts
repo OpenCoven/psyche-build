@@ -371,13 +371,13 @@ describe('crash-safe pane slug ownership', () => {
     expect(await listQuarantinedPaneSlugs(sessionA)).toEqual([]);
   });
 
-  it('refuses to quarantine a slug owned by a different durable pane', async () => {
+  it('keeps cleanup blocked when a slug is owned by a different durable pane', async () => {
     const sessionRoot = project('.psyche-slug-ambiguous-');
     await mutateProjectPaneConfig(sessionRoot, (config) => {
       config.panes = [{ id: 'durable-pane', paneId: '%71', slug: 'shared' }];
     });
 
-    await expect(writeWorktreeRecoveryMarker({
+    const result = await writeWorktreeRecoveryMarker({
       sessionProjectRoot: sessionRoot,
       projectRoot: sessionRoot,
       worktreePath: sessionRoot,
@@ -385,9 +385,18 @@ describe('crash-safe pane slug ownership', () => {
       allowWorktreeReuse: true,
       operation: 'ambiguous-recovery',
       reason: 'pane identity is ambiguous',
-    })).rejects.toThrow(/already durably owned/);
+    });
 
-    expect(await listWorktreeRecoveryMarkers(sessionRoot)).toEqual([]);
+    expect(result).toMatchObject({
+      state: 'target-marker-only',
+      marker: { paneOwnershipState: 'provisional' },
+      warning: expect.stringContaining('already durably owned'),
+    });
+    expect(findBlockingWorktreeRecoveryMarker(
+      sessionRoot,
+      sessionRoot,
+      sessionRoot,
+    )).toMatchObject({ blocked: true, marker: { id: result.marker.id } });
     expect(await listQuarantinedPaneSlugs(sessionRoot)).toEqual([]);
   });
 });

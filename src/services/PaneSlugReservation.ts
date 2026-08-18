@@ -227,7 +227,9 @@ export async function settlePaneSlugReservationAfterFailure(
   return {
     released: false,
     quarantined: true,
-    message: `quarantined pane slug ${reservation.slug} in ${marker.path}`,
+    message: marker.state === 'complete'
+      ? `quarantined pane slug ${reservation.slug} in ${marker.path}`
+      : `retained target cleanup blocker ${marker.path}; ${marker.warning}`,
     marker: {
       path: marker.path,
       generation: marker.marker.generation,

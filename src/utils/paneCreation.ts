@@ -825,7 +825,9 @@ async function createPaneWithReuseReservation(
         operation: 'worktree-creation-ownership',
         reason,
       });
-      return `preserved hook-modified worktree and branch; recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+      return `preserved hook-modified worktree and branch; recovery marker ${marker.path}. ${
+        marker.warning ? `${marker.warning}. ` : ''
+      }${marker.marker.operatorInstructions}`;
     } catch (error) {
       return `preserved hook-modified worktree and branch, but could not write recovery marker: ${
         error instanceof Error ? error.message : String(error)
