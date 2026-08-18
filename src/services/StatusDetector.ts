@@ -57,6 +57,7 @@ export class StatusDetector extends EventEmitter {
   private llmRequests = new Map<string, AbortController>();
   private paneIdMap = new Map<string, string>(); // psyche pane ID -> tmux pane ID
   private paneLifecycles = new Map<string, symbol>();
+  private monitorPanesQueue: Promise<void> = Promise.resolve();
   private isShuttingDown = false;
 
   constructor() {
@@ -122,18 +123,28 @@ export class StatusDetector extends EventEmitter {
   async monitorPanes(panes: PsychePane[]): Promise<void> {
     if (this.isShuttingDown) return;
 
-    // Update workers first so a same-ID replacement releases the old
-    // lifecycle before the replacement mapping becomes authoritative.
-    await this.workerManager.updateWorkers(panes);
+    const apply = this.monitorPanesQueue.then(async () => {
+      if (this.isShuttingDown) return;
 
-    panes.forEach(pane => {
-      if (pane.id && pane.paneId) {
-        if (this.paneIdMap.get(pane.id) !== pane.paneId) {
-          this.paneLifecycles.set(pane.id, Symbol(pane.id));
+      // Update workers first so a same-ID replacement releases the old
+      // lifecycle before the replacement mapping becomes authoritative.
+      await this.workerManager.updateWorkers(panes);
+      if (this.isShuttingDown) return;
+
+      panes.forEach(pane => {
+        if (pane.id && pane.paneId) {
+          if (this.paneIdMap.get(pane.id) !== pane.paneId) {
+            this.paneLifecycles.set(pane.id, Symbol(pane.id));
+          }
+          this.paneIdMap.set(pane.id, pane.paneId);
         }
-        this.paneIdMap.set(pane.id, pane.paneId);
-      }
+      });
     });
+
+    // Keep later updates runnable even when one invocation rejects, while
+    // preserving the rejection for the caller that submitted that update.
+    this.monitorPanesQueue = apply.catch(() => undefined);
+    return apply;
   }
 
   /**

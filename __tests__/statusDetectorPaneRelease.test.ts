@@ -137,6 +137,119 @@ describe('StatusDetector pane release', () => {
     }
   });
 
+  it('serializes overlapping rebinds so the latest pane owns detector and worker state', async () => {
+    const detector = new StatusDetector();
+    const manager = (detector as any).workerManager as PaneWorkerManager;
+    const messageBus = (detector as any).messageBus;
+    const paneIds: Map<string, string> = (detector as any).paneIdMap;
+    const replacementStarted = createDeferred<void>();
+    const releaseReplacement = createDeferred<void>();
+    const staleAnalysis = createDeferred<{ state: 'open_prompt'; summary: string }>();
+    const updates: Array<{ summary?: string }> = [];
+    const lifecycle: string[] = [];
+    const originalUpdateWorkers = manager.updateWorkers.bind(manager);
+
+    vi.spyOn(manager, 'updateWorkers').mockImplementation(async (panes) => {
+      if (panes[0]?.paneId === '%2') {
+        replacementStarted.resolve();
+        await releaseReplacement.promise;
+      }
+      await originalUpdateWorkers(panes);
+    });
+    (detector as any).paneAnalyzer.analyzePane = vi.fn(() => staleAnalysis.promise);
+    detector.on('status-updated', (event) => updates.push(event));
+    messageBus.on('worker:pane-reset', (message: { paneId: string }) => {
+      lifecycle.push(`reset:${paneIds.get(message.paneId)}`);
+    });
+    messageBus.on('worker:ready', (message: { paneId: string }) => {
+      const tracked = (manager as any).panes.get(message.paneId);
+      lifecycle.push(`ready:${tracked?.tmuxPaneId}`);
+    });
+
+    try {
+      await detector.monitorPanes([pane('%1')]);
+      lifecycle.length = 0;
+      messageBus.handleWorkerMessage('pane-a', {
+        id: 'stale-analysis',
+        type: 'analysis-needed',
+        timestamp: Date.now(),
+        paneId: 'pane-a',
+        payload: { captureSnapshot: 'old pane', reason: 'static' },
+      });
+      await vi.waitFor(() => expect((detector as any).paneAnalyzer.analyzePane).toHaveBeenCalledOnce());
+
+      const replaceWithTwo = detector.monitorPanes([pane('%2')]);
+      await replacementStarted.promise;
+      const replaceWithThree = detector.monitorPanes([pane('%3')]);
+      releaseReplacement.resolve();
+      await Promise.all([replaceWithTwo, replaceWithThree]);
+
+      staleAnalysis.resolve({ state: 'open_prompt', summary: 'stale verdict' });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(lifecycle).toEqual([
+        'reset:%1',
+        'ready:%2',
+        'reset:%2',
+        'ready:%3',
+      ]);
+      expect(paneIds.get('pane-a')).toBe('%3');
+      expect((manager as any).panes.get('pane-a')?.tmuxPaneId).toBe('%3');
+      expect(updates.some((event) => event.summary === 'stale verdict')).toBe(false);
+    } finally {
+      releaseReplacement.resolve();
+      staleAnalysis.resolve({ state: 'open_prompt', summary: 'stale verdict' });
+      await detector.shutdown();
+    }
+  });
+
+  it('continues applying queued pane updates after an earlier update fails', async () => {
+    const detector = new StatusDetector();
+    const manager = (detector as any).workerManager as PaneWorkerManager;
+    const originalUpdateWorkers = manager.updateWorkers.bind(manager);
+
+    try {
+      await detector.monitorPanes([pane('%1')]);
+      vi.spyOn(manager, 'updateWorkers').mockImplementationOnce(async () => {
+        throw new Error('update failed');
+      }).mockImplementation(originalUpdateWorkers);
+
+      await expect(detector.monitorPanes([pane('%2')])).rejects.toThrow('update failed');
+      await detector.monitorPanes([pane('%3')]);
+
+      expect((detector as any).paneIdMap.get('pane-a')).toBe('%3');
+      expect((manager as any).panes.get('pane-a')?.tmuxPaneId).toBe('%3');
+    } finally {
+      await detector.shutdown();
+    }
+  });
+
+  it('does not apply queued pane updates after shutdown starts', async () => {
+    const detector = new StatusDetector();
+    const manager = (detector as any).workerManager as PaneWorkerManager;
+    const updateStarted = createDeferred<void>();
+    const releaseUpdate = createDeferred<void>();
+    const originalUpdateWorkers = manager.updateWorkers.bind(manager);
+
+    await detector.monitorPanes([pane('%1')]);
+    const updateWorkers = vi.spyOn(manager, 'updateWorkers').mockImplementation(async (panes) => {
+      updateStarted.resolve();
+      await releaseUpdate.promise;
+      await originalUpdateWorkers(panes);
+    });
+
+    const replaceWithTwo = detector.monitorPanes([pane('%2')]);
+    await updateStarted.promise;
+    const replaceWithThree = detector.monitorPanes([pane('%3')]);
+    const shutdown = detector.shutdown();
+    releaseUpdate.resolve();
+    await Promise.allSettled([replaceWithTwo, replaceWithThree, shutdown]);
+
+    expect(updateWorkers).toHaveBeenCalledTimes(1);
+    expect((detector as any).paneIdMap.size).toBe(0);
+    expect(manager.getStats().workerCount).toBe(0);
+  });
+
   it('publishes nothing from a Codex stop after a rebind during summary extraction', async () => {
     const detector = new StatusDetector();
     const summary = createDeferred<{

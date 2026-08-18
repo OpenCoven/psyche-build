@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PsycheAttentionService } from '../src/services/PsycheAttentionService.js';
 import { getStatusDetector, resetStatusDetector } from '../src/services/StatusDetector.js';
+import { createDeferred } from './utils/deferred.js';
 
 const originalPlatform = process.platform;
 
@@ -14,7 +15,7 @@ function setPlatform(platform: NodeJS.Platform): void {
 
 class MockFocusService extends EventEmitter {
   isPaneFullyFocused = vi.fn(() => false);
-  getPaneAttentionSurface = vi.fn(async () => 'background');
+  getPaneAttentionSurface = vi.fn(async (_tmuxPaneId?: string) => 'background');
   flashPaneAttention = vi.fn(async () => undefined);
   setPaneAttentionIndicator = vi.fn(() => undefined);
   sendAttentionNotification = vi.fn(async () => true);
@@ -364,6 +365,163 @@ describe('PsycheAttentionService', () => {
     await flushAsyncWork();
 
     expect(focusService.sendAttentionNotification).toHaveBeenCalledTimes(1);
+    service.stop();
+  });
+
+  it.each([
+    ['reset', emitPaneReset],
+    ['removal', emitPaneRemoved],
+    ['disarm', emitPaneUserInteraction],
+  ] as const)('invalidates deferred surface work after pane %s', async (_reason, endLifecycle) => {
+    const focusService = new MockFocusService();
+    const surface = createDeferred<'background'>();
+    focusService.getPaneAttentionSurface.mockReturnValue(surface.promise);
+    const service = new PsycheAttentionService({ focusService: focusService as any });
+
+    service.start();
+    emitStatusUpdated({ paneId: 'pane-deferred', status: 'working' });
+    emitAttentionNeeded({
+      paneId: 'pane-deferred',
+      tmuxPaneId: '%40',
+      status: 'idle',
+      title: 'Ready',
+      body: 'Continue.',
+      fingerprint: 'idle:ready',
+    });
+    await vi.waitFor(() => expect(focusService.getPaneAttentionSurface).toHaveBeenCalledOnce());
+
+    endLifecycle({ paneId: 'pane-deferred' });
+    surface.resolve('background');
+    await flushAsyncWork();
+
+    expect(focusService.sendAttentionNotification).not.toHaveBeenCalled();
+    expect(focusService.setPaneAttentionIndicator).not.toHaveBeenCalledWith('%40', true);
+    expect((service as any).activeAttentionPanes.has('pane-deferred')).toBe(false);
+    expect((service as any).notifiedFingerprints.has('pane-deferred')).toBe(false);
+    service.stop();
+  });
+
+  it('invalidates deferred work when a candidate is replaced', async () => {
+    const focusService = new MockFocusService();
+    const oldSurface = createDeferred<'background'>();
+    focusService.getPaneAttentionSurface.mockImplementation((tmuxPaneId?: string) => (
+      tmuxPaneId === '%50' ? oldSurface.promise : Promise.resolve('background')
+    ));
+    const service = new PsycheAttentionService({ focusService: focusService as any });
+
+    service.start();
+    emitStatusUpdated({ paneId: 'pane-replaced', status: 'working' });
+    emitAttentionNeeded({
+      paneId: 'pane-replaced',
+      tmuxPaneId: '%50',
+      status: 'idle',
+      title: 'Old',
+      body: 'Old candidate.',
+      fingerprint: 'idle:old',
+    });
+    await vi.waitFor(() => expect(focusService.getPaneAttentionSurface).toHaveBeenCalledWith('%50'));
+
+    emitAttentionNeeded({
+      paneId: 'pane-replaced',
+      tmuxPaneId: '%51',
+      status: 'idle',
+      title: 'New',
+      body: 'New candidate.',
+      fingerprint: 'idle:new',
+    });
+    await vi.waitFor(() => expect(focusService.sendAttentionNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ tmuxPaneId: '%51' }),
+    ));
+    oldSurface.resolve('background');
+    await flushAsyncWork();
+
+    expect(focusService.sendAttentionNotification).not.toHaveBeenCalledWith(
+      expect.objectContaining({ tmuxPaneId: '%50' }),
+    );
+    expect(focusService.setPaneAttentionIndicator).not.toHaveBeenCalledWith('%50', true);
+    service.stop();
+  });
+
+  it('invalidates deferred work when the service stops', async () => {
+    const focusService = new MockFocusService();
+    const surface = createDeferred<'background'>();
+    focusService.getPaneAttentionSurface.mockReturnValue(surface.promise);
+    const service = new PsycheAttentionService({ focusService: focusService as any });
+
+    service.start();
+    emitStatusUpdated({ paneId: 'pane-stopped', status: 'working' });
+    emitAttentionNeeded({
+      paneId: 'pane-stopped',
+      tmuxPaneId: '%52',
+      status: 'idle',
+      title: 'Ready',
+      body: 'Continue.',
+      fingerprint: 'idle:ready',
+    });
+    await vi.waitFor(() => expect(focusService.getPaneAttentionSurface).toHaveBeenCalledOnce());
+
+    service.stop();
+    surface.resolve('background');
+    await flushAsyncWork();
+
+    expect(focusService.sendAttentionNotification).not.toHaveBeenCalled();
+    expect(focusService.setPaneAttentionIndicator).not.toHaveBeenCalledWith('%52', true);
+  });
+
+  it('does not resurrect attention when reset occurs during notification delivery', async () => {
+    const focusService = new MockFocusService();
+    const notification = createDeferred<boolean>();
+    focusService.sendAttentionNotification.mockReturnValue(notification.promise);
+    const service = new PsycheAttentionService({ focusService: focusService as any });
+
+    service.start();
+    emitStatusUpdated({ paneId: 'pane-notifying', status: 'working' });
+    emitAttentionNeeded({
+      paneId: 'pane-notifying',
+      tmuxPaneId: '%41',
+      status: 'idle',
+      title: 'Ready',
+      body: 'Continue.',
+      fingerprint: 'idle:ready',
+    });
+    await vi.waitFor(() => expect(focusService.sendAttentionNotification).toHaveBeenCalledOnce());
+
+    emitPaneReset({ paneId: 'pane-notifying' });
+    notification.resolve(true);
+    await flushAsyncWork();
+
+    expect(focusService.setPaneAttentionIndicator).not.toHaveBeenCalledWith('%41', true);
+    expect((service as any).activeAttentionPanes.has('pane-notifying')).toBe(false);
+    expect((service as any).notifiedFingerprints.has('pane-notifying')).toBe(false);
+    service.stop();
+  });
+
+  it('does not re-enable attention when reset occurs during a pane flash', async () => {
+    const focusService = new MockFocusService();
+    const flash = createDeferred<undefined>();
+    focusService.getPaneAttentionSurface.mockResolvedValue('same-window');
+    focusService.flashPaneAttention.mockReturnValue(flash.promise);
+    const service = new PsycheAttentionService({ focusService: focusService as any });
+
+    service.start();
+    emitStatusUpdated({ paneId: 'pane-flashing', status: 'working' });
+    emitAttentionNeeded({
+      paneId: 'pane-flashing',
+      tmuxPaneId: '%42',
+      status: 'idle',
+      title: 'Ready',
+      body: 'Continue.',
+      fingerprint: 'idle:ready',
+    });
+    await vi.waitFor(() => expect(focusService.flashPaneAttention).toHaveBeenCalledOnce());
+
+    emitPaneReset({ paneId: 'pane-flashing' });
+    flash.resolve(undefined);
+    await flushAsyncWork();
+
+    expect(focusService.setPaneAttentionIndicator).not.toHaveBeenCalledWith('%42', true);
+    expect((service as any).activeAttentionPanes.has('pane-flashing')).toBe(false);
+    expect((service as any).notifiedFingerprints.has('pane-flashing')).toBe(false);
     service.stop();
   });
 
