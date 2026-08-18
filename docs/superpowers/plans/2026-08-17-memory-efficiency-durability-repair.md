@@ -4,7 +4,7 @@
 
 **Goal:** Preserve control-plane idempotency and recovery guarantees while keeping hot runtime state bounded, and reclaim closed-pane buffers after their final subscriber releases them.
 
-**Architecture:** `ControlJournal` owns an atomic hash-addressed outcome store and snapshot recovery metadata; `ControlRuntime` keeps its 1,000-entry hot cache but consults durable outcomes before execution. Journal snapshots carry the at-most-256 unresolved transactions across compaction, while `BridgeDaemon` tracks unpublished streamed panes as retired until the final stream or subscription detaches.
+**Architecture:** `ControlJournal` owns an atomic hash-addressed completed-key tombstone store plus redacted snapshot recovery metadata. `ControlRuntime` keeps exact outcomes in its bounded 1,000-entry hot cache, tracks tombstone writes in a capped dirty map, and forbids compaction from covering a terminal event until its tombstone is confirmed durable. Journal snapshots carry only redacted state and the at-most-256 unresolved transactions across compaction, while `BridgeDaemon` tracks unpublished streamed panes as retired until the final stream or subscription detaches.
 
 **Tech Stack:** TypeScript, Node.js filesystem promises and crypto, Vitest, NDJSON control journal, WebSocket bridge runtime.
 
@@ -12,87 +12,171 @@
 
 ## File Map
 
-- Modify `src/control/journal.ts`: durable outcome sidecar storage, open-transaction snapshot schema, strict parsing, and snapshot-aware recovery.
-- Modify `src/control/runtime.ts`: asynchronous cold outcome lookup, terminal outcome persistence, and compaction of unresolved transactions.
+- Modify `src/control/journal.ts`: durable completed-key tombstones, redacted/open-transaction snapshot schema, strict parsing, and snapshot-aware recovery.
+- Modify `src/control/runtime.ts`: asynchronous tombstone lookup, crash-safe terminal ordering, dirty-tombstone retry, compaction gating, and bounded exact outcomes.
 - Modify `src/services/bridge/BridgeDaemon.ts`: retired-pane ownership and final-release reclamation.
 - Modify `__tests__/controlRuntime.test.ts`: hot-cache eviction still deduplicates.
-- Modify `__tests__/controlJournal.test.ts`: outcome-store and open-transaction parsing/recovery.
-- Modify `__tests__/controlJournalCompaction.test.ts`: restart deduplication and unresolved-command recovery across compaction.
+- Modify `__tests__/controlJournal.test.ts`: tombstone-store, snapshot-redaction, and open-transaction parsing/recovery.
+- Modify `__tests__/controlJournalCompaction.test.ts`: tombstone-failure compaction gating, restart deduplication, and unresolved-command recovery.
 - Modify `__tests__/bridge/bridgeTerminalStreams.test.ts`: final stream/session release and multiple-subscriber behavior.
 - Modify `__tests__/bridge/BridgeDaemon.test.ts`: legacy unsubscribe releases retired buffers.
 - Modify `docs/CONTROL-PLANE.md`: durable idempotency and unresolved snapshot semantics.
 - Modify `docs/AGENT-SURFACE-CONTROL.md`: durable retry behavior.
 - Modify `docs/BRIDGE-SECURITY.md`: bounded pane-buffer lifecycle.
 
-### Task 1: Make idempotency durable beyond the hot cache
+### Task 1: Make completed-key durability gate terminal compaction
 
 **Files:**
 - Modify: `src/control/journal.ts`
-- Modify: `src/control/runtime.ts:100-340,1520-1615`
+- Modify: `src/control/runtime.ts:100-340,1520-1680`
 - Test: `__tests__/controlJournal.test.ts`
 - Test: `__tests__/controlRuntime.test.ts`
 - Test: `__tests__/controlJournalCompaction.test.ts`
 - Modify: `docs/CONTROL-PLANE.md`
 - Modify: `docs/AGENT-SURFACE-CONTROL.md`
 
-- [ ] **Step 1: Write failing durable-outcome tests**
+- [ ] **Step 1: Write failing compact-tombstone and redaction tests**
 
-Add journal tests that store and reload an outcome under a key containing path
-separators and Unicode, verify the original key is checked after hashing, and
-verify malformed sidecar JSON rejects rather than returning `undefined`.
+Add journal tests for a separator-heavy Unicode idempotency key. Verify the
+sidecar filename is the SHA-256 digest, the stored JSON contains only the
+schema, digest, and terminal sequence, and neither the raw key nor an exact
+outcome sentinel appears on disk:
 
 ```ts
-it('stores outcomes by hashed idempotency key and reloads them', async () => {
+it('stores a compact redacted completed-key tombstone', async () => {
   const root = await newRoot();
   const journal = await ControlJournal.open(root, 4);
-  const outcome = { status: 'succeeded', value: { revision: 7 } } as const;
+  const key = '../retry/λ/secret-looking-key';
 
-  await journal.storeOutcome('../retry/λ', outcome);
+  await journal.storeCompletedKey(key, 27);
 
-  expect(await journal.loadOutcome('../retry/λ')).toEqual(outcome);
-  expect(await journal.loadOutcome('../retry/other')).toBeUndefined();
+  const digest = createHash('sha256').update(key, 'utf8').digest('hex');
+  const raw = await readFile(path.join(
+    root, '.psyche', 'runtime', 'completed-keys', `${digest}.json`,
+  ), 'utf8');
+  expect(JSON.parse(raw)).toEqual({
+    schema: 'psyche.control.completed-key/v1',
+    keyDigest: digest,
+    terminalSequence: 27,
+  });
+  expect(raw).not.toContain(key);
+  expect(await journal.hasCompletedKey(key)).toBe(true);
+  expect(await journal.hasCompletedKey('../retry/other')).toBe(false);
 });
 ```
 
-Replace the compaction test named
-`re-executes a key that fell outside the retained window` with a test that
-submits `idem-dropped`, writes enough later outcomes to evict it from the hot
-map, compacts, restarts, and asserts the old outcome is returned without a new
-journal sequence.
+Add tests that malformed JSON, a mismatched digest, an invalid schema, and a
+non-positive terminal sequence throw rather than becoming cache misses. Add a
+snapshot test containing unique command-value, message, typed-value, script,
+and raw receipt-resource sentinels; trigger runtime compaction and assert none
+appear in `snapshot.json`. The only raw idempotency key allowed in the file is
+one inside a bounded `openTransactions` record.
 
-Add `mkdtemp`/`rm`, `tmpdir`, `path`, and `ControlJournal` imports to
-`controlRuntime.test.ts`, then use the real durable journal:
+- [ ] **Step 2: Write the failing terminal-ordering and compaction regression**
+
+In `controlRuntime.test.ts`, make tombstone persistence fail for one key after
+the handler and terminal append. Assert the original submission still resolves
+to the handler's exact successful outcome, the hot retry returns the same
+outcome without another effect, and the existing operator-visible error path is
+called:
 
 ```ts
-it('checks durable outcomes after the hot idempotency window evicts a key', async () => {
-  const root = await mkdtemp(path.join(tmpdir(), 'psyche-runtime-idempotency-'));
-  try {
-    const journal = await ControlJournal.open(root, 4);
-    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
-    const first = await runtime.submit(command({
-      id: 'old-key',
-      idempotencyKey: 'old-key',
-    }) as ControlCommand);
-    for (let index = 0; index <= 1_000; index += 1) {
-      await runtime.submit(command({
-        id: `new-key-${index}`,
-        idempotencyKey: `new-key-${index}`,
-      }) as ControlCommand);
-    }
-    const sequenceBefore = journal.sequence;
+it('preserves a completed outcome when tombstone persistence fails', async () => {
+  const root = await newRoot();
+  const journal = await ControlJournal.open(root, 4);
+  const effect = vi.fn(async () => ({ paneId: '%7' }));
+  handlers.openTerminal = effect;
+  vi.spyOn(journal, 'storeCompletedKey').mockRejectedValue(new Error('disk full'));
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
 
-    expect(await runtime.submit(command({
-      id: 'old-key-retry',
-      idempotencyKey: 'old-key',
-    }) as ControlCommand)).toEqual(first);
-    expect(journal.sequence).toBe(sequenceBefore);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+  await expect(runtime.submit(openTerminalCommand('idem-dirty')))
+    .resolves.toEqual({ status: 'succeeded', value: { paneId: '%7' } });
+  await expect(runtime.submit(openTerminalCommand('idem-dirty')))
+    .resolves.toEqual({ status: 'succeeded', value: { paneId: '%7' } });
+  expect(effect).toHaveBeenCalledTimes(1);
+  expect(error).toHaveBeenCalledWith(
+    expect.stringContaining('completed-key durability'),
+    expect.any(Error),
+  );
 });
 ```
 
-- [ ] **Step 2: Run the focused tests and verify the new assertions fail**
+Replace `re-executes a key that fell outside the retained window` in
+`controlJournalCompaction.test.ts` with the complete durability regression.
+Fail persistence only for `idem-dirty`, allowing later commands to persist
+normally:
+
+```ts
+it('does not compact a terminal event whose completed key is still dirty', async () => {
+  const root = await newRoot();
+  const journal = await ControlJournal.open(root, 4);
+  const persist = journal.storeCompletedKey.bind(journal);
+  let failOriginal = true;
+  const store = vi.spyOn(journal, 'storeCompletedKey')
+    .mockImplementation(async (key, sequence) => {
+      if (key === 'idem-dirty' && failOriginal) throw new Error('injected sidecar failure');
+      await persist(key, sequence);
+    });
+  const effect = vi.fn(async () => ({ applied: true }));
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const runtime = await ControlRuntime.create({
+    ownerEpoch: 4,
+    handlers: makeHandlers({ takeover: effect }),
+    journal,
+  });
+
+  const first = await runtime.submit(takeover('idem-dirty'));
+  const terminal = journal.findByIdempotencyKey('idem-dirty');
+  expect(terminal?.kind).toBe('command.succeeded');
+
+  for (let index = 0; index < 2_100; index += 1) {
+    await runtime.submit(takeover(`idem-later-${index}`));
+  }
+  await vi.waitFor(() => expect(
+    store.mock.calls.filter(([key]) => key === 'idem-dirty').length,
+  ).toBeGreaterThan(1));
+  await vi.waitFor(() => expect(error.mock.calls.some(([message]) => (
+    String(message).includes('deferred compaction')
+  ))).toBe(true));
+
+  expect(journal.findByIdempotencyKey('idem-dirty')).toEqual(terminal);
+  expect(journal.firstSequence).toBeLessThanOrEqual(terminal!.sequence);
+  expect(effect).toHaveBeenCalledTimes(2_101);
+  await expect(runtime.submit(takeover('idem-blocked'))).resolves.toMatchObject({
+    status: 'rejected',
+    code: 'durability_unavailable',
+  });
+
+  failOriginal = false;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await runtime.submit(takeover('idem-trigger-retry'));
+  await vi.waitFor(() => expect(journal.firstSequence).toBeGreaterThan(terminal!.sequence));
+
+  const reopened = await ControlJournal.open(root, 5);
+  const restartedEffect = vi.fn(async () => ({ applied: 'again' }));
+  const restarted = await ControlRuntime.create({
+    ownerEpoch: 5,
+    handlers: makeHandlers({ takeover: restartedEffect }),
+    journal: reopened,
+  });
+
+  await expect(restarted.submit(takeover('idem-dirty'))).resolves.toEqual({
+    status: 'unknown',
+    code: 'idempotency_outcome_compacted',
+    message: 'command completed previously; its exact outcome is no longer retained',
+  });
+  expect(restartedEffect).not.toHaveBeenCalled();
+  expect(first.status).toBe('succeeded');
+});
+```
+
+This test must prove all required phases: failure after terminal append,
+enough later commands to request compaction, deferred compaction preserving the
+terminal event, persistence restoration, successful retry/compaction, restart,
+and resubmission without a second effect.
+
+- [ ] **Step 3: Run the focused tests and verify the new assertions fail**
 
 Run:
 
@@ -100,51 +184,66 @@ Run:
 pnpm vitest --run __tests__/controlJournal.test.ts __tests__/controlRuntime.test.ts __tests__/controlJournalCompaction.test.ts
 ```
 
-Expected: FAIL because `ControlJournal.loadOutcome` and `storeOutcome` do not
-exist and an evicted key currently executes again.
+Expected: FAIL because completed-key tombstones, dirty tracking, redacted
+snapshots, and compaction gating do not exist.
 
-- [ ] **Step 3: Add the atomic hash-addressed outcome store**
+- [ ] **Step 4: Add the atomic hash-addressed completed-key store**
 
-In `src/control/journal.ts`, add an outcome directory beside `snapshot.json`:
+In `src/control/journal.ts`, add a sidecar directory beside `snapshot.json`:
 
 ```ts
-interface DurableOutcomeRecord {
-  readonly idempotencyKey: string;
-  readonly outcome: CommandOutcome;
+const COMPLETED_KEY_SCHEMA = 'psyche.control.completed-key/v1' as const;
+
+interface DurableCompletedKeyRecord {
+  readonly schema: typeof COMPLETED_KEY_SCHEMA;
+  readonly keyDigest: string;
+  readonly terminalSequence: number;
 }
 
-function outcomeFileName(idempotencyKey: string): string {
-  return `${createHash('sha256').update(idempotencyKey, 'utf8').digest('hex')}.json`;
+function completedKeyDigest(idempotencyKey: string): string {
+  return createHash('sha256').update(idempotencyKey, 'utf8').digest('hex');
 }
 ```
 
-Store `outcomesPath` on `ControlJournal`, initialize it as
-`path.join(runtimeDir, 'outcomes')`, and add:
+Store `completedKeysPath` on `ControlJournal`, initialize it as
+`path.join(runtimeDir, 'completed-keys')`, and add:
 
 ```ts
-async loadOutcome(idempotencyKey: string): Promise<CommandOutcome | undefined> {
-  const file = path.join(this.outcomesPath, outcomeFileName(idempotencyKey));
+async hasCompletedKey(idempotencyKey: string): Promise<boolean> {
+  const digest = completedKeyDigest(idempotencyKey);
+  const file = path.join(this.completedKeysPath, `${digest}.json`);
   let raw: string;
   try {
     raw = await readFile(file, 'utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
     throw error;
   }
-  const parsed = JSON.parse(raw) as Partial<DurableOutcomeRecord>;
-  if (parsed.idempotencyKey !== idempotencyKey || !isCommandOutcome(parsed.outcome)) {
-    throw new Error(`invalid durable control outcome: ${file}`);
+  const parsed = JSON.parse(raw) as Partial<DurableCompletedKeyRecord>;
+  if (parsed.schema !== COMPLETED_KEY_SCHEMA
+    || parsed.keyDigest !== digest
+    || !Number.isInteger(parsed.terminalSequence)
+    || Number(parsed.terminalSequence) < 1) {
+    throw new Error(`invalid durable completed key: ${file}`);
   }
-  return parsed.outcome;
+  return true;
 }
 
-async storeOutcome(idempotencyKey: string, outcome: CommandOutcome): Promise<void> {
-  await mkdir(this.outcomesPath, { recursive: true, mode: 0o700 });
-  const target = path.join(this.outcomesPath, outcomeFileName(idempotencyKey));
+async storeCompletedKey(
+  idempotencyKey: string,
+  terminalSequence: number,
+): Promise<void> {
+  const digest = completedKeyDigest(idempotencyKey);
+  await mkdir(this.completedKeysPath, { recursive: true, mode: 0o700 });
+  const target = path.join(this.completedKeysPath, `${digest}.json`);
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
   const handle = await open(temporary, 'wx', 0o600);
   try {
-    await handle.writeFile(JSON.stringify({ idempotencyKey, outcome }), 'utf8');
+    await handle.writeFile(JSON.stringify({
+      schema: COMPLETED_KEY_SCHEMA,
+      keyDigest: digest,
+      terminalSequence,
+    }), 'utf8');
     await handle.sync();
   } finally {
     await handle.close();
@@ -153,63 +252,26 @@ async storeOutcome(idempotencyKey: string, outcome: CommandOutcome): Promise<voi
 }
 ```
 
-Implement `isCommandOutcome` by accepting only the four existing statuses and
-their required fields. Do not coerce malformed data or treat it as a cache miss:
+Validate `terminalSequence` before writing. Clear dirty state only after the
+file fsync and atomic rename succeed, matching the journal's existing atomic
+publication pattern. Do not persist `CommandOutcome`, raw keys, command
+payloads, messages, or receipts in this store.
+
+Extend `CompactableJournal` and `asCompactable` with:
 
 ```ts
-function isCommandOutcome(value: unknown): value is CommandOutcome {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const candidate = value as {
-    status?: unknown;
-    code?: unknown;
-    message?: unknown;
-  };
-  if (candidate.status === 'succeeded') return true;
-  return (
-    candidate.status === 'failed'
-    || candidate.status === 'unknown'
-    || candidate.status === 'rejected'
-  ) && typeof candidate.code === 'string'
-    && typeof candidate.message === 'string';
-}
+hasCompletedKey(idempotencyKey: string): Promise<boolean>;
+storeCompletedKey(idempotencyKey: string, terminalSequence: number): Promise<void>;
 ```
 
-Extend `CompactableJournal` with:
+- [ ] **Step 5: Serialize cold lookup and bound dirty metadata**
+
+Keep `submit()` synchronous in shape but install the cold lookup promise in
+`pendingByIdempotencyKey` before awaiting I/O. Check sources in this order:
+bounded hot exact outcome, pending submission, retained terminal tail,
+completed-key tombstone, then fresh execution.
 
 ```ts
-loadOutcome(idempotencyKey: string): Promise<CommandOutcome | undefined>;
-storeOutcome(idempotencyKey: string, outcome: CommandOutcome): Promise<void>;
-```
-
-Require these methods in `asCompactable`.
-
-- [ ] **Step 4: Serialize cold lookup with pending-command deduplication**
-
-Keep `submit()` synchronous in shape but place the cold lookup inside the
-promise installed in `pendingByIdempotencyKey`:
-
-```ts
-submit(command: ControlCommand): Promise<CommandOutcome> {
-  this.pruneInactiveResourceQueues();
-  const prior = this.outcomesByIdempotencyKey.get(command.idempotencyKey);
-  if (prior) return Promise.resolve(prior);
-
-  const pending = this.pendingByIdempotencyKey.get(command.idempotencyKey);
-  if (pending) return pending;
-  if (this.pendingByIdempotencyKey.size >= AGENT_CONTROL_LIMITS.pendingCommands) {
-    return Promise.resolve(rejectedOutcome(
-      'runtime_busy',
-      'control runtime pending command capacity exceeded',
-    ));
-  }
-
-  const execution = this.submitAfterDurableLookup(command).finally(() => {
-    this.pendingByIdempotencyKey.delete(command.idempotencyKey);
-  });
-  this.pendingByIdempotencyKey.set(command.idempotencyKey, execution);
-  return execution;
-}
-
 private async submitAfterDurableLookup(command: ControlCommand): Promise<CommandOutcome> {
   const tail = this.journal.findByIdempotencyKey(command.idempotencyKey);
   if (tail && TERMINAL_EVENT_KINDS.has(tail.kind)) {
@@ -217,22 +279,174 @@ private async submitAfterDurableLookup(command: ControlCommand): Promise<Command
     this.rememberOutcome(command.idempotencyKey, outcome);
     return outcome;
   }
-  const durable = await this.compactable?.loadOutcome(command.idempotencyKey);
-  if (durable) {
-    this.rememberOutcome(command.idempotencyKey, durable);
-    return durable;
+  if (await this.compactable?.hasCompletedKey(command.idempotencyKey)) {
+    return {
+      status: 'unknown',
+      code: 'idempotency_outcome_compacted',
+      message: 'command completed previously; its exact outcome is no longer retained',
+    };
   }
-  return this.submitFresh(command);
+  if (!await this.reserveCompletedKeySlot(command.idempotencyKey)) {
+    return rejectedOutcome(
+      'durability_unavailable',
+      'completed-key durability is unavailable; refusing a new effect',
+    );
+  }
+  try {
+    return await this.submitFresh(command);
+  } finally {
+    this.completedKeyReservations.delete(command.idempotencyKey);
+  }
 }
 ```
 
-After each terminal journal append, call
-`await this.compactable?.storeOutcome(command.idempotencyKey, outcome)` before
-`rememberOutcome`. This keeps terminal journal publication ordered before the
-sidecar and makes a sidecar failure explicit. The tail lookup prevents a retry
-from executing again if sidecar publication failed after the terminal event.
+Add:
 
-- [ ] **Step 5: Run focused tests and update contract documentation**
+```ts
+private readonly dirtyCompletedKeys = new Map<string, number>();
+private readonly completedKeyReservations = new Set<string>();
+private compactionBlockedByDurability = false;
+
+private async reserveCompletedKeySlot(idempotencyKey: string): Promise<boolean> {
+  if (!this.compactable) return true;
+  const limit = AGENT_CONTROL_LIMITS.pendingCommands;
+  if (this.compactionBlockedByDurability
+    || this.dirtyCompletedKeys.size + this.completedKeyReservations.size >= limit) {
+    await this.flushDirtyCompletedKeysThrough(Number.POSITIVE_INFINITY);
+  }
+  if (this.compactionBlockedByDurability && this.dirtyCompletedKeys.size === 0) {
+    this.compactionBlockedByDurability = false;
+  }
+  if (this.compactionBlockedByDurability) return false;
+  if (this.dirtyCompletedKeys.size + this.completedKeyReservations.size >= limit) {
+    return false;
+  }
+  this.completedKeyReservations.add(idempotencyKey);
+  return true;
+}
+```
+
+The dirty map stores only the key and terminal sequence. Reserving before
+`submitFresh` prevents concurrent effects from all passing a stale size check.
+The union of dirty entries and reservations never exceeds the existing 256
+pending-command cap; retries remain available even when fresh effects fail
+closed at the cap. Once compaction is deferred for a covered dirty key,
+`compactionBlockedByDurability` also rejects fresh effects until the pending
+write succeeds, bounding journal growth during a persistent failure. Add a
+gated-concurrency test that fills all 256 slots with failing tombstone writes,
+verifies a 257th fresh effect receives `durability_unavailable`, and verifies a
+retry of a terminal key still returns its recorded outcome.
+
+- [ ] **Step 6: Use crash-safe terminal ordering and preserve the real result**
+
+Centralize terminal publication for both surface and non-surface commands:
+
+```ts
+private async persistCompletedKey(
+  idempotencyKey: string,
+  terminalSequence: number,
+): Promise<void> {
+  const journal = this.compactable;
+  if (!journal) return;
+  this.completedKeyReservations.delete(idempotencyKey);
+  this.dirtyCompletedKeys.set(idempotencyKey, terminalSequence);
+  try {
+    await journal.storeCompletedKey(idempotencyKey, terminalSequence);
+    if (this.dirtyCompletedKeys.get(idempotencyKey) === terminalSequence) {
+      this.dirtyCompletedKeys.delete(idempotencyKey);
+    }
+  } catch (error) {
+    console.error(
+      `[control-runtime] completed-key durability failed for terminal sequence ${terminalSequence}`,
+      error,
+    );
+  }
+}
+```
+
+For every terminal path, enforce this exact order:
+
+```ts
+const event = await this.journal.append(terminalKindForOutcome(outcome), payload);
+this.rememberOutcome(command.idempotencyKey, outcome);
+await this.persistCompletedKey(command.idempotencyKey, event.sequence);
+this.maybeCompact();
+return outcome;
+```
+
+Do not throw the tombstone persistence error from `appendTerminal`: the effect
+and terminal event already completed. Keep the dirty entry, emit the explicit
+operator-visible error, return the real `CommandOutcome`, and let retries read
+the hot map or authoritative terminal tail.
+
+- [ ] **Step 7: Retry dirty keys before compaction and on recovery**
+
+Implement:
+
+```ts
+private async flushDirtyCompletedKeysThrough(coveredSequence: number): Promise<boolean> {
+  const journal = this.compactable;
+  if (!journal) return true;
+  for (const [key, sequence] of [...this.dirtyCompletedKeys]) {
+    if (sequence > coveredSequence) continue;
+    await this.persistCompletedKey(key, sequence);
+  }
+  return ![...this.dirtyCompletedKeys.values()]
+    .some((sequence) => sequence <= coveredSequence);
+}
+```
+
+At startup, replay retained terminal events into the hot exact map. For each
+terminal event, call `hasCompletedKey`; if it is absent, add the key and
+sequence to `dirtyCompletedKeys` and attempt persistence. A failed
+reconstruction does not invalidate the terminal outcome: the event remains
+authoritative and ineligible for compaction.
+
+In `compactJournal`, compute `coveredSequence`, then gate all snapshot and
+journal mutation:
+
+```ts
+if (!await this.flushDirtyCompletedKeysThrough(coveredSequence)) {
+  this.compactionBlockedByDurability = true;
+  console.error(
+    `[control-runtime] deferred compaction through sequence ${coveredSequence}: `
+      + 'completed-key durability is pending',
+  );
+  return;
+}
+this.compactionBlockedByDurability = false;
+```
+
+Only after this returns `true` may the runtime write a snapshot and call
+`journal.compact(coveredSequence)`. A terminal event whose tombstone is dirty
+must never be represented as compactable merely because its exact outcome was
+evicted from the hot map.
+
+- [ ] **Step 8: Remove exact outcomes from durable snapshots**
+
+Delete `outcomes` from `JournalSnapshotFile`, `loadSnapshot`, startup restore,
+and compaction writes. Replace `snapshot: ControlSnapshot` with the minimal
+allowlisted durable metadata:
+
+```ts
+export interface DurableControlSnapshot {
+  readonly ownerEpoch: number;
+  readonly sequence: number;
+}
+```
+
+Write only `{ ownerEpoch, sequence }` there. Keep bounded redacted
+`JournalActionReceipt` records and the Task 2 open transactions as separate
+top-level fields. Do not persist commands, exact outcomes, leases, resources,
+approvals, live receipts, command payloads, or effect fields. The open
+transaction command ID and raw idempotency key are the sole minimal exception
+because restart recovery must match and terminalize in-flight work.
+
+Add a test that writes distinctive secret-looking sentinels into a command
+payload, exact outcome, and live receipt, compacts, reads `snapshot.json`, and
+asserts those sentinels are absent while the required open transaction remains.
+
+- [ ] **Step 9: Run focused tests and update contract documentation**
 
 Run:
 
@@ -242,11 +456,17 @@ pnpm vitest --run __tests__/controlJournal.test.ts __tests__/controlRuntime.test
 
 Expected: PASS.
 
-Update `docs/CONTROL-PLANE.md` and `docs/AGENT-SURFACE-CONTROL.md` to state that
-the 1,000-entry map is a hot cache, all terminal keys remain authoritative in
-the disk-backed store, and lookup/storage errors fail closed.
+Update `docs/CONTROL-PLANE.md` and `docs/AGENT-SURFACE-CONTROL.md` to state:
 
-- [ ] **Step 6: Commit durable idempotency**
+- exact outcomes are bounded to the hot map and retained tail;
+- compact redacted tombstones permanently prevent old-key re-execution;
+- a compacted exact outcome returns `idempotency_outcome_compacted`;
+- terminal events cannot be compacted while tombstone persistence is dirty;
+- persistence failure is operator-visible but does not misreport an already
+  completed command as failed; and
+- durable snapshots omit command envelopes and exact outcomes.
+
+- [ ] **Step 10: Commit durable idempotency**
 
 ```bash
 git add src/control/journal.ts src/control/runtime.ts \
@@ -285,9 +505,11 @@ it('recovers a requested command compacted into the snapshot exactly once', asyn
     idempotencyKey: 'idem-open',
   });
   await journal.writeSnapshot({
-    snapshot: runtime.snapshot(),
+    snapshot: {
+      ownerEpoch: 4,
+      sequence: requested.sequence,
+    },
     coveredSequence: requested.sequence,
-    outcomes: {},
     receiptRecords: [],
     openTransactions: [{
       sequence: requested.sequence,
@@ -341,6 +563,9 @@ export interface DurableOpenTransaction {
 ```
 
 Add `openTransactions: DurableOpenTransaction[]` to `JournalSnapshotFile`.
+Task 1 has already removed the exact `outcomes` field and replaced runtime
+snapshot writes with the explicit redacted durable projection; do not
+reintroduce either exact outcomes or command envelopes here.
 `loadSnapshot()` must default an absent field to `[]` for pre-repair snapshots,
 but throw `invalid control journal snapshot open transaction` if a present
 entry lacks an integer positive sequence, non-empty command/idempotency key, or
@@ -427,7 +652,10 @@ const openTransactions = reduceOpenTransactions(
 Write `openTransactions` with the snapshot. Recovery calls
 `reduceOpenTransactions(restored, this.events)` and appends one
 `command.unknown` per remaining record. Before appending, re-check the current
-tail so calling recovery twice cannot duplicate terminal events.
+tail so calling recovery twice cannot duplicate terminal events. The startup
+completed-key reconstruction from Task 1 must then persist tombstones for
+these recovery-generated terminal events before any future compaction may
+cover them.
 
 - [ ] **Step 5: Run recovery tests and document the snapshot invariant**
 
