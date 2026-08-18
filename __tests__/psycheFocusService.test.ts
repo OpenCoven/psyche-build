@@ -11,6 +11,22 @@ afterEach(() => {
 });
 
 describe('PsycheFocusService helper restart', () => {
+  it('does not activate a helper connection after the service has stopped', () => {
+    vi.useFakeTimers();
+    const service = new PsycheFocusService({ projectName: 'test' });
+    const writeTerminalTitle = vi.spyOn(service as any, 'writeTerminalTitle');
+    const connectToHelper = vi.spyOn(service as any, 'connectToHelper');
+
+    (service as any).active = false;
+    (service as any).activateHelperConnection('/fake/helper.sock');
+
+    expect(writeTerminalTitle).not.toHaveBeenCalled();
+    expect(connectToHelper).not.toHaveBeenCalled();
+    expect((service as any).helperSocketPath).toBeNull();
+    expect((service as any).syncInterval).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('only returns processes that own the helper socket path', () => {
     const socketPath = '/Users/test/.psyche/native-helper/run/psyche-helper.sock';
     const lsofOutput = [

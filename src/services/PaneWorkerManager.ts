@@ -48,6 +48,7 @@ export class PaneWorkerManager {
       },
       onPaneRemoved: (paneId, reason) => {
         this.panes.delete(paneId);
+        if (this.panes.size === 0) this.poller.stop();
         this.dispatch(paneId, 'pane-removed', { reason });
       },
       onError: (paneId, error) => {

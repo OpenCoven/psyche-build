@@ -736,6 +736,14 @@ export class PsycheFocusService extends EventEmitter {
       return;
     }
 
+    this.activateHelperConnection(helperSocketPath);
+  }
+
+  private activateHelperConnection(helperSocketPath: string): void {
+    if (!this.active) {
+      return;
+    }
+
     this.helperSocketPath = helperSocketPath;
     this.writeTerminalTitle(this.terminalTitle);
     this.titleApplied = true;
