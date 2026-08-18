@@ -28,6 +28,7 @@ import {
 const DEFAULT_POLL_INTERVAL_MS = 50;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const LOCK_DIRECTORY_NAME = 'pane-config.lock';
+const SLUG_ALLOCATION_LOCK_DIRECTORY_NAME = 'pane-slug-allocation.lock';
 const LOCK_RECORD_NAME = 'lease.json';
 
 export type ProjectPaneConfigPane = Record<string, unknown> | PsychePane;
@@ -109,6 +110,7 @@ interface ConfigLockPaths {
   canonicalProjectRoot: string;
   runtimeDir: string;
   lockDir: string;
+  lockDirectoryName: string;
 }
 
 interface LockReadResult {
@@ -124,7 +126,37 @@ export async function acquireProjectPaneConfigLock(
   projectRoot: string,
   options: ProjectPaneConfigLockOptions = {},
 ): Promise<ProjectPaneConfigLock> {
-  const paths = await resolveConfigLockPaths(projectRoot);
+  return acquireProjectScopedLock(
+    projectRoot,
+    LOCK_DIRECTORY_NAME,
+    'pane config',
+    options,
+  );
+}
+
+/**
+ * Acquires the project-wide sibling slug allocation lease. Reused-worktree
+ * creation holds this outside the shorter pane-config read/write leases.
+ */
+export async function acquireProjectPaneSlugAllocationLock(
+  projectRoot: string,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigLock> {
+  return acquireProjectScopedLock(
+    projectRoot,
+    SLUG_ALLOCATION_LOCK_DIRECTORY_NAME,
+    'pane slug allocation',
+    options,
+  );
+}
+
+async function acquireProjectScopedLock(
+  projectRoot: string,
+  lockDirectoryName: string,
+  lockLabel: string,
+  options: ProjectPaneConfigLockOptions,
+): Promise<ProjectPaneConfigLock> {
+  const paths = await resolveConfigLockPaths(projectRoot, lockDirectoryName);
   const pid = options.pid ?? process.pid;
   const isOwnerProcessAlive = options.isProcessAlive ?? isProcessAlive;
   const resolveProcessStartIdentity = options.getProcessStartIdentity ?? getProcessStartIdentity;
@@ -135,10 +167,10 @@ export async function acquireProjectPaneConfigLock(
   const createNonce = options.createNonce ?? randomUUID;
 
   if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
-    throw new Error('project pane config lock pollIntervalMs must be greater than zero');
+    throw new Error(`project ${lockLabel} lock pollIntervalMs must be greater than zero`);
   }
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
-    throw new Error('project pane config lock timeoutMs must not be negative');
+    throw new Error(`project ${lockLabel} lock timeoutMs must not be negative`);
   }
 
   await mkdir(paths.runtimeDir, { recursive: true });
@@ -159,12 +191,12 @@ export async function acquireProjectPaneConfigLock(
   };
   const candidateDir = path.join(
     paths.runtimeDir,
-    `${LOCK_DIRECTORY_NAME}.candidate.${nonce}`,
+    `${lockDirectoryName}.candidate.${nonce}`,
   );
   const candidateRecordPath = path.join(candidateDir, LOCK_RECORD_NAME);
   const deadline = Date.now() + timeoutMs;
   let acquired = false;
-  let lastWaitReason = 'another project config mutation is in progress';
+  let lastWaitReason = `another project ${lockLabel} operation is in progress`;
 
   try {
     await mkdir(candidateDir);
@@ -197,22 +229,22 @@ export async function acquireProjectPaneConfigLock(
           )) {
             continue;
           }
-          lastWaitReason = `stale config lock recovery is in progress for pid ${current.record.pid}`;
+          lastWaitReason = `stale ${lockLabel} lock recovery is in progress for pid ${current.record.pid}`;
         } else {
-          lastWaitReason = `config lock is held by live or unverifiable pid ${current.record.pid}`;
+          lastWaitReason = `${lockLabel} lock is held by live or unverifiable pid ${current.record.pid}`;
         }
       } else if (current.missing) {
-        lastWaitReason = 'config lock was released while waiting';
+        lastWaitReason = `${lockLabel} lock was released while waiting`;
       } else {
         // A malformed lock could belong to a still-live writer. Without
         // owner metadata, removing it would be an unsafe lock steal.
-        lastWaitReason = 'config lock metadata is unavailable or invalid';
+        lastWaitReason = `${lockLabel} lock metadata is unavailable or invalid`;
       }
 
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
         throw new Error(
-          `Timed out waiting for project pane config lock for ${paths.canonicalProjectRoot}: ${lastWaitReason}`,
+          `Timed out waiting for project ${lockLabel} lock for ${paths.canonicalProjectRoot}: ${lastWaitReason}`,
         );
       }
       await sleep(Math.min(pollIntervalMs, remainingMs));
@@ -816,13 +848,17 @@ export function projectRootFromPaneConfigPath(configPath: string): string | unde
   return path.dirname(path.dirname(resolved));
 }
 
-async function resolveConfigLockPaths(projectRoot: string): Promise<ConfigLockPaths> {
+async function resolveConfigLockPaths(
+  projectRoot: string,
+  lockDirectoryName: string = LOCK_DIRECTORY_NAME,
+): Promise<ConfigLockPaths> {
   const canonicalProjectRoot = await canonicalizePath(projectRoot);
   const runtimeDir = path.join(canonicalProjectRoot, '.psyche', 'runtime');
   return {
     canonicalProjectRoot,
     runtimeDir,
-    lockDir: path.join(runtimeDir, LOCK_DIRECTORY_NAME),
+    lockDir: path.join(runtimeDir, lockDirectoryName),
+    lockDirectoryName,
   };
 }
 
@@ -1078,7 +1114,7 @@ async function quarantineStaleLock(
 
   const quarantineDir = path.join(
     paths.runtimeDir,
-    `${LOCK_DIRECTORY_NAME}.stale.${record.nonce}`,
+    `${paths.lockDirectoryName}.stale.${record.nonce}`,
   );
   try {
     await rename(paths.lockDir, quarantineDir);

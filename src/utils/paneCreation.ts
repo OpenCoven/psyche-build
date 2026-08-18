@@ -36,6 +36,7 @@ import {
 } from '../services/WorktreeCleanupService.js';
 import type { ProjectWorktreeLifecycleLease } from '../services/WorktreeOperationLease.js';
 import {
+  acquireProjectPaneSlugAllocationLock,
   ensureProjectPaneConfigPane,
   mutateProjectPaneConfig,
   projectPaneConfigPath,
@@ -134,6 +135,39 @@ async function waitForPaneReady(
     }
     await new Promise((resolve) => setTimeout(resolve, 30));
   }
+}
+
+function resolvePaneProjectRoot(optionsProjectRoot?: string): string {
+  if (optionsProjectRoot) {
+    return optionsProjectRoot;
+  }
+
+  try {
+    const gitCommonDir = execSync('git rev-parse --git-common-dir', {
+      encoding: 'utf-8',
+      stdio: 'pipe',
+    }).trim();
+
+    if (gitCommonDir === '.git') {
+      return execSync('git rev-parse --show-toplevel', {
+        encoding: 'utf-8',
+        stdio: 'pipe',
+      }).trim();
+    }
+    return path.dirname(gitCommonDir);
+  } catch {
+    return process.cwd();
+  }
+}
+
+function resolvePaneSessionProjectRoot(
+  options: Pick<CreatePaneOptions, 'sessionConfigPath' | 'sessionProjectRoot'>,
+  projectRoot: string,
+): string {
+  return options.sessionProjectRoot
+    || (options.sessionConfigPath
+      ? path.dirname(path.dirname(options.sessionConfigPath))
+      : projectRoot);
 }
 
 async function persistPaneBeforeAgentLaunch(
@@ -277,17 +311,37 @@ export async function createPane(
   );
   let settled = false;
   try {
-    const result = await createPaneWithReuseReservation(
-      {
-        ...options,
-        reuseReservation: reservation,
-        existingWorktree: {
-          ...existingWorktree,
-          worktreePath: reservation.canonicalWorktreePath,
-        },
+    const reservedOptions: CreatePaneOptions = {
+      ...options,
+      reuseReservation: reservation,
+      existingWorktree: {
+        ...existingWorktree,
+        worktreePath: reservation.canonicalWorktreePath,
       },
+    };
+    const createReservedPane = () => createPaneWithReuseReservation(
+      reservedOptions,
       availableAgents,
     );
+
+    let result: CreatePaneResult;
+    if (options.resolveExistingWorktreeSlug) {
+      const projectRoot = resolvePaneProjectRoot(options.projectRoot);
+      const sessionProjectRoot = resolvePaneSessionProjectRoot(options, projectRoot);
+
+      // Lock order is reuse reservation -> project slug allocation -> pane
+      // config read/write. Release the slug lock before completing or
+      // cancelling reuse so cleanup never waits while holding this namespace.
+      const slugLock = await acquireProjectPaneSlugAllocationLock(sessionProjectRoot);
+      try {
+        result = await createReservedPane();
+      } finally {
+        await slugLock.release();
+      }
+    } else {
+      result = await createReservedPane();
+    }
+
     await reservation.complete();
     settled = true;
     return result;
@@ -317,7 +371,6 @@ async function createPaneWithReuseReservation(
     mergeTargetChain,
     skipAgentSelection = false,
     sessionConfigPath: optionsSessionConfigPath,
-    sessionProjectRoot: optionsSessionProjectRoot,
     focusedTmuxPaneId,
     selectedPaneId,
   } = options;
@@ -330,38 +383,9 @@ async function createPaneWithReuseReservation(
   // Load settings to check for default agent and autopilot
   const { SettingsManager } = await import('./settingsManager.js');
 
-  // Get project root (handle git worktrees correctly)
-  let projectRoot: string;
-  if (optionsProjectRoot) {
-    projectRoot = optionsProjectRoot;
-  } else {
-    try {
-      // For git worktrees, we need to get the main repository root, not the worktree root
-      // git rev-parse --git-common-dir gives us the main .git directory
-      const gitCommonDir = execSync('git rev-parse --git-common-dir', {
-        encoding: 'utf-8',
-        stdio: 'pipe',
-      }).trim();
+  const projectRoot = resolvePaneProjectRoot(optionsProjectRoot);
 
-      // If it's a worktree, gitCommonDir will be an absolute path to main .git
-      // If it's the main repo, it will be just '.git'
-      if (gitCommonDir === '.git') {
-        // We're in the main repo
-        projectRoot = execSync('git rev-parse --show-toplevel', {
-          encoding: 'utf-8',
-          stdio: 'pipe',
-        }).trim();
-      } else {
-        // We're in a worktree, get the parent directory of the .git directory
-        projectRoot = path.dirname(gitCommonDir);
-      }
-    } catch {
-      projectRoot = process.cwd();
-    }
-  }
-
-  const sessionProjectRoot = optionsSessionProjectRoot
-    || (optionsSessionConfigPath ? path.dirname(path.dirname(optionsSessionConfigPath)) : projectRoot);
+  const sessionProjectRoot = resolvePaneSessionProjectRoot(options, projectRoot);
   if (existingWorktree && options.resolveExistingWorktreeSlug) {
     const config = await readProjectPaneConfigUnderLock(sessionProjectRoot);
     const freshPanes = Array.isArray(config.panes)

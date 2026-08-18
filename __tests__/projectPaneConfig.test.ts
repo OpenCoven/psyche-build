@@ -3,12 +3,15 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   acquireProjectPaneConfigLock,
+  acquireProjectPaneSlugAllocationLock,
   mutateProjectPaneConfig,
   mutateProjectPaneSettings,
+  readProjectPaneConfigUnderLock,
   removeProjectPaneConfigPaneIdentities,
   replaceProjectPaneConfigPaneIdentity,
   upsertProjectPaneConfigPanes,
 } from '../src/services/ProjectPaneConfig.js';
+import { generateSiblingSlugForTargetPane } from '../src/utils/attachAgent.js';
 import {
   savePanesToFile,
   saveUpdatedPaneConfig,
@@ -29,6 +32,95 @@ function createProject(): string {
 }
 
 describe('project pane config mutation', () => {
+  it('serializes sibling slug allocation across distinct same-basename worktrees', async () => {
+    expect(acquireProjectPaneSlugAllocationLock).toEqual(expect.any(Function));
+    const projectRoot = createProject();
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [{ slug: 'feature' }];
+    });
+    let firstAllocationEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      firstAllocationEntered = resolve;
+    });
+    let releaseFirstAllocation!: () => void;
+    const firstCanPersist = new Promise<void>((resolve) => {
+      releaseFirstAllocation = resolve;
+    });
+    let allocationCount = 0;
+
+    const allocate = async (
+      worktreePath: string,
+      lockOptions: {
+        pollIntervalMs?: number;
+        sleep?: (ms: number) => Promise<void>;
+      } = {},
+    ): Promise<string> => {
+      const lock = await acquireProjectPaneSlugAllocationLock(projectRoot, {
+        pollIntervalMs: 1,
+        ...lockOptions,
+      });
+      try {
+        const config = await readProjectPaneConfigUnderLock(projectRoot);
+        const freshPanes = (config.panes || []).filter(
+          (pane): pane is { slug: string } => typeof pane.slug === 'string',
+        );
+        const slug = generateSiblingSlugForTargetPane(
+          { slug: 'feature', worktreePath },
+          freshPanes,
+        );
+        allocationCount += 1;
+        if (allocationCount === 1) {
+          firstAllocationEntered();
+          await firstCanPersist;
+        }
+        await mutateProjectPaneConfig(projectRoot, (freshConfig) => {
+          freshConfig.panes = [...(freshConfig.panes || []), { slug }];
+        });
+        return slug;
+      } finally {
+        await lock.release();
+      }
+    };
+
+    const first = allocate(join(projectRoot, 'first', 'feature'));
+    await firstEntered;
+
+    let secondAllocationBlocked!: () => void;
+    const secondBlocked = new Promise<void>((resolve) => {
+      secondAllocationBlocked = resolve;
+    });
+    let retrySecondAllocation!: () => void;
+    const secondCanRetry = new Promise<void>((resolve) => {
+      retrySecondAllocation = resolve;
+    });
+    const second = allocate(join(projectRoot, 'second', 'feature'), {
+      sleep: async () => {
+        secondAllocationBlocked();
+        await secondCanRetry;
+      },
+    });
+    await expect(Promise.race([
+      secondBlocked.then(() => 'blocked'),
+      second.then(() => 'allocated'),
+    ])).resolves.toBe('blocked');
+
+    releaseFirstAllocation();
+    retrySecondAllocation();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      'feature-a2',
+      'feature-a3',
+    ]);
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).panes.map(
+      (pane: { slug: string }) => pane.slug,
+    )).toEqual([
+      'feature',
+      'feature-a2',
+      'feature-a3',
+    ]);
+  });
+
   it('rejects a duplicate pane ID instead of replacing the existing record', async () => {
     const projectRoot = createProject();
     const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
