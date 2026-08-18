@@ -75,6 +75,12 @@ export interface WorktreeRecoveryMarkerWriteResult {
   warning?: string;
 }
 
+export interface PaneSlugOwnershipPublicationExpectation {
+  recoveryId: string;
+  ownerNonce: string;
+  generation: string;
+}
+
 /**
  * The destructive cleanup marker is target-project-wide. The linked slug
  * quarantine remains session-local, so unrelated sessions share cleanup
@@ -88,10 +94,43 @@ export async function writeWorktreeRecoveryMarker(
   request: WorktreeRecoveryMarkerRequest,
   options: {
     persistPaneQuarantine?: typeof quarantinePaneSlugOwnershipRecord;
+    lockOptions?: Parameters<typeof acquireProjectWorktreeRecoveryLock>[1];
   } = {},
 ): Promise<WorktreeRecoveryMarkerWriteResult> {
+  const written = await writeWorktreeRecoveryMarkerInternal(request, options);
+  if (!written) {
+    throw new Error('Unconditional worktree recovery marker publication was skipped');
+  }
+  return written;
+}
+
+export async function writeWorktreeRecoveryMarkerIfPaneSlugOwned(
+  request: WorktreeRecoveryMarkerRequest,
+  expectedOwnership: PaneSlugOwnershipPublicationExpectation,
+  options: {
+    persistPaneQuarantine?: typeof quarantinePaneSlugOwnershipRecord;
+    lockOptions?: Parameters<typeof acquireProjectWorktreeRecoveryLock>[1];
+  } = {},
+): Promise<WorktreeRecoveryMarkerWriteResult | undefined> {
+  return writeWorktreeRecoveryMarkerInternal(request, {
+    ...options,
+    expectedOwnership,
+  });
+}
+
+async function writeWorktreeRecoveryMarkerInternal(
+  request: WorktreeRecoveryMarkerRequest,
+  options: {
+    persistPaneQuarantine?: typeof quarantinePaneSlugOwnershipRecord;
+    lockOptions?: Parameters<typeof acquireProjectWorktreeRecoveryLock>[1];
+    expectedOwnership?: PaneSlugOwnershipPublicationExpectation;
+  },
+): Promise<WorktreeRecoveryMarkerWriteResult | undefined> {
   if (request.allowWorktreeReuse && !request.pane.slug) {
     throw new Error('Reusable recovery quarantine requires a pane slug');
+  }
+  if (options.expectedOwnership && !request.pane.slug) {
+    throw new Error('Conditional pane quarantine requires a pane slug');
   }
   const projectRoot = canonicalizePathWithExistingAncestor(request.projectRoot);
   const sessionProjectRoot = canonicalizePathWithExistingAncestor(
@@ -101,6 +140,12 @@ export async function writeWorktreeRecoveryMarker(
   const recoveryId = request.recoveryId || randomUUID();
   if (!/^[0-9a-f-]{36}$/i.test(recoveryId)) {
     throw new Error('Worktree recovery ID must be a UUID');
+  }
+  if (
+    options.expectedOwnership
+    && recoveryId !== options.expectedOwnership.recoveryId
+  ) {
+    throw new Error('Conditional pane quarantine recovery ID changed');
   }
   const id = recoveryMarkerId(projectRoot, worktreePath, recoveryId);
   const marker: WorktreeRecoveryMarker = {
@@ -132,20 +177,44 @@ export async function writeWorktreeRecoveryMarker(
       'Until that explicit acknowledgement, Psyche will refuse destructive worktree cleanup.',
     ].join(' '),
   };
-  const targetLock = await acquireProjectWorktreeRecoveryLock(projectRoot);
+  const targetLock = await acquireProjectWorktreeRecoveryLock(
+    projectRoot,
+    options.lockOptions,
+  );
   try {
     const directory = worktreeRecoveryMarkerDirectory(projectRoot);
     const markerPath = path.join(directory, `${id}.json`);
-    await mkdir(directory, { recursive: true });
-    await atomicWriteJson(markerPath, marker);
+    if (!options.expectedOwnership) {
+      await mkdir(directory, { recursive: true });
+      await atomicWriteJson(markerPath, marker);
+    }
 
     let slugLock: Awaited<ReturnType<typeof acquireProjectPaneSlugAllocationLock>>
       | undefined;
     if (request.pane.slug) {
-      slugLock = await acquireProjectPaneSlugAllocationLock(sessionProjectRoot);
+      slugLock = await acquireProjectPaneSlugAllocationLock(
+        sessionProjectRoot,
+        options.lockOptions,
+      );
     }
     try {
       if (request.pane.slug) {
+        if (options.expectedOwnership) {
+          const current = await readPaneSlugOwnershipRecord(
+            sessionProjectRoot,
+            options.expectedOwnership.recoveryId,
+          );
+          if (
+            !current
+            || current.recoveryId !== options.expectedOwnership.recoveryId
+            || current.owner.nonce !== options.expectedOwnership.ownerNonce
+            || current.updatedAt !== options.expectedOwnership.generation
+          ) {
+            return undefined;
+          }
+          await mkdir(directory, { recursive: true });
+          await atomicWriteJson(markerPath, marker);
+        }
         try {
           await (
             options.persistPaneQuarantine ?? quarantinePaneSlugOwnershipRecord

@@ -21,6 +21,7 @@ import {
   removePaneSlugCleanupBlocker,
   writeProvisionalPaneSlugCleanupBlockerUnderLock,
   writeWorktreeRecoveryMarker,
+  writeWorktreeRecoveryMarkerIfPaneSlugOwned,
 } from './WorktreeRecoveryMarker.js';
 import type {
   TmuxPanePresence,
@@ -124,22 +125,30 @@ export async function reconcileStalePaneSlugReservations(
       continue;
     }
 
-    await writeWorktreeRecoveryMarker({
-      recoveryId: snapshot.recoveryId,
-      sessionProjectRoot: snapshot.sessionProjectRoot,
-      projectRoot: snapshot.projectRoot,
-      worktreePath: snapshot.worktreePath,
-      pane: {
-        id: snapshot.pane.id,
-        paneId: paneId || 'unresolved',
-        slug: snapshot.slug,
+    await writeWorktreeRecoveryMarkerIfPaneSlugOwned(
+      {
+        recoveryId: snapshot.recoveryId,
+        sessionProjectRoot: snapshot.sessionProjectRoot,
+        projectRoot: snapshot.projectRoot,
+        worktreePath: snapshot.worktreePath,
+        pane: {
+          id: snapshot.pane.id,
+          paneId: paneId || 'unresolved',
+          slug: snapshot.slug,
+        },
+        allowWorktreeReuse: true,
+        operation: `${snapshot.operation}-restart-reconciliation`,
+        reason: paneId
+          ? `owner process ended before pane persistence; tmux pane ${paneId} is ${presence}`
+          : 'owner process ended in the crash window after durable slug reservation; pane effect identity is unavailable',
       },
-      allowWorktreeReuse: true,
-      operation: `${snapshot.operation}-restart-reconciliation`,
-      reason: paneId
-        ? `owner process ended before pane persistence; tmux pane ${paneId} is ${presence}`
-        : 'owner process ended in the crash window after durable slug reservation; pane effect identity is unavailable',
-    });
+      {
+        recoveryId: snapshot.recoveryId,
+        ownerNonce: snapshot.owner.nonce,
+        generation: snapshot.updatedAt,
+      },
+      { lockOptions: options.lockOptions },
+    );
   }
 }
 
@@ -265,7 +274,12 @@ async function clearExactOwnershipRecord(
       snapshot.sessionProjectRoot,
       snapshot.recoveryId,
     );
-    if (!current || current.owner.nonce !== snapshot.owner.nonce) {
+    if (
+      !current
+      || current.recoveryId !== snapshot.recoveryId
+      || current.owner.nonce !== snapshot.owner.nonce
+      || current.updatedAt !== snapshot.updatedAt
+    ) {
       return;
     }
     await removePaneSlugOwnershipRecord(

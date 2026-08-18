@@ -444,6 +444,54 @@ describe('crash-safe pane slug ownership', () => {
     expect(await listWorktreeRecoveryMarkers(sessionRoot)).toEqual([]);
   });
 
+  it('does not resurrect quarantine after another reconciler confirms pane absence', async () => {
+    const sessionRoot = project('.psyche-slug-reconcile-race-');
+    const reservation = await reserveCrashSafePaneSlug({
+      sessionProjectRoot: sessionRoot,
+      projectRoot: sessionRoot,
+      paneId: 'racing-pane',
+      operation: 'racing-reconciliation',
+      allocate: () => ({
+        slug: 'racing',
+        worktreePath: path.join(sessionRoot, '.psyche', 'worktrees', 'racing'),
+      }),
+    });
+    await reservation.recordPaneEffect('%91');
+
+    let firstProbeStarted!: () => void;
+    const firstProbeWasStarted = new Promise<void>((resolve) => {
+      firstProbeStarted = resolve;
+    });
+    let releaseFirstProbe!: () => void;
+    const firstProbeCanFinish = new Promise<void>((resolve) => {
+      releaseFirstProbe = resolve;
+    });
+    const staleReconciliation = reconcileStalePaneSlugReservations({
+      sessionProjectRoot: sessionRoot,
+      ownerProbe: { isProcessAlive: () => false },
+      probePane: async () => {
+        firstProbeStarted();
+        await firstProbeCanFinish;
+        return 'unknown';
+      },
+    });
+    await firstProbeWasStarted;
+
+    await reconcileStalePaneSlugReservations({
+      sessionProjectRoot: sessionRoot,
+      ownerProbe: { isProcessAlive: () => false },
+      probePane: async () => 'absent',
+    });
+    expect(await listPaneSlugOwnershipRecords(sessionRoot)).toEqual([]);
+    expect(await listWorktreeRecoveryMarkers(sessionRoot)).toEqual([]);
+
+    releaseFirstProbe();
+    await staleReconciliation;
+
+    expect(await listPaneSlugOwnershipRecords(sessionRoot)).toEqual([]);
+    expect(await listWorktreeRecoveryMarkers(sessionRoot)).toEqual([]);
+  });
+
   it('makes target cleanup visible cross-session and acknowledges both records once', async () => {
     const sessionA = project('.psyche-slug-session-a-');
     const sessionB = project('.psyche-slug-session-b-');
