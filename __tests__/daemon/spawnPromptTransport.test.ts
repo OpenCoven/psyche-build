@@ -55,7 +55,7 @@ async function spawn(
   agent: string,
   prompt: string | undefined,
   h = harness(),
-  permissionMode?: 'plan' | 'acceptEdits' | 'bypassPermissions',
+  permissionMode?: '' | 'plan' | 'acceptEdits' | 'bypassPermissions',
 ) {
   const result = await spawnBridgePane(
     root,
@@ -66,7 +66,7 @@ async function spawn(
       agent,
       prompt,
       title: `${agent}-lane`,
-      ...(permissionMode ? { permissionMode } : {}),
+      ...(permissionMode !== undefined ? { permissionMode } : {}),
     },
     h.deps,
   );
@@ -159,6 +159,22 @@ describe('spawnBridgePane prompt transports', () => {
     expect(h.commands[0]).toContain('--permission-mode plan');
     expect(h.commands[0]).not.toContain('--dangerously-skip-permissions');
     expect(config.panes[0].permissionMode).toBe('plan');
+  });
+
+  it('persists an explicit empty permission mode as the agent default', async () => {
+    fs.mkdirSync(path.join(root, '.psyche'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, '.psyche', 'psyche.config.json'),
+      JSON.stringify({ settings: { permissionMode: 'bypassPermissions' }, panes: [] }),
+    );
+
+    const h = await spawn('claude', 'Fix it', harness(), '');
+    const config = JSON.parse(
+      fs.readFileSync(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+
+    expect(h.commands[0]).not.toContain('--dangerously-skip-permissions');
+    expect(config.panes[0]).toHaveProperty('permissionMode', '');
   });
 
   it('returns the exact identity persisted for the spawned pane', async () => {

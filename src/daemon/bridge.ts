@@ -1568,7 +1568,9 @@ export async function spawnBridgePane(
             }
             : {}),
           agent,
-          ...(request.permissionMode ? { permissionMode: request.permissionMode } : {}),
+          ...(request.permissionMode !== undefined
+            ? { permissionMode: request.permissionMode }
+            : {}),
           agentStatus: agent ? 'working' : 'idle',
           lastUpdated: now,
         };
