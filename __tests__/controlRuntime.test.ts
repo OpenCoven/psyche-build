@@ -415,7 +415,28 @@ describe('ControlRuntime', () => {
     });
   });
 
-  it('fails closed when a retained surface terminal event has no exact sidecar', async () => {
+  it('reconstructs a retained non-surface terminal when its exact sidecar is missing', async () => {
+    const root = await newJournalRoot('control-runtime');
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    const first = await submit(runtime, openTerminalCommand('non-surface-missing-sidecar'));
+    await rm(storedOutcomePath(root, 'non-surface-missing-sidecar'), { force: true });
+
+    const reopened = await ControlJournal.open(root, 8);
+    const restarted = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened });
+    expect(await reopened.loadOutcome('non-surface-missing-sidecar')).toEqual(first);
+    const sequenceBefore = reopened.sequence;
+    const callsBefore = invocations;
+
+    await expect(submit(restarted, openTerminalCommand('non-surface-missing-sidecar', 'non-surface-retry')))
+      .resolves.toEqual(first);
+    expect(invocations).toBe(callsBefore);
+    expect(reopened.sequence).toBe(sequenceBefore);
+  });
+
+  it('fails closed on startup when a retained surface terminal event has no exact sidecar', async () => {
     const root = await newJournalRoot('control-runtime');
     const journal = await ControlJournal.open(root, 7);
     const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
@@ -423,12 +444,43 @@ describe('ControlRuntime', () => {
     await rm(storedOutcomePath(root, 'surface-missing-sidecar'), { force: true });
 
     const reopened = await ControlJournal.open(root, 8);
-    const restarted = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened });
     const sequenceBefore = reopened.sequence;
 
-    await expect(submit(restarted, providerUpsertCommand('surface-missing-sidecar')))
-      .rejects.toThrow('durable outcome sidecar is required for retained surface terminal events');
+    await expect(ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened }))
+      .rejects.toThrow('durable outcome sidecar is required for retained surface or unknown terminal events');
     expect(reopened.sequence).toBe(sequenceBefore);
+    await expect(reopened.loadOutcome('surface-missing-sidecar')).resolves.toBeUndefined();
+  });
+
+  it('fails closed when compaction retained only a surface terminal event without its exact sidecar', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const idempotencyKey = 'surface-request-compacted';
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    await submit(runtime, providerUpsertCommand(idempotencyKey));
+    const requested = journal.read(0).find((event) => (
+      event.kind === 'command.requested' && event.payload.idempotencyKey === idempotencyKey
+    ));
+    expect(requested).toBeDefined();
+
+    await journal.writeSnapshot({
+      snapshot: runtime.snapshot(),
+      coveredSequence: requested!.sequence,
+      outcomes: {},
+      receiptRecords: [],
+    });
+    await journal.compact(requested!.sequence);
+    await rm(storedOutcomePath(root, idempotencyKey), { force: true });
+
+    const reopened = await ControlJournal.open(root, 8);
+    const retained = reopened.read(0).filter((event) => event.payload.idempotencyKey === idempotencyKey);
+    expect(retained.map((event) => event.kind)).toEqual(['command.succeeded']);
+    const sequenceBefore = reopened.sequence;
+
+    await expect(ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened }))
+      .rejects.toThrow('durable outcome sidecar is required for retained surface or unknown terminal events');
+    expect(reopened.sequence).toBe(sequenceBefore);
+    await expect(reopened.loadOutcome(idempotencyKey)).resolves.toBeUndefined();
   });
 
   it('rejects a stale owner epoch before side effects', async () => {

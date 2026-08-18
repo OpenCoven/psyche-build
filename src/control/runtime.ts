@@ -460,7 +460,7 @@ export class ControlRuntime {
       const outcome = reconstructRetainedOutcome(retained, commandKind);
       if (!outcome) {
         this.markDirtyTerminalOutcome(command.idempotencyKey, retained.sequence);
-        throw new Error('durable outcome sidecar is required for retained surface terminal events');
+        throw missingRetainedOutcomeSidecarError();
       }
       this.markDirtyTerminalOutcome(command.idempotencyKey, retained.sequence, outcome);
       this.rememberOutcome(command.idempotencyKey, outcome);
@@ -1696,10 +1696,14 @@ export class ControlRuntime {
         this.rememberOutcome(idempotencyKey, stored);
         continue;
       }
-      const reconstructed = reconstructRetainedOutcome(event, commandKind)
-        ?? this.outcomesByIdempotencyKey.get(idempotencyKey);
-      this.markDirtyTerminalOutcome(idempotencyKey, event.sequence, reconstructed);
-      if (reconstructed) this.rememberOutcome(idempotencyKey, reconstructed);
+      const reconstructed = reconstructRetainedOutcome(event, commandKind);
+      const retained = reconstructed ?? this.outcomesByIdempotencyKey.get(idempotencyKey);
+      if (!retained) {
+        this.markDirtyTerminalOutcome(idempotencyKey, event.sequence);
+        throw missingRetainedOutcomeSidecarError();
+      }
+      this.markDirtyTerminalOutcome(idempotencyKey, event.sequence, retained);
+      this.rememberOutcome(idempotencyKey, retained);
     }
     await this.flushDirtyTerminalOutcomesThrough(Number.POSITIVE_INFINITY);
   }
@@ -2406,8 +2410,12 @@ function reconstructRetainedOutcome(
   event: RuntimeEvent,
   commandKind?: ControlCommand['kind'] | string,
 ): CommandOutcome | undefined {
-  if (isSurfaceControlKind(commandKind) || durableJournalReceiptPayload(event)) return undefined;
+  if (!isRetainedNonSurfaceCommandKind(commandKind) || durableJournalReceiptPayload(event)) return undefined;
   return outcomeFromEvent(event);
+}
+
+function missingRetainedOutcomeSidecarError(): Error {
+  return new Error('durable outcome sidecar is required for retained surface or unknown terminal events');
 }
 
 // DurableReceiptRecord now lives in journal.ts: it is the durable shape the
@@ -2455,19 +2463,32 @@ function retainedCommandKind(
   return retainedCommandKinds(events).get(commandId);
 }
 
-function isSurfaceControlKind(kind?: ControlCommand['kind'] | string): boolean {
-  return kind === 'lease.request'
-    || kind === 'lease.grant'
-    || kind === 'lease.release'
-    || kind === 'lease.revoke'
-    || kind === 'pane.observe'
-    || kind === 'pane.action'
-    || kind === 'browser.inspect'
-    || kind === 'browser.action'
-    || kind === 'browser.script'
-    || kind === 'approval.resolve'
-    || kind === 'provider.resource.upsert'
-    || kind === 'provider.resource.remove';
+function isRetainedNonSurfaceCommandKind(kind?: ControlCommand['kind'] | string): kind is ControlCommand['kind'] {
+  switch (kind) {
+    case 'orchestration.execute':
+    case 'pane.spawn':
+    case 'pane.prompt':
+    case 'pane.interrupt':
+    case 'pane.delegate':
+    case 'pane.takeover':
+    case 'pane.input':
+    case 'pane.terminal.open':
+    case 'pane.resize':
+    case 'pane.focus':
+    case 'pane.kill':
+    case 'pane.respawn':
+    case 'pane.conflict.open':
+    case 'pane.option.update':
+    case 'pane.meta.update':
+    case 'ritual.launch':
+    case 'coven.session.launch':
+    case 'coven.session.open':
+    case 'coven.desktop.action':
+    case 'coven.capability.execute':
+      return true;
+    default:
+      return false;
+  }
 }
 
 function isReceiptResult(value: unknown): value is { receiptId?: string } {
