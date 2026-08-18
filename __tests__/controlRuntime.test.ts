@@ -122,6 +122,16 @@ function providerUpsertCommand(idempotencyKey: string): ControlCommand {
   }) as ControlCommand;
 }
 
+function ritualLaunchCommand(idempotencyKey: string, id = `ritual-${idempotencyKey}`): ControlCommand {
+  return command({
+    id,
+    idempotencyKey,
+    kind: 'ritual.launch',
+    ownerEpoch: 4,
+    payload: { projectId: 'project-1', ritualId: idempotencyKey, params: {} },
+  }) as ControlCommand;
+}
+
 async function submit(runtime: ControlRuntime, input: ControlCommand) {
   if (input.kind !== 'lease.grant' || !('grants' in input.payload)) {
     return runtime.submit(input);
@@ -514,6 +524,64 @@ describe('ControlRuntime', () => {
     expect((runtime as any).dirtyTerminalOutcomes.size).toBe(0);
   }, 90_000);
 
+  it('shares the 256 durability budget between dirty outcomes and active fresh executions', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    const persist = journal.storeOutcome.bind(journal);
+    let failDirty = true;
+    const holdExecution = { release: undefined as (() => void) | undefined };
+    const heldStarted = new Promise<void>((resolve) => {
+      holdExecution.release = resolve;
+    });
+    let startedHeld = false;
+    let invocations = 0;
+    handlers.launchRitual = vi.fn(async ({ ritualId }) => {
+      invocations += 1;
+      if (ritualId === 'idem-shared-budget-held') {
+        startedHeld = true;
+        await heldStarted;
+      }
+      return undefined;
+    });
+    vi.spyOn(journal, 'storeOutcome').mockImplementation(async (idempotencyKey, outcome) => {
+      if (idempotencyKey.startsWith('idem-shared-budget-') && failDirty) {
+        throw new Error('sidecar write failed');
+      }
+      await persist(idempotencyKey, outcome);
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    for (let index = 0; index < 255; index += 1) {
+      await expect(submit(runtime, ritualLaunchCommand(`idem-shared-budget-${index}`, `seed-${index}`)))
+        .resolves.toEqual({ status: 'succeeded' });
+    }
+    expect((runtime as any).dirtyTerminalOutcomes.size).toBe(255);
+
+    const held = submit(runtime, ritualLaunchCommand('idem-shared-budget-held', 'held'));
+    await vi.waitFor(() => expect(startedHeld).toBe(true));
+    expect((runtime as any).activeFreshExecutions.size).toBe(1);
+
+    const blockedCallsBefore = invocations;
+    const blockedSequenceBefore = journal.sequence;
+    await expect(submit(runtime, ritualLaunchCommand('idem-shared-budget-overflow', 'overflow')))
+      .resolves.toMatchObject({ status: 'rejected', code: 'durability_unavailable' });
+    expect(invocations).toBe(blockedCallsBefore);
+    expect(journal.sequence).toBe(blockedSequenceBefore);
+
+    holdExecution.release?.();
+    await expect(held).resolves.toEqual({ status: 'succeeded' });
+    expect((runtime as any).dirtyTerminalOutcomes.size).toBe(256);
+
+    const replayCallsBefore = invocations;
+    await expect(submit(runtime, ritualLaunchCommand('idem-shared-budget-0', 'retry-seed')))
+      .resolves.toEqual({ status: 'succeeded' });
+    await expect(submit(runtime, ritualLaunchCommand('idem-shared-budget-held', 'retry-held')))
+      .resolves.toEqual({ status: 'succeeded' });
+    expect(invocations).toBe(replayCallsBefore);
+
+    failDirty = false;
+  }, 90_000);
+
   it('persists a recovery-generated unknown outcome to the durable sidecar', async () => {
     const root = await newJournalRoot('control-runtime');
     const journal = await ControlJournal.open(root, 4);
@@ -565,6 +633,71 @@ describe('ControlRuntime', () => {
       });
     expect(journal.sequence).toBe(sequenceBefore);
     expect(runtime.surfaces.get(command.payload.resource.id)).toBeUndefined();
+  });
+
+  it('keeps a recovered surface unknown replayable across restarts while sidecar persistence is unavailable', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const command = providerUpsertCommand('surface-crash-recovered-dirty') as Extract<ControlCommand, { kind: 'provider.resource.upsert' }>;
+    const openJournal = async (ownerEpoch: number) => ControlJournal.open(root, ownerEpoch);
+    let failDirty = true;
+
+    {
+      const journal = await openJournal(4);
+      await journal.append('command.requested', {
+        commandId: command.id,
+        idempotencyKey: command.idempotencyKey,
+        kind: command.kind,
+        ownerEpoch: command.ownerEpoch,
+      });
+    }
+
+    const firstJournal = await openJournal(4);
+    const firstPersist = firstJournal.storeOutcome.bind(firstJournal);
+    vi.spyOn(firstJournal, 'storeOutcome').mockImplementation(async (idempotencyKey, outcome) => {
+      if (idempotencyKey === command.idempotencyKey && failDirty) {
+        throw new Error('sidecar write failed');
+      }
+      await firstPersist(idempotencyKey, outcome);
+    });
+    const firstRuntime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal: firstJournal });
+    const expectedUnknown = {
+      status: 'unknown',
+      code: 'recovered-nonterminal',
+      message: 'command outcome is unknown',
+    } as const;
+
+    expect(firstRuntime.surfaces.get(command.payload.resource.id)).toBeUndefined();
+    expect(await firstJournal.loadOutcome(command.idempotencyKey)).toBeUndefined();
+    await expect(submit(firstRuntime, { ...command, id: 'surface-crash-recovered-dirty-retry-1' }))
+      .resolves.toEqual(expectedUnknown);
+
+    const secondJournal = await openJournal(5);
+    const secondPersist = secondJournal.storeOutcome.bind(secondJournal);
+    vi.spyOn(secondJournal, 'storeOutcome').mockImplementation(async (idempotencyKey, outcome) => {
+      if (idempotencyKey === command.idempotencyKey && failDirty) {
+        throw new Error('sidecar write failed');
+      }
+      await secondPersist(idempotencyKey, outcome);
+    });
+    const secondRuntime = await ControlRuntime.create({ ownerEpoch: 5, handlers, journal: secondJournal });
+    const secondSequenceBefore = secondJournal.sequence;
+    await expect(submit(secondRuntime, { ...command, id: 'surface-crash-recovered-dirty-retry-2' }))
+      .resolves.toEqual(expectedUnknown);
+    expect(secondJournal.sequence).toBe(secondSequenceBefore);
+    expect(secondRuntime.surfaces.get(command.payload.resource.id)).toBeUndefined();
+    expect((secondRuntime as any).dirtyTerminalOutcomes.get(command.idempotencyKey)).toMatchObject({
+      outcome: expectedUnknown,
+    });
+
+    failDirty = false;
+    const recoveredJournal = await openJournal(6);
+    const recoveredRuntime = await ControlRuntime.create({ ownerEpoch: 6, handlers, journal: recoveredJournal });
+    await expect(recoveredJournal.loadOutcome(command.idempotencyKey)).resolves.toEqual(expectedUnknown);
+    const recoveredSequenceBefore = recoveredJournal.sequence;
+    await expect(submit(recoveredRuntime, { ...command, id: 'surface-crash-recovered-dirty-retry-3' }))
+      .resolves.toEqual(expectedUnknown);
+    expect(recoveredJournal.sequence).toBe(recoveredSequenceBefore);
+    expect(recoveredRuntime.surfaces.get(command.payload.resource.id)).toBeUndefined();
   });
 
   it('reconstructs a retained non-surface terminal when its exact sidecar is missing', async () => {

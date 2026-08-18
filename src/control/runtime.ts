@@ -508,6 +508,9 @@ export class ControlRuntime {
         'durable outcome persistence is unavailable; refusing a new effect',
       );
     }
+    if (!await this.hasReservedDurabilityCapacity()) {
+      return rejectedOutcome('durability_unavailable', 'durable outcome persistence capacity is exhausted');
+    }
     if (!await this.hasDirtyDurabilityCapacity()) {
       return rejectedOutcome('durability_unavailable', 'durable outcome persistence capacity is exhausted');
     }
@@ -1721,7 +1724,9 @@ export class ControlRuntime {
       if (!TERMINAL_EVENT_KINDS.has(event.kind)) continue;
       const idempotencyKey = stringPayload(event, 'idempotencyKey');
       if (!idempotencyKey) continue;
-      await this.persistTerminalOutcome(idempotencyKey, event.sequence, outcomeFromEvent(event));
+      const outcome = outcomeFromEvent(event);
+      this.rememberOutcome(idempotencyKey, outcome);
+      await this.persistTerminalOutcomeOrLeaveDirty(idempotencyKey, event.sequence, outcome);
     }
   }
 
@@ -1824,6 +1829,15 @@ export class ControlRuntime {
     return this.dirtyTerminalOutcomes.size < DIRTY_TERMINAL_OUTCOME_LIMIT;
   }
 
+  private async hasReservedDurabilityCapacity(): Promise<boolean> {
+    if (!this.compactable) return true;
+    if (this.dirtyTerminalOutcomes.size + this.activeFreshExecutions.size < DIRTY_TERMINAL_OUTCOME_LIMIT) {
+      return true;
+    }
+    await this.flushDirtyTerminalOutcomesThrough(Number.POSITIVE_INFINITY);
+    return this.dirtyTerminalOutcomes.size + this.activeFreshExecutions.size < DIRTY_TERMINAL_OUTCOME_LIMIT;
+  }
+
   private markDirtyTerminalOutcome(
     idempotencyKey: string,
     sequence: number,
@@ -1871,8 +1885,8 @@ export class ControlRuntime {
     sequence: number,
     outcome: CommandOutcome,
   ): Promise<void> {
+    this.markDirtyTerminalOutcome(idempotencyKey, sequence, outcome);
     try {
-      this.markDirtyTerminalOutcome(idempotencyKey, sequence, outcome);
       await this.persistTerminalOutcome(idempotencyKey, sequence, outcome);
     } catch (error) {
       console.error(
@@ -2714,6 +2728,7 @@ function reconstructRetainedOutcome(
   event: RuntimeEvent,
   commandKind?: ControlCommand['kind'] | string,
 ): CommandOutcome | undefined {
+  if (isRecoveredNonterminalRetainedOutcome(event)) return outcomeFromEvent(event);
   if (!isRetainedNonSurfaceCommandKind(commandKind) || durableJournalReceiptPayload(event)) return undefined;
   return outcomeFromEvent(event);
 }
@@ -2759,6 +2774,14 @@ function invalidRetainedOutcomeDigestError(): Error {
 
 function retainedOutcomeDigestMismatchError(): Error {
   return new Error('durable outcome sidecar does not match retained terminal event');
+}
+
+function isRecoveredNonterminalRetainedOutcome(event: RuntimeEvent): boolean {
+  return event.kind === 'command.unknown'
+    && stringPayload(event, 'reason') === 'recovered-nonterminal'
+    && typeof event.payload.outcomeDigest === 'string'
+    && isSha256Digest(event.payload.outcomeDigest)
+    && durableJournalReceiptPayload(event) === undefined;
 }
 
 function missingLegacySnapshotOutcomeSidecarError(): Error {
