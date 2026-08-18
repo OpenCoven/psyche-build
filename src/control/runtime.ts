@@ -459,7 +459,7 @@ export class ControlRuntime {
         return outcome;
       }
       const commandKind = retainedCommandKind(this.journal.read(0), retained);
-      const stored = await this.compactable?.loadOutcome(command.idempotencyKey);
+      const stored = await this.loadRetainedReplayOutcome(command.idempotencyKey, retained.sequence);
       if (stored) {
         this.clearDirtyTerminalOutcome(command.idempotencyKey, retained.sequence);
         this.rememberOutcome(command.idempotencyKey, stored);
@@ -1685,6 +1685,19 @@ export class ControlRuntime {
     }
   }
 
+  private async loadRetainedReplayOutcome(
+    idempotencyKey: string,
+    retainedSequence: number,
+  ): Promise<CommandOutcome | undefined> {
+    if (!this.compactable) return undefined;
+    try {
+      return await this.compactable.loadOutcome(idempotencyKey);
+    } catch (error) {
+      this.invalidateActiveCompactionForSequence(retainedSequence);
+      throw error;
+    }
+  }
+
   /** Warms the bounded hot cache from a snapshot before the tail is replayed over it. */
   private restoreOutcomes(outcomes: Record<string, CommandOutcome>): void {
     for (const [idempotencyKey, outcome] of Object.entries(outcomes)) {
@@ -1706,7 +1719,7 @@ export class ControlRuntime {
       const commandKind = commandId
         ? commandKinds.get(commandTransactionKey(commandId, idempotencyKey))
         : undefined;
-      const stored = await this.compactable.loadOutcome(idempotencyKey);
+      const stored = await this.loadRetainedReplayOutcome(idempotencyKey, event.sequence);
       if (stored) {
         this.clearDirtyTerminalOutcome(idempotencyKey, event.sequence);
         this.rememberOutcome(idempotencyKey, stored);

@@ -1,4 +1,4 @@
-import { mkdir, rm, unlink } from 'node:fs/promises';
+import { mkdir, rename, rm, symlink, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -175,6 +175,78 @@ describe('control journal compaction', () => {
     const sequenceBefore = reopened.sequence;
     await expect(restarted.submit(takeover('idem-race'))).resolves.toEqual(first);
     expect(reopened.sequence).toBe(sequenceBefore);
+  }, 90_000);
+
+  it('aborts compaction when a covered replay hits a retained outcome read error', async () => {
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 4);
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 4, handlers: makeHandlers(), journal,
+    });
+
+    const first = await runtime.submit(takeover('idem-read-race'));
+    for (let index = 0; index < 500; index += 1) {
+      await runtime.submit(takeover(`idem-read-race-later-${index}`));
+    }
+    const coveredSequence = journal.sequence - 1_000;
+    expect(coveredSequence).toBeGreaterThanOrEqual(2);
+    (runtime as any).outcomesByIdempotencyKey.delete('idem-read-race');
+
+    const runtimeDirectory = path.join(root, '.psyche', 'runtime');
+    const outcomesDirectory = path.join(runtimeDirectory, 'outcomes');
+    const trustedDirectory = path.join(runtimeDirectory, 'outcomes-private');
+    const externalDirectory = path.join(root, 'external-read-error-outcomes');
+    await mkdir(externalDirectory, { recursive: true, mode: 0o755 });
+
+    const compactReady = createDeferred<void>();
+    const releaseCompact = createDeferred<void>();
+    let swapped = false;
+    setDurableOutcomePublicationTestHooksForTesting({
+      beforeCompactRename: async ({ coveredSequence: hookCoveredSequence }) => {
+        expect(hookCoveredSequence).toBe(coveredSequence);
+        compactReady.resolve();
+        await releaseCompact.promise;
+      },
+      beforeOutcomePathRead: async ({ directoryPath }) => {
+        if (swapped || directoryPath !== outcomesDirectory) return;
+        swapped = true;
+        await rename(outcomesDirectory, trustedDirectory);
+        await symlink(
+          externalDirectory,
+          outcomesDirectory,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      },
+    });
+
+    const compacting = (runtime as any).compactJournal(journal);
+    await compactReady.promise;
+
+    await expect(runtime.submit(takeover('idem-read-race')))
+      .rejects.toThrow('durable outcome directory changed during read');
+    releaseCompact.resolve();
+    await compacting;
+
+    expect(journal.firstSequence).toBe(1);
+    expect(journal.read(0).filter((event) => (
+      event.kind === 'command.succeeded' && event.payload.idempotencyKey === 'idem-read-race'
+    ))).toHaveLength(1);
+
+    setDurableOutcomePublicationTestHooksForTesting(undefined);
+    await rm(outcomesDirectory, { recursive: true, force: true });
+    await rename(trustedDirectory, outcomesDirectory);
+
+    const sequenceBeforeRetry = journal.sequence;
+    await expect(runtime.submit(takeover('idem-read-race'))).resolves.toEqual(first);
+    expect(journal.sequence).toBe(sequenceBeforeRetry);
+
+    const reopened = await ControlJournal.open(root, 5);
+    const restarted = await ControlRuntime.create({
+      ownerEpoch: 5, handlers: makeHandlers(), journal: reopened,
+    });
+    const sequenceBeforeRestart = reopened.sequence;
+    await expect(restarted.submit(takeover('idem-read-race'))).resolves.toEqual(first);
+    expect(reopened.sequence).toBe(sequenceBeforeRestart);
   }, 90_000);
 
   it('reports a gap to a reader resuming below the retained window', async () => {
