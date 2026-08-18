@@ -1,10 +1,6 @@
 import path from 'path';
 import { TmuxService } from '../services/TmuxService.js';
-import {
-  assertTmuxGenerationUnchanged,
-  captureTmuxGeneration,
-  tearDownGenerationBoundPane,
-} from './TmuxGenerationGuard.js';
+import { tearDownGenerationBoundPane } from './TmuxGenerationGuard.js';
 import {
   ensurePaneBorderStatusForCurrentSession,
   setupSidebarLayout,
@@ -46,16 +42,14 @@ import {
 } from '../services/ProjectPaneConfig.js';
 import {
   paneRecoveryInstructions,
-  tearDownPaneWithVerification,
-  type TmuxPanePresence,
 } from './paneTeardown.js';
 import { createPsychePaneId } from './paneIdentity.js';
 import {
   isPaneLifecycleReservationRetainedError,
   PaneLifecycleReservationRetainedError,
-  retainPaneRecovery,
   type PaneRecoveryPersistenceResult,
 } from './paneLifecycleRecovery.js';
+import { createTransactionalPane } from './transactionalPaneCreation.js';
 
 export interface ReopenWorktreeOptions {
   agent?: AgentName;
@@ -117,7 +111,7 @@ async function reopenWorktreeWithReuseReservation(
 ): Promise<ReopenWorktreeResult> {
   const {
     agent: requestedAgent,
-    slug,
+    slug: requestedSlug,
     worktreePath,
     projectRoot,
     existingPanes,
@@ -213,105 +207,88 @@ async function reopenWorktreeWithReuseReservation(
   const permissionMode = metadata?.permissionMode ?? settings.permissionMode;
   const psychePaneId = createPsychePaneId();
   const currentBranch = getCurrentBranch(worktreePath);
-
-  let paneInfo: string;
-  const allocationGeneration = captureTmuxGeneration(
-    tmuxService,
-    'reopened pane allocation',
-  );
-
-  if (isFirstContentPane) {
-    paneInfo = setupSidebarLayout(controlPaneId, projectRoot);
-  } else {
-    paneInfo = splitPane(
-      insertion ? { targetPane: insertion.targetTmuxPaneId } : {}
-    );
-  }
-
-  const tmuxServerIdentity = allocationGeneration;
-  const newPane: PsychePane = {
-    id: psychePaneId,
-    slug,
-    displayName: metadata?.displayName,
-    branchName: (metadata?.branchName || currentBranch) !== slug
-      ? (metadata?.branchName || currentBranch)
-      : undefined,
-    prompt: '(Reopened session)',
-    paneId: paneInfo,
-    ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
-    projectRoot,
-    projectName: paneProjectName,
-    colorTheme: resolveProjectColorTheme(projectRoot, configSidebarProjects),
-    worktreePath,
-    agent,
-    permissionMode,
-    autopilot: settings.enableAutopilotByDefault ?? false,
-    mergeTargetChain: metadata?.mergeTargetChain,
-  };
-
+  let newPane: PsychePane;
   try {
-    assertTmuxGenerationUnchanged(
-      tmuxService,
-      allocationGeneration,
-      'reopened pane allocation',
-    );
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    if (!(await tmuxService.paneExists(paneInfo))) {
-      throw new Error(`newly split pane ${paneInfo} is not present`);
-    }
-    const paneTitle = projectRoot === sessionProjectRoot
-      ? slug
-      : buildWorktreePaneTitle(slug, projectRoot, paneProjectName);
-    await tmuxService.setPaneTitle(paneInfo, paneTitle);
-
-    if (!controlPaneId) {
-      throw new Error('Pane layout cannot be updated without a control pane');
-    }
-    await insertPaneIntoStoredLayout({
-      panesFile,
-      panes: existingPanes,
-      pane: newPane,
-      controlPaneId,
-      insertion,
-      sidebarWidth: SIDEBAR_WIDTH,
-    });
-    await options.persistReopenedPane(newPane);
-  } catch (error) {
-    const persistenceError = error instanceof Error ? error.message : String(error);
-    const teardown = await tearDownGenerationBoundPane(
-      tmuxService,
-      paneInfo,
-      allocationGeneration,
-      { generationMismatch: 'unknown' },
-    );
-    if (teardown.presence !== 'absent') {
-      const recovery = await retainPaneRecovery({
-        projectRoot,
-        sessionProjectRoot,
-        pane: newPane,
-        operation: 'reopen-worktree',
-        reason: `reopened pane persistence failed: ${persistenceError}`,
-        reservation,
-        persistConfigRecovery: tmuxServerIdentity
-          ? () => persistReopenedPaneRecovery(
-            sessionProjectRoot,
-            newPane,
-          )
-          : async () => ({
-            durable: false,
-            message: 'refused to persist an unversioned reopened pane record',
-          }),
-      });
-      const message = `Failed to persist reopened pane before agent launch: ${persistenceError}; pane teardown is ${teardown.presence}; ${recovery.message}`;
-      if (recovery.retained) {
-        throw new PaneLifecycleReservationRetainedError(message);
+    newPane = await createTransactionalPane({
+    projectRoot,
+    sessionProjectRoot,
+    operation: 'reopen-worktree',
+    slugBase: requestedSlug,
+    worktreePath,
+    paneRecordId: psychePaneId,
+    reservation,
+    allocate: () => (
+      isFirstContentPane
+        ? setupSidebarLayout(controlPaneId, projectRoot)
+        : splitPane(insertion ? { targetPane: insertion.targetTmuxPaneId } : {})
+    ),
+    createPane: ({
+      paneId,
+      tmuxServerIdentity,
+      paneRecordId,
+      slug,
+    }) => ({
+      id: paneRecordId,
+      slug,
+      displayName: metadata?.displayName,
+      branchName: (metadata?.branchName || currentBranch) !== slug
+        ? (metadata?.branchName || currentBranch)
+        : undefined,
+      prompt: '(Reopened session)',
+      paneId,
+      tmuxServerIdentity,
+      projectRoot,
+      projectName: paneProjectName,
+      colorTheme: resolveProjectColorTheme(projectRoot, configSidebarProjects),
+      worktreePath,
+      agent,
+      permissionMode,
+      autopilot: settings.enableAutopilotByDefault ?? false,
+      mergeTargetChain: metadata?.mergeTargetChain,
+    }),
+    persist: async (pane) => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      if (!(await tmuxService.paneExists(pane.paneId))) {
+        throw new Error(`newly split pane ${pane.paneId} is not present`);
       }
-      throw new Error(message);
+      const paneTitle = projectRoot === sessionProjectRoot
+        ? pane.slug
+        : buildWorktreePaneTitle(pane.slug, projectRoot, paneProjectName);
+      await tmuxService.setPaneTitle(pane.paneId, paneTitle);
+      if (!controlPaneId) {
+        throw new Error('Pane layout cannot be updated without a control pane');
+      }
+      await insertPaneIntoStoredLayout({
+        panesFile,
+        panes: existingPanes,
+        pane,
+        controlPaneId,
+        insertion,
+        sidebarWidth: SIDEBAR_WIDTH,
+      });
+      await options.persistReopenedPane(pane);
+    },
+      persistRecovery: (pane) => persistReopenedPaneRecovery(
+        sessionProjectRoot,
+        pane,
+      ),
+      tearDown: (paneId, identity) => tearDownGenerationBoundPane(
+        tmuxService,
+        paneId,
+        identity,
+        { generationMismatch: 'unknown' },
+      ),
+    });
+  } catch (error) {
+    const message = `Failed to persist reopened pane before agent launch: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+    if (isPaneLifecycleReservationRetainedError(error)) {
+      throw new PaneLifecycleReservationRetainedError(message);
     }
-    throw new Error(
-      `Failed to persist reopened pane before agent launch: ${persistenceError}`,
-    );
+    throw new Error(message);
   }
+  const paneInfo = newPane.paneId;
 
   // A durable exact record exists before the pane receives a cwd or agent
   // command. Later launch failures remain visible to normal pane recovery.
@@ -367,34 +344,6 @@ async function reopenWorktreeWithReuseReservation(
   return {
     pane: newPane,
   };
-}
-
-async function tearDownReopenedPane(
-  tmuxService: TmuxService,
-  paneId: string,
-) {
-  return tearDownPaneWithVerification({
-    probe: () => probeReopenedPanePresence(tmuxService, paneId),
-    kill: () => tmuxService.killPane(paneId),
-  });
-}
-
-async function probeReopenedPanePresence(
-  tmuxService: TmuxService,
-  paneId: string,
-): Promise<TmuxPanePresence> {
-  const probe = (tmuxService as TmuxService & {
-    probePanePresence?: (id: string) => Promise<TmuxPanePresence>;
-  }).probePanePresence;
-  if (probe) {
-    return probe.call(tmuxService, paneId);
-  }
-
-  try {
-    return await tmuxService.paneExists(paneId) ? 'present' : 'absent';
-  } catch {
-    return 'unknown';
-  }
 }
 
 async function persistReopenedPaneRecovery(

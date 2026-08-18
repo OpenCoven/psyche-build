@@ -893,6 +893,7 @@ async function createPaneWithReuseReservation(
           projectRoot,
           options.projectLifecycleLease,
           sessionProjectRoot,
+          options.paneSlugReservation?.recoveryId,
         );
       worktreePath = creationReservation.canonicalWorktreePath;
       newPane.worktreePath = worktreePath;

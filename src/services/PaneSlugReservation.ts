@@ -1,5 +1,6 @@
 import {
   acquireProjectPaneSlugAllocationLock,
+  acquireProjectWorktreeRecoveryLock,
   readProjectPaneConfigUnderLock,
   type ProjectPaneConfigLockOptions,
 } from './ProjectPaneConfig.js';
@@ -16,6 +17,9 @@ import {
 } from './PaneSlugRegistry.js';
 import { TmuxService } from './TmuxService.js';
 import {
+  ensurePaneSlugCleanupBlocker,
+  removePaneSlugCleanupBlocker,
+  writeProvisionalPaneSlugCleanupBlockerUnderLock,
   writeWorktreeRecoveryMarker,
 } from './WorktreeRecoveryMarker.js';
 import type {
@@ -34,6 +38,7 @@ export interface CrashSafePaneSlugReservationOptions {
   probePane?: (paneId: string) => Promise<TmuxPanePresence>;
   ownerProbe?: PaneSlugRegistryOwnerProbe;
   lockOptions?: ProjectPaneConfigLockOptions;
+  writeOwnershipRecord?: Parameters<typeof reservePaneSlug>[0]['writeOwnershipRecord'];
 }
 
 export async function reserveCrashSafePaneSlug(
@@ -45,7 +50,33 @@ export async function reserveCrashSafePaneSlug(
     ownerProbe: options.ownerProbe,
     lockOptions: options.lockOptions,
   });
-  return reservePaneSlug(options);
+  const targetLock = await acquireProjectWorktreeRecoveryLock(
+    options.projectRoot,
+    options.lockOptions,
+  );
+  let cleanupRecord: Parameters<typeof ensurePaneSlugCleanupBlocker>[0]
+    | undefined;
+  try {
+    const reservation = await reservePaneSlug({
+      ...options,
+      publishCleanupBlocker: async (record) => {
+        const written = await writeProvisionalPaneSlugCleanupBlockerUnderLock(
+          record,
+        );
+        cleanupRecord = {
+          ...record,
+          targetMarkerId: written.marker.id,
+        };
+        return written.marker.id;
+      },
+    });
+    if (!cleanupRecord) {
+      throw new Error('Pane slug cleanup blocker was not published');
+    }
+    return wrapCrashSafeReservation(reservation, cleanupRecord);
+  } finally {
+    await targetLock.release();
+  }
 }
 
 /**
@@ -63,6 +94,7 @@ export async function reconcileStalePaneSlugReservations(
 ): Promise<void> {
   const records = await listPaneSlugOwnershipRecords(options.sessionProjectRoot);
   for (const snapshot of records) {
+    await ensurePaneSlugCleanupBlocker(snapshot);
     if (
       snapshot.state !== 'provisional'
       || !isPaneSlugOwnerStale(snapshot, options.ownerProbe)
@@ -204,11 +236,7 @@ export async function settlePaneSlugReservationAfterFailure(
 }
 
 async function clearExactOwnershipRecord(
-  snapshot: {
-    sessionProjectRoot: string;
-    recoveryId: string;
-    owner: { nonce: string };
-  },
+  snapshot: Parameters<typeof ensurePaneSlugCleanupBlocker>[0],
   lockOptions?: ProjectPaneConfigLockOptions,
 ): Promise<void> {
   const lock = await acquireProjectPaneSlugAllocationLock(
@@ -230,6 +258,54 @@ async function clearExactOwnershipRecord(
   } finally {
     await lock.release();
   }
+  await removePaneSlugCleanupBlocker(snapshot);
+}
+
+function wrapCrashSafeReservation(
+  reservation: PaneSlugReservation,
+  cleanupRecord: Parameters<typeof ensurePaneSlugCleanupBlocker>[0],
+): PaneSlugReservation {
+  const clearCleanupBlocker = async (
+    settle: () => Promise<void>,
+  ): Promise<void> => {
+    await settle();
+    await removePaneSlugCleanupBlocker(cleanupRecord);
+  };
+  return {
+    get recoveryId() {
+      return reservation.recoveryId;
+    },
+    get sessionProjectRoot() {
+      return reservation.sessionProjectRoot;
+    },
+    get projectRoot() {
+      return reservation.projectRoot;
+    },
+    get slug() {
+      return reservation.slug;
+    },
+    get paneId() {
+      return reservation.paneId;
+    },
+    get worktreePath() {
+      return reservation.worktreePath;
+    },
+    get effect() {
+      return reservation.effect;
+    },
+    recordPaneEffect: (paneId, identity) => (
+      reservation.recordPaneEffect(paneId, identity)
+    ),
+    completeAfterPanePersisted: (pane) => clearCleanupBlocker(
+      () => reservation.completeAfterPanePersisted(pane),
+    ),
+    clearBeforeEffect: () => clearCleanupBlocker(
+      () => reservation.clearBeforeEffect(),
+    ),
+    clearAfterConfirmedTeardown: (presence) => clearCleanupBlocker(
+      () => reservation.clearAfterConfirmedTeardown(presence),
+    ),
+  };
 }
 
 function hasExactPersistedPane(

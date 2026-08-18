@@ -289,9 +289,12 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
 
     async openCovenSession(payload) {
       return openProjectCovenSession(
-        deps.projectRoot,
-        deps.sessionName,
-        payload.sessionId,
+        {
+          sessionProjectRoot: deps.projectRoot,
+          targetProjectRoot: deps.projectRoot,
+          sessionName: deps.sessionName,
+          sessionId: payload.sessionId,
+        },
         covenClientFactory(),
         covenSpawnDeps,
       );

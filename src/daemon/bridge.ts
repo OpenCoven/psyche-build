@@ -480,13 +480,48 @@ export async function routeProjectCovenSessionCapability(
   });
 }
 
+export interface OpenProjectCovenSessionRequest {
+  sessionProjectRoot: string;
+  targetProjectRoot: string;
+  sessionName: string;
+  sessionId: string;
+}
+
 export async function openProjectCovenSession(
-  projectRoot: string,
-  sessionName: string,
-  sessionId: string,
-  client: CovenClient = createCovenClient(),
-  deps: BridgeSpawnDeps = defaultSpawnDeps,
+  requestOrProjectRoot: OpenProjectCovenSessionRequest | string,
+  sessionNameOrClient?: string | CovenClient,
+  sessionIdOrDeps?: string | BridgeSpawnDeps,
+  legacyClient: CovenClient = createCovenClient(),
+  legacyDeps: BridgeSpawnDeps = defaultSpawnDeps,
 ): Promise<BridgeCovenOpenResult> {
+  const request = typeof requestOrProjectRoot === 'string'
+    ? {
+      sessionProjectRoot: requestOrProjectRoot,
+      targetProjectRoot: requestOrProjectRoot,
+      sessionName: String(sessionNameOrClient),
+      sessionId: String(sessionIdOrDeps),
+    }
+    : requestOrProjectRoot;
+  const client = typeof requestOrProjectRoot === 'string'
+    ? legacyClient
+    : (
+      sessionNameOrClient && typeof sessionNameOrClient !== 'string'
+        ? sessionNameOrClient
+        : createCovenClient()
+    );
+  const deps = typeof requestOrProjectRoot === 'string'
+    ? legacyDeps
+    : (
+      sessionIdOrDeps && typeof sessionIdOrDeps !== 'string'
+        ? sessionIdOrDeps
+        : defaultSpawnDeps
+    );
+  const {
+    sessionProjectRoot,
+    targetProjectRoot: projectRoot,
+    sessionName,
+    sessionId,
+  } = request;
   if (!isSafeCovenSessionId(sessionId)) {
     throw bridgeError('invalid_coven_session_id', 'Coven session id contains unsupported characters');
   }
@@ -502,7 +537,7 @@ export async function openProjectCovenSession(
   const title = `coven:${session.title || session.id.slice(0, 8)}`;
   const psychePaneId = nextBridgePaneId();
   const paneSlugReservation = await reserveCrashSafePaneSlug({
-    sessionProjectRoot: projectRoot,
+    sessionProjectRoot,
     projectRoot,
     paneId: psychePaneId,
     operation: 'daemon-coven-session-pane',
@@ -520,7 +555,7 @@ export async function openProjectCovenSession(
   // half-completed lifecycle.
   try {
     const transaction = await transactProjectPaneConfig(
-      projectRoot,
+      sessionProjectRoot,
       async ({ config, persist }) => {
       const paneId = deps.createTmuxPane(sessionName, session.projectRoot, title);
       const tmuxServerIdentity = (
@@ -560,8 +595,8 @@ export async function openProjectCovenSession(
         lastUpdated: now,
       };
       const panes = Array.isArray(config.panes) ? config.panes : [];
-      config.projectName = config.projectName || path.basename(projectRoot);
-      config.projectRoot = projectRoot;
+      config.projectName = config.projectName || path.basename(sessionProjectRoot);
+      config.projectRoot = sessionProjectRoot;
       config.panes = [...panes, record];
       config.lastUpdated = now;
 
@@ -588,8 +623,8 @@ export async function openProjectCovenSession(
               ? ''
               : `; pane teardown is ${teardown.presence}; retained recovery record ${
                 record.id
-              } in ${projectPaneConfigPath(projectRoot)}. ${
-                paneRecoveryInstructions(paneId, projectPaneConfigPath(projectRoot))
+              } in ${projectPaneConfigPath(sessionProjectRoot)}. ${
+                paneRecoveryInstructions(paneId, projectPaneConfigPath(sessionProjectRoot))
               }${recoveryFailure ? `; recovery persist failed: ${recoveryFailure}` : ''}`
           }`,
         );
@@ -607,8 +642,8 @@ export async function openProjectCovenSession(
             bridgeErrorCode(error, 'coven_attach_failed'),
             `${bridgeErrorMessage(error)}; pane teardown is ${teardown.presence}; retained pane record ${
               record.id
-            } in ${projectPaneConfigPath(projectRoot)}. ${
-              paneRecoveryInstructions(paneId, projectPaneConfigPath(projectRoot))
+            } in ${projectPaneConfigPath(sessionProjectRoot)}. ${
+              paneRecoveryInstructions(paneId, projectPaneConfigPath(sessionProjectRoot))
             }`,
           );
         }
@@ -1358,7 +1393,13 @@ export async function spawnBridgePane(
         assertGeneratedWorktreePath(scoped.projectRoot, nextWorktreePath);
 
         const reservation = await WorktreeCleanupService.getInstance()
-          .beginWorktreeCreation(nextWorktreePath, scoped.projectRoot);
+          .beginWorktreeCreation(
+            nextWorktreePath,
+            scoped.projectRoot,
+            undefined,
+            scoped.projectRoot,
+            paneSlugReservation?.recoveryId,
+          );
         let provisionalIdentity: CreatedWorktreeIdentity | undefined;
         let rollbackOwnershipLostReason: string | undefined;
         try {

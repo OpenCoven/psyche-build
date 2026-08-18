@@ -73,6 +73,7 @@ export interface CreatedWorktreeIdentity {
   mainRepoPath: string;
   deleteBranch: boolean;
   configProjectRoot: string;
+  recoveryId?: string;
 }
 
 export interface WorktreeCreationReservation {
@@ -419,6 +420,7 @@ export class WorktreeCleanupService {
     mainRepoPath: string,
     projectLifecycleLease?: ProjectWorktreeLifecycleLease,
     recoveryProjectRoot?: string,
+    authorizedRecoveryId?: string,
   ): Promise<WorktreeCreationReservation> {
     const canonicalWorktreePath = canonicalizePathWithExistingAncestor(worktreePath);
     const ownedProjectLifecycleLease = projectLifecycleLease
@@ -442,6 +444,7 @@ export class WorktreeCleanupService {
         recoveryProjectRoot || mainRepoPath,
         mainRepoPath,
         canonicalWorktreePath,
+        authorizedRecoveryId,
       );
       if (recoveryMarker.blocked) {
         throw new Error(
@@ -526,6 +529,7 @@ export class WorktreeCleanupService {
           mainRepoPath,
           deleteBranch,
           configProjectRoot,
+          ...(authorizedRecoveryId ? { recoveryId: authorizedRecoveryId } : {}),
         }),
         rollbackCreatedWorktree: async (identity) => {
           return this.rollbackCreatedWorktreeWhileLeased(
@@ -642,6 +646,7 @@ export class WorktreeCleanupService {
       identity.configProjectRoot,
       identity.mainRepoPath,
       identity.canonicalWorktreePath,
+      identity.recoveryId,
     );
     if (recoveryMarker.blocked) {
       return {

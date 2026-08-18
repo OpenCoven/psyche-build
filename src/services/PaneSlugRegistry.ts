@@ -1,4 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+} from 'node:fs';
 import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { TmuxServerIdentity } from './TmuxServerIdentity.js';
@@ -88,6 +93,12 @@ export interface PaneSlugRegistryOwnerProbe {
   getProcessStartIdentity?: ProcessStartIdentityResolver;
 }
 
+export interface BlockingPaneSlugOwnership {
+  blocked: boolean;
+  reason?: string;
+  record?: PaneSlugOwnershipRecord;
+}
+
 export async function reservePaneSlug(
   options: {
     sessionProjectRoot: string;
@@ -103,6 +114,10 @@ export async function reservePaneSlug(
     createRecoveryId?: () => string;
     createNonce?: () => string;
     lockOptions?: ProjectPaneConfigLockOptions;
+    publishCleanupBlocker?: (
+      record: PaneSlugOwnershipRecord,
+    ) => Promise<string>;
+    writeOwnershipRecord?: (record: PaneSlugOwnershipRecord) => Promise<void>;
   },
 ): Promise<PaneSlugReservation> {
   const sessionProjectRoot = canonicalizePathWithExistingAncestor(
@@ -161,7 +176,11 @@ export async function reservePaneSlug(
       updatedAt: timestamp,
     };
     assertPaneSlugOwnershipRecord(record);
-    await writePaneSlugOwnershipRecord(record);
+    if (options.publishCleanupBlocker) {
+      record.targetMarkerId = await options.publishCleanupBlocker(record);
+      assertPaneSlugOwnershipRecord(record);
+    }
+    await (options.writeOwnershipRecord ?? writePaneSlugOwnershipRecord)(record);
     return createReservation(record, options.lockOptions);
   } finally {
     await lock.release();
@@ -536,6 +555,70 @@ export function paneSlugOwnershipDirectory(sessionProjectRoot: string): string {
   );
 }
 
+export function findBlockingPaneSlugOwnership(
+  sessionProjectRoot: string,
+  targetProjectRoot: string,
+  targetWorktreePath: string,
+  allowQuarantinedReuse: boolean,
+  authorizedRecoveryId?: string,
+): BlockingPaneSlugOwnership {
+  const directory = paneSlugOwnershipDirectory(sessionProjectRoot);
+  if (!existsSync(directory)) {
+    return { blocked: false };
+  }
+  const targetProject = canonicalizePathWithExistingAncestor(targetProjectRoot);
+  const targetWorktree = canonicalizePathWithExistingAncestor(targetWorktreePath);
+  let entries: string[];
+  try {
+    entries = readdirSync(directory);
+  } catch (error) {
+    return {
+      blocked: true,
+      reason: `could not read pane slug ownership directory: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith('.json')) {
+      continue;
+    }
+    const recordPath = path.join(directory, entry);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(recordPath, 'utf8')) as unknown;
+    } catch (error) {
+      return {
+        blocked: true,
+        reason: `could not read pane slug ownership ${recordPath}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    }
+    if (!isPaneSlugOwnershipRecord(parsed)) {
+      return {
+        blocked: true,
+        reason: `invalid pane slug ownership ${recordPath}`,
+      };
+    }
+    if (
+      canonicalizePathWithExistingAncestor(parsed.projectRoot) === targetProject
+      && pathsOverlap(parsed.worktreePath, targetWorktree)
+      && parsed.recoveryId !== authorizedRecoveryId
+      && !(allowQuarantinedReuse && parsed.state === 'quarantined')
+    ) {
+      return {
+        blocked: true,
+        record: parsed,
+        reason: `pane slug ownership recovery ${parsed.recoveryId} is ${
+          parsed.state
+        }`,
+      };
+    }
+  }
+  return { blocked: false };
+}
+
 function paneSlugOwnershipRecordPath(
   sessionProjectRoot: string,
   recoveryId: string,
@@ -582,6 +665,7 @@ function isPaneSlugOwnershipRecord(
   if (!value || typeof value !== 'object') {
     return false;
   }
+
   const record = value as Partial<PaneSlugOwnershipRecord>;
   return (
     record.version === PANE_SLUG_RECORD_VERSION
@@ -603,4 +687,17 @@ function isPaneSlugOwnershipRecord(
     && typeof record.createdAt === 'string'
     && typeof record.updatedAt === 'string'
   );
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  const canonicalLeft = canonicalizePathWithExistingAncestor(left);
+  const canonicalRight = canonicalizePathWithExistingAncestor(right);
+  return isPathInsideOrEqual(canonicalLeft, canonicalRight)
+    || isPathInsideOrEqual(canonicalRight, canonicalLeft);
+}
+
+function isPathInsideOrEqual(parent: string, candidate: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return relative === ''
+    || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
 }

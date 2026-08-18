@@ -12,8 +12,10 @@ const allocationSites = [
   // attachAgent.ts no longer allocates tmux panes directly; it delegates
   // to createPane (worktree pane creation above) via the shared-worktree
   // existingWorktree flow.
-  ['reopened worktree pane', 'src/utils/reopenWorktree.ts', "captureTmuxGeneration(\n    tmuxService,\n    'reopened pane allocation'"],
-  ['conflict resolution pane', 'src/utils/conflictResolutionPane.ts', "captureTmuxGeneration(\n    tmuxService,\n    'conflict pane allocation'"],
+  // Reopen and conflict flows delegate generation capture and settlement to
+  // createTransactionalPane.
+  ['reopened worktree pane', 'src/utils/reopenWorktree.ts', "operation: 'reopen-worktree'"],
+  ['conflict resolution pane', 'src/utils/conflictResolutionPane.ts', "operation: 'conflict-resolution-pane'"],
   ['startup restoration pane', 'src/hooks/usePaneLoading.ts', 'getServerIdentity?.(newPaneId)'],
   ['detected shell pane', 'src/utils/shellPaneDetection.ts', 'getServerIdentity?.(paneId)'],
   ['background test/dev window', 'src/hooks/usePaneRunner.ts', 'getTmuxServerIdentity: () => tmuxService.getServerIdentity?.()'],

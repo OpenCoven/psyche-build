@@ -83,6 +83,19 @@ vi.mock('../src/services/ProjectPaneConfig.js', () => ({
     lastUpdated: '2026-08-12T13:46:56.497Z',
   })),
 }));
+vi.mock('../src/utils/transactionalPaneCreation.js', () => ({
+  createTransactionalPane: vi.fn(async (options) => {
+    const paneId = await options.allocate();
+    const pane = await options.createPane({
+      paneId,
+      tmuxServerIdentity: tmuxService.getServerIdentity(),
+    });
+    pane.id = options.paneRecordId;
+    pane.slug = options.slugBase;
+    await options.persist(pane);
+    return pane;
+  }),
+}));
 vi.mock('../src/constants/timing.js', () => ({
   TMUX_LAYOUT_APPLY_DELAY: 0,
   TMUX_SPLIT_DELAY: 0,
@@ -134,6 +147,7 @@ describe('conflictResolutionPane rollback cleanup', () => {
       targetBranch: 'main',
       targetRepoPath: '/repo/.psyche/worktrees/feature',
       sessionProjectRoot: '/repo',
+      targetProjectRoot: '/repo',
       projectName: 'repo',
       existingPanes: [],
       agent: 'opencode',

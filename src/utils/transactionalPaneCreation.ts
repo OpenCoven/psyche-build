@@ -16,6 +16,8 @@ import {
   type VerifiedPaneTeardownResult,
 } from './paneTeardown.js';
 import {
+  isPaneLifecycleReservationRetainedError,
+  PaneLifecycleReservationRetainedError,
   retainPaneRecovery,
   type PaneRecoveryPersistenceResult,
   type RetainableWorktreeReservation,
@@ -53,7 +55,12 @@ export interface TransactionalPaneCreationOptions<T extends PsychePane> {
    * allocation and revalidated immediately after the split.
    */
   createPane: (
-    allocation: { paneId: string; tmuxServerIdentity?: TmuxServerIdentity },
+    allocation: {
+      paneId: string;
+      tmuxServerIdentity?: TmuxServerIdentity;
+      paneRecordId: string;
+      slug: string;
+    },
   ) => Promise<T> | T;
   /** Must durably add the exact record before activation. */
   persist: (pane: T) => Promise<void>;
@@ -137,6 +144,8 @@ export async function createTransactionalPane<T extends PsychePane>(
     pane = await options.createPane({
       paneId,
       tmuxServerIdentity: allocationIdentity,
+      paneRecordId: slugReservation.paneId,
+      slug: slugReservation.slug,
     });
     pane.id = slugReservation.paneId;
     pane.slug = slugReservation.slug;
@@ -171,6 +180,9 @@ export async function createTransactionalPane<T extends PsychePane>(
       } catch (compensatedError) {
         failure = compensatedError;
       }
+    }
+    if (isPaneLifecycleReservationRetainedError(failure)) {
+      throw failure;
     }
     const settlement = await settlePaneSlugReservationAfterFailure(
       slugReservation,
@@ -266,9 +278,13 @@ async function compensateAllocatedPaneFailure<T extends PsychePane>(
         message: 'could not construct a pane record for recovery',
       }),
   });
-  throw new Error(
-    `${options.operation} ${reason}; pane teardown is ${teardown.presence}; ${recovery.message}`,
-  );
+  const message = `${options.operation} ${reason}; pane teardown is ${
+    teardown.presence
+  }; ${recovery.message}`;
+  if (recovery.retained) {
+    throw new PaneLifecycleReservationRetainedError(message);
+  }
+  throw new Error(message);
 }
 
 async function teardownAllocation<T extends PsychePane>(

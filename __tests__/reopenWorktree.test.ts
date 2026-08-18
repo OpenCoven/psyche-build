@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { PsychePane } from '../src/types.js';
 
 const fsMock = vi.hoisted(() => ({
   readFileSync: vi.fn(() => JSON.stringify({ controlPaneId: '%0' })),
@@ -33,6 +34,8 @@ const atomicWriteJsonSyncMock = vi.hoisted(() => vi.fn());
 const persistReopenedPaneMock = vi.hoisted(() => vi.fn(async () => {}));
 const mutateProjectPaneConfigMock = vi.hoisted(() => vi.fn());
 const ensureProjectPaneConfigPaneMock = vi.hoisted(() => vi.fn());
+const reserveCrashSafePaneSlugMock = vi.hoisted(() => vi.fn());
+const settlePaneSlugReservationAfterFailureMock = vi.hoisted(() => vi.fn());
 const readWorktreeMetadataMock = vi.hoisted(() => vi.fn(() => ({
   agent: 'codex',
   permissionMode: 'bypassPermissions',
@@ -121,13 +124,66 @@ vi.mock('../src/services/WorktreeCleanupService.js', () => ({
 vi.mock('../src/services/ProjectPaneConfig.js', () => ({
   mutateProjectPaneConfig: mutateProjectPaneConfigMock,
   ensureProjectPaneConfigPane: ensureProjectPaneConfigPaneMock,
+  readProjectPaneConfigUnderLock: vi.fn(async () => ({ panes: [] })),
   readProjectPaneConfig: vi.fn(async () => ({ controlPaneId: '%0', panes: [] })),
   projectPaneConfigPath: (projectRoot: string) => `${projectRoot}/.psyche/psyche.config.json`,
+}));
+
+vi.mock('../src/services/PaneSlugReservation.js', () => ({
+  reserveCrashSafePaneSlug: reserveCrashSafePaneSlugMock,
+  settlePaneSlugReservationAfterFailure: settlePaneSlugReservationAfterFailureMock,
 }));
 
 describe('reopenWorktree', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    splitPaneMock.mockImplementation(() => '%1');
+    setupSidebarLayoutMock.mockImplementation(() => '%1');
+    const occupiedSlugs = new Set<string>();
+    reserveCrashSafePaneSlugMock.mockImplementation(async (options) => {
+      const state = {
+        config: { panes: [] },
+        occupiedSlugs,
+        persistedSlugs: new Set<string>(),
+        ownershipRecords: [],
+      };
+      const candidate = await options.allocate(state);
+      let slug = candidate.slug;
+      let suffix = 2;
+      while (occupiedSlugs.has(slug)) {
+        slug = `${candidate.slug}-${suffix}`;
+        suffix += 1;
+      }
+      occupiedSlugs.add(slug);
+      let effect: { paneId: string; tmuxServerIdentity?: object } | undefined;
+      return {
+        recoveryId: `recovery-${slug}`,
+        sessionProjectRoot: options.sessionProjectRoot,
+        projectRoot: options.projectRoot,
+        paneId: options.paneId,
+        worktreePath: candidate.worktreePath,
+        slug,
+        get effect() {
+          return effect;
+        },
+        recordPaneEffect: vi.fn(async (paneId, tmuxServerIdentity) => {
+          effect = { paneId, tmuxServerIdentity };
+        }),
+        completeAfterPanePersisted: vi.fn(async () => {
+          occupiedSlugs.delete(slug);
+        }),
+        clearBeforeEffect: vi.fn(async () => {
+          occupiedSlugs.delete(slug);
+        }),
+        clearAfterConfirmedTeardown: vi.fn(async () => {
+          occupiedSlugs.delete(slug);
+        }),
+      };
+    });
+    settlePaneSlugReservationAfterFailureMock.mockResolvedValue({
+      released: true,
+      quarantined: false,
+    });
     fsMock.readFileSync.mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
     readWorktreeMetadataMock.mockReturnValue({
       agent: 'codex',
@@ -263,6 +319,58 @@ describe('reopenWorktree', () => {
     );
     expect(persistReopenedPaneMock).toHaveBeenCalledWith(
       expect.objectContaining({ worktreePath: '/repo/.psyche/worktrees/reopen-me' })
+    );
+  });
+
+  it('reserves distinct slugs when concurrent reopen producers race', async () => {
+    const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
+    let paneNumber = 0;
+    splitPaneMock.mockImplementation(() => `%${++paneNumber}`);
+    setupSidebarLayoutMock.mockImplementation(() => `%${++paneNumber}`);
+    let releasePersist!: () => void;
+    const persistGate = new Promise<void>((resolve) => {
+      releasePersist = resolve;
+    });
+    const persisted: PsychePane[] = [];
+    const persist = vi.fn(async (pane: PsychePane) => {
+      persisted.push(pane);
+      if (persisted.length === 2) {
+        releasePersist();
+      }
+      await persistGate;
+    });
+
+    const [first, second] = await Promise.all([
+      reopenWorktree({
+        slug: 'reopen-me',
+        worktreePath: '/repo/.psyche/worktrees/reopen-me',
+        projectRoot: '/repo',
+        existingPanes: [],
+        sessionProjectRoot: '/session',
+        sessionConfigPath: '/session/.psyche/psyche.config.json',
+        persistReopenedPane: persist,
+      }),
+      reopenWorktree({
+        slug: 'reopen-me',
+        worktreePath: '/repo/.psyche/worktrees/reopen-me',
+        projectRoot: '/repo',
+        existingPanes: [],
+        sessionProjectRoot: '/session',
+        sessionConfigPath: '/session/.psyche/psyche.config.json',
+        persistReopenedPane: persist,
+      }),
+    ]);
+
+    expect([first.pane.slug, second.pane.slug].sort()).toEqual([
+      'reopen-me',
+      'reopen-me-2',
+    ]);
+    expect(reserveCrashSafePaneSlugMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionProjectRoot: '/session',
+        projectRoot: '/repo',
+        operation: 'reopen-worktree',
+      }),
     );
   });
 

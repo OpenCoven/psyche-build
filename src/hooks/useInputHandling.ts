@@ -478,9 +478,12 @@ export function useInputHandling(params: UseInputHandlingParams) {
       setIsCreatingPane(true)
       setStatusMessage(`Opening Coven session ${session.title || session.id}...`)
       await openProjectCovenSession(
-        targetProjectRoot,
-        sessionName,
-        session.id,
+        {
+          sessionProjectRoot: projectRoot,
+          targetProjectRoot,
+          sessionName,
+          sessionId: session.id,
+        },
         createKnownCovenSessionClient(covenSessionsState)
       )
       await loadPanes()

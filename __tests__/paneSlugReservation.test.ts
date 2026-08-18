@@ -15,6 +15,7 @@ import {
 import {
   allocateUniquePaneSlug,
   listPaneSlugOwnershipRecords,
+  quarantinePaneSlugOwnershipRecord,
   reservePaneSlug,
 } from '../src/services/PaneSlugRegistry.js';
 import {
@@ -76,6 +77,89 @@ describe('crash-safe pane slug ownership', () => {
       }),
     ]);
     await attachment.clearBeforeEffect();
+  });
+
+  it('publishes the target cleanup blocker before the session ownership write', async () => {
+    const sessionRoot = project('.psyche-slug-prefix-session-');
+    const targetRoot = project('.psyche-slug-prefix-target-');
+    const worktreePath = path.join(targetRoot, '.psyche', 'worktrees', 'prefix');
+    mkdirSync(worktreePath, { recursive: true });
+
+    await expect(reserveCrashSafePaneSlug({
+      sessionProjectRoot: sessionRoot,
+      projectRoot: targetRoot,
+      paneId: 'prefix-pane',
+      operation: 'prefix-crash',
+      allocate: () => ({ slug: 'prefix', worktreePath }),
+      writeOwnershipRecord: async () => {
+        throw new Error('simulated crash before ownership persistence');
+      },
+    })).rejects.toThrow(/simulated crash/);
+
+    expect(await listPaneSlugOwnershipRecords(sessionRoot)).toEqual([]);
+    const markers = await listWorktreeRecoveryMarkers(targetRoot);
+    expect(markers).toEqual([
+      expect.objectContaining({
+        paneOwnershipState: 'provisional',
+        recoveryId: expect.any(String),
+      }),
+    ]);
+    expect(findBlockingWorktreeRecoveryMarker(
+      project('.psyche-slug-prefix-observer-'),
+      targetRoot,
+      worktreePath,
+    )).toMatchObject({
+      blocked: true,
+      marker: { recoveryId: markers[0].recoveryId },
+    });
+  });
+
+  it('blocks cleanup directly from a session ownership record without allocation reconciliation', async () => {
+    const sessionRoot = project('.psyche-slug-direct-session-');
+    const targetRoot = project('.psyche-slug-direct-target-');
+    const worktreePath = path.join(targetRoot, '.psyche', 'worktrees', 'direct');
+    mkdirSync(worktreePath, { recursive: true });
+    const reservation = await reservePaneSlug({
+      sessionProjectRoot: sessionRoot,
+      projectRoot: targetRoot,
+      paneId: 'direct-pane',
+      operation: 'direct-ownership',
+      allocate: () => ({ slug: 'direct', worktreePath }),
+    });
+
+    expect(findBlockingWorktreeRecoveryMarker(
+      sessionRoot,
+      targetRoot,
+      worktreePath,
+    )).toMatchObject({
+      blocked: true,
+      reason: expect.stringContaining(reservation.recoveryId),
+    });
+    await reservation.clearBeforeEffect();
+  });
+
+  it('refuses to acknowledge a cleanup blocker owned by an active provisional producer', async () => {
+    const sessionRoot = project('.psyche-slug-active-session-');
+    const targetRoot = project('.psyche-slug-active-target-');
+    const worktreePath = path.join(targetRoot, '.psyche', 'worktrees', 'active');
+    mkdirSync(worktreePath, { recursive: true });
+    const reservation = await reserveCrashSafePaneSlug({
+      sessionProjectRoot: sessionRoot,
+      projectRoot: targetRoot,
+      paneId: 'active-pane',
+      operation: 'active-producer',
+      allocate: () => ({ slug: 'active', worktreePath }),
+    });
+    const [marker] = await listWorktreeRecoveryMarkers(targetRoot);
+
+    await expect(acknowledgeWorktreeRecoveryMarker(
+      targetRoot,
+      marker.id,
+    )).rejects.toThrow(/active producer/);
+    expect(await listPaneSlugOwnershipRecords(sessionRoot)).toHaveLength(1);
+    expect(await listWorktreeRecoveryMarkers(targetRoot)).toHaveLength(1);
+
+    await reservation.clearBeforeEffect();
   });
 
   it('allocates distinct local and daemon new-pane slugs from fresh state', async () => {
@@ -171,6 +255,7 @@ describe('crash-safe pane slug ownership', () => {
         worktreePath: path.join(sessionRoot, '.psyche', 'worktrees', 'restart-absent'),
       }),
     });
+
     await absent.recordPaneEffect('%51');
     const uncertain = await reservePaneSlug({
       sessionProjectRoot: sessionRoot,
@@ -202,6 +287,43 @@ describe('crash-safe pane slug ownership', () => {
       expect.objectContaining({
         recoveryId: uncertain.recoveryId,
         pane: expect.objectContaining({ paneId: '%52' }),
+      }),
+    ]);
+  });
+
+  it('recreates a missing target marker for an existing session quarantine', async () => {
+    const sessionRoot = project('.psyche-slug-quarantine-session-');
+    const targetRoot = project('.psyche-slug-quarantine-target-');
+    const worktreePath = path.join(targetRoot, '.psyche', 'worktrees', 'repair');
+    mkdirSync(worktreePath, { recursive: true });
+    const reservation = await reservePaneSlug({
+      sessionProjectRoot: sessionRoot,
+      projectRoot: targetRoot,
+      paneId: 'repair-pane',
+      operation: 'repair-quarantine',
+      allocate: () => ({ slug: 'repair', worktreePath }),
+    });
+    await quarantinePaneSlugOwnershipRecord({
+      sessionProjectRoot: sessionRoot,
+      recoveryId: reservation.recoveryId,
+      projectRoot: targetRoot,
+      worktreePath,
+      slug: reservation.slug,
+      pane: { id: reservation.paneId, paneId: '%repair' },
+      operation: 'repair-quarantine',
+      reason: 'target marker was lost',
+      targetMarkerId: 'a'.repeat(64),
+    });
+    expect(await listWorktreeRecoveryMarkers(targetRoot)).toEqual([]);
+
+    await reconcileStalePaneSlugReservations({
+      sessionProjectRoot: sessionRoot,
+    });
+
+    expect(await listWorktreeRecoveryMarkers(targetRoot)).toEqual([
+      expect.objectContaining({
+        recoveryId: reservation.recoveryId,
+        paneOwnershipState: 'quarantined',
       }),
     ]);
   });

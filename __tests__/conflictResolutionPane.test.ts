@@ -16,6 +16,8 @@ const persistExactMock = vi.hoisted(() => vi.fn());
 const beginReservationMock = vi.hoisted(() => vi.fn());
 const capturePaneInsertionMock = vi.hoisted(() => vi.fn(async () => undefined));
 const insertPaneIntoStoredLayoutMock = vi.hoisted(() => vi.fn(async () => ({})));
+const reserveCrashSafePaneSlugMock = vi.hoisted(() => vi.fn());
+const settlePaneSlugReservationAfterFailureMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../src/services/TmuxService.js', () => ({
   TmuxService: { getInstance: () => tmuxService },
@@ -38,6 +40,11 @@ vi.mock('../src/utils/settingsManager.js', () => ({
 vi.mock('../src/utils/agentLaunch.js', () => ({
   buildAgentCommand: () => 'opencode',
   buildInitialPromptCommand: () => 'opencode --prompt',
+  getDefaultEnabledAgents: () => ['opencode'],
+  getAgentDefinitions: () => [{
+    id: 'opencode',
+    name: 'OpenCode',
+  }],
   getAgentProcessName: () => 'opencode',
   getPromptTransport: () => 'inline',
   getSendKeysPostPasteDelayMs: () => 0,
@@ -69,7 +76,12 @@ vi.mock('../src/services/ProjectPaneConfig.js', () => ({
   compareAndRemoveProjectPaneConfigPaneIdentities: vi.fn(),
   ensureProjectPaneConfigPane: vi.fn(),
   projectPaneConfigPath: (root: string) => `${root}/.psyche/psyche.config.json`,
+  readProjectPaneConfigUnderLock: vi.fn(async () => ({ panes: [] })),
   readProjectPaneConfig: vi.fn(async () => ({ controlPaneId: '%0', panes: [] })),
+}));
+vi.mock('../src/services/PaneSlugReservation.js', () => ({
+  reserveCrashSafePaneSlug: reserveCrashSafePaneSlugMock,
+  settlePaneSlugReservationAfterFailure: settlePaneSlugReservationAfterFailureMock,
 }));
 vi.mock('../src/constants/timing.js', () => ({
   TMUX_LAYOUT_APPLY_DELAY: 0,
@@ -79,6 +91,44 @@ vi.mock('../src/constants/timing.js', () => ({
 describe('conflict resolution pane transaction', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    const occupiedSlugs = new Set<string>();
+    reserveCrashSafePaneSlugMock.mockImplementation(async (options) => {
+      const candidate = await options.allocate({
+        config: { panes: [] },
+        occupiedSlugs,
+        persistedSlugs: new Set<string>(),
+        ownershipRecords: [],
+      });
+      occupiedSlugs.add(candidate.slug);
+      let effect: { paneId: string; tmuxServerIdentity?: object } | undefined;
+      return {
+        recoveryId: 'recovery-conflict',
+        sessionProjectRoot: options.sessionProjectRoot,
+        projectRoot: options.projectRoot,
+        paneId: options.paneId,
+        worktreePath: candidate.worktreePath,
+        slug: candidate.slug,
+        get effect() {
+          return effect;
+        },
+        recordPaneEffect: vi.fn(async (paneId, tmuxServerIdentity) => {
+          effect = { paneId, tmuxServerIdentity };
+        }),
+        completeAfterPanePersisted: vi.fn(async () => {
+          occupiedSlugs.delete(candidate.slug);
+        }),
+        clearBeforeEffect: vi.fn(async () => {
+          occupiedSlugs.delete(candidate.slug);
+        }),
+        clearAfterConfirmedTeardown: vi.fn(async () => {
+          occupiedSlugs.delete(candidate.slug);
+        }),
+      };
+    });
+    settlePaneSlugReservationAfterFailureMock.mockResolvedValue({
+      released: true,
+      quarantined: false,
+    });
     beginReservationMock.mockResolvedValue({
       canonicalWorktreePath: '/repo/.psyche/worktrees/feature',
       retain: vi.fn(),
@@ -114,6 +164,7 @@ describe('conflict resolution pane transaction', () => {
       targetBranch: 'main',
       targetRepoPath: '/repo/.psyche/worktrees/feature',
       sessionProjectRoot: '/repo',
+      targetProjectRoot: '/repo',
       projectName: 'repo',
       existingPanes: [] as PsychePane[],
       agent: 'opencode',
@@ -135,6 +186,54 @@ describe('conflict resolution pane transaction', () => {
     expect(beginReservationMock).toHaveBeenCalledWith(
       '/repo/.psyche/worktrees/feature',
       '/repo',
+    );
+  });
+
+  it('reserves distinct slugs when conflict pane producers race', async () => {
+    const { createConflictResolutionPane } = await import(
+      '../src/utils/conflictResolutionPane.js'
+    );
+    let paneNumber = 8;
+    splitPaneMock.mockImplementation(() => `%${++paneNumber}`);
+    let releasePersist!: () => void;
+    const persistGate = new Promise<void>((resolve) => {
+      releasePersist = resolve;
+    });
+    const persisted: PsychePane[] = [];
+    const persistConflictPane = vi.fn(async (pane: PsychePane) => {
+      persisted.push(pane);
+      if (persisted.length === 2) {
+        releasePersist();
+      }
+      await persistGate;
+    });
+    const options = {
+      sourceBranch: 'feature',
+      targetBranch: 'main',
+      targetRepoPath: '/target/.psyche/worktrees/feature',
+      sessionProjectRoot: '/session',
+      targetProjectRoot: '/target',
+      projectName: 'target',
+      existingPanes: [] as PsychePane[],
+      agent: 'opencode' as const,
+      persistConflictPane,
+    };
+
+    const [first, second] = await Promise.all([
+      createConflictResolutionPane(options),
+      createConflictResolutionPane(options),
+    ]);
+
+    expect([first.slug, second.slug].sort()).toEqual([
+      'merge-feature-into-main',
+      'merge-feature-into-main-2',
+    ]);
+    expect(reserveCrashSafePaneSlugMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionProjectRoot: '/session',
+        projectRoot: '/target',
+        operation: 'conflict-resolution-pane',
+      }),
     );
   });
 });
