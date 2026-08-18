@@ -66,6 +66,18 @@ function normalizePublicPath(file) {
   return file.toLowerCase();
 }
 
+function sortUniquePublicPaths(values) {
+  const filesByIdentity = new Map();
+  for (const file of values) {
+    const identity = normalizePublicPath(file);
+    if (!filesByIdentity.has(identity)) {
+      filesByIdentity.set(identity, file);
+    }
+  }
+
+  return [...filesByIdentity.values()].sort(compareStrings);
+}
+
 function sortFailureRecords(records) {
   return [...records].sort(
     (left, right) => compareStrings(left.file, right.file) || compareStrings(left.reason, right.reason),
@@ -276,15 +288,26 @@ async function collectPublicRecursiveFiles() {
   return collectRecursiveTextFiles('docs/src', readDirectoryFromFilesystem);
 }
 
+async function collectPublicSharedFiles() {
+  return collectRecursiveTextFiles('docs/shared', readDirectoryFromFilesystem);
+}
+
 async function collectPublicTopLevelDocsFiles() {
   return collectTopLevelMarkdownFiles('docs', readDirectoryFromFilesystem);
 }
 
-function buildPublicInventory({ rootMarkdownFiles, recursiveFiles, topLevelDocsFiles, packageMarkdownFiles }) {
-  return sortUnique([
+function buildPublicInventory({
+  rootMarkdownFiles,
+  recursiveFiles,
+  sharedFiles = [],
+  topLevelDocsFiles,
+  packageMarkdownFiles,
+}) {
+  return sortUniquePublicPaths([
     ...rootMarkdownFiles,
     ...requiredSourceFiles,
     ...recursiveFiles,
+    ...sharedFiles,
     ...topLevelDocsFiles,
     ...packageMarkdownFiles,
   ]);
@@ -427,6 +450,22 @@ async function selfCheckPublicInventory() {
   assert(recursiveResult.files.every((file) => !file.includes('/dist/')));
   assert.deepEqual(recursiveResult.missingRootFailure, null);
 
+  const sharedTree = new Map([
+    [
+      'docs/shared',
+      [
+        createSyntheticDirEntry('githubStars.js', 'file'),
+        createSyntheticDirEntry('navigation.js', 'file'),
+      ],
+    ],
+  ]);
+  const sharedResult = await collectRecursiveTextFiles(
+    'docs/shared',
+    createSyntheticDirectoryReader(sharedTree),
+  );
+  assert.deepEqual(sharedResult.files, ['docs/shared/githubStars.js', 'docs/shared/navigation.js']);
+  assert.deepEqual(sharedResult.missingRootFailure, null);
+
   const topLevelDocsTree = new Map([
     [
       'docs',
@@ -484,6 +523,7 @@ async function selfCheckPublicInventory() {
   const requiredInventory = buildPublicInventory({
     rootMarkdownFiles: rootResult.files,
     recursiveFiles: [],
+    sharedFiles: sharedResult.files,
     topLevelDocsFiles: topLevelDocsResult.files,
     packageMarkdownFiles: [],
   });
@@ -623,6 +663,10 @@ async function selfCheckPublicInventory() {
   );
   assert(prohibitedFiles.has(normalizePublicPath('docs/coven-demo-loop.md')));
   assert(prohibitedFiles.has(normalizePublicPath('DOCS/COVEN-SESSIONS.MD')));
+  assert.deepEqual(
+    sortUniquePublicPaths(['docs/COVEN-DEMO-LOOP.md', 'docs/coven-demo-loop.md']),
+    ['docs/COVEN-DEMO-LOOP.md'],
+  );
 
   const packageInventory = buildPublicInventory({
     rootMarkdownFiles: rootResult.files,
@@ -686,11 +730,14 @@ async function main() {
   const rootMarkdownResult = await collectPublicRootMarkdownFiles();
   const recursiveResult = await collectPublicRecursiveFiles();
   const recursiveFiles = recursiveResult.files;
+  const sharedResult = await collectPublicSharedFiles();
+  const sharedFiles = sharedResult.files;
   const topLevelDocsResult = await collectPublicTopLevelDocsFiles();
   const topLevelDocsFiles = topLevelDocsResult.files;
   const uniqueInventory = buildPublicInventory({
     rootMarkdownFiles: rootMarkdownResult.files,
     recursiveFiles,
+    sharedFiles,
     topLevelDocsFiles,
     packageMarkdownFiles: packageMarkdownResult.markdownFiles,
   });
@@ -704,6 +751,9 @@ async function main() {
   }
   if (recursiveResult.missingRootFailure) {
     sourceRootFailures.push(recursiveResult.missingRootFailure);
+  }
+  if (sharedResult.missingRootFailure) {
+    sourceRootFailures.push(sharedResult.missingRootFailure);
   }
   if (topLevelDocsResult.missingRootFailure) {
     sourceRootFailures.push(topLevelDocsResult.missingRootFailure);
