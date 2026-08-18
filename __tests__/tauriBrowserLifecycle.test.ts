@@ -670,6 +670,10 @@ function browserNavigationDependencies(
     activeProject: () => project,
     activeWorkspaceRoot: () => '/workspace',
     createBrowserPane: async () => pane,
+    focusBrowserPaneForNavigation: async (
+      _pane: typeof pane,
+      options: { isCurrent: () => boolean },
+    ) => options.isCurrent(),
     ensureBrowserModel: () => browser,
     currentBrowserTab: () => tab,
     createBrowserTab: (): BrowserNavigationTab | null => null,
@@ -828,7 +832,7 @@ describe('project browser URL routing', () => {
     expect(navigations).toBe(0);
   });
 
-  it('reuses the exact project browser active tab', async () => {
+  it('focuses an existing browser pane from a maximized terminal before reusing its active tab', async () => {
     const lifecycle = browserLifecycleHarness();
     const tab: BrowserNavigationTab = {
       id: 'tab-b',
@@ -847,8 +851,31 @@ describe('project browser URL routing', () => {
       worktreePath,
     };
     const nativeCalls: Array<[string, Record<string, unknown>]> = [];
+    const layout = {
+      focusedLeafId: 'terminal-leaf',
+      maximizedLeafId: 'terminal-leaf',
+    };
+    let focusedPaneId = sourceThread.id;
+    let browserSurfaceVisible = false;
+    const focusCalls: unknown[] = [];
     let paneCreates = 0;
     let tabCreates = 0;
+    const focusBrowserPaneForNavigation = compileFunction<
+      (
+        candidate: typeof pane,
+        options: { alreadyFocused?: boolean; isCurrent: () => boolean },
+      ) => Promise<boolean>
+    >(functionSource(mainJs, 'focusBrowserPaneForNavigation'), {
+      paneLayoutForThread: () => layout,
+      focusThread: async (id: string, options: unknown) => {
+        focusCalls.push([id, options]);
+        focusedPaneId = id;
+        layout.focusedLeafId = 'browser-leaf';
+        layout.maximizedLeafId = 'browser-leaf';
+        browserSurfaceVisible = true;
+        return true;
+      },
+    });
     const dependencies = browserNavigationDependencies(
       projectB,
       browser,
@@ -866,6 +893,7 @@ describe('project browser URL routing', () => {
       ensureBrowserModel: () => browser,
       findBrowserPane: () => pane,
       findThread: () => pane,
+      focusBrowserPaneForNavigation,
       createBrowserPane: async () => {
         paneCreates += 1;
         return pane;
@@ -874,6 +902,9 @@ describe('project browser URL routing', () => {
         tabCreates += 1;
         return null;
       },
+      visibleBrowserBounds: () => browserSurfaceVisible
+        ? { x: 1, y: 2, w: 3, h: 4 }
+        : null,
     });
     const navigateBrowserForContext = compileFunction<
       (url: string, context: Record<string, unknown>) => Promise<boolean>
@@ -886,6 +917,19 @@ describe('project browser URL routing', () => {
     })).resolves.toBe(true);
 
     expect(browser.tabs).toEqual([tab]);
+    expect(browser.activeTabId).toBe(tab.id);
+    expect(focusedPaneId).toBe(pane.id);
+    expect(layout).toEqual({
+      focusedLeafId: 'browser-leaf',
+      maximizedLeafId: 'browser-leaf',
+    });
+    expect(focusCalls).toEqual([[
+      pane.id,
+      {
+        focusTerminal: false,
+        preserveFullscreenLeafId: 'terminal-leaf',
+      },
+    ]]);
     expect(paneCreates).toBe(0);
     expect(tabCreates).toBe(0);
     expect(nativeCalls).toEqual([[
@@ -895,6 +939,111 @@ describe('project browser URL routing', () => {
         url: 'https://example.test/docs',
       }),
     ]]);
+  });
+
+  it('focuses an existing browser pane without maximizing a normal layout', async () => {
+    const pane = {
+      id: 'web-b',
+      kind: 'web',
+      projectId: projectB.id,
+      worktreePath,
+    };
+    const layout = {
+      focusedLeafId: 'terminal-leaf',
+      maximizedLeafId: null,
+    };
+    const focusCalls: unknown[] = [];
+    const focusBrowserPaneForNavigation = compileFunction<
+      (
+        candidate: typeof pane,
+        options: { alreadyFocused?: boolean; isCurrent: () => boolean },
+      ) => Promise<boolean>
+    >(functionSource(mainJs, 'focusBrowserPaneForNavigation'), {
+      paneLayoutForThread: () => layout,
+      focusThread: async (id: string, options: unknown) => {
+        focusCalls.push([id, options]);
+        layout.focusedLeafId = 'browser-leaf';
+        return true;
+      },
+    });
+
+    await expect(focusBrowserPaneForNavigation(pane, {
+      isCurrent: () => true,
+    })).resolves.toBe(true);
+    expect(layout).toEqual({
+      focusedLeafId: 'browser-leaf',
+      maximizedLeafId: null,
+    });
+    expect(focusCalls).toEqual([[
+      pane.id,
+      { focusTerminal: false },
+    ]]);
+  });
+
+  it('cancels when an existing browser pane closes during navigation focus', async () => {
+    const lifecycle = browserLifecycleHarness();
+    const tab: BrowserNavigationTab = {
+      id: 'tab-b',
+      url: 'about:blank',
+      created: false,
+      loading: false,
+      title: 'New tab',
+      history: [],
+      historyIndex: -1,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    const pane = {
+      id: 'web-b',
+      kind: 'web',
+      projectId: projectB.id,
+      worktreePath,
+      closing: false,
+    };
+    let nativeNavigations = 0;
+    const focusBrowserPaneForNavigation = compileFunction<
+      (
+        candidate: typeof pane,
+        options: { alreadyFocused?: boolean; isCurrent: () => boolean },
+      ) => Promise<boolean>
+    >(functionSource(mainJs, 'focusBrowserPaneForNavigation'), {
+      paneLayoutForThread: () => ({
+        focusedLeafId: 'terminal-leaf',
+        maximizedLeafId: 'terminal-leaf',
+      }),
+      focusThread: async () => {
+        pane.closing = true;
+        return true;
+      },
+    });
+    const dependencies = browserNavigationDependencies(
+      projectB,
+      browser,
+      tab,
+      async (command) => {
+        if (command === 'browser_navigate') nativeNavigations += 1;
+      },
+      lifecycle,
+    );
+    Object.assign(dependencies, {
+      state: { activeProjectId: projectB.id },
+      findProject: () => projectB,
+      activeProject: () => projectB,
+      activeWorkspaceRoot: () => worktreePath,
+      ensureBrowserModel: () => browser,
+      findBrowserPane: () => pane,
+      findThread: () => pane,
+      focusBrowserPaneForNavigation,
+    });
+    const navigateBrowserForContext = compileFunction<
+      (url: string, context: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowserForContext'), dependencies);
+
+    await expect(navigateBrowserForContext('https://example.test/docs', {
+      project: projectB,
+      projectId: projectB.id,
+      worktreePath,
+    })).resolves.toBe(false);
+    expect(nativeNavigations).toBe(0);
   });
 
   it('creates a missing exact pane and tab once before navigating', async () => {
@@ -914,8 +1063,24 @@ describe('project browser URL routing', () => {
     };
     let pane: BrowserPaneThreadFixture | null = null;
     let paneCreates = 0;
+    let navigationFocuses = 0;
+    let directFocuses = 0;
     let tabCreates = 0;
     const nativeCalls: Array<[string, Record<string, unknown>]> = [];
+    const focusBrowserPaneForNavigation = compileFunction<
+      (
+        pane: BrowserPaneThreadFixture,
+        options: { alreadyFocused?: boolean; isCurrent: () => boolean },
+      ) => Promise<boolean>
+    >(functionSource(mainJs, 'focusBrowserPaneForNavigation'), {
+      paneLayoutForThread: () => {
+        throw new Error('newly created panes should not resolve focus twice');
+      },
+      focusThread: async () => {
+        directFocuses += 1;
+        return true;
+      },
+    });
     const dependencies = browserNavigationDependencies(
       projectB,
       browser as { activeTabId: string; tabs: BrowserNavigationTab[] },
@@ -933,6 +1098,14 @@ describe('project browser URL routing', () => {
       ensureBrowserModel: () => browser,
       findBrowserPane: () => pane,
       findThread: (id: string) => pane && pane.id === id ? pane : null,
+      focusBrowserPaneForNavigation: async (
+        candidate: BrowserPaneThreadFixture,
+        options: { alreadyFocused?: boolean; isCurrent: () => boolean },
+      ) => {
+        navigationFocuses += 1;
+        expect(options.alreadyFocused).toBe(true);
+        return focusBrowserPaneForNavigation(candidate, options);
+      },
       createBrowserPane: async (project: typeof projectB, options: { worktreePath: string }) => {
         paneCreates += 1;
         expect(project).toBe(projectB);
@@ -983,6 +1156,8 @@ describe('project browser URL routing', () => {
     })).resolves.toBe(true);
 
     expect(paneCreates).toBe(1);
+    expect(navigationFocuses).toBe(1);
+    expect(directFocuses).toBe(0);
     expect(tabCreates).toBe(1);
     expect(browser.tabs).toHaveLength(1);
     expect(nativeCalls).toHaveLength(1);

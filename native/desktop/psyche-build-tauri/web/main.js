@@ -4699,6 +4699,24 @@
     return focusThread(thread.id);
   }
 
+  async function focusBrowserPaneForNavigation(pane, options) {
+    options = options || {};
+    var isCurrent = typeof options.isCurrent === "function"
+      ? options.isCurrent
+      : function () { return true; };
+    if (!pane || !isCurrent()) return false;
+    if (!options.alreadyFocused) {
+      var layout = paneLayoutForThread(pane);
+      var maximizedLeafId = layout && layout.maximizedLeafId;
+      var focusOptions = { focusTerminal: false };
+      if (maximizedLeafId) {
+        focusOptions.preserveFullscreenLeafId = maximizedLeafId;
+      }
+      if (!(await focusThread(pane.id, focusOptions))) return false;
+    }
+    return isCurrent();
+  }
+
   function statusLevel(s) {
     if (s === "running") return "ok";
     if (s === "starting") return "";
@@ -11115,20 +11133,30 @@
             ? (project.browsersByWorktree !== browsersByWorktree ||
               browsersByWorktree[worktreePath] !== browser)
             : ensureBrowserModel(project, worktreePath) !== browser) ||
-          (tab && (browser.tabs.indexOf(tab) === -1 || browserTabIsClosing(tab)))) return false;
+          (tab && (
+            browser.tabs.indexOf(tab) === -1 ||
+            browserTabIsClosing(tab) ||
+            (!hasRequestedTab && browser.activeTabId !== tab.id)
+          ))) return false;
       if (!pane) return findBrowserPane(projectId, worktreePath) === null;
       return pane.projectId === projectId && pane.worktreePath === worktreePath &&
         findThread(pane.id) === pane && findBrowserPane(projectId, worktreePath) === pane &&
         !browserPaneIsClosing(pane);
     };
     if (!requestIsCurrent()) return false;
+    var paneAlreadyFocused = false;
     if (!pane) {
       pane = await createBrowserPane(project, {
         worktreePath: worktreePath,
         isCurrent: scopeIsCurrent,
       });
+      paneAlreadyFocused = true;
       if (!pane || !requestIsCurrent()) return false;
     }
+    if (!(await focusBrowserPaneForNavigation(pane, {
+      alreadyFocused: paneAlreadyFocused,
+      isCurrent: requestIsCurrent,
+    }))) return false;
     if (!tab) {
       if (!requestIsCurrent()) return false;
       tab = createBrowserTab(project, "about:blank", true, worktreePath);
