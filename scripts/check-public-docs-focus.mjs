@@ -7,12 +7,15 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const textExtensions = new Set(['.js', '.mjs', '.html', '.css', '.svg', '.md', '.json']);
-const requiredEntryFiles = sortUnique([
+const requiredSourceFiles = sortUnique([
   'docs/src/hero.js',
   'docs/src/index.html',
+  'docs/src/content/index.js',
+  'docs/src/code-highlight.js',
   'docs/src/main.js',
   'docs/src/sidebar.js',
   'docs/src/style.css',
+  'docs/shared/githubStars.js',
   'docs/vite.config.js',
 ]);
 const prohibitedFiles = new Set(['docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md']);
@@ -51,8 +54,8 @@ function hasGlobMetacharacters(value) {
 }
 
 function collectPackageMarkdownFiles(packageFiles) {
-  const boundaryFailures = [];
   const markdownFiles = [];
+  const boundaryFailures = [];
 
   for (const file of sortUnique(packageFiles)) {
     const isDocsEntry = file === 'docs' || file === 'docs/' || file.startsWith('docs/');
@@ -136,9 +139,9 @@ function buildPublicInventory({ recursiveFiles, packageMarkdownFiles }) {
   return sortUnique([
     'README.md',
     'docs/README.md',
-    ...requiredEntryFiles,
+    ...requiredSourceFiles,
     ...recursiveFiles,
-    ...packageMarkdownFiles.filter((file) => !prohibitedFiles.has(file)),
+    ...packageMarkdownFiles,
   ]);
 }
 
@@ -171,6 +174,12 @@ function countInventoryPasses(uniqueInventory, failedInventoryFiles) {
   return passCount;
 }
 
+function assertRequiredInventoryFiles(inventory) {
+  for (const file of requiredSourceFiles) {
+    assert(inventory.includes(file), `required docs source file missing: ${file}`);
+  }
+}
+
 async function selfCheckPublicInventory() {
   const recursiveFiles = await collectPublicRecursiveFiles();
   assert.deepEqual(recursiveFiles, sortUnique(recursiveFiles));
@@ -180,13 +189,19 @@ async function selfCheckPublicInventory() {
   const requiredInventory = buildPublicInventory({ recursiveFiles: [], packageMarkdownFiles: [] });
   assert(requiredInventory.includes('README.md'));
   assert(requiredInventory.includes('docs/README.md'));
-  for (const file of requiredEntryFiles) {
-    assert(requiredInventory.includes(file), `required entrypoint missing from inventory: ${file}`);
-  }
+  assertRequiredInventoryFiles(requiredInventory);
+
+  assert.throws(
+    () => {
+      assertRequiredInventoryFiles(requiredInventory.filter((file) => file !== 'docs/shared/githubStars.js'));
+    },
+    /required docs source file missing: docs\/shared\/githubStars\.js/,
+  );
 
   const packageBoundaryA = collectPackageMarkdownFiles([
     'dist/**/*',
     'CHANGELOG*.md',
+    'docs',
     'CHANGELOG.md',
     'CONTRIBUTING.md',
     'README.md',
@@ -195,6 +210,7 @@ async function selfCheckPublicInventory() {
     'docs/COVEN-DEMO-LOOP.md',
     'docs/AGENT-SURFACE-CONTROL.md',
     'docs/README.md',
+    'docs/COVEN-SESSIONS.md',
     'docs/not-md.txt',
     'docs/superpowers',
     'docs/superpowers/x.md',
@@ -205,9 +221,11 @@ async function selfCheckPublicInventory() {
     'CONTRIBUTING.md',
     'CHANGELOG.md',
     'CHANGELOG*.md',
+    'docs',
     'docs/superpowers/x.md',
     'docs/not-md.txt',
     'docs/superpowers',
+    'docs/COVEN-SESSIONS.md',
     'docs/README.md',
     'docs/AGENT-SURFACE-CONTROL.md',
     'docs/COVEN-DEMO-LOOP.md',
@@ -221,11 +239,13 @@ async function selfCheckPublicInventory() {
   assert(packageBoundaryA.markdownFiles.includes('README.md'));
   assert(packageBoundaryA.markdownFiles.includes('docs/AGENT-SURFACE-CONTROL.md'));
   assert(packageBoundaryA.markdownFiles.includes('docs/COVEN-DEMO-LOOP.md'));
+  assert(packageBoundaryA.markdownFiles.includes('docs/COVEN-SESSIONS.md'));
   assert(packageBoundaryA.markdownFiles.includes('docs/README.md'));
   assert.deepEqual(
     packageBoundaryA.boundaryFailures,
     sortFailureRecords([
       { file: 'CHANGELOG*.md', reason: 'package-published Markdown must use explicit file paths' },
+      { file: 'docs', reason: 'package-published docs must use explicit top-level Markdown file paths' },
       { file: 'docs/', reason: 'package-published docs must use explicit top-level Markdown file paths' },
       { file: 'docs/**/*', reason: 'package-published docs must use explicit top-level Markdown file paths' },
       { file: 'docs/not-md.txt', reason: 'package-published docs must use explicit top-level Markdown file paths' },
@@ -241,13 +261,21 @@ async function selfCheckPublicInventory() {
   assert(packageInventory.includes('CHANGELOG.md'));
   assert(packageInventory.includes('CONTRIBUTING.md'));
   assert(packageInventory.includes('README.md'));
+  assert(packageInventory.includes('docs/COVEN-DEMO-LOOP.md'));
+  assert(packageInventory.includes('docs/COVEN-SESSIONS.md'));
+
+  const overlappingBoundaryFailures = sortFailureRecords([
+    { file: 'docs/superpowers/x.md', reason: 'package-published docs must use explicit top-level Markdown file paths' },
+  ]);
+  const overlappingInventory = new Set(['docs/superpowers/x.md']);
+  assert(overlappingInventory.has(overlappingBoundaryFailures[0].file));
 
   const partialCleanupInventory = buildPublicInventory({
     recursiveFiles: ['docs/src/main.js'],
     packageMarkdownFiles: ['README.md', 'docs/README.md', 'docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md'],
   });
-  assert(!partialCleanupInventory.includes('docs/COVEN-DEMO-LOOP.md'));
-  assert(!partialCleanupInventory.includes('docs/COVEN-SESSIONS.md'));
+  assert(partialCleanupInventory.includes('docs/COVEN-DEMO-LOOP.md'));
+  assert(partialCleanupInventory.includes('docs/COVEN-SESSIONS.md'));
   assert.equal(
     countInventoryPasses(partialCleanupInventory, new Set(['docs/src/main.js'])),
     partialCleanupInventory.length - 1,
@@ -274,6 +302,7 @@ async function main() {
   const inventorySet = new Set(uniqueInventory);
 
   const inventoryFailures = [];
+  const packageBoundaryFailures = [...packageMarkdownResult.boundaryFailures];
   const globalFailures = [];
   const failedInventoryFiles = new Set();
 
@@ -284,13 +313,8 @@ async function main() {
   };
 
   const recordGlobalFailure = (file, reason) => {
-    assert(!inventorySet.has(file), `global prohibited-path failure must stay outside inventory: ${file}`);
     globalFailures.push({ file, reason });
   };
-
-  for (const failure of packageMarkdownResult.boundaryFailures) {
-    recordGlobalFailure(failure.file, failure.reason);
-  }
 
   for (const file of prohibitedFiles) {
     if (packageFiles.includes(file)) {
@@ -331,14 +355,22 @@ async function main() {
 
   const passCount = countInventoryPasses(uniqueInventory, failedInventoryFiles);
   const sortedInventoryFailures = sortFailureRecords(inventoryFailures);
+  const sortedPackageBoundaryFailures = sortFailureRecords(packageBoundaryFailures);
   const sortedGlobalFailures = sortFailureRecords(globalFailures);
 
-  if (sortedInventoryFailures.length > 0 || sortedGlobalFailures.length > 0) {
+  if (sortedInventoryFailures.length > 0 || sortedPackageBoundaryFailures.length > 0 || sortedGlobalFailures.length > 0) {
     console.error(`Passed ${passCount}/${uniqueInventory.length} public documentation source files.`);
 
     if (sortedInventoryFailures.length > 0) {
       console.error('Inventory file failures:');
       for (const failure of sortedInventoryFailures) {
+        console.error(`${failure.file}: ${failure.reason}`);
+      }
+    }
+
+    if (sortedPackageBoundaryFailures.length > 0) {
+      console.error('Package boundary failures:');
+      for (const failure of sortedPackageBoundaryFailures) {
         console.error(`${failure.file}: ${failure.reason}`);
       }
     }
