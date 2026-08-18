@@ -2439,6 +2439,17 @@ export async function dispatchOrchestrationRequest(
   requestId: string;
   result: import('../orchestration/types.js').OrchestrationTaskResult;
 }> {
+  const rawTask = request.task as unknown as Record<string, unknown>;
+  if (
+    Object.prototype.hasOwnProperty.call(rawTask, 'cwd')
+    && typeof rawTask.cwd !== 'string'
+  ) {
+    throw new OrchestrationError(
+      'invalid_orchestration_request',
+      'cwd must be a string when provided',
+    );
+  }
+
   const scoped = await resolveScopedCwd(daemonProjectRoot);
   const claimed = await resolveOrchestrationScopedCwd(
     scoped.projectRoot,

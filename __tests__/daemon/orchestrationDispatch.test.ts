@@ -152,6 +152,60 @@ describe('dispatchOrchestrationRequest', () => {
     });
   });
 
+  it('rejects a numeric cwd from the raw request boundary', async () => {
+    const root = await tempDir('psyche-orch-numeric-cwd-');
+    const orchestrator = createMockOrchestrator();
+    const rawRequest: unknown = JSON.parse(JSON.stringify({
+      type: 'orchestration.execute',
+      requestId: 'request-numeric-cwd',
+      task: {
+        taskId: 'task-numeric-cwd',
+        projectRoot: root,
+        cwd: 42,
+        prompt: 'Reject malformed cwd',
+        lanes: [{ id: 'bad', mode: 'terminal' }],
+      },
+    }));
+
+    await expect(
+      dispatchOrchestrationRequest(
+        root,
+        rawRequest as Parameters<typeof dispatchOrchestrationRequest>[1],
+        orchestrator,
+      ),
+    ).rejects.toMatchObject({
+      code: 'invalid_orchestration_request',
+      message: expect.stringMatching(/cwd .*string/i),
+    });
+  });
+
+  it('rejects a null cwd from the raw request boundary', async () => {
+    const root = await tempDir('psyche-orch-null-cwd-');
+    const orchestrator = createMockOrchestrator();
+    const rawRequest: unknown = JSON.parse(JSON.stringify({
+      type: 'orchestration.execute',
+      requestId: 'request-null-cwd',
+      task: {
+        taskId: 'task-null-cwd',
+        projectRoot: root,
+        cwd: null,
+        prompt: 'Reject malformed cwd',
+        lanes: [{ id: 'bad', mode: 'terminal' }],
+      },
+    }));
+
+    await expect(
+      dispatchOrchestrationRequest(
+        root,
+        rawRequest as Parameters<typeof dispatchOrchestrationRequest>[1],
+        orchestrator,
+      ),
+    ).rejects.toMatchObject({
+      code: 'invalid_orchestration_request',
+      message: expect.stringMatching(/cwd .*string/i),
+    });
+  });
+
   it('rejects task projectRoot outside the daemon project root', async () => {
     const root = await tempDir('psyche-orch-scope-');
     const outside = await tempDir('psyche-orch-outside-');
