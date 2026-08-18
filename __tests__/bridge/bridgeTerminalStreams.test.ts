@@ -188,6 +188,133 @@ describe("BridgeDaemon terminal streams", () => {
 
     // The subscription outlives the pane; its teardown reclaims the buffer.
     expect(hub.bufferedPaneIds()).toContain(PUBLISHED_PANE);
+
+    const streamId = [...session.controlStreams.keys()][0];
+    await control(daemon, session, {
+      type: "panes.detach",
+      requestId: "detach-closed",
+      streamId,
+    });
+
+    expect(hub.bufferedPaneIds()).not.toContain(PUBLISHED_PANE);
+
+    const repeated = await control(daemon, session, {
+      type: "panes.detach",
+      requestId: "detach-closed-again",
+      streamId,
+    });
+    expect(repeated).toMatchObject({ type: "error", code: "no_stream" });
+    expect(hub.bufferedPaneIds()).not.toContain(PUBLISHED_PANE);
+  });
+
+  it("keeps a closed pane buffer until its last terminal stream detaches", async () => {
+    const { daemon, hub } = createDaemon();
+    const firstSession = createSession("connection-1");
+    const secondSession = createSession("connection-2");
+    install(daemon, [firstSession, secondSession]);
+    hub.bufferFor(PUBLISHED_PANE).write(Buffer.from("output\n", "utf8"));
+    const first = await attach(daemon, firstSession);
+    const second = await attach(daemon, secondSession);
+
+    dropPaneFromWorkspace(daemon, PUBLISHED_PANE);
+    await (daemon as any).broadcastWorkspaceChanged();
+
+    await control(daemon, firstSession, {
+      type: "panes.detach",
+      requestId: "detach-first",
+      streamId: first.streamId,
+    });
+    expect(hub.bufferedPaneIds()).toContain(PUBLISHED_PANE);
+
+    await control(daemon, secondSession, {
+      type: "panes.detach",
+      requestId: "detach-second",
+      streamId: second.streamId,
+    });
+    expect(hub.bufferedPaneIds()).not.toContain(PUBLISHED_PANE);
+  });
+
+  it("reclaims on the close sweep when the stream detached first", async () => {
+    const { daemon, hub } = createDaemon();
+    const session = createSession();
+    install(daemon, [session]);
+    hub.bufferFor(PUBLISHED_PANE).write(Buffer.from("output\n", "utf8"));
+    const attached = await attach(daemon, session);
+
+    await control(daemon, session, {
+      type: "panes.detach",
+      requestId: "detach-live",
+      streamId: attached.streamId,
+    });
+    expect(hub.bufferedPaneIds()).toContain(PUBLISHED_PANE);
+
+    dropPaneFromWorkspace(daemon, PUBLISHED_PANE);
+    await (daemon as any).broadcastWorkspaceChanged();
+
+    expect(hub.bufferedPaneIds()).not.toContain(PUBLISHED_PANE);
+  });
+
+  it("reclaims a closed pane buffer when its streaming session closes", async () => {
+    const { daemon, hub } = createDaemon();
+    const session = createSession();
+    install(daemon, [session]);
+    hub.bufferFor(PUBLISHED_PANE).write(Buffer.from("output\n", "utf8"));
+    await attach(daemon, session);
+
+    const closedWorkspace = dropPaneFromWorkspace(daemon, PUBLISHED_PANE);
+    await (daemon as any).broadcastWorkspaceChanged();
+    expect(hub.bufferedPaneIds()).toContain(PUBLISHED_PANE);
+
+    (daemon as any).onSessionClose(session);
+    (daemon as any).onSessionClose(session);
+
+    expect(hub.bufferedPaneIds()).not.toContain(PUBLISHED_PANE);
+    expect(session.controlStreams.size).toBe(0);
+
+    closedWorkspace.revision += 1;
+    await (daemon as any).broadcastWorkspaceChanged();
+    await (daemon as any).broadcastWorkspaceChanged();
+    expect(hub.bufferedPaneIds()).not.toContain(PUBLISHED_PANE);
+  });
+
+  it("does not reclaim while a legacy pane subscriber remains", async () => {
+    const { daemon, hub } = createDaemon();
+    const terminalSession = createSession("terminal");
+    const legacySession = createSession("legacy");
+    install(daemon, [terminalSession, legacySession]);
+    hub.bufferFor(PUBLISHED_PANE).write(Buffer.from("output\n", "utf8"));
+    const attached = await attach(daemon, terminalSession);
+    (daemon as any).subscribePane(legacySession, PUBLISHED_PANE, null);
+
+    dropPaneFromWorkspace(daemon, PUBLISHED_PANE);
+    await (daemon as any).broadcastWorkspaceChanged();
+
+    await control(daemon, terminalSession, {
+      type: "panes.detach",
+      requestId: "detach-terminal",
+      streamId: attached.streamId,
+    });
+    expect(hub.bufferedPaneIds()).toContain(PUBLISHED_PANE);
+
+    (daemon as any).unsubscribePane(legacySession, PUBLISHED_PANE);
+    expect(hub.bufferedPaneIds()).not.toContain(PUBLISHED_PANE);
+  });
+
+  it("does not reclaim a published pane when its final stream detaches", async () => {
+    const { daemon, hub } = createDaemon();
+    const session = createSession();
+    install(daemon, [session]);
+    hub.bufferFor(PUBLISHED_PANE).write(Buffer.from("output\n", "utf8"));
+    const attached = await attach(daemon, session);
+
+    await (daemon as any).broadcastWorkspaceChanged();
+    await control(daemon, session, {
+      type: "panes.detach",
+      requestId: "detach-published",
+      streamId: attached.streamId,
+    });
+
+    expect(hub.bufferedPaneIds()).toContain(PUBLISHED_PANE);
   });
 
   it("keeps buffers for panes the workspace still publishes", async () => {
