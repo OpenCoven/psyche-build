@@ -827,13 +827,6 @@ final class ConnectionManagerTests: XCTestCase {
         let credentialStore = MobileCredentialStore(secureStore: secureStore)
         let pairedHostStore = PairedHostStore(secureStore: InMemorySecureStore())
         let endpoint = testEndpoint()
-        try await pairedHostStore.save(PairedHost(
-            serverID: "host",
-            serverName: "Host",
-            endpoint: endpoint,
-            clientID: "legacy-client",
-            token: "legacy-token"
-        ))
         let manager = makeManager(
             transport: fake,
             pairedHostStore: pairedHostStore,
@@ -860,7 +853,12 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(storedCredential?.token, "durable-token")
 
         await manager.disconnect()
-        let reconnect = Task { await manager.connectToStoredHost() }
+        let restarted = makeManager(
+            transport: fake,
+            pairedHostStore: pairedHostStore,
+            credentialStore: MobileCredentialStore(secureStore: secureStore)
+        )
+        let reconnect = Task { await restarted.connectToStoredHost() }
         try await waitForHello(on: fake, occurrence: 2)
         let reconnectMessages = await fake.sentMessages
         let reconnectHello = try XCTUnwrap(reconnectMessages.compactMap { message -> HelloPayload? in
@@ -871,6 +869,43 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertNil(reconnectHello.invite)
         await fake.emit(.legacy(.welcome(makeWelcome())))
         await reconnect.value
+    }
+
+    func testClearedFreshCredentialAllowsNewInviteRedemption() async throws {
+        let fake = FakeTransport()
+        let secureStore = InMemorySecureStore()
+        let credentials = MobileCredentialStore(secureStore: secureStore)
+        let manager = makeManager(transport: fake, pairedHostStore: PairedHostStore(secureStore: InMemorySecureStore()), credentialStore: credentials)
+        let endpoint = testEndpoint()
+        let first = try XCTUnwrap(PsycheInvite.parse(URL(string: "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&psyche_invite=first")!))
+        let firstConnect = Task { await manager.connect(using: first) }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.authAccepted(AuthAcceptedPayload(token: "first-token"))))
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        _ = await firstConnect.value
+        try await credentials.clear()
+        await manager.disconnect()
+        let second = try XCTUnwrap(PsycheInvite.parse(URL(string: "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&psyche_invite=second")!))
+        let secondConnect = Task { await manager.connect(using: second) }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.authAccepted(AuthAcceptedPayload(token: "second-token"))))
+        for _ in 0..<100 { await Task.yield() }
+        let credential = try await credentials.credential(for: endpoint)
+        XCTAssertEqual(credential?.token, "second-token")
+        secondConnect.cancel()
+    }
+
+    func testMismatchedKnownHostInviteDoesNotReachTransport() async throws {
+        let fake = FakeTransport()
+        let hosts = PairedHostStore(secureStore: InMemorySecureStore())
+        try await hosts.save(PairedHost(serverID: "host", serverName: "Host", endpoint: testEndpoint(), clientID: "legacy", token: "legacy"))
+        let manager = makeManager(transport: fake, pairedHostStore: hosts, credentialStore: MobileCredentialStore(secureStore: InMemorySecureStore()))
+        let invite = try XCTUnwrap(PsycheInvite.parse(URL(string: "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&fingerprint=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&psyche_invite=bad")!))
+        _ = await manager.connect(using: invite)
+        let attempts = await fake.connectionAttempts
+        let messages = await fake.sentMessages
+        XCTAssertEqual(attempts, [])
+        XCTAssertEqual(messages, [])
     }
 
     func testInvalidInviteDoesNotPersistCredentialOrAuthenticate() async throws {
