@@ -577,6 +577,7 @@ describe('StatusDetector pane release', () => {
 
       expect(removed).toEqual(['pane-a']);
       expect(manager.getStats().workerCount).toBe(0);
+      expect((manager as any).poller.timer).toBeNull();
     } finally {
       await manager.shutdown();
       messageBus.destroy();
