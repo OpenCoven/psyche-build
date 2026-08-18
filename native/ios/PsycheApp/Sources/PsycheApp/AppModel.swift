@@ -61,6 +61,13 @@ final class AppModel: ObservableObject {
         hostName = Self.fixtureHostName
     }
 
+    init(composition: MobileAppComposition) {
+        fixtureName = nil
+        self.composition = composition
+        workspaceStore = composition.workspaceStore
+        terminalRegistry = composition.terminalRegistry
+    }
+
     /// Fixed so UI tests can assert host context without a paired record.
     static let fixtureHostName = "psyche-demo.local"
 
@@ -100,10 +107,12 @@ final class AppModel: ObservableObject {
         hasStarted = true
         guard let composition else { return }
 
-        await composition.start()
         if let invite = pendingInvite {
             pendingInvite = nil
+            await composition.start(reconnectToStoredHost: false)
             await composition.connectionManager.connect(using: invite)
+        } else {
+            await composition.start()
         }
 
         // Read the stored identity rather than waiting on a welcome: it is

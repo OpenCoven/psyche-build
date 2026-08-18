@@ -794,6 +794,32 @@ final class ConnectionManagerTests: XCTestCase {
         await connectTask.value
     }
 
+    func testStoredHostReconnectFallsBackToLegacyTokenWhenDurableCredentialReadFails() async throws {
+        let fake = FakeTransport()
+        let pairedHostStore = PairedHostStore(secureStore: InMemorySecureStore())
+        let endpoint = testEndpoint()
+        try await pairedHostStore.save(PairedHost(
+            serverID: "host", serverName: "Host", endpoint: endpoint,
+            clientID: "legacy-client", token: "legacy-token"
+        ))
+        let manager = makeManager(
+            transport: fake,
+            pairedHostStore: pairedHostStore,
+            credentialStore: MobileCredentialStore(secureStore: FailingReadSecureStore())
+        )
+
+        let reconnect = Task { await manager.connectToStoredHost() }
+        try await waitForHello(on: fake)
+        let messages = await fake.sentMessages
+        guard case let .legacy(.hello(hello)) = messages.first else {
+            return XCTFail("Expected reconnect hello")
+        }
+        XCTAssertEqual(hello.token, "legacy-token")
+        XCTAssertNil(hello.invite)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await reconnect.value
+    }
+
     func testInviteRedemptionPersistsDurableCredentialAndReconnectsWithoutInvite() async throws {
         let fake = FakeTransport()
         let secureStore = InMemorySecureStore()
@@ -873,6 +899,39 @@ final class ConnectionManagerTests: XCTestCase {
         let state = await manager.state
         XCTAssertNil(storedCredential)
         XCTAssertEqual(state, .failed("Invite expired"))
+    }
+
+    func testRetiredInviteGenerationDoesNotPersistAuthAcceptedCredential() async throws {
+        let fake = FakeTransport()
+        let credentialStore = MobileCredentialStore(secureStore: InMemorySecureStore())
+        let pairedHostStore = PairedHostStore(secureStore: InMemorySecureStore())
+        let endpoint = testEndpoint()
+        try await pairedHostStore.save(PairedHost(
+            serverID: "host", serverName: "Host", endpoint: endpoint,
+            clientID: "legacy-client", token: "legacy-token"
+        ))
+        let gate = MessageProcessorStartGate()
+        let manager = makeManager(
+            transport: fake,
+            pairedHostStore: pairedHostStore,
+            credentialStore: credentialStore,
+            credentialPersistenceStart: { await gate.wait() }
+        )
+        let invite = try XCTUnwrap(PsycheInvite.parse(URL(string:
+            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&psyche_invite=one-time-invite"
+        )!))
+
+        let redemption = Task { await manager.connect(using: invite) }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.authAccepted(AuthAcceptedPayload(token: "durable-token"))))
+        await gate.waitUntilEntered()
+
+        await manager.disconnect()
+        await gate.release()
+        await redemption.value
+
+        let credential = try await credentialStore.credential(for: endpoint)
+        XCTAssertNil(credential)
     }
 
     func testPairOverridePersistsAndReconnectsWithRequestIdentityAndToken() async throws {
@@ -2204,7 +2263,8 @@ final class ConnectionManagerTests: XCTestCase {
     private func makeManager(
         transport: any PsycheTransport,
         pairedHostStore: PairedHostStore,
-        credentialStore: MobileCredentialStore
+        credentialStore: MobileCredentialStore,
+        credentialPersistenceStart: @escaping @Sendable () async -> Void = {}
     ) -> ConnectionManager {
         let requestClient = ControlRequestClient(transport: transport)
         return ConnectionManager(
@@ -2214,7 +2274,8 @@ final class ConnectionManagerTests: XCTestCase {
             pairedHostStore: pairedHostStore,
             mobileCredentialStore: credentialStore,
             clientID: "test-client",
-            clientName: "Psyche Tests"
+            clientName: "Psyche Tests",
+            credentialPersistenceStart: credentialPersistenceStart
         )
     }
 
@@ -2727,6 +2788,16 @@ private final class BlockingReadSecureStore: SecureStore, @unchecked Sendable {
             storage.removeValue(forKey: key)
         }
     }
+}
+
+private final class FailingReadSecureStore: SecureStore, @unchecked Sendable {
+    func data(forKey key: String) throws -> Data? {
+        throw MobileCredentialStoreError.corruptedRecord
+    }
+
+    func set(_ data: Data, forKey key: String) throws {}
+
+    func removeValue(forKey key: String) throws {}
 }
 
 private final class CancellationOnceSecureStore: SecureStore, @unchecked Sendable {

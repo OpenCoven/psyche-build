@@ -116,6 +116,7 @@ public actor ConnectionManager {
     private let mobileCredentialStore: MobileCredentialStore
     private let messageProcessorStart: @Sendable () async -> Void
     private let snapshotRequestFailureStart: @Sendable () async -> Void
+    private let credentialPersistenceStart: @Sendable () async -> Void
     private let manualCredentials: ConnectionCredentials
     private var activeConnection: ConnectionConfiguration?
     private let clientName: String
@@ -158,7 +159,8 @@ public actor ConnectionManager {
         clientName: String = "Psyche iOS",
         token: String? = nil,
         messageProcessorStart: @escaping @Sendable () async -> Void = {},
-        snapshotRequestFailureStart: @escaping @Sendable () async -> Void = {}
+        snapshotRequestFailureStart: @escaping @Sendable () async -> Void = {},
+        credentialPersistenceStart: @escaping @Sendable () async -> Void = {}
     ) {
         self.transport = transport
         self.workspaceStore = workspaceStore
@@ -172,6 +174,7 @@ public actor ConnectionManager {
         self.clientName = clientName
         self.messageProcessorStart = messageProcessorStart
         self.snapshotRequestFailureStart = snapshotRequestFailureStart
+        self.credentialPersistenceStart = credentialPersistenceStart
     }
 
     deinit {
@@ -200,7 +203,12 @@ public actor ConnectionManager {
         do {
             guard let host = try await pairedHostStore.hosts().first else { return }
             guard canStartStoredReconnect(intentEpoch: intentEpoch) else { return }
-            let credential = try await mobileCredentialStore.credential(for: host.endpoint)
+            let credential: MobileCredential?
+            do {
+                credential = try await mobileCredentialStore.credential(for: host.endpoint)
+            } catch {
+                credential = nil
+            }
             await connect(
                 using: ConnectionConfiguration(
                     endpoint: host.endpoint,
@@ -651,6 +659,10 @@ public actor ConnectionManager {
                 return .ignored
             }
             do {
+                await credentialPersistenceStart()
+                guard isActive(session: session, generation: generation), !Task.isCancelled else {
+                    return .ignored
+                }
                 let committed = try await mobileCredentialStore.save(
                     endpoint: activeConnection.endpoint,
                     token: payload.token,

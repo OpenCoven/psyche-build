@@ -115,6 +115,33 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.pendingInvite?.token, "one-time-token")
     }
 
+    func testPendingLaunchInviteConnectsBeforeStoredHostReconnect() async throws {
+        let transport = AppModelFakeTransport()
+        let pairedHostStore = PairedHostStore(secureStore: InMemorySecureStore())
+        let endpoint = HostEndpoint(
+            host: "studio.example", port: 4242,
+            certificateFingerprint: String(repeating: "a", count: 64)
+        )
+        try await pairedHostStore.save(PairedHost(
+            serverID: "host", serverName: "Host", endpoint: endpoint,
+            clientID: "legacy-client", token: "legacy-token"
+        ))
+        let model = AppModel(composition: MobileAppComposition(
+            transport: transport,
+            pairedHostStore: pairedHostStore,
+            mobileCredentialStore: MobileCredentialStore(secureStore: InMemorySecureStore())
+        ))
+        model.receive(url: URL(string:
+            "psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&psyche_invite=one-time-invite"
+        )!)
+
+        let start = Task { await model.start() }
+        let hello = try await transport.waitForHello()
+        XCTAssertEqual(hello.invite, "one-time-invite")
+        XCTAssertNil(hello.token)
+        start.cancel()
+    }
+
     func testRejectsAnInvalidDeepLinkWithoutChangingPendingInvite() {
         let model = AppModel(fixture: WorkspaceFixtures.multiproject)
 
@@ -140,5 +167,51 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(schemes, ["psyche"])
         XCTAssertTrue(appSource.contains(".onOpenURL"))
         XCTAssertTrue(appSource.contains("model.receive(url: url)"))
+    }
+}
+
+private actor AppModelFakeTransport: PsycheTransport {
+    private var continuation: AsyncStream<MobileServerMessage>.Continuation?
+    private var stream: AsyncStream<MobileServerMessage>?
+    private var helloWaiters: [CheckedContinuation<HelloPayload, any Error>] = []
+    private var lastHello: HelloPayload?
+
+    func connect(to endpoint: HostEndpoint) async throws {
+        let pair = AsyncStream<MobileServerMessage>.makeStream()
+        stream = pair.stream
+        continuation = pair.continuation
+    }
+
+    func disconnect() async {
+        continuation?.finish()
+        continuation = nil
+        stream = nil
+    }
+
+    func send(_ message: MobileClientMessage) async throws {
+        guard case let .legacy(.hello(payload)) = message else { return }
+        lastHello = payload
+        let waiters = helloWaiters
+        helloWaiters.removeAll()
+        waiters.forEach { $0.resume(returning: payload) }
+    }
+
+    func incomingMessages() async -> AsyncStream<MobileServerMessage> {
+        stream ?? AsyncStream { $0.finish() }
+    }
+
+    func incomingBinaryFrames() async -> AsyncStream<TerminalBinaryFrame> {
+        AsyncStream { $0.finish() }
+    }
+
+    func waitForHello() async throws -> HelloPayload {
+        if let lastHello { return lastHello }
+        return try await withCheckedThrowingContinuation { continuation in
+            if let lastHello {
+                continuation.resume(returning: lastHello)
+                return
+            }
+            helloWaiters.append(continuation)
+        }
     }
 }

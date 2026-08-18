@@ -50,10 +50,12 @@ public final class MobileAppComposition: ObservableObject {
         )
     }
 
-    public func start() async {
+    public func start(reconnectToStoredHost: Bool = true) async {
         guard !hasStarted else { return }
         hasStarted = true
         terminalRegistry.start()
-        await connectionManager.connectToStoredHost()
+        if reconnectToStoredHost {
+            await connectionManager.connectToStoredHost()
+        }
     }
 }
