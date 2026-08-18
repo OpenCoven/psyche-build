@@ -128,7 +128,7 @@ async function waitForPaneReady(
   }
 }
 
-async function persistPaneBeforeAgentLaunch(
+export async function persistPaneBeforeAgentLaunch(
   options: CreatePaneOptions,
   sessionProjectRoot: string,
   pane: PsychePane,
@@ -137,6 +137,13 @@ async function persistPaneBeforeAgentLaunch(
   await mutateProjectPaneConfig(sessionProjectRoot, (configRecord) => {
     const config = configRecord as unknown as PsycheConfig;
     const currentPanes = Array.isArray(config.panes) ? config.panes : [];
+    if (options.existingWorktree) {
+      pane.slug = revalidateAttachedPaneSlug(
+        pane.slug,
+        options.existingWorktree,
+        currentPanes,
+      );
+    }
     const panes = currentPanes.some((candidate) => candidate.id === pane.id)
       ? currentPanes
       : [...currentPanes, pane];
@@ -182,6 +189,84 @@ async function persistPaneBeforeAgentLaunch(
     config.panes = panes;
     config.lastUpdated = new Date().toISOString();
   });
+}
+
+function revalidateAttachedPaneSlug(
+  requestedSlug: string,
+  existingWorktree: NonNullable<CreatePaneOptions['existingWorktree']>,
+  panes: readonly PsychePane[],
+): string {
+  const baseSlug = path.basename(existingWorktree.worktreePath) || existingWorktree.slug;
+  const existing = new Set(panes.map((pane) => pane.slug));
+  if (
+    new RegExp(`^${escapeRegExp(baseSlug)}-a(?:[2-9]|[1-9][0-9]+)$`).test(requestedSlug)
+    && !existing.has(requestedSlug)
+  ) {
+    return requestedSlug;
+  }
+  let maxSibling = 1;
+  const prefix = `${baseSlug}-a`;
+  for (const pane of panes) {
+    if (!pane.slug.startsWith(prefix)) continue;
+    const suffix = pane.slug.slice(prefix.length);
+    if (/^\d+$/.test(suffix)) {
+      maxSibling = Math.max(maxSibling, Number.parseInt(suffix, 10));
+    }
+  }
+  return `${baseSlug}-a${maxSibling + 1}`;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+interface WorktreeCreationEffectsOptions {
+  attaching: boolean;
+  projectRoot: string;
+  worktreePath: string;
+  pane: PsychePane;
+  metadata: Parameters<typeof writeWorktreeMetadata>[1];
+  hooksEditingSession: boolean;
+  triggerWorktreeCreated?: typeof triggerHookSync;
+  writeMetadata?: typeof writeWorktreeMetadata;
+  initializeHooks?: typeof initializeHooksDirectory;
+  onMetadataError?: (error: unknown) => void;
+}
+
+export async function runWorktreeCreationEffects(
+  options: WorktreeCreationEffectsOptions,
+): Promise<Awaited<ReturnType<typeof triggerHookSync>>> {
+  if (options.attaching) return { success: true };
+  try {
+    (options.writeMetadata ?? writeWorktreeMetadata)(
+      options.worktreePath,
+      options.metadata,
+    );
+  } catch (error) {
+    options.onMetadataError?.(error);
+  }
+  if (options.hooksEditingSession) {
+    try {
+      (options.initializeHooks ?? initializeHooksDirectory)(options.worktreePath);
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+  try {
+    return await (options.triggerWorktreeCreated ?? triggerHookSync)(
+      'worktree_created',
+      options.projectRoot,
+      options.pane,
+    );
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 async function terminatePaneForRollback(
@@ -397,7 +482,7 @@ async function createPaneWithReuseReservation(
   const generatedSlug = existingWorktree
     ? existingWorktree.slug
     : (slugBase || await generateSlug(prompt));
-  const slug = existingWorktree
+  let slug = existingWorktree
     ? existingWorktree.slug
     : appendSlugSuffix(generatedSlug, slugSuffix);
   const branchName = existingWorktree
@@ -916,25 +1001,6 @@ async function createPaneWithReuseReservation(
       );
     }
 
-    try {
-      writeWorktreeMetadata(worktreePath, {
-        agent,
-        permissionMode: settings.permissionMode,
-        displayName: existingWorktreeMetadata?.displayName,
-        branchName: branchName !== slug ? branchName : undefined,
-        mergeTargetChain,
-      });
-    } catch (metadataError) {
-      LogService.getInstance().warn(
-        `Failed to persist worktree metadata for ${slug}: ${metadataError}`,
-        'paneCreation'
-      );
-    }
-
-    // Initialize .psyche-hooks if this is a hooks editing session
-    if (isHooksEditingSession) {
-      initializeHooksDirectory(worktreePath);
-    }
   } catch (error) {
     // Worktree creation failed - kill the pane and abort. Leaving the pane
     // open at projectRoot is dangerous because the agent would run against
@@ -1010,10 +1076,28 @@ async function createPaneWithReuseReservation(
     );
   }
 
-  // Run worktree_created hook synchronously BEFORE launching the agent.
-  // If the hook fails, tear down the pane and abort so the agent never
-  // runs against a half-configured worktree.
-  const hookResult = await triggerHookSync('worktree_created', projectRoot, newPane);
+  // Creation-only metadata and hooks run before launching the agent. Existing
+  // worktree attachments preserve the worktree and only add a pane/lane.
+  const hookResult = await runWorktreeCreationEffects({
+    attaching: Boolean(existingWorktree),
+    projectRoot,
+    worktreePath,
+    pane: newPane,
+    metadata: {
+      agent,
+      permissionMode: settings.permissionMode,
+      displayName: existingWorktreeMetadata?.displayName,
+      branchName: branchName !== slug ? branchName : undefined,
+      mergeTargetChain,
+    },
+    hooksEditingSession: isHooksEditingSession,
+    onMetadataError: (metadataError) => {
+      LogService.getInstance().warn(
+        `Failed to persist worktree metadata for ${slug}: ${metadataError}`,
+        'paneCreation',
+      );
+    },
+  });
   if (!hookResult.success) {
     const hookError = hookResult.error || 'unknown error';
     let rollbackError: string | undefined;
@@ -1106,6 +1190,23 @@ async function createPaneWithReuseReservation(
       newPane,
       insertion,
     );
+    if (slug !== newPane.slug) {
+      slug = newPane.slug;
+      try {
+        const paneTitle = projectRoot === sessionProjectRoot
+          ? slug
+          : buildWorktreePaneTitle(slug, projectRoot, paneProjectName);
+        await tmuxService.setPaneTitle(paneInfo, paneTitle);
+      } catch (error) {
+        LogService.getInstance().warn(
+          `Failed to update attached pane title for ${slug}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          'paneCreation',
+          newPane.id,
+        );
+      }
+    }
   } catch (error) {
     const persistenceError = error instanceof Error ? error.message : String(error);
     const teardown = await terminatePaneForRollback(

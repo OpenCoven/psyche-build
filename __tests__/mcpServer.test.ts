@@ -240,6 +240,32 @@ describe('MCP canonical delegation and read-only helpers', () => {
     });
   });
 
+  it('maps a rejected orchestration outcome to a JSON-RPC control error', async () => {
+    const fake = client({
+      submit: vi.fn(async () => ({
+        status: 'rejected',
+        code: 'capability_denied',
+        message: 'lease is stale',
+      })),
+    });
+    inject({ controlClientForRoot: vi.fn(async () => fake) });
+
+    await expect(call('psyche_execute_task', {
+      project_root: '/repo',
+      prompt: 'Fix tests',
+      lanes: [{ id: 'terminal', mode: 'terminal' }],
+      task_id: 'task-1',
+      lease_id: 'lease-1',
+      lease_revision: 1,
+    })).resolves.toMatchObject({
+      error: {
+        code: MCP_CONTROL_ERROR_CODE,
+        message: 'lease is stale',
+        data: { code: 'capability_denied' },
+      },
+    });
+  });
+
   it('translates create_pane to a single-lane pane action via control owner', async () => {
     const receipt = {
       schema: 'psyche.control.receipt/v1', actionId: 'b', state: 'queued',
