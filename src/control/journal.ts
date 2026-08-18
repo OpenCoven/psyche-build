@@ -1,5 +1,5 @@
 import { constants, type BigIntStats } from 'node:fs';
-import { lstat, mkdir, open, readFile, realpath, rename, truncate, type FileHandle, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rename, rmdir, truncate, type FileHandle, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
@@ -1320,30 +1320,40 @@ async function privateDirectoryChainExists(directoryPaths: readonly string[]): P
 
 async function ensurePrivateDirectoryChain(directoryPaths: readonly string[]): Promise<void> {
   for (const directoryPath of directoryPaths) {
-    const parentPath = path.dirname(directoryPath);
-    const parentIdentity = await snapshotDurableOutcomeDirectoryIdentity(parentPath);
-    if (!parentIdentity) throw unsafeRuntimeDirectoryPath();
     let stats = await readDurableOutcomeDirectoryStats(directoryPath);
     if (!stats) {
+      const parentPath = path.dirname(directoryPath);
+      const parentIdentity = await snapshotDurableOutcomeDirectoryIdentity(parentPath);
+      if (!parentIdentity) throw unsafeRuntimeDirectoryPath();
+      let created = false;
       try {
         await mkdir(directoryPath, { mode: 0o700 });
+        created = true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
-      await recordDurableMetadataMutationStep({
-        target: 'directory', directoryPath: parentPath, destinationPath: directoryPath,
-        temporaryPath: directoryPath, step: 'created',
-      });
+      if (created) {
+        await recordDurableMetadataMutationStep({
+          target: 'directory', directoryPath: parentPath, destinationPath: directoryPath,
+          temporaryPath: directoryPath, step: 'created',
+        });
+      }
       stats = await readDurableOutcomeDirectoryStats(directoryPath);
+      if (!stats || !isSafeDurableOutcomeDirectoryStats(stats)) throw unsafeDurableOutcomePath();
+      try {
+        await syncPublishedMetadataDirectory({
+          target: 'directory', directoryPath: parentPath, destinationPath: directoryPath,
+          temporaryPath: directoryPath, directoryIdentity: parentIdentity,
+          mismatchError: runtimeDirectoryChangedDuringCreation,
+          syncUnsupportedError: parentDirectorySyncUnsupportedDuringCreation,
+          syncedStep: 'parent-directory-synced',
+        });
+      } catch (error) {
+        if (created) await rmdir(directoryPath).catch(() => undefined);
+        throw error;
+      }
     }
     if (!stats || !isSafeDurableOutcomeDirectoryStats(stats)) throw unsafeDurableOutcomePath();
-    await syncPublishedMetadataDirectory({
-      target: 'directory', directoryPath: parentPath, destinationPath: directoryPath,
-      temporaryPath: directoryPath, directoryIdentity: parentIdentity,
-      mismatchError: runtimeDirectoryChangedDuringCreation,
-      syncUnsupportedError: parentDirectorySyncUnsupportedDuringCreation,
-      syncedStep: 'parent-directory-synced',
-    });
   }
 }
 

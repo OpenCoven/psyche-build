@@ -62,8 +62,6 @@ describe('ControlJournal', () => {
       '.psyche:created', '.psyche:parent-directory-synced',
       'runtime:created', 'runtime:parent-directory-synced',
       'outcomes:created', 'outcomes:parent-directory-synced',
-      '.psyche:parent-directory-synced', 'runtime:parent-directory-synced',
-      'outcomes:parent-directory-synced',
     ]);
   });
 
