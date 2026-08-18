@@ -14,6 +14,7 @@
 		07CD5CF1A0EC6D104609AC2E /* BonjourServiceResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E457435611B4FE24E9F7CCA /* BonjourServiceResolver.swift */; };
 		081E43EFCA60F4E5ADED0047 /* WorkspaceFixturesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C43E6A1E83A7A2553415A2E /* WorkspaceFixturesTests.swift */; };
 		0F01384040440B16FD0E79F4 /* ProjectsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FC6CD0D46E3ABC60ECA196E /* ProjectsView.swift */; };
+		0F2F99EABACC16BF58E7EC2B /* PsycheInviteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBA1C5B00C25BA6F70D2E409 /* PsycheInviteTests.swift */; };
 		21CB84B0171DC6BF9A0F9F79 /* ActionSheetPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EAEE90A9952DD0C2700B685 /* ActionSheetPresentationTests.swift */; };
 		2330B5B27CE5005482E42520 /* PsycheApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56D912A6A487EC289774C800 /* PsycheApp.swift */; };
 		240852AD94156EFDD5CCE5C5 /* CodingKeyRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7313D981B100847A9B66306 /* CodingKeyRow.swift */; };
@@ -50,7 +51,9 @@
 		7F12BD7FD42EFA5F47AF774F /* PairedHostStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E98949BD17F265015F596B21 /* PairedHostStoreTests.swift */; };
 		82F26E4C170DE2FB9134595C /* ControlMessagesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F82FFAD02EDDF3155266ACD4 /* ControlMessagesTests.swift */; };
 		834FD0F2CEF75F2B4DED623D /* DemoStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 171B1ED652B1AA9F5C98FAF0 /* DemoStore.swift */; };
+		848A8D576B00BB5388B06790 /* MobileCredentialStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76DF8952E03D7FA814237659 /* MobileCredentialStoreTests.swift */; };
 		875BFDD977CDD12127F8E5EA /* ConnectionManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A474688E992B73C52AC99E85 /* ConnectionManagerTests.swift */; };
+		94697E576B145A74240E6AB4 /* PsycheInvite.swift in Sources */ = {isa = PBXBuildFile; fileRef = 092E259AC926CDB8D4158BB4 /* PsycheInvite.swift */; };
 		946A093CAC513E842D70C35A /* BonjourHostDiscoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6748125A581F028503863B5 /* BonjourHostDiscoveryTests.swift */; };
 		9879B609721867C764E4325A /* ActionSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10304A718AB6678431A06A44 /* ActionSheetView.swift */; };
 		9CA90B93A245DAC373286CFB /* MobileInspectionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 698F6E9A9AC0CA498A4F9B64 /* MobileInspectionPresentationTests.swift */; };
@@ -60,6 +63,7 @@
 		AB1FC89CB2954D125308A9E5 /* PsycheTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CEEAF9D0EBB558BCAABF4E7 /* PsycheTransport.swift */; };
 		AB2A99048BCFA55F1CCD1840 /* BoundedAsyncSignal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77D00F2DD54B9AA4702860A8 /* BoundedAsyncSignal.swift */; };
 		ADE2364200253F66FF3F60A5 /* NowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40D4A071246B0EBEC1668CCE /* NowView.swift */; };
+		B135EF9E1E9C7F8D6A2C3FA3 /* MobileCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9FF7873C7D8CD82E7390ACF /* MobileCredentialStore.swift */; };
 		B28AA7E56F8C0B0EADACA6C6 /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B01F85780ECB7DA2A3933F1 /* AppModelTests.swift */; };
 		B3A62E2DE6A3F7B9E94D8936 /* CockpitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0208B0729C5558A164DD1556 /* CockpitView.swift */; };
 		B3E9EADB6B356B73E26B5DE8 /* PsycheTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3749C68EDDDED29D3827655 /* PsycheTheme.swift */; };
@@ -147,6 +151,7 @@
 /* Begin PBXFileReference section */
 		0208B0729C5558A164DD1556 /* CockpitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CockpitView.swift; sourceTree = "<group>"; };
 		0899D0A654BB447D7D88380A /* BridgeMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeMessages.swift; sourceTree = "<group>"; };
+		092E259AC926CDB8D4158BB4 /* PsycheInvite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheInvite.swift; sourceTree = "<group>"; };
 		09B68FCC9AC1EECDE02B981A /* URLSessionControlTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSessionControlTransport.swift; sourceTree = "<group>"; };
 		0A673F1BEBAB99E38B91C69D /* ControlRequestClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlRequestClientTests.swift; sourceTree = "<group>"; };
 		0E457435611B4FE24E9F7CCA /* BonjourServiceResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BonjourServiceResolver.swift; sourceTree = "<group>"; };
@@ -190,6 +195,7 @@
 		6AC28DF81E9E1BE9886046B9 /* PsycheApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PsycheApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6C43E6A1E83A7A2553415A2E /* WorkspaceFixturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFixturesTests.swift; sourceTree = "<group>"; };
 		71FE54AF9D7DB661EA784079 /* BoundedAsyncSignalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedAsyncSignalTests.swift; sourceTree = "<group>"; };
+		76DF8952E03D7FA814237659 /* MobileCredentialStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileCredentialStoreTests.swift; sourceTree = "<group>"; };
 		77D00F2DD54B9AA4702860A8 /* BoundedAsyncSignal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedAsyncSignal.swift; sourceTree = "<group>"; };
 		79423F6893871C3D7AD45E8C /* SecureStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureStore.swift; sourceTree = "<group>"; };
 		7C422F47C586CD7CE3F0CCC6 /* CreatePaneFormTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreatePaneFormTests.swift; sourceTree = "<group>"; };
@@ -213,6 +219,7 @@
 		B6748125A581F028503863B5 /* BonjourHostDiscoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BonjourHostDiscoveryTests.swift; sourceTree = "<group>"; };
 		C3749C68EDDDED29D3827655 /* PsycheTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheTheme.swift; sourceTree = "<group>"; };
 		C488A4CD1AA33F91A11AAAEE /* WorkspaceStoreCommandsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceStoreCommandsTests.swift; sourceTree = "<group>"; };
+		C9FF7873C7D8CD82E7390ACF /* MobileCredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileCredentialStore.swift; sourceTree = "<group>"; };
 		D2DEBE06B83FD927FAD0C546 /* PsycheAppUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PsycheAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D9D412D06D4B9BE4902586CC /* ControlMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMessages.swift; sourceTree = "<group>"; };
 		DAFF9B97F032BB54D8E8104B /* ActionSheetPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionSheetPresentation.swift; sourceTree = "<group>"; };
@@ -220,6 +227,7 @@
 		E6A1D2D3833898A9E46B0861 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		E8E8406429DED9F64BBF20B3 /* PsycheTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheTransportTests.swift; sourceTree = "<group>"; };
 		E98949BD17F265015F596B21 /* PairedHostStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairedHostStoreTests.swift; sourceTree = "<group>"; };
+		EBA1C5B00C25BA6F70D2E409 /* PsycheInviteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheInviteTests.swift; sourceTree = "<group>"; };
 		EF803A7087CE4B5777C57208 /* TerminalKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalKey.swift; sourceTree = "<group>"; };
 		F7313D981B100847A9B66306 /* CodingKeyRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodingKeyRow.swift; sourceTree = "<group>"; };
 		F82FFAD02EDDF3155266ACD4 /* ControlMessagesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMessagesTests.swift; sourceTree = "<group>"; };
@@ -310,7 +318,9 @@
 				B25C571EEFFA869223BF5924 /* ConnectionManager.swift */,
 				57532C369ADD3A8953FA08FF /* ControlRequestClient.swift */,
 				4A0D85B21F0645DC962E680C /* MobileAppComposition.swift */,
+				C9FF7873C7D8CD82E7390ACF /* MobileCredentialStore.swift */,
 				B20C06BCF70A170E35F80BF3 /* PinnedCertificateDelegate.swift */,
+				092E259AC926CDB8D4158BB4 /* PsycheInvite.swift */,
 				1CEEAF9D0EBB558BCAABF4E7 /* PsycheTransport.swift */,
 				09B68FCC9AC1EECDE02B981A /* URLSessionControlTransport.swift */,
 			);
@@ -432,8 +442,10 @@
 				A474688E992B73C52AC99E85 /* ConnectionManagerTests.swift */,
 				F82FFAD02EDDF3155266ACD4 /* ControlMessagesTests.swift */,
 				0A673F1BEBAB99E38B91C69D /* ControlRequestClientTests.swift */,
+				76DF8952E03D7FA814237659 /* MobileCredentialStoreTests.swift */,
 				E98949BD17F265015F596B21 /* PairedHostStoreTests.swift */,
 				462E536FA1DDE6558B926190 /* PinnedCertificateDelegateTests.swift */,
+				EBA1C5B00C25BA6F70D2E409 /* PsycheInviteTests.swift */,
 				E8E8406429DED9F64BBF20B3 /* PsycheTransportTests.swift */,
 				203E9FCF5A986D5563D6FE43 /* RemoteActionPresentationTests.swift */,
 				61F1FA349C4783166939B55D /* RemoteActionStoreTests.swift */,
@@ -653,11 +665,13 @@
 				64E7F995F8CE7BFB6FD5C1DD /* FixtureControlRequests.swift in Sources */,
 				CE215E59267AF66B3E88AF53 /* FixtureTerminalClient.swift in Sources */,
 				59BBF14BEACC05542B393FED /* MobileAppComposition.swift in Sources */,
+				B135EF9E1E9C7F8D6A2C3FA3 /* MobileCredentialStore.swift in Sources */,
 				4EE44BEAEF5AEA280FF40827 /* NowItem.swift in Sources */,
 				531AEC6890A3351A83127EAD /* PairedHost.swift in Sources */,
 				509C226C8BAE7EC9489F375A /* PairedHostStore.swift in Sources */,
 				9D716B819F7802ACB98AC881 /* PinnedCertificateDelegate.swift in Sources */,
 				C5705019D0B13652CECE4667 /* ProtocolVersions.swift in Sources */,
+				94697E576B145A74240E6AB4 /* PsycheInvite.swift in Sources */,
 				AB1FC89CB2954D125308A9E5 /* PsycheTransport.swift in Sources */,
 				3972FA586E2A7FAB38059759 /* RemoteActionPresentation.swift in Sources */,
 				425E3A122F5F2D512005F9B6 /* RemoteActionStore.swift in Sources */,
@@ -681,8 +695,10 @@
 				875BFDD977CDD12127F8E5EA /* ConnectionManagerTests.swift in Sources */,
 				82F26E4C170DE2FB9134595C /* ControlMessagesTests.swift in Sources */,
 				C7F239519FB92079A04D842E /* ControlRequestClientTests.swift in Sources */,
+				848A8D576B00BB5388B06790 /* MobileCredentialStoreTests.swift in Sources */,
 				7F12BD7FD42EFA5F47AF774F /* PairedHostStoreTests.swift in Sources */,
 				58653704CB87919CC55070A0 /* PinnedCertificateDelegateTests.swift in Sources */,
+				0F2F99EABACC16BF58E7EC2B /* PsycheInviteTests.swift in Sources */,
 				43F3C300AE917045911BC1DA /* PsycheTransportTests.swift in Sources */,
 				480491FCFB2DDD8E9D6D7767 /* RemoteActionPresentationTests.swift in Sources */,
 				47D56E00948FBC9A38764DAC /* RemoteActionStoreTests.swift in Sources */,
