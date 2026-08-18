@@ -460,6 +460,60 @@ describe('StatusDetector pane release', () => {
     }
   });
 
+  it('does not dispatch an autopilot decision to an old or replacement tmux pane after rebind', async () => {
+    const detector = new StatusDetector();
+    const dispatchStarted = createDeferred<void>();
+    const releaseDispatch = createDeferred<void>();
+    const manager = (detector as any).workerManager as PaneWorkerManager;
+    const tmuxSendKeys = vi.spyOn((manager as any).tmux, 'sendKeys').mockResolvedValue(undefined);
+    const originalSendKeysToPane = detector.sendKeysToPane.bind(detector);
+    vi.spyOn(detector, 'sendKeysToPane').mockImplementation(async (...args) => {
+      dispatchStarted.resolve();
+      await releaseDispatch.promise;
+      return originalSendKeysToPane(...args);
+    });
+    (detector as any).paneAnalyzer.analyzePane = vi.fn(async () => ({
+      state: 'option_dialog',
+      summary: 'continue',
+      options: [{ action: 'Continue', keys: ['Enter'] }],
+    }));
+    const stateManager = StateManager.getInstance();
+    const previousState = (stateManager as any).state;
+    (stateManager as any).state = {
+      ...previousState,
+      panes: [{ ...pane('%1'), autopilot: true }],
+    };
+    const messageBus = (detector as any).messageBus;
+
+    try {
+      await detector.monitorPanes([{ ...pane('%1'), autopilot: true }]);
+      messageBus.handleWorkerMessage('pane-a', {
+        id: 'autopilot-analysis',
+        type: 'analysis-needed',
+        timestamp: Date.now(),
+        paneId: 'pane-a',
+        payload: { captureSnapshot: 'choose Continue', reason: 'static' },
+      });
+      await dispatchStarted.promise;
+
+      (stateManager as any).state = {
+        ...previousState,
+        panes: [{ ...pane('%2'), autopilot: true }],
+      };
+      await detector.monitorPanes([{ ...pane('%2'), autopilot: true }]);
+      releaseDispatch.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(tmuxSendKeys).not.toHaveBeenCalledWith('%1', expect.anything());
+      expect(tmuxSendKeys).not.toHaveBeenCalledWith('%2', expect.anything());
+      expect(tmuxSendKeys).not.toHaveBeenCalled();
+    } finally {
+      releaseDispatch.resolve();
+      (stateManager as any).state = previousState;
+      await detector.shutdown();
+    }
+  });
+
   it('does not publish a deferred analysis verdict after a same-id rebind', async () => {
     const detector = new StatusDetector();
     const deferred = createDeferred<{

@@ -26,6 +26,7 @@ export interface StatusUpdateEvent {
 export interface AttentionNeededEvent {
   paneId: string;
   tmuxPaneId: string;
+  lifecycle?: symbol;
   status: Extract<AgentStatus, 'idle' | 'waiting'>;
   title: string;
   body: string;
@@ -288,7 +289,13 @@ export class StatusDetector extends EventEmitter {
     if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
       return;
     }
-    const attentionEvent = this.buildAttentionEvent(paneId, tmuxPaneId, finalStatus, analysis);
+    const attentionEvent = this.buildAttentionEvent(
+      paneId,
+      tmuxPaneId,
+      lifecycle,
+      finalStatus,
+      analysis,
+    );
     if (attentionEvent) {
       if (!this.isPaneLifecycleCurrent(paneId, tmuxPaneId, lifecycle)) {
         return;
@@ -297,7 +304,7 @@ export class StatusDetector extends EventEmitter {
     }
   }
 
-  private isPaneLifecycleCurrent(
+  isPaneLifecycleCurrent(
     paneId: string,
     tmuxPaneId: string | undefined,
     lifecycle: symbol | undefined
@@ -377,7 +384,14 @@ export class StatusDetector extends EventEmitter {
         const delayBeforeNextCheck = analysis.state === 'option_dialog' ? 2000 : 0;
 
         // Check if autopilot should handle this automatically
-        await this.handleAutopilot(paneId, analysis, finalStatus);
+        await this.handleAutopilot(
+          paneId,
+          analysis,
+          finalStatus,
+          controller,
+          tmuxPaneId,
+          lifecycle,
+        );
 
         if (!this.isAnalysisCurrent(paneId, controller, tmuxPaneId, lifecycle)) {
           return;
@@ -409,7 +423,13 @@ export class StatusDetector extends EventEmitter {
         };
         this.emit('status-updated', statusEvent);
 
-        const attentionEvent = this.buildAttentionEvent(paneId, tmuxPaneId, finalStatus, analysis);
+        const attentionEvent = this.buildAttentionEvent(
+          paneId,
+          tmuxPaneId,
+          lifecycle,
+          finalStatus,
+          analysis,
+        );
         if (attentionEvent) {
           this.emit('attention-needed', attentionEvent);
         }
@@ -580,7 +600,10 @@ export class StatusDetector extends EventEmitter {
   private async handleAutopilot(
     paneId: string,
     analysis: PaneAnalysis,
-    finalStatus: AgentStatus
+    finalStatus: AgentStatus,
+    controller: AbortController,
+    tmuxPaneId: string,
+    lifecycle: symbol | undefined,
   ): Promise<void> {
     const logService = LogService.getInstance();
 
@@ -646,8 +669,17 @@ export class StatusDetector extends EventEmitter {
     );
 
     try {
-      // Send the key through the worker manager
-      await this.sendKeysToPane(paneId, keyToSend);
+      if (!this.isAnalysisCurrent(paneId, controller, tmuxPaneId, lifecycle)) {
+        return;
+      }
+      await this.sendKeysToPane(paneId, keyToSend, {
+        controller,
+        tmuxPaneId,
+        lifecycle,
+      });
+      if (!this.isAnalysisCurrent(paneId, controller, tmuxPaneId, lifecycle)) {
+        return;
+      }
       logService.debug(`Autopilot: Successfully sent key '${keyToSend}' to "${paneName}"`, 'autopilot', paneId);
     } catch (error) {
       logService.error(
@@ -662,6 +694,7 @@ export class StatusDetector extends EventEmitter {
   private buildAttentionEvent(
     paneId: string,
     tmuxPaneId: string,
+    lifecycle: symbol | undefined,
     status: AgentStatus,
     analysis: PaneAnalysis
   ): AttentionNeededEvent | null {
@@ -691,6 +724,7 @@ export class StatusDetector extends EventEmitter {
     return {
       paneId,
       tmuxPaneId,
+      lifecycle,
       status,
       title: normalizedTitle,
       body: normalizedBody,
@@ -723,7 +757,32 @@ export class StatusDetector extends EventEmitter {
   /**
    * Send keys to a pane (future feature)
    */
-  async sendKeysToPane(paneId: string, keys: string): Promise<void> {
+  async sendKeysToPane(
+    paneId: string,
+    keys: string,
+    ownership?: {
+      controller: AbortController;
+      tmuxPaneId: string;
+      lifecycle: symbol | undefined;
+    },
+  ): Promise<void> {
+    if (ownership) {
+      if (!this.isAnalysisCurrent(
+        paneId,
+        ownership.controller,
+        ownership.tmuxPaneId,
+        ownership.lifecycle,
+      )) {
+        return;
+      }
+      return this.workerManager.sendKeysToExpectedPane(
+        paneId,
+        ownership.tmuxPaneId,
+        keys,
+        ownership.controller.signal,
+      );
+    }
+
     return this.workerManager.sendToWorker(paneId, {
       type: 'send-keys',
       timestamp: Date.now(),
