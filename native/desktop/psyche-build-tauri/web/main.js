@@ -12235,12 +12235,6 @@
 
   onRailClick("sidebar-collapse", function () { toggleSidebar(); });
   onRailClick("sidebar-expand", function () { setSidebarOpen(true); });
-  if (sidebarMiniEl) {
-    sidebarMiniEl.addEventListener("click", function (event) {
-      if (event.target.closest("#sidebar-expand")) return;
-      setSidebarOpen(true);
-    });
-  }
   // Sidebar width is a CSS custom property shared by the grid and the rail.
   if (sidebarResizeEl) {
     sidebarResizeEl.addEventListener("pointerdown", function (event) {
