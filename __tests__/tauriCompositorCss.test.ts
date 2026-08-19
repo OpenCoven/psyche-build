@@ -43,14 +43,7 @@ const TRANSITION_TIMING_KEYWORDS = new Set([
   'normal',
   'allow-discrete',
 ]);
-const STEP_POSITION_KEYWORDS = new Set([
-  'start',
-  'end',
-  'jump-start',
-  'jump-end',
-  'jump-none',
-  'jump-both',
-]);
+const TRANSITION_SUBSTITUTION_FUNCTIONS = new Set(['var', 'env', 'attr']);
 
 type ValueNode = ReturnType<typeof valueParser>['nodes'][number];
 
@@ -128,36 +121,17 @@ function resolveCustomProperties(
   return parsed.toString();
 }
 
-function timingFunctionIsValid(node: Extract<ValueNode, { type: 'function' }>): boolean {
-  const name = normalizePropertyName(node.value);
-  const args = splitValueList(valueParser.stringify(node.nodes));
-  if (name === 'cubic-bezier') {
-    if (args.length !== 4 || args.some((arg) => !/^[+-]?(?:\d*\.)?\d+$/.test(arg))) {
-      return false;
-    }
-    const values = args.map(Number);
-    return values[0] >= 0 && values[0] <= 1 && values[2] >= 0 && values[2] <= 1;
-  }
-  if (name === 'steps') {
-    if (args.length < 1 || args.length > 2 || !/^[1-9]\d*$/.test(args[0])) {
-      return false;
-    }
-    return args.length === 1 || STEP_POSITION_KEYWORDS.has(normalizePropertyName(args[1]));
-  }
-  return false;
-}
-
-function unsupportedTransitionFunctions(value: string): string[] {
-  const unsupported: string[] = [];
+function transitionSubstitutions(value: string): string[] {
+  const substitutions: string[] = [];
   valueParser(value).walk((node) => {
     if (
       node.type === 'function'
-      && !timingFunctionIsValid(node)
+      && TRANSITION_SUBSTITUTION_FUNCTIONS.has(normalizePropertyName(node.value))
     ) {
-      unsupported.push(valueParser.stringify(node));
+      substitutions.push(valueParser.stringify(node));
     }
   });
-  return unsupported;
+  return substitutions;
 }
 
 function transitionShorthandProperties(segment: string): string[] {
@@ -193,7 +167,7 @@ function analyzeTransitionDeclaration(
     customProperties,
     ambiguousCustomProperties,
   );
-  const unsupportedFunctions = unsupportedTransitionFunctions(resolved);
+  const substitutions = transitionSubstitutions(resolved);
   if (property === 'transition') {
     const segments = splitValueList(resolved);
     const segmentProperties = segments.map((segment) =>
@@ -201,10 +175,10 @@ function analyzeTransitionDeclaration(
     const soleNone = segments.length === 1 && segmentProperties[0].length === 0;
     return {
       grammarValid:
-        unsupportedFunctions.length === 0
+        substitutions.length === 0
         && segments.every(Boolean)
         && (soleNone || segmentProperties.every((properties) => properties.length === 1)),
-      properties: [...unsupportedFunctions, ...segmentProperties.flat()],
+      properties: [...substitutions, ...segmentProperties.flat()],
     };
   }
 
@@ -213,10 +187,10 @@ function analyzeTransitionDeclaration(
   const soleNone = properties.length === 1 && properties[0] === 'none';
   return {
     grammarValid:
-      unsupportedFunctions.length === 0
+      substitutions.length === 0
       && rawProperties.every(Boolean)
       && (soleNone || !properties.includes('none')),
-    properties: soleNone ? unsupportedFunctions : [...unsupportedFunctions, ...properties],
+    properties: soleNone ? substitutions : [...substitutions, ...properties],
   };
 }
 
@@ -318,7 +292,7 @@ function auditStylesheet(css: string): CompositorFindings {
     const definesTransitionProperties = declarations.some((declaration) => {
       const property = normalizePropertyName(declaration.prop);
       return (
-        (property === 'transition' || property === 'transition-property')
+        property === 'transition-property'
         && analyzeTransitionDeclaration(
           property,
           declaration.value,
@@ -547,6 +521,18 @@ describe('compositor stylesheet audit parser', () => {
         transition: opacity cubic-bezier(foo);
         transition-duration: 200ms;
       }
+      .multiple-timing-functions {
+        transition: opacity ease linear;
+        transition-duration: 200ms;
+      }
+      .too-many-times {
+        transition: opacity 100ms 200ms 300ms;
+        transition-duration: 200ms;
+      }
+      .invalid-steps {
+        transition: opacity steps(1, jump-none);
+        transition-duration: 200ms;
+      }
       .trailing-property-item {
         transition-property: opacity,;
         transition-duration: 200ms;
@@ -557,12 +543,26 @@ describe('compositor stylesheet audit parser', () => {
       '.invalid-property-list { transition-duration: all }',
       '.invalid-shorthand { transition-duration: all }',
       '.invalid-timing-function { transition-duration: all }',
+      '.multiple-timing-functions { transition-duration: all }',
+      '.too-many-times { transition-duration: all }',
+      '.invalid-steps { transition-duration: all }',
       '.trailing-property-item { transition-duration: all }',
       '.invalid-property-list { transition-property: none }',
-      '.invalid-shorthand { transition: bogus() }',
-      '.invalid-timing-function { transition: cubic-bezier(foo) }',
       '.trailing-property-item { transition-property: all }',
     ]);
+  });
+
+  it('accepts standard timing-function forms without reimplementing their grammar', () => {
+    const findings = auditStylesheet(`
+      .linear-function {
+        transition: opacity linear(0, 1);
+      }
+      .exponent-number {
+        transition: opacity cubic-bezier(0, 1e-1, 1, 1);
+      }
+    `);
+
+    expect(findings.transitionViolations).toEqual([]);
   });
 
   it('rejects non-compositor will-change values even while transitioning', () => {
