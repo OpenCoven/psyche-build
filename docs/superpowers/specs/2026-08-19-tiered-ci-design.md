@@ -34,10 +34,10 @@ Pull requests use small jobs that begin in parallel.
 
 A read-only classifier compares the pull-request merge base and head commits
 and publishes `desktop`, `ios`, and `package` booleans. It uses repository-owned
-shell logic and NUL-delimited `git diff --name-status -z --no-renames` records,
-so deleted paths, both sides of renames, Unicode, whitespace, and newlines are
-classified without relying on Git's display quoting. No mutable third-party
-path-filter action is added.
+shell logic and NUL-delimited `git diff --name-only -z --no-renames` output,
+so changed paths with Unicode, whitespace, and newlines are classified without
+relying on Git's display quoting. No mutable third-party path-filter action is
+added.
 
 Desktop-sensitive paths include:
 
