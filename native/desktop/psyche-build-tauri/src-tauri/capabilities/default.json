@@ -32,6 +32,7 @@
     "allow-browser-hide-all-except",
     "allow-browser-destroy",
     "allow-browser-destroy-many",
+    "allow-browser-current-url",
     "allow-browser-reload",
     "allow-browser-eval",
     "allow-browser-script",

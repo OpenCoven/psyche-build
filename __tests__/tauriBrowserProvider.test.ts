@@ -138,6 +138,14 @@ describe('Tauri browser control provider contract', () => {
     expect(provider).toMatch(/enum OperatorCommand[\s\S]*LeaseGrant[\s\S]*LeaseRevoke[\s\S]*ApprovalResolve/);
     expect(provider).toMatch(/LeaseGrant\s*\{\s*request_id:\s*String,\s*\}/);
     expect(provider).toMatch(/"lease\.grant",\s*json!\(\{\s*"requestId": request_id\s*\}\)/);
+  });
+
+  it('returns an affirmative result only after resource removal is acknowledged', () => {
+    const remove = bracedItem(provider, 'pub async fn control_provider_remove');
+    expect(remove).toMatch(/\) -> Result<bool, String>/);
+    expect(remove).toContain('send_request(');
+    expect(remove).toContain('.await?;');
+    expect(remove).toContain('Ok(true)');
     expect(provider).not.toMatch(/control_operator_submit[^(]*\([^)]*serde_json::Value/);
     expect(provider).not.toMatch(/control_provider_(?:upsert|complete)[^(]*\([^)]*serde_json::Value/);
     expect(provider).toMatch(/control_operator_submit[\s\S]*standalone_control_request/);
@@ -160,7 +168,7 @@ describe('Tauri browser control provider contract', () => {
     expect(lib).toContain('control_provider_upsert');
     expect(readFileSync(new URL(
       '../native/desktop/psyche-build-tauri/web/main.js', import.meta.url,
-    ), 'utf8')).toMatch(/control_provider_upsert[\s\S]{0,500}controlGeneration\s*=\s*canonical\.generation/);
+    ), 'utf8')).toMatch(/control_provider_upsert[\s\S]{0,1800}controlGeneration\s*=\s*canonical\.generation/);
   });
 
   it('registers the provider manager and cryptographic dependencies', () => {
@@ -189,7 +197,7 @@ describe('Tauri browser control provider contract', () => {
     for (const command of [
       'browser_navigate', 'browser_set_bounds', 'browser_hide', 'browser_hide_all_except',
       'browser_destroy', 'browser_destroy_many', 'browser_reload', 'browser_eval', 'browser_script',
-      'browser_snapshot',
+      'browser_snapshot', 'browser_current_url',
     ]) {
       expect(lib).toMatch(new RegExp(
         `fn ${command}\\([\\s\\S]{0,380}webview: tauri::Webview[\\s\\S]{0,320}\\{\\n\\s*ensure_trusted_browser_caller\\(webview.label\\(\\)\\)\\?;`,
@@ -198,6 +206,30 @@ describe('Tauri browser control provider contract', () => {
     expect(lib).toContain('ensure_trusted_browser_caller("psyche-browser-untrusted")');
     expect(capability.permissions).toContain('allow-browser-script');
     expect(browserScriptPermission).toContain('commands.allow = ["browser_script"]');
+  });
+
+  it('reads the current embedded document URL through a trusted native command', () => {
+    expect(lib).toMatch(
+      /fn browser_current_url\([\s\S]{0,500}ensure_trusted_browser_caller\(webview\.label\(\)\)\?;[\s\S]{0,500}get_webview\(&label\)[\s\S]{0,300}\.url\(\)/,
+    );
+    expect(lib).toMatch(
+      /generate_handler!\[[\s\S]*browser_current_url/,
+    );
+    expect(capability.permissions).toContain('allow-browser-current-url');
+  });
+
+  it('retires native control authority before exposing a cross-origin document', () => {
+    expect(lib).toMatch(
+      /fn retire_browser_authority_for_page_load[\s\S]*retire_matching_browser_focus_identity/,
+    );
+    expect(lib).toMatch(
+      /\.on_page_load\([\s\S]*retire_browser_authority_for_page_load[\s\S]*emit\(\s*"browser:page-load"/,
+    );
+    for (const command of ['browser_eval', 'browser_script', 'browser_snapshot']) {
+      expect(lib).toMatch(new RegExp(
+        `fn ${command}\\([\\s\\S]{0,1200}ensure_live_browser_document_authority`,
+      ));
+    }
   });
 
   it('keeps browser focus correlation under trusted native navigation authority', () => {

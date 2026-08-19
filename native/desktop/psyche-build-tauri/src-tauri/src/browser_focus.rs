@@ -34,6 +34,7 @@ use webkit2gtk::{
 pub(crate) struct BrowserFocusIdentity {
     pub(crate) generation: u64,
     pub(crate) navigation_token: String,
+    pub(crate) document_url: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -341,6 +342,7 @@ mod tests {
         BrowserFocusIdentity {
             generation,
             navigation_token: token.to_string(),
+            document_url: "https://example.test".to_string(),
         }
     }
 

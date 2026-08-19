@@ -4959,11 +4959,39 @@
       var automationTab = browser.tabs[automationIndex];
       if (!browserTabLifecycle(automationTab).nativeLabel) continue;
       var automationPair = { project: project, worktreePath: thread.worktreePath, browser: browser, tab: automationTab };
-      if (!(await invalidateBrowserAutomation(automationPair))) {
+      var automationInvalidated = false;
+      try {
+        automationInvalidated = await invalidateBrowserAutomation(automationPair);
+      } catch (error) {
+        setStatus(
+          "browser pane close failed before native teardown: " +
+            boundedBrowserError(error),
+          "error"
+        );
+        return false;
+      }
+      if (!automationInvalidated) {
         setStatus("browser automation invalidation failed", "error");
         return false;
       }
-      await removeBrowserControlResource(automationPair);
+      var controlRemoved = false;
+      try {
+        controlRemoved = await removeBrowserControlResource(automationPair);
+      } catch (error) {
+        setStatus(
+          "browser pane close failed before native teardown: " +
+            boundedBrowserError(error),
+          "error"
+        );
+        return false;
+      }
+      if (!controlRemoved) {
+        setStatus(
+          "browser pane close failed before native teardown: browser control resource removal was not confirmed",
+          "error"
+        );
+        return false;
+      }
     }
     var navigationTails = browser.tabs.map(function (tab) {
       return browserTabLifecycle(tab).navigationTail;
@@ -10071,10 +10099,10 @@
     return projectId + "__" + tabId;
   }
   function browserTabLifecycle(tab) {
-    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, pendingTitle: null, pendingTitleUrl: null, pendingTitleGeneration: 0, pendingTitleNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
+    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, replacementOperation: null, authorityTransition: false, quarantinedControlGeneration: 0, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, pendingTitle: null, pendingTitleUrl: null, pendingTitleGeneration: 0, pendingTitleNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
     var lifecycle = browserTabLifecycleStates.get(tab);
     if (!lifecycle) {
-      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, pendingTitle: null, pendingTitleUrl: null, pendingTitleGeneration: 0, pendingTitleNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
+      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, replacementOperation: null, authorityTransition: false, quarantinedControlGeneration: 0, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, pendingTitle: null, pendingTitleUrl: null, pendingTitleGeneration: 0, pendingTitleNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
       browserTabLifecycleStates.set(tab, lifecycle);
     }
     return lifecycle;
@@ -10183,6 +10211,8 @@
     };
     try {
       if (lifecycle.nativeLabel) {
+        var cleanupControlGeneration =
+          lifecycle.controlGeneration || lifecycle.liveGeneration || lifecycle.pendingGeneration;
         var pair = {
           project: context.project,
           worktreePath: context.worktreePath,
@@ -10204,12 +10234,22 @@
           }
           if (!automationInvalidationError) setStatus("browser automation invalidation failed", "error");
           if (!context.ambiguousAfterDispatch) return false;
-        } else {
+        } else if (!context.controlResourceRemoved) {
+          var resourceRemoved = false;
+          var resourceRemovalError = null;
           try {
-            await removeBrowserControlResource(pair);
+            resourceRemoved = await removeBrowserControlResource(pair);
           } catch (error) {
-            if (!context.ambiguousAfterDispatch) throw error;
-            setStatus("browser automation cleanup failed: " + boundedBrowserError(error), "error");
+            resourceRemovalError = error;
+          }
+          if (!resourceRemoved) {
+            lifecycle.quarantinedControlGeneration = cleanupControlGeneration;
+            setStatus(
+              "browser automation cleanup failed: " +
+                boundedBrowserError(resourceRemovalError ||
+                  new Error("browser control resource removal was not confirmed")),
+              "error"
+            );
           }
         }
       }
@@ -10288,6 +10328,7 @@
   }
   function browserControlResource(pair, status) {
     var lifecycle = browserTabLifecycle(pair.tab);
+    var resourceUrl = lifecycle.liveUrl || pair.tab.url || lifecycle.pendingUrl || "about:blank";
     return {
       id: pair.tab.id,
       kind: "browser_tab",
@@ -10296,16 +10337,29 @@
       webviewLabel: lifecycle.nativeLabel,
       projectRoot: status.projectRoot,
       worktreeRoot: pair.worktreePath,
-      url: pair.tab.url || lifecycle.pendingUrl || "about:blank",
-      title: pair.tab.title || tabTitle(pair.tab.url),
+      url: resourceUrl,
+      title: browserControlTitle(resourceUrl),
       loading: !!pair.tab.loading,
       viewport: browserControlViewport(pair),
     };
   }
+  function browserControlTitle(url) {
+    try {
+      var parsed = new URL(String(url || ""));
+      if ((parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname) {
+        return "Browser (" + parsed.hostname.toLowerCase() + ")";
+      }
+    } catch (_) {}
+    return "Browser";
+  }
   function publishBrowserControlResource(pair) {
     if (!pair || browserTabIsClosing(pair.tab)) return Promise.resolve(false);
     var lifecycle = browserTabLifecycle(pair.tab);
-    if (!lifecycle.nativeLabel || !lifecycle.liveGeneration || lifecycle.pendingGeneration) return Promise.resolve(false);
+    if (!lifecycle.nativeLabel || !lifecycle.liveGeneration || lifecycle.pendingGeneration ||
+        lifecycle.replacementOperation || lifecycle.authorityTransition ||
+        lifecycle.quarantinedControlGeneration) {
+      return Promise.resolve(false);
+    }
     var nativeGeneration = lifecycle.liveGeneration;
     return ensureBrowserControlProvider(pair.project).then(function (status) {
       return invoke("control_provider_upsert", {
@@ -10313,24 +10367,45 @@
         resource: browserControlResource(pair, status),
       }).then(function (canonical) {
         if (!canonical || typeof canonical.generation !== "number") return false;
-        if (lifecycle.liveGeneration !== nativeGeneration || lifecycle.pendingGeneration) return false;
+        if (lifecycle.liveGeneration !== nativeGeneration || lifecycle.pendingGeneration ||
+            lifecycle.replacementOperation || lifecycle.authorityTransition ||
+            lifecycle.quarantinedControlGeneration) {
+          return invoke("control_provider_remove", {
+            projectRoot: pair.project.root,
+            tabId: pair.tab.id,
+            generation: canonical.generation,
+          }).then(function (result) {
+            lifecycle.controlGeneration = 0;
+            if (result !== true) {
+              lifecycle.quarantinedControlGeneration = canonical.generation;
+            }
+            return false;
+          }, function () {
+            lifecycle.controlGeneration = 0;
+            lifecycle.quarantinedControlGeneration = canonical.generation;
+            return false;
+          });
+        }
         lifecycle.controlGeneration = canonical.generation;
         return true;
       });
     }).catch(function () { return false; });
   }
-  function removeBrowserControlResource(pair) {
+  function removeBrowserControlResource(pair, expectedGeneration) {
     if (!pair) return Promise.resolve(false);
     var lifecycle = browserTabLifecycle(pair.tab);
-    var generation = lifecycle.controlGeneration || lifecycle.liveGeneration || lifecycle.pendingGeneration;
+    var generation = expectedGeneration ||
+      lifecycle.controlGeneration || lifecycle.liveGeneration || lifecycle.pendingGeneration;
     if (!generation) return Promise.resolve(false);
     return ensureBrowserControlProvider(pair.project).then(function () {
       return invoke("control_provider_remove", {
         projectRoot: pair.project.root,
         tabId: pair.tab.id,
         generation: generation,
-      }).then(function () { return true; });
-    }).catch(function () { return false; });
+      }).then(function (result) {
+        return result === true;
+      });
+    });
   }
   function invalidateBrowserAutomation(pair) {
     if (!pair) return Promise.resolve(false);
@@ -10361,8 +10436,13 @@
     var destroyFlight = destroyChild && label
       ? invoke("browser_destroy", { label: label }).catch(function () { return false; })
       : Promise.resolve(false);
-    await Promise.allSettled([invalidateFlight, removeFlight, destroyFlight]);
-    return true;
+    var outcomes = await Promise.allSettled([invalidateFlight, removeFlight, destroyFlight]);
+    var removal = outcomes[1];
+    var removalConfirmed =
+      removal && removal.status === "fulfilled" && removal.value === true;
+    lifecycle.quarantinedControlGeneration =
+      removalConfirmed ? 0 : generation;
+    return removalConfirmed;
   }
   function installBrowserAutomationForPair(pair) {
     if (!pair || !window.PsycheControl) return Promise.resolve(false);
@@ -10511,7 +10591,7 @@
       tabId: pair.tab.id,
       generation: effect.generation,
       url: String(pair.tab.url || "about:blank").slice(0, 2048),
-      title: String(pair.tab.title || "").slice(0, 512),
+      title: browserControlTitle(pair.tab.url),
       loading: !!pair.tab.loading,
       viewport: { width: width, height: height },
       capturedAt: capturedAt.toISOString(),
@@ -10663,14 +10743,14 @@
       try { navigated = await navigateBrowser(action.url, { tabId: pair.tab.id }); }
       catch (_) { throw ambiguousBrowserLifecycle("browser navigation outcome is unknown"); }
       if (!navigated) throw ambiguousBrowserLifecycle("browser navigation outcome is unknown");
-      return { url: pair.tab.url, title: pair.tab.title };
+      return { url: pair.tab.url, title: browserControlTitle(pair.tab.url) };
     }
     if (action.kind === "reload") {
       var reloaded;
       try { reloaded = await navigateBrowser(pair.tab.url, { tabId: pair.tab.id, replace: true, preserveHistory: true }); }
       catch (_) { throw ambiguousBrowserLifecycle("browser reload outcome is unknown"); }
       if (!reloaded) throw ambiguousBrowserLifecycle("browser reload outcome is unknown");
-      return { url: pair.tab.url, title: pair.tab.title };
+      return { url: pair.tab.url, title: browserControlTitle(pair.tab.url) };
     }
     if (action.kind === "back" || action.kind === "forward") {
       var delta = action.kind === "back" ? -1 : 1;
@@ -10680,7 +10760,11 @@
       try { moved = await navigateBrowser(pair.tab.history[index], { tabId: pair.tab.id, fromHistory: true, historyIndex: index }); }
       catch (_) { throw ambiguousBrowserLifecycle("browser history navigation outcome is unknown"); }
       if (!moved) throw ambiguousBrowserLifecycle("browser history navigation outcome is unknown");
-      return { url: pair.tab.url, title: pair.tab.title, historyIndex: pair.tab.historyIndex };
+      return {
+        url: pair.tab.url,
+        title: browserControlTitle(pair.tab.url),
+        historyIndex: pair.tab.historyIndex,
+      };
     }
     if (action.kind === "close") {
       var lifecycle = browserTabLifecycle(pair.tab);
@@ -10710,7 +10794,10 @@
       return false;
     }
     var lifecycle = browserTabLifecycle(pair.tab);
-    if (effect.generation !== (lifecycle.controlGeneration || lifecycle.liveGeneration) || lifecycle.pendingGeneration) {
+    if (effect.generation !== (lifecycle.controlGeneration || lifecycle.liveGeneration) ||
+        lifecycle.pendingGeneration || lifecycle.replacementOperation ||
+        lifecycle.authorityTransition ||
+        lifecycle.quarantinedControlGeneration) {
       await completeBrowserProviderEffect(pair.project, {
         actionId: effect.actionId,
         status: "failed",
@@ -10742,7 +10829,10 @@
       if (!current || current.project !== pair.project || current.browser !== pair.browser ||
           current.tab !== pair.tab || current.worktreePath !== pair.worktreePath) return false;
       var currentLifecycle = browserTabLifecycle(current.tab);
-      return effect.generation === (currentLifecycle.controlGeneration || currentLifecycle.liveGeneration) && !currentLifecycle.pendingGeneration && !!currentLifecycle.nativeLabel;
+      return effect.generation === (currentLifecycle.controlGeneration || currentLifecycle.liveGeneration) &&
+        !currentLifecycle.pendingGeneration && !currentLifecycle.replacementOperation &&
+        !currentLifecycle.authorityTransition &&
+        !currentLifecycle.quarantinedControlGeneration && !!currentLifecycle.nativeLabel;
     };
     var operationClass;
     try {
@@ -10867,6 +10957,16 @@
     try { return new URL(String(left)).href === new URL(String(right)).href; }
     catch (_) { return String(left) === String(right); }
   }
+  function browserUrlsShareOrigin(left, right) {
+    if (!left || !right) return false;
+    try {
+      var leftUrl = new URL(String(left));
+      var rightUrl = new URL(String(right));
+      return leftUrl.origin !== "null" && leftUrl.origin === rightUrl.origin;
+    } catch (_) {
+      return false;
+    }
+  }
   function browserNativeUrl(value) {
     if (typeof value !== "string" || !value) return null;
     try {
@@ -10888,6 +10988,7 @@
         pane.worktreePath !== pair.worktreePath ||
         findThread(pane.id) !== pane || browserPaneIsClosing(pane)) return null;
     var lifecycle = browserTabLifecycle(pair.tab);
+    if (lifecycle.replacementOperation) return null;
     var hasPendingNavigation = lifecycle.pendingGeneration > 0;
     if (hasPendingNavigation && lifecycle.pendingNavigationToken && navigationToken !== lifecycle.pendingNavigationToken) return null;
     if (!hasPendingNavigation && navigationToken && navigationToken !== lifecycle.liveNavigationToken) return null;
@@ -10900,6 +11001,105 @@
         (!lifecycle.eventUrl || !browserUrlsMatch(url, lifecycle.eventUrl))) return null;
     if (url) lifecycle.eventUrl = url;
     return pair;
+  }
+  function browserNativeDocumentReplacementContext(nativeLabel, url) {
+    var nativeUrl = browserNativeUrl(url);
+    if (!nativeUrl) return null;
+    var pair = browserNativeEventContext(nativeLabel, null, null);
+    if (!pair) return null;
+    var lifecycle = browserTabLifecycle(pair.tab);
+    if (lifecycle.pendingGeneration || !lifecycle.liveUrl ||
+        browserUrlsShareOrigin(nativeUrl, lifecycle.liveUrl)) return null;
+    return { pair: pair, url: nativeUrl };
+  }
+  async function rotateBrowserAuthorityForNativeReplacement(pair, reportedUrl) {
+    if (!pair) return false;
+    var lifecycle = browserTabLifecycle(pair.tab);
+    if (lifecycle.replacementOperation) return lifecycle.replacementOperation.promise;
+    var reportedNativeUrl = browserNativeUrl(reportedUrl);
+    if (!reportedNativeUrl || !lifecycle.nativeLabel || !lifecycle.liveGeneration ||
+        lifecycle.pendingGeneration || !lifecycle.liveUrl ||
+        browserUrlsShareOrigin(reportedNativeUrl, lifecycle.liveUrl)) return false;
+    var previousGeneration =
+      lifecycle.controlGeneration || lifecycle.liveGeneration;
+    if (!previousGeneration) return false;
+    var operation = { url: reportedNativeUrl, promise: null };
+    lifecycle.replacementOperation = operation;
+    operation.promise = Promise.resolve().then(async function () {
+      var replacementUrl = null;
+      var quarantineError = null;
+      try {
+        replacementUrl = browserNativeUrl(await invoke("browser_current_url", {
+          label: browserLabelForTab(pair.project, pair.tab),
+        }));
+        if (!replacementUrl) {
+          quarantineError = new Error("native browser URL could not be confirmed");
+        }
+      } catch (error) {
+        quarantineError = error;
+      }
+      browserAutomationSnapshotRefs.forEach(function (entry, id) {
+        if (entry && entry.tabId === pair.tab.id &&
+            entry.generation === previousGeneration) {
+          browserAutomationSnapshotRefs.delete(id);
+        }
+      });
+      var removalConfirmed = false;
+      try {
+        var removed = await removeBrowserControlResource(pair, previousGeneration);
+        removalConfirmed = removed === true;
+        if (!removed && !quarantineError) {
+          quarantineError = new Error("browser control resource removal was not confirmed");
+        }
+      } catch (error) {
+        if (!quarantineError) quarantineError = error;
+      }
+      try {
+        await invoke("browser_destroy", {
+          label: browserLabelForTab(pair.project, pair.tab),
+        });
+      } catch (error) {
+        if (!quarantineError) quarantineError = error;
+        try {
+          await invoke("browser_hide", {
+            label: browserLabelForTab(pair.project, pair.tab),
+          });
+        } catch (_) {}
+      }
+      invalidateBrowserNavigation(pair.tab);
+      lifecycle.controlGeneration = 0;
+      lifecycle.quarantinedControlGeneration =
+        removalConfirmed ? 0 : previousGeneration;
+      lifecycle.liveGeneration = 0;
+      lifecycle.liveUrl = null;
+      lifecycle.liveNavigationToken = null;
+      lifecycle.nativeLabel = null;
+      lifecycle.automationSource = null;
+      lifecycle.eventUrl = null;
+      lifecycle.viewLive = false;
+      pair.tab.created = false;
+      pair.tab.loading = false;
+      pair.tab.url = replacementUrl || reportedNativeUrl;
+      pair.tab.title = tabTitle(pair.tab.url);
+      renderBrowserTabs();
+      syncUrlInput();
+      saveWorkspaceSoon();
+      lifecycle.replacementOperation = null;
+      if (quarantineError) {
+        setStatus(
+          "browser document replacement quarantined: " +
+            boundedBrowserError(quarantineError),
+          "error"
+        );
+        return false;
+      }
+      return navigateBrowser(replacementUrl, { tabId: pair.tab.id });
+    }).finally(function () {
+      if (lifecycle.replacementOperation === operation) {
+        lifecycle.replacementOperation = null;
+      }
+    });
+    return operation.promise;
   }
   function markBrowserTabLoaded(nativeLabel, url, title, navigationToken) {
     var pair = browserNativeEventContext(nativeLabel, url, navigationToken);
@@ -10932,6 +11132,16 @@
   }
   function handleBrowserPageLoad(event) {
     var payload = event.payload || {};
+    var replacement = browserNativeDocumentReplacementContext(
+      payload.label,
+      payload.url
+    );
+    if (replacement) {
+      return rotateBrowserAuthorityForNativeReplacement(
+        replacement.pair,
+        replacement.url
+      );
+    }
     var pair = browserNativeEventContext(payload.label, payload.url, payload.navigationToken);
     if (!pair) return false;
     if (payload.phase === "started") {
@@ -11040,16 +11250,29 @@
         !lifecycle.liveNavigationToken ||
         payload.navigationToken !== lifecycle.liveNavigationToken) return null;
     var liveUrl = null;
+    var replacementUrl = null;
     if (lifecycle.liveUrl &&
         !browserUrlsMatch(nativeUrl, lifecycle.liveUrl) &&
         (!lifecycle.eventUrl || !browserUrlsMatch(nativeUrl, lifecycle.eventUrl))) {
-      liveUrl = nativeUrl;
+      if (browserUrlsShareOrigin(nativeUrl, lifecycle.liveUrl)) liveUrl = nativeUrl;
+      else replacementUrl = nativeUrl;
     }
-    return { pair: pair, pane: pane, liveUrl: liveUrl };
+    return {
+      pair: pair,
+      pane: pane,
+      liveUrl: liveUrl,
+      replacementUrl: replacementUrl,
+    };
   }
   function handleBrowserFocus(event) {
     var context = browserFocusEventContext(event && event.payload || {});
     if (!context) return false;
+    if (context.replacementUrl) {
+      return rotateBrowserAuthorityForNativeReplacement(
+        context.pair,
+        context.replacementUrl
+      );
+    }
     if (context.liveUrl) {
       var lifecycle = browserTabLifecycle(context.pair.tab);
       lifecycle.liveUrl = context.liveUrl;
@@ -11124,7 +11347,26 @@
         setStatus("browser automation invalidation failed", "error");
         return false;
       }
-      await removeBrowserControlResource(closingPair);
+      var closingControlRemoved = false;
+      try {
+        closingControlRemoved = await removeBrowserControlResource(closingPair);
+      } catch (error) {
+        lifecycle.closing = false;
+        setStatus(
+          "browser tab close failed before native teardown: " +
+            boundedBrowserError(error),
+          "error"
+        );
+        return false;
+      }
+      if (!closingControlRemoved) {
+        lifecycle.closing = false;
+        setStatus(
+          "browser tab close failed before native teardown: browser control resource removal was not confirmed",
+          "error"
+        );
+        return false;
+      }
     }
     try {
       await invoke("browser_destroy", { label: browserLabelForTab(project, tab) });
@@ -11495,6 +11737,7 @@
       var previousHistory = Array.isArray(tab.history) ? tab.history.slice() : [];
       var previousHistoryIndex = tab.historyIndex;
       var navigationPair = { project: project, worktreePath: worktreePath, browser: browser, tab: tab };
+      var removalGeneration = lifecycle.quarantinedControlGeneration || 0;
       if (lifecycle.nativeLabel) {
         var automationInvalidated = false;
         try {
@@ -11507,14 +11750,30 @@
           setStatus("browser automation invalidation failed", "error");
           return false;
         }
+        removalGeneration =
+          lifecycle.controlGeneration || lifecycle.liveGeneration || lifecycle.pendingGeneration;
+      }
+      if (removalGeneration) {
+        lifecycle.authorityTransition = true;
         try {
-          await removeBrowserControlResource(navigationPair);
+          var controlRemoved = await removeBrowserControlResource(
+            navigationPair,
+            removalGeneration
+          );
+          if (!controlRemoved) {
+            throw new Error("browser control resource removal was not confirmed");
+          }
+          lifecycle.quarantinedControlGeneration = 0;
         } catch (error) {
+          lifecycle.authorityTransition = false;
           setStatus("browser navigation failed before dispatch: " + boundedBrowserError(error), "error");
           return false;
         }
       }
-      if (lifecycle.invalidationGeneration !== invalidationGeneration || !requestIsCurrent()) return false;
+      if (lifecycle.invalidationGeneration !== invalidationGeneration || !requestIsCurrent()) {
+        lifecycle.authorityTransition = false;
+        return false;
+      }
       var navigationVisible = browserNavigationOwnsVisiblePane({
         project: project,
         worktreePath: worktreePath,
@@ -11525,7 +11784,10 @@
       var b = navigationVisible
         ? visibleBrowserBounds()
         : { x: -10000, y: -10000, w: 1, h: 1 };
-      if (!b) return false;
+      if (!b) {
+        lifecycle.authorityTransition = false;
+        return false;
+      }
       var generation = beginBrowserNavigation(tab);
       lifecycle.controlGeneration = 0;
       var navigationToken = generation + ":" + (globalThis.crypto && globalThis.crypto.randomUUID ? globalThis.crypto.randomUUID() : Date.now() + ":" + Math.random());
@@ -11542,6 +11804,7 @@
       lifecycle.pendingTitleNavigationToken = null;
       lifecycle.eventUrl = null;
       lifecycle.viewLive = true;
+      lifecycle.authorityTransition = false;
       lifecycle.navigationSnapshot = {
         url: previousUrl,
         title: previousTitle,
@@ -11563,6 +11826,7 @@
         previousUrl: previousUrl,
         previousHistory: previousHistory,
         previousHistoryIndex: previousHistoryIndex,
+        controlResourceRemoved: removalGeneration > 0,
       };
       tab.loading = true;
       if (!context.preserveHistory) tab.title = tabTitle(normalised);

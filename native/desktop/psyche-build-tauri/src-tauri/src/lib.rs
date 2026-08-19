@@ -1724,6 +1724,7 @@ struct BrowserNavigationResult {
 struct BrowserNavigationWaiter {
     generation: u64,
     token: String,
+    requested_url: String,
     native_view: Option<usize>,
     navigation_identity: Option<u64>,
     completion: Option<tokio::sync::oneshot::Sender<Result<BrowserNavigationResult, String>>>,
@@ -1899,6 +1900,54 @@ impl Drop for BrowserNavigationWaiterGuard {
 static BROWSER_NAVIGATION_WAITERS: Lazy<Mutex<HashMap<String, BrowserNavigationWaiter>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+fn browser_documents_share_origin(left: &str, right: &str) -> bool {
+    let Ok(left) = Url::parse(left) else {
+        return false;
+    };
+    let Ok(right) = Url::parse(right) else {
+        return false;
+    };
+    matches!(left.scheme(), "http" | "https")
+        && matches!(right.scheme(), "http" | "https")
+        && left.origin() == right.origin()
+}
+
+fn retire_browser_authority_for_page_load(label: &str, current_url: &str) -> bool {
+    if BROWSER_NAVIGATION_WAITERS.lock().contains_key(label) {
+        return false;
+    }
+    let Some(identity) = browser_focus_identity(label) else {
+        return false;
+    };
+    if browser_documents_share_origin(&identity.document_url, current_url) {
+        return false;
+    }
+    retire_matching_browser_focus_identity(label, &identity);
+    true
+}
+
+fn ensure_live_browser_document_authority(
+    label: &str,
+    current_url: &str,
+) -> Result<BrowserFocusIdentity, String> {
+    let identity = browser_focus_identity(label)
+        .ok_or_else(|| "browser document authority is unavailable".to_string())?;
+    if !browser_documents_share_origin(&identity.document_url, current_url) {
+        retire_matching_browser_focus_identity(label, &identity);
+        return Err("browser document authority was replaced".to_string());
+    }
+    Ok(identity)
+}
+
+fn browser_document_authority_unchanged(
+    expected_url: &str,
+    expected_identity: &BrowserFocusIdentity,
+    observed_url: &str,
+    observed_identity: Option<&BrowserFocusIdentity>,
+) -> bool {
+    expected_url == observed_url && observed_identity == Some(expected_identity)
+}
+
 fn browser_title_identity(label: &str) -> Option<BrowserFocusIdentity> {
     {
         let waiters = BROWSER_NAVIGATION_WAITERS.lock();
@@ -1907,6 +1956,7 @@ fn browser_title_identity(label: &str) -> Option<BrowserFocusIdentity> {
                 || BrowserFocusIdentity {
                     generation: waiter.generation,
                     navigation_token: waiter.token.clone(),
+                    document_url: waiter.requested_url.clone(),
                 },
             );
         }
@@ -2030,9 +2080,10 @@ fn send_browser_navigation_result(
             Ok(BrowserNavigationResult { terminal_url })
         }
     });
-    let focus_identity = result.as_ref().ok().map(|_| BrowserFocusIdentity {
+    let focus_identity = result.as_ref().ok().map(|result| BrowserFocusIdentity {
         generation: waiter.generation,
         navigation_token: waiter.token.clone(),
+        document_url: result.terminal_url.clone(),
     });
     if let Some(identity) = focus_identity.as_ref() {
         install_browser_focus_identity(label.to_string(), identity.clone());
@@ -3681,6 +3732,7 @@ fn ensure_browser(
                 app_for_load
                     .state::<BrowserAutomationAuthorizations>()
                     .remove(&browser_label);
+                retire_browser_authority_for_page_load(&browser_label, payload.url().as_str());
             }
             let phase = match payload.event() {
                 PageLoadEvent::Started => "started",
@@ -4429,6 +4481,7 @@ async fn browser_navigate(
             BrowserNavigationWaiter {
                 generation,
                 token: navigation_token.clone(),
+                requested_url: url.clone(),
                 native_view: None,
                 navigation_identity: None,
                 completion: Some(completion),
@@ -4614,6 +4667,24 @@ fn browser_destroy_many(
 }
 
 #[tauri::command]
+fn browser_current_url(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<String, String> {
+    ensure_trusted_browser_caller(webview.label())?;
+    let label = safe_browser_label(label);
+    let browser = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser webview missing".to_string())?;
+    let url = browser.url().map_err(|error| error.to_string())?;
+    match url.scheme() {
+        "http" | "https" | "about" => Ok(url.to_string()),
+        _ => Err("browser document URL is unsupported".to_string()),
+    }
+}
+
+#[tauri::command]
 fn browser_reload(
     webview: tauri::Webview,
     app: AppHandle,
@@ -4638,6 +4709,8 @@ fn browser_eval(
     ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
+        let current_url = webview.url().map_err(|error| error.to_string())?;
+        ensure_live_browser_document_authority(&label, current_url.as_str())?;
         if let Some(correlation) = automation_receipt {
             let authorizations = app.state::<BrowserAutomationAuthorizations>();
             authorizations.install(&label, correlation.clone());
@@ -4789,6 +4862,8 @@ async fn browser_script(
     let before_url = browser
         .url()
         .map_err(|_| "target_unavailable".to_string())?;
+    ensure_live_browser_document_authority(&label, before_url.as_str())
+        .map_err(|_| "target_unavailable".to_string())?;
     let document_token = evaluate_browser_script_document_token(&browser)
         .await
         .map_err(|_| "effect_unknown".to_string())?;
@@ -4903,6 +4978,8 @@ async fn browser_snapshot(
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| "browser webview missing".to_string())?;
+    let current_url = webview.url().map_err(|error| error.to_string())?;
+    let document_authority = ensure_live_browser_document_authority(&label, current_url.as_str())?;
     let size = webview.size().map_err(|error| error.to_string())?;
     validate_browser_snapshot_dimensions(size.width, size.height)?;
     #[cfg(not(target_os = "macos"))]
@@ -4966,10 +5043,22 @@ async fn browser_snapshot(
                 wk_webview.takeSnapshotWithConfiguration_completionHandler(None, &completion);
             })
             .map_err(|error| error.to_string())?;
-        tokio::time::timeout(std::time::Duration::from_secs(15), receiver)
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(15), receiver)
             .await
             .map_err(|_| "browser snapshot timed out".to_string())?
-            .map_err(|_| "browser snapshot callback was dropped".to_string())?
+            .map_err(|_| "browser snapshot callback was dropped".to_string())??;
+        let observed_url = webview.url().map_err(|error| error.to_string())?;
+        let observed_identity =
+            ensure_live_browser_document_authority(&label, observed_url.as_str()).ok();
+        if !browser_document_authority_unchanged(
+            current_url.as_str(),
+            &document_authority,
+            observed_url.as_str(),
+            observed_identity.as_ref(),
+        ) {
+            return Err("browser document authority was replaced".to_string());
+        }
+        Ok(snapshot)
     }
 }
 
@@ -8499,6 +8588,7 @@ pub fn run() {
             browser_hide_all_except,
             browser_destroy,
             browser_destroy_many,
+            browser_current_url,
             browser_reload,
             browser_eval,
             browser_script,
@@ -8855,6 +8945,64 @@ mod browser_app_shortcut_tests {
     }
 
     #[test]
+    fn browser_snapshot_completion_requires_unchanged_document_authority() {
+        let identity = BrowserFocusIdentity {
+            generation: 70,
+            navigation_token: "approved-document".to_string(),
+            document_url: "https://old.example/account".to_string(),
+        };
+        let replacement = BrowserFocusIdentity {
+            generation: 71,
+            navigation_token: "replacement-document".to_string(),
+            document_url: "https://new.example/dashboard".to_string(),
+        };
+
+        assert!(browser_document_authority_unchanged(
+            "https://old.example/account",
+            &identity,
+            "https://old.example/account",
+            Some(&identity),
+        ));
+        assert!(!browser_document_authority_unchanged(
+            "https://old.example/account",
+            &identity,
+            "https://new.example/dashboard",
+            Some(&replacement),
+        ));
+        assert!(!browser_document_authority_unchanged(
+            "https://old.example/account",
+            &identity,
+            "https://old.example/account",
+            None,
+        ));
+    }
+
+    #[test]
+    fn page_initiated_cross_origin_navigation_retires_native_authority() {
+        let label = "psyche-browser-cross-origin-retirement".to_string();
+        let identity = BrowserFocusIdentity {
+            generation: 71,
+            navigation_token: "old-document".to_string(),
+            document_url: "https://old.example/account".to_string(),
+        };
+        install_browser_focus_identity(label.clone(), identity.clone());
+
+        assert!(retire_browser_authority_for_page_load(
+            &label,
+            "https://new.example/dashboard",
+        ));
+        assert_eq!(browser_focus_identity(&label), None);
+
+        install_browser_focus_identity(label.clone(), identity.clone());
+        assert!(!retire_browser_authority_for_page_load(
+            &label,
+            "https://old.example/settings",
+        ));
+        assert_eq!(browser_focus_identity(&label), Some(identity));
+        retire_browser_focus_label(&label);
+    }
+
+    #[test]
     fn browser_script_execution_uses_the_document_context_world() {
         assert_eq!(
             browser_script_execution_world_name(),
@@ -8973,11 +9121,12 @@ mod pty_runtime_tests {
         assert!(validate_browser_snapshot_dimensions(8192, 8192).is_err());
     }
 
-    fn browser_navigation_waiter(_url: &str) -> BrowserNavigationWaiter {
+    fn browser_navigation_waiter(url: &str) -> BrowserNavigationWaiter {
         let (completion, _receiver) = tokio::sync::oneshot::channel();
         BrowserNavigationWaiter {
             generation: 1,
             token: "requested-token".to_string(),
+            requested_url: url.to_string(),
             native_view: None,
             navigation_identity: None,
             completion: Some(completion),
@@ -8995,6 +9144,7 @@ mod pty_runtime_tests {
             BrowserNavigationWaiter {
                 generation: 41,
                 token: "requested".to_string(),
+                requested_url: "https://requested.example".to_string(),
                 native_view: Some(410),
                 navigation_identity: Some(41),
                 completion: Some(requested_sender),
@@ -9005,6 +9155,7 @@ mod pty_runtime_tests {
             BrowserNavigationWaiter {
                 generation: 42,
                 token: "unrelated".to_string(),
+                requested_url: "https://unrelated.example".to_string(),
                 native_view: Some(420),
                 navigation_identity: Some(42),
                 completion: Some(unrelated_sender),
@@ -9060,6 +9211,7 @@ mod pty_runtime_tests {
             Some(BrowserFocusIdentity {
                 generation: 41,
                 navigation_token: "requested".to_string(),
+                document_url: "https://terminal.example".to_string(),
             })
         );
         assert_eq!(browser_focus_identity(&unrelated_label), None);
@@ -9077,6 +9229,7 @@ mod pty_runtime_tests {
             BrowserNavigationWaiter {
                 generation: 51,
                 token: "failure".to_string(),
+                requested_url: "https://failure.example".to_string(),
                 native_view: Some(510),
                 navigation_identity: Some(52),
                 completion: Some(sender),
@@ -9107,6 +9260,7 @@ mod pty_runtime_tests {
             BrowserNavigationWaiter {
                 generation: 61,
                 token: "pending-title".to_string(),
+                requested_url: "https://pending-title.example".to_string(),
                 native_view: Some(610),
                 navigation_identity: Some(62),
                 completion: Some(sender),
@@ -9118,6 +9272,7 @@ mod pty_runtime_tests {
             Some(BrowserFocusIdentity {
                 generation: 61,
                 navigation_token: "pending-title".to_string(),
+                document_url: "https://pending-title.example".to_string(),
             })
         );
         BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
@@ -9126,6 +9281,7 @@ mod pty_runtime_tests {
             BrowserFocusIdentity {
                 generation: 63,
                 navigation_token: "live-title".to_string(),
+                document_url: "https://live-title.example".to_string(),
             },
         );
         assert_eq!(
@@ -9133,6 +9289,7 @@ mod pty_runtime_tests {
             Some(BrowserFocusIdentity {
                 generation: 63,
                 navigation_token: "live-title".to_string(),
+                document_url: "https://live-title.example".to_string(),
             })
         );
         retire_browser_focus_label(&label);
