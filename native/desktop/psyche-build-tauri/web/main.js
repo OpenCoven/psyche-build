@@ -4964,9 +4964,6 @@
       }
       await removeBrowserControlResource(automationPair);
     }
-    browser.tabs.forEach(function (tab) {
-      invalidateBrowserNavigation(tab);
-    });
     var navigationTails = browser.tabs.map(function (tab) {
       return browserTabLifecycle(tab).navigationTail;
     }).filter(function (tail) {
@@ -5018,6 +5015,12 @@
       }
     });
     if (failures.length) {
+      destroyed.forEach(function (label) {
+        var destroyedTab = browser.tabs.find(function (tab) {
+          return browserLabelForTab(project, tab) === label;
+        });
+        if (destroyedTab) invalidateBrowserNavigation(destroyedTab);
+      });
       var recovery = await recoverAffectedLiveTabs(destroyed, failedLabels);
       var closeErrors = failures.map(function (failure) {
         return failure.label + ": " + failure.error;
@@ -5030,6 +5033,7 @@
     }
     var wasActive = state.activeThreadId === thread.id;
     browser.tabs.forEach(function (tab) {
+      invalidateBrowserNavigation(tab);
       tab.created = false;
       tab.loading = false;
       var lifecycle = browserTabLifecycle(tab);
@@ -11121,9 +11125,9 @@
       }
       await removeBrowserControlResource(closingPair);
     }
-    invalidateBrowserNavigation(tab);
     try {
       await invoke("browser_destroy", { label: browserLabelForTab(project, tab) });
+      invalidateBrowserNavigation(tab);
     } catch (error) {
       lifecycle.closing = false;
       setStatus("browser tab close failed: " + boundedBrowserError(error), "error");

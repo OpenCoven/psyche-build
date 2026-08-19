@@ -2654,23 +2654,52 @@ describe('Tauri native browser lifecycle', () => {
     expect(project.browsersByWorktree['/workspace'].tabs).toHaveLength(1);
   });
 
-  it('retains tab state and reports native browser destruction failures', async () => {
+  it('retains the live focus identity after native browser destruction fails', async () => {
     const statuses: Array<[string, string]> = [];
-    const project: IdentifiedBrowserProjectFixture = {
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://current.example',
+      created: true,
+      loading: false,
+      title: 'Current title',
+      history: ['https://current.example'],
+      historyIndex: 0,
+    };
+    const browser = {
+      activeTabId: tab.id,
+      tabs: [tab],
+    };
+    const project = {
       id: 'project-a',
+      root: '/project',
       browsersByWorktree: {
-        '/workspace': {
-          activeTabId: 'tab-a',
-          tabs: [{ id: 'tab-a', created: true }],
-        },
+        '/workspace': browser,
       },
     };
+    const pane: BrowserPaneThreadFixture = {
+      id: 'web-pane',
+      kind: 'web',
+      projectId: project.id,
+      worktreePath: '/workspace',
+    };
+    const lifecycle = browserLifecycleHarness();
+    Object.assign(lifecycle.browserTabLifecycle(tab), {
+      generation: 7,
+      invalidationGeneration: 2,
+      nativeLabel: 'native-tab-a',
+      liveGeneration: 7,
+      controlGeneration: 11,
+      liveUrl: tab.url,
+      liveNavigationToken: 'current-token',
+      eventUrl: tab.url,
+      viewLive: true,
+    });
     const closeBrowserTab = compileFunction<
-      (project: IdentifiedBrowserProjectFixture, tabId: string) => Promise<boolean>
+      (value: typeof project, tabId: string) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserTab'), {
-      ...browserLifecycleHarness(),
+      ...lifecycle,
       activeProject: () => project,
-      ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
+      ensureBrowserModel: () => browser,
       invoke: async () => { throw new Error('native unavailable'); },
       browserLabelForTab: () => 'project-a:tab-a',
       setStatus: (text: string, level: string) => statuses.push([text, level]),
@@ -2680,14 +2709,116 @@ describe('Tauri native browser lifecycle', () => {
     });
 
     await expect(closeBrowserTab(project, 'tab-a')).resolves.toBe(false);
-    expect(project.browsersByWorktree['/workspace']).toMatchObject({
+    expect(browser).toMatchObject({
       activeTabId: 'tab-a',
       tabs: [{ id: 'tab-a', created: true }],
+    });
+    expect(lifecycle.browserTabLifecycle(tab)).toMatchObject({
+      closing: false,
+      generation: 7,
+      invalidationGeneration: 2,
+      nativeLabel: 'native-tab-a',
+      liveGeneration: 7,
+      controlGeneration: 11,
+      liveUrl: 'https://current.example',
+      liveNavigationToken: 'current-token',
+      eventUrl: 'https://current.example',
+      viewLive: true,
     });
     expect(statuses).toEqual([[
       'browser tab close failed: native unavailable',
       'error',
     ]]);
+
+    const focusHandlers = browserNativeEventHandlers({
+      lifecycle,
+      project,
+      worktreePath: '/workspace',
+      browser,
+      tab,
+      pane,
+      nativeLabel: 'native-tab-a',
+    });
+    expect(focusHandlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        generation: 7,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+  });
+
+  it('does not revive a live identity superseded while a tab close is pending', async () => {
+    let rejectDestroy!: (error: Error) => void;
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old.example',
+      created: true,
+      loading: false,
+      title: 'Old title',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    const project = {
+      id: 'project-a',
+      root: '/project',
+      browsersByWorktree: { '/workspace': browser },
+    };
+    const lifecycle = browserLifecycleHarness();
+    Object.assign(lifecycle.browserTabLifecycle(tab), {
+      generation: 7,
+      invalidationGeneration: 2,
+      nativeLabel: 'native-tab-a',
+      liveGeneration: 7,
+      liveUrl: tab.url,
+      liveNavigationToken: 'old-token',
+      eventUrl: tab.url,
+      viewLive: true,
+    });
+    const closeBrowserTab = compileFunction<
+      (value: typeof project, tabId: string) => Promise<boolean>
+    >(functionSource(mainJs, 'closeBrowserTab'), {
+      ...lifecycle,
+      activeProject: () => project,
+      ensureBrowserModel: () => browser,
+      invoke: () => new Promise<void>((_resolve, reject) => { rejectDestroy = reject; }),
+      browserLabelForTab: () => 'project-a:tab-a',
+      setStatus: () => {},
+      renderBrowserTabs: () => {},
+      syncProjectBrowser: () => {},
+      saveWorkspaceSoon: () => {},
+    });
+
+    const closing = closeBrowserTab(project, tab.id);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    Object.assign(lifecycle.browserTabLifecycle(tab), {
+      generation: 9,
+      invalidationGeneration: 4,
+      nativeLabel: 'native-tab-a-replacement',
+      liveGeneration: 9,
+      liveUrl: 'https://replacement.example',
+      liveNavigationToken: 'replacement-token',
+      eventUrl: 'https://replacement.example',
+      viewLive: true,
+    });
+    rejectDestroy(new Error('native unavailable'));
+
+    await expect(closing).resolves.toBe(false);
+    expect(lifecycle.browserTabLifecycle(tab)).toMatchObject({
+      closing: false,
+      generation: 9,
+      invalidationGeneration: 4,
+      nativeLabel: 'native-tab-a-replacement',
+      liveGeneration: 9,
+      liveUrl: 'https://replacement.example',
+      liveNavigationToken: 'replacement-token',
+      eventUrl: 'https://replacement.example',
+      viewLive: true,
+    });
   });
 
   it('does not remove a successor when duplicate tab closes resolve concurrently', async () => {
@@ -6019,7 +6150,10 @@ describe('Tauri native browser lifecycle', () => {
       projectId: 'project-a',
       worktreePath: '/workspace',
     };
-    const project = { id: 'project-a' };
+    const project = {
+      id: 'project-a',
+      browsersByWorktree: {} as Record<string, unknown>,
+    };
     const tabs = [
       {
         id: 'tab-a',
@@ -6050,13 +6184,35 @@ describe('Tauri native browser lifecycle', () => {
       },
     ];
     const browser = { tabs, activeTabId: 'tab-b' };
+    project.browsersByWorktree['/workspace'] = browser;
     const nativeViews = new Set(['project-a:tab-a', 'project-a:tab-b']);
     const calls: string[] = [];
     const statuses: Array<[string, string]> = [];
+    const lifecycle = browserLifecycleHarness();
+    Object.assign(lifecycle.browserTabLifecycle(tabs[0]), {
+      generation: 3,
+      nativeLabel: 'project-a:tab-a',
+      liveGeneration: 3,
+      liveUrl: tabs[0].url,
+      liveNavigationToken: 'tab-a-token',
+      eventUrl: tabs[0].url,
+      viewLive: true,
+    });
+    Object.assign(lifecycle.browserTabLifecycle(tabs[1]), {
+      generation: 7,
+      invalidationGeneration: 2,
+      nativeLabel: 'project-a:tab-b',
+      liveGeneration: 7,
+      controlGeneration: 13,
+      liveUrl: tabs[1].url,
+      liveNavigationToken: 'tab-b-token',
+      eventUrl: tabs[1].url,
+      viewLive: true,
+    });
     const closeBrowserPane = compileFunction<
       (value: BrowserPaneThreadFixture) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserPane'), {
-      ...browserLifecycleHarness(),
+      ...lifecycle,
       findProject: () => project,
       ensureBrowserModel: () => browser,
       invoke: async (command: string, args: { labels?: string[]; label?: string }) => {
@@ -6131,6 +6287,34 @@ describe('Tauri native browser lifecycle', () => {
       'browser pane close failed; native close failures: project-a:tab-b: destroy failed at project-a:tab-b; recreated 1/1 confirmed-destroyed live tabs',
       'error',
     ]]);
+    expect(lifecycle.browserTabLifecycle(tabs[1])).toMatchObject({
+      generation: 7,
+      invalidationGeneration: 2,
+      nativeLabel: 'project-a:tab-b',
+      liveGeneration: 7,
+      controlGeneration: 13,
+      liveUrl: 'https://b.example/current',
+      liveNavigationToken: 'tab-b-token',
+      eventUrl: 'https://b.example/current',
+      viewLive: true,
+    });
+    const focusHandlers = browserNativeEventHandlers({
+      lifecycle,
+      project,
+      worktreePath: '/workspace',
+      browser,
+      tab: tabs[1],
+      pane: thread,
+      nativeLabel: 'project-a:tab-b',
+    });
+    expect(focusHandlers.handleBrowserFocus({
+      payload: {
+        label: 'project-a:tab-b',
+        url: 'https://b.example/current',
+        generation: 7,
+        navigationToken: 'tab-b-token',
+      },
+    })).toBe(true);
   });
 
   it('routes every thread close entry point through native-aware teardown', async () => {
