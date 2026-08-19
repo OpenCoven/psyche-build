@@ -1,11 +1,20 @@
 #!/usr/bin/env node
 
 import { strict as assert } from 'node:assert';
+import { execFile } from 'node:child_process';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import {
+  modules as contentModules,
+  sections as contentSections,
+  validateNavigationGraph,
+} from '../docs/src/content/index.js';
+import { renderHero } from '../docs/src/hero.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const execFileAsync = promisify(execFile);
 const textExtensions = new Set(['.js', '.mjs', '.html', '.css', '.svg', '.md', '.json']);
 const requiredSourceFiles = sortUnique([
   'docs/src/hero.js',
@@ -52,6 +61,19 @@ const prohibitedPositionPatterns = [
 const prohibitedFiles = new Map(
   ['docs/COVEN-DEMO-LOOP.md', 'docs/COVEN-SESSIONS.md'].map((file) => [normalizePublicPath(file), file]),
 );
+const requiredPackageDocumentationFiles = ['docs/INTEGRATIONS.md'];
+const historicalDocumentationPrefixes = [
+  'docs/superpowers/plans/',
+  'docs/superpowers/specs/',
+];
+const generatedAgentsDocumentationFiles = new Set([
+  'scripts/generate-hooks-docs.js',
+  'src/utils/generated-agents-doc.ts',
+]);
+const generatedDocumentationPrefixes = [
+  'docs/client/',
+  'docs/src/dist/',
+];
 
 function isEnoent(error) {
   return Boolean(error && typeof error === 'object' && error.code === 'ENOENT');
@@ -91,9 +113,10 @@ function isTextAsset(relativePath) {
   return textExtensions.has(path.extname(relativePath).toLowerCase());
 }
 
-function collectPackageMarkdownFiles(packageFilesValue) {
+function collectPackageMarkdownFiles(packageFilesValue, packedFilesValue) {
   const markdownFiles = [];
   const boundaryFailures = [];
+  const archiveFailures = [];
   const packageFiles = [];
 
   if (!Array.isArray(packageFilesValue)) {
@@ -102,6 +125,7 @@ function collectPackageMarkdownFiles(packageFilesValue) {
       packageFiles,
       markdownFiles,
       boundaryFailures: sortFailureRecords(boundaryFailures),
+      archiveFailures,
     };
   }
 
@@ -144,10 +168,41 @@ function collectPackageMarkdownFiles(packageFilesValue) {
     boundaryFailures.push({ file, reason: 'package-published Markdown must use explicit file paths' });
   }
 
+  if (packedFilesValue !== undefined) {
+    if (!Array.isArray(packedFilesValue) || packedFilesValue.some((file) => typeof file !== 'string')) {
+      archiveFailures.push({
+        file: 'npm pack --dry-run',
+        reason: 'npm package archive file list must be an array of strings',
+      });
+    } else {
+      const packedFiles = new Set(packedFilesValue.map(normalizePublicPath));
+      for (const file of sortUnique([
+        ...markdownFiles,
+        ...requiredPackageDocumentationFiles,
+      ])) {
+        if (!packedFiles.has(normalizePublicPath(file))) {
+          archiveFailures.push({
+            file,
+            reason: 'required documentation is missing from the npm package archive',
+          });
+        }
+      }
+      for (const [identity, file] of prohibitedFiles) {
+        if (packedFiles.has(identity)) {
+          archiveFailures.push({
+            file,
+            reason: 'prohibited documentation is present in the npm package archive',
+          });
+        }
+      }
+    }
+  }
+
   return {
     packageFiles: sortUnique(packageFiles),
     markdownFiles: sortUnique(markdownFiles),
     boundaryFailures: sortFailureRecords(boundaryFailures),
+    archiveFailures: sortFailureRecords(archiveFailures),
   };
 }
 
@@ -162,6 +217,32 @@ async function loadPackageJson() {
 
     throw error;
   }
+}
+
+async function collectPackedFilePaths() {
+  const { stdout } = await execFileAsync(
+    'npm',
+    ['pack', '--dry-run', '--json', '--ignore-scripts'],
+    {
+      cwd: root,
+      encoding: 'utf8',
+      maxBuffer: 32 * 1024 * 1024,
+    },
+  );
+  const result = JSON.parse(stdout);
+  if (!Array.isArray(result) || !result[0] || !Array.isArray(result[0].files)) {
+    throw new Error('npm pack --dry-run --json returned an invalid file list');
+  }
+  return result[0].files.map((entry) => entry.path);
+}
+
+async function collectTrackedFiles() {
+  const { stdout } = await execFileAsync('git', ['ls-files', '-z'], {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  return stdout.split('\0').filter(Boolean).sort(compareStrings);
 }
 
 async function collectRecursiveTextFiles(relativeDirectory, readDirectory) {
@@ -304,6 +385,7 @@ async function collectPublicTopLevelDocsFiles() {
 }
 
 function buildPublicInventory({
+  trackedFiles,
   rootMarkdownFiles,
   recursiveFiles,
   sharedFiles = [],
@@ -311,6 +393,10 @@ function buildPublicInventory({
   topLevelDocsFiles,
   packageMarkdownFiles,
 }) {
+  if (Array.isArray(trackedFiles)) {
+    return sortUniquePublicPaths(trackedFiles.filter(isTrackedPublicDocumentationFile));
+  }
+
   return sortUniquePublicPaths([
     ...rootMarkdownFiles,
     ...requiredSourceFiles,
@@ -320,6 +406,25 @@ function buildPublicInventory({
     ...topLevelDocsFiles,
     ...packageMarkdownFiles,
   ]);
+}
+
+function isTrackedPublicDocumentationFile(file) {
+  if (historicalDocumentationPrefixes.some((prefix) => file.startsWith(prefix))) {
+    return false;
+  }
+  if (generatedDocumentationPrefixes.some((prefix) => file.startsWith(prefix))) {
+    return false;
+  }
+  if (generatedAgentsDocumentationFiles.has(file)) {
+    return true;
+  }
+  if (path.posix.extname(file).toLowerCase() === '.md') {
+    return true;
+  }
+  if (requiredSourceFiles.includes(file)) {
+    return true;
+  }
+  return file.startsWith('docs/') && isTextAsset(file);
 }
 
 async function inspectTextSource(file) {
@@ -491,6 +596,35 @@ async function selfCheckPublicInventory() {
   assert.deepEqual(staticResult.files, ['docs/public/favicon.svg', 'docs/public/og.svg']);
   assert.deepEqual(staticResult.missingRootFailure, null);
 
+  const trackedInventory = buildPublicInventory({
+    trackedFiles: [
+      ...requiredSourceFiles,
+      'README.md',
+      'docs/brand/source/psyche-hero.svg',
+      'docs/client/generated.js',
+      'docs/src/dist/generated.js',
+      'docs/superpowers/plans/history.md',
+      'native/ios/README.md',
+      'protocol-fixtures/README.md',
+      'scripts/generate-hooks-docs.js',
+      'src/utils/generated-agents-doc.ts',
+    ],
+    rootMarkdownFiles: ['UNTRACKED-NOTE.md'],
+    recursiveFiles: ['docs/src/untracked.js'],
+    topLevelDocsFiles: ['docs/UNTRACKED.md'],
+    packageMarkdownFiles: [],
+  });
+  assert(trackedInventory.includes('native/ios/README.md'));
+  assert(trackedInventory.includes('protocol-fixtures/README.md'));
+  assert(trackedInventory.includes('docs/brand/source/psyche-hero.svg'));
+  assert(trackedInventory.includes('scripts/generate-hooks-docs.js'));
+  assert(trackedInventory.includes('src/utils/generated-agents-doc.ts'));
+  assert(!trackedInventory.includes('UNTRACKED-NOTE.md'));
+  assert(!trackedInventory.includes('docs/UNTRACKED.md'));
+  assert(!trackedInventory.includes('docs/client/generated.js'));
+  assert(!trackedInventory.includes('docs/src/dist/generated.js'));
+  assert(!trackedInventory.includes('docs/superpowers/plans/history.md'));
+
   const topLevelDocsTree = new Map([
     [
       'docs',
@@ -582,6 +716,24 @@ async function selfCheckPublicInventory() {
   assert.deepEqual(
     missingPackageFiles.boundaryFailures,
     [{ file: 'package.json#files', reason: 'package.json.files must be an array of strings' }],
+  );
+
+  const missingRequiredArchiveFile = collectPackageMarkdownFiles(
+    ['README.md'],
+    ['README.md', 'docs/COVEN-DEMO-LOOP.md'],
+  );
+  assert.deepEqual(
+    missingRequiredArchiveFile.archiveFailures,
+    sortFailureRecords([
+      {
+        file: 'docs/COVEN-DEMO-LOOP.md',
+        reason: 'prohibited documentation is present in the npm package archive',
+      },
+      {
+        file: 'docs/INTEGRATIONS.md',
+        reason: 'required documentation is missing from the npm package archive',
+      },
+    ]),
   );
 
   const missingRecursiveResult = await collectRecursiveTextFiles(
@@ -751,44 +903,34 @@ async function main() {
     return 1;
   }
 
-  const packageMarkdownResult = collectPackageMarkdownFiles(packageJson.files);
+  const [trackedFiles, packedFiles] = await Promise.all([
+    collectTrackedFiles(),
+    collectPackedFilePaths(),
+  ]);
+  const packageMarkdownResult = collectPackageMarkdownFiles(packageJson.files, packedFiles);
   const packageFiles = packageMarkdownResult.packageFiles;
-  const rootMarkdownResult = await collectPublicRootMarkdownFiles();
-  const recursiveResult = await collectPublicRecursiveFiles();
-  const recursiveFiles = recursiveResult.files;
-  const sharedResult = await collectPublicSharedFiles();
-  const sharedFiles = sharedResult.files;
-  const staticResult = await collectPublicStaticFiles();
-  const staticFiles = staticResult.files;
-  const topLevelDocsResult = await collectPublicTopLevelDocsFiles();
-  const topLevelDocsFiles = topLevelDocsResult.files;
   const uniqueInventory = buildPublicInventory({
-    rootMarkdownFiles: rootMarkdownResult.files,
-    recursiveFiles,
-    sharedFiles,
-    staticFiles,
-    topLevelDocsFiles,
+    trackedFiles,
+    rootMarkdownFiles: [],
+    recursiveFiles: [],
+    sharedFiles: [],
+    staticFiles: [],
+    topLevelDocsFiles: [],
     packageMarkdownFiles: packageMarkdownResult.markdownFiles,
   });
   const inventorySet = new Set(uniqueInventory);
 
   const inventoryFailures = [];
   const packageBoundaryFailures = [...packageMarkdownResult.boundaryFailures];
+  const packageArchiveFailures = [...packageMarkdownResult.archiveFailures];
   const sourceRootFailures = [];
-  if (rootMarkdownResult.missingRootFailure) {
-    sourceRootFailures.push(rootMarkdownResult.missingRootFailure);
-  }
-  if (recursiveResult.missingRootFailure) {
-    sourceRootFailures.push(recursiveResult.missingRootFailure);
-  }
-  if (sharedResult.missingRootFailure) {
-    sourceRootFailures.push(sharedResult.missingRootFailure);
-  }
-  if (staticResult.missingRootFailure) {
-    sourceRootFailures.push(staticResult.missingRootFailure);
-  }
-  if (topLevelDocsResult.missingRootFailure) {
-    sourceRootFailures.push(topLevelDocsResult.missingRootFailure);
+  for (const file of requiredSourceFiles) {
+    if (!inventorySet.has(file)) {
+      sourceRootFailures.push({
+        file,
+        reason: 'required public documentation source is not tracked',
+      });
+    }
   }
   const globalFailures = [];
   const failedInventoryFiles = new Set();
@@ -836,15 +978,33 @@ async function main() {
     }
   }
 
+  for (const reason of validateNavigationGraph({
+    modules: contentModules,
+    sections: contentSections,
+    renderedEntries: [
+      {
+        source: 'docs/src/hero.js',
+        rendered: renderHero(null),
+      },
+    ],
+  })) {
+    globalFailures.push({
+      file: 'docs/src/content/index.js',
+      reason,
+    });
+  }
+
   const passCount = countInventoryPasses(uniqueInventory, failedInventoryFiles);
   const sortedInventoryFailures = sortFailureRecords(inventoryFailures);
   const sortedPackageBoundaryFailures = sortFailureRecords(packageBoundaryFailures);
+  const sortedPackageArchiveFailures = sortFailureRecords(packageArchiveFailures);
   const sortedSourceRootFailures = sortFailureRecords(sourceRootFailures);
   const sortedGlobalFailures = sortFailureRecords(globalFailures);
 
   if (
     sortedInventoryFailures.length > 0
     || sortedPackageBoundaryFailures.length > 0
+    || sortedPackageArchiveFailures.length > 0
     || sortedSourceRootFailures.length > 0
     || sortedGlobalFailures.length > 0
   ) {
@@ -860,6 +1020,13 @@ async function main() {
     if (sortedPackageBoundaryFailures.length > 0) {
       console.error('Package boundary failures:');
       for (const failure of sortedPackageBoundaryFailures) {
+        console.error(`${failure.file}: ${failure.reason}`);
+      }
+    }
+
+    if (sortedPackageArchiveFailures.length > 0) {
+      console.error('Package archive failures:');
+      for (const failure of sortedPackageArchiveFailures) {
         console.error(`${failure.file}: ${failure.reason}`);
       }
     }

@@ -77,7 +77,7 @@
     "release:testflight": "node scripts/app-store-connect.mjs wait-and-localize",
     "test": "vitest --run",
     "smoke": "pnpm run build && vitest --run -c vitest.smoke.config.ts",
-    "prepack": "pnpm run docs:focus:check && pnpm run build",
+    "prepack": "pnpm run build && pnpm run docs:focus:check",
     "smoke:pack": "node scripts/smoke-pack-install.js"
   },
   "bin": {

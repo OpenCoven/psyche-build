@@ -13,7 +13,7 @@ describe('control task token package surface', () => {
   it('pins the real prepack and pack-smoke contract for the published subpath', () => {
     expect(packageJson.files).toContain('dist/**/*');
     expect(packageJson.scripts?.prepack).toBe(
-      'pnpm run docs:focus:check && pnpm run build',
+      'pnpm run build && pnpm run docs:focus:check',
     );
     expect(packageJson.scripts?.prepublishOnly).toBeUndefined();
     expect(packageJson.scripts?.['smoke:pack']).toBe('node scripts/smoke-pack-install.js');

@@ -44,6 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           pnpm docs:focus:check
+          pnpm --dir docs build
           pnpm test
           pnpm typecheck
           pnpm build
