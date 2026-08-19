@@ -478,7 +478,7 @@ describe('desktop Tauri layout', () => {
     const job = workflowJob(workflow, 'desktop-check');
 
     expect(job).toMatch(
-      /- name: Install Tauri Linux prerequisites\s*\n\s+if: runner\.os == 'Linux'\s*\n\s+timeout-minutes: 10\s*\n\s+shell: bash\s*\n\s+run: \|/,
+      /- name: Install Tauri Linux prerequisites\s*\n\s+if: runner\.os == 'Linux'\s*\n\s+timeout-minutes: 20\s*\n\s+shell: bash\s*\n\s+run: \|/,
     );
     for (const dependency of [
       'libwebkit2gtk-4.1-dev',
