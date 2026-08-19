@@ -70,7 +70,8 @@ This job always runs on macOS because repository tests depend on tmux.
 It performs:
 
 - locked dependency installation;
-- the complete root Vitest suite;
+- the non-desktop subset of the root Vitest suite, with desktop contract
+  tests running in `desktop-web`;
 - production and test typechecks;
 - the root build;
 - the public-documentation focus check and production docs build when those
