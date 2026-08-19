@@ -793,6 +793,168 @@ describe('TerminalPaneController lifecycle', () => {
   });
 });
 
+describe('TerminalPaneController resize resilience', () => {
+  type IntersectionEntries = Array<{ isIntersecting: boolean }>;
+
+  function createObservedHarness(paneId: string) {
+    const frames = frameQueue();
+    const scheduler = new FrameScheduler(frames.requestFrame);
+    const element = new FakeElement();
+    const timers: Array<{ id: number; callback: () => void; delay: number }> = [];
+    let nextTimerId = 1;
+    let notifyIntersection: (entries: IntersectionEntries) => void = () => undefined;
+    const fits: FakeFitAddon[] = [];
+    const controller = createTerminalPaneController({
+      paneId,
+      threadId: paneId,
+      container: element,
+      frameScheduler: scheduler,
+      invoke: vi.fn(async () => undefined),
+      initialVisibility: visible,
+      terminalFactory: (terminalOptions) => new FakeTerminal(terminalOptions),
+      fitAddonFactory: (terminal) => {
+        const fit = new FakeFitAddon(terminal as unknown as FakeTerminal);
+        fits.push(fit);
+        return fit;
+      },
+      webglAddonFactory: () => null,
+      createResizeObserver: () => ({ observe: () => undefined, disconnect: () => undefined }),
+      createIntersectionObserver: (callback) => {
+        notifyIntersection = callback;
+        return { observe: () => undefined, disconnect: () => undefined };
+      },
+      documentTarget: null,
+      setTimer: (callback, delay) => {
+        const id = nextTimerId++;
+        timers.push({ id, callback, delay });
+        return id as unknown as ReturnType<typeof setTimeout>;
+      },
+      clearTimer: (timer) => {
+        const index = timers.findIndex((entry) => entry.id === (timer as unknown as number));
+        if (index !== -1) timers.splice(index, 1);
+      },
+    });
+    controllers.push(controller);
+    return {
+      controller,
+      element,
+      fits,
+      frames,
+      timers,
+      intersect: (isIntersecting: boolean) => notifyIntersection([{ isIntersecting }]),
+    };
+  }
+
+  it('keeps the visible cadence when a layout rebuild momentarily detaches the pane', async () => {
+    const harness = createObservedHarness('pane-blip');
+
+    harness.intersect(false);
+    await flushPromises();
+
+    // Nothing is applied yet: the pane owes the debounce before it counts as hidden.
+    expect(harness.controller.rendererSnapshot().effectiveVisible).toBe(true);
+    expect(harness.timers.map((timer) => timer.delay)).toEqual([250]);
+
+    harness.intersect(true);
+    await flushPromises();
+
+    expect(harness.timers).toHaveLength(0);
+    expect(harness.controller.rendererSnapshot().visibility.intersecting).toBe(true);
+    expect(harness.controller.rendererSnapshot().effectiveVisible).toBe(true);
+  });
+
+  it('still drops to the hidden cadence once the pane stays off screen', async () => {
+    const harness = createObservedHarness('pane-offscreen');
+
+    harness.intersect(false);
+    const debounce = harness.timers.shift();
+    expect(debounce?.delay).toBe(250);
+    debounce?.callback();
+    await flushPromises();
+
+    expect(harness.controller.rendererSnapshot().visibility.intersecting).toBe(false);
+    expect(harness.controller.rendererSnapshot().effectiveVisible).toBe(false);
+  });
+
+  it('lets an explicit visibility update outrank a pending hide debounce', async () => {
+    const harness = createObservedHarness('pane-explicit');
+
+    harness.intersect(false);
+    expect(harness.timers).toHaveLength(1);
+
+    await harness.controller.setVisibility({
+      documentVisible: true,
+      paneVisible: true,
+      intersecting: true,
+    });
+
+    expect(harness.timers).toHaveLength(0);
+    expect(harness.controller.rendererSnapshot().effectiveVisible).toBe(true);
+  });
+
+  it('applies a dequeued offscreen debounce to the latest visibility state only', async () => {
+    const harness = createObservedHarness('pane-stale-hide');
+
+    harness.intersect(false);
+    const debounce = harness.timers.shift();
+    expect(debounce?.delay).toBe(250);
+
+    await harness.controller.setVisibility({
+      documentVisible: false,
+      paneVisible: false,
+      intersecting: true,
+    });
+    debounce?.callback();
+    await flushPromises();
+
+    expect(harness.controller.rendererSnapshot().visibility).toEqual({
+      documentVisible: false,
+      paneVisible: false,
+      intersecting: false,
+    });
+  });
+
+  it('drops a pending hide debounce on disposal', () => {
+    const harness = createObservedHarness('pane-disposed');
+
+    harness.intersect(false);
+    expect(harness.timers).toHaveLength(1);
+
+    harness.controller.dispose();
+    expect(harness.timers).toHaveLength(0);
+  });
+
+  it('retries a fit that threw instead of stranding the pane at a stale size', () => {
+    const harness = createObservedHarness('pane-fit-retry');
+    harness.frames.flush();
+    const fit = harness.fits[0];
+    fit.fitCalls = 0;
+
+    const failure = new Error('measurement unavailable');
+    let shouldThrow = true;
+    const originalFit = fit.fit.bind(fit);
+    fit.fit = () => {
+      originalFit();
+      if (shouldThrow) throw failure;
+    };
+
+    harness.controller.scheduleFit();
+    harness.frames.flush();
+    expect(fit.fitCalls).toBe(1);
+
+    // The next visible frame has to retry: the failed fit never landed, so the
+    // pane is still sized for whatever box it held before.
+    shouldThrow = false;
+    harness.controller.write('after the failure');
+    harness.frames.flush();
+    expect(fit.fitCalls).toBe(2);
+
+    harness.controller.write('once fitted');
+    harness.frames.flush();
+    expect(fit.fitCalls).toBe(2);
+  });
+});
+
 describe('Tauri terminal controller integration', () => {
   const mainSource = readFileSync(
     resolve(process.cwd(), 'native/desktop/psyche-build-tauri/web/main.js'),
@@ -826,4 +988,5 @@ describe('Tauri terminal controller integration', () => {
     expect(runtimeBundle).toContain('webgl_recovery_failed');
     expect(runtimeBundle).toContain('webgl_recovery_cooldown');
   });
+
 });

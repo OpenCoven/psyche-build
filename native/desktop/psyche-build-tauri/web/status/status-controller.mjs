@@ -657,11 +657,12 @@ function normalizeFailureTimestamps(value) {
   return parsed == null ? [] : [parsed];
 }
 
-function metricDisplayValue(valueText) {
+function metricDisplayValue(valueText, menuText = valueText) {
   const text = valueText == null ? null : String(valueText);
   return {
     available: text != null,
     valueText: text,
+    menuText: menuText == null ? null : String(menuText),
   };
 }
 
@@ -697,6 +698,7 @@ function compactConnection(nativeHealth, covenHealth) {
     available: true,
     state,
     valueText,
+    menuText: valueText,
   };
 }
 
@@ -719,6 +721,26 @@ function compactActivity(activity) {
   return `${Math.round(operations)} ops`;
 }
 
+function menuTasks(summary) {
+  const parts = [
+    `${summary.counts.running} running`,
+    `${summary.counts.waiting} waiting`,
+  ];
+  if (summary.counts.failed > 0) {
+    parts.push(`${summary.counts.failed} failed`);
+  }
+  return parts.join(' · ');
+}
+
+function menuActivity(activity) {
+  const lines = finiteNumber(activity?.workspace?.linesPerSecond) ?? 0;
+  const operations = finiteNumber(activity?.workspace?.operationsPerSecond) ?? 0;
+  if (lines <= 0 && operations <= 0) return 'idle';
+  if (lines > 0) return `${Math.round(lines)} lines/s`;
+  const roundedOperations = Math.round(operations);
+  return `${roundedOperations} ${roundedOperations === 1 ? 'op/s' : 'ops/s'}`;
+}
+
 function buildMetricDisplays(sample) {
   const nativeSnapshot = sample.nativeSnapshot;
   const frame = sample.frame;
@@ -727,16 +749,22 @@ function buildMetricDisplays(sample) {
 
   return {
     connection: compactConnection(sample.nativeHealth, sample.covenHealth),
-    agents: metricDisplayValue(String(summary.counts.agents)),
-    shells: metricDisplayValue(String(summary.counts.shells)),
-    tasks: metricDisplayValue(compactTasks(summary)),
+    agents: metricDisplayValue(String(summary.counts.agents), `${summary.counts.agents} active`),
+    shells: metricDisplayValue(String(summary.counts.shells), `${summary.counts.shells} running`),
+    tasks: metricDisplayValue(compactTasks(summary), menuTasks(summary)),
     performance: metricDisplayValue(
       nativeSnapshot
         ? `${formatPercent(nativeSnapshot.workspace?.cpuPercent)} ${shortMemory(nativeSnapshot.workspace?.memoryBytes)}`
         : null,
+      nativeSnapshot
+        ? `CPU ${formatPercent(nativeSnapshot.workspace?.cpuPercent)} · ${formatMemory(nativeSnapshot.workspace?.memoryBytes)}`
+        : null,
     ),
-    fps: metricDisplayValue(Number.isFinite(frame?.fps) ? String(Math.round(frame.fps)) : null),
-    activity: metricDisplayValue(compactActivity(activity)),
+    fps: metricDisplayValue(
+      Number.isFinite(frame?.fps) ? String(Math.round(frame.fps)) : null,
+      Number.isFinite(frame?.fps) ? `${Math.round(frame.fps)} FPS` : null,
+    ),
+    activity: metricDisplayValue(compactActivity(activity), menuActivity(activity)),
   };
 }
 
@@ -1265,9 +1293,20 @@ function renderMoreMenuState({
   head.textContent = 'Status options';
   body.appendChild(head);
 
+  const columns = doc.createElement('div');
+  columns.className = 'status-more-columns';
+  columns.setAttribute('aria-hidden', 'true');
+  for (const label of ['Metric', 'Reading', 'Visible', 'Order']) {
+    columns.appendChild(appendTextCell(doc, 'status-more-column', label));
+  }
+  body.appendChild(columns);
+
   for (const id of preferences.order) {
     const row = doc.createElement('div');
     row.className = 'status-more-row';
+    row.dataset.metricKind = ['performance', 'fps', 'activity'].includes(id)
+      ? 'telemetry'
+      : 'status';
 
     const open = doc.createElement('button');
     open.type = 'button';
@@ -1291,7 +1330,7 @@ function renderMoreMenuState({
     } else {
       setPlainMetricValue(
         { value },
-        available ? (display?.valueText ?? '--') : 'Unavailable',
+        available ? (display?.menuText ?? '--') : 'Unavailable',
       );
       value.className = 'status-more-open-value';
     }
@@ -1311,16 +1350,14 @@ function renderMoreMenuState({
     checkbox.setAttribute('aria-label', `Show ${METRICS[id].label}`);
     toggle.append(
       checkbox,
-      appendTextCell(doc, 'status-more-toggle-label', 'Show'),
+      appendTextCell(doc, 'status-more-toggle-label', 'Visible'),
     );
+    toggle.querySelector('.status-more-toggle-label')?.setAttribute('aria-hidden', 'true');
 
-    const meta = doc.createElement('div');
-    meta.className = 'status-more-meta';
     const badges = [];
     if (!availableMetrics.has(id)) badges.push('unavailable');
     if (overflowed.includes(id)) badges.push('hidden by width');
     if (preferences.pinned.includes(id)) badges.push('pinned');
-    meta.textContent = badges.join(' · ');
 
     const controls = doc.createElement('div');
     controls.className = 'status-more-controls';
@@ -1330,8 +1367,9 @@ function renderMoreMenuState({
     earlier.dataset.focusKey = `more-earlier:${id}`;
     earlier.dataset.metric = id;
     earlier.dataset.moreAction = 'move-earlier';
-    earlier.textContent = 'Earlier';
-    earlier.setAttribute('aria-label', `Move ${METRICS[id].label} earlier`);
+    earlier.textContent = '↑';
+    earlier.title = `Move ${METRICS[id].label} earlier`;
+    earlier.setAttribute('aria-label', earlier.title);
     earlier.disabled = preferences.order.indexOf(id) <= 0;
 
     const later = doc.createElement('button');
@@ -1340,12 +1378,19 @@ function renderMoreMenuState({
     later.dataset.focusKey = `more-later:${id}`;
     later.dataset.metric = id;
     later.dataset.moreAction = 'move-later';
-    later.textContent = 'Later';
-    later.setAttribute('aria-label', `Move ${METRICS[id].label} later`);
+    later.textContent = '↓';
+    later.title = `Move ${METRICS[id].label} later`;
+    later.setAttribute('aria-label', later.title);
     later.disabled = preferences.order.indexOf(id) >= preferences.order.length - 1;
 
     controls.append(earlier, later);
-    row.append(open, toggle, meta, controls);
+    row.append(open, toggle, controls);
+    if (badges.length > 0) {
+      const meta = doc.createElement('div');
+      meta.className = 'status-more-meta';
+      meta.textContent = badges.join(' · ');
+      row.appendChild(meta);
+    }
     body.appendChild(row);
   }
 

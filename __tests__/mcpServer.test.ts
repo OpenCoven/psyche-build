@@ -212,11 +212,15 @@ describe('MCP canonical delegation and read-only helpers', () => {
   });
 
   it('delegates multi-lane execute_task with normalized task request', async () => {
-    const fake = client({ submit: vi.fn(async () => ({ status: 'succeeded' })) });
+    const outcome = {
+      status: 'succeeded' as const,
+      value: { taskId: 'task-2', status: 'completed' },
+    };
+    const fake = client({ submit: vi.fn(async () => outcome) });
     inject({ controlClientForRoot: vi.fn(async () => fake), randomId: () => 'id-2' });
     const auth = { task_id: 'task-2', lease_id: 'lease-2', lease_revision: 1 };
 
-    await call('psyche_execute_task', {
+    const response = await call('psyche_execute_task', {
       ...auth, project_root: '/repo', prompt: 'Fix tests',
       lanes: [
         { id: 'codex', mode: 'isolated-worktree', agent: 'codex' },
@@ -225,6 +229,7 @@ describe('MCP canonical delegation and read-only helpers', () => {
       concurrency: 2,
     });
 
+    expect(payload(response)).toEqual(outcome);
     expect(fake.submit).toHaveBeenCalledOnce();
     const submitted = fake.submit.mock.calls[0][0];
     expect(submitted.kind).toBe('orchestration.execute');
@@ -278,12 +283,38 @@ describe('MCP canonical delegation and read-only helpers', () => {
     };
 
     expect((await call('psyche_execute_task', args)).error.message).toBe('control connection closed');
-    expect(payload(await call('psyche_execute_task', args)))
-      .toMatchObject({ status: 'unknown', code: 'effect_unknown' });
+    expect((await call('psyche_execute_task', args)).error)
+      .toMatchObject({ data: { code: 'effect_unknown' } });
     expect(effects).toHaveBeenCalledOnce();
     expect(fake.submit.mock.calls[0][0].id).not.toBe(fake.submit.mock.calls[1][0].id);
     expect(fake.submit.mock.calls[0][0].idempotencyKey)
       .toBe(fake.submit.mock.calls[1][0].idempotencyKey);
+  });
+
+  it('maps a rejected orchestration outcome to a JSON-RPC control error', async () => {
+    const fake = client({
+      submit: vi.fn(async () => ({
+        status: 'rejected',
+        code: 'capability_denied',
+        message: 'lease is stale',
+      })),
+    });
+    inject({ controlClientForRoot: vi.fn(async () => fake) });
+
+    await expect(call('psyche_execute_task', {
+      project_root: '/repo',
+      prompt: 'Fix tests',
+      lanes: [{ id: 'terminal', mode: 'terminal' }],
+      task_id: 'task-1',
+      lease_id: 'lease-1',
+      lease_revision: 1,
+    })).resolves.toMatchObject({
+      error: {
+        code: MCP_CONTROL_ERROR_CODE,
+        message: 'lease is stale',
+        data: { code: 'capability_denied' },
+      },
+    });
   });
 
   it('translates create_pane to a single-lane pane action via control owner', async () => {

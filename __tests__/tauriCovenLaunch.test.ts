@@ -7,6 +7,7 @@ import {
   disposePtyClient,
   routePtyBatch,
 } from '../native/desktop/psyche-build-tauri/web/runtime/pty-client';
+import { withFilesScopeSelectionHelper } from './tauriMainHarness';
 
 const repoRoot = process.cwd();
 const libRs = readFileSync(
@@ -134,7 +135,11 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     ...compilePaneFocusDependencies(dependencies),
     ...dependencies,
   };
-  return compileIsolatedFunction<T>(source, resolvedDependencies);
+  const dependenciesWithFilesScope = withFilesScopeSelectionHelper(
+    functionSource,
+    resolvedDependencies,
+  );
+  return compileIsolatedFunction<T>(source, dependenciesWithFilesScope);
 }
 
 function deferred<T>() {

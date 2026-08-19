@@ -989,12 +989,21 @@ export const TOOLS: ToolDef[] = [
         ...(typeof args.branch === 'string' ? { startPointBranch: args.branch } : {}),
         ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}),
       };
-      return client.submit(command(
-        'orchestration.execute',
-        projectRoot,
-        { ...authorization!, request },
-        operationId ? `mcp:orchestration.execute:${operationId}` : undefined,
-      ));
+      const outcome = await client.submit(
+        command(
+          'orchestration.execute',
+          projectRoot,
+          { ...authorization!, request },
+          operationId ? `mcp:orchestration.execute:${operationId}` : undefined,
+        ),
+      );
+      if (outcome.status !== 'succeeded') {
+        throw new ControlResponseError(
+          outcome.code ?? 'orchestration_failed',
+          outcome.message ?? 'orchestration failed',
+        );
+      }
+      return outcome;
     }),
   },
   {

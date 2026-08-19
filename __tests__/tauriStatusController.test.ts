@@ -1066,7 +1066,9 @@ describe('tauri status controller', () => {
 
     const hiddenTasksOpen = hiddenByWidth.elements.moreMenu.querySelector('[data-focus-key="more-open:tasks"]');
     expect(hiddenTasksOpen?.querySelector('.status-more-open-label')?.textContent).toBe('Tasks');
-    expect(hiddenTasksOpen?.querySelector('.status-more-open-value')?.textContent).toBe('2 Run  1 Wait  1 Fail');
+    expect(hiddenTasksOpen?.querySelector('.status-more-open-value')?.textContent).toBe(
+      '2 running · 1 waiting · 1 failed',
+    );
     expect(hiddenTasksOpen?.title).toBeTruthy();
     expect(
       hiddenByWidth.elements.moreMenu.querySelector('[data-focus-key="more-open:tasks"]')
@@ -1089,6 +1091,166 @@ describe('tauri status controller', () => {
     expect(unavailablePerfOpen?.querySelector('.status-more-open-label')?.textContent).toBe('Perf');
     expect(unavailablePerfOpen?.querySelector('.status-more-open-value')?.textContent).toBe('Unavailable');
     expect(unavailablePerfOpen?.parentElement?.querySelector('.status-more-meta')?.textContent).toContain('unavailable');
+  });
+
+  it('renders a compact labeled matrix with explicit readings and metric kinds', () => {
+    const { controller, elements } = createHarness({
+      hidden: true,
+      barWidth: 300,
+    });
+    const rendered = controller.render(buildSample({
+      nativeSnapshot: buildNativeSnapshot({
+        workspace: {
+          cpuPercent: 55,
+          memoryBytes: 512 * 1024 * 1024,
+        },
+      }),
+      frame: {
+        fps: 59.6,
+        renderLatencyMs: 17,
+        droppedFrames: 0,
+      },
+      activity: {
+        workspace: {
+          bytesPerSecond: 100,
+          linesPerSecond: 14.6,
+          operationsPerSecond: 3,
+          errors: 0,
+        },
+        threads: [],
+      },
+      summary: {
+        counts: {
+          agents: 3,
+          shells: 2,
+          running: 4,
+          waiting: 1,
+          failed: 0,
+        },
+      },
+    }));
+
+    expect(rendered?.labels).toMatchObject({
+      agents: '3',
+      shells: '2',
+      tasks: '4 Run  1 Wait',
+      performance: '55% 512M',
+      fps: '60',
+      activity: '15 l/s',
+    });
+
+    elements.more.dispatch('click');
+    const columns = elements.moreMenu.querySelector('.status-more-columns');
+    expect(columns?.attributes.get('aria-hidden')).toBe('true');
+    expect(classTexts(columns as FakeElement, 'status-more-column')).toEqual([
+      'Metric',
+      'Reading',
+      'Visible',
+      'Order',
+    ]);
+
+    const expectedReadings: Record<string, string> = {
+      connection: 'Connected',
+      agents: '3 active',
+      shells: '2 running',
+      tasks: '4 running · 1 waiting',
+      performance: 'CPU 55% · 512 MB',
+      fps: '60 FPS',
+      activity: '15 lines/s',
+    };
+    for (const [id, reading] of Object.entries(expectedReadings)) {
+      const open = elements.moreMenu.querySelector(`[data-focus-key="more-open:${id}"]`);
+      expect(open?.querySelector('.status-more-open-value')?.textContent).toBe(reading);
+      expect(open?.parentElement?.dataset.metricKind).toBe(
+        ['performance', 'fps', 'activity'].includes(id) ? 'telemetry' : 'status',
+      );
+    }
+
+    const connectionRow = elements.moreMenu
+      .querySelector('[data-focus-key="more-open:connection"]')?.parentElement;
+    expect(connectionRow?.querySelector('.status-more-meta')).toBeNull();
+    expect(
+      elements.moreMenu
+        .querySelector('[data-focus-key="more-open:tasks"]')
+        ?.parentElement?.querySelector('.status-more-meta')?.textContent,
+    ).toContain('hidden by width');
+  });
+
+  it('formats output menu readings for idle and singular or plural operation rates', () => {
+    const { controller, elements } = createHarness({ hidden: true });
+    const renderOutput = (linesPerSecond: number, operationsPerSecond: number) => {
+      controller.render(buildSample({
+        activity: {
+          workspace: {
+            bytesPerSecond: 0,
+            linesPerSecond,
+            operationsPerSecond,
+            errors: 0,
+          },
+          threads: [],
+        },
+      }));
+      return elements.moreMenu
+        .querySelector('[data-focus-key="more-open:activity"]')
+        ?.querySelector('.status-more-open-value')?.textContent;
+    };
+
+    controller.render(buildSample());
+    elements.more.dispatch('click');
+    expect(renderOutput(0, 0)).toBe('idle');
+    expect(renderOutput(0, 1)).toBe('1 op/s');
+    expect(renderOutput(0, 2)).toBe('2 ops/s');
+  });
+
+  it('keeps native visibility switches and compact titled order controls accessible', () => {
+    const { controller, elements } = createHarness({ hidden: true });
+    controller.render(buildSample({
+      nativeSnapshot: buildNativeSnapshot(),
+    }));
+    elements.more.dispatch('click');
+
+    const performanceCheckbox = elements.moreMenu.querySelector(
+      '[data-focus-key="more-show:performance"]',
+    );
+    expect(performanceCheckbox?.tagName).toBe('INPUT');
+    expect(performanceCheckbox?.type).toBe('checkbox');
+    expect(performanceCheckbox?.attributes.get('aria-label')).toBe('Show Perf');
+    expect(performanceCheckbox?.parentElement?.querySelector('.status-more-toggle-label')?.textContent)
+      .toBe('Visible');
+    expect(
+      performanceCheckbox?.parentElement
+        ?.querySelector('.status-more-toggle-label')?.attributes.get('aria-hidden'),
+    ).toBe('true');
+
+    const connectionCheckbox = elements.moreMenu.querySelector(
+      '[data-focus-key="more-show:connection"]',
+    );
+    expect(connectionCheckbox?.checked).toBe(true);
+    expect(connectionCheckbox?.disabled).toBe(true);
+
+    const connectionEarlier = elements.moreMenu.querySelector(
+      '[data-focus-key="more-earlier:connection"]',
+    );
+    expect(connectionEarlier?.textContent).toBe('↑');
+    expect(connectionEarlier?.attributes.get('aria-label')).toBe('Move Conn earlier');
+    expect(connectionEarlier?.title).toBe('Move Conn earlier');
+    expect(connectionEarlier?.disabled).toBe(true);
+
+    const connectionLater = elements.moreMenu.querySelector(
+      '[data-focus-key="more-later:connection"]',
+    );
+    expect(connectionLater?.textContent).toBe('↓');
+    expect(connectionLater?.attributes.get('aria-label')).toBe('Move Conn later');
+    expect(connectionLater?.title).toBe('Move Conn later');
+    expect(connectionLater?.disabled).toBe(false);
+
+    const activityLater = elements.moreMenu.querySelector(
+      '[data-focus-key="more-later:activity"]',
+    );
+    expect(activityLater?.textContent).toBe('↓');
+    expect(activityLater?.attributes.get('aria-label')).toBe('Move Output later');
+    expect(activityLater?.title).toBe('Move Output later');
+    expect(activityLater?.disabled).toBe(true);
   });
 
   it('moves focus into the detail panel from More and restores it to More for overflowed metrics', () => {

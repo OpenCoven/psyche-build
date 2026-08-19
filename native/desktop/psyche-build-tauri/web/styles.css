@@ -175,7 +175,7 @@ kbd {
   background: var(--sidebar-surface);
 }
 
-/* Collapsed rails — one click anywhere brings the surface back. */
+/* Collapsed rails stay inert except for their explicit controls. */
 .mini-rail {
   display: flex;
   flex-direction: column;
@@ -233,7 +233,7 @@ kbd {
   padding: 0 8px 8px;
   flex: none;
 }
-.sidebar-head .rail-btn { width: 26px; height: 26px; border-radius: 7px; }
+.sidebar-head .rail-btn { width: 100%; height: 34px; border-radius: 8px; }
 
 /* -------- Sidebar sections: Sessions | Files --------
    The file tree used to be a right-dock panel. It now shares the left rail
@@ -291,6 +291,7 @@ kbd {
   gap: 4px;
   padding: 0 10px 8px;
 }
+.sidebar-controls[hidden] { display: none; }
 .session-filter {
   border: 1px solid transparent;
   border-radius: 999px;
@@ -326,6 +327,30 @@ kbd {
   min-height: 24px;
   padding: 0 4px 0 10px;
   border-bottom: 1px solid var(--border);
+}
+.sidebar-back-button {
+  flex: none;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  transition: background var(--transition-fast), color var(--transition-fast),
+              border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.sidebar-back-button:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.sidebar-back-button:focus-visible {
+  outline: none;
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 .sidebar-subbar .panel-crumb { flex: 1 1 auto; min-width: 0; }
 .sidebar-files .file-tree { flex: 1 1 auto; }
@@ -910,6 +935,25 @@ kbd {
   border-color: var(--accent-line);
 }
 .rail-btn[aria-pressed="true"] .panel-fill { opacity: 0.85; }
+.new-session-button {
+  justify-content: flex-start;
+  padding: 0 12px;
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.new-session-button:hover:not(:disabled),
+.new-session-button[aria-expanded="true"] {
+  background: rgba(var(--rgb-accent), 0.2);
+  border-color: rgba(var(--rgb-accent), 0.46);
+  color: #f8f5ff;
+}
+.new-session-button:focus-visible {
+  border-color: rgba(var(--rgb-accent), 0.5);
+  box-shadow: var(--focus-ring);
+}
 
 /* The titlebar splits into a sidebar cap and a blank workspace drag zone so
    the detail corner can bite into the chrome below it. */
@@ -2488,22 +2532,22 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 
 .status-metric[data-severity="warn"],
-.status-more-btn[data-severity="warn"],
-.status-more-item[data-severity="warn"] {
+.status-more-btn[data-severity="warn"] {
   color: var(--warn);
 }
 
-.status-metric[data-severity="warn"] .status-metric-value {
+.status-metric[data-severity="warn"] .status-metric-value,
+.status-more-open[data-severity="warn"] .status-more-open-value {
   color: var(--warn);
 }
 
 .status-metric[data-severity="danger"],
-.status-more-btn[data-severity="danger"],
-.status-more-item[data-severity="danger"] {
+.status-more-btn[data-severity="danger"] {
   color: var(--error);
 }
 
-.status-metric[data-severity="danger"] .status-metric-value {
+.status-metric[data-severity="danger"] .status-metric-value,
+.status-more-open[data-severity="danger"] .status-more-open-value {
   color: var(--error);
 }
 
@@ -2513,9 +2557,9 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   bottom: calc(var(--status-h) + 8px);
   z-index: 65;
   display: grid;
-  gap: 2px;
-  width: 260px;
-  max-width: min(320px, calc(100vw - 16px));
+  gap: 0;
+  width: 320px;
+  max-width: calc(100vw - 16px);
   padding: 6px;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
@@ -2524,12 +2568,36 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 
 .status-more-head {
-  padding: 4px 6px 2px;
+  padding: 4px 6px 6px;
   color: var(--muted);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.07em;
   text-transform: uppercase;
+}
+
+.status-more-columns {
+  display: grid;
+  grid-template-columns: minmax(64px, 0.75fr) minmax(0, 1.25fr) 44px 52px;
+  align-items: center;
+  min-height: 20px;
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.status-more-column {
+  min-width: 0;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.status-more-column:nth-child(3),
+.status-more-column:nth-child(4) {
+  padding: 0;
+  text-align: center;
 }
 
 .status-more-item {
@@ -2542,49 +2610,115 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 .status-more-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface-1);
+  grid-template-columns: minmax(0, 1fr) 44px 52px;
+  align-items: center;
+  min-height: 30px;
+  border-bottom: 1px solid var(--border);
+}
+
+.status-more-row:last-child {
+  border-bottom: 0;
 }
 
 .status-more-open {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: minmax(64px, 0.75fr) minmax(0, 1.25fr);
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 0;
+  height: 28px;
   padding: 0;
+  border-radius: 4px;
 }
 
 .status-more-open-label,
 .status-more-open-value {
   min-width: 0;
+  padding: 0 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.status-more-open-label {
+  color: var(--muted);
+}
+
 .status-more-open-value {
-  margin-left: auto;
+  color: var(--text);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-more-row[data-metric-kind="telemetry"] .status-more-open-value {
+  font-weight: 600;
 }
 
 .status-more-toggle {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
+  justify-content: center;
   min-width: 0;
   color: var(--text-soft);
 }
 
 .status-more-toggle input {
+  appearance: none;
+  position: relative;
+  width: 26px;
+  height: 14px;
   margin: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.status-more-toggle input::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--muted);
+  transition: transform 120ms ease;
+}
+
+.status-more-toggle input:checked {
+  border-color: var(--accent-line);
+  background: rgba(var(--rgb-accent), 0.18);
+}
+
+.status-more-toggle input:checked::after {
+  background: var(--text);
+  transform: translateX(12px);
+}
+
+.status-more-toggle input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.status-more-toggle-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .status-more-meta {
+  grid-column: 1;
+  grid-row: 2;
   min-width: 0;
+  padding: 0 4px 4px;
   color: var(--muted);
   font-size: 9px;
   line-height: 1.3;
@@ -2594,18 +2728,24 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
+  gap: 2px;
 }
 
 .status-more-move {
+  width: 22px;
   height: 22px;
-  padding: 0 8px;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
   color: var(--text-soft);
   font: inherit;
   font-size: 10px;
+}
+
+.status-more-move:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .status-agent-row,
@@ -3952,31 +4092,22 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
    <html data-theme="...">, persisted as settings.theme.
    ========================================================================== */
 
-/* Coven Purple used to live in :root and needed no block. That stopped being
-   true when the redesign restated :root as the neutral ramp — the default
-   theme kept its name and its violet accent but lost every surface tint, so
-   the one theme most windows run rendered flat grey while the other five kept
-   their colour. It gets an explicit block like everyone else now; :root stays
-   neutral as the fallback for an unrecognised data-theme. */
+/* Coven Purple mirrors the canonical OpenCoven violet and ink primitives. Its
+   explicit block intentionally replaces the prior saturated violet surface
+   ramp with deep grey-violet ink surfaces while :root remains the neutral
+   fallback for unknown themes. */
 :root[data-theme="coven-purple"] {
-  --rgb-accent: 184, 157, 255;
-  --accent: #b89dff;
-  --accent-strong: #9d80f0;
-  /* Surfaces sit on the accent's own violet axis (the r:g:b ratios of #b89dff)
-     rather than a generic blue, so chrome and accent read as one hue. Each
-     step was solved to hold the luminance of the original tinted ramp while
-     widening the channel spread ~4x, which is why every text and semantic
-     token keeps its contrast to two decimal places: --text 16.72:1 -> 16.73:1,
-     --muted 5.15:1 unchanged, --faint 3.67:1 -> 3.68:1 on bg/1. Saturation
-     moved; lightness did not. */
-  --rgb-deep: 15,  6,  39;
-  --rgb-s1:   22,  9,  58;
-  --rgb-s2:   30, 12,  79;
-  --rgb-s3:   40, 16, 103;
-  --rgb-term: 16,  6,  40;
-  --text: #f5f2fb;
-  --text-soft: #c8c2d8;
-  --muted: #8a8499;
+  --rgb-accent: 154, 113, 255;
+  --accent: #9a71ff;
+  --accent-strong: #8254eb;
+  --rgb-deep: 18, 13, 24;
+  --rgb-s1: 27, 21, 36;
+  --rgb-s2: 42, 34, 56;
+  --rgb-s3: 63, 53, 80;
+  --rgb-term: 18, 13, 24;
+  --text: #f3eff7;
+  --text-soft: #bdb3cd;
+  --muted: #9c8fb3;
 }
 
 :root[data-theme="claude-orange"] {
@@ -4113,11 +4244,16 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 .sidebar-head { padding: 10px 10px 8px; gap: 6px; }
 .sidebar-head .rail-btn {
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
+  width: 100%;
+  height: 34px;
+  border-radius: 8px;
   border-color: var(--border);
   background: var(--surface-2);
+}
+.sidebar-head .new-session-button {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent);
 }
 
 /* The keyboard hints lived here permanently to teach three shortcuts; the
@@ -4771,6 +4907,9 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .session-project-name {
   min-width: 0;
   flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text);
   font-size: 11.5px;
   font-weight: 700;
@@ -4779,4 +4918,29 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 .session-project-head .session-project-count {
   color: rgb(var(--project-accent-rgb) / 0.84);
+}
+
+.session-project-files {
+  flex: none;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.session-project-files:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.session-project-files:focus-visible {
+  outline: none;
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
 }

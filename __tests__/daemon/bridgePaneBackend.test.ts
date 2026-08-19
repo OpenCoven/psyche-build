@@ -29,6 +29,12 @@ function spawnResult(id: string) {
       agent: 'codex',
       title: `${id} lane`,
     },
+    createdPane: {
+      id: `psyche-${id}`,
+      slug: id,
+      prompt: 'Fix the failing tests',
+      paneId: `%${id}`,
+    },
     worktreePath: `/w/${id}`,
     branch: `psyche/${id}`,
     persistedPane: {

@@ -144,6 +144,8 @@ export interface BridgeSpawnDeps {
 export interface BridgeSpawnResult {
   id: string;
   pane: PaneSummary;
+  /** Exact durable pane record created by this spawn. */
+  createdPane?: PsychePane;
   worktreePath: string;
   branch: string;
   /** Canonical identity copied from the pane record after it is persisted. */
@@ -1951,6 +1953,7 @@ function bridgeSpawnResult(
   return {
       id: String(pane.paneId),
       pane: rawPaneToSummary(pane, projectRoot),
+      createdPane: pane as unknown as PsychePane,
       worktreePath: String(pane.worktreePath),
       branch: branchName,
       persistedPane: {

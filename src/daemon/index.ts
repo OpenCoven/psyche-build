@@ -29,7 +29,6 @@ import {
   bridgeErrorMessage,
   buildScopedProject,
   capturePaneText,
-  dispatchOrchestrationRequest,
   getProjectCovenSession,
   listProjectCovenSessions,
   listScopedProjects,
@@ -62,6 +61,7 @@ import { createDaemonOrchestrator } from './orchestrationBackend.js';
 import { PaneOutputFanout } from './paneOutputFanout.js';
 import { BrowserProviderBroker } from '../control/browserProviderBroker.js';
 import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
+import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
 
 export interface DaemonOptions {
   port: number;
@@ -423,7 +423,6 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       paneOutput,
       controlRuntime: host.runtime,
       ownerEpoch: host.epoch,
-      orchestrator,
     });
     conn.bind();
   });
@@ -470,8 +469,6 @@ export interface ConnectionDeps {
   /** Current owner epoch, stamped onto every translated command. */
   ownerEpoch: number;
   workspaceProvider?: () => Promise<WorkspaceSnapshot>;
-  /** Orchestrator for `orchestration.execute` requests. */
-  orchestrator?: Orchestrator;
 }
 
 /**
@@ -1185,22 +1182,82 @@ export class Connection {
         return;
       }
       case 'orchestration.execute': {
-        if (!this.deps.orchestrator) {
-          this.send({
-            type: 'error',
-            requestId: msg.requestId,
-            code: 'orchestration_unavailable',
-            message: 'orchestration is not configured for this daemon',
-          });
-          return;
-        }
         try {
-          const response = await dispatchOrchestrationRequest(
-            this.deps.projectRoot,
-            msg,
-            this.deps.orchestrator,
-          );
-          this.send(response);
+          const requestLease = await this.submitControl(this.buildCommand(
+            'lease.request',
+            {
+              taskId: msg.task.taskId,
+              ttlMs: AGENT_CONTROL_LIMITS.leaseTtlMs,
+              grants: [{
+                target: { kind: 'project', id: this.deps.projectRoot },
+                capabilities: ['pane.create'],
+              }],
+            },
+            {
+              actorKind: 'human',
+              idempotencyKey: `v0:orchestration:${this.actorId}:${msg.requestId}:lease-request`,
+            },
+          ));
+          if (requestLease.status !== 'succeeded') {
+            this.sendControlError(msg.requestId, 'orchestration_failed', requestLease);
+            return;
+          }
+          const leaseRequestId = (requestLease.value as { requestId?: string } | undefined)?.requestId;
+          if (!leaseRequestId) {
+            this.send({
+              type: 'error',
+              requestId: msg.requestId,
+              code: 'orchestration_failed',
+              message: 'control runtime returned no lease request ID',
+            });
+            return;
+          }
+          const grantLease = await this.submitControl(this.buildCommand(
+            'lease.grant',
+            { requestId: leaseRequestId },
+            {
+              actorKind: 'human',
+              idempotencyKey: `v0:orchestration:${this.actorId}:${msg.requestId}:lease-grant`,
+            },
+          ));
+          if (grantLease.status !== 'succeeded') {
+            this.sendControlError(msg.requestId, 'orchestration_failed', grantLease);
+            return;
+          }
+          const lease = (grantLease.value as {
+            lease?: { id?: string; revision?: number };
+          } | undefined)?.lease;
+          if (!lease?.id || !lease.revision) {
+            this.send({
+              type: 'error',
+              requestId: msg.requestId,
+              code: 'orchestration_failed',
+              message: 'control runtime returned no orchestration lease',
+            });
+            return;
+          }
+          const outcome = await this.submitControl(this.buildCommand(
+            'orchestration.execute',
+            {
+              taskId: msg.task.taskId,
+              leaseId: lease.id,
+              leaseRevision: lease.revision,
+              request: msg.task,
+            },
+            {
+              actorKind: 'human',
+              idempotencyKey: `v0:orchestration:${this.actorId}:${msg.requestId}:execute`,
+            },
+          ));
+          if (outcome.status !== 'succeeded') {
+            this.sendControlError(msg.requestId, 'orchestration_failed', outcome);
+            return;
+          }
+          this.send({
+            type: 'orchestration.execute.result',
+            requestId: msg.requestId,
+            result: outcome.value as import('../orchestration/types.js').OrchestrationTaskResult,
+          });
           await this.emitWorkspaceChanged();
         } catch (e) {
           this.send({

@@ -83,6 +83,7 @@ describe('pull request CI workflow contract', () => {
 
   it('runs the complete non-secret TypeScript, package, Rust, and frontend gates', () => {
     const workflow = workflowSource();
+    const typescriptJob = workflowJobSource(workflow, 'typescript-rust');
 
     expect(workflow).toContain('runs-on: macos-15');
     expect(workflow).toContain('- name: Install tmux');
@@ -90,6 +91,8 @@ describe('pull request CI workflow contract', () => {
     expect(workflow.indexOf('brew install tmux')).toBeLessThan(workflow.indexOf('pnpm test'));
     expect(workflow).toContain('pnpm install --frozen-lockfile');
     for (const command of [
+      'pnpm docs:focus:check',
+      'pnpm --dir docs build',
       'pnpm test',
       'pnpm typecheck',
       'pnpm build',
@@ -101,6 +104,13 @@ describe('pull request CI workflow contract', () => {
     ]) {
       expect(workflow).toContain(command);
     }
+    expect(typescriptJob.match(/pnpm --dir docs build/g)).toHaveLength(1);
+    expect(typescriptJob.indexOf('pnpm docs:focus:check')).toBeLessThan(
+      typescriptJob.indexOf('pnpm --dir docs build'),
+    );
+    expect(typescriptJob.indexOf('pnpm --dir docs build')).toBeLessThan(
+      typescriptJob.indexOf('pnpm build'),
+    );
     expect(workflow).not.toContain('secrets.');
   });
 

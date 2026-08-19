@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { FrameScheduler } from '../native/desktop/psyche-build-tauri/web/runtime/frame-scheduler';
+import { withFilesScopeSelectionHelper } from './tauriMainHarness';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
@@ -75,6 +76,9 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     saveWorkspaceSoon: () => undefined,
     saveWorkspaceNow: async () => true,
     scheduleBrowserBounds: () => undefined,
+    mountedSplitBranches: new Map(),
+    applyProjectedSplitRatios: () => false,
+    schedulePaneTreeLayout: () => undefined,
     isPersistentThread: (thread: Record<string, any>) =>
       ['shell', 'psyche', 'coven-code', 'coven-attach'].includes(thread?.launch?.launchKind),
     nativeSessionRequest: (thread: Record<string, any>) => ({ id: thread.id }),
@@ -91,8 +95,12 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     ) => preferredId,
     ...dependencies,
   };
-  const names = Object.keys(resolvedDependencies);
-  const values = Object.values(resolvedDependencies);
+  const dependenciesWithFilesScope = withFilesScopeSelectionHelper(
+    functionSource,
+    resolvedDependencies,
+  );
+  const names = Object.keys(dependenciesWithFilesScope);
+  const values = Object.values(dependenciesWithFilesScope);
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
@@ -954,6 +962,169 @@ describe('Tauri physical terminal panes', () => {
     expect(focusPaneDivider).toHaveBeenCalledOnce();
     expect(focusPaneDivider).toHaveBeenCalledWith('split-a');
     expect(saveWorkspaceSoon).toHaveBeenCalledTimes(1);
+  });
+
+  type PaneLayout = { root: any; focusedLeafId: string };
+
+  function splitBranchHarness(hostWidth: number, hostHeight: number) {
+    const leafA = PsychePanes.createLeaf('leaf-a', 'thread-a');
+    const leafB = PsychePanes.createLeaf('leaf-b', 'thread-b');
+    const layout: PaneLayout = {
+      root: PsychePanes.insertRelative(leafA, 'leaf-a', leafB, 'split-a', 'right'),
+      focusedLeafId: 'leaf-a',
+    };
+    const branches = {
+      first: { style: { flexGrow: '0.5' } },
+      second: { style: { flexGrow: '0.5' } },
+      divider: new FakeEventTarget(),
+    };
+    const scheduleTerminalPaneFits = vi.fn();
+    const scheduleBrowserBounds = vi.fn();
+    const applyProjectedSplitRatios = compileFunction<(
+      layout: PaneLayout,
+    ) => boolean>(functionSource('applyProjectedSplitRatios'), {
+      terminalHost: {},
+      mountedSplitBranches: new Map([['split-a', branches]]),
+      effectivePaneRoot: (candidate: PaneLayout) => candidate.root,
+      measuredTerminalHost: () => ({ x: 0, y: 0, width: hostWidth, height: hostHeight }),
+      PANE_MINIMUMS: { width: 200, height: 137, separator: 6 },
+      PsychePanes,
+      scheduleTerminalPaneFits,
+      scheduleBrowserBounds,
+    });
+    return {
+      layout,
+      branches,
+      applyProjectedSplitRatios,
+      scheduleTerminalPaneFits,
+      scheduleBrowserBounds,
+    };
+  }
+
+  it('restyles the mounted branches with the same ratios a full render would project', () => {
+    const harness = splitBranchHarness(1000, 600);
+    harness.layout.root = PsychePanes.resizeSplit(harness.layout.root, 'split-a', 0.7);
+    const expected = PsychePanes.layoutRects(
+      harness.layout.root,
+      { x: 0, y: 0, width: 1000, height: 600 },
+      { width: 200, height: 137, separator: 6 },
+    ).splits[0].ratio;
+
+    expect(harness.applyProjectedSplitRatios(harness.layout)).toBe(true);
+    expect(harness.branches.first.style.flexGrow).toBe(String(expected));
+    expect(harness.branches.second.style.flexGrow).toBe(String(1 - expected));
+    expect(harness.branches.divider.attributes.get('aria-valuenow'))
+      .toBe(String(Math.round(expected * 100)));
+    expect(harness.scheduleTerminalPaneFits).toHaveBeenCalledOnce();
+    expect(harness.scheduleBrowserBounds).toHaveBeenCalledOnce();
+  });
+
+  it('clamps a live divider drag to the pane minimums instead of collapsing a branch', () => {
+    const harness = splitBranchHarness(1000, 600);
+    harness.layout.root = PsychePanes.resizeSplit(harness.layout.root, 'split-a', 0.01);
+
+    expect(harness.applyProjectedSplitRatios(harness.layout)).toBe(true);
+    // 200px minimum over the 994px the separator leaves behind.
+    expect(Number(harness.branches.first.style.flexGrow)).toBeCloseTo(200 / 994, 6);
+  });
+
+  it('defers to a full render when the mounted tree no longer matches the model', () => {
+    const harness = splitBranchHarness(1000, 600);
+    const nested = PsychePanes.insertRelative(
+      harness.layout.root, 'leaf-b', PsychePanes.createLeaf('leaf-c', 'thread-c'), 'split-b', 'right',
+    );
+    harness.layout.root = nested;
+
+    // The registry still only knows split-a, so the restyle cannot be complete.
+    expect(harness.applyProjectedSplitRatios(harness.layout)).toBe(false);
+    expect(harness.scheduleTerminalPaneFits).not.toHaveBeenCalled();
+    expect(harness.scheduleBrowserBounds).not.toHaveBeenCalled();
+  });
+
+  it('resizes a divider drag in place and commits exactly one render when it ends', () => {
+    const leafA = PsychePanes.createLeaf('leaf-a', 'thread-a');
+    const leafB = PsychePanes.createLeaf('leaf-b', 'thread-b');
+    const layout: PaneLayout = {
+      root: PsychePanes.insertRelative(leafA, 'leaf-a', leafB, 'split-a', 'right'),
+      focusedLeafId: 'leaf-a',
+    };
+    const applyProjectedSplitRatios = vi.fn(() => true);
+    const schedulePaneTreeLayout = vi.fn();
+    const updateActiveSplit = compileFunction<(
+      splitId: string,
+      ratio: number,
+      expectedLayout?: PaneLayout,
+      restoreFocus?: boolean,
+      live?: boolean,
+    ) => boolean>(functionSource('updateActiveSplit'), {
+      activePaneLayout: () => layout,
+      PsychePanes,
+      schedulePaneTreeLayout,
+      applyProjectedSplitRatios,
+    });
+    const windowTarget = new FakeEventTarget();
+    const divider = new FakeEventTarget();
+    const captures: number[] = [];
+    const releases: number[] = [];
+    (divider as unknown as Record<string, unknown>).setPointerCapture =
+      (pointerId: number) => { captures.push(pointerId); };
+    (divider as unknown as Record<string, unknown>).releasePointerCapture =
+      (pointerId: number) => { releases.push(pointerId); };
+    divider.parentElement = {
+      getBoundingClientRect: () => ({ left: 0, width: 1000 }),
+    };
+    const createPaneDivider = compileFunction<(
+      node: PaneLayout['root'], ratio: number,
+    ) => FakeEventTarget>(functionSource('createPaneDivider'), {
+      document: { createElement: () => divider },
+      window: windowTarget,
+      activePaneLayout: () => layout,
+      updateActiveSplit,
+      schedulePaneTreeLayout,
+    });
+    createPaneDivider(layout.root, 0.5);
+
+    divider.dispatch('pointerdown', { pointerId: 4, preventDefault: () => undefined });
+    expect(captures).toEqual([4]);
+
+    windowTarget.dispatch('pointermove', { pointerId: 4, clientX: 600 });
+    windowTarget.dispatch('pointermove', { pointerId: 4, clientX: 640 });
+    windowTarget.dispatch('pointermove', { pointerId: 4, clientX: 700 });
+
+    expect(layout.root.ratio).toBeCloseTo(0.7);
+    expect(applyProjectedSplitRatios).toHaveBeenCalledTimes(3);
+    // The point of the whole change: no pane-tree rebuild while the pointer moves.
+    expect(schedulePaneTreeLayout).not.toHaveBeenCalled();
+
+    windowTarget.dispatch('pointerup', { pointerId: 4 });
+    expect(releases).toEqual([4]);
+    expect(schedulePaneTreeLayout).toHaveBeenCalledTimes(1);
+    expect(schedulePaneTreeLayout).toHaveBeenCalledWith(null);
+  });
+
+  it('does not commit a render when a divider is pressed without moving', () => {
+    const layout = { root: { type: 'split', id: 'split-a', orientation: 'row', ratio: 0.5 } };
+    const windowTarget = new FakeEventTarget();
+    const divider = new FakeEventTarget();
+    const schedulePaneTreeLayout = vi.fn();
+    divider.parentElement = {
+      getBoundingClientRect: () => ({ left: 0, width: 1000 }),
+    };
+    const createPaneDivider = compileFunction<(
+      node: { id: string }, ratio: number,
+    ) => FakeEventTarget>(functionSource('createPaneDivider'), {
+      document: { createElement: () => divider },
+      window: windowTarget,
+      activePaneLayout: () => layout,
+      updateActiveSplit: () => false,
+      schedulePaneTreeLayout,
+    });
+    createPaneDivider({ id: 'split-a' }, 0.5);
+
+    divider.dispatch('pointerdown', { pointerId: 9, preventDefault: () => undefined });
+    windowTarget.dispatch('pointerup', { pointerId: 9 });
+
+    expect(schedulePaneTreeLayout).not.toHaveBeenCalled();
   });
 
   it('ignores pointer resizing when the split has no measurable height', () => {
