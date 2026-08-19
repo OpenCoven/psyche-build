@@ -50,10 +50,9 @@ function chroma(triplet: string) {
   return Math.max(...channels) - Math.min(...channels);
 }
 
-/** Comfortably above the subtle ramp this theme first shipped with (spread 8)
- *  and well under what it carries now (34), so the assertion fails if the
- *  default drifts back toward grey without pinning an exact palette. */
-const MIN_DEFAULT_CHROMA = 12;
+/** Below the canonical ink-950 spread (11), so the default cannot drift to a
+ *  grayscale terminal surface without the exact palette contract also failing. */
+const MIN_DEFAULT_CHROMA = 10;
 
 describe('theme tokens', () => {
   const { names, defaultTheme } = declaredThemes();
@@ -78,7 +77,7 @@ describe('theme tokens', () => {
     for (const shape of shapes) expect(shape).toEqual(shapes[0]);
   });
 
-  it('pins the historical Coven Purple palette', () => {
+  it('pins the canonical Coven Purple palette', () => {
     const block = themeBlock('coven-purple') ?? '';
 
     expect({
@@ -94,17 +93,17 @@ describe('theme tokens', () => {
       textSoft: customProperty(block, '--text-soft'),
       muted: customProperty(block, '--muted'),
     }).toEqual({
-      rgbAccent: '184, 157, 255',
-      accent: '#b89dff',
-      accentStrong: '#9d80f0',
-      deep: '15, 6, 39',
-      surface1: '22, 9, 58',
-      surface2: '30, 12, 79',
-      surface3: '40, 16, 103',
-      terminal: '16, 6, 40',
-      text: '#f5f2fb',
-      textSoft: '#c8c2d8',
-      muted: '#8a8499',
+      rgbAccent: '154, 113, 255',
+      accent: '#9a71ff',
+      accentStrong: '#8254eb',
+      deep: '18, 13, 24',
+      surface1: '27, 21, 36',
+      surface2: '42, 34, 56',
+      surface3: '63, 53, 80',
+      terminal: '18, 13, 24',
+      text: '#f3eff7',
+      textSoft: '#bdb3cd',
+      muted: '#9c8fb3',
     });
   });
 

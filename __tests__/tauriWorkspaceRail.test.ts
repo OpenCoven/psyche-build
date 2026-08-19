@@ -352,6 +352,13 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toContain('onRailClick("sidebar-expand", function () { setSidebarOpen(true); });');
   });
 
+  it('keeps the collapsed sidebar rail inert outside its explicit expand control', () => {
+    expect(mainJs).toContain(
+      'onRailClick("sidebar-expand", function () { setSidebarOpen(true); });',
+    );
+    expect(mainJs).not.toContain('sidebarMiniEl.addEventListener("click"');
+  });
+
   it('discovers canonical Git worktrees through a read-only native command', () => {
     expect(tauri).toMatch(/fn\s+git_worktrees\(root:\s*String\)\s*->\s*Result<Vec<GitWorktree>/);
     expect(tauri).toMatch(/"worktree",\s*"list",\s*"--porcelain"/);
