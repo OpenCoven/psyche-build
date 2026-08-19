@@ -62,7 +62,10 @@ import { PaneOutputFanout } from './paneOutputFanout.js';
 import { BrowserProviderBroker } from '../control/browserProviderBroker.js';
 import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
 import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
-import { daemonOrchestrationControlIdempotencyKey } from '../orchestration/operationIdentity.js';
+import {
+  daemonOrchestrationControlIdempotencyKey,
+  daemonOrchestrationControlStepIdempotencyKey,
+} from '../orchestration/operationIdentity.js';
 
 export interface DaemonOptions {
   port: number;
@@ -1189,6 +1192,16 @@ export class Connection {
             connectionId: this.actorId,
             requestId: msg.requestId,
           });
+          const leaseRequestIdempotencyKey = daemonOrchestrationControlStepIdempotencyKey({
+            executionIdempotencyKey,
+            connectionId: this.actorId,
+            step: 'lease-request',
+          });
+          const leaseGrantIdempotencyKey = daemonOrchestrationControlStepIdempotencyKey({
+            executionIdempotencyKey,
+            connectionId: this.actorId,
+            step: 'lease-grant',
+          });
           const requestLease = await this.submitControl(this.buildCommand(
             'lease.request',
             {
@@ -1201,7 +1214,7 @@ export class Connection {
             },
             {
               actorKind: 'human',
-              idempotencyKey: `v0:orchestration:${this.actorId}:${msg.requestId}:lease-request`,
+              idempotencyKey: leaseRequestIdempotencyKey,
             },
           ));
           if (requestLease.status !== 'succeeded') {
@@ -1223,7 +1236,7 @@ export class Connection {
             { requestId: leaseRequestId },
             {
               actorKind: 'human',
-              idempotencyKey: `v0:orchestration:${this.actorId}:${msg.requestId}:lease-grant`,
+              idempotencyKey: leaseGrantIdempotencyKey,
             },
           ));
           if (grantLease.status !== 'succeeded') {

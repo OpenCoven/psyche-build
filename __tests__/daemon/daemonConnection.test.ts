@@ -379,10 +379,19 @@ describe('daemon connection authentication', () => {
         operationId: 'daemon-operation-b',
         task,
       });
+      await request(first.ws, {
+        type: 'orchestration.execute',
+        requestId: '1',
+        operationId: 'daemon-operation-c',
+        task,
+      });
 
       const executions = submitted.filter((candidate) => candidate.kind === 'orchestration.execute');
-      expect(executions).toHaveLength(2);
+      expect(executions).toHaveLength(3);
       expect(executions[1].idempotencyKey).not.toBe(executions[0].idempotencyKey);
+      expect(executions[2].idempotencyKey).not.toBe(executions[0].idempotencyKey);
+      const leaseRequests = submitted.filter((candidate) => candidate.kind === 'lease.request');
+      expect(leaseRequests[2].idempotencyKey).not.toBe(leaseRequests[0].idempotencyKey);
     });
 
     it('scopes legacy request-id fallback to one connection', async () => {

@@ -58,6 +58,17 @@ export function daemonOrchestrationControlIdempotencyKey(input: {
   )}`;
 }
 
+export function daemonOrchestrationControlStepIdempotencyKey(input: {
+  executionIdempotencyKey: string;
+  connectionId: string;
+  step: 'lease-request' | 'lease-grant';
+}): string {
+  return `orch-daemon-step-v1-${tupleDigest(
+    'psyche.orchestration.daemon-control-step.v1',
+    [input.step, input.connectionId, input.executionIdempotencyKey],
+  )}`;
+}
+
 export function bridgePaneLaunchRequestId(operationId: string, laneId: string): string {
   return `orch-pane-v1-${tupleDigest(
     'psyche.orchestration.bridge-pane.v1',
