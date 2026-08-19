@@ -94,6 +94,22 @@ describe('classify-ci-changes', () => {
     expect(runClassifier(repoDir, baseSha, headSha, 'pull_request')).toMatchObject({ desktop: 'true', ios: 'true' })
   })
 
+  it.each([
+    'src/services/bridge/wireProtocol.ts',
+    'src/actions/types.ts',
+    'src/workspace/snapshot.ts',
+    'src/utils/fileBrowser.ts',
+  ])('shared mobile contract path %s => both native tiers true', (path) => {
+    const { repoDir, baseSha, headSha } = initRepo(
+      { 'docs/readme.md': 'a\n' },
+      { 'docs/readme.md': 'a\n', [path]: 'x\n' },
+    )
+    expect(runClassifier(repoDir, baseSha, headSha, 'pull_request')).toMatchObject({
+      desktop: 'true',
+      ios: 'true',
+    })
+  })
+
   it('.github/workflows/ci.yml => desktop=true, ios=true, package=true', () => {
     const { repoDir, baseSha, headSha } = initRepo({ 'docs/readme.md': 'a\n' }, { 'docs/readme.md': 'a\n', '.github/workflows/ci.yml': 'x\n' })
     expect(runClassifier(repoDir, baseSha, headSha, 'pull_request')).toEqual({

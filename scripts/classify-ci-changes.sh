@@ -31,7 +31,7 @@ if [[ "$GITHUB_EVENT_NAME" == "pull_request" && -n "$BASE_SHA" && -n "$HEAD_SHA"
           native/ios/*|scripts/generate-protocol-fixtures.ts|scripts/app-store-connect.mjs)
             ios=true
             ;;
-          src/control/*|src/daemon/*|src/mcp/*|src/orchestration/*|protocol-fixtures/*)
+          src/control/*|src/daemon/*|src/mcp/*|src/orchestration/*|src/services/bridge/*|src/workspace/*|src/actions/types.ts|src/utils/fileBrowser.ts|protocol-fixtures/*)
             desktop=true
             ios=true
             ;;
