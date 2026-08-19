@@ -72,7 +72,7 @@ export function render() {
     <p>Integration is always an explicit step, never automatic. Once a lane's work is ready:</p>
     <ul>
       <li>Press <kbd>f</kbd> to inspect changed files and diffs in read-only mode.</li>
-      <li>Press <kbd>j</kbd> to compare lanes side by side.</li>
+      <li>Press <kbd>j</kbd> to jump between lanes (switch tmux focus).</li>
       <li>Press <kbd>m</kbd> to merge, create a GitHub PR, attach another agent, or clean up.</li>
       <li>Press <kbd>x</kbd> to close and discard a lane you do not want.</li>
     </ul>
