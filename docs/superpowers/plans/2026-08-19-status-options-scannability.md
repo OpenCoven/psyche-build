@@ -215,3 +215,25 @@ Confirm the diff changes only the approved spec, plan, source, focused tests,
 generated status bundle, and ignored repository goal. Verify collapsed metric
 copy, persistence keys, event action names, and detail panel rendering are
 unchanged.
+
+## Follow-up Addendum: Canonical Coven Palette
+
+The approved visual outcome also aligns only the
+`:root[data-theme="coven-purple"]` tokens in
+`native/desktop/psyche-build-tauri/web/styles.css` with the canonical OpenCoven
+accent (`#9a71ff`, strong `#8254eb`) and ink surfaces (`#120d18`, `#1b1524`,
+`#2a2238`, `#3f3550`). Pin the exact values in
+`__tests__/tauriThemeTokens.test.ts` before changing CSS, then update this plan
+and the design spec. Do not rebuild or modify generated JavaScript bundles.
+
+Verify with:
+
+```bash
+pnpm vitest --run __tests__/tauriThemeTokens.test.ts
+pnpm vitest --run \
+  __tests__/tauriStatusController.test.ts \
+  __tests__/tauriFooterStatusBar.test.ts \
+  __tests__/tauriWebBundles.test.ts
+pnpm typecheck
+git diff --check
+```

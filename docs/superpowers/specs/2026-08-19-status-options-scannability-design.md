@@ -71,6 +71,24 @@ the existing footer tokens:
 The signature element is the compact instrument-panel reading column: explicit
 units, aligned numerals, and semantic emphasis confined to the data itself.
 
+## Canonical Coven Palette
+
+The approved Coven Purple appearance uses OpenCoven's canonical violet accent
+on the deep grey-violet ink ramp:
+
+- Accent: `#9a71ff` (`154, 113, 255`)
+- Strong accent: `#8254eb`
+- Deep and terminal surfaces: `18, 13, 24` (`#120d18`)
+- Surface 1: `27, 21, 36` (`#1b1524`)
+- Surface 2: `42, 34, 56` (`#2a2238`)
+- Surface 3: `63, 53, 80` (`#3f3550`)
+- Text: `#f3eff7`
+- Soft text: `#bdb3cd`
+- Muted text: `#9c8fb3`
+
+This replaces the prior highly saturated violet surface ramp without changing
+the palette or behavior of any other theme or semantic status color.
+
 ## Acceptance Criteria
 
 - Seven metrics fit in materially less vertical space than the current cards.
