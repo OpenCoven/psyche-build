@@ -18,7 +18,7 @@ use objc2_foundation::{NSObject, NSObjectProtocol};
 use objc2_web_kit::WKWebView;
 
 #[cfg(target_os = "windows")]
-use webview2_com::{take_pwstr, FocusChangedEventHandler};
+use webview2_com::{take_pwstr, FocusChangedEventHandler, SourceChangedEventHandler};
 #[cfg(target_os = "windows")]
 use windows::core::{Interface, PWSTR};
 
@@ -42,6 +42,7 @@ pub(crate) struct BrowserFocusIdentity {
 pub(crate) struct BrowserFocusPayload {
     pub(crate) label: String,
     pub(crate) url: String,
+    pub(crate) title: String,
     pub(crate) generation: u64,
     pub(crate) navigation_token: String,
 }
@@ -52,12 +53,34 @@ struct BrowserNativeFocusView {
     registration_id: u64,
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BrowserWindowsFocusRegistration {
+    native_view: usize,
+    registration_id: u64,
+    got_focus_token: i64,
+    source_changed_token: i64,
+}
+
 static BROWSER_LIVE_FOCUS_IDENTITIES: Lazy<Mutex<HashMap<String, BrowserFocusIdentity>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static BROWSER_NATIVE_FOCUS_VIEWS: Lazy<Mutex<HashMap<usize, BrowserNativeFocusView>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+#[cfg(target_os = "windows")]
+static BROWSER_WINDOWS_FOCUS_REGISTRATIONS: Lazy<
+    Mutex<HashMap<String, BrowserWindowsFocusRegistration>>,
+> = Lazy::new(|| Mutex::new(HashMap::new()));
 static NEXT_BROWSER_NATIVE_FOCUS_REGISTRATION: AtomicU64 = AtomicU64::new(1);
 static BROWSER_NATIVE_FOCUS_APP: OnceCell<AppHandle> = OnceCell::new();
+const BROWSER_FOCUS_TITLE_LIMIT: usize = 512;
+
+fn bounded_browser_focus_title(title: &str) -> String {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    trimmed.chars().take(BROWSER_FOCUS_TITLE_LIMIT).collect()
+}
 
 pub(crate) fn browser_focus_identity(label: &str) -> Option<BrowserFocusIdentity> {
     BROWSER_LIVE_FOCUS_IDENTITIES.lock().get(label).cloned()
@@ -65,6 +88,26 @@ pub(crate) fn browser_focus_identity(label: &str) -> Option<BrowserFocusIdentity
 
 pub(crate) fn install_browser_focus_identity(label: String, identity: BrowserFocusIdentity) {
     BROWSER_LIVE_FOCUS_IDENTITIES.lock().insert(label, identity);
+}
+
+pub(crate) fn refresh_browser_focus_identity_document_url(
+    label: &str,
+    generation: u64,
+    navigation_token: &str,
+    document_url: &str,
+) -> bool {
+    if document_url.is_empty() {
+        return false;
+    }
+    let mut identities = BROWSER_LIVE_FOCUS_IDENTITIES.lock();
+    let Some(identity) = identities.get_mut(label) else {
+        return false;
+    };
+    if identity.generation != generation || identity.navigation_token != navigation_token {
+        return false;
+    }
+    identity.document_url = document_url.to_string();
+    true
 }
 
 pub(crate) fn retire_matching_browser_focus_identity(label: &str, identity: &BrowserFocusIdentity) {
@@ -78,6 +121,10 @@ pub(crate) fn retire_browser_focus_label(label: &str) {
     BROWSER_NATIVE_FOCUS_VIEWS
         .lock()
         .retain(|_, registration| registration.label != label);
+    #[cfg(target_os = "windows")]
+    {
+        BROWSER_WINDOWS_FOCUS_REGISTRATIONS.lock().remove(label);
+    }
     BROWSER_LIVE_FOCUS_IDENTITIES.lock().remove(label);
 }
 
@@ -113,6 +160,7 @@ fn resolve_browser_native_focus(
     native_view: usize,
     registration_id: u64,
     current_url: &str,
+    current_title: &str,
 ) -> Option<BrowserFocusPayload> {
     if current_url.is_empty() {
         return None;
@@ -126,6 +174,7 @@ fn resolve_browser_native_focus(
     Some(BrowserFocusPayload {
         label: registration.label,
         url: current_url.to_string(),
+        title: bounded_browser_focus_title(current_title),
         generation: identity.generation,
         navigation_token: identity.navigation_token,
     })
@@ -135,19 +184,119 @@ fn dispatch_browser_native_focus<E>(
     native_view: usize,
     registration_id: u64,
     current_url: &str,
+    current_title: &str,
     dispatch: impl FnOnce(BrowserFocusPayload) -> Result<(), E>,
 ) -> bool {
-    resolve_browser_native_focus(native_view, registration_id, current_url)
-        .is_some_and(|payload| dispatch(payload).is_ok())
+    resolve_browser_native_focus(native_view, registration_id, current_url, current_title)
+        .is_some_and(|payload| {
+            let _ = refresh_browser_focus_identity_document_url(
+                &payload.label,
+                payload.generation,
+                &payload.navigation_token,
+                &payload.url,
+            );
+            dispatch(payload).is_ok()
+        })
 }
 
-fn emit_browser_native_focus(native_view: usize, registration_id: u64, current_url: &str) -> bool {
+#[cfg(any(target_os = "windows", test))]
+fn dispatch_browser_native_route<E>(
+    native_view: usize,
+    registration_id: u64,
+    current_url: &str,
+    current_title: &str,
+    dispatch: impl FnOnce(BrowserFocusPayload) -> Result<(), E>,
+) -> bool {
+    dispatch_browser_native_focus(
+        native_view,
+        registration_id,
+        current_url,
+        current_title,
+        dispatch,
+    )
+}
+
+fn emit_browser_native_focus(
+    native_view: usize,
+    registration_id: u64,
+    current_url: &str,
+    current_title: &str,
+) -> bool {
     let Some(app) = BROWSER_NATIVE_FOCUS_APP.get() else {
         return false;
     };
-    dispatch_browser_native_focus(native_view, registration_id, current_url, |payload| {
-        app.emit_to("main", "browser:focus", payload)
-    })
+    dispatch_browser_native_focus(
+        native_view,
+        registration_id,
+        current_url,
+        current_title,
+        |payload| app.emit_to("main", "browser:focus", payload),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn emit_browser_native_route(
+    native_view: usize,
+    registration_id: u64,
+    current_url: &str,
+    current_title: &str,
+) -> bool {
+    let Some(app) = BROWSER_NATIVE_FOCUS_APP.get() else {
+        return false;
+    };
+    dispatch_browser_native_focus(
+        native_view,
+        registration_id,
+        current_url,
+        current_title,
+        |payload| app.emit_to("main", "browser:route", payload),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn with_windows_browser_native_event(
+    native_view: usize,
+    registration_id: u64,
+    webview: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+) -> Option<(usize, u64, String, String)> {
+    let mut source = PWSTR::null();
+    if unsafe { webview.Source(&mut source) }.is_err() {
+        return None;
+    }
+    let current_url = take_pwstr(source);
+    let mut title = PWSTR::null();
+    let current_title = if unsafe { webview.DocumentTitle(&mut title) }.is_ok() {
+        take_pwstr(title)
+    } else {
+        String::new()
+    };
+    Some((native_view, registration_id, current_url, current_title))
+}
+
+#[cfg(target_os = "windows")]
+fn emit_windows_browser_native_focus(
+    native_view: usize,
+    registration_id: u64,
+    webview: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+) -> bool {
+    with_windows_browser_native_event(native_view, registration_id, webview).is_some_and(
+        |(native_view, registration_id, current_url, current_title)| {
+            emit_browser_native_focus(native_view, registration_id, &current_url, &current_title)
+        },
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn emit_windows_browser_native_route(
+    native_view: usize,
+    registration_id: u64,
+    webview: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+) -> bool {
+    with_windows_browser_native_event(native_view, registration_id, webview).is_some_and(
+        |(native_view, registration_id, current_url, current_title)| {
+            emit_browser_native_route(native_view, registration_id, &current_url, &current_title)
+        },
+    )
 }
 
 pub(crate) async fn install_browser_native_focus_callback(
@@ -193,7 +342,10 @@ define_class!(
                 .and_then(|url| url.absoluteString())
                 .map(|url| url.to_string())
                 .unwrap_or_default();
-            emit_browser_native_focus(native_view, registration_id, &current_url);
+            let current_title = unsafe { (&*(native_view as *const WKWebView)).title() }
+                .map(|title| title.to_string())
+                .unwrap_or_default();
+            emit_browser_native_focus(native_view, registration_id, &current_url, &current_title);
         }
     }
 );
@@ -256,25 +408,72 @@ fn install_platform_browser_focus_callback(
     label: String,
 ) -> Result<(), String> {
     let controller = platform_webview.controller();
+    let native_webview = unsafe { controller.CoreWebView2() }.map_err(|error| error.to_string())?;
     let native_view = controller.as_raw() as usize;
-    let registration_id = register_browser_native_focus_view(native_view, label)?;
-    let handler = FocusChangedEventHandler::create(Box::new(move |sender, _args| {
+    let registration_id = register_browser_native_focus_view(native_view, label.clone())?;
+    let focus_callback_view = native_view;
+    let focus_callback_registration_id = registration_id;
+    let got_focus = FocusChangedEventHandler::create(Box::new(move |sender, _args| {
         if let Some(controller) = sender {
-            let callback_view = controller.as_raw() as usize;
+            if controller.as_raw() as usize != focus_callback_view {
+                return Ok(());
+            }
             if let Ok(webview) = unsafe { controller.CoreWebView2() } {
-                let mut source = PWSTR::null();
-                if unsafe { webview.Source(&mut source) }.is_ok() {
-                    let current_url = take_pwstr(source);
-                    emit_browser_native_focus(callback_view, registration_id, &current_url);
-                }
+                emit_windows_browser_native_focus(
+                    focus_callback_view,
+                    focus_callback_registration_id,
+                    &webview,
+                );
             }
         }
         Ok(())
     }));
-    let mut token = 0;
-    if let Err(error) = unsafe { controller.add_GotFocus(&handler, &mut token) } {
+    let source_changed_callback_view = native_view;
+    let source_changed_callback_registration_id = registration_id;
+    let source_changed = SourceChangedEventHandler::create(Box::new(move |sender, _args| {
+        let Some(args) = _args else {
+            return Ok(());
+        };
+        let mut is_new_document = Default::default();
+        if unsafe { args.IsNewDocument(&mut is_new_document) }.is_err() || is_new_document.as_bool()
+        {
+            return Ok(());
+        }
+        if let Some(webview) = sender {
+            emit_windows_browser_native_route(
+                source_changed_callback_view,
+                source_changed_callback_registration_id,
+                &webview,
+            );
+        }
+        Ok(())
+    }));
+    let mut got_focus_token = 0;
+    if let Err(error) = unsafe { controller.add_GotFocus(&got_focus, &mut got_focus_token) } {
         unregister_browser_native_focus_view(native_view, registration_id);
         return Err(error.to_string());
+    }
+    let mut source_changed_token = 0;
+    if let Err(error) =
+        unsafe { native_webview.add_SourceChanged(&source_changed, &mut source_changed_token) }
+    {
+        let _ = unsafe { controller.remove_GotFocus(got_focus_token) };
+        unregister_browser_native_focus_view(native_view, registration_id);
+        return Err(error.to_string());
+    }
+    if let Some(previous) = BROWSER_WINDOWS_FOCUS_REGISTRATIONS.lock().insert(
+        label,
+        BrowserWindowsFocusRegistration {
+            native_view,
+            registration_id,
+            got_focus_token,
+            source_changed_token,
+        },
+    ) {
+        if previous.native_view == native_view {
+            let _ = unsafe { controller.remove_GotFocus(previous.got_focus_token) };
+            let _ = unsafe { native_webview.remove_SourceChanged(previous.source_changed_token) };
+        }
     }
     Ok(())
 }
@@ -296,13 +495,21 @@ fn install_platform_browser_focus_callback(
     webview.connect_focus_in_event(move |webview, _event| {
         let callback_view = linux_webview_identity(webview);
         let current_url = webview.uri().map(|url| url.to_string()).unwrap_or_default();
-        emit_browser_native_focus(callback_view, registration_id, &current_url);
+        let current_title = webview
+            .title()
+            .map(|title| title.to_string())
+            .unwrap_or_default();
+        emit_browser_native_focus(callback_view, registration_id, &current_url, &current_title);
         glib::Propagation::Proceed
     });
     webview.connect_button_press_event(move |webview, _event| {
         let callback_view = linux_webview_identity(webview);
         let current_url = webview.uri().map(|url| url.to_string()).unwrap_or_default();
-        emit_browser_native_focus(callback_view, registration_id, &current_url);
+        let current_title = webview
+            .title()
+            .map(|title| title.to_string())
+            .unwrap_or_default();
+        emit_browser_native_focus(callback_view, registration_id, &current_url, &current_title);
         glib::Propagation::Proceed
     });
     Ok(())
@@ -330,7 +537,31 @@ pub(crate) fn detach_browser_native_focus_callback(webview: &Webview) {
             });
         });
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let registration = BROWSER_WINDOWS_FOCUS_REGISTRATIONS
+            .lock()
+            .remove(webview.label());
+        if let Some(registration) = registration {
+            unregister_browser_native_focus_view(
+                registration.native_view,
+                registration.registration_id,
+            );
+            let _ = webview.with_webview(move |platform_webview| {
+                let controller = platform_webview.controller();
+                if controller.as_raw() as usize != registration.native_view {
+                    return;
+                }
+                let _ = unsafe { controller.remove_GotFocus(registration.got_focus_token) };
+                if let Ok(native_webview) = unsafe { controller.CoreWebView2() } {
+                    let _ = unsafe {
+                        native_webview.remove_SourceChanged(registration.source_changed_token)
+                    };
+                }
+            });
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = webview;
 }
 
@@ -360,6 +591,7 @@ mod tests {
             native_view,
             registration_id,
             "https://example.test/path#current",
+            "  Current route title  ",
             |payload| {
                 emitted.push(payload);
                 Ok::<(), ()>(())
@@ -370,6 +602,7 @@ mod tests {
             vec![BrowserFocusPayload {
                 label: label.clone(),
                 url: "https://example.test/path#current".to_string(),
+                title: "Current route title".to_string(),
                 generation: 2,
                 navigation_token: "current".to_string(),
             }]
@@ -387,14 +620,18 @@ mod tests {
         let replacement_registration_id =
             register_browser_native_focus_view(native_view, label.clone()).unwrap();
 
-        assert!(
-            resolve_browser_native_focus(native_view, registration_id, "https://example.test",)
-                .is_none()
-        );
+        assert!(resolve_browser_native_focus(
+            native_view,
+            registration_id,
+            "https://example.test",
+            "",
+        )
+        .is_none());
         assert!(resolve_browser_native_focus(
             native_view,
             replacement_registration_id,
             "https://example.test",
+            "",
         )
         .is_some());
         retire_browser_focus_label(&label);
@@ -402,6 +639,7 @@ mod tests {
             native_view,
             replacement_registration_id,
             "https://example.test",
+            "",
         )
         .is_none());
     }
@@ -413,15 +651,118 @@ mod tests {
         let registration_id =
             register_browser_native_focus_view(native_view, label.clone()).unwrap();
         install_browser_focus_identity(label.clone(), identity(4, "fragment"));
+        let mut emitted = Vec::new();
 
         assert_eq!(
-            resolve_browser_native_focus(
+            dispatch_browser_native_focus(
                 native_view,
                 registration_id,
                 "https://example.test/page#section",
+                "Fragment title",
+                |payload| {
+                    emitted.push(payload);
+                    Ok::<(), ()>(())
+                },
             )
-            .map(|payload| payload.url),
+            .then_some(
+                emitted
+                    .first()
+                    .map(|payload| (payload.url.clone(), payload.title.clone())),
+            )
+            .flatten(),
+            Some((
+                "https://example.test/page#section".to_string(),
+                "Fragment title".to_string(),
+            )),
+        );
+        assert_eq!(
+            browser_focus_identity(&label).map(|identity| identity.document_url),
             Some("https://example.test/page#section".to_string())
+        );
+        retire_browser_focus_label(&label);
+    }
+
+    #[test]
+    fn native_focus_bounds_and_serializes_titles() {
+        let label = "psyche-browser-native-title".to_string();
+        let native_view = 44;
+        let registration_id =
+            register_browser_native_focus_view(native_view, label.clone()).unwrap();
+        install_browser_focus_identity(label.clone(), identity(7, "title"));
+        let expected = "Current route title "
+            .repeat(40)
+            .trim()
+            .chars()
+            .take(512)
+            .collect::<String>();
+
+        let payload = resolve_browser_native_focus(
+            native_view,
+            registration_id,
+            "https://example.test/account#details",
+            &format!("  {}  ", "Current route title ".repeat(40).trim()),
+        )
+        .unwrap();
+
+        assert_eq!(payload.title, expected);
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap()["title"],
+            serde_json::Value::String(payload.title.clone())
+        );
+        retire_browser_focus_label(&label);
+    }
+
+    #[test]
+    fn native_focus_emits_successive_same_document_route_updates() {
+        let label = "psyche-browser-native-route-updates".to_string();
+        let native_view = 45;
+        let registration_id =
+            register_browser_native_focus_view(native_view, label.clone()).unwrap();
+        install_browser_focus_identity(label.clone(), identity(8, "route"));
+        let mut emitted = Vec::new();
+
+        assert!(dispatch_browser_native_route(
+            native_view,
+            registration_id,
+            "https://example.test/account?view=details",
+            "Details",
+            |payload| {
+                emitted.push(payload);
+                Ok::<(), ()>(())
+            },
+        ));
+        assert!(dispatch_browser_native_route(
+            native_view,
+            registration_id,
+            "https://example.test/account?view=billing",
+            "  ",
+            |payload| {
+                emitted.push(payload);
+                Ok::<(), ()>(())
+            },
+        ));
+        assert_eq!(
+            emitted,
+            vec![
+                BrowserFocusPayload {
+                    label: label.clone(),
+                    url: "https://example.test/account?view=details".to_string(),
+                    title: "Details".to_string(),
+                    generation: 8,
+                    navigation_token: "route".to_string(),
+                },
+                BrowserFocusPayload {
+                    label: label.clone(),
+                    url: "https://example.test/account?view=billing".to_string(),
+                    title: String::new(),
+                    generation: 8,
+                    navigation_token: "route".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            browser_focus_identity(&label).map(|identity| identity.document_url),
+            Some("https://example.test/account?view=billing".to_string())
         );
         retire_browser_focus_label(&label);
     }

@@ -55,8 +55,18 @@ describe('Tauri browser focus authority', () => {
   it('installs native callbacks for supported desktop webviews and fails closed elsewhere', () => {
     expect(nativeFocus).toContain('#[cfg(target_os = "macos")]');
     expect(nativeFocus).toContain('NSClickGestureRecognizer');
+    expect(nativeFocus).toContain('bounded_browser_focus_title');
+    expect(nativeFocus).toContain('.title()');
     expect(nativeFocus).toContain('#[cfg(target_os = "windows")]');
     expect(nativeFocus).toContain('add_GotFocus');
+    expect(nativeFocus).toContain('SourceChangedEventHandler');
+    expect(nativeFocus).toContain('add_SourceChanged');
+    expect(nativeFocus).toContain('IsNewDocument');
+    expect(nativeFocus).toContain('DocumentTitle');
+    expect(nativeFocus).toContain('emit_to("main", "browser:route", payload)');
+    expect(nativeFocus).toContain('remove_GotFocus');
+    expect(nativeFocus).toContain('remove_SourceChanged');
+    expect(nativeFocus).toContain('BROWSER_WINDOWS_FOCUS_REGISTRATIONS');
     expect(nativeFocus).toContain('#[cfg(target_os = "linux")]');
     expect(nativeFocus).toContain('connect_focus_in_event');
     expect(nativeFocus).toContain('connect_button_press_event');
@@ -64,13 +74,17 @@ describe('Tauri browser focus authority', () => {
     expect(nativeFocus).toContain('native browser focus callbacks are unsupported');
   });
 
-  it('emits focus only from the native registry with the current native URL', () => {
+  it('emits focus only from the native registry with the current native URL and bounded title', () => {
     expect(nativeFocus).toContain('BROWSER_NATIVE_FOCUS_VIEWS');
     expect(nativeFocus).toContain('resolve_browser_native_focus');
+    expect(nativeFocus).toContain('pub(crate) title: String');
+    expect(nativeFocus).toContain('title: bounded_browser_focus_title(current_title)');
     expect(nativeFocus).toContain('emit_to("main", "browser:focus"');
+    expect(nativeFocus).toContain('emit_to("main", "browser:route"');
     expect(nativeFocus).toContain('registration_id');
     expect(nativeFocus).toContain('.URL()');
     expect(nativeFocus).toContain('CoreWebView2');
+    expect(nativeFocus).toContain('emit_windows_browser_native_focus');
     expect(nativeFocus).toContain('.uri()');
   });
 });
