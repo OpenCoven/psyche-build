@@ -1266,6 +1266,53 @@ describe('Tauri agent picker', () => {
     expect(emptyState).toContain('else openBlankBrowserTab();');
   });
 
+  it('keeps the compositor hint until the transitioning element itself finishes', () => {
+    const classes = new Set<string>();
+    const listeners = new Map<string, (event: { target: unknown }) => void>();
+    const timers = new Map<number, () => void>();
+    let nextTimer = 1;
+    const element = {
+      classList: {
+        add: (name: string) => classes.add(name),
+        remove: (name: string) => classes.delete(name),
+      },
+      addEventListener: (type: string, listener: (event: { target: unknown }) => void) => {
+        listeners.set(type, listener);
+      },
+      removeEventListener: (type: string) => {
+        listeners.delete(type);
+      },
+      __compositorTransitionCleanup: null as null | (() => void),
+    };
+    const begin = Function(
+      'window',
+      `"use strict";
+       ${functionSource('beginCompositorTransition')}
+       return beginCompositorTransition;`,
+    )({
+      setTimeout(callback: () => void) {
+        const id = nextTimer;
+        nextTimer += 1;
+        timers.set(id, callback);
+        return id;
+      },
+      clearTimeout(id: number) {
+        timers.delete(id);
+      },
+    }) as (target: typeof element) => void;
+
+    begin(element);
+    expect(classes.has('is-transitioning')).toBe(true);
+
+    listeners.get('transitionend')?.({ target: {} });
+    expect(classes.has('is-transitioning')).toBe(true);
+
+    listeners.get('transitionend')?.({ target: element });
+    expect(classes.has('is-transitioning')).toBe(false);
+    expect(listeners.size).toBe(0);
+    expect(timers.size).toBe(0);
+  });
+
   it('supports standard non-modal keyboard navigation for the New Pane menu', () => {
     expect(indexHtml).toMatch(/id="rail-new-tab"[\s\S]*aria-controls="new-pane-menu"/);
     const items: Array<{ disabled: boolean; focus: () => void; click: () => void }> = [];
@@ -1292,6 +1339,7 @@ describe('Tauri agent picker', () => {
       });
     }
     const source = [
+      'beginCompositorTransition',
       'newPaneMenuItems', 'focusNewPaneMenuItem', 'closeNewPaneMenu',
       'toggleNewPaneMenu', 'handleNewPaneMenuKeydown',
     ].map(functionSource).join('\n');
@@ -1386,6 +1434,7 @@ describe('Tauri agent picker', () => {
       querySelectorAll: () => [gitItem],
     };
     const source = [
+      'beginCompositorTransition',
       'newPaneMenuItems', 'focusNewPaneMenuItem', 'closeNewPaneMenu',
       'toggleNewPaneMenu', 'handleNewPaneMenuKeydown', 'onMenuClick',
       'focusGitPaneEntry', 'openGitPaneFromNewPaneMenu',
