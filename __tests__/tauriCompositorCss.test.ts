@@ -43,7 +43,14 @@ const TRANSITION_TIMING_KEYWORDS = new Set([
   'normal',
   'allow-discrete',
 ]);
-const TRANSITION_ALLOWED_FUNCTIONS = new Set(['cubic-bezier', 'steps', 'linear']);
+const STEP_POSITION_KEYWORDS = new Set([
+  'start',
+  'end',
+  'jump-start',
+  'jump-end',
+  'jump-none',
+  'jump-both',
+]);
 
 type ValueNode = ReturnType<typeof valueParser>['nodes'][number];
 
@@ -78,8 +85,7 @@ function splitValueList(value: string): string[] {
     }
   }
   return segments
-    .map((nodes) => valueParser.stringify(nodes).trim())
-    .filter(Boolean);
+    .map((nodes) => valueParser.stringify(nodes).trim());
 }
 
 function isTransitionTime(token: string): boolean {
@@ -89,6 +95,7 @@ function isTransitionTime(token: string): boolean {
 function resolveCustomProperties(
   value: string,
   customProperties: ReadonlyMap<string, string>,
+  ambiguousCustomProperties: ReadonlySet<string>,
   resolving = new Set<string>(),
 ): string {
   const parsed = valueParser(value);
@@ -103,16 +110,41 @@ function resolveCustomProperties(
     const fallback = separator === -1
       ? ''
       : valueParser.stringify(node.nodes.slice(separator + 1)).trim();
+    if (ambiguousCustomProperties.has(name)) return;
     const replacement = customProperties.get(name) || fallback;
     if (!replacement || resolving.has(name)) return;
     const nextResolving = new Set(resolving).add(name);
     nodes.splice(
       index,
       1,
-      ...valueParser(resolveCustomProperties(replacement, customProperties, nextResolving)).nodes,
+      ...valueParser(resolveCustomProperties(
+        replacement,
+        customProperties,
+        ambiguousCustomProperties,
+        nextResolving,
+      )).nodes,
     );
   });
   return parsed.toString();
+}
+
+function timingFunctionIsValid(node: Extract<ValueNode, { type: 'function' }>): boolean {
+  const name = normalizePropertyName(node.value);
+  const args = splitValueList(valueParser.stringify(node.nodes));
+  if (name === 'cubic-bezier') {
+    if (args.length !== 4 || args.some((arg) => !/^[+-]?(?:\d*\.)?\d+$/.test(arg))) {
+      return false;
+    }
+    const values = args.map(Number);
+    return values[0] >= 0 && values[0] <= 1 && values[2] >= 0 && values[2] <= 1;
+  }
+  if (name === 'steps') {
+    if (args.length < 1 || args.length > 2 || !/^[1-9]\d*$/.test(args[0])) {
+      return false;
+    }
+    return args.length === 1 || STEP_POSITION_KEYWORDS.has(normalizePropertyName(args[1]));
+  }
+  return false;
 }
 
 function unsupportedTransitionFunctions(value: string): string[] {
@@ -120,7 +152,7 @@ function unsupportedTransitionFunctions(value: string): string[] {
   valueParser(value).walk((node) => {
     if (
       node.type === 'function'
-      && !TRANSITION_ALLOWED_FUNCTIONS.has(normalizePropertyName(node.value))
+      && !timingFunctionIsValid(node)
     ) {
       unsupported.push(valueParser.stringify(node));
     }
@@ -154,26 +186,35 @@ function analyzeTransitionDeclaration(
   property: string,
   value: string,
   customProperties: ReadonlyMap<string, string>,
+  ambiguousCustomProperties: ReadonlySet<string>,
 ): TransitionAnalysis {
-  const resolved = resolveCustomProperties(value, customProperties);
+  const resolved = resolveCustomProperties(
+    value,
+    customProperties,
+    ambiguousCustomProperties,
+  );
   const unsupportedFunctions = unsupportedTransitionFunctions(resolved);
   if (property === 'transition') {
     const segments = splitValueList(resolved);
-    const segmentProperties = segments.map(transitionShorthandProperties);
+    const segmentProperties = segments.map((segment) =>
+      segment ? transitionShorthandProperties(segment) : ['all']);
     const soleNone = segments.length === 1 && segmentProperties[0].length === 0;
     return {
       grammarValid:
         unsupportedFunctions.length === 0
+        && segments.every(Boolean)
         && (soleNone || segmentProperties.every((properties) => properties.length === 1)),
       properties: [...unsupportedFunctions, ...segmentProperties.flat()],
     };
   }
 
-  const properties = splitValueList(resolved).map(normalizePropertyName);
+  const rawProperties = splitValueList(resolved);
+  const properties = rawProperties.map((value) => normalizePropertyName(value) || 'all');
   const soleNone = properties.length === 1 && properties[0] === 'none';
   return {
     grammarValid:
       unsupportedFunctions.length === 0
+      && rawProperties.every(Boolean)
       && (soleNone || !properties.includes('none')),
     properties: soleNone ? unsupportedFunctions : [...unsupportedFunctions, ...properties],
   };
@@ -282,6 +323,7 @@ function auditStylesheet(css: string): CompositorFindings {
           property,
           declaration.value,
           customProperties,
+          ambiguousCustomProperties,
         ).grammarValid
       );
     });
@@ -302,6 +344,7 @@ function auditStylesheet(css: string): CompositorFindings {
         property,
         declaration.value,
         customProperties,
+        ambiguousCustomProperties,
       );
       for (const transitionProperty of transition.properties) {
         if (!TRANSITION_ALLOWLIST.has(transitionProperty)) {
@@ -312,13 +355,21 @@ function auditStylesheet(css: string): CompositorFindings {
       }
     }
 
-    if (
-      property === 'will-change'
-      && (!rule || !selectorListTargetsTransitioningClass(rule.selector))
-    ) {
-      findings.willChangeViolations.push(
-        `${prelude} { ${declaration.prop}: ${declaration.value} }`,
-      );
+    if (property === 'will-change') {
+      if (!rule || !selectorListTargetsTransitioningClass(rule.selector)) {
+        findings.willChangeViolations.push(
+          `${prelude} { ${declaration.prop}: ${declaration.value} }`,
+        );
+      } else {
+        for (const hintedProperty of splitValueList(declaration.value)) {
+          const normalized = normalizePropertyName(hintedProperty) || 'all';
+          if (!TRANSITION_ALLOWLIST.has(normalized)) {
+            findings.willChangeViolations.push(
+              `${prelude} { ${declaration.prop}: ${normalized} }`,
+            );
+          }
+        }
+      }
     }
   });
 
@@ -450,7 +501,7 @@ describe('compositor stylesheet audit parser', () => {
       }
       .shadowed-variable {
         --shadowed-timing: 120ms ease, background 120ms ease;
-        transition: opacity var(--shadowed-timing);
+        transition: opacity var(--shadowed-timing, 120ms ease);
       }
       @media (prefers-reduced-motion: no-preference) {
         :root {
@@ -475,9 +526,9 @@ describe('compositor stylesheet audit parser', () => {
       '.variable-tail { transition: var(--rest) }',
       '.expanded-tail { transition: background }',
       '.expanded-implicit { transition: all }',
-      '.shadowed-variable { transition: var(--shadowed-timing) }',
-      '.scoped-fallback { transition: background }',
-      '.conditional-fallback { transition: background }',
+      '.shadowed-variable { transition: var(--shadowed-timing, 120ms ease) }',
+      '.scoped-fallback { transition: var(--scoped-timing, 120ms ease, background 120ms ease) }',
+      '.conditional-fallback { transition: var(--conditional-timing, 120ms ease, background 120ms ease) }',
       '.environment-fallback { transition: env(unknown-transition, 120ms ease, background 120ms ease) }',
     ]);
   });
@@ -492,13 +543,40 @@ describe('compositor stylesheet audit parser', () => {
         transition: opacity bogus();
         transition-duration: 200ms;
       }
+      .invalid-timing-function {
+        transition: opacity cubic-bezier(foo);
+        transition-duration: 200ms;
+      }
+      .trailing-property-item {
+        transition-property: opacity,;
+        transition-duration: 200ms;
+      }
     `);
 
     expect(findings.transitionViolations).toEqual([
       '.invalid-property-list { transition-duration: all }',
       '.invalid-shorthand { transition-duration: all }',
+      '.invalid-timing-function { transition-duration: all }',
+      '.trailing-property-item { transition-duration: all }',
       '.invalid-property-list { transition-property: none }',
       '.invalid-shorthand { transition: bogus() }',
+      '.invalid-timing-function { transition: cubic-bezier(foo) }',
+      '.trailing-property-item { transition-property: all }',
+    ]);
+  });
+
+  it('rejects non-compositor will-change values even while transitioning', () => {
+    const findings = auditStylesheet(`
+      .safe.is-transitioning {
+        will-change: transform, opacity;
+      }
+      .unsafe.is-transitioning {
+        will-change: transform, width;
+      }
+    `);
+
+    expect(findings.willChangeViolations).toEqual([
+      '.unsafe.is-transitioning { will-change: width }',
     ]);
   });
 
