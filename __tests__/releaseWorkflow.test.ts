@@ -105,6 +105,19 @@ describe('macOS release workflow contract', () => {
     expect(verifyJob).toContain('echo "desktop_only=$DESKTOP_ONLY" >> "$GITHUB_OUTPUT"');
   });
 
+  it('builds the production docs site exactly once before the root release build', () => {
+    const verifyJob = workflowJobSource(workflowSource(), 'verify');
+
+    expect(verifyJob).toContain('pnpm docs:focus:check');
+    expect(verifyJob.match(/pnpm --dir docs build/g)).toHaveLength(1);
+    expect(verifyJob.indexOf('pnpm docs:focus:check')).toBeLessThan(
+      verifyJob.indexOf('pnpm --dir docs build'),
+    );
+    expect(verifyJob.indexOf('pnpm --dir docs build')).toBeLessThan(
+      verifyJob.indexOf('pnpm build'),
+    );
+  });
+
   it('skips TestFlight only for verified desktop-only dispatches', () => {
     const workflow = workflowSource();
     const iosJob = workflowJobSource(workflow, 'upload-ios');

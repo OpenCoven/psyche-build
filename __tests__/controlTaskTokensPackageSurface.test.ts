@@ -12,7 +12,9 @@ const packageJson = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'),
 describe('control task token package surface', () => {
   it('pins the real prepack and pack-smoke contract for the published subpath', () => {
     expect(packageJson.files).toContain('dist/**/*');
-    expect(packageJson.scripts?.prepack).toBe('pnpm run build');
+    expect(packageJson.scripts?.prepack).toBe(
+      'pnpm run build && pnpm run docs:focus:check',
+    );
     expect(packageJson.scripts?.prepublishOnly).toBeUndefined();
     expect(packageJson.scripts?.['smoke:pack']).toBe('node scripts/smoke-pack-install.js');
     expect(packageJson.exports?.['./control-task-tokens']).toEqual({

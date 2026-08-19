@@ -279,10 +279,8 @@ describe('v0.0.1 release documentation contract', () => {
     const publicGuides = [
       'README.md',
       'docs/BREAKING-CHANGES.md',
-      'docs/COVEN-DEMO-LOOP.md',
       'docs/README.md',
       'docs/src/content/getting-started.js',
-      'docs/src/content/coven-demo.js',
       'docs/src/content/troubleshooting.js',
     ];
     for (const filePath of publicGuides) {

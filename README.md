@@ -55,11 +55,9 @@ node /path/to/psyche-build/psyche
 
 Press `n` to create a new pane, type a prompt, pick one or more agents (or none for a plain terminal), and Psyche Build handles the rest — tmux pane, git worktree, branch, and agent launch.
 
-Press `u` to open rituals: reusable setup recipes for starting a project with a known pane layout. Built-ins include Start Coding, Terminal First, Review Stack, Release Check, and Fix OpenClaw. You can also save project rituals and attach a default ritual to a project.
+Press `u` to open rituals: reusable setup recipes for starting a project with a known pane layout. Built-ins include Start Coding, Terminal First, Review Stack, and Release Check. You can also save project rituals and attach a default ritual to a project.
 
 Open the selected pane menu with `m` when you want to inspect, merge, create a PR, attach another agent, or clean up.
-
-For the full Psyche Build + Coven walkthrough, see [Coven demo loop](./docs/COVEN-DEMO-LOOP.md).
 
 New to tmux? Run:
 
@@ -97,7 +95,6 @@ Psyche Build creates a tmux pane for each task. Every work pane gets its own git
 - **Pane visibility controls** — hide individual panes, isolate one project, or restore everything later without stopping work
 - **Multi-project cockpit** — add multiple repos to the same session and switch scope from the sidebar
 - **Rituals** — open, save, and attach reusable project setup recipes without restoring brittle tmux snapshots
-- **Fix OpenClaw cockpit** — a built-in ritual opens Coven repair, verification, diff watch, and session panes so rescue work stays visible
 - **Coven sessions** — the CLI sidebar can show live session status and `[o]` opens a session as a visible Psyche Build pane; the macOS app rail intentionally shows app-origin local threads only
 - **Lifecycle hooks** — run scripts on worktree create, pre-merge, post-merge, and more
 
@@ -254,31 +251,22 @@ both so you can inspect or merge the work; removing them stays an explicit
 action in the TUI, because a worktree can hold the only copy of uncommitted
 changes.
 
-## Coven and OpenCoven
+## Optional integrations
 
-Psyche Build works as a standalone tmux/worktree cockpit. Its CLI and bridge
-also speak to Coven when a local daemon is available, so OpenCoven-managed
-harness sessions can appear beside normal Psyche Build panes. The macOS app
-rail intentionally does not render daemon-discovered sessions.
+Psyche Build's tmux, worktree, terminal, agent, file-browser, merge,
+pull-request, ritual, settings, and cleanup workflows work independently.
+Supported coding agents and a compatible local session provider can extend
+those workflows without becoming prerequisites.
 
-Coven is the harness substrate. Psyche Build is the cockpit. OpenMeow and OpenClaw can sit above them as intake and orchestration layers.
-
-Demo loop:
-
-1. Open a project in Psyche Build.
-2. Launch a Coven-backed Codex or Claude Code session.
-3. Watch it as a visible pane/session.
-4. Inspect files and diffs.
-5. Merge, create a PR, archive, or clean up explicitly.
-
-See [Psyche Build + Coven demo loop](./docs/COVEN-DEMO-LOOP.md) and the [OpenCoven public roadmap](https://github.com/OpenCoven/coven/blob/main/docs/ROADMAP.md).
+For optional agent and local-session boundaries, see
+[Psyche Build integrations](./docs/INTEGRATIONS.md).
 
 ## Docs
 
 - [Documentation index](./docs/README.md)
 - [Breaking changes: comux → Psyche Build](./docs/BREAKING-CHANGES.md)
 - [Bridge and daemon security model](./docs/BRIDGE-SECURITY.md)
-- [Psyche Build + Coven demo loop](./docs/COVEN-DEMO-LOOP.md)
+- [Psyche Build integrations](./docs/INTEGRATIONS.md)
 - [Product spec](./docs/PRODUCT-SPEC.md)
 - [Smoke test](./docs/SMOKE.md)
 - [Release runbook](./docs/RELEASE.md)

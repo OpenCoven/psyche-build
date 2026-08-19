@@ -3,7 +3,7 @@ export const meta = { title: 'Agents' };
 export function render() {
   return `
     <h1>Agents</h1>
-    <p class="lead">Psyche Build supports 12 AI coding agents, led by <strong>Coven Code</strong> — OpenCoven's own CLI coding harness. Each agent is automatically detected if its CLI is installed and available in your PATH.</p>
+    <p class="lead">Psyche Build detects supported AI coding agent CLIs and launches them in isolated panes and git worktrees. Each agent remains an optional integration; plain terminal panes work without any agent CLI.</p>
 
     <h2>Agent Detection</h2>
     <p>Run <code>psyche doctor</code> to see whether this shell can find a supported agent CLI. psyche can still create plain terminal panes when none are installed; install at least one supported CLI when you want prompt-launched agent panes.</p>
