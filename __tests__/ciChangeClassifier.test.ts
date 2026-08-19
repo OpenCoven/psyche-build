@@ -120,4 +120,18 @@ describe('CI change classifier', () => {
       typescript: 'true',
     });
   });
+
+  it('fails open when the classifier itself changes', () => {
+    const cwd = createRepository();
+    const base = git(cwd, 'rev-parse', 'HEAD');
+    mkdirSync(join(cwd, 'scripts'), { recursive: true });
+    writeFileSync(join(cwd, 'scripts/classify-ci-changes.sh'), '#!/bin/sh\n');
+    const head = commitAll(cwd, 'change classifier');
+
+    expect(classify(cwd, base, head, 'pull_request')).toEqual({
+      desktop: 'true',
+      ios: 'true',
+      typescript: 'true',
+    });
+  });
 });

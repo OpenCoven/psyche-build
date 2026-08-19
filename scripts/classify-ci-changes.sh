@@ -48,7 +48,7 @@ if "$classification_complete"; then
     for path in "${changed_paths[@]}"; do
       [[ -n "$path" ]] || continue
       case "$path" in
-        .github/*|package.json|pnpm-lock.yaml|pnpm-workspace.yaml|rust-toolchain.toml)
+        .github/*|scripts/classify-ci-changes.sh|package.json|pnpm-lock.yaml|pnpm-workspace.yaml|rust-toolchain.toml)
           desktop=true
           ios=true
           typescript=true
