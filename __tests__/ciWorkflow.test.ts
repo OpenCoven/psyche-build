@@ -141,6 +141,7 @@ describe('pull request CI workflow contract', () => {
       'pnpm --dir docs build',
       'pnpm test:quality',
       'pnpm typecheck',
+      'pnpm typecheck:tests',
       'pnpm build',
     ]) {
       expect(qualityJob).toContain(command);

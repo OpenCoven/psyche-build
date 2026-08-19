@@ -106,6 +106,7 @@ jobs:
           pnpm --dir docs build
           pnpm test:quality
           pnpm typecheck
+          pnpm typecheck:tests
           pnpm build
 
   package-smoke:
