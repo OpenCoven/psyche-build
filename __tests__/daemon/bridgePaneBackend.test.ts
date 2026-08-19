@@ -23,6 +23,12 @@ function spawnResult(id: string) {
   return {
     id: `%${id}`,
     pane: {} as never,
+    createdPane: {
+      id: `psyche-${id}`,
+      slug: id,
+      prompt: 'Fix the failing tests',
+      paneId: `%${id}`,
+    },
     worktreePath: `/w/${id}`,
     branch: `psyche/${id}`,
   };
@@ -33,7 +39,7 @@ describe('createBridgePaneBackend', () => {
     const spawnPane = vi.fn(async () => spawnResult('codex'));
     const backend = createBridgePaneBackend({ sessionName: 'psyche-repo', spawnPane });
 
-    await backend.execute(lane());
+    const output = await backend.execute(lane());
 
     const [projectRoot, sessionName, request] = spawnPane.mock.calls[0] as any[];
     expect(projectRoot).toBe(ROOT);
@@ -43,6 +49,9 @@ describe('createBridgePaneBackend', () => {
       cwd: ROOT,
       agent: 'codex',
       prompt: 'Fix the failing tests',
+    });
+    expect(output).toMatchObject({
+      pane: { id: 'psyche-codex' },
     });
     expect(backend.spawned().get('codex')).toMatchObject({ id: '%codex' });
   });
