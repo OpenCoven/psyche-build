@@ -1,3 +1,26 @@
+import { snapshotFrameSchedulerResources } from './frame-scheduler';
+import { snapshotPtyClientResources } from './pty-client';
+import {
+  snapshotTerminalPaneResources,
+  type TerminalPaneResourceSnapshot,
+} from './terminal-pane-controller';
+
+export interface RuntimeResourceSnapshot extends TerminalPaneResourceSnapshot {
+  ptyClients: number;
+  frameCallbacks: number;
+}
+
+export function snapshotRuntimeResources(): RuntimeResourceSnapshot {
+  const paneResources = snapshotTerminalPaneResources();
+  const ptyResources = snapshotPtyClientResources();
+  return {
+    ...paneResources,
+    ptyClients: ptyResources.ptyClients,
+    timers: paneResources.timers + ptyResources.timers,
+    ...snapshotFrameSchedulerResources(),
+  };
+}
+
 export { FrameScheduler } from './frame-scheduler';
 export type {
   FrameRequest,
