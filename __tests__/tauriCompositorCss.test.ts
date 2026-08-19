@@ -60,15 +60,55 @@ function stripComments(css: string): string {
 function splitRules(text: string): Rule[] {
   const rules: Rule[] = [];
   let buffer = '';
+  let quote = '';
   let i = 0;
   while (i < text.length) {
     const char = text[i];
+    if (quote) {
+      buffer += char;
+      if (char === '\\' && i + 1 < text.length) {
+        buffer += text[i + 1];
+        i += 2;
+      } else {
+        if (char === quote) quote = '';
+        i += 1;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      buffer += char;
+      i += 1;
+      continue;
+    }
+    if (char === '\\') {
+      buffer += char;
+      if (i + 1 < text.length) {
+        buffer += text[i + 1];
+        i += 2;
+      } else {
+        i += 1;
+      }
+      continue;
+    }
     if (char === '{') {
       let depth = 1;
+      let bodyQuote = '';
       let j = i + 1;
       while (j < text.length && depth > 0) {
-        if (text[j] === '{') depth += 1;
-        else if (text[j] === '}') depth -= 1;
+        const bodyChar = text[j];
+        if (bodyQuote) {
+          if (bodyChar === '\\') j += 1;
+          else if (bodyChar === bodyQuote) bodyQuote = '';
+        } else if (bodyChar === '"' || bodyChar === "'") {
+          bodyQuote = bodyChar;
+        } else if (bodyChar === '\\') {
+          j += 1;
+        } else if (bodyChar === '{') {
+          depth += 1;
+        } else if (bodyChar === '}') {
+          depth -= 1;
+        }
         j += 1;
       }
       rules.push({ prelude: buffer.trim(), body: text.slice(i + 1, j - 1) });
@@ -297,6 +337,39 @@ describe('compositor stylesheet audit parser', () => {
     expect(findings.keyframeViolations).toEqual([
       '@KeYfRaMeS unsafe-standard { to: width }',
       '@-WeBkIt-KeYfRaMeS unsafe-prefixed { to: filter }',
+    ]);
+  });
+
+  it.each([
+    ['double-quoted strings', '.always-layered[data-label="{}"]'],
+    ['single-quoted strings', ".always-layered[data-label='{}']"],
+    [
+      'escaped double quotes',
+      String.raw`.always-layered[data-label="escaped \" {}"]`,
+    ],
+    [
+      'escaped single quotes',
+      String.raw`.always-layered[data-label='escaped \' {}']`,
+    ],
+  ])('audits braces inside %s', (_description, selector) => {
+    const findings = auditStylesheet(`${selector} { will-change: transform; }`);
+
+    expect(findings.willChangeViolations).toEqual([
+      `${selector} { will-change: transform }`,
+    ]);
+  });
+
+  it('audits following rules after braces in quoted declaration values', () => {
+    const findings = auditStylesheet(`
+      .safe::before { content: "{"; }
+      .always-layered { will-change: transform; }
+      .safe::after { content: '{'; }
+      .also-always-layered { will-change: opacity; }
+    `);
+
+    expect(findings.willChangeViolations).toEqual([
+      '.always-layered { will-change: transform }',
+      '.also-always-layered { will-change: opacity }',
     ]);
   });
 
