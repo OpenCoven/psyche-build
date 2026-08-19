@@ -136,9 +136,8 @@ Platform jobs depend only on `changes`; they do not form a serial chain.
 Stable aggregate jobs provide branch-protection targets:
 
 - `TypeScript and Rust` preserves the existing required check name and depends
-  on `quality`, `desktop-web`, `rust-test`, and `desktop-check`;
-- `Desktop validation` uses `always()` and succeeds when desktop jobs pass or
-  are intentionally skipped by the classifier;
+  on `quality`, `desktop-web`, `rust-test`, and `desktop-check`, succeeding only
+  when desktop jobs pass or are intentionally skipped by the classifier;
 - `iOS` preserves the existing required check name, uses `always()`, and
   succeeds when `ios-core` passes or is intentionally skipped.
 
