@@ -32,9 +32,12 @@ Pull requests use small jobs that begin in parallel.
 
 #### `changes`
 
-A read-only classifier compares the pull-request base and head commits and
-publishes `desktop` and `ios` booleans. It uses repository-owned shell logic and
-`git diff --name-only`; no mutable third-party path-filter action is added.
+A read-only classifier compares the pull-request merge base and head commits
+and publishes `desktop`, `ios`, and `package` booleans. It uses repository-owned
+shell logic and NUL-delimited `git diff --name-status -z --no-renames` records,
+so deleted paths, both sides of renames, Unicode, whitespace, and newlines are
+classified without relying on Git's display quoting. No mutable third-party
+path-filter action is added.
 
 Desktop-sensitive paths include:
 
@@ -50,8 +53,15 @@ iOS-sensitive paths include:
 - protocol, control, and shared contract surfaces consumed by mobile;
 - workflow and package-manager configuration used by iOS jobs.
 
-If classification cannot establish a valid base or encounters an unknown
-event, it fails open by enabling both platform groups.
+Package-sensitive paths include package metadata and lockfiles, build and
+release scripts, root runtime and declaration sources, generated package
+documentation, public package documentation, the CLI launcher, and workspace
+packages.
+
+If classification cannot establish valid commits or a merge base, encounters
+an unknown event, or receives an initial push with a zero `before` SHA, it
+fails open by enabling all three groups. Pushes also enable all groups so
+`main` retains full validation.
 
 #### `quality`
 
@@ -69,6 +79,14 @@ It performs:
 It does not run Rust commands, desktop bundle parity, iOS builds, or package
 installation smoke.
 
+#### `package-smoke`
+
+This Ubuntu job runs when `changes.package` is true. It performs a locked
+dependency install and `pnpm smoke:pack`, including package build, archive
+contents, clean installation, runtime exports, and declaration consumption.
+Because pushes fail open to all groups, the same job preserves package
+validation on `main`.
+
 #### `desktop-web`
 
 This job runs when `changes.desktop` is true and performs the platform-neutral
@@ -78,13 +96,15 @@ check. No desktop matrix member repeats these commands.
 #### `rust-test`
 
 This job runs when `changes.desktop` is true on macOS. It performs Rust
-formatting and the complete Rust test suite once.
+formatting and the complete macOS Rust test-target suite once.
 
 #### `desktop-check`
 
-This macOS, Windows, and Ubuntu matrix runs when `changes.desktop` is true. Each
-member performs only locked dependency setup and `cargo check` for its native
-platform. Linux installs the Tauri system prerequisites before checking.
+This Windows and Ubuntu matrix runs when `changes.desktop` is true. Each member
+runs the complete platform-native Rust test targets with `--all-targets`, so
+`cfg(test)` code compiles and executes on every supported desktop platform.
+macOS is omitted from the matrix because `rust-test` already runs the same test
+surface there. Linux installs the Tauri system prerequisites before testing.
 
 The matrix remains fail-fast false so one platform failure does not hide
 results from another. The Linux job receives a tighter timeout around package
@@ -96,17 +116,23 @@ This job runs when `changes.ios` is true and performs:
 
 - pinned Xcode and simulator validation;
 - generated Xcode project parity;
-- `PsycheCore` tests.
+- `PsycheCore` tests;
+- a `PsycheApp` build-for-testing that compiles the app, unit tests, and UI
+  tests;
+- `PsycheAppTests` execution.
 
-It does not run the separate `PsycheApp` build or app/UI test suite.
+The expensive `PsycheAppUITests` execution remains a `main`-push escalation,
+while pull requests still compile that bundle and run app unit tests. This
+ensures Swift syntax and type errors under `native/ios/PsycheApp` fail required
+iOS without restoring the full UI-test latency to every pull request.
 
 ### Pushes to `main`
 
 The same workflow escalates coverage on `main`:
 
 - desktop platform jobs run regardless of path classification;
-- full Rust tests and native checks run;
-- the complete iOS Core, app build, app test, and UI test sequence runs;
+- full Rust tests run on macOS, Windows, and Linux;
+- the complete iOS Core, app build, app unit test, and UI test sequence runs;
 - package installation smoke runs against the integrated commit.
 
 This catches cross-surface integration defects before a release tag is cut
@@ -136,15 +162,17 @@ Platform jobs depend only on `changes`; they do not form a serial chain.
 Stable aggregate jobs provide branch-protection targets:
 
 - `TypeScript and Rust` preserves the existing required check name and depends
-  on `quality`, `desktop-web`, `rust-test`, and `desktop-check`, succeeding only
-  when desktop jobs pass or are intentionally skipped by the classifier;
+  on `quality`, `package-smoke`, `desktop-web`, `rust-test`, and
+  `desktop-check`, succeeding only when package and desktop jobs pass or are
+  intentionally skipped by the classifier;
 - `iOS` preserves the existing required check name, uses `always()`, and
   succeeds when `ios-core` passes or is intentionally skipped.
 
-The aggregates fail when a required upstream job fails or is cancelled. This
-keeps the repository's current branch-protection checks stable while allowing
-safe path-based skips. No branch-protection API mutation is required during
-rollout.
+The aggregates fail when a required upstream job fails or is cancelled. They
+also reject missing or unexpected classifier output instead of treating it as
+an intentional skip. This keeps the repository's current branch-protection
+checks stable while allowing safe path-based skips. No branch-protection API
+mutation is required during rollout.
 
 ## Failure Handling
 
@@ -163,13 +191,14 @@ Workflow contract tests will verify:
 
 - stable aggregate required-check names;
 - pull-request jobs run in parallel after classification;
-- desktop bundle parity and Rust tests occur exactly once on pull requests;
-- the desktop matrix performs platform checks without repeated web or Vitest
-  work;
-- pull requests run only `PsycheCore`, while `main` and release run the app/UI
-  sequence;
-- package installation smoke is absent from ordinary PR jobs and present on
-  `main` and release;
+- desktop bundle parity occurs once and Rust test targets run once per desktop
+  platform;
+- the desktop matrix performs Windows/Linux tests without repeated web or
+  Vitest work;
+- iOS-changing pull requests run Core tests, compile the app/unit/UI bundles,
+  and run app unit tests, while `main` and release also execute UI tests;
+- package installation smoke runs only for package-affecting pull requests and
+  remains present on `main` and release;
 - path classification fails open and covers shared protocol/control,
   workflow, lockfile, desktop, and iOS surfaces;
 - action pins, read-only permissions, credential handling, and release secret
@@ -181,8 +210,11 @@ Workflow contract tests will verify:
   allocation.
 - A typical TypeScript pull request receives its required result from the
   quality job without waiting for full iOS UI tests.
-- A desktop change receives one web parity build, one Rust test run, and three
-  parallel native compile checks.
-- An iOS change receives Core tests on the pull request and the full app/UI
-  suite after integration to `main`.
+- A desktop change receives one web parity build and one Rust test-target run
+  on each of macOS, Windows, and Linux.
+- An iOS change receives Core tests, an app/test-bundle build, and app unit
+  tests on the pull request, with UI execution added after integration to
+  `main`.
+- A package-affecting pull request verifies a packed clean install; unrelated
+  pull requests intentionally skip that job.
 - Pushes to `main` and release tags retain comprehensive platform validation.

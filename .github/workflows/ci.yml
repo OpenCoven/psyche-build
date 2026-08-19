@@ -162,8 +162,9 @@ jobs:
           toolchain: 1.95.0
 
       - name: Install Tauri Linux prerequisites
-        if: runner.os == 'Linux'
         timeout-minutes: 10
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
           sudo env DEBIAN_FRONTEND=noninteractive apt-get \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
@@ -190,7 +191,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require successful quality and desktop validation
+      - name: Require successful quality, package, and desktop validation
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           DESKTOP_REQUIRED: ${{ needs.changes.outputs.desktop }}
