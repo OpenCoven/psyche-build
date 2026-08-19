@@ -20,6 +20,7 @@ jobs:
     outputs:
       desktop: ${{ steps.classify.outputs.desktop }}
       ios: ${{ steps.classify.outputs.ios }}
+      package: ${{ steps.classify.outputs.package }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -65,8 +66,28 @@ jobs:
           pnpm typecheck
           pnpm build
 
+  package-smoke:
+    name: Package smoke
+    needs: changes
+    if: needs.changes.outputs.package == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Verify package installation
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: pnpm smoke:pack
 
   desktop-web:
@@ -117,7 +138,7 @@ jobs:
           set -euo pipefail
           MANIFEST="native/desktop/psyche-build-tauri/src-tauri/Cargo.toml"
           cargo fmt --manifest-path "$MANIFEST" --check
-          cargo test --manifest-path "$MANIFEST" --locked
+          cargo test --manifest-path "$MANIFEST" --locked --all-targets
 
   desktop-check:
     name: Desktop check (${{ matrix.os }})
@@ -129,7 +150,6 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - macos-15
           - windows-2025
           - ubuntu-24.04
     steps:
@@ -144,11 +164,11 @@ jobs:
       - name: Install Tauri Linux prerequisites
         if: runner.os == 'Linux'
         timeout-minutes: 10
-        env:
-          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install \
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install \
             --yes --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             build-essential \
@@ -160,17 +180,13 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
 
-      - name: Check desktop runtime
-        run: cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
-
-      - name: Test desktop runtime on main
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cargo test --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
+      - name: Test desktop runtime
+        run: cargo test --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked --all-targets
 
   typescript-rust:
     name: TypeScript and Rust
     if: always()
-    needs: [changes, quality, desktop-web, rust-test, desktop-check]
+    needs: [changes, quality, package-smoke, desktop-web, rust-test, desktop-check]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -178,7 +194,9 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           DESKTOP_REQUIRED: ${{ needs.changes.outputs.desktop }}
+          PACKAGE_REQUIRED: ${{ needs.changes.outputs.package }}
           QUALITY_RESULT: ${{ needs.quality.result }}
+          PACKAGE_SMOKE_RESULT: ${{ needs['package-smoke'].result }}
           DESKTOP_WEB_RESULT: ${{ needs['desktop-web'].result }}
           RUST_TEST_RESULT: ${{ needs['rust-test'].result }}
           DESKTOP_CHECK_RESULT: ${{ needs['desktop-check'].result }}
@@ -187,15 +205,34 @@ jobs:
           set -euo pipefail
           test "$CHANGES_RESULT" = success
           test "$QUALITY_RESULT" = success
-          if [ "$DESKTOP_REQUIRED" = true ]; then
-            test "$DESKTOP_WEB_RESULT" = success
-            test "$RUST_TEST_RESULT" = success
-            test "$DESKTOP_CHECK_RESULT" = success
-          else
-            test "$DESKTOP_WEB_RESULT" = skipped
-            test "$RUST_TEST_RESULT" = skipped
-            test "$DESKTOP_CHECK_RESULT" = skipped
-          fi
+          case "$PACKAGE_REQUIRED" in
+            true)
+              test "$PACKAGE_SMOKE_RESULT" = success
+              ;;
+            false)
+              test "$PACKAGE_SMOKE_RESULT" = skipped
+              ;;
+            *)
+              echo "::error::Unexpected package classifier output: $PACKAGE_REQUIRED"
+              exit 1
+              ;;
+          esac
+          case "$DESKTOP_REQUIRED" in
+            true)
+              test "$DESKTOP_WEB_RESULT" = success
+              test "$RUST_TEST_RESULT" = success
+              test "$DESKTOP_CHECK_RESULT" = success
+              ;;
+            false)
+              test "$DESKTOP_WEB_RESULT" = skipped
+              test "$RUST_TEST_RESULT" = skipped
+              test "$DESKTOP_CHECK_RESULT" = skipped
+              ;;
+            *)
+              echo "::error::Unexpected desktop classifier output: $DESKTOP_REQUIRED"
+              exit 1
+              ;;
+          esac
 
   ios-core:
     name: iOS Core
@@ -257,21 +294,38 @@ jobs:
             -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
             -derivedDataPath "$RUNNER_TEMP/psyche-core-derived-data"
 
-      - name: Build and test the iOS app on push
+      - name: Build the iOS app and test bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing \
+            -project native/ios/Psyche.xcodeproj \
+            -scheme PsycheApp \
+            -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
+            -derivedDataPath "$RUNNER_TEMP/psyche-app-derived-data"
+
+      - name: Test the iOS app
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild test-without-building \
+            -project native/ios/Psyche.xcodeproj \
+            -scheme PsycheApp \
+            -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
+            -derivedDataPath "$RUNNER_TEMP/psyche-app-derived-data" \
+            -only-testing:PsycheAppTests
+
+      - name: Test the iOS app UI on main
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
         run: |
           set -euo pipefail
-          xcodebuild build \
+          xcodebuild test-without-building \
             -project native/ios/Psyche.xcodeproj \
             -scheme PsycheApp \
             -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
-            -derivedDataPath "$RUNNER_TEMP/psyche-app-build-derived-data"
-          xcodebuild test \
-            -project native/ios/Psyche.xcodeproj \
-            -scheme PsycheApp \
-            -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
-            -derivedDataPath "$RUNNER_TEMP/psyche-app-test-derived-data"
+            -derivedDataPath "$RUNNER_TEMP/psyche-app-derived-data" \
+            -only-testing:PsycheAppUITests
 
   ios:
     name: iOS
@@ -289,8 +343,15 @@ jobs:
         run: |
           set -euo pipefail
           test "$CHANGES_RESULT" = success
-          if [ "$IOS_REQUIRED" = true ]; then
-            test "$IOS_RESULT" = success
-          else
-            test "$IOS_RESULT" = skipped
-          fi
+          case "$IOS_REQUIRED" in
+            true)
+              test "$IOS_RESULT" = success
+              ;;
+            false)
+              test "$IOS_RESULT" = skipped
+              ;;
+            *)
+              echo "::error::Unexpected iOS classifier output: $IOS_REQUIRED"
+              exit 1
+              ;;
+          esac
