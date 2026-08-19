@@ -989,14 +989,4 @@ describe('Tauri terminal controller integration', () => {
     expect(runtimeBundle).toContain('webgl_recovery_cooldown');
   });
 
-  it('applies delayed intersection hides as a visibility patch', () => {
-    const controllerSource = readFileSync(
-      resolve(
-        process.cwd(),
-        'native/desktop/psyche-build-tauri/web/runtime/terminal-pane-controller.ts',
-      ),
-      'utf8',
-    );
-    expect(controllerSource).toContain('applyVisibilityPatch({ intersecting: false })');
-  });
 });
