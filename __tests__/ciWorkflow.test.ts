@@ -81,6 +81,52 @@ describe('pull request CI workflow contract', () => {
     }
   });
 
+  it('defines the tiered workflow topology and job contracts', () => {
+    const workflow = workflowSource();
+
+    for (const job of [
+      'changes',
+      'quality',
+      'desktop-web',
+      'rust-test',
+      'desktop-check',
+      'typescript-rust',
+      'ios-core',
+      'ios',
+    ]) {
+      expect(workflow).toContain(`  ${job}:`);
+    }
+
+    const changes = workflowJobSource(workflow, 'changes');
+    const quality = workflowJobSource(workflow, 'quality');
+    const desktopWeb = workflowJobSource(workflow, 'desktop-web');
+    const rustTest = workflowJobSource(workflow, 'rust-test');
+    const desktopCheck = workflowJobSource(workflow, 'desktop-check');
+    const typescriptRust = workflowJobSource(workflow, 'typescript-rust');
+    const iosCore = workflowJobSource(workflow, 'ios-core');
+    const ios = workflowJobSource(workflow, 'ios');
+
+    expect(changes).toContain('classifier');
+    expect(quality).not.toContain('needs: changes');
+    for (const job of [desktopWeb, rustTest, desktopCheck, typescriptRust, iosCore, ios]) {
+      expect(job).toContain('needs: changes');
+    }
+    expect(desktopWeb.match(/build:web/g) ?? []).toHaveLength(1);
+    expect(rustTest.match(/cargo fmt/g) ?? []).toHaveLength(1);
+    expect(rustTest).toContain('cargo test');
+    expect(desktopCheck).toContain('cargo check');
+    expect(desktopCheck).not.toContain('pnpm vitest');
+    expect(desktopCheck).not.toContain('build:web');
+    expect(workflow).toContain('smoke:pack');
+    expect(workflow).toContain('PsycheApp');
+    expect(workflow).toContain('cargo test');
+    expect(workflow).toContain('if: always()');
+    expect(workflow).toContain('CHANGES_RESULT');
+    expect(workflow).toContain('Acquire::Retries=3');
+    expect(workflow).toContain('DEBIAN_FRONTEND=noninteractive');
+    expect(workflow).toContain('timeout-minutes: 10');
+  });
+
   it('runs the complete non-secret TypeScript, package, Rust, and frontend gates', () => {
     const workflow = workflowSource();
 
