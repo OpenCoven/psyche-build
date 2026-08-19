@@ -66,6 +66,13 @@ pub(crate) fn install_browser_focus_identity(label: String, identity: BrowserFoc
     BROWSER_LIVE_FOCUS_IDENTITIES.lock().insert(label, identity);
 }
 
+pub(crate) fn retire_matching_browser_focus_identity(label: &str, identity: &BrowserFocusIdentity) {
+    let mut identities = BROWSER_LIVE_FOCUS_IDENTITIES.lock();
+    if identities.get(label) == Some(identity) {
+        identities.remove(label);
+    }
+}
+
 pub(crate) fn retire_browser_focus_label(label: &str) {
     BROWSER_NATIVE_FOCUS_VIEWS
         .lock()
@@ -415,5 +422,18 @@ mod tests {
             Some("https://example.test/page#section".to_string())
         );
         retire_browser_focus_label(&label);
+    }
+
+    #[test]
+    fn matching_focus_retirement_does_not_remove_a_successor() {
+        let label = "psyche-browser-native-focus-retirement".to_string();
+        let old = identity(5, "old");
+        let current = identity(6, "current");
+        install_browser_focus_identity(label.clone(), current.clone());
+
+        retire_matching_browser_focus_identity(&label, &old);
+        assert_eq!(browser_focus_identity(&label), Some(current.clone()));
+        retire_matching_browser_focus_identity(&label, &current);
+        assert_eq!(browser_focus_identity(&label), None);
     }
 }

@@ -211,7 +211,7 @@ describe('Tauri browser control provider contract', () => {
       /fn browser_focus_identity\(label: &str\)[\s\S]*BROWSER_LIVE_FOCUS_IDENTITIES\.lock\(\)\.get\(label\)\.cloned\(\)/,
     );
     expect(lib).toMatch(
-      /complete_browser_navigation[\s\S]*generation: waiter\.generation,[\s\S]*navigation_token: waiter\.token\.clone\(\),/,
+      /fn send_browser_navigation_result[\s\S]*generation: waiter\.generation,[\s\S]*navigation_token: waiter\.token\.clone\(\),/,
     );
     expect(nativeFocus).toContain('resolve_browser_native_focus');
     expect(nativeFocus).toContain('registration_id');
