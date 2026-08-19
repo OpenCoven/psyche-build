@@ -93,6 +93,7 @@ type PtyClientState = PtyClientController & {
 const MAX_ACCEPTED_IN_FLIGHT = 2;
 const ACK_RETRY_DELAY_MS = 25;
 const clients = new Map<string, PtyClientState>();
+let activeAckRetryTimers = 0;
 
 function normalizeBatchBytes(batch: PtyDataBatch): Uint8Array {
   const count = Number.isFinite(batch.byteCount) ? Math.max(0, batch.byteCount) : batch.bytes.length;
@@ -144,7 +145,12 @@ function takeStartQuarantine(state: PtyClientState): QuarantinedBatch[] {
 
 function clearAckRetry(lane: DeliveryLane): void {
   if (lane.ackRetryTimer) {
-    clearTimeout(lane.ackRetryTimer);
+    try {
+      clearTimeout(lane.ackRetryTimer);
+      activeAckRetryTimers -= 1;
+    } catch {
+      return;
+    }
     lane.ackRetryTimer = null;
   }
   lane.ackRetryAttempt = 0;
@@ -229,8 +235,10 @@ function scheduleAcknowledgementRetry(state: PtyClientState, lane: DeliveryLane)
   lane.ackRetryAttempt += 1;
   lane.ackRetryTimer = setTimeout(() => {
     lane.ackRetryTimer = null;
+    activeAckRetryTimers -= 1;
     acknowledgeCurrentSequence(state, lane);
   }, delay);
+  activeAckRetryTimers += 1;
 }
 
 function acknowledgeCurrentSequence(state: PtyClientState, lane: DeliveryLane): void {
@@ -696,6 +704,13 @@ export function createPtyClient(options: PtyClientOptions): PtyClientController 
   const state = createClientState(options);
   clients.set(options.threadId, state);
   return state;
+}
+
+export function snapshotPtyClientResources(): { ptyClients: number; timers: number } {
+  return {
+    ptyClients: clients.size,
+    timers: activeAckRetryTimers,
+  };
 }
 
 export function routePtyBatch(batch: PtyDataBatch): boolean {
