@@ -619,6 +619,10 @@ export function createTerminalPaneController(
     return ptyClient.setVisible(visibleNow);
   }
 
+  function applyVisibilityPatch(patch: Partial<VisibilityState>): Promise<boolean> {
+    return applyVisibility({ ...visibility, ...patch });
+  }
+
   const resizeObserver = (options.createResizeObserver ?? defaultResizeObserverFactory)(() => {
     if (disposed) return;
     fitPending = true;
@@ -644,7 +648,7 @@ export function createTerminalPaneController(
     intersectionHideTimer = setTimer(() => {
       intersectionHideTimer = null;
       if (disposed || !visibility.intersecting) return;
-      void applyVisibility({ ...visibility, intersecting: false }).catch(() => {});
+      void applyVisibilityPatch({ intersecting: false }).catch(() => {});
     }, INTERSECTION_HIDE_DEBOUNCE_MS);
   });
   intersectionObserver?.observe(options.container);
