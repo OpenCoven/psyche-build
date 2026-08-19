@@ -37,14 +37,14 @@ describe('pull request CI workflow contract', () => {
     expect(workflow).toContain('cancel-in-progress: true');
     expect(workflow).toContain('name: TypeScript and Rust');
     expect(workflow).toContain('name: iOS');
-    expect(workflow.match(/^\s{4}timeout-minutes: 60$/gm)).toHaveLength(3);
+    expect(workflow.match(/^\s{4}timeout-minutes: 60$/gm)).toHaveLength(2);
   });
 
-  it('gives the desktop runtime matrix the same 60 minute timeout contract as adjacent jobs', () => {
+  it('bounds the split desktop check matrix independently', () => {
     const workflow = workflowSource();
-    const job = workflowJobSource(workflow, 'desktop-runtime');
+    const job = workflowJobSource(workflow, 'desktop-check');
 
-    expect(job).toContain('timeout-minutes: 60');
+    expect(job).toContain('timeout-minutes: 45');
   });
 
   it('pins Node, pnpm, Rust, and every third-party action', () => {
@@ -108,15 +108,26 @@ describe('pull request CI workflow contract', () => {
 
     expect(changes).toContain('classifier');
     expect(quality).not.toContain('needs: changes');
-    for (const job of [desktopWeb, rustTest, desktopCheck, typescriptRust, iosCore, ios]) {
+    for (const job of [desktopWeb, rustTest, desktopCheck, iosCore]) {
       expect(job).toContain('needs: changes');
     }
+    expect(typescriptRust).toContain(
+      'needs: [changes, quality, desktop-web, rust-test, desktop-check]',
+    );
+    expect(typescriptRust).toContain('QUALITY_RESULT');
+    expect(typescriptRust).toContain('DESKTOP_WEB_RESULT');
+    expect(typescriptRust).toContain('RUST_TEST_RESULT');
+    expect(typescriptRust).toContain('DESKTOP_CHECK_RESULT');
+    expect(ios).toContain('needs: [changes, ios-core]');
+    expect(ios).toContain('IOS_CORE_RESULT');
+    expect(workflow).not.toContain('  desktop-runtime:');
     expect(desktopWeb.match(/build:web/g) ?? []).toHaveLength(1);
     expect(rustTest.match(/cargo fmt/g) ?? []).toHaveLength(1);
     expect(rustTest).toContain('cargo test');
     expect(desktopCheck).toContain('cargo check');
     expect(desktopCheck).not.toContain('pnpm vitest');
     expect(desktopCheck).not.toContain('build:web');
+    expect(desktopCheck).toContain('shell: bash');
     expect(workflow).toContain('smoke:pack');
     expect(workflow).toContain('PsycheApp');
     expect(workflow).toContain('cargo test');

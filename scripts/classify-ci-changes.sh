@@ -25,26 +25,17 @@ if valid_sha "$head_sha" && [[ "$base_sha" != "$(printf '0%.0s' {1..40})" ]] && 
 
   if git rev-parse --verify "$base_sha^{commit}" >/dev/null 2>&1 &&
     git rev-parse --verify "$head_sha^{commit}" >/dev/null 2>&1; then
-    diff_output=
     if [[ "$event_name" == "pull_request" ]]; then
-      diff_output="$(git diff --name-only "$base_sha...$head_sha")"
+      while IFS= read -r -d '' path; do
+        changed_paths+=("$path")
+      done < <(git diff --no-renames --name-only -z "$base_sha...$head_sha")
+      classification_complete=true
     elif [[ "$event_name" == "push" ]]; then
-      diff_output="$(git diff --name-only "$base_sha" "$head_sha")"
-    fi
-    if [[ -n "$diff_output" ]]; then
-      while IFS= read -r path; do
-        [[ -n "$path" ]] && changed_paths+=("$path")
-      done <<< "$diff_output"
+      while IFS= read -r -d '' path; do
+        changed_paths+=("$path")
+      done < <(git diff --no-renames --name-only -z "$base_sha" "$head_sha")
       classification_complete=true
     fi
-  fi
-elif [[ "$event_name" == "push" ]] && valid_sha "$head_sha"; then
-  if diff_output="$(git diff-tree --root --no-commit-id --name-only -r "$head_sha")" &&
-    [[ -n "$diff_output" ]]; then
-    while IFS= read -r path; do
-      [[ -n "$path" ]] && changed_paths+=("$path")
-    done <<< "$diff_output"
-    classification_complete=true
   fi
 fi
 
@@ -65,10 +56,11 @@ if "$classification_complete"; then
         native/desktop/*|Cargo.toml|Cargo.lock|__tests__/tauri*|scripts/build-macos-app.mjs)
           desktop=true
           ;;
-        native/ios/*|scripts/generate-protocol-fixtures.ts|scripts/app-store-connect.mjs)
+        native/ios/*|protocol-fixtures/*|src/control/*|src/services/bridge/*|scripts/generate-protocol-fixtures.ts|scripts/app-store-connect.mjs)
           ios=true
+          typescript=true
           ;;
-        docs/*|src/*|scripts/*|__tests__/*|protocol-fixtures/*)
+        docs/*|src/*|scripts/*|__tests__/*)
           typescript=true
           ;;
         *)
