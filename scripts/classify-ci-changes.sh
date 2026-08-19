@@ -23,6 +23,7 @@ if [[ "$GITHUB_EVENT_NAME" == "pull_request" && -n "$BASE_SHA" && -n "$HEAD_SHA"
           .github/workflows/*|.github/actions/*|package.json|pnpm-lock.yaml|pnpm-workspace.yaml|rust-toolchain.toml|scripts/classify-ci-changes.sh)
             desktop=true
             ios=true
+            package=true
             ;;
           native/desktop/*|frontend/*|packages/*|Cargo.toml|Cargo.lock|__tests__/tauri*|scripts/build-macos-app.mjs)
             desktop=true
@@ -39,7 +40,7 @@ if [[ "$GITHUB_EVENT_NAME" == "pull_request" && -n "$BASE_SHA" && -n "$HEAD_SHA"
         esac
 
         case "$path" in
-          package.json|pnpm-lock.yaml|pnpm-workspace.yaml|tsconfig*.json|psyche|scripts/*|src/*|packages/*|README.md|CHANGELOG.md|CONTRIBUTING.md|LICENSE|docs/README.md|docs/AGENT-SURFACE-CONTROL.md|docs/BREAKING-CHANGES.md|docs/BRIDGE-SECURITY.md|docs/INTEGRATIONS.md|docs/PRODUCT-SPEC.md|docs/RELEASE.md|docs/SMOKE.md)
+          .github/workflows/*|.github/actions/*|package.json|pnpm-lock.yaml|pnpm-workspace.yaml|tsconfig*.json|psyche|scripts/*|src/*|packages/*|README.md|CHANGELOG.md|CONTRIBUTING.md|LICENSE|docs/README.md|docs/AGENT-SURFACE-CONTROL.md|docs/BREAKING-CHANGES.md|docs/BRIDGE-SECURITY.md|docs/INTEGRATIONS.md|docs/PRODUCT-SPEC.md|docs/RELEASE.md|docs/SMOKE.md)
             package=true
             ;;
           *)
@@ -50,6 +51,8 @@ if [[ "$GITHUB_EVENT_NAME" == "pull_request" && -n "$BASE_SHA" && -n "$HEAD_SHA"
   fi
 fi
 
-printf 'desktop=%s\n' "$desktop" >> "$GITHUB_OUTPUT"
-printf 'ios=%s\n' "$ios" >> "$GITHUB_OUTPUT"
-printf 'package=%s\n' "$package" >> "$GITHUB_OUTPUT"
+{
+  printf 'desktop=%s\n' "$desktop"
+  printf 'ios=%s\n' "$ios"
+  printf 'package=%s\n' "$package"
+} >> "$GITHUB_OUTPUT"

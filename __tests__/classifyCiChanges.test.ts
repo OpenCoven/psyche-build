@@ -94,9 +94,13 @@ describe('classify-ci-changes', () => {
     expect(runClassifier(repoDir, baseSha, headSha, 'pull_request')).toMatchObject({ desktop: 'true', ios: 'true' })
   })
 
-  it('.github/workflows/ci.yml => both true', () => {
+  it('.github/workflows/ci.yml => desktop=true, ios=true, package=true', () => {
     const { repoDir, baseSha, headSha } = initRepo({ 'docs/readme.md': 'a\n' }, { 'docs/readme.md': 'a\n', '.github/workflows/ci.yml': 'x\n' })
-    expect(runClassifier(repoDir, baseSha, headSha, 'pull_request')).toMatchObject({ desktop: 'true', ios: 'true' })
+    expect(runClassifier(repoDir, baseSha, headSha, 'pull_request')).toEqual({
+      desktop: 'true',
+      ios: 'true',
+      package: 'true',
+    })
   })
 
   it('editing scripts/classify-ci-changes.sh => desktop=true, ios=true, package=true', () => {
@@ -111,24 +115,22 @@ describe('classify-ci-changes', () => {
     })
   })
 
-  it('package metadata, scripts, runtime, types, and published docs require package smoke', () => {
-    for (const path of [
-      'package.json',
-      'pnpm-lock.yaml',
-      'scripts/release-version.mjs',
-      'src/index.ts',
-      'src/control-task-tokens.ts',
-      'src/utils/generated-agents-doc.ts',
-      'README.md',
-      'docs/README.md',
-    ]) {
-      const { repoDir, baseSha, headSha } = initRepo(
-        { 'docs/notes.md': 'a\n' },
-        { 'docs/notes.md': 'a\n', [path]: 'changed\n' },
-      )
-      expect(runClassifier(repoDir, baseSha, headSha, 'pull_request'), path)
-        .toMatchObject({ package: 'true' })
-    }
+  it.each([
+    'package.json',
+    'pnpm-lock.yaml',
+    'scripts/release-version.mjs',
+    'src/index.ts',
+    'src/control-task-tokens.ts',
+    'src/utils/generated-agents-doc.ts',
+    'README.md',
+    'docs/README.md',
+  ])('package-affecting path %s requires package smoke', (path) => {
+    const { repoDir, baseSha, headSha } = initRepo(
+      { 'docs/notes.md': 'a\n' },
+      { 'docs/notes.md': 'a\n', [path]: 'changed\n' },
+    )
+    expect(runClassifier(repoDir, baseSha, headSha, 'pull_request'), path)
+      .toMatchObject({ package: 'true' })
   })
 
   it('renaming a native iOS file into docs still selects iOS', () => {
