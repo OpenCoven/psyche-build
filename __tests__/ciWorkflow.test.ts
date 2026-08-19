@@ -24,6 +24,8 @@ function workflowJobSource(source: string, name: string): string {
 }
 
 describe('pull request CI workflow contract', () => {
+  const mainPushCondition = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
+
   it('runs read-only checks for pull requests and configured pushes with stable required checks', () => {
     const workflow = workflowSource();
     const changesJob = workflowJobSource(workflow, 'changes');
@@ -120,7 +122,7 @@ describe('pull request CI workflow contract', () => {
     ]) {
       expect(qualityJob).toContain(command);
     }
-    expect(qualityJob).toContain("if: github.event_name == 'push'");
+    expect(qualityJob).toContain(`if: ${mainPushCondition}`);
     expect(qualityJob).toContain('pnpm smoke:pack');
     expect(qualityJob).not.toContain('cargo fmt');
     expect(qualityJob).not.toContain('cargo test');
@@ -177,7 +179,7 @@ describe('pull request CI workflow contract', () => {
     expect(desktopCheckJob).toContain(
       'cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked',
     );
-    expect(desktopCheckJob).toContain("if: github.event_name == 'push'");
+    expect(desktopCheckJob).toContain(`if: ${mainPushCondition}`);
     expect(desktopCheckJob).toContain(
       'cargo test --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked',
     );
@@ -219,7 +221,7 @@ describe('pull request CI workflow contract', () => {
     expect(iosCoreJob).toContain('pnpm install --frozen-lockfile');
     expect(iosCoreJob).toContain('pnpm ios:project:check');
     expect(iosCoreJob).toContain('-scheme PsycheCore');
-    expect(iosCoreJob).toContain("if: github.event_name == 'push'");
+    expect(iosCoreJob).toContain(`if: ${mainPushCondition}`);
     expect(iosCoreJob).toContain('-scheme PsycheApp');
 
     expect(requiredIosJob).toContain('name: iOS');

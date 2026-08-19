@@ -66,7 +66,7 @@ jobs:
           pnpm build
 
       - name: Verify package installation
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: pnpm smoke:pack
 
   desktop-web:
@@ -164,7 +164,7 @@ jobs:
         run: cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
 
       - name: Test desktop runtime on main
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: cargo test --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
 
   typescript-rust:
@@ -258,7 +258,7 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/psyche-core-derived-data"
 
       - name: Build and test the iOS app on push
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
         run: |
           set -euo pipefail
