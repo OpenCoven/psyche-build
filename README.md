@@ -81,6 +81,21 @@ The doctor output also calls out supported agent CLIs and the Coven boundary:
 - Without Coven, Psyche Build still manages tmux panes, worktrees, merge, PR, settings, rituals, and local file browsing.
 - With a local Coven daemon, Psyche Build's CLI and bridge can list, open, and launch scoped Coven harness sessions.
 
+## The model
+
+Every Psyche Build workflow uses the same four definitions:
+
+- **Task** — one requested outcome.
+- **Lane** — one agent or terminal working on that task.
+- **Isolation mode** — an isolated worktree, a shared worktree, a plain
+  terminal, or a Coven-managed session.
+- **Integration** — inspect, compare, merge, create a PR, archive, or clean up.
+
+A pane is the concrete surface a lane runs in; a worktree is the most common
+isolation mode. Coven-native is the default capability provider and Psyche is
+an optional registration point; an explicitly unavailable provider fails
+closed instead of degrading silently.
+
 ## What it does
 
 Psyche Build creates a tmux pane for each task. Every work pane gets its own git worktree and branch so agents work in complete isolation. When a task is done, open the pane menu with `m` and choose Merge to bring it back into your main branch, or Create GitHub PR to push the branch and file a pull request.

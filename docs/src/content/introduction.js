@@ -5,6 +5,7 @@ export function render() {
     <h1>What is psyche?</h1>
     <p class="lead">psyche runs multiple coding agents and shell panes in parallel using tmux and git worktrees. It automates the worktree lifecycle, supports multiple projects in one session, includes a built-in read-only file browser for each worktree, and can raise native macOS notifications when background panes need attention. If you provide an OpenRouter key, it will also generate branch names, commit messages, and other quality-of-life automation for you.</p>
     <p>Use <kbd>f</kbd> to browse files inside a pane's worktree, <kbd>h</kbd> and <kbd>H</kbd> to hide panes without stopping them, and <kbd>P</kbd> to focus a single project's panes inside a shared session.</p>
+    <p>psyche organizes all of this with one model: a <strong>task</strong> is one requested outcome, a <strong>lane</strong> is one agent or terminal working on it, an <strong>isolation mode</strong> is where a lane runs (an isolated worktree, a shared worktree, a plain terminal, or a Coven-managed session), and <strong>integration</strong> is how you inspect, compare, merge, PR, archive, or clean up the result. See <a href="#/core-concepts">Core Concepts</a> for the full model.</p>
 
     <div class="agent-cloud">
       <a href="#/agents" class="agent-cloud-item">

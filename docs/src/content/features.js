@@ -14,7 +14,7 @@ export function render() {
         <tr><td>Project sessions</td><td>You want one stable psyche session per repository</td><td><a href="#/core-concepts">Core Concepts</a></td></tr>
         <tr><td>Worktree panes</td><td>You want several agents working without touching the same checkout</td><td><a href="#/getting-started">Getting Started</a></td></tr>
         <tr><td>Agent registry</td><td>You use Claude Code, Codex, opencode, Gemini, Qwen, Amp, Cursor, Copilot, Cline, Crush, or pi</td><td><a href="#/agents">Agents</a></td></tr>
-        <tr><td>A/B agent pairs</td><td>You want two agents to attempt the same task independently</td><td><a href="#/multi-agent">Multi-Agent</a></td></tr>
+        <tr><td>Two-lane comparison</td><td>You want two agents to attempt the same task independently</td><td><a href="#/multi-agent">Multi-Agent</a></td></tr>
         <tr><td>Shared-worktree agents</td><td>You want another agent or shell attached to an existing branch</td><td><a href="#/workflows">Workflows</a></td></tr>
         <tr><td>File browser</td><td>You want to inspect files and diffs without leaving psyche</td><td><a href="#/workflows">Workflows</a></td></tr>
         <tr><td>Pane visibility controls</td><td>You want to focus one pane or one project without stopping background work</td><td><a href="#/keyboard-shortcuts">Keyboard Shortcuts</a></td></tr>
