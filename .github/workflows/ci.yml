@@ -63,7 +63,7 @@ jobs:
   desktop-web:
     name: Desktop web
     needs: changes
-    if: always()
+    if: needs.changes.result == 'success' && needs.changes.outputs.desktop == 'true'
     runs-on: macos-15
     timeout-minutes: 25
     steps:
@@ -112,7 +112,7 @@ jobs:
   rust-test:
     name: Rust tests
     needs: changes
-    if: always()
+    if: needs.changes.result == 'success' && needs.changes.outputs.desktop == 'true'
     runs-on: macos-15
     timeout-minutes: 45
     steps:
@@ -154,7 +154,7 @@ jobs:
   desktop-check:
     name: Desktop check (${{ matrix.os }})
     needs: changes
-    if: always()
+    if: needs.changes.result == 'success' && needs.changes.outputs.desktop == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -240,9 +240,12 @@ jobs:
           set -euo pipefail
           test "$CHANGES_RESULT" = success
           test "$QUALITY_RESULT" = success
-          test "$DESKTOP_WEB_RESULT" = success
-          test "$RUST_TEST_RESULT" = success
-          test "$DESKTOP_CHECK_RESULT" = success
+          for result in "$DESKTOP_WEB_RESULT" "$RUST_TEST_RESULT" "$DESKTOP_CHECK_RESULT"; do
+            case "$result" in
+              success|skipped) ;;
+              *) exit 1 ;;
+            esac
+          done
           if [ "$TYPESCRIPT_REQUIRED" != true ]; then
             echo "TypeScript validation is not required for this change set."
           fi
@@ -282,7 +285,7 @@ jobs:
   ios-core:
     name: iOS Core
     needs: changes
-    if: always()
+    if: needs.changes.result == 'success' && needs.changes.outputs.ios == 'true'
     runs-on: macos-15
     timeout-minutes: 50
     env:
@@ -364,10 +367,10 @@ jobs:
             -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
             -derivedDataPath "$RUNNER_TEMP/psyche-core-derived-data"
 
-  ios:
-    name: iOS
-    needs: [changes, ios-core]
-    if: always()
+  ios-app:
+    name: iOS app
+    needs: changes
+    if: needs.changes.result == 'success' && needs.changes.outputs.ios == 'true'
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -376,13 +379,11 @@ jobs:
       - name: Require successful change classification
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
-          IOS_CORE_RESULT: ${{ needs.ios-core.result }}
           IOS_REQUIRED: ${{ needs.changes.outputs.ios }}
         shell: bash
         run: |
           set -euo pipefail
           test "$CHANGES_RESULT" = success
-          test "$IOS_CORE_RESULT" = success
           if [ "$IOS_REQUIRED" != true ]; then
             echo "iOS app validation is not required for this change set."
           fi
@@ -461,3 +462,26 @@ jobs:
             -scheme PsycheApp \
             -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
             -derivedDataPath "$RUNNER_TEMP/psyche-app-test-derived-data"
+
+  ios:
+    name: iOS
+    needs: [changes, ios-core, ios-app]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require successful applicable iOS validation
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          IOS_CORE_RESULT: ${{ needs.ios-core.result }}
+          IOS_APP_RESULT: ${{ needs.ios-app.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          for result in "$IOS_CORE_RESULT" "$IOS_APP_RESULT"; do
+            case "$result" in
+              success|skipped) ;;
+              *) exit 1 ;;
+            esac
+          done

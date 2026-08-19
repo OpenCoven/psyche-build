@@ -107,4 +107,17 @@ describe('CI change classifier', () => {
       typescript: 'true',
     });
   });
+
+  it('runs desktop and TypeScript validation for Tauri tests', () => {
+    const cwd = createRepository();
+    const base = git(cwd, 'rev-parse', 'HEAD');
+    mkdirSync(join(cwd, '__tests__'), { recursive: true });
+    writeFileSync(join(cwd, '__tests__/tauriExample.test.ts'), 'export {};\n');
+    const head = commitAll(cwd, 'change Tauri test');
+
+    expect(classify(cwd, base, head, 'pull_request')).toMatchObject({
+      desktop: 'true',
+      typescript: 'true',
+    });
+  });
 });

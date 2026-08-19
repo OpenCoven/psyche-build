@@ -53,8 +53,12 @@ if "$classification_complete"; then
           ios=true
           typescript=true
           ;;
-        native/desktop/*|Cargo.toml|Cargo.lock|__tests__/tauri*|scripts/build-macos-app.mjs)
+        native/desktop/*|Cargo.toml|Cargo.lock|scripts/build-macos-app.mjs)
           desktop=true
+          ;;
+        __tests__/tauri*)
+          desktop=true
+          typescript=true
           ;;
         native/ios/*|protocol-fixtures/*|src/control/*|src/services/bridge/*|scripts/generate-protocol-fixtures.ts|scripts/app-store-connect.mjs)
           ios=true

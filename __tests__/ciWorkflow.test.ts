@@ -92,6 +92,7 @@ describe('pull request CI workflow contract', () => {
       'desktop-check',
       'typescript-rust',
       'ios-core',
+      'ios-app',
       'ios',
     ]) {
       expect(workflow).toContain(`  ${job}:`);
@@ -104,12 +105,23 @@ describe('pull request CI workflow contract', () => {
     const desktopCheck = workflowJobSource(workflow, 'desktop-check');
     const typescriptRust = workflowJobSource(workflow, 'typescript-rust');
     const iosCore = workflowJobSource(workflow, 'ios-core');
+    const iosApp = workflowJobSource(workflow, 'ios-app');
     const ios = workflowJobSource(workflow, 'ios');
 
     expect(changes).toContain('classifier');
     expect(quality).not.toContain('needs: changes');
-    for (const job of [desktopWeb, rustTest, desktopCheck, iosCore]) {
+    for (const job of [desktopWeb, rustTest, desktopCheck, iosCore, iosApp]) {
       expect(job).toContain('needs: changes');
+    }
+    for (const job of [desktopWeb, rustTest, desktopCheck]) {
+      expect(job).toContain(
+        "if: needs.changes.result == 'success' && needs.changes.outputs.desktop == 'true'",
+      );
+    }
+    for (const job of [iosCore, iosApp]) {
+      expect(job).toContain(
+        "if: needs.changes.result == 'success' && needs.changes.outputs.ios == 'true'",
+      );
     }
     expect(typescriptRust).toContain(
       'needs: [changes, quality, desktop-web, rust-test, desktop-check]',
@@ -118,8 +130,12 @@ describe('pull request CI workflow contract', () => {
     expect(typescriptRust).toContain('DESKTOP_WEB_RESULT');
     expect(typescriptRust).toContain('RUST_TEST_RESULT');
     expect(typescriptRust).toContain('DESKTOP_CHECK_RESULT');
-    expect(ios).toContain('needs: [changes, ios-core]');
+    expect(typescriptRust).toContain('success|skipped');
+    expect(ios).toContain('needs: [changes, ios-core, ios-app]');
     expect(ios).toContain('IOS_CORE_RESULT');
+    expect(ios).toContain('IOS_APP_RESULT');
+    expect(ios).toContain('success|skipped');
+    expect(ios).toContain('runs-on: ubuntu-24.04');
     expect(workflow).not.toContain('  desktop-runtime:');
     expect(desktopWeb.match(/build:web/g) ?? []).toHaveLength(1);
     expect(rustTest.match(/cargo fmt/g) ?? []).toHaveLength(1);
