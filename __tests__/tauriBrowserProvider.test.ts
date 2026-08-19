@@ -13,6 +13,10 @@ const lib = readFileSync(new URL(
   '../native/desktop/psyche-build-tauri/src-tauri/src/lib.rs',
   import.meta.url,
 ), 'utf8');
+const nativeFocus = readFileSync(new URL(
+  '../native/desktop/psyche-build-tauri/src-tauri/src/browser_focus.rs',
+  import.meta.url,
+), 'utf8');
 const mainJs = readFileSync(new URL(
   '../native/desktop/psyche-build-tauri/web/main.js',
   import.meta.url,
@@ -203,16 +207,18 @@ describe('Tauri browser control provider contract', () => {
     expect(lib).toMatch(
       /BrowserNavigationWaiter \{\s*generation,\s*token: navigation_token\.clone\(\),/,
     );
-    expect(lib).toMatch(
+    expect(nativeFocus).toMatch(
       /fn browser_focus_identity\(label: &str\)[\s\S]*BROWSER_LIVE_FOCUS_IDENTITIES\.lock\(\)\.get\(label\)\.cloned\(\)/,
     );
     expect(lib).toMatch(
-      /complete_browser_navigation[\s\S]*generation: waiter\.generation,[\s\S]*navigation_token: waiter\.token\.clone\(\),[\s\S]*focus_nonce: waiter\.focus_nonce\.clone\(\),/,
+      /complete_browser_navigation[\s\S]*generation: waiter\.generation,[\s\S]*navigation_token: waiter\.token\.clone\(\),/,
     );
+    expect(nativeFocus).toContain('resolve_browser_native_focus');
+    expect(nativeFocus).toContain('registration_id');
     expect(mainJs).toContain(
       'generation: generation, navigationToken: navigationToken',
     );
-    expect(mainJs).toContain('payload.focusNonce !== lifecycle.liveFocusNonce');
+    expect(mainJs).not.toContain('focusNonce');
   });
 
   it('pre-bounds screenshot pixels and reserves base64 JSON wire overhead', () => {

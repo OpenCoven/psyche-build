@@ -24,6 +24,7 @@
     "allow-pty-list",
     "allow-pty-transport-metrics",
     "allow-browser-app-shortcut",
+    "allow-browser-report-title",
     "allow-browser-automation-result",
     "allow-browser-navigate",
     "allow-browser-set-bounds",

@@ -13,6 +13,7 @@ fn main() {
             "pty_list",
             "pty_transport_metrics",
             "browser_app_shortcut",
+            "browser_report_title",
             "browser_automation_result",
             "browser_navigate",
             "browser_set_bounds",
