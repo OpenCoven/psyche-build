@@ -85,11 +85,47 @@ function isTransitionTime(token: string): boolean {
   return /^[+-]?(?:\d*\.)?\d+(?:e[+-]?\d+)?m?s$/i.test(token);
 }
 
-function transitionShorthandProperties(segment: string): string[] {
-  const parsed = valueParser(segment);
-  const words = parsed.nodes
-    .filter((node): node is Extract<ValueNode, { type: 'word' }> => node.type === 'word')
-    .map((node) => normalizePropertyName(node.value));
+function resolveCustomProperties(
+  value: string,
+  customProperties: ReadonlyMap<string, string>,
+  resolving = new Set<string>(),
+): string {
+  const parsed = valueParser(value);
+  parsed.walk((node, index, nodes) => {
+    if (node.type !== 'function' || normalizePropertyName(node.value) !== 'var') return;
+    const separator = node.nodes.findIndex(
+      (child) => child.type === 'div' && child.value === ',',
+    );
+    const name = valueParser.stringify(
+      separator === -1 ? node.nodes : node.nodes.slice(0, separator),
+    ).trim();
+    const fallback = separator === -1
+      ? ''
+      : valueParser.stringify(node.nodes.slice(separator + 1)).trim();
+    const replacement = customProperties.get(name) || fallback;
+    if (!replacement || resolving.has(name)) return;
+    const nextResolving = new Set(resolving).add(name);
+    nodes.splice(
+      index,
+      1,
+      ...valueParser(resolveCustomProperties(replacement, customProperties, nextResolving)).nodes,
+    );
+  });
+  return parsed.toString();
+}
+
+function transitionShorthandProperties(
+  segment: string,
+  customProperties: ReadonlyMap<string, string>,
+): string[] {
+  const parsed = valueParser(resolveCustomProperties(segment, customProperties));
+  const words = parsed.nodes.flatMap((node) => {
+    if (node.type === 'word') return [normalizePropertyName(node.value)];
+    if (node.type === 'function' && normalizePropertyName(node.value) === 'var') {
+      return [valueParser.stringify(node)];
+    }
+    return [];
+  });
 
   if (words.length === 1 && words[0] === 'none') {
     return [];
@@ -143,6 +179,19 @@ interface CompositorFindings {
 
 function auditStylesheet(css: string): CompositorFindings {
   const root = postcss.parse(css, { from: undefined });
+  const customPropertyValues = new Map<string, Set<string>>();
+  root.walkDecls((declaration) => {
+    const property = decodeCssIdentifier(declaration.prop);
+    if (!property.startsWith('--')) return;
+    const values = customPropertyValues.get(property) ?? new Set<string>();
+    values.add(declaration.value);
+    customPropertyValues.set(property, values);
+  });
+  const customProperties = new Map(
+    [...customPropertyValues]
+      .filter(([, values]) => values.size === 1)
+      .map(([property, values]) => [property, [...values][0]]),
+  );
   const findings: CompositorFindings = {
     keyframeViolations: [],
     transitionViolations: [],
@@ -163,6 +212,24 @@ function auditStylesheet(css: string): CompositorFindings {
     });
   });
 
+  root.walkRules((rule) => {
+    const declarations = rule.nodes.filter(
+      (node): node is Declaration => node.type === 'decl',
+    );
+    const duration = declarations.find(
+      (declaration) => normalizePropertyName(declaration.prop) === 'transition-duration',
+    );
+    const definesTransitionProperties = declarations.some((declaration) => {
+      const property = normalizePropertyName(declaration.prop);
+      return property === 'transition' || property === 'transition-property';
+    });
+    if (duration && !definesTransitionProperties) {
+      findings.transitionViolations.push(
+        `${rule.selector} { ${duration.prop}: all }`,
+      );
+    }
+  });
+
   root.walkDecls((declaration) => {
     const property = normalizePropertyName(declaration.prop);
     const rule = ruleForDeclaration(declaration);
@@ -171,7 +238,8 @@ function auditStylesheet(css: string): CompositorFindings {
     if (property === 'transition' || property === 'transition-property') {
       const transitionProperties =
         property === 'transition'
-          ? splitValueList(declaration.value).flatMap(transitionShorthandProperties)
+          ? splitValueList(declaration.value)
+            .flatMap((segment) => transitionShorthandProperties(segment, customProperties))
           : splitValueList(declaration.value)
             .map(normalizePropertyName)
             .filter((name) => name !== 'none');
@@ -278,6 +346,45 @@ describe('compositor stylesheet audit parser', () => {
       '.paint { transition: color }',
       '.border { transition-property: border-color }',
       '.inherited { transition-property: inherit }',
+    ]);
+  });
+
+  it('rejects duration-only transitions that retain the implicit all property', () => {
+    const findings = auditStylesheet(`
+      .implicit-all {
+        transition-duration: 200ms;
+      }
+      .explicit-safe {
+        transition-property: opacity;
+        transition-duration: 200ms;
+      }
+    `);
+
+    expect(findings.transitionViolations).toEqual([
+      '.implicit-all { transition-duration: all }',
+    ]);
+  });
+
+  it('rejects unresolved custom properties in transition shorthands', () => {
+    const findings = auditStylesheet(`
+      :root {
+        --safe-timing: 120ms ease;
+        --unsafe-tail: 120ms ease, background 120ms ease;
+      }
+      .safe-variable {
+        transition: opacity var(--safe-timing);
+      }
+      .variable-tail {
+        transition: opacity var(--rest);
+      }
+      .expanded-tail {
+        transition: opacity var(--unsafe-tail);
+      }
+    `);
+
+    expect(findings.transitionViolations).toEqual([
+      '.variable-tail { transition: var(--rest) }',
+      '.expanded-tail { transition: background }',
     ]);
   });
 
