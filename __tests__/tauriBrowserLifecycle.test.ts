@@ -593,6 +593,10 @@ function browserLifecycleHarness() {
     pendingGeneration: number;
     pendingUrl: string | null;
     pendingNavigationToken: string | null;
+    pendingTitle: string | null;
+    pendingTitleUrl: string | null;
+    pendingTitleGeneration: number;
+    pendingTitleNavigationToken: string | null;
     liveGeneration: number;
     controlGeneration: number;
     liveUrl: string | null;
@@ -623,6 +627,10 @@ function browserLifecycleHarness() {
         pendingGeneration: 0,
         pendingUrl: null,
         pendingNavigationToken: null,
+        pendingTitle: null,
+        pendingTitleUrl: null,
+        pendingTitleGeneration: 0,
+        pendingTitleNavigationToken: null,
         liveGeneration: 0,
         controlGeneration: 0,
         liveUrl: null,
@@ -648,6 +656,10 @@ function browserLifecycleHarness() {
         pendingGeneration: 0,
         pendingUrl: null,
         pendingNavigationToken: null,
+        pendingTitle: null,
+        pendingTitleUrl: null,
+        pendingTitleGeneration: 0,
+        pendingTitleNavigationToken: null,
         liveGeneration: 0,
         controlGeneration: 0,
         liveUrl: null,
@@ -691,6 +703,10 @@ function browserLifecycleHarness() {
       lifecycle.pendingGeneration = 0;
       lifecycle.pendingUrl = null;
       lifecycle.pendingNavigationToken = null;
+      lifecycle.pendingTitle = null;
+      lifecycle.pendingTitleUrl = null;
+      lifecycle.pendingTitleGeneration = 0;
+      lifecycle.pendingTitleNavigationToken = null;
       lifecycle.eventUrl = null;
       lifecycle.navigationSnapshot = null;
       return lifecycle.generation;
@@ -733,7 +749,9 @@ function browserNavigationDependencies(
     findThread: () => pane,
     visibleBrowserBounds: () => ({ x: 1, y: 2, w: 3, h: 4 }),
     normaliseUrl: (url: string) => url,
-    browserUrlsMatch: (left: string, right: string) => left === right,
+    browserUrlsMatch: compileFunction<
+      (left: string, right: string) => boolean
+    >(functionSource(mainJs, 'browserUrlsMatch'), {}),
     tabTitle: (url: string) => url,
     renderBrowserTabs: () => {},
     updateBrowserControls: () => {},
@@ -790,6 +808,10 @@ function browserNavigationDependencies(
         state.pendingGeneration = 0;
         state.pendingUrl = null;
         state.pendingNavigationToken = null;
+        state.pendingTitle = null;
+        state.pendingTitleUrl = null;
+        state.pendingTitleGeneration = 0;
+        state.pendingTitleNavigationToken = null;
         state.eventUrl = null;
         state.navigationSnapshot = null;
       } else {
@@ -2001,9 +2023,9 @@ function browserNativeEventHandlers(options: {
   const browserUrlsMatch = compileFunction<
     (left: string, right: string) => boolean
   >(functionSource(mainJs, 'browserUrlsMatch'), {});
-  const browserUrlsShareOrigin = compileFunction<
-    (left: string, right: string) => boolean
-  >(functionSource(mainJs, 'browserUrlsShareOrigin'), {});
+  const browserNativeUrl = compileFunction<
+    (value: string) => string | null
+  >(functionSource(mainJs, 'browserNativeUrl'), {});
   const browserNativeEventContext = compileFunction<
     (nativeLabel: string, url: string) => {
       project: typeof project;
@@ -2046,9 +2068,29 @@ function browserNativeEventHandlers(options: {
     updateBrowserControls: () => calls.push('controls'),
   });
   const handleBrowserTitle = compileFunction<
-    (event: { payload: { label: string; url: string; title: string } }) => boolean
+    (event: {
+      payload: {
+        label: string;
+        url: string;
+        title: string;
+        generation?: number;
+        navigationToken?: string;
+      };
+    }) => boolean
   >(functionSource(mainJs, 'handleBrowserTitle'), {
-    markBrowserTabLoaded,
+    browserTitleEventContext: compileFunction(
+      functionSource(mainJs, 'browserTitleEventContext'),
+      {
+        browserNativeUrl,
+        browserNativeEventContext,
+        browserTabLifecycle: lifecycle.browserTabLifecycle,
+        browserUrlsMatch,
+      },
+    ),
+    state,
+    activeWorkspaceRoot: () => worktreePath,
+    renderBrowserTabs: () => calls.push('render'),
+    saveWorkspaceSoon: () => calls.push('save'),
   });
   const browserFocusEventContext = compileFunction<
     (payload: {
@@ -2077,7 +2119,7 @@ function browserNativeEventHandlers(options: {
     findThread: (threadId: string) => pane?.id === threadId ? pane : null,
     activeWorkspaceRoot: () => worktreePath,
     browserUrlsMatch,
-    browserUrlsShareOrigin,
+    browserNativeUrl,
     state,
   });
   const handleBrowserFocus = compileFunction<
@@ -2383,6 +2425,45 @@ describe('Tauri native browser lifecycle', () => {
     ]);
   });
 
+  it('accepts a cross-origin URL from the exact live native focus identity', () => {
+    const fixture = browserFocusFixture();
+    const url = 'https://account.example.net/dashboard';
+
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url,
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    expect(fixture.tab.url).toBe(url);
+    expect(fixture.lifecycle.browserTabLifecycle(fixture.tab)).toMatchObject({
+      liveUrl: url,
+      eventUrl: url,
+    });
+  });
+
+  it.each([
+    'not a URL',
+    'javascript:alert(1)',
+    'data:text/html,untrusted',
+    'ftp://files.example.test/archive',
+    'about:config',
+  ])('rejects an invalid native focus URL %s', (url) => {
+    const fixture = browserFocusFixture();
+
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url,
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(false);
+    expect(fixture.tab.url).toBe('https://current.example');
+  });
+
   it('rejects a same-document focus URL carrying a stale navigation token', () => {
     const fixture = browserFocusFixture();
 
@@ -2422,7 +2503,9 @@ describe('Tauri native browser lifecycle', () => {
     expect(destroyBrowserWebview).toContain('BROWSER_NAVIGATION_WAITERS.lock().remove(&label);');
     expect(destroyBrowserWebview).toContain('retire_browser_focus_label(&label);');
     expect(destroyBrowserWebview).toContain('detach_browser_native_focus_callback(&webview);');
-    expect(destroyBrowserWebview).toContain('webview.close().map_err(|error| error.to_string())?;');
+    expect(destroyBrowserWebview.indexOf('webview.close().map_err(|error| error.to_string())'))
+      .toBeLessThan(destroyBrowserWebview.indexOf('retire_browser_focus_label(&label);'));
+    expect(destroyBrowserWebview).toContain('close_browser_webview_transactionally(');
     expect(destroyBrowserWebview).toContain('app.state::<BrowserShortcutAuthorizations>().remove(&label);');
 
     const browserDestroy = rustFunctionSource(nativeLib, 'browser_destroy');
@@ -4197,8 +4280,10 @@ describe('Tauri native browser lifecycle', () => {
       nativeLabel: 'native-tab-a',
       pendingGeneration: 2,
       pendingUrl: 'https://second.example',
+      pendingNavigationToken: 'second-token',
       liveGeneration: 1,
       liveUrl: 'https://first.example',
+      liveNavigationToken: 'first-token',
       eventUrl: null,
       viewLive: true,
     });
@@ -4232,6 +4317,8 @@ describe('Tauri native browser lifecycle', () => {
         label: 'native-tab-a',
         url: 'https://first.example',
         title: 'Stale first title',
+        generation: 1,
+        navigationToken: 'first-token',
       },
     })).toBe(false);
     expect(handlers.handleBrowserTitle({
@@ -4239,6 +4326,8 @@ describe('Tauri native browser lifecycle', () => {
         label: 'stale-native-label',
         url: 'https://second.example',
         title: 'Stale label title',
+        generation: 2,
+        navigationToken: 'second-token',
       },
     })).toBe(false);
     expect(tab).toMatchObject({
@@ -4254,6 +4343,7 @@ describe('Tauri native browser lifecycle', () => {
         label: 'native-tab-a',
         url: 'https://second.example',
         phase: 'started',
+        navigationToken: 'second-token',
       },
     })).toBe(false);
     lifecycle.browserTabLifecycle(tab).pendingGeneration = 2;
@@ -4263,6 +4353,7 @@ describe('Tauri native browser lifecycle', () => {
         label: 'native-tab-a',
         url: 'https://second.example',
         phase: 'started',
+        navigationToken: 'second-token',
       },
     })).toBe(true);
     expect(tab.loading).toBe(true);
@@ -4271,6 +4362,7 @@ describe('Tauri native browser lifecycle', () => {
         label: 'native-tab-a',
         url: 'https://second.example',
         phase: 'finished',
+        navigationToken: 'second-token',
       },
     })).toBe(true);
     expect(handlers.handleBrowserTitle({
@@ -4278,6 +4370,8 @@ describe('Tauri native browser lifecycle', () => {
         label: 'native-tab-a',
         url: 'https://second.example',
         title: 'Current second title',
+        generation: 2,
+        navigationToken: 'second-token',
       },
     })).toBe(true);
     expect(tab).toMatchObject({
@@ -4292,7 +4386,6 @@ describe('Tauri native browser lifecycle', () => {
       'url',
       'save',
       'render',
-      'url',
       'save',
     ]);
   });
@@ -4569,7 +4662,7 @@ describe('Tauri native browser lifecycle', () => {
     expect(handlers.calls).toEqual([]);
   });
 
-  it('accepts current page-load and title events before native navigation settles', async () => {
+  it('replays a correlated pending DOM title only after native navigation settles', async () => {
     let resolveNavigation!: () => void;
     const lifecycle = browserLifecycleHarness();
     const project = {
@@ -4615,35 +4708,28 @@ describe('Tauri native browser lifecycle', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(handlers.handleBrowserPageLoad({
-      payload: {
-        label: 'project-a:tab-a',
-        url: 'https://current.example',
-        phase: 'started',
-        navigationToken: lifecycle.browserTabLifecycle(tab).pendingNavigationToken,
-      },
-    })).toBe(true);
-    expect(handlers.handleBrowserPageLoad({
-      payload: {
-        label: 'project-a:tab-a',
-        url: 'https://current.example',
-        phase: 'finished',
-        navigationToken: lifecycle.browserTabLifecycle(tab).pendingNavigationToken,
-      },
-    })).toBe(true);
+    const pending = lifecycle.browserTabLifecycle(tab);
     expect(handlers.handleBrowserTitle({
       payload: {
         label: 'project-a:tab-a',
         url: 'https://current.example',
         title: 'Current title',
+        generation: pending.pendingGeneration,
+        navigationToken: pending.pendingNavigationToken || undefined,
       },
     })).toBe(true);
     expect(settled).toBe(false);
     expect(tab).toMatchObject({
-      created: true,
-      loading: false,
-      url: 'https://current.example',
-      title: 'Current title',
+      created: false,
+      loading: true,
+      url: 'https://old.example',
+      title: 'https://current.example',
+    });
+    expect(lifecycle.browserTabLifecycle(tab)).toMatchObject({
+      pendingTitle: 'Current title',
+      pendingTitleUrl: 'https://current.example/',
+      pendingTitleGeneration: pending.pendingGeneration,
+      pendingTitleNavigationToken: pending.pendingNavigationToken,
     });
 
     resolveNavigation();
@@ -4653,6 +4739,12 @@ describe('Tauri native browser lifecycle', () => {
       loading: false,
       url: 'https://current.example',
       title: 'Current title',
+    });
+    expect(lifecycle.browserTabLifecycle(tab)).toMatchObject({
+      pendingTitle: null,
+      pendingTitleUrl: null,
+      pendingTitleGeneration: 0,
+      pendingTitleNavigationToken: null,
     });
     expect(tab).not.toHaveProperty('pendingGeneration');
     expect(tab).not.toHaveProperty('pendingUrl');

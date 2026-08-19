@@ -43,9 +43,15 @@ describe('Tauri cross-platform browser navigation', () => {
     expect(lib).toContain('remove_NavigationCompleted');
     const registration = rustItem('struct BrowserWindowsNavigationRegistration');
     expect(registration).toMatch(/native_view[\s\S]*generation[\s\S]*token[\s\S]*navigation_id/);
+    const completion = source.slice(
+      source.indexOf('let completed ='),
+      source.indexOf('let mut starting_registration_token'),
+    );
+    expect(completion.indexOf('browser_windows_completion_matches'))
+      .toBeLessThan(completion.indexOf('take_windows_browser_navigation'));
   });
 
-  it('uses an owned monotonic WebKitGTK state and rejects redirects or replacements', () => {
+  it('uses an owned monotonic WebKitGTK state for redirects and replacements', () => {
     const source = cfgFunction('linux', 'start_browser_navigation');
 
     expect(source).toContain('connect_load_changed');
@@ -55,7 +61,9 @@ describe('Tauri cross-platform browser navigation', () => {
     expect(lib).toContain('NEXT_BROWSER_LINUX_NAVIGATION_SEQUENCE');
     const registration = rustItem('struct BrowserLinuxNavigationRegistration');
     expect(registration).toMatch(/native_view[\s\S]*generation[\s\S]*token[\s\S]*sequence[\s\S]*phase/);
-    expect(lib).toContain('browser navigation redirected without a stable WebKit navigation identity');
+    expect(registration).toContain('requested_url');
+    expect(lib).toContain('BrowserLinuxNavigationPhase::Redirected');
+    expect(lib).toContain('browser navigation signal order was ambiguous');
     expect(lib).toContain('browser navigation was replaced before completion');
     expect(lib).toContain('disconnect_linux_browser_navigation_signals');
   });
@@ -77,8 +85,9 @@ describe('Tauri cross-platform browser navigation', () => {
     const destroy = rustItem('fn destroy_browser_webview(');
     const navigate = rustItem('async fn browser_navigate(');
     expect(lib).toContain('detach_browser_navigation_callbacks');
-    expect(retire).toMatch(/detach_browser_navigation_callbacks\(&webview, label\)[\s\S]*webview\.close\(\)/);
-    expect(destroy).toMatch(/detach_browser_navigation_callbacks\(&webview, &label\)[\s\S]*webview\.close\(\)/);
+    expect(retire).toMatch(/webview\.close\(\)[\s\S]*detach_browser_navigation_callbacks\(&webview, label\)/);
+    expect(destroy).toMatch(/webview\.close\(\)[\s\S]*detach_browser_navigation_callbacks\(&webview, &label\)/);
+    expect(lib).toContain('close_browser_webview_transactionally');
     expect(navigate).toMatch(/Err\(_\) => \{[\s\S]*retire_browser_webview_for_navigation\(&app, &label\)[\s\S]*browser navigation timed out/);
     expect(navigate).toMatch(/Ok\(Ok\(Err\(error\)\)\) => \{[\s\S]*retire_browser_webview_for_navigation\(&app, &label\)/);
   });

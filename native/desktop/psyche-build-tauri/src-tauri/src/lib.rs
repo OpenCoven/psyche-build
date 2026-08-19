@@ -1740,11 +1740,12 @@ struct BrowserNavigationKey {
 }
 
 #[cfg(any(target_os = "linux", test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum BrowserLinuxNavigationPhase {
     AwaitingStart,
     Started,
-    Committed,
+    Redirected(String),
+    Committed(String),
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1773,19 +1774,10 @@ fn advance_browser_linux_navigation(
     requested_url: &str,
 ) -> BrowserLinuxNavigationDecision {
     const REPLACED: &str = "browser navigation was replaced before completion";
-    const REDIRECTED: &str =
-        "browser navigation redirected without a stable WebKit navigation identity";
     const FAILED: &str = "browser navigation failed";
     const AMBIGUOUS: &str = "browser navigation signal order was ambiguous";
 
-    if matches!(event, BrowserLinuxNavigationEvent::Failed) {
-        return BrowserLinuxNavigationDecision::Reject(FAILED.to_string());
-    }
-    if matches!(event, BrowserLinuxNavigationEvent::Redirected) {
-        return BrowserLinuxNavigationDecision::Reject(REDIRECTED.to_string());
-    }
-
-    match (*phase, event) {
+    match (phase.clone(), event) {
         (BrowserLinuxNavigationPhase::AwaitingStart, BrowserLinuxNavigationEvent::Started) => {
             if observed_url != requested_url {
                 BrowserLinuxNavigationDecision::Reject(REPLACED.to_string())
@@ -1794,23 +1786,54 @@ fn advance_browser_linux_navigation(
                 BrowserLinuxNavigationDecision::Pending
             }
         }
+        (
+            BrowserLinuxNavigationPhase::AwaitingStart,
+            BrowserLinuxNavigationEvent::Redirected
+            | BrowserLinuxNavigationEvent::Committed
+            | BrowserLinuxNavigationEvent::Finished
+            | BrowserLinuxNavigationEvent::Failed,
+        ) => BrowserLinuxNavigationDecision::Pending,
+        (
+            BrowserLinuxNavigationPhase::Started | BrowserLinuxNavigationPhase::Redirected(_),
+            BrowserLinuxNavigationEvent::Redirected,
+        ) if !observed_url.is_empty() => {
+            *phase = BrowserLinuxNavigationPhase::Redirected(observed_url.to_string());
+            BrowserLinuxNavigationDecision::Pending
+        }
         (BrowserLinuxNavigationPhase::Started, BrowserLinuxNavigationEvent::Committed) => {
-            if observed_url != requested_url {
-                BrowserLinuxNavigationDecision::Reject(REDIRECTED.to_string())
-            } else {
-                *phase = BrowserLinuxNavigationPhase::Committed;
+            if observed_url == requested_url {
+                *phase = BrowserLinuxNavigationPhase::Committed(observed_url.to_string());
                 BrowserLinuxNavigationDecision::Pending
+            } else {
+                BrowserLinuxNavigationDecision::Reject(AMBIGUOUS.to_string())
             }
         }
-        (BrowserLinuxNavigationPhase::Committed, BrowserLinuxNavigationEvent::Finished) => {
-            if observed_url != requested_url {
-                BrowserLinuxNavigationDecision::Reject(REDIRECTED.to_string())
+        (
+            BrowserLinuxNavigationPhase::Redirected(ref redirected_url),
+            BrowserLinuxNavigationEvent::Committed,
+        ) => {
+            if observed_url == redirected_url {
+                *phase = BrowserLinuxNavigationPhase::Committed(observed_url.to_string());
+                BrowserLinuxNavigationDecision::Pending
             } else {
+                BrowserLinuxNavigationDecision::Reject(AMBIGUOUS.to_string())
+            }
+        }
+        (
+            BrowserLinuxNavigationPhase::Committed(ref committed_url),
+            BrowserLinuxNavigationEvent::Finished,
+        ) => {
+            if observed_url == committed_url {
                 BrowserLinuxNavigationDecision::Complete(observed_url.to_string())
+            } else {
+                BrowserLinuxNavigationDecision::Reject(AMBIGUOUS.to_string())
             }
         }
         (_, BrowserLinuxNavigationEvent::Started) => {
             BrowserLinuxNavigationDecision::Reject(REPLACED.to_string())
+        }
+        (_, BrowserLinuxNavigationEvent::Failed) => {
+            BrowserLinuxNavigationDecision::Reject(FAILED.to_string())
         }
         _ => BrowserLinuxNavigationDecision::Reject(AMBIGUOUS.to_string()),
     }
@@ -1828,6 +1851,11 @@ struct BrowserWindowsNavigationRegistration {
     armed: bool,
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn browser_windows_completion_matches(expected: Option<u64>, observed: u64) -> bool {
+    expected == Some(observed)
+}
+
 #[cfg(target_os = "linux")]
 struct BrowserLinuxNavigationRegistration {
     native_view: usize,
@@ -1842,10 +1870,13 @@ struct BrowserLinuxNavigationRegistration {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct BrowserTitleEvent {
     pub label: String,
     pub title: String,
     pub url: String,
+    pub generation: u64,
+    pub navigation_token: String,
 }
 
 struct BrowserNavigationWaiterGuard {
@@ -1867,6 +1898,21 @@ impl Drop for BrowserNavigationWaiterGuard {
 
 static BROWSER_NAVIGATION_WAITERS: Lazy<Mutex<HashMap<String, BrowserNavigationWaiter>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn browser_title_identity(label: &str) -> Option<BrowserFocusIdentity> {
+    {
+        let waiters = BROWSER_NAVIGATION_WAITERS.lock();
+        if let Some(waiter) = waiters.get(label) {
+            return (waiter.native_view.is_some() && waiter.navigation_identity.is_some()).then(
+                || BrowserFocusIdentity {
+                    generation: waiter.generation,
+                    navigation_token: waiter.token.clone(),
+                },
+            );
+        }
+    }
+    browser_focus_identity(label)
+}
 
 #[cfg(target_os = "windows")]
 static BROWSER_WINDOWS_NAVIGATIONS: Lazy<
@@ -3552,6 +3598,8 @@ fn browser_report_title(webview: tauri::Webview, title: String) -> Result<(), St
         .url()
         .map_err(|error| error.to_string())?
         .to_string();
+    let identity = browser_title_identity(webview.label())
+        .ok_or_else(|| "browser title has no live native navigation identity".to_string())?;
     webview
         .app_handle()
         .emit_to(
@@ -3561,6 +3609,8 @@ fn browser_report_title(webview: tauri::Webview, title: String) -> Result<(), St
                 label: webview.label().to_string(),
                 title: title.to_string(),
                 url,
+                generation: identity.generation,
+                navigation_token: identity.navigation_token,
             },
         )
         .map_err(|error| error.to_string())
@@ -3781,12 +3831,27 @@ fn detach_browser_navigation_callbacks(webview: &tauri::Webview, label: &str) {
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn detach_browser_navigation_callbacks(_webview: &tauri::Webview, _label: &str) {}
 
+fn close_browser_webview_transactionally(
+    close: impl FnOnce() -> Result<(), String>,
+    retire: impl FnOnce(),
+) -> Result<(), String> {
+    close()?;
+    retire();
+    Ok(())
+}
+
 fn retire_browser_webview_for_navigation(app: &AppHandle, label: &str) -> Result<(), String> {
-    retire_browser_focus_label(label);
     if let Some(webview) = app.get_webview(label) {
-        detach_browser_navigation_callbacks(&webview, label);
-        detach_browser_native_focus_callback(&webview);
-        webview.close().map_err(|error| error.to_string())?;
+        close_browser_webview_transactionally(
+            || webview.close().map_err(|error| error.to_string()),
+            || {
+                detach_browser_navigation_callbacks(&webview, label);
+                detach_browser_native_focus_callback(&webview);
+                retire_browser_focus_label(label);
+            },
+        )?;
+    } else {
+        retire_browser_focus_label(label);
     }
     app.state::<BrowserShortcutAuthorizations>().remove(label);
     app.state::<BrowserAutomationAuthorizations>().remove(label);
@@ -3980,14 +4045,14 @@ async fn start_browser_navigation(
                         if callback_view != native_view {
                             return Ok(());
                         }
+                        let Some(args) = args else {
+                            return Ok(());
+                        };
+                        let mut navigation_id = 0;
+                        if unsafe { args.NavigationId(&mut navigation_id) }.is_err() {
+                            return Ok(());
+                        }
                         let event = (|| {
-                            let args = args.ok_or_else(|| {
-                                "browser navigation completion arguments are unavailable"
-                                    .to_string()
-                            })?;
-                            let mut navigation_id = 0;
-                            unsafe { args.NavigationId(&mut navigation_id) }
-                                .map_err(|error| error.to_string())?;
                             let mut succeeded = Default::default();
                             unsafe { args.IsSuccess(&mut succeeded) }
                                 .map_err(|error| error.to_string())?;
@@ -3998,7 +4063,6 @@ async fn start_browser_navigation(
                             unsafe { callback_webview.Source(&mut source) }
                                 .map_err(|error| error.to_string())?;
                             Ok::<_, String>((
-                                navigation_id,
                                 succeeded.as_bool(),
                                 web_error_status.0,
                                 take_pwstr(source),
@@ -4015,6 +4079,12 @@ async fn start_browser_navigation(
                                     && registration.armed
                             })
                             .and_then(|registration| registration.navigation_id);
+                        if !browser_windows_completion_matches(
+                            expected_navigation_id,
+                            navigation_id,
+                        ) {
+                            return Ok(());
+                        }
                         let Some(registration) = take_windows_browser_navigation(
                             &completed_label,
                             generation,
@@ -4028,11 +4098,8 @@ async fn start_browser_navigation(
                             &registration,
                         );
 
-                        match (event, expected_navigation_id) {
-                            (
-                                Ok((navigation_id, succeeded, status, terminal_url)),
-                                Some(expected),
-                            ) if navigation_id == expected => {
+                        match event {
+                            Ok((succeeded, status, terminal_url)) => {
                                 let result = if succeeded {
                                     Ok(terminal_url)
                                 } else {
@@ -4045,27 +4112,17 @@ async fn start_browser_navigation(
                                     generation,
                                     &completed_navigation_token,
                                     callback_view,
-                                    expected,
+                                    navigation_id,
                                     result,
                                 );
                             }
-                            (Err(error), _) => {
+                            Err(error) => {
                                 reject_pending_browser_navigation(
                                     &completed_label,
                                     generation,
                                     &completed_navigation_token,
                                     callback_view,
                                     error,
-                                );
-                            }
-                            _ => {
-                                reject_pending_browser_navigation(
-                                    &completed_label,
-                                    generation,
-                                    &completed_navigation_token,
-                                    callback_view,
-                                    "browser navigation completed with an ambiguous native identity"
-                                        .to_string(),
                                 );
                             }
                         }
@@ -4490,12 +4547,19 @@ fn browser_hide_all_except(
 
 fn destroy_browser_webview(app: &AppHandle, label: Option<String>) -> Result<(), String> {
     let label = safe_browser_label(label);
-    BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
-    retire_browser_focus_label(&label);
     if let Some(webview) = app.get_webview(&label) {
-        detach_browser_navigation_callbacks(&webview, &label);
-        detach_browser_native_focus_callback(&webview);
-        webview.close().map_err(|error| error.to_string())?;
+        close_browser_webview_transactionally(
+            || webview.close().map_err(|error| error.to_string()),
+            || {
+                BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
+                detach_browser_navigation_callbacks(&webview, &label);
+                detach_browser_native_focus_callback(&webview);
+                retire_browser_focus_label(&label);
+            },
+        )?;
+    } else {
+        BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
+        retire_browser_focus_label(&label);
     }
     app.state::<BrowserShortcutAuthorizations>().remove(&label);
     app.state::<BrowserAutomationAuthorizations>()
@@ -9035,7 +9099,47 @@ mod pty_runtime_tests {
     }
 
     #[test]
-    fn linux_navigation_state_requires_exact_unredirected_signal_order() {
+    fn browser_title_identity_tracks_pending_then_live_native_navigation() {
+        let label = "browser-native-title".to_string();
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        BROWSER_NAVIGATION_WAITERS.lock().insert(
+            label.clone(),
+            BrowserNavigationWaiter {
+                generation: 61,
+                token: "pending-title".to_string(),
+                native_view: Some(610),
+                navigation_identity: Some(62),
+                completion: Some(sender),
+            },
+        );
+
+        assert_eq!(
+            browser_title_identity(&label),
+            Some(BrowserFocusIdentity {
+                generation: 61,
+                navigation_token: "pending-title".to_string(),
+            })
+        );
+        BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
+        install_browser_focus_identity(
+            label.clone(),
+            BrowserFocusIdentity {
+                generation: 63,
+                navigation_token: "live-title".to_string(),
+            },
+        );
+        assert_eq!(
+            browser_title_identity(&label),
+            Some(BrowserFocusIdentity {
+                generation: 63,
+                navigation_token: "live-title".to_string(),
+            })
+        );
+        retire_browser_focus_label(&label);
+    }
+
+    #[test]
+    fn linux_navigation_state_completes_only_after_finished() {
         let requested = "https://example.test/path";
         let mut phase = BrowserLinuxNavigationPhase::AwaitingStart;
 
@@ -9048,7 +9152,6 @@ mod pty_runtime_tests {
             ),
             BrowserLinuxNavigationDecision::Pending
         );
-        assert_eq!(phase, BrowserLinuxNavigationPhase::Started);
         assert_eq!(
             advance_browser_linux_navigation(
                 &mut phase,
@@ -9058,7 +9161,6 @@ mod pty_runtime_tests {
             ),
             BrowserLinuxNavigationDecision::Pending
         );
-        assert_eq!(phase, BrowserLinuxNavigationPhase::Committed);
         assert_eq!(
             advance_browser_linux_navigation(
                 &mut phase,
@@ -9071,7 +9173,47 @@ mod pty_runtime_tests {
     }
 
     #[test]
-    fn linux_navigation_state_rejects_replacement_redirect_and_failure() {
+    fn linux_navigation_state_accepts_owned_redirect_chains() {
+        let requested = "http://example.test/login";
+        let mut phase = BrowserLinuxNavigationPhase::AwaitingStart;
+
+        for (event, url) in [
+            (BrowserLinuxNavigationEvent::Started, requested),
+            (
+                BrowserLinuxNavigationEvent::Redirected,
+                "https://example.test/login",
+            ),
+            (
+                BrowserLinuxNavigationEvent::Redirected,
+                "https://auth.example.test/authorize",
+            ),
+            (
+                BrowserLinuxNavigationEvent::Redirected,
+                "https://example.test/callback",
+            ),
+            (
+                BrowserLinuxNavigationEvent::Committed,
+                "https://example.test/callback",
+            ),
+        ] {
+            assert_eq!(
+                advance_browser_linux_navigation(&mut phase, event, url, requested),
+                BrowserLinuxNavigationDecision::Pending
+            );
+        }
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut phase,
+                BrowserLinuxNavigationEvent::Finished,
+                "https://example.test/callback",
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Complete("https://example.test/callback".to_string())
+        );
+    }
+
+    #[test]
+    fn linux_navigation_state_rejects_replacement_ambiguous_evolution_and_failure() {
         let requested = "https://example.test/path";
 
         let mut replacement = BrowserLinuxNavigationPhase::Started;
@@ -9087,17 +9229,16 @@ mod pty_runtime_tests {
             )
         );
 
-        let mut redirect = BrowserLinuxNavigationPhase::Started;
+        let mut ambiguous = BrowserLinuxNavigationPhase::Started;
         assert_eq!(
             advance_browser_linux_navigation(
-                &mut redirect,
-                BrowserLinuxNavigationEvent::Redirected,
+                &mut ambiguous,
+                BrowserLinuxNavigationEvent::Committed,
                 "https://redirected.example",
                 requested,
             ),
             BrowserLinuxNavigationDecision::Reject(
-                "browser navigation redirected without a stable WebKit navigation identity"
-                    .to_string()
+                "browser navigation signal order was ambiguous".to_string()
             )
         );
 
@@ -9111,6 +9252,29 @@ mod pty_runtime_tests {
             ),
             BrowserLinuxNavigationDecision::Reject("browser navigation failed".to_string())
         );
+    }
+
+    #[test]
+    fn windows_navigation_completion_ignores_unrelated_native_ids() {
+        assert!(!browser_windows_completion_matches(None, 7));
+        assert!(!browser_windows_completion_matches(Some(41), 7));
+        assert!(browser_windows_completion_matches(Some(41), 41));
+    }
+
+    #[test]
+    fn browser_close_failure_preserves_live_authority() {
+        let retired = std::cell::Cell::new(false);
+        assert_eq!(
+            close_browser_webview_transactionally(
+                || Err("close failed".to_string()),
+                || retired.set(true),
+            ),
+            Err("close failed".to_string())
+        );
+        assert!(!retired.get());
+
+        close_browser_webview_transactionally(|| Ok(()), || retired.set(true)).unwrap();
+        assert!(retired.get());
     }
 
     #[test]

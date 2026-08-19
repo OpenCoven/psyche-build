@@ -10066,10 +10066,10 @@
     return projectId + "__" + tabId;
   }
   function browserTabLifecycle(tab) {
-    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
+    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, pendingTitle: null, pendingTitleUrl: null, pendingTitleGeneration: 0, pendingTitleNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
     var lifecycle = browserTabLifecycleStates.get(tab);
     if (!lifecycle) {
-      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
+      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, pendingTitle: null, pendingTitleUrl: null, pendingTitleGeneration: 0, pendingTitleNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
       browserTabLifecycleStates.set(tab, lifecycle);
     }
     return lifecycle;
@@ -10105,6 +10105,10 @@
     lifecycle.pendingGeneration = 0;
     lifecycle.pendingUrl = null;
     lifecycle.pendingNavigationToken = null;
+    lifecycle.pendingTitle = null;
+    lifecycle.pendingTitleUrl = null;
+    lifecycle.pendingTitleGeneration = 0;
+    lifecycle.pendingTitleNavigationToken = null;
     lifecycle.eventUrl = null;
     lifecycle.navigationSnapshot = null;
     return lifecycle.generation;
@@ -10144,6 +10148,10 @@
         lifecycle.pendingGeneration = 0;
         lifecycle.pendingUrl = null;
         lifecycle.pendingNavigationToken = null;
+        lifecycle.pendingTitle = null;
+        lifecycle.pendingTitleUrl = null;
+        lifecycle.pendingTitleGeneration = 0;
+        lifecycle.pendingTitleNavigationToken = null;
         lifecycle.eventUrl = null;
         lifecycle.navigationSnapshot = null;
       } else {
@@ -10854,15 +10862,14 @@
     try { return new URL(String(left)).href === new URL(String(right)).href; }
     catch (_) { return String(left) === String(right); }
   }
-  function browserUrlsShareOrigin(left, right) {
-    if (!left || !right) return false;
+  function browserNativeUrl(value) {
+    if (typeof value !== "string" || !value) return null;
     try {
-      var leftUrl = new URL(String(left));
-      var rightUrl = new URL(String(right));
-      return leftUrl.origin !== "null" && leftUrl.origin === rightUrl.origin;
-    } catch (_) {
-      return false;
-    }
+      var parsed = new URL(value);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:" ||
+          parsed.href === "about:blank") return parsed.href;
+    } catch (_) {}
+    return null;
   }
   function browserNativeEventContext(nativeLabel, url, navigationToken) {
     var pair = browserTabForNativeLabel(nativeLabel);
@@ -10900,6 +10907,10 @@
       lifecycle.pendingGeneration = 0;
       lifecycle.pendingUrl = null;
       lifecycle.pendingNavigationToken = null;
+      lifecycle.pendingTitle = null;
+      lifecycle.pendingTitleUrl = null;
+      lifecycle.pendingTitleGeneration = 0;
+      lifecycle.pendingTitleNavigationToken = null;
       lifecycle.navigationSnapshot = null;
       pair.tab.created = true;
     }
@@ -10941,16 +10952,54 @@
     }
     return true;
   }
+  function browserTitleEventContext(payload) {
+    payload = payload || {};
+    var nativeUrl = browserNativeUrl(payload.url);
+    var title = typeof payload.title === "string" ? payload.title.trim() : "";
+    if (!nativeUrl || !title || title.length > 4096 ||
+        !Number.isSafeInteger(payload.generation) || payload.generation <= 0 ||
+        typeof payload.navigationToken !== "string" || !payload.navigationToken) return null;
+    var pair = browserNativeEventContext(
+      payload.label,
+      null,
+      payload.navigationToken
+    );
+    if (!pair) return null;
+    var lifecycle = browserTabLifecycle(pair.tab);
+    if (lifecycle.pendingGeneration) {
+      if (payload.generation !== lifecycle.pendingGeneration ||
+          lifecycle.pendingGeneration !== lifecycle.generation ||
+          payload.navigationToken !== lifecycle.pendingNavigationToken) return null;
+      return { pair: pair, lifecycle: lifecycle, title: title, url: nativeUrl, pending: true };
+    }
+    if (payload.generation !== lifecycle.liveGeneration ||
+        lifecycle.liveGeneration !== lifecycle.generation ||
+        payload.navigationToken !== lifecycle.liveNavigationToken ||
+        (lifecycle.liveUrl && !browserUrlsMatch(nativeUrl, lifecycle.liveUrl) &&
+          (!lifecycle.eventUrl || !browserUrlsMatch(nativeUrl, lifecycle.eventUrl)))) return null;
+    return { pair: pair, lifecycle: lifecycle, title: title, url: nativeUrl, pending: false };
+  }
   function handleBrowserTitle(event) {
     var payload = event.payload || {};
-    var marked = markBrowserTabLoaded(payload.label, payload.url, payload.title, payload.navigationToken);
-    var pair = marked && typeof browserTabForNativeLabel === "function"
-      ? browserTabForNativeLabel(payload.label)
-      : null;
-    if (pair && typeof publishBrowserControlResource === "function") {
-      publishBrowserControlResource(pair).catch(function () {});
+    var context = browserTitleEventContext(payload);
+    if (!context) return false;
+    if (context.pending) {
+      context.lifecycle.pendingTitle = context.title;
+      context.lifecycle.pendingTitleUrl = context.url;
+      context.lifecycle.pendingTitleGeneration = payload.generation;
+      context.lifecycle.pendingTitleNavigationToken = payload.navigationToken;
+    } else {
+      context.pair.tab.title = context.title;
+      if (context.pair.project.id === state.activeProjectId &&
+          activeWorkspaceRoot(context.pair.project) === context.pair.worktreePath) {
+        renderBrowserTabs();
+      }
+      saveWorkspaceSoon();
     }
-    return marked;
+    if (typeof publishBrowserControlResource === "function") {
+      publishBrowserControlResource(context.pair).catch(function () {});
+    }
+    return true;
   }
   function browserFocusEventContext(payload) {
     payload = payload || {};
@@ -10959,6 +11008,8 @@
         typeof payload.url !== "string" || !payload.url ||
         !Number.isSafeInteger(payload.generation) || payload.generation <= 0 ||
         typeof payload.navigationToken !== "string" || !payload.navigationToken) return null;
+    var nativeUrl = browserNativeUrl(payload.url);
+    if (!nativeUrl) return null;
     var pair = browserTabForNativeLabel(nativeLabel);
     if (!pair || findProject(pair.project.id) !== pair.project) return null;
     if (!pair.project.browsersByWorktree ||
@@ -10984,13 +11035,10 @@
         !lifecycle.liveNavigationToken ||
         payload.navigationToken !== lifecycle.liveNavigationToken) return null;
     var liveUrl = null;
-    if (payload.url && lifecycle.liveUrl &&
-        !browserUrlsMatch(payload.url, lifecycle.liveUrl) &&
-        (!lifecycle.eventUrl || !browserUrlsMatch(payload.url, lifecycle.eventUrl))) {
-      if (!payload.navigationToken ||
-          payload.navigationToken !== lifecycle.liveNavigationToken ||
-          !browserUrlsShareOrigin(payload.url, lifecycle.liveUrl)) return null;
-      liveUrl = String(payload.url);
+    if (lifecycle.liveUrl &&
+        !browserUrlsMatch(nativeUrl, lifecycle.liveUrl) &&
+        (!lifecycle.eventUrl || !browserUrlsMatch(nativeUrl, lifecycle.eventUrl))) {
+      liveUrl = nativeUrl;
     }
     return { pair: pair, pane: pane, liveUrl: liveUrl };
   }
@@ -11483,6 +11531,10 @@
       lifecycle.pendingGeneration = generation;
       lifecycle.pendingUrl = normalised;
       lifecycle.pendingNavigationToken = navigationToken;
+      lifecycle.pendingTitle = null;
+      lifecycle.pendingTitleUrl = null;
+      lifecycle.pendingTitleGeneration = 0;
+      lifecycle.pendingTitleNavigationToken = null;
       lifecycle.eventUrl = null;
       lifecycle.viewLive = true;
       lifecycle.navigationSnapshot = {
@@ -11520,6 +11572,12 @@
         var terminalUrl = nativeNavigation && nativeNavigation.terminalUrl
           ? String(nativeNavigation.terminalUrl)
           : normalised;
+        var completedTitle = lifecycle.pendingTitle &&
+          lifecycle.pendingTitleGeneration === generation &&
+          lifecycle.pendingTitleNavigationToken === navigationToken &&
+          browserUrlsMatch(lifecycle.pendingTitleUrl, terminalUrl)
+          ? lifecycle.pendingTitle
+          : null;
         tab.created = true;
         tab.url = terminalUrl;
         tab.loading = false;
@@ -11529,10 +11587,15 @@
         lifecycle.pendingGeneration = 0;
         lifecycle.pendingUrl = null;
         lifecycle.pendingNavigationToken = null;
+        lifecycle.pendingTitle = null;
+        lifecycle.pendingTitleUrl = null;
+        lifecycle.pendingTitleGeneration = 0;
+        lifecycle.pendingTitleNavigationToken = null;
         lifecycle.eventUrl = terminalUrl;
         lifecycle.navigationSnapshot = null;
         lifecycle.viewLive = true;
-        if (!browserUrlsMatch(terminalUrl, normalised)) tab.title = tabTitle(terminalUrl);
+        if (completedTitle) tab.title = completedTitle;
+        else if (!browserUrlsMatch(terminalUrl, normalised)) tab.title = tabTitle(terminalUrl);
         if (context.fromHistory && typeof context.historyIndex === "number") {
           tab.historyIndex = context.historyIndex;
         } else if (!context.fromHistory && !context.preserveHistory) {
