@@ -38,6 +38,7 @@ afterAll(() => {
 function requestWithLaneMode(mode: OrchestrationLaneMode): OrchestrationTaskRequest {
   return {
     taskId: `task-${mode}`,
+    operationId: `operation-${mode}`,
     projectRoot: root,
     prompt: 'Fix the failing tests',
     lanes: [{

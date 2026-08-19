@@ -2468,6 +2468,72 @@ describe('ControlRuntime', () => {
     expect(handlers.executeOrchestration).toHaveBeenCalledOnce();
   });
 
+  it('derives orchestration authority from the control idempotency key, not caller names or trace ids', async () => {
+    const observed: Array<{ operationId: string | undefined; requestOperationId?: string }> = [];
+    handlers.executeOrchestration = vi.fn(async (payload, _authorize, operationId) => {
+      observed.push({
+        operationId,
+        requestOperationId: (payload.request as { operationId?: string }).operationId,
+      });
+      return { ok: true };
+    });
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7,
+      handlers,
+      journal: createMemoryJournal(),
+    });
+    const request = {
+      taskId: 'shared-task',
+      traceId: 'caller-trace',
+      operationId: 'caller-operation-must-not-win',
+      projectRoot: '/repo',
+      prompt: 'test',
+      lanes: [{ id: 'same-lane', mode: 'terminal' as const }],
+    };
+    const granted = await submit(runtime, command({
+      id: 'grant-operation-authority',
+      idempotencyKey: 'grant-operation-authority',
+      kind: 'lease.grant',
+      ownerEpoch: 7,
+      payload: {
+        requestId: 'request-operation-authority',
+        actorId: 'agent-1',
+        taskId: request.taskId,
+        ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: '/repo' }, capabilities: ['pane.create'] }],
+      },
+    }));
+    const lease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
+    const execute = (id: string, idempotencyKey: string) => submit(runtime, command({
+      id,
+      idempotencyKey,
+      kind: 'orchestration.execute',
+      ownerEpoch: 7,
+      actor: { id: 'agent-1', kind: 'psyche' },
+      payload: {
+        request,
+        taskId: request.taskId,
+        leaseId: lease.id,
+        leaseRevision: lease.revision,
+      },
+    }));
+
+    await expect(execute('control-operation-a', 'canonical-control-operation-a'))
+      .resolves.toMatchObject({ status: 'succeeded' });
+    await expect(execute('control-operation-a-retry', 'canonical-control-operation-a'))
+      .resolves.toMatchObject({ status: 'succeeded' });
+    await expect(execute('control-operation-b', 'canonical-control-operation-b'))
+      .resolves.toMatchObject({ status: 'succeeded' });
+
+    expect(handlers.executeOrchestration).toHaveBeenCalledTimes(2);
+    expect(observed[0].operationId).toMatch(/^orch-op-v1-[0-9a-f]{64}$/);
+    expect(observed[0].requestOperationId).toBe(observed[0].operationId);
+    expect(observed[1].requestOperationId).toBe(observed[1].operationId);
+    expect(observed[1].operationId).not.toBe(observed[0].operationId);
+    expect(observed[0].operationId).not.toContain(request.taskId);
+    expect(observed[0].operationId).not.toContain(request.traceId);
+  });
+
   it('revalidates lease revocation before each orchestration lane effect', async () => {
     const projectRoot = process.cwd();
     const capabilityLeases = new CapabilityLeaseStore(

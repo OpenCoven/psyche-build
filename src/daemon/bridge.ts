@@ -73,6 +73,7 @@ import {
   type CapabilityProviderId,
 } from '../orchestration/capabilityRouter.js';
 import { OrchestrationError } from '../orchestration/types.js';
+import { deriveOrchestrationOperationId } from '../orchestration/operationIdentity.js';
 import type {
   CovenSessionEvent,
   CovenSessionLaunchRequest,
@@ -2720,7 +2721,9 @@ export async function dispatchOrchestrationRequest(
     task: import('../orchestration/types.js').OrchestrationTaskRequest;
   },
   orchestrator: import('../orchestration/orchestrator.js').Orchestrator,
-  options?: import('../orchestration/orchestrator.js').OrchestrationExecutionOptions,
+  options?: import('../orchestration/orchestrator.js').OrchestrationExecutionOptions & {
+    operationId?: string;
+  },
 ): Promise<{
   type: 'orchestration.execute.result';
   requestId: string;
@@ -2751,11 +2754,17 @@ export async function dispatchOrchestrationRequest(
 
   const task: import('../orchestration/types.js').OrchestrationTaskRequest = {
     ...request.task,
+    operationId: options?.operationId
+      ?? deriveOrchestrationOperationId(request.requestId),
     projectRoot: scoped.projectRoot,
     cwd: cwd.requestedCwd,
   };
 
-  const result = await orchestrator.execute(task, options);
+  const result = await orchestrator.execute(task, {
+    ...(options?.beforeLaneEffect
+      ? { beforeLaneEffect: options.beforeLaneEffect }
+      : {}),
+  });
 
   return {
     type: 'orchestration.execute.result',

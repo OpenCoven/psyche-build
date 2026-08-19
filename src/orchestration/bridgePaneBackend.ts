@@ -5,6 +5,10 @@ import {
 } from '../control/resources/panes.js';
 import type { LaneBackend, LaneExecutionOutput } from './orchestrator.js';
 import { OrchestrationError, type OrchestrationLanePlan } from './types.js';
+import {
+  bridgePaneLaunchRequestId,
+  orchestrationLaneResultKey,
+} from './operationIdentity.js';
 
 export interface BridgePaneBackendOptions {
   sessionName: string;
@@ -20,7 +24,7 @@ export interface BridgePaneBackendOptions {
 
 export interface BridgePaneBackend {
   execute: LaneBackend;
-  /** Spawn results keyed by lane id, for callers that need worktree/branch. */
+  /** Spawn results keyed by bounded operation/lane identity. */
   spawned: () => Map<string, BridgeSpawnResult>;
 }
 
@@ -56,7 +60,7 @@ export function createBridgePaneBackend(options: BridgePaneBackendOptions): Brid
     }
 
     const result = await spawnPane(lane.projectRoot, options.sessionName, {
-      requestId: `${lane.taskId}:${lane.id}`,
+      requestId: bridgePaneLaunchRequestId(lane.operationId, lane.id),
       cwd: lane.cwd,
       ...(lane.agent ? { agent: lane.agent } : {}),
       prompt: lane.prompt,
@@ -74,7 +78,7 @@ export function createBridgePaneBackend(options: BridgePaneBackendOptions): Brid
     }
 
     if (options.retainResults !== false) {
-      spawned.set(lane.id, result);
+      spawned.set(orchestrationLaneResultKey(lane.operationId, lane.id), result);
     }
     return {
       pane: {
@@ -89,6 +93,7 @@ export function createBridgePaneBackend(options: BridgePaneBackendOptions): Brid
           taskId: lane.taskId,
           laneId: lane.id,
           traceId: lane.traceId,
+          operationId: lane.operationId,
           mode: lane.mode,
         },
       },

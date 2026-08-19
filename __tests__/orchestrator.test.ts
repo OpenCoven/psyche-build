@@ -8,6 +8,7 @@ const ROOT = process.cwd();
 function task(overrides: Partial<OrchestrationTaskRequest> = {}): OrchestrationTaskRequest {
   return {
     taskId: 'task-1',
+    operationId: 'operation-1',
     projectRoot: ROOT,
     prompt: 'Fix the failing tests',
     lanes: [{ id: 'a', mode: 'terminal' }],

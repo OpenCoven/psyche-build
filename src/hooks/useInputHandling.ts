@@ -1,5 +1,6 @@
 import { useEffect, useRef, type Dispatch, type SetStateAction } from "react"
 import path from "path"
+import { randomUUID } from "node:crypto"
 import { useInput } from "ink"
 import { runPairAction } from "../actions/implementations/pairAction.js"
 import { runDevicesAction } from "../actions/implementations/devicesAction.js"
@@ -1831,6 +1832,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
 
       const result = await orchestrator.execute({
         taskId: `attach-${Date.now()}`,
+        operationId: `tui-attach-${randomUUID()}`,
         projectRoot: targetProjectRoot,
         prompt: promptValue,
         lanes,

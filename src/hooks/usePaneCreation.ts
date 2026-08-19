@@ -2,6 +2,7 @@ import path from 'path';
 import * as os from 'os';
 import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import type { PsychePane, MergeTargetReference, SavePanes } from '../types.js';
 import { createPane, type CreatePaneOptions } from '../utils/paneCreation.js';
 import { LogService } from '../services/LogService.js';
@@ -341,6 +342,7 @@ export default function usePaneCreation({
 
       const result = await orchestrator.execute(buildMultiAgentTaskRequest({
         taskId: `task-${Date.now()}`,
+        operationId: `tui-create-${randomUUID()}`,
         projectRoot: targetProjectRoot,
         prompt,
         agents: dedupedAgents,

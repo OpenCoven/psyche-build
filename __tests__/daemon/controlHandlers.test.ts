@@ -48,11 +48,13 @@ describe('createDaemonControlHandlers executeOrchestration', () => {
         },
       },
       authorizeEffect,
+      'control-operation-authority',
     );
 
     expect(execute).toHaveBeenCalledWith(
       expect.objectContaining({
         taskId: 'authorized-task',
+        operationId: 'control-operation-authority',
         projectRoot,
         cwd: path.join(projectRoot, 'src', 'daemon'),
       }),
@@ -267,9 +269,13 @@ describe('createDaemonControlHandlers executeOrchestration', () => {
         },
       },
       async () => undefined,
+      'control-operation-1',
     );
 
     expect(executeLane).toHaveBeenCalledOnce();
+    expect(executeLane).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: 'control-operation-1',
+    }));
     expect(result).toMatchObject({
       taskId: 'task-1',
       status: 'completed',

@@ -62,6 +62,7 @@ import { PaneOutputFanout } from './paneOutputFanout.js';
 import { BrowserProviderBroker } from '../control/browserProviderBroker.js';
 import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
 import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
+import { deriveOrchestrationOperationId } from '../orchestration/operationIdentity.js';
 
 export interface DaemonOptions {
   port: number;
@@ -1246,7 +1247,7 @@ export class Connection {
             },
             {
               actorKind: 'human',
-              idempotencyKey: `v0:orchestration:${this.actorId}:${msg.requestId}:execute`,
+              idempotencyKey: deriveOrchestrationOperationId(msg.requestId),
             },
           ));
           if (outcome.status !== 'succeeded') {

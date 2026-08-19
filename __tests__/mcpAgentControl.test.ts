@@ -1648,20 +1648,24 @@ describe('agent surface MCP tools', () => {
     expect(response).toMatchObject({ status: 'succeeded', value: completed });
     expect(execute).toHaveBeenCalledOnce();
     expect(execute).toHaveBeenCalledWith(
-      expect.objectContaining({ taskId, projectRoot }),
+      expect.objectContaining({
+        taskId,
+        projectRoot,
+        operationId: expect.stringMatching(/^orch-op-v1-[0-9a-f]{64}$/),
+      }),
       { beforeLaneEffect: expect.any(Function) },
     );
 
     host.runtime.capabilityLeases.grant(grant);
-    const stale = payload(await call('psyche_execute_task', {
+    const stale = await call('psyche_execute_task', {
       project_root: projectRoot,
       lease_id: lease.id,
       lease_revision: lease.revision,
       prompt: 'stale',
       lanes: [{ id: 'stale', mode: 'terminal' }],
-    }));
+    });
 
-    expect(stale).toMatchObject({ status: 'failed', code: 'lease_revision_mismatch' });
+    expect(stale.error).toMatchObject({ data: { code: 'lease_revision_mismatch' } });
     expect(execute).toHaveBeenCalledOnce();
   });
 

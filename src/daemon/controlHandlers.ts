@@ -127,7 +127,7 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       await deps.tmux.killPane(await resolvePaneId(payload.paneId));
     },
 
-    async executeOrchestration(payload, authorizeEffect) {
+    async executeOrchestration(payload, authorizeEffect, operationId) {
       if (!deps.orchestrator) {
         throw codedHandlerError('backend_unavailable', 'orchestration executor is unavailable');
       }
@@ -139,10 +139,11 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
           task: {
             ...payload.request,
             taskId: payload.taskId,
+            operationId,
           },
         },
         deps.orchestrator as Orchestrator,
-        { beforeLaneEffect: authorizeEffect },
+        { beforeLaneEffect: authorizeEffect, operationId },
       );
       return response.result;
     },

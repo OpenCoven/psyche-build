@@ -289,6 +289,10 @@ describe('MCP canonical delegation and read-only helpers', () => {
     expect(fake.submit.mock.calls[0][0].id).not.toBe(fake.submit.mock.calls[1][0].id);
     expect(fake.submit.mock.calls[0][0].idempotencyKey)
       .toBe(fake.submit.mock.calls[1][0].idempotencyKey);
+    expect(fake.submit.mock.calls[0][0].idempotencyKey)
+      .toBe('mcp:orchestration.execute:caller-operation-7');
+    expect(fake.submit.mock.calls[0][0].idempotencyKey).not.toContain('task-2');
+    expect(fake.submit.mock.calls[0][0].idempotencyKey).not.toContain('codex');
   });
 
   it('maps a rejected orchestration outcome to a JSON-RPC control error', async () => {

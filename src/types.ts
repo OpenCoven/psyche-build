@@ -123,6 +123,7 @@ export interface PsychePane {
     taskId: string;
     laneId: string;
     traceId: string;
+    operationId: string;
     mode: OrchestrationLaneMode;
   };
   permissionMode?: PermissionMode;

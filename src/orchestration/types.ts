@@ -29,6 +29,7 @@ export interface OrchestrationLaneRequest {
 export interface OrchestrationTaskRequest {
   taskId: string;
   traceId?: string;
+  operationId?: string;
   projectRoot: string;
   cwd?: string;
   prompt: string;
@@ -42,6 +43,7 @@ export interface OrchestrationTaskRequest {
 export interface OrchestrationLanePlan extends OrchestrationLaneRequest {
   taskId: string;
   traceId: string;
+  operationId: string;
   index: number;
   projectRoot: string;
   cwd: string;
@@ -54,6 +56,7 @@ export interface OrchestrationLanePlan extends OrchestrationLaneRequest {
 export interface OrchestrationTaskPlan {
   taskId: string;
   traceId: string;
+  operationId: string;
   projectRoot: string;
   cwd: string;
   concurrency: number;

@@ -32,6 +32,44 @@ function createMockOrchestrator(
 }
 
 describe('dispatchOrchestrationRequest', () => {
+  it('derives a stable authoritative operation identity from the direct request id', async () => {
+    const root = await tempDir('psyche-orch-operation-');
+    const delegated: OrchestrationLanePlan[] = [];
+    const orchestrator = createMockOrchestrator(async (lane) => {
+      delegated.push(lane);
+      return {};
+    });
+    const request = {
+      type: 'orchestration.execute' as const,
+      requestId: 'direct-request-1',
+      task: {
+        taskId: 'shared-task',
+        traceId: 'caller-trace',
+        operationId: 'caller-operation-must-not-win',
+        projectRoot: root,
+        prompt: 'Fix tests',
+        lanes: [{ id: 'same-lane', mode: 'terminal' as const }],
+      },
+    };
+
+    await dispatchOrchestrationRequest(root, request, orchestrator);
+    await dispatchOrchestrationRequest(root, request, orchestrator);
+    await dispatchOrchestrationRequest(root, {
+      ...request,
+      requestId: 'direct-request-2',
+    }, orchestrator);
+    await dispatchOrchestrationRequest(root, {
+      ...request,
+      requestId: delegated[0].operationId,
+    }, orchestrator);
+
+    expect(delegated[0].operationId).toMatch(/^orch-op-v1-[0-9a-f]{64}$/);
+    expect(delegated[1].operationId).toBe(delegated[0].operationId);
+    expect(delegated[2].operationId).not.toBe(delegated[0].operationId);
+    expect(delegated[3].operationId).not.toBe(delegated[0].operationId);
+    expect(delegated[0].operationId).not.toContain('caller-operation');
+  });
+
   it('executes a task through the orchestrator and returns the result', async () => {
     const root = await tempDir('psyche-orch-dispatch-');
     const orchestrator = createMockOrchestrator();
@@ -317,6 +355,7 @@ describe('panes.spawn translation to single lane', () => {
   it('builds a single-pane task request with an agent', () => {
     const request = buildSinglePaneTaskRequest({
       taskId: 'spawn-1',
+      operationId: 'operation-spawn-1',
       projectRoot: '/repo',
       prompt: 'Fix bug',
       agent: 'codex',
@@ -332,6 +371,7 @@ describe('panes.spawn translation to single lane', () => {
   it('builds a terminal lane when no agent is given', () => {
     const request = buildSinglePaneTaskRequest({
       taskId: 'spawn-2',
+      operationId: 'operation-spawn-2',
       projectRoot: '/repo',
       prompt: 'Run shell',
     });
@@ -347,6 +387,7 @@ describe('panes.spawn translation to single lane', () => {
 
     const task = buildSinglePaneTaskRequest({
       taskId: 'spawn-3',
+      operationId: 'operation-spawn-3',
       projectRoot: root,
       prompt: 'Work',
       agent: 'claude',

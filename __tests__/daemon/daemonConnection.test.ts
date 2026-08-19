@@ -264,6 +264,60 @@ describe('daemon connection authentication', () => {
         result: { status: 'completed' },
       });
     });
+
+    it('uses a stable execution identity when a direct request retries after reconnect', async () => {
+      const root = await projectWithPanes([]);
+      const submitted: any[] = [];
+      const controlRuntime = {
+        submit: vi.fn(async (command: any) => {
+          submitted.push(command);
+          if (command.kind === 'lease.request') {
+            return { status: 'succeeded', value: { requestId: command.id } };
+          }
+          if (command.kind === 'lease.grant') {
+            return {
+              status: 'succeeded',
+              value: { lease: { id: `lease-${submitted.length}`, revision: 1 } },
+            };
+          }
+          return {
+            status: 'succeeded',
+            value: {
+              taskId: 'shared-task',
+              traceId: 'shared-trace',
+              status: 'completed',
+              startedAt: '2026-08-18T00:00:00.000Z',
+              completedAt: '2026-08-18T00:00:00.000Z',
+              lanes: [],
+            },
+          };
+        }),
+      };
+      const message = {
+        type: 'orchestration.execute',
+        requestId: 'retry-after-reconnect',
+        task: {
+          taskId: 'shared-task',
+          projectRoot: root,
+          prompt: 'Fix tests',
+          lanes: [{ id: 'same-lane', mode: 'terminal' }],
+        },
+      };
+      const first = await buildConnection(root, {
+        controlRuntime: controlRuntime as ConnectionDeps['controlRuntime'],
+      });
+      const retry = await buildConnection(root, {
+        controlRuntime: controlRuntime as ConnectionDeps['controlRuntime'],
+      });
+
+      await request(first.ws, message);
+      await request(retry.ws, message);
+
+      const executions = submitted.filter((candidate) => candidate.kind === 'orchestration.execute');
+      expect(executions).toHaveLength(2);
+      expect(executions[1].idempotencyKey).toBe(executions[0].idempotencyKey);
+      expect(executions[0].idempotencyKey).not.toContain(executions[0].actor.id);
+    });
   });
 
   it('rejects a wrong token', async () => {

@@ -198,6 +198,7 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
         taskId: lane.taskId,
         laneId: lane.id,
         traceId: lane.traceId,
+        operationId: lane.operationId,
         mode: lane.mode,
       },
     };

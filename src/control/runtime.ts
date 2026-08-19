@@ -51,6 +51,7 @@ import type {
   LeaseGrant,
   PromptEnvelope,
 } from './types.js';
+import { deriveOrchestrationOperationId } from '../orchestration/operationIdentity.js';
 
 const STABLE_SURFACE_EFFECT_CODES = new Set([
   'action_timeout',
@@ -82,6 +83,7 @@ export interface ControlHandlers {
   executeOrchestration(
     payload: Payload<'orchestration.execute'>,
     authorizeEffect: OrchestrationEffectGuard,
+    operationId: string,
   ): Promise<unknown>;
   spawnPane(payload: Payload<'pane.spawn'>): Promise<unknown>;
   sendPrompt(payload: PromptEnvelope): Promise<unknown>;
@@ -1157,9 +1159,17 @@ export class ControlRuntime {
           {
             const authorizeEffect = this.orchestrationEffectGuard(command);
             await authorizeEffect();
+            const operationId = deriveOrchestrationOperationId(command.idempotencyKey);
             return succeededOutcome(await this.handlers.executeOrchestration(
-              command.payload,
+              {
+                ...command.payload,
+                request: {
+                  ...command.payload.request,
+                  operationId,
+                },
+              },
               authorizeEffect,
+              operationId,
             ));
           }
         case 'ritual.launch':
