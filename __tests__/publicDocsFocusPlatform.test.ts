@@ -11,6 +11,7 @@ type ExecuteNpmPackDryRun = (
     options: Record<string, unknown>,
   ) => Promise<ExecFileResult>,
   options: {
+    comSpec?: string;
     cwd: string;
     platform: NodeJS.Platform;
   },
@@ -28,7 +29,7 @@ async function loadNpmPackRunner(): Promise<{
 }
 
 describe('public docs npm pack runner', () => {
-  it('uses npm.cmd on Windows without a shell and preserves the non-recursive dry-run arguments', async () => {
+  it('uses the Windows command processor without a shell and preserves fixed dry-run arguments', async () => {
     const runner = await loadNpmPackRunner();
     const calls: Array<{
       executable: string;
@@ -43,6 +44,7 @@ describe('public docs npm pack runner', () => {
         return { stdout: '[]' };
       },
       {
+        comSpec: 'C:\\Windows\\System32\\cmd.exe',
         cwd: 'C:\\psyche-build',
         platform: 'win32',
       },
@@ -51,8 +53,17 @@ describe('public docs npm pack runner', () => {
     expect(stdout).toBe('[]');
     expect(calls).toEqual([
       {
-        executable: 'npm.cmd',
-        args: ['pack', '--dry-run', '--json', '--ignore-scripts'],
+        executable: 'C:\\Windows\\System32\\cmd.exe',
+        args: [
+          '/d',
+          '/s',
+          '/c',
+          'npm.cmd',
+          'pack',
+          '--dry-run',
+          '--json',
+          '--ignore-scripts',
+        ],
         options: {
           cwd: 'C:\\psyche-build',
           encoding: 'utf8',
@@ -61,6 +72,26 @@ describe('public docs npm pack runner', () => {
       },
     ]);
     expect(calls[0]?.options).not.toHaveProperty('shell');
+  });
+
+  it('falls back to cmd.exe when ComSpec is unavailable', async () => {
+    const runner = await loadNpmPackRunner();
+    const executables: string[] = [];
+
+    expect(runner.executeNpmPackDryRun).toBeTypeOf('function');
+    await runner.executeNpmPackDryRun?.(
+      async (executable) => {
+        executables.push(executable);
+        return { stdout: '[]' };
+      },
+      {
+        comSpec: '',
+        cwd: 'C:\\psyche-build',
+        platform: 'win32',
+      },
+    );
+
+    expect(executables).toEqual(['cmd.exe']);
   });
 
   it('uses npm directly on Unix platforms', async () => {
