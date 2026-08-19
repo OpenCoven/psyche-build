@@ -436,43 +436,50 @@ describe('desktop Tauri layout', () => {
 
   it('checks the desktop runtime on exactly macOS, Windows, and Linux', () => {
     const workflow = readText(ciWorkflowPath);
-    const job = workflowJob(workflow, 'desktop-runtime');
+    const desktopCheck = workflowJob(workflow, 'desktop-check');
+    const desktopWeb = workflowJob(workflow, 'desktop-web');
+    const rustTest = workflowJob(workflow, 'rust-test');
     const bundleFreshnessGate = 'pnpm vitest --run __tests__/tauriDesktopPlatform.test.ts __tests__/tauriWebBundles.test.ts __tests__/tauriPackageScripts.test.ts __tests__/tauriDesktopTabs.test.ts';
     const buildBundles = 'pnpm --dir native/desktop/psyche-build-tauri build:web';
 
-    expect(job).toContain('runs-on: ${{ matrix.os }}');
-    expect([...job.matchAll(/^\s{10}- (.+)$/gm)].map(([, runner]) => runner)).toEqual([
+    expect(desktopCheck).toContain('runs-on: ${{ matrix.os }}');
+    expect([...desktopCheck.matchAll(/^\s{10}- (.+)$/gm)].map(([, runner]) => runner)).toEqual([
       'macos-15',
       'windows-2025',
       'ubuntu-24.04',
     ]);
-    expect(job).toContain('pnpm install --frozen-lockfile');
-    expect(job).toContain(buildBundles);
-    expect(job).toContain(
-      'cargo fmt --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --check',
-    );
-    expect(job).toContain(
-      'cargo test --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked',
-    );
-    expect(job).toContain(
-      'cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked',
-    );
-    expect(job).toContain(bundleFreshnessGate);
+    expect(desktopWeb).toContain('pnpm install --frozen-lockfile');
+    expect(desktopWeb).toContain(buildBundles);
+    expect(rustTest).toContain('cargo fmt --manifest-path "$MANIFEST" --check');
+    expect(rustTest).toContain('cargo test --manifest-path "$MANIFEST" --locked');
+    expect(desktopCheck).toContain('cargo check --manifest-path "$MANIFEST" --locked');
+    expect(desktopWeb).toContain(bundleFreshnessGate);
     expect(
-      job.indexOf(bundleFreshnessGate),
-      'desktop-runtime must run bundle freshness checks before the in-place build can overwrite stale committed bundles',
-    ).toBeLessThan(job.indexOf(buildBundles));
-    expect(job).not.toMatch(/^\s+run: .*tauri build(?:\s|$)/gmi);
-    expect(job).not.toMatch(/upload-artifact|signing|notarize|publish/i);
+      desktopWeb.indexOf(bundleFreshnessGate),
+      'desktop-web must run bundle freshness checks before the in-place build can overwrite stale committed bundles',
+    ).toBeLessThan(desktopWeb.indexOf(buildBundles));
+    for (const job of [desktopWeb, rustTest, desktopCheck]) {
+      expect(job).not.toMatch(/^\s+run: .*tauri build(?:\s|$)/gmi);
+      expect(job).not.toMatch(/upload-artifact|signing|notarize|publish/i);
+    }
   });
 
   it('installs official Tauri prerequisites only on Linux with a target-safe shell', () => {
     const workflow = readText(ciWorkflowPath);
-    const job = workflowJob(workflow, 'desktop-runtime');
-
-    expect(job).toMatch(
-      /- name: Install Tauri Linux prerequisites\s*\n\s+if: runner\.os == 'Linux'\s*\n\s+shell: bash\s*\n\s+run: \|/,
+    const job = workflowJob(workflow, 'desktop-check');
+    const installStart = job.indexOf('- name: Install Tauri Linux prerequisites');
+    const installEnd = job.indexOf('\n      - name:', installStart + 1);
+    const installStep = job.slice(
+      installStart,
+      installEnd === -1 ? undefined : installEnd,
     );
+
+    expect(installStart).toBeGreaterThanOrEqual(0);
+    expect(installStep).toContain(
+      "if: runner.os == 'Linux' && needs.changes.outputs.desktop == 'true'",
+    );
+    expect(installStep).toContain('shell: bash');
+    expect(installStep).toContain('run: |');
     for (const dependency of [
       'libwebkit2gtk-4.1-dev',
       'build-essential',
@@ -486,8 +493,9 @@ describe('desktop Tauri layout', () => {
     ]) {
       expect(job).toContain(dependency);
     }
-    expect(job.match(/shell: bash/g)).toHaveLength(1);
-    expect(job).not.toMatch(/\bMANIFEST=|\$MANIFEST|set -euo pipefail/);
+    expect(job).toMatch(
+      /- name: Check desktop runtime\s*\n\s+if: needs\.changes\.outputs\.desktop == 'true'\s*\n\s+shell: bash\s*\n\s+run: \|/,
+    );
   });
 
   it('keeps portable opaque defaults and macOS presentation in its overlay', () => {

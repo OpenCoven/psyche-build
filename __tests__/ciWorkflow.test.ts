@@ -37,14 +37,14 @@ describe('pull request CI workflow contract', () => {
     expect(workflow).toContain('cancel-in-progress: true');
     expect(workflow).toContain('name: TypeScript and Rust');
     expect(workflow).toContain('name: iOS');
-    expect(workflow.match(/^\s{4}timeout-minutes: 60$/gm)).toHaveLength(3);
+    expect(workflow.match(/^\s{4}timeout-minutes: 60$/gm)).toHaveLength(2);
   });
 
-  it('gives the desktop runtime matrix the same 60 minute timeout contract as adjacent jobs', () => {
+  it('bounds the split desktop check matrix independently', () => {
     const workflow = workflowSource();
-    const job = workflowJobSource(workflow, 'desktop-runtime');
+    const job = workflowJobSource(workflow, 'desktop-check');
 
-    expect(job).toContain('timeout-minutes: 60');
+    expect(job).toContain('timeout-minutes: 45');
   });
 
   it('pins Node, pnpm, Rust, and every third-party action', () => {
@@ -92,6 +92,7 @@ describe('pull request CI workflow contract', () => {
       'desktop-check',
       'typescript-rust',
       'ios-core',
+      'ios-app',
       'ios',
     ]) {
       expect(workflow).toContain(`  ${job}:`);
@@ -104,19 +105,45 @@ describe('pull request CI workflow contract', () => {
     const desktopCheck = workflowJobSource(workflow, 'desktop-check');
     const typescriptRust = workflowJobSource(workflow, 'typescript-rust');
     const iosCore = workflowJobSource(workflow, 'ios-core');
+    const iosApp = workflowJobSource(workflow, 'ios-app');
     const ios = workflowJobSource(workflow, 'ios');
 
     expect(changes).toContain('classifier');
     expect(quality).not.toContain('needs: changes');
-    for (const job of [desktopWeb, rustTest, desktopCheck, typescriptRust, iosCore, ios]) {
+    for (const job of [desktopWeb, rustTest, desktopCheck, iosCore, iosApp]) {
       expect(job).toContain('needs: changes');
     }
+    for (const job of [desktopWeb, rustTest, desktopCheck]) {
+      expect(job).toContain(
+        "if: needs.changes.result == 'success' && needs.changes.outputs.desktop == 'true'",
+      );
+    }
+    for (const job of [iosCore, iosApp]) {
+      expect(job).toContain(
+        "if: needs.changes.result == 'success' && needs.changes.outputs.ios == 'true'",
+      );
+    }
+    expect(typescriptRust).toContain(
+      'needs: [changes, quality, desktop-web, rust-test, desktop-check]',
+    );
+    expect(typescriptRust).toContain('QUALITY_RESULT');
+    expect(typescriptRust).toContain('DESKTOP_WEB_RESULT');
+    expect(typescriptRust).toContain('RUST_TEST_RESULT');
+    expect(typescriptRust).toContain('DESKTOP_CHECK_RESULT');
+    expect(typescriptRust).toContain('success|skipped');
+    expect(ios).toContain('needs: [changes, ios-core, ios-app]');
+    expect(ios).toContain('IOS_CORE_RESULT');
+    expect(ios).toContain('IOS_APP_RESULT');
+    expect(ios).toContain('success|skipped');
+    expect(ios).toContain('runs-on: ubuntu-24.04');
+    expect(workflow).not.toContain('  desktop-runtime:');
     expect(desktopWeb.match(/build:web/g) ?? []).toHaveLength(1);
     expect(rustTest.match(/cargo fmt/g) ?? []).toHaveLength(1);
     expect(rustTest).toContain('cargo test');
     expect(desktopCheck).toContain('cargo check');
     expect(desktopCheck).not.toContain('pnpm vitest');
     expect(desktopCheck).not.toContain('build:web');
+    expect(desktopCheck).toContain('shell: bash');
     expect(workflow).toContain('smoke:pack');
     expect(workflow).toContain('PsycheApp');
     expect(workflow).toContain('cargo test');
