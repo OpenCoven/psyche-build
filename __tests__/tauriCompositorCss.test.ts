@@ -223,7 +223,7 @@ function auditStylesheet(css: string): CompositorFindings {
   const root = postcss.parse(css, { from: undefined });
   const customPropertyValues = new Map<string, Set<string>>();
   root.walkRules((rule) => {
-    if (rule.selector.trim() !== ':root') return;
+    if (rule.parent?.type !== 'root' || rule.selector.trim() !== ':root') return;
     for (const node of rule.nodes) {
       if (node.type !== 'decl') continue;
       const property = decodeCssIdentifier(node.prop);
@@ -438,9 +438,18 @@ describe('compositor stylesheet audit parser', () => {
       .scope {
         --scoped-timing: 120ms ease;
       }
+      @media (prefers-reduced-motion: no-preference) {
+        :root {
+          --conditional-timing: 120ms ease;
+        }
+      }
       .scoped-fallback {
         transition:
           opacity var(--scoped-timing, 120ms ease, background 120ms ease);
+      }
+      .conditional-fallback {
+        transition:
+          opacity var(--conditional-timing, 120ms ease, background 120ms ease);
       }
       .environment-fallback {
         transition:
@@ -453,6 +462,7 @@ describe('compositor stylesheet audit parser', () => {
       '.expanded-tail { transition: background }',
       '.expanded-implicit { transition: all }',
       '.scoped-fallback { transition: background }',
+      '.conditional-fallback { transition: background }',
       '.environment-fallback { transition: env(unknown-transition, 120ms ease, background 120ms ease) }',
     ]);
   });
