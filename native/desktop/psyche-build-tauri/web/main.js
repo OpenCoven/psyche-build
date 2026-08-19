@@ -11340,8 +11340,9 @@
     }
     return true;
   }
-  function browserDocumentEventContext(payload) {
+  function browserDocumentEventContext(payload, allowSameOriginRouteAdoption) {
     payload = payload || {};
+    allowSameOriginRouteAdoption = allowSameOriginRouteAdoption === true;
     var nativeLabel = payload.label;
     if (typeof nativeLabel !== "string" || !nativeLabel ||
         typeof payload.url !== "string" || !payload.url ||
@@ -11373,7 +11374,8 @@
     if (lifecycle.liveUrl &&
         !browserUrlsMatch(nativeUrl, lifecycle.liveUrl) &&
         (!lifecycle.eventUrl || !browserUrlsMatch(nativeUrl, lifecycle.eventUrl))) {
-      if (browserUrlsShareOrigin(nativeUrl, lifecycle.liveUrl)) {
+      if (allowSameOriginRouteAdoption &&
+          browserUrlsShareOrigin(nativeUrl, lifecycle.liveUrl)) {
         liveUrl = nativeUrl;
         titleUrl = nativeUrl;
       } else {
@@ -11396,7 +11398,7 @@
     };
   }
   function browserFocusEventContext(payload) {
-    var context = browserDocumentEventContext(payload);
+    var context = browserDocumentEventContext(payload, false);
     if (!context) return null;
     if (state.activeProjectId !== context.pair.project.id ||
         activeWorkspaceRoot(context.pair.project) !== context.pair.worktreePath ||
@@ -11441,7 +11443,7 @@
     return true;
   }
   function handleBrowserRoute(event) {
-    var context = browserDocumentEventContext(event && event.payload || {});
+    var context = browserDocumentEventContext(event && event.payload || {}, true);
     if (!context) return false;
     if (context.replacementUrl) {
       return rotateBrowserAuthorityForNativeReplacement(

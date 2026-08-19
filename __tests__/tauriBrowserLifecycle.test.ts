@@ -2595,10 +2595,10 @@ describe('Tauri native browser lifecycle', () => {
   it.each([
     ['pushState', 'https://current.example/account?view=details'],
     ['hash', 'https://current.example/#details'],
-  ])('focuses a current same-document %s URL and adopts it as live', (_kind, url) => {
+  ])('adopts a current same-document %s route URL without focus handoff', (_kind, url) => {
     const fixture = browserFocusFixture();
 
-    expect(fixture.handlers.handleBrowserFocus({
+    expect(fixture.handlers.handleBrowserRoute({
       payload: {
         label: 'native-tab-a',
         url,
@@ -2608,6 +2608,9 @@ describe('Tauri native browser lifecycle', () => {
     })).toBe(true);
     expect(fixture.tab.url).toBe(url);
     expect(fixture.lifecycle.browserTabLifecycle(fixture.tab)).toMatchObject({
+      generation: 3,
+      liveGeneration: 3,
+      controlGeneration: 4,
       liveUrl: url,
       eventUrl: url,
     });
@@ -2615,9 +2618,34 @@ describe('Tauri native browser lifecycle', () => {
       'render',
       'sync-url',
       'save',
-      'surface:browser',
-      'focus:web-pane',
       'publish',
+    ]);
+  });
+
+  it('treats a same-origin mismatched focus URL as document replacement', async () => {
+    const fixture = browserFocusFixture();
+    const url = 'https://current.example/account?view=details';
+
+    await expect(Promise.resolve(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url,
+        title: 'Account details',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    }))).resolves.toBe(true);
+    expect(fixture.tab.url).toBe('https://current.example');
+    expect(fixture.state.activeThreadId).toBe('terminal-pane');
+    expect(fixture.lifecycle.browserTabLifecycle(fixture.tab)).toMatchObject({
+      generation: 4,
+      controlGeneration: 0,
+      liveGeneration: 0,
+      liveNavigationToken: null,
+      eventUrl: null,
+    });
+    expect(fixture.handlers.calls).toEqual([
+      `rotate:${url}`,
     ]);
   });
 
@@ -2736,10 +2764,10 @@ describe('Tauri native browser lifecycle', () => {
     ]);
   });
 
-  it('accepts repeated same-document focus route updates when the source change title is unavailable', () => {
+  it('accepts repeated same-document route updates when the source change title is unavailable', () => {
     const fixture = browserFocusFixture();
 
-    expect(fixture.handlers.handleBrowserFocus({
+    expect(fixture.handlers.handleBrowserRoute({
       payload: {
         label: 'native-tab-a',
         url: 'https://current.example/account?view=details',
@@ -2750,7 +2778,7 @@ describe('Tauri native browser lifecycle', () => {
     })).toBe(true);
     fixture.handlers.calls.length = 0;
 
-    expect(fixture.handlers.handleBrowserFocus({
+    expect(fixture.handlers.handleBrowserRoute({
       payload: {
         label: 'native-tab-a',
         url: 'https://current.example/account?view=billing',
@@ -2778,16 +2806,14 @@ describe('Tauri native browser lifecycle', () => {
       'render',
       'sync-url',
       'save',
-      'surface:browser',
-      'focus:web-pane',
       'publish',
     ]);
   });
 
-  it('records a validated same-document focus URL in tab history', () => {
+  it('records a validated same-document route URL in tab history', () => {
     const fixture = browserFocusFixture();
 
-    expect(fixture.handlers.handleBrowserFocus({
+    expect(fixture.handlers.handleBrowserRoute({
       payload: {
         label: 'native-tab-a',
         url: 'https://current.example/account?view=details',
@@ -2809,10 +2835,10 @@ describe('Tauri native browser lifecycle', () => {
     });
   });
 
-  it('deduplicates duplicate same-document focus events against the current history entry', () => {
+  it('deduplicates duplicate same-document route events against the current history entry', () => {
     const fixture = browserFocusFixture();
 
-    expect(fixture.handlers.handleBrowserFocus({
+    expect(fixture.handlers.handleBrowserRoute({
       payload: {
         label: 'native-tab-a',
         url: 'https://current.example/account?view=details',
@@ -2823,7 +2849,7 @@ describe('Tauri native browser lifecycle', () => {
     })).toBe(true);
     fixture.handlers.calls.length = 0;
 
-    expect(fixture.handlers.handleBrowserFocus({
+    expect(fixture.handlers.handleBrowserRoute({
       payload: {
         label: 'native-tab-a',
         url: 'https://current.example/account?view=details',
@@ -2838,13 +2864,11 @@ describe('Tauri native browser lifecycle', () => {
     ]);
     expect(fixture.tab.historyIndex).toBe(1);
     expect(fixture.handlers.calls).toEqual([
-      'surface:browser',
-      'focus:web-pane',
       'publish',
     ]);
   });
 
-  it('rejects the old provider generation until the replacement upsert publishes a same-document focus URL', async () => {
+  it('rejects the old provider generation until the replacement upsert publishes a same-document route URL', async () => {
     const fixture = browserFocusFixture();
     const lifecycle = fixture.lifecycle.browserTabLifecycle(fixture.tab);
     lifecycle.controlGeneration = 9;
@@ -2942,7 +2966,7 @@ describe('Tauri native browser lifecycle', () => {
       >(functionSource(mainJs, 'browserNativeScriptError'), {}),
     });
 
-    expect(handlers.handleBrowserFocus({
+    expect(handlers.handleBrowserRoute({
       payload: {
         label: 'native-tab-a',
         url: 'https://current.example/account?view=details',
@@ -3004,7 +3028,7 @@ describe('Tauri native browser lifecycle', () => {
     });
   });
 
-  it('accepts successive same-document focus events with one native generation and keeps provider generations monotonic', async () => {
+  it('accepts successive same-document route events with one native generation and keeps provider generations monotonic', async () => {
     const fixture = browserFocusFixture();
     const lifecycle = fixture.lifecycle.browserTabLifecycle(fixture.tab);
     lifecycle.controlGeneration = 9;
@@ -3107,7 +3131,7 @@ describe('Tauri native browser lifecycle', () => {
       >(functionSource(mainJs, 'browserNativeScriptError'), {}),
     });
 
-    expect(handlers.handleBrowserFocus({
+    expect(handlers.handleBrowserRoute({
       payload: {
         label: 'native-tab-a',
         url: 'https://current.example/account?view=details',
@@ -3143,7 +3167,7 @@ describe('Tauri native browser lifecycle', () => {
       },
     })).resolves.toBe(false);
 
-    expect(handlers.handleBrowserFocus({
+    expect(handlers.handleBrowserRoute({
       payload: {
         label: 'native-tab-a',
         url: 'https://current.example/account?view=billing',
@@ -3220,7 +3244,7 @@ describe('Tauri native browser lifecycle', () => {
     ]));
   });
 
-  it('truncates stale forward history before appending a new same-document focus URL', () => {
+  it('truncates stale forward history before appending a new same-document route URL', () => {
     const fixture = browserFocusFixture();
     fixture.tab.history = [
       'https://current.example',
@@ -3234,7 +3258,7 @@ describe('Tauri native browser lifecycle', () => {
       eventUrl: 'https://current.example',
     });
 
-    expect(fixture.handlers.handleBrowserFocus({
+    expect(fixture.handlers.handleBrowserRoute({
       payload: {
         label: 'native-tab-a',
         url: 'https://current.example/account?view=billing',
@@ -3250,7 +3274,7 @@ describe('Tauri native browser lifecycle', () => {
     expect(fixture.tab.historyIndex).toBe(1);
   });
 
-  it('repairs mismatched current history before appending a new same-document focus URL', () => {
+  it('repairs mismatched current history before appending a new same-document route URL', () => {
     const fixture = browserFocusFixture();
     fixture.tab.history = [
       'https://current.example',
@@ -3263,7 +3287,7 @@ describe('Tauri native browser lifecycle', () => {
       eventUrl: 'https://current.example',
     });
 
-    expect(fixture.handlers.handleBrowserFocus({
+    expect(fixture.handlers.handleBrowserRoute({
       payload: {
         label: 'native-tab-a',
         url: 'https://current.example/account?view=billing',
@@ -3279,10 +3303,10 @@ describe('Tauri native browser lifecycle', () => {
     expect(fixture.tab.historyIndex).toBe(1);
   });
 
-  it('lets the current browser history controls consume focus-synchronized entries', async () => {
+  it('lets the current browser history controls consume route-synchronized entries', async () => {
     const fixture = browserFocusFixture();
 
-    expect(fixture.handlers.handleBrowserFocus({
+    expect(fixture.handlers.handleBrowserRoute({
       payload: {
         label: 'native-tab-a',
         url: 'https://current.example/account?view=details',
