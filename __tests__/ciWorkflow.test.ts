@@ -24,8 +24,16 @@ function workflowJobSource(source: string, name: string): string {
 }
 
 describe('pull request CI workflow contract', () => {
-  it('runs read-only checks for pull requests and pushes to main with stable job names', () => {
+  const mainPushCondition = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
+
+  it('runs read-only checks for pull requests and configured pushes with stable required checks', () => {
     const workflow = workflowSource();
+    const changesJob = workflowJobSource(workflow, 'changes');
+    const qualityJob = workflowJobSource(workflow, 'quality');
+    const packageSmokeJob = workflowJobSource(workflow, 'package-smoke');
+    const desktopCheckJob = workflowJobSource(workflow, 'desktop-check');
+    const requiredTypeScriptJob = workflowJobSource(workflow, 'typescript-rust');
+    const requiredIosJob = workflowJobSource(workflow, 'ios');
 
     expect(workflow).toContain('name: CI');
     expect(workflow).toMatch(/pull_request:\s*\n/);
@@ -35,16 +43,12 @@ describe('pull request CI workflow contract', () => {
     expect(workflow).toContain('contents: read');
     expect(workflow).toContain('group: ci-${{ github.workflow }}-${{ github.ref }}');
     expect(workflow).toContain('cancel-in-progress: true');
-    expect(workflow).toContain('name: TypeScript and Rust');
-    expect(workflow).toContain('name: iOS');
-    expect(workflow.match(/^\s{4}timeout-minutes: 60$/gm)).toHaveLength(3);
-  });
-
-  it('gives the desktop runtime matrix the same 60 minute timeout contract as adjacent jobs', () => {
-    const workflow = workflowSource();
-    const job = workflowJobSource(workflow, 'desktop-runtime');
-
-    expect(job).toContain('timeout-minutes: 60');
+    expect(changesJob).toContain('name: Classify changes');
+    expect(qualityJob).toContain('name: Quality');
+    expect(packageSmokeJob).toContain('name: Package smoke');
+    expect(desktopCheckJob).toContain('name: Desktop runtime (${{ matrix.os }})');
+    expect(requiredTypeScriptJob).toContain('name: TypeScript and Rust');
+    expect(requiredIosJob).toContain('name: iOS');
   });
 
   it('pins Node, pnpm, Rust, and every third-party action', () => {
@@ -81,104 +85,211 @@ describe('pull request CI workflow contract', () => {
     }
   });
 
-  it('defines the tiered workflow topology and job contracts', () => {
+  it('defines the tiered workflow topology and deduplicates validation surfaces', () => {
     const workflow = workflowSource();
+    expect(workflow).not.toContain('  desktop-runtime:');
+    const changesJob = workflowJobSource(workflow, 'changes');
+    const qualityJob = workflowJobSource(workflow, 'quality');
+    const packageSmokeJob = workflowJobSource(workflow, 'package-smoke');
+    const desktopWebJob = workflowJobSource(workflow, 'desktop-web');
+    const rustTestJob = workflowJobSource(workflow, 'rust-test');
+    const desktopCheckJob = workflowJobSource(workflow, 'desktop-check');
+    const requiredTypeScriptJob = workflowJobSource(workflow, 'typescript-rust');
+    const iosCoreJob = workflowJobSource(workflow, 'ios-core');
+    const requiredIosJob = workflowJobSource(workflow, 'ios');
 
-    for (const job of [
-      'changes',
-      'quality',
-      'desktop-web',
-      'rust-test',
-      'desktop-check',
-      'typescript-rust',
-      'ios-core',
-      'ios',
-    ]) {
-      expect(workflow).toContain(`  ${job}:`);
-    }
+    expect(changesJob).toContain('name: Classify changes');
+    expect(changesJob).toContain('runs-on: ubuntu-24.04');
+    expect(changesJob).toContain('timeout-minutes: 10');
+    expect(changesJob).toContain('fetch-depth: 0');
+    expect(changesJob).toContain('persist-credentials: false');
+    expect(changesJob).toContain(
+      'BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}',
+    );
+    expect(changesJob).toContain(
+      'HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}',
+    );
+    expect(changesJob).toContain('GITHUB_EVENT_NAME: ${{ github.event_name }}');
+    expect(changesJob).toContain('scripts/classify-ci-changes.sh');
+    expect(changesJob).toContain('package: ${{ steps.classify.outputs.package }}');
 
-    const changes = workflowJobSource(workflow, 'changes');
-    const quality = workflowJobSource(workflow, 'quality');
-    const desktopWeb = workflowJobSource(workflow, 'desktop-web');
-    const rustTest = workflowJobSource(workflow, 'rust-test');
-    const desktopCheck = workflowJobSource(workflow, 'desktop-check');
-    const typescriptRust = workflowJobSource(workflow, 'typescript-rust');
-    const iosCore = workflowJobSource(workflow, 'ios-core');
-    const ios = workflowJobSource(workflow, 'ios');
-
-    expect(changes).toContain('classifier');
-    expect(quality).not.toContain('needs: changes');
-    for (const job of [desktopWeb, rustTest, desktopCheck, typescriptRust, iosCore, ios]) {
-      expect(job).toContain('needs: changes');
-    }
-    expect(desktopWeb.match(/build:web/g) ?? []).toHaveLength(1);
-    expect(rustTest.match(/cargo fmt/g) ?? []).toHaveLength(1);
-    expect(rustTest).toContain('cargo test');
-    expect(desktopCheck).toContain('cargo check');
-    expect(desktopCheck).not.toContain('pnpm vitest');
-    expect(desktopCheck).not.toContain('build:web');
-    expect(workflow).toContain('smoke:pack');
-    expect(workflow).toContain('PsycheApp');
-    expect(workflow).toContain('cargo test');
-    expect(workflow).toContain('if: always()');
-    expect(workflow).toContain('CHANGES_RESULT');
-    expect(workflow).toContain('Acquire::Retries=3');
-    expect(workflow).toContain('DEBIAN_FRONTEND=noninteractive');
-    expect(workflow).toContain('timeout-minutes: 10');
-  });
-
-  it('runs the complete non-secret TypeScript, package, Rust, and frontend gates', () => {
-    const workflow = workflowSource();
-    const typescriptJob = workflowJobSource(workflow, 'typescript-rust');
-
-    expect(workflow).toContain('runs-on: macos-15');
-    expect(workflow).toContain('- name: Install tmux');
-    expect(workflow).toContain('brew install tmux');
-    expect(workflow.indexOf('brew install tmux')).toBeLessThan(workflow.indexOf('pnpm test'));
-    expect(workflow).toContain('pnpm install --frozen-lockfile');
+    expect(qualityJob).toContain('name: Quality');
+    expect(qualityJob).not.toContain('needs:');
+    expect(qualityJob).toContain('runs-on: macos-15');
+    expect(qualityJob).toContain('timeout-minutes: 35');
+    expect(qualityJob).toContain('- name: Install tmux');
+    expect(qualityJob).toContain('brew install tmux');
+    expect(qualityJob).toContain('pnpm install --frozen-lockfile');
     for (const command of [
       'pnpm docs:focus:check',
       'pnpm --dir docs build',
       'pnpm test',
       'pnpm typecheck',
       'pnpm build',
-      'pnpm smoke:pack',
-      'cargo fmt --manifest-path "$MANIFEST" --check',
-      'cargo test --manifest-path "$MANIFEST" --locked',
-      'cargo check --manifest-path "$MANIFEST" --locked',
-      'pnpm --dir native/desktop/psyche-build-tauri build:web',
     ]) {
-      expect(workflow).toContain(command);
+      expect(qualityJob).toContain(command);
     }
-    expect(typescriptJob.match(/pnpm --dir docs build/g)).toHaveLength(1);
-    expect(typescriptJob.indexOf('pnpm docs:focus:check')).toBeLessThan(
-      typescriptJob.indexOf('pnpm --dir docs build'),
+    expect(qualityJob).not.toContain('pnpm smoke:pack');
+    expect(qualityJob).not.toContain('cargo fmt');
+    expect(qualityJob).not.toContain('cargo test');
+    expect(qualityJob).not.toContain('cargo check');
+    expect(qualityJob).not.toContain('build:web');
+    expect(qualityJob.indexOf('brew install tmux')).toBeLessThan(qualityJob.indexOf('pnpm test'));
+    expect(qualityJob.match(/pnpm --dir docs build/g)).toHaveLength(1);
+    expect(qualityJob.indexOf('pnpm docs:focus:check')).toBeLessThan(
+      qualityJob.indexOf('pnpm --dir docs build'),
     );
-    expect(typescriptJob.indexOf('pnpm --dir docs build')).toBeLessThan(
-      typescriptJob.indexOf('pnpm build'),
+    expect(qualityJob.indexOf('pnpm --dir docs build')).toBeLessThan(
+      qualityJob.indexOf('pnpm build'),
     );
+
+    expect(packageSmokeJob).toContain('name: Package smoke');
+    expect(packageSmokeJob).toContain('needs: changes');
+    expect(packageSmokeJob).toContain("if: needs.changes.outputs.package == 'true'");
+    expect(packageSmokeJob).toContain('runs-on: ubuntu-24.04');
+    expect(packageSmokeJob).toContain('pnpm install --frozen-lockfile');
+    expect(packageSmokeJob).toContain('pnpm smoke:pack');
+
+    expect(desktopWebJob).toContain('name: Desktop web');
+    expect(desktopWebJob).toContain('needs: changes');
+    expect(desktopWebJob).toContain("if: needs.changes.outputs.desktop == 'true'");
+    expect(desktopWebJob).toContain('runs-on: macos-15');
+    expect(desktopWebJob).toContain('timeout-minutes: 25');
+    expect(desktopWebJob).toContain('pnpm install --frozen-lockfile');
+    for (const testFile of [
+      '__tests__/tauriDesktopPlatform.test.ts',
+      '__tests__/tauriWebBundles.test.ts',
+      '__tests__/tauriPackageScripts.test.ts',
+      '__tests__/tauriDesktopTabs.test.ts',
+    ]) {
+      expect(desktopWebJob).toContain(testFile);
+    }
+    expect(desktopWebJob).toContain('pnpm --dir native/desktop/psyche-build-tauri build:web');
+    expect(workflow.match(/pnpm --dir native\/desktop\/psyche-build-tauri build:web/g))
+      .toHaveLength(1);
+
+    expect(rustTestJob).toContain('name: Rust tests');
+    expect(rustTestJob).toContain('needs: changes');
+    expect(rustTestJob).toContain("if: needs.changes.outputs.desktop == 'true'");
+    expect(rustTestJob).toContain('runs-on: macos-15');
+    expect(rustTestJob).toContain('timeout-minutes: 45');
+    expect(rustTestJob).toContain('cargo fmt --manifest-path "$MANIFEST" --check');
+    expect(rustTestJob).toContain('cargo test --manifest-path "$MANIFEST" --locked');
+    expect(workflow.match(/cargo fmt --manifest-path/g)).toHaveLength(1);
+    expect(workflow.match(/cargo check --manifest-path/g)).toHaveLength(1);
+
+    expect(desktopCheckJob).toContain('name: Desktop runtime (${{ matrix.os }})');
+    expect(desktopCheckJob).toContain('needs: changes');
+    expect(desktopCheckJob).toContain("if: needs.changes.outputs.desktop == 'true'");
+    expect(desktopCheckJob).toContain('timeout-minutes: 45');
+    expect(desktopCheckJob).toContain('fail-fast: false');
+    for (const os of ['macos-15', 'windows-2025', 'ubuntu-24.04']) {
+      expect(desktopCheckJob).toContain(os);
+    }
+    expect(desktopCheckJob).toContain('timeout-minutes: 10');
+    expect(desktopCheckJob).toContain("if: runner.os == 'Linux'");
+    expect(desktopCheckJob).toContain('shell: bash');
+    expect(desktopCheckJob).toContain('sudo env DEBIAN_FRONTEND=noninteractive apt-get');
+    expect(desktopCheckJob).toContain('Acquire::Retries=3');
+    expect(desktopCheckJob).toContain('Acquire::http::Timeout=30');
+    expect(desktopCheckJob).toContain(
+      'cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked',
+    );
+    expect(desktopCheckJob).toContain(mainPushCondition);
+    expect(desktopCheckJob).toContain(
+      'cargo test --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked --all-targets',
+    );
+    expect(desktopCheckJob).not.toContain('pnpm install');
+    expect(desktopCheckJob).not.toContain('pnpm vitest');
+    expect(desktopCheckJob).not.toContain('build:web');
+
+    expect(requiredTypeScriptJob).toContain('name: TypeScript and Rust');
+    expect(requiredTypeScriptJob).toContain('if: always()');
+    expect(requiredTypeScriptJob).toContain(
+      'needs: [changes, quality, package-smoke, desktop-web, rust-test, desktop-check]',
+    );
+    expect(requiredTypeScriptJob).toContain('runs-on: ubuntu-24.04');
+    expect(requiredTypeScriptJob).toContain('timeout-minutes: 5');
+    for (const variable of [
+      'CHANGES_RESULT',
+      'DESKTOP_REQUIRED',
+      'PACKAGE_REQUIRED',
+      'QUALITY_RESULT',
+      'PACKAGE_SMOKE_RESULT',
+      'DESKTOP_WEB_RESULT',
+      'RUST_TEST_RESULT',
+      'DESKTOP_CHECK_RESULT',
+    ]) {
+      expect(requiredTypeScriptJob).toContain(variable);
+    }
+    expect(requiredTypeScriptJob).toContain('test "$CHANGES_RESULT" = success');
+    expect(requiredTypeScriptJob).toContain('test "$QUALITY_RESULT" = success');
+    expect(requiredTypeScriptJob).toContain('case "$PACKAGE_REQUIRED" in');
+    expect(requiredTypeScriptJob).toContain('case "$DESKTOP_REQUIRED" in');
+    expect(requiredTypeScriptJob).toContain('Unexpected package classifier output');
+    expect(requiredTypeScriptJob).toContain('Unexpected desktop classifier output');
+    expect(requiredTypeScriptJob).toContain('test "$PACKAGE_SMOKE_RESULT" = success');
+    expect(requiredTypeScriptJob).toContain('test "$PACKAGE_SMOKE_RESULT" = skipped');
+    expect(requiredTypeScriptJob).toContain('test "$DESKTOP_WEB_RESULT" = success');
+    expect(requiredTypeScriptJob).toContain('test "$RUST_TEST_RESULT" = success');
+    expect(requiredTypeScriptJob).toContain('test "$DESKTOP_CHECK_RESULT" = success');
+    expect(requiredTypeScriptJob).toContain('test "$DESKTOP_WEB_RESULT" = skipped');
+    expect(requiredTypeScriptJob).toContain('test "$RUST_TEST_RESULT" = skipped');
+    expect(requiredTypeScriptJob).toContain('test "$DESKTOP_CHECK_RESULT" = skipped');
+
+    expect(iosCoreJob).toContain('name: iOS Core');
+    expect(iosCoreJob).toContain('needs: changes');
+    expect(iosCoreJob).toContain("if: needs.changes.outputs.ios == 'true'");
+    expect(iosCoreJob).toContain('runs-on: macos-15');
+    expect(iosCoreJob).toContain('timeout-minutes: 50');
+    expect(iosCoreJob).toContain('pnpm install --frozen-lockfile');
+    expect(iosCoreJob).toContain('pnpm ios:project:check');
+    expect(iosCoreJob).toContain('-scheme PsycheCore');
+    expect(iosCoreJob).toContain('Build the iOS app and test bundles');
+    expect(iosCoreJob).toContain('build-for-testing');
+    expect(iosCoreJob).toContain('Test the iOS app');
+    expect(iosCoreJob).toContain('test-without-building');
+    expect(iosCoreJob).toContain('-only-testing:PsycheAppTests');
+    expect(iosCoreJob).toContain(`if: ${mainPushCondition}`);
+    expect(iosCoreJob).toContain('-only-testing:PsycheAppUITests');
+    expect(iosCoreJob).toContain('-scheme PsycheApp');
+
+    expect(requiredIosJob).toContain('name: iOS');
+    expect(requiredIosJob).toContain('if: always()');
+    expect(requiredIosJob).toContain('needs: [changes, ios-core]');
+    expect(requiredIosJob).toContain('runs-on: ubuntu-24.04');
+    expect(requiredIosJob).toContain('timeout-minutes: 5');
+    for (const variable of ['CHANGES_RESULT', 'IOS_REQUIRED', 'IOS_RESULT']) {
+      expect(requiredIosJob).toContain(variable);
+    }
+    expect(requiredIosJob).toContain('test "$CHANGES_RESULT" = success');
+    expect(requiredIosJob).toContain('case "$IOS_REQUIRED" in');
+    expect(requiredIosJob).toContain('Unexpected iOS classifier output');
+    expect(requiredIosJob).toContain('test "$IOS_RESULT" = success');
+    expect(requiredIosJob).toContain('test "$IOS_RESULT" = skipped');
     expect(workflow).not.toContain('secrets.');
   });
 
-  it('pins the Apple toolchain and runs deterministic iOS build and test gates', () => {
+  it('pins the Apple toolchain and builds/tests the app without making UI tests a PR gate', () => {
     const workflow = workflowSource();
+    const iosCoreJob = workflowJobSource(workflow, 'ios-core');
     const destination = 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro';
 
-    expect(workflow).toContain('DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer');
-    expect(workflow).toContain("grep -Fx 'Xcode 26.2'");
-    expect(workflow).toContain("grep -Fx 'Build version 17C52'");
-    expect(workflow).toContain('uses: ./.github/actions/setup-xcodegen');
-    expect(workflow).not.toContain('XCODEGEN_VERSION=');
-    expect(workflow).not.toContain('XCODEGEN_SHA256=');
-    expect(workflow).toContain('xcrun simctl list devices available');
-    expect(workflow).toContain('iPhone 16 Pro');
-    expect(workflow).toContain('com.apple.CoreSimulator.SimRuntime.iOS-26-2');
-    expect(workflow).toContain('pnpm ios:project:check');
-    expect(workflow).toContain('-scheme PsycheCore');
-    expect(workflow).toContain('-scheme PsycheApp');
+    expect(iosCoreJob).toContain('DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer');
+    expect(iosCoreJob).toContain("grep -Fx 'Xcode 26.2'");
+    expect(iosCoreJob).toContain("grep -Fx 'Build version 17C52'");
+    expect(iosCoreJob).toContain('uses: ./.github/actions/setup-xcodegen');
+    expect(iosCoreJob).not.toContain('XCODEGEN_VERSION=');
+    expect(iosCoreJob).not.toContain('XCODEGEN_SHA256=');
+    expect(iosCoreJob).toContain('xcrun simctl list devices available');
+    expect(iosCoreJob).toContain('iPhone 16 Pro');
+    expect(iosCoreJob).toContain('com.apple.CoreSimulator.SimRuntime.iOS-26-2');
+    expect(iosCoreJob).toContain('Test iOS Core');
+    expect(iosCoreJob).toContain('Build the iOS app and test bundles');
+    expect(iosCoreJob).toContain('Test the iOS app');
+    expect(iosCoreJob).toContain('-only-testing:PsycheAppTests');
+    expect(iosCoreJob).toContain('-only-testing:PsycheAppUITests');
     expect(workflow.match(new RegExp(destination.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')))
-      .toHaveLength(3);
-    expect(workflow).toContain('test');
-    expect(workflow).toContain('build');
+      .toHaveLength(4);
   });
 });
