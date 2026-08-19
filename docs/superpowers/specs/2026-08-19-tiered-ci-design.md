@@ -135,14 +135,17 @@ Platform jobs depend only on `changes`; they do not form a serial chain.
 
 Stable aggregate jobs provide branch-protection targets:
 
-- `PR quality` depends on `quality`;
+- `TypeScript and Rust` preserves the existing required check name and depends
+  on `quality`, `desktop-web`, `rust-test`, and `desktop-check`;
 - `Desktop validation` uses `always()` and succeeds when desktop jobs pass or
   are intentionally skipped by the classifier;
-- `iOS validation` uses `always()` and succeeds when `ios-core` passes or is
-  intentionally skipped.
+- `iOS` preserves the existing required check name, uses `always()`, and
+  succeeds when `ios-core` passes or is intentionally skipped.
 
 The aggregates fail when a required upstream job fails or is cancelled. This
-keeps required check names stable while allowing safe path-based skips.
+keeps the repository's current branch-protection checks stable while allowing
+safe path-based skips. No branch-protection API mutation is required during
+rollout.
 
 ## Failure Handling
 
