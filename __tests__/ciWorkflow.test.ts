@@ -25,6 +25,12 @@ function workflowJobSource(source: string, name: string): string {
 
 describe('pull request CI workflow contract', () => {
   const mainPushCondition = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
+  const desktopContractTests = [
+    '__tests__/tauriDesktopPlatform.test.ts',
+    '__tests__/tauriWebBundles.test.ts',
+    '__tests__/tauriPackageScripts.test.ts',
+    '__tests__/tauriDesktopTabs.test.ts',
+  ];
 
   it('runs read-only checks for pull requests and configured pushes with stable required checks', () => {
     const workflow = workflowSource();
@@ -120,18 +126,23 @@ describe('pull request CI workflow contract', () => {
     for (const command of [
       'pnpm docs:focus:check',
       'pnpm --dir docs build',
-      'pnpm test',
+      'pnpm test:quality',
       'pnpm typecheck',
       'pnpm build',
     ]) {
       expect(qualityJob).toContain(command);
+    }
+    for (const testFile of desktopContractTests) {
+      expect(qualityJob).not.toContain(testFile);
     }
     expect(qualityJob).not.toContain('pnpm smoke:pack');
     expect(qualityJob).not.toContain('cargo fmt');
     expect(qualityJob).not.toContain('cargo test');
     expect(qualityJob).not.toContain('cargo check');
     expect(qualityJob).not.toContain('build:web');
-    expect(qualityJob.indexOf('brew install tmux')).toBeLessThan(qualityJob.indexOf('pnpm test'));
+    expect(qualityJob.indexOf('brew install tmux')).toBeLessThan(
+      qualityJob.indexOf('pnpm test:quality'),
+    );
     expect(qualityJob.match(/pnpm --dir docs build/g)).toHaveLength(1);
     expect(qualityJob.indexOf('pnpm docs:focus:check')).toBeLessThan(
       qualityJob.indexOf('pnpm --dir docs build'),
@@ -153,12 +164,7 @@ describe('pull request CI workflow contract', () => {
     expect(desktopWebJob).toContain('runs-on: macos-15');
     expect(desktopWebJob).toContain('timeout-minutes: 25');
     expect(desktopWebJob).toContain('pnpm install --frozen-lockfile');
-    for (const testFile of [
-      '__tests__/tauriDesktopPlatform.test.ts',
-      '__tests__/tauriWebBundles.test.ts',
-      '__tests__/tauriPackageScripts.test.ts',
-      '__tests__/tauriDesktopTabs.test.ts',
-    ]) {
+    for (const testFile of desktopContractTests) {
       expect(desktopWebJob).toContain(testFile);
     }
     expect(desktopWebJob).toContain('pnpm --dir native/desktop/psyche-build-tauri build:web');

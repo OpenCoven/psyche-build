@@ -12,6 +12,9 @@ const packageJson = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'),
 describe('control task token package surface', () => {
   it('pins the real prepack and pack-smoke contract for the published subpath', () => {
     expect(packageJson.files).toContain('dist/**/*');
+    expect(packageJson.scripts?.['test:quality']).toBe(
+      'vitest --run --exclude __tests__/tauriDesktopPlatform.test.ts --exclude __tests__/tauriWebBundles.test.ts --exclude __tests__/tauriPackageScripts.test.ts --exclude __tests__/tauriDesktopTabs.test.ts',
+    );
     expect(packageJson.scripts?.prepack).toBe(
       'pnpm run build && pnpm run docs:focus:check',
     );
