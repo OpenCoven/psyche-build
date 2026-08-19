@@ -3899,9 +3899,18 @@ fn take_linux_browser_navigation(
 }
 
 #[cfg(target_os = "linux")]
+fn linux_browser_webview_pointer(
+    webview: &webkit2gtk::WebView,
+) -> *mut webkit2gtk::ffi::WebKitWebView {
+    <webkit2gtk::WebView as ToGlibPtr<'_, *mut webkit2gtk::ffi::WebKitWebView>>::to_glib_none(
+        webview,
+    )
+    .0
+}
+
+#[cfg(target_os = "linux")]
 fn linux_browser_webview_identity(webview: &webkit2gtk::WebView) -> usize {
-    let pointer: *mut webkit2gtk::ffi::WebKitWebView = webview.to_glib_none().0;
-    pointer as usize
+    linux_browser_webview_pointer(webview) as usize
 }
 
 #[cfg(target_os = "linux")]
@@ -3909,7 +3918,7 @@ fn disconnect_linux_browser_navigation_signals(
     webview: &webkit2gtk::WebView,
     registration: &BrowserLinuxNavigationRegistration,
 ) {
-    let pointer: *mut webkit2gtk::ffi::WebKitWebView = webview.to_glib_none().0;
+    let pointer = linux_browser_webview_pointer(webview);
     let object = pointer.cast::<glib::gobject_ffi::GObject>();
     for handler in [
         registration.load_changed_handler,
@@ -5038,7 +5047,10 @@ async fn browser_snapshot(
         .get_webview(&label)
         .ok_or_else(|| "browser webview missing".to_string())?;
     let current_url = webview.url().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
     let document_authority = ensure_live_browser_document_authority(&label, current_url.as_str())?;
+    #[cfg(not(target_os = "macos"))]
+    ensure_live_browser_document_authority(&label, current_url.as_str())?;
     let size = webview.size().map_err(|error| error.to_string())?;
     validate_browser_snapshot_dimensions(size.width, size.height)?;
     #[cfg(not(target_os = "macos"))]
