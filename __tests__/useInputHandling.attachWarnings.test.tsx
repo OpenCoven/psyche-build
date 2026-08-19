@@ -146,16 +146,18 @@ describe('useInputHandling attach warnings', () => {
 
     await sleep(20);
     stdin.write('a');
-    await sleep(80);
+    await vi.waitFor(() => {
+      expect(setIsCreatingPane).toHaveBeenLastCalledWith(false);
+      expect(setStatusMessage).toHaveBeenCalledWith(
+        'Pane launched, but orchestration metadata was not saved: disk full retry would be unsafe',
+      );
+    });
 
     expect(createPaneMock).toHaveBeenCalledTimes(1);
     expect(savePanes).toHaveBeenCalledTimes(2);
     expect(loadPanes).toHaveBeenCalledTimes(1);
     expect(setIsCreatingPane).toHaveBeenNthCalledWith(1, true);
     expect(setIsCreatingPane).toHaveBeenLastCalledWith(false);
-    expect(setStatusMessage).toHaveBeenCalledWith(
-      'Pane launched, but orchestration metadata was not saved: disk full retry would be unsafe',
-    );
     expect(
       setStatusMessage.mock.calls.some(([status]) =>
         String(status).startsWith('Failed to attach')
@@ -168,21 +170,24 @@ describe('useInputHandling attach warnings', () => {
   it('keeps the ordinary attach success message unchanged', async () => {
     const savePanes = vi.fn(async () => {});
     const loadPanes = vi.fn(async () => {});
+    const setIsCreatingPane = vi.fn();
     const setStatusMessage = vi.fn();
     const { stdin, unmount } = render(
       <Harness
         savePanes={savePanes}
         loadPanes={loadPanes}
-        setIsCreatingPane={vi.fn()}
+        setIsCreatingPane={setIsCreatingPane}
         setStatusMessage={setStatusMessage}
       />,
     );
 
     await sleep(20);
     stdin.write('a');
-    await sleep(80);
+    await vi.waitFor(() => {
+      expect(setIsCreatingPane).toHaveBeenLastCalledWith(false);
+      expect(setStatusMessage).toHaveBeenCalledWith('Attached 1 agent to thread-a');
+    });
 
-    expect(setStatusMessage).toHaveBeenCalledWith('Attached 1 agent to thread-a');
     expect(createPaneMock).toHaveBeenCalledTimes(1);
     expect(savePanes).toHaveBeenCalledTimes(2);
 
