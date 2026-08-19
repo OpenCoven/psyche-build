@@ -198,10 +198,7 @@ function revalidateAttachedPaneSlug(
 ): string {
   const baseSlug = path.basename(existingWorktree.worktreePath) || existingWorktree.slug;
   const existing = new Set(panes.map((pane) => pane.slug));
-  if (
-    new RegExp(`^${escapeRegExp(baseSlug)}-a(?:[2-9]|[1-9][0-9]+)$`).test(requestedSlug)
-    && !existing.has(requestedSlug)
-  ) {
+  if (!existing.has(requestedSlug)) {
     return requestedSlug;
   }
   let maxSibling = 1;
@@ -214,10 +211,6 @@ function revalidateAttachedPaneSlug(
     }
   }
   return `${baseSlug}-a${maxSibling + 1}`;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 interface WorktreeCreationEffectsOptions {

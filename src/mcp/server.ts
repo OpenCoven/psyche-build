@@ -992,7 +992,7 @@ export const TOOLS: ToolDef[] = [
           outcome.message ?? 'orchestration failed',
         );
       }
-      return outcome.value;
+      return outcome;
     }),
   },
   {

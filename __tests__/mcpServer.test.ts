@@ -212,11 +212,15 @@ describe('MCP canonical delegation and read-only helpers', () => {
   });
 
   it('delegates multi-lane execute_task with normalized task request', async () => {
-    const fake = client({ submit: vi.fn(async () => ({ status: 'succeeded' })) });
+    const outcome = {
+      status: 'succeeded' as const,
+      value: { taskId: 'task-2', status: 'completed' },
+    };
+    const fake = client({ submit: vi.fn(async () => outcome) });
     inject({ controlClientForRoot: vi.fn(async () => fake), randomId: () => 'id-2' });
     const auth = { task_id: 'task-2', lease_id: 'lease-2', lease_revision: 1 };
 
-    await call('psyche_execute_task', {
+    const response = await call('psyche_execute_task', {
       ...auth, project_root: '/repo', prompt: 'Fix tests',
       lanes: [
         { id: 'codex', mode: 'isolated-worktree', agent: 'codex' },
@@ -225,6 +229,7 @@ describe('MCP canonical delegation and read-only helpers', () => {
       concurrency: 2,
     });
 
+    expect(payload(response)).toEqual(outcome);
     expect(fake.submit).toHaveBeenCalledOnce();
     const submitted = fake.submit.mock.calls[0][0];
     expect(submitted.kind).toBe('orchestration.execute');
