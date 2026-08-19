@@ -43,7 +43,8 @@
     element.classList.add("is-transitioning");
 
     var settled = false;
-    function finish() {
+    function finish(event) {
+      if (event && event.target !== element) return;
       if (settled) return;
       settled = true;
       element.removeEventListener("transitionend", finish);
