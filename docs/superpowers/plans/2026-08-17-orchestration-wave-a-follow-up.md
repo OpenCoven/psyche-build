@@ -666,7 +666,7 @@ git add src/orchestration/types.ts src/orchestration/orchestrator.ts src/orchest
 git commit -m "fix: preserve launched orchestration effects"
 ```
 
-### Task 6: Run full focused validation and publish the repair PR
+### Task 6: Run full focused validation and update the existing PR
 
 **Files:**
 - Verify: all files changed in Tasks 1-5
@@ -688,16 +688,19 @@ pnpm vitest --run \
 
 Expected: all selected test files pass with zero failed tests.
 
-- [ ] **Step 2: Run non-generating TypeScript validation**
+- [ ] **Step 2: Run non-generating TypeScript, docs, and package validation**
 
 ```bash
 pnpm --filter @opencoven/psyche-vim-core typecheck
 pnpm exec tsc --noEmit
 pnpm run typecheck:tests
+pnpm docs:focus:check
+pnpm --dir docs build
+pnpm smoke:pack
 ```
 
-Expected: all three commands exit successfully without modifying tracked
-generated files.
+Expected: all commands exit successfully without modifying tracked generated
+files.
 
 - [ ] **Step 3: Verify repository cleanliness and exact change scope**
 
@@ -710,28 +713,25 @@ git log --oneline origin/main..HEAD
 Expected: no whitespace errors; status contains only intended changes; commit
 history contains the design, five repair commits, and no unrelated work.
 
-- [ ] **Step 4: Push and create the follow-up PR**
+- [ ] **Step 4: Push the reconciled branch to the existing PR**
 
 ```bash
 git push -u origin fix/orchestration-wave-a-follow-up
-gh pr create \
-  --repo OpenCoven/psyche-build \
-  --base main \
-  --head fix/orchestration-wave-a-follow-up \
-  --title "Fix orchestration Wave A production contracts" \
-  --body-file /tmp/orchestration-wave-a-follow-up-pr.md
 ```
 
-The PR body must summarize the five repaired defects and list the exact
-validation commands from Steps 1-2.
+PR #177 remains the delivery vehicle. Refresh its tracked plan/spec references
+if reconciliation changed the documented validation scope.
 
-- [ ] **Step 5: Resolve review threads and merge only after green CI**
+- [ ] **Step 5: Verify green CI and leave PR #177 unmerged**
 
 Verify:
 
 ```bash
 gh pr checks --repo OpenCoven/psyche-build --watch
 ```
+
+Do not merge from this task; stop after the reconciled branch is pushed,
+validation is recorded, and review threads are addressed.
 
 Expected: every required check passes. Resolve all actionable review threads,
 then rebase-merge to preserve linear history.

@@ -71,11 +71,13 @@ Focused coverage will prove:
 - Concurrent attaches allocate distinct sibling slugs from fresh state.
 
 Validation will run the focused orchestration, MCP, attach, local backend, and
-daemon suites, followed by non-generating TypeScript checks and green pull
-request CI.
+daemon suites, followed by non-generating TypeScript checks plus the current
+main docs/public-package gates: `pnpm docs:focus:check`,
+`pnpm --dir docs build`, and `pnpm smoke:pack`.
 
 ## Completion
 
 The follow-up is complete when all five defects have regression coverage, the
-production paths use the repaired contracts, the focused and type-checking
-commands pass, and the follow-up PR merges with no unresolved review threads.
+production paths use the repaired contracts, the focused, type-checking, and
+package-validation commands pass, and the reconciled follow-up PR is ready to
+merge with no unresolved review threads.
