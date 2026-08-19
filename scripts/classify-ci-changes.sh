@@ -25,7 +25,7 @@ if [[ "$GITHUB_EVENT_NAME" == "pull_request" && -n "$BASE_SHA" && -n "$HEAD_SHA"
             ios=true
             package=true
             ;;
-          native/desktop/*|frontend/*|packages/*|Cargo.toml|Cargo.lock|__tests__/tauri*|scripts/build-macos-app.mjs)
+          native/desktop/*|frontend/*|packages/*|Cargo.toml|Cargo.lock|vitest.config.ts|vitest.smoke.config.ts|__tests__/tauri*|scripts/build-macos-app.mjs)
             desktop=true
             ;;
           native/ios/*|scripts/generate-protocol-fixtures.ts|scripts/app-store-connect.mjs)

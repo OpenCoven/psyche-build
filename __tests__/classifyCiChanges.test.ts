@@ -119,6 +119,21 @@ describe('classify-ci-changes', () => {
     })
   })
 
+  it.each([
+    'vitest.config.ts',
+    'vitest.smoke.config.ts',
+  ])('root Vitest config %s => desktop=true, ios=false, package=false', (path) => {
+    const { repoDir, baseSha, headSha } = initRepo(
+      { 'docs/readme.md': 'a\n' },
+      { 'docs/readme.md': 'a\n', [path]: 'export default {}\n' },
+    )
+    expect(runClassifier(repoDir, baseSha, headSha, 'pull_request')).toEqual({
+      desktop: 'true',
+      ios: 'false',
+      package: 'false',
+    })
+  })
+
   it('editing scripts/classify-ci-changes.sh => desktop=true, ios=true, package=true', () => {
     const { repoDir, baseSha, headSha } = initRepo(
       { 'docs/readme.md': 'a\n' },
