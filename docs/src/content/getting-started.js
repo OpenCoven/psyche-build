@@ -27,7 +27,7 @@ open -a "Psyche Build"</code></pre>
       <li>
         <p><strong>Check setup:</strong></p>
         <pre><code data-lang="bash">node /path/to/psyche-build/psyche doctor</code></pre>
-        <p>Doctor confirms tmux and git, shows whether any supported agent CLIs are detected, and explains which Coven features are optional.</p>
+        <p>Doctor confirms tmux and git, reports detected supported agent CLIs, and identifies optional integration availability.</p>
       </li>
       <li>
         <p><strong>Launch psyche:</strong></p>
@@ -132,9 +132,9 @@ set -ga update-environment "TERM_PROGRAM"</code></pre>
       On Linux, swap <code>pbcopy</code> for <code>wl-copy</code> (Wayland) or <code>xclip -selection clipboard -in</code> (X11) in the clipboard bindings.
     </div>
 
-    <h2>Standalone vs Coven</h2>
-    <p>psyche does not require Coven for the core cockpit. Without Coven, you can create tmux panes, open plain terminals, launch installed agent CLIs, isolate work in git worktrees, inspect files, merge, create PRs, and run rituals.</p>
-    <p>When a local Coven daemon is available, psyche adds harness-aware session actions: list scoped Coven sessions, open them in panes, and launch new scoped Coven sessions for the current project.</p>
+    <h2>Optional integrations</h2>
+    <p>Psyche Build does not require another OpenCoven product for panes, worktrees, agent launches, file inspection, merging, pull requests, rituals, settings, or cleanup.</p>
+    <p>When a supported local integration is available, Psyche Build may add scoped session actions without changing the core workflow.</p>
 
     <h2>Next Steps</h2>
     <ul>

@@ -49,9 +49,9 @@ open -a "Psyche Build"</code></pre>
       <li>Set <code>defaultAgent</code> only after the agent appears in the selector.</li>
     </ol>
 
-    <h2>No Coven Sessions Appear</h2>
-    <p>Coven is optional. If no local Coven daemon is running, psyche still supports tmux panes, worktrees, installed agents, merge, PR, rituals, settings, and file browsing.</p>
-    <p>When Coven is available, only sessions scoped to the current project are shown. Confirm the daemon is running for the same project root before debugging psyche.</p>
+    <h2>Optional session integration is unavailable</h2>
+    <p>Psyche Build's core tmux, worktree, agent, merge, pull-request, ritual, settings, and file-browser workflows continue without the optional session provider.</p>
+    <p>If you enabled that integration, verify its local service is running for the same canonical project root, then restart or refresh Psyche Build.</p>
 
     <h2>Branch Names or Commit Messages Are Generic</h2>
     <p>Smart branch names and AI commit messages require OpenRouter.</p>
