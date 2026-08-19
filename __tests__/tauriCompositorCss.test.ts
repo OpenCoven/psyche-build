@@ -29,6 +29,7 @@ const ANIMATABLE_ALLOWLIST = new Set([
 ]);
 
 const FORBIDDEN_TRANSITION_PROPERTIES = [
+  'all',
   'width',
   'height',
   'top',
@@ -137,10 +138,52 @@ function parseDeclarations(body: string): Array<{ property: string; value: strin
   return declarations;
 }
 
-/** First identifier of a `transition` shorthand segment is the property. */
-function transitionShorthandProperty(segment: string): string {
-  const token = segment.trim().split(/\s+/)[0] || '';
-  return token.toLowerCase();
+function splitTopLevel(text: string, delimiter: 'comma' | 'whitespace'): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let parenthesisDepth = 0;
+  let quote = '';
+
+  function push(end: number): void {
+    const part = text.slice(start, end).trim();
+    if (part) parts.push(part);
+  }
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (quote) {
+      if (char === '\\') i += 1;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === '\\') {
+      i += 1;
+    } else if (char === '(') {
+      parenthesisDepth += 1;
+    } else if (char === ')') {
+      parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+    } else if (
+      parenthesisDepth === 0
+      && (
+        (delimiter === 'comma' && char === ',')
+        || (delimiter === 'whitespace' && /\s/.test(char))
+      )
+    ) {
+      push(i);
+      start = i + 1;
+    }
+  }
+
+  push(text.length);
+  return parts;
+}
+
+function transitionShorthandForbiddenProperties(segment: string): string[] {
+  return splitTopLevel(segment, 'whitespace')
+    .map((token) => token.toLowerCase())
+    .filter((token) => FORBIDDEN_TRANSITION_PROPERTIES.includes(token));
 }
 
 function isKeyframesAtRule(atName: string): boolean {
@@ -299,15 +342,17 @@ function auditStylesheet(css: string): CompositorFindings {
 
       const declarations = parseDeclarations(rule.body);
       for (const decl of declarations) {
-        if (decl.property === 'transition' || decl.property === 'transition-property') {
+        const transitionProperty = decl.property.replace(/^-[a-z0-9]+-/, '');
+        if (transitionProperty === 'transition' || transitionProperty === 'transition-property') {
           const names =
-            decl.property === 'transition'
-              ? decl.value.split(',').map(transitionShorthandProperty)
-              : decl.value.split(',').map((token) => token.trim().toLowerCase());
+            transitionProperty === 'transition'
+              ? splitTopLevel(decl.value, 'comma')
+                .flatMap(transitionShorthandForbiddenProperties)
+              : splitTopLevel(decl.value, 'comma')
+                .map((token) => token.toLowerCase())
+                .filter((token) => FORBIDDEN_TRANSITION_PROPERTIES.includes(token));
           for (const name of names) {
-            if (FORBIDDEN_TRANSITION_PROPERTIES.includes(name)) {
-              findings.transitionViolations.push(`${prelude} { ${decl.property}: ${name} }`);
-            }
+            findings.transitionViolations.push(`${prelude} { ${decl.property}: ${name} }`);
           }
         }
         if (decl.property === 'will-change') {
@@ -337,6 +382,44 @@ describe('compositor stylesheet audit parser', () => {
     expect(findings.keyframeViolations).toEqual([
       '@KeYfRaMeS unsafe-standard { to: width }',
       '@-WeBkIt-KeYfRaMeS unsafe-prefixed { to: filter }',
+    ]);
+  });
+
+  it('rejects unsafe transition shorthands regardless of token order or function commas', () => {
+    const findings = auditStylesheet(`
+      .duration-first {
+        transition: 200ms width ease;
+      }
+      .mixed-list {
+        transition:
+          opacity 120ms cubic-bezier(.2, .8, .2, 1),
+          160ms filter linear;
+      }
+      .all-properties {
+        transition: all 120ms ease;
+      }
+    `);
+
+    expect(findings.transitionViolations).toEqual([
+      '.duration-first { transition: width }',
+      '.mixed-list { transition: filter }',
+      '.all-properties { transition: all }',
+    ]);
+  });
+
+  it('audits vendor-prefixed transitions and transition-property all', () => {
+    const findings = auditStylesheet(`
+      .prefixed {
+        -webkit-transition: 120ms box-shadow ease;
+      }
+      .all-properties {
+        transition-property: opacity, all;
+      }
+    `);
+
+    expect(findings.transitionViolations).toEqual([
+      '.prefixed { -webkit-transition: box-shadow }',
+      '.all-properties { transition-property: all }',
     ]);
   });
 
@@ -418,5 +501,11 @@ describe('desktop stylesheet compositor safety', () => {
 
   it('scopes will-change to active .is-transitioning selectors', () => {
     expect(findings.willChangeViolations).toEqual([]);
+  });
+
+  it('hints only transform and opacity during active transitions', () => {
+    expect(css).toMatch(
+      /\.is-transitioning\s*\{\s*will-change:\s*transform,\s*opacity;\s*\}/,
+    );
   });
 });

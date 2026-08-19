@@ -1184,7 +1184,7 @@ kbd {
  * transitionend/animationend or a 500 ms safety timeout, so no layer is ever
  * pinned for the lifetime of the app.
  */
-.is-transitioning { will-change: transform; }
+.is-transitioning { will-change: transform, opacity; }
 .boot-error {
   color: #ff6b6b;
   padding: 24px;
