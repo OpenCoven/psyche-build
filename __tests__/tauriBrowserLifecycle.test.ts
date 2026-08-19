@@ -2815,6 +2815,7 @@ describe('Tauri native browser lifecycle', () => {
 
   it('retains the live focus identity after native browser destruction fails', async () => {
     const statuses: Array<[string, string]> = [];
+    const restoredTabs: string[] = [];
     const tab: BrowserNavigationTab = {
       id: 'tab-a',
       url: 'https://current.example',
@@ -2860,6 +2861,10 @@ describe('Tauri native browser lifecycle', () => {
       activeProject: () => project,
       ensureBrowserModel: () => browser,
       invoke: async () => { throw new Error('native unavailable'); },
+      installBrowserAutomationForPair: async (pair: { tab: { id: string } }) => {
+        restoredTabs.push(pair.tab.id);
+        return true;
+      },
       browserLabelForTab: () => 'project-a:tab-a',
       setStatus: (text: string, level: string) => statuses.push([text, level]),
       renderBrowserTabs: () => { throw new Error('must not render'); },
@@ -2888,6 +2893,7 @@ describe('Tauri native browser lifecycle', () => {
       'browser tab close failed: native unavailable',
       'error',
     ]]);
+    expect(restoredTabs).toEqual(['tab-a']);
 
     const focusHandlers = browserNativeEventHandlers({
       lifecycle,
@@ -6923,10 +6929,21 @@ describe('Tauri native browser lifecycle', () => {
     const nativeViews = new Set(['project-a:tab-a', 'project-a:tab-b']);
     const calls: string[] = [];
     const statuses: Array<[string, string]> = [];
+    const lifecycle = browserLifecycleHarness();
+    Object.assign(lifecycle.browserTabLifecycle(tabs[0]), {
+      nativeLabel: 'project-a:tab-a',
+      liveGeneration: 1,
+      viewLive: true,
+    });
+    Object.assign(lifecycle.browserTabLifecycle(tabs[1]), {
+      nativeLabel: 'project-a:tab-b',
+      liveGeneration: 1,
+      viewLive: true,
+    });
     const closeBrowserPane = compileFunction<
       (value: BrowserPaneThreadFixture) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserPane'), {
-      ...browserLifecycleHarness(),
+      ...lifecycle,
       findProject: () => project,
       ensureBrowserModel: () => browser,
       invoke: async (command: string, args: { labels?: string[]; label?: string }) => {
@@ -6953,6 +6970,10 @@ describe('Tauri native browser lifecycle', () => {
       },
       browserLabelForTab: (_: typeof project, tab: { id: string }) => `${project.id}:${tab.id}`,
       nativeBrowserLabel: (label: string) => label,
+      installBrowserAutomationForPair: async (pair: { tab: { id: string } }) => {
+        calls.push(`restore-control:${pair.tab.id}`);
+        return true;
+      },
       setStatus: (text: string, level: string) => statuses.push([text, level]),
       saveWorkspaceSoon: () => calls.push('save'),
       stageBrowserSurface: () => calls.push('stage'),
@@ -6990,6 +7011,7 @@ describe('Tauri native browser lifecycle', () => {
       'browser_navigate:project-a:tab-a',
       'sync',
       'save',
+      'restore-control:tab-b',
     ]);
     expect(statuses).toEqual([[
       'browser pane close failed; native close failures: project-a:tab-b: destroy failed at project-a:tab-b; recreated 0/1 confirmed-destroyed live tabs; recreation failures: tab-a: tab-a restore unavailable',
@@ -7090,6 +7112,10 @@ describe('Tauri native browser lifecycle', () => {
       },
       browserLabelForTab: (_: typeof project, tab: { id: string }) => `${project.id}:${tab.id}`,
       nativeBrowserLabel: (label: string) => label,
+      installBrowserAutomationForPair: async (pair: { tab: { id: string } }) => {
+        calls.push(`restore-control:${pair.tab.id}`);
+        return true;
+      },
       setStatus: (text: string, level: string) => statuses.push([text, level]),
       saveWorkspaceSoon: () => calls.push('save'),
       stageBrowserSurface: () => calls.push('stage'),
@@ -7136,6 +7162,8 @@ describe('Tauri native browser lifecycle', () => {
       'browser_navigate:project-a:tab-a',
       'sync',
       'save',
+      'restore-control:tab-a',
+      'restore-control:tab-b',
     ]);
     expect(statuses).toEqual([[
       'browser pane close failed; native close failures: project-a:tab-b: destroy failed at project-a:tab-b; recreated 1/1 confirmed-destroyed live tabs',

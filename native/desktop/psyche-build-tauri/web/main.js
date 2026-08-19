@@ -4955,6 +4955,26 @@
         recoveryErrors: recoveryErrors,
       };
     }
+    async function restoreLiveBrowserControls() {
+      var recoveryErrors = [];
+      for (var index = 0; index < browser.tabs.length; index += 1) {
+        var tab = browser.tabs[index];
+        var lifecycle = browserTabLifecycle(tab);
+        if (!tab.created || !lifecycle.nativeLabel || !lifecycle.viewLive) continue;
+        try {
+          var restored = await installBrowserAutomationForPair({
+            project: project,
+            worktreePath: thread.worktreePath,
+            browser: browser,
+            tab: tab,
+          });
+          if (!restored) recoveryErrors.push(tab.id + ": browser control restore was not confirmed");
+        } catch (error) {
+          recoveryErrors.push(tab.id + ": " + boundedBrowserError(error));
+        }
+      }
+      return recoveryErrors;
+    }
     for (var automationIndex = 0; automationIndex < browser.tabs.length; automationIndex += 1) {
       var automationTab = browser.tabs[automationIndex];
       if (!browserTabLifecycle(automationTab).nativeLabel) continue;
@@ -5024,6 +5044,10 @@
           transportStatus += "; recreation failures: " + transportRecovery.recoveryErrors.join(", ");
         }
       }
+      var transportControlErrors = await restoreLiveBrowserControls();
+      if (transportControlErrors.length) {
+        transportStatus += "; browser control restore failures: " + transportControlErrors.join(", ");
+      }
       setStatus(transportStatus, "error");
       return false;
     }
@@ -5057,6 +5081,10 @@
       var recoveryStatus = "browser pane close failed; native close failures: " + closeErrors.join(", ");
       recoveryStatus += "; recreated " + recovery.recreated + "/" + recovery.affectedLiveTabs + " confirmed-destroyed live tabs";
       if (recovery.recoveryErrors.length) recoveryStatus += "; recreation failures: " + recovery.recoveryErrors.join(", ");
+      var controlRecoveryErrors = await restoreLiveBrowserControls();
+      if (controlRecoveryErrors.length) {
+        recoveryStatus += "; browser control restore failures: " + controlRecoveryErrors.join(", ");
+      }
       setStatus(recoveryStatus, "error");
       return false;
     }
@@ -11397,7 +11425,16 @@
       invalidateBrowserNavigation(tab);
     } catch (error) {
       lifecycle.closing = false;
-      setStatus("browser tab close failed: " + boundedBrowserError(error), "error");
+      var closeStatus = "browser tab close failed: " + boundedBrowserError(error);
+      try {
+        var controlRestored = await installBrowserAutomationForPair(closingPair);
+        if (!controlRestored) {
+          closeStatus += "; browser control restore was not confirmed";
+        }
+      } catch (restoreError) {
+        closeStatus += "; browser control restore failed: " + boundedBrowserError(restoreError);
+      }
+      setStatus(closeStatus, "error");
       return false;
     }
     idx = browser.tabs.findIndex(function (t) { return t === tab; });
