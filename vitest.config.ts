@@ -14,11 +14,11 @@ export default defineConfig({
     exclude: [
       ...configDefaults.exclude,
       '.worktrees/**',
-      // Agent tooling (e.g. Claude Code) creates throwaway worktree copies
-      // under `.claude/worktrees/**`. Those stale duplicates are gitignored and
-      // not part of the suite; excluding them keeps `pnpm test` from picking up
-      // outdated copies of real test files, exactly like `.worktrees/**` above.
-      '.claude/**',
+      // Agent tooling (e.g. Claude Code) creates throwaway worktree copies under
+      // `.claude/worktrees/**`. Those stale duplicates are gitignored and not part
+      // of the suite; excluding them keeps `pnpm test` from picking up outdated
+      // copies of real test files, exactly like `.worktrees/**` above.
+      '.claude/worktrees/**',
       '.psyche/**',
       '**/psyche.smoke.test.ts',
     ],
