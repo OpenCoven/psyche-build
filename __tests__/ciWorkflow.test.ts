@@ -186,7 +186,7 @@ describe('pull request CI workflow contract', () => {
     for (const os of ['macos-15', 'windows-2025', 'ubuntu-24.04']) {
       expect(desktopCheckJob).toContain(os);
     }
-    expect(desktopCheckJob).toContain('timeout-minutes: 10');
+    expect(desktopCheckJob).toContain('timeout-minutes: 20');
     expect(desktopCheckJob).toContain("if: runner.os == 'Linux'");
     expect(desktopCheckJob).toContain('shell: bash');
     expect(desktopCheckJob).toContain('sudo env DEBIAN_FRONTEND=noninteractive apt-get');

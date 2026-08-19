@@ -164,7 +164,7 @@ jobs:
 
       - name: Install Tauri Linux prerequisites
         if: runner.os == 'Linux'
-        timeout-minutes: 10
+        timeout-minutes: 20
         shell: bash
         run: |
           sudo env DEBIAN_FRONTEND=noninteractive apt-get \
