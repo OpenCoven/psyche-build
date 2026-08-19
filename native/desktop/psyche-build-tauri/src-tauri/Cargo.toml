@@ -46,9 +46,17 @@ tauri-plugin-macos-fps = "0.1.0"
 window-vibrancy = "0.6"
 block2 = "0.6.2"
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", features = ["NSBitmapImageRep", "NSImage", "NSImageRep"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSBitmapImageRep", "NSClickGestureRecognizer", "NSGestureRecognizer", "NSImage", "NSImageRep", "NSResponder", "NSView"] }
 objc2-foundation = { version = "0.3.2", features = ["NSData", "NSDictionary", "NSError", "NSObject", "NSString", "NSURL", "NSURLRequest"] }
 objc2-web-kit = { version = "0.3.2", features = ["block2", "WKNavigation", "WKNavigationDelegate", "WKSnapshotConfiguration", "WKWebView"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "0.38"
+windows = "0.61"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+webkit2gtk = { version = "2", features = ["v2_40"] }
 
 
 [profile.release]
