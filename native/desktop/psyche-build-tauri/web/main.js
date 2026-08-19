@@ -26,6 +26,39 @@
     showBootError("Unhandled promise rejection:\n" + String(e.reason));
   });
 
+  // ============================================================
+  // 1a. Compositor-safe transition helper
+  // ============================================================
+  //
+  // Adds `.is-transitioning` for the duration of a transform/opacity
+  // transition or animation, giving the compositor a scoped `will-change`
+  // hint. The class is removed on transitionend/animationend and, as a
+  // safety net against interrupted or never-fired events, after 500 ms so no
+  // element keeps a pinned compositor layer.
+  function beginCompositorTransition(element) {
+    if (!element || !element.classList) return;
+    if (element.__compositorTransitionCleanup) {
+      element.__compositorTransitionCleanup();
+    }
+    element.classList.add("is-transitioning");
+
+    var settled = false;
+    function finish() {
+      if (settled) return;
+      settled = true;
+      element.removeEventListener("transitionend", finish);
+      element.removeEventListener("animationend", finish);
+      window.clearTimeout(timer);
+      element.__compositorTransitionCleanup = null;
+      element.classList.remove("is-transitioning");
+    }
+
+    var timer = window.setTimeout(finish, 500);
+    element.addEventListener("transitionend", finish);
+    element.addEventListener("animationend", finish);
+    element.__compositorTransitionCleanup = finish;
+  }
+
   function initializeTitlebarBrandMark() {
     var mark = document.getElementById("titlebar-brand-mark");
     if (!mark) return;
@@ -11503,6 +11536,7 @@
     var trigger = document.getElementById("rail-new-tab");
     if (!open) { closeNewPaneMenu(); return; }
     newPaneMenuEl.hidden = false;
+    beginCompositorTransition(newPaneMenuEl);
     if (trigger) trigger.setAttribute("aria-expanded", "true");
     focusNewPaneMenuItem(0);
   }

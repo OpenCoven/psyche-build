@@ -272,7 +272,7 @@ kbd {
   font-weight: 600;
   cursor: pointer;
   transition: background var(--transition-fast), color var(--transition-fast),
-              border-color var(--transition-fast), box-shadow var(--transition-fast);
+              border-color var(--transition-fast);
 }
 .sidebar-tab svg { flex: none; opacity: 0.85; }
 .sidebar-tab:hover { background: rgba(255, 255, 255, 0.045); color: var(--text); }
@@ -341,7 +341,7 @@ kbd {
   line-height: 1;
   white-space: nowrap;
   transition: background var(--transition-fast), color var(--transition-fast),
-              border-color var(--transition-fast), box-shadow var(--transition-fast);
+              border-color var(--transition-fast);
 }
 .sidebar-back-button:hover {
   background: var(--surface-2);
@@ -467,7 +467,6 @@ kbd {
   transition:
     border-color var(--transition-fast),
     background var(--transition-fast),
-    box-shadow var(--transition-fast),
     color var(--transition-fast);
 }
 .project-appearance-choice:hover {
@@ -725,7 +724,7 @@ kbd {
   flex: 0 0 7px;
   border-radius: 999px;
   background: var(--muted);
-  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+  transition: background var(--transition-fast);
 }
 .session-row.running .dot,
 .session-row.running .session-dot { background: var(--ok); box-shadow: 0 0 6px rgba(52, 211, 153, 0.5); }
@@ -796,7 +795,7 @@ kbd {
    sticky header's opaque backdrop and must not be replaced. */
 .session-group-head {
   border-radius: 6px;
-  transition: box-shadow var(--transition-fast), color var(--transition-fast);
+  transition: color var(--transition-fast);
 }
 .session-group-head:hover {
   box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.05);
@@ -1177,10 +1176,15 @@ kbd {
   /* Pane minimums are relaxed so a narrow window can still hold the canvas. */
   --terminal-min:   220px;
   --browser-min:    72px;
-  transition: grid-template-columns var(--transition-layout),
-              grid-template-rows    var(--transition-layout);
-  will-change: grid-template-columns, grid-template-rows;
 }
+
+/*
+ * The compositor may only be hinted while an element is actively transitioning.
+ * `beginCompositorTransition` in main.js toggles this class and removes it on
+ * transitionend/animationend or a 500 ms safety timeout, so no layer is ever
+ * pinned for the lifetime of the app.
+ */
+.is-transitioning { will-change: transform; }
 .boot-error {
   color: #ff6b6b;
   padding: 24px;
@@ -1889,11 +1893,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   box-shadow:
     0 0 0 1px rgba(var(--rgb-accent), 0.18),
     0 12px 32px -12px rgba(var(--rgb-accent), 0.55);
-  transition:
-    left var(--transition-fast),
-    top var(--transition-fast),
-    width var(--transition-fast),
-    height var(--transition-fast);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2184,8 +2183,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   font-family: var(--font-mono);
   font-size: 12.5px;
   outline: none;
-  transition: border-color var(--transition-fast), background var(--transition-fast),
-              box-shadow var(--transition-fast);
+  transition: border-color var(--transition-fast), background var(--transition-fast);
 }
 #command-input:focus {
   border-color: var(--accent);
@@ -3518,7 +3516,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   font-family: var(--font-mono);
   font-size: 12px;
   outline: none;
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast),
+  transition: border-color var(--transition-fast),
               background var(--transition-fast);
 }
 .browser-bar input:focus {
@@ -3771,15 +3769,29 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   z-index: 1;
   pointer-events: none;
   background:
-    linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.55) 48%, transparent 100%) -45% 0 / 40% 100% no-repeat,
     linear-gradient(#eceaf1, #eceaf1) 28px 30px / 42% 18px no-repeat,
     linear-gradient(#e1dee8, #e1dee8) 28px 66px / 72% 12px no-repeat,
     linear-gradient(#e7e4ed, #e7e4ed) 28px 92px / 58% 12px no-repeat,
     linear-gradient(#f4f2f7, #f4f2f7);
+}
+.preview-placeholder.loading::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.55) 48%, transparent 100%);
+  transform: translateX(-120%);
   animation: browser-skeleton-sheen 1.05s ease-in-out infinite;
 }
 @keyframes browser-skeleton-sheen {
-  to { background-position: 145% 0, 28px 30px, 28px 66px, 28px 92px, 0 0; }
+  to { transform: translateX(340%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .preview-placeholder.loading::after { animation: none; opacity: 0; }
 }
 .preview-placeholder.loading .preview-empty {
   opacity: 0;
