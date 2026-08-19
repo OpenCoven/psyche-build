@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
 type ContentModule = {
@@ -21,9 +22,12 @@ type ValidateNavigationGraph = (input: {
   }>;
 }) => string[];
 
+type RenderContentModule = (contentModule: ContentModule) => string;
+
 async function loadContentRegistry(): Promise<{
   modules: Record<string, ContentModule>;
   sections: NavigationSection[];
+  renderContentModule?: RenderContentModule;
   validateNavigationGraph?: ValidateNavigationGraph;
 }> {
   // @ts-expect-error The Vite documentation app is plain JavaScript.
@@ -102,5 +106,47 @@ describe('public docs navigation graph', () => {
     ).toEqual([
       'navigation source "docs/src/hero.js": internal target "/missing-target" does not resolve',
     ]);
+  });
+
+  it('renders double-quoted, single-quoted, and unquoted internal routes as usable anchors', async () => {
+    const registry = await loadContentRegistry();
+    const renderContentModule = registry.renderContentModule;
+    const mainSource = await readFile(new URL('../docs/src/main.js', import.meta.url), 'utf8');
+
+    expect(renderContentModule).toBeTypeOf('function');
+    expect(mainSource).toContain('renderContentModule(mod)');
+
+    const rendered = renderContentModule?.({
+      render: () => [
+        '<a href="#/configuration">Double</a>',
+        "<a href='#/configuration'>Single</a>",
+        '<a href=#/configuration>Unquoted</a>',
+        '<span data-href="#/configuration">Metadata</span>',
+      ].join(''),
+    });
+
+    expect(rendered).toBe([
+      '<a href="#configuration">Double</a>',
+      "<a href='#configuration'>Single</a>",
+      '<a href=#configuration>Unquoted</a>',
+      '<span data-href="#/configuration">Metadata</span>',
+    ].join(''));
+    expect(
+      registry.validateNavigationGraph?.({
+        modules: {
+          introduction: { render: () => rendered },
+          configuration: { render: () => '<p>Configuration</p>' },
+        },
+        sections: [
+          {
+            title: 'Overview',
+            pages: [
+              { path: '/introduction', title: 'Introduction' },
+              { path: '/configuration', title: 'Configuration' },
+            ],
+          },
+        ],
+      }),
+    ).toEqual([]);
   });
 });
