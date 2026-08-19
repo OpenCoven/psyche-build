@@ -12,6 +12,7 @@ import {
   validateNavigationGraph,
 } from '../docs/src/content/index.js';
 import { renderHero } from '../docs/src/hero.js';
+import { executeNpmPackDryRun } from './npm-pack-runner.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const execFileAsync = promisify(execFile);
@@ -220,15 +221,7 @@ async function loadPackageJson() {
 }
 
 async function collectPackedFilePaths() {
-  const { stdout } = await execFileAsync(
-    'npm',
-    ['pack', '--dry-run', '--json', '--ignore-scripts'],
-    {
-      cwd: root,
-      encoding: 'utf8',
-      maxBuffer: 32 * 1024 * 1024,
-    },
-  );
+  const stdout = await executeNpmPackDryRun(execFileAsync, { cwd: root });
   const result = JSON.parse(stdout);
   if (!Array.isArray(result) || !result[0] || !Array.isArray(result[0].files)) {
     throw new Error('npm pack --dry-run --json returned an invalid file list');
