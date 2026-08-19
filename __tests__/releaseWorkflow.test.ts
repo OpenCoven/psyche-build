@@ -118,6 +118,31 @@ describe('macOS release workflow contract', () => {
     );
   });
 
+  it('keeps the exhaustive release verification gates in the verify job', () => {
+    const workflow = workflowSource();
+    const verifyJob = workflowJobSource(workflow, 'verify');
+
+    for (const expected of [
+      'ref: ${{ github.event.inputs.tag || github.ref }}',
+      'pnpm smoke:pack',
+      'cargo test --manifest-path "$MANIFEST" --locked',
+      'cargo check --manifest-path "$MANIFEST" --locked',
+      'pnpm --dir native/desktop/psyche-build-tauri build:web',
+      'pnpm ios:project:check',
+      '-scheme PsycheCore',
+    ]) {
+      expect(verifyJob).toContain(expected);
+    }
+
+    expect(verifyJob.match(/-scheme PsycheApp/g)).toHaveLength(2);
+    expect(verifyJob.indexOf('pnpm docs:focus:check')).toBeLessThan(
+      verifyJob.indexOf('pnpm --dir docs build'),
+    );
+    expect(verifyJob.indexOf('pnpm --dir docs build')).toBeLessThan(
+      verifyJob.indexOf('pnpm build'),
+    );
+  });
+
   it('skips TestFlight only for verified desktop-only dispatches', () => {
     const workflow = workflowSource();
     const iosJob = workflowJobSource(workflow, 'upload-ios');
