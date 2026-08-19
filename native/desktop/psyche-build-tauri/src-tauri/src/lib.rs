@@ -3909,10 +3909,8 @@ fn disconnect_linux_browser_navigation_signals(
     webview: &webkit2gtk::WebView,
     registration: &BrowserLinuxNavigationRegistration,
 ) {
-    let object = webview
-        .to_glib_none()
-        .0
-        .cast::<glib::gobject_ffi::GObject>();
+    let pointer: *mut webkit2gtk::ffi::WebKitWebView = webview.to_glib_none().0;
+    let object = pointer.cast::<glib::gobject_ffi::GObject>();
     for handler in [
         registration.load_changed_handler,
         registration.load_failed_handler,
