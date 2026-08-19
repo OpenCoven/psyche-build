@@ -77,6 +77,18 @@ describe('classify-ci-changes', () => {
     expect(runClassifier(repoDir, baseSha, headSha, 'pull_request')).toMatchObject({ desktop: 'true', ios: 'false' })
   })
 
+  it('frontend-only change => desktop=true, ios=false, package=true', () => {
+    const { repoDir, baseSha, headSha } = initRepo(
+      { 'docs/readme.md': 'a\n' },
+      { 'docs/readme.md': 'a\n', 'frontend/src/dashboard.ts': 'x\n' },
+    )
+    expect(runClassifier(repoDir, baseSha, headSha, 'pull_request')).toEqual({
+      desktop: 'true',
+      ios: 'false',
+      package: 'true',
+    })
+  })
+
   it('native/ios change => desktop=false, ios=true, package=false', () => {
     const { repoDir, baseSha, headSha } = initRepo(
       { 'docs/readme.md': 'a\n' },
@@ -149,12 +161,16 @@ describe('classify-ci-changes', () => {
   it.each([
     'package.json',
     'pnpm-lock.yaml',
+    'tsconfig.json',
     'scripts/release-version.mjs',
     'src/index.ts',
+    'frontend/src/components/Dashboard.vue',
+    'packages/vim-core/src/index.ts',
     'src/control-task-tokens.ts',
     'src/utils/generated-agents-doc.ts',
     'README.md',
     'docs/README.md',
+    'docs/INTEGRATIONS.md',
   ])('package-affecting path %s requires package smoke', (path) => {
     const { repoDir, baseSha, headSha } = initRepo(
       { 'docs/notes.md': 'a\n' },

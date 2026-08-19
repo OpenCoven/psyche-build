@@ -40,7 +40,7 @@ if [[ "$GITHUB_EVENT_NAME" == "pull_request" && -n "$BASE_SHA" && -n "$HEAD_SHA"
         esac
 
         case "$path" in
-          .github/workflows/*|.github/actions/*|package.json|pnpm-lock.yaml|pnpm-workspace.yaml|tsconfig*.json|psyche|scripts/*|src/*|packages/*|README.md|CHANGELOG.md|CONTRIBUTING.md|LICENSE|docs/README.md|docs/AGENT-SURFACE-CONTROL.md|docs/BREAKING-CHANGES.md|docs/BRIDGE-SECURITY.md|docs/INTEGRATIONS.md|docs/PRODUCT-SPEC.md|docs/RELEASE.md|docs/SMOKE.md)
+          .github/workflows/*|.github/actions/*|package.json|pnpm-lock.yaml|pnpm-workspace.yaml|tsconfig*.json|psyche|scripts/*|src/*|frontend/*|packages/*|README.md|CHANGELOG.md|CONTRIBUTING.md|LICENSE|docs/README.md|docs/AGENT-SURFACE-CONTROL.md|docs/BREAKING-CHANGES.md|docs/BRIDGE-SECURITY.md|docs/INTEGRATIONS.md|docs/PRODUCT-SPEC.md|docs/RELEASE.md|docs/SMOKE.md)
             package=true
             ;;
           *)
