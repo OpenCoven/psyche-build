@@ -13,8 +13,194 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Tiered topology: `changes` classifies which surfaces a commit touches so the
+  # heavy jobs stay skippable, `quality` always runs as the fast baseline, and
+  # the surface-specific jobs plus the comprehensive macOS gates fan out from the
+  # classifier. `ci-required` aggregates every result so branch protection can
+  # require one status that fails closed.
+  changes:
+    name: Classify changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      code: ${{ steps.classifier.outputs.code }}
+      desktop: ${{ steps.classifier.outputs.desktop }}
+      rust: ${{ steps.classifier.outputs.rust }}
+      ios: ${{ steps.classifier.outputs.ios }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: classifier
+        name: Classify changed paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Fail open: when the diff base cannot be resolved, run every surface.
+          base=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            base="${{ github.event.before }}"
+          fi
+
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "classifier: diff base unavailable, running all surfaces"
+            changed="__ALL__"
+          else
+            changed="$(git diff --name-only "$base" "${{ github.sha }}")"
+          fi
+
+          match() {
+            [ "$changed" = "__ALL__" ] && return 0
+            printf '%s\n' "$changed" | grep -Eq "$1"
+          }
+
+          code=false; desktop=false; rust=false; ios=false
+          if match '^(src/|__tests__/|package.json|pnpm-lock.yaml|tsconfig.*|vitest.*|docs/)'; then code=true; fi
+          if match '^native/desktop/'; then desktop=true; code=true; fi
+          if match '(Cargo\.(toml|lock)$|\.rs$|native/desktop/psyche-build-tauri/src-tauri/)'; then rust=true; fi
+          if match '^native/ios/'; then ios=true; fi
+
+          {
+            echo "code=$code"
+            echo "desktop=$desktop"
+            echo "rust=$rust"
+            echo "ios=$ios"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  quality:
+    name: Quality baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify TypeScript and public docs focus
+        run: |
+          set -euo pipefail
+          pnpm docs:focus:check
+          pnpm typecheck
+
+  desktop-web:
+    name: Desktop web bundles
+    needs: changes
+    if: ${{ needs.changes.outputs.desktop == 'true' || needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify platform-neutral desktop contracts
+        run: pnpm vitest --run __tests__/tauriDesktopPlatform.test.ts __tests__/tauriWebBundles.test.ts __tests__/tauriPackageScripts.test.ts __tests__/tauriDesktopTabs.test.ts
+
+      - name: Build desktop web bundles
+        run: pnpm --dir native/desktop/psyche-build-tauri build:web
+
+  rust-test:
+    name: Rust tests
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+
+      - name: Install Tauri Linux prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Verify Rust formatting
+        run: cargo fmt --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --check
+
+      - name: Test desktop runtime
+        run: cargo test --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
+
+  desktop-check:
+    name: Rust type check
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+
+      - name: Install Tauri Linux prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Check desktop runtime
+        run: cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
+
   typescript-rust:
     name: TypeScript and Rust
+    needs: changes
+    if: ${{ always() && needs.changes.result != 'failure' }}
     runs-on: macos-15
     timeout-minutes: 60
     steps:
@@ -61,6 +247,8 @@ jobs:
 
   desktop-runtime:
     name: Desktop runtime (${{ matrix.os }})
+    needs: changes
+    if: ${{ always() && needs.changes.result != 'failure' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -91,8 +279,8 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=3 update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             build-essential \
             curl \
@@ -121,8 +309,70 @@ jobs:
       - name: Check desktop runtime
         run: cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
 
+  ios-core:
+    name: iOS Core
+    needs: changes
+    if: ${{ needs.changes.outputs.ios == 'true' || needs.changes.outputs.code == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Require pinned Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Xcode 26.2' "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Build version 17C52' "$RUNNER_TEMP/xcode-version.txt"
+
+      - uses: ./.github/actions/setup-xcodegen
+
+      - name: Require iOS 26.2 iPhone 16 Pro simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/available-simulators.json"
+          if ! jq -e '
+            .devices["com.apple.CoreSimulator.SimRuntime.iOS-26-2"]
+            | any(.name == "iPhone 16 Pro" and .isAvailable == true)
+          ' "$RUNNER_TEMP/available-simulators.json" >/dev/null; then
+            echo "::error::iOS 26.2 iPhone 16 Pro simulator is unavailable"
+            xcrun simctl list devices available
+            exit 1
+          fi
+
+      - name: Generate and verify the iOS project
+        run: pnpm ios:project:check
+
+      - name: Test Core
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -project native/ios/Psyche.xcodeproj \
+            -scheme PsycheCore \
+            -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
+            -derivedDataPath "$RUNNER_TEMP/psyche-core-derived-data"
+
   ios:
     name: iOS
+    needs: changes
+    if: ${{ needs.changes.outputs.ios == 'true' || needs.changes.outputs.code == 'true' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -169,15 +419,10 @@ jobs:
       - name: Generate and verify the iOS project
         run: pnpm ios:project:check
 
-      - name: Test Core, build the app, and run app and UI tests
+      - name: Build the app and run app and UI tests
         shell: bash
         run: |
           set -euo pipefail
-          xcodebuild test \
-            -project native/ios/Psyche.xcodeproj \
-            -scheme PsycheCore \
-            -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
-            -derivedDataPath "$RUNNER_TEMP/psyche-core-derived-data"
           xcodebuild build \
             -project native/ios/Psyche.xcodeproj \
             -scheme PsycheApp \
@@ -188,3 +433,58 @@ jobs:
             -scheme PsycheApp \
             -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
             -derivedDataPath "$RUNNER_TEMP/psyche-app-test-derived-data"
+
+  ci-required:
+    name: CI required
+    needs:
+      - changes
+      - quality
+      - desktop-web
+      - rust-test
+      - desktop-check
+      - typescript-rust
+      - desktop-runtime
+      - ios-core
+      - ios
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Verify no required job failed
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          DESKTOP_WEB_RESULT: ${{ needs.desktop-web.result }}
+          RUST_TEST_RESULT: ${{ needs.rust-test.result }}
+          DESKTOP_CHECK_RESULT: ${{ needs.desktop-check.result }}
+          TYPESCRIPT_RUST_RESULT: ${{ needs.typescript-rust.result }}
+          DESKTOP_RUNTIME_RESULT: ${{ needs.desktop-runtime.result }}
+          IOS_CORE_RESULT: ${{ needs.ios-core.result }}
+          IOS_RESULT: ${{ needs.ios.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for entry in \
+            "changes:$CHANGES_RESULT" \
+            "quality:$QUALITY_RESULT" \
+            "desktop-web:$DESKTOP_WEB_RESULT" \
+            "rust-test:$RUST_TEST_RESULT" \
+            "desktop-check:$DESKTOP_CHECK_RESULT" \
+            "typescript-rust:$TYPESCRIPT_RUST_RESULT" \
+            "desktop-runtime:$DESKTOP_RUNTIME_RESULT" \
+            "ios-core:$IOS_CORE_RESULT" \
+            "ios:$IOS_RESULT"; do
+            name="${entry%%:*}"
+            result="${entry#*:}"
+            echo "$name => $result"
+            # A skipped job means its surface was untouched; only failure or
+            # cancellation should fail the required gate.
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::A required CI job failed"
+            exit 1
+          fi
