@@ -3816,6 +3816,7 @@
     // but against a DOM that stayed mounted, so fit() sees a real box and the
     // pane keeps the visible PTY cadence throughout.
     scheduleTerminalPaneFits();
+    scheduleBrowserBounds();
     return true;
   }
 

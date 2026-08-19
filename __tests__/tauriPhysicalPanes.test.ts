@@ -979,6 +979,7 @@ describe('Tauri physical terminal panes', () => {
       divider: new FakeEventTarget(),
     };
     const scheduleTerminalPaneFits = vi.fn();
+    const scheduleBrowserBounds = vi.fn();
     const applyProjectedSplitRatios = compileFunction<(
       layout: PaneLayout,
     ) => boolean>(functionSource('applyProjectedSplitRatios'), {
@@ -989,8 +990,15 @@ describe('Tauri physical terminal panes', () => {
       PANE_MINIMUMS: { width: 200, height: 137, separator: 6 },
       PsychePanes,
       scheduleTerminalPaneFits,
+      scheduleBrowserBounds,
     });
-    return { layout, branches, applyProjectedSplitRatios, scheduleTerminalPaneFits };
+    return {
+      layout,
+      branches,
+      applyProjectedSplitRatios,
+      scheduleTerminalPaneFits,
+      scheduleBrowserBounds,
+    };
   }
 
   it('restyles the mounted branches with the same ratios a full render would project', () => {
@@ -1008,6 +1016,7 @@ describe('Tauri physical terminal panes', () => {
     expect(harness.branches.divider.attributes.get('aria-valuenow'))
       .toBe(String(Math.round(expected * 100)));
     expect(harness.scheduleTerminalPaneFits).toHaveBeenCalledOnce();
+    expect(harness.scheduleBrowserBounds).toHaveBeenCalledOnce();
   });
 
   it('clamps a live divider drag to the pane minimums instead of collapsing a branch', () => {
@@ -1029,6 +1038,7 @@ describe('Tauri physical terminal panes', () => {
     // The registry still only knows split-a, so the restyle cannot be complete.
     expect(harness.applyProjectedSplitRatios(harness.layout)).toBe(false);
     expect(harness.scheduleTerminalPaneFits).not.toHaveBeenCalled();
+    expect(harness.scheduleBrowserBounds).not.toHaveBeenCalled();
   });
 
   it('resizes a divider drag in place and commits exactly one render when it ends', () => {
