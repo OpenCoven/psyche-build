@@ -62,6 +62,7 @@ mod native_workspace;
 mod pane_metrics;
 mod platform;
 pub mod pty_transport;
+mod runtime_diagnostics;
 mod workspace_contract;
 use browser_focus::{
     browser_focus_identity, detach_browser_native_focus_callback, install_browser_focus_identity,
@@ -91,6 +92,7 @@ use pty_transport::{
     PumpMetrics as TransportPumpMetrics, RecentOutputSnapshots, TransportSessionKey,
     EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
 };
+use runtime_diagnostics::{runtime_diagnostics, runtime_process_metrics, RuntimeDiagnosticsState};
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis(100);
@@ -8623,6 +8625,7 @@ fn git_log(root: String, limit: Option<u32>) -> Result<Vec<GitCommit>, String> {
 pub fn run() {
     env_logger::init();
 
+    let runtime_diagnostics_state = RuntimeDiagnosticsState::from_startup();
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -8634,6 +8637,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .manage(runtime_diagnostics_state)
         .manage(MetricsState::default())
         .manage(ControlProviderState::default())
         .manage(BrowserShortcutAuthorizations::default())
@@ -8690,6 +8694,8 @@ pub fn run() {
             control_provider_shutdown,
             control_operator_submit,
             control_state,
+            runtime_diagnostics,
+            runtime_process_metrics,
         ])
         .setup(|app| {
             if let Err(error) = platform::configure_window(app) {
@@ -8699,6 +8705,66 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod runtime_diagnostics_command_tests {
+    use crate::runtime_diagnostics::{stress_authorized_for, NativeRuntimeReport, ProcessMetrics};
+
+    #[test]
+    fn runtime_diagnostics_omits_unavailable_engine_version_and_metrics() {
+        let report = NativeRuntimeReport::from_parts(
+            "linux",
+            "x86_64",
+            "WebKitGTK",
+            None,
+            None,
+            true,
+            false,
+        );
+        let json = serde_json::to_value(report).unwrap();
+        assert!(json.get("engineVersion").is_none());
+        assert!(json.get("process").is_none());
+    }
+
+    #[test]
+    fn runtime_diagnostics_production_never_authorizes_the_stress_harness() {
+        assert!(!stress_authorized_for(false, Some("1")));
+        assert!(stress_authorized_for(true, Some("1")));
+        assert!(!stress_authorized_for(true, Some("0")));
+        assert!(!stress_authorized_for(true, Some("true")));
+    }
+
+    #[test]
+    fn runtime_diagnostics_uses_stable_camel_case_process_fields() {
+        let report = NativeRuntimeReport::from_parts(
+            "macos",
+            "aarch64",
+            "WKWebView",
+            Some("17.6".to_string()),
+            Some(ProcessMetrics {
+                cpu_percent: 12.5,
+                rss_bytes: 4096,
+            }),
+            true,
+            true,
+        );
+
+        let json = serde_json::to_value(report).unwrap();
+
+        assert!(json.get("engineVersion").is_some());
+        assert!(json.get("debugBuild").is_some());
+        assert!(json.get("stressAuthorized").is_some());
+        assert!(json.get("engine_version").is_none());
+        assert!(json.get("debug_build").is_none());
+        assert!(json.get("stress_authorized").is_none());
+
+        let process = json.get("process").unwrap();
+        assert!(process.get("cpuPercent").is_some());
+        assert!(process.get("rssBytes").is_some());
+        assert!(process.get("cpu_percent").is_none());
+        assert!(process.get("rss_bytes").is_none());
+    }
 }
 
 #[cfg(test)]
