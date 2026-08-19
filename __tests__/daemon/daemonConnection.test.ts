@@ -202,6 +202,70 @@ describe('daemon connection authentication', () => {
     expect(ws.closes[0].code).toBe(4401);
   });
 
+  describe('daemon WebSocket orchestration routing', () => {
+    it('requests a project lease and executes through the canonical runtime', async () => {
+      const root = await projectWithPanes([]);
+      const submitted: any[] = [];
+      const controlRuntime = {
+        submit: vi.fn(async (command: any) => {
+          submitted.push(command);
+          if (command.kind === 'lease.request') {
+            return { status: 'succeeded', value: { requestId: command.id } };
+          }
+          if (command.kind === 'lease.grant') {
+            return {
+              status: 'succeeded',
+              value: { lease: { id: 'lease-1', revision: 1 } },
+            };
+          }
+          return {
+            status: 'succeeded',
+            value: {
+              taskId: 'task-1',
+              traceId: 'trace-1',
+              status: 'completed',
+              startedAt: '2026-08-18T00:00:00.000Z',
+              completedAt: '2026-08-18T00:00:00.000Z',
+              lanes: [],
+            },
+          };
+        }),
+      };
+      const { ws } = await buildConnection(root, {
+        controlRuntime: controlRuntime as ConnectionDeps['controlRuntime'],
+      });
+
+      await request(ws, {
+        type: 'orchestration.execute',
+        requestId: 'request-1',
+        task: {
+          taskId: 'task-1',
+          projectRoot: root,
+          prompt: 'Fix tests',
+          lanes: [{ id: 'terminal', mode: 'terminal' }],
+        },
+      });
+
+      expect(submitted.map((command) => command.kind)).toEqual([
+        'lease.request',
+        'lease.grant',
+        'orchestration.execute',
+      ]);
+      expect(submitted[2]).toMatchObject({
+        payload: {
+          taskId: 'task-1',
+          leaseId: 'lease-1',
+          leaseRevision: 1,
+        },
+      });
+      expect(ws.sent[0]).toMatchObject({
+        type: 'orchestration.execute.result',
+        requestId: 'request-1',
+        result: { status: 'completed' },
+      });
+    });
+  });
+
   it('rejects a wrong token', async () => {
     const root = await projectWithPanes([]);
     const { ws } = await buildConnection(root, { authed: false });

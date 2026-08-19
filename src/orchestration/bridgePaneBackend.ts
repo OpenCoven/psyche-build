@@ -63,8 +63,14 @@ export function createBridgePaneBackend(options: BridgePaneBackendOptions): Brid
       ...(lane.existingWorktree ? { existingWorktree: lane.existingWorktree } : {}),
     });
 
+    if (!result.createdPane) {
+      throw new OrchestrationError(
+        'lane_execution_failed',
+        `Lane "${lane.id}" spawn did not return its durable pane record`,
+      );
+    }
     spawned.set(lane.id, result);
-    return {};
+    return { pane: result.createdPane };
   };
 
   return { execute, spawned: () => new Map(spawned) };

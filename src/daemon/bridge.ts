@@ -134,6 +134,8 @@ export interface BridgeSpawnDeps {
 export interface BridgeSpawnResult {
   id: string;
   pane: PaneSummary;
+  /** Exact durable pane record created by this spawn. */
+  createdPane?: PsychePane;
   worktreePath: string;
   branch: string;
 }
@@ -1642,6 +1644,7 @@ export async function spawnBridgePane(
     return {
       id: persistedPaneId,
       pane: rawPaneToSummary(pane, scoped.projectRoot),
+      createdPane: pane as unknown as PsychePane,
       worktreePath: String(pane.worktreePath),
       branch: String(pane.branchName || pane.branch),
     };
