@@ -26,7 +26,7 @@ export function render() {
       </thead>
       <tbody>
         <tr><td>Claude Code</td><td><code>-claude-code</code></td></tr>
-        <tr><td>opencode</td><td><code>-opencode</code></td></tr>
+        <tr><td>OpenCode</td><td><code>-opencode</code></td></tr>
         <tr><td>Codex</td><td><code>-codex</code></td></tr>
       </tbody>
     </table>
