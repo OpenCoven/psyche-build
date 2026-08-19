@@ -58,7 +58,7 @@ expect(section).toMatch(/\.status-more-menu\s*\{[^}]*width:\s*320px;/s);
 expect(section).toContain('.status-more-columns');
 expect(section).toMatch(/\.status-more-row\s*\{[^}]*grid-template-columns:/s);
 expect(section).toMatch(/\.status-more-toggle input\s*\{[^}]*appearance:\s*none;/s);
-expect(section).toContain('.status-more-item[data-severity="danger"] .status-more-open-value');
+expect(section).toContain('.status-more-open[data-severity="danger"] .status-more-open-value');
 ```
 
 - [ ] **Step 3: Run the focused tests and verify failure**
@@ -78,16 +78,16 @@ Expected: failures for the new column, value-copy, switch, and width contracts.
 
 - [ ] **Step 1: Extend display records with More-menu copy**
 
-Change `metricDisplayValue` to accept an optional `menuValueText`, then build
+Change `metricDisplayValue` to accept an optional `menuText`, then build
 explicit menu values without changing `valueText`:
 
 ```js
-function metricDisplayValue(valueText, menuValueText = valueText) {
+function metricDisplayValue(valueText, menuText = valueText) {
   const text = valueText == null ? null : String(valueText);
   return {
     available: text != null,
     valueText: text,
-    menuValueText: menuValueText == null ? text : String(menuValueText),
+    menuText: menuText == null ? null : String(menuText),
   };
 }
 ```
@@ -105,7 +105,7 @@ interactive control already has an accessible name.
 - [ ] **Step 3: Render compact rows**
 
 Set `row.dataset.metricKind` to `telemetry` for performance, FPS, and activity
-and `status` otherwise. Render `display.menuValueText` in the More menu. Keep
+and `status` otherwise. Render `display.menuText` in the More menu. Keep
 native checkboxes and their `aria-label`, change visible helper copy from `Show`
 to `Visible`, and render `↑`/`↓` order buttons with the existing full aria labels
 plus matching `title` attributes.
