@@ -41,7 +41,7 @@ import type { CapabilityLeaseGrantItem } from '../control/capabilityLeases.js';
 import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
 import { canonicalizeBoundedJson } from '../control/boundedJson.js';
 import { getBuiltInRituals, listProjectRituals } from '../utils/rituals.js';
-import type { OrchestrationTaskRequest } from '../orchestration/types.js';
+import type { OrchestrationTaskSubmission } from '../orchestration/types.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 export const SERVER_NAME = 'psyche';
@@ -981,11 +981,11 @@ export const TOOLS: ToolDef[] = [
         : undefined;
       if (operationId && operationId.length > 256) invalid('`operation_id` exceeds 256 characters');
       if (!Array.isArray(args.lanes) || args.lanes.length === 0) invalid('requires at least one lane');
-      const request: OrchestrationTaskRequest = {
+      const request: OrchestrationTaskSubmission = {
         taskId: authorization!.taskId,
         projectRoot,
         prompt,
-        lanes: args.lanes as OrchestrationTaskRequest['lanes'],
+        lanes: args.lanes as OrchestrationTaskSubmission['lanes'],
         ...(typeof args.branch === 'string' ? { startPointBranch: args.branch } : {}),
         ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}),
       };

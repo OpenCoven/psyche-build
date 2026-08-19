@@ -2718,7 +2718,7 @@ export async function dispatchOrchestrationRequest(
   request: {
     type: 'orchestration.execute';
     requestId: string;
-    task: import('../orchestration/types.js').OrchestrationTaskRequest;
+    task: import('../orchestration/types.js').OrchestrationTaskSubmission;
   },
   orchestrator: import('../orchestration/orchestrator.js').Orchestrator,
   options?: import('../orchestration/orchestrator.js').OrchestrationExecutionOptions & {

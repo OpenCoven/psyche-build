@@ -85,6 +85,34 @@ describe('Orchestrator', () => {
     expect(peak).toBe(2);
   });
 
+  it('preserves lane concurrency while serializing authorization checks', async () => {
+    let active = 0;
+    let peak = 0;
+    const authorize = vi.fn(async () => undefined);
+    const orchestrator = new Orchestrator({
+      executeLane: async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await sleep(20);
+        active -= 1;
+        return {};
+      },
+    });
+
+    await orchestrator.execute(task({
+      concurrency: 2,
+      lanes: [
+        { id: 'one', mode: 'terminal' },
+        { id: 'two', mode: 'terminal' },
+      ],
+    }), {
+      beforeLaneEffect: authorize,
+    });
+
+    expect(authorize).toHaveBeenCalledTimes(2);
+    expect(peak).toBe(2);
+  });
+
   it('still runs every lane when concurrency is below the lane count', async () => {
     const seen: string[] = [];
     const orchestrator = new Orchestrator({
