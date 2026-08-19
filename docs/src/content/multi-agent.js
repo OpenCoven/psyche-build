@@ -15,10 +15,10 @@ export function render() {
 
     <h2>Launch One or Many Isolated Lanes</h2>
     <p>Press <kbd>n</kbd>, describe the task once, and pick one or more agents (or none for a plain terminal). Each selected agent starts as its own lane in an isolated worktree and branch, all receiving the same prompt.</p>
-    <p>For example, with Claude Code and opencode installed, the multi-select launch offers each agent independently:</p>
-    <pre><code data-lang="bash">[x] Claude Code
-[x] OpenCode
-[ ] Codex</code></pre>
+    <p>For example, with Claude Code and OpenCode available, the multi-select launch offers each agent independently:</p>
+    <pre><code data-lang="text">◉ Claude Code
+◉ OpenCode
+◎ Codex</code></pre>
     <p>Selecting two agents launches two isolated lanes. Psyche Build derives a shared base slug from your prompt (e.g. <code>fix-auth</code>) and appends an agent-specific suffix per lane:</p>
     <table>
       <thead>
