@@ -47,7 +47,7 @@ interface Rule {
   body: string;
 }
 
-/** Strip block and line comments before structural parsing. */
+/** Strip block comments before structural parsing. */
 function stripComments(css: string): string {
   return css.replace(/\/\*[\s\S]*?\*\//g, '');
 }
@@ -103,6 +103,120 @@ function transitionShorthandProperty(segment: string): string {
   return token.toLowerCase();
 }
 
+function isKeyframesAtRule(atName: string): boolean {
+  return /^(?:-[a-z0-9]+-)?keyframes$/.test(atName);
+}
+
+/** Split a selector list on commas outside attribute and pseudo arguments. */
+function splitSelectorList(prelude: string): string[] {
+  const selectors: string[] = [];
+  let start = 0;
+  let bracketDepth = 0;
+  let parenthesisDepth = 0;
+  let quote = '';
+
+  for (let i = 0; i < prelude.length; i += 1) {
+    const char = prelude[i];
+    if (quote) {
+      if (char === '\\') i += 1;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === '\\') {
+      i += 1;
+    } else if (char === '[') {
+      bracketDepth += 1;
+    } else if (char === ']') {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+    } else if (char === '(') {
+      parenthesisDepth += 1;
+    } else if (char === ')') {
+      parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+    } else if (char === ',' && bracketDepth === 0 && parenthesisDepth === 0) {
+      selectors.push(prelude.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+
+  selectors.push(prelude.slice(start).trim());
+  return selectors;
+}
+
+function isCssIdentifierContinuation(char: string): boolean {
+  return (
+    char === '\\' ||
+    /[a-zA-Z0-9_-]/.test(char) ||
+    (char.length > 0 && char.charCodeAt(0) >= 0x80)
+  );
+}
+
+/**
+ * Require the rightmost compound selector to name `.is-transitioning`
+ * directly. Classes inside attributes, pseudo arguments, or ancestors do not
+ * prove that the element receiving `will-change` is actively transitioning.
+ */
+function selectorTargetsTransitioningClass(selector: string): boolean {
+  let bracketDepth = 0;
+  let parenthesisDepth = 0;
+  let quote = '';
+  let targetsTransitioningClass = false;
+
+  for (let i = 0; i < selector.length; i += 1) {
+    const char = selector[i];
+    if (quote) {
+      if (char === '\\') i += 1;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === '\\') {
+      i += 1;
+      continue;
+    }
+    if (char === '[') {
+      bracketDepth += 1;
+      continue;
+    }
+    if (char === ']') {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+    if (char === '(') {
+      parenthesisDepth += 1;
+      continue;
+    }
+    if (char === ')') {
+      parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+      continue;
+    }
+    if (bracketDepth > 0 || parenthesisDepth > 0) continue;
+    if (
+      char === '.' &&
+      selector.startsWith('.is-transitioning', i) &&
+      !isCssIdentifierContinuation(selector[i + '.is-transitioning'.length] || '')
+    ) {
+      targetsTransitioningClass = true;
+      i += '.is-transitioning'.length - 1;
+      continue;
+    }
+    if (/\s|[>+~]/.test(char) || (char === '|' && selector[i + 1] === '|')) {
+      targetsTransitioningClass = false;
+    }
+  }
+
+  return targetsTransitioningClass;
+}
+
+function selectorListTargetsTransitioningClass(prelude: string): boolean {
+  const selectors = splitSelectorList(prelude);
+  return selectors.length > 0 && selectors.every(selectorTargetsTransitioningClass);
+}
+
 interface CompositorFindings {
   keyframeViolations: string[];
   transitionViolations: string[];
@@ -124,7 +238,7 @@ function auditStylesheet(css: string): CompositorFindings {
         ? prelude.slice(1).split(/[\s({]/)[0].toLowerCase()
         : '';
 
-      if (atName === 'keyframes') {
+      if (isKeyframesAtRule(atName)) {
         for (const frame of splitRules(rule.body)) {
           for (const decl of parseDeclarations(frame.body)) {
             if (!ANIMATABLE_ALLOWLIST.has(decl.property)) {
@@ -157,7 +271,7 @@ function auditStylesheet(css: string): CompositorFindings {
           }
         }
         if (decl.property === 'will-change') {
-          if (!prelude.includes('.is-transitioning')) {
+          if (!selectorListTargetsTransitioningClass(prelude)) {
             findings.willChangeViolations.push(`${prelude} { will-change: ${decl.value} }`);
           }
         }
@@ -168,6 +282,54 @@ function auditStylesheet(css: string): CompositorFindings {
   visit(splitRules(clean));
   return findings;
 }
+
+describe('compositor stylesheet audit parser', () => {
+  it('audits standard and vendor-prefixed keyframes case-insensitively', () => {
+    const findings = auditStylesheet(`
+      @KeYfRaMeS unsafe-standard {
+        to { width: 10px; }
+      }
+      @-WeBkIt-KeYfRaMeS unsafe-prefixed {
+        to { filter: blur(2px); }
+      }
+    `);
+
+    expect(findings.keyframeViolations).toEqual([
+      '@KeYfRaMeS unsafe-standard { to: width }',
+      '@-WeBkIt-KeYfRaMeS unsafe-prefixed { to: filter }',
+    ]);
+  });
+
+  it('accepts selector lists whose selectors target .is-transitioning', () => {
+    const selectors = [
+      '.button.is-transitioning',
+      '.option\\,primary.is-transitioning',
+      '.menu > .is-transitioning:hover',
+    ].join(',\n');
+    const findings = auditStylesheet(`
+      ${selectors} {
+        will-change: transform;
+      }
+    `);
+
+    expect(findings.willChangeViolations).toEqual([]);
+  });
+
+  it.each([
+    [':not(.is-transitioning)', 'a negated class'],
+    ['[data-state=".is-transitioning"]', 'an attribute string lookalike'],
+    ['.is-transitioning, .always-layered', 'a mixed selector list'],
+    ['.is-transitioning .child', 'a transitioning ancestor'],
+    ['.is-transitioning\\-lookalike', 'an escaped class-name extension'],
+    [':not(.foo\\).is-transitioning)', 'an escaped pseudo argument delimiter'],
+  ])('rejects %s because it uses %s', (selector) => {
+    const findings = auditStylesheet(`${selector} { will-change: transform; }`);
+
+    expect(findings.willChangeViolations).toEqual([
+      `${selector} { will-change: transform }`,
+    ]);
+  });
+});
 
 describe('desktop stylesheet compositor safety', () => {
   const css = readFileSync(cssPath, 'utf8');
