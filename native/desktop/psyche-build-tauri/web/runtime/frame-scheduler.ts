@@ -7,6 +7,12 @@ export interface FrameSchedulerSnapshot {
   coalescedVisualUpdates: number;
 }
 
+let activeFrameCallbacks = 0;
+
+export function snapshotFrameSchedulerResources(): { frameCallbacks: number } {
+  return { frameCallbacks: activeFrameCallbacks };
+}
+
 export class FrameScheduler {
   private pending = new Map<string, FrameSchedulerCallback>();
   private activeBatch: Map<string, FrameSchedulerCallback> | null = null;
@@ -24,6 +30,8 @@ export class FrameScheduler {
   schedule(key: string, callback: FrameSchedulerCallback): void {
     if (this.pending.has(key)) {
       this.coalescedVisualUpdates += 1;
+    } else {
+      activeFrameCallbacks += 1;
     }
     this.pending.set(key, callback);
     this.requestPendingFrame();
@@ -35,6 +43,7 @@ export class FrameScheduler {
       for (const key of batch.keys()) {
         if (key.startsWith(prefix)) {
           batch.delete(key);
+          activeFrameCallbacks -= 1;
         }
       }
     }
@@ -69,6 +78,8 @@ export class FrameScheduler {
 
     try {
       for (const [key, callback] of pending) {
+        pending.delete(key);
+        activeFrameCallbacks -= 1;
         try {
           callback();
         } catch (error) {

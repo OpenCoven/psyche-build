@@ -68,11 +68,36 @@ export const sections = [
 
 const canonicalNavigationPath = /^\/[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+export function normalizeInternalRouteHrefs(rendered) {
+  return rendered.replace(
+    /((?:^|[\s<])href\s*=\s*)(?:"(#\/[^"]*)"|'(#\/[^']*)'|(#\/[^\s>]+))/gim,
+    (_match, prefix, doubleQuoted, singleQuoted, unquoted) => {
+      if (doubleQuoted !== undefined) {
+        return `${prefix}"#${doubleQuoted.slice(2)}"`;
+      }
+      if (singleQuoted !== undefined) {
+        return `${prefix}'#${singleQuoted.slice(2)}'`;
+      }
+      return `${prefix}#${unquoted.slice(2)}`;
+    },
+  );
+}
+
 function internalNavigationTargets(rendered) {
-  return [...rendered.matchAll(/href\s*=\s*["']#(\/?[^"'?\s]+)["']/g)].map((match) => {
-    const target = match[1];
-    return target.startsWith('/') ? target : `/${target}`;
+  return [
+    ...rendered.matchAll(/(?:^|[\s<])href\s*=\s*(?:"(#[^"]*)"|'(#[^']*)'|(#[^\s>]+))/gim),
+  ].flatMap((match) => {
+    const href = match[1] ?? match[2] ?? match[3];
+    if (href === '#') {
+      return [];
+    }
+    const target = href.slice(1);
+    return [target.startsWith('/') ? target : `/${target}`];
   });
+}
+
+export function renderContentModule(contentModule) {
+  return normalizeInternalRouteHrefs(contentModule.render());
 }
 
 export function validateNavigationGraph({
@@ -110,7 +135,7 @@ export function validateNavigationGraph({
 
       let rendered;
       try {
-        rendered = contentModule.render();
+        rendered = renderContentModule(contentModule);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         failures.push(`navigation target "${page.path}": render() threw: ${message}`);

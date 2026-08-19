@@ -98,6 +98,11 @@ interface ObserverAdapter {
   disconnect(): void;
 }
 
+type OwnedTimer = {
+  active: boolean;
+  handle: ReturnType<typeof setTimeout>;
+};
+
 interface VisibilityDocument {
   visibilityState?: string;
   hidden?: boolean;
@@ -150,7 +155,35 @@ const INTERSECTION_HIDE_DEBOUNCE_MS = 250;
 const MAX_SYNTHETIC_RETAINED_BYTES = 64 * 1024;
 const WEBGL_RECOVERY_COOLDOWN_MS = 30_000;
 const controllers = new Map<string, TerminalPaneController>();
+const terminals = new Set<TerminalAdapter>();
+const fitAddons = new Set<FitAddonAdapter>();
+const webglAddons = new Set<WebglAddonAdapter>();
+const resizeObservers = new Set<ObserverAdapter>();
+const intersectionObservers = new Set<ObserverAdapter>();
+const timers = new Set<OwnedTimer>();
 const syntheticEncoder = new TextEncoder();
+
+export interface TerminalPaneResourceSnapshot {
+  paneControllers: number;
+  terminals: number;
+  fitAddons: number;
+  webglAddons: number;
+  resizeObservers: number;
+  intersectionObservers: number;
+  timers: number;
+}
+
+export function snapshotTerminalPaneResources(): TerminalPaneResourceSnapshot {
+  return {
+    paneControllers: controllers.size,
+    terminals: terminals.size,
+    fitAddons: fitAddons.size,
+    webglAddons: webglAddons.size,
+    resizeObservers: resizeObservers.size,
+    intersectionObservers: intersectionObservers.size,
+    timers: timers.size,
+  };
+}
 
 function boundedByteSuffix(bytes: Uint8Array, limit: number): Uint8Array {
   if (limit <= 0 || bytes.byteLength === 0) return new Uint8Array();
@@ -241,12 +274,22 @@ function isEffectivelyVisible(state: VisibilityState): boolean {
   return state.documentVisible && state.paneVisible && state.intersecting;
 }
 
-function disposeOnce(disposable: TerminalDisposable | null | undefined): void {
+function disposeOnce(disposable: TerminalDisposable | null | undefined): boolean {
   try {
     disposable?.dispose();
+    return true;
   } catch {
     // Disposal is best-effort so one addon cannot strand the rest of the pane.
+    return false;
   }
+}
+
+function disposeTracked<T extends TerminalDisposable>(
+  resources: Set<T>,
+  disposable: T | null | undefined,
+): void {
+  if (!disposable) return;
+  if (disposeOnce(disposable)) resources.delete(disposable);
 }
 
 export function createTerminalPaneController(
@@ -264,8 +307,8 @@ export function createTerminalPaneController(
   let disposed = false;
   let fitPending = true;
   let writeInProgress = false;
-  let hiddenTimer: ReturnType<typeof setTimeout> | null = null;
-  let intersectionHideTimer: ReturnType<typeof setTimeout> | null = null;
+  let hiddenTimer: OwnedTimer | null = null;
+  let intersectionHideTimer: OwnedTimer | null = null;
   let lastHiddenDrainAt = isEffectivelyVisible(visibility)
     ? Number.NEGATIVE_INFINITY
     : (options.now ?? Date.now)();
@@ -286,13 +329,49 @@ export function createTerminalPaneController(
     console.warn(`terminal pane ${options.paneId} ${operation} failed`, error);
   });
 
+  function scheduleOwnedTimer(callback: () => void, delay: number): OwnedTimer {
+    const timer = {
+      active: true,
+      handle: undefined as unknown as ReturnType<typeof setTimeout>,
+    };
+    timer.handle = setTimer(() => {
+      timer.active = false;
+      timers.delete(timer);
+      callback();
+    }, delay);
+    timers.add(timer);
+    return timer;
+  }
+
+  function clearOwnedTimer(timer: OwnedTimer): void {
+    if (!timer.active) return;
+    try {
+      clearTimer(timer.handle);
+      timer.active = false;
+      timers.delete(timer);
+    } catch {
+      // Keep failed cancellation visible in the runtime resource snapshot.
+    }
+  }
+
   const terminal = (options.terminalFactory ?? defaultTerminalFactory)({
     scrollback: 10_000,
     ...options.terminalOptions,
   });
-  const fitAddon = (options.fitAddonFactory ?? defaultFitAddonFactory)(terminal);
-  if (fitAddon) terminal.loadAddon(fitAddon);
-  terminal.open(options.container);
+  terminals.add(terminal);
+  let fitAddon: FitAddonAdapter | null = null;
+  try {
+    fitAddon = (options.fitAddonFactory ?? defaultFitAddonFactory)(terminal);
+    if (fitAddon) {
+      fitAddons.add(fitAddon);
+      terminal.loadAddon(fitAddon);
+    }
+    terminal.open(options.container);
+  } catch (error) {
+    disposeTracked(fitAddons, fitAddon);
+    disposeTracked(terminals, terminal);
+    throw error;
+  }
 
   let webglAddon: WebglAddonAdapter | null = null;
   let webglContextLossRegistration: TerminalDisposable | null = null;
@@ -304,7 +383,7 @@ export function createTerminalPaneController(
     webglContextLossRegistration = null;
     webglAddon = null;
     disposeOnce(registration);
-    disposeOnce(addon);
+    disposeTracked(webglAddons, addon);
   }
 
   function setRendererFallback(reason: RendererFallbackReason): void {
@@ -318,7 +397,7 @@ export function createTerminalPaneController(
     contextLossRegistration: TerminalDisposable | null,
   ): void {
     disposeOnce(contextLossRegistration);
-    disposeOnce(addon);
+    disposeTracked(webglAddons, addon);
   }
 
   function recoverWebgl(): void {
@@ -327,6 +406,7 @@ export function createTerminalPaneController(
     let contextLossRegistration: TerminalDisposable | null = null;
     try {
       addon = (options.webglAddonFactory ?? defaultWebglAddonFactory)();
+      if (addon) webglAddons.add(addon);
       if (disposed) {
         disposeWebglRecoveryAttempt(addon, contextLossRegistration);
         return;
@@ -391,6 +471,7 @@ export function createTerminalPaneController(
   try {
     webglAddon = (options.webglAddonFactory ?? defaultWebglAddonFactory)();
     if (webglAddon) {
+      webglAddons.add(webglAddon);
       terminal.loadAddon(webglAddon);
       const initialAddon = webglAddon;
       webglContextLossRegistration = initialAddon.onContextLoss?.(
@@ -415,13 +496,13 @@ export function createTerminalPaneController(
 
   function clearHiddenTimer(): void {
     if (hiddenTimer == null) return;
-    clearTimer(hiddenTimer);
+    clearOwnedTimer(hiddenTimer);
     hiddenTimer = null;
   }
 
   function clearIntersectionHideTimer(): void {
     if (intersectionHideTimer == null) return;
-    clearTimer(intersectionHideTimer);
+    clearOwnedTimer(intersectionHideTimer);
     intersectionHideTimer = null;
   }
 
@@ -537,7 +618,7 @@ export function createTerminalPaneController(
     if (disposed || hiddenTimer != null || writeInProgress || !hasQueuedWrites()) return;
     const elapsed = now() - lastHiddenDrainAt;
     const delay = Math.max(0, HIDDEN_DRAIN_MS - elapsed);
-    hiddenTimer = setTimer(() => {
+    hiddenTimer = scheduleOwnedTimer(() => {
       hiddenTimer = null;
       if (disposed) return;
       if (isEffectivelyVisible(visibility)) {
@@ -627,6 +708,7 @@ export function createTerminalPaneController(
       scheduleVisibleDelivery();
     }
   });
+  if (resizeObserver) resizeObservers.add(resizeObserver);
   resizeObserver?.observe(options.container);
 
   const intersectionObserver = (
@@ -641,12 +723,13 @@ export function createTerminalPaneController(
       return;
     }
     if (!visibility.intersecting || intersectionHideTimer != null) return;
-    intersectionHideTimer = setTimer(() => {
+    intersectionHideTimer = scheduleOwnedTimer(() => {
       intersectionHideTimer = null;
       if (disposed || !visibility.intersecting) return;
       void applyVisibility({ ...visibility, intersecting: false }).catch(() => {});
     }, INTERSECTION_HIDE_DEBOUNCE_MS);
   });
+  if (intersectionObserver) intersectionObservers.add(intersectionObserver);
   intersectionObserver?.observe(options.container);
 
   const handleDocumentVisibility = () => {
@@ -742,12 +825,14 @@ export function createTerminalPaneController(
       pendingDimensions = null;
       ptyClient.dispose();
       resizeObserver?.disconnect();
+      if (resizeObserver) resizeObservers.delete(resizeObserver);
       intersectionObserver?.disconnect();
+      if (intersectionObserver) intersectionObservers.delete(intersectionObserver);
       documentTarget?.removeEventListener('visibilitychange', handleDocumentVisibility);
       for (const registration of registrations.splice(0)) disposeOnce(registration);
       releaseWebglAddon();
-      disposeOnce(fitAddon);
-      disposeOnce(terminal);
+      disposeTracked(fitAddons, fitAddon);
+      disposeTracked(terminals, terminal);
     },
   };
 
