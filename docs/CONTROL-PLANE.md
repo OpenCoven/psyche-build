@@ -247,4 +247,4 @@ Relevant plans and specs:
 ## Related docs
 
 - [Bridge security](BRIDGE-SECURITY.md)
-- [Coven sessions](COVEN-SESSIONS.md)
+- [Psyche Build integrations](INTEGRATIONS.md)

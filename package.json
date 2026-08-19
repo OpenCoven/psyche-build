@@ -46,8 +46,7 @@
     "docs/AGENT-SURFACE-CONTROL.md",
     "docs/BREAKING-CHANGES.md",
     "docs/BRIDGE-SECURITY.md",
-    "docs/COVEN-DEMO-LOOP.md",
-    "docs/COVEN-SESSIONS.md",
+    "docs/INTEGRATIONS.md",
     "docs/PRODUCT-SPEC.md",
     "docs/RELEASE.md",
     "docs/SMOKE.md",
@@ -61,6 +60,7 @@
     "app:stable": "node scripts/build-macos-app.mjs stable",
     "dev:tauri": "pnpm --filter psyche-build-tauri run dev",
     "app:dev": "node scripts/build-macos-app.mjs dev",
+    "docs:focus:check": "node scripts/check-public-docs-focus.mjs",
     "generate:hooks-docs": "node scripts/generate-hooks-docs.js",
     "clean": "rm -rf dist src/utils/generated-agents-doc.ts",
     "dev": "pnpm run generate:hooks-docs && tsc && PSYCHE_DEV=true PSYCHE_DEV_WATCH=false node dist/index.js",
@@ -77,7 +77,7 @@
     "release:testflight": "node scripts/app-store-connect.mjs wait-and-localize",
     "test": "vitest --run",
     "smoke": "pnpm run build && vitest --run -c vitest.smoke.config.ts",
-    "prepack": "pnpm run build",
+    "prepack": "pnpm run build && pnpm run docs:focus:check",
     "smoke:pack": "node scripts/smoke-pack-install.js"
   },
   "bin": {
