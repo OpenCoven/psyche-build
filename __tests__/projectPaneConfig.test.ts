@@ -1,6 +1,6 @@
 import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   acquireProjectPaneConfigLock,
   mutateProjectPaneConfig,
@@ -13,6 +13,11 @@ import {
   savePanesToFile,
   saveUpdatedPaneConfig,
 } from '../src/hooks/usePaneSync.js';
+import * as paneCreation from '../src/utils/paneCreation.js';
+import {
+  readWorktreeMetadata,
+  writeWorktreeMetadata,
+} from '../src/utils/worktreeMetadata.js';
 
 const roots: string[] = [];
 
@@ -29,6 +34,88 @@ function createProject(): string {
 }
 
 describe('project pane config mutation', () => {
+  it('allocates concurrent attached-pane sibling slugs under the durable config lock', async () => {
+    const projectRoot = createProject();
+    const worktreePath = join(projectRoot, '.psyche', 'worktrees', 'feature');
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [{ id: 'source', paneId: '%1', slug: 'feature', worktreePath }];
+    });
+    const persist = (paneCreation as Record<string, unknown>).persistPaneBeforeAgentLaunch;
+    expect(persist).toBeTypeOf('function');
+
+    const options = {
+      prompt: 'review',
+      existingWorktree: {
+        slug: 'feature-a2',
+        worktreePath,
+        branchName: 'feature',
+      },
+      projectName: 'repo',
+      existingPanes: [],
+      projectRoot,
+      sessionProjectRoot: projectRoot,
+    };
+    const pane = (id: string, paneId: string) => ({
+      id,
+      paneId,
+      slug: 'feature-a2',
+      prompt: 'review',
+      worktreePath,
+    });
+
+    await Promise.all([
+      (persist as Function)(options, projectRoot, pane('attached-1', '%2'), undefined),
+      (persist as Function)(options, projectRoot, pane('attached-2', '%3'), undefined),
+    ]);
+
+    const config = JSON.parse(
+      readFileSync(join(projectRoot, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+    expect(config.panes.map((candidate: { slug: string }) => candidate.slug)).toEqual([
+      'feature',
+      'feature-a2',
+      'feature-a3',
+    ]);
+  });
+
+  it('skips worktree creation hooks and preserves metadata when attaching', async () => {
+    const projectRoot = createProject();
+    const worktreePath = join(projectRoot, '.psyche', 'worktrees', 'feature');
+    writeWorktreeMetadata(worktreePath, {
+      agent: 'codex',
+      permissionMode: 'bypassPermissions',
+      displayName: 'Existing metadata',
+      branchName: 'feature',
+    });
+    const runEffects = (paneCreation as Record<string, unknown>).runWorktreeCreationEffects;
+    expect(runEffects).toBeTypeOf('function');
+    const triggerWorktreeCreated = vi.fn(async () => ({ success: true }));
+    const writeMetadata = vi.fn();
+    const initializeHooks = vi.fn();
+
+    await (runEffects as Function)({
+      attaching: true,
+      projectRoot,
+      worktreePath,
+      pane: { id: 'attached', paneId: '%2', slug: 'feature-a2', prompt: 'review' },
+      metadata: { agent: 'claude', permissionMode: 'plan' },
+      hooksEditingSession: true,
+      triggerWorktreeCreated,
+      writeMetadata,
+      initializeHooks,
+    });
+
+    expect(triggerWorktreeCreated).not.toHaveBeenCalled();
+    expect(writeMetadata).not.toHaveBeenCalled();
+    expect(initializeHooks).not.toHaveBeenCalled();
+    expect(readWorktreeMetadata(worktreePath)).toEqual({
+      agent: 'codex',
+      permissionMode: 'bypassPermissions',
+      displayName: 'Existing metadata',
+      branchName: 'feature',
+    });
+  });
+
   it('rejects a duplicate pane ID instead of replacing the existing record', async () => {
     const projectRoot = createProject();
     const configPath = join(projectRoot, '.psyche', 'psyche.config.json');

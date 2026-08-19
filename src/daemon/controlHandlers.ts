@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
 import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
 import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
+import type { Orchestrator } from '../orchestration/orchestrator.js';
 import {
   spawnBridgePane,
   killBridgePane,
@@ -25,6 +26,7 @@ import {
   resolveConfiguredPaneId,
   updatePaneMeta,
   defaultSpawnDeps,
+  dispatchOrchestrationRequest,
   type BridgeSpawnRequest,
   type BridgeSpawnResult,
   type BridgeSpawnDeps,
@@ -55,6 +57,7 @@ export interface DaemonControlHandlerDeps {
   closePane?: (projectRoot: string, paneId: string) => Promise<void>;
   browserProvider?: Pick<BrowserProviderBroker, 'dispatch'>;
   browserSemanticSnapshots?: BrowserSemanticSnapshotRegistry;
+  orchestrator?: Orchestrator;
 }
 
 function notSupported(kind: string): () => Promise<never> {
@@ -123,7 +126,21 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       await deps.tmux.killPane(await resolvePaneId(payload.paneId));
     },
 
-    executeOrchestration: notSupported('orchestration.execute'),
+    async executeOrchestration(payload) {
+      if (!deps.orchestrator) {
+        return notSupported('orchestration.execute')();
+      }
+      const response = await dispatchOrchestrationRequest(
+        deps.projectRoot,
+        {
+          type: 'orchestration.execute',
+          requestId: payload.taskId,
+          task: payload.request,
+        },
+        deps.orchestrator,
+      );
+      return response.result;
+    },
     sendPrompt: notSupported('pane.prompt'),
     interruptPane: notSupported('pane.interrupt'),
     openTerminal: notSupported('pane.terminal.open'),

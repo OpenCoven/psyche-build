@@ -149,6 +149,8 @@ describe('Pane Lifecycle Integration Tests', () => {
   beforeEach(() => {
     // Reset all mocks
     vi.clearAllMocks();
+    mockTriggerHookSync.mockReset();
+    mockTriggerHookSync.mockResolvedValue({ success: true });
     mockEnqueueCleanup.mockReset();
     mockBeginWorktreeReuseReservation.mockImplementation(async (worktreePath: string) => ({
       canonicalWorktreePath: worktreePath,
@@ -880,37 +882,39 @@ describe('Pane Lifecycle Integration Tests', () => {
       );
     });
 
-    it('does not roll back a reused worktree when the worktree_created hook fails', async () => {
+    it('skips the worktree_created hook and launches the agent for a reused worktree', async () => {
       const existingWorktreePath = '/test/.psyche/worktrees/resume-me';
       createdWorktreePaths.add(existingWorktreePath);
       createdWorktreePaths.add(`${existingWorktreePath}/.git`);
       const { triggerHookSync } = await import('../../src/utils/hooks.js');
-      vi.mocked(triggerHookSync).mockResolvedValueOnce({
+      vi.mocked(triggerHookSync).mockResolvedValue({
         success: false,
         error: 'dependency install failed',
       });
 
       const { createPane } = await import('../../src/utils/paneCreation.js');
 
-      await expect(
-        createPane(
-          {
-            prompt: 'resume work',
-            agent: 'claude',
-            projectName: 'test-project',
-            existingPanes: [],
-            existingWorktree: {
-              slug: 'resume-me',
-              worktreePath: existingWorktreePath,
-              branchName: 'feature/resume-me',
-            },
-            persistReusedPane: mockPersistReusedPane,
+      await expect(createPane(
+        {
+          prompt: 'resume work',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          existingWorktree: {
+            slug: 'resume-me',
+            worktreePath: existingWorktreePath,
+            branchName: 'feature/resume-me',
           },
-          ['claude']
-        )
-      ).rejects.toThrow(/worktree_created hook failed/);
+          persistReusedPane: mockPersistReusedPane,
+        },
+        ['claude'],
+      )).resolves.toMatchObject({
+        pane: { slug: 'resume-me', agent: 'claude' },
+      });
 
+      expect(triggerHookSync).not.toHaveBeenCalled();
       expect(mockRollbackCreatedWorktree).not.toHaveBeenCalled();
+      expect(getSendKeysCommands().some((cmd) => cmd.includes('claude'))).toBe(true);
     });
 
     it('runs worktree_created hook before launching the agent', async () => {

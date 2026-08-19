@@ -11,6 +11,7 @@ import { SurfaceRegistry } from '../../src/control/surfaces.js';
 import { ControlRuntime } from '../../src/control/runtime.js';
 import { CapabilityLeaseStore } from '../../src/control/capabilityLeases.js';
 import { ApprovalStore } from '../../src/control/approvals.js';
+import { Orchestrator } from '../../src/orchestration/orchestrator.js';
 
 function handlersWithCovenClient(
   sendInput: (sessionId: string, input: string) => Promise<void>,
@@ -189,6 +190,39 @@ describe('createDaemonControlHandlers updatePaneMeta', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('createDaemonControlHandlers executeOrchestration', () => {
+  it('executes the canonical task through the configured orchestrator', async () => {
+    const executeLane = vi.fn(async () => ({}));
+    const orchestrator = new Orchestrator({ executeLane });
+    const handlers = createDaemonControlHandlers({
+      tmux: new TmuxControl('psyche-test'),
+      projectRoot: process.cwd(),
+      sessionName: 'psyche-test',
+      capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+      orchestrator,
+    } as any);
+
+    const result = await handlers.executeOrchestration({
+      taskId: 'task-1',
+      leaseId: 'lease-1',
+      leaseRevision: 1,
+      request: {
+        taskId: 'task-1',
+        projectRoot: process.cwd(),
+        prompt: 'Fix tests',
+        lanes: [{ id: 'terminal', mode: 'terminal' }],
+      },
+    });
+
+    expect(executeLane).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      taskId: 'task-1',
+      status: 'completed',
+      lanes: [{ id: 'terminal', status: 'completed' }],
+    });
   });
 });
 

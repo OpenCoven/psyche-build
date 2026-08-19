@@ -892,6 +892,28 @@ describe('TerminalPaneController resize resilience', () => {
     expect(harness.controller.rendererSnapshot().effectiveVisible).toBe(true);
   });
 
+  it('applies a dequeued offscreen debounce to the latest visibility state only', async () => {
+    const harness = createObservedHarness('pane-stale-hide');
+
+    harness.intersect(false);
+    const debounce = harness.timers.shift();
+    expect(debounce?.delay).toBe(250);
+
+    await harness.controller.setVisibility({
+      documentVisible: false,
+      paneVisible: false,
+      intersecting: true,
+    });
+    debounce?.callback();
+    await flushPromises();
+
+    expect(harness.controller.rendererSnapshot().visibility).toEqual({
+      documentVisible: false,
+      paneVisible: false,
+      intersecting: false,
+    });
+  });
+
   it('drops a pending hide debounce on disposal', () => {
     const harness = createObservedHarness('pane-disposed');
 
@@ -966,4 +988,5 @@ describe('Tauri terminal controller integration', () => {
     expect(runtimeBundle).toContain('webgl_recovery_failed');
     expect(runtimeBundle).toContain('webgl_recovery_cooldown');
   });
+
 });

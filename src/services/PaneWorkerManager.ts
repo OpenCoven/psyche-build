@@ -48,6 +48,7 @@ export class PaneWorkerManager {
       },
       onPaneRemoved: (paneId, reason) => {
         this.panes.delete(paneId);
+        if (this.panes.size === 0) this.poller.stop();
         this.dispatch(paneId, 'pane-removed', { reason });
       },
       onError: (paneId, error) => {
@@ -100,6 +101,36 @@ export class PaneWorkerManager {
       paneId,
       payload,
     };
+  }
+
+  async sendKeysToExpectedPane(
+    paneId: string,
+    expectedTmuxPaneId: string,
+    keys: string,
+    signal?: AbortSignal,
+    isCurrent?: () => boolean,
+  ): Promise<boolean> {
+    const ownsExpectedPane = () => (
+      !signal?.aborted
+      && this.panes.get(paneId)?.tmuxPaneId === expectedTmuxPaneId
+      && (isCurrent?.() ?? true)
+    );
+    if (!ownsExpectedPane()) {
+      return false;
+    }
+
+    const escapedKeys = keys.replace(/'/g, "'\\''");
+    const sent = await this.tmux.sendKeys(expectedTmuxPaneId, `'${escapedKeys}'`, {
+      signal,
+      isCurrent: ownsExpectedPane,
+    });
+    if (!sent) {
+      return false;
+    }
+    if (ownsExpectedPane()) {
+      this.poller.onKeysSent(paneId);
+    }
+    return true;
   }
 
   /**

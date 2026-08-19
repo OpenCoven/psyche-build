@@ -983,7 +983,16 @@ export const TOOLS: ToolDef[] = [
         ...(typeof args.branch === 'string' ? { startPointBranch: args.branch } : {}),
         ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}),
       };
-      return client.submit(command('orchestration.execute', projectRoot, { ...authorization!, request }));
+      const outcome = await client.submit(
+        command('orchestration.execute', projectRoot, { ...authorization!, request }),
+      );
+      if (outcome.status !== 'succeeded') {
+        throw new ControlResponseError(
+          outcome.code ?? 'orchestration_failed',
+          outcome.message ?? 'orchestration failed',
+        );
+      }
+      return outcome;
     }),
   },
   {

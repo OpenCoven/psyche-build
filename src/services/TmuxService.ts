@@ -46,6 +46,13 @@ interface RetryConfig {
   maxDelay: number; // cap for exponential backoff
 }
 
+export interface TmuxRetryGuard {
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
+}
+
+const RETRY_CANCELED = Symbol('retry-canceled');
+
 const RETRY_CONFIGS: Record<RetryStrategy, RetryConfig> = {
   [RetryStrategy.NONE]: { strategy: RetryStrategy.NONE, maxRetries: 0, baseDelay: 0, maxDelay: 0 },
   [RetryStrategy.FAST]: { strategy: RetryStrategy.FAST, maxRetries: 2, baseDelay: 50, maxDelay: 100 },
@@ -65,6 +72,27 @@ const PERMANENT_ERRORS = [
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isRetryCurrent(guard: TmuxRetryGuard): boolean {
+  return !guard.signal?.aborted && (guard.isCurrent?.() ?? true);
+}
+
+function sleepUntilRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return sleep(ms);
+  if (signal.aborted) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', handleAbort);
+      resolve();
+    }, ms);
+    const handleAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal.addEventListener('abort', handleAbort, { once: true });
+  });
 }
 
 function quoteShellArgument(value: string): string {
@@ -114,17 +142,32 @@ export class TmuxService {
    */
   private async executeWithRetry<T>(
     operation: () => T,
-    strategy: RetryStrategy = RetryStrategy.IDEMPOTENT,
+    strategy?: RetryStrategy,
     context?: string
-  ): Promise<T> {
+  ): Promise<T>;
+  private async executeWithRetry<T>(
+    operation: () => T,
+    strategy: RetryStrategy,
+    context: string | undefined,
+    guard: TmuxRetryGuard
+  ): Promise<T | typeof RETRY_CANCELED>;
+  private async executeWithRetry<T>(
+    operation: () => T,
+    strategy: RetryStrategy = RetryStrategy.IDEMPOTENT,
+    context?: string,
+    guard?: TmuxRetryGuard
+  ): Promise<T | typeof RETRY_CANCELED> {
     const config = RETRY_CONFIGS[strategy];
 
     if (config.maxRetries === 0) {
+      if (guard && !isRetryCurrent(guard)) return RETRY_CANCELED;
       return operation();
     }
 
     let lastError: unknown;
     for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
+      if (guard && !isRetryCurrent(guard)) return RETRY_CANCELED;
+
       try {
         return operation();
       } catch (error) {
@@ -147,7 +190,8 @@ export class TmuxService {
             `Retry attempt ${attempt + 1}/${config.maxRetries}${context ? ` (${context})` : ''}, waiting ${delay}ms`,
             'debug'
           );
-          await sleep(delay);
+          await sleepUntilRetry(delay, guard?.signal);
+          if (guard && !isRetryCurrent(guard)) return RETRY_CANCELED;
         }
       }
     }
@@ -782,14 +826,23 @@ export class TmuxService {
    * Send keys to a pane
    * @deprecated Use sendShellCommand() for shell commands or sendTmuxKeys() for tmux keys
    */
-  async sendKeys(paneId: string, keys: string): Promise<void> {
-    await this.executeWithRetry(
+  async sendKeys(paneId: string, keys: string): Promise<void>;
+  async sendKeys(paneId: string, keys: string, guard: TmuxRetryGuard): Promise<boolean>;
+  async sendKeys(
+    paneId: string,
+    keys: string,
+    guard?: TmuxRetryGuard
+  ): Promise<void | boolean> {
+    const result = await this.executeWithRetry(
       () => {
         this.execute(`tmux send-keys -t '${paneId}' ${keys}`);
       },
       RetryStrategy.FAST,
-      `sendKeys(${paneId})`
+      `sendKeys(${paneId})`,
+      guard ?? {},
     );
+    if (!guard) return;
+    return result !== RETRY_CANCELED;
   }
 
   /**
