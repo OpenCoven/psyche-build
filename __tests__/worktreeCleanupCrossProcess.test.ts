@@ -144,7 +144,7 @@ describe('cross-process worktree lifecycle coordination', () => {
             ...(Array.isArray(config.panes) ? config.panes : []),
             {
               id: 'daemon-pane',
-              slug: 'reuse-me',
+              slug: 'reuse-me-a2',
               prompt: '',
               paneId: '%2',
               worktreePath,
