@@ -13,10 +13,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  typescript-rust:
-    name: TypeScript and Rust
+  changes:
+    name: Classify changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      desktop: ${{ steps.classifier.outputs.desktop }}
+      ios: ${{ steps.classifier.outputs.ios }}
+      typescript: ${{ steps.classifier.outputs.typescript }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: classifier
+        name: Classify changed validation paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/classify-ci-changes.sh
+
+  quality:
+    name: Quality
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -29,35 +51,223 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
-        with:
-          toolchain: 1.95.0
-          components: rustfmt
-
       - name: Install tmux
         run: brew install tmux
 
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify TypeScript and package surfaces
+      - name: Run repository tests
+        run: pnpm test
+
+  desktop-web:
+    name: Desktop web
+    needs: changes
+    if: always()
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - name: Require successful change classification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DESKTOP_REQUIRED: ${{ needs.changes.outputs.desktop }}
+        shell: bash
         run: |
           set -euo pipefail
-          pnpm docs:focus:check
-          pnpm --dir docs build
-          pnpm test
-          pnpm typecheck
-          pnpm build
-          pnpm smoke:pack
+          test "$CHANGES_RESULT" = success
+          if [ "$DESKTOP_REQUIRED" != true ]; then
+            echo "Desktop web validation is not required for this change set."
+          fi
 
-      - name: Verify Rust and Tauri surfaces
+      - name: Skip unchanged desktop web surface
+        if: needs.changes.outputs.desktop != 'true'
+        run: echo "Desktop web validation skipped."
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: needs.changes.outputs.desktop == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        if: needs.changes.outputs.desktop == 'true'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: needs.changes.outputs.desktop == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        if: needs.changes.outputs.desktop == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify platform-neutral desktop contracts
+        if: needs.changes.outputs.desktop == 'true'
+        run: pnpm vitest --run __tests__/tauriDesktopPlatform.test.ts __tests__/tauriWebBundles.test.ts __tests__/tauriPackageScripts.test.ts __tests__/tauriDesktopTabs.test.ts
+
+      - name: Build desktop web bundles
+        if: needs.changes.outputs.desktop == 'true'
+        run: pnpm --dir native/desktop/psyche-build-tauri build:web
+
+  rust-test:
+    name: Rust tests
+    needs: changes
+    if: always()
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Require successful change classification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DESKTOP_REQUIRED: ${{ needs.changes.outputs.desktop }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          if [ "$DESKTOP_REQUIRED" != true ]; then
+            echo "Desktop Rust validation is not required for this change set."
+          fi
+
+      - name: Skip unchanged desktop Rust surface
+        if: needs.changes.outputs.desktop != 'true'
+        run: echo "Desktop Rust validation skipped."
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: needs.changes.outputs.desktop == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
+        if: needs.changes.outputs.desktop == 'true'
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+
+      - name: Format and test desktop Rust
+        if: needs.changes.outputs.desktop == 'true'
         run: |
           set -euo pipefail
           MANIFEST="native/desktop/psyche-build-tauri/src-tauri/Cargo.toml"
           cargo fmt --manifest-path "$MANIFEST" --check
           cargo test --manifest-path "$MANIFEST" --locked
+
+  desktop-check:
+    name: Desktop check (${{ matrix.os }})
+    needs: changes
+    if: always()
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-15
+          - windows-2025
+          - ubuntu-24.04
+    steps:
+      - name: Require successful change classification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DESKTOP_REQUIRED: ${{ needs.changes.outputs.desktop }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          if [ "$DESKTOP_REQUIRED" != true ]; then
+            echo "Desktop cargo check is not required for this change set."
+          fi
+
+      - name: Skip unchanged desktop check surface
+        if: needs.changes.outputs.desktop != 'true'
+        run: echo "Desktop cargo check skipped."
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: needs.changes.outputs.desktop == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
+        if: needs.changes.outputs.desktop == 'true'
+        with:
+          toolchain: 1.95.0
+
+      - name: Install Tauri Linux prerequisites
+        if: runner.os == 'Linux' && needs.changes.outputs.desktop == 'true'
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install \
+            --yes --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Check desktop runtime
+        if: needs.changes.outputs.desktop == 'true'
+        run: |
+          set -euo pipefail
+          MANIFEST="native/desktop/psyche-build-tauri/src-tauri/Cargo.toml"
           cargo check --manifest-path "$MANIFEST" --locked
-          pnpm --dir native/desktop/psyche-build-tauri build:web
+
+  typescript-rust:
+    name: TypeScript and Rust
+    needs: changes
+    if: always()
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Require successful change classification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TYPESCRIPT_REQUIRED: ${{ needs.changes.outputs.typescript }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          if [ "$TYPESCRIPT_REQUIRED" != true ]; then
+            echo "TypeScript validation is not required for this change set."
+          fi
+
+      - name: Skip unchanged TypeScript surface
+        if: needs.changes.outputs.typescript != 'true'
+        run: echo "TypeScript validation skipped."
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: needs.changes.outputs.typescript == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        if: needs.changes.outputs.typescript == 'true'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: needs.changes.outputs.typescript == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        if: needs.changes.outputs.typescript == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify TypeScript, docs, and package surfaces
+        if: needs.changes.outputs.typescript == 'true'
+        run: |
+          set -euo pipefail
+          pnpm docs:focus:check
+          pnpm --dir docs build
+          pnpm typecheck
+          pnpm build
+          pnpm smoke:pack
 
   desktop-runtime:
     name: Desktop runtime (${{ matrix.os }})
@@ -121,28 +331,51 @@ jobs:
       - name: Check desktop runtime
         run: cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
 
-  ios:
-    name: iOS
+  ios-core:
+    name: iOS Core
+    needs: changes
+    if: always()
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 50
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
+      - name: Require successful change classification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          IOS_REQUIRED: ${{ needs.changes.outputs.ios }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          if [ "$IOS_REQUIRED" != true ]; then
+            echo "iOS Core validation is not required for this change set."
+          fi
+
+      - name: Skip unchanged iOS Core surface
+        if: needs.changes.outputs.ios != 'true'
+        run: echo "iOS Core validation skipped."
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: needs.changes.outputs.ios == 'true'
         with:
           persist-credentials: false
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        if: needs.changes.outputs.ios == 'true'
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: needs.changes.outputs.ios == 'true'
         with:
           node-version: 24
           cache: pnpm
 
       - name: Install locked dependencies
+        if: needs.changes.outputs.ios == 'true'
         run: pnpm install --frozen-lockfile
 
       - name: Require pinned Xcode
+        if: needs.changes.outputs.ios == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -151,8 +384,10 @@ jobs:
           grep -Fx 'Build version 17C52' "$RUNNER_TEMP/xcode-version.txt"
 
       - uses: ./.github/actions/setup-xcodegen
+        if: needs.changes.outputs.ios == 'true'
 
       - name: Require iOS 26.2 iPhone 16 Pro simulator
+        if: needs.changes.outputs.ios == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -167,9 +402,11 @@ jobs:
           fi
 
       - name: Generate and verify the iOS project
+        if: needs.changes.outputs.ios == 'true'
         run: pnpm ios:project:check
 
-      - name: Test Core, build the app, and run app and UI tests
+      - name: Test iOS Core
+        if: needs.changes.outputs.ios == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -178,11 +415,97 @@ jobs:
             -scheme PsycheCore \
             -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
             -derivedDataPath "$RUNNER_TEMP/psyche-core-derived-data"
+
+  ios:
+    name: iOS
+    needs: changes
+    if: always()
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - name: Require successful change classification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          IOS_REQUIRED: ${{ needs.changes.outputs.ios }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          if [ "$IOS_REQUIRED" != true ]; then
+            echo "iOS app validation is not required for this change set."
+          fi
+
+      - name: Skip unchanged iOS app surface
+        if: needs.changes.outputs.ios != 'true'
+        run: echo "iOS app validation skipped."
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: needs.changes.outputs.ios == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        if: needs.changes.outputs.ios == 'true'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: needs.changes.outputs.ios == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        if: needs.changes.outputs.ios == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Require pinned Xcode
+        if: needs.changes.outputs.ios == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Xcode 26.2' "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Build version 17C52' "$RUNNER_TEMP/xcode-version.txt"
+
+      - uses: ./.github/actions/setup-xcodegen
+        if: needs.changes.outputs.ios == 'true'
+
+      - name: Require iOS 26.2 iPhone 16 Pro simulator
+        if: needs.changes.outputs.ios == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/available-simulators.json"
+          if ! jq -e '
+            .devices["com.apple.CoreSimulator.SimRuntime.iOS-26-2"]
+            | any(.name == "iPhone 16 Pro" and .isAvailable == true)
+          ' "$RUNNER_TEMP/available-simulators.json" >/dev/null; then
+            echo "::error::iOS 26.2 iPhone 16 Pro simulator is unavailable"
+            xcrun simctl list devices available
+            exit 1
+          fi
+
+      - name: Generate and verify the iOS project
+        if: needs.changes.outputs.ios == 'true'
+        run: pnpm ios:project:check
+
+      - name: Build the iOS app
+        if: needs.changes.outputs.ios == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
           xcodebuild build \
             -project native/ios/Psyche.xcodeproj \
             -scheme PsycheApp \
             -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
             -derivedDataPath "$RUNNER_TEMP/psyche-app-build-derived-data"
+
+      - name: Run iOS app and UI tests
+        if: needs.changes.outputs.ios == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
           xcodebuild test \
             -project native/ios/Psyche.xcodeproj \
             -scheme PsycheApp \
