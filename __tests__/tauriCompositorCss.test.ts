@@ -43,7 +43,7 @@ const TRANSITION_TIMING_KEYWORDS = new Set([
   'normal',
   'allow-discrete',
 ]);
-const TRANSITION_SUBSTITUTION_FUNCTIONS = new Set(['var', 'env', 'attr']);
+const TRANSITION_ALLOWED_FUNCTIONS = new Set(['cubic-bezier', 'steps', 'linear']);
 
 type ValueNode = ReturnType<typeof valueParser>['nodes'][number];
 
@@ -115,17 +115,17 @@ function resolveCustomProperties(
   return parsed.toString();
 }
 
-function transitionSubstitutions(value: string): string[] {
-  const substitutions: string[] = [];
+function unsupportedTransitionFunctions(value: string): string[] {
+  const unsupported: string[] = [];
   valueParser(value).walk((node) => {
     if (
       node.type === 'function'
-      && TRANSITION_SUBSTITUTION_FUNCTIONS.has(normalizePropertyName(node.value))
+      && !TRANSITION_ALLOWED_FUNCTIONS.has(normalizePropertyName(node.value))
     ) {
-      substitutions.push(valueParser.stringify(node));
+      unsupported.push(valueParser.stringify(node));
     }
   });
-  return substitutions;
+  return unsupported;
 }
 
 function transitionShorthandProperties(segment: string): string[] {
@@ -156,16 +156,16 @@ function analyzeTransitionDeclaration(
   customProperties: ReadonlyMap<string, string>,
 ): TransitionAnalysis {
   const resolved = resolveCustomProperties(value, customProperties);
-  const substitutions = transitionSubstitutions(resolved);
+  const unsupportedFunctions = unsupportedTransitionFunctions(resolved);
   if (property === 'transition') {
     const segments = splitValueList(resolved);
     const segmentProperties = segments.map(transitionShorthandProperties);
     const soleNone = segments.length === 1 && segmentProperties[0].length === 0;
     return {
       grammarValid:
-        substitutions.length === 0
+        unsupportedFunctions.length === 0
         && (soleNone || segmentProperties.every((properties) => properties.length === 1)),
-      properties: [...substitutions, ...segmentProperties.flat()],
+      properties: [...unsupportedFunctions, ...segmentProperties.flat()],
     };
   }
 
@@ -173,9 +173,9 @@ function analyzeTransitionDeclaration(
   const soleNone = properties.length === 1 && properties[0] === 'none';
   return {
     grammarValid:
-      substitutions.length === 0
+      unsupportedFunctions.length === 0
       && (soleNone || !properties.includes('none')),
-    properties: soleNone ? substitutions : [...substitutions, ...properties],
+    properties: soleNone ? unsupportedFunctions : [...unsupportedFunctions, ...properties],
   };
 }
 
@@ -222,20 +222,29 @@ interface CompositorFindings {
 function auditStylesheet(css: string): CompositorFindings {
   const root = postcss.parse(css, { from: undefined });
   const customPropertyValues = new Map<string, Set<string>>();
-  root.walkRules((rule) => {
-    if (rule.parent?.type !== 'root' || rule.selector.trim() !== ':root') return;
-    for (const node of rule.nodes) {
-      if (node.type !== 'decl') continue;
-      const property = decodeCssIdentifier(node.prop);
-      if (!property.startsWith('--')) continue;
-      const values = customPropertyValues.get(property) ?? new Set<string>();
-      values.add(node.value);
-      customPropertyValues.set(property, values);
+  const ambiguousCustomProperties = new Set<string>();
+  root.walkDecls((declaration) => {
+    const property = decodeCssIdentifier(declaration.prop);
+    if (!property.startsWith('--')) return;
+    const rule = ruleForDeclaration(declaration);
+    if (
+      !rule
+      || rule.parent?.type !== 'root'
+      || rule.selector.trim() !== ':root'
+    ) {
+      ambiguousCustomProperties.add(property);
+      return;
     }
+    const values = customPropertyValues.get(property) ?? new Set<string>();
+    values.add(declaration.value);
+    customPropertyValues.set(property, values);
   });
   const customProperties = new Map(
     [...customPropertyValues]
-      .filter(([, values]) => values.size === 1)
+      .filter(
+        ([property, values]) =>
+          values.size === 1 && !ambiguousCustomProperties.has(property),
+      )
       .map(([property, values]) => [property, [...values][0]]),
   );
   const findings: CompositorFindings = {
@@ -422,6 +431,7 @@ describe('compositor stylesheet audit parser', () => {
         --safe-timing: 120ms ease;
         --unsafe-tail: 120ms ease, background 120ms ease;
         --implicit-tail: 120ms ease, 160ms ease;
+        --shadowed-timing: 120ms ease;
       }
       .safe-variable {
         transition: opacity var(--safe-timing);
@@ -437,6 +447,10 @@ describe('compositor stylesheet audit parser', () => {
       }
       .scope {
         --scoped-timing: 120ms ease;
+      }
+      .shadowed-variable {
+        --shadowed-timing: 120ms ease, background 120ms ease;
+        transition: opacity var(--shadowed-timing);
       }
       @media (prefers-reduced-motion: no-preference) {
         :root {
@@ -461,6 +475,7 @@ describe('compositor stylesheet audit parser', () => {
       '.variable-tail { transition: var(--rest) }',
       '.expanded-tail { transition: background }',
       '.expanded-implicit { transition: all }',
+      '.shadowed-variable { transition: var(--shadowed-timing) }',
       '.scoped-fallback { transition: background }',
       '.conditional-fallback { transition: background }',
       '.environment-fallback { transition: env(unknown-transition, 120ms ease, background 120ms ease) }',
@@ -473,11 +488,17 @@ describe('compositor stylesheet audit parser', () => {
         transition-property: none, opacity;
         transition-duration: 200ms;
       }
+      .invalid-shorthand {
+        transition: opacity bogus();
+        transition-duration: 200ms;
+      }
     `);
 
     expect(findings.transitionViolations).toEqual([
       '.invalid-property-list { transition-duration: all }',
+      '.invalid-shorthand { transition-duration: all }',
       '.invalid-property-list { transition-property: none }',
+      '.invalid-shorthand { transition: bogus() }',
     ]);
   });
 
