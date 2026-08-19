@@ -1,5 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import postcss, { type AtRule, type Declaration, type Rule } from 'postcss';
+import selectorParser from 'postcss-selector-parser';
+import valueParser from 'postcss-value-parser';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -7,7 +10,7 @@ import { describe, expect, it } from 'vitest';
  *
  * The GPU ADE terminal-rendering slice requires that every animated visual
  * update stays on the compositor: keyframes may only animate `transform` and
- * `opacity`, transitions may not name layout/paint/filter properties, and the
+ * `opacity`, transitions may only target those same properties, and the
  * `will-change` hint may only appear while an element is actively transitioning
  * (a `.is-transitioning` selector) so the browser never pins compositor layers
  * for the lifetime of the app.
@@ -28,276 +31,108 @@ const ANIMATABLE_ALLOWLIST = new Set([
   'animation-timing-function',
 ]);
 
-const FORBIDDEN_TRANSITION_PROPERTIES = [
-  'all',
-  'width',
-  'height',
-  'top',
-  'right',
-  'bottom',
-  'left',
-  'inset',
-  'background-position',
-  'box-shadow',
-  'filter',
-  'backdrop-filter',
-];
+const TRANSITION_ALLOWLIST = new Set(['transform', 'opacity']);
+const TRANSITION_TIMING_KEYWORDS = new Set([
+  'ease',
+  'linear',
+  'ease-in',
+  'ease-out',
+  'ease-in-out',
+  'step-start',
+  'step-end',
+  'normal',
+  'allow-discrete',
+]);
 
-interface Rule {
-  prelude: string;
-  body: string;
+type ValueNode = ReturnType<typeof valueParser>['nodes'][number];
+
+function decodeCssIdentifier(identifier: string): string {
+  return identifier.replace(
+    /\\([0-9a-fA-F]{1,6})(?:\r\n|[ \t\r\n\f])?|\\(\r\n|[\s\S])/g,
+    (_match, hex: string | undefined, escaped: string | undefined) => {
+      if (hex) {
+        const codePoint = Number.parseInt(hex, 16);
+        return codePoint === 0 || codePoint > 0x10ffff
+          ? '\uFFFD'
+          : String.fromCodePoint(codePoint);
+      }
+      return escaped === '\r\n' || /[\r\n\f]/.test(escaped || '') ? '' : escaped || '';
+    },
+  );
 }
 
-/** Strip block comments before structural parsing. */
-function stripComments(css: string): string {
-  return css.replace(/\/\*[\s\S]*?\*\//g, '');
+function normalizePropertyName(property: string): string {
+  return decodeCssIdentifier(property)
+    .toLowerCase()
+    .replace(/^-[a-z0-9]+-/, '');
 }
 
-/**
- * Split a stylesheet (or a nested block body) into `{ prelude, body }` rules by
- * scanning balanced braces. Declarations that precede the first brace at the
- * current level are ignored here; callers that need them read the body.
- */
-function splitRules(text: string): Rule[] {
-  const rules: Rule[] = [];
-  let buffer = '';
-  let quote = '';
-  let i = 0;
-  while (i < text.length) {
-    const char = text[i];
-    if (quote) {
-      buffer += char;
-      if (char === '\\' && i + 1 < text.length) {
-        buffer += text[i + 1];
-        i += 2;
-      } else {
-        if (char === quote) quote = '';
-        i += 1;
-      }
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      buffer += char;
-      i += 1;
-      continue;
-    }
-    if (char === '\\') {
-      buffer += char;
-      if (i + 1 < text.length) {
-        buffer += text[i + 1];
-        i += 2;
-      } else {
-        i += 1;
-      }
-      continue;
-    }
-    if (char === '{') {
-      let depth = 1;
-      let bodyQuote = '';
-      let j = i + 1;
-      while (j < text.length && depth > 0) {
-        const bodyChar = text[j];
-        if (bodyQuote) {
-          if (bodyChar === '\\') j += 1;
-          else if (bodyChar === bodyQuote) bodyQuote = '';
-        } else if (bodyChar === '"' || bodyChar === "'") {
-          bodyQuote = bodyChar;
-        } else if (bodyChar === '\\') {
-          j += 1;
-        } else if (bodyChar === '{') {
-          depth += 1;
-        } else if (bodyChar === '}') {
-          depth -= 1;
-        }
-        j += 1;
-      }
-      rules.push({ prelude: buffer.trim(), body: text.slice(i + 1, j - 1) });
-      buffer = '';
-      i = j;
+function splitValueList(value: string): string[] {
+  const segments: ValueNode[][] = [[]];
+  for (const node of valueParser(value).nodes) {
+    if (node.type === 'div' && node.value === ',') {
+      segments.push([]);
     } else {
-      buffer += char;
-      i += 1;
+      segments[segments.length - 1].push(node);
     }
   }
-  return rules;
+  return segments
+    .map((nodes) => valueParser.stringify(nodes).trim())
+    .filter(Boolean);
 }
 
-/** Parse `prop: value` declarations from a flat block body. */
-function parseDeclarations(body: string): Array<{ property: string; value: string }> {
-  const declarations: Array<{ property: string; value: string }> = [];
-  for (const raw of body.split(';')) {
-    const segment = raw.trim();
-    if (!segment) continue;
-    const colon = segment.indexOf(':');
-    if (colon === -1) continue;
-    const property = segment.slice(0, colon).trim().toLowerCase();
-    const value = segment.slice(colon + 1).trim();
-    if (property) declarations.push({ property, value });
-  }
-  return declarations;
+function isTransitionTime(token: string): boolean {
+  return /^[+-]?(?:\d*\.)?\d+(?:e[+-]?\d+)?m?s$/i.test(token);
 }
 
-function splitTopLevel(text: string, delimiter: 'comma' | 'whitespace'): string[] {
-  const parts: string[] = [];
-  let start = 0;
-  let parenthesisDepth = 0;
-  let quote = '';
+function transitionShorthandProperties(segment: string): string[] {
+  const parsed = valueParser(segment);
+  const words = parsed.nodes
+    .filter((node): node is Extract<ValueNode, { type: 'word' }> => node.type === 'word')
+    .map((node) => normalizePropertyName(node.value));
 
-  function push(end: number): void {
-    const part = text.slice(start, end).trim();
-    if (part) parts.push(part);
+  if (words.length === 1 && words[0] === 'none') {
+    return [];
   }
 
-  for (let i = 0; i < text.length; i += 1) {
-    const char = text[i];
-    if (quote) {
-      if (char === '\\') i += 1;
-      else if (char === quote) quote = '';
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-    } else if (char === '\\') {
-      i += 1;
-    } else if (char === '(') {
-      parenthesisDepth += 1;
-    } else if (char === ')') {
-      parenthesisDepth = Math.max(0, parenthesisDepth - 1);
-    } else if (
-      parenthesisDepth === 0
-      && (
-        (delimiter === 'comma' && char === ',')
-        || (delimiter === 'whitespace' && /\s/.test(char))
-      )
-    ) {
-      push(i);
-      start = i + 1;
-    }
-  }
-
-  push(text.length);
-  return parts;
-}
-
-function transitionShorthandForbiddenProperties(segment: string): string[] {
-  return splitTopLevel(segment, 'whitespace')
-    .map((token) => token.toLowerCase())
-    .filter((token) => FORBIDDEN_TRANSITION_PROPERTIES.includes(token));
+  const properties = words.filter(
+    (word) => !isTransitionTime(word) && !TRANSITION_TIMING_KEYWORDS.has(word),
+  );
+  return properties.length > 0 ? properties : ['all'];
 }
 
 function isKeyframesAtRule(atName: string): boolean {
   return /^(?:-[a-z0-9]+-)?keyframes$/.test(atName);
 }
 
-/** Split a selector list on commas outside attribute and pseudo arguments. */
-function splitSelectorList(prelude: string): string[] {
-  const selectors: string[] = [];
-  let start = 0;
-  let bracketDepth = 0;
-  let parenthesisDepth = 0;
-  let quote = '';
+function selectorListTargetsTransitioningClass(selectorList: string): boolean {
+  let selectorCount = 0;
+  let allSelectorsTargetClass = true;
 
-  for (let i = 0; i < prelude.length; i += 1) {
-    const char = prelude[i];
-    if (quote) {
-      if (char === '\\') i += 1;
-      else if (char === quote) quote = '';
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-    } else if (char === '\\') {
-      i += 1;
-    } else if (char === '[') {
-      bracketDepth += 1;
-    } else if (char === ']') {
-      bracketDepth = Math.max(0, bracketDepth - 1);
-    } else if (char === '(') {
-      parenthesisDepth += 1;
-    } else if (char === ')') {
-      parenthesisDepth = Math.max(0, parenthesisDepth - 1);
-    } else if (char === ',' && bracketDepth === 0 && parenthesisDepth === 0) {
-      selectors.push(prelude.slice(start, i).trim());
-      start = i + 1;
-    }
-  }
+  selectorParser((root) => {
+    root.each((selector) => {
+      selectorCount += 1;
+      let compoundStart = 0;
+      selector.nodes.forEach((node, index) => {
+        if (node.type === 'combinator') compoundStart = index + 1;
+      });
+      const targetsClass = selector.nodes
+        .slice(compoundStart)
+        .some((node) => node.type === 'class' && node.value === 'is-transitioning');
+      if (!targetsClass) allSelectorsTargetClass = false;
+    });
+  }).processSync(selectorList);
 
-  selectors.push(prelude.slice(start).trim());
-  return selectors;
+  return selectorCount > 0 && allSelectorsTargetClass;
 }
 
-function isCssIdentifierContinuation(char: string): boolean {
-  return (
-    char === '\\' ||
-    /[a-zA-Z0-9_-]/.test(char) ||
-    (char.length > 0 && char.charCodeAt(0) >= 0x80)
-  );
+function ruleForDeclaration(declaration: Declaration): Rule | null {
+  return declaration.parent?.type === 'rule' ? declaration.parent : null;
 }
 
-/**
- * Require the rightmost compound selector to name `.is-transitioning`
- * directly. Classes inside attributes, pseudo arguments, or ancestors do not
- * prove that the element receiving `will-change` is actively transitioning.
- */
-function selectorTargetsTransitioningClass(selector: string): boolean {
-  let bracketDepth = 0;
-  let parenthesisDepth = 0;
-  let quote = '';
-  let targetsTransitioningClass = false;
-
-  for (let i = 0; i < selector.length; i += 1) {
-    const char = selector[i];
-    if (quote) {
-      if (char === '\\') i += 1;
-      else if (char === quote) quote = '';
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (char === '\\') {
-      i += 1;
-      continue;
-    }
-    if (char === '[') {
-      bracketDepth += 1;
-      continue;
-    }
-    if (char === ']') {
-      bracketDepth = Math.max(0, bracketDepth - 1);
-      continue;
-    }
-    if (char === '(') {
-      parenthesisDepth += 1;
-      continue;
-    }
-    if (char === ')') {
-      parenthesisDepth = Math.max(0, parenthesisDepth - 1);
-      continue;
-    }
-    if (bracketDepth > 0 || parenthesisDepth > 0) continue;
-    if (
-      char === '.' &&
-      selector.startsWith('.is-transitioning', i) &&
-      !isCssIdentifierContinuation(selector[i + '.is-transitioning'.length] || '')
-    ) {
-      targetsTransitioningClass = true;
-      i += '.is-transitioning'.length - 1;
-      continue;
-    }
-    if (/\s|[>+~]/.test(char) || (char === '|' && selector[i + 1] === '|')) {
-      targetsTransitioningClass = false;
-    }
-  }
-
-  return targetsTransitioningClass;
-}
-
-function selectorListTargetsTransitioningClass(prelude: string): boolean {
-  const selectors = splitSelectorList(prelude);
-  return selectors.length > 0 && selectors.every(selectorTargetsTransitioningClass);
+function atRulePrelude(atRule: AtRule): string {
+  const separator = atRule.raws.afterName || (atRule.params ? ' ' : '');
+  return `@${atRule.name}${separator}${atRule.params}`.trim();
 }
 
 interface CompositorFindings {
@@ -307,64 +142,58 @@ interface CompositorFindings {
 }
 
 function auditStylesheet(css: string): CompositorFindings {
-  const clean = stripComments(css);
+  const root = postcss.parse(css, { from: undefined });
   const findings: CompositorFindings = {
     keyframeViolations: [],
     transitionViolations: [],
     willChangeViolations: [],
   };
 
-  function visit(rules: Rule[]): void {
-    for (const rule of rules) {
-      const prelude = rule.prelude;
-      const atName = prelude.startsWith('@')
-        ? prelude.slice(1).split(/[\s({]/)[0].toLowerCase()
-        : '';
+  root.walkAtRules((atRule) => {
+    const atName = normalizePropertyName(atRule.name);
+    if (!isKeyframesAtRule(atName)) return;
+    const prelude = atRulePrelude(atRule);
+    atRule.walkDecls((declaration) => {
+      const property = normalizePropertyName(declaration.prop);
+      if (ANIMATABLE_ALLOWLIST.has(property)) return;
+      const frame = ruleForDeclaration(declaration);
+      findings.keyframeViolations.push(
+        `${prelude} { ${frame?.selector || '<unknown>'}: ${property} }`,
+      );
+    });
+  });
 
-      if (isKeyframesAtRule(atName)) {
-        for (const frame of splitRules(rule.body)) {
-          for (const decl of parseDeclarations(frame.body)) {
-            if (!ANIMATABLE_ALLOWLIST.has(decl.property)) {
-              findings.keyframeViolations.push(
-                `${prelude} { ${frame.prelude}: ${decl.property} }`,
-              );
-            }
-          }
-        }
-        continue;
-      }
+  root.walkDecls((declaration) => {
+    const property = normalizePropertyName(declaration.prop);
+    const rule = ruleForDeclaration(declaration);
+    const prelude = rule?.selector || '<unknown>';
 
-      // Conditional group at-rules (@media, @supports, @container) nest rules.
-      if (atName && rule.body.includes('{')) {
-        visit(splitRules(rule.body));
-        continue;
-      }
-
-      const declarations = parseDeclarations(rule.body);
-      for (const decl of declarations) {
-        const transitionProperty = decl.property.replace(/^-[a-z0-9]+-/, '');
-        if (transitionProperty === 'transition' || transitionProperty === 'transition-property') {
-          const names =
-            transitionProperty === 'transition'
-              ? splitTopLevel(decl.value, 'comma')
-                .flatMap(transitionShorthandForbiddenProperties)
-              : splitTopLevel(decl.value, 'comma')
-                .map((token) => token.toLowerCase())
-                .filter((token) => FORBIDDEN_TRANSITION_PROPERTIES.includes(token));
-          for (const name of names) {
-            findings.transitionViolations.push(`${prelude} { ${decl.property}: ${name} }`);
-          }
-        }
-        if (decl.property === 'will-change') {
-          if (!selectorListTargetsTransitioningClass(prelude)) {
-            findings.willChangeViolations.push(`${prelude} { will-change: ${decl.value} }`);
-          }
+    if (property === 'transition' || property === 'transition-property') {
+      const transitionProperties =
+        property === 'transition'
+          ? splitValueList(declaration.value).flatMap(transitionShorthandProperties)
+          : splitValueList(declaration.value)
+            .map(normalizePropertyName)
+            .filter((name) => name !== 'none');
+      for (const transitionProperty of transitionProperties) {
+        if (!TRANSITION_ALLOWLIST.has(transitionProperty)) {
+          findings.transitionViolations.push(
+            `${prelude} { ${declaration.prop}: ${transitionProperty} }`,
+          );
         }
       }
     }
-  }
 
-  visit(splitRules(clean));
+    if (
+      property === 'will-change'
+      && (!rule || !selectorListTargetsTransitioningClass(rule.selector))
+    ) {
+      findings.willChangeViolations.push(
+        `${prelude} { ${declaration.prop}: ${declaration.value} }`,
+      );
+    }
+  });
+
   return findings;
 }
 
@@ -420,6 +249,65 @@ describe('compositor stylesheet audit parser', () => {
     expect(findings.transitionViolations).toEqual([
       '.prefixed { -webkit-transition: box-shadow }',
       '.all-properties { transition-property: all }',
+    ]);
+  });
+
+  it('allows only transform and opacity transition properties', () => {
+    const findings = auditStylesheet(`
+      .paint {
+        transition:
+          transform 120ms ease,
+          background 120ms ease,
+          color 120ms ease,
+          opacity 120ms ease;
+      }
+      .border {
+        transition-property: transform, border-color;
+      }
+      .disabled {
+        transition: none;
+      }
+      .inherited {
+        transition-duration: 120ms;
+        transition-property: inherit;
+      }
+    `);
+
+    expect(findings.transitionViolations).toEqual([
+      '.paint { transition: background }',
+      '.paint { transition: color }',
+      '.border { transition-property: border-color }',
+      '.inherited { transition-property: inherit }',
+    ]);
+  });
+
+  it('preserves comment markers inside strings while parsing later rules', () => {
+    const findings = auditStylesheet(`
+      .safe::before { content: "/*"; }
+      .always-layered { will-change: transform; }
+      .safe::after { content: "*/"; }
+    `);
+
+    expect(findings.willChangeViolations).toEqual([
+      '.always-layered { will-change: transform }',
+    ]);
+  });
+
+  it('normalizes escaped declaration identifiers before auditing', () => {
+    const findings = auditStylesheet(String.raw`
+      .paint {
+        transit\ion: background 120ms ease;
+      }
+      .always-layered {
+        will-\63hange: transform;
+      }
+    `);
+
+    expect(findings.transitionViolations).toEqual([
+      String.raw`.paint { transit\ion: background }`,
+    ]);
+    expect(findings.willChangeViolations).toEqual([
+      String.raw`.always-layered { will-\63hange: transform }`,
     ]);
   });
 
@@ -495,7 +383,7 @@ describe('desktop stylesheet compositor safety', () => {
     expect(findings.keyframeViolations).toEqual([]);
   });
 
-  it('never transitions layout, paint, or filter properties', () => {
+  it('only transitions transform and opacity', () => {
     expect(findings.transitionViolations).toEqual([]);
   });
 
