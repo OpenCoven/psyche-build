@@ -110,10 +110,13 @@ missing authority returns `lease_missing` before an effect.
 
 Orchestration launch authority is separate from caller task, lane, and trace
 labels. Control execution derives a bounded operation identity from the
-canonical command idempotency key; direct daemon execution derives it from the
-protocol `requestId`. Each bridge pane launch then hashes that identity with the
-lane ID, so the same operation/lane reconciles while another operation cannot
-inherit its persisted pane.
+canonical command idempotency key. Direct daemon clients should provide the
+top-level orchestration `operationId` for retry reconciliation across
+connections; `requestId` is response correlation only. Legacy requests without
+an operation ID are scoped to one connection, so a reused request ID after
+reconnect cannot inherit another launch. Each bridge pane launch hashes the
+authoritative operation identity with the lane ID, so the same operation/lane
+reconciles while another operation cannot inherit its persisted pane.
 
 If `psyche mcp` starts without a task binding, non-operator task-scoped MCP
 tools such as `psyche_control_list`, `psyche_control_lease status`,

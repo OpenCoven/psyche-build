@@ -62,7 +62,7 @@ import { PaneOutputFanout } from './paneOutputFanout.js';
 import { BrowserProviderBroker } from '../control/browserProviderBroker.js';
 import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
 import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
-import { deriveOrchestrationOperationId } from '../orchestration/operationIdentity.js';
+import { daemonOrchestrationControlIdempotencyKey } from '../orchestration/operationIdentity.js';
 
 export interface DaemonOptions {
   port: number;
@@ -1184,6 +1184,11 @@ export class Connection {
       }
       case 'orchestration.execute': {
         try {
+          const executionIdempotencyKey = daemonOrchestrationControlIdempotencyKey({
+            operationId: msg.operationId,
+            connectionId: this.actorId,
+            requestId: msg.requestId,
+          });
           const requestLease = await this.submitControl(this.buildCommand(
             'lease.request',
             {
@@ -1247,7 +1252,7 @@ export class Connection {
             },
             {
               actorKind: 'human',
-              idempotencyKey: deriveOrchestrationOperationId(msg.requestId),
+              idempotencyKey: executionIdempotencyKey,
             },
           ));
           if (outcome.status !== 'succeeded') {

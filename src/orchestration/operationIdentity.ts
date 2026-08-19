@@ -38,6 +38,26 @@ export function deriveOrchestrationOperationId(authority: string): string {
   return `orch-op-v1-${tupleDigest('psyche.orchestration.operation.v1', [authority])}`;
 }
 
+export function daemonOrchestrationControlIdempotencyKey(input: {
+  operationId?: string;
+  connectionId: string;
+  requestId: string;
+}): string {
+  if (typeof input.connectionId !== 'string' || typeof input.requestId !== 'string') {
+    throw new OrchestrationError(
+      'invalid_orchestration_request',
+      'daemon orchestration connection and request identities must be strings',
+    );
+  }
+  const authority = input.operationId === undefined
+    ? ['connection', input.connectionId, input.requestId]
+    : ['explicit', normalizeOrchestrationOperationId(input.operationId)];
+  return `orch-daemon-v1-${tupleDigest(
+    'psyche.orchestration.daemon-control.v1',
+    authority,
+  )}`;
+}
+
 export function bridgePaneLaunchRequestId(operationId: string, laneId: string): string {
   return `orch-pane-v1-${tupleDigest(
     'psyche.orchestration.bridge-pane.v1',
