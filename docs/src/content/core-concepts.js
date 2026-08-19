@@ -10,7 +10,7 @@ export function render() {
     <ul>
       <li><strong>Task</strong> — one requested outcome.</li>
       <li><strong>Lane</strong> — one agent or terminal working on that task.</li>
-      <li><strong>Isolation mode</strong> — an isolated worktree, a shared worktree, a plain terminal, or a Coven-managed session.</li>
+      <li><strong>Isolation mode</strong> — an isolated worktree, a shared worktree, a plain terminal, or an optional provider-managed session.</li>
       <li><strong>Integration</strong> — inspect, compare, merge, create a PR, archive, or clean up.</li>
     </ul>
     <p>The concepts below — projects, panes, and worktrees — are how psyche implements that model. A pane is the concrete surface a lane runs in; a worktree is the most common isolation mode.</p>

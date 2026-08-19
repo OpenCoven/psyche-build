@@ -88,19 +88,19 @@ Every Psyche Build workflow uses the same four definitions:
 - **Task** — one requested outcome.
 - **Lane** — one agent or terminal working on that task.
 - **Isolation mode** — an isolated worktree, a shared worktree, a plain
-  terminal, or a Coven-managed session.
+  terminal, or an optional provider-managed session.
 - **Integration** — inspect, compare, merge, create a PR, archive, or clean up.
 
 A pane is the concrete surface a lane runs in; a worktree is the most common
-isolation mode. Coven-native is the default capability provider and Psyche is
-an optional registration point; an explicitly unavailable provider fails
-closed instead of degrading silently.
+isolation mode. Psyche Build owns lane orchestration. Optional capability and
+session providers register bounded integrations; an explicitly unavailable
+provider fails closed instead of degrading silently.
 
 ## What it does
 
 Psyche Build creates a tmux pane for each task. Every work pane gets its own git worktree and branch so agents work in complete isolation. When a task is done, open the pane menu with `m` and choose Merge to bring it back into your main branch, or Create GitHub PR to push the branch and file a pull request.
 
-- **Worktree isolation** — each pane is a full working copy, no conflicts between agents
+- **Worktree isolation** — each pane is a full working copy, so parallel lanes do not edit the same checkout
 - **Agent support** — Coven Code, Claude Code, Codex, OpenCode, Cline CLI, Gemini CLI, Qwen CLI, Amp CLI, pi CLI, Cursor CLI, Copilot CLI, and Crush CLI
 - **Multi-select launches** — choose any combination of enabled agents per prompt
 - **AI naming** — branches, pane labels, and commit messages can be generated automatically

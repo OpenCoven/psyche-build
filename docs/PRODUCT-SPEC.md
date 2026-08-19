@@ -36,7 +36,7 @@ The public model uses four definitions everywhere:
 
 - **Task** — one requested outcome.
 - **Lane** — one agent or terminal working on that task.
-- **Isolation mode** — an isolated worktree, a shared worktree, a plain terminal, or a Coven-managed session.
+- **Isolation mode** — an isolated worktree, a shared worktree, a plain terminal, or an optional provider-managed session.
 - **Integration** — inspect, compare, merge, create a PR, archive, or clean up.
 
 Psyche Build implements that model with these primitives:
@@ -46,7 +46,7 @@ Psyche Build implements that model with these primitives:
 - **Pane** — one terminal workspace and the concrete surface a lane runs in, often backed by a worktree and agent process.
 - **Worktree** — an isolated git checkout for a task or branch; the most common isolation mode.
 - **Agent** — Coven Code, Claude Code, Codex, OpenCode, Cline CLI, Gemini CLI, Qwen CLI, Amp CLI, pi CLI, Cursor CLI, Copilot CLI, Crush CLI, or another configured coding launcher.
-- **Capability provider** — resolves a lane's execution capability. Coven-native is the default; Psyche is an optional registration point; an explicitly unavailable provider fails closed.
+- **Capability provider** — registers a bounded optional execution or session integration with Psyche Build; an explicitly unavailable provider fails closed.
 - **Ritual** — a reusable project setup recipe for opening a known pane layout.
 - **Operator** — the person coordinating visible work and approving consequential actions.
 - **Optional session** — a provider-managed session that Psyche Build can list,

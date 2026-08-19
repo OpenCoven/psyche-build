@@ -9,7 +9,7 @@ export function render() {
     <ul>
       <li><strong>Task</strong> — one requested outcome.</li>
       <li><strong>Lane</strong> — one agent or terminal working on that task.</li>
-      <li><strong>Isolation mode</strong> — an isolated worktree, a shared worktree, a plain terminal, or a Coven-managed session.</li>
+      <li><strong>Isolation mode</strong> — an isolated worktree, a shared worktree, a plain terminal, or an optional provider-managed session.</li>
       <li><strong>Integration</strong> — inspect, compare, merge, create a PR, archive, or clean up.</li>
     </ul>
 
@@ -30,7 +30,7 @@ export function render() {
         <tr><td>Codex</td><td><code>-codex</code></td></tr>
       </tbody>
     </table>
-    <p>Because each lane has an independent worktree, the lanes never conflict.</p>
+    <p>Because each lane has an independent worktree, parallel agents do not edit the same checkout. Integration conflicts can still occur and remain an explicit review step.</p>
 
     <h2>Compare Two Lanes (A/B Example)</h2>
     <p>Running two agents on one task is a two-lane comparison, not a special product mode — it is just a multi-select launch with two agents. It is useful when you want different model or tooling instincts on the same prompt.</p>
@@ -65,8 +65,8 @@ export function render() {
     </ul>
     <p>Every mutation passes through the same authenticated authority, policy, approval, and receipt path as the TUI. See <a href="#/agents">Agents</a> and the README's MCP section for the full lease and approval model.</p>
 
-    <h2>Optional Coven and Capability Providers</h2>
-    <p>Lanes resolve their execution capability through a provider. The Coven-native provider is the default; Psyche is an optional registration point for additional capabilities. Providers are optional — when a provider is missing or explicitly unavailable, that capability fails closed rather than silently degrading, and ordinary panes, worktrees, merges, and file browsing keep working. A Coven-managed session is one of the available isolation modes when a compatible local session provider is running.</p>
+    <h2>Optional Capability and Session Providers</h2>
+    <p>Psyche Build owns lane orchestration. Optional providers can register bounded execution or session capabilities. When a provider is missing or explicitly unavailable, that capability fails closed rather than silently degrading, while ordinary panes, worktrees, merges, and file browsing keep working. See the <a href="https://github.com/OpenCoven/psyche-build/blob/main/docs/INTEGRATIONS.md">Psyche Build integrations guide</a> for the supported boundary.</p>
 
     <h2>Integrate Results Explicitly</h2>
     <p>Integration is always an explicit step, never automatic. Once a lane's work is ready:</p>
