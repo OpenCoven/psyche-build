@@ -10099,10 +10099,10 @@
     return projectId + "__" + tabId;
   }
   function browserTabLifecycle(tab) {
-    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, replacementOperation: null, authorityTransition: false, quarantinedControlGeneration: 0, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, pendingTitle: null, pendingTitleUrl: null, pendingTitleGeneration: 0, pendingTitleNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
+    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, replacementOperation: null, authorityTransition: false, quarantinedControlGeneration: 0, confirmedAbsentControlGeneration: 0, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, pendingTitle: null, pendingTitleUrl: null, pendingTitleGeneration: 0, pendingTitleNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
     var lifecycle = browserTabLifecycleStates.get(tab);
     if (!lifecycle) {
-      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, replacementOperation: null, authorityTransition: false, quarantinedControlGeneration: 0, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, pendingTitle: null, pendingTitleUrl: null, pendingTitleGeneration: 0, pendingTitleNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
+      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, operationGeneration: 0, pendingOperation: null, activationOperation: null, cleanupGeneration: 0, cleanupOperation: null, replacementOperation: null, authorityTransition: false, quarantinedControlGeneration: 0, confirmedAbsentControlGeneration: 0, automationTail: null, automationSource: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, pendingNavigationToken: null, pendingTitle: null, pendingTitleUrl: null, pendingTitleGeneration: 0, pendingTitleNavigationToken: null, liveGeneration: 0, liveUrl: null, liveNavigationToken: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
       browserTabLifecycleStates.set(tab, lifecycle);
     }
     return lifecycle;
@@ -10361,6 +10361,7 @@
       return Promise.resolve(false);
     }
     var nativeGeneration = lifecycle.liveGeneration;
+    lifecycle.confirmedAbsentControlGeneration = 0;
     return ensureBrowserControlProvider(pair.project).then(function (status) {
       return invoke("control_provider_upsert", {
         projectRoot: pair.project.root,
@@ -10375,18 +10376,25 @@
             tabId: pair.tab.id,
             generation: canonical.generation,
           }).then(function (result) {
-            lifecycle.controlGeneration = 0;
-            if (result !== true) {
+            if (lifecycle.controlGeneration === canonical.generation) {
+              lifecycle.controlGeneration = 0;
+            }
+            if (result === true && !lifecycle.controlGeneration) {
+              lifecycle.confirmedAbsentControlGeneration = canonical.generation;
+            } else if (result !== true) {
               lifecycle.quarantinedControlGeneration = canonical.generation;
             }
             return false;
           }, function () {
-            lifecycle.controlGeneration = 0;
+            if (lifecycle.controlGeneration === canonical.generation) {
+              lifecycle.controlGeneration = 0;
+            }
             lifecycle.quarantinedControlGeneration = canonical.generation;
             return false;
           });
         }
         lifecycle.controlGeneration = canonical.generation;
+        lifecycle.confirmedAbsentControlGeneration = 0;
         return true;
       });
     }).catch(function () { return false; });
@@ -10394,6 +10402,15 @@
   function removeBrowserControlResource(pair, expectedGeneration) {
     if (!pair) return Promise.resolve(false);
     var lifecycle = browserTabLifecycle(pair.tab);
+    if (expectedGeneration &&
+        lifecycle.confirmedAbsentControlGeneration === expectedGeneration &&
+        lifecycle.controlGeneration !== expectedGeneration) {
+      return Promise.resolve(true);
+    }
+    if (!expectedGeneration && !lifecycle.controlGeneration &&
+        lifecycle.confirmedAbsentControlGeneration) {
+      return Promise.resolve(true);
+    }
     var generation = expectedGeneration ||
       lifecycle.controlGeneration || lifecycle.liveGeneration || lifecycle.pendingGeneration;
     if (!generation) return Promise.resolve(false);
@@ -10403,7 +10420,14 @@
         tabId: pair.tab.id,
         generation: generation,
       }).then(function (result) {
-        return result === true;
+        if (result !== true) return false;
+        if (lifecycle.controlGeneration === generation) {
+          lifecycle.controlGeneration = 0;
+        }
+        if (!lifecycle.controlGeneration) {
+          lifecycle.confirmedAbsentControlGeneration = generation;
+        }
+        return true;
       });
     });
   }

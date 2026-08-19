@@ -49,6 +49,9 @@ describe('Tauri cross-platform browser navigation', () => {
     );
     expect(completion.indexOf('browser_windows_completion_matches'))
       .toBeLessThan(completion.indexOf('take_windows_browser_navigation'));
+    expect(source).toMatch(
+      /browser_navigation_urls_equivalent\(\s*&uri,\s*&registration\.requested_url,\s*\)/,
+    );
   });
 
   it('uses an owned monotonic WebKitGTK state for redirects and replacements', () => {

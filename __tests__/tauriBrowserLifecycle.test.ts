@@ -600,6 +600,7 @@ function browserLifecycleHarness() {
     pendingTitleNavigationToken: string | null;
     liveGeneration: number;
     controlGeneration: number;
+    confirmedAbsentControlGeneration: number;
     liveUrl: string | null;
     liveNavigationToken: string | null;
     eventUrl: string | null;
@@ -634,6 +635,7 @@ function browserLifecycleHarness() {
         pendingTitleNavigationToken: null,
         liveGeneration: 0,
         controlGeneration: 0,
+        confirmedAbsentControlGeneration: 0,
         liveUrl: null,
         liveNavigationToken: null,
         eventUrl: null,
@@ -663,6 +665,7 @@ function browserLifecycleHarness() {
         pendingTitleNavigationToken: null,
         liveGeneration: 0,
         controlGeneration: 0,
+        confirmedAbsentControlGeneration: 0,
         liveUrl: null,
         liveNavigationToken: null,
         eventUrl: null,
@@ -4289,7 +4292,7 @@ describe('Tauri native browser lifecycle', () => {
     });
   });
 
-  it('requires every canonical removal request to reach the provider', async () => {
+  it('makes repeated exact removal idempotent only after confirmed absence', async () => {
     const calls: number[] = [];
     const tab = {
       id: 'tab-a',
@@ -4316,7 +4319,11 @@ describe('Tauri native browser lifecycle', () => {
 
     await expect(removeBrowserControlResource(pair, 9)).resolves.toBe(true);
     await expect(removeBrowserControlResource(pair, 9)).resolves.toBe(true);
-    expect(calls).toEqual([9, 9]);
+    expect(calls).toEqual([9]);
+    expect(lifecycle.browserTabLifecycle(tab)).toMatchObject({
+      controlGeneration: 0,
+      confirmedAbsentControlGeneration: 9,
+    });
   });
 
   it('rejects a non-affirmative canonical removal response', async () => {
@@ -4391,6 +4398,135 @@ describe('Tauri native browser lifecycle', () => {
       'browser navigation failed before dispatch: '.length + 240,
     );
     expect(statuses[0]?.[1]).toBe('error');
+    expect(tab.url).toBe('https://old.example');
+  });
+
+  it('closes during pending controlled navigation after the prior resource removal', async () => {
+    let resolveNavigation!: () => void;
+    const controlRemovals: number[] = [];
+    const nativeCalls: string[] = [];
+    const project = {
+      id: 'project-a',
+      root: '/project',
+      browsersByWorktree: {} as Record<string, unknown>,
+    };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old.example',
+      created: true,
+      loading: false,
+      title: 'Old',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const successor: BrowserNavigationTab = {
+      id: 'tab-b',
+      url: 'https://successor.example',
+      created: true,
+      loading: false,
+      title: 'Successor',
+      history: ['https://successor.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab, successor] };
+    project.browsersByWorktree['/workspace'] = browser;
+    const lifecycle = browserLifecycleHarness();
+    Object.assign(lifecycle.browserTabLifecycle(tab), {
+      generation: 3,
+      nativeLabel: 'native-tab-a',
+      liveGeneration: 3,
+      controlGeneration: 9,
+      liveUrl: tab.url,
+      liveNavigationToken: 'old-token',
+      eventUrl: tab.url,
+      viewLive: true,
+    });
+    const removeBrowserControlResource = compileFunction<
+      (value: { project: { root: string }; tab: BrowserNavigationTab }, generation?: number) =>
+        Promise<boolean>
+    >(functionSource(mainJs, 'removeBrowserControlResource'), {
+      browserTabLifecycle: lifecycle.browserTabLifecycle,
+      ensureBrowserControlProvider: async () => ({ providerId: 'desktop' }),
+      invoke: async (_command: string, args: { generation: number }) => {
+        controlRemovals.push(args.generation);
+        return args.generation === 9;
+      },
+    });
+    const invoke = async (command: string) => {
+      nativeCalls.push(command);
+      if (command === 'browser_navigate') {
+        return new Promise<void>((resolve) => { resolveNavigation = resolve; });
+      }
+    };
+    const navigationDependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      invoke,
+      lifecycle,
+    );
+    Object.assign(navigationDependencies, {
+      invalidateBrowserAutomation: async () => true,
+      removeBrowserControlResource,
+      discardObsoleteBrowserNavigation: compileFunction<
+        (context: Record<string, unknown>) => Promise<boolean>
+      >(functionSource(mainJs, 'discardObsoleteBrowserNavigation'), {
+        ...lifecycle,
+        invalidateBrowserAutomation: async () => true,
+        removeBrowserControlResource,
+        invoke,
+        syncProjectBrowser: () => {},
+        saveWorkspaceSoon: () => {},
+        setStatus: () => {},
+        boundedBrowserError: compileFunction<
+          (error: unknown) => string
+        >(functionSource(mainJs, 'boundedBrowserError'), {}),
+      }),
+    });
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), navigationDependencies);
+    const closeBrowserTab = compileFunction<
+      (value: typeof project, tabId: string) => Promise<boolean>
+    >(functionSource(mainJs, 'closeBrowserTab'), {
+      ...lifecycle,
+      activeProject: () => project,
+      ensureBrowserModel: () => browser,
+      invalidateBrowserAutomation: async () => true,
+      removeBrowserControlResource,
+      invoke,
+      browserLabelForTab: () => 'project-a:tab-a',
+      setStatus: () => {},
+      renderBrowserTabs: () => {},
+      syncProjectBrowser: () => {},
+      saveWorkspaceSoon: () => {},
+      restoreDormantBrowserTab: async () => true,
+    });
+
+    const navigation = navigateBrowser('https://new.example', { tabId: tab.id });
+    for (let index = 0; index < 8 && nativeCalls.length === 0; index += 1) {
+      await Promise.resolve();
+    }
+    expect(controlRemovals).toEqual([9]);
+    expect(nativeCalls).toEqual(['browser_navigate']);
+
+    await expect(closeBrowserTab(project, tab.id)).resolves.toBe(true);
+    expect(controlRemovals).toEqual([9]);
+    expect(browser.tabs).toEqual([successor]);
+    expect(nativeCalls).toEqual(['browser_navigate', 'browser_destroy']);
+
+    resolveNavigation();
+    await expect(navigation).resolves.toBe(false);
+    expect(controlRemovals).toEqual([9]);
+    expect(nativeCalls).toEqual([
+      'browser_navigate',
+      'browser_destroy',
+      'browser_destroy',
+    ]);
+    expect(lifecycle.browserTabLifecycle(tab)).toMatchObject({
+      cleanupGeneration: 1,
+      cleanupOperation: null,
+    });
     expect(tab.url).toBe('https://old.example');
   });
 

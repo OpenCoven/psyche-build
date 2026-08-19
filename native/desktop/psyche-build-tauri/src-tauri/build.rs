@@ -21,6 +21,7 @@ fn main() {
             "browser_hide_all_except",
             "browser_destroy",
             "browser_destroy_many",
+            "browser_current_url",
             "browser_reload",
             "browser_eval",
             "browser_script",

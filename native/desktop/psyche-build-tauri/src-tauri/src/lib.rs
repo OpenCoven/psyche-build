@@ -1767,6 +1767,64 @@ enum BrowserLinuxNavigationDecision {
     Reject(String),
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
+fn browser_navigation_urls_equivalent(left: &str, right: &str) -> bool {
+    fn is_unreserved(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+    }
+
+    fn hex_value(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    fn canonical_component(value: &str) -> String {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        let input = value.as_bytes();
+        let mut output = Vec::with_capacity(input.len());
+        let mut index = 0;
+        while index < input.len() {
+            if input[index] == b'%' && index + 2 < input.len() {
+                if let (Some(high), Some(low)) =
+                    (hex_value(input[index + 1]), hex_value(input[index + 2]))
+                {
+                    let decoded = (high << 4) | low;
+                    if is_unreserved(decoded) {
+                        output.push(decoded);
+                    } else {
+                        output.extend_from_slice(&[
+                            b'%',
+                            HEX[(decoded >> 4) as usize],
+                            HEX[(decoded & 0x0f) as usize],
+                        ]);
+                    }
+                    index += 3;
+                    continue;
+                }
+            }
+            output.push(input[index]);
+            index += 1;
+        }
+        String::from_utf8(output).unwrap_or_else(|_| value.to_string())
+    }
+
+    let (Ok(left), Ok(right)) = (Url::parse(left), Url::parse(right)) else {
+        return left == right;
+    };
+    left.scheme() == right.scheme()
+        && canonical_component(left.username()) == canonical_component(right.username())
+        && left.password().map(canonical_component) == right.password().map(canonical_component)
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+        && canonical_component(left.path()) == canonical_component(right.path())
+        && left.query().map(canonical_component) == right.query().map(canonical_component)
+        && left.fragment().map(canonical_component) == right.fragment().map(canonical_component)
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn advance_browser_linux_navigation(
     phase: &mut BrowserLinuxNavigationPhase,
@@ -1780,7 +1838,7 @@ fn advance_browser_linux_navigation(
 
     match (phase.clone(), event) {
         (BrowserLinuxNavigationPhase::AwaitingStart, BrowserLinuxNavigationEvent::Started) => {
-            if observed_url != requested_url {
+            if !browser_navigation_urls_equivalent(observed_url, requested_url) {
                 BrowserLinuxNavigationDecision::Reject(REPLACED.to_string())
             } else {
                 *phase = BrowserLinuxNavigationPhase::Started;
@@ -1802,7 +1860,7 @@ fn advance_browser_linux_navigation(
             BrowserLinuxNavigationDecision::Pending
         }
         (BrowserLinuxNavigationPhase::Started, BrowserLinuxNavigationEvent::Committed) => {
-            if observed_url == requested_url {
+            if browser_navigation_urls_equivalent(observed_url, requested_url) {
                 *phase = BrowserLinuxNavigationPhase::Committed(observed_url.to_string());
                 BrowserLinuxNavigationDecision::Pending
             } else {
@@ -1813,7 +1871,7 @@ fn advance_browser_linux_navigation(
             BrowserLinuxNavigationPhase::Redirected(ref redirected_url),
             BrowserLinuxNavigationEvent::Committed,
         ) => {
-            if observed_url == redirected_url {
+            if browser_navigation_urls_equivalent(observed_url, redirected_url) {
                 *phase = BrowserLinuxNavigationPhase::Committed(observed_url.to_string());
                 BrowserLinuxNavigationDecision::Pending
             } else {
@@ -1824,7 +1882,7 @@ fn advance_browser_linux_navigation(
             BrowserLinuxNavigationPhase::Committed(ref committed_url),
             BrowserLinuxNavigationEvent::Finished,
         ) => {
-            if observed_url == committed_url {
+            if browser_navigation_urls_equivalent(observed_url, committed_url) {
                 BrowserLinuxNavigationDecision::Complete(observed_url.to_string())
             } else {
                 BrowserLinuxNavigationDecision::Reject(AMBIGUOUS.to_string())
@@ -4037,7 +4095,10 @@ async fn start_browser_navigation(
                                         "browser navigation redirect identity was ambiguous"
                                             .to_string(),
                                     );
-                                } else if uri != registration.requested_url {
+                                } else if !browser_navigation_urls_equivalent(
+                                    &uri,
+                                    &registration.requested_url,
+                                ) {
                                     rejection = Some(
                                         "browser navigation was replaced before completion"
                                             .to_string(),
@@ -9366,6 +9427,94 @@ mod pty_runtime_tests {
                 requested,
             ),
             BrowserLinuxNavigationDecision::Complete("https://example.test/callback".to_string())
+        );
+    }
+
+    #[test]
+    fn browser_navigation_url_equivalence_accepts_common_webview_canonicalization() {
+        for (requested, observed) in [
+            ("https://example.test", "https://example.test/"),
+            ("https://example.test:443/docs", "https://example.test/docs"),
+            (
+                "http://EXAMPLE.test:80/%7euser",
+                "http://example.test/~user",
+            ),
+            (
+                "https://example.test/a%2fb?value=%7e#%61",
+                "https://example.test/a%2Fb?value=~#a",
+            ),
+        ] {
+            assert!(
+                browser_navigation_urls_equivalent(requested, observed),
+                "{requested} should be equivalent to {observed}"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_navigation_url_equivalence_preserves_navigation_distinctions() {
+        for (left, right) in [
+            ("http://example.test/path", "https://example.test/path"),
+            ("https://a.example.test/path", "https://b.example.test/path"),
+            ("https://example.test:444/path", "https://example.test/path"),
+            ("https://example.test/path", "https://example.test/path/"),
+            ("https://example.test/a%2Fb", "https://example.test/a/b"),
+            (
+                "https://example.test/path?a=1",
+                "https://example.test/path?a=2",
+            ),
+            ("https://example.test/path#a", "https://example.test/path#b"),
+        ] {
+            assert!(
+                !browser_navigation_urls_equivalent(left, right),
+                "{left} should remain distinct from {right}"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_navigation_state_accepts_direct_canonicalization_without_weakening_redirect_policy() {
+        let requested = "https://example.test/%7euser";
+        let mut direct = BrowserLinuxNavigationPhase::AwaitingStart;
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut direct,
+                BrowserLinuxNavigationEvent::Started,
+                "https://example.test/~user",
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Pending
+        );
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut direct,
+                BrowserLinuxNavigationEvent::Committed,
+                "https://example.test:443/~user",
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Pending
+        );
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut direct,
+                BrowserLinuxNavigationEvent::Finished,
+                "https://example.test/~user",
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Complete("https://example.test/~user".to_string())
+        );
+
+        let mut replacement = BrowserLinuxNavigationPhase::AwaitingStart;
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut replacement,
+                BrowserLinuxNavigationEvent::Started,
+                "https://example.test/replaced",
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Reject(
+                "browser navigation was replaced before completion".to_string()
+            )
         );
     }
 
