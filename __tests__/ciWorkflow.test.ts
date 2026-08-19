@@ -114,6 +114,19 @@ describe('pull request CI workflow contract', () => {
     );
     expect(changesJob).toContain('GITHUB_EVENT_NAME: ${{ github.event_name }}');
     expect(changesJob).toContain('scripts/classify-ci-changes.sh');
+    expect(changesJob).toContain(
+      'git show "$BASE_SHA:scripts/classify-ci-changes.sh" > "$RUNNER_TEMP/classify-ci-changes.sh"',
+    );
+    expect(changesJob).toContain('chmod +x "$RUNNER_TEMP/classify-ci-changes.sh"');
+    expect(changesJob).toContain(
+      'GITHUB_OUTPUT="$RUNNER_TEMP/classify-ci-changes-output.txt" bash "$RUNNER_TEMP/classify-ci-changes.sh"',
+    );
+    expect(changesJob).toContain('if [ "$GITHUB_EVENT_NAME" != \'pull_request\' ]; then');
+    for (const output of ['desktop=true', 'ios=true', 'package=true']) {
+      expect(changesJob).toContain(output);
+    }
+    expect(changesJob).toContain('cat "$RUNNER_TEMP/classify-ci-changes-output.txt" >> "$GITHUB_OUTPUT"');
+    expect(changesJob).not.toMatch(/run:\s*(?:bash\s+)?scripts\/classify-ci-changes\.sh/);
     expect(changesJob).toContain('package: ${{ steps.classify.outputs.package }}');
 
     expect(qualityJob).toContain('name: Quality');

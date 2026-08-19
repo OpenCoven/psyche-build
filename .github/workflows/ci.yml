@@ -33,7 +33,49 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-        run: scripts/classify-ci-changes.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          write_fail_open_outputs() {
+            {
+              printf 'desktop=true\n'
+              printf 'ios=true\n'
+              printf 'package=true\n'
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          if [ "$GITHUB_EVENT_NAME" != 'pull_request' ]; then
+            write_fail_open_outputs
+            exit 0
+          fi
+
+          if ! git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null 2>&1; then
+            write_fail_open_outputs
+            exit 0
+          fi
+
+          if ! git show "$BASE_SHA:scripts/classify-ci-changes.sh" > "$RUNNER_TEMP/classify-ci-changes.sh"; then
+            write_fail_open_outputs
+            exit 0
+          fi
+
+          chmod +x "$RUNNER_TEMP/classify-ci-changes.sh"
+          : > "$RUNNER_TEMP/classify-ci-changes-output.txt"
+
+          if ! GITHUB_OUTPUT="$RUNNER_TEMP/classify-ci-changes-output.txt" bash "$RUNNER_TEMP/classify-ci-changes.sh"; then
+            write_fail_open_outputs
+            exit 0
+          fi
+
+          if ! grep -Eq '^desktop=' "$RUNNER_TEMP/classify-ci-changes-output.txt" \
+            || ! grep -Eq '^ios=' "$RUNNER_TEMP/classify-ci-changes-output.txt" \
+            || ! grep -Eq '^package=' "$RUNNER_TEMP/classify-ci-changes-output.txt"; then
+            write_fail_open_outputs
+            exit 0
+          fi
+
+          cat "$RUNNER_TEMP/classify-ci-changes-output.txt" >> "$GITHUB_OUTPUT"
 
   quality:
     name: Quality
