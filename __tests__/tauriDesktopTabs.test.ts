@@ -12,6 +12,10 @@ const tauriLib = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'),
   'utf8',
 ).replace(/\r\n/g, '\n');
+const nativeFocus = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/browser_focus.rs'),
+  'utf8',
+).replace(/\r\n/g, '\n');
 const tauriBuild = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/build.rs'),
   'utf8',
@@ -26,6 +30,13 @@ const browserShortcutCapabilityPath = join(
 );
 const browserShortcutCapability = existsSync(browserShortcutCapabilityPath)
   ? JSON.parse(readFileSync(browserShortcutCapabilityPath, 'utf8'))
+  : null;
+const browserTitleCapabilityPath = join(
+  repoRoot,
+  'native/desktop/psyche-build-tauri/src-tauri/capabilities/browser-title-reporting.json',
+);
+const browserTitleCapability = existsSync(browserTitleCapabilityPath)
+  ? JSON.parse(readFileSync(browserTitleCapabilityPath, 'utf8'))
   : null;
 const tauriCargo = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml'),
@@ -158,12 +169,15 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(injection).toContain('reflectApply(promiseThen, pending, [');
     expect(injection).toContain('secret = nextSecret;');
     expect(injection).not.toMatch(/emit\("browser:shortcut-(terminal-pane|agent-pane|composer)"/);
-    expect(tauriLib).toMatch(
-      /emit\("browser:title", \{\{ label: browserLabel, title: title, url: location\.href \}\}\);/,
+    expect(tauriLib).toContain('"browser_report_title"');
+    expect(tauriLib).toContain('"browser:title"');
+    expect(tauriLib).not.toContain('browser_focus_initialization_script');
+    expect(tauriLib).not.toContain('focusNonce');
+    expect(nativeFocus).toContain('emit_to("main", "browser:focus", payload)');
+    expect(tauriLib).not.toContain(
+      'navigationToken: window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ || null',
     );
-    expect(tauriLib).toMatch(
-      /emit\("browser:focus", \{\{ label: browserLabel, url: location\.href \}\}\);/,
-    );
+    expect(tauriLib).not.toContain('__PSYCHE_BROWSER_FOCUS_IDENTITY__');
     expect(tauriLib).not.toMatch(forbiddenBrowserNewTabShortcut);
     expect(injection).toContain(
       'var key = event.key ? reflectApply(stringToLowerCase, event.key, []) : "";',
@@ -266,6 +280,18 @@ describe('Tauri desktop tab shortcuts', () => {
     });
     expect(browserShortcutCapability.permissions).toHaveLength(2);
     expect(JSON.stringify(browserShortcutCapability)).not.toContain('core:event:allow-emit');
+    expect(browserTitleCapability).toEqual({
+      $schema: '../gen/schemas/macOS-schema.json',
+      identifier: 'browser-title-reporting',
+      description: 'Allows embedded browser webviews to report non-authoritative page titles',
+      local: true,
+      webviews: ['psyche-browser-*'],
+      remote: {
+        urls: ['http://*', 'https://*'],
+      },
+      permissions: ['allow-browser-report-title'],
+    });
+    expect(JSON.stringify(browserTitleCapability)).not.toContain('core:event:allow-emit');
   });
 
   it('manages per-webview shortcut authorization across navigation and destruction', () => {
@@ -285,11 +311,13 @@ describe('Tauri desktop tab shortcuts', () => {
     );
   });
 
-  it('keeps browser navigation single-shot for newly created webviews', () => {
+  it('recreates browser webviews and installs native focus callbacks for each navigation', () => {
     expect(tauriLib).toMatch(/fn\s+ensure_browser[\s\S]*?->\s*Result<bool,\s*String>/);
     expect(tauriLib).toMatch(/return\s+Ok\(false\);/);
     expect(tauriLib).toMatch(/let\s+created\s*=\s*ensure_browser\(/);
-    expect(tauriLib).toMatch(/webview\s*=\s*app[\s\S]*?if\s+!created\s*\{[\s\S]*?webview\s*\.set_position\(LogicalPosition::new\(x,\s*y\)\)[\s\S]*?webview\s*\.set_size\(LogicalSize::new\(w\.max\(1\.0\),\s*h\.max\(1\.0\)\)\)/);
+    expect(tauriLib).toContain('retire_browser_webview_for_navigation(&app, &label)?;');
+    expect(tauriLib).toMatch(/\.initialization_script\(shortcut_script\)[\s\S]*\.initialization_script\(title_script\)[\s\S]*\.initialization_script\(automation_source\)/);
+    expect(tauriLib).toContain('install_browser_native_focus_callback(&webview, &label).await');
     const navigate = tauriLib.slice(tauriLib.indexOf('async fn browser_navigate('), tauriLib.indexOf('fn browser_set_bounds('));
     expect(navigate.match(/start_browser_navigation\(/g)).toHaveLength(1);
   });
