@@ -175,7 +175,7 @@ kbd {
   background: var(--sidebar-surface);
 }
 
-/* Collapsed rails — one click anywhere brings the surface back. */
+/* Collapsed rails stay inert except for their explicit controls. */
 .mini-rail {
   display: flex;
   flex-direction: column;
