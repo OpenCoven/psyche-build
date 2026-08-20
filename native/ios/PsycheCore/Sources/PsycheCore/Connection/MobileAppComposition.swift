@@ -7,6 +7,7 @@ public final class MobileAppComposition: ObservableObject {
     public let requestClient: ControlRequestClient
     public let workspaceStore: WorkspaceStore
     public let pairedHostStore: PairedHostStore
+    public let bonjourHostDiscovery: BonjourHostDiscovery
     public let connectionManager: ConnectionManager
     public let terminalRegistry: TerminalSessionRegistry
 
@@ -15,11 +16,13 @@ public final class MobileAppComposition: ObservableObject {
     public init(
         transport: any PsycheTransport,
         pairedHostStore: PairedHostStore,
+        bonjourHostDiscovery: BonjourHostDiscovery = BonjourHostDiscovery(),
         clientID: String = UUID().uuidString,
         clientName: String = "Psyche iOS"
     ) {
         self.transport = transport
         self.pairedHostStore = pairedHostStore
+        self.bonjourHostDiscovery = bonjourHostDiscovery
 
         let requestClient = ControlRequestClient(transport: transport)
         let workspaceStore = WorkspaceStore(controlRequests: requestClient)
@@ -49,6 +52,6 @@ public final class MobileAppComposition: ObservableObject {
         guard !hasStarted else { return }
         hasStarted = true
         terminalRegistry.start()
-        await connectionManager.connectToStoredHost()
+        await connectionManager.connectToLastConnectedHost()
     }
 }

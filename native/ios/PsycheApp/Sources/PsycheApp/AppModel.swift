@@ -29,28 +29,24 @@ final class AppModel: ObservableObject {
 
     var isFixture: Bool { fixtureName != nil }
 
-    init(
-        fixture: String? = nil,
-        fixtureSendFails: Bool = false,
-        fixtureInspectionFails: Bool = false
+    init(composition: MobileAppComposition) {
+        fixtureName = nil
+        self.composition = composition
+        workspaceStore = composition.workspaceStore
+        terminalRegistry = composition.terminalRegistry
+    }
+
+    private init(
+        fixtureName: String,
+        fixtureSendFails: Bool,
+        fixtureInspectionFails: Bool
     ) {
-        fixtureName = fixture
-
-        guard let fixture else {
-            let composition = MobileAppComposition.production()
-            self.composition = composition
-            workspaceStore = composition.workspaceStore
-            terminalRegistry = composition.terminalRegistry
-            return
-        }
-
+        self.fixtureName = fixtureName
         composition = nil
         workspaceStore = DemoStore.makeWorkspaceStore(
-            fixture: fixture,
+            fixture: fixtureName,
             inspectionFails: fixtureInspectionFails
         )
-        // A fixture terminal client, so the fixture shell renders real output
-        // through the real registry without opening a socket.
         terminalRegistry = TerminalSessionRegistry(
             client: FixtureTerminalClient(sendFails: fixtureSendFails)
         )
@@ -58,11 +54,41 @@ final class AppModel: ObservableObject {
         hostName = Self.fixtureHostName
     }
 
+    convenience init(
+        fixture: String? = nil,
+        fixtureSendFails: Bool = false,
+        fixtureInspectionFails: Bool = false
+    ) {
+        if let fixture {
+            self.init(
+                fixtureName: fixture,
+                fixtureSendFails: fixtureSendFails,
+                fixtureInspectionFails: fixtureInspectionFails
+            )
+        } else {
+            self.init(composition: MobileAppComposition.production())
+        }
+    }
+
     /// Fixed so UI tests can assert host context without a paired record.
     static let fixtureHostName = "psyche-demo.local"
 
+    func recordConnectedHost(_ host: PairedHost) {
+        hostName = host.serverName
+        connectionError = nil
+    }
+
     func recordPairedHostName(_ name: String) {
         hostName = name
+        connectionError = nil
+    }
+
+    func loadLastConnectedHostContext() async {
+        guard let composition,
+              let host = try? await composition.pairedHostStore.lastConnectedHost() else {
+            return
+        }
+        hostName = host.serverName
     }
 
     /// Reads the launch arguments once so the decision cannot drift between
@@ -90,13 +116,7 @@ final class AppModel: ObservableObject {
         guard let composition else { return }
 
         await composition.start()
-
-        // Read the stored identity rather than waiting on a welcome: it is
-        // what auto-connect just used, and it lets Settings and VoiceOver name
-        // the host even when the connection has not come up.
-        if let paired = try? await composition.pairedHostStore.hosts().first {
-            hostName = paired.serverName
-        }
+        await loadLastConnectedHostContext()
 
         let state = await composition.connectionManager.state
         if case let .failed(reason) = state {
