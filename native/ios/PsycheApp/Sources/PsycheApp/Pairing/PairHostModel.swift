@@ -22,6 +22,12 @@ final class PairHostModel: ObservableObject {
         var id: String { entry.serverID }
         var serverID: String { entry.serverID }
         var serverName: String { entry.serverName }
+        var discriminator: String {
+            if let resolvedAddress, let resolvedPort {
+                return "\(resolvedAddress):\(resolvedPort) • \(serverIDSuffix)"
+            }
+            return serverIDSuffix
+        }
 
         var resolutionFailure: BonjourResolutionFailure? {
             guard case let .resolutionFailed(failure) = entry.availability else { return nil }
@@ -36,6 +42,11 @@ final class PairHostModel: ObservableObject {
         var resolvedEndpoint: HostEndpoint? { resolvedHost?.endpoint }
         var resolvedAddress: String? { resolvedEndpoint?.host }
         var resolvedPort: Int? { resolvedEndpoint?.port }
+
+        private var serverIDSuffix: String {
+            let suffix = String(serverID.suffix(6))
+            return suffix.count == serverID.count ? suffix : "…\(suffix)"
+        }
     }
 
     struct Dependencies: Sendable {
@@ -184,6 +195,7 @@ final class PairHostModel: ObservableObject {
 
     private var observationTask: Task<Void, Never>?
     private var actionTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
     private var retryTasks: [String: Task<Void, Never>] = [:]
     private var hasStarted = false
     private var hasStopped = false
@@ -508,30 +520,29 @@ final class PairHostModel: ObservableObject {
     }
 
     func stop() async {
+        if let stopTask {
+            await stopTask.value
+            return
+        }
         guard hasStarted, !hasStopped else { return }
         hasStopped = true
         observationGeneration &+= 1
-        observationTask?.cancel()
-        observationTask = nil
-
-        actionTask?.cancel()
-        actionTask = nil
-        activeActionID = nil
-        actionOwnedServerID = nil
-
-        retryTasks.values.forEach { $0.cancel() }
-        retryTasks.removeAll()
-        retryingServerIDs.removeAll()
-
-        pairingCode = ""
-
         let shouldDisconnect = ownsIncompleteConnection && phase != .ready
         if shouldDisconnect {
-            await dependencies.disconnect()
             ownsIncompleteConnection = false
         }
-
-        await dependencies.stopDiscovery()
+        cancelOwnedTasks()
+        pairingCode = ""
+        let dependencies = self.dependencies
+        let cleanupTask = Task.detached(priority: .utility) { [dependencies, shouldDisconnect] in
+            await dependencies.stopDiscovery()
+            if shouldDisconnect {
+                await dependencies.disconnect()
+            }
+        }
+        stopTask = cleanupTask
+        await cleanupTask.value
+        stopTask = nil
     }
 
     func select(serverID: String) {

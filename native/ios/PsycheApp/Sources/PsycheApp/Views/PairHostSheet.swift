@@ -2,9 +2,24 @@ import PsycheCore
 import SwiftUI
 
 struct PairHostSheet: View {
+    private enum StopPhase {
+        case cancelling
+        case finishingReadyHost
+
+        var progressMessage: String {
+            switch self {
+            case .cancelling:
+                return "Closing connection sheet…"
+            case .finishingReadyHost:
+                return "Finishing connection…"
+            }
+        }
+    }
+
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model: PairHostModel
     @State private var deliveredReadyServerID: String?
+    @State private var stopPhase: StopPhase?
 
     private let onReady: (PairedHost) -> Void
 
@@ -22,21 +37,23 @@ struct PairHostSheet: View {
                 progressSection
                 errorSection
             }
+            .disabled(isStopping)
             .navigationTitle("Connections")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") {
+                        beginCancellation()
+                    }
+                    .disabled(isStopping)
                 }
             }
             .accessibilityIdentifier("pair-host-sheet")
         }
         .presentationDetents([.medium, .large])
+        .interactiveDismissDisabled()
         .task {
             await model.start()
-        }
-        .onDisappear {
-            Task { await model.stop() }
         }
         .onChange(of: model.readyHost?.serverID) {
             deliverReadyHostIfNeeded()
@@ -54,7 +71,7 @@ struct PairHostSheet: View {
                     PairHostRow(
                         row: row,
                         isSelected: model.selectedServerID == row.serverID && !model.showManualEntry,
-                        isBusy: model.isActionInProgress,
+                        isBusy: model.isActionInProgress || isStopping,
                         isRetrying: model.retryingServerIDs.contains(row.serverID),
                         onSelect: { model.select(serverID: row.serverID) },
                         onRetry: { model.retry(serverID: row.serverID) }
@@ -85,17 +102,28 @@ struct PairHostSheet: View {
                     .frame(minHeight: PsycheTheme.minimumTapTarget)
                     .tint(PsycheTheme.amber)
                     .accessibilityIdentifier("pair-host-repair-confirm")
-                    .disabled(model.isActionInProgress)
+                    .disabled(model.isActionInProgress || isStopping)
 
                     Button("Back") {
                         model.cancelRePairingConfirmation()
                     }
                     .frame(minHeight: PsycheTheme.minimumTapTarget)
                     .accessibilityIdentifier("pair-host-repair-cancel")
-                    .disabled(model.isActionInProgress)
+                    .disabled(model.isActionInProgress || isStopping)
                 }
             default:
-                Section(row.serverName) {
+                Section("Selected host") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(row.serverName)
+                            .foregroundStyle(.primary)
+                        Text(row.discriminator)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Selected host, \(row.serverName), \(row.discriminator)")
+                    .accessibilityIdentifier("pair-host-selected")
+
                     if let message = model.selectedActionMessage {
                         Text(message)
                             .foregroundStyle(.secondary)
@@ -118,7 +146,7 @@ struct PairHostSheet: View {
                     }
                     .frame(minHeight: PsycheTheme.minimumTapTarget)
                     .accessibilityIdentifier("pair-host-submit")
-                    .disabled(!model.canSubmitSelectedAction)
+                    .disabled(!model.canSubmitSelectedAction || isStopping)
 
                     if row.resolutionFailure != nil {
                         Text("Retry the row above or switch on manual connection below.")
@@ -140,7 +168,7 @@ struct PairHostSheet: View {
             )
             .frame(minHeight: PsycheTheme.minimumTapTarget)
             .accessibilityIdentifier("pair-host-manual-toggle")
-            .disabled(model.isActionInProgress)
+            .disabled(model.isActionInProgress || isStopping)
 
             if model.showManualEntry {
                 TextField("Host or IP address", text: $model.manualHost)
@@ -166,7 +194,7 @@ struct PairHostSheet: View {
                 }
                 .frame(minHeight: PsycheTheme.minimumTapTarget)
                 .accessibilityIdentifier("pair-host-submit")
-                .disabled(!model.canSubmitPrimaryAction)
+                .disabled(!model.canSubmitPrimaryAction || isStopping)
             }
         } header: {
             Text("Manual connection")
@@ -206,6 +234,9 @@ struct PairHostSheet: View {
     }
 
     private var progressMessage: String? {
+        if let stopPhase {
+            return stopPhase.progressMessage
+        }
         switch model.phase {
         case .connecting:
             return "Connecting to host…"
@@ -218,14 +249,44 @@ struct PairHostSheet: View {
         }
     }
 
+    @MainActor
     private func deliverReadyHostIfNeeded() {
         guard model.phase == .ready,
               let host = model.readyHost,
-              deliveredReadyServerID != host.serverID else {
+              deliveredReadyServerID != host.serverID,
+              !isStopping else {
             return
         }
         deliveredReadyServerID = host.serverID
+        stopPhase = .finishingReadyHost
+        Task {
+            await finishReadyHost(host)
+        }
+    }
+
+    private var isStopping: Bool {
+        stopPhase != nil
+    }
+
+    @MainActor
+    private func beginCancellation() {
+        guard !isStopping else { return }
+        stopPhase = .cancelling
+        Task {
+            await finishCancellation()
+        }
+    }
+
+    @MainActor
+    private func finishReadyHost(_ host: PairedHost) async {
         onReady(host)
+        await model.stop()
+        dismiss()
+    }
+
+    @MainActor
+    private func finishCancellation() async {
+        await model.stop()
         dismiss()
     }
 }
@@ -242,8 +303,13 @@ private struct PairHostRow: View {
         VStack(alignment: .leading, spacing: 10) {
             Button(action: onSelect) {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(row.serverName)
-                        .foregroundStyle(.primary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(row.serverName)
+                            .foregroundStyle(.primary)
+                        Text(row.discriminator)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer(minLength: 8)
                     if isSelected {
                         Image(systemName: "checkmark")
@@ -256,7 +322,7 @@ private struct PairHostRow: View {
             .buttonStyle(.plain)
             .disabled(isBusy)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(row.serverName)
+            .accessibilityLabel("\(row.serverName), \(row.discriminator)")
             .accessibilityHint(selectionHint)
             .accessibilityAddTraits(isSelected ? [.isSelected] : [])
             .accessibilityIdentifier("pair-host-row-\(row.serverID)")

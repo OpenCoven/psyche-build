@@ -166,6 +166,44 @@ final class PairHostModelTests: XCTestCase {
         XCTAssertEqual(model.rows[1].resolvedEndpoint?.host, "server-b.local")
     }
 
+    func testSameNameHostsPublishDistinctVisibleDiscriminators() async throws {
+        let probe = PairHostModelProbe()
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([
+            makeEntry(
+                serverID: "studio-111111",
+                serverName: "Studio",
+                host: "studio.local",
+                port: 4242
+            ),
+            makeEntry(
+                serverID: "studio-222222",
+                serverName: "Studio",
+                host: "studio.local",
+                port: 4242
+            ),
+            makeFailedEntry(
+                serverID: "studio-333333",
+                serverName: "Studio",
+                failure: .timedOut
+            )
+        ])
+
+        await waitUntil { model.rows.count == 3 }
+
+        XCTAssertEqual(
+            model.rows.map(\.discriminator),
+            [
+                "studio.local:4242 • …111111",
+                "studio.local:4242 • …222222",
+                "…333333"
+            ]
+        )
+        XCTAssertNotEqual(model.rows[0].discriminator, model.rows[1].discriminator)
+    }
+
     func testStatusLookupFailureIsExplicitAndLaterValidSnapshotRecoversWhenIdle() async throws {
         let probe = PairHostModelProbe()
         await probe.setPairingStatusResults(
@@ -785,6 +823,76 @@ final class PairHostModelTests: XCTestCase {
         XCTAssertNil(model.readyHost)
     }
 
+    func testConcurrentStopCallsShareOneCleanupAndBothAwaitCompletion() async throws {
+        let probe = PairHostModelProbe()
+        let stopGate = AsyncGate()
+        let disconnectGate = AsyncGate()
+        let readinessGate = AsyncGate()
+        let completions = CompletionTracker()
+        let endpoint = HostEndpoint(
+            host: "alpha.local",
+            port: 4242,
+            certificateFingerprint: testFingerprint
+        )
+        await probe.setPairingStatus(.paired, for: "server-a")
+        await probe.setConnectPairedResult(.success(makePairedHost(
+            serverID: "server-a",
+            serverName: "Alpha",
+            endpoint: endpoint
+        )))
+        await probe.setReadinessGate(readinessGate)
+        await probe.setStopGate(stopGate)
+        await probe.setDisconnectGate(disconnectGate)
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha")])
+        await waitUntil { model.rows.count == 1 }
+        model.select(serverID: "server-a")
+
+        let submitTask = Task { await model.submit() }
+        await readinessGate.waitUntilStarted()
+        await waitUntil { model.phase == .loadingWorkspace }
+
+        let firstStop = Task {
+            await model.stop()
+            await completions.mark("first")
+        }
+        let secondStop = Task {
+            await model.stop()
+            await completions.mark("second")
+        }
+
+        await stopGate.waitUntilStarted()
+        await waitUntilAsync { await probe.stopCount() == 1 }
+        let firstCompletedBeforeStop = await completions.contains("first")
+        let secondCompletedBeforeStop = await completions.contains("second")
+        XCTAssertFalse(firstCompletedBeforeStop)
+        XCTAssertFalse(secondCompletedBeforeStop)
+
+        await stopGate.succeed()
+        await disconnectGate.waitUntilStarted()
+        await waitUntilAsync { await probe.disconnectCount() == 1 }
+        let firstCompletedBeforeDisconnect = await completions.contains("first")
+        let secondCompletedBeforeDisconnect = await completions.contains("second")
+        XCTAssertFalse(firstCompletedBeforeDisconnect)
+        XCTAssertFalse(secondCompletedBeforeDisconnect)
+
+        await disconnectGate.succeed()
+        await firstStop.value
+        await secondStop.value
+        await submitTask.value
+
+        let firstCompletedAfterCleanup = await completions.contains("first")
+        let secondCompletedAfterCleanup = await completions.contains("second")
+        let stopCount = await probe.stopCount()
+        let disconnectCount = await probe.disconnectCount()
+        XCTAssertTrue(firstCompletedAfterCleanup)
+        XCTAssertTrue(secondCompletedAfterCleanup)
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(disconnectCount, 1)
+    }
+
     func testStopDuringActionCancelsOwnedWorkStopsDiscoveryAndDisconnectsIncompleteConnection() async throws {
         let probe = PairHostModelProbe()
         let readinessGate = AsyncGate()
@@ -821,6 +929,54 @@ final class PairHostModelTests: XCTestCase {
         XCTAssertEqual(disconnectCount, 1)
         XCTAssertEqual(model.pairingCode, "")
         XCTAssertNil(model.readyHost)
+    }
+
+    func testStopDuringIncompleteConnectionWaitsForDisconnectBeforeReturning() async throws {
+        let probe = PairHostModelProbe()
+        let readinessGate = AsyncGate()
+        let disconnectGate = AsyncGate()
+        let completions = CompletionTracker()
+        let endpoint = HostEndpoint(
+            host: "alpha.local",
+            port: 4242,
+            certificateFingerprint: testFingerprint
+        )
+        await probe.setPairingStatus(.paired, for: "server-a")
+        await probe.setConnectPairedResult(.success(makePairedHost(
+            serverID: "server-a",
+            serverName: "Alpha",
+            endpoint: endpoint
+        )))
+        await probe.setReadinessGate(readinessGate)
+        await probe.setDisconnectGate(disconnectGate)
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha")])
+        await waitUntil { model.rows.count == 1 }
+        model.select(serverID: "server-a")
+
+        let submitTask = Task { await model.submit() }
+        await readinessGate.waitUntilStarted()
+        await waitUntil { model.phase == .loadingWorkspace }
+
+        let stopTask = Task {
+            await model.stop()
+            await completions.mark("stop")
+        }
+
+        await disconnectGate.waitUntilStarted()
+        let completedBeforeDisconnect = await completions.contains("stop")
+        XCTAssertFalse(completedBeforeDisconnect)
+
+        await disconnectGate.succeed()
+        await stopTask.value
+        await submitTask.value
+
+        let completedAfterDisconnect = await completions.contains("stop")
+        let disconnectCount = await probe.disconnectCount()
+        XCTAssertTrue(completedAfterDisconnect)
+        XCTAssertEqual(disconnectCount, 1)
     }
 
     func testStopWhilePairedConnectIsActiveButStillBlockedDisconnectsExactlyOnce() async throws {
@@ -1056,7 +1212,9 @@ final class PairHostModelTests: XCTestCase {
 
         await model.stop()
 
+        let stopCount = await probe.stopCount()
         let disconnectCount = await probe.disconnectCount()
+        XCTAssertEqual(stopCount, 1)
         XCTAssertEqual(disconnectCount, 0)
     }
 
@@ -1345,6 +1503,18 @@ private actor DeferredThrowingValue<Value: Sendable> {
     }
 }
 
+private actor CompletionTracker {
+    private var completions: Set<String> = []
+
+    func mark(_ key: String) {
+        completions.insert(key)
+    }
+
+    func contains(_ key: String) -> Bool {
+        completions.contains(key)
+    }
+}
+
 private actor PairHostModelProbe {
     private let stream: AsyncStream<[BonjourDiscoveryEntry]>
     private let continuation: AsyncStream<[BonjourDiscoveryEntry]>.Continuation
@@ -1388,6 +1558,8 @@ private actor PairHostModelProbe {
     private var connectForPairingGate: AsyncGate?
     private var pairGate: AsyncGate?
     private var readinessGate: AsyncGate?
+    private var stopGate: AsyncGate?
+    private var disconnectGate: AsyncGate?
     private var retryGates: [String: AsyncGate] = [:]
 
     init() {
@@ -1453,6 +1625,14 @@ private actor PairHostModelProbe {
         readinessGate = gate
     }
 
+    func setStopGate(_ gate: AsyncGate?) {
+        stopGate = gate
+    }
+
+    func setDisconnectGate(_ gate: AsyncGate?) {
+        disconnectGate = gate
+    }
+
     func setRetryGate(_ gate: AsyncGate, for serverID: String) {
         retryGates[serverID] = gate
     }
@@ -1472,8 +1652,9 @@ private actor PairHostModelProbe {
         return stream
     }
 
-    private func stopDiscovery() {
+    private func stopDiscovery() async {
         stopInvocationCount += 1
+        try? await stopGate?.wait()
     }
 
     private func retryDiscovery(serverID: String) async {
@@ -1544,8 +1725,9 @@ private actor PairHostModelProbe {
         try await readinessGate?.wait()
     }
 
-    private func disconnect() {
+    private func disconnect() async {
         disconnectInvocationCount += 1
+        try? await disconnectGate?.wait()
     }
 }
 
