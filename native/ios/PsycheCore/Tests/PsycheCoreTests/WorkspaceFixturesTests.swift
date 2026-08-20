@@ -84,6 +84,15 @@ final class WorkspaceFixturesTests: XCTestCase {
         XCTAssertTrue(infra?.projectPanes.isEmpty == true)
     }
 
+    func testFixturePublishesWebsiteRituals() {
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject)
+
+        XCTAssertEqual(
+            workspace.projects.first { $0.id == "website" }?.rituals.map(\.id),
+            ["review-site"]
+        )
+    }
+
     func testFixtureSpansMultipleProjectsAndWorktrees() {
         let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject)
 
@@ -94,5 +103,48 @@ final class WorkspaceFixturesTests: XCTestCase {
             [true, false],
             "The multiproject fixture must cover a main worktree and a feature worktree"
         )
+    }
+
+    func testProjectReplacingPreservesRituals() {
+        let ritual = WorkspaceRitualSnapshot(
+            id: "release-checklist",
+            displayName: "Release checklist",
+            description: "Prepare a release safely."
+        )
+        let original = WorkspaceProjectSnapshot(
+            id: "psyche",
+            root: "/repos/psyche",
+            title: "Psyche Build",
+            rituals: [ritual],
+            worktrees: [],
+            projectPanes: [],
+            runningCount: 0,
+            attentionCount: 0
+        )
+
+        let replaced = original.replacing(
+            worktrees: [
+                WorkspaceWorktreeSnapshot(
+                    path: "/repos/psyche",
+                    head: "abc123",
+                    branch: "main",
+                    isMain: true,
+                    detached: false,
+                    bare: false,
+                    locked: false,
+                    lockReason: nil,
+                    prunable: false,
+                    pruneReason: nil,
+                    dirty: false,
+                    missing: false,
+                    panes: [],
+                    runningCount: 0,
+                    attentionCount: 0
+                )
+            ],
+            projectPanes: []
+        )
+
+        XCTAssertEqual(replaced.rituals, [ritual])
     }
 }

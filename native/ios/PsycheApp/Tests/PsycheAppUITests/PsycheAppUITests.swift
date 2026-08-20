@@ -393,6 +393,40 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(element("pane-chip-pane-1", in: app).waitForExistence(timeout: 10))
     }
 
+    func testRitualLessProjectsDoNotOfferARitualMenu() throws {
+        let app = launchApp()
+
+        let paneRow = row("now-pane-ios-cockpit", in: app)
+        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
+        paneRow.tap()
+        XCTAssertTrue(element("pane-workspace-ios-cockpit", in: app).waitForExistence(timeout: 10))
+
+        openPaneActions(in: app)
+
+        XCTAssertTrue(app.buttons["pane-new"].waitForExistence(timeout: 10))
+        XCTAssertFalse(element("pane-rituals", in: app).exists)
+    }
+
+    /// Launching a ritual republishes the workspace, but the pane you were
+    /// reading stays selected while the new ritual pane joins the switcher.
+    func testLaunchingARitualRefreshesTheWorkspaceWithoutLosingSelection() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+        XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
+
+        openPaneActions(in: app)
+        let rituals = app.buttons["pane-rituals"]
+        XCTAssertTrue(rituals.waitForExistence(timeout: 10))
+        rituals.tap()
+
+        let ritual = app.buttons["pane-ritual-review-site"]
+        XCTAssertTrue(ritual.waitForExistence(timeout: 10))
+        ritual.tap()
+
+        XCTAssertTrue(element("pane-chip-ritual-review-site", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
+    }
+
     func testRenamingAPaneUpdatesWhatTheWorkspaceShows() throws {
         let app = launchApp()
         openWebHomePane(in: app)
@@ -527,6 +561,39 @@ final class PsycheAppUITests: XCTestCase {
             element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10),
             "The secondary pane should have been hidden, not discarded"
         )
+    }
+
+    func testCompactCollapsedSecondaryChipPromotesThatPane() throws {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launchApp()
+        try requireCompactWidth(in: app)
+        openWebHomePane(in: app)
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        try waitForLandscape(app)
+        splitBeside("ios-cockpit", in: app)
+        XCTAssertTrue(element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10))
+
+        XCUIDevice.shared.orientation = .portrait
+        try waitForPortrait(app)
+
+        let cockpitChip = row("pane-chip-ios-cockpit", in: app)
+        XCTAssertTrue(cockpitChip.waitForExistence(timeout: 10))
+        cockpitChip.tap()
+
+        XCTAssertTrue(
+            element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10)
+        )
+        XCTAssertFalse(
+            app.otherElements["terminal-pane-web-home"].exists,
+            "Selecting the collapsed secondary should promote it into the single visible slot"
+        )
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        try waitForLandscape(app)
+
+        XCTAssertTrue(element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(element("terminal-pane-web-home", in: app).waitForExistence(timeout: 10))
     }
 
     // MARK: - Regular width (iPad)

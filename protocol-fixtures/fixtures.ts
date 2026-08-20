@@ -204,6 +204,11 @@ export const WORKSPACE_SNAPSHOT_FIXTURE = {
       id: 'project-1',
       root: '/repo',
       title: 'psyche-build',
+      rituals: [{
+        id: 'release-checklist',
+        displayName: 'Release checklist',
+        description: 'Prepare a release safely.',
+      }],
       worktrees: [{
         path: '/repo',
         head: '0123456789abcdef0123456789abcdef01234567',
