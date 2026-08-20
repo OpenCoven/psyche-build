@@ -12,8 +12,27 @@ const PROCESS_METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProcessMetrics {
-    pub(crate) cpu_percent: f32,
-    pub(crate) rss_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cpu_percent: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rss_bytes: Option<u64>,
+}
+
+impl ProcessMetrics {
+    fn new(cpu_percent: Option<f32>, rss_bytes: Option<u64>) -> Option<Self> {
+        if cpu_percent.is_none() && rss_bytes.is_none() {
+            None
+        } else {
+            Some(Self {
+                cpu_percent,
+                rss_bytes,
+            })
+        }
+    }
+
+    fn without_cpu(self) -> Option<Self> {
+        Self::new(None, self.rss_bytes)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -121,10 +140,7 @@ impl ProcessMetricsSource for SysinfoProcessMetricsSource {
             Self::refresh_kind(),
         );
         let process = self.system.process(selection.pid())?;
-        Some(ProcessMetrics {
-            cpu_percent: process.cpu_usage(),
-            rss_bytes: process.memory(),
-        })
+        ProcessMetrics::new(Some(process.cpu_usage()), Some(process.memory()))
     }
 }
 
@@ -133,6 +149,8 @@ struct ProcessMetricsCache<S> {
     selection: ProcessSelection,
     refresh_interval: Duration,
     last_refresh_at: Option<Instant>,
+    // sysinfo process CPU is delta-based, so the first refresh only primes it.
+    cpu_refresh_primed: bool,
     cached: Option<ProcessMetrics>,
 }
 
@@ -146,6 +164,7 @@ where
             selection: ProcessSelection::CurrentProcess(pid),
             refresh_interval,
             last_refresh_at: None,
+            cpu_refresh_primed: false,
             cached: None,
         }
     }
@@ -156,7 +175,13 @@ where
 
     fn sample_at(&mut self, now: Instant) -> Option<ProcessMetrics> {
         if self.should_refresh(now) {
-            self.cached = self.source.sample_process(self.selection);
+            let sampled = self.source.sample_process(self.selection);
+            self.cached = if self.cpu_refresh_primed {
+                sampled
+            } else {
+                self.cpu_refresh_primed = true;
+                sampled.and_then(ProcessMetrics::without_cpu)
+            };
             self.last_refresh_at = Some(now);
         }
         self.cached
@@ -251,10 +276,11 @@ mod tests {
     }
 
     fn process_sample(cpu_percent: f32, rss_bytes: u64) -> ProcessMetrics {
-        ProcessMetrics {
-            cpu_percent,
-            rss_bytes,
-        }
+        ProcessMetrics::new(Some(cpu_percent), Some(rss_bytes)).unwrap()
+    }
+
+    fn process_sample_without_cpu(rss_bytes: u64) -> ProcessMetrics {
+        ProcessMetrics::new(None, Some(rss_bytes)).unwrap()
     }
 
     #[test]
@@ -348,11 +374,11 @@ mod tests {
 
         assert_eq!(
             cache.sample_at(started_at),
-            Some(process_sample(10.0, 1_024))
+            Some(process_sample_without_cpu(1_024))
         );
         assert_eq!(
             cache.sample_at(started_at.checked_add(Duration::from_millis(500)).unwrap()),
-            Some(process_sample(10.0, 1_024))
+            Some(process_sample_without_cpu(1_024))
         );
         assert_eq!(
             cache.sample_at(started_at.checked_add(Duration::from_secs(1)).unwrap()),
@@ -365,6 +391,47 @@ mod tests {
                 ProcessSelection::CurrentProcess(pid),
                 ProcessSelection::CurrentProcess(pid),
             ]
+        );
+    }
+
+    #[test]
+    fn runtime_diagnostics_process_sampling_omits_initial_cpu_until_a_later_refresh() {
+        let mut cache = ProcessMetricsCache::new(
+            FakeProcessMetricsSource::with_responses([
+                Some(process_sample(0.0, 1_024)),
+                Some(process_sample(40.0, 2_048)),
+            ]),
+            Pid::from_u32(17),
+            Duration::from_secs(1),
+        );
+        let started_at = Instant::now();
+
+        let first_sample = serde_json::to_value(cache.sample_at(started_at).unwrap()).unwrap();
+        assert!(first_sample.get("cpuPercent").is_none());
+        assert_eq!(
+            first_sample
+                .get("rssBytes")
+                .and_then(|value| value.as_u64()),
+            Some(1_024)
+        );
+
+        let second_sample = serde_json::to_value(
+            cache
+                .sample_at(started_at.checked_add(Duration::from_secs(1)).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            second_sample
+                .get("cpuPercent")
+                .and_then(|value| value.as_f64()),
+            Some(40.0)
+        );
+        assert_eq!(
+            second_sample
+                .get("rssBytes")
+                .and_then(|value| value.as_u64()),
+            Some(2_048)
         );
     }
 

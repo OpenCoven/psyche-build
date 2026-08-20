@@ -8743,8 +8743,8 @@ mod runtime_diagnostics_command_tests {
             "WKWebView",
             Some("17.6".to_string()),
             Some(ProcessMetrics {
-                cpu_percent: 12.5,
-                rss_bytes: 4096,
+                cpu_percent: Some(12.5),
+                rss_bytes: Some(4096),
             }),
             true,
             true,
