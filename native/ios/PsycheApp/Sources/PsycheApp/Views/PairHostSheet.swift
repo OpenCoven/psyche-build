@@ -54,7 +54,7 @@ struct PairHostSheet: View {
                     PairHostRow(
                         row: row,
                         isSelected: model.selectedServerID == row.serverID && !model.showManualEntry,
-                        isBusy: isBusy,
+                        isBusy: model.isActionInProgress,
                         isRetrying: model.retryingServerIDs.contains(row.serverID),
                         onSelect: { model.select(serverID: row.serverID) },
                         onRetry: { model.retry(serverID: row.serverID) }
@@ -66,7 +66,7 @@ struct PairHostSheet: View {
 
     @ViewBuilder
     private var selectedHostSection: some View {
-        if let row = selectedRow, !model.showManualEntry {
+        if let row = model.selectedRow, !model.showManualEntry {
             switch model.phase {
             case .confirmingRePair:
                 Section("Confirm certificate change") {
@@ -85,25 +85,27 @@ struct PairHostSheet: View {
                     .frame(minHeight: PsycheTheme.minimumTapTarget)
                     .tint(PsycheTheme.amber)
                     .accessibilityIdentifier("pair-host-repair-confirm")
-                    .disabled(isBusy)
+                    .disabled(model.isActionInProgress)
 
                     Button("Back") {
                         model.cancelRePairingConfirmation()
                     }
                     .frame(minHeight: PsycheTheme.minimumTapTarget)
                     .accessibilityIdentifier("pair-host-repair-cancel")
-                    .disabled(isBusy)
+                    .disabled(model.isActionInProgress)
                 }
             default:
                 Section(row.serverName) {
-                    Text(selectedHostMessage(for: row))
-                        .foregroundStyle(.secondary)
+                    if let message = model.selectedActionMessage {
+                        Text(message)
+                            .foregroundStyle(.secondary)
+                    }
 
-                    if row.pairingStatus != .paired, row.resolutionFailure == nil {
+                    if model.selectedRequiresPairingCode {
                         pairingCodeField
                     }
 
-                    if row.pairingStatus == .requiresRePairing {
+                    if model.selectedShowsRePairWarning {
                         Label(
                             "Re-pairing replaces the certificate previously trusted for this host.",
                             systemImage: "exclamationmark.shield.fill"
@@ -111,12 +113,12 @@ struct PairHostSheet: View {
                         .foregroundStyle(PsycheTheme.amber)
                     }
 
-                    Button(selectedHostActionTitle(for: row)) {
+                    Button(model.primaryActionTitle) {
                         Task { await model.submit() }
                     }
                     .frame(minHeight: PsycheTheme.minimumTapTarget)
                     .accessibilityIdentifier("pair-host-submit")
-                    .disabled(isSubmitDisabled(for: row))
+                    .disabled(!model.canSubmitSelectedAction)
 
                     if row.resolutionFailure != nil {
                         Text("Retry the row above or switch on manual connection below.")
@@ -138,7 +140,7 @@ struct PairHostSheet: View {
             )
             .frame(minHeight: PsycheTheme.minimumTapTarget)
             .accessibilityIdentifier("pair-host-manual-toggle")
-            .disabled(isBusy)
+            .disabled(model.isActionInProgress)
 
             if model.showManualEntry {
                 TextField("Host or IP address", text: $model.manualHost)
@@ -155,14 +157,16 @@ struct PairHostSheet: View {
                     .autocorrectionDisabled()
                     .accessibilityIdentifier("pair-host-manual-fingerprint")
 
-                pairingCodeField
+                if model.showsPairingCodeField {
+                    pairingCodeField
+                }
 
-                Button("Pair") {
+                Button(model.primaryActionTitle) {
                     Task { await model.submit() }
                 }
                 .frame(minHeight: PsycheTheme.minimumTapTarget)
                 .accessibilityIdentifier("pair-host-submit")
-                .disabled(isManualSubmitDisabled)
+                .disabled(!model.canSubmitPrimaryAction)
             }
         } header: {
             Text("Manual connection")
@@ -201,11 +205,6 @@ struct PairHostSheet: View {
             .accessibilityIdentifier("pair-host-code")
     }
 
-    private var selectedRow: PairHostModel.Row? {
-        guard let selectedServerID = model.selectedServerID else { return nil }
-        return model.rows.first(where: { $0.serverID == selectedServerID })
-    }
-
     private var progressMessage: String? {
         switch model.phase {
         case .connecting:
@@ -216,68 +215,6 @@ struct PairHostSheet: View {
             return "Loading workspace…"
         default:
             return nil
-        }
-    }
-
-    private var isBusy: Bool {
-        switch model.phase {
-        case .connecting, .pairing, .loadingWorkspace:
-            true
-        default:
-            false
-        }
-    }
-
-    private var isManualSubmitDisabled: Bool {
-        isBusy
-            || model.manualHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || model.manualPort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || model.manualFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || model.pairingCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private func selectedHostMessage(for row: PairHostModel.Row) -> String {
-        if row.resolutionFailure != nil {
-            return "This host was discovered, but its network address is unavailable right now."
-        }
-
-        switch row.pairingStatus {
-        case .paired:
-            return "This device already trusts \(row.serverName)."
-        case .unpaired:
-            return "Enter the six-digit code shown by \(row.serverName) to trust and connect to it."
-        case .requiresRePairing:
-            return "Enter a new code, then review the certificate-change warning before re-pairing."
-        }
-    }
-
-    private func selectedHostActionTitle(for row: PairHostModel.Row) -> String {
-        if row.resolutionFailure != nil {
-            return "Address unavailable"
-        }
-
-        switch row.pairingStatus {
-        case .paired:
-            return "Connect"
-        case .unpaired:
-            return "Pair"
-        case .requiresRePairing:
-            return "Review re-pair warning"
-        }
-    }
-
-    private func isSubmitDisabled(for row: PairHostModel.Row) -> Bool {
-        if isBusy {
-            return true
-        }
-        if row.resolutionFailure != nil {
-            return true
-        }
-        switch row.pairingStatus {
-        case .paired:
-            return false
-        case .unpaired, .requiresRePairing:
-            return model.pairingCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
 
@@ -305,14 +242,8 @@ private struct PairHostRow: View {
         VStack(alignment: .leading, spacing: 10) {
             Button(action: onSelect) {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(row.serverName)
-                            .foregroundStyle(.primary)
-                        Label(status.text, systemImage: status.systemImage)
-                            .font(.footnote)
-                            .foregroundStyle(status.color)
-                            .accessibilityIdentifier("pair-host-status-\(row.serverID)")
-                    }
+                    Text(row.serverName)
+                        .foregroundStyle(.primary)
                     Spacer(minLength: 8)
                     if isSelected {
                         Image(systemName: "checkmark")
@@ -325,10 +256,15 @@ private struct PairHostRow: View {
             .buttonStyle(.plain)
             .disabled(isBusy)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(row.serverName), \(status.text)")
+            .accessibilityLabel(row.serverName)
             .accessibilityHint(selectionHint)
             .accessibilityAddTraits(isSelected ? [.isSelected] : [])
             .accessibilityIdentifier("pair-host-row-\(row.serverID)")
+
+            Label(status.text, systemImage: status.systemImage)
+                .font(.footnote)
+                .foregroundStyle(status.color)
+                .accessibilityIdentifier("pair-host-status-\(row.serverID)")
 
             if row.resolutionFailure != nil {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {

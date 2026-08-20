@@ -50,6 +50,78 @@ final class PairHostModel: ObservableObject {
         let disconnect: @Sendable () async -> Void
     }
 
+    private enum SubmitTarget: Equatable {
+        case none
+        case manual
+        case selectedUnavailable
+        case unavailable(Row)
+        case paired(Row)
+        case unpaired(Row)
+        case requiresRePairing(Row)
+
+        var row: Row? {
+            switch self {
+            case let .unavailable(row), let .paired(row), let .unpaired(row), let .requiresRePairing(row):
+                return row
+            case .none, .manual, .selectedUnavailable:
+                return nil
+            }
+        }
+
+        var actionTitle: String {
+            switch self {
+            case .none, .selectedUnavailable, .paired:
+                return "Connect"
+            case .manual, .unpaired:
+                return "Pair"
+            case .requiresRePairing:
+                return "Review re-pair warning"
+            case .unavailable:
+                return "Address unavailable"
+            }
+        }
+
+        var selectedMessage: String? {
+            switch self {
+            case .unavailable:
+                return "This host was discovered, but its network address is unavailable right now."
+            case let .paired(row):
+                return "This device already trusts \(row.serverName)."
+            case let .unpaired(row):
+                return "Enter the six-digit code shown by \(row.serverName) to trust and connect to it."
+            case .requiresRePairing:
+                return "Enter a new code, then review the certificate-change warning before re-pairing."
+            case .none, .manual, .selectedUnavailable:
+                return nil
+            }
+        }
+
+        var requiresPairingCode: Bool {
+            switch self {
+            case .manual, .unpaired, .requiresRePairing:
+                return true
+            case .none, .selectedUnavailable, .unavailable, .paired:
+                return false
+            }
+        }
+
+        var canSubmitWhenIdle: Bool {
+            switch self {
+            case .manual, .paired, .unpaired, .requiresRePairing:
+                return true
+            case .none, .selectedUnavailable, .unavailable:
+                return false
+            }
+        }
+
+        var showsRePairWarning: Bool {
+            if case .requiresRePairing = self {
+                return true
+            }
+            return false
+        }
+    }
+
     private struct DeinitCleanupPlan: Sendable {
         let shouldStopDiscovery: Bool
         let shouldDisconnect: Bool
@@ -84,6 +156,24 @@ final class PairHostModel: ObservableObject {
     @Published var pairingCode = ""
     @Published private(set) var retryingServerIDs: Set<String> = []
 
+    var selectedRow: Row? { selectedSubmitTarget.row }
+    var selectedRequiresPairingCode: Bool { selectedSubmitTarget.requiresPairingCode }
+    var selectedActionMessage: String? { selectedSubmitTarget.selectedMessage }
+    var selectedShowsRePairWarning: Bool { selectedSubmitTarget.showsRePairWarning }
+    var showsPairingCodeField: Bool { primarySubmitTarget.requiresPairingCode }
+    var canSubmitSelectedAction: Bool { !isActionInProgress && selectedSubmitTarget.canSubmitWhenIdle }
+    var canSubmitPrimaryAction: Bool { !isActionInProgress && primarySubmitTarget.canSubmitWhenIdle }
+    var primaryActionTitle: String { primarySubmitTarget.actionTitle }
+
+    var isActionInProgress: Bool {
+        switch phase {
+        case .connecting, .pairing, .loadingWorkspace:
+            return true
+        case .browsing, .selected, .confirmingRePair, .ready, .failed:
+            return false
+        }
+    }
+
     let dependencies: Dependencies
 
     private enum FailureSource {
@@ -102,6 +192,26 @@ final class PairHostModel: ObservableObject {
     private var actionOwnedServerID: String?
     private var failureSource: FailureSource?
     private var ownsIncompleteConnection = false
+
+    private var selectedSubmitTarget: SubmitTarget {
+        guard let selectedServerID else { return .none }
+        guard let row = rows.first(where: { $0.serverID == selectedServerID }) else { return .selectedUnavailable }
+        if row.resolutionFailure != nil {
+            return .unavailable(row)
+        }
+        switch row.pairingStatus {
+        case .paired:
+            return .paired(row)
+        case .unpaired:
+            return .unpaired(row)
+        case .requiresRePairing:
+            return .requiresRePairing(row)
+        }
+    }
+
+    private var primarySubmitTarget: SubmitTarget {
+        showManualEntry ? .manual : selectedSubmitTarget
+    }
 
     init(dependencies: Dependencies) {
         self.dependencies = dependencies
@@ -464,7 +574,8 @@ final class PairHostModel: ObservableObject {
     }
 
     func submit() async {
-        if showManualEntry {
+        switch primarySubmitTarget {
+        case .manual:
             do {
                 let endpoint = try validatedManualEndpoint()
                 let code = try validatedPairingCode()
@@ -476,28 +587,15 @@ final class PairHostModel: ObservableObject {
             } catch {
                 applyFailure(error, source: .validation, clearPairingCode: shouldClearPairingCode(for: error))
             }
-            return
-        }
-
-        guard let selectedServerID else {
+        case .none:
             applyFailure(PairHostModelError.chooseHostOrManual, source: .validation, clearPairingCode: false)
-            return
-        }
-
-        guard let row = rows.first(where: { $0.serverID == selectedServerID }) else {
+        case .selectedUnavailable:
             applyFailure(PairHostModelError.selectedHostUnavailable, source: .validation, clearPairingCode: false)
-            return
-        }
-
-        guard row.resolutionFailure == nil else {
+        case .unavailable:
             applyFailure(PairHostModelError.resolutionFailed, source: .validation, clearPairingCode: false)
-            return
-        }
-
-        switch row.pairingStatus {
-        case .paired:
+        case let .paired(row):
             await enqueuePairedConnect(row: row)
-        case .unpaired:
+        case let .unpaired(row):
             do {
                 let code = try validatedPairingCode()
                 guard let endpoint = row.resolvedEndpoint else {
@@ -520,7 +618,7 @@ final class PairHostModel: ObservableObject {
 
     func confirmRePairing() async {
         guard phase == .confirmingRePair else { return }
-        guard let row = selectedRowForConfirmedRePairing(),
+        guard case let .requiresRePairing(row) = selectedSubmitTarget,
               let endpoint = row.resolvedEndpoint else {
             applyFailure(PairHostModelError.rePairingUnavailable, source: .validation, clearPairingCode: false)
             return
@@ -806,17 +904,6 @@ final class PairHostModel: ObservableObject {
     ) {
         guard generation == observationGeneration else { return }
         applyDiscoveryFailure(error)
-    }
-
-    private func selectedRowForConfirmedRePairing() -> Row? {
-        guard let selectedServerID,
-              let row = rows.first(where: { $0.serverID == selectedServerID }),
-              row.resolutionFailure == nil,
-              row.resolvedEndpoint != nil,
-              row.pairingStatus == .requiresRePairing else {
-            return nil
-        }
-        return row
     }
 
     private func deinitCleanupPlan() -> DeinitCleanupPlan {

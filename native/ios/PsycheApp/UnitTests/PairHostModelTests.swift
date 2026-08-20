@@ -58,6 +58,90 @@ final class PairHostModelTests: XCTestCase {
         XCTAssertEqual(model.readyHost?.token, "fixture-token")
     }
 
+    func testComputedSelectedStateCoversPairedUnpairedRepairAndResolutionFailedRows() async throws {
+        let probe = PairHostModelProbe()
+        await probe.setPairingStatus(.paired, for: "paired")
+        await probe.setPairingStatus(.unpaired, for: "unpaired")
+        await probe.setPairingStatus(.requiresRePairing, for: "repair")
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([
+            makeEntry(serverID: "paired", serverName: "Paired Host"),
+            makeEntry(serverID: "unpaired", serverName: "Unpaired Host"),
+            makeEntry(
+                serverID: "repair",
+                serverName: "Repair Host",
+                fingerprint: otherFingerprint
+            ),
+            makeFailedEntry(serverID: "offline", serverName: "Offline Host", failure: .timedOut)
+        ])
+        await waitUntil { model.rows.count == 4 }
+
+        model.select(serverID: "paired")
+        XCTAssertEqual(model.selectedRow?.serverID, "paired")
+        XCTAssertEqual(model.selectedActionMessage, "This device already trusts Paired Host.")
+        XCTAssertFalse(model.selectedRequiresPairingCode)
+        XCTAssertFalse(model.selectedShowsRePairWarning)
+        XCTAssertEqual(model.primaryActionTitle, "Connect")
+        XCTAssertFalse(model.showsPairingCodeField)
+        XCTAssertTrue(model.canSubmitSelectedAction)
+
+        model.select(serverID: "unpaired")
+        XCTAssertEqual(model.selectedRow?.serverID, "unpaired")
+        XCTAssertEqual(
+            model.selectedActionMessage,
+            "Enter the six-digit code shown by Unpaired Host to trust and connect to it."
+        )
+        XCTAssertTrue(model.selectedRequiresPairingCode)
+        XCTAssertFalse(model.selectedShowsRePairWarning)
+        XCTAssertEqual(model.primaryActionTitle, "Pair")
+        XCTAssertTrue(model.showsPairingCodeField)
+        XCTAssertTrue(model.canSubmitSelectedAction)
+
+        model.select(serverID: "repair")
+        XCTAssertEqual(model.selectedRow?.serverID, "repair")
+        XCTAssertEqual(
+            model.selectedActionMessage,
+            "Enter a new code, then review the certificate-change warning before re-pairing."
+        )
+        XCTAssertTrue(model.selectedRequiresPairingCode)
+        XCTAssertTrue(model.selectedShowsRePairWarning)
+        XCTAssertEqual(model.primaryActionTitle, "Review re-pair warning")
+        XCTAssertTrue(model.showsPairingCodeField)
+        XCTAssertTrue(model.canSubmitSelectedAction)
+
+        model.select(serverID: "offline")
+        XCTAssertEqual(model.selectedRow?.serverID, "offline")
+        XCTAssertEqual(
+            model.selectedActionMessage,
+            "This host was discovered, but its network address is unavailable right now."
+        )
+        XCTAssertFalse(model.selectedRequiresPairingCode)
+        XCTAssertFalse(model.selectedShowsRePairWarning)
+        XCTAssertEqual(model.primaryActionTitle, "Address unavailable")
+        XCTAssertFalse(model.showsPairingCodeField)
+        XCTAssertFalse(model.canSubmitSelectedAction)
+    }
+
+    func testComputedManualStateKeepsSubmitEnabledForValidationFailures() async {
+        let model = PairHostModel.fixture()
+
+        model.setManualEntrySelected(true)
+
+        XCTAssertTrue(model.showManualEntry)
+        XCTAssertNil(model.selectedRow)
+        XCTAssertEqual(model.primaryActionTitle, "Pair")
+        XCTAssertTrue(model.showsPairingCodeField)
+        XCTAssertTrue(model.canSubmitPrimaryAction)
+        XCTAssertFalse(model.isActionInProgress)
+
+        await model.submit()
+
+        XCTAssertEqual(model.phase, .failed)
+        XCTAssertEqual(model.errorMessage, "Enter the host name or IP address.")
+    }
+
     func testDiscoveryRowsMergeResolvedAndFailedEntriesInStableServerIDOrder() async throws {
         let probe = PairHostModelProbe()
         await probe.setPairingStatus(.paired, for: "server-b")
@@ -325,14 +409,23 @@ final class PairHostModelTests: XCTestCase {
         let submitTask = Task { await model.submit() }
         await connectGate.waitUntilStarted()
         await waitUntil { model.phase == .connecting }
+        XCTAssertTrue(model.isActionInProgress)
+        XCTAssertFalse(model.canSubmitSelectedAction)
+        XCTAssertFalse(model.canSubmitPrimaryAction)
 
         await connectGate.succeed()
         await pairGate.waitUntilStarted()
         await waitUntil { model.phase == .pairing }
+        XCTAssertTrue(model.isActionInProgress)
+        XCTAssertFalse(model.canSubmitSelectedAction)
+        XCTAssertFalse(model.canSubmitPrimaryAction)
 
         await pairGate.succeed()
         await readinessGate.waitUntilStarted()
         await waitUntil { model.phase == .loadingWorkspace }
+        XCTAssertTrue(model.isActionInProgress)
+        XCTAssertFalse(model.canSubmitSelectedAction)
+        XCTAssertFalse(model.canSubmitPrimaryAction)
 
         let actionOrder = await probe.recordedActionOrder()
         XCTAssertEqual(actionOrder, ["connectForPairing", "pair", "waitForWorkspaceReady"])
