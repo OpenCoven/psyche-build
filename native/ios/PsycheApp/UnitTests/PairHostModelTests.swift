@@ -1238,6 +1238,116 @@ final class PairHostModelTests: XCTestCase {
         XCTAssertEqual(finalDisconnectCount, 1)
     }
 
+    func testStopDuringSessionClaimWaitsForPendingStartRelinquishesSessionAndNeverStartsDiscovery() async throws {
+        let claimGate = SessionClaimGate()
+        let authority = PairHostModel.SessionAuthority(beforeClaimActivation: {
+            await claimGate.wait()
+        })
+        let firstProbe = PairHostModelProbe()
+        let stopCompletion = CompletionTracker()
+
+        weak var weakModel: PairHostModel?
+        var model: PairHostModel? = PairHostModel(
+            dependencies: await firstProbe.dependencies(),
+            authority: authority
+        )
+        weakModel = model
+
+        let startTask = Task { [weak model] in
+            await model?.start()
+        }
+        await claimGate.waitUntilStarted()
+
+        let stopTask = Task { [weak model] in
+            await model?.stop()
+            await stopCompletion.mark("stop")
+        }
+
+        await Task.yield()
+        let stopFinishedBeforeRelease = await stopCompletion.contains("stop")
+        let firstStartCountBeforeRelease = await firstProbe.startCount()
+        XCTAssertFalse(stopFinishedBeforeRelease)
+        XCTAssertEqual(firstStartCountBeforeRelease, 0)
+
+        await claimGate.release()
+        await stopTask.value
+        await startTask.value
+
+        let firstStartCountAfterRelease = await firstProbe.startCount()
+        let firstStopCountAfterRelease = await firstProbe.stopCount()
+        let firstDisconnectCountAfterRelease = await firstProbe.disconnectCount()
+        XCTAssertEqual(firstStartCountAfterRelease, 0)
+        XCTAssertEqual(firstStopCountAfterRelease, 0)
+        XCTAssertEqual(firstDisconnectCountAfterRelease, 0)
+
+        model = nil
+        await waitUntil { weakModel == nil }
+        let firstStopCountAfterReleaseDeinit = await firstProbe.stopCount()
+        let firstDisconnectCountAfterReleaseDeinit = await firstProbe.disconnectCount()
+        XCTAssertEqual(firstStopCountAfterReleaseDeinit, 0)
+        XCTAssertEqual(firstDisconnectCountAfterReleaseDeinit, 0)
+
+        let secondProbe = PairHostModelProbe()
+        let secondModel = PairHostModel(
+            dependencies: await secondProbe.dependencies(),
+            authority: authority
+        )
+
+        await secondModel.start()
+        let secondStartCount = await secondProbe.startCount()
+        XCTAssertEqual(secondStartCount, 1)
+
+        await secondModel.stop()
+        let secondStopCount = await secondProbe.stopCount()
+        let secondDisconnectCount = await secondProbe.disconnectCount()
+        XCTAssertEqual(secondStopCount, 1)
+        XCTAssertEqual(secondDisconnectCount, 0)
+    }
+
+    func testCancellingStartDuringSessionClaimRelinquishesSessionWithoutStartingDiscovery() async throws {
+        let claimGate = SessionClaimGate()
+        let authority = PairHostModel.SessionAuthority(beforeClaimActivation: {
+            await claimGate.wait()
+        })
+        let probe = PairHostModelProbe()
+        let startCompletion = CompletionTracker()
+
+        weak var weakModel: PairHostModel?
+        var model: PairHostModel? = PairHostModel(
+            dependencies: await probe.dependencies(),
+            authority: authority
+        )
+        weakModel = model
+
+        let startTask = Task { [weak model] in
+            await model?.start()
+            await startCompletion.mark("start")
+        }
+        await claimGate.waitUntilStarted()
+
+        startTask.cancel()
+        await Task.yield()
+        let startFinishedBeforeRelease = await startCompletion.contains("start")
+        XCTAssertFalse(startFinishedBeforeRelease)
+
+        await claimGate.release()
+        await startTask.value
+
+        let startCountAfterCancellation = await probe.startCount()
+        let stopCountAfterCancellation = await probe.stopCount()
+        let disconnectCountAfterCancellation = await probe.disconnectCount()
+        XCTAssertEqual(startCountAfterCancellation, 0)
+        XCTAssertEqual(stopCountAfterCancellation, 0)
+        XCTAssertEqual(disconnectCountAfterCancellation, 0)
+
+        model = nil
+        await waitUntil { weakModel == nil }
+        let stopCountAfterCancellationDeinit = await probe.stopCount()
+        let disconnectCountAfterCancellationDeinit = await probe.disconnectCount()
+        XCTAssertEqual(stopCountAfterCancellationDeinit, 0)
+        XCTAssertEqual(disconnectCountAfterCancellationDeinit, 0)
+    }
+
     func testReleasingOlderSessionSkipsSharedCleanupWithoutExplicitStop() async throws {
         let authority = PairHostModel.SessionAuthority()
         let cleanup = SharedCleanupProbe()
@@ -1652,6 +1762,37 @@ private actor AsyncGate {
         didCancel = true
         continuation?.resume(throwing: CancellationError())
         continuation = nil
+    }
+}
+
+private actor SessionClaimGate {
+    private var didStart = false
+    private var isReleased = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        didStart = true
+        guard !isReleased else { return }
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func waitUntilStarted(timeout: TimeInterval = 1) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !didStart {
+            if Date() >= deadline {
+                return
+            }
+            await Task.yield()
+        }
+    }
+
+    func release() {
+        isReleased = true
+        let waiting = continuations
+        continuations.removeAll()
+        waiting.forEach { $0.resume() }
     }
 }
 

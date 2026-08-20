@@ -28,9 +28,14 @@ final class PairHostModel: ObservableObject {
             case ending(UInt64)
         }
 
+        private let beforeClaimActivation: (@Sendable () async -> Void)?
         private var nextSessionID: UInt64 = 0
         private var state: State = .idle
         private var endingWaiters: [CheckedContinuation<Void, Never>] = []
+
+        init(beforeClaimActivation: (@Sendable () async -> Void)? = nil) {
+            self.beforeClaimActivation = beforeClaimActivation
+        }
 
         func claimSession() async -> UInt64 {
             while case .ending(_) = state {
@@ -39,9 +44,16 @@ final class PairHostModel: ObservableObject {
                 }
             }
 
+            if let beforeClaimActivation {
+                await beforeClaimActivation()
+            }
             nextSessionID &+= 1
             state = .active(nextSessionID)
             return nextSessionID
+        }
+
+        func relinquishIfCurrent(_ sessionID: UInt64) async {
+            await endIfCurrent(sessionID) {}
         }
 
         func endIfCurrent(
@@ -249,6 +261,7 @@ final class PairHostModel: ObservableObject {
 
     private var observationTask: Task<Void, Never>?
     private var actionTask: Task<Void, Never>?
+    private var startTask: Task<Void, Never>?
     private var stopTask: Task<Void, Never>?
     private var retryTasks: [String: Task<Void, Never>] = [:]
     private var hasStarted = false
@@ -559,30 +572,60 @@ final class PairHostModel: ObservableObject {
     }
 
     func start() async {
+        if let startTask {
+            await startTask.value
+            return
+        }
         guard !hasStarted else { return }
         hasStarted = true
         hasStopped = false
-        sessionID = await sessionAuthority.claimSession()
-        observationGeneration &+= 1
-        let generation = observationGeneration
-        let stream = await dependencies.startDiscovery()
+        let authority = sessionAuthority
         let dependencies = self.dependencies
-        observationTask = Task { [weak self, dependencies] in
-            for await snapshot in stream {
-                guard !Task.isCancelled else { return }
-                do {
-                    let rows = try await Self.makeRows(from: snapshot, dependencies: dependencies)
-                    await self?.applyDiscoveryRowsIfCurrent(
-                        rows,
-                        snapshotServerIDs: Set(snapshot.map(\.serverID)),
-                        generation: generation
-                    )
-                } catch is CancellationError {
-                    return
-                } catch {
-                    await self?.applyDiscoveryFailureIfCurrent(error, generation: generation)
+        let startTask = Task { [weak self, authority, dependencies] in
+            let claimedSessionID = await authority.claimSession()
+            guard let self else {
+                await authority.relinquishIfCurrent(claimedSessionID)
+                return
+            }
+            guard let generation = await self.prepareStartAfterClaim(sessionID: claimedSessionID) else {
+                await authority.relinquishIfCurrent(claimedSessionID)
+                return
+            }
+
+            let stream = await dependencies.startDiscovery()
+            guard await self.canObserveClaimedSession(sessionID: claimedSessionID) else {
+                await authority.endIfCurrent(claimedSessionID) {
+                    await dependencies.stopDiscovery()
+                }
+                return
+            }
+
+            let observationTask = Task { [weak self, dependencies] in
+                for await snapshot in stream {
+                    guard !Task.isCancelled else { return }
+                    do {
+                        let rows = try await Self.makeRows(from: snapshot, dependencies: dependencies)
+                        await self?.applyDiscoveryRowsIfCurrent(
+                            rows,
+                            snapshotServerIDs: Set(snapshot.map(\.serverID)),
+                            generation: generation
+                        )
+                    } catch is CancellationError {
+                        return
+                    } catch {
+                        await self?.applyDiscoveryFailureIfCurrent(error, generation: generation)
+                    }
                 }
             }
+            await self.installObservationTaskIfCurrent(
+                observationTask,
+                sessionID: claimedSessionID
+            )
+        }
+        self.startTask = startTask
+        await awaitStartTask(startTask)
+        if self.startTask != nil {
+            self.startTask = nil
         }
     }
 
@@ -598,22 +641,29 @@ final class PairHostModel: ObservableObject {
         if shouldDisconnect {
             ownsIncompleteConnection = false
         }
+        let startTask = self.startTask
         cancelOwnedTasks()
         pairingCode = ""
         let dependencies = self.dependencies
         let authority = sessionAuthority
         let sessionID = self.sessionID
-        let cleanupTask = Task.detached(priority: .utility) { [authority, dependencies, sessionID, shouldDisconnect] in
-            guard let sessionID else { return }
-            await authority.endIfCurrent(sessionID) {
-                await dependencies.stopDiscovery()
-                if shouldDisconnect {
-                    await dependencies.disconnect()
+        let cleanupTask = Task.detached(priority: .utility) {
+            [authority, dependencies, sessionID, shouldDisconnect, startTask] in
+            if let sessionID {
+                await authority.endIfCurrent(sessionID) {
+                    await dependencies.stopDiscovery()
+                    if shouldDisconnect {
+                        await dependencies.disconnect()
+                    }
                 }
+            }
+            if let startTask {
+                await startTask.value
             }
         }
         stopTask = cleanupTask
         await cleanupTask.value
+        self.sessionID = nil
         stopTask = nil
     }
 
@@ -896,6 +946,14 @@ final class PairHostModel: ObservableObject {
         }
     }
 
+    private func awaitStartTask(_ task: Task<Void, Never>) async {
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
     private func transitionAction(
         actionID: UUID,
         phase nextPhase: Phase? = nil,
@@ -1001,6 +1059,8 @@ final class PairHostModel: ObservableObject {
     }
 
     private func cancelOwnedTasks() {
+        startTask?.cancel()
+        startTask = nil
         observationTask?.cancel()
         observationTask = nil
         actionTask?.cancel()
@@ -1010,6 +1070,29 @@ final class PairHostModel: ObservableObject {
         retryTasks.values.forEach { $0.cancel() }
         retryTasks.removeAll()
         retryingServerIDs.removeAll()
+    }
+
+    private func prepareStartAfterClaim(sessionID claimedSessionID: UInt64) -> UInt64? {
+        guard !hasStopped, !Task.isCancelled else { return nil }
+        sessionID = claimedSessionID
+        observationGeneration &+= 1
+        return observationGeneration
+    }
+
+    private func canObserveClaimedSession(sessionID claimedSessionID: UInt64) -> Bool {
+        guard !hasStopped, !Task.isCancelled else { return false }
+        return sessionID == claimedSessionID
+    }
+
+    private func installObservationTaskIfCurrent(
+        _ task: Task<Void, Never>,
+        sessionID claimedSessionID: UInt64
+    ) {
+        guard canObserveClaimedSession(sessionID: claimedSessionID) else {
+            task.cancel()
+            return
+        }
+        observationTask = task
     }
 
     private func shouldClearPairingCode(for error: Error) -> Bool {
