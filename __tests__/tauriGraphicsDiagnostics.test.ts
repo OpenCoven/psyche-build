@@ -152,6 +152,53 @@ describe('graphics evidence classification', () => {
     });
   });
 
+  it('rejects vendor generic descriptors with ancillary identifiers on WebGPU, raw WebGL, and ANGLE paths', () => {
+    const genericDescriptorValues = [
+      'VGA',
+      '3D',
+      'Video',
+      'Display',
+      'Compatible',
+      'Compatibility',
+      'Controller',
+    ].map((descriptor) => `NVIDIA ${descriptor} (0x00002684)`);
+
+    for (const value of [
+      ...genericDescriptorValues,
+      'NVIDIA VGA Compatible Controller (0x00002684)',
+      'NVIDIA 3D Video Display Controller (0x00002684)',
+    ]) {
+      const probes = [
+        {
+          webgpuAdapterAvailable: true as const,
+          webgpuAdapter: value,
+          unsupportedFields: [],
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: value,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: `ANGLE (NVIDIA, ${value}, OpenGL)`,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+      ];
+
+      for (const probe of probes) {
+        expect(classifyGraphicsEvidence(probe), value).toEqual({
+          acceleration: 'unknown',
+          fallbackReason: 'renderer_masked_or_ambiguous',
+          supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+          unsupportedFields: [],
+        });
+      }
+    }
+  });
+
   it('never upgrades known software implementations to accelerated', () => {
     expect(classifyGraphicsEvidence({
       strictContext: 'webgl2',
