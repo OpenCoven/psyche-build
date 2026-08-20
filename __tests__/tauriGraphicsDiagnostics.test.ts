@@ -306,6 +306,65 @@ describe('graphics evidence classification', () => {
     });
   });
 
+  it('does not treat backend and API family descriptors as product adapters', () => {
+    const backendApiOnlyValues = [
+      'WebGPU API',
+      'WebGL Backend',
+      'DirectX Runtime 12',
+      'WebGPU',
+      'WebGL',
+      'WebGL2',
+      'DirectX',
+      'Direct3D',
+      'D3D',
+      'D3D11',
+      'D3D12',
+      'OpenGL',
+      'Vulkan',
+      'Metal',
+      'ANGLE',
+    ];
+
+    for (const value of backendApiOnlyValues) {
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: value,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgpu',
+      });
+
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: `ANGLE (Google, ${value}, OpenGL)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+      });
+    }
+
+    for (const adapter of [
+      'NVIDIA GeForce RTX 4090 WebGPU API',
+      'Intel Arc A770 WebGL Backend',
+      'AMD Radeon Pro 560X DirectX Runtime 12',
+    ]) {
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: adapter,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'accelerated',
+        adapter,
+        supportingProbe: 'webgpu',
+      });
+    }
+  });
+
   it('does not treat identifier-only formats as hardware adapters', () => {
     const identifiers = [
       'PCI: 10de:2484',
@@ -1227,6 +1286,9 @@ describe('graphics probes', () => {
   it('filters generic descriptor and backend/version WebGPU descriptions', async () => {
     for (const description of [
       'High Performance GPU',
+      'WebGPU API',
+      'WebGL Backend',
+      'DirectX Runtime 12',
       'Vulkan API 1.3',
       'NVIDIA Windows Display Driver',
       'Intel Integrated GPU',
