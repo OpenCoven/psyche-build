@@ -245,6 +245,67 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('preserves contextual alphanumeric models before contiguous identifier sequences', () => {
+    for (const { value, adapter } of [
+      { value: 'NVIDIA A100 10DE 20B0', adapter: 'NVIDIA A100' },
+      { value: 'Intel A770 8086 56A0', adapter: 'Intel A770' },
+    ]) {
+      const probes = [
+        {
+          webgpuAdapterAvailable: true as const,
+          webgpuAdapter: value,
+          unsupportedFields: [],
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: value,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: `ANGLE (${value.split(' ')[0]}, ${value}, OpenGL)`,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+      ];
+
+      for (const probe of probes) {
+        expect(classifyGraphicsEvidence(probe), value).toMatchObject({
+          acceleration: 'accelerated',
+          adapter,
+          supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+        });
+      }
+    }
+
+    for (const probe of [
+      {
+        webgpuAdapterAvailable: true as const,
+        webgpuAdapter: 'NVIDIA ABCD 10DE 20B0',
+        unsupportedFields: [],
+      },
+      {
+        strictContext: 'webgl2' as const,
+        renderer: 'NVIDIA ABCD 10DE 20B0',
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false as const,
+      },
+      {
+        strictContext: 'webgl2' as const,
+        renderer: 'ANGLE (NVIDIA, NVIDIA ABCD 10DE 20B0, OpenGL)',
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false as const,
+      },
+    ]) {
+      expect(classifyGraphicsEvidence(probe)).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+      });
+    }
+  });
+
   it('strips complete mixed identifier sequences from named adapters across every path', () => {
     const probes = [
       {

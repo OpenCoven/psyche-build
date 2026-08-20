@@ -568,6 +568,14 @@ function stripAncillaryIdentifierFragments(value: string): string {
 function shouldPreserveProductModelToken(prefix: string, tokens: string[]): boolean {
   const firstToken = tokens[0];
   if (!firstToken || tokens.length < 2 || /^0x/i.test(firstToken)) return false;
+  if (
+    tokens.length >= 3
+    && /^[a-z]/i.test(firstToken)
+    && /\d/.test(firstToken)
+  ) {
+    return true;
+  }
+
   const prefixTokens = prefix.match(/[a-z0-9]+/gi) ?? [];
   const precedingToken = prefixTokens.at(-1);
   return Boolean(
