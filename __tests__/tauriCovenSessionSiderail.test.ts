@@ -2177,9 +2177,10 @@ describe('Tauri Coven session project rail', () => {
       renderer.render();
 
       expect(covenRows(renderer.sessionListEl)).toHaveLength(0);
-      expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(1);
+      expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(0);
       expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
-        .toEqual(['Parent']);
+        .toEqual([]);
+      expect(renderer.state.projects.map((project) => project.id)).toEqual(['parent']);
     },
   );
 
@@ -2195,9 +2196,10 @@ describe('Tauri Coven session project rail', () => {
     renderer.render();
 
     expect(covenRows(renderer.sessionListEl)).toHaveLength(0);
-    expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(1);
+    expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(0);
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
-      .toEqual([project.name]);
+      .toEqual([]);
+    expect(renderer.state.projects.map((candidate) => candidate.id)).toEqual([project.id]);
   });
 
   it('keeps exact-root ownership even when the matching project worktree is flagged', () => {
@@ -2306,7 +2308,7 @@ describe('Tauri Coven session project rail', () => {
       .toContain('coven-tone-warn');
   });
 
-  it('renders one global loading state across empty projects while keeping project headers', () => {
+  it('renders one global loading state across empty projects while omitting empty projects', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
@@ -2319,9 +2321,9 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.querySelectorAll('.session-inline-state')).toHaveLength(1);
     expect(renderer.sessionListEl.querySelector('.session-inline-state')?.textContent)
       .toBe('Loading Coven sessions');
-    expect(renderer.sessionListEl.querySelectorAll('.session-group')).toHaveLength(2);
+    expect(renderer.sessionListEl.querySelectorAll('.session-group')).toHaveLength(0);
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
-      .toEqual(['Alpha', 'Beta']);
+      .toEqual([]);
     expect(renderer.sessionListEl.querySelectorAll('.session-row')).toHaveLength(0);
     expect(renderer.sessionListEl.querySelector('.session-empty')).toBeNull();
   });
@@ -2344,18 +2346,29 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.textContent).not.toContain('Finished');
   });
 
-  it('drops a project group whose threads have all exited', () => {
+  it('omits a truly empty project while preserving state.projects', () => {
     const renderer = createRenderer({
-      projects: [{ id: 'alpha', name: 'Alpha', root: '/alpha' }],
-      threads: [{ id: 'done', projectId: 'alpha', name: 'Finished', status: 'exited' }],
+      projects: [
+        { id: 'alpha', name: 'Alpha', root: '/alpha' },
+        { id: 'beta', name: 'Beta', root: '/beta' },
+      ],
+      threads: [
+        { id: 'done', projectId: 'alpha', name: 'Finished', status: 'exited' },
+        { id: 'beta-live', projectId: 'beta', name: 'Visible Beta', status: 'running' },
+      ],
     });
 
     renderer.render();
 
-    expect(renderer.sessionListEl.querySelector('.session-row')).toBeNull();
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      .toEqual(['Beta']);
+    expect(renderer.sessionListEl.querySelector('.session-group')?.dataset.projectId).toBe('beta');
+    expect(renderer.sessionListEl.querySelector('.session-row')?.dataset.threadId)
+      .toBe('beta-live');
+    expect(renderer.state.projects.map((project) => project.id)).toEqual(['alpha', 'beta']);
   });
 
-  it('groups local threads by pane kind, in input order, while keeping zero-session project headers', () => {
+  it('groups local threads by pane kind, in input order, while omitting empty projects', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
@@ -2374,9 +2387,9 @@ describe('Tauri Coven session project rail', () => {
     renderer.render();
 
     const groups = renderer.sessionListEl.querySelectorAll('.session-group');
-    expect(groups).toHaveLength(2);
+    expect(groups).toHaveLength(1);
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
-      .toEqual(['Alpha', 'Beta']);
+      .toEqual(['Alpha']);
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-category-name')))
       .toEqual(['Agents', 'Shells']);
     const populated = groups.find((group) => group.querySelector('.session-row'));
@@ -2384,7 +2397,86 @@ describe('Tauri Coven session project rail', () => {
       .toEqual(['attached', 'local']);
   });
 
-  it('renders one global error across empty projects while keeping project headers', () => {
+  it('keeps a hidden running project rendered without a session row and shows the empty message', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha',
+        name: 'Alpha',
+        root: '/alpha',
+        worktrees: [
+          { path: '/alpha', branch: 'main', is_main: true, dirty: false, missing: false },
+        ],
+      }],
+      threads: [{
+        id: 'hidden-alpha',
+        projectId: 'alpha',
+        name: 'Hidden Alpha',
+        status: 'running',
+        hidden: true,
+        worktreePath: '/alpha',
+      }],
+    });
+
+    renderer.render();
+
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      .toEqual(['Alpha']);
+    expect(renderer.sessionListEl.querySelector('.session-row')).toBeNull();
+    expect(renderer.sessionListEl.querySelector('.session-empty')?.textContent)
+      .toBe('No sessions yet.');
+  });
+
+  it('keeps a project with an assigned Coven session rendered with one Coven row', () => {
+    const renderer = createRenderer({
+      projects: [{ id: 'alpha', name: 'Alpha', root: '/alpha' }],
+      sessions: [{
+        id: 'daemon-alpha',
+        projectRoot: '/alpha',
+        title: 'Daemon Alpha',
+        status: 'waiting',
+        labels: ['source:psyche-build'],
+      }],
+    });
+
+    renderer.render();
+
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      .toEqual(['Alpha']);
+    expect(covenRows(renderer.sessionListEl)).toHaveLength(1);
+    expect(covenRows(renderer.sessionListEl)[0].dataset.sessionId).toBe('daemon-alpha');
+  });
+
+  it('keeps a running shell project rendered when the agents filter hides its only row', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha',
+        name: 'Alpha',
+        root: '/alpha',
+        worktrees: [
+          { path: '/alpha', branch: 'main', is_main: true, dirty: false, missing: false },
+        ],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'alpha',
+        name: 'Shell task',
+        status: 'running',
+        kind: 'shell',
+        worktreePath: '/alpha',
+      }],
+      typeFilter: 'agents',
+    });
+
+    renderer.render();
+
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      .toEqual(['Alpha']);
+    expect(localRows(renderer.sessionListEl)).toHaveLength(0);
+    expect(renderer.sessionListEl.querySelector('.session-empty')?.textContent)
+      .toBe('No sessions match the agents filter.');
+  });
+
+  it('renders one global error across empty projects while omitting empty projects', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
@@ -2398,9 +2490,9 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.querySelectorAll('.session-inline-state')).toHaveLength(1);
     expect(renderer.sessionListEl.querySelector('.session-inline-state')?.textContent)
       .toBe('Discovery failed');
-    expect(renderer.sessionListEl.querySelectorAll('.session-group')).toHaveLength(2);
+    expect(renderer.sessionListEl.querySelectorAll('.session-group')).toHaveLength(0);
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
-      .toEqual(['Alpha', 'Beta']);
+      .toEqual([]);
     expect(renderer.sessionListEl.querySelectorAll('.session-row')).toHaveLength(0);
     expect(renderer.sessionListEl.querySelector('.session-empty')).toBeNull();
   });
@@ -4202,7 +4294,7 @@ describe('Tauri Coven session project rail', () => {
     expect(styles).toContain('.session-inline-state');
     const rendererSource = extractFunctionSource(mainJs, 'renderSessionList');
     expect(rendererSource).toContain('PsycheSessions.buildSidebarProjectModel');
-    expect(rendererSource).toContain('localSessions: localRows');
+    expect(rendererSource).toContain('localSessions: visibleLocalRows');
     expect(rendererSource).toContain('covenSessions: remoteRows');
     expect(rendererSource).toContain('covenDiscovery');
     expect(rendererSource).toContain('createSessionRow');
