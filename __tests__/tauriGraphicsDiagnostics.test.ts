@@ -399,6 +399,51 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects mixed vendor and hardware identifier syntax on every adapter path', () => {
+    const mixedIdentifierValues = [
+      'NVIDIA 10DE:2484',
+      'NVIDIA VEN=10DE DEV=2484',
+      'PCI\\VEN_10DE&DEV_2484&SUBSYS_00000000',
+    ];
+
+    for (const value of mixedIdentifierValues) {
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: value,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+        unsupportedFields: [],
+      });
+
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: `ANGLE (NVIDIA, ${value}, D3D11)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+        unsupportedFields: [],
+      });
+
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: value,
+        unsupportedFields: [],
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgpu',
+        unsupportedFields: [],
+      });
+    }
+  });
+
   it('rejects the complete vendor and generic-only token sets', () => {
     for (const vendor of [
       'NVIDIA',
@@ -672,6 +717,34 @@ describe('graphics probes', () => {
       '0x10de 0x2484',
       'PCI 10de:2484',
       'DEV_2484',
+    ]) {
+      const probe = await probeGraphicsEvidence({
+        navigatorTarget: {
+          gpu: {
+            requestAdapter: async () => ({ info: { description } }),
+          },
+        },
+        createCanvas: () => null,
+      });
+
+      expect(probe).toEqual({
+        webgpuAdapterAvailable: true,
+        unsupportedFields: ['webgpu.adapterInfo', 'webgl.context'],
+      });
+      expect(classifyGraphicsEvidence(probe)).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'webgpu_adapter_info_unavailable',
+        supportingProbe: 'webgpu',
+        unsupportedFields: ['webgpu.adapterInfo', 'webgl.context'],
+      });
+    }
+  });
+
+  it('filters mixed vendor and hardware identifier WebGPU descriptions', async () => {
+    for (const description of [
+      'NVIDIA 10DE:2484',
+      'NVIDIA VEN=10DE DEV=2484',
+      'PCI\\VEN_10DE&DEV_2484&SUBSYS_00000000',
     ]) {
       const probe = await probeGraphicsEvidence({
         navigatorTarget: {
