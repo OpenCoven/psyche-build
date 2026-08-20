@@ -294,6 +294,9 @@ const knownAdapterWords = new Set([
   'webgpu',
 ]);
 const productFamilyModelWords = new Set(['arc', 'gtx', 'rtx', 'rx']);
+// Conservative evidence contract: these standalone model tokens are preserved
+// when they precede a hardware ID sequence; this is not product inference.
+const CONSERVATIVE_VERSIONED_MODEL_TOKENS = new Set(['a100', 'h100', 'a770']);
 const concatenatedDescriptorFragments = [
   ...knownAdapterWords,
   'advancedmicrodevices',
@@ -316,7 +319,7 @@ const embeddedUuidLabelPattern = /\buuid\b\s*[:=#-]?\s*(?=\{?[0-9a-f]{8}-[0-9a-f
 const identifierOnlyPattern = /^(?:(?:pci|ven|dev|vendor|device|id)|(?:0x)?[0-9a-f]+|[\s,:/\\\-&_;])+$/i;
 const hardwareIdentifierPattern = /(?:\b(?:0x)?[0-9a-f]{4,8}\s*:\s*(?:0x)?[0-9a-f]{4,8}\b|(?<![\p{L}\p{N}])(?:pci|ven|dev|subsys|vendor[^\p{L}\p{N}{}]*id|device[^\p{L}\p{N}{}]*id|vid|pid|did|luid|uuid)(?:[^\p{L}\p{N}{}]+(?:\{[0-9a-f-]+\}|(?:0x)?[0-9a-f]+)|(?:\{[0-9a-f-]+\}|(?:0x)?[0-9]+|(?:0x)?[0-9a-f]{4,}))(?![\p{L}\p{N}]))/iu;
 const identifierSequencePattern = /(?<![\p{L}\p{N}])(?:0x)?[0-9a-f]{4,8}(?:[\s-]+(?:0x)?[0-9a-f]{4,8})+(?![\p{L}\p{N}])/giu;
-const ancillaryIdentifierLabelPattern = /\s+(?:(?:pci|ven|dev|subsys|vid|pid|did|luid|uuid)\b(?:\s*(?:id|identifier)\b)?|(?:vendor|device)\b\s*(?:id|identifier)\b)\s*[:=#-]?\s*(?:0x)?[0-9a-f]{1,8}\b/gi;
+const ancillaryIdentifierLabelPattern = /\s+(?:(?:pci|ven|dev|subsys|vid|pid|did|luid|uuid)\b(?:\s*(?:id|identifier)\b)?|(?:vendor|device)\b\s*(?:id|identifier)\b)\s*[:=#-]?\s*(?:0x)?[0-9a-f]{1,8}\b(?:[\s-]+(?:0x)?[0-9a-f]{1,8}\b)*/gi;
 const ancillaryIdentifierPattern = /\s*\(\s*0x[0-9a-f]+\s*\)|\s+0x[0-9a-f]+\b/gi;
 const backendOnlyAdapterPattern = /^(?:angle\s+)?(?:metal|vulkan|opengl(?:\s+es)?|direct3d(?:\s*(?:11|12))?|d3d(?:11|12))(?:\s+(?:renderer|engine|[0-9]+(?:\.[0-9]+)*))?$/i;
 const genericTrailingAngleSegmentPattern = /^(?:angle|unspecified\s+version|(?:metal|vulkan|opengl(?:\s+es)?|direct3d(?:\s*(?:11|12))?|d3d(?:11|12)?)(?:\s+(?:renderer|engine|backend|version|[0-9]+(?:\.[0-9]+)*))*)$/i;
@@ -552,6 +555,7 @@ function stripAncillaryIdentifierFragments(value: string): string {
   return value
     .replace(embeddedUuidLabelPattern, ' ')
     .replace(embeddedUuidPattern, ' ')
+    .replace(ancillaryIdentifierLabelPattern, ' ')
     .replace(identifierSequencePattern, (sequence, offset, source) => {
       const tokens = sequence.match(/(?:0x)?[0-9a-f]{4,8}/gi) ?? [];
       const prefix = source.slice(0, offset);
@@ -559,7 +563,6 @@ function stripAncillaryIdentifierFragments(value: string): string {
         ? ` ${tokens[0]} `
         : ' ';
     })
-    .replace(ancillaryIdentifierLabelPattern, ' ')
     .replace(ancillaryIdentifierPattern, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -568,13 +571,7 @@ function stripAncillaryIdentifierFragments(value: string): string {
 function shouldPreserveProductModelToken(prefix: string, tokens: string[]): boolean {
   const firstToken = tokens[0];
   if (!firstToken || tokens.length < 2 || /^0x/i.test(firstToken)) return false;
-  if (
-    tokens.length >= 3
-    && /^[a-z]/i.test(firstToken)
-    && /\d/.test(firstToken)
-  ) {
-    return true;
-  }
+  if (tokens.length >= 3 && CONSERVATIVE_VERSIONED_MODEL_TOKENS.has(lowerCase(firstToken))) return true;
 
   const prefixTokens = prefix.match(/[a-z0-9]+/gi) ?? [];
   const precedingToken = prefixTokens.at(-1);

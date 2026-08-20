@@ -306,6 +306,70 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('does not infer unknown shape-only models before GPU ID sequences across every graphics path', () => {
+    const probes = [
+      {
+        webgpuAdapterAvailable: true as const,
+        webgpuAdapter: 'NVIDIA GPU A123 10DE 2684',
+        unsupportedFields: [],
+      },
+      {
+        strictContext: 'webgl2' as const,
+        renderer: 'NVIDIA GPU A123 10DE 2684',
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false as const,
+      },
+      {
+        strictContext: 'webgl2' as const,
+        renderer: 'ANGLE (NVIDIA, NVIDIA GPU A123 10DE 2684, OpenGL)',
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false as const,
+      },
+    ];
+
+    for (const probe of probes) {
+      expect(classifyGraphicsEvidence(probe)).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+      });
+    }
+  });
+
+  it('strips complete multi-token device labels before validating named products across every graphics path', () => {
+    const product = 'NVIDIA GeForce RTX 4090';
+    const probes = [
+      {
+        webgpuAdapterAvailable: true as const,
+        webgpuAdapter: `${product} Device ID: 10DE 2684`,
+        unsupportedFields: [],
+      },
+      {
+        strictContext: 'webgl2' as const,
+        renderer: `${product} Device ID: 10DE 2684`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false as const,
+      },
+      {
+        strictContext: 'webgl2' as const,
+        renderer: `ANGLE (NVIDIA, ${product} Device ID: 10DE 2684, OpenGL)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false as const,
+      },
+    ];
+
+    for (const probe of probes) {
+      expect(classifyGraphicsEvidence(probe)).toMatchObject({
+        acceleration: 'accelerated',
+        adapter: product,
+        supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+      });
+      if (probe.renderer?.startsWith('ANGLE')) {
+        expect(classifyGraphicsEvidence(probe).backend).toBe('OpenGL');
+      }
+    }
+  });
+
   it('strips complete mixed identifier sequences from named adapters across every path', () => {
     const probes = [
       {
