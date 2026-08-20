@@ -1053,6 +1053,109 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(lastConnectedHost, expectedHost)
     }
 
+    func testSelectedHostMismatchDuringAuthoritativeWelcomeFailsBeforeSnapshotOrSelectionUpdate() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake)
+        let stored = makePairedHost(
+            serverID: "server-1",
+            serverName: "Stored Host",
+            endpoint: testEndpoint(host: "stored.local", port: 5151),
+            clientID: "paired-client",
+            token: "issued-token"
+        )
+        try await composition.pairedHostStore.save(stored)
+        try await composition.pairedHostStore.markLastConnected(serverID: stored.serverID)
+        let refreshedEndpoint = testEndpoint(host: "refreshed.local", port: 6262)
+
+        let connectTask = Task {
+            try await composition.manager.connectToPairedHost(
+                serverID: stored.serverID,
+                resolvedEndpoint: refreshedEndpoint
+            )
+        }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome(
+            serverID: "server-2",
+            serverName: "Different Host"
+        ))))
+
+        let mismatch = ConnectionManagerError.selectedHostMismatch(
+            expectedServerID: stored.serverID,
+            actualServerID: "server-2"
+        )
+        do {
+            _ = try await connectTask.value
+            XCTFail("Expected mismatched selected host negotiation to fail")
+        } catch {
+            XCTAssertEqual(
+                error as? ConnectionManagerError,
+                .connectionFailed(reason: mismatch.localizedDescription)
+            )
+        }
+
+        let snapshotRequestCount = await fake.sentMessages
+            .filter(\.isWorkspaceSnapshotRequest)
+            .count
+        let failure = await waitForFailure(in: composition.manager)
+        let persistedHosts = try await composition.pairedHostStore.hosts()
+        let lastConnectedHost = try await composition.pairedHostStore.lastConnectedHost()
+        XCTAssertEqual(snapshotRequestCount, 0)
+        XCTAssertEqual(failure, mismatch.localizedDescription)
+        XCTAssertEqual(persistedHosts, [stored])
+        XCTAssertEqual(lastConnectedHost, stored)
+        XCTAssertNil(composition.workspaceStore.workspace)
+    }
+
+    func testWorkspaceReadyPersistsRenamedSelectedHostFromAuthoritativeWelcome() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake)
+        let stored = makePairedHost(
+            serverID: "server-1",
+            serverName: "Stored Host",
+            endpoint: testEndpoint(host: "stored.local", port: 5151),
+            clientID: "paired-client",
+            token: "issued-token"
+        )
+        try await composition.pairedHostStore.save(stored)
+        try await composition.pairedHostStore.markLastConnected(serverID: stored.serverID)
+        let refreshedEndpoint = testEndpoint(host: "refreshed.local", port: 6262)
+
+        let connectTask = Task {
+            try await composition.manager.connectToPairedHost(
+                serverID: stored.serverID,
+                resolvedEndpoint: refreshedEndpoint
+            )
+        }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome(
+            serverID: stored.serverID,
+            serverName: "Renamed Host"
+        ))))
+        _ = try await connectTask.value
+
+        let readiness = workspaceReadinessResult(on: composition.manager)
+        let requestID = try await waitForSnapshotRequest(on: fake)
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: requestID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
+        ))))
+
+        let readinessResult = await readiness.value
+        XCTAssertNoThrow(try readinessResult.get())
+        let expectedHost = PairedHost(
+            serverID: stored.serverID,
+            serverName: "Renamed Host",
+            endpoint: refreshedEndpoint,
+            clientID: stored.clientID,
+            token: stored.token
+        )
+        let persistedHosts = try await composition.pairedHostStore.hosts()
+        let lastConnectedHost = try await composition.pairedHostStore.lastConnectedHost()
+        XCTAssertEqual(persistedHosts, [expectedHost])
+        XCTAssertEqual(lastConnectedHost, expectedHost)
+    }
+
     func testSnapshotRequestFailureFailsWorkspaceReadyWaiter() async throws {
         let fake = FakeTransport()
         let composition = makeComposition(transport: fake, token: "token")

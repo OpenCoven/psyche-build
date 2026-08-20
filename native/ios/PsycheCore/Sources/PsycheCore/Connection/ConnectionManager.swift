@@ -53,6 +53,7 @@ final class PairingPersistenceAuthorization: @unchecked Sendable {
 public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
     case missingWelcomeIdentity
     case selectedHostUnavailable(serverID: String)
+    case selectedHostMismatch(expectedServerID: String, actualServerID: String)
     case connectionFailed(reason: String)
     case workspaceReadinessUnavailable
     case unsupportedProtocolVersion(Int)
@@ -66,6 +67,8 @@ public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
             "The host accepted pairing before identifying itself."
         case .selectedHostUnavailable(let serverID):
             "The paired host \(serverID) is no longer available on this device. Choose another paired host or pair it again."
+        case .selectedHostMismatch(let expectedServerID, let actualServerID):
+            "Expected paired host \(expectedServerID), but the authenticated host identified itself as \(actualServerID)."
         case .connectionFailed(let reason):
             "The connection failed: \(reason)"
         case .workspaceReadinessUnavailable:
@@ -749,10 +752,26 @@ public actor ConnectionManager {
                         .localizedDescription
                 )
             }
-            welcomeIdentity = WelcomeIdentity(
+            let welcomeIdentity = WelcomeIdentity(
                 serverID: payload.serverID,
                 serverName: payload.serverName
             )
+            if let readyHost = pendingReadyHost {
+                guard welcomeIdentity.serverID == readyHost.serverID else {
+                    return .failed(
+                        ConnectionManagerError.selectedHostMismatch(
+                            expectedServerID: readyHost.serverID,
+                            actualServerID: welcomeIdentity.serverID
+                        )
+                        .localizedDescription
+                    )
+                }
+                pendingReadyHost = rebuiltReadyHost(
+                    from: readyHost,
+                    welcomeIdentity: welcomeIdentity
+                )
+            }
+            self.welcomeIdentity = welcomeIdentity
             await requestClient.beginGeneration(generation)
             guard isActive(session: session, generation: generation) else {
                 return .ignored
@@ -1033,6 +1052,20 @@ public actor ConnectionManager {
         workspaceReadyGeneration = generation
         completeWorkspaceReadiness(for: generation, with: .success(()))
         return true
+    }
+
+    private func rebuiltReadyHost(
+        from readyHost: PairedHost,
+        welcomeIdentity: WelcomeIdentity
+    ) -> PairedHost {
+        guard let activeConnection else { return readyHost }
+        return PairedHost(
+            serverID: welcomeIdentity.serverID,
+            serverName: welcomeIdentity.serverName,
+            endpoint: activeConnection.endpoint,
+            clientID: activeConnection.credentials.clientID,
+            token: activeConnection.credentials.token
+        )
     }
 
     private func recordProcessedMessage() {
