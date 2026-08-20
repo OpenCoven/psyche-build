@@ -151,7 +151,7 @@ const OPENGL_HARDWARE_HINTS = [
 const SOFTWARE_RENDERER_MARKER_VERSION = 2;
 const sharedStartupState: RuntimeGraphicsStartupState = createRuntimeGraphicsStartupState();
 const genericAdapterPattern = /^(adapter|gpu|graphics)$/i;
-const identifierOnlyPattern = /^(0x)?[0-9a-f-]+$/i;
+const identifierOnlyPattern = /^(?:(?:0x)?[0-9a-f]+(?:\s*[:/,\\-]\s*(?:0x)?[0-9a-f]+)+|(?:0x)?[0-9a-f]+|PCI(?:[\\/:])?VEN_[0-9a-f]+(?:[&\\/:][a-z]+_[0-9a-f]+)+)$/i;
 const DIRECT3D_BACKEND_PATTERN = /\b(?:direct3d(?:11|12)?|d3d(?:11|12)?)\b/i;
 
 export const SOFTWARE_RENDERER_MARKERS = Object.freeze({
@@ -358,7 +358,13 @@ function isMaskedRenderer(text: string): boolean {
 function normalizeAdapterString(value: string): string | undefined {
   const normalized = normalizeString(value);
   if (!normalized) return undefined;
-  if (genericAdapterPattern.test(normalized)) return undefined;
+  if (
+    genericAdapterPattern.test(normalized)
+    || identifierOnlyPattern.test(normalized)
+    || isMaskedRenderer(normalized)
+  ) {
+    return undefined;
+  }
   return normalized;
 }
 
@@ -396,12 +402,10 @@ function hasExplicitOpenGlHardwareHint(text: string): boolean {
 }
 
 function normalizeWebGpuAdapterInfo(info: GraphicsGpuAdapterInfo | undefined): string | undefined {
-  const description = normalizeString(info?.description);
+  const description = normalizeAdapterString(info?.description ?? '');
   if (description) return description;
 
-  const device = normalizeString(info?.device);
-  if (device && !identifierOnlyPattern.test(device)) return device;
-  return undefined;
+  return normalizeAdapterString(info?.device ?? '');
 }
 
 async function probeWebGpu(
@@ -620,8 +624,9 @@ function parseWebGlRenderer(renderer: string, source: Exclude<RuntimeGraphicsPro
       .map((segment) => segment.trim())
       .filter((segment) => segment.length > 0);
     const softwareMarker = softwareMarkerFor(renderer);
+    const adapterToken = segments[1] ?? '';
     const adapter = normalizeAdapterString(
-      stripAngleAdapterTokens(segments[1] ?? '', backend) ?? softwareMarker ?? '',
+      stripAngleAdapterTokens(adapterToken, backend) ?? softwareMarker ?? '',
     );
 
     if (softwareMarker) {
@@ -633,7 +638,7 @@ function parseWebGlRenderer(renderer: string, source: Exclude<RuntimeGraphicsPro
       };
     }
 
-    if (isMaskedRenderer(renderer)) {
+    if (isMaskedRenderer(adapterToken)) {
       return {
         source,
         category: 'ambiguous',
@@ -641,13 +646,20 @@ function parseWebGlRenderer(renderer: string, source: Exclude<RuntimeGraphicsPro
       };
     }
 
-    if (!backend || !adapter) {
+    if (!adapter) {
       return {
         source,
         category: 'ambiguous',
-        backend,
+        reason: 'renderer_masked_or_ambiguous',
+      };
+    }
+
+    if (!backend) {
+      return {
+        source,
+        category: 'ambiguous',
         adapter,
-        reason: backend ? 'renderer_masked_or_ambiguous' : 'renderer_unrecognized',
+        reason: 'renderer_unrecognized',
       };
     }
 

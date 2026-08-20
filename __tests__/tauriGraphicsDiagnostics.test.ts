@@ -220,6 +220,45 @@ describe('graphics evidence classification', () => {
     });
   });
 
+  it('keeps masked ANGLE adapters unknown even when OpenGL is named as the backend', () => {
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'ANGLE (Google, Generic Renderer, OpenGL)',
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toEqual({
+      acceleration: 'unknown',
+      fallbackReason: 'renderer_masked_or_ambiguous',
+      supportingProbe: 'webgl2',
+      unsupportedFields: [],
+    });
+  });
+
+  it('does not treat identifier-only WebGPU or ANGLE values as hardware adapters', () => {
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'ANGLE (Google, 0x10de, OpenGL)',
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toEqual({
+      acceleration: 'unknown',
+      fallbackReason: 'renderer_masked_or_ambiguous',
+      supportingProbe: 'webgl2',
+      unsupportedFields: [],
+    });
+
+    expect(classifyGraphicsEvidence({
+      webgpuAdapterAvailable: true,
+      webgpuAdapter: '0x10de',
+      unsupportedFields: [],
+    })).toEqual({
+      acceleration: 'unknown',
+      fallbackReason: 'renderer_masked_or_ambiguous',
+      supportingProbe: 'webgpu',
+      unsupportedFields: [],
+    });
+  });
+
   it('stays conservative for masked, strict-failure, conflicting, absent-version, and unrecognized cases', () => {
     expect(classifyGraphicsEvidence({
       strictContext: 'webgl2',
@@ -393,6 +432,30 @@ describe('graphics probes', () => {
       webgpuAdapterInfoSource: 'requestAdapterInfo',
       fallbackContext: 'webgl',
       unsupportedFields: ['webgl.strictContext', 'webgl.debugRendererInfo', 'webgl.renderer'],
+    });
+  });
+
+  it('does not promote identifier-only WebGPU descriptions or devices to adapter evidence', async () => {
+    const result = await probeGraphicsEvidence({
+      navigatorTarget: {
+        gpu: {
+          requestAdapter: async () => ({
+            info: { description: '0x10de', device: '0x2484' },
+          }),
+        },
+      },
+      createCanvas: () => null,
+    });
+
+    expect(result).toEqual({
+      webgpuAdapterAvailable: true,
+      unsupportedFields: ['webgpu.adapterInfo', 'webgl.context'],
+    });
+    expect(classifyGraphicsEvidence(result)).toEqual({
+      acceleration: 'unknown',
+      fallbackReason: 'webgpu_adapter_info_unavailable',
+      supportingProbe: 'webgpu',
+      unsupportedFields: ['webgpu.adapterInfo', 'webgl.context'],
     });
   });
 
