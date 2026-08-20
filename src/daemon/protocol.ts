@@ -148,7 +148,12 @@ export type ClientRequest =
   | { type: 'panes.resize'; requestId: string; streamId: StreamId; cols: number; rows: number }
   | { type: 'panes.kill'; requestId: string; id: PaneId }
   | { type: 'panes.meta'; requestId: string; id: PaneId; title?: string; agent?: string }
-  | { type: 'orchestration.execute'; requestId: string; task: OrchestrationTaskRequest };
+  | {
+      type: 'orchestration.execute';
+      requestId: string;
+      operationId?: string;
+      task: OrchestrationTaskSubmission;
+    };
 
 export type ServerResponse =
   | { type: 'welcome'; protocol: number; serverVersion: string }
@@ -204,7 +209,7 @@ import type {
   AgenticCapabilityRequest,
 } from '../orchestration/capabilityRouter.js';
 import type {
-  OrchestrationTaskRequest,
+  OrchestrationTaskSubmission,
   OrchestrationTaskResult,
 } from '../orchestration/types.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';

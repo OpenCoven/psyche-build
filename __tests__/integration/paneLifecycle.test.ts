@@ -122,6 +122,53 @@ vi.mock('../../src/services/ProjectPaneConfig.js', () => ({
   ensureProjectPaneConfigPane: ensureProjectPaneConfigPaneMock,
 }));
 
+vi.mock('../../src/services/PaneSlugRegistry.js', () => ({
+  allocateUniquePaneSlug: async (baseSlug: string) => baseSlug,
+}));
+
+vi.mock('../../src/services/PaneSlugReservation.js', () => ({
+  reserveCrashSafePaneSlug: async (options: {
+    sessionProjectRoot: string;
+    projectRoot: string;
+    paneId: string;
+    allocate: (state: {
+      config: { panes: unknown[] };
+      occupiedSlugs: Set<string>;
+      persistedSlugs: Set<string>;
+      ownershipRecords: unknown[];
+    }) => Promise<{ slug: string; worktreePath: string }>;
+  }) => {
+    const candidate = await options.allocate({
+      config: { panes: [] },
+      occupiedSlugs: new Set(),
+      persistedSlugs: new Set(),
+      ownershipRecords: [],
+    });
+    let effect: { paneId: string } | undefined;
+    return {
+      recoveryId: '00000000-0000-4000-8000-000000000001',
+      sessionProjectRoot: options.sessionProjectRoot,
+      projectRoot: options.projectRoot,
+      slug: candidate.slug,
+      paneId: options.paneId,
+      worktreePath: candidate.worktreePath,
+      get effect() {
+        return effect;
+      },
+      recordPaneEffect: async (paneId: string) => {
+        effect = { paneId };
+      },
+      completeAfterPanePersisted: async () => {},
+      clearBeforeEffect: async () => {},
+      clearAfterConfirmedTeardown: async () => {},
+    };
+  },
+  settlePaneSlugReservationAfterFailure: async () => ({
+    released: true,
+    quarantined: false,
+  }),
+}));
+
 vi.mock('../../src/utils/welcomePaneManager.js', () => ({
   destroyWelcomePaneCoordinated: destroyWelcomePaneCoordinatedMock,
 }));

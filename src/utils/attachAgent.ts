@@ -59,11 +59,11 @@ export function generateSiblingSlugForTargetPane(
 
 /**
  * Compatibility wrapper: submits one shared-worktree lane by delegating
- * to `createPane` with an `existingWorktree` ref whose slug is a freshly
- * computed sibling suffix.
+ * to `createPane` with an allocator that computes the sibling slug from the
+ * persisted pane registry while reuse is reserved.
  *
  * All tmux split, layout, title, hook, launch, and focus logic is handled
- * by `createPane` — this function owns only the sibling-slug computation.
+ * by `createPane` — this function owns only the sibling-slug allocator.
  */
 export async function attachAgentToWorktree(
   options: AttachAgentOptions,
@@ -73,11 +73,6 @@ export async function attachAgentToWorktree(
   }
 
   const projectRoot = options.targetPane.projectRoot || options.sessionProjectRoot;
-  const slug = generateSiblingSlugForTargetPane(
-    options.targetPane,
-    options.existingPanes,
-  );
-
   const createPaneOptions: CreatePaneOptions = {
     prompt: options.prompt,
     agent: options.agent,
@@ -85,10 +80,13 @@ export async function attachAgentToWorktree(
     projectRoot,
     existingPanes: options.existingPanes,
     existingWorktree: {
-      slug,
+      slug: options.targetPane.slug,
       worktreePath: options.targetPane.worktreePath,
-      branchName: options.targetPane.branchName || slug,
+      branchName: options.targetPane.branchName || options.targetPane.slug,
     },
+    resolveExistingWorktreeSlug: (freshPanes) => (
+      generateSiblingSlugForTargetPane(options.targetPane, freshPanes)
+    ),
     sessionProjectRoot: options.sessionProjectRoot,
     ...(options.sessionConfigPath ? { sessionConfigPath: options.sessionConfigPath } : {}),
     ...(options.persistReusedPane ? { persistReusedPane: options.persistReusedPane } : {}),

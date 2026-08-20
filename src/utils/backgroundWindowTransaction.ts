@@ -592,7 +592,9 @@ async function retainUncertainBackgroundRecovery(
       operation: `background-${options.type}-allocation`,
       reason,
     });
-    return `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+    return `wrote recovery marker ${marker.path}. ${
+      marker.warning ? `${marker.warning}. ` : ''
+    }${marker.marker.operatorInstructions}`;
   } catch (error) {
     return `could not write recovery marker: ${errorMessage(error)}`;
   }
@@ -878,7 +880,9 @@ async function retainJoinedBackgroundRecovery(
         operation: `background-${options.type}-join`,
         reason: `${reason}: ${errorMessage(error)}`,
       });
-      return `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+      return `wrote recovery marker ${marker.path}. ${
+        marker.warning ? `${marker.warning}. ` : ''
+      }${marker.marker.operatorInstructions}`;
     } catch (markerError) {
       return `could not write recovery marker: ${errorMessage(markerError)}`;
     }

@@ -16,6 +16,7 @@ import type {
 
 export interface MultiAgentTaskInput {
   taskId: string;
+  operationId: string;
   traceId?: string;
   projectRoot: string;
   prompt: string;
@@ -57,6 +58,7 @@ export function buildMultiAgentTaskRequest(input: MultiAgentTaskInput): Orchestr
 
   return {
     taskId: input.taskId,
+    operationId: input.operationId,
     ...(input.traceId ? { traceId: input.traceId } : {}),
     projectRoot: input.projectRoot,
     prompt: input.prompt,
@@ -70,6 +72,7 @@ export function buildMultiAgentTaskRequest(input: MultiAgentTaskInput): Orchestr
 
 export interface SinglePaneTaskInput {
   taskId: string;
+  operationId: string;
   traceId?: string;
   projectRoot: string;
   prompt: string;
@@ -85,6 +88,7 @@ export interface SinglePaneTaskInput {
 export function buildSinglePaneTaskRequest(input: SinglePaneTaskInput): OrchestrationTaskRequest {
   return {
     taskId: input.taskId,
+    operationId: input.operationId,
     ...(input.traceId ? { traceId: input.traceId } : {}),
     projectRoot: input.projectRoot,
     prompt: input.prompt,
@@ -100,6 +104,7 @@ export function buildSinglePaneTaskRequest(input: SinglePaneTaskInput): Orchestr
 
 export interface SharedWorktreeTaskInput {
   taskId: string;
+  operationId: string;
   traceId?: string;
   projectRoot: string;
   prompt: string;
@@ -118,6 +123,7 @@ export function buildSharedWorktreeTaskRequest(
   const laneIds = buildLaneIdsForAgents(input.agents);
   return {
     taskId: input.taskId,
+    operationId: input.operationId,
     ...(input.traceId ? { traceId: input.traceId } : {}),
     projectRoot: input.projectRoot,
     prompt: input.prompt,

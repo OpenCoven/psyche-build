@@ -8,6 +8,16 @@ import {
   type BridgeSpawnDeps,
   type BridgeSpawnPromptKeysRequest,
 } from '../../src/daemon/bridge.js';
+import { generateSiblingSlugForTargetPane } from '../../src/utils/attachAgent.js';
+import {
+  mutateProjectPaneConfig,
+  readProjectPaneConfigUnderLock,
+  withProjectPaneSlugAllocationLock,
+} from '../../src/services/ProjectPaneConfig.js';
+import {
+  acknowledgeWorktreeRecoveryMarker,
+  listWorktreeRecoveryMarkers,
+} from '../../src/services/WorktreeRecoveryMarker.js';
 
 let root: string;
 let nextMockPaneId = 9;
@@ -51,11 +61,23 @@ function harness() {
   };
 }
 
-async function spawn(agent: string, prompt: string | undefined, h = harness()) {
+async function spawn(
+  agent: string,
+  prompt: string | undefined,
+  h = harness(),
+  permissionMode?: '' | 'plan' | 'acceptEdits' | 'bypassPermissions',
+) {
   const result = await spawnBridgePane(
     root,
     'psyche-test',
-    { requestId: 'req-1', cwd: root, agent, prompt, title: `${agent}-lane` },
+    {
+      requestId: 'req-1',
+      cwd: root,
+      agent,
+      prompt,
+      title: `${agent}-lane`,
+      ...(permissionMode !== undefined ? { permissionMode } : {}),
+    },
     h.deps,
   );
   return { ...h, result };
@@ -65,6 +87,20 @@ async function spawn(agent: string, prompt: string | undefined, h = harness()) {
 function promptFiles(): string[] {
   const dir = path.join(root, '.psyche', 'prompts');
   return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+}
+
+async function waitForSlugAllocationWaiter(): Promise<void> {
+  const runtimeDir = path.join(root, '.psyche', 'runtime');
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const entries = fs.existsSync(runtimeDir) ? fs.readdirSync(runtimeDir) : [];
+    if (entries.some((entry) => (
+      entry.startsWith('pane-slug-allocation.lock.candidate.')
+    ))) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('daemon did not wait for the shared pane slug allocation lock');
 }
 
 describe('spawnBridgePane prompt transports', () => {
@@ -130,6 +166,55 @@ describe('spawnBridgePane prompt transports', () => {
     await spawn('cline', 'Fix it', h);
 
     expect(order).toEqual(['launch:cline', 'keys']);
+  });
+
+  it('uses the request permission mode instead of broader project settings', async () => {
+    fs.mkdirSync(path.join(root, '.psyche'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, '.psyche', 'psyche.config.json'),
+      JSON.stringify({ settings: { permissionMode: 'bypassPermissions' }, panes: [] }),
+    );
+
+    const h = await spawn('claude', 'Fix it', harness(), 'plan');
+    const config = JSON.parse(
+      fs.readFileSync(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+
+    expect(h.commands[0]).toContain('--permission-mode plan');
+    expect(h.commands[0]).not.toContain('--dangerously-skip-permissions');
+    expect(config.panes[0].permissionMode).toBe('plan');
+  });
+
+  it('persists an explicit empty permission mode as the agent default', async () => {
+    fs.mkdirSync(path.join(root, '.psyche'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, '.psyche', 'psyche.config.json'),
+      JSON.stringify({ settings: { permissionMode: 'bypassPermissions' }, panes: [] }),
+    );
+
+    const h = await spawn('claude', 'Fix it', harness(), '');
+    const config = JSON.parse(
+      fs.readFileSync(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+
+    expect(h.commands[0]).not.toContain('--dangerously-skip-permissions');
+    expect(config.panes[0]).toHaveProperty('permissionMode', '');
+  });
+
+  it('returns the exact identity persisted for the spawned pane', async () => {
+    const h = await spawn('codex', 'Fix it');
+    const config = JSON.parse(
+      fs.readFileSync(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+    const pane = config.panes[0];
+
+    expect(h.result.persistedPane).toEqual({
+      id: pane.id,
+      slug: pane.slug,
+      paneId: pane.paneId,
+      worktreePath: pane.worktreePath,
+      branchName: pane.branchName,
+    });
   });
 });
 
@@ -328,6 +413,126 @@ describe('shared-worktree attach', () => {
     expect(config.panes.map((p: any) => p.slug)).toEqual([base, `${base}-a2`]);
   });
 
+  it('quarantines an unrecorded pane slug before another daemon attach allocates', async () => {
+    const first = await seedWorktree();
+    const base = path.basename(first.worktreePath);
+    const configPath = path.join(root, '.psyche', 'psyche.config.json');
+    const stableConfig = fs.readFileSync(configPath, 'utf8');
+    const failed = harness();
+    failed.deps.beforeExistingWorktreePersist = () => {
+      fs.rmSync(configPath);
+      fs.mkdirSync(configPath);
+    };
+    failed.deps.killTmuxPane = vi.fn();
+    failed.deps.probeTmuxPane = () => 'present';
+
+    await expect(spawnBridgePane(
+      root,
+      'psyche-test',
+      {
+        requestId: 'uncertain',
+        cwd: root,
+        agent: 'claude',
+        prompt: 'Review it',
+        existingWorktree: {
+          slug: base,
+          worktreePath: first.worktreePath,
+          branchName: first.branch,
+        },
+      },
+      failed.deps,
+    )).rejects.toThrow(/recovery persist failed/);
+
+    const markers = await listWorktreeRecoveryMarkers(root);
+    expect(markers).toEqual([
+      expect.objectContaining({
+        worktreePath: first.worktreePath,
+        pane: expect.objectContaining({
+          paneId: '%10',
+          slug: `${base}-a2`,
+        }),
+        allowWorktreeReuse: true,
+      }),
+    ]);
+
+    fs.rmSync(configPath, { recursive: true });
+    fs.writeFileSync(configPath, stableConfig);
+    const next = await spawnBridgePane(
+      root,
+      'psyche-test',
+      {
+        requestId: 'next',
+        cwd: root,
+        agent: 'claude',
+        prompt: 'Review it safely',
+        existingWorktree: {
+          slug: base,
+          worktreePath: first.worktreePath,
+          branchName: first.branch,
+        },
+      },
+      harness().deps,
+    );
+    expect(next.persistedPane?.slug).toBe(`${base}-a3`);
+
+    await acknowledgeWorktreeRecoveryMarker(root, markers[0].id);
+  });
+
+  it('releases the failed sibling slug after teardown is confirmed absent', async () => {
+    const first = await seedWorktree();
+    const base = path.basename(first.worktreePath);
+    const configPath = path.join(root, '.psyche', 'psyche.config.json');
+    const stableConfig = fs.readFileSync(configPath, 'utf8');
+    const failed = harness();
+    let panePresent = true;
+    failed.deps.beforeExistingWorktreePersist = () => {
+      fs.rmSync(configPath);
+      fs.mkdirSync(configPath);
+    };
+    failed.deps.killTmuxPane = () => {
+      panePresent = false;
+    };
+    failed.deps.probeTmuxPane = () => panePresent ? 'present' : 'absent';
+
+    await expect(spawnBridgePane(
+      root,
+      'psyche-test',
+      {
+        requestId: 'closed',
+        cwd: root,
+        agent: 'claude',
+        prompt: 'Review it',
+        existingWorktree: {
+          slug: base,
+          worktreePath: first.worktreePath,
+          branchName: first.branch,
+        },
+      },
+      failed.deps,
+    )).rejects.toThrow();
+    expect(await listWorktreeRecoveryMarkers(root)).toEqual([]);
+
+    fs.rmSync(configPath, { recursive: true });
+    fs.writeFileSync(configPath, stableConfig);
+    const retry = await spawnBridgePane(
+      root,
+      'psyche-test',
+      {
+        requestId: 'retry',
+        cwd: root,
+        agent: 'claude',
+        prompt: 'Review it',
+        existingWorktree: {
+          slug: base,
+          worktreePath: first.worktreePath,
+          branchName: first.branch,
+        },
+      },
+      harness().deps,
+    );
+    expect(retry.persistedPane?.slug).toBe(`${base}-a2`);
+  });
+
   // The property that matters most: a shared worktree belongs to other panes.
   // A failure while attaching must never take it — or their work — with it.
   it('does NOT delete the shared worktree when the attach fails', async () => {
@@ -484,5 +689,91 @@ describe('concurrent shared-worktree attach', () => {
     const slugs = config.panes.map((p: any) => p.slug);
     expect(new Set(slugs).size).toBe(slugs.length);
     expect(slugs).toHaveLength(4);
+  });
+
+  it('serializes mixed daemon and local sibling allocation through persistence', async () => {
+    const seed = await spawnBridgePane(
+      root,
+      'psyche-test',
+      { requestId: 'seed', cwd: root, agent: 'coven-code', prompt: 'Fix auth' },
+      harness().deps,
+    );
+    const targetPane = {
+      slug: path.basename(seed.worktreePath),
+      worktreePath: seed.worktreePath,
+    };
+    const existingWorktree = {
+      ...targetPane,
+      branchName: seed.branch,
+    };
+
+    let releaseLocalPersistence!: () => void;
+    const localMayPersist = new Promise<void>((resolve) => {
+      releaseLocalPersistence = resolve;
+    });
+    let localAllocated!: () => void;
+    const localHasAllocated = new Promise<void>((resolve) => {
+      localAllocated = resolve;
+    });
+
+    let localSlug = '';
+    const localAttach = withProjectPaneSlugAllocationLock(root, async () => {
+      const config = await readProjectPaneConfigUnderLock(root);
+      const freshPanes = Array.isArray(config.panes)
+        ? config.panes.map((pane) => ({ slug: String(pane.slug ?? '') }))
+        : [];
+      localSlug = generateSiblingSlugForTargetPane(targetPane, freshPanes);
+      localAllocated();
+      await localMayPersist;
+      await mutateProjectPaneConfig(root, (freshConfig) => {
+        const panes = Array.isArray(freshConfig.panes) ? freshConfig.panes : [];
+        freshConfig.panes = [
+          ...panes,
+          {
+            id: 'local-sibling',
+            paneId: '%local',
+            slug: localSlug,
+            worktreePath: seed.worktreePath,
+            branchName: seed.branch,
+          },
+        ];
+      });
+    });
+
+    await localHasAllocated;
+    let daemonReachedPersistence = false;
+    const daemonAttach = spawnBridgePane(
+      root,
+      'psyche-test',
+      {
+        requestId: 'daemon-sibling',
+        cwd: root,
+        agent: 'claude',
+        prompt: 'Review',
+        existingWorktree,
+      },
+      {
+        ...harness().deps,
+        beforeExistingWorktreePersist: () => {
+          daemonReachedPersistence = true;
+        },
+      },
+    );
+
+    await waitForSlugAllocationWaiter();
+    expect(daemonReachedPersistence).toBe(false);
+
+    releaseLocalPersistence();
+    const [, daemonResult] = await Promise.all([localAttach, daemonAttach]);
+
+    expect(localSlug).toBe(`${targetPane.slug}-a2`);
+    expect(daemonResult.persistedPane?.slug).toBe(`${targetPane.slug}-a3`);
+    const config = JSON.parse(
+      fs.readFileSync(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+    const siblingSlugs = config.panes
+      .map((pane: any) => pane.slug)
+      .filter((slug: string) => slug.startsWith(`${targetPane.slug}-a`));
+    expect(siblingSlugs).toEqual([localSlug, daemonResult.persistedPane?.slug]);
   });
 });

@@ -5,7 +5,7 @@ vi.mock('../src/utils/runProcess.js', () => ({
   runProcess: (...args: unknown[]) => runProcessMock(...args),
 }));
 
-import { generateSlug } from '../src/utils/slug.js';
+import { derivePaneSlug, generateSlug } from '../src/utils/slug.js';
 
 describe('slug generation', () => {
   beforeEach(() => {
@@ -36,5 +36,11 @@ describe('slug generation', () => {
       input: expect.stringContaining(hostilePrompt),
       timeoutMs: 5000,
     }));
+  });
+});
+
+describe('pane slug derivation', () => {
+  it('normalizes the full value into a valid deterministic pane slug', () => {
+    expect(derivePaneSlug('coven-owner:Session.One')).toBe('coven-owner-session.one');
   });
 });

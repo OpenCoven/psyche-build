@@ -115,6 +115,7 @@ export interface ActionContext {
   /** Optional lifecycle seam; production captures the live tmux generation. */
   getTmuxServerIdentity?: () => TmuxServerIdentity | undefined;
   sessionName: string;
+  sessionProjectRoot?: string;
   projectName: string;
   savePanes: SavePanes;
   /**

@@ -10,6 +10,7 @@ import { COMPACTED_OUTCOME_CODE, ControlJournal, exactCommandOutcomeDigest } fro
 import { createCanonicalElementSemantics } from '../src/control/policy.js';
 import { SurfaceRegistry } from '../src/control/surfaces.js';
 import type { ControlCommand } from '../src/control/types.js';
+import { Orchestrator } from '../src/orchestration/orchestrator.js';
 import { createDeferred } from './utils/deferred.js';
 
 const handlers: ControlHandlers = {
@@ -2465,6 +2466,273 @@ describe('ControlRuntime', () => {
       payload: { request, taskId: request.taskId, leaseId: lease.id, leaseRevision: lease.revision } })))
       .resolves.toMatchObject({ status: 'succeeded' });
     expect(handlers.executeOrchestration).toHaveBeenCalledOnce();
+  });
+
+  it('derives orchestration authority from the control idempotency key, not caller names or trace ids', async () => {
+    const observed: Array<{ operationId: string | undefined; requestOperationId?: string }> = [];
+    handlers.executeOrchestration = vi.fn(async (payload, _authorize, operationId) => {
+      observed.push({
+        operationId,
+        requestOperationId: (payload.request as { operationId?: string }).operationId,
+      });
+      return { ok: true };
+    });
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7,
+      handlers,
+      journal: createMemoryJournal(),
+    });
+    const request = {
+      taskId: 'shared-task',
+      traceId: 'caller-trace',
+      operationId: 'caller-operation-must-not-win',
+      projectRoot: '/repo',
+      prompt: 'test',
+      lanes: [{ id: 'same-lane', mode: 'terminal' as const }],
+    };
+    const granted = await submit(runtime, command({
+      id: 'grant-operation-authority',
+      idempotencyKey: 'grant-operation-authority',
+      kind: 'lease.grant',
+      ownerEpoch: 7,
+      payload: {
+        requestId: 'request-operation-authority',
+        actorId: 'agent-1',
+        taskId: request.taskId,
+        ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: '/repo' }, capabilities: ['pane.create'] }],
+      },
+    }));
+    const lease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
+    const execute = (id: string, idempotencyKey: string) => submit(runtime, command({
+      id,
+      idempotencyKey,
+      kind: 'orchestration.execute',
+      ownerEpoch: 7,
+      actor: { id: 'agent-1', kind: 'psyche' },
+      payload: {
+        request,
+        taskId: request.taskId,
+        leaseId: lease.id,
+        leaseRevision: lease.revision,
+      },
+    }));
+
+    await expect(execute('control-operation-a', 'canonical-control-operation-a'))
+      .resolves.toMatchObject({ status: 'succeeded' });
+    await expect(execute('control-operation-a-retry', 'canonical-control-operation-a'))
+      .resolves.toMatchObject({ status: 'succeeded' });
+    await expect(execute('control-operation-b', 'canonical-control-operation-b'))
+      .resolves.toMatchObject({ status: 'succeeded' });
+
+    expect(handlers.executeOrchestration).toHaveBeenCalledTimes(2);
+    expect(observed[0].operationId).toMatch(/^orch-op-v1-[0-9a-f]{64}$/);
+    expect(observed[0].requestOperationId).toBe(observed[0].operationId);
+    expect(observed[1].requestOperationId).toBe(observed[1].operationId);
+    expect(observed[1].operationId).not.toBe(observed[0].operationId);
+    expect(observed[0].operationId).not.toContain(request.taskId);
+    expect(observed[0].operationId).not.toContain(request.traceId);
+  });
+
+  it('revalidates lease revocation before each orchestration lane effect', async () => {
+    const projectRoot = process.cwd();
+    const capabilityLeases = new CapabilityLeaseStore(
+      () => new Date('2026-08-17T12:00:00.000Z'),
+      7,
+    );
+    const effects: string[] = [];
+    let leaseId = '';
+    handlers.executeOrchestration = vi.fn(async (payload, authorize) => {
+      const orchestrator = new Orchestrator({
+        executeLane: async (lane) => {
+          effects.push(lane.id);
+          if (lane.id === 'first') capabilityLeases.revoke(leaseId);
+          return { pane: { id: `pane-${lane.id}`, slug: lane.id } as never };
+        },
+      });
+      return orchestrator.execute(payload.request, { beforeLaneEffect: authorize });
+    });
+    const journal = createMemoryJournal();
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7,
+      handlers,
+      journal,
+      capabilityLeases,
+    });
+    const request = { taskId: 'task-orchestration', projectRoot, prompt: 'test',
+      concurrency: 1, lanes: [
+        { id: 'first', mode: 'terminal' as const },
+        { id: 'second', mode: 'terminal' as const },
+      ] };
+    const granted = await submit(runtime, command({
+      id: 'grant-orchestration-revoke', idempotencyKey: 'grant-orchestration-revoke',
+      kind: 'lease.grant', projectRoot, ownerEpoch: 7, payload: {
+        requestId: 'request-orchestration-revoke', actorId: 'agent-1',
+        taskId: request.taskId, ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: projectRoot }, capabilities: ['pane.create'] }],
+      },
+    }));
+    const lease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
+    leaseId = lease.id;
+
+    const orchestration = command({
+      id: 'orchestration-revoke', idempotencyKey: 'orchestration-revoke',
+      kind: 'orchestration.execute', projectRoot, ownerEpoch: 7, actor: { id: 'agent-1', kind: 'psyche' },
+      payload: { request, taskId: request.taskId, leaseId: lease.id, leaseRevision: lease.revision },
+    });
+    const firstOutcome = await submit(runtime, orchestration);
+    expect(firstOutcome).toMatchObject({
+      status: 'succeeded',
+      value: {
+        status: 'partial',
+        lanes: [
+          {
+            id: 'first',
+            status: 'completed',
+            pane: { id: 'pane-first', slug: 'first' },
+          },
+          {
+            id: 'second',
+            status: 'failed',
+            error: { code: 'lease_missing' },
+          },
+        ],
+      },
+    });
+    expect(effects).toEqual(['first']);
+
+    await expect(submit(runtime, {
+      ...orchestration,
+      id: 'orchestration-revoke-retry',
+    })).resolves.toMatchObject({
+      status: 'succeeded',
+      value: {
+        status: 'partial',
+        lanes: [
+          { id: 'first', status: 'completed', pane: { id: 'pane-first' } },
+          { id: 'second', status: 'failed', error: { code: 'lease_missing' } },
+        ],
+      },
+    });
+    expect(effects).toEqual(['first']);
+    expect(handlers.executeOrchestration).toHaveBeenCalledOnce();
+
+    const recovered = await ControlRuntime.create({
+      ownerEpoch: 7,
+      handlers,
+      journal,
+    });
+    await expect(submit(recovered, {
+      ...orchestration,
+      id: 'orchestration-revoke-restart-retry',
+    })).resolves.toMatchObject({
+      status: 'succeeded',
+      value: {
+        status: 'partial',
+        lanes: [
+          { id: 'first', status: 'completed', pane: { id: 'pane-first' } },
+          { id: 'second', status: 'failed', error: { code: 'lease_missing' } },
+        ],
+      },
+    });
+    expect(effects).toEqual(['first']);
+    expect(handlers.executeOrchestration).toHaveBeenCalledOnce();
+  });
+
+  it('revalidates lease expiry before each orchestration lane effect', async () => {
+    const projectRoot = process.cwd();
+    let now = new Date('2026-08-17T12:00:00.000Z');
+    const capabilityLeases = new CapabilityLeaseStore(() => now, 7);
+    const effects: string[] = [];
+    handlers.executeOrchestration = vi.fn(async (payload, authorize) => {
+      const orchestrator = new Orchestrator({
+        executeLane: async (lane) => {
+          effects.push(lane.id);
+          if (lane.id === 'first') {
+            now = new Date('2026-08-17T12:01:01.000Z');
+          }
+          return { pane: { id: `pane-${lane.id}`, slug: lane.id } as never };
+        },
+      });
+      return orchestrator.execute(payload.request, { beforeLaneEffect: authorize });
+    });
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7,
+      handlers,
+      journal: createMemoryJournal(),
+      capabilityLeases,
+    });
+    const request = { taskId: 'task-orchestration', projectRoot, prompt: 'test',
+      concurrency: 1, lanes: [
+        { id: 'first', mode: 'terminal' as const },
+        { id: 'second', mode: 'terminal' as const },
+      ] };
+    const granted = await submit(runtime, command({
+      id: 'grant-orchestration-expiry', idempotencyKey: 'grant-orchestration-expiry',
+      kind: 'lease.grant', projectRoot, ownerEpoch: 7, payload: {
+        requestId: 'request-orchestration-expiry', actorId: 'agent-1',
+        taskId: request.taskId, ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: projectRoot }, capabilities: ['pane.create'] }],
+      },
+    }));
+    const lease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
+
+    await expect(submit(runtime, command({
+      id: 'orchestration-expiry', idempotencyKey: 'orchestration-expiry',
+      kind: 'orchestration.execute', projectRoot, ownerEpoch: 7, actor: { id: 'agent-1', kind: 'psyche' },
+      payload: { request, taskId: request.taskId, leaseId: lease.id, leaseRevision: lease.revision },
+    }))).resolves.toMatchObject({
+      status: 'succeeded',
+      value: {
+        status: 'partial',
+        lanes: [
+          { id: 'first', status: 'completed', pane: { id: 'pane-first' } },
+          { id: 'second', status: 'failed', error: { code: 'lease_expired' } },
+        ],
+      },
+    });
+    expect(effects).toEqual(['first']);
+  });
+
+  it('reconciles recovered orchestration ambiguity without replay', async () => {
+    const journal = createMemoryJournal();
+    await journal.append('command.requested', {
+      commandId: 'orchestration-before-drop',
+      idempotencyKey: 'stable-operation',
+      kind: 'orchestration.execute',
+      ownerEpoch: 7,
+    });
+    journal.recoverNonterminalCommands = vi.fn(async () => [
+      await journal.append('command.unknown', {
+        commandId: 'orchestration-before-drop',
+        idempotencyKey: 'stable-operation',
+        reason: 'recovered-nonterminal',
+      }),
+    ]);
+    handlers.executeOrchestration = vi.fn(async () => {
+      throw new Error('must not replay');
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+
+    await expect(runtime.submit(command({
+      id: 'orchestration-retry',
+      idempotencyKey: 'stable-operation',
+      kind: 'orchestration.execute',
+      ownerEpoch: 7,
+      actor: { id: 'agent-1', kind: 'psyche' },
+      payload: {
+        taskId: 'task-orchestration',
+        leaseId: 'lease-1',
+        leaseRevision: 1,
+        request: {
+          taskId: 'task-orchestration',
+          projectRoot: '/repo',
+          prompt: 'test',
+          lanes: [{ id: 'one', mode: 'terminal' }],
+        },
+      },
+    }))).resolves.toMatchObject({ status: 'unknown', code: 'recovered-nonterminal' });
+    expect(handlers.executeOrchestration).not.toHaveBeenCalled();
   });
 
   it('revalidates lease expiry before an approved effect', async () => {

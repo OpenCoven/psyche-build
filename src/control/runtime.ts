@@ -51,6 +51,7 @@ import type {
   LeaseGrant,
   PromptEnvelope,
 } from './types.js';
+import { deriveOrchestrationOperationId } from '../orchestration/operationIdentity.js';
 
 const STABLE_SURFACE_EFFECT_CODES = new Set([
   'action_timeout',
@@ -76,9 +77,14 @@ const STABLE_SURFACE_EFFECT_CODES = new Set([
 ]);
 
 export type Payload<K extends ControlCommand['kind']> = Extract<ControlCommand, { kind: K }>['payload'];
+export type OrchestrationEffectGuard = () => Promise<void>;
 
 export interface ControlHandlers {
-  executeOrchestration(payload: Payload<'orchestration.execute'>): Promise<unknown>;
+  executeOrchestration(
+    payload: Payload<'orchestration.execute'>,
+    authorizeEffect: OrchestrationEffectGuard,
+    operationId: string,
+  ): Promise<unknown>;
   spawnPane(payload: Payload<'pane.spawn'>): Promise<unknown>;
   sendPrompt(payload: PromptEnvelope): Promise<unknown>;
   interruptPane(payload: Payload<'pane.interrupt'>): Promise<unknown>;
@@ -1150,16 +1156,22 @@ export class ControlRuntime {
         case 'pane.meta.update':
           return succeededOutcome(await this.handlers.updatePaneMeta(command.payload));
         case 'orchestration.execute':
-          await this.assertCapabilityLease({
-            leaseId: command.payload.leaseId,
-            revision: command.payload.leaseRevision,
-            ownerEpoch: command.ownerEpoch,
-            actorId: command.actor.id,
-            taskId: command.payload.taskId,
-            target: { kind: 'project', id: command.projectRoot },
-            capability: 'pane.create',
-          });
-          return succeededOutcome(await this.handlers.executeOrchestration(command.payload));
+          {
+            const authorizeEffect = this.orchestrationEffectGuard(command);
+            await authorizeEffect();
+            const operationId = deriveOrchestrationOperationId(command.idempotencyKey);
+            return succeededOutcome(await this.handlers.executeOrchestration(
+              {
+                ...command.payload,
+                request: {
+                  ...command.payload.request,
+                  operationId,
+                },
+              },
+              authorizeEffect,
+              operationId,
+            ));
+          }
         case 'ritual.launch':
           return succeededOutcome(await this.handlers.launchRitual(command.payload));
         case 'coven.session.launch':
@@ -1307,6 +1319,21 @@ export class ControlRuntime {
   private async assertCapabilityLease(assertion: CapabilityLeaseAssertion): Promise<void> {
     await this.assertTaskSubjectActive(assertion.taskId, assertion.actorId);
     this.capabilityLeases.assert(assertion);
+  }
+
+  private orchestrationEffectGuard(
+    command: Extract<ControlCommand, { kind: 'orchestration.execute' }>,
+  ): OrchestrationEffectGuard {
+    const assertion = Object.freeze({
+      leaseId: command.payload.leaseId,
+      revision: command.payload.leaseRevision,
+      ownerEpoch: command.ownerEpoch,
+      actorId: command.actor.id,
+      taskId: command.payload.taskId,
+      target: Object.freeze({ kind: 'project' as const, id: command.projectRoot }),
+      capability: 'pane.create' as const,
+    });
+    return () => this.assertCapabilityLease(assertion);
   }
 
   private async assertTaskSubjectActive(taskId: string, actorId: string): Promise<void> {

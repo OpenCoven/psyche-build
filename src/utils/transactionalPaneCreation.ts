@@ -2,6 +2,7 @@ import type { PsychePane } from '../types.js';
 import {
   ensureProjectPaneConfigPane,
   projectPaneConfigPath,
+  readProjectPaneConfigUnderLock,
 } from '../services/ProjectPaneConfig.js';
 import { TmuxService } from '../services/TmuxService.js';
 import {
@@ -15,10 +16,25 @@ import {
   type VerifiedPaneTeardownResult,
 } from './paneTeardown.js';
 import {
+  isPaneLifecycleReservationRetainedError,
+  PaneLifecycleReservationRetainedError,
   retainPaneRecovery,
   type PaneRecoveryPersistenceResult,
   type RetainableWorktreeReservation,
 } from './paneLifecycleRecovery.js';
+import { createPsychePaneId } from './paneIdentity.js';
+import {
+  allocateUniquePaneSlug,
+  type PaneSlugReservation,
+} from '../services/PaneSlugRegistry.js';
+import {
+  reserveCrashSafePaneSlug,
+  settlePaneSlugReservationAfterFailure,
+} from '../services/PaneSlugReservation.js';
+import {
+  attachDurableEffectWarning,
+  type DurableEffectWarning,
+} from './durableEffectWarnings.js';
 
 export interface TmuxPaneAllocation {
   paneId: string;
@@ -31,13 +47,24 @@ export interface TransactionalPaneCreationOptions<T extends PsychePane> {
   /** Project whose pane registry owns the new record. */
   sessionProjectRoot: string;
   operation: string;
+  /** Stable slug stem resolved under the shared session namespace lock. */
+  slugBase?: string;
+  /** Target path protected by recovery if pane persistence is ambiguous. */
+  worktreePath?: string;
+  /** Optional stable pane identity; generated before reservation by default. */
+  paneRecordId?: string;
   allocate: () => Promise<string> | string;
   /**
    * Builds the record before persistence using the generation captured before
    * allocation and revalidated immediately after the split.
    */
   createPane: (
-    allocation: { paneId: string; tmuxServerIdentity?: TmuxServerIdentity },
+    allocation: {
+      paneId: string;
+      tmuxServerIdentity?: TmuxServerIdentity;
+      paneRecordId: string;
+      slug: string;
+    },
   ) => Promise<T> | T;
   /** Must durably add the exact record before activation. */
   persist: (pane: T) => Promise<void>;
@@ -54,6 +81,7 @@ export interface TransactionalPaneCreationOptions<T extends PsychePane> {
   ) => Promise<VerifiedPaneTeardownResult>;
   reservation?: RetainableWorktreeReservation;
   persistRecovery?: (pane: T) => Promise<PaneRecoveryPersistenceResult>;
+  removeCleanupBlocker?: Parameters<typeof reserveCrashSafePaneSlug>[0]['removeCleanupBlocker'];
 }
 
 /**
@@ -66,23 +94,41 @@ export async function createTransactionalPane<T extends PsychePane>(
   options: TransactionalPaneCreationOptions<T>,
 ): Promise<T> {
   const tmuxService = options.tmuxService ?? TmuxService.getInstance();
-  const allocationIdentity = getTmuxServerIdentity(
-    options,
-    tmuxService,
-  );
-  if (!allocationIdentity) {
-    throw new Error(
-      `${options.operation} could not capture the tmux server generation before allocation`,
-    );
-  }
-
+  const slugReservation = await reserveCrashSafePaneSlug({
+    sessionProjectRoot: options.sessionProjectRoot,
+    projectRoot: options.projectRoot,
+    paneId: options.paneRecordId || createPsychePaneId(),
+    operation: options.operation,
+    removeCleanupBlocker: options.removeCleanupBlocker,
+    allocate: async ({ occupiedSlugs }) => {
+      const slug = await allocateUniquePaneSlug(
+        options.slugBase || options.operation,
+        occupiedSlugs,
+      );
+      return {
+        slug,
+        worktreePath: options.worktreePath || options.projectRoot,
+      };
+    },
+  });
   let paneId: string | undefined;
   let pane: T | undefined;
+  let allocationIdentity: TmuxServerIdentity | undefined;
   try {
+    allocationIdentity = getTmuxServerIdentity(
+      options,
+      tmuxService,
+    );
+    if (!allocationIdentity) {
+      throw new Error(
+        `${options.operation} could not capture the tmux server generation before allocation`,
+      );
+    }
     paneId = await options.allocate();
     if (!paneId) {
       throw new Error(`${options.operation} did not return a tmux pane ID`);
     }
+    await slugReservation.recordPaneEffect(paneId, allocationIdentity);
 
     // From this assignment onward every failure must compensate the split.
     // A post-allocation identity capture is a verification of the generation
@@ -104,20 +150,78 @@ export async function createTransactionalPane<T extends PsychePane>(
     pane = await options.createPane({
       paneId,
       tmuxServerIdentity: allocationIdentity,
+      paneRecordId: slugReservation.paneId,
+      slug: slugReservation.slug,
     });
+    pane.id = slugReservation.paneId;
+    pane.slug = slugReservation.slug;
     await options.persist(pane);
+    const settlement = await slugReservation.completeAfterPanePersisted(pane);
+    applyRecoveryWarning(pane, settlement?.cleanupWarning);
   } catch (error) {
-    if (!paneId) {
-      throw error;
+    if (pane && await hasExactDurablePane(options.sessionProjectRoot, pane)) {
+      let cleanupWarning: string | undefined;
+      try {
+        const settlement = await slugReservation.completeAfterPanePersisted(pane);
+        applyRecoveryWarning(pane, settlement?.cleanupWarning);
+        cleanupWarning = settlement?.cleanupWarning?.message;
+      } catch {
+        const settlement = await settlePaneSlugReservationAfterFailure(slugReservation, {
+          operation: `${options.operation}-durable-pane-reconciliation`,
+          reason: errorMessage(error),
+        });
+        cleanupWarning = settlement.message;
+      }
+      throw new Error(
+        `${errorMessage(error)}; exact pane ${pane.id} remains durably persisted${
+          cleanupWarning ? `; ${cleanupWarning}` : ''
+        }`,
+      );
     }
-    await compensateAllocatedPaneFailure(
-      options,
-      tmuxService,
-      pane,
-      paneId,
-      allocationIdentity,
-      errorMessage(error),
+    let failure = error;
+    if (paneId && allocationIdentity) {
+      try {
+        await compensateAllocatedPaneFailure(
+          options,
+          tmuxService,
+          pane,
+          paneId,
+          allocationIdentity,
+          slugReservation,
+          errorMessage(error),
+        );
+      } catch (compensatedError) {
+        failure = compensatedError;
+      }
+    }
+    if (isPaneLifecycleReservationRetainedError(failure)) {
+      throw failure;
+    }
+    const settlement = await settlePaneSlugReservationAfterFailure(
+      slugReservation,
+      {
+        operation: `${options.operation}-failure`,
+        reason: errorMessage(failure),
+        teardown: async (effect) => teardownAllocation(
+          options,
+          tmuxService,
+          effect.paneId,
+          effect.tmuxServerIdentity || allocationIdentity!,
+          pane === undefined,
+        ),
+      },
     );
+    if (settlement.quarantined) {
+      throw new Error(
+        `${errorMessage(failure)}; ${
+          settlement.message || `pane slug ${slugReservation.slug} remains quarantined`
+        }`,
+      );
+    }
+    if (settlement.message) {
+      throw new Error(`${errorMessage(failure)}; ${settlement.message}`);
+    }
+    throw failure;
   }
 
   // The durable record owns this pane from here forward. Activation failures
@@ -127,16 +231,45 @@ export async function createTransactionalPane<T extends PsychePane>(
   return pane!;
 }
 
+function applyRecoveryWarning(
+  pane: PsychePane,
+  warning: DurableEffectWarning | undefined,
+): void {
+  if (!warning) {
+    return;
+  }
+  attachDurableEffectWarning(pane, warning);
+}
+
+async function hasExactDurablePane(
+  sessionProjectRoot: string,
+  pane: PsychePane,
+): Promise<boolean> {
+  try {
+    const config = await readProjectPaneConfigUnderLock(sessionProjectRoot);
+    return (config.panes || []).some((candidate) => (
+      candidate.id === pane.id
+      && candidate.paneId === pane.paneId
+      && candidate.slug === pane.slug
+    ));
+  } catch {
+    return false;
+  }
+}
+
 async function compensateAllocatedPaneFailure<T extends PsychePane>(
   options: TransactionalPaneCreationOptions<T>,
   tmuxService: Pick<TmuxService, 'getServerIdentity' | 'paneExists' | 'killPane'>,
   pane: T | undefined,
   paneId: string,
   allocationIdentity: TmuxServerIdentity,
+  slugReservation: PaneSlugReservation,
   reason: string,
 ): Promise<never> {
   const recoveryPane = pane ?? provisionalRecoveryPane(
     options.operation,
+    slugReservation.paneId,
+    slugReservation.slug,
     paneId,
     allocationIdentity,
   );
@@ -148,12 +281,18 @@ async function compensateAllocatedPaneFailure<T extends PsychePane>(
     pane === undefined,
   );
   if (teardown.presence === 'absent') {
+    const settlement = await slugReservation.clearAfterConfirmedTeardown('absent');
     throw new Error(
-      `${options.operation} ${reason}; pane ${paneId} was removed`,
+      `${options.operation} ${reason}; pane ${paneId} was removed${
+        settlement?.cleanupWarning
+          ? `; ${settlement.cleanupWarning.message}`
+          : ''
+      }`,
     );
   }
 
   const recovery = await retainPaneRecovery({
+    recoveryId: slugReservation.recoveryId,
     projectRoot: options.projectRoot,
     sessionProjectRoot: options.sessionProjectRoot,
     pane: recoveryPane,
@@ -169,9 +308,13 @@ async function compensateAllocatedPaneFailure<T extends PsychePane>(
         message: 'could not construct a pane record for recovery',
       }),
   });
-  throw new Error(
-    `${options.operation} ${reason}; pane teardown is ${teardown.presence}; ${recovery.message}`,
-  );
+  const message = `${options.operation} ${reason}; pane teardown is ${
+    teardown.presence
+  }; ${recovery.message}`;
+  if (recovery.retained) {
+    throw new PaneLifecycleReservationRetainedError(message);
+  }
+  throw new Error(message);
 }
 
 async function teardownAllocation<T extends PsychePane>(
@@ -239,13 +382,15 @@ function getTmuxServerIdentity<T extends PsychePane>(
 
 function provisionalRecoveryPane(
   operation: string,
+  paneRecordId: string,
+  paneSlug: string,
   paneId: string,
   tmuxServerIdentity: TmuxServerIdentity,
 ): PsychePane {
   const suffix = paneId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 96) || 'pane';
   return {
-    id: `untracked-${suffix}`,
-    slug: `${operation}-untracked`,
+    id: paneRecordId || `untracked-${suffix}`,
+    slug: paneSlug || `${operation}-untracked`,
     prompt: '',
     paneId,
     tmuxServerIdentity,
