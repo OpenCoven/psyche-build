@@ -713,10 +713,16 @@ function hasExplicitOpenGlHardwareHint(text: string): boolean {
 }
 
 function normalizeWebGpuAdapterInfo(info: GraphicsGpuAdapterInfo | undefined): string | undefined {
-  const description = normalizeAdapterString(info?.description ?? '');
-  if (description) return description;
+  const description = normalizeString(info?.description);
+  if (description && softwareMarkerFor(description)) return description;
 
-  return normalizeAdapterString(info?.device ?? '');
+  const normalizedDescription = normalizeAdapterString(description ?? '');
+  if (normalizedDescription) return normalizedDescription;
+
+  const device = normalizeString(info?.device);
+  if (device && softwareMarkerFor(device)) return device;
+
+  return normalizeAdapterString(device ?? '');
 }
 
 async function probeWebGpu(

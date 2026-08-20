@@ -1943,6 +1943,48 @@ describe('graphics evidence classification', () => {
       unsupportedFields: ['webgpu', 'webgl.context'],
     });
   });
+
+  it('does not promote WebGPU software markers over strict WebGL hardware evidence', async () => {
+    for (const webgpuDescription of [
+      'SwiftShader',
+      'llvmpipe',
+      'Microsoft Basic Render Driver',
+    ]) {
+      const canvas = createCanvasHarness((kind, attributes) => {
+        if (kind === 'webgl2' && attributes?.failIfMajorPerformanceCaveat) {
+          return new FakeWebGlContext(
+            'ANGLE (NVIDIA, NVIDIA GeForce RTX 4090, Direct3D11)',
+          );
+        }
+        return null;
+      });
+
+      const probe = await probeGraphicsEvidence({
+        navigatorTarget: {
+          gpu: {
+            requestAdapter: async () => ({
+              info: { description: webgpuDescription },
+            }),
+          },
+        },
+        createCanvas: canvas.createCanvas,
+      });
+
+      expect(probe).toMatchObject({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: webgpuDescription,
+        webgpuAdapterInfoSource: 'adapter.info',
+        strictContext: 'webgl2',
+        renderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4090, Direct3D11)',
+        unsupportedFields: [],
+      });
+      expect(classifyGraphicsEvidence(probe)).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'conflicting_reliable_evidence',
+        unsupportedFields: [],
+      });
+    }
+  });
 });
 
 describe('graphics probes', () => {
