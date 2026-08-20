@@ -225,6 +225,128 @@ describe('bounded performance metrics', () => {
     expect(collector.snapshot().transport.bytesPerSecond).toBe(100);
   });
 
+  it('requires timestamped wrappers for raw native PTY arrays and maps cumulative queue high-water metrics', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      sampledAt: 1_000,
+      ptySnapshots: [
+        {
+          threadId: 'native-pty',
+          pendingBytes: 2,
+          pendingFragments: 1,
+          queuedBytes: 3,
+          queueDepth: 1,
+          prepared: false,
+          inFlightBatches: 1,
+          inFlightBytes: 4,
+          lastAckedSequence: 1,
+          blockedProducers: 0,
+          visibility: 'visible',
+          effectiveCadenceMicros: 0,
+          draining: false,
+          cancelled: false,
+          workerRunning: true,
+          metrics: {
+            state: {
+              bytesEmitted: 100,
+              batchesEmitted: 2,
+              batchesAcknowledged: 1,
+              totalAckLatencyMicros: 2_000,
+              maxAckLatencyMicros: 3_000,
+              pushWouldBlockCount: 1,
+              pendingBytesHighWater: 12_000,
+              pendingFragmentsHighWater: 9,
+              inFlightBatchesHighWater: 3,
+              inFlightBytesHighWater: 500,
+            },
+          },
+        },
+      ],
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 2_000,
+      ptySnapshots: [
+        {
+          threadId: 'native-pty',
+          pendingBytes: 4,
+          pendingFragments: 2,
+          queuedBytes: 5,
+          queueDepth: 2,
+          prepared: false,
+          inFlightBatches: 1,
+          inFlightBytes: 4,
+          lastAckedSequence: 2,
+          blockedProducers: 0,
+          visibility: 'visible',
+          effectiveCadenceMicros: 0,
+          draining: false,
+          cancelled: false,
+          workerRunning: true,
+          metrics: {
+            state: {
+              bytesEmitted: 4_196,
+              batchesEmitted: 6,
+              batchesAcknowledged: 2,
+              totalAckLatencyMicros: 6_000,
+              maxAckLatencyMicros: 7_000,
+              pushWouldBlockCount: 3,
+              pendingBytesHighWater: 15_000,
+              pendingFragmentsHighWater: 12,
+              inFlightBatchesHighWater: 4,
+              inFlightBytesHighWater: 700,
+            },
+          },
+        },
+      ],
+    });
+
+    expect(collector.snapshot().transport).toMatchObject({
+      bytesPerSecond: 4_096,
+      batchesPerSecond: 4,
+      queueBytesHighWater: 15_000,
+      queueDepthHighWater: 12,
+      backpressureCount: 3,
+      averageAckLatencyMs: 3,
+      maxAckLatencyMs: 7,
+    });
+  });
+
+  it('rejects bare timestamp-less native PTY arrays', () => {
+    const collector = createPerformanceMetricsCollector();
+
+    expect(() =>
+      collector.mergeNativeSnapshot([
+        {
+          threadId: 'native-pty',
+          metrics: { state: { bytesEmitted: 100, batchesEmitted: 1 } },
+        },
+      ]),
+    ).toThrow(/sampledAt.*ptySnapshots/);
+  });
+
+  it('treats process presence as authoritative while absence preserves the prior process fields', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      sampledAt: 1_000,
+      process: { cpuPercent: 12, rssBytes: 64 * 1024 * 1024 },
+    });
+    collector.mergeNativeSnapshot({ sampledAt: 2_000 });
+    expect(collector.snapshot().process).toEqual({
+      cpuPercent: 12,
+      rssBytes: 64 * 1024 * 1024,
+    });
+
+    collector.mergeNativeSnapshot({ sampledAt: 3_000, process: { rssBytes: 96 * 1024 * 1024 } });
+    expect(collector.snapshot().process).toEqual({ rssBytes: 96 * 1024 * 1024 });
+
+    collector.mergeNativeSnapshot({ sampledAt: 4_000, process: null });
+    expect(collector.snapshot()).not.toHaveProperty('process');
+
+    collector.mergeNativeSnapshot({ sampledAt: 5_000, process: { cpuPercent: 18 } });
+    collector.mergeNativeSnapshot({ sampledAt: 6_000, process: {} });
+    expect(collector.snapshot()).not.toHaveProperty('process');
+  });
+
   it('forgets PTYs that disappear from an authoritative snapshot', () => {
     const collector = createPerformanceMetricsCollector();
     collector.mergeNativeSnapshot({

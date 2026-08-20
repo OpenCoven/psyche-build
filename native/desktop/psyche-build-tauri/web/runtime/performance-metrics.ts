@@ -201,14 +201,17 @@ const transportKeys = {
     'batchIntervals',
     'intervalsMs',
   ],
-  queueBytes: [
+  queueBytesCurrent: [
     'queueBytes',
     'queuedBytes',
     'pendingBytes',
+  ],
+  queueBytesHighWater: [
     'queueBytesHighWater',
     'pendingBytesHighWater',
   ],
-  queueDepth: ['queueDepth', 'queuedBatches', 'queueDepthHighWater'],
+  queueDepthCurrent: ['queueDepth', 'queuedBatches', 'pendingFragments'],
+  queueDepthHighWater: ['queueDepthHighWater', 'pendingFragmentsHighWater'],
   blocked: ['blockedProducers', 'blockedProducerCount', 'blockedProducersHighWater'],
   backpressure: [
     'backpressureCount',
@@ -397,8 +400,12 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
       };
     }
 
-    const queueBytes = numberFrom(transport, transportKeys.queueBytes);
-    const queueDepth = numberFrom(transport, transportKeys.queueDepth);
+    const queueBytes =
+      numberFrom(transport, transportKeys.queueBytesHighWater)
+      ?? numberFrom(transport, transportKeys.queueBytesCurrent);
+    const queueDepth =
+      numberFrom(transport, transportKeys.queueDepthHighWater)
+      ?? numberFrom(transport, transportKeys.queueDepthCurrent);
     const blocked = numberFrom(transport, transportKeys.blocked);
     const backpressure = numberFrom(transport, transportKeys.backpressure);
     if (queueBytes !== undefined) queueBytesHighWater = Math.max(queueBytesHighWater, queueBytes);
@@ -477,11 +484,15 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     if (paneSource === undefined && directFallback !== undefined) fallbackPanes = directFallback;
     if (directLosses !== undefined) contextLosses = Math.max(contextLosses, directLosses);
 
-    const process = isRecord(input.process) ? input.process : input;
-    const cpu = numberFrom(process, ['cpuPercent', 'cpu']);
-    const rss = numberFrom(process, ['rssBytes', 'residentBytes', 'memoryBytes']);
-    if (cpu !== undefined) processCpu = cpu;
-    if (rss !== undefined) processRss = rss;
+    if (Object.prototype.hasOwnProperty.call(input, 'process')) {
+      processCpu = undefined;
+      processRss = undefined;
+      const process = isRecord(input.process) ? input.process : undefined;
+      const cpu = numberFrom(process, ['cpuPercent', 'cpu']);
+      const rss = numberFrom(process, ['rssBytes', 'residentBytes', 'memoryBytes']);
+      if (cpu !== undefined) processCpu = cpu;
+      if (rss !== undefined) processRss = rss;
+    }
 
     const longTasks = isRecord(input.longTasks) ? input.longTasks : undefined;
     const duration = numberFrom(longTasks, ['duration', 'durationMs']);
@@ -498,15 +509,21 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
 
   function mergeNativeSnapshot(input: unknown): void {
     if (Array.isArray(input)) {
-      for (const entry of input) mergeNativeSnapshot(entry);
-      return;
+      throw new TypeError(
+        'mergeNativeSnapshot requires { sampledAt, ptySnapshots: rawNativeArray, process? }',
+      );
     }
     if (!isRecord(input)) return;
 
-    const nested = input.ptySnapshots ?? input.pty ?? input.ptys ?? input.snapshots;
+    const nested = input.ptySnapshots;
     if (Array.isArray(nested)) {
+      const sampledAt = numberFrom(input, ['sampledAt']);
+      if (sampledAt === undefined) {
+        throw new TypeError(
+          'mergeNativeSnapshot requires { sampledAt, ptySnapshots: rawNativeArray, process? }',
+        );
+      }
       const entries = nested.filter(isRecord);
-      const sampledAt = numberFrom(input, ['sampledAt', 'timestamp', 'time']);
       const currentPtyIds = new Set(entries.map((entry, index) => ptyIdentity(entry, index)));
       for (const id of previousPtyCounters.keys()) {
         if (!currentPtyIds.has(id)) previousPtyCounters.delete(id);
@@ -694,8 +711,10 @@ function aggregateTransportEntries(entries: readonly RecordLike[]): RecordLike {
     'totalAckLatencyMicros',
   ];
   const maxKeys = [
-    ...transportKeys.queueBytes,
-    ...transportKeys.queueDepth,
+    ...transportKeys.queueBytesCurrent,
+    ...transportKeys.queueBytesHighWater,
+    ...transportKeys.queueDepthCurrent,
+    ...transportKeys.queueDepthHighWater,
     ...transportKeys.blocked,
     ...transportKeys.ackMax,
     'maxAckLatencyMicros',
