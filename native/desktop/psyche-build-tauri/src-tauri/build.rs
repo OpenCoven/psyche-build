@@ -52,6 +52,8 @@ fn main() {
             "control_provider_shutdown",
             "control_operator_submit",
             "control_state",
+            "runtime_diagnostics",
+            "runtime_process_metrics",
         ]));
     tauri_build::try_build(attributes).expect("failed to run tauri build script");
 }
