@@ -454,6 +454,9 @@ describe('graphics evidence classification', () => {
       'AMD Discrete Desktop',
       'Default Vulkan API',
       'Linux macOS Windows',
+      'Vulkan Runtime 1.3',
+      'NVIDIA Windows Display Driver Version 555',
+      'High Performance GPU Mode',
     ];
 
     for (const value of ambiguousValues) {
@@ -489,6 +492,85 @@ describe('graphics evidence classification', () => {
         supportingProbe: 'webgpu',
       });
     }
+  });
+
+  it('requires a meaningful product token after removing the full generic descriptor vocabulary', () => {
+    const genericVocabularyValues = [
+      'Runtime',
+      'Version',
+      'Mode',
+      'Implementation',
+      'Engine',
+      'Platform',
+      'System',
+      'Native',
+      'Hardware',
+      'Acceleration',
+      'Accelerated',
+      'Rendering',
+      'Render',
+      'Direct',
+      'Compatibility',
+      'Compatible',
+      'Standard',
+      'Basic',
+      'Generic',
+      'Default',
+      'High',
+      'Low',
+      'Power',
+      'Performance',
+      'API',
+      'Driver',
+      'Display',
+      'Windows',
+      'macOS',
+      'Linux',
+      'Android',
+      'iOS',
+    ];
+
+    for (const value of genericVocabularyValues) {
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: value,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgpu',
+      });
+
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: value,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+      });
+    }
+
+    expect(classifyGraphicsEvidence({
+      webgpuAdapterAvailable: true,
+      webgpuAdapter: 'NVIDIA GeForce RTX 4090',
+      unsupportedFields: [],
+    })).toMatchObject({
+      acceleration: 'accelerated',
+    });
+
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'ANGLE (Microsoft, Microsoft Basic Render Driver Direct3D11, D3D11)',
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toMatchObject({
+      acceleration: 'software',
+      adapter: 'Microsoft Basic Render Driver',
+      fallbackReason: 'software_renderer_detected',
+    });
   });
 
   it('preserves meaningful products alongside generic descriptors', () => {
@@ -1029,6 +1111,9 @@ describe('graphics probes', () => {
       'NVIDIA Windows Display Driver',
       'Intel Integrated GPU',
       'AMD Discrete Desktop',
+      'Vulkan Runtime 1.3',
+      'NVIDIA Windows Display Driver Version 555',
+      'High Performance GPU Mode',
     ]) {
       const probe = await probeGraphicsEvidence({
         navigatorTarget: {
