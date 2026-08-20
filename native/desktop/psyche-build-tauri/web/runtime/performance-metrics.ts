@@ -905,26 +905,34 @@ export function createPerformanceMetricsCollector(
     if (options.rendererSnapshots) {
       try {
         const panes = options.rendererSnapshots();
-        webglPanes = panes.filter((pane) =>
+        const nextWebglPanes = panes.filter((pane) =>
           pane.webgl === true || pane.state?.toLowerCase() === 'webgl' ||
           pane.state?.toLowerCase() === 'webgl2',
         ).length;
-        recoveringPanes = panes.filter((pane) =>
+        const nextRecoveringPanes = panes.filter((pane) =>
           pane.recovering === true || pane.state?.toLowerCase() === 'recovering',
         ).length;
-        fallbackPanes = panes.filter((pane) =>
+        const nextFallbackPanes = panes.filter((pane) =>
           pane.fallback === true || pane.state?.toLowerCase() === 'fallback',
         ).length;
+        const nextRendererTransitions = panes.reduce(
+          (sum, pane) => sum + (finiteNonNegative(pane.rendererTransitions) ?? 0),
+          0,
+        );
+        const nextContextLosses = panes.reduce(
+          (sum, pane) => sum + (finiteNonNegative(pane.contextLosses) ?? 0),
+          0,
+        );
+        webglPanes = nextWebglPanes;
+        recoveringPanes = nextRecoveringPanes;
+        fallbackPanes = nextFallbackPanes;
         rendererTransitions = Math.max(
           rendererTransitions,
-          panes.reduce((sum, pane) => sum + (finiteNonNegative(pane.rendererTransitions) ?? 0), 0),
+          nextRendererTransitions,
         );
         contextLosses = Math.max(
           contextLosses,
-          panes.reduce(
-            (sum, pane) => sum + (finiteNonNegative(pane.contextLosses) ?? 0),
-            0,
-          ),
+          nextContextLosses,
         );
       } catch (error) {
         reportError(error, 'renderer snapshot');
@@ -989,7 +997,7 @@ export function createPerformanceMetricsCollector(
   }
 
   function reset(): void {
-    if (running) sampleRuntimeState();
+    sampleRuntimeState();
     collectionEpoch += 1;
     coalescedVisualUpdatesBaseline = coalescedVisualUpdates;
     rendererTransitionsBaseline = rendererTransitions;

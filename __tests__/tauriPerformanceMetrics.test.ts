@@ -715,6 +715,44 @@ describe('bounded performance metrics', () => {
     });
   });
 
+  it('samples stopped providers before resetting cumulative baselines', () => {
+    let coalescedVisualUpdates = 5;
+    let rendererTransitions = 7;
+    let contextLosses = 4;
+    const invoke = vi.fn();
+    const requestFrame = vi.fn();
+    const setInterval = vi.fn();
+    const collector = createPerformanceMetricsCollector({
+      invoke,
+      requestFrame,
+      setInterval,
+      schedulerSnapshot: () => ({ coalescedVisualUpdates }),
+      rendererSnapshots: () => [{
+        state: 'webgl',
+        rendererTransitions,
+        contextLosses,
+      }],
+    });
+
+    collector.reset();
+    const snapshot = collector.snapshot();
+
+    expect(snapshot.renderer).toMatchObject({
+      coalescedVisualUpdates: 0,
+      webglPanes: 1,
+      recoveringPanes: 0,
+      fallbackPanes: 0,
+      rendererTransitions: 0,
+      contextLosses: 0,
+    });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(requestFrame).not.toHaveBeenCalled();
+    expect(setInterval).not.toHaveBeenCalled();
+    expect(coalescedVisualUpdates).toBe(5);
+    expect(rendererTransitions).toBe(7);
+    expect(contextLosses).toBe(4);
+  });
+
   describe('live performance collection', () => {
     it('polls native metrics at the interval cadence without invoking from rAF', async () => {
       let intervalCallback: (() => void) | undefined;
