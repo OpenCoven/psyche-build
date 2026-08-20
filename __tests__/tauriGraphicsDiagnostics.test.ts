@@ -350,6 +350,119 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects vendor-only, generic-only, and identifier-only evidence on every adapter path', () => {
+    const ambiguousValues = [
+      'NVIDIA',
+      'Intel',
+      'ANGLE Renderer',
+      'Generic GPU',
+      '0x10de 0x2484',
+      'PCI 10de:2484',
+      'DEV_2484',
+    ];
+
+    for (const value of ambiguousValues) {
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: value,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+        unsupportedFields: [],
+      });
+
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: `ANGLE (Google, ${value}, OpenGL)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+        unsupportedFields: [],
+      });
+
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: value,
+        unsupportedFields: [],
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgpu',
+        unsupportedFields: [],
+      });
+    }
+  });
+
+  it('rejects the complete vendor and generic-only token sets', () => {
+    for (const vendor of [
+      'NVIDIA',
+      'AMD',
+      'ATI',
+      'Intel',
+      'Apple',
+      'Microsoft',
+      'Google',
+      'Qualcomm',
+      'ARM',
+      'Imagination',
+    ]) {
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: vendor,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+      });
+    }
+
+    for (const generic of [
+      'ANGLE Renderer',
+      'Generic GPU',
+      'Generic Renderer',
+      'GPU',
+      'Renderer',
+      'Graphics Adapter',
+      'Default Adapter',
+    ]) {
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: generic,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+      });
+    }
+  });
+
+  it('preserves named products that contain vendor names', () => {
+    for (const adapter of [
+      'Apple M3',
+      'NVIDIA GeForce RTX 4090',
+      'Intel Arc A770',
+      'AMD Radeon Pro 560X',
+      'Qualcomm Adreno 740',
+      'ARM Mali-G715',
+    ]) {
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: adapter,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'accelerated',
+        adapter,
+        supportingProbe: 'webgpu',
+      });
+    }
+  });
+
   it('stays conservative for masked, strict-failure, conflicting, absent-version, and unrecognized cases', () => {
     expect(classifyGraphicsEvidence({
       strictContext: 'webgl2',
@@ -548,6 +661,38 @@ describe('graphics probes', () => {
       supportingProbe: 'webgpu',
       unsupportedFields: ['webgpu.adapterInfo', 'webgl.context'],
     });
+  });
+
+  it('filters ambiguous WebGPU descriptions before they become adapter evidence', async () => {
+    for (const description of [
+      'NVIDIA',
+      'Intel',
+      'ANGLE Renderer',
+      'Generic GPU',
+      '0x10de 0x2484',
+      'PCI 10de:2484',
+      'DEV_2484',
+    ]) {
+      const probe = await probeGraphicsEvidence({
+        navigatorTarget: {
+          gpu: {
+            requestAdapter: async () => ({ info: { description } }),
+          },
+        },
+        createCanvas: () => null,
+      });
+
+      expect(probe).toEqual({
+        webgpuAdapterAvailable: true,
+        unsupportedFields: ['webgpu.adapterInfo', 'webgl.context'],
+      });
+      expect(classifyGraphicsEvidence(probe)).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'webgpu_adapter_info_unavailable',
+        supportingProbe: 'webgpu',
+        unsupportedFields: ['webgpu.adapterInfo', 'webgl.context'],
+      });
+    }
   });
 
   it('records renderer access failures without discarding the usable strict context', async () => {
