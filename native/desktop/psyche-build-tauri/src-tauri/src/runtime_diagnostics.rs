@@ -1,10 +1,11 @@
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate};
 use tauri::State;
 
+use crate::coven_sessions::is_safe_session_id;
 use crate::platform::{self, RuntimePlatformInfo};
 
 const PROCESS_METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -90,6 +91,139 @@ impl NativeRuntimeReport {
 
 pub(crate) fn stress_authorized_for(debug_build: bool, startup_value: Option<&str>) -> bool {
     debug_build && matches!(startup_value, Some("1"))
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DiagnosticsFixture {
+    Steady,
+    Burst,
+    Rewrite,
+}
+
+pub(crate) struct DiagnosticsCommandSpec {
+    pub(crate) program: &'static str,
+    pub(crate) args: Vec<String>,
+}
+
+#[cfg(unix)]
+const STEADY_FIXTURE_SCRIPT: &str = r#"sequence=0
+while :
+do
+  printf '\033[32msteady:%d\033[0m\n' "$sequence"
+  sequence=$((sequence + 1))
+  sleep 0.05
+done
+"#;
+
+#[cfg(unix)]
+const BURST_FIXTURE_SCRIPT: &str = r#"sequence=0
+while :
+do
+  printf '\033[1;31mburst:%d\033[0m\n' "$sequence"
+  sequence=$((sequence + 1))
+  printf '\033[1;33mburst:%d\033[0m\n' "$sequence"
+  sequence=$((sequence + 1))
+  printf '\033[1;32mburst:%d\033[0m\n' "$sequence"
+  sequence=$((sequence + 1))
+  printf '\033[1;36mburst:%d\033[0m\n' "$sequence"
+  sequence=$((sequence + 1))
+  sleep 0.05
+done
+"#;
+
+#[cfg(unix)]
+const REWRITE_FIXTURE_SCRIPT: &str = r#"sequence=0
+while :
+do
+  printf '\033[2K\033[36mrewrite:%d\033[0m\r' "$sequence"
+  sequence=$((sequence + 1))
+  sleep 0.05
+done
+"#;
+
+#[cfg(windows)]
+const STEADY_FIXTURE_SCRIPT: &str = r#"$sequence = 0
+while ($true) {
+  Write-Host "$([char]27)[32msteady:$sequence$([char]27)[0m"
+  $sequence++
+  Start-Sleep -Milliseconds 50
+}
+"#;
+
+#[cfg(windows)]
+const BURST_FIXTURE_SCRIPT: &str = r#"$sequence = 0
+while ($true) {
+  1..4 | ForEach-Object {
+    Write-Host "$([char]27)[1;31mburst:$sequence$([char]27)[0m"
+    $sequence++
+  }
+  Start-Sleep -Milliseconds 50
+}
+"#;
+
+#[cfg(windows)]
+const REWRITE_FIXTURE_SCRIPT: &str = r#"$sequence = 0
+while ($true) {
+  Write-Host -NoNewline "$([char]27)[2K$([char]27)[36mrewrite:$sequence$([char]27)[0m`r"
+  $sequence++
+  Start-Sleep -Milliseconds 50
+}
+"#;
+
+impl DiagnosticsFixture {
+    pub(crate) fn command_spec(self) -> DiagnosticsCommandSpec {
+        let script = match self {
+            Self::Steady => STEADY_FIXTURE_SCRIPT,
+            Self::Burst => BURST_FIXTURE_SCRIPT,
+            Self::Rewrite => REWRITE_FIXTURE_SCRIPT,
+        };
+
+        #[cfg(unix)]
+        {
+            DiagnosticsCommandSpec {
+                program: "/bin/sh",
+                args: vec!["-c".to_string(), script.to_string()],
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            DiagnosticsCommandSpec {
+                program: "powershell.exe",
+                args: vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    script.to_string(),
+                ],
+            }
+        }
+    }
+}
+
+pub(crate) fn fixture_start_options(
+    thread_id: &str,
+    fixture: DiagnosticsFixture,
+) -> Result<crate::StartOptions, String> {
+    if !is_safe_session_id(thread_id) {
+        return Err("thread id is unsafe".to_string());
+    }
+
+    let spec = fixture.command_spec();
+    Ok(crate::StartOptions {
+        thread_id: thread_id.to_string(),
+        project_root: Some(".".to_string()),
+        cwd: None,
+        launch_kind: None,
+        coven_session_id: None,
+        command: Some(spec.program.to_string()),
+        args: Some(spec.args),
+        cols: Some(120),
+        rows: Some(40),
+        env: None,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,6 +363,14 @@ impl RuntimeDiagnosticsState {
         self.process_metrics.lock().sample()
     }
 
+    pub(crate) fn ensure_stress_authorized(&self) -> Result<(), String> {
+        if self.stress_authorized {
+            Ok(())
+        } else {
+            Err("render diagnostics are not authorized".to_string())
+        }
+    }
+
     fn report(&self) -> NativeRuntimeReport {
         NativeRuntimeReport::from_platform_info(
             &self.platform_info,
@@ -362,6 +504,108 @@ mod tests {
         assert!(!stress_authorized_for(true, Some("true")));
         assert!(!stress_authorized_for(true, Some(" 1 ")));
         assert!(stress_authorized_for(true, Some("1")));
+    }
+
+    #[test]
+    fn diagnostics_fixture_serializes_only_the_fixed_lowercase_values() {
+        for (fixture, expected) in [
+            (DiagnosticsFixture::Steady, "steady"),
+            (DiagnosticsFixture::Burst, "burst"),
+            (DiagnosticsFixture::Rewrite, "rewrite"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&fixture).unwrap(),
+                format!("\"{expected}\"")
+            );
+            assert_eq!(
+                serde_json::from_str::<DiagnosticsFixture>(&format!("\"{expected}\"")).unwrap(),
+                fixture
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostics_fixture_rejects_arbitrary_values_and_unknown_fields() {
+        assert!(serde_json::from_str::<DiagnosticsFixture>("\"custom\"").is_err());
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct FixtureRequest {
+            fixture: DiagnosticsFixture,
+        }
+
+        assert!(
+            serde_json::from_str::<FixtureRequest>(r#"{"fixture":"steady","extra":true}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn diagnostics_fixture_command_specs_are_fixed_and_platform_specific() {
+        for fixture in [
+            DiagnosticsFixture::Steady,
+            DiagnosticsFixture::Burst,
+            DiagnosticsFixture::Rewrite,
+        ] {
+            let spec = fixture.command_spec();
+            #[cfg(unix)]
+            {
+                assert_eq!(spec.program, "/bin/sh");
+                assert_eq!(spec.args.len(), 2);
+                assert_eq!(spec.args[0], "-c");
+                assert!(spec.args[1].contains("sequence=$((sequence + 1))"));
+                assert!(spec.args[1].contains("\\033"));
+            }
+            #[cfg(windows)]
+            {
+                assert_eq!(spec.program, "powershell.exe");
+                assert_eq!(
+                    &spec.args[..4],
+                    &[
+                        "-NoLogo".to_string(),
+                        "-NoProfile".to_string(),
+                        "-NonInteractive".to_string(),
+                        "-Command".to_string()
+                    ]
+                );
+                assert!(spec.args[4].contains("$sequence++"));
+                assert!(spec.args[4].contains("[char]27"));
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostics_fixture_start_options_validate_thread_ids_and_fix_commands() {
+        assert_eq!(
+            fixture_start_options("../unsafe", DiagnosticsFixture::Rewrite).unwrap_err(),
+            "thread id is unsafe"
+        );
+
+        let options = fixture_start_options("stress-1", DiagnosticsFixture::Burst).unwrap();
+        assert_eq!(options.thread_id, "stress-1");
+        assert_eq!(options.project_root.as_deref(), Some("."));
+        assert!(options.command.is_some());
+        assert!(options.args.is_some());
+        assert!(options.env.is_none());
+        assert!(options.launch_kind.is_none());
+    }
+
+    #[test]
+    fn runtime_diagnostics_state_exposes_authorization_without_rereading_environment() {
+        let state = RuntimeDiagnosticsState {
+            platform_info: platform::runtime_info(),
+            debug_build: false,
+            stress_authorized: false,
+            process_metrics: Mutex::new(ProcessMetricsCache::new(
+                SysinfoProcessMetricsSource::default(),
+                Pid::from_u32(1),
+                PROCESS_METRICS_REFRESH_INTERVAL,
+            )),
+        };
+
+        assert_eq!(
+            state.ensure_stress_authorized().unwrap_err(),
+            "render diagnostics are not authorized"
+        );
     }
 
     #[test]

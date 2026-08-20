@@ -299,9 +299,13 @@ describe('Tauri desktop tab shortcuts', () => {
       description: 'Allows only the main app webview to access runtime diagnostics',
       local: true,
       webviews: ['main'],
-      permissions: ['allow-runtime-diagnostics', 'allow-runtime-process-metrics'],
+      permissions: [
+        'allow-runtime-diagnostics',
+        'allow-runtime-process-metrics',
+        'allow-diagnostics-spawn-fixture',
+      ],
     });
-    expect(mainRuntimeDiagnosticsCapability.permissions).toHaveLength(2);
+    expect(mainRuntimeDiagnosticsCapability.permissions).toHaveLength(3);
     expect(mainRuntimeDiagnosticsCapability.windows).toBeUndefined();
     expect(JSON.stringify(mainRuntimeDiagnosticsCapability)).not.toContain('psyche-browser-*');
 

@@ -94,7 +94,10 @@ use pty_transport::{
     PumpMetrics as TransportPumpMetrics, RecentOutputSnapshots, TransportSessionKey,
     EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
 };
-use runtime_diagnostics::{runtime_diagnostics, runtime_process_metrics, RuntimeDiagnosticsState};
+use runtime_diagnostics::{
+    fixture_start_options, runtime_diagnostics, runtime_process_metrics, DiagnosticsFixture,
+    RuntimeDiagnosticsState,
+};
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis(100);
@@ -2854,6 +2857,24 @@ async fn pty_start(
     options: StartOptions,
 ) -> Result<(), String> {
     ensure_trusted_pty_caller(webview.label())?;
+    match tauri::async_runtime::spawn_blocking(move || pty_start_blocking(app, options)).await {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY start task: {error}")),
+    }
+}
+
+#[tauri::command]
+async fn diagnostics_spawn_fixture(
+    webview: tauri::Webview,
+    app: AppHandle,
+    state: State<'_, RuntimeDiagnosticsState>,
+    thread_id: String,
+    fixture: DiagnosticsFixture,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    state.ensure_stress_authorized()?;
+    let options = fixture_start_options(&thread_id, fixture)?;
+
     match tauri::async_runtime::spawn_blocking(move || pty_start_blocking(app, options)).await {
         Ok(result) => result,
         Err(error) => Err(format!("failed to join PTY start task: {error}")),
@@ -8695,6 +8716,7 @@ pub fn run() {
             control_state,
             runtime_diagnostics,
             runtime_process_metrics,
+            diagnostics_spawn_fixture,
         ])
         .setup(|app| {
             if let Err(error) = platform::configure_window(app) {

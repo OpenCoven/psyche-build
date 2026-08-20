@@ -54,6 +54,7 @@ fn main() {
             "control_state",
             "runtime_diagnostics",
             "runtime_process_metrics",
+            "diagnostics_spawn_fixture",
         ]));
     tauri_build::try_build(attributes).expect("failed to run tauri build script");
 }
