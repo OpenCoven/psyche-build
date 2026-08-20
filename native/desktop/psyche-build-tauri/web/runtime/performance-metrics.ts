@@ -260,6 +260,7 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
   let longTaskCount = 0;
   let longTaskTotal = 0;
   let longTaskMax = 0;
+  // High-water and backpressure values are cumulative native evidence.
   let queueBytesHighWater = 0;
   let queueDepthHighWater = 0;
   let blockedProducersHighWater = 0;
@@ -309,6 +310,20 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     if (kind === 'focus') focusToNextPaintMs = duration;
     if (kind === 'resize') resizeToNextPaintMs = duration;
     interactions.delete(kind);
+  }
+
+  function clearCurrentPtyTransportState(): void {
+    batchSizes.clear();
+    batchIntervals.clear();
+    ackLatencies.clear();
+    previousTransport = undefined;
+    previousPtySampledAt = undefined;
+    previousPtyCounters.clear();
+    bytesPerSecond = 0;
+    batchesPerSecond = 0;
+    averageBatchBytesOverride = undefined;
+    ackAverage = undefined;
+    ackMax = undefined;
   }
 
   function mergeOneNativeSnapshot(
@@ -521,8 +536,8 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
         }
       }
       if (entries.length === 0) {
-        previousPtySampledAt = undefined;
         mergeOneNativeSnapshot(input);
+        clearCurrentPtyTransportState();
       }
       return;
     }

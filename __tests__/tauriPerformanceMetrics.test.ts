@@ -247,6 +247,58 @@ describe('bounded performance metrics', () => {
     expect(collector.snapshot().transport.bytesPerSecond).toBe(0);
   });
 
+  it('clears current transport evidence when an authoritative PTY snapshot is empty', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      sampledAt: 1_000,
+      ptySnapshots: [
+        {
+          threadId: 'pty',
+          queuedBytes: 4_096,
+          queuedBatches: 3,
+          blockedProducers: 1,
+          backpressureCount: 2,
+          batchSizes: [100, 200],
+          batchIntervalsMs: [10, 20],
+          ackLatenciesMs: [5],
+          metrics: { state: { bytesEmitted: 100, batchesEmitted: 2 } },
+        },
+      ],
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 2_000,
+      ptySnapshots: [
+        {
+          threadId: 'pty',
+          queuedBytes: 8_192,
+          queuedBatches: 6,
+          blockedProducers: 2,
+          backpressureCount: 4,
+          batchSizes: [300],
+          batchIntervalsMs: [30],
+          ackLatenciesMs: [7],
+          metrics: { state: { bytesEmitted: 200, batchesEmitted: 4 } },
+        },
+      ],
+    });
+
+    collector.mergeNativeSnapshot({ sampledAt: 3_000, ptySnapshots: [] });
+
+    expect(collector.snapshot().transport).toMatchObject({
+      bytesPerSecond: 0,
+      batchesPerSecond: 0,
+      averageBatchBytes: 0,
+      p95BatchBytes: 0,
+      p95BatchIntervalMs: 0,
+      queueBytesHighWater: 8_192,
+      queueDepthHighWater: 6,
+      blockedProducersHighWater: 2,
+      backpressureCount: 4,
+    });
+    expect(collector.snapshot().transport).not.toHaveProperty('averageAckLatencyMs');
+    expect(collector.snapshot().transport).not.toHaveProperty('maxAckLatencyMs');
+  });
+
   it('uses current renderer pane counts and clears them for an empty snapshot', () => {
     const collector = createPerformanceMetricsCollector();
     collector.mergeNativeSnapshot({
