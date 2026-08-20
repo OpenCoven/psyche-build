@@ -1,6 +1,8 @@
 import React from 'react';
 import { execFileSync } from 'node:child_process';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
 import { useInputHandling } from '../src/hooks/useInputHandling.js';
@@ -8,9 +10,9 @@ import type { PsychePane } from '../src/types.js';
 import type { TrackProjectActivity } from '../src/types/activity.js';
 import type { AgentName } from '../src/utils/agentLaunch.js';
 
-const createPaneMock = vi.fn();
-vi.mock('../src/utils/paneCreation.js', () => ({
-  createPane: (...args: unknown[]) => createPaneMock(...args),
+const createPaneMock = vi.hoisted(() => vi.fn());
+vi.mock('../src/control/resources/panes.js', () => ({
+  defaultCreatePane: (...args: unknown[]) => createPaneMock(...args),
 }));
 vi.mock('../src/utils/remotePaneActions.js', () => ({
   drainRemotePaneActions: vi.fn(async () => []),
@@ -18,21 +20,86 @@ vi.mock('../src/utils/remotePaneActions.js', () => ({
 }));
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const ROOT = process.cwd();
-const BRANCH = execFileSync('git', ['branch', '--show-current'], {
-  cwd: ROOT,
-  encoding: 'utf8',
-}).trim();
+const MAIN_BRANCH = 'main';
+const ATTACH_BRANCH = 'thread-a';
+
+interface AttachWorktreeFixture {
+  projectRoot: string;
+  worktreePath: string;
+}
+
+let fixture: AttachWorktreeFixture | undefined;
+
+function runGit(args: string[], cwd: string): string {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+function requireFixture(): AttachWorktreeFixture {
+  if (!fixture) {
+    throw new Error('attach warning fixture is not initialized');
+  }
+  return fixture;
+}
+
+beforeAll(() => {
+  const projectRoot = fs.mkdtempSync(
+    path.join(process.cwd(), '.use-input-handling-attach-warnings-'),
+  );
+  const worktreePath = path.join(projectRoot, '.psyche', 'worktrees', ATTACH_BRANCH);
+  fixture = {
+    projectRoot,
+    worktreePath,
+  };
+  try {
+    runGit(['init'], projectRoot);
+    runGit(['config', 'user.name', 'Test User'], projectRoot);
+    runGit(['config', 'user.email', 'test@example.invalid'], projectRoot);
+    runGit(['checkout', '-b', MAIN_BRANCH], projectRoot);
+    fs.writeFileSync(path.join(projectRoot, 'README.md'), '# Attach warning test repo\n');
+    runGit(['add', 'README.md'], projectRoot);
+    runGit(['-c', 'commit.gpgsign=false', 'commit', '-m', 'init'], projectRoot);
+
+    fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+    runGit(['worktree', 'add', '-b', ATTACH_BRANCH, worktreePath, MAIN_BRANCH], projectRoot);
+
+    fixture = {
+      projectRoot: fs.realpathSync.native(projectRoot),
+      worktreePath: fs.realpathSync.native(worktreePath),
+    };
+    fs.mkdirSync(path.join(fixture.projectRoot, '.psyche'), { recursive: true });
+    fs.writeFileSync(
+      path.join(fixture.projectRoot, '.psyche', 'psyche.config.json'),
+      JSON.stringify({ panes: [], sidebarProjects: [] }),
+    );
+  } catch (error) {
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+    fixture = undefined;
+    throw error;
+  }
+});
+
+afterAll(() => {
+  if (!fixture?.projectRoot) return;
+  try {
+    runGit(['worktree', 'remove', '--force', fixture.worktreePath], fixture.projectRoot);
+  } catch {}
+  fs.rmSync(fixture.projectRoot, { recursive: true, force: true });
+});
 
 function pane(overrides: Partial<PsychePane> = {}): PsychePane {
+  const activeFixture = requireFixture();
   return {
     id: 'psyche-1',
-    slug: 'thread-a',
+    slug: ATTACH_BRANCH,
     prompt: '',
     paneId: '%1',
-    worktreePath: ROOT,
-    branchName: BRANCH,
-    projectRoot: ROOT,
+    worktreePath: activeFixture.worktreePath,
+    branchName: ATTACH_BRANCH,
+    projectRoot: activeFixture.projectRoot,
     projectName: 'Repo',
     ...overrides,
   };
@@ -52,6 +119,7 @@ function Harness({
   const trackProjectActivity = (async <T,>(
     work: () => Promise<T> | T,
   ): Promise<T> => await work()) as TrackProjectActivity;
+  const activeFixture = requireFixture();
 
   useInputHandling({
     panes: [pane()],
@@ -100,13 +168,13 @@ function Harness({
     setDevSourceFromPane: vi.fn(),
     refreshPsycheSettings: vi.fn(),
     savePanes,
-    sidebarProjects: [{ projectRoot: ROOT, projectName: 'Repo' }],
+    sidebarProjects: [{ projectRoot: activeFixture.projectRoot, projectName: 'Repo' }],
     saveSidebarProjects: vi.fn(async (projects) => projects),
     loadPanes,
     cleanExit: vi.fn(),
     getAvailableAgentsForProject: vi.fn((): AgentName[] => ['claude']),
-    panesFile: `${ROOT}/.psyche/psyche.config.json`,
-    projectRoot: ROOT,
+    panesFile: `${activeFixture.projectRoot}/.psyche/psyche.config.json`,
+    projectRoot: activeFixture.projectRoot,
     projectActionItems: [],
     findCardInDirection: vi.fn(() => null),
   });
