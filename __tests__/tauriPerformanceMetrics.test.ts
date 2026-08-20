@@ -844,13 +844,13 @@ describe('bounded performance metrics', () => {
     });
   });
 
-  it('discards removed pane baselines so reused IDs report new cumulative counters', () => {
+  it('retains retired pane deltas, counts replacement generations, and clears them on reset', () => {
     let panes = [{
       paneId: 'pane-a',
       rendererGeneration: 1,
       state: 'webgl',
-      rendererTransitions: 8,
-      contextLosses: 4,
+      rendererTransitions: 0,
+      contextLosses: 0,
     }];
     const collector = createPerformanceMetricsCollector({
       rendererSnapshots: () => panes,
@@ -858,10 +858,22 @@ describe('bounded performance metrics', () => {
 
     collector.snapshot();
     collector.reset();
+    panes = [{
+      paneId: 'pane-a',
+      rendererGeneration: 1,
+      state: 'webgl',
+      rendererTransitions: 3,
+      contextLosses: 2,
+    }];
+    expect(collector.snapshot().renderer).toMatchObject({
+      rendererTransitions: 3,
+      contextLosses: 2,
+    });
+
     panes = [];
     expect(collector.snapshot().renderer).toMatchObject({
-      rendererTransitions: 0,
-      contextLosses: 0,
+      rendererTransitions: 3,
+      contextLosses: 2,
     });
 
     panes = [{
@@ -872,8 +884,14 @@ describe('bounded performance metrics', () => {
       contextLosses: 1,
     }];
     expect(collector.snapshot().renderer).toMatchObject({
-      rendererTransitions: 1,
-      contextLosses: 1,
+      rendererTransitions: 4,
+      contextLosses: 3,
+    });
+
+    collector.reset();
+    expect(collector.snapshot().renderer).toMatchObject({
+      rendererTransitions: 0,
+      contextLosses: 0,
     });
   });
 

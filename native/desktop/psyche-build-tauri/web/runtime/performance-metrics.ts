@@ -359,9 +359,11 @@ export function createPerformanceMetricsCollector(
   const rendererPaneCounters = new Map<string, {
     rendererTransitions: number;
     contextLosses: number;
+    rendererTransitionsBaseline: number;
+    contextLossesBaseline: number;
   }>();
-  const rendererTransitionPaneBaselines = new Map<string, number>();
-  const contextLossPaneBaselines = new Map<string, number>();
+  let retiredRendererTransitions = 0;
+  let retiredContextLosses = 0;
   let focusToNextPaintMs: number | undefined;
   let resizeToNextPaintMs: number | undefined;
   let running = false;
@@ -613,40 +615,46 @@ export function createPerformanceMetricsCollector(
 
     if (keyedPaneCounters) {
       rendererCountersFromPanes = true;
-      const nextCounters = new Map<string, {
-        rendererTransitions: number;
-        contextLosses: number;
-      }>();
+      const nextKeys = new Set<string>();
       for (const [index, pane] of panes.entries()) {
         const paneKey = paneKeys[index];
         if (paneKey === undefined) continue;
+        nextKeys.add(paneKey);
         const previous = rendererPaneCounters.get(paneKey);
-        nextCounters.set(paneKey, {
-          rendererTransitions:
-            numberFrom(pane, ['rendererTransitions']) ?? previous?.rendererTransitions ?? 0,
-          contextLosses:
-            numberFrom(pane, ['contextLosses', 'contextLoss']) ?? previous?.contextLosses ?? 0,
+        const rendererTransitionsValue =
+          numberFrom(pane, ['rendererTransitions']) ?? previous?.rendererTransitions ?? 0;
+        const contextLossesValue =
+          numberFrom(pane, ['contextLosses', 'contextLoss']) ?? previous?.contextLosses ?? 0;
+        rendererPaneCounters.set(paneKey, {
+          rendererTransitions: rendererTransitionsValue,
+          contextLosses: contextLossesValue,
+          rendererTransitionsBaseline: previous?.rendererTransitionsBaseline ?? 0,
+          contextLossesBaseline: previous?.contextLossesBaseline ?? 0,
         });
       }
-      rendererPaneCounters.clear();
-      for (const [paneKey, counters] of nextCounters) rendererPaneCounters.set(paneKey, counters);
-      for (const paneKey of rendererTransitionPaneBaselines.keys()) {
-        if (!nextCounters.has(paneKey)) rendererTransitionPaneBaselines.delete(paneKey);
-      }
-      for (const paneKey of contextLossPaneBaselines.keys()) {
-        if (!nextCounters.has(paneKey)) contextLossPaneBaselines.delete(paneKey);
-      }
-      rendererTransitions = [...nextCounters].reduce(
-        (sum, [paneKey, counters]) => sum + cumulativeDelta(
+      for (const [paneKey, counters] of rendererPaneCounters) {
+        if (nextKeys.has(paneKey)) continue;
+        retiredRendererTransitions += cumulativeDelta(
           counters.rendererTransitions,
-          rendererTransitionPaneBaselines.get(paneKey) ?? 0,
+          counters.rendererTransitionsBaseline,
+        );
+        retiredContextLosses += cumulativeDelta(
+          counters.contextLosses,
+          counters.contextLossesBaseline,
+        );
+        rendererPaneCounters.delete(paneKey);
+      }
+      rendererTransitions = retiredRendererTransitions + [...rendererPaneCounters.values()].reduce(
+        (sum, counters) => sum + cumulativeDelta(
+          counters.rendererTransitions,
+          counters.rendererTransitionsBaseline,
         ),
         0,
       );
-      contextLosses = [...nextCounters].reduce(
-        (sum, [paneKey, counters]) => sum + cumulativeDelta(
+      contextLosses = retiredContextLosses + [...rendererPaneCounters.values()].reduce(
+        (sum, counters) => sum + cumulativeDelta(
           counters.contextLosses,
-          contextLossPaneBaselines.get(paneKey) ?? 0,
+          counters.contextLossesBaseline,
         ),
         0,
       );
@@ -656,8 +664,8 @@ export function createPerformanceMetricsCollector(
     if (paneSourcePresent && rendererCountersFromPanes) {
       rendererCountersFromPanes = false;
       rendererPaneCounters.clear();
-      rendererTransitionPaneBaselines.clear();
-      contextLossPaneBaselines.clear();
+      retiredRendererTransitions = 0;
+      retiredContextLosses = 0;
     }
     if (panes.length > 0) {
       rendererTransitions = Math.max(
@@ -1083,11 +1091,11 @@ export function createPerformanceMetricsCollector(
     collectionEpoch += 1;
     coalescedVisualUpdatesBaseline = coalescedVisualUpdates;
     if (rendererCountersFromPanes) {
-      rendererTransitionPaneBaselines.clear();
-      contextLossPaneBaselines.clear();
-      for (const [paneKey, counters] of rendererPaneCounters) {
-        rendererTransitionPaneBaselines.set(paneKey, counters.rendererTransitions);
-        contextLossPaneBaselines.set(paneKey, counters.contextLosses);
+      retiredRendererTransitions = 0;
+      retiredContextLosses = 0;
+      for (const counters of rendererPaneCounters.values()) {
+        counters.rendererTransitionsBaseline = counters.rendererTransitions;
+        counters.contextLossesBaseline = counters.contextLosses;
       }
       rendererTransitionsBaseline = 0;
       contextLossesBaseline = 0;
