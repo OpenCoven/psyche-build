@@ -15,6 +15,7 @@ final class AppModel: ObservableObject {
     /// Which host the state on screen came from. Rows read it for VoiceOver,
     /// where the host is not otherwise recoverable from the visible text.
     @Published private(set) var hostName: String?
+    @Published private(set) var hostDiscriminator: String?
 
     let workspaceStore: WorkspaceStore
     /// `nil` under a fixture launch — that absence is what makes the fixture
@@ -26,6 +27,7 @@ final class AppModel: ObservableObject {
     let paneComposerSendAttempts = PaneComposerSendAttempts()
 
     private var hasStarted = false
+    private let pairHostSessionAuthority = PairHostModel.SessionAuthority()
 
     var isFixture: Bool { fixtureName != nil }
 
@@ -52,6 +54,7 @@ final class AppModel: ObservableObject {
         )
         terminalRegistry.start()
         hostName = Self.fixtureHostName
+        hostDiscriminator = nil
     }
 
     convenience init(
@@ -75,14 +78,15 @@ final class AppModel: ObservableObject {
 
     func recordConnectedHost(_ host: PairedHost) {
         hostName = host.serverName
+        hostDiscriminator = PairHostDiscriminatorFormatter.format(host: host)
         connectionError = nil
     }
 
     func makePairHostModel() -> PairHostModel {
         if let composition {
-            return PairHostModel(composition: composition)
+            return PairHostModel(composition: composition, authority: pairHostSessionAuthority)
         }
-        return PairHostModel.fixture()
+        return PairHostModel.fixture(authority: pairHostSessionAuthority)
     }
 
     func loadLastConnectedHostContext() async {
@@ -91,6 +95,7 @@ final class AppModel: ObservableObject {
             return
         }
         hostName = host.serverName
+        hostDiscriminator = PairHostDiscriminatorFormatter.format(host: host)
     }
 
     /// Reads the launch arguments once so the decision cannot drift between

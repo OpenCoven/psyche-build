@@ -20,11 +20,18 @@ struct SettingsView: View {
                 .accessibilityIdentifier("settings-status")
 
                 LabeledContent("Host") {
-                    Text(model.hostName ?? "Not paired")
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(model.hostName ?? "Not paired")
+                        if let hostDiscriminator = model.hostDiscriminator {
+                            Text(hostDiscriminator)
+                                .font(.footnote)
+                        }
+                    }
+                    .multilineTextAlignment(.trailing)
+                    .foregroundStyle(.secondary)
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Host, \(model.hostName ?? "not paired")")
+                .accessibilityLabel(hostAccessibilityLabel)
                 .accessibilityIdentifier("settings-host")
 
                 if let lastConfirmedAt = store.lastConfirmedAt {
@@ -82,5 +89,13 @@ struct SettingsView: View {
         } else {
             "Live"
         }
+    }
+
+    private var hostAccessibilityLabel: String {
+        let hostName = model.hostName ?? "not paired"
+        guard let hostDiscriminator = model.hostDiscriminator else {
+            return "Host, \(hostName)"
+        }
+        return "Host, \(hostName), \(hostDiscriminator)"
     }
 }

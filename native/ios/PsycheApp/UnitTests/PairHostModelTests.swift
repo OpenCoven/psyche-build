@@ -1184,6 +1184,131 @@ final class PairHostModelTests: XCTestCase {
         XCTAssertNil(weakModel)
     }
 
+    func testOlderSessionStopSkipsSharedCleanupAfterNewerSessionClaimsAuthority() async throws {
+        let authority = PairHostModel.SessionAuthority()
+        let cleanup = SharedCleanupProbe()
+        let readinessGateA = AsyncGate()
+        let readinessGateB = AsyncGate()
+        let modelA = PairHostModel(
+            dependencies: sharedSessionDependencies(
+                cleanup: cleanup,
+                entry: makeEntry(serverID: "server-a", serverName: "Alpha"),
+                readinessGate: readinessGateA
+            ),
+            authority: authority
+        )
+        let modelB = PairHostModel(
+            dependencies: sharedSessionDependencies(
+                cleanup: cleanup,
+                entry: makeEntry(serverID: "server-b", serverName: "Beta"),
+                readinessGate: readinessGateB
+            ),
+            authority: authority
+        )
+
+        await modelA.start()
+        await waitUntil { modelA.rows.count == 1 }
+        modelA.select(serverID: "server-a")
+        let submitA = Task { await modelA.submit() }
+        await readinessGateA.waitUntilStarted()
+        await waitUntil { modelA.phase == .loadingWorkspace }
+
+        await modelB.start()
+        await waitUntil { modelB.rows.count == 1 }
+        modelB.select(serverID: "server-b")
+        let submitB = Task { await modelB.submit() }
+        await readinessGateB.waitUntilStarted()
+        await waitUntil { modelB.phase == .loadingWorkspace }
+
+        await modelA.stop()
+        await submitA.value
+
+        let stopCountAfterAStop = await cleanup.stopCount()
+        let disconnectCountAfterAStop = await cleanup.disconnectCount()
+        XCTAssertEqual(stopCountAfterAStop, 0)
+        XCTAssertEqual(disconnectCountAfterAStop, 0)
+        XCTAssertEqual(modelB.phase, .loadingWorkspace)
+
+        await modelB.stop()
+        await submitB.value
+
+        let finalStopCount = await cleanup.stopCount()
+        let finalDisconnectCount = await cleanup.disconnectCount()
+        XCTAssertEqual(finalStopCount, 1)
+        XCTAssertEqual(finalDisconnectCount, 1)
+    }
+
+    func testReleasingOlderSessionSkipsSharedCleanupWithoutExplicitStop() async throws {
+        let authority = PairHostModel.SessionAuthority()
+        let cleanup = SharedCleanupProbe()
+        let readinessGateA = AsyncGate()
+        let readinessGateB = AsyncGate()
+
+        weak var weakModelA: PairHostModel?
+        weak var weakModelB: PairHostModel?
+        var modelA: PairHostModel? = PairHostModel(
+            dependencies: sharedSessionDependencies(
+                cleanup: cleanup,
+                entry: makeEntry(serverID: "server-a", serverName: "Alpha"),
+                readinessGate: readinessGateA
+            ),
+            authority: authority
+        )
+        var modelB: PairHostModel? = PairHostModel(
+            dependencies: sharedSessionDependencies(
+                cleanup: cleanup,
+                entry: makeEntry(serverID: "server-b", serverName: "Beta"),
+                readinessGate: readinessGateB
+            ),
+            authority: authority
+        )
+        weakModelA = modelA
+        weakModelB = modelB
+
+        await modelA?.start()
+        await waitUntil { modelA?.rows.count == 1 }
+        modelA?.select(serverID: "server-a")
+        let submitA = Task { [weak modelA] in
+            await modelA?.submit()
+        }
+        await readinessGateA.waitUntilStarted()
+        await waitUntil { modelA?.phase == .loadingWorkspace }
+
+        await modelB?.start()
+        await waitUntil { modelB?.rows.count == 1 }
+        modelB?.select(serverID: "server-b")
+        let submitB = Task { [weak modelB] in
+            await modelB?.submit()
+        }
+        await readinessGateB.waitUntilStarted()
+        await waitUntil { modelB?.phase == .loadingWorkspace }
+
+        submitA.cancel()
+        await readinessGateA.waitUntilCancelled()
+        await submitA.value
+        modelA = nil
+
+        await waitUntil { weakModelA == nil }
+        let stopCountAfterModelARelease = await cleanup.stopCount()
+        let disconnectCountAfterModelARelease = await cleanup.disconnectCount()
+        XCTAssertEqual(stopCountAfterModelARelease, 0)
+        XCTAssertEqual(disconnectCountAfterModelARelease, 0)
+        XCTAssertEqual(modelB?.phase, .loadingWorkspace)
+
+        submitB.cancel()
+        await readinessGateB.waitUntilCancelled()
+        await submitB.value
+        modelB = nil
+
+        await waitUntil { weakModelB == nil }
+        await waitUntilAsync { await cleanup.stopCount() == 1 }
+        await waitUntilAsync { await cleanup.disconnectCount() == 1 }
+        let finalStopCount = await cleanup.stopCount()
+        let finalDisconnectCount = await cleanup.disconnectCount()
+        XCTAssertEqual(finalStopCount, 1)
+        XCTAssertEqual(finalDisconnectCount, 1)
+    }
+
     func testStopAfterReadyDoesNotDisconnect() async throws {
         let probe = PairHostModelProbe()
         let readinessGate = AsyncGate()
@@ -1314,6 +1439,65 @@ private extension PairHostModelTests {
             }
             await Task.yield()
         }
+    }
+
+    func sharedSessionDependencies(
+        cleanup: SharedCleanupProbe,
+        entry: BonjourDiscoveryEntry,
+        readinessGate: AsyncGate
+    ) -> PairHostModel.Dependencies {
+        let endpoint: HostEndpoint?
+        if case let .resolved(host) = entry.availability {
+            endpoint = host.endpoint
+        } else {
+            endpoint = nil
+        }
+        return PairHostModel.Dependencies(
+            startDiscovery: {
+                AsyncStream { continuation in
+                    continuation.yield([entry])
+                    continuation.finish()
+                }
+            },
+            stopDiscovery: {
+                await cleanup.recordStop()
+            },
+            retryDiscovery: { _ in },
+            pairingStatus: { _, _ in .paired },
+            connectPaired: { serverID, resolvedEndpoint in
+                PairedHost(
+                    serverID: serverID,
+                    serverName: entry.serverName,
+                    endpoint: resolvedEndpoint ?? endpoint ?? HostEndpoint(
+                        host: "\(serverID).local",
+                        port: 4242,
+                        certificateFingerprint: testFingerprint
+                    ),
+                    clientID: "test-client",
+                    token: "token"
+                )
+            },
+            connectForPairing: { _ in },
+            pair: { _ in
+                PairedHost(
+                    serverID: entry.serverID,
+                    serverName: entry.serverName,
+                    endpoint: endpoint ?? HostEndpoint(
+                        host: "\(entry.serverID).local",
+                        port: 4242,
+                        certificateFingerprint: testFingerprint
+                    ),
+                    clientID: "test-client",
+                    token: "token"
+                )
+            },
+            waitForWorkspaceReady: {
+                try await readinessGate.wait()
+            },
+            disconnect: {
+                await cleanup.recordDisconnect()
+            }
+        )
     }
 
     func makeEntry(
@@ -1513,6 +1697,22 @@ private actor CompletionTracker {
     func contains(_ key: String) -> Bool {
         completions.contains(key)
     }
+}
+
+private actor SharedCleanupProbe {
+    private var stopInvocationCount = 0
+    private var disconnectInvocationCount = 0
+
+    func recordStop() {
+        stopInvocationCount += 1
+    }
+
+    func recordDisconnect() {
+        disconnectInvocationCount += 1
+    }
+
+    func stopCount() -> Int { stopInvocationCount }
+    func disconnectCount() -> Int { disconnectInvocationCount }
 }
 
 private actor PairHostModelProbe {

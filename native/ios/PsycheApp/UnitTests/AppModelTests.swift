@@ -24,6 +24,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(model.workspaceStore.workspace)
         XCTAssertEqual(model.workspaceStore.nowSections.map(\.kind), [.needsYou, .running, .recent])
         XCTAssertEqual(model.hostName, AppModel.fixtureHostName)
+        XCTAssertNil(model.hostDiscriminator)
     }
 
     func testFixtureStartIsANoOpRatherThanAConnectionAttempt() async {
@@ -34,6 +35,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.composition)
         XCTAssertNil(model.connectionError)
         XCTAssertEqual(model.hostName, AppModel.fixtureHostName)
+        XCTAssertNil(model.hostDiscriminator)
     }
 
     func testFixtureMakePairHostModelCreatesFreshFixtureModelAndPublishesDeterministicRows() async {
@@ -66,6 +68,7 @@ final class AppModelTests: XCTestCase {
         let second = model.makePairHostModel()
 
         XCTAssertFalse(first === second)
+        XCTAssertEqual(first.sessionAuthorityIdentity, second.sessionAuthorityIdentity)
     }
 
     func testProductionRootComposesOneSharedGraph() throws {
@@ -116,6 +119,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.workspaceStore.workspace)
         XCTAssertTrue(model.workspaceStore.isStale)
         XCTAssertNil(model.hostName)
+        XCTAssertNil(model.hostDiscriminator)
     }
 
     func testLoadLastConnectedHostContextUsesSelectedStoredHostNotSortedHosts() async throws {
@@ -130,6 +134,7 @@ final class AppModelTests: XCTestCase {
         await model.loadLastConnectedHostContext()
 
         XCTAssertEqual(model.hostName, "Studio")
+        XCTAssertEqual(model.hostDiscriminator, "server-z.local:4242 • …rver-z")
     }
 
     func testLoadLastConnectedHostContextWithoutSelectionDoesNotFallbackToSortedHost() async throws {
@@ -137,11 +142,19 @@ final class AppModelTests: XCTestCase {
         let model = AppModel(composition: composition)
         let alpha = makePairedHost(serverID: "server-a", serverName: "Alpha")
         try await store.save(alpha)
-        model.recordConnectedHost(makePairedHost(serverID: "server-existing", serverName: "Remembered"))
+        model.recordConnectedHost(
+            makePairedHost(
+                serverID: "server-existing",
+                serverName: "Remembered",
+                host: "remembered.local",
+                port: 5151
+            )
+        )
 
         await model.loadLastConnectedHostContext()
 
         XCTAssertEqual(model.hostName, "Remembered")
+        XCTAssertEqual(model.hostDiscriminator, "remembered.local:5151 • …isting")
     }
 
     func testFixtureLoadLastConnectedHostContextIsANoOpWithoutConnectionGraph() async {
@@ -151,6 +164,7 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertNil(model.composition)
         XCTAssertEqual(model.hostName, AppModel.fixtureHostName)
+        XCTAssertNil(model.hostDiscriminator)
     }
 
     func testFixtureNameIsReadFromLaunchArguments() {
@@ -196,12 +210,17 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(model.terminalRegistry.lastErrorMessage)
     }
 
-    func testRecordConnectedHostSetsServerNameAndClearsAnExistingConnectionError() async throws {
+    func testRecordConnectedHostSetsServerNameDiscriminatorAndClearsAnExistingConnectionError() async throws {
         let transport = FakeTransport(shouldFailConnection: true)
         let (composition, store) = makeComposition(transport: transport)
         let model = AppModel(composition: composition)
         let failingHost = makePairedHost(serverID: "server-z", serverName: "Studio")
-        let recoveredHost = makePairedHost(serverID: "server-a", serverName: "Alpha")
+        let recoveredHost = makePairedHost(
+            serverID: "server-a",
+            serverName: "Alpha",
+            host: "alpha.local",
+            port: 5151
+        )
         try await store.save(failingHost)
         try await store.markLastConnected(serverID: failingHost.serverID)
 
@@ -209,7 +228,58 @@ final class AppModelTests: XCTestCase {
         model.recordConnectedHost(recoveredHost)
 
         XCTAssertEqual(model.hostName, "Alpha")
+        XCTAssertEqual(model.hostDiscriminator, "alpha.local:5151 • …rver-a")
         XCTAssertNil(model.connectionError)
+    }
+
+    func testRecordConnectedHostKeepsSameNameHostsDistinguishableByDiscriminator() {
+        let model = AppModel(fixture: WorkspaceFixtures.multiproject)
+        let first = makePairedHost(
+            serverID: "studio-111111",
+            serverName: "Studio",
+            host: "studio.local",
+            port: 4242
+        )
+        let second = makePairedHost(
+            serverID: "studio-222222",
+            serverName: "Studio",
+            host: "studio.local",
+            port: 4343
+        )
+
+        model.recordConnectedHost(first)
+        let firstDiscriminator = model.hostDiscriminator
+        model.recordConnectedHost(second)
+
+        XCTAssertEqual(model.hostName, "Studio")
+        XCTAssertEqual(firstDiscriminator, "studio.local:4242 • …111111")
+        XCTAssertEqual(model.hostDiscriminator, "studio.local:4343 • …222222")
+        XCTAssertNotEqual(firstDiscriminator, model.hostDiscriminator)
+    }
+
+    func testLoadLastConnectedHostContextRestoresExactSelectedHostContext() async throws {
+        let (composition, store) = makeComposition()
+        let model = AppModel(composition: composition)
+        let first = makePairedHost(
+            serverID: "studio-111111",
+            serverName: "Studio",
+            host: "studio.local",
+            port: 4242
+        )
+        let second = makePairedHost(
+            serverID: "studio-222222",
+            serverName: "Studio",
+            host: "studio.local",
+            port: 4343
+        )
+        try await store.save(first)
+        try await store.save(second)
+        try await store.markLastConnected(serverID: second.serverID)
+
+        await model.loadLastConnectedHostContext()
+
+        XCTAssertEqual(model.hostName, "Studio")
+        XCTAssertEqual(model.hostDiscriminator, "studio.local:4343 • …222222")
     }
 
     func testStartUsesSelectedLastConnectedHostOnceAndRecordsFailureState() async throws {
@@ -230,6 +300,7 @@ final class AppModelTests: XCTestCase {
             reason: FakeTransportError.connectionFailed.localizedDescription
         ).localizedDescription
         XCTAssertEqual(model.hostName, "Studio")
+        XCTAssertEqual(model.hostDiscriminator, "server-z.local:4242 • …rver-z")
         XCTAssertEqual(model.connectionError, expectedError)
         XCTAssertEqual(connectionAttempts, [studio.endpoint])
     }
@@ -270,6 +341,7 @@ private extension AppModelTests {
         serverID: String = "server-1",
         serverName: String = "Host",
         host: String? = nil,
+        port: Int = 4242,
         clientID: String = "test-client",
         token: String? = nil
     ) -> PairedHost {
@@ -279,7 +351,7 @@ private extension AppModelTests {
             serverName: serverName,
             endpoint: HostEndpoint(
                 host: resolvedHost,
-                port: 4242,
+                port: port,
                 certificateFingerprint: testCertificateFingerprint
             ),
             clientID: clientID,

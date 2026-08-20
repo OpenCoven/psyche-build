@@ -2,8 +2,63 @@ import Combine
 import Foundation
 import PsycheCore
 
+enum PairHostDiscriminatorFormatter {
+    static func format(serverID: String, endpoint: HostEndpoint?) -> String {
+        let suffix = serverIDSuffix(for: serverID)
+        guard let endpoint else { return suffix }
+        return "\(endpoint.host):\(endpoint.port) • \(suffix)"
+    }
+
+    static func format(host: PairedHost) -> String {
+        format(serverID: host.serverID, endpoint: host.endpoint)
+    }
+
+    private static func serverIDSuffix(for serverID: String) -> String {
+        let suffix = String(serverID.suffix(6))
+        return suffix.count == serverID.count ? suffix : "…\(suffix)"
+    }
+}
+
 @MainActor
 final class PairHostModel: ObservableObject {
+    actor SessionAuthority {
+        private enum State {
+            case idle
+            case active(UInt64)
+            case ending(UInt64)
+        }
+
+        private var nextSessionID: UInt64 = 0
+        private var state: State = .idle
+        private var endingWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func claimSession() async -> UInt64 {
+            while case .ending(_) = state {
+                await withCheckedContinuation { continuation in
+                    endingWaiters.append(continuation)
+                }
+            }
+
+            nextSessionID &+= 1
+            state = .active(nextSessionID)
+            return nextSessionID
+        }
+
+        func endIfCurrent(
+            _ sessionID: UInt64,
+            perform operation: @Sendable () async -> Void
+        ) async {
+            guard case let .active(currentSessionID) = state, currentSessionID == sessionID else { return }
+            state = .ending(sessionID)
+            await operation()
+            guard case let .ending(endingSessionID) = state, endingSessionID == sessionID else { return }
+            state = .idle
+            let waiters = endingWaiters
+            endingWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+    }
+
     enum Phase: Equatable {
         case browsing
         case selected
@@ -23,10 +78,7 @@ final class PairHostModel: ObservableObject {
         var serverID: String { entry.serverID }
         var serverName: String { entry.serverName }
         var discriminator: String {
-            if let resolvedAddress, let resolvedPort {
-                return "\(resolvedAddress):\(resolvedPort) • \(serverIDSuffix)"
-            }
-            return serverIDSuffix
+            PairHostDiscriminatorFormatter.format(serverID: serverID, endpoint: resolvedEndpoint)
         }
 
         var resolutionFailure: BonjourResolutionFailure? {
@@ -43,10 +95,6 @@ final class PairHostModel: ObservableObject {
         var resolvedAddress: String? { resolvedEndpoint?.host }
         var resolvedPort: Int? { resolvedEndpoint?.port }
 
-        private var serverIDSuffix: String {
-            let suffix = String(serverID.suffix(6))
-            return suffix.count == serverID.count ? suffix : "…\(suffix)"
-        }
     }
 
     struct Dependencies: Sendable {
@@ -134,21 +182,25 @@ final class PairHostModel: ObservableObject {
     }
 
     private struct DeinitCleanupPlan: Sendable {
+        let authority: SessionAuthority
+        let sessionID: UInt64?
         let shouldStopDiscovery: Bool
         let shouldDisconnect: Bool
         let stopDiscovery: @Sendable () async -> Void
         let disconnect: @Sendable () async -> Void
 
         func launchIfNeeded() {
-            guard shouldStopDiscovery || shouldDisconnect else { return }
+            guard let sessionID, shouldStopDiscovery || shouldDisconnect else { return }
             Task.detached(
                 priority: .utility,
-                operation: { [shouldStopDiscovery, shouldDisconnect, stopDiscovery, disconnect] in
-                    if shouldStopDiscovery {
-                        await stopDiscovery()
-                    }
-                    if shouldDisconnect {
-                        await disconnect()
+                operation: { [authority, sessionID, shouldStopDiscovery, shouldDisconnect, stopDiscovery, disconnect] in
+                    await authority.endIfCurrent(sessionID) {
+                        if shouldStopDiscovery {
+                            await stopDiscovery()
+                        }
+                        if shouldDisconnect {
+                            await disconnect()
+                        }
                     }
                 }
             )
@@ -187,6 +239,8 @@ final class PairHostModel: ObservableObject {
 
     let dependencies: Dependencies
 
+    private let sessionAuthority: SessionAuthority
+
     private enum FailureSource {
         case discovery
         case validation
@@ -204,6 +258,7 @@ final class PairHostModel: ObservableObject {
     private var actionOwnedServerID: String?
     private var failureSource: FailureSource?
     private var ownsIncompleteConnection = false
+    private var sessionID: UInt64?
 
     private var selectedSubmitTarget: SubmitTarget {
         guard let selectedServerID else { return .none }
@@ -225,11 +280,19 @@ final class PairHostModel: ObservableObject {
         showManualEntry ? .manual : selectedSubmitTarget
     }
 
-    init(dependencies: Dependencies) {
-        self.dependencies = dependencies
+    var sessionAuthorityIdentity: ObjectIdentifier {
+        ObjectIdentifier(sessionAuthority)
     }
 
-    static func fixture() -> PairHostModel {
+    init(
+        dependencies: Dependencies,
+        authority: SessionAuthority = SessionAuthority()
+    ) {
+        self.dependencies = dependencies
+        sessionAuthority = authority
+    }
+
+    static func fixture(authority: SessionAuthority = SessionAuthority()) -> PairHostModel {
         let entries = fixtureEntries()
         let entriesByServerID = Dictionary(uniqueKeysWithValues: entries.map { ($0.serverID, $0) })
         let statusByServerID: [String: PairingStatus] = [
@@ -287,10 +350,13 @@ final class PairHostModel: ObservableObject {
             disconnect: {
                 await pendingPairing.clear()
             }
-        ))
+        ), authority: authority)
     }
 
-    convenience init(composition: MobileAppComposition) {
+    convenience init(
+        composition: MobileAppComposition,
+        authority: SessionAuthority = SessionAuthority()
+    ) {
         let discovery = composition.bonjourHostDiscovery
         let store = composition.pairedHostStore
         let manager = composition.connectionManager
@@ -328,7 +394,7 @@ final class PairHostModel: ObservableObject {
             disconnect: {
                 await manager.disconnect()
             }
-        ))
+        ), authority: authority)
     }
 
     deinit {
@@ -496,6 +562,7 @@ final class PairHostModel: ObservableObject {
         guard !hasStarted else { return }
         hasStarted = true
         hasStopped = false
+        sessionID = await sessionAuthority.claimSession()
         observationGeneration &+= 1
         let generation = observationGeneration
         let stream = await dependencies.startDiscovery()
@@ -534,10 +601,15 @@ final class PairHostModel: ObservableObject {
         cancelOwnedTasks()
         pairingCode = ""
         let dependencies = self.dependencies
-        let cleanupTask = Task.detached(priority: .utility) { [dependencies, shouldDisconnect] in
-            await dependencies.stopDiscovery()
-            if shouldDisconnect {
-                await dependencies.disconnect()
+        let authority = sessionAuthority
+        let sessionID = self.sessionID
+        let cleanupTask = Task.detached(priority: .utility) { [authority, dependencies, sessionID, shouldDisconnect] in
+            guard let sessionID else { return }
+            await authority.endIfCurrent(sessionID) {
+                await dependencies.stopDiscovery()
+                if shouldDisconnect {
+                    await dependencies.disconnect()
+                }
             }
         }
         stopTask = cleanupTask
@@ -919,6 +991,8 @@ final class PairHostModel: ObservableObject {
 
     private func deinitCleanupPlan() -> DeinitCleanupPlan {
         DeinitCleanupPlan(
+            authority: sessionAuthority,
+            sessionID: sessionID,
             shouldStopDiscovery: hasStarted && !hasStopped,
             shouldDisconnect: ownsIncompleteConnection && phase != .ready,
             stopDiscovery: dependencies.stopDiscovery,
