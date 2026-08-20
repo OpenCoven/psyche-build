@@ -114,6 +114,7 @@ type ParsedEvidence = {
 };
 
 const SOFTWARE_MARKER_DEFINITIONS = [
+  ['apple software renderer', 'Apple Software Renderer'],
   ['swiftshader', 'SwiftShader'],
   ['llvmpipe', 'llvmpipe'],
   ['softpipe', 'softpipe'],
@@ -145,10 +146,11 @@ const OPENGL_HARDWARE_HINTS = [
   'vega',
 ] as const;
 
-const SOFTWARE_RENDERER_MARKER_VERSION = 1;
+const SOFTWARE_RENDERER_MARKER_VERSION = 2;
 const sharedStartupState: RuntimeGraphicsStartupState = createRuntimeGraphicsStartupState();
 const genericAdapterPattern = /^(adapter|gpu|graphics)$/i;
 const identifierOnlyPattern = /^(0x)?[0-9a-f-]+$/i;
+const DIRECT3D_BACKEND_PATTERN = /\b(?:direct3d(?:11|12)?|d3d(?:11|12)?)\b/i;
 
 export const SOFTWARE_RENDERER_MARKERS = Object.freeze({
   version: SOFTWARE_RENDERER_MARKER_VERSION,
@@ -334,7 +336,7 @@ function softwareMarkerFor(text: string): string | undefined {
 
 function parseExplicitBackend(text: string): RuntimeGraphicsBackend | undefined {
   if (/\bmetal\b/i.test(text)) return 'Metal';
-  if (/\bdirect3d\b/i.test(text) || /\bd3d(?:11|12)?\b/i.test(text)) return 'Direct3D';
+  if (DIRECT3D_BACKEND_PATTERN.test(text)) return 'Direct3D';
   if (/\bvulkan\b/i.test(text)) return 'Vulkan';
   if (/\bopengl\b/i.test(text)) return 'OpenGL';
   return undefined;

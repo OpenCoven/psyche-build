@@ -165,6 +165,49 @@ describe('graphics evidence classification', () => {
     });
   });
 
+  it('treats Apple Software Renderer as software even with Apple hardware hints', () => {
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl',
+      renderer: 'Apple Software Renderer',
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toMatchObject({
+      acceleration: 'software',
+      backend: 'OpenGL',
+      adapter: 'Apple Software Renderer',
+      supportingProbe: 'webgl',
+      fallbackReason: 'software_renderer_detected',
+    });
+  });
+
+  it('classifies numbered Direct3D ANGLE renderers and strips shader suffixes', () => {
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Ti Direct3D11 vs_5_0 ps_5_0)',
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toMatchObject({
+      acceleration: 'accelerated',
+      backend: 'Direct3D',
+      adapter: 'NVIDIA GeForce GTX 1660 Ti',
+      supportingProbe: 'webgl2',
+      unsupportedFields: [],
+    });
+
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4080 SUPER Direct3D12 vs_5_1 ps_5_1)',
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toMatchObject({
+      acceleration: 'accelerated',
+      backend: 'Direct3D',
+      adapter: 'NVIDIA GeForce RTX 4080 SUPER',
+      supportingProbe: 'webgl2',
+      unsupportedFields: [],
+    });
+  });
+
   it('stays conservative for masked, strict-failure, conflicting, absent-version, and unrecognized cases', () => {
     expect(classifyGraphicsEvidence({
       strictContext: 'webgl2',
