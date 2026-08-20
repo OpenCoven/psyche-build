@@ -174,6 +174,7 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).not.toContain('browser_focus_initialization_script');
     expect(tauriLib).not.toContain('focusNonce');
     expect(nativeFocus).toContain('emit_to("main", "browser:focus", payload)');
+    expect(nativeFocus).toContain('emit_to("main", "browser:route", payload)');
     expect(tauriLib).not.toContain(
       'navigationToken: window.__PSYCHE_BROWSER_NAVIGATION_TOKEN__ || null',
     );

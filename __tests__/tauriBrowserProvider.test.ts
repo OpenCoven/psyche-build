@@ -168,7 +168,9 @@ describe('Tauri browser control provider contract', () => {
     expect(lib).toContain('control_provider_upsert');
     expect(readFileSync(new URL(
       '../native/desktop/psyche-build-tauri/web/main.js', import.meta.url,
-    ), 'utf8')).toMatch(/control_provider_upsert[\s\S]{0,1800}controlGeneration\s*=\s*canonical\.generation/);
+    ), 'utf8')).toMatch(
+      /function publishBrowserControlResource\([^)]*\)\s*\{[\s\S]*control_provider_upsert[\s\S]*controlGeneration\s*=\s*canonical\.generation/
+    );
   });
 
   it('registers the provider manager and cryptographic dependencies', () => {

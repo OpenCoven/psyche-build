@@ -63,6 +63,8 @@ mod pane_metrics;
 mod platform;
 pub mod pty_transport;
 mod workspace_contract;
+#[cfg(test)]
+use browser_focus::refresh_browser_focus_identity_document_url;
 use browser_focus::{
     browser_focus_identity, detach_browser_native_focus_callback, install_browser_focus_identity,
     install_browser_native_focus_callback, retire_browser_focus_label,
@@ -1958,28 +1960,24 @@ impl Drop for BrowserNavigationWaiterGuard {
 static BROWSER_NAVIGATION_WAITERS: Lazy<Mutex<HashMap<String, BrowserNavigationWaiter>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-fn browser_documents_share_origin(left: &str, right: &str) -> bool {
+fn browser_documents_match_exact(left: &str, right: &str) -> bool {
     let Ok(left) = Url::parse(left) else {
         return false;
     };
     let Ok(right) = Url::parse(right) else {
         return false;
     };
-    matches!(left.scheme(), "http" | "https")
-        && matches!(right.scheme(), "http" | "https")
-        && left.origin() == right.origin()
+    matches!(left.scheme(), "http" | "https" | "about") && left == right
 }
 
 fn retire_browser_authority_for_page_load(label: &str, current_url: &str) -> bool {
+    let _ = current_url;
     if BROWSER_NAVIGATION_WAITERS.lock().contains_key(label) {
         return false;
     }
     let Some(identity) = browser_focus_identity(label) else {
         return false;
     };
-    if browser_documents_share_origin(&identity.document_url, current_url) {
-        return false;
-    }
     retire_matching_browser_focus_identity(label, &identity);
     true
 }
@@ -1990,7 +1988,7 @@ fn ensure_live_browser_document_authority(
 ) -> Result<BrowserFocusIdentity, String> {
     let identity = browser_focus_identity(label)
         .ok_or_else(|| "browser document authority is unavailable".to_string())?;
-    if !browser_documents_share_origin(&identity.document_url, current_url) {
+    if !browser_documents_match_exact(&identity.document_url, current_url) {
         retire_matching_browser_focus_identity(label, &identity);
         return Err("browser document authority was replaced".to_string());
     }
@@ -2003,7 +2001,8 @@ fn browser_document_authority_unchanged(
     observed_url: &str,
     observed_identity: Option<&BrowserFocusIdentity>,
 ) -> bool {
-    expected_url == observed_url && observed_identity == Some(expected_identity)
+    browser_documents_match_exact(expected_url, observed_url)
+        && observed_identity == Some(expected_identity)
 }
 
 fn browser_title_identity(label: &str) -> Option<BrowserFocusIdentity> {
@@ -9049,8 +9048,8 @@ mod browser_app_shortcut_tests {
     }
 
     #[test]
-    fn page_initiated_cross_origin_navigation_retires_native_authority() {
-        let label = "psyche-browser-cross-origin-retirement".to_string();
+    fn page_initiated_page_load_retires_exact_native_authority() {
+        let label = "psyche-browser-page-load-retirement".to_string();
         let identity = BrowserFocusIdentity {
             generation: 71,
             navigation_token: "old-document".to_string(),
@@ -9065,11 +9064,51 @@ mod browser_app_shortcut_tests {
         assert_eq!(browser_focus_identity(&label), None);
 
         install_browser_focus_identity(label.clone(), identity.clone());
-        assert!(!retire_browser_authority_for_page_load(
+        assert!(retire_browser_authority_for_page_load(
             &label,
             "https://old.example/settings",
         ));
-        assert_eq!(browser_focus_identity(&label), Some(identity));
+        assert_eq!(browser_focus_identity(&label), None);
+
+        install_browser_focus_identity(label.clone(), identity);
+        assert!(retire_browser_authority_for_page_load(
+            &label,
+            "https://old.example/account",
+        ));
+        assert_eq!(browser_focus_identity(&label), None);
+        retire_browser_focus_label(&label);
+    }
+
+    #[test]
+    fn exact_document_authority_rejects_same_origin_replacement_but_accepts_route_updates() {
+        let label = "psyche-browser-exact-document-authority".to_string();
+        let identity = BrowserFocusIdentity {
+            generation: 72,
+            navigation_token: "live-document".to_string(),
+            document_url: "https://old.example/account".to_string(),
+        };
+        install_browser_focus_identity(label.clone(), identity.clone());
+
+        assert_eq!(
+            ensure_live_browser_document_authority(&label, "https://old.example/settings")
+                .unwrap_err(),
+            "browser document authority was replaced"
+        );
+        assert_eq!(browser_focus_identity(&label), None);
+
+        install_browser_focus_identity(label.clone(), identity.clone());
+        assert!(refresh_browser_focus_identity_document_url(
+            &label,
+            identity.generation,
+            &identity.navigation_token,
+            "https://old.example/settings",
+        ));
+        assert_eq!(
+            ensure_live_browser_document_authority(&label, "https://old.example/settings")
+                .unwrap()
+                .document_url,
+            "https://old.example/settings".to_string()
+        );
         retire_browser_focus_label(&label);
     }
 
