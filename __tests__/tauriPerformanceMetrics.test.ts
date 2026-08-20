@@ -311,6 +311,78 @@ describe('bounded performance metrics', () => {
     });
   });
 
+  it('uses emitted counters for throughput and batch evidence in actual native snapshots', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      sampledAt: 1_000,
+      ptySnapshots: [
+        {
+          threadId: 'native-pty',
+          pendingBytes: 0,
+          pendingFragments: 0,
+          queuedBytes: 0,
+          queueDepth: 0,
+          prepared: true,
+          inFlightBatches: 0,
+          inFlightBytes: 0,
+          lastAckedSequence: 0,
+          blockedProducers: 0,
+          visibility: 'visible',
+          effectiveCadenceMicros: 0,
+          draining: false,
+          cancelled: false,
+          workerRunning: true,
+          metrics: {
+            state: {
+              bytesAccepted: 10_000,
+              fragmentsAccepted: 100,
+              bytesEmitted: 0,
+              batchesEmitted: 0,
+            },
+          },
+        },
+      ],
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 2_000,
+      ptySnapshots: [
+        {
+          threadId: 'native-pty',
+          pendingBytes: 0,
+          pendingFragments: 0,
+          queuedBytes: 0,
+          queueDepth: 0,
+          prepared: true,
+          inFlightBatches: 0,
+          inFlightBytes: 0,
+          lastAckedSequence: 0,
+          blockedProducers: 0,
+          visibility: 'visible',
+          effectiveCadenceMicros: 0,
+          draining: false,
+          cancelled: false,
+          workerRunning: true,
+          metrics: {
+            state: {
+              bytesAccepted: 30_000,
+              fragmentsAccepted: 300,
+              bytesEmitted: 400,
+              batchesEmitted: 2,
+            },
+          },
+        },
+      ],
+    });
+
+    expect(collector.snapshot().transport).toMatchObject({
+      bytesPerSecond: 400,
+      batchesPerSecond: 2,
+      averageBatchBytes: 200,
+      p95BatchBytes: 200,
+      p95BatchIntervalMs: 500,
+    });
+  });
+
   it('rejects bare timestamp-less native PTY arrays', () => {
     const collector = createPerformanceMetricsCollector();
 

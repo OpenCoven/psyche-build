@@ -168,14 +168,14 @@ class CircularSamples {
 }
 
 const transportKeys = {
+  emittedBytes: ['bytesEmitted'],
+  emittedBatches: ['batchesEmitted'],
   bytes: [
     'bytes',
     'totalBytes',
     'bytesRead',
     'bytesReceived',
     'bytesWritten',
-    'bytesAccepted',
-    'bytesEmitted',
     'totalBytesRead',
     'totalBytesReceived',
   ],
@@ -185,7 +185,6 @@ const transportKeys = {
     'totalBatches',
     'batchesRead',
     'batchesReceived',
-    'batchesEmitted',
   ],
   batchSizes: [
     'batchSizes',
@@ -337,26 +336,30 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     if (sampledAt !== undefined) latestSampledAt = sampledAt;
 
     const transport = transportSource(input);
-    const currentBytes = numberFrom(transport, transportKeys.bytes);
-    const currentBatches = numberFrom(transport, transportKeys.batches);
-    const sizes = numberArrayFrom(transport, transportKeys.batchSizes);
-    const intervals = numberArrayFrom(transport, transportKeys.intervals);
+    const emittedBytes = numberFrom(transport, transportKeys.emittedBytes);
+    const emittedBatches = numberFrom(transport, transportKeys.emittedBatches);
+    const hasEmittedCounters = emittedBytes !== undefined || emittedBatches !== undefined;
+    const currentBytes = emittedBytes ?? numberFrom(transport, transportKeys.bytes);
+    const currentBatches = emittedBatches ?? numberFrom(transport, transportKeys.batches);
+    const sizes = hasEmittedCounters ? [] : numberArrayFrom(transport, transportKeys.batchSizes);
+    const intervals = hasEmittedCounters ? [] : numberArrayFrom(transport, transportKeys.intervals);
     for (const size of sizes) batchSizes.push(size);
     for (const interval of intervals) batchIntervals.push(interval);
-    const emittedBytes = numberFrom(transport, ['bytesEmitted']);
-    const emittedBatches = numberFrom(transport, ['batchesEmitted']);
     const directAverageBatchBytes = numberFrom(transport, ['averageBatchBytes']);
-    if (directAverageBatchBytes !== undefined) {
+    if (!hasEmittedCounters && directAverageBatchBytes !== undefined) {
       averageBatchBytesOverride = directAverageBatchBytes;
     } else if (emittedBytes !== undefined && emittedBatches !== undefined && emittedBatches > 0) {
       averageBatchBytesOverride = emittedBytes / emittedBatches;
     }
 
+    let elapsedMs: number | undefined;
+    let emittedDeltaBytes: number | undefined;
+    let emittedDeltaBatches: number | undefined;
     if (ptyDeltas !== undefined) {
       if (ptyDeltas.bytes !== undefined) bytesPerSecond = 0;
       if (ptyDeltas.batches !== undefined) batchesPerSecond = 0;
       if (sampledAt !== undefined && previousPtySampledAt !== undefined) {
-        const elapsedMs = sampledAt - previousPtySampledAt;
+        elapsedMs = sampledAt - previousPtySampledAt;
         if (elapsedMs > 0) {
           if (ptyDeltas.bytes !== undefined) {
             bytesPerSecond = (ptyDeltas.bytes * 1_000) / elapsedMs;
@@ -366,11 +369,17 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
           }
         }
       }
+      emittedDeltaBytes = ptyDeltas.bytes;
+      emittedDeltaBatches = ptyDeltas.batches;
       if (sampledAt !== undefined) previousPtySampledAt = sampledAt;
     } else if (sampledAt !== undefined && previousTransport !== undefined) {
-      const elapsedMs = sampledAt - previousTransport.sampledAt;
+      elapsedMs = sampledAt - previousTransport.sampledAt;
       if (elapsedMs > 0) {
         if (currentBytes !== undefined && previousTransport.bytes !== undefined) {
+          emittedDeltaBytes =
+            currentBytes >= previousTransport.bytes
+              ? currentBytes - previousTransport.bytes
+              : undefined;
           bytesPerSecond =
             currentBytes >= previousTransport.bytes
               ? ((currentBytes - previousTransport.bytes) * 1_000) / elapsedMs
@@ -379,6 +388,10 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
           bytesPerSecond = (sizes.reduce((sum, size) => sum + size, 0) * 1_000) / elapsedMs;
         }
         if (currentBatches !== undefined && previousTransport.batches !== undefined) {
+          emittedDeltaBatches =
+            currentBatches >= previousTransport.batches
+              ? currentBatches - previousTransport.batches
+              : undefined;
           batchesPerSecond =
             currentBatches >= previousTransport.batches
               ? ((currentBatches - previousTransport.batches) * 1_000) / elapsedMs
@@ -386,6 +399,14 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
         } else if (sizes.length > 0) {
           batchesPerSecond = (sizes.length * 1_000) / elapsedMs;
         }
+      }
+    }
+    if (hasEmittedCounters && emittedDeltaBatches !== undefined && emittedDeltaBatches > 0) {
+      if (emittedDeltaBytes !== undefined) {
+        batchSizes.push(emittedDeltaBytes / emittedDeltaBatches);
+      }
+      if (elapsedMs !== undefined && elapsedMs > 0) {
+        batchIntervals.push(elapsedMs / emittedDeltaBatches);
       }
     }
     if (
@@ -673,8 +694,12 @@ function updatePtyCounters(
   for (const [index, entry] of entries.entries()) {
     const id = ptyIdentity(entry, index + indexOffset);
     const source = transportSource(entry);
-    const currentBytes = numberFrom(source, transportKeys.bytes);
-    const currentBatches = numberFrom(source, transportKeys.batches);
+    const currentBytes =
+      numberFrom(source, transportKeys.emittedBytes)
+      ?? numberFrom(source, transportKeys.bytes);
+    const currentBatches =
+      numberFrom(source, transportKeys.emittedBatches)
+      ?? numberFrom(source, transportKeys.batches);
     const previous = previousPtyCounters.get(id);
     if (currentBytes !== undefined) {
       hasBytes = true;
@@ -704,6 +729,8 @@ function updatePtyCounters(
 function aggregateTransportEntries(entries: readonly RecordLike[]): RecordLike {
   const aggregate: RecordLike = {};
   const sumKeys = [
+    ...transportKeys.emittedBytes,
+    ...transportKeys.emittedBatches,
     ...transportKeys.bytes,
     ...transportKeys.batches,
     ...transportKeys.backpressure,
