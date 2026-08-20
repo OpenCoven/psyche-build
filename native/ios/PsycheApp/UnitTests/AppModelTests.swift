@@ -143,6 +143,24 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(model.terminalRegistry.lastErrorMessage)
     }
 
+    func testRecordPairedHostNameCannotClearAnExistingConnectionError() async throws {
+        let transport = FakeTransport(shouldFailConnection: true)
+        let (composition, store) = makeComposition(transport: transport)
+        let model = AppModel(composition: composition)
+        let failingHost = makePairedHost(serverID: "server-z", serverName: "Studio")
+        try await store.save(failingHost)
+        try await store.markLastConnected(serverID: failingHost.serverID)
+
+        await model.start()
+        model.recordPairedHostName("Studio")
+
+        let expectedError = ConnectionManagerError.connectionFailed(
+            reason: FakeTransportError.connectionFailed.localizedDescription
+        ).localizedDescription
+        XCTAssertEqual(model.hostName, "Studio")
+        XCTAssertEqual(model.connectionError, expectedError)
+    }
+
     func testRecordConnectedHostSetsServerNameAndClearsAnExistingConnectionError() async throws {
         let transport = FakeTransport(shouldFailConnection: true)
         let (composition, store) = makeComposition(transport: transport)

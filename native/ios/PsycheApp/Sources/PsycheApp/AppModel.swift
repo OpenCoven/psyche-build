@@ -80,7 +80,6 @@ final class AppModel: ObservableObject {
 
     func recordPairedHostName(_ name: String) {
         hostName = name
-        connectionError = nil
     }
 
     func loadLastConnectedHostContext() async {
