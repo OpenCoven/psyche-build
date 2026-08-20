@@ -1441,6 +1441,80 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects compact and separated vendor/device identifier labels across graphics paths', () => {
+    const ambiguousValues = [
+      'NVIDIA VendorIdentifier10DE',
+      'NVIDIA DeviceIdentifier2484',
+      'NVIDIA Vendor Identifier 10DE',
+      'NVIDIA Device Identifier 2484',
+    ];
+
+    for (const value of ambiguousValues) {
+      const probes = [
+        {
+          strictContext: 'webgl2' as const,
+          renderer: value,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: `ANGLE (NVIDIA, ${value}, OpenGL)`,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        {
+          webgpuAdapterAvailable: true as const,
+          webgpuAdapter: value,
+          unsupportedFields: [],
+        },
+      ];
+
+      for (const probe of probes) {
+        expect(classifyGraphicsEvidence(probe), value).toEqual({
+          acceleration: 'unknown',
+          fallbackReason: 'renderer_masked_or_ambiguous',
+          supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+          unsupportedFields: [],
+        });
+      }
+    }
+
+    const product = 'NVIDIA GeForce RTX 4090';
+    for (const label of [
+      'VendorIdentifier10DE',
+      'DeviceIdentifier2484',
+      'Vendor Identifier 10DE',
+      'Device Identifier 2484',
+    ]) {
+      for (const probe of [
+        {
+          webgpuAdapterAvailable: true as const,
+          webgpuAdapter: `${product} ${label}`,
+          unsupportedFields: [],
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: `${product} ${label} OpenGL Engine`,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: `ANGLE (NVIDIA, ${product} ${label}, OpenGL)`,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+      ]) {
+        expect(classifyGraphicsEvidence(probe), label).toMatchObject({
+          acceleration: 'accelerated',
+          adapter: product,
+          supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+        });
+      }
+    }
+  });
+
   it('rejects vendor and generic adapters with embedded UUIDs across WebGPU, raw WebGL, and ANGLE', () => {
     for (const value of [
       'NVIDIA {550e8400-e29b-41d4-a716-446655440000}',
