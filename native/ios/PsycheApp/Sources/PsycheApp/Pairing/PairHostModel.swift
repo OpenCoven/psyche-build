@@ -86,47 +86,50 @@ final class PairHostModel: ObservableObject {
     }
 
     convenience init(composition: MobileAppComposition) {
+        let discovery = composition.bonjourHostDiscovery
+        let store = composition.pairedHostStore
+        let manager = composition.connectionManager
         self.init(dependencies: Dependencies(
             startDiscovery: {
-                await composition.bonjourHostDiscovery.start()
+                await discovery.start()
             },
             stopDiscovery: {
-                await composition.bonjourHostDiscovery.stop()
+                await discovery.stop()
             },
             retryDiscovery: { serverID in
-                await composition.bonjourHostDiscovery.retry(serverID: serverID)
+                await discovery.retry(serverID: serverID)
             },
             pairingStatus: { serverID, fingerprint in
-                try await composition.pairedHostStore.pairingStatus(
+                try await store.pairingStatus(
                     forServerID: serverID,
                     certificateFingerprint: fingerprint
                 )
             },
             connectPaired: { serverID, endpoint in
-                try await composition.connectionManager.connectToPairedHost(
+                try await manager.connectToPairedHost(
                     serverID: serverID,
                     resolvedEndpoint: endpoint
                 )
             },
             connectForPairing: { endpoint in
-                try await composition.connectionManager.connectForPairing(to: endpoint)
+                try await manager.connectForPairing(to: endpoint)
             },
             pair: { code in
-                try await composition.connectionManager.pair(code: code)
+                try await manager.pair(code: code)
             },
             waitForWorkspaceReady: {
-                try await composition.connectionManager.waitForWorkspaceReady()
+                try await manager.waitForWorkspaceReady()
             },
             disconnect: {
-                await composition.connectionManager.disconnect()
+                await manager.disconnect()
             }
         ))
     }
 
     deinit {
-        observationTask?.cancel()
-        actionTask?.cancel()
-        retryTasks.values.forEach { $0.cancel() }
+        MainActor.assumeIsolated {
+            cancelOwnedTasks()
+        }
     }
 
     func start() async {
@@ -136,8 +139,23 @@ final class PairHostModel: ObservableObject {
         observationGeneration &+= 1
         let generation = observationGeneration
         let stream = await dependencies.startDiscovery()
-        observationTask = Task { [weak self] in
-            await self?.observeDiscovery(stream, generation: generation)
+        let dependencies = self.dependencies
+        observationTask = Task { [weak self, dependencies] in
+            for await snapshot in stream {
+                guard !Task.isCancelled else { return }
+                do {
+                    let rows = try await Self.makeRows(from: snapshot, dependencies: dependencies)
+                    await self?.applyDiscoveryRowsIfCurrent(
+                        rows,
+                        snapshotServerIDs: Set(snapshot.map(\.serverID)),
+                        generation: generation
+                    )
+                } catch is CancellationError {
+                    return
+                } catch {
+                    await self?.applyDiscoveryFailureIfCurrent(error, generation: generation)
+                }
+            }
         }
     }
 
@@ -182,11 +200,11 @@ final class PairHostModel: ObservableObject {
         guard retryTasks[serverID] == nil else { return }
         retryingServerIDs.insert(serverID)
         let dependencies = self.dependencies
-        let task = Task { @MainActor [weak self] in
-            guard let self else { return }
+        let task = Task { [weak self] in
             defer {
-                retryTasks[serverID] = nil
-                retryingServerIDs.remove(serverID)
+                Task { @MainActor [weak self] in
+                    self?.finishRetry(serverID: serverID)
+                }
             }
             await dependencies.retryDiscovery(serverID)
         }
@@ -198,13 +216,11 @@ final class PairHostModel: ObservableObject {
             do {
                 let endpoint = try validatedManualEndpoint()
                 let code = try validatedPairingCode()
-                await enqueueAction(owningServerID: nil) { [endpoint, code] actionID in
-                    await self.performPairingFlow(
-                        endpoint: endpoint,
-                        code: code,
-                        actionID: actionID
-                    )
-                }
+                await enqueuePairingFlow(
+                    endpoint: endpoint,
+                    code: code,
+                    owningServerID: nil
+                )
             } catch {
                 applyFailure(error, source: .validation, clearPairingCode: false)
             }
@@ -228,9 +244,7 @@ final class PairHostModel: ObservableObject {
 
         switch row.pairingStatus {
         case .paired:
-            await enqueueAction(owningServerID: row.serverID) { actionID in
-                await self.performPairedConnect(row: row, actionID: actionID)
-            }
+            await enqueuePairedConnect(row: row)
         case .unpaired:
             do {
                 let code = try validatedPairingCode()
@@ -238,13 +252,11 @@ final class PairHostModel: ObservableObject {
                     applyFailure(PairHostModelError.selectedHostUnavailable, source: .validation, clearPairingCode: false)
                     return
                 }
-                await enqueueAction(owningServerID: row.serverID) { [endpoint, code] actionID in
-                    await self.performPairingFlow(
-                        endpoint: endpoint,
-                        code: code,
-                        actionID: actionID
-                    )
-                }
+                await enqueuePairingFlow(
+                    endpoint: endpoint,
+                    code: code,
+                    owningServerID: row.serverID
+                )
             } catch {
                 applyFailure(error, source: .validation, clearPairingCode: false)
             }
@@ -256,8 +268,7 @@ final class PairHostModel: ObservableObject {
 
     func confirmRePairing() async {
         guard phase == .confirmingRePair else { return }
-        guard let selectedServerID,
-              let row = rows.first(where: { $0.serverID == selectedServerID }),
+        guard let row = selectedRowForConfirmedRePairing(),
               let endpoint = row.resolvedEndpoint else {
             applyFailure(PairHostModelError.rePairingUnavailable, source: .validation, clearPairingCode: false)
             return
@@ -265,13 +276,11 @@ final class PairHostModel: ObservableObject {
 
         do {
             let code = try validatedPairingCode()
-            await enqueueAction(owningServerID: row.serverID) { [endpoint, code] actionID in
-                await self.performPairingFlow(
-                    endpoint: endpoint,
-                    code: code,
-                    actionID: actionID
-                )
-            }
+            await enqueuePairingFlow(
+                endpoint: endpoint,
+                code: code,
+                owningServerID: row.serverID
+            )
         } catch {
             applyFailure(error, source: .validation, clearPairingCode: false)
         }
@@ -283,27 +292,10 @@ final class PairHostModel: ObservableObject {
         phase = selectedServerID == nil ? .browsing : .selected
     }
 
-    private func observeDiscovery(
-        _ stream: AsyncStream<[BonjourDiscoveryEntry]>,
-        generation: UInt64
-    ) async {
-        for await snapshot in stream {
-            guard !Task.isCancelled else { return }
-            do {
-                let rows = try await makeRows(from: snapshot)
-                guard generation == observationGeneration else { return }
-                applyDiscoveryRows(rows, snapshotServerIDs: Set(snapshot.map(\.serverID)))
-            } catch is CancellationError {
-                return
-            } catch {
-                guard generation == observationGeneration else { return }
-                applyDiscoveryFailure(error)
-            }
-        }
-    }
-
-    private func makeRows(from snapshot: [BonjourDiscoveryEntry]) async throws -> [Row] {
-        let dependencies = self.dependencies
+    private static func makeRows(
+        from snapshot: [BonjourDiscoveryEntry],
+        dependencies: Dependencies
+    ) async throws -> [Row] {
         return try await withThrowingTaskGroup(of: Row.self) { group in
             for entry in snapshot {
                 group.addTask {
@@ -352,94 +344,156 @@ final class PairHostModel: ObservableObject {
         phase = .failed
     }
 
-    private func enqueueAction(
-        owningServerID: String?,
-        operation: @escaping @MainActor (UUID) async -> Void
+    private func enqueuePairedConnect(row: Row) async {
+        guard actionTask == nil else { return }
+        let actionID = UUID()
+        beginQueuedAction(actionID: actionID, owningServerID: row.serverID, phase: .connecting)
+        let dependencies = self.dependencies
+        let task = Task { [weak self] in
+            defer {
+                Task { @MainActor [weak self] in
+                    self?.finishAction(actionID: actionID)
+                }
+            }
+            do {
+                let host = try await dependencies.connectPaired(row.serverID, row.resolvedEndpoint)
+                guard await self?.transitionAction(
+                    actionID: actionID,
+                    phase: .loadingWorkspace,
+                    ownsIncompleteConnection: true
+                ) == true else {
+                    return
+                }
+                try await dependencies.waitForWorkspaceReady()
+                await self?.completeAction(
+                    actionID: actionID,
+                    host: host,
+                    clearsPairingCode: false
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                await self?.failActionIfCurrent(
+                    actionID: actionID,
+                    error: error,
+                    clearPairingCode: false
+                )
+            }
+        }
+        actionTask = task
+        await awaitActionTask(task)
+    }
+
+    private func enqueuePairingFlow(
+        endpoint: HostEndpoint,
+        code: String,
+        owningServerID: String?
     ) async {
         guard actionTask == nil else { return }
         let actionID = UUID()
-        activeActionID = actionID
-        actionOwnedServerID = owningServerID
-        let task = Task { @MainActor [weak self] in
-            guard let self else { return }
+        beginQueuedAction(actionID: actionID, owningServerID: owningServerID, phase: .connecting)
+        let dependencies = self.dependencies
+        let task = Task { [weak self] in
             defer {
-                if activeActionID == actionID {
-                    actionTask = nil
-                    activeActionID = nil
-                    actionOwnedServerID = nil
+                Task { @MainActor [weak self] in
+                    self?.finishAction(actionID: actionID)
                 }
             }
-            await operation(actionID)
+            do {
+                try await dependencies.connectForPairing(endpoint)
+                guard await self?.transitionAction(
+                    actionID: actionID,
+                    phase: .pairing,
+                    ownsIncompleteConnection: true
+                ) == true else {
+                    return
+                }
+                let host = try await dependencies.pair(code)
+                guard await self?.transitionAction(actionID: actionID, phase: .loadingWorkspace) == true else {
+                    return
+                }
+                try await dependencies.waitForWorkspaceReady()
+                await self?.completeAction(
+                    actionID: actionID,
+                    host: host,
+                    clearsPairingCode: true
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                await self?.failActionIfCurrent(
+                    actionID: actionID,
+                    error: error,
+                    clearPairingCode: true
+                )
+            }
         }
         actionTask = task
-        await task.value
+        await awaitActionTask(task)
     }
 
-    private func performPairedConnect(
-        row: Row,
-        actionID: UUID
-    ) async {
-        guard beginAction(actionID: actionID, phase: .connecting) else { return }
-        do {
-            let host = try await dependencies.connectPaired(row.serverID, row.resolvedEndpoint)
-            guard continueAction(actionID) else { return }
-            ownsIncompleteConnection = true
-            phase = .loadingWorkspace
-            try await dependencies.waitForWorkspaceReady()
-            guard continueAction(actionID) else { return }
-            ownsIncompleteConnection = false
-            readyHost = host
-            phase = .ready
-        } catch is CancellationError {
-            return
-        } catch {
-            guard continueAction(actionID) else { return }
-            applyFailure(error, source: .action, clearPairingCode: false)
-        }
-    }
-
-    private func performPairingFlow(
-        endpoint: HostEndpoint,
-        code: String,
-        actionID: UUID
-    ) async {
-        guard beginAction(actionID: actionID, phase: .connecting) else { return }
-        do {
-            try await dependencies.connectForPairing(endpoint)
-            guard continueAction(actionID) else { return }
-            ownsIncompleteConnection = true
-            phase = .pairing
-            let host = try await dependencies.pair(code)
-            guard continueAction(actionID) else { return }
-            phase = .loadingWorkspace
-            try await dependencies.waitForWorkspaceReady()
-            guard continueAction(actionID) else { return }
-            ownsIncompleteConnection = false
-            pairingCode = ""
-            readyHost = host
-            phase = .ready
-        } catch is CancellationError {
-            return
-        } catch {
-            guard continueAction(actionID) else { return }
-            applyFailure(error, source: .action, clearPairingCode: true)
-        }
-    }
-
-    private func beginAction(
+    private func beginQueuedAction(
         actionID: UUID,
+        owningServerID: String?,
         phase nextPhase: Phase
-    ) -> Bool {
-        guard activeActionID == actionID else { return false }
+    ) {
+        activeActionID = actionID
+        actionOwnedServerID = owningServerID
         readyHost = nil
         errorMessage = nil
         failureSource = nil
         phase = nextPhase
-        return true
     }
 
-    private func continueAction(_ actionID: UUID) -> Bool {
-        activeActionID == actionID && !Task.isCancelled
+    private func awaitActionTask(_ task: Task<Void, Never>) async {
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private func transitionAction(
+        actionID: UUID,
+        phase nextPhase: Phase,
+        ownsIncompleteConnection: Bool? = nil
+    ) -> Bool {
+        guard activeActionID == actionID else { return false }
+        if let ownsIncompleteConnection {
+            self.ownsIncompleteConnection = ownsIncompleteConnection
+        }
+        phase = nextPhase
+        return !Task.isCancelled
+    }
+
+    private func completeAction(
+        actionID: UUID,
+        host: PairedHost,
+        clearsPairingCode: Bool
+    ) {
+        guard activeActionID == actionID else { return }
+        ownsIncompleteConnection = false
+        if clearsPairingCode {
+            pairingCode = ""
+        }
+        readyHost = host
+        phase = .ready
+    }
+
+    private func failActionIfCurrent(
+        actionID: UUID,
+        error: Error,
+        clearPairingCode: Bool
+    ) {
+        guard activeActionID == actionID else { return }
+        applyFailure(error, source: .action, clearPairingCode: clearPairingCode)
+    }
+
+    private func finishAction(actionID: UUID) {
+        guard activeActionID == actionID else { return }
+        actionTask = nil
+        activeActionID = nil
+        actionOwnedServerID = nil
     }
 
     private func applyFailure(
@@ -466,6 +520,51 @@ final class PairHostModel: ObservableObject {
 
     private func ownsSelectionDuringAction(_ serverID: String) -> Bool {
         actionOwnedServerID == serverID && activeActionID != nil
+    }
+
+    private func finishRetry(serverID: String) {
+        retryTasks[serverID] = nil
+        retryingServerIDs.remove(serverID)
+    }
+
+    private func applyDiscoveryRowsIfCurrent(
+        _ rows: [Row],
+        snapshotServerIDs: Set<String>,
+        generation: UInt64
+    ) {
+        guard generation == observationGeneration else { return }
+        applyDiscoveryRows(rows, snapshotServerIDs: snapshotServerIDs)
+    }
+
+    private func applyDiscoveryFailureIfCurrent(
+        _ error: Error,
+        generation: UInt64
+    ) {
+        guard generation == observationGeneration else { return }
+        applyDiscoveryFailure(error)
+    }
+
+    private func selectedRowForConfirmedRePairing() -> Row? {
+        guard let selectedServerID,
+              let row = rows.first(where: { $0.serverID == selectedServerID }),
+              row.resolutionFailure == nil,
+              row.resolvedEndpoint != nil,
+              row.pairingStatus == .requiresRePairing else {
+            return nil
+        }
+        return row
+    }
+
+    private func cancelOwnedTasks() {
+        observationTask?.cancel()
+        observationTask = nil
+        actionTask?.cancel()
+        actionTask = nil
+        activeActionID = nil
+        actionOwnedServerID = nil
+        retryTasks.values.forEach { $0.cancel() }
+        retryTasks.removeAll()
+        retryingServerIDs.removeAll()
     }
 
     private func validatedManualEndpoint() throws -> HostEndpoint {
