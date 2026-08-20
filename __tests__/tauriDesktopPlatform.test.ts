@@ -478,6 +478,7 @@ describe('desktop Tauri layout', () => {
     expect(installStep).toContain(
       "if: runner.os == 'Linux' && needs.changes.outputs.desktop == 'true'",
     );
+    expect(installStep).toContain('timeout-minutes: 20');
     expect(installStep).toContain('shell: bash');
     expect(installStep).toContain('run: |');
     for (const dependency of [

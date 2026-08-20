@@ -7,6 +7,7 @@ import { TmuxService } from "./services/TmuxService.js"
 import usePanes from "./hooks/usePanes.js"
 import useProjectSettings from "./hooks/useProjectSettings.js"
 import useTerminalWidth from "./hooks/useTerminalWidth.js"
+import useLayoutWidth from "./hooks/useLayoutWidth.js"
 import useNavigation from "./hooks/useNavigation.js"
 import useAutoUpdater from "./hooks/useAutoUpdater.js"
 import useAgentStatus from "./hooks/useAgentStatus.js"
@@ -247,8 +248,10 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
 
   // Track terminal dimensions for responsive layout
   const terminalWidth = useTerminalWidth()
+  // Measured against the tmux window, not this pane — see useLayoutWidth.
+  const layoutWidth = useLayoutWidth()
   const [sidePanelCollapsed, setSidePanelCollapsed] = useState(() =>
-    shouldUseCompactSidePanel(terminalWidth)
+    shouldUseCompactSidePanel(layoutWidth)
   )
   const [sidePanelManualOverride, setSidePanelManualOverride] = useState(false)
   const sidePanelWidth = getSidePanelWidth(sidePanelCollapsed)
@@ -269,13 +272,13 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     }
     
     // Auto-collapse on small terminals
-    if (shouldUseCompactSidePanel(terminalWidth)) {
+    if (shouldUseCompactSidePanel(layoutWidth)) {
       setSidePanelCollapsed(true)
     } else {
       // Expand when terminal is large enough
       setSidePanelCollapsed(false)
     }
-  }, [terminalWidth, sidePanelManualOverride])
+  }, [layoutWidth, sidePanelManualOverride])
 
   // Track unread error and warning counts for logs badge
   const [unreadErrorCount, setUnreadErrorCount] = useState(0)
