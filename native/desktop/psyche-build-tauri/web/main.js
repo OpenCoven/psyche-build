@@ -5474,15 +5474,15 @@
       label: "Close project",
       danger: true,
       run: function () {
+        var wasActive = state.activeProjectId === project.id;
         return Promise.resolve(removeProject(project.id)).then(function (closed) {
-          if (!closed) restoreProjectFocus();
+          if (!closed || !wasActive) restoreProjectFocus();
           return closed;
         }, function (error) {
           restoreProjectFocus();
           throw error;
         });
       },
-    }];
   }
 
   var sessionContextMenu = null;
