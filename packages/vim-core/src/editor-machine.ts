@@ -138,6 +138,7 @@ export function createEditorMachine(
   let insertSessionText = '';
   let insertSessionAppliedText = '';
   let insertSessionKind: 'insert' | 'replace' | 'open' = 'insert';
+  let replaceRestorations: { from: number; inserted: string; original: string }[] = [];
   let lastChange: EditorInput[] | undefined;
   let lastVisualChange: VisualChange | undefined;
   let activeVisualChange: VisualChange | undefined;
