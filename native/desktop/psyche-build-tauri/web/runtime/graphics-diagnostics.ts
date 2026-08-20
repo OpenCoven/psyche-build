@@ -310,9 +310,10 @@ const concatenatedDescriptorFragments = [
   'microsoftcorporation',
 ].map((fragment) => fragment.replace(/[^a-z0-9]/gi, '').toLowerCase());
 const uuidPattern = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i;
+const embeddedUuidPattern = /\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?/gi;
 const identifierOnlyPattern = /^(?:(?:pci|ven|dev|vendor|device|id)|(?:0x)?[0-9a-f]+|[\s,:/\\\-&_;])+$/i;
 const hardwareIdentifierPattern = /(?:\b(?:0x)?[0-9a-f]{4,8}\s*:\s*(?:0x)?[0-9a-f]{4,8}\b|(?<![\p{L}\p{N}])(?:pci|ven|dev|subsys|vendor[^\p{L}\p{N}{}]*id|device[^\p{L}\p{N}{}]*id|vid|pid|did|luid|uuid)(?:[^\p{L}\p{N}{}]+(?:\{[0-9a-f-]+\}|(?:0x)?[0-9a-f]+)|(?:\{[0-9a-f-]+\}|(?:0x)?[0-9]+|(?:0x)?[0-9a-f]{4,}))(?![\p{L}\p{N}]))/iu;
-const unprefixedIdentifierPairPattern = /(?<![\p{L}\p{N}])[0-9a-f]{4,8}[\s-]+[0-9a-f]{4,8}(?![\p{L}\p{N}])/iu;
+const unprefixedIdentifierPairPattern = /(?<![\p{L}\p{N}])[0-9a-f]{4,8}[\s-]+[0-9a-f]{4,8}(?![\p{L}\p{N}])(?!(?:[\s-]+)[0-9a-f]{4,8}(?![\p{L}\p{N}]))/giu;
 const ancillaryIdentifierLabelPattern = /\s+(?:(?:pci|ven|dev|subsys|vid|pid|did|luid|uuid)\b(?:\s*(?:id|identifier)\b)?|(?:vendor|device)\b\s*(?:id|identifier)\b)\s*[:=#-]?\s*(?:0x)?[0-9a-f]{1,8}\b/gi;
 const ancillaryIdentifierPattern = /\s*\(\s*0x[0-9a-f]+\s*\)|\s+0x[0-9a-f]+\b/gi;
 const backendOnlyAdapterPattern = /^(?:angle\s+)?(?:metal|vulkan|opengl(?:\s+es)?|direct3d(?:\s*(?:11|12))?|d3d(?:11|12))(?:\s+(?:renderer|engine|[0-9]+(?:\.[0-9]+)*))?$/i;
@@ -531,7 +532,6 @@ function normalizeAdapterString(value: string): string | undefined {
 function isReliableAdapterEvidence(value: string): boolean {
   const candidate = stripAncillaryIdentifierFragments(value);
   const normalized = lowerCase(candidate).replace(/\s+/g, ' ').trim();
-  const hasUnprefixedIdentifierPair = unprefixedIdentifierPairPattern.test(candidate);
   return !(
     genericAdapterPattern.test(candidate)
     || genericAdapterNames.has(normalized)
@@ -539,19 +539,28 @@ function isReliableAdapterEvidence(value: string): boolean {
     || hardwareIdentifierPattern.test(candidate)
     || identifierOnlyPattern.test(candidate)
     || uuidPattern.test(candidate)
-    || (isConcatenatedDescriptorIdentifier(candidate) && !hasUnprefixedIdentifierPair)
+    || isConcatenatedDescriptorIdentifier(candidate)
     || backendOnlyAdapterPattern.test(candidate)
     || isMaskedRenderer(candidate)
-    || (!hasMeaningfulProductToken(candidate) && !hasUnprefixedIdentifierPair)
+    || !hasMeaningfulProductToken(candidate)
   );
 }
 
 function stripAncillaryIdentifierFragments(value: string): string {
-  return value
+  const uuidFragments: string[] = [];
+  const protectedValue = value.replace(embeddedUuidPattern, (fragment) => {
+    uuidFragments.push(fragment);
+    return ` UUID_FRAGMENT_${uuidFragments.length} `;
+  });
+  const stripped = protectedValue
     .replace(ancillaryIdentifierLabelPattern, ' ')
     .replace(ancillaryIdentifierPattern, ' ')
+    .replace(unprefixedIdentifierPairPattern, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  return stripped.replace(/UUID_FRAGMENT_(\d+)/g, (_, index: string) => (
+    uuidFragments[Number(index) - 1] ?? ''
+  ));
 }
 
 function isConcatenatedDescriptorIdentifier(value: string): boolean {
