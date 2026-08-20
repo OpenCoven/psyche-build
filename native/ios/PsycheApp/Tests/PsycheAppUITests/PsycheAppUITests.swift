@@ -588,6 +588,12 @@ final class PsycheAppUITests: XCTestCase {
             app.otherElements["terminal-pane-web-home"].exists,
             "Selecting the collapsed secondary should promote it into the single visible slot"
         )
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        try waitForLandscape(app)
+
+        XCTAssertTrue(element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(element("terminal-pane-web-home", in: app).waitForExistence(timeout: 10))
     }
 
     // MARK: - Regular width (iPad)

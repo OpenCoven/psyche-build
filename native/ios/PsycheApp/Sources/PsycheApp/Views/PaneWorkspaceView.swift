@@ -137,6 +137,13 @@ struct PaneWorkspaceView: View {
             registry.focus(selection.paneID)
             return
         }
+        if store.secondaryPaneID == selection.paneID,
+           let previousPrimaryPaneID = store.primaryPaneID,
+           previousPrimaryPaneID != selection.paneID {
+            store.primaryPaneID = selection.paneID
+            store.secondaryPaneID = previousPrimaryPaneID
+            return
+        }
         store.primaryPaneID = selection.paneID
         if store.secondaryPaneID == selection.paneID {
             store.secondaryPaneID = nil
