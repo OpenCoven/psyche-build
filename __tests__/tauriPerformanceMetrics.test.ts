@@ -728,6 +728,7 @@ describe('bounded performance metrics', () => {
       setInterval,
       schedulerSnapshot: () => ({ coalescedVisualUpdates }),
       rendererSnapshots: () => [{
+        paneId: 'pane-a',
         state: 'webgl',
         rendererTransitions,
         contextLosses,
@@ -751,6 +752,70 @@ describe('bounded performance metrics', () => {
     expect(coalescedVisualUpdates).toBe(5);
     expect(rendererTransitions).toBe(7);
     expect(contextLosses).toBe(4);
+  });
+
+  it('resets renderer counters per pane instead of using historical aggregate totals', () => {
+    let panes = [{
+      paneId: 'old-pane',
+      state: 'webgl',
+      rendererTransitions: 100,
+      contextLosses: 50,
+    }];
+    const collector = createPerformanceMetricsCollector({
+      rendererSnapshots: () => panes,
+    });
+
+    expect(collector.snapshot().renderer).toMatchObject({
+      rendererTransitions: 100,
+      contextLosses: 50,
+    });
+    collector.reset();
+    expect(collector.snapshot().renderer).toMatchObject({
+      rendererTransitions: 0,
+      contextLosses: 0,
+    });
+
+    panes = [{
+      paneId: 'new-pane',
+      state: 'webgl',
+      rendererTransitions: 2,
+      contextLosses: 1,
+    }];
+    expect(collector.snapshot().renderer).toMatchObject({
+      rendererTransitions: 2,
+      contextLosses: 1,
+    });
+  });
+
+  it('discards removed pane baselines so reused IDs report new cumulative counters', () => {
+    let panes = [{
+      paneId: 'pane-a',
+      state: 'webgl',
+      rendererTransitions: 8,
+      contextLosses: 4,
+    }];
+    const collector = createPerformanceMetricsCollector({
+      rendererSnapshots: () => panes,
+    });
+
+    collector.snapshot();
+    collector.reset();
+    panes = [];
+    expect(collector.snapshot().renderer).toMatchObject({
+      rendererTransitions: 0,
+      contextLosses: 0,
+    });
+
+    panes = [{
+      paneId: 'pane-a',
+      state: 'webgl',
+      rendererTransitions: 1,
+      contextLosses: 1,
+    }];
+    expect(collector.snapshot().renderer).toMatchObject({
+      rendererTransitions: 1,
+      contextLosses: 1,
+    });
   });
 
   describe('live performance collection', () => {
@@ -852,6 +917,7 @@ describe('bounded performance metrics', () => {
         now: () => 1_000,
         schedulerSnapshot: () => ({ coalescedVisualUpdates }),
         rendererSnapshots: () => [{
+          paneId: 'pane-a',
           state: 'webgl',
           rendererTransitions,
           contextLosses,
@@ -1044,9 +1110,9 @@ describe('bounded performance metrics', () => {
       const collector = createPerformanceMetricsCollector({
         schedulerSnapshot: () => ({ pendingCallbacks: 2, coalescedVisualUpdates: 4 }),
         rendererSnapshots: () => [
-          { state: 'webgl', contextLosses: 2 },
-          { state: 'recovering', contextLosses: 1 },
-          { state: 'fallback', contextLosses: 0 },
+          { paneId: 'pane-a', state: 'webgl', contextLosses: 2 },
+          { paneId: 'pane-b', state: 'recovering', contextLosses: 1 },
+          { paneId: 'pane-c', state: 'fallback', contextLosses: 0 },
         ],
       });
 
@@ -1064,6 +1130,7 @@ describe('bounded performance metrics', () => {
       const collector = createPerformanceMetricsCollector({
         schedulerSnapshot: () => ({ pendingCallbacks: 2, coalescedVisualUpdates: 4 }),
         rendererSnapshots: () => [{
+          paneId: 'pane-a',
           state: 'webgl',
           rendererTransitions: 1,
           contextLosses: 2,

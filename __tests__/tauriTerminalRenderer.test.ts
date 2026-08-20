@@ -564,6 +564,7 @@ describe('TerminalPaneController lifecycle', () => {
     expect(success.terminals[0].options.scrollback).toBe(10_000);
     expect(success.terminals[0].loadedAddons).toEqual([success.fits[0], success.webgls[0]]);
     expect(lifecycleEvents).toEqual(['open', 'webgl']);
+    expect(success.controller.rendererSnapshot().paneId).toBe('webgl-success');
     expect(success.controller.rendererSnapshot().state).toBe('webgl');
     expect(success.controller.rendererSnapshot().fallbackReason).toBeNull();
 

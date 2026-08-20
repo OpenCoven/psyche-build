@@ -21,6 +21,7 @@ export interface VisibilityState {
 }
 
 export interface RendererSnapshot {
+  paneId: string;
   state: RendererState;
   fallbackReason: RendererFallbackReason | null;
   rendererTransitions: number;
@@ -798,6 +799,7 @@ export function createTerminalPaneController(
     },
     rendererSnapshot() {
       return {
+        paneId: options.paneId,
         state: rendererState,
         fallbackReason: rendererFallbackReason,
         rendererTransitions,

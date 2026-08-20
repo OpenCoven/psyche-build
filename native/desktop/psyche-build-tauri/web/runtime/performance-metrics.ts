@@ -63,6 +63,7 @@ export interface PerformanceSchedulerSnapshot {
 }
 
 export interface PerformanceRendererSnapshot {
+  paneId: string;
   state?: string;
   rendererTransitions?: number;
   contextLosses?: number;
@@ -351,8 +352,15 @@ export function createPerformanceMetricsCollector(
   let rendererTransitions = 0;
   let contextLosses = 0;
   let coalescedVisualUpdatesBaseline = 0;
+  let rendererCountersFromPanes = false;
   let rendererTransitionsBaseline = 0;
   let contextLossesBaseline = 0;
+  const rendererPaneCounters = new Map<string, {
+    rendererTransitions: number;
+    contextLosses: number;
+  }>();
+  const rendererTransitionPaneBaselines = new Map<string, number>();
+  const contextLossPaneBaselines = new Map<string, number>();
   let focusToNextPaintMs: number | undefined;
   let resizeToNextPaintMs: number | undefined;
   let running = false;
@@ -579,6 +587,90 @@ export function createPerformanceMetricsCollector(
     ackMax = undefined;
   }
 
+  function updateRendererPaneState(
+    panes: RecordLike[],
+    paneSourcePresent: boolean,
+    directTransitions: number | undefined,
+    directLosses: number | undefined,
+  ): void {
+    const paneIds = panes.map((pane) =>
+      typeof pane.paneId === 'string' && pane.paneId.length > 0 ? pane.paneId : undefined,
+    );
+    const hasPaneCounters = panes.some((pane) =>
+      numberFrom(pane, ['rendererTransitions']) !== undefined ||
+      numberFrom(pane, ['contextLosses', 'contextLoss']) !== undefined,
+    );
+    const keyedPaneCounters = paneSourcePresent &&
+      paneIds.every((paneId) => paneId !== undefined) &&
+      (hasPaneCounters || (panes.length === 0 && rendererCountersFromPanes));
+
+    if (keyedPaneCounters) {
+      rendererCountersFromPanes = true;
+      const nextCounters = new Map<string, {
+        rendererTransitions: number;
+        contextLosses: number;
+      }>();
+      for (const [index, pane] of panes.entries()) {
+        const paneId = paneIds[index];
+        if (paneId === undefined) continue;
+        nextCounters.set(paneId, {
+          rendererTransitions: numberFrom(pane, ['rendererTransitions']) ?? 0,
+          contextLosses: numberFrom(pane, ['contextLosses', 'contextLoss']) ?? 0,
+        });
+      }
+      rendererPaneCounters.clear();
+      for (const [paneId, counters] of nextCounters) rendererPaneCounters.set(paneId, counters);
+      for (const paneId of rendererTransitionPaneBaselines.keys()) {
+        if (!nextCounters.has(paneId)) rendererTransitionPaneBaselines.delete(paneId);
+      }
+      for (const paneId of contextLossPaneBaselines.keys()) {
+        if (!nextCounters.has(paneId)) contextLossPaneBaselines.delete(paneId);
+      }
+      rendererTransitions = [...nextCounters].reduce(
+        (sum, [paneId, counters]) => sum + cumulativeDelta(
+          counters.rendererTransitions,
+          rendererTransitionPaneBaselines.get(paneId) ?? 0,
+        ),
+        0,
+      );
+      contextLosses = [...nextCounters].reduce(
+        (sum, [paneId, counters]) => sum + cumulativeDelta(
+          counters.contextLosses,
+          contextLossPaneBaselines.get(paneId) ?? 0,
+        ),
+        0,
+      );
+      return;
+    }
+
+    if (paneSourcePresent && rendererCountersFromPanes) {
+      rendererCountersFromPanes = false;
+      rendererPaneCounters.clear();
+      rendererTransitionPaneBaselines.clear();
+      contextLossPaneBaselines.clear();
+    }
+    if (panes.length > 0) {
+      rendererTransitions = Math.max(
+        rendererTransitions,
+        panes.reduce(
+          (sum, pane) => sum + (numberFrom(pane, ['rendererTransitions']) ?? 0),
+          0,
+        ),
+      );
+      contextLosses = Math.max(
+        contextLosses,
+        panes.reduce(
+          (sum, pane) => sum + (numberFrom(pane, ['contextLosses', 'contextLoss']) ?? 0),
+          0,
+        ),
+      );
+    }
+    if (directTransitions !== undefined) {
+      rendererTransitions = Math.max(rendererTransitions, directTransitions);
+    }
+    if (directLosses !== undefined) contextLosses = Math.max(contextLosses, directLosses);
+  }
+
   function mergeOneNativeSnapshot(
     input: RecordLike,
     ptyDeltas?: { bytes?: number; batches?: number; backpressure?: number },
@@ -755,22 +847,6 @@ export function createPerformanceMetricsCollector(
       fallbackPanes = panes.filter((pane) =>
         paneFlag(pane, ['fallback', 'isFallback']) || paneState(pane) === 'fallback',
       ).length;
-      if (panes.length > 0) {
-        rendererTransitions = Math.max(
-          rendererTransitions,
-          panes.reduce(
-            (sum, pane) => sum + (numberFrom(pane, ['rendererTransitions']) ?? 0),
-            0,
-          ),
-        );
-        contextLosses = Math.max(
-          contextLosses,
-          panes.reduce(
-            (sum, pane) => sum + (numberFrom(pane, ['contextLosses', 'contextLoss']) ?? 0),
-            0,
-          ),
-        );
-      }
     }
     const directWebgl = numberFrom(renderer, ['webglPanes']);
     const directRecovering = numberFrom(renderer, ['recoveringPanes']);
@@ -780,10 +856,7 @@ export function createPerformanceMetricsCollector(
     if (paneSource === undefined && directWebgl !== undefined) webglPanes = directWebgl;
     if (paneSource === undefined && directRecovering !== undefined) recoveringPanes = directRecovering;
     if (paneSource === undefined && directFallback !== undefined) fallbackPanes = directFallback;
-    if (directTransitions !== undefined) {
-      rendererTransitions = Math.max(rendererTransitions, directTransitions);
-    }
-    if (directLosses !== undefined) contextLosses = Math.max(contextLosses, directLosses);
+    updateRendererPaneState(panes, paneSource !== undefined, directTransitions, directLosses);
 
     if (Object.prototype.hasOwnProperty.call(input, 'process')) {
       processCpu = undefined;
@@ -926,12 +999,10 @@ export function createPerformanceMetricsCollector(
         webglPanes = nextWebglPanes;
         recoveringPanes = nextRecoveringPanes;
         fallbackPanes = nextFallbackPanes;
-        rendererTransitions = Math.max(
-          rendererTransitions,
+        updateRendererPaneState(
+          panes.map((pane) => pane as unknown as RecordLike),
+          true,
           nextRendererTransitions,
-        );
-        contextLosses = Math.max(
-          contextLosses,
           nextContextLosses,
         );
       } catch (error) {
@@ -969,11 +1040,12 @@ export function createPerformanceMetricsCollector(
         webglPanes,
         recoveringPanes,
         fallbackPanes,
-        rendererTransitions: cumulativeDelta(
-          rendererTransitions,
-          rendererTransitionsBaseline,
-        ),
-        contextLosses: cumulativeDelta(contextLosses, contextLossesBaseline),
+        rendererTransitions: rendererCountersFromPanes
+          ? rendererTransitions
+          : cumulativeDelta(rendererTransitions, rendererTransitionsBaseline),
+        contextLosses: rendererCountersFromPanes
+          ? contextLosses
+          : cumulativeDelta(contextLosses, contextLossesBaseline),
       },
       interactions: {},
     };
@@ -1000,8 +1072,19 @@ export function createPerformanceMetricsCollector(
     sampleRuntimeState();
     collectionEpoch += 1;
     coalescedVisualUpdatesBaseline = coalescedVisualUpdates;
-    rendererTransitionsBaseline = rendererTransitions;
-    contextLossesBaseline = contextLosses;
+    if (rendererCountersFromPanes) {
+      rendererTransitionPaneBaselines.clear();
+      contextLossPaneBaselines.clear();
+      for (const [paneId, counters] of rendererPaneCounters) {
+        rendererTransitionPaneBaselines.set(paneId, counters.rendererTransitions);
+        contextLossPaneBaselines.set(paneId, counters.contextLosses);
+      }
+      rendererTransitionsBaseline = 0;
+      contextLossesBaseline = 0;
+    } else {
+      rendererTransitionsBaseline = rendererTransitions;
+      contextLossesBaseline = contextLosses;
+    }
     frames.clear();
     batchSizes.clear();
     batchIntervals.clear();
