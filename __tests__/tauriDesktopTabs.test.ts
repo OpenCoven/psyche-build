@@ -38,6 +38,13 @@ const browserTitleCapabilityPath = join(
 const browserTitleCapability = existsSync(browserTitleCapabilityPath)
   ? JSON.parse(readFileSync(browserTitleCapabilityPath, 'utf8'))
   : null;
+const mainRuntimeDiagnosticsCapabilityPath = join(
+  repoRoot,
+  'native/desktop/psyche-build-tauri/src-tauri/capabilities/main-runtime-diagnostics.json',
+);
+const mainRuntimeDiagnosticsCapability = existsSync(mainRuntimeDiagnosticsCapabilityPath)
+  ? JSON.parse(readFileSync(mainRuntimeDiagnosticsCapabilityPath, 'utf8'))
+  : null;
 const tauriCargo = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml'),
   'utf8'
@@ -262,11 +269,11 @@ describe('Tauri desktop tab shortcuts', () => {
     }
   });
 
-  it('grants every generated app permission to main and only the shortcut to browsers', () => {
+  it('keeps diagnostics restricted to the main app webview while browsers stay narrowly scoped', () => {
     const generatedPermissions = registeredAppCommands().map(
       (command) => `allow-${command.replaceAll('_', '-')}`,
     );
-    const mainAppPermissions = defaultCapability.permissions.filter(
+    const mainWindowPermissions = defaultCapability.permissions.filter(
       (permission: string) => !permission.includes(':'),
     );
     expect(defaultCapability).toMatchObject({
@@ -283,6 +290,25 @@ describe('Tauri desktop tab shortcuts', () => {
         'dialog:allow-open',
       ]),
     });
+    expect(defaultCapability.permissions).not.toContain('allow-runtime-diagnostics');
+    expect(defaultCapability.permissions).not.toContain('allow-runtime-process-metrics');
+
+    expect(mainRuntimeDiagnosticsCapability).toEqual({
+      $schema: '../gen/schemas/macOS-schema.json',
+      identifier: 'main-runtime-diagnostics',
+      description: 'Allows only the main app webview to access runtime diagnostics',
+      local: true,
+      webviews: ['main'],
+      permissions: ['allow-runtime-diagnostics', 'allow-runtime-process-metrics'],
+    });
+    expect(mainRuntimeDiagnosticsCapability.permissions).toHaveLength(2);
+    expect(mainRuntimeDiagnosticsCapability.windows).toBeUndefined();
+    expect(JSON.stringify(mainRuntimeDiagnosticsCapability)).not.toContain('psyche-browser-*');
+
+    const mainAppPermissions = [
+      ...mainWindowPermissions,
+      ...mainRuntimeDiagnosticsCapability.permissions,
+    ];
     expect(mainAppPermissions).toEqual(generatedPermissions);
 
     expect(browserShortcutCapability).not.toBeNull();
@@ -298,6 +324,8 @@ describe('Tauri desktop tab shortcuts', () => {
       permissions: ['allow-browser-app-shortcut', 'allow-browser-automation-result'],
     });
     expect(browserShortcutCapability.permissions).toHaveLength(2);
+    expect(browserShortcutCapability.permissions).not.toContain('allow-runtime-diagnostics');
+    expect(browserShortcutCapability.permissions).not.toContain('allow-runtime-process-metrics');
     expect(JSON.stringify(browserShortcutCapability)).not.toContain('core:event:allow-emit');
     expect(browserTitleCapability).toEqual({
       $schema: '../gen/schemas/macOS-schema.json',
