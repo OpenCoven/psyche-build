@@ -383,6 +383,65 @@ describe('bounded performance metrics', () => {
     });
   });
 
+  it('weights emitted interval aggregates by their emitted batch counts', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      sampledAt: 0,
+      transport: { bytesEmitted: 0, batchesEmitted: 0 },
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 1_000,
+      transport: { bytesEmitted: 100, batchesEmitted: 1 },
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 2_000,
+      transport: { bytesEmitted: 1_100, batchesEmitted: 101 },
+    });
+
+    expect(collector.snapshot().transport).toMatchObject({
+      averageBatchBytes: 1_100 / 101,
+      p95BatchBytes: 10,
+      p95BatchIntervalMs: 10,
+    });
+  });
+
+  it('keeps retired PTY backpressure history while counting later monotonic growth', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      sampledAt: 1_000,
+      ptySnapshots: [
+        { threadId: 'first', metrics: { state: { pushWouldBlockCount: 10 } } },
+        { threadId: 'second', metrics: { state: { pushWouldBlockCount: 5 } } },
+      ],
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 2_000,
+      ptySnapshots: [
+        { threadId: 'second', metrics: { state: { pushWouldBlockCount: 6 } } },
+      ],
+    });
+
+    expect(collector.snapshot().transport.backpressureCount).toBe(16);
+  });
+
+  it('treats a PTY backpressure counter reset as a zero-delta interval', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      sampledAt: 1_000,
+      ptySnapshots: [{ threadId: 'resetting', metrics: { state: { pushWouldBlockCount: 10 } } }],
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 2_000,
+      ptySnapshots: [{ threadId: 'resetting', metrics: { state: { pushWouldBlockCount: 2 } } }],
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 3_000,
+      ptySnapshots: [{ threadId: 'resetting', metrics: { state: { pushWouldBlockCount: 3 } } }],
+    });
+
+    expect(collector.snapshot().transport.backpressureCount).toBe(11);
+  });
+
   it('rejects bare timestamp-less native PTY arrays', () => {
     const collector = createPerformanceMetricsCollector();
 
@@ -481,7 +540,7 @@ describe('bounded performance metrics', () => {
     expect(collector.snapshot().transport).toMatchObject({
       bytesPerSecond: 0,
       batchesPerSecond: 0,
-      averageBatchBytes: 0,
+      averageBatchBytes: 50,
       p95BatchBytes: 0,
       p95BatchIntervalMs: 0,
       queueBytesHighWater: 8_192,
@@ -528,6 +587,14 @@ describe('bounded performance metrics', () => {
     collector.mergeNativeSnapshot({
       sampledAt: 1_000,
       process: { cpuPercent: 12 },
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 2_000,
+      transport: { bytesEmitted: 0, batchesEmitted: 0 },
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 3_000,
+      transport: { bytesEmitted: 100, batchesEmitted: 1, pushWouldBlockCount: 3 },
     });
     collector.reset();
 

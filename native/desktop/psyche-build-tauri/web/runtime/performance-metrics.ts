@@ -153,6 +153,20 @@ class CircularSamples {
     this.size = Math.min(FRAME_SAMPLE_LIMIT, this.size + 1);
   }
 
+  pushRepeated(value: number, count: number): void {
+    if (!Number.isFinite(value) || value < 0 || !Number.isFinite(count) || count <= 0) return;
+    const repeats = Math.floor(count);
+    if (repeats === 0) return;
+    const retained = Math.min(FRAME_SAMPLE_LIMIT, repeats);
+    if (retained === FRAME_SAMPLE_LIMIT) {
+      this.values.fill(value);
+      this.next = 0;
+      this.size = FRAME_SAMPLE_LIMIT;
+      return;
+    }
+    for (let index = 0; index < retained; index += 1) this.push(value);
+  }
+
   toArray(): number[] {
     if (this.size === 0) return [];
     const start = (this.next - this.size + FRAME_SAMPLE_LIMIT) % FRAME_SAMPLE_LIMIT;
@@ -252,13 +266,19 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
   let previousFrameTimestamp: number | undefined;
   let latestSampledAt = 0;
   let previousTransport:
-    | { sampledAt: number; bytes?: number; batches?: number }
+    | { sampledAt: number; bytes?: number; batches?: number; backpressure?: number }
     | undefined;
   let previousPtySampledAt: number | undefined;
   const previousPtyCounters = new Map<string, { bytes?: number; batches?: number }>();
+  // Keep this history separate so retired PTYs cannot erase cumulative backpressure evidence.
+  const previousPtyBackpressureCounters = new Map<string, number>();
   let bytesPerSecond = 0;
   let batchesPerSecond = 0;
   let averageBatchBytesOverride: number | undefined;
+  // These totals are collector-lifetime deltas from native cumulative counters.
+  let emittedBytesTotal = 0;
+  let emittedBatchesTotal = 0;
+  let hasEmittedBytesTotal = false;
   let longTaskCount = 0;
   let longTaskTotal = 0;
   let longTaskMax = 0;
@@ -330,7 +350,7 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
 
   function mergeOneNativeSnapshot(
     input: RecordLike,
-    ptyDeltas?: { bytes?: number; batches?: number },
+    ptyDeltas?: { bytes?: number; batches?: number; backpressure?: number },
   ): void {
     const sampledAt = numberFrom(input, ['sampledAt', 'timestamp', 'time']);
     if (sampledAt !== undefined) latestSampledAt = sampledAt;
@@ -341,6 +361,7 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     const hasEmittedCounters = emittedBytes !== undefined || emittedBatches !== undefined;
     const currentBytes = emittedBytes ?? numberFrom(transport, transportKeys.bytes);
     const currentBatches = emittedBatches ?? numberFrom(transport, transportKeys.batches);
+    const backpressure = numberFrom(transport, transportKeys.backpressure);
     const sizes = hasEmittedCounters ? [] : numberArrayFrom(transport, transportKeys.batchSizes);
     const intervals = hasEmittedCounters ? [] : numberArrayFrom(transport, transportKeys.intervals);
     for (const size of sizes) batchSizes.push(size);
@@ -348,8 +369,6 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     const directAverageBatchBytes = numberFrom(transport, ['averageBatchBytes']);
     if (!hasEmittedCounters && directAverageBatchBytes !== undefined) {
       averageBatchBytesOverride = directAverageBatchBytes;
-    } else if (emittedBytes !== undefined && emittedBatches !== undefined && emittedBatches > 0) {
-      averageBatchBytesOverride = emittedBytes / emittedBatches;
     }
 
     let elapsedMs: number | undefined;
@@ -403,21 +422,41 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     }
     if (hasEmittedCounters && emittedDeltaBatches !== undefined && emittedDeltaBatches > 0) {
       if (emittedDeltaBytes !== undefined) {
-        batchSizes.push(emittedDeltaBytes / emittedDeltaBatches);
+        // Native cumulative counters provide interval-aggregate distribution
+        // estimates, not exact individual batch sizes.
+        batchSizes.pushRepeated(emittedDeltaBytes / emittedDeltaBatches, emittedDeltaBatches);
       }
       if (elapsedMs !== undefined && elapsedMs > 0) {
-        batchIntervals.push(elapsedMs / emittedDeltaBatches);
+        batchIntervals.pushRepeated(elapsedMs / emittedDeltaBatches, emittedDeltaBatches);
+      }
+    }
+    if (emittedDeltaBytes !== undefined && emittedDeltaBytes > 0) {
+      emittedBytesTotal += emittedDeltaBytes;
+      hasEmittedBytesTotal = true;
+    }
+    if (emittedDeltaBatches !== undefined && emittedDeltaBatches > 0) {
+      emittedBatchesTotal += emittedDeltaBatches;
+    }
+    if (ptyDeltas?.backpressure !== undefined) {
+      backpressureCount += ptyDeltas.backpressure;
+    } else if (backpressure !== undefined) {
+      const previousBackpressure = previousTransport?.backpressure;
+      if (previousBackpressure === undefined) {
+        backpressureCount += backpressure;
+      } else if (backpressure >= previousBackpressure) {
+        backpressureCount += backpressure - previousBackpressure;
       }
     }
     if (
       ptyDeltas === undefined &&
       sampledAt !== undefined &&
-      (currentBytes !== undefined || currentBatches !== undefined)
+      (currentBytes !== undefined || currentBatches !== undefined || backpressure !== undefined)
     ) {
       previousTransport = {
         sampledAt,
         bytes: currentBytes ?? previousTransport?.bytes,
         batches: currentBatches ?? previousTransport?.batches,
+        backpressure: backpressure ?? previousTransport?.backpressure,
       };
     }
 
@@ -428,14 +467,11 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
       numberFrom(transport, transportKeys.queueDepthHighWater)
       ?? numberFrom(transport, transportKeys.queueDepthCurrent);
     const blocked = numberFrom(transport, transportKeys.blocked);
-    const backpressure = numberFrom(transport, transportKeys.backpressure);
     if (queueBytes !== undefined) queueBytesHighWater = Math.max(queueBytesHighWater, queueBytes);
     if (queueDepth !== undefined) queueDepthHighWater = Math.max(queueDepthHighWater, queueDepth);
     if (blocked !== undefined) {
       blockedProducersHighWater = Math.max(blockedProducersHighWater, blocked);
     }
-    if (backpressure !== undefined) backpressureCount = backpressure;
-
     const ackSamples = numberArrayFrom(transport, transportKeys.ackSamples);
     const acknowledged = numberFrom(transport, ['batchesAcknowledged']);
     const totalAckMicros = numberFrom(transport, ['totalAckLatencyMicros']);
@@ -556,7 +592,12 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
           return entrySampledAt === undefined || entrySampledAt === sampledAt;
         });
       if (sameSample) {
-        const { deltas } = updatePtyCounters(entries, previousPtyCounters);
+        const { deltas } = updatePtyCounters(
+          entries,
+          previousPtyCounters,
+          0,
+          previousPtyBackpressureCounters,
+        );
         mergeOneNativeSnapshot({
           ...input,
           ...(sampledAt !== undefined ? { sampledAt } : {}),
@@ -564,7 +605,12 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
         }, deltas);
       } else {
         for (const [index, entry] of entries.entries()) {
-          const { deltas } = updatePtyCounters([entry], previousPtyCounters, index);
+          const { deltas } = updatePtyCounters(
+            [entry],
+            previousPtyCounters,
+            index,
+            previousPtyBackpressureCounters,
+          );
           mergeOneNativeSnapshot(
             entry.sampledAt === undefined && sampledAt !== undefined
               ? { ...entry, sampledAt }
@@ -590,9 +636,11 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
         bytesPerSecond,
         batchesPerSecond,
         averageBatchBytes:
-          batchSizes.toArray().length > 0
-            ? average(batchSizes.toArray())
-            : (averageBatchBytesOverride ?? 0),
+          hasEmittedBytesTotal && emittedBatchesTotal > 0
+            ? emittedBytesTotal / emittedBatchesTotal
+            : (batchSizes.toArray().length > 0
+              ? average(batchSizes.toArray())
+              : (averageBatchBytesOverride ?? 0)),
         p95BatchBytes: nearestRank(batchSizes.toArray()),
         p95BatchIntervalMs: nearestRank(batchIntervals.toArray()),
         queueBytesHighWater,
@@ -639,9 +687,13 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     previousTransport = undefined;
     previousPtySampledAt = undefined;
     previousPtyCounters.clear();
+    previousPtyBackpressureCounters.clear();
     bytesPerSecond = 0;
     batchesPerSecond = 0;
     averageBatchBytesOverride = undefined;
+    emittedBytesTotal = 0;
+    emittedBatchesTotal = 0;
+    hasEmittedBytesTotal = false;
     longTaskCount = 0;
     longTaskTotal = 0;
     longTaskMax = 0;
@@ -686,11 +738,14 @@ function updatePtyCounters(
   entries: readonly RecordLike[],
   previousPtyCounters: Map<string, { bytes?: number; batches?: number }>,
   indexOffset = 0,
-): { deltas: { bytes?: number; batches?: number } } {
+  previousPtyBackpressureCounters: Map<string, number>,
+): { deltas: { bytes?: number; batches?: number; backpressure?: number } } {
   let bytesDelta = 0;
   let batchesDelta = 0;
+  let backpressureDelta = 0;
   let hasBytes = false;
   let hasBatches = false;
+  let hasBackpressure = false;
   for (const [index, entry] of entries.entries()) {
     const id = ptyIdentity(entry, index + indexOffset);
     const source = transportSource(entry);
@@ -700,7 +755,9 @@ function updatePtyCounters(
     const currentBatches =
       numberFrom(source, transportKeys.emittedBatches)
       ?? numberFrom(source, transportKeys.batches);
+    const currentBackpressure = numberFrom(source, transportKeys.backpressure);
     const previous = previousPtyCounters.get(id);
+    const previousBackpressure = previousPtyBackpressureCounters.get(id);
     if (currentBytes !== undefined) {
       hasBytes = true;
       if (previous?.bytes !== undefined && currentBytes >= previous.bytes) {
@@ -713,6 +770,16 @@ function updatePtyCounters(
         batchesDelta += currentBatches - previous.batches;
       }
     }
+    if (currentBackpressure !== undefined) {
+      hasBackpressure = true;
+      if (previousBackpressure === undefined) {
+        backpressureDelta += currentBackpressure;
+      } else if (currentBackpressure >= previousBackpressure) {
+        backpressureDelta += currentBackpressure - previousBackpressure;
+      }
+      // A lower native counter is a reset; its interval contributes zero.
+      previousPtyBackpressureCounters.set(id, currentBackpressure);
+    }
     previousPtyCounters.set(id, {
       bytes: currentBytes ?? previous?.bytes,
       batches: currentBatches ?? previous?.batches,
@@ -722,6 +789,7 @@ function updatePtyCounters(
     deltas: {
       ...(hasBytes ? { bytes: bytesDelta } : {}),
       ...(hasBatches ? { batches: batchesDelta } : {}),
+      ...(hasBackpressure ? { backpressure: backpressureDelta } : {}),
     },
   };
 }
