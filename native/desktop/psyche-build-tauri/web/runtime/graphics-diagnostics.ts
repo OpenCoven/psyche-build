@@ -126,6 +126,7 @@ const SOFTWARE_MARKER_DEFINITIONS = [
 const MASKED_RENDERERS = new Set([
   'angle',
   'generic renderer',
+  'opengl',
   'renderer',
   'unknown',
   'webkit webgl',
@@ -390,8 +391,7 @@ function stripOpenGlAdapterTokens(value: string): string | undefined {
 
 function hasExplicitOpenGlHardwareHint(text: string): boolean {
   const normalized = lowerCase(text);
-  return normalized.includes('opengl')
-    || normalized.includes('/pcie/')
+  return normalized.includes('/pcie/')
     || OPENGL_HARDWARE_HINTS.some((hint) => normalized.includes(hint));
 }
 

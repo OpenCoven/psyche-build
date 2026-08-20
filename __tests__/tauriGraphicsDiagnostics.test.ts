@@ -234,6 +234,18 @@ describe('graphics evidence classification', () => {
     });
 
     expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'OpenGL',
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toEqual({
+      acceleration: 'unknown',
+      fallbackReason: 'renderer_masked_or_ambiguous',
+      supportingProbe: 'webgl2',
+      unsupportedFields: [],
+    });
+
+    expect(classifyGraphicsEvidence({
       fallbackContext: 'webgl2',
       renderer: 'ANGLE (Apple, Apple M3, Metal)',
       unsupportedFields: ['webgl.strictContext'],
