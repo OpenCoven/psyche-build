@@ -8,6 +8,7 @@ import {
   ensureRuntimeGraphicsStartupSummary,
   mergeRuntimeGraphicsReport,
   probeGraphicsEvidence,
+  type GraphicsWebGlContext,
 } from '../native/desktop/psyche-build-tauri/web/runtime/graphics-diagnostics';
 import {
   classifyGraphicsEvidence as classifyGraphicsEvidenceFromEntry,
@@ -45,7 +46,7 @@ function createCanvasHarness(
   respond: (
     kind: 'webgl2' | 'webgl',
     attributes?: typeof STRICT_WEBGL_CONTEXT_ATTRIBUTES,
-  ) => FakeWebGlContext | null,
+  ) => GraphicsWebGlContext | null,
 ) {
   const requests: Array<{
     kind: 'webgl2' | 'webgl';
@@ -135,7 +136,6 @@ describe('graphics evidence classification', () => {
       webgpuAdapterAvailable: false,
     })).toMatchObject({
       acceleration: 'software',
-      backend: 'OpenGL',
       adapter: 'llvmpipe',
       fallbackReason: 'software_renderer_detected',
     });
@@ -147,7 +147,6 @@ describe('graphics evidence classification', () => {
       webgpuAdapterAvailable: false,
     })).toMatchObject({
       acceleration: 'software',
-      backend: 'OpenGL',
       adapter: 'softpipe',
       fallbackReason: 'software_renderer_detected',
     });
@@ -173,10 +172,23 @@ describe('graphics evidence classification', () => {
       webgpuAdapterAvailable: false,
     })).toMatchObject({
       acceleration: 'software',
-      backend: 'OpenGL',
       adapter: 'Apple Software Renderer',
       supportingProbe: 'webgl',
       fallbackReason: 'software_renderer_detected',
+    });
+  });
+
+  it('omits a backend when strict WebGL renderer evidence does not name one', () => {
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'NVIDIA GeForce RTX 4090',
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toEqual({
+      acceleration: 'accelerated',
+      adapter: 'NVIDIA GeForce RTX 4090',
+      supportingProbe: 'webgl2',
+      unsupportedFields: [],
     });
   });
 
@@ -358,6 +370,27 @@ describe('graphics probes', () => {
       unsupportedFields: ['webgl.strictContext', 'webgl.debugRendererInfo', 'webgl.renderer'],
     });
   });
+
+  it('records renderer access failures without discarding the usable strict context', async () => {
+    const canvas = createCanvasHarness((kind, attributes) => {
+      if (kind !== 'webgl2' || !attributes?.failIfMajorPerformanceCaveat) return null;
+      return {
+        getExtension: () => ({ UNMASKED_RENDERER_WEBGL: 0x9246 }),
+        getParameter: () => {
+          throw new Error('renderer access denied');
+        },
+      };
+    });
+
+    await expect(probeGraphicsEvidence({
+      navigatorTarget: {},
+      createCanvas: canvas.createCanvas,
+    })).resolves.toEqual({
+      webgpuAdapterAvailable: false,
+      strictContext: 'webgl2',
+      unsupportedFields: ['webgpu', 'webgl.renderer'],
+    });
+  });
 });
 
 describe('runtime graphics startup wiring', () => {
@@ -414,6 +447,44 @@ describe('runtime graphics startup wiring', () => {
       unsupportedFields: ['webgpu'],
     });
     expect(firstReport).toEqual(secondReport);
+  });
+
+  it('reports startup collection failures without rejecting application startup', async () => {
+    const startupState = createRuntimeGraphicsStartupState();
+    const failure = new Error('runtime diagnostics unavailable');
+    const reportError = vi.fn();
+
+    await expect(ensureRuntimeGraphicsStartupSummary({
+      invoke: async () => {
+        throw failure;
+      },
+      reportError,
+      navigatorTarget: {},
+      createCanvas: () => null,
+    }, startupState)).resolves.toBeNull();
+
+    expect(reportError).toHaveBeenCalledTimes(1);
+    expect(reportError).toHaveBeenCalledWith(failure, 'collect runtime graphics report');
+  });
+
+  it('reports malformed native runtime facts instead of failing silently', async () => {
+    const startupState = createRuntimeGraphicsStartupState();
+    const reportError = vi.fn();
+
+    await expect(ensureRuntimeGraphicsStartupSummary({
+      invoke: async () => ({ os: 'macos' }),
+      reportError,
+      navigatorTarget: {},
+      createCanvas: () => null,
+    }, startupState)).resolves.toBeNull();
+
+    expect(reportError).toHaveBeenCalledTimes(1);
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: 'runtime_diagnostics returned invalid runtime graphics facts',
+      }),
+      'collect runtime graphics report',
+    );
   });
 
   it('keeps the runtime source and committed bundle wired to the startup summary', () => {

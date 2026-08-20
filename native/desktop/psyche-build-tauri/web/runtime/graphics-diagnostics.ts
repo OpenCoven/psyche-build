@@ -97,6 +97,7 @@ export interface GraphicsProbeDependencies {
 export interface RuntimeGraphicsStartupDependencies extends GraphicsProbeDependencies {
   invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
   log?: (label: '[psyche:graphics]', report: RuntimeGraphicsReport) => void;
+  reportError?: (error: unknown, operation: 'collect runtime graphics report') => void;
 }
 
 export interface RuntimeGraphicsStartupState {
@@ -259,9 +260,12 @@ export async function collectRuntimeGraphicsReport(
       readNativeRuntimeGraphicsFacts(invoke),
       probeGraphicsEvidence(deps),
     ]);
-    if (!nativeFacts) return null;
+    if (!nativeFacts) {
+      throw new Error('runtime_diagnostics returned invalid runtime graphics facts');
+    }
     return mergeRuntimeGraphicsReport(nativeFacts, classifyGraphicsEvidence(probe));
-  } catch {
+  } catch (error) {
+    (deps.reportError ?? defaultReportError)(error, 'collect runtime graphics report');
     return null;
   }
 }
@@ -522,7 +526,13 @@ function readWebGlRenderer(
     return undefined;
   }
 
-  const renderer = normalizeString(context.getParameter(debugRendererInfo.UNMASKED_RENDERER_WEBGL));
+  let renderer: string | undefined;
+  try {
+    renderer = normalizeString(context.getParameter(debugRendererInfo.UNMASKED_RENDERER_WEBGL));
+  } catch {
+    unsupportedFields.add('webgl.renderer');
+    return undefined;
+  }
   if (!renderer) {
     unsupportedFields.add('webgl.renderer');
     return undefined;
@@ -654,7 +664,7 @@ function parseWebGlRenderer(renderer: string, source: Exclude<RuntimeGraphicsPro
     return {
       source,
       category: 'software',
-      backend: 'OpenGL',
+      backend: parseExplicitBackend(renderer),
       adapter: softwareMarker,
     };
   }
@@ -687,7 +697,7 @@ function parseWebGlRenderer(renderer: string, source: Exclude<RuntimeGraphicsPro
   return {
     source,
     category: 'hardware',
-    backend: 'OpenGL',
+    backend: parseExplicitBackend(renderer),
     adapter,
   };
 }
@@ -810,5 +820,11 @@ function defaultInvoke():
 function defaultLog(label: '[psyche:graphics]', report: RuntimeGraphicsReport): void {
   if (typeof console !== 'undefined' && typeof console.info === 'function') {
     console.info(label, report);
+  }
+}
+
+function defaultReportError(error: unknown, operation: 'collect runtime graphics report'): void {
+  if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+    console.warn(`[psyche:graphics] ${operation} failed`, error);
   }
 }
