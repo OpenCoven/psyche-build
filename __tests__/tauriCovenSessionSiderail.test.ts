@@ -928,7 +928,9 @@ function createRenderer(options: {
   };
 }
 
-function createSessionContextMenuHarness() {
+function createSessionContextMenuHarness(options: {
+  removeProject?: () => Promise<boolean> | boolean;
+} = {}) {
   const document = new FakeDocument();
   const sessionListEl = new FakeElement('div', document);
   document.connectRoot(sessionListEl);
@@ -942,7 +944,7 @@ function createSessionContextMenuHarness() {
   sessionListEl.appendChild(project);
 
   const openProjectAppearancePopover = vi.fn();
-  const removeProject = vi.fn().mockResolvedValue(true);
+  const removeProject = vi.fn(options.removeProject ?? (() => Promise.resolve(true)));
   const windowValue = { innerWidth: 1280, innerHeight: 720 };
   const projectValue = { id: 'psyche', name: 'PSYCHE-BUILD', root: '/repo/psyche-build' };
   const harness = Function(
@@ -1663,6 +1665,50 @@ describe('Tauri Coven session project rail', () => {
 
     expect(harness.document.activeElement).toBe(harness.project);
     expect(harness.project.focused).toBe(true);
+  });
+
+  it('restores focus when a keyboard-opened project close action returns false', async () => {
+    let successHarness: ReturnType<typeof createSessionContextMenuHarness>;
+    const failureHarness = createSessionContextMenuHarness({
+      removeProject: () => Promise.resolve(false),
+    });
+
+    failureHarness.project.focus();
+    failureHarness.handleTreeKeydown(new FakeEvent(failureHarness.project, 'ContextMenu'));
+
+    const failureCloseButton = failureHarness.sessionContextMenu()?.querySelectorAll('button')[1];
+    expect(failureCloseButton?.textContent).toBe('Close project');
+
+    failureCloseButton?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(failureHarness.removeProject).toHaveBeenCalledOnce();
+    expect(failureHarness.removeProject).toHaveBeenCalledWith('psyche');
+    expect(failureHarness.document.activeElement).toBe(failureHarness.project);
+    expect(failureHarness.project.focused).toBe(true);
+
+    successHarness = createSessionContextMenuHarness({
+      removeProject: () => {
+        successHarness.sessionListEl.removeChild(successHarness.project);
+        return Promise.resolve(true);
+      },
+    });
+
+    successHarness.project.focus();
+    successHarness.handleTreeKeydown(new FakeEvent(successHarness.project, 'ContextMenu'));
+
+    const successCloseButton = successHarness.sessionContextMenu()?.querySelectorAll('button')[1];
+    expect(successCloseButton?.textContent).toBe('Close project');
+
+    successCloseButton?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(successHarness.removeProject).toHaveBeenCalledOnce();
+    expect(successHarness.removeProject).toHaveBeenCalledWith('psyche');
+    expect(successHarness.project.isConnected).toBe(false);
+    expect(successHarness.document.activeElement).not.toBe(successHarness.project);
   });
 
   it('activates focused branch treeitems on Enter and toggles them on Space', async () => {

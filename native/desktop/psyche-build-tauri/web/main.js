@@ -5457,6 +5457,14 @@
 
   function projectAppearanceContextActions(project, anchor) {
     if (!project) return [];
+    var restoreKey = anchor && anchor.dataset
+      ? anchor.dataset.treeKey || ""
+      : "";
+    function restoreProjectFocus() {
+      if (!restoreKey) return;
+      sessionTreeFocusKey = restoreKey;
+      restoreSessionTreeFocus(restoreKey);
+    }
     return [{
       label: "Customize appearance",
       run: function () {
@@ -5466,7 +5474,13 @@
       label: "Close project",
       danger: true,
       run: function () {
-        return removeProject(project.id);
+        return Promise.resolve(removeProject(project.id)).then(function (closed) {
+          if (!closed) restoreProjectFocus();
+          return closed;
+        }, function (error) {
+          restoreProjectFocus();
+          throw error;
+        });
       },
     }];
   }
