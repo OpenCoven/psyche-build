@@ -165,6 +165,9 @@ describe('command builders', () => {
     expect(() =>
       buildAgentCommand('coven-code', undefined, { covenSessionId: '$(touch /tmp/unsafe)' })
     ).toThrow('Coven session id contains unsupported characters');
+    expect(() =>
+      buildAgentCommand('coven-code', undefined, { covenSessionId: '' })
+    ).toThrow('Coven session id contains unsupported characters');
   });
 
   it('builds option-style initial prompt command', () => {

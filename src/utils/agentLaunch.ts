@@ -473,7 +473,7 @@ function appendCovenSessionId(
   context: AgentCommandContext | undefined
 ): string {
   const sessionId = context?.covenSessionId;
-  if (!sessionId || agent !== 'coven-code') {
+  if (sessionId === undefined || agent !== 'coven-code') {
     return command;
   }
 
