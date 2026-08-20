@@ -259,6 +259,97 @@ describe('graphics evidence classification', () => {
     });
   });
 
+  it('does not treat backend-only names as hardware adapters', () => {
+    for (const adapter of ['Metal', 'Vulkan', 'OpenGL', 'Direct3D', 'D3D11', 'ANGLE Vulkan Renderer']) {
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: adapter,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgpu',
+      });
+
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: adapter,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+      });
+    }
+
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'ANGLE (Google, Metal, Metal)',
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toMatchObject({
+      acceleration: 'unknown',
+      fallbackReason: 'renderer_masked_or_ambiguous',
+      supportingProbe: 'webgl2',
+    });
+
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'ANGLE (Google, ANGLE Vulkan Renderer, Vulkan 1.3)',
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toMatchObject({
+      acceleration: 'unknown',
+      fallbackReason: 'renderer_masked_or_ambiguous',
+      supportingProbe: 'webgl2',
+    });
+  });
+
+  it('does not treat identifier-only formats as hardware adapters', () => {
+    const identifiers = [
+      'PCI: 10de:2484',
+      'VEN_10DE&DEV_2484',
+      'Vendor ID: 0x10de',
+      '123456',
+      '0x10de',
+    ];
+
+    for (const adapter of identifiers) {
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: adapter,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgpu',
+      });
+
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: `ANGLE (Google, ${adapter}, Vulkan 1.3)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+      });
+
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: adapter,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+      });
+    }
+  });
+
   it('stays conservative for masked, strict-failure, conflicting, absent-version, and unrecognized cases', () => {
     expect(classifyGraphicsEvidence({
       strictContext: 'webgl2',

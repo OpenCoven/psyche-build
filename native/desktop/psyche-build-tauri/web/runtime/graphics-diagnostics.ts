@@ -151,7 +151,9 @@ const OPENGL_HARDWARE_HINTS = [
 const SOFTWARE_RENDERER_MARKER_VERSION = 2;
 const sharedStartupState: RuntimeGraphicsStartupState = createRuntimeGraphicsStartupState();
 const genericAdapterPattern = /^(adapter|gpu|graphics)$/i;
-const identifierOnlyPattern = /^(?:(?:0x)?[0-9a-f]+(?:\s*[:/,\\-]\s*(?:0x)?[0-9a-f]+)+|(?:0x)?[0-9a-f]+|PCI(?:[\\/:])?VEN_[0-9a-f]+(?:[&\\/:][a-z]+_[0-9a-f]+)+)$/i;
+const identifierOnlyPattern = /^(?:(?:PCI\s*:\s*)?(?:0x)?[0-9a-f]+(?:\s*[:/,\\-]\s*(?:0x)?[0-9a-f]+)+|VEN_[0-9a-f]+(?:&DEV_[0-9a-f]+)+|Vendor\s+ID\s*:\s*(?:0x)?[0-9a-f]+|(?:0x)?[0-9a-f]+)$/i;
+const identifierEvidencePattern = /(?:PCI\s*:\s*(?:0x)?[0-9a-f]+(?:\s*:\s*(?:0x)?[0-9a-f]+)+|VEN_[0-9a-f]+(?:&DEV_[0-9a-f]+)+|Vendor\s+ID\s*:\s*(?:0x)?[0-9a-f]+)/i;
+const backendOnlyAdapterPattern = /^(?:angle\s+)?(?:metal|vulkan|opengl(?:\s+es)?|direct3d(?:\s*(?:11|12))?|d3d(?:11|12))(?:\s+(?:renderer|engine|[0-9]+(?:\.[0-9]+)*))?$/i;
 const DIRECT3D_BACKEND_PATTERN = /\b(?:direct3d(?:11|12)?|d3d(?:11|12)?)\b/i;
 
 export const SOFTWARE_RENDERER_MARKERS = Object.freeze({
@@ -357,15 +359,17 @@ function isMaskedRenderer(text: string): boolean {
 
 function normalizeAdapterString(value: string): string | undefined {
   const normalized = normalizeString(value);
-  if (!normalized) return undefined;
-  if (
-    genericAdapterPattern.test(normalized)
-    || identifierOnlyPattern.test(normalized)
-    || isMaskedRenderer(normalized)
-  ) {
-    return undefined;
-  }
-  return normalized;
+  return normalized && isReliableAdapterEvidence(normalized) ? normalized : undefined;
+}
+
+function isReliableAdapterEvidence(value: string): boolean {
+  return !(
+    genericAdapterPattern.test(value)
+    || identifierOnlyPattern.test(value)
+    || identifierEvidencePattern.test(value)
+    || backendOnlyAdapterPattern.test(value)
+    || isMaskedRenderer(value)
+  );
 }
 
 function stripAngleAdapterTokens(
@@ -681,7 +685,7 @@ function parseWebGlRenderer(renderer: string, source: Exclude<RuntimeGraphicsPro
     };
   }
 
-  if (isMaskedRenderer(renderer)) {
+  if (!isReliableAdapterEvidence(renderer)) {
     return {
       source,
       category: 'ambiguous',
