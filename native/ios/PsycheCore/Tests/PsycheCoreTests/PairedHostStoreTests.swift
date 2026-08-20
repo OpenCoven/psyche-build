@@ -225,6 +225,8 @@ final class PairedHostStoreTests: XCTestCase {
         let secureStore = InMemorySecureStore()
         let keyA = "paired-hosts.alpha"
         let keyB = "paired-hosts.beta"
+        let selectionKeyA = PairedHostStore.selectionKey(forStoreKey: keyA)
+        let selectionKeyB = PairedHostStore.selectionKey(forStoreKey: keyB)
         let storeA = PairedHostStore(secureStore: secureStore, key: keyA)
         let storeB = PairedHostStore(secureStore: secureStore, key: keyB)
         let hostA = makeHost(serverID: "server-a")
@@ -242,7 +244,7 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(selectedAAfterFirstMark, hostA)
         XCTAssertNil(selectedBAfterFirstMark)
         XCTAssertNil(try secureStore.data(forKey: PairedHostStore.lastConnectedKey))
-        XCTAssertEqual(try secureStore.data(forKey: "\(keyA).last-connected"), selectedAData)
+        XCTAssertEqual(try secureStore.data(forKey: selectionKeyA), selectedAData)
 
         try await storeB.markLastConnected(serverID: "server-b")
 
@@ -250,14 +252,16 @@ final class PairedHostStoreTests: XCTestCase {
         let selectedBAfterSecondMark = try await storeB.lastConnectedHost()
         XCTAssertEqual(selectedAAfterSecondMark, hostA)
         XCTAssertEqual(selectedBAfterSecondMark, hostB)
-        XCTAssertEqual(try secureStore.data(forKey: "\(keyA).last-connected"), selectedAData)
-        XCTAssertEqual(try secureStore.data(forKey: "\(keyB).last-connected"), selectedBData)
+        XCTAssertEqual(try secureStore.data(forKey: selectionKeyA), selectedAData)
+        XCTAssertEqual(try secureStore.data(forKey: selectionKeyB), selectedBData)
     }
 
     func testCustomSelectionKeysKeepClearAndRemoveAllIsolatedAcrossStores() async throws {
         let secureStore = InMemorySecureStore()
         let keyA = "paired-hosts.alpha"
         let keyB = "paired-hosts.beta"
+        let selectionKeyA = PairedHostStore.selectionKey(forStoreKey: keyA)
+        let selectionKeyB = PairedHostStore.selectionKey(forStoreKey: keyB)
         let storeA = PairedHostStore(secureStore: secureStore, key: keyA)
         let storeB = PairedHostStore(secureStore: secureStore, key: keyB)
         let hostA = makeHost(serverID: "server-a")
@@ -287,9 +291,46 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(hostsBAfterRemoveAll, [hostB])
         XCTAssertEqual(selectedBAfterRemoveAll, hostB)
         XCTAssertNil(try secureStore.data(forKey: keyA))
-        XCTAssertNil(try secureStore.data(forKey: "\(keyA).last-connected"))
+        XCTAssertNil(try secureStore.data(forKey: selectionKeyA))
         XCTAssertNotNil(try secureStore.data(forKey: keyB))
-        XCTAssertNotNil(try secureStore.data(forKey: "\(keyB).last-connected"))
+        XCTAssertNotNil(try secureStore.data(forKey: selectionKeyB))
+    }
+
+    func testCustomSelectionKeyNamespaceAvoidsPrimaryKeySuffixCollisions() async throws {
+        let secureStore = InMemorySecureStore()
+        let keyA = "paired-hosts.alpha"
+        let keyB = "paired-hosts.alpha.last-connected"
+        let selectionKeyA = PairedHostStore.selectionKey(forStoreKey: keyA)
+        let storeA = PairedHostStore(secureStore: secureStore, key: keyA)
+        let storeB = PairedHostStore(secureStore: secureStore, key: keyB)
+        let hostA = makeHost(serverID: "server-a")
+        let hostB = makeHost(serverID: "server-b")
+
+        XCTAssertNotEqual(selectionKeyA, keyB)
+
+        try await storeA.save(hostA)
+        try await storeB.save(hostB)
+        let originalStoreBRecordData = try secureStore.data(forKey: keyB)
+
+        try await storeA.markLastConnected(serverID: "server-a")
+
+        let selectedAAfterMark = try await storeA.lastConnectedHost()
+        let hostsBAfterMark = try await storeB.hosts()
+        let selectedBAfterMark = try await storeB.lastConnectedHost()
+
+        XCTAssertEqual(try secureStore.data(forKey: keyB), originalStoreBRecordData)
+        XCTAssertEqual(selectedAAfterMark, hostA)
+        XCTAssertEqual(hostsBAfterMark, [hostB])
+        XCTAssertNil(selectedBAfterMark)
+
+        try await storeA.removeAll()
+
+        let selectedAAfterRemoveAll = try await storeA.lastConnectedHost()
+        let hostsBAfterRemoveAll = try await storeB.hosts()
+
+        XCTAssertNil(selectedAAfterRemoveAll)
+        XCTAssertEqual(try secureStore.data(forKey: keyB), originalStoreBRecordData)
+        XCTAssertEqual(hostsBAfterRemoveAll, [hostB])
     }
 
     func testStaleLastConnectedSelectionIsRemovedAndReturnsNil() async throws {
@@ -368,6 +409,78 @@ final class PairedHostStoreTests: XCTestCase {
         let selected = try await store.lastConnectedHost()
         XCTAssertEqual(loaded, originalHost)
         XCTAssertNil(selected)
+    }
+
+    func testRemovingSelectedHostRollsBackToExactPriorBytesWhenSelectionClearFails() async throws {
+        let secureStore = InjectedFailureSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let originalHost = makeHost()
+        let otherHost = makeHost(serverID: "server-z")
+
+        try await store.save(originalHost)
+        try await store.save(otherHost)
+        try await store.markLastConnected(serverID: "server-1")
+
+        let originalRecordData = try secureStore.data(forKey: PairedHostStore.defaultKey)
+        let originalSelectionData = try secureStore.data(forKey: PairedHostStore.lastConnectedKey)
+
+        secureStore.failNextRemove(
+            forKey: PairedHostStore.lastConnectedKey,
+            error: .selectionRemoveFailed
+        )
+
+        do {
+            try await store.remove(serverID: "server-1")
+            XCTFail("Expected clearing the selected host to fail")
+        } catch {
+            XCTAssertEqual(error as? InjectedSecureStoreFailure, .selectionRemoveFailed)
+        }
+
+        XCTAssertEqual(try secureStore.data(forKey: PairedHostStore.defaultKey), originalRecordData)
+        XCTAssertEqual(
+            try secureStore.data(forKey: PairedHostStore.lastConnectedKey),
+            originalSelectionData
+        )
+        let restoredOriginalHost = try await store.host(withServerID: "server-1")
+        let restoredOtherHost = try await store.host(withServerID: "server-z")
+        let restoredSelection = try await store.lastConnectedHost()
+        XCTAssertEqual(restoredOriginalHost, originalHost)
+        XCTAssertEqual(restoredOtherHost, otherHost)
+        XCTAssertEqual(restoredSelection, originalHost)
+    }
+
+    func testRemoveAllRollsBackToExactPriorBytesWhenSelectionRemovalFails() async throws {
+        let secureStore = InjectedFailureSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let originalHost = makeHost()
+
+        try await store.save(originalHost)
+        try await store.markLastConnected(serverID: "server-1")
+
+        let originalRecordData = try secureStore.data(forKey: PairedHostStore.defaultKey)
+        let originalSelectionData = try secureStore.data(forKey: PairedHostStore.lastConnectedKey)
+
+        secureStore.failNextRemove(
+            forKey: PairedHostStore.lastConnectedKey,
+            error: .selectionRemoveFailed
+        )
+
+        do {
+            try await store.removeAll()
+            XCTFail("Expected the selection removal to fail")
+        } catch {
+            XCTAssertEqual(error as? InjectedSecureStoreFailure, .selectionRemoveFailed)
+        }
+
+        XCTAssertEqual(try secureStore.data(forKey: PairedHostStore.defaultKey), originalRecordData)
+        XCTAssertEqual(
+            try secureStore.data(forKey: PairedHostStore.lastConnectedKey),
+            originalSelectionData
+        )
+        let restoredHosts = try await store.hosts()
+        let restoredSelection = try await store.lastConnectedHost()
+        XCTAssertEqual(restoredHosts, [originalHost])
+        XCTAssertEqual(restoredSelection, originalHost)
     }
 
     func testInvalidatedRecordSuccessfulConnectionLeavesHostAndSelectionUntouched() async throws {
@@ -593,16 +706,24 @@ final class PairedHostStoreTests: XCTestCase {
 
 private enum InjectedSecureStoreFailure: Error, Equatable {
     case selectionWriteFailed
+    case selectionRemoveFailed
 }
 
 private final class InjectedFailureSecureStore: SecureStore, @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [String: Data] = [:]
     private var nextSetFailures: [String: InjectedSecureStoreFailure] = [:]
+    private var nextRemoveFailures: [String: InjectedSecureStoreFailure] = [:]
 
     func failNextSet(forKey key: String, error: InjectedSecureStoreFailure) {
         lock.withLock {
             nextSetFailures[key] = error
+        }
+    }
+
+    func failNextRemove(forKey key: String, error: InjectedSecureStoreFailure) {
+        lock.withLock {
+            nextRemoveFailures[key] = error
         }
     }
 
@@ -620,6 +741,9 @@ private final class InjectedFailureSecureStore: SecureStore, @unchecked Sendable
     }
 
     func removeValue(forKey key: String) throws {
+        if let error = lock.withLock({ nextRemoveFailures.removeValue(forKey: key) }) {
+            throw error
+        }
         _ = lock.withLock {
             storage.removeValue(forKey: key)
         }
