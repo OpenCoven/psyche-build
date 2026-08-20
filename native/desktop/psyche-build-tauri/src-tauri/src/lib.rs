@@ -2881,6 +2881,25 @@ async fn diagnostics_spawn_fixture(
     }
 }
 
+#[tauri::command]
+async fn diagnostics_cycle_window(
+    window: tauri::Window,
+    state: State<'_, RuntimeDiagnosticsState>,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(window.label())?;
+    state.ensure_stress_authorized()?;
+    window
+        .minimize()
+        .map_err(|error| format!("failed to minimize diagnostics window: {error}"))?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    window
+        .unminimize()
+        .map_err(|error| format!("failed to restore diagnostics window: {error}"))?;
+    window
+        .set_focus()
+        .map_err(|error| format!("failed to focus restored diagnostics window: {error}"))
+}
+
 fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let thread_id = options.thread_id.clone();
     let (pending_start, resolved_cwd) = prepare_pty_start(&options)?;
@@ -8717,6 +8736,7 @@ pub fn run() {
             runtime_diagnostics,
             runtime_process_metrics,
             diagnostics_spawn_fixture,
+            diagnostics_cycle_window,
         ])
         .setup(|app| {
             if let Err(error) = platform::configure_window(app) {
