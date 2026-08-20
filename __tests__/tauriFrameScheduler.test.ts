@@ -50,7 +50,10 @@ describe('FrameScheduler', () => {
     expect(frames.queued).toHaveLength(1);
     frames.queued.shift()!(16);
     expect(values).toEqual([2]);
-    expect(scheduler.snapshot()).toEqual({ coalescedVisualUpdates: 1 });
+    expect(scheduler.snapshot()).toEqual({
+      pendingCallbacks: 0,
+      coalescedVisualUpdates: 1,
+    });
   });
 
   it('keeps work for different keys independent while sharing one frame', () => {

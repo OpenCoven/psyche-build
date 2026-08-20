@@ -618,6 +618,35 @@ describe('TerminalPaneController lifecycle', () => {
     expect(harness.fits[0].disposeCalls).toBe(0);
   });
 
+  it('reports only real renderer transitions and context losses', () => {
+    const first = new FakeWebglAddon();
+    const recovered = new FakeWebglAddon();
+    const factory = vi.fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(recovered);
+    const harness = createHarness('webgl-counters', { webglFactory: factory });
+
+    expect(harness.controller.rendererSnapshot()).toMatchObject({
+      rendererTransitions: 1,
+      contextLosses: 0,
+    });
+    first.loseContext();
+    expect(harness.controller.rendererSnapshot()).toMatchObject({
+      rendererTransitions: 2,
+      contextLosses: 1,
+    });
+    first.loseContext();
+    expect(harness.controller.rendererSnapshot()).toMatchObject({
+      rendererTransitions: 2,
+      contextLosses: 1,
+    });
+    harness.frames.flush(32);
+    expect(harness.controller.rendererSnapshot()).toMatchObject({
+      rendererTransitions: 3,
+      contextLosses: 1,
+    });
+  });
+
   it('keeps disposed state when the recovery factory disposes the pane', () => {
     const first = new FakeWebglAddon();
     const replacement = new FakeWebglAddon();

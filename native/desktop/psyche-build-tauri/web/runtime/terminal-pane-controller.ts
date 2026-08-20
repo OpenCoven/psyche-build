@@ -23,6 +23,8 @@ export interface VisibilityState {
 export interface RendererSnapshot {
   state: RendererState;
   fallbackReason: RendererFallbackReason | null;
+  rendererTransitions: number;
+  contextLosses: number;
   visibility: VisibilityState;
   effectiveVisible: boolean;
   queuedWrites: number;
@@ -304,6 +306,8 @@ export function createTerminalPaneController(
   let visibility = options.initialVisibility ?? defaultVisibility(documentTarget);
   let rendererState: RendererState = 'initializing';
   let rendererFallbackReason: RendererFallbackReason | null = null;
+  let rendererTransitions = 0;
+  let contextLosses = 0;
   let disposed = false;
   let fitPending = true;
   let writeInProgress = false;
@@ -388,8 +392,13 @@ export function createTerminalPaneController(
 
   function setRendererFallback(reason: RendererFallbackReason): void {
     if (disposed) return;
-    rendererState = 'fallback';
+    setRendererState('fallback');
     rendererFallbackReason = reason;
+  }
+
+  function setRendererState(nextState: RendererState): void {
+    if (rendererState !== nextState) rendererTransitions += 1;
+    rendererState = nextState;
   }
 
   function disposeWebglRecoveryAttempt(
@@ -435,7 +444,7 @@ export function createTerminalPaneController(
       }
       webglAddon = recoveredAddon;
       webglContextLossRegistration = contextLossRegistration;
-      rendererState = 'webgl';
+      setRendererState('webgl');
       rendererFallbackReason = null;
       lastSuccessfulRecoveryAt = recoveredAt;
       fitPending = true;
@@ -454,6 +463,7 @@ export function createTerminalPaneController(
 
   function handleWebglContextLoss(failedAddon: WebglAddonAdapter): void {
     if (disposed || webglAddon !== failedAddon) return;
+    contextLosses += 1;
     const recoveredInsideCooldown = lastSuccessfulRecoveryAt != null &&
       now() - lastSuccessfulRecoveryAt < WEBGL_RECOVERY_COOLDOWN_MS;
     if (disposed) return;
@@ -463,7 +473,7 @@ export function createTerminalPaneController(
       setRendererFallback('webgl_recovery_cooldown');
       return;
     }
-    rendererState = 'recovering';
+    setRendererState('recovering');
     rendererFallbackReason = null;
     scheduleWebglRecovery();
   }
@@ -477,7 +487,7 @@ export function createTerminalPaneController(
       webglContextLossRegistration = initialAddon.onContextLoss?.(
         () => handleWebglContextLoss(initialAddon),
       ) ?? null;
-      rendererState = 'webgl';
+      setRendererState('webgl');
     } else {
       setRendererFallback('webgl_unavailable');
     }
@@ -790,6 +800,8 @@ export function createTerminalPaneController(
       return {
         state: rendererState,
         fallbackReason: rendererFallbackReason,
+        rendererTransitions,
+        contextLosses,
         visibility: { ...visibility },
         effectiveVisible: isEffectivelyVisible(visibility),
         queuedWrites: ptyWrites.length + (syntheticWrite ? 1 : 0),
@@ -812,7 +824,7 @@ export function createTerminalPaneController(
     dispose() {
       if (disposed) return;
       disposed = true;
-      rendererState = 'disposed';
+      setRendererState('disposed');
       rendererFallbackReason = null;
       controllers.delete(options.paneId);
       options.frameScheduler.cancelPrefix(framePrefix);

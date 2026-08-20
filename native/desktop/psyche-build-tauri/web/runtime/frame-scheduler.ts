@@ -4,6 +4,7 @@ export type FrameRequestCallback = (timestamp: number) => void;
 export type FrameRequest = (callback: FrameRequestCallback) => number;
 
 export interface FrameSchedulerSnapshot {
+  pendingCallbacks: number;
   coalescedVisualUpdates: number;
 }
 
@@ -51,6 +52,7 @@ export class FrameScheduler {
 
   snapshot(): FrameSchedulerSnapshot {
     return {
+      pendingCallbacks: this.pending.size + (this.activeBatch?.size ?? 0),
       coalescedVisualUpdates: this.coalescedVisualUpdates,
     };
   }

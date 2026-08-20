@@ -70,6 +70,24 @@ export type {
   FrameSchedulerSnapshot,
 } from './frame-scheduler';
 export {
+  createPerformanceMetricsCollector,
+  summarizeFrames,
+  FRAME_SAMPLE_LIMIT,
+} from './performance-metrics';
+export type {
+  FrameSummary,
+  InteractionKind,
+  PerformanceMetricsCollector,
+  PerformanceMetricsCollectorOptions,
+  PerformanceObserverEntries,
+  PerformanceObserverEntryList,
+  PerformanceObserverFactory,
+  PerformanceObserverLike,
+  PerformanceRendererSnapshot,
+  PerformanceSchedulerSnapshot,
+  RuntimePerformanceSnapshot,
+} from './performance-metrics';
+export {
   createPtyClient,
   disposePtyClient,
   routePtyBatch,

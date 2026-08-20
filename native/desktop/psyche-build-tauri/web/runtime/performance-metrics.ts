@@ -52,7 +52,53 @@ export interface RuntimePerformanceSnapshot {
   };
 }
 
+export interface PerformanceSchedulerSnapshot {
+  pendingCallbacks?: number;
+  coalescedVisualUpdates?: number;
+}
+
+export interface PerformanceRendererSnapshot {
+  state?: string;
+  rendererTransitions?: number;
+  contextLosses?: number;
+  webgl?: boolean;
+  recovering?: boolean;
+  fallback?: boolean;
+}
+
+export interface PerformanceObserverEntryList {
+  getEntries(): Array<{ duration?: number; entryType?: string }>;
+}
+
+export type PerformanceObserverEntries =
+  | PerformanceObserverEntryList
+  | Array<{ duration?: number; entryType?: string }>;
+
+export interface PerformanceObserverLike {
+  observe(options: { entryTypes: string[] }): void;
+  disconnect(): void;
+}
+
+export type PerformanceObserverFactory = (
+  callback: (list: PerformanceObserverEntries) => void,
+) => PerformanceObserverLike;
+
+export interface PerformanceMetricsCollectorOptions {
+  invoke?: (command: string, args: Record<string, unknown>) => Promise<unknown>;
+  requestFrame?: (callback: (timestamp: number) => void) => number;
+  cancelFrame?: (handle: number) => void;
+  setInterval?: (callback: () => void, delay: number) => unknown;
+  clearInterval?: (handle: unknown) => void;
+  now?: () => number;
+  createPerformanceObserver?: PerformanceObserverFactory;
+  schedulerSnapshot?: () => PerformanceSchedulerSnapshot;
+  rendererSnapshots?: () => readonly PerformanceRendererSnapshot[];
+  reportError?: (error: unknown, operation: string) => void;
+}
+
 export interface PerformanceMetricsCollector {
+  start(): void;
+  stop(): void;
   recordFrame(timestamp: number): void;
   recordLongTask(duration: number): void;
   recordInteractionStart(kind: InteractionKind, timestamp: number): void;
@@ -256,7 +302,9 @@ function paneState(pane: RecordLike): string {
   return '';
 }
 
-export function createPerformanceMetricsCollector(): PerformanceMetricsCollector {
+export function createPerformanceMetricsCollector(
+  options: PerformanceMetricsCollectorOptions = {},
+): PerformanceMetricsCollector {
   const frames = new CircularSamples();
   const batchSizes = new CircularSamples();
   const batchIntervals = new CircularSamples();
@@ -298,6 +346,165 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
   let contextLosses = 0;
   let focusToNextPaintMs: number | undefined;
   let resizeToNextPaintMs: number | undefined;
+  let running = false;
+  let generation = 0;
+  let frameHandle: number | null = null;
+  let intervalHandle: unknown = null;
+  let pollInFlight = false;
+  let lastPollStartedAt: number | undefined;
+  let performanceObserver: PerformanceObserverLike | null = null;
+  const reportError = options.reportError ?? ((error, operation) => {
+    console.warn(`performance metrics ${operation} failed`, error);
+  });
+  const now = options.now ?? (() =>
+    typeof globalThis.performance !== 'undefined' && typeof globalThis.performance.now === 'function'
+      ? globalThis.performance.now()
+      : Date.now());
+  type RequestFrameFunction = (callback: (timestamp: number) => void) => number;
+  const requestFrame = options.requestFrame ?? ((callback: (timestamp: number) => void) =>
+    typeof (globalThis as unknown as { requestAnimationFrame?: RequestFrameFunction })
+      .requestAnimationFrame === 'function'
+      ? (globalThis as unknown as { requestAnimationFrame: RequestFrameFunction })
+        .requestAnimationFrame(callback)
+      : setTimeout(() => callback(now()), 16) as unknown as number);
+  const cancelFrame = options.cancelFrame ?? ((handle: number) => {
+    const cancel = (globalThis as { cancelAnimationFrame?: (value: number) => void })
+      .cancelAnimationFrame;
+    if (typeof cancel === 'function') cancel(handle);
+    else clearTimeout(handle);
+  });
+  const setIntervalFn = options.setInterval ?? ((callback: () => void, delay: number) =>
+    setInterval(callback, delay));
+  const clearIntervalFn = options.clearInterval ?? ((handle: unknown) =>
+    clearInterval(handle as ReturnType<typeof setInterval>));
+
+  function scheduleFrame(loopGeneration: number): void {
+    if (!running || generation !== loopGeneration || frameHandle !== null) return;
+    try {
+      frameHandle = requestFrame((timestamp) => {
+        frameHandle = null;
+        if (!running || generation !== loopGeneration) return;
+        recordFrame(timestamp);
+        recordInteractionPaint('focus', timestamp);
+        recordInteractionPaint('resize', timestamp);
+        scheduleFrame(loopGeneration);
+      });
+    } catch (error) {
+      reportError(error, 'requestAnimationFrame');
+    }
+  }
+
+  function pollNativeMetrics(pollGeneration: number): void {
+    if (!running || generation !== pollGeneration || pollInFlight) return;
+    const sampledAt = now();
+    if (
+      lastPollStartedAt !== undefined &&
+      sampledAt - lastPollStartedAt < 1_000
+    ) return;
+    lastPollStartedAt = sampledAt;
+    pollInFlight = true;
+    let ptyResult: Promise<unknown>;
+    let processResult: Promise<unknown>;
+    try {
+      ptyResult = Promise.resolve(
+        (options.invoke ?? defaultInvoke)('pty_transport_metrics', {
+          threadId: null,
+          thread_id: null,
+        }),
+      );
+    } catch (error) {
+      ptyResult = Promise.reject(error);
+    }
+    try {
+      processResult = Promise.resolve(
+        (options.invoke ?? defaultInvoke)('runtime_process_metrics', {}),
+      );
+    } catch (error) {
+      processResult = Promise.reject(error);
+    }
+
+    void Promise.all([ptyResult, processResult])
+      .then(([ptySnapshots, process]) => {
+        if (!running || generation !== pollGeneration) return;
+        mergeNativeSnapshot({ sampledAt, ptySnapshots, process });
+      })
+      .catch((error) => {
+        if (running && generation === pollGeneration) reportError(error, 'native metrics poll');
+      })
+      .finally(() => {
+        if (generation === pollGeneration) pollInFlight = false;
+      });
+  }
+
+  function start(): void {
+    if (running) return;
+    running = true;
+    generation += 1;
+    const loopGeneration = generation;
+    scheduleFrame(loopGeneration);
+    intervalHandle = setIntervalFn(() => pollNativeMetrics(loopGeneration), 1_000);
+    if (options.createPerformanceObserver) {
+      let observer: PerformanceObserverLike | null = null;
+      try {
+        const observerGeneration = generation;
+        observer = options.createPerformanceObserver((list) => {
+          try {
+            if (!running || generation !== observerGeneration) return;
+            const entries = Array.isArray(list) ? list : list.getEntries();
+            for (const entry of entries) {
+              if (entry.entryType === undefined || entry.entryType === 'longtask') {
+                if (entry.duration !== undefined) recordLongTask(entry.duration);
+              }
+            }
+          } catch (error) {
+            reportError(error, 'PerformanceObserver callback');
+          }
+        });
+        observer.observe({ entryTypes: ['longtask'] });
+        performanceObserver = observer;
+      } catch (error) {
+        try {
+          observer?.disconnect();
+        } catch (disconnectError) {
+          reportError(disconnectError, 'PerformanceObserver.disconnect');
+        }
+        reportError(error, 'PerformanceObserver');
+        performanceObserver = null;
+      }
+    }
+  }
+
+  function stop(): void {
+    if (!running) return;
+    running = false;
+    generation += 1;
+    if (frameHandle !== null) {
+      try {
+        cancelFrame(frameHandle);
+      } catch (error) {
+        reportError(error, 'cancelAnimationFrame');
+      }
+      frameHandle = null;
+    }
+    if (intervalHandle !== null) {
+      try {
+        clearIntervalFn(intervalHandle);
+      } catch (error) {
+        reportError(error, 'clearInterval');
+      }
+      intervalHandle = null;
+    }
+    pollInFlight = false;
+    lastPollStartedAt = undefined;
+    if (performanceObserver) {
+      try {
+        performanceObserver.disconnect();
+      } catch (error) {
+        reportError(error, 'PerformanceObserver.disconnect');
+      }
+      performanceObserver = null;
+    }
+  }
 
   function recordFrame(timestamp: number): void {
     const value = finiteNonNegative(timestamp);
@@ -646,7 +853,43 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     mergeOneNativeSnapshot(input);
   }
 
+  function sampleRuntimeState(): void {
+    if (options.schedulerSnapshot) {
+      try {
+        const scheduler = options.schedulerSnapshot();
+        const coalesced = numberFrom(scheduler as RecordLike, ['coalescedVisualUpdates']);
+        if (coalesced !== undefined) {
+          coalescedVisualUpdates = Math.max(coalescedVisualUpdates, coalesced);
+        }
+      } catch (error) {
+        reportError(error, 'scheduler snapshot');
+      }
+    }
+    if (options.rendererSnapshots) {
+      try {
+        const panes = options.rendererSnapshots();
+        webglPanes = panes.filter((pane) =>
+          pane.webgl === true || pane.state?.toLowerCase() === 'webgl' ||
+          pane.state?.toLowerCase() === 'webgl2',
+        ).length;
+        recoveringPanes = panes.filter((pane) =>
+          pane.recovering === true || pane.state?.toLowerCase() === 'recovering',
+        ).length;
+        fallbackPanes = panes.filter((pane) =>
+          pane.fallback === true || pane.state?.toLowerCase() === 'fallback',
+        ).length;
+        contextLosses = panes.reduce(
+          (sum, pane) => sum + (finiteNonNegative(pane.contextLosses) ?? 0),
+          0,
+        );
+      } catch (error) {
+        reportError(error, 'renderer snapshot');
+      }
+    }
+  }
+
   function snapshot(): RuntimePerformanceSnapshot {
+    sampleRuntimeState();
     const result: RuntimePerformanceSnapshot = {
       sampledAt: latestSampledAt,
       frames: summarizeFrames(frames.toArray()),
@@ -734,6 +977,8 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
   }
 
   return {
+    start,
+    stop,
     recordFrame,
     recordLongTask,
     recordInteractionStart,
@@ -742,6 +987,10 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     snapshot,
     reset,
   };
+}
+
+function defaultInvoke(_command: string, _args: Record<string, unknown>): Promise<unknown> {
+  return Promise.reject(new Error('performance metrics invoke dependency is not configured'));
 }
 
 function ptyIdentity(entry: RecordLike, index: number): string {
