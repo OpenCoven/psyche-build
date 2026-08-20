@@ -3,6 +3,7 @@ import {
   FRAME_SAMPLE_LIMIT,
   createPerformanceMetricsCollector,
   summarizeFrames,
+  type PerformanceRendererSnapshot,
 } from '../native/desktop/psyche-build-tauri/web/runtime/performance-metrics';
 
 describe('bounded performance metrics', () => {
@@ -787,9 +788,66 @@ describe('bounded performance metrics', () => {
     });
   });
 
+  it('reports full counters for an atomic same-pane replacement generation', () => {
+    let panes = [{
+      paneId: 'pane-a',
+      rendererGeneration: 1,
+      state: 'webgl',
+      rendererTransitions: 8,
+      contextLosses: 4,
+    }];
+    const collector = createPerformanceMetricsCollector({
+      rendererSnapshots: () => panes,
+    });
+
+    collector.snapshot();
+    collector.reset();
+    panes = [{
+      paneId: 'pane-a',
+      rendererGeneration: 2,
+      state: 'webgl',
+      rendererTransitions: 1,
+      contextLosses: 0,
+    }];
+
+    expect(collector.snapshot().renderer).toMatchObject({
+      rendererTransitions: 1,
+      contextLosses: 0,
+    });
+  });
+
+  it('reports only same-instance renderer counter increments', () => {
+    let panes = [{
+      paneId: 'pane-a',
+      rendererGeneration: 1,
+      state: 'webgl',
+      rendererTransitions: 8,
+      contextLosses: 4,
+    }];
+    const collector = createPerformanceMetricsCollector({
+      rendererSnapshots: () => panes,
+    });
+
+    collector.snapshot();
+    collector.reset();
+    panes = [{
+      paneId: 'pane-a',
+      rendererGeneration: 1,
+      state: 'webgl',
+      rendererTransitions: 9,
+      contextLosses: 5,
+    }];
+
+    expect(collector.snapshot().renderer).toMatchObject({
+      rendererTransitions: 1,
+      contextLosses: 1,
+    });
+  });
+
   it('discards removed pane baselines so reused IDs report new cumulative counters', () => {
     let panes = [{
       paneId: 'pane-a',
+      rendererGeneration: 1,
       state: 'webgl',
       rendererTransitions: 8,
       contextLosses: 4,
@@ -808,6 +866,7 @@ describe('bounded performance metrics', () => {
 
     panes = [{
       paneId: 'pane-a',
+      rendererGeneration: 2,
       state: 'webgl',
       rendererTransitions: 1,
       contextLosses: 1,
@@ -815,6 +874,61 @@ describe('bounded performance metrics', () => {
     expect(collector.snapshot().renderer).toMatchObject({
       rendererTransitions: 1,
       contextLosses: 1,
+    });
+  });
+
+  it('keeps generation metadata without retaining terminal content', () => {
+    const collector = createPerformanceMetricsCollector({
+      rendererSnapshots: () => [{
+        paneId: 'pane-a',
+        rendererGeneration: 7,
+        state: 'webgl',
+        rendererTransitions: 1,
+        contextLosses: 0,
+      }],
+    });
+
+    const snapshot = collector.snapshot();
+    expect(snapshot.renderer).toMatchObject({
+      webglPanes: 1,
+      rendererTransitions: 1,
+      contextLosses: 0,
+    });
+    const forbidden = /^(content|string|buffer|command|payload|data|bytes)$/i;
+    const assertSafe = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return;
+      for (const [key, child] of Object.entries(value)) {
+        expect(key).not.toMatch(forbidden);
+        assertSafe(child);
+      }
+    };
+    assertSafe(snapshot);
+  });
+
+  it('retains keyed renderer state across metadata-only snapshots', () => {
+    let panes: PerformanceRendererSnapshot[] = [{
+      paneId: 'pane-a',
+      rendererGeneration: 1,
+      state: 'webgl',
+      rendererTransitions: 8,
+      contextLosses: 4,
+    }];
+    const collector = createPerformanceMetricsCollector({
+      rendererSnapshots: () => panes,
+    });
+
+    collector.snapshot();
+    collector.reset();
+    panes = [{
+      paneId: 'pane-a',
+      rendererGeneration: 1,
+      state: 'webgl',
+    }];
+
+    expect(collector.snapshot().renderer).toMatchObject({
+      webglPanes: 1,
+      rendererTransitions: 0,
+      contextLosses: 0,
     });
   });
 

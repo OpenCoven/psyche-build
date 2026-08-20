@@ -258,6 +258,18 @@ describe('TerminalPaneController lifecycle', () => {
     expect(second.terminals[0].disposeCalls).toBe(0);
   });
 
+  it('assigns a new renderer generation to an atomic same-pane replacement', () => {
+    const first = createHarness('generation-replacement');
+    const firstGeneration = first.controller.rendererSnapshot().rendererGeneration;
+
+    first.controller.dispose();
+    const replacement = createHarness('generation-replacement');
+    const replacementGeneration = replacement.controller.rendererSnapshot().rendererGeneration;
+
+    expect(replacementGeneration).toBeGreaterThan(firstGeneration);
+    expect(replacementGeneration).not.toBe(firstGeneration);
+  });
+
   it('coalesces visible delivery per frame and preserves write completion ordering', async () => {
     const harness = createHarness('visible-output');
     expect(harness.controller.receive(batch('visible-output', 1, [1, 2]))).toBe(true);
@@ -650,6 +662,7 @@ describe('TerminalPaneController lifecycle', () => {
 
   it('keeps renderer snapshots free of terminal payload fields', () => {
     const harness = createHarness('renderer-snapshot-shape');
+    expect(harness.controller.rendererSnapshot().rendererGeneration).toBeGreaterThan(0);
     const forbidden = /^(content|string|buffer|command|payload|data|bytes)$/i;
     const assertSafe = (value: unknown): void => {
       if (!value || typeof value !== 'object') return;

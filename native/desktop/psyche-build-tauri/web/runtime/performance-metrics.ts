@@ -64,6 +64,7 @@ export interface PerformanceSchedulerSnapshot {
 
 export interface PerformanceRendererSnapshot {
   paneId: string;
+  rendererGeneration?: number;
   state?: string;
   rendererTransitions?: number;
   contextLosses?: number;
@@ -596,13 +597,19 @@ export function createPerformanceMetricsCollector(
     const paneIds = panes.map((pane) =>
       typeof pane.paneId === 'string' && pane.paneId.length > 0 ? pane.paneId : undefined,
     );
+    const paneKeys = panes.map((pane, index) => {
+      const paneId = paneIds[index];
+      if (paneId === undefined) return undefined;
+      const rendererGeneration = finiteNonNegative(pane.rendererGeneration);
+      return JSON.stringify([paneId, rendererGeneration ?? null]);
+    });
     const hasPaneCounters = panes.some((pane) =>
       numberFrom(pane, ['rendererTransitions']) !== undefined ||
       numberFrom(pane, ['contextLosses', 'contextLoss']) !== undefined,
     );
     const keyedPaneCounters = paneSourcePresent &&
       paneIds.every((paneId) => paneId !== undefined) &&
-      (hasPaneCounters || (panes.length === 0 && rendererCountersFromPanes));
+      (hasPaneCounters || rendererCountersFromPanes);
 
     if (keyedPaneCounters) {
       rendererCountersFromPanes = true;
@@ -611,32 +618,35 @@ export function createPerformanceMetricsCollector(
         contextLosses: number;
       }>();
       for (const [index, pane] of panes.entries()) {
-        const paneId = paneIds[index];
-        if (paneId === undefined) continue;
-        nextCounters.set(paneId, {
-          rendererTransitions: numberFrom(pane, ['rendererTransitions']) ?? 0,
-          contextLosses: numberFrom(pane, ['contextLosses', 'contextLoss']) ?? 0,
+        const paneKey = paneKeys[index];
+        if (paneKey === undefined) continue;
+        const previous = rendererPaneCounters.get(paneKey);
+        nextCounters.set(paneKey, {
+          rendererTransitions:
+            numberFrom(pane, ['rendererTransitions']) ?? previous?.rendererTransitions ?? 0,
+          contextLosses:
+            numberFrom(pane, ['contextLosses', 'contextLoss']) ?? previous?.contextLosses ?? 0,
         });
       }
       rendererPaneCounters.clear();
-      for (const [paneId, counters] of nextCounters) rendererPaneCounters.set(paneId, counters);
-      for (const paneId of rendererTransitionPaneBaselines.keys()) {
-        if (!nextCounters.has(paneId)) rendererTransitionPaneBaselines.delete(paneId);
+      for (const [paneKey, counters] of nextCounters) rendererPaneCounters.set(paneKey, counters);
+      for (const paneKey of rendererTransitionPaneBaselines.keys()) {
+        if (!nextCounters.has(paneKey)) rendererTransitionPaneBaselines.delete(paneKey);
       }
-      for (const paneId of contextLossPaneBaselines.keys()) {
-        if (!nextCounters.has(paneId)) contextLossPaneBaselines.delete(paneId);
+      for (const paneKey of contextLossPaneBaselines.keys()) {
+        if (!nextCounters.has(paneKey)) contextLossPaneBaselines.delete(paneKey);
       }
       rendererTransitions = [...nextCounters].reduce(
-        (sum, [paneId, counters]) => sum + cumulativeDelta(
+        (sum, [paneKey, counters]) => sum + cumulativeDelta(
           counters.rendererTransitions,
-          rendererTransitionPaneBaselines.get(paneId) ?? 0,
+          rendererTransitionPaneBaselines.get(paneKey) ?? 0,
         ),
         0,
       );
       contextLosses = [...nextCounters].reduce(
-        (sum, [paneId, counters]) => sum + cumulativeDelta(
+        (sum, [paneKey, counters]) => sum + cumulativeDelta(
           counters.contextLosses,
-          contextLossPaneBaselines.get(paneId) ?? 0,
+          contextLossPaneBaselines.get(paneKey) ?? 0,
         ),
         0,
       );
@@ -1075,9 +1085,9 @@ export function createPerformanceMetricsCollector(
     if (rendererCountersFromPanes) {
       rendererTransitionPaneBaselines.clear();
       contextLossPaneBaselines.clear();
-      for (const [paneId, counters] of rendererPaneCounters) {
-        rendererTransitionPaneBaselines.set(paneId, counters.rendererTransitions);
-        contextLossPaneBaselines.set(paneId, counters.contextLosses);
+      for (const [paneKey, counters] of rendererPaneCounters) {
+        rendererTransitionPaneBaselines.set(paneKey, counters.rendererTransitions);
+        contextLossPaneBaselines.set(paneKey, counters.contextLosses);
       }
       rendererTransitionsBaseline = 0;
       contextLossesBaseline = 0;

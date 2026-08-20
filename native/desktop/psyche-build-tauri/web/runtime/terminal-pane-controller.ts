@@ -22,6 +22,7 @@ export interface VisibilityState {
 
 export interface RendererSnapshot {
   paneId: string;
+  rendererGeneration: number;
   state: RendererState;
   fallbackReason: RendererFallbackReason | null;
   rendererTransitions: number;
@@ -158,6 +159,7 @@ const INTERSECTION_HIDE_DEBOUNCE_MS = 250;
 const MAX_SYNTHETIC_RETAINED_BYTES = 64 * 1024;
 const WEBGL_RECOVERY_COOLDOWN_MS = 30_000;
 const controllers = new Map<string, TerminalPaneController>();
+let nextRendererGeneration = 0;
 const terminals = new Set<TerminalAdapter>();
 const fitAddons = new Set<FitAddonAdapter>();
 const webglAddons = new Set<WebglAddonAdapter>();
@@ -300,6 +302,7 @@ export function createTerminalPaneController(
 ): TerminalPaneController {
   const existing = controllers.get(options.paneId);
   if (existing && existing.rendererSnapshot().state !== 'disposed') return existing;
+  const rendererGeneration = ++nextRendererGeneration;
 
   const documentTarget = options.documentTarget === undefined
     ? defaultDocumentTarget()
@@ -800,6 +803,7 @@ export function createTerminalPaneController(
     rendererSnapshot() {
       return {
         paneId: options.paneId,
+        rendererGeneration,
         state: rendererState,
         fallbackReason: rendererFallbackReason,
         rendererTransitions,
