@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/macOS-schema.json",
+  "identifier": "main-runtime-diagnostics",
+  "description": "Allows only the main app webview to access runtime diagnostics",
+  "local": true,
+  "webviews": ["main"],
+  "permissions": [
+    "allow-runtime-diagnostics",
+    "allow-runtime-process-metrics"
+  ]
+}
