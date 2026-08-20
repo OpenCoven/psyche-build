@@ -403,7 +403,7 @@ final class PsycheAppUITests: XCTestCase {
 
         openPaneActions(in: app)
 
-        XCTAssertTrue(app.buttons["New pane"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["pane-new"].waitForExistence(timeout: 10))
         XCTAssertFalse(element("pane-rituals", in: app).exists)
     }
 

@@ -74,6 +74,7 @@ struct PaneControlsMenu: View {
             } label: {
                 Label("New pane", systemImage: "plus")
             }
+            .accessibilityIdentifier("pane-new")
             if let ritualContext, !ritualContext.rituals.isEmpty {
                 Menu {
                     ForEach(ritualContext.rituals) { ritual in
