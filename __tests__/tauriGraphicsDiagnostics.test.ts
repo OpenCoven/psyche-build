@@ -444,6 +444,45 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects vendor plus numeric identifiers on raw WebGL, ANGLE, and WebGPU paths', () => {
+    for (const value of ['NVIDIA 0x10de', 'NVIDIA 123456']) {
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: value,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+        unsupportedFields: [],
+      });
+
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: `ANGLE (Google, ${value}, OpenGL)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+        unsupportedFields: [],
+      });
+
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: value,
+        unsupportedFields: [],
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgpu',
+        unsupportedFields: [],
+      });
+    }
+  });
+
   it('rejects the complete vendor and generic-only token sets', () => {
     for (const vendor of [
       'NVIDIA',

@@ -172,6 +172,29 @@ const vendorOnlyAdapterNames = new Set([
   'nvidia',
   'qualcomm',
 ]);
+const knownAdapterWords = new Set([
+  ...vendorOnlyAdapterNames,
+  'adapter',
+  'angle',
+  'default',
+  'd3d',
+  'dev',
+  'device',
+  'engine',
+  'es',
+  'generic',
+  'gpu',
+  'graphics',
+  'id',
+  'metal',
+  'opengl',
+  'pci',
+  'renderer',
+  'subsys',
+  'ven',
+  'vendor',
+  'vulkan',
+]);
 const identifierOnlyPattern = /^(?:(?:pci|ven|dev|vendor|device|id)|(?:0x)?[0-9a-f]+|[\s,:/\\\-&_;])+$/i;
 const hardwareIdentifierPattern = /(?:\b(?:0x)?[0-9a-f]{4,8}\s*:\s*(?:0x)?[0-9a-f]{4,8}\b|\b(?:ven|dev)(?:_|=|:|\s)+(?:0x)?[0-9a-f]{4,8}\b|\bpci(?:\\|\/|:|\s)|\bsubsys(?:_|=|:|\s)+(?:0x)?[0-9a-f]{4,8}\b|\b(?:vendor|device)\s+id\b)/i;
 const backendOnlyAdapterPattern = /^(?:angle\s+)?(?:metal|vulkan|opengl(?:\s+es)?|direct3d(?:\s*(?:11|12))?|d3d(?:11|12))(?:\s+(?:renderer|engine|[0-9]+(?:\.[0-9]+)*))?$/i;
@@ -393,7 +416,27 @@ function isReliableAdapterEvidence(value: string): boolean {
     || identifierOnlyPattern.test(value)
     || backendOnlyAdapterPattern.test(value)
     || isMaskedRenderer(value)
+    || !hasMeaningfulProductToken(value)
   );
+}
+
+function hasMeaningfulProductToken(value: string): boolean {
+  if (/0x[0-9a-f]+/i.test(value)) return false;
+
+  const tokens = value.match(/[a-z0-9]+/gi) ?? [];
+  return tokens
+    .filter((token) => !isKnownAdapterWord(token))
+    .some((token) => {
+      if (!/[a-z]/i.test(token)) return false;
+      return !(/^[0-9a-f]+$/i.test(token) && /^\d/.test(token));
+    });
+}
+
+function isKnownAdapterWord(token: string): boolean {
+  const normalized = lowerCase(token);
+  return knownAdapterWords.has(normalized)
+    || /^(?:direct3d|d3d)(?:11|12)?$/i.test(normalized)
+    || /^(?:vs|ps)\d*(?:_\d+)*$/i.test(normalized);
 }
 
 function stripAngleAdapterTokens(
