@@ -248,6 +248,7 @@ extension WorkspaceProjectSnapshot {
             id: id,
             root: root,
             title: title,
+            rituals: rituals,
             worktrees: worktrees,
             projectPanes: projectPanes,
             runningCount: runningCount,
