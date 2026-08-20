@@ -1,0 +1,869 @@
+import Foundation
+import PsycheCore
+import XCTest
+@testable import Psyche_Build
+
+private let testFingerprint = String(repeating: "a", count: 64)
+private let otherFingerprint = String(repeating: "b", count: 64)
+
+@MainActor
+final class PairHostModelTests: XCTestCase {
+    func testDiscoveryRowsMergeResolvedAndFailedEntriesInStableServerIDOrder() async throws {
+        let probe = PairHostModelProbe()
+        await probe.setPairingStatus(.paired, for: "server-b")
+        await probe.setPairingStatus(.requiresRePairing, for: "server-c")
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([
+            makeEntry(serverID: "server-c", serverName: "Gamma"),
+            makeFailedEntry(serverID: "server-a", serverName: "Alpha", failure: .timedOut),
+            makeEntry(serverID: "server-b", serverName: "Beta")
+        ])
+
+        await waitUntil { model.rows.count == 3 }
+
+        XCTAssertEqual(model.phase, .browsing)
+        XCTAssertEqual(model.rows.map(\.serverID), ["server-a", "server-b", "server-c"])
+        XCTAssertEqual(model.rows.map(\.pairingStatus), [.unpaired, .paired, .requiresRePairing])
+        XCTAssertEqual(model.rows[0].resolutionFailure, .timedOut)
+        XCTAssertNil(model.rows[0].resolvedEndpoint)
+        XCTAssertEqual(model.rows[1].serverName, "Beta")
+        XCTAssertEqual(model.rows[1].resolvedEndpoint?.host, "server-b.local")
+    }
+
+    func testStatusLookupFailureIsExplicitAndLaterValidSnapshotRecoversWhenIdle() async throws {
+        let probe = PairHostModelProbe()
+        await probe.setPairingStatusResults(
+            [.failure(TestFailure("Stored pairing data is unavailable")), .success(.paired)],
+            for: "server-a"
+        )
+        let model = PairHostModel(dependencies: await probe.dependencies())
+        let snapshot = [makeEntry(serverID: "server-a", serverName: "Alpha")]
+
+        await model.start()
+        await probe.yield(snapshot)
+
+        await waitUntil { model.phase == .failed }
+        XCTAssertEqual(model.errorMessage, "Stored pairing data is unavailable")
+
+        await probe.yield(snapshot)
+
+        await waitUntil {
+            model.phase == .browsing &&
+                model.errorMessage == nil &&
+                model.rows.count == 1
+        }
+        XCTAssertEqual(model.rows.first?.pairingStatus, .paired)
+    }
+
+    func testSelectionIsRetainedOnCompatibleRefreshAndClearedWhenServiceDisappearsWhileIdle() async throws {
+        let probe = PairHostModelProbe()
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha", host: "alpha.local")])
+        await waitUntil { model.rows.count == 1 }
+
+        model.select(serverID: "server-a")
+        XCTAssertEqual(model.phase, .selected)
+
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha", host: "alpha-2.local")])
+        await waitUntil { model.rows.first?.resolvedEndpoint?.host == "alpha-2.local" }
+
+        XCTAssertEqual(model.selectedServerID, "server-a")
+        XCTAssertEqual(model.phase, .selected)
+
+        await probe.yield([])
+        await waitUntil { model.selectedServerID == nil }
+
+        XCTAssertEqual(model.phase, .browsing)
+    }
+
+    func testRetryDelegatesOneIDMarksAndClearsRetryStateAndLeavesOtherRowsAndSelectionIntact() async throws {
+        let probe = PairHostModelProbe()
+        let retryGate = AsyncGate()
+        await probe.setRetryGate(retryGate, for: "server-a")
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([
+            makeEntry(serverID: "server-a", serverName: "Alpha"),
+            makeEntry(serverID: "server-b", serverName: "Beta")
+        ])
+        await waitUntil { model.rows.count == 2 }
+        model.select(serverID: "server-b")
+
+        model.retry(serverID: "server-a")
+        await retryGate.waitUntilStarted()
+        await waitUntil { model.retryingServerIDs.contains("server-a") }
+
+        XCTAssertTrue(model.retryingServerIDs.contains("server-a"))
+        XCTAssertFalse(model.retryingServerIDs.contains("server-b"))
+        XCTAssertEqual(model.selectedServerID, "server-b")
+
+        await retryGate.succeed()
+        await waitUntil { model.retryingServerIDs.isEmpty }
+
+        let retryCalls = await probe.recordedRetryCalls()
+        XCTAssertEqual(retryCalls, ["server-a"])
+        XCTAssertEqual(model.selectedServerID, "server-b")
+    }
+
+    func testPairedHostConnectsWithResolvedEndpointSkipsPairAndBecomesReadyOnlyAfterWorkspaceReadiness() async throws {
+        let probe = PairHostModelProbe()
+        let connectGate = AsyncGate()
+        let readinessGate = AsyncGate()
+        let endpoint = HostEndpoint(
+            host: "alpha.local",
+            port: 4242,
+            certificateFingerprint: testFingerprint
+        )
+        let readyHost = makePairedHost(
+            serverID: "server-a",
+            serverName: "Alpha",
+            endpoint: endpoint,
+            token: "token-1"
+        )
+        await probe.setPairingStatus(.paired, for: "server-a")
+        await probe.setConnectPairedGate(connectGate)
+        await probe.setReadinessGate(readinessGate)
+        await probe.setConnectPairedResult(.success(readyHost))
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha", host: "alpha.local")])
+        await waitUntil { model.rows.count == 1 }
+        model.select(serverID: "server-a")
+
+        let submitTask = Task { await model.submit() }
+        await connectGate.waitUntilStarted()
+        await waitUntil { model.phase == .connecting }
+        XCTAssertNil(model.readyHost)
+
+        await connectGate.succeed()
+        await readinessGate.waitUntilStarted()
+        await waitUntil { model.phase == .loadingWorkspace }
+        XCTAssertNil(model.readyHost)
+
+        let connectPairedCalls = await probe.recordedConnectPairedCalls()
+        let pairCalls = await probe.recordedPairCalls()
+        XCTAssertEqual(connectPairedCalls, [.init(serverID: "server-a", endpoint: endpoint)])
+        XCTAssertTrue(pairCalls.isEmpty)
+
+        await readinessGate.succeed()
+        await submitTask.value
+
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.readyHost, readyHost)
+    }
+
+    func testUnpairedHostValidatesCodeRunsPairingPathInOrderAndBecomesReadyAfterWorkspaceReadiness() async throws {
+        let probe = PairHostModelProbe()
+        let connectGate = AsyncGate()
+        let pairGate = AsyncGate()
+        let readinessGate = AsyncGate()
+        let endpoint = HostEndpoint(
+            host: "alpha.local",
+            port: 4242,
+            certificateFingerprint: testFingerprint
+        )
+        let pairedHost = makePairedHost(serverID: "server-a", serverName: "Alpha", endpoint: endpoint)
+        await probe.setConnectForPairingGate(connectGate)
+        await probe.setPairGate(pairGate)
+        await probe.setReadinessGate(readinessGate)
+        await probe.setPairResult(.success(pairedHost))
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha", host: "alpha.local")])
+        await waitUntil { model.rows.count == 1 }
+        model.select(serverID: "server-a")
+        model.pairingCode = "123456"
+
+        let submitTask = Task { await model.submit() }
+        await connectGate.waitUntilStarted()
+        await waitUntil { model.phase == .connecting }
+
+        await connectGate.succeed()
+        await pairGate.waitUntilStarted()
+        await waitUntil { model.phase == .pairing }
+
+        await pairGate.succeed()
+        await readinessGate.waitUntilStarted()
+        await waitUntil { model.phase == .loadingWorkspace }
+
+        let actionOrder = await probe.recordedActionOrder()
+        XCTAssertEqual(actionOrder, ["connectForPairing", "pair", "waitForWorkspaceReady"])
+
+        await readinessGate.succeed()
+        await submitTask.value
+
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.readyHost, pairedHost)
+        XCTAssertEqual(model.pairingCode, "")
+    }
+
+    func testChangedFingerprintRequiresExplicitConfirmationBeforeRePairAndCancelReturnsToSelected() async throws {
+        let probe = PairHostModelProbe()
+        let readinessGate = AsyncGate()
+        let endpoint = HostEndpoint(
+            host: "alpha.local",
+            port: 4242,
+            certificateFingerprint: otherFingerprint
+        )
+        let pairedHost = makePairedHost(serverID: "server-a", serverName: "Alpha", endpoint: endpoint)
+        await probe.setPairingStatus(.requiresRePairing, for: "server-a")
+        await probe.setPairResult(.success(pairedHost))
+        await probe.setReadinessGate(readinessGate)
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([
+            makeEntry(
+                serverID: "server-a",
+                serverName: "Alpha",
+                host: "alpha.local",
+                fingerprint: otherFingerprint
+            )
+        ])
+        await waitUntil { model.rows.count == 1 }
+        model.select(serverID: "server-a")
+        model.pairingCode = "123456"
+
+        await model.submit()
+
+        XCTAssertEqual(model.phase, .confirmingRePair)
+        let initialPairingCalls = await probe.recordedConnectForPairingCalls()
+        XCTAssertTrue(initialPairingCalls.isEmpty)
+
+        model.cancelRePairingConfirmation()
+        XCTAssertEqual(model.phase, .selected)
+
+        await model.submit()
+        XCTAssertEqual(model.phase, .confirmingRePair)
+
+        let confirmTask = Task { await model.confirmRePairing() }
+        await readinessGate.waitUntilStarted()
+        await waitUntil { model.phase == .loadingWorkspace }
+
+        await readinessGate.succeed()
+        await confirmTask.value
+
+        let actionOrder = await probe.recordedActionOrder()
+        XCTAssertEqual(actionOrder, ["connectForPairing", "pair", "waitForWorkspaceReady"])
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.readyHost, pairedHost)
+    }
+
+    func testManualInvalidFieldsFailLocallyAndValidManualSubmitUsesNormalizedEndpointAndPairingPath() async throws {
+        let probe = PairHostModelProbe()
+        let readinessGate = AsyncGate()
+        let endpoint = HostEndpoint(
+            host: "manual.local",
+            port: 4242,
+            certificateFingerprint: otherFingerprint
+        )
+        let pairedHost = makePairedHost(serverID: "manual-server", serverName: "Manual Host", endpoint: endpoint)
+        await probe.setPairResult(.success(pairedHost))
+        await probe.setReadinessGate(readinessGate)
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        model.showManualEntry = true
+        model.manualHost = "bad host"
+        model.manualPort = "70000"
+        model.manualFingerprint = "not-a-fingerprint"
+        model.pairingCode = "12"
+
+        await model.submit()
+
+        XCTAssertEqual(model.phase, .failed)
+        XCTAssertNotNil(model.errorMessage)
+        let initialConnectForPairingCalls = await probe.recordedConnectForPairingCalls()
+        let initialPairCalls = await probe.recordedPairCalls()
+        XCTAssertTrue(initialConnectForPairingCalls.isEmpty)
+        XCTAssertTrue(initialPairCalls.isEmpty)
+
+        model.manualHost = "  manual.local  "
+        model.manualPort = " 4242 "
+        model.manualFingerprint = otherFingerprint.uppercased().chunked(by: 2).joined(separator: ":")
+        model.pairingCode = "123456"
+
+        let submitTask = Task { await model.submit() }
+        await readinessGate.waitUntilStarted()
+        await waitUntil { model.phase == .loadingWorkspace }
+
+        await readinessGate.succeed()
+        await submitTask.value
+
+        let connectForPairingCalls = await probe.recordedConnectForPairingCalls()
+        let manualActionOrder = await probe.recordedActionOrder()
+        XCTAssertEqual(connectForPairingCalls, [.init(endpoint: endpoint)])
+        XCTAssertEqual(manualActionOrder, ["connectForPairing", "pair", "waitForWorkspaceReady"])
+        XCTAssertEqual(model.manualHost, "manual.local")
+        XCTAssertEqual(model.manualPort, "4242")
+        XCTAssertEqual(model.manualFingerprint, otherFingerprint)
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.readyHost, pairedHost)
+    }
+
+    func testResolutionFailedRowCannotConnectAndExposesRetryOrManualGuidance() async throws {
+        let probe = PairHostModelProbe()
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([
+            makeFailedEntry(serverID: "server-a", serverName: "Alpha", failure: .unresolved)
+        ])
+        await waitUntil { model.rows.count == 1 }
+        model.select(serverID: "server-a")
+        model.pairingCode = "123456"
+
+        await model.submit()
+
+        XCTAssertEqual(model.phase, .failed)
+        XCTAssertTrue(model.errorMessage?.contains("Retry") == true)
+        XCTAssertTrue(model.errorMessage?.localizedCaseInsensitiveContains("manual") == true)
+        let connectForPairingCalls = await probe.recordedConnectForPairingCalls()
+        let connectPairedCalls = await probe.recordedConnectPairedCalls()
+        XCTAssertTrue(connectForPairingCalls.isEmpty)
+        XCTAssertTrue(connectPairedCalls.isEmpty)
+    }
+
+    func testReadinessFailureClearsCodeRetainsValidatedManualFieldsAndDoesNotSetReadyHost() async throws {
+        let probe = PairHostModelProbe()
+        let readinessGate = AsyncGate()
+        let readinessError = TestFailure("Workspace never became ready")
+        let endpoint = HostEndpoint(
+            host: "manual.local",
+            port: 4242,
+            certificateFingerprint: otherFingerprint
+        )
+        await probe.setPairResult(.success(makePairedHost(
+            serverID: "manual-server",
+            serverName: "Manual Host",
+            endpoint: endpoint
+        )))
+        await probe.setReadinessGate(readinessGate)
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        model.showManualEntry = true
+        model.manualHost = " manual.local "
+        model.manualPort = "4242"
+        model.manualFingerprint = otherFingerprint
+        model.pairingCode = "123456"
+
+        let submitTask = Task { await model.submit() }
+        await readinessGate.waitUntilStarted()
+        await waitUntil { model.phase == .loadingWorkspace }
+
+        await readinessGate.fail(readinessError)
+        await submitTask.value
+
+        XCTAssertEqual(model.phase, .failed)
+        XCTAssertEqual(model.errorMessage, readinessError.localizedDescription)
+        XCTAssertEqual(model.pairingCode, "")
+        XCTAssertEqual(model.manualHost, "manual.local")
+        XCTAssertEqual(model.manualPort, "4242")
+        XCTAssertEqual(model.manualFingerprint, otherFingerprint)
+        XCTAssertNil(model.readyHost)
+    }
+
+    func testDuplicateSubmitDoesNotLaunchDuplicateConnections() async throws {
+        let probe = PairHostModelProbe()
+        let connectGate = AsyncGate()
+        let readinessGate = AsyncGate()
+        let endpoint = HostEndpoint(
+            host: "alpha.local",
+            port: 4242,
+            certificateFingerprint: testFingerprint
+        )
+        await probe.setPairingStatus(.paired, for: "server-a")
+        await probe.setConnectPairedGate(connectGate)
+        await probe.setReadinessGate(readinessGate)
+        await probe.setConnectPairedResult(.success(makePairedHost(
+            serverID: "server-a",
+            serverName: "Alpha",
+            endpoint: endpoint
+        )))
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha")])
+        await waitUntil { model.rows.count == 1 }
+        model.select(serverID: "server-a")
+
+        let firstSubmit = Task { await model.submit() }
+        await connectGate.waitUntilStarted()
+        await waitUntil { model.phase == .connecting }
+
+        await model.submit()
+        let connectPairedCalls = await probe.recordedConnectPairedCalls()
+        XCTAssertEqual(connectPairedCalls.count, 1)
+
+        await connectGate.succeed()
+        await readinessGate.waitUntilStarted()
+        await readinessGate.succeed()
+        await firstSubmit.value
+    }
+
+    func testStopDuringActionCancelsOwnedWorkStopsDiscoveryAndDisconnectsIncompleteConnection() async throws {
+        let probe = PairHostModelProbe()
+        let readinessGate = AsyncGate()
+        let endpoint = HostEndpoint(
+            host: "alpha.local",
+            port: 4242,
+            certificateFingerprint: testFingerprint
+        )
+        await probe.setPairingStatus(.paired, for: "server-a")
+        await probe.setConnectPairedResult(.success(makePairedHost(
+            serverID: "server-a",
+            serverName: "Alpha",
+            endpoint: endpoint
+        )))
+        await probe.setReadinessGate(readinessGate)
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha")])
+        await waitUntil { model.rows.count == 1 }
+        model.select(serverID: "server-a")
+        model.pairingCode = "123456"
+
+        let submitTask = Task { await model.submit() }
+        await readinessGate.waitUntilStarted()
+        await waitUntil { model.phase == .loadingWorkspace }
+
+        await model.stop()
+        await submitTask.value
+
+        let stopCount = await probe.stopCount()
+        let disconnectCount = await probe.disconnectCount()
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(disconnectCount, 1)
+        XCTAssertEqual(model.pairingCode, "")
+        XCTAssertNil(model.readyHost)
+    }
+
+    func testStopAfterReadyDoesNotDisconnect() async throws {
+        let probe = PairHostModelProbe()
+        let readinessGate = AsyncGate()
+        let endpoint = HostEndpoint(
+            host: "alpha.local",
+            port: 4242,
+            certificateFingerprint: testFingerprint
+        )
+        let readyHost = makePairedHost(serverID: "server-a", serverName: "Alpha", endpoint: endpoint)
+        await probe.setPairingStatus(.paired, for: "server-a")
+        await probe.setConnectPairedResult(.success(readyHost))
+        await probe.setReadinessGate(readinessGate)
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha")])
+        await waitUntil { model.rows.count == 1 }
+        model.select(serverID: "server-a")
+
+        let submitTask = Task { await model.submit() }
+        await readinessGate.waitUntilStarted()
+        await readinessGate.succeed()
+        await submitTask.value
+
+        XCTAssertEqual(model.phase, .ready)
+
+        await model.stop()
+
+        let disconnectCount = await probe.disconnectCount()
+        XCTAssertEqual(disconnectCount, 0)
+    }
+
+    func testProductionInitializerUsesProvidedCompositionGraphForStoreAndManagerClosures() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        let host = makePairedHost(serverID: "server-a", serverName: "Alpha")
+        try await store.save(host)
+        let composition = MobileAppComposition(
+            transport: FakeTransport(),
+            pairedHostStore: store,
+            bonjourHostDiscovery: BonjourHostDiscovery()
+        )
+        let model = PairHostModel(composition: composition)
+
+        let status = try await model.dependencies.pairingStatus(
+            host.serverID,
+            host.certificateFingerprint.uppercased()
+        )
+        await model.dependencies.disconnect()
+        let connectionState = await composition.connectionManager.state
+        let storedHost = try await composition.pairedHostStore.host(withServerID: host.serverID)
+
+        XCTAssertEqual(status, .paired)
+        XCTAssertEqual(connectionState, .disconnected)
+        XCTAssertEqual(storedHost, host)
+    }
+}
+
+private extension PairHostModelTests {
+    func waitUntil(
+        timeout: TimeInterval = 1,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ condition: @escaping @MainActor () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() >= deadline {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
+                return
+            }
+            await Task.yield()
+        }
+    }
+
+    func makeEntry(
+        serverID: String,
+        serverName: String,
+        host: String? = nil,
+        port: Int = 4242,
+        fingerprint: String = testFingerprint
+    ) -> BonjourDiscoveryEntry {
+        let normalizedHost = host ?? "\(serverID).local"
+        return BonjourDiscoveryEntry(
+            identity: BonjourHostIdentity(
+                serverID: serverID,
+                serverName: serverName,
+                domain: "local.",
+                certificateFingerprint: fingerprint,
+                supportedVersions: [PsycheProtocolVersion.current]
+            ),
+            availability: .resolved(DiscoveredHost(
+                identity: BonjourHostIdentity(
+                    serverID: serverID,
+                    serverName: serverName,
+                    domain: "local.",
+                    certificateFingerprint: fingerprint,
+                    supportedVersions: [PsycheProtocolVersion.current]
+                ),
+                endpoint: HostEndpoint(
+                    host: normalizedHost,
+                    port: port,
+                    certificateFingerprint: fingerprint
+                )
+            ))
+        )
+    }
+
+    func makeFailedEntry(
+        serverID: String,
+        serverName: String,
+        fingerprint: String = testFingerprint,
+        failure: BonjourResolutionFailure
+    ) -> BonjourDiscoveryEntry {
+        BonjourDiscoveryEntry(
+            identity: BonjourHostIdentity(
+                serverID: serverID,
+                serverName: serverName,
+                domain: "local.",
+                certificateFingerprint: fingerprint,
+                supportedVersions: [PsycheProtocolVersion.current]
+            ),
+            availability: .resolutionFailed(failure)
+        )
+    }
+
+    func makePairedHost(
+        serverID: String = "server-1",
+        serverName: String = "Host",
+        endpoint: HostEndpoint? = nil,
+        clientID: String = "test-client",
+        token: String? = "token"
+    ) -> PairedHost {
+        PairedHost(
+            serverID: serverID,
+            serverName: serverName,
+            endpoint: endpoint ?? HostEndpoint(
+                host: "\(serverID).local",
+                port: 4242,
+                certificateFingerprint: testFingerprint
+            ),
+            clientID: clientID,
+            token: token
+        )
+    }
+}
+
+private struct TestFailure: LocalizedError, Equatable, Sendable {
+    let message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    var errorDescription: String? { message }
+}
+
+private struct StatusCall: Sendable, Equatable {
+    let serverID: String
+    let fingerprint: String
+}
+
+private struct ConnectPairedCall: Sendable, Equatable {
+    let serverID: String
+    let endpoint: HostEndpoint?
+}
+
+private struct ConnectForPairingCall: Sendable, Equatable {
+    let endpoint: HostEndpoint
+}
+
+private struct PairCall: Sendable, Equatable {
+    let code: String
+}
+
+private actor AsyncGate {
+    private var didStart = false
+    private var continuation: CheckedContinuation<Void, any Error>?
+
+    func wait() async throws {
+        didStart = true
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+            }
+        } onCancel: {
+            Task { await self.cancel() }
+        }
+    }
+
+    func waitUntilStarted(timeout: TimeInterval = 1) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !didStart {
+            if Date() >= deadline {
+                return
+            }
+            await Task.yield()
+        }
+    }
+
+    func succeed() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func fail(_ error: any Error) {
+        continuation?.resume(throwing: error)
+        continuation = nil
+    }
+
+    private func cancel() {
+        continuation?.resume(throwing: CancellationError())
+        continuation = nil
+    }
+}
+
+private actor PairHostModelProbe {
+    private let stream: AsyncStream<[BonjourDiscoveryEntry]>
+    private let continuation: AsyncStream<[BonjourDiscoveryEntry]>.Continuation
+
+    private var storedPairingStatusResults: [String: [Result<PairingStatus, TestFailure>]] = [:]
+    private var storedConnectPairedResult: Result<PairedHost, TestFailure> =
+        .success(PairedHost(
+            serverID: "paired-default",
+            serverName: "Default",
+            endpoint: HostEndpoint(
+                host: "paired-default.local",
+                port: 4242,
+                certificateFingerprint: testFingerprint
+            ),
+            clientID: "client",
+            token: "token"
+        ))
+    private var storedPairResult: Result<PairedHost, TestFailure> =
+        .success(PairedHost(
+            serverID: "pair-default",
+            serverName: "Default",
+            endpoint: HostEndpoint(
+                host: "pair-default.local",
+                port: 4242,
+                certificateFingerprint: testFingerprint
+            ),
+            clientID: "client",
+            token: "token"
+        ))
+    private var startInvocationCount = 0
+    private var stopInvocationCount = 0
+    private var disconnectInvocationCount = 0
+    private var retryCalls: [String] = []
+    private var pairingStatusCalls: [StatusCall] = []
+    private var connectPairedCalls: [ConnectPairedCall] = []
+    private var connectForPairingCalls: [ConnectForPairingCall] = []
+    private var pairCalls: [PairCall] = []
+    private var actionOrder: [String] = []
+    private var connectPairedGate: AsyncGate?
+    private var connectForPairingGate: AsyncGate?
+    private var pairGate: AsyncGate?
+    private var readinessGate: AsyncGate?
+    private var retryGates: [String: AsyncGate] = [:]
+
+    init() {
+        let stream = AsyncStream<[BonjourDiscoveryEntry]>.makeStream()
+        self.stream = stream.stream
+        continuation = stream.continuation
+    }
+
+    func dependencies() -> PairHostModel.Dependencies {
+        PairHostModel.Dependencies(
+            startDiscovery: { await self.startDiscovery() },
+            stopDiscovery: { await self.stopDiscovery() },
+            retryDiscovery: { await self.retryDiscovery(serverID: $0) },
+            pairingStatus: { try await self.pairingStatus(serverID: $0, fingerprint: $1) },
+            connectPaired: { try await self.connectPaired(serverID: $0, endpoint: $1) },
+            connectForPairing: { try await self.connectForPairing(endpoint: $0) },
+            pair: { try await self.pair(code: $0) },
+            waitForWorkspaceReady: { try await self.waitForWorkspaceReady() },
+            disconnect: { await self.disconnect() }
+        )
+    }
+
+    func yield(_ snapshot: [BonjourDiscoveryEntry]) {
+        continuation.yield(snapshot)
+    }
+
+    func setPairingStatus(_ status: PairingStatus, for serverID: String) {
+        storedPairingStatusResults[serverID] = [.success(status)]
+    }
+
+    func setPairingStatusResults(
+        _ results: [Result<PairingStatus, TestFailure>],
+        for serverID: String
+    ) {
+        storedPairingStatusResults[serverID] = results
+    }
+
+    func setConnectPairedResult(_ result: Result<PairedHost, TestFailure>) {
+        storedConnectPairedResult = result
+    }
+
+    func setPairResult(_ result: Result<PairedHost, TestFailure>) {
+        storedPairResult = result
+    }
+
+    func setConnectPairedGate(_ gate: AsyncGate?) {
+        connectPairedGate = gate
+    }
+
+    func setConnectForPairingGate(_ gate: AsyncGate?) {
+        connectForPairingGate = gate
+    }
+
+    func setPairGate(_ gate: AsyncGate?) {
+        pairGate = gate
+    }
+
+    func setReadinessGate(_ gate: AsyncGate?) {
+        readinessGate = gate
+    }
+
+    func setRetryGate(_ gate: AsyncGate, for serverID: String) {
+        retryGates[serverID] = gate
+    }
+
+    func recordedRetryCalls() -> [String] { retryCalls }
+    func recordedConnectPairedCalls() -> [ConnectPairedCall] { connectPairedCalls }
+    func recordedConnectForPairingCalls() -> [ConnectForPairingCall] { connectForPairingCalls }
+    func recordedPairCalls() -> [PairCall] { pairCalls }
+    func recordedActionOrder() -> [String] { actionOrder }
+    func stopCount() -> Int { stopInvocationCount }
+    func disconnectCount() -> Int { disconnectInvocationCount }
+
+    private func startDiscovery() -> AsyncStream<[BonjourDiscoveryEntry]> {
+        startInvocationCount += 1
+        return stream
+    }
+
+    private func stopDiscovery() {
+        stopInvocationCount += 1
+    }
+
+    private func retryDiscovery(serverID: String) async {
+        retryCalls.append(serverID)
+        if let gate = retryGates[serverID] {
+            try? await gate.wait()
+        }
+    }
+
+    private func pairingStatus(
+        serverID: String,
+        fingerprint: String
+    ) throws -> PairingStatus {
+        pairingStatusCalls.append(.init(serverID: serverID, fingerprint: fingerprint))
+        guard var stored = storedPairingStatusResults[serverID], let result = stored.first else {
+            return .unpaired
+        }
+        if stored.count > 1 {
+            stored.removeFirst()
+            storedPairingStatusResults[serverID] = stored
+        }
+        switch result {
+        case .success(let status):
+            return status
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    private func connectPaired(
+        serverID: String,
+        endpoint: HostEndpoint?
+    ) async throws -> PairedHost {
+        connectPairedCalls.append(.init(serverID: serverID, endpoint: endpoint))
+        actionOrder.append("connectPaired")
+        try await connectPairedGate?.wait()
+        switch storedConnectPairedResult {
+        case .success(let host):
+            return host
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    private func connectForPairing(endpoint: HostEndpoint) async throws {
+        connectForPairingCalls.append(.init(endpoint: endpoint))
+        actionOrder.append("connectForPairing")
+        try await connectForPairingGate?.wait()
+    }
+
+    private func pair(code: String) async throws -> PairedHost {
+        pairCalls.append(.init(code: code))
+        actionOrder.append("pair")
+        try await pairGate?.wait()
+        switch storedPairResult {
+        case .success(let host):
+            return host
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    private func waitForWorkspaceReady() async throws {
+        actionOrder.append("waitForWorkspaceReady")
+        try await readinessGate?.wait()
+    }
+
+    private func disconnect() {
+        disconnectInvocationCount += 1
+    }
+}
+
+private extension String {
+    func chunked(by size: Int) -> [String] {
+        stride(from: 0, to: count, by: size).map { start in
+            let startIndex = index(self.startIndex, offsetBy: start)
+            let chunkEndIndex = index(
+                startIndex,
+                offsetBy: size,
+                limitedBy: self.endIndex
+            ) ?? self.endIndex
+            return String(self[startIndex..<chunkEndIndex])
+        }
+    }
+}
