@@ -247,6 +247,18 @@ const genericAdapterWords = new Set([
   'version',
   'windows',
 ]);
+const knownProductModelWords = new Set([
+  'adreno',
+  'arc',
+  'geforce',
+  'iris',
+  'mali',
+  'quadro',
+  'radeon',
+  'rtx',
+  'uhd',
+  'vega',
+]);
 const entitySuffixWords = new Set([
   'co',
   'company',
@@ -262,6 +274,9 @@ const entitySuffixWords = new Set([
   'technologies',
   'technology',
 ]);
+const concatenatedEntitySuffixes = [...entitySuffixWords].sort(
+  (left, right) => right.length - left.length,
+);
 const knownAdapterWords = new Set([
   ...vendorOnlyAdapterNames,
   ...genericAdapterWords,
@@ -557,20 +572,43 @@ function isConcatenatedDescriptorIdentifier(value: string): boolean {
 function hasMeaningfulProductToken(value: string): boolean {
   if (/0x[0-9a-f]+/i.test(value)) return false;
 
-  const tokens = removeVendorEntityAliases(value).match(/[a-z0-9]+/gi) ?? [];
+  const tokens = splitConcatenatedEntitySuffixes(
+    removeVendorEntityAliases(value).match(/[a-z0-9]+/gi) ?? [],
+  );
   const finalEntitySuffixIndex = tokens.reduce(
     (lastIndex, token, index) => (
       entitySuffixWords.has(lowerCase(token)) ? index : lastIndex
     ),
     -1,
   );
-  return tokens
+  const meaningfulTokens = tokens
     .slice(finalEntitySuffixIndex + 1)
-    .filter((token) => !isKnownAdapterWord(token))
-    .some((token) => {
-      if (!/[a-z]/i.test(token)) return false;
-      return !(/^[0-9a-f]+$/i.test(token) && /^\d/.test(token));
-    });
+    .filter((token) => !isKnownAdapterWord(token));
+  const hasDescriptiveToken = meaningfulTokens.some((token) => /[a-z]/i.test(token));
+  return hasDescriptiveToken && (
+    meaningfulTokens.length >= 2
+    || meaningfulTokens.some((token) => /[a-z]/i.test(token) && /\d/.test(token))
+    || meaningfulTokens.some((token) => knownProductModelWords.has(lowerCase(token)))
+  );
+}
+
+function splitConcatenatedEntitySuffixes(tokens: string[]): string[] {
+  return tokens.flatMap((token) => {
+    let remainder = token;
+    const suffixes: string[] = [];
+
+    while (true) {
+      const suffix = concatenatedEntitySuffixes.find(
+        (candidate) => remainder.length > candidate.length
+          && remainder.toLowerCase().endsWith(candidate),
+      );
+      if (!suffix) break;
+      remainder = remainder.slice(0, -suffix.length);
+      suffixes.unshift(suffix);
+    }
+
+    return remainder ? [remainder, ...suffixes] : [token];
+  });
 }
 
 function removeVendorEntityAliases(value: string): string {
