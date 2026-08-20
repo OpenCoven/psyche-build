@@ -50,6 +50,28 @@ final class PairHostModel: ObservableObject {
         let disconnect: @Sendable () async -> Void
     }
 
+    private struct DeinitCleanupPlan: Sendable {
+        let shouldStopDiscovery: Bool
+        let shouldDisconnect: Bool
+        let stopDiscovery: @Sendable () async -> Void
+        let disconnect: @Sendable () async -> Void
+
+        func launchIfNeeded() {
+            guard shouldStopDiscovery || shouldDisconnect else { return }
+            Task.detached(
+                priority: .utility,
+                operation: { [shouldStopDiscovery, shouldDisconnect, stopDiscovery, disconnect] in
+                    if shouldStopDiscovery {
+                        await stopDiscovery()
+                    }
+                    if shouldDisconnect {
+                        await disconnect()
+                    }
+                }
+            )
+        }
+    }
+
     @Published private(set) var rows: [Row] = []
     @Published private(set) var phase: Phase = .browsing
     @Published private(set) var errorMessage: String?
@@ -128,7 +150,9 @@ final class PairHostModel: ObservableObject {
 
     deinit {
         MainActor.assumeIsolated {
+            let cleanupPlan = deinitCleanupPlan()
             cancelOwnedTasks()
+            cleanupPlan.launchIfNeeded()
         }
     }
 
@@ -222,7 +246,7 @@ final class PairHostModel: ObservableObject {
                     owningServerID: nil
                 )
             } catch {
-                applyFailure(error, source: .validation, clearPairingCode: false)
+                applyFailure(error, source: .validation, clearPairingCode: shouldClearPairingCode(for: error))
             }
             return
         }
@@ -258,7 +282,7 @@ final class PairHostModel: ObservableObject {
                     owningServerID: row.serverID
                 )
             } catch {
-                applyFailure(error, source: .validation, clearPairingCode: false)
+                applyFailure(error, source: .validation, clearPairingCode: shouldClearPairingCode(for: error))
             }
         case .requiresRePairing:
             clearNonReadyError()
@@ -282,7 +306,7 @@ final class PairHostModel: ObservableObject {
                 owningServerID: row.serverID
             )
         } catch {
-            applyFailure(error, source: .validation, clearPairingCode: false)
+            applyFailure(error, source: .validation, clearPairingCode: shouldClearPairingCode(for: error))
         }
     }
 
@@ -555,6 +579,15 @@ final class PairHostModel: ObservableObject {
         return row
     }
 
+    private func deinitCleanupPlan() -> DeinitCleanupPlan {
+        DeinitCleanupPlan(
+            shouldStopDiscovery: hasStarted && !hasStopped,
+            shouldDisconnect: ownsIncompleteConnection && phase != .ready,
+            stopDiscovery: dependencies.stopDiscovery,
+            disconnect: dependencies.disconnect
+        )
+    }
+
     private func cancelOwnedTasks() {
         observationTask?.cancel()
         observationTask = nil
@@ -565,6 +598,12 @@ final class PairHostModel: ObservableObject {
         retryTasks.values.forEach { $0.cancel() }
         retryTasks.removeAll()
         retryingServerIDs.removeAll()
+    }
+
+    private func shouldClearPairingCode(for error: Error) -> Bool {
+        guard let error = error as? PairHostModelError else { return false }
+        guard case .pairingCodeInvalid = error else { return false }
+        return true
     }
 
     private func validatedManualEndpoint() throws -> HostEndpoint {

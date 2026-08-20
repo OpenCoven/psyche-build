@@ -220,7 +220,7 @@ final class PairHostModelTests: XCTestCase {
         XCTAssertEqual(model.pairingCode, "")
     }
 
-    func testUnpairedHostWithInvalidPairingCodeFailsLocallyWithoutConnecting() async throws {
+    func testUnpairedHostWithInvalidPairingCodeClearsCodeAndFailsLocallyWithoutConnecting() async throws {
         let probe = PairHostModelProbe()
         let model = PairHostModel(dependencies: await probe.dependencies())
 
@@ -234,6 +234,28 @@ final class PairHostModelTests: XCTestCase {
 
         XCTAssertEqual(model.phase, .failed)
         XCTAssertEqual(model.errorMessage, "The pairing code must contain exactly six digits.")
+        XCTAssertEqual(model.pairingCode, "")
+        let connectForPairingCalls = await probe.recordedConnectForPairingCalls()
+        let pairCalls = await probe.recordedPairCalls()
+        XCTAssertTrue(connectForPairingCalls.isEmpty)
+        XCTAssertTrue(pairCalls.isEmpty)
+    }
+
+    func testManualSubmitWithInvalidPairingCodeClearsCodeAndDoesNotConnect() async throws {
+        let probe = PairHostModelProbe()
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        model.showManualEntry = true
+        model.manualHost = "manual.local"
+        model.manualPort = "4242"
+        model.manualFingerprint = otherFingerprint
+        model.pairingCode = "12345"
+
+        await model.submit()
+
+        XCTAssertEqual(model.phase, .failed)
+        XCTAssertEqual(model.errorMessage, "The pairing code must contain exactly six digits.")
+        XCTAssertEqual(model.pairingCode, "")
         let connectForPairingCalls = await probe.recordedConnectForPairingCalls()
         let pairCalls = await probe.recordedPairCalls()
         XCTAssertTrue(connectForPairingCalls.isEmpty)
@@ -327,6 +349,39 @@ final class PairHostModelTests: XCTestCase {
             model.errorMessage,
             "This host is no longer ready to re-pair. Retry discovery or use manual entry."
         )
+        let connectForPairingCalls = await probe.recordedConnectForPairingCalls()
+        let pairCalls = await probe.recordedPairCalls()
+        XCTAssertTrue(connectForPairingCalls.isEmpty)
+        XCTAssertTrue(pairCalls.isEmpty)
+    }
+
+    func testRePairConfirmationWithInvalidPairingCodeClearsCodeAndDoesNotConnect() async throws {
+        let probe = PairHostModelProbe()
+        await probe.setPairingStatus(.requiresRePairing, for: "server-a")
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([
+            makeEntry(
+                serverID: "server-a",
+                serverName: "Alpha",
+                host: "alpha.local",
+                fingerprint: otherFingerprint
+            )
+        ])
+        await waitUntil { model.rows.count == 1 }
+        model.select(serverID: "server-a")
+        model.pairingCode = "123456"
+
+        await model.submit()
+        XCTAssertEqual(model.phase, .confirmingRePair)
+
+        model.pairingCode = "12345"
+        await model.confirmRePairing()
+
+        XCTAssertEqual(model.phase, .failed)
+        XCTAssertEqual(model.errorMessage, "The pairing code must contain exactly six digits.")
+        XCTAssertEqual(model.pairingCode, "")
         let connectForPairingCalls = await probe.recordedConnectForPairingCalls()
         let pairCalls = await probe.recordedPairCalls()
         XCTAssertTrue(connectForPairingCalls.isEmpty)
@@ -550,6 +605,86 @@ final class PairHostModelTests: XCTestCase {
         XCTAssertNil(model.readyHost)
     }
 
+    func testReleasingModelAfterPairedConnectOwnsIncompleteConnectionDisconnectsExactlyOnceWithoutStop() async throws {
+        let probe = PairHostModelProbe()
+        let readinessGate = AsyncGate()
+        let endpoint = HostEndpoint(
+            host: "alpha.local",
+            port: 4242,
+            certificateFingerprint: testFingerprint
+        )
+        await probe.setPairingStatus(.paired, for: "server-a")
+        await probe.setConnectPairedResult(.success(makePairedHost(
+            serverID: "server-a",
+            serverName: "Alpha",
+            endpoint: endpoint
+        )))
+        await probe.setReadinessGate(readinessGate)
+
+        weak var weakModel: PairHostModel?
+        var model: PairHostModel? = PairHostModel(dependencies: await probe.dependencies())
+        weakModel = model
+
+        await model?.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha")])
+        await waitUntil { model?.rows.count == 1 }
+        model?.select(serverID: "server-a")
+
+        let submitTask = Task { [weak model] in
+            await model?.submit()
+        }
+        await readinessGate.waitUntilStarted()
+        await waitUntil { model?.phase == .loadingWorkspace }
+
+        submitTask.cancel()
+        await readinessGate.waitUntilCancelled()
+        await submitTask.value
+        model = nil
+
+        await waitUntil { weakModel == nil }
+        await waitUntilAsync { await probe.stopCount() == 1 }
+        await waitUntilAsync { await probe.disconnectCount() == 1 }
+
+        let disconnectCount = await probe.disconnectCount()
+        XCTAssertEqual(disconnectCount, 1)
+        XCTAssertNil(weakModel)
+    }
+
+    func testReleasingModelAfterConnectForPairingOwnsIncompleteConnectionDisconnectsExactlyOnceWithoutStop() async throws {
+        let probe = PairHostModelProbe()
+        let pairGate = AsyncGate()
+        await probe.setPairGate(pairGate)
+
+        weak var weakModel: PairHostModel?
+        var model: PairHostModel? = PairHostModel(dependencies: await probe.dependencies())
+        weakModel = model
+
+        await model?.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha")])
+        await waitUntil { model?.rows.count == 1 }
+        model?.select(serverID: "server-a")
+        model?.pairingCode = "123456"
+
+        let submitTask = Task { [weak model] in
+            await model?.submit()
+        }
+        await pairGate.waitUntilStarted()
+        await waitUntil { model?.phase == .pairing }
+
+        submitTask.cancel()
+        await pairGate.waitUntilCancelled()
+        await submitTask.value
+        model = nil
+
+        await waitUntil { weakModel == nil }
+        await waitUntilAsync { await probe.stopCount() == 1 }
+        await waitUntilAsync { await probe.disconnectCount() == 1 }
+
+        let disconnectCount = await probe.disconnectCount()
+        XCTAssertEqual(disconnectCount, 1)
+        XCTAssertNil(weakModel)
+    }
+
     func testReleasingModelWithActiveDiscoveryAndActionWorkCancelsOwnedTasksAndDoesNotLeak() async throws {
         let probe = PairHostModelProbe()
         let connectGate = AsyncGate()
@@ -625,6 +760,46 @@ final class PairHostModelTests: XCTestCase {
         XCTAssertEqual(disconnectCount, 0)
     }
 
+    func testReleasingReadyModelDoesNotDisconnect() async throws {
+        let probe = PairHostModelProbe()
+        let endpoint = HostEndpoint(
+            host: "alpha.local",
+            port: 4242,
+            certificateFingerprint: testFingerprint
+        )
+        await probe.setPairingStatus(.paired, for: "server-a")
+        await probe.setConnectPairedResult(.success(makePairedHost(
+            serverID: "server-a",
+            serverName: "Alpha",
+            endpoint: endpoint
+        )))
+
+        weak var weakModel: PairHostModel?
+        var model: PairHostModel? = PairHostModel(dependencies: await probe.dependencies())
+        weakModel = model
+
+        await model?.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha")])
+        await waitUntil { model?.rows.count == 1 }
+        model?.select(serverID: "server-a")
+
+        let submitTask = Task { [weak model] in
+            await model?.submit()
+        }
+        await submitTask.value
+
+        XCTAssertEqual(model?.phase, .ready)
+
+        model = nil
+
+        await waitUntil { weakModel == nil }
+        await waitUntilAsync { await probe.stopCount() == 1 }
+
+        let disconnectCount = await probe.disconnectCount()
+        XCTAssertEqual(disconnectCount, 0)
+        XCTAssertNil(weakModel)
+    }
+
     func testProductionInitializerUsesProvidedCompositionGraphForStoreAndManagerClosures() async throws {
         let store = PairedHostStore(secureStore: InMemorySecureStore())
         let host = makePairedHost(serverID: "server-a", serverName: "Alpha")
@@ -661,6 +836,22 @@ private extension PairHostModelTests {
         while !condition() {
             if Date() >= deadline {
                 XCTFail("Timed out waiting for condition", file: file, line: line)
+                return
+            }
+            await Task.yield()
+        }
+    }
+
+    func waitUntilAsync(
+        timeout: TimeInterval = 1,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ condition: @escaping () async -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !(await condition()) {
+            if Date() >= deadline {
+                XCTFail("Timed out waiting for async condition", file: file, line: line)
                 return
             }
             await Task.yield()
