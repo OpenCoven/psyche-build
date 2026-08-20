@@ -534,6 +534,90 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects expanded AMD entity-only evidence on raw WebGL, ANGLE, and WebGPU paths', () => {
+    const value = 'Advanced Micro Devices, Inc.';
+
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: value,
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toMatchObject({
+      acceleration: 'unknown',
+      supportingProbe: 'webgl2',
+    });
+
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: `ANGLE (AMD, ${value}, OpenGL)`,
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toMatchObject({
+      acceleration: 'unknown',
+      supportingProbe: 'webgl2',
+    });
+
+    expect(classifyGraphicsEvidence({
+      webgpuAdapterAvailable: true,
+      webgpuAdapter: value,
+      unsupportedFields: [],
+    })).toMatchObject({
+      acceleration: 'unknown',
+      supportingProbe: 'webgpu',
+    });
+  });
+
+  it('rejects known vendor entity aliases without product tokens', () => {
+    for (const value of [
+      'Advanced Micro Devices, Inc.',
+      'ATI Technologies',
+      'NVIDIA Corporation',
+      'Intel Corporation',
+      'Apple Inc.',
+      'Google Inc.',
+      'Google LLC',
+      'Qualcomm Technologies',
+      'ARM Ltd.',
+      'ARM Limited',
+      'Imagination Technologies',
+      'Microsoft Corporation',
+    ]) {
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: value,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgpu',
+      });
+    }
+  });
+
+  it('keeps expanded vendor entities when followed by a meaningful product', () => {
+    for (const adapter of [
+      'Advanced Micro Devices, Inc. Radeon RX 7900 XTX',
+      'ANGLE (AMD, Advanced Micro Devices, Inc. Radeon RX 7900 XTX, Vulkan 1.3)',
+    ]) {
+      const evidence = adapter.startsWith('ANGLE')
+        ? {
+            strictContext: 'webgl2' as const,
+            renderer: adapter,
+            unsupportedFields: [],
+            webgpuAdapterAvailable: false,
+          }
+        : {
+            webgpuAdapterAvailable: true,
+            webgpuAdapter: adapter,
+            unsupportedFields: [],
+          };
+
+      expect(classifyGraphicsEvidence(evidence)).toMatchObject({
+        acceleration: 'accelerated',
+      });
+    }
+  });
+
   it('rejects vendor plus numeric identifiers on raw WebGL, ANGLE, and WebGPU paths', () => {
     for (const value of ['NVIDIA 0x10de', 'NVIDIA 123456']) {
       expect(classifyGraphicsEvidence({

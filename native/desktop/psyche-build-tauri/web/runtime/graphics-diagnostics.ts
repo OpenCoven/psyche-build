@@ -172,6 +172,18 @@ const vendorOnlyAdapterNames = new Set([
   'nvidia',
   'qualcomm',
 ]);
+const vendorEntityAliasPatterns = [
+  /\badvanced\s+micro\s+devices\b/gi,
+  /\bati\s+technologies\b/gi,
+  /\bnvidia\s+corporation\b/gi,
+  /\bintel\s+corporation\b/gi,
+  /\bapple\s+inc(?:orporated)?\b/gi,
+  /\bgoogle\s+(?:inc(?:orporated)?|llc)\b/gi,
+  /\bqualcomm\s+technologies\b/gi,
+  /\barm\s+(?:ltd|limited)\b/gi,
+  /\bimagination\s+technologies\b/gi,
+  /\bmicrosoft\s+corporation\b/gi,
+] as const;
 const genericAdapterWords = new Set([
   'adapter',
   'co',
@@ -445,13 +457,20 @@ function isReliableAdapterEvidence(value: string): boolean {
 function hasMeaningfulProductToken(value: string): boolean {
   if (/0x[0-9a-f]+/i.test(value)) return false;
 
-  const tokens = value.match(/[a-z0-9]+/gi) ?? [];
+  const tokens = removeVendorEntityAliases(value).match(/[a-z0-9]+/gi) ?? [];
   return tokens
     .filter((token) => !isKnownAdapterWord(token))
     .some((token) => {
       if (!/[a-z]/i.test(token)) return false;
       return !(/^[0-9a-f]+$/i.test(token) && /^\d/.test(token));
     });
+}
+
+function removeVendorEntityAliases(value: string): string {
+  return vendorEntityAliasPatterns.reduce(
+    (normalized, pattern) => normalized.replace(pattern, ' '),
+    value,
+  );
 }
 
 function isKnownAdapterWord(token: string): boolean {
@@ -717,7 +736,11 @@ function parseWebGlRenderer(renderer: string, source: Exclude<RuntimeGraphicsPro
       .map((segment) => segment.trim())
       .filter((segment) => segment.length > 0);
     const softwareMarker = softwareMarkerFor(renderer);
-    const adapterToken = segments[1] ?? '';
+    const adapterSegments = segments.slice(1);
+    if (adapterSegments.at(-1) && backendOnlyAdapterPattern.test(adapterSegments.at(-1)!)) {
+      adapterSegments.pop();
+    }
+    const adapterToken = adapterSegments.join(', ');
     const adapter = normalizeAdapterString(
       stripAngleAdapterTokens(adapterToken, backend) ?? softwareMarker ?? '',
     );
