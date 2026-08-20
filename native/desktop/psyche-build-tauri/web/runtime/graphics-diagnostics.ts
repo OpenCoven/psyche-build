@@ -708,7 +708,6 @@ function isReliableEvidence(evidence: ParsedEvidence | null): evidence is Parsed
 
 function hasConflictingReliableEvidence(first: ParsedEvidence, second: ParsedEvidence): boolean {
   if (first.category !== second.category) return true;
-  if (first.category !== 'hardware') return false;
   if (first.backend && second.backend && first.backend !== second.backend) return true;
 
   if (first.adapter && second.adapter) {

@@ -262,6 +262,19 @@ describe('graphics evidence classification', () => {
 
     expect(classifyGraphicsEvidence({
       strictContext: 'webgl2',
+      renderer: 'ANGLE (Microsoft, Microsoft Basic Render Driver Direct3D11, D3D11)',
+      webgpuAdapterAvailable: true,
+      webgpuAdapter: 'Vulkan SwiftShader',
+      webgpuAdapterInfoSource: 'adapter.info',
+      unsupportedFields: [],
+    })).toEqual({
+      acceleration: 'unknown',
+      fallbackReason: 'conflicting_reliable_evidence',
+      unsupportedFields: [],
+    });
+
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
       renderer: 'Acme Renderer 1.0',
       unsupportedFields: [],
       webgpuAdapterAvailable: false,
