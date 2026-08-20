@@ -107,6 +107,67 @@ final class PairHostModel: ObservableObject {
         self.dependencies = dependencies
     }
 
+    static func fixture() -> PairHostModel {
+        let entries = fixtureEntries()
+        let entriesByServerID = Dictionary(uniqueKeysWithValues: entries.map { ($0.serverID, $0) })
+        let statusByServerID: [String: PairingStatus] = [
+            "studio": .paired,
+            "new-host": .unpaired,
+            "changed-host": .requiresRePairing,
+            "offline-host": .unpaired
+        ]
+        let pendingPairing = FixturePendingPairing()
+
+        return PairHostModel(dependencies: Dependencies(
+            startDiscovery: {
+                AsyncStream { continuation in
+                    continuation.yield(entries)
+                    continuation.finish()
+                }
+            },
+            stopDiscovery: {},
+            retryDiscovery: { _ in },
+            pairingStatus: { serverID, _ in
+                statusByServerID[serverID] ?? .unpaired
+            },
+            connectPaired: { serverID, endpoint in
+                if let entry = entriesByServerID[serverID],
+                   let resolvedEndpoint = fixtureResolvedEndpoint(for: entry) {
+                    return fixturePairedHost(
+                        serverID: serverID,
+                        serverName: entry.serverName,
+                        endpoint: endpoint ?? resolvedEndpoint
+                    )
+                }
+                return fixturePairedHost(
+                    serverID: serverID,
+                    serverName: serverID,
+                    endpoint: endpoint ?? fixtureManualEndpoint()
+                )
+            },
+            connectForPairing: { endpoint in
+                await pendingPairing.set(endpoint: endpoint)
+            },
+            pair: { _ in
+                let endpoint = await pendingPairing.takeEndpoint() ?? fixtureResolvedEndpoint(
+                    host: "new-host.local",
+                    port: 4243,
+                    fingerprint: String(repeating: "b", count: 64)
+                )
+                let identity = fixtureIdentity(forEndpoint: endpoint, entries: entries)
+                return fixturePairedHost(
+                    serverID: identity.serverID,
+                    serverName: identity.serverName,
+                    endpoint: endpoint
+                )
+            },
+            waitForWorkspaceReady: {},
+            disconnect: {
+                await pendingPairing.clear()
+            }
+        ))
+    }
+
     convenience init(composition: MobileAppComposition) {
         let discovery = composition.bonjourHostDiscovery
         let store = composition.pairedHostStore
@@ -153,6 +214,159 @@ final class PairHostModel: ObservableObject {
             let cleanupPlan = deinitCleanupPlan()
             cancelOwnedTasks()
             cleanupPlan.launchIfNeeded()
+        }
+    }
+
+    nonisolated private static func fixtureEntries() -> [BonjourDiscoveryEntry] {
+            [
+                fixtureResolvedEntry(
+                    serverID: "studio",
+                    serverName: "Studio",
+                    host: "studio.local",
+                    port: 4242,
+                    fingerprint: String(repeating: "a", count: 64)
+                ),
+                fixtureResolvedEntry(
+                    serverID: "new-host",
+                    serverName: "New Host",
+                    host: "new-host.local",
+                    port: 4243,
+                    fingerprint: String(repeating: "b", count: 64)
+                ),
+                fixtureResolvedEntry(
+                    serverID: "changed-host",
+                    serverName: "Changed Host",
+                    host: "changed-host.local",
+                    port: 4244,
+                    fingerprint: String(repeating: "c", count: 64)
+                ),
+                fixtureFailedEntry(
+                    serverID: "offline-host",
+                    serverName: "Offline Host",
+                    fingerprint: String(repeating: "d", count: 64),
+                    failure: .timedOut
+                )
+            ].sorted { $0.serverID < $1.serverID }
+        }
+
+    nonisolated private static func fixtureResolvedEntry(
+            serverID: String,
+            serverName: String,
+            host: String,
+            port: Int,
+            fingerprint: String
+        ) -> BonjourDiscoveryEntry {
+            let identity = fixtureIdentity(
+                serverID: serverID,
+                serverName: serverName,
+                fingerprint: fingerprint
+            )
+            return BonjourDiscoveryEntry(
+                identity: identity,
+                availability: .resolved(DiscoveredHost(
+                    identity: identity,
+                    endpoint: fixtureResolvedEndpoint(
+                        host: host,
+                        port: port,
+                        fingerprint: fingerprint
+                    )
+                ))
+            )
+        }
+
+    nonisolated private static func fixtureFailedEntry(
+            serverID: String,
+            serverName: String,
+            fingerprint: String,
+            failure: BonjourResolutionFailure
+        ) -> BonjourDiscoveryEntry {
+            BonjourDiscoveryEntry(
+                identity: fixtureIdentity(
+                    serverID: serverID,
+                    serverName: serverName,
+                    fingerprint: fingerprint
+                ),
+                availability: .resolutionFailed(failure)
+            )
+        }
+
+    nonisolated private static func fixtureIdentity(
+            serverID: String,
+            serverName: String,
+            fingerprint: String
+        ) -> BonjourHostIdentity {
+            BonjourHostIdentity(
+                serverID: serverID,
+                serverName: serverName,
+                domain: "local.",
+                certificateFingerprint: fingerprint,
+                supportedVersions: [PsycheProtocolVersion.current]
+            )
+        }
+
+    nonisolated private static func fixtureResolvedEndpoint(
+            host: String,
+            port: Int,
+            fingerprint: String
+        ) -> HostEndpoint {
+            return HostEndpoint(
+                host: host,
+                port: port,
+                certificateFingerprint: fingerprint
+            )
+        }
+
+    nonisolated private static func fixtureResolvedEndpoint(for entry: BonjourDiscoveryEntry) -> HostEndpoint? {
+            guard case let .resolved(host) = entry.availability else { return nil }
+            return host.endpoint
+        }
+
+    nonisolated private static func fixtureManualEndpoint() -> HostEndpoint {
+            HostEndpoint(
+                host: "fixture.local",
+                port: 4242,
+                certificateFingerprint: String(repeating: "e", count: 64)
+            )
+        }
+
+    nonisolated private static func fixtureIdentity(
+            forEndpoint endpoint: HostEndpoint,
+            entries: [BonjourDiscoveryEntry]
+        ) -> (serverID: String, serverName: String) {
+            if let match = entries.first(where: { fixtureResolvedEndpoint(for: $0) == endpoint }) {
+                return (match.serverID, match.serverName)
+            }
+            return (endpoint.host, endpoint.host)
+        }
+
+    nonisolated private static func fixturePairedHost(
+            serverID: String,
+            serverName: String,
+            endpoint: HostEndpoint
+        ) -> PairedHost {
+            PairedHost(
+                serverID: serverID,
+                serverName: serverName,
+                endpoint: endpoint,
+                clientID: "fixture-client",
+                token: "fixture-token"
+            )
+        }
+
+    private actor FixturePendingPairing {
+        private var endpoint: HostEndpoint?
+
+        func set(endpoint: HostEndpoint) {
+            self.endpoint = endpoint
+        }
+
+        func takeEndpoint() -> HostEndpoint? {
+            defer { endpoint = nil }
+            return endpoint
+        }
+
+        func clear() {
+            endpoint = nil
         }
     }
 

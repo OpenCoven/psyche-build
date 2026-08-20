@@ -78,8 +78,11 @@ final class AppModel: ObservableObject {
         connectionError = nil
     }
 
-    func recordPairedHostName(_ name: String) {
-        hostName = name
+    func makePairHostModel() -> PairHostModel {
+        if let composition {
+            return PairHostModel(composition: composition)
+        }
+        return PairHostModel.fixture()
     }
 
     func loadLastConnectedHostContext() async {

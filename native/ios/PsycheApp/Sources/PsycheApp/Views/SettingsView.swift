@@ -44,11 +44,11 @@ struct SettingsView: View {
             }
 
             Section {
-                Button("Pair a host") { isPairSheetPresented = true }
+                Button("Connections") { isPairSheetPresented = true }
                     .frame(minHeight: PsycheTheme.minimumTapTarget)
                     .accessibilityIdentifier("settings-pair-host")
             } footer: {
-                Text("Pairing exchanges a token with a host on your local network.")
+                Text("Discover, pair, or switch to a Psyche host on your local network.")
             }
 
             Section("Diagnostics") {
@@ -70,8 +70,8 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .accessibilityIdentifier("settings-view")
         .sheet(isPresented: $isPairSheetPresented) {
-            PairHostSheet { host, _ in
-                model.recordPairedHostName(host)
+            PairHostSheet(model: model.makePairHostModel()) { host in
+                model.recordConnectedHost(host)
             }
         }
     }

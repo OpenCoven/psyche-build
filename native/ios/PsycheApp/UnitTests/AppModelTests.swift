@@ -36,6 +36,38 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.hostName, AppModel.fixtureHostName)
     }
 
+    func testFixtureMakePairHostModelCreatesFreshFixtureModelAndPublishesDeterministicRows() async {
+        let model = AppModel(fixture: WorkspaceFixtures.multiproject)
+        let pairHostModel = model.makePairHostModel()
+
+        await pairHostModel.start()
+        await waitUntil { pairHostModel.rows.count == 4 }
+
+        XCTAssertNil(model.composition)
+        XCTAssertEqual(
+            pairHostModel.rows.map(\.serverID),
+            ["changed-host", "new-host", "offline-host", "studio"]
+        )
+        XCTAssertEqual(
+            pairHostModel.rows.map(\.serverName),
+            ["Changed Host", "New Host", "Offline Host", "Studio"]
+        )
+        XCTAssertEqual(
+            pairHostModel.rows.map(\.pairingStatus),
+            [.requiresRePairing, .unpaired, .unpaired, .paired]
+        )
+        XCTAssertEqual(pairHostModel.rows[2].resolutionFailure, .timedOut)
+    }
+
+    func testMakePairHostModelReturnsDistinctModelsForEachCall() {
+        let model = AppModel(fixture: WorkspaceFixtures.multiproject)
+
+        let first = model.makePairHostModel()
+        let second = model.makePairHostModel()
+
+        XCTAssertFalse(first === second)
+    }
+
     func testProductionRootComposesOneSharedGraph() throws {
         let discovery = BonjourHostDiscovery()
         let (composition, _) = makeComposition(bonjourHostDiscovery: discovery)
@@ -54,6 +86,27 @@ final class AppModelTests: XCTestCase {
         let (composition, _) = makeComposition(bonjourHostDiscovery: discovery)
 
         XCTAssertTrue(composition.bonjourHostDiscovery === discovery)
+    }
+
+    func testProductionMakePairHostModelUsesInjectedCompositionGraph() async throws {
+        let discovery = BonjourHostDiscovery()
+        let (composition, store) = makeComposition(bonjourHostDiscovery: discovery)
+        let host = makePairedHost(serverID: "server-a", serverName: "Alpha")
+        try await store.save(host)
+        let model = AppModel(composition: composition)
+
+        let pairHostModel = model.makePairHostModel()
+        let status = try await pairHostModel.dependencies.pairingStatus(
+            host.serverID,
+            host.certificateFingerprint.uppercased()
+        )
+        await pairHostModel.dependencies.disconnect()
+        let connectionState = await composition.connectionManager.state
+        let storedHost = try await composition.pairedHostStore.host(withServerID: host.serverID)
+
+        XCTAssertEqual(status, .paired)
+        XCTAssertEqual(connectionState, .disconnected)
+        XCTAssertEqual(storedHost, host)
     }
 
     func testProductionRootStartsWithNothingConfirmed() {
@@ -143,24 +196,6 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(model.terminalRegistry.lastErrorMessage)
     }
 
-    func testRecordPairedHostNameCannotClearAnExistingConnectionError() async throws {
-        let transport = FakeTransport(shouldFailConnection: true)
-        let (composition, store) = makeComposition(transport: transport)
-        let model = AppModel(composition: composition)
-        let failingHost = makePairedHost(serverID: "server-z", serverName: "Studio")
-        try await store.save(failingHost)
-        try await store.markLastConnected(serverID: failingHost.serverID)
-
-        await model.start()
-        model.recordPairedHostName("Studio")
-
-        let expectedError = ConnectionManagerError.connectionFailed(
-            reason: FakeTransportError.connectionFailed.localizedDescription
-        ).localizedDescription
-        XCTAssertEqual(model.hostName, "Studio")
-        XCTAssertEqual(model.connectionError, expectedError)
-    }
-
     func testRecordConnectedHostSetsServerNameAndClearsAnExistingConnectionError() async throws {
         let transport = FakeTransport(shouldFailConnection: true)
         let (composition, store) = makeComposition(transport: transport)
@@ -201,6 +236,22 @@ final class AppModelTests: XCTestCase {
 }
 
 private extension AppModelTests {
+    func waitUntil(
+        timeout: TimeInterval = 1,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ condition: @escaping @MainActor () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() >= deadline {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
+                return
+            }
+            await Task.yield()
+        }
+    }
+
     func makeComposition(
         transport: any PsycheTransport = FakeTransport(),
         secureStore: any SecureStore = InMemorySecureStore(),

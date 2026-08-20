@@ -8,6 +8,56 @@ private let otherFingerprint = String(repeating: "b", count: 64)
 
 @MainActor
 final class PairHostModelTests: XCTestCase {
+    func testFixturePublishesDeterministicRowsAndConnectsPairedStudio() async {
+        let model = PairHostModel.fixture()
+
+        await model.start()
+        await waitUntil { model.rows.count == 4 }
+
+        XCTAssertEqual(model.rows.map(\.serverID), ["changed-host", "new-host", "offline-host", "studio"])
+        XCTAssertEqual(model.rows.map(\.pairingStatus), [.requiresRePairing, .unpaired, .unpaired, .paired])
+
+        model.select(serverID: "studio")
+        await model.submit()
+
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(
+            model.readyHost,
+            makePairedHost(
+                serverID: "studio",
+                serverName: "Studio",
+                endpoint: HostEndpoint(
+                    host: "studio.local",
+                    port: 4242,
+                    certificateFingerprint: testFingerprint
+                ),
+                clientID: "fixture-client",
+                token: "fixture-token"
+            )
+        )
+    }
+
+    func testFixtureChangedHostRequiresConfirmationAndCompletesDeterministicRePairing() async {
+        let model = PairHostModel.fixture()
+
+        await model.start()
+        await waitUntil { model.rows.count == 4 }
+
+        model.select(serverID: "changed-host")
+        model.pairingCode = "123456"
+
+        await model.submit()
+        XCTAssertEqual(model.phase, .confirmingRePair)
+
+        await model.confirmRePairing()
+
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.readyHost?.serverID, "changed-host")
+        XCTAssertEqual(model.readyHost?.serverName, "Changed Host")
+        XCTAssertEqual(model.readyHost?.clientID, "fixture-client")
+        XCTAssertEqual(model.readyHost?.token, "fixture-token")
+    }
+
     func testDiscoveryRowsMergeResolvedAndFailedEntriesInStableServerIDOrder() async throws {
         let probe = PairHostModelProbe()
         await probe.setPairingStatus(.paired, for: "server-b")
