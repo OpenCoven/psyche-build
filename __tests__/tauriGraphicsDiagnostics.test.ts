@@ -245,6 +245,84 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('strips complete mixed identifier sequences from named adapters across every path', () => {
+    const probes = [
+      {
+        probe: {
+          webgpuAdapterAvailable: true as const,
+          webgpuAdapter: 'NVIDIA H100 10DE 0x2684',
+          unsupportedFields: [],
+        },
+        adapter: 'NVIDIA H100',
+      },
+      {
+        probe: {
+          strictContext: 'webgl2' as const,
+          renderer: 'NVIDIA H100 10DE 0x2684',
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        adapter: 'NVIDIA H100',
+      },
+      {
+        probe: {
+          strictContext: 'webgl2' as const,
+          renderer: 'ANGLE (NVIDIA, NVIDIA H100 10DE 0x2684, OpenGL)',
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        adapter: 'NVIDIA H100',
+        backend: 'OpenGL',
+      },
+      {
+        probe: {
+          webgpuAdapterAvailable: true as const,
+          webgpuAdapter: 'Intel Arc A770 8086 0x56A0',
+          unsupportedFields: [],
+        },
+        adapter: 'Intel Arc A770',
+      },
+      {
+        probe: {
+          strictContext: 'webgl2' as const,
+          renderer: 'ANGLE (Intel, Intel Arc A770 8086 0x56A0, Vulkan 1.3)',
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        adapter: 'Intel Arc A770',
+        backend: 'Vulkan',
+      },
+      {
+        probe: {
+          strictContext: 'webgl2' as const,
+          renderer: 'Intel Arc A770 8086 0x56A0',
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        adapter: 'Intel Arc A770',
+      },
+      {
+        probe: {
+          strictContext: 'webgl2' as const,
+          renderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4090 10DE 0x2684 1458-1A2B Direct3D11 vs_5_0 ps_5_0, D3D11)',
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        adapter: 'NVIDIA GeForce RTX 4090',
+      },
+    ];
+
+    for (const { probe, adapter, backend } of probes) {
+      const classification = classifyGraphicsEvidence(probe);
+      expect(classification).toMatchObject({
+        acceleration: 'accelerated',
+        adapter,
+        supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+      });
+      if (backend) expect(classification.backend).toBe(backend);
+    }
+  });
+
   it('strips identifier sequences of any length from named adapters', () => {
     expect(classifyGraphicsEvidence({
       webgpuAdapterAvailable: true,

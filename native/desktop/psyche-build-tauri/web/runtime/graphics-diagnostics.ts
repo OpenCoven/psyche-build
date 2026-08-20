@@ -556,7 +556,9 @@ function stripAncillaryIdentifierFragments(value: string): string {
     .replace(identifierSequencePattern, (sequence, offset, source) => {
       const tokens = sequence.match(/(?:0x)?[0-9a-f]{4,8}/gi) ?? [];
       const prefix = source.slice(0, offset);
-      return hasNamedProductPrefix(prefix) ? ` ${tokens[0]} ` : ' ';
+      return hasNamedProductPrefix(prefix) && hasLikelyProductModelPrefix(prefix)
+        ? ` ${tokens[0]} `
+        : ' ';
     })
     .replace(ancillaryIdentifierLabelPattern, ' ')
     .replace(ancillaryIdentifierPattern, ' ')
@@ -579,6 +581,13 @@ function hasNamedProductPrefix(value: string): boolean {
       && !entitySuffixWords.has(normalized)
       && /[a-z]/i.test(token);
   });
+}
+
+function hasLikelyProductModelPrefix(value: string): boolean {
+  const tokens = value.match(/[a-z0-9]+/gi) ?? [];
+  const finalToken = tokens.at(-1);
+  if (!finalToken) return false;
+  return !(/\d/.test(finalToken) && /[^0-9a-f]/i.test(finalToken));
 }
 
 function isConcatenatedDescriptorIdentifier(value: string): boolean {
