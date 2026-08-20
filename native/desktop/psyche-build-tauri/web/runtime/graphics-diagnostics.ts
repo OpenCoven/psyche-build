@@ -271,6 +271,23 @@ const knownAdapterWords = new Set([
   'webgl2',
   'webgpu',
 ]);
+const concatenatedDescriptorFragments = [
+  ...knownAdapterWords,
+  'advancedmicrodevices',
+  'atitechnologies',
+  'nvidiacorporation',
+  'intelcorporation',
+  'appleinc',
+  'appleincorporated',
+  'googleinc',
+  'googlellc',
+  'qualcommtechnologies',
+  'armltd',
+  'armlimited',
+  'imaginationtechnologies',
+  'microsoftcorporation',
+].map((fragment) => fragment.replace(/[^a-z0-9]/gi, '').toLowerCase());
+const uuidPattern = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i;
 const identifierOnlyPattern = /^(?:(?:pci|ven|dev|vendor|device|id)|(?:0x)?[0-9a-f]+|[\s,:/\\\-&_;])+$/i;
 const hardwareIdentifierPattern = /(?:\b(?:0x)?[0-9a-f]{4,8}\s*:\s*(?:0x)?[0-9a-f]{4,8}\b|(?<![\p{L}\p{N}])(?:pci|ven|dev|subsys|vendor[^\p{L}\p{N}{}]*id|device[^\p{L}\p{N}{}]*id|vid|pid|did|luid|uuid)(?:[^\p{L}\p{N}{}]+(?:\{[0-9a-f-]+\}|(?:0x)?[0-9a-f]+)|(?:\{[0-9a-f-]+\}|(?:0x)?[0-9]+|(?:0x)?[0-9a-f]{4,}))(?![\p{L}\p{N}]))/iu;
 const backendOnlyAdapterPattern = /^(?:angle\s+)?(?:metal|vulkan|opengl(?:\s+es)?|direct3d(?:\s*(?:11|12))?|d3d(?:11|12))(?:\s+(?:renderer|engine|[0-9]+(?:\.[0-9]+)*))?$/i;
@@ -490,10 +507,36 @@ function isReliableAdapterEvidence(value: string): boolean {
     || vendorOnlyAdapterNames.has(normalized)
     || hardwareIdentifierPattern.test(value)
     || identifierOnlyPattern.test(value)
+    || uuidPattern.test(value)
+    || isConcatenatedDescriptorIdentifier(value)
     || backendOnlyAdapterPattern.test(value)
     || isMaskedRenderer(value)
     || !hasMeaningfulProductToken(value)
   );
+}
+
+function isConcatenatedDescriptorIdentifier(value: string): boolean {
+  const normalized = lowerCase(value).replace(/[^a-z0-9]/g, '');
+  if (!normalized) return false;
+
+  const reachable = new Array<boolean>(normalized.length + 1).fill(false);
+  reachable[0] = true;
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    if (!reachable[index]) continue;
+
+    if (/\d/.test(normalized[index])) {
+      reachable[index + 1] = true;
+    }
+
+    for (const fragment of concatenatedDescriptorFragments) {
+      if (fragment && normalized.startsWith(fragment, index)) {
+        reachable[index + fragment.length] = true;
+      }
+    }
+  }
+
+  return reachable[normalized.length] ?? false;
 }
 
 function hasMeaningfulProductToken(value: string): boolean {

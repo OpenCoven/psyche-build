@@ -917,6 +917,70 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects concatenated descriptor identifiers and bare UUIDs on WebGPU, raw WebGL, and ANGLE paths', () => {
+    const ambiguousValues = [
+      'WebGPUBackend',
+      'VulkanRuntime',
+      'NVIDIADriver',
+      '550e8400-e29b-41d4-a716-446655440000',
+      '{550e8400-e29b-41d4-a716-446655440000}',
+      '550E8400-E29B-41D4-A716-446655440000',
+    ];
+
+    for (const value of ambiguousValues) {
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: value,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toMatchObject({
+        acceleration: 'unknown',
+      });
+
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: `ANGLE (Google, ${value}, Vulkan 1.3)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+      });
+
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: value,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgpu',
+      });
+    }
+  });
+
+  it('preserves concatenated named product identifiers', () => {
+    for (const adapter of [
+      'GeForceRTX4090',
+      'RadeonRX7900XTX',
+      'IntelArcA770',
+      'AppleM3',
+      'MaliG715',
+      'Adreno740',
+    ]) {
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: adapter,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'accelerated',
+        adapter,
+        supportingProbe: 'webgpu',
+      });
+    }
+  });
+
   it('keeps expanded vendor entities when followed by a meaningful product', () => {
     for (const adapter of [
       'Advanced Micro Devices, Inc. Radeon RX 7900 XTX',
