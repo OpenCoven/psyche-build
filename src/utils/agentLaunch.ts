@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { TmuxService } from '../services/TmuxService.js';
 import {
@@ -611,6 +612,7 @@ export interface LaunchAgentInPaneOptions {
   permissionMode?: PermissionMode;
   psychePaneId?: string;
   codexHookEventFile?: string;
+  generateCovenSessionId?: () => string;
   /** Injectable for tests. */
   tmuxService?: Pick<
     TmuxService,
@@ -642,6 +644,7 @@ export async function launchAgentInPane(
     permissionMode,
     psychePaneId,
     codexHookEventFile,
+    generateCovenSessionId = randomUUID,
     tmuxService = TmuxService.getInstance(),
   } = options;
 
@@ -654,6 +657,8 @@ export async function launchAgentInPane(
 
   const hasInitialPrompt = !!(prompt && prompt.trim());
   const promptTransport = getPromptTransport(agent);
+  const covenCommandContext =
+    agent === 'coven-code' ? { covenSessionId: generateCovenSessionId() } : undefined;
   // send-keys agents are launched bare, then typed into once their TUI is up.
   const shouldSendPromptViaTmux = hasInitialPrompt && promptTransport === 'send-keys';
 
@@ -681,7 +686,8 @@ export async function launchAgentInPane(
       launchCommand = `${promptBootstrap}; ${buildInitialPromptCommand(
         agent,
         '"$PSYCHE_PROMPT_CONTENT"',
-        permissionMode
+        permissionMode,
+        covenCommandContext
       )}`;
     } else {
       const escapedPrompt = prompt
@@ -692,11 +698,12 @@ export async function launchAgentInPane(
       launchCommand = buildInitialPromptCommand(
         agent,
         `"${escapedPrompt}"`,
-        permissionMode
+        permissionMode,
+        covenCommandContext
       );
     }
   } else {
-    launchCommand = buildAgentCommand(agent, permissionMode);
+    launchCommand = buildAgentCommand(agent, permissionMode, covenCommandContext);
   }
 
   if (agent === 'codex') {
