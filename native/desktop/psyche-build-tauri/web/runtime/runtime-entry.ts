@@ -1,4 +1,14 @@
 import { snapshotFrameSchedulerResources } from './frame-scheduler';
+import {
+  classifyGraphicsEvidence,
+  collectRuntimeGraphicsReport,
+  createRuntimeGraphicsStartupState,
+  ensureRuntimeGraphicsStartupSummary,
+  mergeRuntimeGraphicsReport,
+  probeGraphicsEvidence,
+  SOFTWARE_RENDERER_MARKERS,
+  STRICT_WEBGL_CONTEXT_ATTRIBUTES,
+} from './graphics-diagnostics';
 import { snapshotPtyClientResources } from './pty-client';
 import {
   snapshotTerminalPaneResources,
@@ -21,6 +31,36 @@ export function snapshotRuntimeResources(): RuntimeResourceSnapshot {
   };
 }
 
+export {
+  classifyGraphicsEvidence,
+  collectRuntimeGraphicsReport,
+  createRuntimeGraphicsStartupState,
+  ensureRuntimeGraphicsStartupSummary,
+  mergeRuntimeGraphicsReport,
+  probeGraphicsEvidence,
+  SOFTWARE_RENDERER_MARKERS,
+  STRICT_WEBGL_CONTEXT_ATTRIBUTES,
+};
+export type {
+  GraphicsCanvas,
+  GraphicsClassification,
+  GraphicsDebugRendererInfo,
+  GraphicsGpu,
+  GraphicsGpuAdapter,
+  GraphicsGpuAdapterInfo,
+  GraphicsNavigator,
+  GraphicsProbeDependencies,
+  GraphicsProbeResult,
+  GraphicsWebGlContext,
+  RuntimeGraphicsAcceleration,
+  RuntimeGraphicsBackend,
+  RuntimeGraphicsFallbackReason,
+  RuntimeGraphicsNativeFacts,
+  RuntimeGraphicsProbe,
+  RuntimeGraphicsReport,
+  RuntimeGraphicsStartupDependencies,
+  RuntimeGraphicsStartupState,
+} from './graphics-diagnostics';
 export { FrameScheduler } from './frame-scheduler';
 export type {
   FrameRequest,
@@ -73,3 +113,5 @@ export type {
   VirtualWindow,
   VirtualWindowOptions,
 } from './virtual-list';
+
+void ensureRuntimeGraphicsStartupSummary();
