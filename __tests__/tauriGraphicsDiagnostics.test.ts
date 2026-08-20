@@ -191,6 +191,43 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects mixed-prefixed NVIDIA identifier sequences across WebGPU, raw WebGL, and ANGLE', () => {
+    for (const adapter of [
+      'NVIDIA 10DE 0x2684',
+      'NVIDIA Controller 10DE 0x2684',
+      'NVIDIA VGA Controller 0x10DE 2684 0x1458',
+    ]) {
+      const probes = [
+        {
+          webgpuAdapterAvailable: true as const,
+          webgpuAdapter: adapter,
+          unsupportedFields: [],
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: adapter,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: `ANGLE (NVIDIA, ${adapter}, OpenGL)`,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+      ];
+
+      for (const probe of probes) {
+        expect(classifyGraphicsEvidence(probe), adapter).toEqual({
+          acceleration: 'unknown',
+          fallbackReason: 'renderer_masked_or_ambiguous',
+          supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+          unsupportedFields: [],
+        });
+      }
+    }
+  });
+
   it('strips unprefixed identifier pairs from named adapters without rejecting the product', () => {
     for (const adapter of [
       'NVIDIA GeForce RTX 4090 10DE 2684',

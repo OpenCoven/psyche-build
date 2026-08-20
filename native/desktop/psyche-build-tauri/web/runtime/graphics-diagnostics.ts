@@ -313,7 +313,7 @@ const uuidPattern = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 const embeddedUuidPattern = /\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?/gi;
 const identifierOnlyPattern = /^(?:(?:pci|ven|dev|vendor|device|id)|(?:0x)?[0-9a-f]+|[\s,:/\\\-&_;])+$/i;
 const hardwareIdentifierPattern = /(?:\b(?:0x)?[0-9a-f]{4,8}\s*:\s*(?:0x)?[0-9a-f]{4,8}\b|(?<![\p{L}\p{N}])(?:pci|ven|dev|subsys|vendor[^\p{L}\p{N}{}]*id|device[^\p{L}\p{N}{}]*id|vid|pid|did|luid|uuid)(?:[^\p{L}\p{N}{}]+(?:\{[0-9a-f-]+\}|(?:0x)?[0-9a-f]+)|(?:\{[0-9a-f-]+\}|(?:0x)?[0-9]+|(?:0x)?[0-9a-f]{4,}))(?![\p{L}\p{N}]))/iu;
-const unprefixedIdentifierSequencePattern = /(?<![\p{L}\p{N}])[0-9a-f]{4,8}(?:[\s-]+[0-9a-f]{4,8})+(?![\p{L}\p{N}])/giu;
+const identifierSequencePattern = /(?<![\p{L}\p{N}])(?:0x)?[0-9a-f]{4,8}(?:[\s-]+(?:0x)?[0-9a-f]{4,8})+(?![\p{L}\p{N}])/giu;
 const ancillaryIdentifierLabelPattern = /\s+(?:(?:pci|ven|dev|subsys|vid|pid|did|luid|uuid)\b(?:\s*(?:id|identifier)\b)?|(?:vendor|device)\b\s*(?:id|identifier)\b)\s*[:=#-]?\s*(?:0x)?[0-9a-f]{1,8}\b/gi;
 const ancillaryIdentifierPattern = /\s*\(\s*0x[0-9a-f]+\s*\)|\s+0x[0-9a-f]+\b/gi;
 const backendOnlyAdapterPattern = /^(?:angle\s+)?(?:metal|vulkan|opengl(?:\s+es)?|direct3d(?:\s*(?:11|12))?|d3d(?:11|12))(?:\s+(?:renderer|engine|[0-9]+(?:\.[0-9]+)*))?$/i;
@@ -553,13 +553,13 @@ function stripAncillaryIdentifierFragments(value: string): string {
     return ` UUID_FRAGMENT_${uuidFragments.length} `;
   });
   const stripped = protectedValue
-    .replace(ancillaryIdentifierLabelPattern, ' ')
-    .replace(ancillaryIdentifierPattern, ' ')
-    .replace(unprefixedIdentifierSequencePattern, (sequence, offset, source) => {
-      const tokens = sequence.match(/[0-9a-f]{4,8}/gi) ?? [];
+    .replace(identifierSequencePattern, (sequence, offset, source) => {
+      const tokens = sequence.match(/(?:0x)?[0-9a-f]{4,8}/gi) ?? [];
       const prefix = source.slice(0, offset);
       return hasNamedProductPrefix(prefix) ? ` ${tokens[0]} ` : ' ';
     })
+    .replace(ancillaryIdentifierLabelPattern, ' ')
+    .replace(ancillaryIdentifierPattern, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   return stripped.replace(/UUID_FRAGMENT_(\d+)/g, (_, index: string) => (
