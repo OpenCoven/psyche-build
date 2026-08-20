@@ -527,11 +527,8 @@ final class PsycheAppUITests: XCTestCase {
 
         let host = element("settings-host", in: app)
         XCTAssertTrue(host.waitForExistence(timeout: 10))
-        XCTAssertTrue(host.label.contains("Studio"), host.label)
-        XCTAssertTrue(
-            host.label.contains("studio.local:4242") || host.label.contains("studio"),
-            host.label
-        )
+        XCTAssertTrue(host.label.localizedCaseInsensitiveContains("Studio"), host.label)
+        XCTAssertTrue(host.label.contains("studio.local:4242"), host.label)
         XCTAssertFalse(element("pair-host-error", in: app).exists)
         XCTAssertFalse(element("connection-error", in: app).exists)
     }
