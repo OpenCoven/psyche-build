@@ -197,6 +197,7 @@ public actor BonjourHostDiscovery {
     private struct Batch {
         let id: UInt64
         let serviceIDs: Set<String>
+        let shouldPublishEmptySnapshot: Bool
     }
 
     private struct ResolutionAttempt {
@@ -344,7 +345,11 @@ public actor BonjourHostDiscovery {
             )
         }
         cancelRetryTasks(for: serviceIDs)
-        activeBatch = Batch(id: currentBatchID, serviceIDs: serviceIDs)
+        activeBatch = Batch(
+            id: currentBatchID,
+            serviceIDs: serviceIDs,
+            shouldPublishEmptySnapshot: serviceIDs.isEmpty && removedPublishedIDs.isEmpty
+        )
         if !removedPublishedIDs.isEmpty {
             publishCurrentEntries()
         }
@@ -410,7 +415,9 @@ public actor BonjourHostDiscovery {
               batch.id == batchID else {
             return
         }
-        _ = completed
+        if completed, batch.shouldPublishEmptySnapshot, publishedEntries.isEmpty {
+            publishCurrentEntries()
+        }
         activeBatch = nil
         batchTask = nil
     }

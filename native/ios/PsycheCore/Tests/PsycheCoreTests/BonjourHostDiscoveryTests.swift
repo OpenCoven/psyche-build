@@ -132,6 +132,87 @@ final class BonjourHostDiscoveryTests: XCTestCase {
         XCTAssertEqual(hosts.map(\.serverID), ["server-2"])
     }
 
+    func testDiscoveryPublishesAnEmptySnapshotForAnInitialEmptyBrowseBatch() async throws {
+        let browser = FakeBonjourBrowser()
+        let resolver = FakeBonjourServiceResolver(endpoints: [
+            .init(name: "Good", domain: "local."): .init(host: "good.local", port: 47_123)
+        ])
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
+        let stream = await discovery.start()
+        let emptyBatchPublished = XCTestExpectation(description: "empty browse snapshot published")
+        let validBatchPublished = XCTestExpectation(description: "later valid browse snapshot published")
+
+        let consumer = Task {
+            var iterator = stream.makeAsyncIterator()
+            let firstBatch = await iterator.next()
+            guard let firstBatch else {
+                XCTFail("Expected an empty discovery batch")
+                return
+            }
+            XCTAssertTrue(firstBatch.isEmpty)
+            emptyBatchPublished.fulfill()
+
+            let secondBatch = await iterator.next()
+            XCTAssertEqual(secondBatch?.map(\.serverID), ["good"])
+            validBatchPublished.fulfill()
+        }
+        defer { consumer.cancel() }
+
+        browser.emit([])
+        await fulfillment(of: [emptyBatchPublished], timeout: 1)
+
+        browser.emit([
+            makeRecord(name: "Good", txt: [
+                "serverId": "good", "fingerprint": fingerprint, "versions": "3"
+            ])
+        ])
+        await fulfillment(of: [validBatchPublished], timeout: 1)
+
+        await discovery.stop()
+    }
+
+    func testDiscoveryPublishesAnEmptySnapshotWhenAllBrowsedRecordsAreFilteredOut() async throws {
+        let browser = FakeBonjourBrowser()
+        let resolver = FakeBonjourServiceResolver(endpoints: [
+            .init(name: "Good", domain: "local."): .init(host: "good.local", port: 47_123)
+        ])
+        let discovery = BonjourHostDiscovery(browser: browser, resolver: resolver)
+        let stream = await discovery.start()
+        let emptyBatchPublished = XCTestExpectation(description: "filtered browse snapshot published")
+        let validBatchPublished = XCTestExpectation(description: "later valid browse snapshot published")
+
+        let consumer = Task {
+            var iterator = stream.makeAsyncIterator()
+            let firstBatch = await iterator.next()
+            guard let firstBatch else {
+                XCTFail("Expected an empty discovery batch")
+                return
+            }
+            XCTAssertTrue(firstBatch.isEmpty)
+            emptyBatchPublished.fulfill()
+
+            let secondBatch = await iterator.next()
+            XCTAssertEqual(secondBatch?.map(\.serverID), ["good"])
+            validBatchPublished.fulfill()
+        }
+        defer { consumer.cancel() }
+
+        browser.emit([
+            makeRecord(txt: ["serverId": "broken", "fingerprint": "bogus", "versions": "3"]),
+            makeRecord(txt: ["fingerprint": fingerprint, "versions": "3"])
+        ])
+        await fulfillment(of: [emptyBatchPublished], timeout: 1)
+
+        browser.emit([
+            makeRecord(name: "Good", txt: [
+                "serverId": "good", "fingerprint": fingerprint, "versions": "3"
+            ])
+        ])
+        await fulfillment(of: [validBatchPublished], timeout: 1)
+
+        await discovery.stop()
+    }
+
     func testDiscoveryPublishesOnlyParseableHostsAndStopsTheBrowser() async throws {
         let browser = FakeBonjourBrowser()
         let resolver = FakeBonjourServiceResolver(endpoints: [
