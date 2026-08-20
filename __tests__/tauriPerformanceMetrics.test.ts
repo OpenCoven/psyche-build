@@ -156,6 +156,7 @@ describe('bounded performance metrics', () => {
       webglPanes: 4,
       recoveringPanes: 0,
       fallbackPanes: 1,
+      rendererTransitions: 0,
       contextLosses: 2,
     });
     expect(snapshot.interactions).toEqual({
@@ -707,6 +708,7 @@ describe('bounded performance metrics', () => {
         webglPanes: 0,
         recoveringPanes: 0,
         fallbackPanes: 0,
+        rendererTransitions: 0,
         contextLosses: 0,
       },
       interactions: {},
@@ -790,6 +792,168 @@ describe('bounded performance metrics', () => {
       expect(reportError).not.toHaveBeenCalled();
     });
 
+    it('rejects a pre-reset poll from merging after reset while retaining current pane counts', async () => {
+      let intervalCallback: (() => void) | undefined;
+      let resolvePty!: (value: unknown) => void;
+      let resolveProcess!: (value: unknown) => void;
+      let coalescedVisualUpdates = 5;
+      let rendererTransitions = 7;
+      let contextLosses = 4;
+      const collector = createPerformanceMetricsCollector({
+        invoke: vi.fn((command: string) => new Promise((resolve) => {
+          if (command === 'pty_transport_metrics') resolvePty = resolve;
+          else resolveProcess = resolve;
+        })),
+        requestFrame: () => 1,
+        cancelFrame: vi.fn(),
+        setInterval: (callback) => {
+          intervalCallback = callback;
+          return 1;
+        },
+        clearInterval: vi.fn(),
+        now: () => 1_000,
+        schedulerSnapshot: () => ({ coalescedVisualUpdates }),
+        rendererSnapshots: () => [{
+          state: 'webgl',
+          rendererTransitions,
+          contextLosses,
+        }],
+      });
+
+      collector.start();
+      intervalCallback?.();
+      collector.snapshot();
+      collector.reset();
+      expect(collector.snapshot().renderer).toMatchObject({
+        coalescedVisualUpdates: 0,
+        webglPanes: 1,
+        recoveringPanes: 0,
+        fallbackPanes: 0,
+        rendererTransitions: 0,
+        contextLosses: 0,
+      });
+
+      coalescedVisualUpdates = 8;
+      rendererTransitions = 9;
+      contextLosses = 10;
+      resolvePty([{ threadId: 'stale', metrics: { state: { bytesEmitted: 100 } } }]);
+      resolveProcess({ cpuPercent: 12 });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(collector.snapshot()).toMatchObject({
+        sampledAt: 0,
+        renderer: {
+          coalescedVisualUpdates: 3,
+          webglPanes: 1,
+          rendererTransitions: 2,
+          contextLosses: 6,
+        },
+      });
+      expect(collector.snapshot()).not.toHaveProperty('process');
+      collector.stop();
+    });
+
+    it('merges each successful native command independently and reports command-specific failures', async () => {
+      let intervalCallback: (() => void) | undefined;
+      const reportError = vi.fn();
+      const invoke = vi.fn((command: string) => (
+        command === 'pty_transport_metrics'
+          ? Promise.resolve([{ threadId: 'pty', metrics: { state: { bytesEmitted: 100 } } }])
+          : Promise.reject(new Error('process unavailable'))
+      ));
+      const collector = createPerformanceMetricsCollector({
+        invoke,
+        requestFrame: () => 1,
+        cancelFrame: vi.fn(),
+        setInterval: (callback) => {
+          intervalCallback = callback;
+          return 1;
+        },
+        clearInterval: vi.fn(),
+        now: () => 1_000,
+        reportError,
+      });
+
+      collector.start();
+      intervalCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(collector.snapshot().transport).toMatchObject({
+        queueBytesHighWater: 0,
+      });
+      expect(reportError).toHaveBeenCalledWith(expect.any(Error), 'runtime_process_metrics');
+      expect(collector.snapshot()).not.toHaveProperty('process');
+      collector.stop();
+    });
+
+    it('keeps transport state unchanged when transport fails and clears process on a successful null result', async () => {
+      let intervalCallback: (() => void) | undefined;
+      let clock = 1_000;
+      let poll = 0;
+      const reportError = vi.fn();
+      const invoke = vi.fn((command: string) => {
+        if (command === 'pty_transport_metrics') {
+          return poll === 0
+            ? Promise.resolve([{ threadId: 'pty', queuedBytes: 4096 }])
+            : Promise.reject(new Error('transport unavailable'));
+        }
+        return poll++ === 0
+          ? Promise.resolve({ cpuPercent: 12 })
+          : Promise.resolve(null);
+      });
+      const collector = createPerformanceMetricsCollector({
+        invoke,
+        requestFrame: () => 1,
+        cancelFrame: vi.fn(),
+        setInterval: (callback) => {
+          intervalCallback = callback;
+          return 1;
+        },
+        clearInterval: vi.fn(),
+        now: () => clock,
+        reportError,
+      });
+
+      collector.start();
+      intervalCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(collector.snapshot()).toMatchObject({
+        transport: { queueBytesHighWater: 4096 },
+        process: { cpuPercent: 12 },
+      });
+
+      clock = 2_000;
+      intervalCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(collector.snapshot()).toMatchObject({
+        transport: { queueBytesHighWater: 4096 },
+      });
+      expect(collector.snapshot()).not.toHaveProperty('process');
+      expect(reportError).toHaveBeenCalledWith(expect.any(Error), 'pty_transport_metrics');
+      collector.stop();
+    });
+
+    it('disconnects the performance observer exactly once when stopped repeatedly', () => {
+      const disconnect = vi.fn();
+      const collector = createPerformanceMetricsCollector({
+        requestFrame: () => 1,
+        cancelFrame: vi.fn(),
+        setInterval: () => 1,
+        clearInterval: vi.fn(),
+        createPerformanceObserver: () => ({
+          observe: vi.fn(),
+          disconnect,
+        }),
+      });
+
+      collector.start();
+      collector.stop();
+      collector.stop();
+
+      expect(disconnect).toHaveBeenCalledOnce();
+    });
+
     it('reports observer failures while continuing collection without long tasks', () => {
       const reportError = vi.fn();
       const collector = createPerformanceMetricsCollector({
@@ -809,6 +973,35 @@ describe('bounded performance metrics', () => {
       collector.stop();
     });
 
+    it('reports observer observe failures without stopping frame collection', () => {
+      const reportError = vi.fn();
+      const frames: Array<(timestamp: number) => void> = [];
+      const collector = createPerformanceMetricsCollector({
+        requestFrame: (callback) => {
+          frames.push(callback);
+          return frames.length;
+        },
+        cancelFrame: vi.fn(),
+        setInterval: () => 1,
+        clearInterval: vi.fn(),
+        createPerformanceObserver: () => ({
+          observe: () => {
+            throw new Error('observe unavailable');
+          },
+          disconnect: vi.fn(),
+        }),
+        reportError,
+      });
+
+      collector.start();
+      frames.shift()?.(0);
+      frames.shift()?.(16);
+
+      expect(reportError).toHaveBeenCalledWith(expect.any(Error), 'PerformanceObserver');
+      expect(collector.snapshot().frames.sampleCount).toBe(1);
+      collector.stop();
+    });
+
     it('samples scheduler and renderer providers when taking a snapshot', () => {
       const collector = createPerformanceMetricsCollector({
         schedulerSnapshot: () => ({ pendingCallbacks: 2, coalescedVisualUpdates: 4 }),
@@ -824,8 +1017,39 @@ describe('bounded performance metrics', () => {
         webglPanes: 1,
         recoveringPanes: 1,
         fallbackPanes: 1,
+        rendererTransitions: 0,
         contextLosses: 3,
       });
+    });
+
+    it('keeps renderer and metrics snapshots free of terminal payload fields', () => {
+      const collector = createPerformanceMetricsCollector({
+        schedulerSnapshot: () => ({ pendingCallbacks: 2, coalescedVisualUpdates: 4 }),
+        rendererSnapshots: () => [{
+          state: 'webgl',
+          rendererTransitions: 1,
+          contextLosses: 2,
+          queuedWrites: 3,
+          syntheticRetainedBytes: 12,
+        }],
+      });
+      collector.mergeNativeSnapshot({
+        sampledAt: 1_000,
+        renderer: {
+          panes: [{ state: 'webgl', rendererTransitions: 1, contextLosses: 2 }],
+        },
+      });
+
+      const forbidden = /^(content|string|buffer|command|payload|data|bytes)$/i;
+      const assertSafe = (value: unknown): void => {
+        if (!value || typeof value !== 'object') return;
+        for (const [key, child] of Object.entries(value)) {
+          expect(key).not.toMatch(forbidden);
+          assertSafe(child);
+        }
+      };
+
+      assertSafe(collector.snapshot());
     });
   });
 });

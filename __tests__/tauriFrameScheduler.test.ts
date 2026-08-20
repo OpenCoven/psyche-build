@@ -84,6 +84,7 @@ describe('FrameScheduler', () => {
     frames.queued.shift()!(16);
     expect(values).toEqual(['first']);
     expect(frames.queued).toHaveLength(1);
+    expect(scheduler.snapshot().pendingCallbacks).toBe(2);
 
     frames.queued.shift()!(32);
     expect(values).toEqual(['first', 'second', 'third']);
@@ -100,8 +101,27 @@ describe('FrameScheduler', () => {
     scheduler.schedule('pane-2:fit', () => values.push('other'));
     scheduler.cancelPrefix('pane-1:');
 
+    expect(scheduler.snapshot()).toEqual({
+      pendingCallbacks: 1,
+      coalescedVisualUpdates: 0,
+    });
     frames.queued.shift()!(16);
     expect(values).toEqual(['other']);
+  });
+
+  it('tracks coalescing and pending callbacks when cancellation removes only part of a batch', () => {
+    const frames = createFrameQueue();
+    const scheduler = new FrameScheduler(frames.requestFrame);
+
+    scheduler.schedule('pane-1:fit', () => undefined);
+    scheduler.schedule('pane-1:fit', () => undefined);
+    scheduler.schedule('pane-2:fit', () => undefined);
+    scheduler.cancelPrefix('pane-1:');
+
+    expect(scheduler.snapshot()).toEqual({
+      pendingCallbacks: 1,
+      coalescedVisualUpdates: 1,
+    });
   });
 
   it('cancels matching callbacks that remain in the active frame', () => {
@@ -136,6 +156,10 @@ describe('FrameScheduler', () => {
     expect(errors).toHaveBeenCalledOnce();
     expect(errors).toHaveBeenCalledWith(error, 'pane-a:paint');
     expect(afterFailure).toHaveBeenCalledOnce();
+    expect(scheduler.snapshot()).toEqual({
+      pendingCallbacks: 0,
+      coalescedVisualUpdates: 0,
+    });
   });
 
   it('isolates a throwing error sink from later callbacks', () => {

@@ -647,6 +647,20 @@ describe('TerminalPaneController lifecycle', () => {
     });
   });
 
+  it('keeps renderer snapshots free of terminal payload fields', () => {
+    const harness = createHarness('renderer-snapshot-shape');
+    const forbidden = /^(content|string|buffer|command|payload|data|bytes)$/i;
+    const assertSafe = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return;
+      for (const [key, child] of Object.entries(value)) {
+        expect(key).not.toMatch(forbidden);
+        assertSafe(child);
+      }
+    };
+
+    assertSafe(harness.controller.rendererSnapshot());
+  });
+
   it('keeps disposed state when the recovery factory disposes the pane', () => {
     const first = new FakeWebglAddon();
     const replacement = new FakeWebglAddon();

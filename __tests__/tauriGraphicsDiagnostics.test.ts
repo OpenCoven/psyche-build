@@ -12,9 +12,17 @@ import {
 } from '../native/desktop/psyche-build-tauri/web/runtime/graphics-diagnostics';
 import {
   classifyGraphicsEvidence as classifyGraphicsEvidenceFromEntry,
+  createPerformanceMetricsCollector as createPerformanceMetricsCollectorFromEntry,
+  FRAME_SAMPLE_LIMIT as frameSampleLimitFromEntry,
   mergeRuntimeGraphicsReport as mergeRuntimeGraphicsReportFromEntry,
   probeGraphicsEvidence as probeGraphicsEvidenceFromEntry,
+  summarizeFrames as summarizeFramesFromEntry,
 } from '../native/desktop/psyche-build-tauri/web/runtime/runtime-entry';
+import {
+  FRAME_SAMPLE_LIMIT,
+  createPerformanceMetricsCollector,
+  summarizeFrames,
+} from '../native/desktop/psyche-build-tauri/web/runtime/performance-metrics';
 
 const runtimeEntryPath = resolve(
   process.cwd(),
@@ -2487,6 +2495,9 @@ describe('runtime graphics startup wiring', () => {
     expect(classifyGraphicsEvidenceFromEntry).toBe(classifyGraphicsEvidence);
     expect(probeGraphicsEvidenceFromEntry).toBe(probeGraphicsEvidence);
     expect(mergeRuntimeGraphicsReportFromEntry).toBe(mergeRuntimeGraphicsReport);
+    expect(createPerformanceMetricsCollectorFromEntry).toBe(createPerformanceMetricsCollector);
+    expect(summarizeFramesFromEntry).toBe(summarizeFrames);
+    expect(frameSampleLimitFromEntry).toBe(FRAME_SAMPLE_LIMIT);
   });
 
   it('logs one structured startup summary per startup state', async () => {
@@ -2586,9 +2597,15 @@ describe('runtime graphics startup wiring', () => {
     expect(runtimeEntry).toContain('mergeRuntimeGraphicsReport');
     expect(runtimeEntry).toContain('ensureRuntimeGraphicsStartupSummary');
     expect(runtimeEntry).toContain('void ensureRuntimeGraphicsStartupSummary();');
+    expect(runtimeEntry).toContain('createPerformanceMetricsCollector');
+    expect(runtimeEntry).toContain('summarizeFrames');
+    expect(runtimeEntry).toContain('FRAME_SAMPLE_LIMIT');
 
     expect(runtimeBundle).toContain('[psyche:graphics]');
     expect(runtimeBundle).toContain('runtime_diagnostics');
     expect(runtimeBundle).toContain('failIfMajorPerformanceCaveat');
+    expect(runtimeBundle).toContain('createPerformanceMetricsCollector');
+    expect(runtimeBundle).toContain('summarizeFrames');
+    expect(runtimeBundle).toContain('FRAME_SAMPLE_LIMIT');
   });
 });

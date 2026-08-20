@@ -14,6 +14,10 @@ export interface FrameSummary {
   estimatedDroppedFrames: number;
 }
 
+function cumulativeDelta(value: number, baseline: number): number {
+  return Math.max(0, value - baseline);
+}
+
 export interface RuntimePerformanceSnapshot {
   sampledAt: number;
   frames: FrameSummary;
@@ -40,6 +44,7 @@ export interface RuntimePerformanceSnapshot {
     webglPanes: number;
     recoveringPanes: number;
     fallbackPanes: number;
+    rendererTransitions: number;
     contextLosses: number;
   };
   interactions: {
@@ -343,7 +348,11 @@ export function createPerformanceMetricsCollector(
   let webglPanes = 0;
   let recoveringPanes = 0;
   let fallbackPanes = 0;
+  let rendererTransitions = 0;
   let contextLosses = 0;
+  let coalescedVisualUpdatesBaseline = 0;
+  let rendererTransitionsBaseline = 0;
+  let contextLossesBaseline = 0;
   let focusToNextPaintMs: number | undefined;
   let resizeToNextPaintMs: number | undefined;
   let running = false;
@@ -351,6 +360,7 @@ export function createPerformanceMetricsCollector(
   let frameHandle: number | null = null;
   let intervalHandle: unknown = null;
   let pollInFlight = false;
+  let collectionEpoch = 0;
   let lastPollStartedAt: number | undefined;
   let performanceObserver: PerformanceObserverLike | null = null;
   const reportError = options.reportError ?? ((error, operation) => {
@@ -396,6 +406,7 @@ export function createPerformanceMetricsCollector(
 
   function pollNativeMetrics(pollGeneration: number): void {
     if (!running || generation !== pollGeneration || pollInFlight) return;
+    const pollEpoch = collectionEpoch;
     const sampledAt = now();
     if (
       lastPollStartedAt !== undefined &&
@@ -423,16 +434,29 @@ export function createPerformanceMetricsCollector(
       processResult = Promise.reject(error);
     }
 
-    void Promise.all([ptyResult, processResult])
-      .then(([ptySnapshots, process]) => {
-        if (!running || generation !== pollGeneration) return;
-        mergeNativeSnapshot({ sampledAt, ptySnapshots, process });
-      })
-      .catch((error) => {
-        if (running && generation === pollGeneration) reportError(error, 'native metrics poll');
+    void Promise.allSettled([ptyResult, processResult])
+      .then((results) => {
+        if (!running || generation !== pollGeneration || collectionEpoch !== pollEpoch) return;
+        const [pty, process] = results;
+        if (pty.status === 'rejected') reportError(pty.reason, 'pty_transport_metrics');
+        if (process.status === 'rejected') reportError(process.reason, 'runtime_process_metrics');
+
+        const input: RecordLike = { sampledAt };
+        if (pty.status === 'fulfilled') input.ptySnapshots = pty.value;
+        if (process.status === 'fulfilled') input.process = process.value;
+        if (Object.prototype.hasOwnProperty.call(input, 'ptySnapshots') ||
+            Object.prototype.hasOwnProperty.call(input, 'process')) {
+          try {
+            mergeNativeSnapshot(input);
+          } catch (error) {
+            reportError(error, 'native metrics merge');
+          }
+        }
       })
       .finally(() => {
-        if (generation === pollGeneration) pollInFlight = false;
+        if (generation === pollGeneration && collectionEpoch === pollEpoch) {
+          pollInFlight = false;
+        }
       });
   }
 
@@ -711,7 +735,9 @@ export function createPerformanceMetricsCollector(
         : undefined;
     const coalesced = numberFrom(scheduler, ['coalescedVisualUpdates'])
       ?? numberFrom(renderer, ['coalescedVisualUpdates']);
-    if (coalesced !== undefined) coalescedVisualUpdates = Math.max(coalescedVisualUpdates, coalesced);
+    if (coalesced !== undefined) {
+      coalescedVisualUpdates = Math.max(coalescedVisualUpdates, coalesced);
+    }
 
     const paneSource = renderer.panes ?? renderer.rendererSnapshots;
     const panes = Array.isArray(paneSource)
@@ -730,6 +756,13 @@ export function createPerformanceMetricsCollector(
         paneFlag(pane, ['fallback', 'isFallback']) || paneState(pane) === 'fallback',
       ).length;
       if (panes.length > 0) {
+        rendererTransitions = Math.max(
+          rendererTransitions,
+          panes.reduce(
+            (sum, pane) => sum + (numberFrom(pane, ['rendererTransitions']) ?? 0),
+            0,
+          ),
+        );
         contextLosses = Math.max(
           contextLosses,
           panes.reduce(
@@ -742,10 +775,14 @@ export function createPerformanceMetricsCollector(
     const directWebgl = numberFrom(renderer, ['webglPanes']);
     const directRecovering = numberFrom(renderer, ['recoveringPanes']);
     const directFallback = numberFrom(renderer, ['fallbackPanes']);
+    const directTransitions = numberFrom(renderer, ['rendererTransitions']);
     const directLosses = numberFrom(renderer, ['contextLosses']);
     if (paneSource === undefined && directWebgl !== undefined) webglPanes = directWebgl;
     if (paneSource === undefined && directRecovering !== undefined) recoveringPanes = directRecovering;
     if (paneSource === undefined && directFallback !== undefined) fallbackPanes = directFallback;
+    if (directTransitions !== undefined) {
+      rendererTransitions = Math.max(rendererTransitions, directTransitions);
+    }
     if (directLosses !== undefined) contextLosses = Math.max(contextLosses, directLosses);
 
     if (Object.prototype.hasOwnProperty.call(input, 'process')) {
@@ -878,9 +915,16 @@ export function createPerformanceMetricsCollector(
         fallbackPanes = panes.filter((pane) =>
           pane.fallback === true || pane.state?.toLowerCase() === 'fallback',
         ).length;
-        contextLosses = panes.reduce(
-          (sum, pane) => sum + (finiteNonNegative(pane.contextLosses) ?? 0),
-          0,
+        rendererTransitions = Math.max(
+          rendererTransitions,
+          panes.reduce((sum, pane) => sum + (finiteNonNegative(pane.rendererTransitions) ?? 0), 0),
+        );
+        contextLosses = Math.max(
+          contextLosses,
+          panes.reduce(
+            (sum, pane) => sum + (finiteNonNegative(pane.contextLosses) ?? 0),
+            0,
+          ),
         );
       } catch (error) {
         reportError(error, 'renderer snapshot');
@@ -910,11 +954,18 @@ export function createPerformanceMetricsCollector(
         backpressureCount,
       },
       renderer: {
-        coalescedVisualUpdates,
+        coalescedVisualUpdates: cumulativeDelta(
+          coalescedVisualUpdates,
+          coalescedVisualUpdatesBaseline,
+        ),
         webglPanes,
         recoveringPanes,
         fallbackPanes,
-        contextLosses,
+        rendererTransitions: cumulativeDelta(
+          rendererTransitions,
+          rendererTransitionsBaseline,
+        ),
+        contextLosses: cumulativeDelta(contextLosses, contextLossesBaseline),
       },
       interactions: {},
     };
@@ -938,6 +989,11 @@ export function createPerformanceMetricsCollector(
   }
 
   function reset(): void {
+    if (running) sampleRuntimeState();
+    collectionEpoch += 1;
+    coalescedVisualUpdatesBaseline = coalescedVisualUpdates;
+    rendererTransitionsBaseline = rendererTransitions;
+    contextLossesBaseline = contextLosses;
     frames.clear();
     batchSizes.clear();
     batchIntervals.clear();
@@ -967,11 +1023,13 @@ export function createPerformanceMetricsCollector(
     ackMax = undefined;
     processCpu = undefined;
     processRss = undefined;
-    coalescedVisualUpdates = 0;
-    webglPanes = 0;
-    recoveringPanes = 0;
-    fallbackPanes = 0;
-    contextLosses = 0;
+    pollInFlight = false;
+    lastPollStartedAt = undefined;
+    if (!running) {
+      webglPanes = 0;
+      recoveringPanes = 0;
+      fallbackPanes = 0;
+    }
     focusToNextPaintMs = undefined;
     resizeToNextPaintMs = undefined;
   }
