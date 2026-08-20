@@ -64,6 +64,31 @@ public struct DiscoveredHost: Sendable, Equatable, Identifiable {
     }
 }
 
+public struct BonjourDiscoveryEntry: Sendable, Equatable, Identifiable {
+    public let identity: BonjourHostIdentity
+    public let availability: BonjourHostAvailability
+
+    public var id: String { identity.serverID }
+    public var serverID: String { identity.serverID }
+    public var serverName: String { identity.serverName }
+
+    public init(identity: BonjourHostIdentity, availability: BonjourHostAvailability) {
+        self.identity = identity
+        self.availability = availability
+    }
+}
+
+public enum BonjourHostAvailability: Sendable, Equatable {
+    case resolved(DiscoveredHost)
+    case resolutionFailed(BonjourResolutionFailure)
+}
+
+public enum BonjourResolutionFailure: Sendable, Equatable {
+    case timedOut
+    case unresolved
+    case invalidEndpoint
+}
+
 /// TXT records are attacker-controlled — anyone on the LAN can advertise
 /// `_psyche._tcp`. Nothing here trusts a field it has not validated, and a
 /// record missing any of them is dropped rather than surfaced half-formed.
@@ -148,18 +173,19 @@ struct BonjourHostDiscoveryLifecycle: @unchecked Sendable {
     }
 }
 
-/// Browses the LAN and publishes only the hosts that survived parsing.
+/// Browses the LAN and publishes discovery rows for every valid identity.
 public actor BonjourHostDiscovery {
     private let browser: any BonjourBrowsing
     private let resolver: any BonjourServiceResolving
     private let lifecycle: BonjourHostDiscoveryLifecycle
     private var observationTask: Task<Void, Never>?
     private var batchTask: Task<Void, Never>?
-    private var continuation: AsyncStream<[DiscoveredHost]>.Continuation?
+    private var continuation: AsyncStream<[BonjourDiscoveryEntry]>.Continuation?
     private var observationID: UInt64 = 0
     private var batchID: UInt64 = 0
     private var activeBatch: Batch?
-    private var publishedHosts: [String: DiscoveredHost] = [:]
+    private var publishedEntries: [String: BonjourDiscoveryEntry] = [:]
+    private var latestIdentities: [String: BonjourHostIdentity] = [:]
 
     /// Four concurrent resolutions keep a stale peer from serially delaying
     /// usable hosts while keeping Bonjour work bounded on busy LANs.
@@ -168,7 +194,6 @@ public actor BonjourHostDiscovery {
     private struct Batch {
         let id: UInt64
         let serviceIDs: Set<String>
-        var resolvedServiceIDs: Set<String> = []
     }
 
     public init(
@@ -190,7 +215,7 @@ public actor BonjourHostDiscovery {
         self.lifecycle = lifecycle
     }
 
-    public func start() -> AsyncStream<[DiscoveredHost]> {
+    public func start() -> AsyncStream<[BonjourDiscoveryEntry]> {
         observationID &+= 1
         let currentObservationID = observationID
         observationTask?.cancel()
@@ -198,12 +223,13 @@ public actor BonjourHostDiscovery {
         continuation?.finish()
         continuation = nil
         activeBatch = nil
-        publishedHosts = [:]
+        publishedEntries = [:]
+        latestIdentities = [:]
 
         let records = browser.records()
         browser.start()
 
-        let (stream, continuation) = AsyncStream<[DiscoveredHost]>.makeStream()
+        let (stream, continuation) = AsyncStream<[BonjourDiscoveryEntry]>.makeStream()
         self.continuation = continuation
         let task = Task { [resolver] in
             for await batch in records {
@@ -215,7 +241,7 @@ public actor BonjourHostDiscovery {
                 )
             }
             await self.lifecycle.beforeFinishObservation()
-            self.finishObservation(currentObservationID)
+            await self.finishObservation(currentObservationID)
             self.lifecycle.didFinishObservation()
         }
         observationTask = task
@@ -235,10 +261,22 @@ public actor BonjourHostDiscovery {
         batchTask?.cancel()
         batchTask = nil
         activeBatch = nil
-        publishedHosts = [:]
+        publishedEntries = [:]
+        latestIdentities = [:]
         continuation?.finish()
         continuation = nil
         browser.stop()
+    }
+
+    public func retry(serverID: String) async {
+        guard let identity = latestIdentities[serverID] else { return }
+        let currentObservationID = observationID
+        guard let entry = await Self.resolveHost(identity, using: resolver) else { return }
+        guard currentObservationID == self.observationID,
+              latestIdentities[serverID] == identity else {
+            return
+        }
+        publishRetriedEntry(entry, observationID: currentObservationID, identity: identity)
     }
 
     private func beginBatch(
@@ -253,21 +291,28 @@ public actor BonjourHostDiscovery {
         let currentBatchID = batchID
         batchTask?.cancel()
         let serviceIDs = Set(identities.map(\.serverID))
-        let removedServiceIDs = Set(publishedHosts.keys).subtracting(serviceIDs)
-        for serviceID in removedServiceIDs {
-            publishedHosts.removeValue(forKey: serviceID)
+        let removedIdentityIDs = Set(latestIdentities.keys).subtracting(serviceIDs)
+        let removedPublishedIDs = Set(publishedEntries.keys).subtracting(serviceIDs)
+        for serviceID in removedIdentityIDs {
+            latestIdentities.removeValue(forKey: serviceID)
+        }
+        for serviceID in removedPublishedIDs {
+            publishedEntries.removeValue(forKey: serviceID)
+        }
+        for identity in identities {
+            latestIdentities[identity.serverID] = identity
         }
         activeBatch = Batch(id: currentBatchID, serviceIDs: serviceIDs)
-        if !removedServiceIDs.isEmpty {
-            publishCurrentHosts()
+        if !removedPublishedIDs.isEmpty {
+            publishCurrentEntries()
         }
 
         let discovery = self
         batchTask = Task { [resolver, discovery] in
-            let completed = await BonjourHostDiscovery.resolveHosts(from: identities, using: resolver) { host in
+            let completed = await BonjourHostDiscovery.resolveHosts(from: identities, using: resolver) { entry in
                 guard !Task.isCancelled else { return }
-                await discovery.publishResolvedHost(
-                    host,
+                await discovery.publishResolvedEntry(
+                    entry,
                     observationID: observationID,
                     batchID: currentBatchID
                 )
@@ -281,18 +326,31 @@ public actor BonjourHostDiscovery {
         }
     }
 
-    private func publishResolvedHost(
-        _ host: DiscoveredHost,
+    private func publishResolvedEntry(
+        _ entry: BonjourDiscoveryEntry,
         observationID: UInt64,
         batchID: UInt64
     ) {
         guard observationID == self.observationID,
-              activeBatch?.id == batchID else {
+              activeBatch?.id == batchID,
+              latestIdentities[entry.serverID] == entry.identity else {
             return
         }
-        activeBatch?.resolvedServiceIDs.insert(host.serverID)
-        publishedHosts[host.serverID] = host
-        publishCurrentHosts()
+        publishedEntries[entry.serverID] = entry
+        publishCurrentEntries()
+    }
+
+    private func publishRetriedEntry(
+        _ entry: BonjourDiscoveryEntry,
+        observationID: UInt64,
+        identity: BonjourHostIdentity
+    ) {
+        guard observationID == self.observationID,
+              latestIdentities[entry.serverID] == identity else {
+            return
+        }
+        publishedEntries[entry.serverID] = entry
+        publishCurrentEntries()
     }
 
     private func finishBatch(
@@ -305,23 +363,13 @@ public actor BonjourHostDiscovery {
               batch.id == batchID else {
             return
         }
-        if completed {
-            // Keep a still-present prior host visible during its refresh, then
-            // remove it only after this complete batch proved it unresolved.
-            let failedServiceIDs = batch.serviceIDs.subtracting(batch.resolvedServiceIDs)
-            for serviceID in failedServiceIDs {
-                publishedHosts.removeValue(forKey: serviceID)
-            }
-            if !failedServiceIDs.isEmpty || publishedHosts.isEmpty {
-                publishCurrentHosts()
-            }
-        }
+        _ = completed
         activeBatch = nil
         batchTask = nil
     }
 
-    private func publishCurrentHosts() {
-        continuation?.yield(publishedHosts.values.sorted { $0.serverID < $1.serverID })
+    private func publishCurrentEntries() {
+        continuation?.yield(publishedEntries.values.sorted { $0.serverID < $1.serverID })
     }
 
     private func finishObservation(_ observationID: UInt64) {
@@ -330,6 +378,8 @@ public actor BonjourHostDiscovery {
         batchTask?.cancel()
         batchTask = nil
         activeBatch = nil
+        publishedEntries = [:]
+        latestIdentities = [:]
         continuation?.finish()
         continuation = nil
         browser.stop()
@@ -348,7 +398,8 @@ public actor BonjourHostDiscovery {
         batchTask?.cancel()
         batchTask = nil
         activeBatch = nil
-        publishedHosts = [:]
+        publishedEntries = [:]
+        latestIdentities = [:]
         continuation = nil
         lifecycle.didTerminateObservation()
         browser.stop()
@@ -357,11 +408,11 @@ public actor BonjourHostDiscovery {
     private static func resolveHosts(
         from identities: [BonjourHostIdentity],
         using resolver: any BonjourServiceResolving,
-        publish: @escaping @Sendable (DiscoveredHost) async -> Void
+        publish: @escaping @Sendable (BonjourDiscoveryEntry) async -> Void
     ) async -> Bool {
         guard !identities.isEmpty else { return !Task.isCancelled }
 
-        await withTaskGroup(of: DiscoveredHost?.self) { group in
+        await withTaskGroup(of: BonjourDiscoveryEntry?.self) { group in
             var nextIdentityIndex = 0
 
             func resolveNextIdentity() {
@@ -397,17 +448,46 @@ public actor BonjourHostDiscovery {
     private static func resolveHost(
         _ identity: BonjourHostIdentity,
         using resolver: any BonjourServiceResolving
-    ) async -> DiscoveredHost? {
+    ) async -> BonjourDiscoveryEntry? {
         guard !Task.isCancelled else { return nil }
         do {
             let resolved = try await resolver.resolve(name: identity.serverName, domain: identity.domain)
-            guard !Task.isCancelled,
-                  let endpoint = endpoint(from: resolved, fingerprint: identity.certificateFingerprint) else {
-                return nil
+            guard !Task.isCancelled else { return nil }
+            guard let endpoint = endpoint(from: resolved, fingerprint: identity.certificateFingerprint) else {
+                return BonjourDiscoveryEntry(
+                    identity: identity,
+                    availability: .resolutionFailed(.invalidEndpoint)
+                )
             }
-            return DiscoveredHost(identity: identity, endpoint: endpoint)
-        } catch {
+            return BonjourDiscoveryEntry(
+                identity: identity,
+                availability: .resolved(DiscoveredHost(identity: identity, endpoint: endpoint))
+            )
+        } catch is CancellationError {
             return nil
+        } catch let error as BonjourServiceResolverError {
+            switch error {
+            case .timedOut:
+                return BonjourDiscoveryEntry(
+                    identity: identity,
+                    availability: .resolutionFailed(.timedOut)
+                )
+            case .unresolved:
+                return BonjourDiscoveryEntry(
+                    identity: identity,
+                    availability: .resolutionFailed(.unresolved)
+                )
+            case .invalidEndpoint:
+                return BonjourDiscoveryEntry(
+                    identity: identity,
+                    availability: .resolutionFailed(.invalidEndpoint)
+                )
+            }
+        } catch {
+            return BonjourDiscoveryEntry(
+                identity: identity,
+                availability: .resolutionFailed(.unresolved)
+            )
         }
     }
 
