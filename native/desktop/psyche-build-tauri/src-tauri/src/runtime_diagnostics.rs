@@ -176,11 +176,16 @@ where
     fn sample_at(&mut self, now: Instant) -> Option<ProcessMetrics> {
         if self.should_refresh(now) {
             let sampled = self.source.sample_process(self.selection);
-            self.cached = if self.cpu_refresh_primed {
-                sampled
-            } else {
-                self.cpu_refresh_primed = true;
-                sampled.and_then(ProcessMetrics::without_cpu)
+            self.cached = match sampled {
+                Some(sampled) if self.cpu_refresh_primed => Some(sampled),
+                Some(sampled) => {
+                    self.cpu_refresh_primed = true;
+                    sampled.without_cpu()
+                }
+                None => {
+                    self.cpu_refresh_primed = false;
+                    None
+                }
             };
             self.last_refresh_at = Some(now);
         }
@@ -444,6 +449,30 @@ mod tests {
         );
 
         assert_eq!(cache.sample_at(Instant::now()), None);
+    }
+
+    #[test]
+    fn runtime_diagnostics_process_sampling_recovery_omits_cpu_until_a_later_successful_refresh() {
+        let mut cache = ProcessMetricsCache::new(
+            FakeProcessMetricsSource::with_responses([
+                None,
+                Some(process_sample(20.0, 1_024)),
+                Some(process_sample(40.0, 2_048)),
+            ]),
+            Pid::from_u32(23),
+            Duration::from_secs(1),
+        );
+        let started_at = Instant::now();
+
+        assert_eq!(cache.sample_at(started_at), None);
+        assert_eq!(
+            cache.sample_at(started_at.checked_add(Duration::from_secs(1)).unwrap()),
+            Some(process_sample_without_cpu(1_024))
+        );
+        assert_eq!(
+            cache.sample_at(started_at.checked_add(Duration::from_secs(2)).unwrap()),
+            Some(process_sample(40.0, 2_048))
+        );
     }
 
     #[test]
