@@ -8329,6 +8329,7 @@
   async function removeProject(id) {
     var project = findProject(id);
     if (!project) return false;
+    var wasActiveProject = state.activeProjectId === id;
     var projectOpenFiles = state.openFiles.filter(function (file) {
       return file.projectId === id;
     });
@@ -8376,13 +8377,15 @@
     // Remove the project from state.
     state.projects = state.projects.filter(function (p) { return p.id !== id; });
     startCovenPolling();
-    if (state.activeProjectId === id) {
+    var shouldRefreshSidebar = threadIds.length === 0;
+    if (wasActiveProject) {
       var next = state.projects[0] || null;
       // Force setActiveProject to do its restore work even though the id
       // matches — clear first.
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(null);
       else Object.assign(state, { activeProjectId: null });
       if (next) {
+        shouldRefreshSidebar = false;
         await setActiveProject(next.id);
       } else {
         state.activeThreadId = null;
@@ -8390,7 +8393,8 @@
         setStatus("no project — click + to open one", "");
       }
     }
-    refreshTabs();
+    if (shouldRefreshSidebar) refreshSidebar();
+    else refreshTabs();
     if (restoredTerminalView) syncPaneMetricsVisibility();
     syncProjectBrowser();
     saveWorkspaceSoon();
