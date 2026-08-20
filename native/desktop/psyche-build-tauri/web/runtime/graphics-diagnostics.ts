@@ -268,7 +268,7 @@ const knownAdapterWords = new Set([
   'vulkan',
 ]);
 const identifierOnlyPattern = /^(?:(?:pci|ven|dev|vendor|device|id)|(?:0x)?[0-9a-f]+|[\s,:/\\\-&_;])+$/i;
-const hardwareIdentifierPattern = /(?:\b(?:0x)?[0-9a-f]{4,8}\s*:\s*(?:0x)?[0-9a-f]{4,8}\b|\b(?:ven|dev)(?:_|=|:|\s)+(?:0x)?[0-9a-f]{4,8}\b|\b(?:vendorid|deviceid|ven|dev|subsys)(?:0x)?[0-9a-f]{4,8}\b|\b(?:vid|pid|did|luid|uuid)(?:_|=|:|-|\s)*(?:0x)?[0-9a-f]{4,32}\b|\bpci(?:\\|\/|:|\s)|\bsubsys(?:_|=|:|\s)+(?:0x)?[0-9a-f]{4,8}\b|\b(?:vendor|device)\s+id\b)/i;
+const hardwareIdentifierPattern = /(?:\b(?:0x)?[0-9a-f]{4,8}\s*:\s*(?:0x)?[0-9a-f]{4,8}\b|(?<![\p{L}\p{N}])(?:pci|ven|dev|subsys|vendor[^\p{L}\p{N}{}]*id|device[^\p{L}\p{N}{}]*id|vid|pid|did|luid|uuid)(?:[^\p{L}\p{N}{}]+(?:\{[0-9a-f-]+\}|(?:0x)?[0-9a-f]+)|(?:\{[0-9a-f-]+\}|(?:0x)?[0-9]+|(?:0x)?[0-9a-f]{4,}))(?![\p{L}\p{N}]))/iu;
 const backendOnlyAdapterPattern = /^(?:angle\s+)?(?:metal|vulkan|opengl(?:\s+es)?|direct3d(?:\s*(?:11|12))?|d3d(?:11|12))(?:\s+(?:renderer|engine|[0-9]+(?:\.[0-9]+)*))?$/i;
 const DIRECT3D_BACKEND_PATTERN = /\b(?:direct3d(?:11|12)?|d3d(?:11|12)?)\b/i;
 
