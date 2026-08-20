@@ -1,5 +1,4 @@
 export const FRAME_SAMPLE_LIMIT = 20_000;
-const PTY_RETIREMENT_HISTORY_LIMIT = 1_024;
 
 type RecordLike = Record<string, unknown>;
 export type InteractionKind = 'focus' | 'resize';
@@ -272,8 +271,6 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
   let previousPtySampledAt: number | undefined;
   const previousPtyCounters = new Map<string, { bytes?: number; batches?: number }>();
   const previousPtyBackpressureCounters = new Map<string, number>();
-  const retiredPtyIds = new Set<string>();
-  const retiredPtyIdOrder: string[] = [];
   let bytesPerSecond = 0;
   let batchesPerSecond = 0;
   let averageBatchBytesOverride: number | undefined;
@@ -289,6 +286,7 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
   let queueDepthHighWater = 0;
   let blockedProducersHighWater = 0;
   let backpressureCount = 0;
+  let backpressureInitialized = false;
   let ackAverage: number | undefined;
   let ackMax: number | undefined;
   let processCpu: number | undefined;
@@ -348,23 +346,6 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     averageBatchBytesOverride = undefined;
     ackAverage = undefined;
     ackMax = undefined;
-  }
-
-  function rememberRetiredPty(id: string): void {
-    if (retiredPtyIds.has(id)) return;
-    retiredPtyIds.add(id);
-    retiredPtyIdOrder.push(id);
-    if (retiredPtyIdOrder.length > PTY_RETIREMENT_HISTORY_LIMIT) {
-      const evicted = retiredPtyIdOrder.shift();
-      if (evicted !== undefined) retiredPtyIds.delete(evicted);
-    }
-  }
-
-  function consumeRetiredPty(id: string): boolean {
-    if (!retiredPtyIds.delete(id)) return false;
-    const orderIndex = retiredPtyIdOrder.indexOf(id);
-    if (orderIndex >= 0) retiredPtyIdOrder.splice(orderIndex, 1);
-    return true;
   }
 
   function mergeOneNativeSnapshot(
@@ -605,8 +586,22 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
         if (!currentPtyIds.has(id)) {
           previousPtyCounters.delete(id);
           previousPtyBackpressureCounters.delete(id);
-          rememberRetiredPty(id);
         }
+      }
+      if (!backpressureInitialized) {
+        backpressureCount = 0;
+        for (const [index, entry] of entries.entries()) {
+          const id = ptyIdentity(entry, index);
+          const currentBackpressure = numberFrom(
+            transportSource(entry),
+            transportKeys.backpressure,
+          );
+          if (currentBackpressure !== undefined) {
+            backpressureCount += currentBackpressure;
+            previousPtyBackpressureCounters.set(id, currentBackpressure);
+          }
+        }
+        backpressureInitialized = true;
       }
       const sameSample =
         entries.length > 0 &&
@@ -620,8 +615,6 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
           previousPtyCounters,
           0,
           previousPtyBackpressureCounters,
-          retiredPtyIds,
-          consumeRetiredPty,
         );
         mergeOneNativeSnapshot({
           ...input,
@@ -635,8 +628,6 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
             previousPtyCounters,
             index,
             previousPtyBackpressureCounters,
-            retiredPtyIds,
-            consumeRetiredPty,
           );
           mergeOneNativeSnapshot(
             entry.sampledAt === undefined && sampledAt !== undefined
@@ -715,8 +706,6 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     previousPtySampledAt = undefined;
     previousPtyCounters.clear();
     previousPtyBackpressureCounters.clear();
-    retiredPtyIds.clear();
-    retiredPtyIdOrder.length = 0;
     bytesPerSecond = 0;
     batchesPerSecond = 0;
     averageBatchBytesOverride = undefined;
@@ -730,6 +719,7 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     queueDepthHighWater = 0;
     blockedProducersHighWater = 0;
     backpressureCount = 0;
+    backpressureInitialized = false;
     ackAverage = undefined;
     ackMax = undefined;
     processCpu = undefined;
@@ -768,8 +758,6 @@ function updatePtyCounters(
   previousPtyCounters: Map<string, { bytes?: number; batches?: number }>,
   indexOffset = 0,
   previousPtyBackpressureCounters: Map<string, number>,
-  retiredPtyIds: ReadonlySet<string>,
-  consumeRetiredPty: (id: string) => boolean,
 ): { deltas: { bytes?: number; batches?: number; backpressure?: number } } {
   let bytesDelta = 0;
   let batchesDelta = 0;
@@ -789,7 +777,6 @@ function updatePtyCounters(
     const currentBackpressure = numberFrom(source, transportKeys.backpressure);
     const previous = previousPtyCounters.get(id);
     const previousBackpressure = previousPtyBackpressureCounters.get(id);
-    const wasRetired = retiredPtyIds.has(id);
     if (currentBytes !== undefined) {
       hasBytes = true;
       if (previous?.bytes !== undefined && currentBytes >= previous.bytes) {
@@ -804,14 +791,11 @@ function updatePtyCounters(
     }
     if (currentBackpressure !== undefined) {
       hasBackpressure = true;
-      if (previousBackpressure === undefined) {
-        if (!wasRetired) backpressureDelta += currentBackpressure;
-      } else if (currentBackpressure >= previousBackpressure) {
+      if (previousBackpressure !== undefined && currentBackpressure >= previousBackpressure) {
         backpressureDelta += currentBackpressure - previousBackpressure;
       }
       // A lower native counter is a reset; its interval contributes zero.
       previousPtyBackpressureCounters.set(id, currentBackpressure);
-      if (wasRetired) consumeRetiredPty(id);
     }
     previousPtyCounters.set(id, {
       bytes: currentBytes ?? previous?.bytes,

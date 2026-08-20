@@ -445,6 +445,66 @@ describe('bounded performance metrics', () => {
     expect(collector.snapshot().transport.backpressureCount).toBe(11);
   });
 
+  it('initializes backpressure from all current PTY counters on the first snapshot', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      sampledAt: 1_000,
+      ptySnapshots: [
+        { threadId: 'first', metrics: { state: { pushWouldBlockCount: 4 } } },
+        { threadId: 'second', metrics: { state: { pushWouldBlockCount: 7 } } },
+      ],
+    });
+
+    expect(collector.snapshot().transport.backpressureCount).toBe(11);
+  });
+
+  it('baselines new PTYs while counting deltas for existing PTYs', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      sampledAt: 1_000,
+      ptySnapshots: [{ threadId: 'existing', metrics: { state: { pushWouldBlockCount: 4 } } }],
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 2_000,
+      ptySnapshots: [
+        { threadId: 'existing', metrics: { state: { pushWouldBlockCount: 7 } } },
+        { threadId: 'new', metrics: { state: { pushWouldBlockCount: 20 } } },
+      ],
+    });
+    expect(collector.snapshot().transport.backpressureCount).toBe(7);
+
+    collector.mergeNativeSnapshot({
+      sampledAt: 3_000,
+      ptySnapshots: [
+        { threadId: 'existing', metrics: { state: { pushWouldBlockCount: 9 } } },
+        { threadId: 'new', metrics: { state: { pushWouldBlockCount: 25 } } },
+      ],
+    });
+
+    expect(collector.snapshot().transport.backpressureCount).toBe(14);
+  });
+
+  it('does not double-count a reused PTY after more than 1024 retirements', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      sampledAt: 1_000,
+      ptySnapshots: [
+        { threadId: 'reused', metrics: { state: { pushWouldBlockCount: 10 } } },
+        ...Array.from({ length: 1_024 }, (_, index) => ({
+          threadId: `retired-${index}`,
+          metrics: { state: { pushWouldBlockCount: 0 } },
+        })),
+      ],
+    });
+    collector.mergeNativeSnapshot({ sampledAt: 2_000, ptySnapshots: [] });
+    collector.mergeNativeSnapshot({
+      sampledAt: 3_000,
+      ptySnapshots: [{ threadId: 'reused', metrics: { state: { pushWouldBlockCount: 11 } } }],
+    });
+
+    expect(collector.snapshot().transport.backpressureCount).toBe(10);
+  });
+
   it('treats a PTY backpressure counter reset as a zero-delta interval', () => {
     const collector = createPerformanceMetricsCollector();
     collector.mergeNativeSnapshot({
