@@ -7,6 +7,32 @@ final class PaneControlsTests: XCTestCase {
         named: WorkspaceFixtures.multiproject
     )
 
+    func testToolbarTargetPrefersTheFocusedVisiblePane() {
+        let target = PaneWorkspaceToolbarTarget.resolve(
+            primaryPaneID: "bridge-protocol",
+            secondaryPaneID: "web-home",
+            focusedPaneID: "web-home",
+            in: workspace
+        )
+
+        XCTAssertEqual(target?.paneID, "web-home")
+        XCTAssertEqual(target?.paneTitle, "homepage polish")
+        XCTAssertEqual(target?.ritualContext?.projectID, "website")
+        XCTAssertEqual(target?.ritualContext?.rituals.map(\.id), ["review-site"])
+    }
+
+    func testToolbarTargetFallsBackToThePrimaryPane() {
+        let target = PaneWorkspaceToolbarTarget.resolve(
+            primaryPaneID: "bridge-protocol",
+            secondaryPaneID: "web-home",
+            focusedPaneID: nil,
+            in: workspace
+        )
+
+        XCTAssertEqual(target?.paneID, "bridge-protocol")
+        XCTAssertEqual(target?.ritualContext?.projectID, "psyche")
+    }
+
     func testFocusedPaneUsesItsCanonicalProjectRituals() {
         let context = PaneRitualContext.resolve(
             paneID: "web-home",
@@ -32,5 +58,32 @@ final class PaneControlsTests: XCTestCase {
         XCTAssertNil(
             PaneRitualContext.resolve(paneID: "%404", in: workspace)
         )
+    }
+
+    func testRefreshFailurePresentationCallsOutThatTheRitualAlreadyLaunched() {
+        let presentation = PaneControlsErrorPresentation(
+            RitualLaunchRefreshFailure(
+                ritualName: "Review site",
+                refreshErrorDescription: WorkspaceStoreError.noControlRequests.localizedDescription
+            )
+        )
+
+        XCTAssertEqual(presentation.title, "Workspace refresh failed")
+        XCTAssertTrue(presentation.message.contains("Review site launched"), presentation.message)
+        XCTAssertTrue(
+            presentation.message.localizedCaseInsensitiveContains("avoid retrying"),
+            presentation.message
+        )
+        XCTAssertTrue(
+            presentation.message.contains(WorkspaceStoreError.noControlRequests.localizedDescription),
+            presentation.message
+        )
+    }
+
+    func testLaunchFailureKeepsTheExistingGenericErrorPresentation() {
+        let presentation = PaneControlsErrorPresentation(WorkspaceStoreError.rejected)
+
+        XCTAssertEqual(presentation.title, "That did not work")
+        XCTAssertEqual(presentation.message, WorkspaceStoreError.rejected.localizedDescription)
     }
 }

@@ -64,11 +64,11 @@ struct PaneWorkspaceView: View {
         .navigationTitle(primaryPane?.title ?? primaryPane?.id ?? "Pane")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if let pane = primaryPane {
+            if let target = toolbarTarget {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         inspectionTarget = InspectionTarget(
-                            paneID: focusedVisiblePane?.id ?? pane.id
+                            paneID: target.paneID
                         )
                     } label: {
                         Label("Browse files", systemImage: "folder")
@@ -78,12 +78,9 @@ struct PaneWorkspaceView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     PaneControlsMenu(
-                        paneID: pane.id,
-                        paneTitle: pane.title ?? pane.id,
-                        ritualContext: PaneRitualContext.resolve(
-                            paneID: pane.id,
-                            in: store.workspace
-                        )
+                        paneID: target.paneID,
+                        paneTitle: target.paneTitle,
+                        ritualContext: target.ritualContext
                     )
                 }
             }
@@ -202,6 +199,15 @@ struct PaneWorkspaceView: View {
         return [primaryPane, secondaryPane]
             .compactMap { $0 }
             .first { $0.id == focusedPaneID }
+    }
+
+    private var toolbarTarget: PaneWorkspaceToolbarTarget? {
+        PaneWorkspaceToolbarTarget.resolve(
+            primaryPaneID: primaryPane?.id,
+            secondaryPaneID: secondaryPane?.id,
+            focusedPaneID: focusedVisiblePane?.id,
+            in: store.workspace
+        )
     }
 
     private func pane(_ paneID: String?) -> WorkspacePaneSnapshot? {

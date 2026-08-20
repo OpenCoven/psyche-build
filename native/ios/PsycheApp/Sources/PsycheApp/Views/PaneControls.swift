@@ -1,6 +1,10 @@
 import PsycheCore
 import SwiftUI
 
+protocol PaneControlsAlertError: LocalizedError {
+    var alertTitle: String { get }
+}
+
 struct PaneRitualContext: Equatable {
     let projectID: String
     let projectTitle: String
@@ -10,19 +14,40 @@ struct PaneRitualContext: Equatable {
         paneID: String,
         in workspace: WorkspaceSnapshot?
     ) -> PaneRitualContext? {
-        guard let project = workspace?.projects.first(where: { project in
-            project.projectPanes.contains { $0.id == paneID }
-                || project.worktrees.contains { worktree in
-                    worktree.panes.contains { $0.id == paneID }
-                }
-        }) else {
+        guard let match = paneProjectMatch(paneID: paneID, in: workspace) else {
             return nil
         }
         return PaneRitualContext(
-            projectID: project.id,
-            projectTitle: project.title,
-            rituals: project.rituals
+            projectID: match.project.id,
+            projectTitle: match.project.title,
+            rituals: match.project.rituals
         )
+    }
+}
+
+struct PaneControlsErrorPresentation: Equatable {
+    let title: String
+    let message: String
+
+    init(_ error: any Error) {
+        if let alertError = error as? any PaneControlsAlertError {
+            title = alertError.alertTitle
+            message = alertError.errorDescription ?? error.localizedDescription
+        } else {
+            title = "That did not work"
+            message = error.localizedDescription
+        }
+    }
+}
+
+struct RitualLaunchRefreshFailure: PaneControlsAlertError, Equatable {
+    let ritualName: String
+    let refreshErrorDescription: String
+
+    var alertTitle: String { "Workspace refresh failed" }
+
+    var errorDescription: String? {
+        "\(ritualName) launched, but the workspace refresh failed. The ritual may already be running, so avoid retrying it until the workspace updates. \(refreshErrorDescription)"
     }
 }
 
@@ -40,7 +65,7 @@ struct PaneControlsMenu: View {
     @State private var isConfirmingStop = false
     @State private var isWorking = false
     @State private var renameText = ""
-    @State private var errorMessage: String?
+    @State private var errorPresentation: PaneControlsErrorPresentation?
 
     var body: some View {
         Menu {
@@ -108,15 +133,15 @@ struct PaneControlsMenu: View {
             ))
         }
         .alert(
-            "That did not work",
+            errorPresentation?.title ?? "That did not work",
             isPresented: Binding(
-                get: { errorMessage != nil },
-                set: { if !$0 { errorMessage = nil } }
+                get: { errorPresentation != nil },
+                set: { if !$0 { errorPresentation = nil } }
             )
         ) {
-            Button("OK", role: .cancel) { errorMessage = nil }
+            Button("OK", role: .cancel) { errorPresentation = nil }
         } message: {
-            Text(errorMessage ?? "")
+            Text(errorPresentation?.message ?? "")
         }
     }
 
@@ -133,7 +158,14 @@ struct PaneControlsMenu: View {
     private func launch(_ ritual: WorkspaceRitualSnapshot, inProject projectID: String) {
         run {
             try await store.launchRitual(ritual.id, inProject: projectID)
-            _ = try await store.requestFullSnapshot()
+            do {
+                _ = try await store.requestFullSnapshot()
+            } catch {
+                throw RitualLaunchRefreshFailure(
+                    ritualName: ritual.displayName,
+                    refreshErrorDescription: error.localizedDescription
+                )
+            }
         }
     }
 
@@ -145,9 +177,63 @@ struct PaneControlsMenu: View {
             do {
                 try await operation()
             } catch {
-                errorMessage = error.localizedDescription
+                errorPresentation = PaneControlsErrorPresentation(error)
             }
             isWorking = false
         }
     }
+}
+
+struct PaneWorkspaceToolbarTarget: Equatable {
+    let paneID: String
+    let paneTitle: String
+    let ritualContext: PaneRitualContext?
+
+    static func resolve(
+        primaryPaneID: String?,
+        secondaryPaneID: String?,
+        focusedPaneID: String?,
+        in workspace: WorkspaceSnapshot?
+    ) -> PaneWorkspaceToolbarTarget? {
+        let visiblePaneIDs = Set([primaryPaneID, secondaryPaneID].compactMap { $0 })
+        let targetPaneID = focusedPaneID.flatMap { visiblePaneIDs.contains($0) ? $0 : nil }
+            ?? primaryPaneID
+        guard let targetPaneID,
+              let match = paneProjectMatch(paneID: targetPaneID, in: workspace)
+        else {
+            return nil
+        }
+        return PaneWorkspaceToolbarTarget(
+            paneID: match.pane.id,
+            paneTitle: match.pane.title ?? match.pane.id,
+            ritualContext: PaneRitualContext(
+                projectID: match.project.id,
+                projectTitle: match.project.title,
+                rituals: match.project.rituals
+            )
+        )
+    }
+}
+
+private struct PaneProjectMatch {
+    let project: WorkspaceProjectSnapshot
+    let pane: WorkspacePaneSnapshot
+}
+
+private func paneProjectMatch(
+    paneID: String,
+    in workspace: WorkspaceSnapshot?
+) -> PaneProjectMatch? {
+    guard let workspace else { return nil }
+    for project in workspace.projects {
+        if let pane = project.projectPanes.first(where: { $0.id == paneID }) {
+            return PaneProjectMatch(project: project, pane: pane)
+        }
+        for worktree in project.worktrees {
+            if let pane = worktree.panes.first(where: { $0.id == paneID }) {
+                return PaneProjectMatch(project: project, pane: pane)
+            }
+        }
+    }
+    return nil
 }

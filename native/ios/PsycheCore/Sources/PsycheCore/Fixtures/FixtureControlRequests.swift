@@ -79,6 +79,40 @@ public actor FixtureControlRequests: ControlRequesting {
                 diff: "@@ -1 +1 @@\n-old\n+new"
             ))
 
+        case .workspaceSnapshot:
+            return .workspaceSnapshot(MobileWorkspaceSnapshotResult(
+                requestID: requestID,
+                sequence: sequence,
+                workspace: workspace
+            ))
+
+        case .launchRitual(let launch):
+            guard let project = workspace.projects.first(where: { $0.id == launch.projectID }),
+                  let ritual = project.rituals.first(where: { $0.id == launch.ritualID })
+            else {
+                return .ack(ControlAckResponse(requestID: requestID, ok: false))
+            }
+
+            apply { workspace in
+                Self.insertPane(
+                    WorkspacePaneSnapshot(
+                        id: "ritual-\(ritual.id)",
+                        cwd: project.root,
+                        title: ritual.displayName,
+                        kind: "agent",
+                        agent: "Coven",
+                        status: "starting",
+                        needsAttention: false,
+                        lastActivity: nil,
+                        recoverability: "recoverable"
+                    ),
+                    into: workspace,
+                    projectID: project.id,
+                    cwd: project.root
+                )
+            }
+            return .ack(ControlAckResponse(requestID: requestID, ok: true))
+
         case .spawnPane(let spawn):
             let paneID = "pane-\(nextID)"
             apply { workspace in
@@ -172,11 +206,15 @@ public actor FixtureControlRequests: ControlRequesting {
                 let worktrees = project.worktrees.map { worktree -> WorkspaceWorktreeSnapshot in
                     guard worktree.path == cwd, !inserted else { return worktree }
                     inserted = true
-                    return worktree.replacingPanes(worktree.panes + [pane])
+                    return worktree.replacingPanes(
+                        worktree.panes.filter { $0.id != pane.id } + [pane]
+                    )
                 }
                 return project.replacing(
                     worktrees: worktrees,
-                    projectPanes: inserted ? project.projectPanes : project.projectPanes + [pane]
+                    projectPanes: inserted
+                        ? project.projectPanes.filter { $0.id != pane.id }
+                        : project.projectPanes.filter { $0.id != pane.id } + [pane]
                 )
             }
         )

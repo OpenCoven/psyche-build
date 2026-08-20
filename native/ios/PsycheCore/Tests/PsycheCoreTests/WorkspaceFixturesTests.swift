@@ -84,6 +84,15 @@ final class WorkspaceFixturesTests: XCTestCase {
         XCTAssertTrue(infra?.projectPanes.isEmpty == true)
     }
 
+    func testFixturePublishesWebsiteRituals() {
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject)
+
+        XCTAssertEqual(
+            workspace.projects.first { $0.id == "website" }?.rituals.map(\.id),
+            ["review-site"]
+        )
+    }
+
     func testFixtureSpansMultipleProjectsAndWorktrees() {
         let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject)
 
