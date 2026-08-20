@@ -253,6 +253,14 @@ final class WireProtocolContractTests: XCTestCase {
 
         XCTAssertEqual(snapshot.type, "workspace.snapshot.result")
         XCTAssertEqual(snapshot.workspace.revision, 42)
+        XCTAssertEqual(
+            snapshot.workspace.projects.first?.rituals.first,
+            WorkspaceRitualSnapshot(
+                id: "release-checklist",
+                displayName: "Release checklist",
+                description: "Prepare a release safely."
+            )
+        )
         XCTAssertEqual(snapshot.workspace.projects.first?.worktrees.count, 2)
         XCTAssertEqual(
             snapshot.workspace.projects.first?.worktrees.first?.panes.first?.lastActivity,
@@ -266,6 +274,24 @@ final class WireProtocolContractTests: XCTestCase {
             try comparableJSON(JSONEncoder().encode(snapshot)),
             try comparableJSON(data)
         )
+    }
+
+    func testWorkspaceProjectSnapshotDefaultsMissingRitualsToEmpty() throws {
+        let data = Data("""
+        {
+          "id": "project-1",
+          "root": "/repo",
+          "title": "psyche-build",
+          "worktrees": [],
+          "projectPanes": [],
+          "runningCount": 0,
+          "attentionCount": 0
+        }
+        """.utf8)
+
+        let project = try JSONDecoder().decode(WorkspaceProjectSnapshot.self, from: data)
+
+        XCTAssertEqual(project.rituals, [])
     }
 
     // MARK: - Spot checks the host side also asserts

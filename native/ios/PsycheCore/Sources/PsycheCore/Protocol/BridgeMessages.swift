@@ -110,14 +110,63 @@ public struct WorkspaceSnapshot: Codable, Sendable, Equatable {
     public let projects: [WorkspaceProjectSnapshot]
 }
 
+public struct WorkspaceRitualSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let displayName: String
+    public let description: String?
+
+    public init(id: String, displayName: String, description: String? = nil) {
+        self.id = id
+        self.displayName = displayName
+        self.description = description
+    }
+}
+
 public struct WorkspaceProjectSnapshot: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let root: String
     public let title: String
+    public let rituals: [WorkspaceRitualSnapshot]
     public let worktrees: [WorkspaceWorktreeSnapshot]
     public let projectPanes: [WorkspacePaneSnapshot]
     public let runningCount: Int
     public let attentionCount: Int
+
+    public init(
+        id: String,
+        root: String,
+        title: String,
+        rituals: [WorkspaceRitualSnapshot] = [],
+        worktrees: [WorkspaceWorktreeSnapshot],
+        projectPanes: [WorkspacePaneSnapshot],
+        runningCount: Int,
+        attentionCount: Int
+    ) {
+        self.id = id
+        self.root = root
+        self.title = title
+        self.rituals = rituals
+        self.worktrees = worktrees
+        self.projectPanes = projectPanes
+        self.runningCount = runningCount
+        self.attentionCount = attentionCount
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, root, title, rituals, worktrees, projectPanes, runningCount, attentionCount
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        root = try container.decode(String.self, forKey: .root)
+        title = try container.decode(String.self, forKey: .title)
+        rituals = try container.decodeIfPresent([WorkspaceRitualSnapshot].self, forKey: .rituals) ?? []
+        worktrees = try container.decode([WorkspaceWorktreeSnapshot].self, forKey: .worktrees)
+        projectPanes = try container.decode([WorkspacePaneSnapshot].self, forKey: .projectPanes)
+        runningCount = try container.decode(Int.self, forKey: .runningCount)
+        attentionCount = try container.decode(Int.self, forKey: .attentionCount)
+    }
 }
 
 public struct WorkspaceWorktreeSnapshot: Codable, Sendable, Equatable, Identifiable {

@@ -248,6 +248,13 @@
                 "title": "orphaned pane"
               }
             ],
+            "rituals": [
+              {
+                "description": "Prepare a release safely.",
+                "displayName": "Release checklist",
+                "id": "release-checklist"
+              }
+            ],
             "root": "/repo",
             "runningCount": 1,
             "title": "psyche-build",
@@ -342,6 +349,13 @@
                 "recoverability": "missing-worktree",
                 "status": "exited",
                 "title": "orphaned pane"
+              }
+            ],
+            "rituals": [
+              {
+                "description": "Prepare a release safely.",
+                "displayName": "Release checklist",
+                "id": "release-checklist"
               }
             ],
             "root": "/repo",
