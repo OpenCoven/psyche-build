@@ -85,7 +85,8 @@
   }
   if (!window.PsycheRuntime ||
       typeof window.PsycheRuntime.createTerminalPaneController !== "function" ||
-      typeof window.PsycheRuntime.FrameScheduler !== "function") {
+      typeof window.PsycheRuntime.FrameScheduler !== "function" ||
+      typeof window.PsycheRuntime.createTauriStressHarness !== "function") {
     showBootError("PTY runtime bundle missing. Run `pnpm --dir native/desktop/psyche-build-tauri build:web`.");
     return;
   }
@@ -473,11 +474,11 @@
   function filesPaneKey(projectId, workspaceRoot) {
     return paneLayoutKey(projectId, workspaceRoot);
   }
-  function ensureFilesPane(project, workspaceRoot) {
+  function ensureFilesPane(project, workspaceRoot, options) {
     var key = filesPaneKey(project.id, workspaceRoot);
     var existing = filesPanes.get(key);
     if (existing) {
-      if (existing.hidden) reopenFilesPane(existing);
+      if (existing.hidden) reopenFilesPane(existing, options);
       return existing;
     }
     var filesPane = {
@@ -492,7 +493,7 @@
       host: null,
     };
     filesPanes.set(key, filesPane);
-    commitPanePlacement(prepareFilesPanePlacement(filesPane));
+    commitPanePlacement(prepareFilesPanePlacement(filesPane, options));
     mountFilesPane(filesPane);
     return filesPane;
   }
@@ -612,7 +613,7 @@
       height: Math.max(0, rect.height - verticalPadding),
     };
   }
-  function preparePanePlacement(threadId, projectId, worktreePath) {
+  function preparePanePlacement(threadId, projectId, worktreePath, options) {
     var key = paneLayoutKey(projectId, worktreePath);
     var current = paneLayouts.get(key) || null;
     var leaf = PsychePanes.createLeaf(nextPaneId("leaf"), threadId);
@@ -630,10 +631,11 @@
           nextPaneId("split")
         )
       : leaf;
-    if (!PsychePanes.canFit(root, measuredTerminalHost(), PANE_MINIMUMS)) return null;
+    if ((!options || options.allowOverflow !== true) &&
+        !PsychePanes.canFit(root, measuredTerminalHost(), PANE_MINIMUMS)) return null;
     return { key: key, value: { root: root, focusedLeafId: leaf.id } };
   }
-  function prepareFilesPanePlacement(filesPane) {
+  function prepareFilesPanePlacement(filesPane, options) {
     var key = filesPaneKey(filesPane.projectId, filesPane.workspaceRoot);
     var current = paneLayouts.get(key) || null;
     var filesLeaf = PsychePanes.createLeaf(filesPane.id, filesPane.id);
@@ -658,11 +660,13 @@
       spanRoot: null,
       spanSignature: null,
     });
-    value.maximizedLeafId = PsychePanes.canFit(
-      proposedRoot,
-      measuredTerminalHost(),
-      PANE_MINIMUMS
-    ) ? null : filesLeaf.id;
+    value.maximizedLeafId = options && options.allowOverflow === true
+      ? null
+      : (PsychePanes.canFit(
+          proposedRoot,
+          measuredTerminalHost(),
+          PANE_MINIMUMS
+        ) ? null : filesLeaf.id);
     return { key: key, value: value };
   }
   function commitPanePlacement(placement) {
@@ -2332,7 +2336,9 @@
     var worktreePath = opts.worktreePath || launch.cwd || launch.projectRoot ||
       (project && activeWorkspaceRoot(project));
     var projectId = project ? project.id : null;
-    var placement = preparePanePlacement(id, projectId, worktreePath);
+    var placement = preparePanePlacement(id, projectId, worktreePath, {
+      allowOverflow: opts.allowOverflow === true,
+    });
     if (!placement) {
       setStatus("Not enough space for another terminal pane", "warn");
       return null;
@@ -2373,6 +2379,7 @@
       startedAt: Date.now(),
       finishedAt: null,
       exitCode: null,
+      diagnosticsFixture: opts.diagnosticsFixture || null,
     };
     if (isPersistentThread(thread)) {
       try {
@@ -2386,13 +2393,16 @@
     state.threads.push(thread);
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountTerminal(thread);
-    focusThread(id, opts.focusTerminal === false ? { focusTerminal: false } : undefined);
+    if (opts.focus !== false) {
+      focusThread(id, opts.focusTerminal === false ? { focusTerminal: false } : undefined);
+    }
     refreshSidebar();
     refreshTabs();
     // The controller's initial keyed frame fits before this later spawn frame,
     // so the PTY starts at the visible xterm size instead of 80x24.
     requestAnimationFrame(function () {
       if (!isLiveThread(thread)) return;
+      if (opts.deferPtyStart === true) return;
       if (isPersistentThread(thread)) attachThreadClient(thread);
       else spawnPty(thread);
     });
@@ -2427,7 +2437,9 @@
       return !isCurrent() || browserPaneIsClosing(existing) ? null : existing;
     }
     var id = makeThreadId();
-    var placement = preparePanePlacement(id, project.id, worktreePath);
+    var placement = preparePanePlacement(id, project.id, worktreePath, {
+      allowOverflow: options.allowOverflow === true,
+    });
     if (!placement) {
       setStatus("Not enough space for another pane", "warn");
       return null;
@@ -5213,8 +5225,9 @@
     var nextThreadId = detachThreadPane(thread);
     thread.terminalController = null;
     thread.term = null;
+    var ptyStopConfirmed = true;
     if (thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
-      await stopThreadPty(thread);
+      ptyStopConfirmed = await stopThreadPty(thread);
     }
     var closingProjectId = thread.projectId;
     state.threads = state.threads.filter(function (t) { return t.id !== id; });
@@ -5258,7 +5271,7 @@
     refreshSidebar();
     refreshTabs();
     await saveWorkspaceNow();
-    return true;
+    return !(options && options.requirePtyStop === true) || ptyStopConfirmed;
   }
 
   function hideThread(id) {
@@ -5321,12 +5334,12 @@
     return true;
   }
 
-  function reopenFilesPane(filesPane) {
+  function reopenFilesPane(filesPane, options) {
     if (!filesPane || !filesPane.hidden) return false;
     var project = findProject(filesPane.projectId);
     if (!project || state.activeProjectId !== project.id ||
         activeWorkspaceRoot(project) !== filesPane.workspaceRoot) return false;
-    var placement = prepareFilesPanePlacement(filesPane);
+    var placement = prepareFilesPanePlacement(filesPane, options);
     if (!placement) {
       setStatus("Not enough space to reopen the Files pane", "warn");
       return false;
@@ -5348,13 +5361,18 @@
     return hideThread(surface.id);
   }
 
-  function reopenThread(id) {
+  function reopenThread(id, options) {
     var thread = findThread(id);
     if (!thread || !thread.hidden) return false;
     var project = findProject(thread.projectId);
     if (state.activeProjectId !== thread.projectId || !project ||
         activeWorkspaceRoot(project) !== thread.worktreePath) return false;
-    var placement = preparePanePlacement(thread.id, thread.projectId, thread.worktreePath);
+    var placement = preparePanePlacement(
+      thread.id,
+      thread.projectId,
+      thread.worktreePath,
+      { allowOverflow: !!thread.diagnosticsFixture || !!(options && options.allowOverflow) }
+    );
     if (!placement) {
       setStatus("Not enough space to reopen this terminal pane", "warn");
       return false;
@@ -8930,7 +8948,8 @@
   }
 
   function isEditableFile(file) {
-    return !!file && !file.loading && !file.error && !file.binary && !file.truncated;
+    return !!file && !file.loading && !file.error && !file.binary && !file.truncated &&
+      file.diagnosticsFixture !== true;
   }
 
   function discardFile(file) {
@@ -9001,6 +9020,7 @@
 
   function readOnlyReason(file) {
     if (file.loading) return "Loading…";
+    if (file.diagnosticsFixture) return "Read-only — generated diagnostics document.";
     if (file.error) return "Read-only — " + file.error;
     if (file.binary) return "Read-only — binary or invalid UTF-8 file.";
     if (file.truncated) return "Read-only — file exceeds the 512 KiB preview limit.";
@@ -11534,7 +11554,8 @@
     var tab = browser.tabs.find(function (t) { return t.id === browser.activeTabId; });
     return tab || browser.tabs[0] || null;
   }
-  function createBrowserTab(project, url, activate, worktreePath) {
+  function createBrowserTab(project, url, activate, worktreePath, options) {
+    options = options || {};
     project = project || activeProject();
     worktreePath = worktreePath || activeWorkspaceRoot(project);
     var pane = project && findBrowserPane(project.id, worktreePath);
@@ -11542,9 +11563,9 @@
     var browser = ensureBrowserModel(project, worktreePath);
     if (!browser) return null;
     var maxTabs = Math.min(settings.maxBrowserTabsPerProject, HARD_MAX_BROWSER_TABS_PER_PROJECT);
-    if (browser.tabs.length >= maxTabs) { setStatus("browser tab limit reached (" + maxTabs + "/project)", "warn"); return null; }
+    if (!options.allowOverflow && browser.tabs.length >= maxTabs) { setStatus("browser tab limit reached (" + maxTabs + "/project)", "warn"); return null; }
     var normalised = url && url !== "about:blank" ? normaliseUrl(url) : "about:blank";
-    var tab = { id: makeBrowserTabId(), url: normalised || "about:blank", title: tabTitle(normalised), history: normalised && normalised !== "about:blank" ? [normalised] : [], historyIndex: normalised && normalised !== "about:blank" ? 0 : -1, created: false, loading: false };
+    var tab = { id: makeBrowserTabId(), url: normalised || "about:blank", title: tabTitle(normalised), history: normalised && normalised !== "about:blank" ? [normalised] : [], historyIndex: normalised && normalised !== "about:blank" ? 0 : -1, created: false, loading: false, diagnosticsFixture: options.diagnosticsFixture === true };
     browser.tabs.push(tab);
     if (activate || !browser.activeTabId) { browser.activeTabId = tab.id; markActiveSurface("browser"); }
     renderBrowserTabs(); saveWorkspaceSoon(); return tab;
@@ -14094,6 +14115,570 @@
     };
   }
 
+  var runtimeStressHarness = null;
+  var diagnosticsStressContext = null;
+  var activeDiagnosticsBrowserFixture = null;
+  var diagnosticsFileCounter = 0;
+
+  function diagnosticsCleanupFailure(primaryError, cleanupErrors, message) {
+    if (!cleanupErrors.length) return primaryError;
+    return new AggregateError(
+      [primaryError].concat(cleanupErrors),
+      primaryError instanceof Error ? primaryError.message : message,
+      { cause: primaryError }
+    );
+  }
+
+  function diagnosticsStressProject() {
+    var context = diagnosticsStressContext;
+    var project = context && findProject(context.projectId);
+    if (!context || !project || activeWorkspaceRoot(project) !== context.workspaceRoot) {
+      throw new Error("render diagnostics workspace changed");
+    }
+    return project;
+  }
+
+  async function prepareDiagnosticsStressRun() {
+    if (diagnosticsStressContext) {
+      throw new Error("render diagnostics are already prepared");
+    }
+    var project = activeProject();
+    if (!project) throw new Error("render diagnostics require an active project");
+    var workspaceRoot = activeWorkspaceRoot(project);
+    if (!workspaceRoot || !(await showTerminalView())) {
+      throw new Error("render diagnostics require an active workspace");
+    }
+    var layoutKey = paneLayoutKey(project.id, workspaceRoot);
+    var originalLayout = paneLayouts.get(layoutKey) || null;
+    var originalThreadId = state.activeThreadId;
+    var originalFileId = state.activeFileId;
+    var originalSidebarWidth = document.documentElement.style.getPropertyValue("--sidebar-w");
+    diagnosticsStressContext = {
+      projectId: project.id,
+      workspaceRoot: workspaceRoot,
+      layoutKey: layoutKey,
+    };
+    var disposed = false;
+    return {
+      id: "diagnostics-run-scope",
+      async dispose() {
+        if (disposed) return;
+        disposed = true;
+        activeDiagnosticsBrowserFixture = null;
+        diagnosticsStressContext = null;
+        if (originalLayout) paneLayouts.set(layoutKey, originalLayout);
+        else paneLayouts.delete(layoutKey);
+        if (originalSidebarWidth) {
+          document.documentElement.style.setProperty("--sidebar-w", originalSidebarWidth);
+        } else {
+          document.documentElement.style.removeProperty("--sidebar-w");
+        }
+        state.activeFileId = null;
+        state.activeThreadId = null;
+        renderPaneWorkspace({ preserveTerminalFocus: false });
+        var originalFile = originalFileId && findOpenFile(originalFileId);
+        var originalThread = originalThreadId && findThread(originalThreadId);
+        if (originalFile) {
+          activateFileTabNow(originalFile.id);
+          restoreFileEditorFocus();
+        } else if (originalThread && !originalThread.hidden) {
+          await focusThread(originalThread.id);
+        } else {
+          refreshSidebar();
+          refreshTabs();
+        }
+        scheduleTerminalPaneFits();
+        scheduleBrowserBounds();
+        saveWorkspaceSoon();
+      },
+    };
+  }
+
+  async function startDiagnosticsFixture(thread, fixture) {
+    var controller = ensureThreadPtyController(thread);
+    if (!controller) throw new Error("diagnostics terminal controller is unavailable");
+    var attempt = typeof controller.prepareForPtyStart === "function"
+      ? controller.prepareForPtyStart()
+      : null;
+    thread.startInFlight = true;
+    thread.stopRequested = false;
+    thread.exitDuringStart = false;
+    thread.status = "starting";
+    thread.spawning = true;
+    syncThreadPaneMetadata(thread);
+    try {
+      await invoke("diagnostics_spawn_fixture", {
+        threadId: thread.id,
+        thread_id: thread.id,
+        fixture: fixture,
+      });
+      thread.startInFlight = false;
+      if (!isLiveThread(thread)) {
+        await stopThreadPty(thread);
+        throw new Error("diagnostics terminal was removed during startup");
+      }
+      if (thread.exitDuringStart) {
+        thread.exitDuringStart = false;
+        throw new Error("diagnostics terminal exited during startup");
+      }
+      thread.ptyStarted = true;
+      thread.status = "running";
+      thread.spawning = false;
+      if (typeof controller.markPtyStarted === "function") {
+        await controller.markPtyStarted(attempt);
+      }
+      return true;
+    } catch (error) {
+      thread.startInFlight = false;
+      thread.ptyStarted = false;
+      thread.spawning = false;
+      if (typeof controller.restoreAfterFailedPtyStart === "function") {
+        controller.restoreAfterFailedPtyStart(attempt);
+      }
+      throw error;
+    } finally {
+      syncThreadPaneMetadata(thread);
+      refreshSidebar();
+      refreshTabs();
+    }
+  }
+
+  async function createDiagnosticsTerminalFixture(index, fixture) {
+    var project = diagnosticsStressProject();
+    var context = diagnosticsStressContext;
+    var thread = await createThread({
+      project: project,
+      worktreePath: context.workspaceRoot,
+      name: "render " + fixture + " " + (index + 1),
+      kind: "shell",
+      command: null,
+      args: [],
+      launchKind: null,
+      projectRoot: project.root,
+      cwd: context.workspaceRoot,
+      focusTerminal: false,
+      focus: false,
+      deferPtyStart: true,
+      allowOverflow: true,
+      diagnosticsFixture: fixture,
+    });
+    if (!thread) throw new Error("failed to allocate diagnostics terminal");
+    try {
+      await startDiagnosticsFixture(thread, fixture);
+    } catch (error) {
+      var cleanupErrors = [];
+      try {
+        if (findThread(thread.id) && !(await closeThread(thread.id, {
+          focus: false,
+          preserveTerminalFocus: false,
+          requirePtyStop: true,
+        }))) {
+          throw new Error("diagnostics terminal close was not confirmed");
+        }
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      throw diagnosticsCleanupFailure(
+        error,
+        cleanupErrors,
+        "failed to create diagnostics terminal"
+      );
+    }
+    var disposed = false;
+    return {
+      id: thread.id,
+      async dispose() {
+        if (disposed) return;
+        disposed = true;
+        if (!findThread(thread.id)) return;
+        if (!(await closeThread(thread.id, {
+          focus: false,
+          preserveTerminalFocus: false,
+          requirePtyStop: true,
+        }))) {
+          throw new Error("failed to dispose diagnostics terminal " + thread.id);
+        }
+      },
+    };
+  }
+
+  async function createDiagnosticsEditorFixture(documentFixture) {
+    var project = diagnosticsStressProject();
+    var context = diagnosticsStressContext;
+    var key = filesPaneKey(project.id, context.workspaceRoot);
+    var existingPane = filesPanes.get(key) || null;
+    var existingPaneWasHidden = !!(existingPane && existingPane.hidden);
+    var filesPane = ensureFilesPane(project, context.workspaceRoot, {
+      allowOverflow: true,
+    });
+    if (filesPane.hidden) {
+      throw new Error("failed to restore diagnostics editor pane");
+    }
+    var previousActiveFileId = filesPane.activeFileId;
+    diagnosticsFileCounter += 1;
+    var file = {
+      id: "diagnostics-file-" + diagnosticsFileCounter,
+      path: documentFixture.name,
+      rel: documentFixture.name,
+      name: documentFixture.name,
+      projectId: project.id,
+      workspaceRoot: context.workspaceRoot,
+      text: documentFixture.text,
+      originalText: documentFixture.text,
+      dirty: false,
+      saving: false,
+      savePromise: null,
+      languageId: "plain",
+      cursor: { line: 1, column: 1 },
+      selection: { anchor: 0, head: 0 },
+      truncated: false,
+      binary: false,
+      size: documentFixture.text.length,
+      error: null,
+      saveError: null,
+      saveState: "clean",
+      loading: false,
+      diagnosticsFixture: true,
+    };
+    try {
+      state.openFiles.push(file);
+      filesPane.activeFileId = file.id;
+      if (!activateFileTabNow(file.id)) {
+        throw new Error("failed to activate diagnostics editor");
+      }
+      renderFileView({ reload: true });
+    } catch (error) {
+      state.openFiles = state.openFiles.filter(function (candidate) {
+        return candidate !== file;
+      });
+      filesPane.activeFileId = previousActiveFileId;
+      var cleanupErrors = [];
+      try {
+        if (state.activeFileId === file.id) {
+          state.activeFileId = null;
+          if (previousActiveFileId && findOpenFile(previousActiveFileId)) {
+            activateFileTabNow(previousActiveFileId);
+          }
+        }
+        if (!existingPane && filesPanes.get(key) === filesPane) {
+          removeFilesPaneNow(filesPane);
+        } else if (existingPaneWasHidden && !filesPane.hidden) {
+          hideFilesPane(filesPane);
+        }
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      throw diagnosticsCleanupFailure(
+        error,
+        cleanupErrors,
+        "failed to create diagnostics editor"
+      );
+    }
+    var disposed = false;
+    return {
+      id: filesPane.id,
+      async dispose() {
+        if (disposed) return;
+        disposed = true;
+        state.openFiles = state.openFiles.filter(function (candidate) {
+          return candidate !== file;
+        });
+        var remaining = filesForPane(filesPane);
+        var previous = previousActiveFileId && findOpenFile(previousActiveFileId);
+        var next = previous || remaining[0] || null;
+        filesPane.activeFileId = next ? next.id : null;
+        if (state.activeFileId === file.id) {
+          state.activeFileId = null;
+          if (next) {
+            activateFileTabNow(next.id);
+          } else if (fileViewEl) {
+            fileViewEl.hidden = true;
+          }
+        }
+        if (!existingPane && remaining.length === 0 && filesPanes.get(key) === filesPane) {
+          removeFilesPaneNow(filesPane);
+        } else if (existingPaneWasHidden && !filesPane.hidden) {
+          hideFilesPane(filesPane);
+        } else {
+          refreshTabs();
+          renderPaneWorkspace({ preserveTerminalFocus: false });
+        }
+      },
+    };
+  }
+
+  async function createDiagnosticsBrowserFixture(page) {
+    var project = diagnosticsStressProject();
+    var context = diagnosticsStressContext;
+    var existingPane = findBrowserPane(project.id, context.workspaceRoot);
+    var existingPaneWasHidden = !!(existingPane && existingPane.hidden);
+    if (existingPane && existingPane.hidden &&
+        !reopenThread(existingPane.id, { allowOverflow: true })) {
+      throw new Error("failed to restore diagnostics browser pane");
+    }
+    var browser = ensureBrowserModel(project, context.workspaceRoot);
+    var previousActiveTabId = browser.activeTabId;
+    var pane = null;
+    var tab = null;
+    try {
+      pane = await createBrowserPane(project, {
+        worktreePath: context.workspaceRoot,
+        allowOverflow: true,
+      });
+      if (!pane) throw new Error("failed to allocate diagnostics browser pane");
+      tab = createBrowserTab(
+        project,
+        page.url,
+        true,
+        context.workspaceRoot,
+        { allowOverflow: true, diagnosticsFixture: true }
+      );
+      if (!tab) throw new Error("failed to allocate diagnostics browser tab");
+      var navigated = await navigateBrowserForContext(page.url, {
+        project: project,
+        projectId: project.id,
+        worktreePath: context.workspaceRoot,
+        tabId: tab.id,
+      });
+      if (!navigated) throw new Error("failed to navigate diagnostics browser");
+      await invoke("browser_eval", {
+        label: browserLabelForTab(project, tab),
+        script: "document.open();document.write(" + JSON.stringify(page.html) +
+          ");document.close();",
+      });
+      tab.title = page.title;
+      renderBrowserTabs();
+    } catch (error) {
+      var cleanupErrors = [];
+      try {
+        if (tab && browser.tabs.indexOf(tab) !== -1 &&
+            !(await closeBrowserTab(project, tab.id))) {
+          throw new Error("diagnostics browser tab close was not confirmed");
+        }
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      var setupPrevious = previousActiveTabId && browser.tabs.find(function (candidate) {
+        return candidate.id === previousActiveTabId;
+      });
+      if (setupPrevious) {
+        browser.activeTabId = setupPrevious.id;
+        renderBrowserTabs();
+      }
+      try {
+        if (!existingPane && pane && findThread(pane.id) &&
+            !(await closeBrowserPane(pane))) {
+          throw new Error("diagnostics browser pane close was not confirmed");
+        }
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      try {
+        var setupPane = pane || existingPane;
+        if (existingPaneWasHidden && setupPane && !setupPane.hidden &&
+            !hideThread(setupPane.id)) {
+          throw new Error("diagnostics browser pane hide was not confirmed");
+        }
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      throw diagnosticsCleanupFailure(
+        error,
+        cleanupErrors,
+        "failed to create diagnostics browser"
+      );
+    }
+    var fixture = {
+      project: project,
+      worktreePath: context.workspaceRoot,
+      pane: pane,
+      browser: browser,
+      tab: tab,
+      page: page,
+    };
+    activeDiagnosticsBrowserFixture = fixture;
+    var disposed = false;
+    return {
+      id: pane.id,
+      async dispose() {
+        if (disposed) return;
+        disposed = true;
+        if (activeDiagnosticsBrowserFixture === fixture) {
+          activeDiagnosticsBrowserFixture = null;
+        }
+        var errors = [];
+        if (browser.tabs.indexOf(tab) !== -1) {
+          try {
+            if (!(await closeBrowserTab(project, tab.id))) {
+              throw new Error("diagnostics browser tab close was not confirmed");
+            }
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        var previous = previousActiveTabId && browser.tabs.find(function (candidate) {
+          return candidate.id === previousActiveTabId;
+        });
+        if (previous) {
+          browser.activeTabId = previous.id;
+          try {
+            await activateBrowserTab(project, previous.id);
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        if (!existingPane && findThread(pane.id)) {
+          try {
+            if (!(await closeBrowserPane(pane))) {
+              throw new Error("diagnostics browser pane close was not confirmed");
+            }
+          } catch (error) {
+            errors.push(error);
+          }
+        } else if (existingPaneWasHidden && !pane.hidden) {
+          try {
+            if (!hideThread(pane.id)) {
+              throw new Error("diagnostics browser pane hide was not confirmed");
+            }
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        if (errors.length) {
+          throw new AggregateError(errors, "failed to dispose diagnostics browser");
+        }
+      },
+    };
+  }
+
+  async function focusDiagnosticsStressSurface(id) {
+    var surface = canvasSurfaceById(id);
+    if (!surface) throw new Error("diagnostics surface is unavailable: " + id);
+    if (surface.kind === "files") {
+      if (!focusCanvasSurface(surface)) {
+        throw new Error("failed to focus diagnostics editor");
+      }
+      fileEditor.focus();
+      return;
+    }
+    if (surface.hidden) return;
+    if (!(await focusThread(surface.id, {
+      focusTerminal: surface.kind !== "web",
+      refreshStatus: false,
+    }))) {
+      throw new Error("failed to focus diagnostics surface " + id);
+    }
+  }
+
+  function diagnosticsSplitIds(root) {
+    if (!root || root.type === "leaf") return [];
+    return [root.id].concat(
+      diagnosticsSplitIds(root.first),
+      diagnosticsSplitIds(root.second)
+    );
+  }
+
+  function applyDiagnosticsStressGeometry(_step, geometry) {
+    var context = diagnosticsStressContext;
+    var layout = context && paneLayouts.get(context.layoutKey);
+    if (!layout || !layout.root) return;
+    document.documentElement.style.setProperty(
+      "--sidebar-w",
+      geometry.sidebarWidth + "px"
+    );
+    var nextRoot = layout.root;
+    diagnosticsSplitIds(nextRoot).forEach(function (splitId, index) {
+      nextRoot = PsychePanes.resizeSplit(
+        nextRoot,
+        splitId,
+        geometry.splitRatios[index % geometry.splitRatios.length]
+      );
+    });
+    layout.root = nextRoot;
+    if (!applyProjectedSplitRatios(layout)) {
+      renderPaneWorkspace();
+    }
+  }
+
+  async function setDiagnosticsStressSurfaceVisible(id, visible) {
+    var thread = findThread(id);
+    if (!thread || !thread.diagnosticsFixture) {
+      throw new Error("diagnostics terminal is unavailable: " + id);
+    }
+    var changed = visible ? reopenThread(id) : hideThread(id);
+    if (!changed && thread.hidden === visible) {
+      throw new Error("failed to change diagnostics terminal visibility");
+    }
+    await syncThreadPtyVisibility(thread);
+  }
+
+  async function loseDiagnosticsBrowserContext() {
+    var fixture = activeDiagnosticsBrowserFixture;
+    if (!fixture || fixture.browser.tabs.indexOf(fixture.tab) === -1) return false;
+    var lostTitle = fixture.page.title + " · context-lost";
+    var unavailableTitle = fixture.page.title + " · context-unavailable";
+    await invoke("browser_eval", {
+      label: browserLabelForTab(fixture.project, fixture.tab),
+      script: "window.losePsycheDiagnosticsContext && " +
+        "window.losePsycheDiagnosticsContext();",
+    });
+    for (var attempt = 0; attempt < 40; attempt += 1) {
+      if (fixture.tab.title === lostTitle) return true;
+      if (fixture.tab.title === unavailableTitle) return false;
+      await new Promise(function (resolve) { setTimeout(resolve, 25); });
+    }
+    return false;
+  }
+
+  function diagnosticsRendererSnapshots() {
+    return state.threads.map(function (thread) {
+      return thread.terminalController &&
+        typeof thread.terminalController.rendererSnapshot === "function"
+        ? thread.terminalController.rendererSnapshot()
+        : null;
+    }).filter(Boolean);
+  }
+
+  async function installRuntimeStressHarness() {
+    try {
+      var report = await invoke("runtime_diagnostics");
+      if (!report || report.debugBuild !== true || report.stressAuthorized !== true) return null;
+      runtimeStressHarness = ptyRuntime.createTauriStressHarness({
+        authorized: true,
+        prepareRun: prepareDiagnosticsStressRun,
+        createTerminal: createDiagnosticsTerminalFixture,
+        createEditor: createDiagnosticsEditorFixture,
+        createBrowser: createDiagnosticsBrowserFixture,
+        focus: focusDiagnosticsStressSurface,
+        resize: applyDiagnosticsStressGeometry,
+        setVisible: setDiagnosticsStressSurfaceVisible,
+        loseGraphicsContext: loseDiagnosticsBrowserContext,
+        invoke: invoke,
+        schedulerSnapshot: function () { return terminalFrameScheduler.snapshot(); },
+        rendererSnapshots: diagnosticsRendererSnapshots,
+        requestFrame: window.requestAnimationFrame.bind(window),
+        cancelFrame: window.cancelAnimationFrame.bind(window),
+        now: performance.now.bind(performance),
+        createPerformanceObserver: typeof PerformanceObserver === "function"
+          ? function (callback) { return new PerformanceObserver(callback); }
+          : undefined,
+        onProgress: function (progress) {
+          window.dispatchEvent(new CustomEvent("psyche:render-stress-progress", {
+            detail: progress,
+          }));
+        },
+        reportError: function (error, operation) {
+          console.warn("[render diagnostics] " + operation + " failed", error);
+        },
+      });
+      window.PsycheRenderStress = runtimeStressHarness;
+      return runtimeStressHarness;
+    } catch (error) {
+      console.warn("[render diagnostics] harness unavailable", error);
+      return null;
+    }
+  }
+
   async function boot(env) {
     state.env = env || {};
     await installTerminalImageDrop();
@@ -14145,6 +14730,7 @@
     paneMetricsPollTimer = setInterval(refreshVisiblePaneMetrics, 15000);
     refreshVisiblePaneMetrics();
     if (typeof refreshStatusController === "function") refreshStatusController();
+    await installRuntimeStressHarness();
   }
 
   invoke("app_environment")

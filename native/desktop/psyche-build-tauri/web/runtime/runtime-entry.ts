@@ -111,6 +111,11 @@ export type {
   StressScenario,
   StressScenarioResult,
 } from './stress-harness';
+export { createTauriStressHarness } from './stress-runtime-adapter';
+export type {
+  TauriStressHarness,
+  TauriStressRuntimeHost,
+} from './stress-runtime-adapter';
 export {
   createPtyClient,
   disposePtyClient,

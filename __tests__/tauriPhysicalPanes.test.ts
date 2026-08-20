@@ -1428,6 +1428,8 @@ describe('Tauri physical terminal panes', () => {
       'returnFromFileFocus',
       'revealFileForDecision',
       'closeFileTab',
+      'prepareDiagnosticsStressRun',
+      'createDiagnosticsEditorFixture',
     ];
     for (const name of transitionOnly) {
       expect(renderPaneWorkspaceCalls(name), name).toEqual([
@@ -1445,6 +1447,7 @@ describe('Tauri physical terminal panes', () => {
       'refreshSidebar',
       'removeFilesPaneNow',
       'activateFileTabNow',
+      'applyDiagnosticsStressGeometry',
     ];
     for (const name of preserveOnly) {
       expect(renderPaneWorkspaceCalls(name), name).toEqual([

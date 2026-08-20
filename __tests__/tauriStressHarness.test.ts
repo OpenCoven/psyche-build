@@ -134,6 +134,52 @@ describe('Tauri diagnostics stress harness', () => {
   it('generates a large deterministic editor document and a local diagnostic browser page', () => {
     const document = createLargeEditorDocument(12);
     const page = createDiagnosticBrowserPage(12);
+    const reports: Array<[string, { title: string }]> = [];
+    let contextLost = false;
+    const browserWindow: {
+      __TAURI__: {
+        core: {
+          invoke(command: string, payload: { title: string }): Promise<void>;
+        };
+      };
+      losePsycheDiagnosticsContext?: () => boolean;
+    } = {
+      __TAURI__: {
+        core: {
+          async invoke(command, payload) {
+            reports.push([command, payload]);
+          },
+        },
+      },
+    };
+    const browserDocument = {
+      title: page.title,
+      getElementById() {
+        return {
+          getContext() {
+            return {
+              clearColor() {},
+              clear() {},
+              COLOR_BUFFER_BIT: 0x4000,
+              getExtension() {
+                return {
+                  loseContext() {
+                    contextLost = true;
+                  },
+                };
+              },
+            };
+          },
+        };
+      },
+    };
+    const script = page.html.match(/<script>([\s\S]+)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    Function('window', 'document', 'requestAnimationFrame', script as string)(
+      browserWindow,
+      browserDocument,
+      () => 1,
+    );
 
     expect(document.name).toBe('psyche-render-stress-12.txt');
     expect(document.languageId).toBe('text');
@@ -144,6 +190,19 @@ describe('Tauri diagnostics stress harness', () => {
     expect(page.title).toBe('Psyche render diagnostics · 12 panes');
     expect(page.html).toContain('requestAnimationFrame');
     expect(page.html).toContain('WEBGL_lose_context');
+    expect(page.html).toContain('context-unavailable');
+    expect(page.html).toContain('context-lost');
+    expect(browserWindow.losePsycheDiagnosticsContext?.()).toBe(true);
+    expect(contextLost).toBe(true);
+    expect(browserDocument.title).toBe(
+      'Psyche render diagnostics · 12 panes · context-lost',
+    );
+    expect(reports).toEqual([
+      [
+        'browser_report_title',
+        { title: 'Psyche render diagnostics · 12 panes · context-lost' },
+      ],
+    ]);
   });
 
   it('runs fixed scenarios with per-frame geometry, hidden panes, window cycling, and context loss', async () => {
@@ -273,6 +332,112 @@ describe('Tauri diagnostics stress harness', () => {
     expect(result.finishedAt - result.startedAt).toBe(4 * 45_000);
     expect(result.scenarios.map((scenario) => scenario.finishedAt - scenario.startedAt))
       .toEqual([45_000, 45_000, 45_000, 45_000]);
+  });
+
+  it('does not burst focus operations to catch up after a stalled clock', async () => {
+    const controller = new AbortController();
+    const focusTimes: number[] = [];
+    const frames = createFrameDriver();
+    let now = 0;
+    let firstSleep = true;
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, []);
+      },
+      async createEditor() {
+        return createResource('editor', []);
+      },
+      async createBrowser() {
+        return createResource('browser', []);
+      },
+      async focus() {
+        focusTimes.push(now);
+        if (focusTimes.length === 3) controller.abort(abortError());
+      },
+      resize() {},
+      async setVisible() {},
+      async cycleWindow() {},
+      async loseGraphicsContext() {
+        return false;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += firstSleep ? 1_000 : ms;
+        firstSleep = false;
+        frames.flush(now);
+      },
+      requestFrame: frames.request,
+      cancelFrame: frames.cancel,
+      now: () => now,
+      onProgress() {},
+    };
+
+    await expect(runStressPlan(dependencies, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(focusTimes).toEqual([1_000, 1_250, 1_500]);
+    expect(frames.pending()).toBe(0);
+  });
+
+  it('keeps the 250 ms focus cycle on visible resources after hiding panes', async () => {
+    const controller = new AbortController();
+    const hidden = new Set<string>();
+    const focusedWhileHidden: string[] = [];
+    const frames = createFrameDriver();
+    let now = 0;
+    let measuredFocuses = 0;
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, []);
+      },
+      async createEditor() {
+        return createResource('editor', []);
+      },
+      async createBrowser() {
+        return createResource('browser', []);
+      },
+      async focus(id) {
+        if (hidden.size === 0) return;
+        measuredFocuses += 1;
+        if (hidden.has(id)) focusedWhileHidden.push(id);
+        if (focusedWhileHidden.length > 0 || measuredFocuses === 20) {
+          controller.abort(abortError());
+        }
+      },
+      resize() {},
+      async setVisible(id, visible) {
+        if (visible) hidden.delete(id);
+        else hidden.add(id);
+      },
+      async cycleWindow() {},
+      async loseGraphicsContext() {
+        return false;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += ms;
+        frames.flush(now);
+      },
+      requestFrame: frames.request,
+      cancelFrame: frames.cancel,
+      now: () => now,
+      onProgress() {},
+    };
+
+    await expect(runStressPlan(dependencies, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(measuredFocuses).toBe(20);
+    expect(focusedWhileHidden).toEqual([]);
+    expect(frames.pending()).toBe(0);
   });
 
   it('uses the same complete cleanup path when cancellation occurs during restore', async () => {

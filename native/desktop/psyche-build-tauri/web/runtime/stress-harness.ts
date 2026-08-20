@@ -200,9 +200,25 @@ function draw() {
   requestAnimationFrame(draw);
 }
 requestAnimationFrame(draw);
+function reportContextStatus(status) {
+  document.title = status;
+  try {
+    const core = window.__TAURI__ && window.__TAURI__.core;
+    const invoke = core && core.invoke;
+    if (typeof invoke === 'function') {
+      Promise.resolve(
+        invoke('browser_report_title', { title: status })
+      ).catch(function () {});
+    }
+  } catch (_) {}
+}
 window.losePsycheDiagnosticsContext = function () {
   const extension = gl && gl.getExtension('WEBGL_lose_context');
-  if (!extension) return false;
+  if (!extension) {
+    reportContextStatus(${JSON.stringify(`${title} · context-unavailable`)});
+    return false;
+  }
+  reportContextStatus(${JSON.stringify(`${title} · context-lost`)});
   extension.loseContext();
   return true;
 };
@@ -294,17 +310,14 @@ async function runActivePhase(
     requestGeometryFrame();
     const phaseStartedAt = dependencies.now();
     let focusStep = 0;
+    let nextFocusAt = phaseStartedAt + STRESS_FOCUS_INTERVAL_MS;
     while (true) {
       const elapsedBeforeSleep = Math.max(0, dependencies.now() - phaseStartedAt);
       const remainingMs = durationMs - elapsedBeforeSleep;
       if (remainingMs <= 0) break;
-      const nextFocusAt = Math.min(
-        durationMs,
-        (focusStep + 1) * STRESS_FOCUS_INTERVAL_MS,
-      );
       const delayMs = Math.min(
         remainingMs,
-        Math.max(0, nextFocusAt - elapsedBeforeSleep),
+        Math.max(0, nextFocusAt - dependencies.now()),
       );
       if (delayMs > 0) {
         await dependencies.sleep(delayMs, phaseController.signal);
@@ -315,6 +328,7 @@ async function runActivePhase(
       if (elapsedBeforeFocus >= durationMs) break;
       await dependencies.focus(stressFocusId(focusOrder, focusStep));
       focusStep += 1;
+      nextFocusAt = dependencies.now() + STRESS_FOCUS_INTERVAL_MS;
       const elapsedMs = Math.min(
         durationMs,
         Math.max(0, dependencies.now() - phaseStartedAt),
@@ -427,6 +441,11 @@ async function runStressScenario(
       hiddenPaneIds.add(id);
       await dependencies.setVisible(id, false);
     }
+    const measurementFocusOrder = buildStressFocusOrder(
+      terminalIds.slice(0, hiddenStart),
+      editor.id,
+      browser.id,
+    );
 
     dependencies.resetMetrics();
     const beforeMeasurement = dependencies.snapshotMetrics();
@@ -437,7 +456,7 @@ async function runStressScenario(
       scenarioValue,
       'measure',
       scenarioValue.measureMs,
-      focusOrder,
+      measurementFocusOrder,
     );
     const afterMeasurement = dependencies.snapshotMetrics();
 
