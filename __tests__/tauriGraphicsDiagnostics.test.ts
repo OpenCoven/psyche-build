@@ -495,6 +495,45 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects organization-only and implementation-only names on raw WebGL, ANGLE, and WebGPU paths', () => {
+    for (const value of ['Google LLC', 'NVIDIA Display Driver']) {
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: value,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+        unsupportedFields: [],
+      });
+
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: `ANGLE (Google, ${value}, OpenGL)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+        unsupportedFields: [],
+      });
+
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: value,
+        unsupportedFields: [],
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgpu',
+        unsupportedFields: [],
+      });
+    }
+  });
+
   it('rejects vendor plus numeric identifiers on raw WebGL, ANGLE, and WebGPU paths', () => {
     for (const value of ['NVIDIA 0x10de', 'NVIDIA 123456']) {
       expect(classifyGraphicsEvidence({
@@ -585,8 +624,10 @@ describe('graphics evidence classification', () => {
       'NVIDIA GeForce Graphics',
       'NVIDIA GeForce Driver',
       'Intel Arc A770',
+      'Intel UHD Graphics 630',
       'AMD Radeon Pro 560X',
       'Qualcomm Adreno 740',
+      'Qualcomm Technologies, Inc. Adreno 740',
       'ARM Mali-G715',
     ]) {
       expect(classifyGraphicsEvidence({
