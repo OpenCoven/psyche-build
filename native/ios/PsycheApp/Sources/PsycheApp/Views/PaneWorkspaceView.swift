@@ -80,7 +80,10 @@ struct PaneWorkspaceView: View {
                     PaneControlsMenu(
                         paneID: pane.id,
                         paneTitle: pane.title ?? pane.id,
-                        projectTitle: projectTitle(forPane: pane.id) ?? "this project"
+                        ritualContext: PaneRitualContext.resolve(
+                            paneID: pane.id,
+                            in: store.workspace
+                        )
                     )
                 }
             }
@@ -199,15 +202,6 @@ struct PaneWorkspaceView: View {
         return [primaryPane, secondaryPane]
             .compactMap { $0 }
             .first { $0.id == focusedPaneID }
-    }
-
-    private func projectTitle(forPane paneID: String) -> String? {
-        store.workspace?.projects.first { project in
-            project.projectPanes.contains { $0.id == paneID }
-                || project.worktrees.contains { worktree in
-                    worktree.panes.contains { $0.id == paneID }
-                }
-        }?.title
     }
 
     private func pane(_ paneID: String?) -> WorkspacePaneSnapshot? {

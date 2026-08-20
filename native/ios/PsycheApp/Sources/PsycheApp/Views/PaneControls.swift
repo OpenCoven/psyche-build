@@ -1,6 +1,31 @@
 import PsycheCore
 import SwiftUI
 
+struct PaneRitualContext: Equatable {
+    let projectID: String
+    let projectTitle: String
+    let rituals: [WorkspaceRitualSnapshot]
+
+    static func resolve(
+        paneID: String,
+        in workspace: WorkspaceSnapshot?
+    ) -> PaneRitualContext? {
+        guard let project = workspace?.projects.first(where: { project in
+            project.projectPanes.contains { $0.id == paneID }
+                || project.worktrees.contains { worktree in
+                    worktree.panes.contains { $0.id == paneID }
+                }
+        }) else {
+            return nil
+        }
+        return PaneRitualContext(
+            projectID: project.id,
+            projectTitle: project.title,
+            rituals: project.rituals
+        )
+    }
+}
+
 /// Rename and stop for the pane on screen, plus the way in to creating one.
 struct PaneControlsMenu: View {
     @EnvironmentObject private var store: WorkspaceStore
@@ -8,7 +33,7 @@ struct PaneControlsMenu: View {
 
     let paneID: String
     let paneTitle: String
-    let projectTitle: String
+    let ritualContext: PaneRitualContext?
 
     @State private var isCreating = false
     @State private var isRenaming = false
@@ -23,6 +48,24 @@ struct PaneControlsMenu: View {
                 isCreating = true
             } label: {
                 Label("New pane", systemImage: "plus")
+            }
+            if let ritualContext, !ritualContext.rituals.isEmpty {
+                Menu {
+                    ForEach(ritualContext.rituals) { ritual in
+                        Button {
+                            launch(ritual, inProject: ritualContext.projectID)
+                        } label: {
+                            Text(ritual.displayName)
+                        }
+                        .disabled(store.isStale || isWorking)
+                        .accessibilityIdentifier("pane-ritual-\(ritual.id)")
+                        .accessibilityHint(Text(ritual.description ?? ""))
+                    }
+                } label: {
+                    Label("Rituals", systemImage: "wand.and.stars")
+                }
+                .disabled(store.isStale || isWorking)
+                .accessibilityIdentifier("pane-rituals")
             }
             Button {
                 renameText = paneTitle
@@ -60,7 +103,7 @@ struct PaneControlsMenu: View {
             // cannot be mistaken for deleting the worktree.
             Text(StopPaneConfirmation.message(
                 paneTitle: paneTitle,
-                projectTitle: projectTitle,
+                projectTitle: ritualContext?.projectTitle ?? "this project",
                 hostName: model.hostName
             ))
         }
@@ -85,6 +128,13 @@ struct PaneControlsMenu: View {
 
     private func stop() {
         run { try await store.stopPane(paneID) }
+    }
+
+    private func launch(_ ritual: WorkspaceRitualSnapshot, inProject projectID: String) {
+        run {
+            try await store.launchRitual(ritual.id, inProject: projectID)
+            _ = try await store.requestFullSnapshot()
+        }
     }
 
     /// Failures surface instead of being swallowed — a command that quietly

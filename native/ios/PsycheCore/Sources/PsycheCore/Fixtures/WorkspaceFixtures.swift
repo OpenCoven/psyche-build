@@ -80,6 +80,13 @@ public enum WorkspaceFixtures {
                     id: "website",
                     root: "/Users/demo/Code/open-coven.dev",
                     title: "open-coven.dev",
+                    rituals: [
+                        WorkspaceRitualSnapshot(
+                            id: "review-site",
+                            displayName: "Review site",
+                            description: "Open a focused website review pane."
+                        )
+                    ],
                     worktrees: [
                         worktree(
                             path: "/Users/demo/Code/open-coven.dev",
