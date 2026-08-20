@@ -1189,9 +1189,11 @@ export function createEditorMachine(
     const to = mode === 'replace'
       ? advanceGraphemes(document.text(), position, graphemeCount(input.text))
       : position;
+    const original = mode === 'replace' ? document.text().slice(position, to) : '';
     if (!apply(position, to, input.text, position + input.text.length, insertFirstEdit ? 'new' : 'join')) {
       return snapshot();
     }
+    if (mode === 'replace') replaceRestorations.push({ from: position, inserted: input.text, original });
     insertFirstEdit = false;
     if (activeVisualChange) activeVisualChange.insert += input.text;
     return snapshot();
@@ -1248,6 +1250,7 @@ export function createEditorMachine(
       insertSessionText = '';
       insertSessionAppliedText = '';
       insertSessionKind = 'insert';
+      replaceRestorations = [];
       return enter('normal');
     }
 
