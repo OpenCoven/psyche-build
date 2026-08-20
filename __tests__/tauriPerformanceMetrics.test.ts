@@ -992,6 +992,60 @@ describe('bounded performance metrics', () => {
       collector.stop();
     });
 
+    it('re-establishes the frame baseline after stop and restart without bridging the stopped interval', () => {
+      const frameCallbacks: Array<(timestamp: number) => void> = [];
+      const collector = createPerformanceMetricsCollector({
+        requestFrame: (callback) => {
+          frameCallbacks.push(callback);
+          return frameCallbacks.length;
+        },
+        cancelFrame: vi.fn(),
+        setInterval: () => 1,
+        clearInterval: vi.fn(),
+      });
+
+      collector.start();
+      frameCallbacks.pop()?.(100);
+      expect(collector.snapshot().frames.sampleCount).toBe(0);
+
+      collector.stop();
+      collector.start();
+      frameCallbacks.pop()?.(1_100);
+      expect(collector.snapshot().frames.sampleCount).toBe(0);
+
+      frameCallbacks.pop()?.(1_116);
+      expect(collector.snapshot().frames).toMatchObject({
+        sampleCount: 1,
+        averageMs: 16,
+        maxMs: 16,
+      });
+      collector.stop();
+    });
+
+    it('clears pending interaction starts when stopped before a paint', () => {
+      const frameCallbacks: Array<(timestamp: number) => void> = [];
+      const collector = createPerformanceMetricsCollector({
+        requestFrame: (callback) => {
+          frameCallbacks.push(callback);
+          return frameCallbacks.length;
+        },
+        cancelFrame: vi.fn(),
+        setInterval: () => 1,
+        clearInterval: vi.fn(),
+      });
+
+      collector.start();
+      collector.recordInteractionStart('focus', 100);
+      collector.recordInteractionStart('resize', 100);
+      collector.stop();
+      collector.start();
+      frameCallbacks.pop()?.(1_100);
+      frameCallbacks.pop()?.(1_116);
+
+      expect(collector.snapshot().interactions).toEqual({});
+      collector.stop();
+    });
+
     it('skips overlapping native polls and rejects stale results after stop', async () => {
       let intervalCallback: (() => void) | undefined;
       let resolvePty!: (value: unknown) => void;

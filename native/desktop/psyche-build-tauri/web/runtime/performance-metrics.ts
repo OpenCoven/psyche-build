@@ -473,6 +473,8 @@ export function createPerformanceMetricsCollector(
 
   function start(): void {
     if (running) return;
+    previousFrameTimestamp = undefined;
+    interactions.clear();
     running = true;
     generation += 1;
     const loopGeneration = generation;
@@ -513,6 +515,8 @@ export function createPerformanceMetricsCollector(
     if (!running) return;
     running = false;
     generation += 1;
+    previousFrameTimestamp = undefined;
+    interactions.clear();
     if (frameHandle !== null) {
       try {
         cancelFrame(frameHandle);
