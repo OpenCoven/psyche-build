@@ -657,12 +657,17 @@ func testLaunchingARitualRefreshesWorkspaceAndPreservesTheCurrentPane() throws {
 Create the deterministic iPad destination once if it is not already listed:
 
 ```bash
-xcrun simctl list devices available | grep -F "Psyche iPad Pro 13-inch" || \
+xcrun simctl list devices available | grep -F "Psyche iPad Pro 13-inch 26.5" || \
   xcrun simctl create \
-    "Psyche iPad Pro 13-inch" \
+    "Psyche iPad Pro 13-inch 26.5" \
     com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4-8GB \
-    com.apple.CoreSimulator.SimRuntime.iOS-18-6
+    com.apple.CoreSimulator.SimRuntime.iOS-26-5
 ```
+
+Acceptance uses the same runtime generation as the iPhone gate to avoid
+OS-specific baseline drift in `NavigationSplitView` and accessibility behavior;
+the representative UI baseline failures reproduced on iOS 18.6 but passed
+unchanged on iOS 26.5.
 
 Run:
 
@@ -678,7 +683,7 @@ xcodebuild \
 xcodebuild \
   -project native/ios/Psyche.xcodeproj \
   -scheme PsycheApp \
-  -destination 'platform=iOS Simulator,name=Psyche iPad Pro 13-inch' \
+  -destination 'platform=iOS Simulator,name=Psyche iPad Pro 13-inch 26.5,OS=26.5' \
   -derivedDataPath native/ios/.build-ipad \
   -only-testing:PsycheAppUITests/PsycheAppUITests/testPaneWithoutPublishedRitualsHidesTheRitualMenu \
   -only-testing:PsycheAppUITests/PsycheAppUITests/testLaunchingARitualRefreshesWorkspaceAndPreservesTheCurrentPane \
@@ -751,7 +756,7 @@ Expected: both schemes report `** TEST SUCCEEDED **` with zero assertion failure
 xcodebuild \
   -project native/ios/Psyche.xcodeproj \
   -scheme PsycheApp \
-  -destination 'platform=iOS Simulator,name=Psyche iPad Pro 13-inch' \
+  -destination 'platform=iOS Simulator,name=Psyche iPad Pro 13-inch 26.5,OS=26.5' \
   -derivedDataPath native/ios/.build-ipad \
   test
 ```
