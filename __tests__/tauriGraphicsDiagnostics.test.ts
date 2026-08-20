@@ -444,6 +444,70 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects generic descriptors and backend versions on every adapter path', () => {
+    const ambiguousValues = [
+      'High Performance GPU',
+      'Vulkan API 1.3',
+      'NVIDIA Windows Display Driver',
+      'NVIDIA High Performance',
+      'Intel Integrated GPU',
+      'AMD Discrete Desktop',
+      'Default Vulkan API',
+      'Linux macOS Windows',
+    ];
+
+    for (const value of ambiguousValues) {
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: value,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+      });
+
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: `ANGLE (NVIDIA, ${value}, Vulkan 1.3)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+      });
+
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: value,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgpu',
+      });
+    }
+  });
+
+  it('preserves meaningful products alongside generic descriptors', () => {
+    for (const adapter of [
+      'NVIDIA GeForce RTX 4090 High Performance',
+      'Intel Arc A770 Discrete GPU',
+    ]) {
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: adapter,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'accelerated',
+        adapter,
+        supportingProbe: 'webgpu',
+      });
+    }
+  });
+
   it('rejects concrete generic and compact identifier examples on raw WebGL, ANGLE, and WebGPU paths', () => {
     const ambiguousValues = [
       'NVIDIA Driver',
@@ -935,6 +999,36 @@ describe('graphics probes', () => {
       '0x10de 0x2484',
       'PCI 10de:2484',
       'DEV_2484',
+    ]) {
+      const probe = await probeGraphicsEvidence({
+        navigatorTarget: {
+          gpu: {
+            requestAdapter: async () => ({ info: { description } }),
+          },
+        },
+        createCanvas: () => null,
+      });
+
+      expect(probe).toEqual({
+        webgpuAdapterAvailable: true,
+        unsupportedFields: ['webgpu.adapterInfo', 'webgl.context'],
+      });
+      expect(classifyGraphicsEvidence(probe)).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'webgpu_adapter_info_unavailable',
+        supportingProbe: 'webgpu',
+        unsupportedFields: ['webgpu.adapterInfo', 'webgl.context'],
+      });
+    }
+  });
+
+  it('filters generic descriptor and backend/version WebGPU descriptions', async () => {
+    for (const description of [
+      'High Performance GPU',
+      'Vulkan API 1.3',
+      'NVIDIA Windows Display Driver',
+      'Intel Integrated GPU',
+      'AMD Discrete Desktop',
     ]) {
       const probe = await probeGraphicsEvidence({
         navigatorTarget: {
