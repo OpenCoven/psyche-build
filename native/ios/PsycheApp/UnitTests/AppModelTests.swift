@@ -38,9 +38,9 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.hostDiscriminator)
     }
 
-    func testFixtureMakePairHostModelCreatesFreshFixtureModelAndPublishesDeterministicRows() async {
+    func testFixtureBeginPairHostFlowPublishesDeterministicRowsWithoutLiveComposition() async {
         let model = AppModel(fixture: WorkspaceFixtures.multiproject)
-        let pairHostModel = model.makePairHostModel()
+        let pairHostModel = await model.beginPairHostFlow()
 
         await pairHostModel.start()
         await waitUntil { pairHostModel.rows.count == 4 }
@@ -59,16 +59,33 @@ final class AppModelTests: XCTestCase {
             [.requiresRePairing, .unpaired, .unpaired, .paired]
         )
         XCTAssertEqual(pairHostModel.rows[2].resolutionFailure, .timedOut)
+
+        await model.endPairHostFlow(pairHostModel)
     }
 
-    func testMakePairHostModelReturnsDistinctModelsForEachCall() {
-        let model = AppModel(fixture: WorkspaceFixtures.multiproject)
+    func testBeginPairHostFlowReturnsOneActiveModelForConcurrentAndRepeatedCalls() async {
+        let (composition, _) = makeComposition()
+        let factory = AppModelPairHostFactory()
+        let model = AppModel(
+            composition: composition,
+            pairHostModelFactory: { factory.makeModel() }
+        )
 
-        let first = model.makePairHostModel()
-        let second = model.makePairHostModel()
+        let firstTask = Task { @MainActor in
+            ObjectIdentifier(await model.beginPairHostFlow())
+        }
+        let secondTask = Task { @MainActor in
+            ObjectIdentifier(await model.beginPairHostFlow())
+        }
+        let firstID = await firstTask.value
+        let secondID = await secondTask.value
+        let thirdID = ObjectIdentifier(await model.beginPairHostFlow())
+        let activeModel = try? XCTUnwrap(model.activePairHostModel)
 
-        XCTAssertFalse(first === second)
-        XCTAssertEqual(first.sessionAuthorityIdentity, second.sessionAuthorityIdentity)
+        XCTAssertEqual(firstID, secondID)
+        XCTAssertEqual(firstID, thirdID)
+        XCTAssertEqual(activeModel.map(ObjectIdentifier.init), firstID)
+        XCTAssertEqual(factory.probes.count, 1)
     }
 
     func testProductionRootComposesOneSharedGraph() throws {
@@ -91,14 +108,14 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(composition.bonjourHostDiscovery === discovery)
     }
 
-    func testProductionMakePairHostModelUsesInjectedCompositionGraph() async throws {
+    func testProductionBeginPairHostFlowUsesInjectedCompositionGraph() async throws {
         let discovery = BonjourHostDiscovery()
         let (composition, store) = makeComposition(bonjourHostDiscovery: discovery)
         let host = makePairedHost(serverID: "server-a", serverName: "Alpha")
         try await store.save(host)
         let model = AppModel(composition: composition)
 
-        let pairHostModel = model.makePairHostModel()
+        let pairHostModel = await model.beginPairHostFlow()
         let status = try await pairHostModel.dependencies.pairingStatus(
             host.serverID,
             host.certificateFingerprint.uppercased()
@@ -110,6 +127,217 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(status, .paired)
         XCTAssertEqual(connectionState, .disconnected)
         XCTAssertEqual(storedHost, host)
+
+        await model.endPairHostFlow(pairHostModel)
+    }
+
+    func testEndPairHostFlowRetainsActiveModelUntilStopFinishes() async throws {
+        let (composition, _) = makeComposition()
+        let factory = AppModelPairHostFactory()
+        let model = AppModel(
+            composition: composition,
+            pairHostModelFactory: { factory.makeModel() }
+        )
+        let pairHostModel = await model.beginPairHostFlow()
+        let firstProbe = try XCTUnwrap(factory.probes.first)
+        let stopGate = AsyncGate()
+        await firstProbe.setStopGate(stopGate)
+
+        await pairHostModel.start()
+
+        let endTask = Task { @MainActor in
+            await model.endPairHostFlow(pairHostModel)
+        }
+
+        await stopGate.waitUntilStarted()
+
+        XCTAssertTrue(model.activePairHostModel === pairHostModel)
+
+        await stopGate.succeed()
+        await endTask.value
+
+        let stopCount = await firstProbe.stopCount()
+        XCTAssertNil(model.activePairHostModel)
+        XCTAssertEqual(stopCount, 1)
+    }
+
+    func testBeginPairHostFlowDuringBlockedEndWaitsAndReturnsDistinctModelAfterCleanup() async throws {
+        let (composition, _) = makeComposition()
+        let factory = AppModelPairHostFactory()
+        let model = AppModel(
+            composition: composition,
+            pairHostModelFactory: { factory.makeModel() }
+        )
+        let first = await model.beginPairHostFlow()
+        let firstID = ObjectIdentifier(first)
+        let firstProbe = try XCTUnwrap(factory.probes.first)
+        let stopGate = AsyncGate()
+        await firstProbe.setStopGate(stopGate)
+
+        await first.start()
+
+        let endTask = Task { @MainActor in
+            await model.endPairHostFlow(first)
+        }
+        await stopGate.waitUntilStarted()
+
+        let secondTask = Task { @MainActor in
+            ObjectIdentifier(await model.beginPairHostFlow())
+        }
+
+        await Task.yield()
+        XCTAssertEqual(factory.probes.count, 1)
+        XCTAssertTrue(model.activePairHostModel === first)
+
+        await stopGate.succeed()
+        let secondID = await secondTask.value
+        await endTask.value
+
+        XCTAssertNotEqual(secondID, firstID)
+        XCTAssertEqual(factory.probes.count, 2)
+        XCTAssertEqual(model.activePairHostModel.map(ObjectIdentifier.init), secondID)
+    }
+
+    func testConcurrentEndPairHostFlowCallsShareOneStopAndCleanup() async throws {
+        let (composition, _) = makeComposition()
+        let factory = AppModelPairHostFactory()
+        let model = AppModel(
+            composition: composition,
+            pairHostModelFactory: { factory.makeModel() }
+        )
+        let pairHostModel = await model.beginPairHostFlow()
+        let probe = try XCTUnwrap(factory.probes.first)
+        let stopGate = AsyncGate()
+        let disconnectGate = AsyncGate()
+        let readinessGate = AsyncGate()
+        await probe.setStopGate(stopGate)
+        await probe.setDisconnectGate(disconnectGate)
+        await probe.setReadinessGate(readinessGate)
+
+        await pairHostModel.start()
+        await probe.yield([makeDiscoveryEntry(serverID: "server-a", serverName: "Alpha")])
+        await waitUntil { pairHostModel.rows.count == 1 }
+        pairHostModel.select(serverID: "server-a")
+
+        let submitTask = Task { @MainActor in
+            await pairHostModel.submit()
+        }
+        await readinessGate.waitUntilStarted()
+        await waitUntil { pairHostModel.phase == .loadingWorkspace }
+
+        let firstEnd = Task { @MainActor in
+            await model.endPairHostFlow(pairHostModel)
+        }
+        let secondEnd = Task { @MainActor in
+            await model.endPairHostFlow(pairHostModel)
+        }
+
+        await stopGate.waitUntilStarted()
+        let stopCountBeforeDisconnect = await probe.stopCount()
+        XCTAssertEqual(stopCountBeforeDisconnect, 1)
+
+        await stopGate.succeed()
+        await disconnectGate.waitUntilStarted()
+        let disconnectCountBeforeFinish = await probe.disconnectCount()
+        XCTAssertEqual(disconnectCountBeforeFinish, 1)
+
+        await disconnectGate.succeed()
+        await firstEnd.value
+        await secondEnd.value
+        await submitTask.value
+
+        let finalStopCount = await probe.stopCount()
+        let finalDisconnectCount = await probe.disconnectCount()
+        XCTAssertNil(model.activePairHostModel)
+        XCTAssertEqual(finalStopCount, 1)
+        XCTAssertEqual(finalDisconnectCount, 1)
+    }
+
+    func testExternalEndOfIncompleteConnectionDisconnectsBeforeNewBeginReturns() async throws {
+        let (composition, _) = makeComposition()
+        let factory = AppModelPairHostFactory()
+        let model = AppModel(
+            composition: composition,
+            pairHostModelFactory: { factory.makeModel() }
+        )
+        let first = await model.beginPairHostFlow()
+        let firstID = ObjectIdentifier(first)
+        let firstProbe = try XCTUnwrap(factory.probes.first)
+        let disconnectGate = AsyncGate()
+        let readinessGate = AsyncGate()
+        await firstProbe.setDisconnectGate(disconnectGate)
+        await firstProbe.setReadinessGate(readinessGate)
+
+        await first.start()
+        await firstProbe.yield([makeDiscoveryEntry(serverID: "server-a", serverName: "Alpha")])
+        await waitUntil { first.rows.count == 1 }
+        first.select(serverID: "server-a")
+
+        let submitTask = Task { @MainActor in
+            await first.submit()
+        }
+        await readinessGate.waitUntilStarted()
+        await waitUntil { first.phase == .loadingWorkspace }
+
+        let endTask = Task { @MainActor in
+            await model.endPairHostFlow(first)
+        }
+        await disconnectGate.waitUntilStarted()
+
+        let secondTask = Task { @MainActor in
+            ObjectIdentifier(await model.beginPairHostFlow())
+        }
+        await Task.yield()
+
+        XCTAssertEqual(factory.probes.count, 1)
+
+        await disconnectGate.succeed()
+        let secondID = await secondTask.value
+        await endTask.value
+        await submitTask.value
+
+        let disconnectCount = await firstProbe.disconnectCount()
+        XCTAssertNotEqual(secondID, firstID)
+        XCTAssertEqual(factory.probes.count, 2)
+        XCTAssertEqual(disconnectCount, 1)
+    }
+
+    func testReadyEndStopsDiscoveryWithoutDisconnectAndAllowsNewDistinctFlow() async throws {
+        let (composition, _) = makeComposition()
+        let factory = AppModelPairHostFactory()
+        let model = AppModel(
+            composition: composition,
+            pairHostModelFactory: { factory.makeModel() }
+        )
+        let first = await model.beginPairHostFlow()
+        let firstID = ObjectIdentifier(first)
+        let firstProbe = try XCTUnwrap(factory.probes.first)
+        let readinessGate = AsyncGate()
+        await firstProbe.setReadinessGate(readinessGate)
+
+        await first.start()
+        await firstProbe.yield([makeDiscoveryEntry(serverID: "server-a", serverName: "Alpha")])
+        await waitUntil { first.rows.count == 1 }
+        first.select(serverID: "server-a")
+
+        let submitTask = Task { @MainActor in
+            await first.submit()
+        }
+        await readinessGate.waitUntilStarted()
+        await readinessGate.succeed()
+        await submitTask.value
+
+        XCTAssertEqual(first.phase, .ready)
+
+        await model.endPairHostFlow(first)
+        let second = await model.beginPairHostFlow()
+
+        let stopCount = await firstProbe.stopCount()
+        let disconnectCount = await firstProbe.disconnectCount()
+        XCTAssertNotEqual(ObjectIdentifier(second), firstID)
+        XCTAssertEqual(factory.probes.count, 2)
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(disconnectCount, 0)
     }
 
     func testProductionRootStartsWithNothingConfirmed() {
@@ -357,5 +585,233 @@ private extension AppModelTests {
             clientID: clientID,
             token: token
         )
+    }
+
+    func makeDiscoveryEntry(
+        serverID: String,
+        serverName: String,
+        host: String? = nil,
+        port: Int = 4242
+    ) -> BonjourDiscoveryEntry {
+        let resolvedHost = host ?? "\(serverID).local"
+        let identity = BonjourHostIdentity(
+            serverID: serverID,
+            serverName: serverName,
+            domain: "local.",
+            certificateFingerprint: testCertificateFingerprint,
+            supportedVersions: [PsycheProtocolVersion.current]
+        )
+        return BonjourDiscoveryEntry(
+            identity: identity,
+            availability: .resolved(DiscoveredHost(
+                identity: identity,
+                endpoint: HostEndpoint(
+                    host: resolvedHost,
+                    port: port,
+                    certificateFingerprint: testCertificateFingerprint
+                )
+            ))
+        )
+    }
+}
+
+@MainActor
+private final class AppModelPairHostFactory {
+    private(set) var probes: [AppModelPairHostProbe] = []
+
+    func makeModel() -> PairHostModel {
+        let probe = AppModelPairHostProbe()
+        probes.append(probe)
+        return probe.makeModel()
+    }
+}
+
+@MainActor
+private final class AppModelPairHostProbe {
+    private let recorder = AppModelPairHostRecorder()
+
+    func makeModel() -> PairHostModel {
+        PairHostModel(dependencies: PairHostModel.Dependencies(
+            startDiscovery: { await self.recorder.startDiscovery() },
+            stopDiscovery: { await self.recorder.stopDiscovery() },
+            retryDiscovery: { _ in },
+            pairingStatus: { _, _ in .paired },
+            connectPaired: { try await self.recorder.connectPaired(serverID: $0, endpoint: $1) },
+            connectForPairing: { _ in },
+            pair: { _ in
+                throw AppModelTestFailure("Unexpected pairing call")
+            },
+            waitForWorkspaceReady: { try await self.recorder.waitForWorkspaceReady() },
+            disconnect: { await self.recorder.disconnect() }
+        ))
+    }
+
+    func yield(_ snapshot: [BonjourDiscoveryEntry]) async {
+        await recorder.yield(snapshot)
+    }
+
+    func setConnectPairedResult(_ result: Result<PairedHost, AppModelTestFailure>) async {
+        await recorder.setConnectPairedResult(result)
+    }
+
+    func setReadinessGate(_ gate: AsyncGate?) async {
+        await recorder.setReadinessGate(gate)
+    }
+
+    func setStopGate(_ gate: AsyncGate?) async {
+        await recorder.setStopGate(gate)
+    }
+
+    func setDisconnectGate(_ gate: AsyncGate?) async {
+        await recorder.setDisconnectGate(gate)
+    }
+
+    func stopCount() async -> Int {
+        await recorder.stopCount()
+    }
+
+    func disconnectCount() async -> Int {
+        await recorder.disconnectCount()
+    }
+}
+
+private actor AppModelPairHostRecorder {
+    private let stream: AsyncStream<[BonjourDiscoveryEntry]>
+    private let continuation: AsyncStream<[BonjourDiscoveryEntry]>.Continuation
+    private var connectPairedResult: Result<PairedHost, AppModelTestFailure> = .success(
+        PairedHost(
+            serverID: "server-a",
+            serverName: "Alpha",
+            endpoint: HostEndpoint(
+                host: "server-a.local",
+                port: 4242,
+                certificateFingerprint: testCertificateFingerprint
+            ),
+            clientID: "test-client",
+            token: "test-token"
+        )
+    )
+    private var readinessGate: AsyncGate?
+    private var stopGate: AsyncGate?
+    private var disconnectGate: AsyncGate?
+    private var stopInvocationCount = 0
+    private var disconnectInvocationCount = 0
+
+    init() {
+        let stream = AsyncStream<[BonjourDiscoveryEntry]>.makeStream()
+        self.stream = stream.stream
+        continuation = stream.continuation
+    }
+
+    func startDiscovery() -> AsyncStream<[BonjourDiscoveryEntry]> {
+        stream
+    }
+
+    func yield(_ snapshot: [BonjourDiscoveryEntry]) {
+        continuation.yield(snapshot)
+    }
+
+    func setConnectPairedResult(_ result: Result<PairedHost, AppModelTestFailure>) {
+        connectPairedResult = result
+    }
+
+    func setReadinessGate(_ gate: AsyncGate?) {
+        readinessGate = gate
+    }
+
+    func setStopGate(_ gate: AsyncGate?) {
+        stopGate = gate
+    }
+
+    func setDisconnectGate(_ gate: AsyncGate?) {
+        disconnectGate = gate
+    }
+
+    func connectPaired(
+        serverID: String,
+        endpoint: HostEndpoint?
+    ) async throws -> PairedHost {
+        switch connectPairedResult {
+        case .success(let host):
+            return PairedHost(
+                serverID: serverID,
+                serverName: host.serverName,
+                endpoint: endpoint ?? host.endpoint,
+                clientID: host.clientID,
+                token: host.token
+            )
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    func waitForWorkspaceReady() async throws {
+        try await readinessGate?.wait()
+    }
+
+    func stopDiscovery() async {
+        stopInvocationCount += 1
+        try? await stopGate?.wait()
+    }
+
+    func disconnect() async {
+        disconnectInvocationCount += 1
+        try? await disconnectGate?.wait()
+    }
+
+    func stopCount() -> Int {
+        stopInvocationCount
+    }
+
+    func disconnectCount() -> Int {
+        disconnectInvocationCount
+    }
+}
+
+private struct AppModelTestFailure: LocalizedError, Equatable, Sendable {
+    let message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    var errorDescription: String? { message }
+}
+
+private actor AsyncGate {
+    private var didStart = false
+    private var didCancel = false
+    private var continuation: CheckedContinuation<Void, any Error>?
+
+    func wait() async throws {
+        didStart = true
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+            }
+        } onCancel: {
+            Task { await self.cancel() }
+        }
+    }
+
+    func waitUntilStarted(timeout: TimeInterval = 1) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !didStart {
+            if Date() >= deadline {
+                return
+            }
+            await Task.yield()
+        }
+    }
+
+    func succeed() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    private func cancel() {
+        didCancel = true
+        continuation?.resume(throwing: CancellationError())
+        continuation = nil
     }
 }

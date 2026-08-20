@@ -7,6 +7,7 @@ struct SettingsView: View {
     @EnvironmentObject private var store: WorkspaceStore
     @EnvironmentObject private var model: AppModel
     @State private var isPairSheetPresented = false
+    @State private var isBeginningPairHostFlow = false
 
     var body: some View {
         List {
@@ -51,9 +52,12 @@ struct SettingsView: View {
             }
 
             Section {
-                Button("Connections") { isPairSheetPresented = true }
+                Button("Connections") {
+                    beginPairHostFlow()
+                }
                     .frame(minHeight: PsycheTheme.minimumTapTarget)
                     .accessibilityIdentifier("settings-pair-host")
+                    .disabled(isBeginningPairHostFlow || model.activePairHostModel != nil)
             } footer: {
                 Text("Discover, pair, or switch to a Psyche host on your local network.")
             }
@@ -76,9 +80,22 @@ struct SettingsView: View {
         .listStyle(.insetGrouped)
         .navigationTitle("Settings")
         .accessibilityIdentifier("settings-view")
-        .sheet(isPresented: $isPairSheetPresented) {
-            PairHostSheet(model: model.makePairHostModel()) { host in
-                model.recordConnectedHost(host)
+        .sheet(isPresented: $isPairSheetPresented, onDismiss: {
+            Task {
+                await endPresentedPairHostFlowIfNeeded()
+            }
+        }) {
+            if let pairHostModel = model.activePairHostModel {
+                PairHostSheet(
+                    model: pairHostModel,
+                    onCancel: {
+                        await model.endPairHostFlow(pairHostModel)
+                    },
+                    onReady: { host in
+                        model.recordConnectedHost(host)
+                        await model.endPairHostFlow(pairHostModel)
+                    }
+                )
             }
         }
     }
@@ -97,5 +114,33 @@ struct SettingsView: View {
             return "Host, \(hostName)"
         }
         return "Host, \(hostName), \(hostDiscriminator)"
+    }
+
+    @MainActor
+    private func beginPairHostFlow() {
+        guard !isPairSheetPresented,
+              !isBeginningPairHostFlow,
+              model.activePairHostModel == nil else {
+            return
+        }
+        isBeginningPairHostFlow = true
+        Task {
+            let pairHostModel = await model.beginPairHostFlow()
+            await MainActor.run {
+                isBeginningPairHostFlow = false
+                if model.activePairHostModel === pairHostModel {
+                    isPairSheetPresented = true
+                }
+            }
+        }
+    }
+
+    private func endPresentedPairHostFlowIfNeeded() async {
+        if let pairHostModel = await MainActor.run(body: { model.activePairHostModel }) {
+            await model.endPairHostFlow(pairHostModel)
+        }
+        await MainActor.run {
+            isBeginningPairHostFlow = false
+        }
     }
 }

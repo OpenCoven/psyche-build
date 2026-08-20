@@ -16,6 +16,7 @@ final class AppModel: ObservableObject {
     /// where the host is not otherwise recoverable from the visible text.
     @Published private(set) var hostName: String?
     @Published private(set) var hostDiscriminator: String?
+    @Published private(set) var activePairHostModel: PairHostModel?
 
     let workspaceStore: WorkspaceStore
     /// `nil` under a fixture launch — that absence is what makes the fixture
@@ -27,15 +28,27 @@ final class AppModel: ObservableObject {
     let paneComposerSendAttempts = PaneComposerSendAttempts()
 
     private var hasStarted = false
-    private let pairHostSessionAuthority = PairHostModel.SessionAuthority()
+    private let pairHostModelFactory: @MainActor () -> PairHostModel
+    private var pairHostCleanupTask: Task<Void, Never>?
 
     var isFixture: Bool { fixtureName != nil }
 
-    init(composition: MobileAppComposition) {
-        fixtureName = nil
+    convenience init(composition: MobileAppComposition) {
+        self.init(
+            composition: composition,
+            pairHostModelFactory: { PairHostModel(composition: composition) }
+        )
+    }
+
+    init(
+        composition: MobileAppComposition,
+        pairHostModelFactory: @escaping @MainActor () -> PairHostModel
+    ) {
         self.composition = composition
+        fixtureName = nil
         workspaceStore = composition.workspaceStore
         terminalRegistry = composition.terminalRegistry
+        self.pairHostModelFactory = pairHostModelFactory
     }
 
     private init(
@@ -43,16 +56,20 @@ final class AppModel: ObservableObject {
         fixtureSendFails: Bool,
         fixtureInspectionFails: Bool
     ) {
-        self.fixtureName = fixtureName
-        composition = nil
-        workspaceStore = DemoStore.makeWorkspaceStore(
+        let workspaceStore = DemoStore.makeWorkspaceStore(
             fixture: fixtureName,
             inspectionFails: fixtureInspectionFails
         )
-        terminalRegistry = TerminalSessionRegistry(
+        let terminalRegistry = TerminalSessionRegistry(
             client: FixtureTerminalClient(sendFails: fixtureSendFails)
         )
         terminalRegistry.start()
+
+        self.fixtureName = fixtureName
+        composition = nil
+        self.workspaceStore = workspaceStore
+        self.terminalRegistry = terminalRegistry
+        pairHostModelFactory = { PairHostModel.fixture() }
         hostName = Self.fixtureHostName
         hostDiscriminator = nil
     }
@@ -82,11 +99,38 @@ final class AppModel: ObservableObject {
         connectionError = nil
     }
 
-    func makePairHostModel() -> PairHostModel {
-        if let composition {
-            return PairHostModel(composition: composition, authority: pairHostSessionAuthority)
+    func beginPairHostFlow() async -> PairHostModel {
+        if let pairHostCleanupTask {
+            await pairHostCleanupTask.value
         }
-        return PairHostModel.fixture(authority: pairHostSessionAuthority)
+        if let activePairHostModel {
+            return activePairHostModel
+        }
+
+        let model = pairHostModelFactory()
+        activePairHostModel = model
+        return model
+    }
+
+    func endPairHostFlow(_ model: PairHostModel) async {
+        guard activePairHostModel === model else { return }
+        if let pairHostCleanupTask {
+            await pairHostCleanupTask.value
+            return
+        }
+
+        let cleanupTask = Task { [weak self] in
+            await model.stop()
+            await MainActor.run {
+                guard let self else { return }
+                if self.activePairHostModel === model {
+                    self.activePairHostModel = nil
+                }
+                self.pairHostCleanupTask = nil
+            }
+        }
+        pairHostCleanupTask = cleanupTask
+        await cleanupTask.value
     }
 
     func loadLastConnectedHostContext() async {

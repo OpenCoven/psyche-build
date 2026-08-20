@@ -21,77 +21,6 @@ enum PairHostDiscriminatorFormatter {
 
 @MainActor
 final class PairHostModel: ObservableObject {
-    actor SessionAuthority {
-        private enum State {
-            case idle
-            case active(UInt64)
-            case ending(UInt64)
-        }
-
-        private let beforeClaimActivation: (@Sendable () async -> Void)?
-        private var nextSessionID: UInt64 = 0
-        private var state: State = .idle
-        private var connectionOwnerSessionID: UInt64?
-        private var endingWaiters: [CheckedContinuation<Void, Never>] = []
-
-        init(beforeClaimActivation: (@Sendable () async -> Void)? = nil) {
-            self.beforeClaimActivation = beforeClaimActivation
-        }
-
-        func claimSession() async -> UInt64 {
-            while case .ending(_) = state {
-                await withCheckedContinuation { continuation in
-                    endingWaiters.append(continuation)
-                }
-            }
-
-            if let beforeClaimActivation {
-                await beforeClaimActivation()
-            }
-            nextSessionID &+= 1
-            state = .active(nextSessionID)
-            return nextSessionID
-        }
-
-        func relinquishIfCurrent(_ sessionID: UInt64) async {
-            await endIfCurrent(sessionID) {}
-        }
-
-        func endIfCurrent(
-            _ sessionID: UInt64,
-            perform operation: @Sendable () async -> Void
-        ) async {
-            guard case let .active(currentSessionID) = state, currentSessionID == sessionID else { return }
-            state = .ending(sessionID)
-            await operation()
-            guard case let .ending(endingSessionID) = state, endingSessionID == sessionID else { return }
-            state = .idle
-            let waiters = endingWaiters
-            endingWaiters.removeAll()
-            waiters.forEach { $0.resume() }
-        }
-
-        func claimConnectionIfCurrent(_ sessionID: UInt64) -> Bool {
-            guard case let .active(currentSessionID) = state, currentSessionID == sessionID else { return false }
-            connectionOwnerSessionID = sessionID
-            return true
-        }
-
-        func releaseConnectionIfOwned(_ sessionID: UInt64) {
-            guard connectionOwnerSessionID == sessionID else { return }
-            connectionOwnerSessionID = nil
-        }
-
-        func disconnectIfConnectionOwner(
-            _ sessionID: UInt64,
-            perform operation: @Sendable () async -> Void
-        ) async {
-            guard connectionOwnerSessionID == sessionID else { return }
-            connectionOwnerSessionID = nil
-            await operation()
-        }
-    }
-
     enum Phase: Equatable {
         case browsing
         case selected
@@ -214,34 +143,6 @@ final class PairHostModel: ObservableObject {
         }
     }
 
-    private struct DeinitCleanupPlan: Sendable {
-        let authority: SessionAuthority
-        let sessionID: UInt64?
-        let shouldStopDiscovery: Bool
-        let shouldDisconnect: Bool
-        let stopDiscovery: @Sendable () async -> Void
-        let disconnect: @Sendable () async -> Void
-
-        func launchIfNeeded() {
-            guard let sessionID, shouldStopDiscovery || shouldDisconnect else { return }
-            Task.detached(
-                priority: .utility,
-                operation: { [authority, sessionID, shouldStopDiscovery, shouldDisconnect, stopDiscovery, disconnect] in
-                    if shouldStopDiscovery {
-                        await authority.endIfCurrent(sessionID) {
-                            await stopDiscovery()
-                        }
-                    }
-                    if shouldDisconnect {
-                        await authority.disconnectIfConnectionOwner(sessionID) {
-                            await disconnect()
-                        }
-                    }
-                }
-            )
-        }
-    }
-
     @Published private(set) var rows: [Row] = []
     @Published private(set) var phase: Phase = .browsing
     @Published private(set) var errorMessage: String?
@@ -274,8 +175,6 @@ final class PairHostModel: ObservableObject {
 
     let dependencies: Dependencies
 
-    private let sessionAuthority: SessionAuthority
-
     private enum FailureSource {
         case discovery
         case validation
@@ -294,7 +193,6 @@ final class PairHostModel: ObservableObject {
     private var actionOwnedServerID: String?
     private var failureSource: FailureSource?
     private var ownsIncompleteConnection = false
-    private var sessionID: UInt64?
 
     private var selectedSubmitTarget: SubmitTarget {
         guard let selectedServerID else { return .none }
@@ -316,19 +214,11 @@ final class PairHostModel: ObservableObject {
         showManualEntry ? .manual : selectedSubmitTarget
     }
 
-    var sessionAuthorityIdentity: ObjectIdentifier {
-        ObjectIdentifier(sessionAuthority)
-    }
-
-    init(
-        dependencies: Dependencies,
-        authority: SessionAuthority = SessionAuthority()
-    ) {
+    init(dependencies: Dependencies) {
         self.dependencies = dependencies
-        sessionAuthority = authority
     }
 
-    static func fixture(authority: SessionAuthority = SessionAuthority()) -> PairHostModel {
+    static func fixture() -> PairHostModel {
         let entries = fixtureEntries()
         let entriesByServerID = Dictionary(uniqueKeysWithValues: entries.map { ($0.serverID, $0) })
         let statusByServerID: [String: PairingStatus] = [
@@ -386,13 +276,10 @@ final class PairHostModel: ObservableObject {
             disconnect: {
                 await pendingPairing.clear()
             }
-        ), authority: authority)
+        ))
     }
 
-    convenience init(
-        composition: MobileAppComposition,
-        authority: SessionAuthority = SessionAuthority()
-    ) {
+    convenience init(composition: MobileAppComposition) {
         let discovery = composition.bonjourHostDiscovery
         let store = composition.pairedHostStore
         let manager = composition.connectionManager
@@ -430,14 +317,16 @@ final class PairHostModel: ObservableObject {
             disconnect: {
                 await manager.disconnect()
             }
-        ), authority: authority)
+        ))
     }
 
     deinit {
         MainActor.assumeIsolated {
-            let cleanupPlan = deinitCleanupPlan()
+            assert(
+                !ownsIncompleteConnection,
+                "PairHostModel released before stop() finished an incomplete connection."
+            )
             cancelOwnedTasks()
-            cleanupPlan.launchIfNeeded()
         }
     }
 
@@ -602,33 +491,21 @@ final class PairHostModel: ObservableObject {
         guard !hasStarted else { return }
         hasStarted = true
         hasStopped = false
-        let authority = sessionAuthority
         let dependencies = self.dependencies
-        let startTask = Task { [weak self, authority, dependencies] in
-            let claimedSessionID = await authority.claimSession()
-            guard let self else {
-                await authority.relinquishIfCurrent(claimedSessionID)
-                return
-            }
-            guard let generation = await self.prepareStartAfterClaim(sessionID: claimedSessionID) else {
-                await authority.relinquishIfCurrent(claimedSessionID)
-                return
-            }
+        observationGeneration &+= 1
+        let generation = observationGeneration
+        let startTask = Task { [weak self, dependencies] in
+            guard let self else { return }
 
             let stream = await dependencies.startDiscovery()
-            guard await self.canObserveClaimedSession(sessionID: claimedSessionID) else {
-                await authority.endIfCurrent(claimedSessionID) {
-                    await dependencies.stopDiscovery()
-                }
-                return
-            }
+            guard self.canObserve(generation: generation) else { return }
 
             let observationTask = Task { [weak self, dependencies] in
                 for await snapshot in stream {
                     guard !Task.isCancelled else { return }
                     do {
                         let rows = try await Self.makeRows(from: snapshot, dependencies: dependencies)
-                        await self?.applyDiscoveryRowsIfCurrent(
+                        self?.applyDiscoveryRowsIfCurrent(
                             rows,
                             snapshotServerIDs: Set(snapshot.map(\.serverID)),
                             generation: generation
@@ -636,14 +513,11 @@ final class PairHostModel: ObservableObject {
                     } catch is CancellationError {
                         return
                     } catch {
-                        await self?.applyDiscoveryFailureIfCurrent(error, generation: generation)
+                        self?.applyDiscoveryFailureIfCurrent(error, generation: generation)
                     }
                 }
             }
-            await self.installObservationTaskIfCurrent(
-                observationTask,
-                sessionID: claimedSessionID
-            )
+            self.installObservationTaskIfCurrent(observationTask, generation: generation)
         }
         self.startTask = startTask
         await awaitStartTask(startTask)
@@ -661,26 +535,15 @@ final class PairHostModel: ObservableObject {
         hasStopped = true
         observationGeneration &+= 1
         let shouldDisconnect = ownsIncompleteConnection && phase != .ready
-        if shouldDisconnect {
-            ownsIncompleteConnection = false
-        }
+        ownsIncompleteConnection = false
         let startTask = self.startTask
         cancelOwnedTasks()
         pairingCode = ""
         let dependencies = self.dependencies
-        let authority = sessionAuthority
-        let sessionID = self.sessionID
-        let cleanupTask = Task.detached(priority: .utility) {
-            [authority, dependencies, sessionID, shouldDisconnect, startTask] in
-            if let sessionID {
-                await authority.endIfCurrent(sessionID) {
-                    await dependencies.stopDiscovery()
-                }
-                if shouldDisconnect {
-                    await authority.disconnectIfConnectionOwner(sessionID) {
-                        await dependencies.disconnect()
-                    }
-                }
+        let cleanupTask = Task { [dependencies, shouldDisconnect, startTask] in
+            await dependencies.stopDiscovery()
+            if shouldDisconnect {
+                await dependencies.disconnect()
             }
             if let startTask {
                 await startTask.value
@@ -688,7 +551,6 @@ final class PairHostModel: ObservableObject {
         }
         stopTask = cleanupTask
         await cleanupTask.value
-        self.sessionID = nil
         stopTask = nil
     }
 
@@ -864,18 +726,18 @@ final class PairHostModel: ObservableObject {
                 }
             }
             do {
-                guard await self?.claimConnectionOwnershipIfCurrent(actionID: actionID) == true else {
+                guard self?.claimConnectionOwnershipIfCurrent(actionID: actionID) == true else {
                     return
                 }
                 let host = try await dependencies.connectPaired(row.serverID, row.resolvedEndpoint)
-                guard await self?.transitionAction(
+                guard self?.transitionAction(
                     actionID: actionID,
                     phase: .loadingWorkspace
                 ) == true else {
                     return
                 }
                 try await dependencies.waitForWorkspaceReady()
-                await self?.completeAction(
+                self?.completeAction(
                     actionID: actionID,
                     host: host,
                     clearsPairingCode: false
@@ -883,7 +745,7 @@ final class PairHostModel: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
-                await self?.failActionIfCurrent(
+                self?.failActionIfCurrent(
                     actionID: actionID,
                     error: error,
                     clearPairingCode: false
@@ -910,22 +772,22 @@ final class PairHostModel: ObservableObject {
                 }
             }
             do {
-                guard await self?.claimConnectionOwnershipIfCurrent(actionID: actionID) == true else {
+                guard self?.claimConnectionOwnershipIfCurrent(actionID: actionID) == true else {
                     return
                 }
                 try await dependencies.connectForPairing(endpoint)
-                guard await self?.transitionAction(
+                guard self?.transitionAction(
                     actionID: actionID,
                     phase: .pairing
                 ) == true else {
                     return
                 }
                 let host = try await dependencies.pair(code)
-                guard await self?.transitionAction(actionID: actionID, phase: .loadingWorkspace) == true else {
+                guard self?.transitionAction(actionID: actionID, phase: .loadingWorkspace) == true else {
                     return
                 }
                 try await dependencies.waitForWorkspaceReady()
-                await self?.completeAction(
+                self?.completeAction(
                     actionID: actionID,
                     host: host,
                     clearsPairingCode: true
@@ -933,7 +795,7 @@ final class PairHostModel: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
-                await self?.failActionIfCurrent(
+                self?.failActionIfCurrent(
                     actionID: actionID,
                     error: error,
                     clearPairingCode: true
@@ -973,17 +835,8 @@ final class PairHostModel: ObservableObject {
         }
     }
 
-    private func claimConnectionOwnershipIfCurrent(actionID: UUID) async -> Bool {
-        guard activeActionID == actionID, let sessionID else { return false }
-        let authority = sessionAuthority
-        guard await authority.claimConnectionIfCurrent(sessionID) else {
-            cancelStaleActionIfCurrent(actionID: actionID)
-            return false
-        }
-        guard activeActionID == actionID, self.sessionID == sessionID else {
-            await authority.releaseConnectionIfOwned(sessionID)
-            return false
-        }
+    private func claimConnectionOwnershipIfCurrent(actionID: UUID) -> Bool {
+        guard activeActionID == actionID else { return false }
         ownsIncompleteConnection = true
         return true
     }
@@ -1007,14 +860,9 @@ final class PairHostModel: ObservableObject {
         actionID: UUID,
         host: PairedHost,
         clearsPairingCode: Bool
-    ) async {
+    ) {
         guard activeActionID == actionID else { return }
-        let sessionID = self.sessionID
         ownsIncompleteConnection = false
-        if let sessionID {
-            await sessionAuthority.releaseConnectionIfOwned(sessionID)
-        }
-        guard activeActionID == actionID else { return }
         if clearsPairingCode {
             pairingCode = ""
         }
@@ -1026,14 +874,9 @@ final class PairHostModel: ObservableObject {
         actionID: UUID,
         error: Error,
         clearPairingCode: Bool
-    ) async {
+    ) {
         guard activeActionID == actionID else { return }
-        let sessionID = self.sessionID
         ownsIncompleteConnection = false
-        if let sessionID {
-            await sessionAuthority.releaseConnectionIfOwned(sessionID)
-        }
-        guard activeActionID == actionID else { return }
         applyFailure(error, source: .action, clearPairingCode: clearPairingCode)
     }
 
@@ -1100,17 +943,6 @@ final class PairHostModel: ObservableObject {
         applyDiscoveryFailure(error)
     }
 
-    private func deinitCleanupPlan() -> DeinitCleanupPlan {
-        DeinitCleanupPlan(
-            authority: sessionAuthority,
-            sessionID: sessionID,
-            shouldStopDiscovery: hasStarted && !hasStopped,
-            shouldDisconnect: ownsIncompleteConnection && phase != .ready,
-            stopDiscovery: dependencies.stopDiscovery,
-            disconnect: dependencies.disconnect
-        )
-    }
-
     private func cancelOwnedTasks() {
         startTask?.cancel()
         startTask = nil
@@ -1125,23 +957,16 @@ final class PairHostModel: ObservableObject {
         retryingServerIDs.removeAll()
     }
 
-    private func prepareStartAfterClaim(sessionID claimedSessionID: UInt64) -> UInt64? {
-        guard !hasStopped, !Task.isCancelled else { return nil }
-        sessionID = claimedSessionID
-        observationGeneration &+= 1
-        return observationGeneration
-    }
-
-    private func canObserveClaimedSession(sessionID claimedSessionID: UInt64) -> Bool {
+    private func canObserve(generation: UInt64) -> Bool {
         guard !hasStopped, !Task.isCancelled else { return false }
-        return sessionID == claimedSessionID
+        return observationGeneration == generation
     }
 
     private func installObservationTaskIfCurrent(
         _ task: Task<Void, Never>,
-        sessionID claimedSessionID: UInt64
+        generation: UInt64
     ) {
-        guard canObserveClaimedSession(sessionID: claimedSessionID) else {
+        guard canObserve(generation: generation) else {
             task.cancel()
             return
         }

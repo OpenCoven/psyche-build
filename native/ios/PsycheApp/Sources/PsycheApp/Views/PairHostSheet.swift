@@ -17,14 +17,20 @@ struct PairHostSheet: View {
     }
 
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var model: PairHostModel
+    @ObservedObject private var model: PairHostModel
     @State private var deliveredReadyServerID: String?
     @State private var stopPhase: StopPhase?
 
-    private let onReady: (PairedHost) -> Void
+    private let onCancel: () async -> Void
+    private let onReady: (PairedHost) async -> Void
 
-    init(model: PairHostModel, onReady: @escaping (PairedHost) -> Void) {
-        _model = StateObject(wrappedValue: model)
+    init(
+        model: PairHostModel,
+        onCancel: @escaping () async -> Void,
+        onReady: @escaping (PairedHost) async -> Void
+    ) {
+        self.model = model
+        self.onCancel = onCancel
         self.onReady = onReady
     }
 
@@ -279,14 +285,13 @@ struct PairHostSheet: View {
 
     @MainActor
     private func finishReadyHost(_ host: PairedHost) async {
-        onReady(host)
-        await model.stop()
+        await onReady(host)
         dismiss()
     }
 
     @MainActor
     private func finishCancellation() async {
-        await model.stop()
+        await onCancel()
         dismiss()
     }
 }

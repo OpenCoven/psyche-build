@@ -72,10 +72,18 @@ server ID. It does not fall back to sorted host order.
 
 ## Architecture
 
+### AppModel
+
+`AppModel` owns the pairing-flow coordinator. It keeps one active
+`PairHostModel`, serializes begin/end requests, and retains the current model
+until `await model.stop()` finishes so shared Bonjour and connection cleanup
+cannot race a replacement sheet.
+
 ### PairHostSheet
 
-`PairHostSheet` renders state supplied by `PairHostModel`. It does not call
-networking or secure storage directly.
+`PairHostSheet` renders the `AppModel`-owned `PairHostModel`. It does not call
+networking or secure storage directly and delegates explicit cancel, ready, and
+defensive presenter dismissal cleanup back to `AppModel`.
 
 The sheet presents:
 
@@ -96,12 +104,12 @@ transport mechanics.
 
 Its responsibilities are:
 
-- start and stop `BonjourHostDiscovery` with the sheet lifecycle;
+- start and stop `BonjourHostDiscovery` for one coordinator-owned flow;
 - merge discovery entries with `PairedHostStore.pairingStatus`;
 - retain the user's selected row while compatible snapshots refresh;
 - validate manual host, port, fingerprint, and pairing-code input;
 - route paired, unpaired, and re-pairing actions to `ConnectionManager`;
-- cancel in-flight work when the sheet closes or the user goes back;
+- cancel in-flight work when `AppModel` ends the flow or the user goes back;
 - wait for workspace readiness before reporting success; and
 - expose stable phases and user-facing errors to SwiftUI.
 
@@ -310,7 +318,7 @@ never infers or silently accepts a certificate.
 - validate manual host, port, fingerprint, and code fields;
 - drive paired connect, new pairing, and re-pairing paths;
 - show code, protocol, pin, transport, and snapshot errors;
-- cancel active work on dismissal;
+- route dismissal through `AppModel.endPairHostFlow(_:)`;
 - report success and dismiss only after workspace readiness;
 - expose concise accessibility labels and disable duplicate actions while work
   is in progress.
