@@ -154,6 +154,43 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects complete NVIDIA identifier sequences across WebGPU, raw WebGL, and ANGLE', () => {
+    for (const adapter of [
+      'NVIDIA 10DE 2684 1458',
+      'NVIDIA Controller 10DE 2684 1458',
+      'NVIDIA VGA Controller 10DE 2684 1458',
+    ]) {
+      const probes = [
+        {
+          webgpuAdapterAvailable: true as const,
+          webgpuAdapter: adapter,
+          unsupportedFields: [],
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: adapter,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: `ANGLE (NVIDIA, ${adapter}, OpenGL)`,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+      ];
+
+      for (const probe of probes) {
+        expect(classifyGraphicsEvidence(probe), adapter).toEqual({
+          acceleration: 'unknown',
+          fallbackReason: 'renderer_masked_or_ambiguous',
+          supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+          unsupportedFields: [],
+        });
+      }
+    }
+  });
+
   it('strips unprefixed identifier pairs from named adapters without rejecting the product', () => {
     for (const adapter of [
       'NVIDIA GeForce RTX 4090 10DE 2684',
@@ -169,6 +206,18 @@ describe('graphics evidence classification', () => {
         supportingProbe: 'webgpu',
       });
     }
+  });
+
+  it('strips identifier sequences of any length from named adapters', () => {
+    expect(classifyGraphicsEvidence({
+      webgpuAdapterAvailable: true,
+      webgpuAdapter: 'NVIDIA GeForce RTX 4090 10DE-2684 1458-1A2B',
+      unsupportedFields: [],
+    })).toMatchObject({
+      acceleration: 'accelerated',
+      adapter: 'NVIDIA GeForce RTX 4090',
+      supportingProbe: 'webgpu',
+    });
   });
 
   it('preserves legitimate single-token GPU model identifiers', () => {
