@@ -247,18 +247,6 @@ const genericAdapterWords = new Set([
   'version',
   'windows',
 ]);
-const knownProductModelWords = new Set([
-  'adreno',
-  'arc',
-  'geforce',
-  'iris',
-  'mali',
-  'quadro',
-  'radeon',
-  'rtx',
-  'uhd',
-  'vega',
-]);
 const entitySuffixWords = new Set([
   'co',
   'company',
@@ -588,7 +576,6 @@ function hasMeaningfulProductToken(value: string): boolean {
   return hasDescriptiveToken && (
     meaningfulTokens.length >= 2
     || meaningfulTokens.some((token) => /[a-z]/i.test(token) && /\d/.test(token))
-    || meaningfulTokens.some((token) => knownProductModelWords.has(lowerCase(token)))
   );
 }
 

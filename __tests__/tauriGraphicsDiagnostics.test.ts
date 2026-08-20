@@ -750,6 +750,40 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects lone graphics product-family words across every adapter path', () => {
+    const probes = [
+      (adapter: string) => ({
+        webgpuAdapterAvailable: true as const,
+        webgpuAdapter: adapter,
+        unsupportedFields: [],
+      }),
+      (renderer: string) => ({
+        strictContext: 'webgl2' as const,
+        renderer,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false as const,
+      }),
+      (adapter: string) => ({
+        strictContext: 'webgl2' as const,
+        renderer: `ANGLE (Google, ${adapter}, OpenGL)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false as const,
+      }),
+    ];
+
+    for (const value of ['GeForce', 'Radeon', 'Arc']) {
+      for (const createProbe of probes) {
+        const probe = createProbe(value);
+        expect(classifyGraphicsEvidence(probe), value).toEqual({
+          acceleration: 'unknown',
+          fallbackReason: 'renderer_masked_or_ambiguous',
+          supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+          unsupportedFields: [],
+        });
+      }
+    }
+  });
+
   it('rejects concrete generic and compact identifier examples on raw WebGL, ANGLE, and WebGPU paths', () => {
     const ambiguousValues = [
       'NVIDIA Driver',
@@ -1194,8 +1228,6 @@ describe('graphics evidence classification', () => {
       'NVIDIA GeForce RTX 4090',
       'NVIDIA GeForce RTX 4090 Backend',
       'NVIDIA Corporation GeForce RTX 4090',
-      'NVIDIA GeForce Graphics',
-      'NVIDIA GeForce Driver',
       'Intel Arc A770',
       'Intel Arc A770 Frontend',
       'Intel UHD Graphics 630',
