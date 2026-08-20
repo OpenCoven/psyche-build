@@ -45,4 +45,41 @@ describe('pane rebinding generation', () => {
 
     expect(result.worktreePanesToRecreate).toEqual([pane]);
   });
+
+  it('rebinds repeated managed labels by their distinct reserved slugs after reload', async () => {
+    const { rebindAndFilterPanes } = await import('../src/hooks/usePaneSync.js');
+    const panes: PsychePane[] = [
+      {
+        id: 'psyche-1',
+        slug: 'fix-bug',
+        displayName: 'Fix bug · fix-bug',
+        prompt: '',
+        paneId: '%7',
+        worktreePath: '/repo/.psyche/worktrees/fix-bug',
+        type: 'worktree',
+      },
+      {
+        id: 'psyche-2',
+        slug: 'fix-bug-2',
+        displayName: 'Fix bug · fix-bug-2',
+        prompt: '',
+        paneId: '%8',
+        worktreePath: '/repo/.psyche/worktrees/fix-bug-2',
+        type: 'worktree',
+      },
+    ];
+
+    const result = rebindAndFilterPanes(
+      panes,
+      new Map([
+        ['Fix bug · fix-bug', '%17'],
+        ['Fix bug · fix-bug-2', '%18'],
+      ]),
+      ['%17', '%18'],
+      true,
+    );
+
+    expect(result.activePanes.map((pane) => pane.paneId)).toEqual(['%17', '%18']);
+    expect(result.worktreePanesToRecreate).toEqual([]);
+  });
 });

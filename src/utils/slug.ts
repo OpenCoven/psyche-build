@@ -1,5 +1,16 @@
 import { runProcess } from './runProcess.js';
 
+export function derivePaneSlug(value: string, fallback = 'pane'): string {
+  const segment = value.split('/').pop() || value;
+  const normalized = segment
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return normalized || fallback;
+}
+
 export const callClaudeCode = async (prompt: string): Promise<string | null> => {
   try {
     const result = await runProcess('claude', {

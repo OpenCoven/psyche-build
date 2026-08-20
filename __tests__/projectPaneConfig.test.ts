@@ -1,14 +1,24 @@
-import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   acquireProjectPaneConfigLock,
+  acquireProjectPaneSlugAllocationLock,
   mutateProjectPaneConfig,
   mutateProjectPaneSettings,
+  readProjectPaneConfigUnderLock,
   removeProjectPaneConfigPaneIdentities,
   replaceProjectPaneConfigPaneIdentity,
   upsertProjectPaneConfigPanes,
 } from '../src/services/ProjectPaneConfig.js';
+import { generateSiblingSlugForTargetPane } from '../src/utils/attachAgent.js';
 import {
   savePanesToFile,
   saveUpdatedPaneConfig,
@@ -34,6 +44,95 @@ function createProject(): string {
 }
 
 describe('project pane config mutation', () => {
+  it('serializes sibling slug allocation across distinct same-basename worktrees', async () => {
+    expect(acquireProjectPaneSlugAllocationLock).toEqual(expect.any(Function));
+    const projectRoot = createProject();
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [{ slug: 'feature' }];
+    });
+    let firstAllocationEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      firstAllocationEntered = resolve;
+    });
+    let releaseFirstAllocation!: () => void;
+    const firstCanPersist = new Promise<void>((resolve) => {
+      releaseFirstAllocation = resolve;
+    });
+    let allocationCount = 0;
+
+    const allocate = async (
+      worktreePath: string,
+      lockOptions: {
+        pollIntervalMs?: number;
+        sleep?: (ms: number) => Promise<void>;
+      } = {},
+    ): Promise<string> => {
+      const lock = await acquireProjectPaneSlugAllocationLock(projectRoot, {
+        pollIntervalMs: 1,
+        ...lockOptions,
+      });
+      try {
+        const config = await readProjectPaneConfigUnderLock(projectRoot);
+        const freshPanes = (config.panes || []).filter(
+          (pane): pane is { slug: string } => typeof pane.slug === 'string',
+        );
+        const slug = generateSiblingSlugForTargetPane(
+          { slug: 'feature', worktreePath },
+          freshPanes,
+        );
+        allocationCount += 1;
+        if (allocationCount === 1) {
+          firstAllocationEntered();
+          await firstCanPersist;
+        }
+        await mutateProjectPaneConfig(projectRoot, (freshConfig) => {
+          freshConfig.panes = [...(freshConfig.panes || []), { slug }];
+        });
+        return slug;
+      } finally {
+        await lock.release();
+      }
+    };
+
+    const first = allocate(join(projectRoot, 'first', 'feature'));
+    await firstEntered;
+
+    let secondAllocationBlocked!: () => void;
+    const secondBlocked = new Promise<void>((resolve) => {
+      secondAllocationBlocked = resolve;
+    });
+    let retrySecondAllocation!: () => void;
+    const secondCanRetry = new Promise<void>((resolve) => {
+      retrySecondAllocation = resolve;
+    });
+    const second = allocate(join(projectRoot, 'second', 'feature'), {
+      sleep: async () => {
+        secondAllocationBlocked();
+        await secondCanRetry;
+      },
+    });
+    await expect(Promise.race([
+      secondBlocked.then(() => 'blocked'),
+      second.then(() => 'allocated'),
+    ])).resolves.toBe('blocked');
+
+    releaseFirstAllocation();
+    retrySecondAllocation();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      'feature-a2',
+      'feature-a3',
+    ]);
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).panes.map(
+      (pane: { slug: string }) => pane.slug,
+    )).toEqual([
+      'feature',
+      'feature-a2',
+      'feature-a3',
+    ]);
+  });
+
   it('allocates concurrent attached-pane sibling slugs under the durable config lock', async () => {
     const projectRoot = createProject();
     const worktreePath = join(projectRoot, '.psyche', 'worktrees', 'feature');
@@ -135,6 +234,63 @@ describe('project pane config mutation', () => {
     }])).rejects.toThrow(/Duplicate pane ID/);
 
     expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([original]);
+  });
+
+  it('loads and atomically migrates legacy sidebar panes with duplicate slugs', async () => {
+    const projectRoot = createProject();
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    const fixturePath = join(
+      process.cwd(),
+      '__tests__',
+      'fixtures',
+      'sidebar-duplicate-slugs.json',
+    );
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'));
+    mkdirSync(join(projectRoot, '.psyche'), { recursive: true });
+    writeFileSync(configPath, `${JSON.stringify(fixture, null, 2)}\n`);
+
+    const loaded = await readProjectPaneConfigUnderLock(projectRoot);
+    expect(loaded.panes).toMatchObject([
+      {
+        id: 'pane-primary',
+        slug: 'fix-auth',
+        displayName: 'Fix auth',
+      },
+      {
+        id: 'pane-api',
+        slug: 'fix-auth-api-service',
+        branchName: 'fix-auth',
+        displayName: 'Fix auth · fix-auth-api-service',
+      },
+      {
+        id: 'pane-web',
+        slug: 'fix-auth-web-client',
+        branchName: 'fix-auth',
+        displayName: 'Fix auth · fix-auth-web-client',
+      },
+    ]);
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).panes.map(
+      (pane: { slug: string }) => pane.slug,
+    )).toEqual(['fix-auth', 'fix-auth', 'fix-auth']);
+
+    await upsertProjectPaneConfigPanes(projectRoot, [{
+      id: 'pane-created-after-migration',
+      paneId: '%4',
+      slug: 'follow-up',
+      displayName: 'Follow up',
+      prompt: '',
+    }]);
+
+    const persisted = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(persisted.panes.map((pane: { id: string }) => pane.id)).toEqual([
+      'pane-primary',
+      'pane-api',
+      'pane-web',
+      'pane-created-after-migration',
+    ]);
+    expect(new Set(persisted.panes.map(
+      (pane: { slug: string }) => pane.slug,
+    )).size).toBe(4);
   });
 
   it('removes a pane only when its exact tmux identity remains current', async () => {

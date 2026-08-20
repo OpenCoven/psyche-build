@@ -42,6 +42,7 @@ import {
   type TmuxPanePresence,
 } from '../utils/paneTeardown.js';
 import { retainPaneRecovery } from '../utils/paneLifecycleRecovery.js';
+import { indexUniquePaneTitles } from '../utils/paneTitleIndex.js';
 
 // Separate config structure to match new format
 export interface PsycheConfig {
@@ -159,18 +160,10 @@ export async function fetchTmuxPaneIds(maxRetries = 2): Promise<{
     try {
       const paneInfo = await tmuxService.getAllPaneInfo('session');
       const currentWindowPaneIds = await tmuxService.getAllPaneIds('window');
-      const allPaneIds: string[] = [];
-      const titleToId = new Map<string, string>();
-
-      for (const pane of paneInfo) {
-        if (!pane.paneId || !pane.paneId.startsWith('%') || pane.title === SPACER_PANE_TITLE) {
-          continue;
-        }
-        allPaneIds.push(pane.paneId);
-        if (pane.title) {
-          titleToId.set(pane.title.trim(), pane.paneId);
-        }
-      }
+      const { allPaneIds, titleToId } = indexUniquePaneTitles(
+        paneInfo,
+        SPACER_PANE_TITLE,
+      );
 
       if (allPaneIds.length > 0 || retryCount === maxRetries) {
         return { allPaneIds, titleToId, currentWindowPaneIds };

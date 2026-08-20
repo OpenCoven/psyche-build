@@ -5,7 +5,7 @@
 import { initSidebar, updateActiveSection } from './sidebar.js';
 import { renderHero, fetchStars, formatStars } from './hero.js';
 import { processCodeBlocks } from './code-highlight.js';
-import { sections } from './content/index.js';
+import { renderContentModule, sections } from './content/index.js';
 
 async function init() {
   // Render hero
@@ -21,8 +21,7 @@ async function init() {
     for (const page of section.pages) {
       const mod = await page.load();
       const sectionId = page.path.slice(1); // "/introduction" -> "introduction"
-      // Rewrite internal links from #/xxx to #xxx for single-page anchors
-      const rendered = mod.render().replace(/href="#\//g, 'href="#');
+      const rendered = renderContentModule(mod);
       html += `<section id="${sectionId}" class="doc-section">${rendered}</section>`;
     }
   }

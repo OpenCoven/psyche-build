@@ -264,6 +264,212 @@ describe('daemon connection authentication', () => {
         result: { status: 'completed' },
       });
     });
+
+    it('reconciles the same explicit daemon operation across reconnects and request ids', async () => {
+      const root = await projectWithPanes([]);
+      const submitted: any[] = [];
+      const executionOutcomes = new Map<string, unknown>();
+      let executionEffects = 0;
+      const controlRuntime = {
+        submit: vi.fn(async (command: any) => {
+          submitted.push(command);
+          if (command.kind === 'lease.request') {
+            return { status: 'succeeded', value: { requestId: command.id } };
+          }
+          if (command.kind === 'lease.grant') {
+            return {
+              status: 'succeeded',
+              value: { lease: { id: `lease-${submitted.length}`, revision: 1 } },
+            };
+          }
+          const prior = executionOutcomes.get(command.idempotencyKey);
+          if (prior) return prior;
+          executionEffects += 1;
+          const outcome = {
+            status: 'succeeded',
+            value: {
+              taskId: 'shared-task',
+              traceId: 'shared-trace',
+              status: 'completed',
+              startedAt: '2026-08-18T00:00:00.000Z',
+              completedAt: '2026-08-18T00:00:00.000Z',
+              lanes: [],
+            },
+          };
+          executionOutcomes.set(command.idempotencyKey, outcome);
+          return outcome;
+        }),
+      };
+      const message = {
+        type: 'orchestration.execute',
+        operationId: 'stable-daemon-operation',
+        task: {
+          taskId: 'shared-task',
+          projectRoot: root,
+          prompt: 'Fix tests',
+          lanes: [{ id: 'same-lane', mode: 'terminal' }],
+        },
+      };
+      const first = await buildConnection(root, {
+        controlRuntime: controlRuntime as unknown as ConnectionDeps['controlRuntime'],
+      });
+      const retry = await buildConnection(root, {
+        controlRuntime: controlRuntime as unknown as ConnectionDeps['controlRuntime'],
+      });
+
+      await request(first.ws, { ...message, requestId: 'request-before-disconnect' });
+      await request(retry.ws, { ...message, requestId: 'request-after-reconnect' });
+
+      const executions = submitted.filter((candidate) => candidate.kind === 'orchestration.execute');
+      expect(executions).toHaveLength(2);
+      expect(executions[1].idempotencyKey).toBe(executions[0].idempotencyKey);
+      expect(executions[0].idempotencyKey).not.toContain(executions[0].actor.id);
+      expect(executionEffects).toBe(1);
+      expect(first.ws.sent[0]).toMatchObject({ requestId: 'request-before-disconnect' });
+      expect(retry.ws.sent[0]).toMatchObject({ requestId: 'request-after-reconnect' });
+    });
+
+    it('keeps distinct explicit operations separate when connections reuse a request id', async () => {
+      const root = await projectWithPanes([]);
+      const submitted: any[] = [];
+      const controlRuntime = {
+        submit: vi.fn(async (command: any) => {
+          submitted.push(command);
+          if (command.kind === 'lease.request') {
+            return { status: 'succeeded', value: { requestId: command.id } };
+          }
+          if (command.kind === 'lease.grant') {
+            return { status: 'succeeded', value: { lease: { id: command.id, revision: 1 } } };
+          }
+          return {
+            status: 'succeeded',
+            value: {
+              taskId: 'shared-task',
+              traceId: 'shared-trace',
+              status: 'completed',
+              startedAt: '2026-08-18T00:00:00.000Z',
+              completedAt: '2026-08-18T00:00:00.000Z',
+              lanes: [],
+            },
+          };
+        }),
+      };
+      const first = await buildConnection(root, {
+        controlRuntime: controlRuntime as ConnectionDeps['controlRuntime'],
+      });
+      const second = await buildConnection(root, {
+        controlRuntime: controlRuntime as ConnectionDeps['controlRuntime'],
+      });
+      const task = {
+        taskId: 'shared-task',
+        projectRoot: root,
+        prompt: 'Fix tests',
+        lanes: [{ id: 'same-lane', mode: 'terminal' }],
+      };
+
+      await request(first.ws, {
+        type: 'orchestration.execute',
+        requestId: '1',
+        operationId: 'daemon-operation-a',
+        task,
+      });
+      await request(second.ws, {
+        type: 'orchestration.execute',
+        requestId: '1',
+        operationId: 'daemon-operation-b',
+        task,
+      });
+      await request(first.ws, {
+        type: 'orchestration.execute',
+        requestId: '1',
+        operationId: 'daemon-operation-c',
+        task,
+      });
+
+      const executions = submitted.filter((candidate) => candidate.kind === 'orchestration.execute');
+      expect(executions).toHaveLength(3);
+      expect(executions[1].idempotencyKey).not.toBe(executions[0].idempotencyKey);
+      expect(executions[2].idempotencyKey).not.toBe(executions[0].idempotencyKey);
+      const leaseRequests = submitted.filter((candidate) => candidate.kind === 'lease.request');
+      expect(leaseRequests[2].idempotencyKey).not.toBe(leaseRequests[0].idempotencyKey);
+    });
+
+    it('scopes legacy request-id fallback to one connection', async () => {
+      const root = await projectWithPanes([]);
+      const submitted: any[] = [];
+      const controlRuntime = {
+        submit: vi.fn(async (command: any) => {
+          submitted.push(command);
+          if (command.kind === 'lease.request') {
+            return { status: 'succeeded', value: { requestId: command.id } };
+          }
+          if (command.kind === 'lease.grant') {
+            return { status: 'succeeded', value: { lease: { id: command.id, revision: 1 } } };
+          }
+          return {
+            status: 'succeeded',
+            value: {
+              taskId: 'shared-task',
+              traceId: 'shared-trace',
+              status: 'completed',
+              startedAt: '2026-08-18T00:00:00.000Z',
+              completedAt: '2026-08-18T00:00:00.000Z',
+              lanes: [],
+            },
+          };
+        }),
+      };
+      const first = await buildConnection(root, {
+        controlRuntime: controlRuntime as ConnectionDeps['controlRuntime'],
+      });
+      const reconnect = await buildConnection(root, {
+        controlRuntime: controlRuntime as ConnectionDeps['controlRuntime'],
+      });
+      const message = {
+        type: 'orchestration.execute',
+        requestId: '1',
+        task: {
+          taskId: 'shared-task',
+          projectRoot: root,
+          prompt: 'Fix tests',
+          lanes: [{ id: 'same-lane', mode: 'terminal' }],
+        },
+      };
+
+      await request(first.ws, message);
+      await request(reconnect.ws, message);
+
+      const executions = submitted.filter((candidate) => candidate.kind === 'orchestration.execute');
+      expect(executions).toHaveLength(2);
+      expect(executions[1].idempotencyKey).not.toBe(executions[0].idempotencyKey);
+    });
+
+    it('rejects an oversized explicit daemon operation id before control execution', async () => {
+      const root = await projectWithPanes([]);
+      const controlRuntime = { submit: vi.fn() };
+      const { ws } = await buildConnection(root, {
+        controlRuntime: controlRuntime as unknown as ConnectionDeps['controlRuntime'],
+      });
+
+      await request(ws, {
+        type: 'orchestration.execute',
+        requestId: 'oversized-operation',
+        operationId: 'x'.repeat(129),
+        task: {
+          taskId: 'task-1',
+          projectRoot: root,
+          prompt: 'Fix tests',
+          lanes: [{ id: 'same-lane', mode: 'terminal' }],
+        },
+      });
+
+      expect(ws.sent[0]).toMatchObject({
+        type: 'error',
+        requestId: 'oversized-operation',
+        code: 'invalid_orchestration_request',
+      });
+      expect(controlRuntime.submit).not.toHaveBeenCalled();
+    });
   });
 
   it('rejects a wrong token', async () => {

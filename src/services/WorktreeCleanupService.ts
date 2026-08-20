@@ -32,6 +32,7 @@ import {
 } from './LiveTmuxWorktreeGuard.js';
 import {
   findBlockingWorktreeRecoveryMarker,
+  findBlockingWorktreeReuseRecoveryMarker,
 } from './WorktreeRecoveryMarker.js';
 
 export interface WorktreeCleanupJob {
@@ -72,6 +73,7 @@ export interface CreatedWorktreeIdentity {
   mainRepoPath: string;
   deleteBranch: boolean;
   configProjectRoot: string;
+  recoveryId?: string;
 }
 
 export interface WorktreeCreationReservation {
@@ -239,6 +241,7 @@ export class WorktreeCleanupService {
     worktreePath: string,
     projectRoot?: string,
     projectLifecycleLease?: ProjectWorktreeLifecycleLease,
+    recoveryProjectRoot?: string,
   ): Promise<WorktreeReuseReservation> {
     const canonicalWorktreePath = canonicalizePathWithExistingAncestor(worktreePath);
     const ownedProjectLifecycleLease = projectLifecycleLease
@@ -258,8 +261,10 @@ export class WorktreeCleanupService {
         operation: 'reuse',
       });
       const generation = this.incrementCleanupGeneration(canonicalWorktreePath);
-      const recoveryMarker = findBlockingWorktreeRecoveryMarker(
-        projectRoot || operationLease.canonicalProjectRoot,
+      const targetProjectRoot = projectRoot || operationLease.canonicalProjectRoot;
+      const recoveryMarker = findBlockingWorktreeReuseRecoveryMarker(
+        recoveryProjectRoot || targetProjectRoot,
+        targetProjectRoot,
         canonicalWorktreePath,
       );
       if (recoveryMarker.blocked) {
@@ -414,6 +419,8 @@ export class WorktreeCleanupService {
     worktreePath: string,
     mainRepoPath: string,
     projectLifecycleLease?: ProjectWorktreeLifecycleLease,
+    recoveryProjectRoot?: string,
+    authorizedRecoveryId?: string,
   ): Promise<WorktreeCreationReservation> {
     const canonicalWorktreePath = canonicalizePathWithExistingAncestor(worktreePath);
     const ownedProjectLifecycleLease = projectLifecycleLease
@@ -434,8 +441,10 @@ export class WorktreeCleanupService {
       });
       this.incrementCleanupGeneration(canonicalWorktreePath);
       const recoveryMarker = findBlockingWorktreeRecoveryMarker(
+        recoveryProjectRoot || mainRepoPath,
         mainRepoPath,
         canonicalWorktreePath,
+        authorizedRecoveryId,
       );
       if (recoveryMarker.blocked) {
         throw new Error(
@@ -520,6 +529,7 @@ export class WorktreeCleanupService {
           mainRepoPath,
           deleteBranch,
           configProjectRoot,
+          ...(authorizedRecoveryId ? { recoveryId: authorizedRecoveryId } : {}),
         }),
         rollbackCreatedWorktree: async (identity) => {
           return this.rollbackCreatedWorktreeWhileLeased(
@@ -633,8 +643,10 @@ export class WorktreeCleanupService {
     }
 
     const recoveryMarker = findBlockingWorktreeRecoveryMarker(
+      identity.configProjectRoot,
       identity.mainRepoPath,
       identity.canonicalWorktreePath,
+      identity.recoveryId,
     );
     if (recoveryMarker.blocked) {
       return {
@@ -1146,6 +1158,7 @@ export class WorktreeCleanupService {
     }
 
     const recoveryMarker = findBlockingWorktreeRecoveryMarker(
+      job.currentProjectRoot,
       job.mainRepoPath,
       protectedWorktreePath,
     );
@@ -1504,6 +1517,9 @@ export class WorktreeCleanupService {
               }
 
               const recoveryMarker = findBlockingWorktreeRecoveryMarker(
+                job.configPath
+                  ? path.dirname(path.dirname(job.configPath))
+                  : job.projectRoot,
                 job.projectRoot,
                 target.canonicalWorktreePath,
               );

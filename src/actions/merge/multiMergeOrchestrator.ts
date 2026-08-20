@@ -636,7 +636,10 @@ async function createAndMonitorConflictPane(
       agent,
       projectName: context.projectName,
       existingPanes: context.panes,
-      sessionProjectRoot: pane.projectRoot || worktree.parentRepoPath,
+      sessionProjectRoot: context.sessionProjectRoot
+        || pane.projectRoot
+        || worktree.parentRepoPath,
+      targetProjectRoot: pane.projectRoot || worktree.parentRepoPath,
       persistConflictPane: async (nextPane) => {
         await context.savePanes([...context.panes, nextPane], context.panes);
       },

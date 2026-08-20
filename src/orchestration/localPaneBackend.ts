@@ -9,6 +9,23 @@ import { laneSlugSuffix } from './adapters.js';
 import type { LaneBackend, LaneExecutionOutput } from './orchestrator.js';
 import { OrchestrationError, type OrchestrationLanePlan } from './types.js';
 import { persistProjectPaneConfigPaneDelta } from '../services/ProjectPaneConfig.js';
+import { generateSiblingSlugForTargetPane } from '../utils/attachAgent.js';
+
+const MAX_ORCHESTRATION_WARNING_LENGTH = 1_024;
+const ORCHESTRATION_PERSISTENCE_WARNING_PREFIX =
+  'Pane launched, but orchestration metadata was not saved: ';
+
+function orchestrationPersistenceWarningMessage(error: unknown): string {
+  let detail: string;
+  try {
+    detail = error instanceof Error ? error.message : String(error);
+  } catch {
+    detail = 'unknown error';
+  }
+  const safeDetail = detail.replace(/[\r\n\0]/g, ' ').trim() || 'unknown error';
+  return `${ORCHESTRATION_PERSISTENCE_WARNING_PREFIX}${safeDetail}`
+    .slice(0, MAX_ORCHESTRATION_WARNING_LENGTH);
+}
 
 export interface LocalPaneBackendOptions {
   projectName: string;
@@ -33,6 +50,11 @@ export interface LocalPaneBackendOptions {
     previousPanes: PsychePane[],
     nextPanes: PsychePane[],
   ) => Promise<void>;
+  /** Injectable shared-worktree slug allocator. */
+  resolveExistingWorktreeSlug?: (
+    targetPane: Pick<PsychePane, 'slug' | 'worktreePath'>,
+    freshPanes: readonly PsychePane[],
+  ) => string;
   /**
    * Shared slug stem for multi-lane tasks, so sibling lanes read as variants
    * of one task (fix-auth-codex, fix-auth-claude) rather than unrelated names.
@@ -82,6 +104,8 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
       );
       return mutation.result as PsychePane;
     });
+  const resolveExistingWorktreeSlug = options.resolveExistingWorktreeSlug
+    ?? generateSiblingSlugForTargetPane;
   const created: PsychePane[] = [];
 
   // The first createPane call in a session may build the sidebar layout and
@@ -109,6 +133,13 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
         ...(options.slugBase ? { slugBase: options.slugBase } : {}),
         ...(laneSlugSuffix(lane.agent) ? { slugSuffix: laneSlugSuffix(lane.agent) } : {}),
         ...(lane.existingWorktree ? { existingWorktree: lane.existingWorktree } : {}),
+        ...(lane.existingWorktree
+          ? {
+            resolveExistingWorktreeSlug: (freshPanes: readonly PsychePane[]) => (
+              resolveExistingWorktreeSlug(lane.existingWorktree!, freshPanes)
+            ),
+          }
+          : {}),
         ...(lane.startPointBranch ? { startPointBranch: lane.startPointBranch } : {}),
         ...(lane.mergeTargetChain ? { mergeTargetChain: lane.mergeTargetChain } : {}),
         projectName: options.projectName,
@@ -144,9 +175,12 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
     // decide which agent to use. A lane always names its agent, so reaching
     // here means the request was built wrong.
     if (result.needsAgentChoice || !result.pane) {
+      const recovery = result.warnings?.map((warning) => warning.message).join('; ');
       throw new OrchestrationError(
         'unsupported_agent',
-        `Lane "${lane.id}" could not resolve an agent`,
+        `Lane "${lane.id}" could not resolve an agent${
+          recovery ? `; ${recovery}` : ''
+        }`,
       );
     }
 
@@ -157,22 +191,39 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
     const persistedPane = {
       ...result.pane,
     };
+    const createdIndex = created.push(persistedPane) - 1;
     const paneWithOrchestration: PsychePane = {
       ...persistedPane,
       orchestration: {
         taskId: lane.taskId,
         laneId: lane.id,
         traceId: lane.traceId,
+        operationId: lane.operationId,
         mode: lane.mode,
       },
     };
-    result.pane = await persistOrchestrationMetadata(
-      persistedPane,
-      paneWithOrchestration,
-    );
-    created.push(result.pane);
-
-    return { pane: result.pane };
+    try {
+      const enrichedPane = await persistOrchestrationMetadata(
+        persistedPane,
+        paneWithOrchestration,
+      );
+      created[createdIndex] = enrichedPane;
+      return {
+        pane: enrichedPane,
+        ...(result.warnings ? { warnings: result.warnings } : {}),
+      };
+    } catch (error) {
+      return {
+        pane: persistedPane,
+        warnings: [
+          ...(result.warnings || []),
+          {
+            code: 'orchestration_persistence_failed',
+            message: orchestrationPersistenceWarningMessage(error),
+          },
+        ],
+      };
+    }
   };
 
   const execute: LaneBackend = (lane) => {

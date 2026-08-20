@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 const repoRoot = process.cwd();
 const webRoot = join(repoRoot, 'native/desktop/psyche-build-tauri');
@@ -2001,7 +2001,7 @@ describe('project browser URL routing', () => {
 
 function browserNativeEventHandlers(options: {
   lifecycle: ReturnType<typeof browserLifecycleHarness>;
-  project: { id: string; browsersByWorktree?: Record<string, unknown> };
+  project: { id: string; root?: string; browsersByWorktree?: Record<string, unknown> };
   worktreePath: string;
   browser: { activeTabId: string; tabs: BrowserNavigationTab[] };
   tab: BrowserNavigationTab;
@@ -2009,6 +2009,12 @@ function browserNativeEventHandlers(options: {
   state?: { activeProjectId: string; activeThreadId: string | null };
   calls?: string[];
   nativeLabel?: string;
+  publishBrowserControlResource?: (pair: {
+    project: { id: string; root?: string; browsersByWorktree?: Record<string, unknown> };
+    worktreePath: string;
+    browser: { activeTabId: string; tabs: BrowserNavigationTab[] };
+    tab: BrowserNavigationTab;
+  }) => Promise<boolean>;
 }) {
   const {
     lifecycle,
@@ -2023,6 +2029,8 @@ function browserNativeEventHandlers(options: {
   };
   const calls = options.calls ?? [];
   const nativeLabel = options.nativeLabel ?? 'native-tab-a';
+  const publishBrowserControlResource = options.publishBrowserControlResource
+    ?? (async () => { calls.push('publish'); return true; });
   let pane = options.pane;
   const browserUrlsMatch = compileFunction<
     (left: string, right: string) => boolean
@@ -2058,19 +2066,25 @@ function browserNativeEventHandlers(options: {
     findThread: (threadId: string) => pane?.id === threadId ? pane : null,
     browserUrlsMatch,
   });
-  const browserNativeDocumentReplacementContext = (
-    label: string,
-    url: string,
-  ) => {
-    const pair = browserNativeEventContext(label, null as unknown as string);
-    if (!pair) return null;
-    const nativeUrl = browserNativeUrl(url);
-    const tabLifecycle = lifecycle.browserTabLifecycle(tab);
-    if (!nativeUrl || tabLifecycle.pendingGeneration ||
-        !tabLifecycle.liveUrl ||
-        browserUrlsShareOrigin(nativeUrl, tabLifecycle.liveUrl)) return null;
-    return { pair, url: nativeUrl };
-  };
+  const normaliseBrowserEventTitle = compileFunction<
+    (title: unknown) => string
+  >(functionSource(mainJs, 'normaliseBrowserEventTitle'), {});
+  const browserNativeDocumentReplacementContext = compileFunction<
+    (label: string, url: string, phase?: string) => {
+      pair: {
+        project: typeof project;
+        worktreePath: string;
+        browser: typeof browser;
+        tab: typeof tab;
+      };
+      url: string;
+    } | null
+  >(functionSource(mainJs, 'browserNativeDocumentReplacementContext'), {
+    browserNativeUrl,
+    browserNativeEventContext,
+    browserTabLifecycle: lifecycle.browserTabLifecycle,
+    browserUrlsMatch,
+  });
   const rotateBrowserAuthorityForNativeReplacement = async (
     pair: { tab: BrowserNavigationTab },
     url: string,
@@ -2089,6 +2103,7 @@ function browserNativeEventHandlers(options: {
   >(functionSource(mainJs, 'markBrowserTabLoaded'), {
     browserNativeEventContext,
     browserTabLifecycle: lifecycle.browserTabLifecycle,
+    normaliseBrowserEventTitle,
     state,
     activeWorkspaceRoot: () => worktreePath,
     renderBrowserTabs: () => calls.push('render'),
@@ -2133,10 +2148,11 @@ function browserNativeEventHandlers(options: {
     renderBrowserTabs: () => calls.push('render'),
     saveWorkspaceSoon: () => calls.push('save'),
   });
-  const browserFocusEventContext = compileFunction<
+  const browserDocumentEventContext = compileFunction<
     (payload: {
       label: string;
       url?: string;
+      title?: string;
       generation?: number;
       navigationToken?: string;
     }) => {
@@ -2147,47 +2163,134 @@ function browserNativeEventHandlers(options: {
         tab: typeof tab;
       };
       pane: BrowserPaneThreadFixture;
+      liveUrl: string | null;
+      replacementUrl: string | null;
+      title: string | null;
     } | null
-  >(functionSource(mainJs, 'browserFocusEventContext'), {
-    browserTabForNativeLabel: (label: string) => label === nativeLabel
-      ? { project, worktreePath, browser, tab }
-      : null,
-    browserTabLifecycle: lifecycle.browserTabLifecycle,
-    browserTabIsClosing: lifecycle.browserTabIsClosing,
-    browserPaneIsClosing: lifecycle.browserPaneIsClosing,
-    findProject: (projectId: string) => projectId === project.id ? project : null,
-    findBrowserPane: () => pane,
-    findThread: (threadId: string) => pane?.id === threadId ? pane : null,
-    activeWorkspaceRoot: () => worktreePath,
+  >(
+    functionSource(
+      mainJs,
+      mainJs.includes('function browserDocumentEventContext(')
+        ? 'browserDocumentEventContext'
+        : 'browserFocusEventContext',
+    ),
+    {
+      browserNativeEventContext,
+      browserTabLifecycle: lifecycle.browserTabLifecycle,
+      findBrowserPane: () => pane,
+      findThread: (threadId: string) => pane?.id === threadId ? pane : null,
+      normaliseBrowserEventTitle,
+      browserUrlsMatch,
+      browserUrlsShareOrigin,
+      browserNativeUrl,
+    },
+  );
+  const browserFocusEventContext = mainJs.includes('function browserFocusEventContext(')
+    ? compileFunction<
+      (payload: {
+        label: string;
+        url?: string;
+        title?: string;
+        generation?: number;
+        navigationToken?: string;
+      }) => {
+        pair: {
+          project: typeof project;
+          worktreePath: string;
+          browser: typeof browser;
+          tab: typeof tab;
+        };
+        pane: BrowserPaneThreadFixture;
+        liveUrl: string | null;
+        replacementUrl: string | null;
+        title: string | null;
+      } | null
+    >(functionSource(mainJs, 'browserFocusEventContext'), {
+      browserDocumentEventContext,
+      state,
+      activeWorkspaceRoot: () => worktreePath,
+      browserPaneIsClosing: lifecycle.browserPaneIsClosing,
+    })
+    : browserDocumentEventContext;
+  const recordBrowserHistoryUrl = compileFunction<
+    (tab: BrowserNavigationTab, url: string, previousUrl?: string | null) => void
+  >(functionSource(mainJs, 'recordBrowserHistoryUrl'), {
     browserUrlsMatch,
-    browserUrlsShareOrigin,
-    browserNativeUrl,
-    state,
   });
+  const adoptBrowserDocumentEvent = mainJs.includes('function adoptBrowserDocumentEvent(')
+    ? compileFunction<
+      (context: {
+        pair: {
+          project: typeof project;
+          worktreePath: string;
+          browser: typeof browser;
+          tab: typeof tab;
+        };
+        pane: BrowserPaneThreadFixture;
+        liveUrl: string | null;
+        replacementUrl: string | null;
+        title: string | null;
+      }) => boolean | Promise<boolean>
+    >(functionSource(mainJs, 'adoptBrowserDocumentEvent'), {
+      browserTabLifecycle: lifecycle.browserTabLifecycle,
+      recordBrowserHistoryUrl,
+      state,
+      activeWorkspaceRoot: () => worktreePath,
+      renderBrowserTabs: () => calls.push('render'),
+      syncUrlInput: () => calls.push('sync-url'),
+      saveWorkspaceSoon: () => calls.push('save'),
+      tabTitle: (url: string) => `title:${url}`,
+    })
+    : null;
   const handleBrowserFocus = compileFunction<
     (event: {
       payload: {
         label: string;
         url?: string;
+        title?: string;
         generation?: number;
         navigationToken?: string;
       };
     }) => boolean
   >(functionSource(mainJs, 'handleBrowserFocus'), {
+    browserDocumentEventContext,
     browserFocusEventContext,
+    adoptBrowserDocumentEvent,
     markActiveSurface: (surface: string) => calls.push(`surface:${surface}`),
     state,
     focusThread: (threadId: string) => calls.push(`focus:${threadId}`),
-    publishBrowserControlResource: async () => { calls.push('publish'); },
+    publishBrowserControlResource,
     browserTabLifecycle: lifecycle.browserTabLifecycle,
+    beginBrowserNavigation: lifecycle.beginBrowserNavigation,
+    recordBrowserHistoryUrl,
     renderBrowserTabs: () => calls.push('render'),
     syncUrlInput: () => calls.push('sync-url'),
     saveWorkspaceSoon: () => calls.push('save'),
+    tabTitle: (url: string) => `title:${url}`,
     rotateBrowserAuthorityForNativeReplacement,
   });
+  const handleBrowserRoute = mainJs.includes('function handleBrowserRoute(')
+    ? compileFunction<
+      (event: {
+        payload: {
+          label: string;
+          url?: string;
+          title?: string;
+          generation?: number;
+          navigationToken?: string;
+        };
+      }) => boolean
+    >(functionSource(mainJs, 'handleBrowserRoute'), {
+      browserDocumentEventContext,
+      adoptBrowserDocumentEvent,
+      publishBrowserControlResource,
+      rotateBrowserAuthorityForNativeReplacement,
+    })
+    : handleBrowserFocus;
   return {
     calls,
     handleBrowserFocus,
+    handleBrowserRoute,
     handleBrowserPageLoad,
     handleBrowserTitle,
     setPane(nextPane: BrowserPaneThreadFixture | null) {
@@ -2200,6 +2303,7 @@ function browserFocusFixture() {
   const lifecycle = browserLifecycleHarness();
   const project = {
     id: 'project-a',
+    root: '/project-a',
     browsersByWorktree: {} as Record<string, unknown>,
   };
   const tab: BrowserNavigationTab = {
@@ -2491,10 +2595,10 @@ describe('Tauri native browser lifecycle', () => {
   it.each([
     ['pushState', 'https://current.example/account?view=details'],
     ['hash', 'https://current.example/#details'],
-  ])('focuses a current same-document %s URL and adopts it as live', (_kind, url) => {
+  ])('adopts a current same-document %s route URL without focus handoff', (_kind, url) => {
     const fixture = browserFocusFixture();
 
-    expect(fixture.handlers.handleBrowserFocus({
+    expect(fixture.handlers.handleBrowserRoute({
       payload: {
         label: 'native-tab-a',
         url,
@@ -2504,6 +2608,9 @@ describe('Tauri native browser lifecycle', () => {
     })).toBe(true);
     expect(fixture.tab.url).toBe(url);
     expect(fixture.lifecycle.browserTabLifecycle(fixture.tab)).toMatchObject({
+      generation: 3,
+      liveGeneration: 3,
+      controlGeneration: 4,
       liveUrl: url,
       eventUrl: url,
     });
@@ -2511,9 +2618,748 @@ describe('Tauri native browser lifecycle', () => {
       'render',
       'sync-url',
       'save',
+      'publish',
+    ]);
+  });
+
+  it('treats a same-origin mismatched focus URL as document replacement', async () => {
+    const fixture = browserFocusFixture();
+    const url = 'https://current.example/account?view=details';
+
+    await expect(Promise.resolve(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url,
+        title: 'Account details',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    }))).resolves.toBe(true);
+    expect(fixture.tab.url).toBe('https://current.example');
+    expect(fixture.state.activeThreadId).toBe('terminal-pane');
+    expect(fixture.lifecycle.browserTabLifecycle(fixture.tab)).toMatchObject({
+      generation: 4,
+      controlGeneration: 0,
+      liveGeneration: 0,
+      liveNavigationToken: null,
+      eventUrl: null,
+    });
+    expect(fixture.handlers.calls).toEqual([
+      `rotate:${url}`,
+    ]);
+  });
+
+  it('keeps same-document route adoption separate from browser focus handoff', () => {
+    const fixture = browserFocusFixture();
+    const url = 'https://current.example/account?view=details';
+
+    expect(fixture.handlers.handleBrowserRoute({
+      payload: {
+        label: 'native-tab-a',
+        url,
+        title: '  Account details  ',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    expect(fixture.tab.url).toBe(url);
+    expect(fixture.tab.title).toBe('Account details');
+    expect(fixture.tab.history).toEqual([
+      'https://current.example',
+      'https://current.example/account?view=details',
+    ]);
+    expect(fixture.tab.historyIndex).toBe(1);
+    expect(fixture.lifecycle.browserTabLifecycle(fixture.tab)).toMatchObject({
+      generation: 3,
+      liveGeneration: 3,
+      controlGeneration: 4,
+      liveUrl: url,
+      eventUrl: url,
+    });
+    expect(fixture.handlers.calls).toEqual([
+      'render',
+      'sync-url',
+      'save',
+      'publish',
+    ]);
+
+    fixture.handlers.calls.length = 0;
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url,
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    expect(fixture.handlers.calls).toEqual([
       'surface:browser',
       'focus:web-pane',
       'publish',
+    ]);
+  });
+
+  it('adopts background same-document route updates without foreground focus handoff', () => {
+    const fixture = browserFocusFixture();
+    const url = 'https://current.example/account?view=details';
+    fixture.state.activeProjectId = 'other-project';
+
+    expect(fixture.handlers.handleBrowserRoute({
+      payload: {
+        label: 'native-tab-a',
+        url,
+        title: '  Account details  ',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    expect(fixture.tab.url).toBe(url);
+    expect(fixture.tab.title).toBe('Account details');
+    expect(fixture.tab.history).toEqual([
+      'https://current.example',
+      'https://current.example/account?view=details',
+    ]);
+    expect(fixture.lifecycle.browserTabLifecycle(fixture.tab)).toMatchObject({
+      generation: 3,
+      liveGeneration: 3,
+      controlGeneration: 4,
+      liveUrl: url,
+      eventUrl: url,
+    });
+    expect(fixture.state.activeThreadId).toBe('terminal-pane');
+    expect(fixture.handlers.calls).toEqual([
+      'save',
+      'publish',
+    ]);
+  });
+
+  it('updates a bounded title from an exact current focus event without replacing the live URL', () => {
+    const fixture = browserFocusFixture();
+    const rawTitle = `  ${'Retitled current page '.repeat(40).trim()}  `;
+    const expectedTitle = 'Retitled current page '.repeat(40).trim().slice(0, 512);
+
+    expect(fixture.handlers.handleBrowserFocus({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example',
+        title: rawTitle,
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    expect(fixture.tab.url).toBe('https://current.example');
+    expect(fixture.tab.title).toBe(expectedTitle);
+    expect(fixture.lifecycle.browserTabLifecycle(fixture.tab)).toMatchObject({
+      generation: 3,
+      liveGeneration: 3,
+      liveUrl: 'https://current.example',
+      eventUrl: 'https://current.example',
+    });
+    expect(fixture.handlers.calls).toEqual([
+      'render',
+      'save',
+      'surface:browser',
+      'focus:web-pane',
+      'publish',
+    ]);
+  });
+
+  it('accepts repeated same-document route updates when the source change title is unavailable', () => {
+    const fixture = browserFocusFixture();
+
+    expect(fixture.handlers.handleBrowserRoute({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example/account?view=details',
+        title: 'Details title',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    fixture.handlers.calls.length = 0;
+
+    expect(fixture.handlers.handleBrowserRoute({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example/account?view=billing',
+        title: '   ',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    expect(fixture.tab.url).toBe('https://current.example/account?view=billing');
+    expect(fixture.tab.title).toBe('title:https://current.example/account?view=billing');
+    expect(fixture.tab.history).toEqual([
+      'https://current.example',
+      'https://current.example/account?view=details',
+      'https://current.example/account?view=billing',
+    ]);
+    expect(fixture.tab.historyIndex).toBe(2);
+    expect(fixture.lifecycle.browserTabLifecycle(fixture.tab)).toMatchObject({
+      generation: 3,
+      liveGeneration: 3,
+      controlGeneration: 5,
+      liveUrl: 'https://current.example/account?view=billing',
+      eventUrl: 'https://current.example/account?view=billing',
+    });
+    expect(fixture.handlers.calls).toEqual([
+      'render',
+      'sync-url',
+      'save',
+      'publish',
+    ]);
+  });
+
+  it('records a validated same-document route URL in tab history', () => {
+    const fixture = browserFocusFixture();
+
+    expect(fixture.handlers.handleBrowserRoute({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example/account?view=details',
+        title: 'History title',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    expect(fixture.tab.url).toBe('https://current.example/account?view=details');
+    expect(fixture.tab.history).toEqual([
+      'https://current.example',
+      'https://current.example/account?view=details',
+    ]);
+    expect(fixture.tab.historyIndex).toBe(1);
+    expect(fixture.lifecycle.browserTabLifecycle(fixture.tab)).toMatchObject({
+      generation: 3,
+      liveGeneration: 3,
+      controlGeneration: 4,
+    });
+  });
+
+  it('deduplicates duplicate same-document route events against the current history entry', () => {
+    const fixture = browserFocusFixture();
+
+    expect(fixture.handlers.handleBrowserRoute({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example/account?view=details',
+        title: 'Details title',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    fixture.handlers.calls.length = 0;
+
+    expect(fixture.handlers.handleBrowserRoute({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example/account?view=details',
+        title: 'Details title',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    expect(fixture.tab.history).toEqual([
+      'https://current.example',
+      'https://current.example/account?view=details',
+    ]);
+    expect(fixture.tab.historyIndex).toBe(1);
+    expect(fixture.handlers.calls).toEqual([
+      'publish',
+    ]);
+  });
+
+  it('rejects the old provider generation until the replacement upsert publishes a same-document route URL', async () => {
+    const fixture = browserFocusFixture();
+    const lifecycle = fixture.lifecycle.browserTabLifecycle(fixture.tab);
+    lifecycle.controlGeneration = 9;
+    const upserts: Array<{
+      resource: Record<string, unknown>;
+      resolve: (value: { generation: number }) => void;
+    }> = [];
+    const publishBrowserControlResource = compileFunction<
+      (pair: {
+        project: { id: string; root?: string; browsersByWorktree?: Record<string, unknown> };
+        worktreePath: string;
+        browser: typeof fixture.browser;
+        tab: BrowserNavigationTab;
+      }) => Promise<boolean>
+    >(functionSource(mainJs, 'publishBrowserControlResource'), {
+      browserTabIsClosing: fixture.lifecycle.browserTabIsClosing,
+      browserTabLifecycle: fixture.lifecycle.browserTabLifecycle,
+      ensureBrowserControlProvider: async () => ({ providerId: 'desktop-1', projectRoot: '/project' }),
+      browserControlResource: (pair: {
+        project: { id: string; root?: string; browsersByWorktree?: Record<string, unknown> };
+        worktreePath: string;
+        browser: typeof fixture.browser;
+        tab: BrowserNavigationTab;
+      }, status: { providerId: string; projectRoot: string }) => {
+        const state = fixture.lifecycle.browserTabLifecycle(pair.tab);
+        return {
+          id: pair.tab.id,
+          kind: 'browser_tab',
+          generation: state.controlGeneration || state.liveGeneration || state.pendingGeneration || state.generation,
+          providerId: status.providerId,
+          webviewLabel: state.nativeLabel,
+          projectRoot: status.projectRoot,
+          worktreeRoot: pair.worktreePath,
+          url: pair.tab.url || 'about:blank',
+          title: pair.tab.title || '',
+          loading: !!pair.tab.loading,
+          viewport: { width: 800, height: 600 },
+        };
+      },
+      invoke: async (command: string, args: Record<string, unknown>) => {
+        expect(command).toBe('control_provider_upsert');
+        return await new Promise((resolve) => {
+          upserts.push({
+            resource: (args as { resource: Record<string, unknown> }).resource,
+            resolve: (value) => resolve(value),
+          });
+        });
+      },
+    });
+    const handlers = browserNativeEventHandlers({
+      lifecycle: fixture.lifecycle,
+      project: fixture.project,
+      worktreePath: '/workspace',
+      browser: fixture.browser,
+      tab: fixture.tab,
+      pane: fixture.pane,
+      state: fixture.state,
+      publishBrowserControlResource,
+    });
+    const completions: unknown[] = [];
+    const runBrowserLifecycleOperation = vi.fn(async () => ({ ok: true }));
+    const handleBrowserProviderEffect = compileFunction<
+      (event: { payload: Record<string, unknown> }) => Promise<boolean>
+    >(functionSource(mainJs, 'handleBrowserProviderEffect'), {
+      browserControlPairByTabId: (tabId: string, projectRoot: string) => (
+        tabId === fixture.tab.id && projectRoot === fixture.project.root
+          ? {
+            project: fixture.project,
+            worktreePath: '/workspace',
+            browser: fixture.browser,
+            tab: fixture.tab,
+          }
+          : null
+      ),
+      state: { projects: [fixture.project] },
+      browserControlProviders: new Map([[fixture.project.root, {
+        status: { projectRoot: fixture.project.root },
+      }]]),
+      browserTabLifecycle: fixture.lifecycle.browserTabLifecycle,
+      completeBrowserProviderEffect: async (_project: unknown, result: unknown) => { completions.push(result); },
+      browserProviderOperationPreflight: () => 'lifecycle',
+      runBrowserLifecycleOperation,
+      installBrowserAutomationForPair: vi.fn(),
+      awaitBrowserAutomationResult: vi.fn(),
+      invoke: vi.fn(),
+      browserLabelForTab: () => 'native-tab-a',
+      PsycheControl: { browserAutomationSource: () => '' },
+      browserAutomationDispatchScript: () => '',
+      canonicalizeBrowserSemanticSnapshot: vi.fn(),
+      canonicalizeBrowserScriptResult: vi.fn(),
+      canonicalizeBrowserActionResult: vi.fn(),
+      quarantineBrowserAutomation: vi.fn(),
+      browserNativeScriptError: compileFunction<
+        (error: unknown) => Error
+      >(functionSource(mainJs, 'browserNativeScriptError'), {}),
+    });
+
+    expect(handlers.handleBrowserRoute({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example/account?view=details',
+        title: 'Provider title',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    expect(fixture.tab.url).toBe('https://current.example/account?view=details');
+    expect(fixture.tab.title).toBe('Provider title');
+    expect(lifecycle).toMatchObject({
+      generation: 3,
+      liveGeneration: 3,
+      controlGeneration: 10,
+      liveUrl: 'https://current.example/account?view=details',
+      eventUrl: 'https://current.example/account?view=details',
+    });
+    await vi.waitFor(() => expect(upserts).toHaveLength(1));
+    expect(upserts[0]?.resource).toMatchObject({
+      generation: 10,
+      url: 'https://current.example/account?view=details',
+      title: 'Provider title',
+    });
+
+    await expect(handleBrowserProviderEffect({
+      payload: {
+        actionId: 'stale-generation',
+        tabId: fixture.tab.id,
+        projectRoot: fixture.project.root,
+        generation: 9,
+        operation: { kind: 'action', action: { kind: 'reload' } },
+      },
+    })).resolves.toBe(false);
+    expect(runBrowserLifecycleOperation).not.toHaveBeenCalled();
+    expect(completions).toContainEqual({
+      actionId: 'stale-generation',
+      status: 'failed',
+      code: 'resource_replaced',
+      message: 'browser tab generation was replaced',
+    });
+
+    upserts[0]?.resolve({ generation: 12 });
+    await vi.waitFor(() => expect(lifecycle.controlGeneration).toBe(12));
+
+    await expect(handleBrowserProviderEffect({
+      payload: {
+        actionId: 'published-generation',
+        tabId: fixture.tab.id,
+        projectRoot: fixture.project.root,
+        generation: 12,
+        operation: { kind: 'action', action: { kind: 'reload' } },
+      },
+    })).resolves.toBe(true);
+    expect(runBrowserLifecycleOperation).toHaveBeenCalledOnce();
+    expect(completions).toContainEqual({
+      actionId: 'published-generation',
+      status: 'succeeded',
+      value: { ok: true },
+    });
+  });
+
+  it('accepts successive same-document route events with one native generation and keeps provider generations monotonic', async () => {
+    const fixture = browserFocusFixture();
+    const lifecycle = fixture.lifecycle.browserTabLifecycle(fixture.tab);
+    lifecycle.controlGeneration = 9;
+    const calls: string[] = [];
+    const upserts: Array<{
+      resource: Record<string, unknown>;
+      resolve: (value: { generation: number }) => void;
+    }> = [];
+    const publishBrowserControlResource = compileFunction<
+      (pair: {
+        project: { id: string; root?: string; browsersByWorktree?: Record<string, unknown> };
+        worktreePath: string;
+        browser: typeof fixture.browser;
+        tab: BrowserNavigationTab;
+      }) => Promise<boolean>
+    >(functionSource(mainJs, 'publishBrowserControlResource'), {
+      browserTabIsClosing: fixture.lifecycle.browserTabIsClosing,
+      browserTabLifecycle: fixture.lifecycle.browserTabLifecycle,
+      ensureBrowserControlProvider: async () => ({ providerId: 'desktop-1', projectRoot: '/project' }),
+      browserControlResource: (pair: {
+        project: { id: string; root?: string; browsersByWorktree?: Record<string, unknown> };
+        worktreePath: string;
+        browser: typeof fixture.browser;
+        tab: BrowserNavigationTab;
+      }, status: { providerId: string; projectRoot: string }) => {
+        const state = fixture.lifecycle.browserTabLifecycle(pair.tab);
+        return {
+          id: pair.tab.id,
+          kind: 'browser_tab',
+          generation: state.controlGeneration || state.liveGeneration || state.pendingGeneration || state.generation,
+          providerId: status.providerId,
+          webviewLabel: state.nativeLabel,
+          projectRoot: status.projectRoot,
+          worktreeRoot: pair.worktreePath,
+          url: pair.tab.url || 'about:blank',
+          title: pair.tab.title || '',
+          loading: !!pair.tab.loading,
+          viewport: { width: 800, height: 600 },
+        };
+      },
+      invoke: async (command: string, args: Record<string, unknown>) => {
+        if (command === 'control_provider_upsert') {
+          calls.push('control_provider_upsert');
+          return await new Promise((resolve) => {
+            upserts.push({
+              resource: (args as { resource: Record<string, unknown> }).resource,
+              resolve: (value) => resolve(value),
+            });
+          });
+        }
+        calls.push(`${command}:${(args as { generation: number }).generation}`);
+        return true;
+      },
+    });
+    const handlers = browserNativeEventHandlers({
+      lifecycle: fixture.lifecycle,
+      project: fixture.project,
+      worktreePath: '/workspace',
+      browser: fixture.browser,
+      tab: fixture.tab,
+      pane: fixture.pane,
+      state: fixture.state,
+      publishBrowserControlResource,
+    });
+    const completions: unknown[] = [];
+    const runBrowserLifecycleOperation = vi.fn(async () => ({ ok: true }));
+    const handleBrowserProviderEffect = compileFunction<
+      (event: { payload: Record<string, unknown> }) => Promise<boolean>
+    >(functionSource(mainJs, 'handleBrowserProviderEffect'), {
+      browserControlPairByTabId: (tabId: string, projectRoot: string) => (
+        tabId === fixture.tab.id && projectRoot === fixture.project.root
+          ? {
+            project: fixture.project,
+            worktreePath: '/workspace',
+            browser: fixture.browser,
+            tab: fixture.tab,
+          }
+          : null
+      ),
+      state: { projects: [fixture.project] },
+      browserControlProviders: new Map([[fixture.project.root, {
+        status: { projectRoot: fixture.project.root },
+      }]]),
+      browserTabLifecycle: fixture.lifecycle.browserTabLifecycle,
+      completeBrowserProviderEffect: async (_project: unknown, result: unknown) => { completions.push(result); },
+      browserProviderOperationPreflight: () => 'lifecycle',
+      runBrowserLifecycleOperation,
+      installBrowserAutomationForPair: vi.fn(),
+      awaitBrowserAutomationResult: vi.fn(),
+      invoke: vi.fn(),
+      browserLabelForTab: () => 'native-tab-a',
+      PsycheControl: { browserAutomationSource: () => '' },
+      browserAutomationDispatchScript: () => '',
+      canonicalizeBrowserSemanticSnapshot: vi.fn(),
+      canonicalizeBrowserScriptResult: vi.fn(),
+      canonicalizeBrowserActionResult: vi.fn(),
+      quarantineBrowserAutomation: vi.fn(),
+      browserNativeScriptError: compileFunction<
+        (error: unknown) => Error
+      >(functionSource(mainJs, 'browserNativeScriptError'), {}),
+    });
+
+    expect(handlers.handleBrowserRoute({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example/account?view=details',
+        title: 'Details title',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    await vi.waitFor(() => expect(upserts).toHaveLength(1));
+    expect(fixture.tab.history).toEqual([
+      'https://current.example',
+      'https://current.example/account?view=details',
+    ]);
+    expect(fixture.tab.title).toBe('Details title');
+    expect(lifecycle).toMatchObject({
+      generation: 3,
+      liveGeneration: 3,
+      controlGeneration: 10,
+      liveUrl: 'https://current.example/account?view=details',
+    });
+    expect(upserts[0]?.resource).toMatchObject({
+      generation: 10,
+      url: 'https://current.example/account?view=details',
+      title: 'Details title',
+    });
+    await expect(handleBrowserProviderEffect({
+      payload: {
+        actionId: 'stale-generation-9',
+        tabId: fixture.tab.id,
+        projectRoot: fixture.project.root,
+        generation: 9,
+        operation: { kind: 'action', action: { kind: 'reload' } },
+      },
+    })).resolves.toBe(false);
+
+    expect(handlers.handleBrowserRoute({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example/account?view=billing',
+        title: 'Billing title',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    await vi.waitFor(() => expect(upserts).toHaveLength(2));
+    expect(fixture.tab.history).toEqual([
+      'https://current.example',
+      'https://current.example/account?view=details',
+      'https://current.example/account?view=billing',
+    ]);
+    expect(fixture.tab.title).toBe('Billing title');
+    expect(lifecycle).toMatchObject({
+      generation: 3,
+      liveGeneration: 3,
+      controlGeneration: 11,
+      liveUrl: 'https://current.example/account?view=billing',
+    });
+    expect(upserts[1]?.resource).toMatchObject({
+      generation: 11,
+      url: 'https://current.example/account?view=billing',
+      title: 'Billing title',
+    });
+
+    upserts[0]?.resolve({ generation: 10 });
+    await vi.waitFor(() => expect(calls).toContain('control_provider_remove:10'));
+    expect(lifecycle.controlGeneration).toBe(11);
+
+    await expect(handleBrowserProviderEffect({
+      payload: {
+        actionId: 'stale-generation-10',
+        tabId: fixture.tab.id,
+        projectRoot: fixture.project.root,
+        generation: 10,
+        operation: { kind: 'action', action: { kind: 'reload' } },
+      },
+    })).resolves.toBe(false);
+    expect(runBrowserLifecycleOperation).not.toHaveBeenCalled();
+
+    upserts[1]?.resolve({ generation: 13 });
+    await vi.waitFor(() => expect(lifecycle.controlGeneration).toBe(13));
+
+    await expect(handleBrowserProviderEffect({
+      payload: {
+        actionId: 'published-generation',
+        tabId: fixture.tab.id,
+        projectRoot: fixture.project.root,
+        generation: 13,
+        operation: { kind: 'action', action: { kind: 'reload' } },
+      },
+    })).resolves.toBe(true);
+    expect(runBrowserLifecycleOperation).toHaveBeenCalledOnce();
+    expect(completions).toEqual(expect.arrayContaining([
+      {
+        actionId: 'stale-generation-9',
+        status: 'failed',
+        code: 'resource_replaced',
+        message: 'browser tab generation was replaced',
+      },
+      {
+        actionId: 'stale-generation-10',
+        status: 'failed',
+        code: 'resource_replaced',
+        message: 'browser tab generation was replaced',
+      },
+      {
+        actionId: 'published-generation',
+        status: 'succeeded',
+        value: { ok: true },
+      },
+    ]));
+  });
+
+  it('truncates stale forward history before appending a new same-document route URL', () => {
+    const fixture = browserFocusFixture();
+    fixture.tab.history = [
+      'https://current.example',
+      'https://current.example/account?view=details',
+      'https://current.example/account?view=security',
+    ];
+    fixture.tab.historyIndex = 0;
+    fixture.tab.url = 'https://current.example';
+    Object.assign(fixture.lifecycle.browserTabLifecycle(fixture.tab), {
+      liveUrl: 'https://current.example',
+      eventUrl: 'https://current.example',
+    });
+
+    expect(fixture.handlers.handleBrowserRoute({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example/account?view=billing',
+        title: 'Billing title',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    expect(fixture.tab.history).toEqual([
+      'https://current.example',
+      'https://current.example/account?view=billing',
+    ]);
+    expect(fixture.tab.historyIndex).toBe(1);
+  });
+
+  it('repairs mismatched current history before appending a new same-document route URL', () => {
+    const fixture = browserFocusFixture();
+    fixture.tab.history = [
+      'https://current.example',
+      'https://current.example/account?view=details',
+    ];
+    fixture.tab.historyIndex = 1;
+    fixture.tab.url = 'https://current.example';
+    Object.assign(fixture.lifecycle.browserTabLifecycle(fixture.tab), {
+      liveUrl: 'https://current.example',
+      eventUrl: 'https://current.example',
+    });
+
+    expect(fixture.handlers.handleBrowserRoute({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example/account?view=billing',
+        title: 'Billing title',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    expect(fixture.tab.history).toEqual([
+      'https://current.example',
+      'https://current.example/account?view=billing',
+    ]);
+    expect(fixture.tab.historyIndex).toBe(1);
+  });
+
+  it('lets the current browser history controls consume route-synchronized entries', async () => {
+    const fixture = browserFocusFixture();
+
+    expect(fixture.handlers.handleBrowserRoute({
+      payload: {
+        label: 'native-tab-a',
+        url: 'https://current.example/account?view=details',
+        title: 'Focus title',
+        generation: 3,
+        navigationToken: 'current-token',
+      },
+    })).toBe(true);
+    const pair = {
+      project: fixture.project,
+      worktreePath: '/workspace',
+      tab: fixture.tab,
+    };
+    const navigations: Array<[string, Record<string, unknown>]> = [];
+    const run = compileFunction<
+      (
+        pair: {
+          project: typeof fixture.project;
+          worktreePath: string;
+          tab: BrowserNavigationTab;
+        },
+        effect: Record<string, unknown>,
+      ) => Promise<unknown>
+    >(functionSource(mainJs, 'runBrowserLifecycleOperation'), {
+      state: { activeProjectId: fixture.project.id },
+      activeProject: () => fixture.project,
+      activeWorkspaceRoot: () => '/workspace',
+      navigateBrowser: async (url: string, options: Record<string, unknown>) => {
+        navigations.push([url, options]);
+        fixture.tab.url = url;
+        fixture.tab.title = url;
+        if (typeof options.historyIndex === 'number') fixture.tab.historyIndex = options.historyIndex;
+        return true;
+      },
+      browserTabLifecycle: fixture.lifecycle.browserTabLifecycle,
+      closeBrowserTab: async () => true,
+      invoke: async () => ({}),
+      ambiguousBrowserLifecycle: Function(
+        `return (${functionSource(mainJs, 'ambiguousBrowserLifecycle')});`,
+      )(),
+    });
+
+    await expect(run(pair, { operation: { action: { kind: 'back' } } })).resolves.toMatchObject({
+      url: 'https://current.example',
+      historyIndex: 0,
+    });
+    await expect(run(pair, { operation: { action: { kind: 'forward' } } })).resolves.toMatchObject({
+      url: 'https://current.example/account?view=details',
+      historyIndex: 1,
+    });
+    expect(navigations).toEqual([
+      ['https://current.example', { tabId: 'tab-a', fromHistory: true, historyIndex: 0 }],
+      ['https://current.example/account?view=details', { tabId: 'tab-a', fromHistory: true, historyIndex: 1 }],
     ]);
   });
 
@@ -2545,6 +3391,36 @@ describe('Tauri native browser lifecycle', () => {
   it('rotates authority on a native cross-origin page-load signal', async () => {
     const fixture = browserFocusFixture();
     const url = 'https://account.example.net/dashboard';
+
+    await expect(Promise.resolve(fixture.handlers.handleBrowserPageLoad({
+      payload: {
+        label: 'native-tab-a',
+        url,
+        phase: 'started',
+      },
+    }))).resolves.toBe(true);
+    expect(fixture.lifecycle.browserTabLifecycle(fixture.tab)).toMatchObject({
+      generation: 4,
+      controlGeneration: 0,
+      liveGeneration: 0,
+      liveNavigationToken: null,
+      eventUrl: null,
+    });
+    expect(fixture.handlers.calls).toEqual([
+      `rotate:${url}`,
+    ]);
+  });
+
+  it('rotates authority on a native same-origin full page-load replacement', async () => {
+    const fixture = browserFocusFixture();
+    fixture.tab.url = 'https://current.example/a';
+    fixture.tab.history = ['https://current.example/a'];
+    fixture.tab.historyIndex = 0;
+    Object.assign(fixture.lifecycle.browserTabLifecycle(fixture.tab), {
+      liveUrl: 'https://current.example/a',
+      eventUrl: 'https://current.example/a',
+    });
+    const url = 'https://current.example/b';
 
     await expect(Promise.resolve(fixture.handlers.handleBrowserPageLoad({
       payload: {
@@ -2616,9 +3492,13 @@ describe('Tauri native browser lifecycle', () => {
     expect(nativeLib).toContain('retire_browser_webview_for_navigation(&app, &label)?;');
     expect(nativeLib).toContain('install_browser_native_focus_callback(&webview, &label).await');
     expect(nativeFocus).toContain('emit_to("main", "browser:focus", payload)');
+    expect(nativeFocus).toContain('emit_to("main", "browser:route", payload)');
+    expect(nativeFocus).toContain('title: bounded_browser_focus_title(current_title)');
+    expect(nativeFocus).toContain('DocumentTitle');
     expect(mainJs).toContain(
       'generation: generation, navigationToken: navigationToken',
     );
+    expect(mainJs).toContain('listen("browser:route", handleBrowserRoute)');
     expect(mainJs).not.toContain('focusNonce');
     const destroyBrowserWebview = rustFunctionSource(nativeLib, 'destroy_browser_webview');
     expect(destroyBrowserWebview).toContain('BROWSER_NAVIGATION_WAITERS.lock().remove(&label);');

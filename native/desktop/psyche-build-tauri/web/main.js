@@ -10423,16 +10423,35 @@
       return Promise.resolve(false);
     }
     var nativeGeneration = lifecycle.liveGeneration;
+    var nativeLabel = lifecycle.nativeLabel;
+    var liveUrl = lifecycle.liveUrl;
+    var liveNavigationToken = lifecycle.liveNavigationToken;
+    var publishedGeneration =
+      lifecycle.controlGeneration || lifecycle.liveGeneration ||
+      lifecycle.pendingGeneration || lifecycle.generation;
     lifecycle.confirmedAbsentControlGeneration = 0;
     return ensureBrowserControlProvider(pair.project).then(function (status) {
+      var resource = browserControlResource(pair, status);
+      if (typeof resource.generation === "number") {
+        publishedGeneration = resource.generation;
+      }
       return invoke("control_provider_upsert", {
         projectRoot: pair.project.root,
-        resource: browserControlResource(pair, status),
+        resource: resource,
       }).then(function (canonical) {
         if (!canonical || typeof canonical.generation !== "number") return false;
-        if (lifecycle.liveGeneration !== nativeGeneration || lifecycle.pendingGeneration ||
+        var currentGeneration =
+          lifecycle.controlGeneration || lifecycle.liveGeneration ||
+          lifecycle.pendingGeneration || lifecycle.generation;
+        if (lifecycle.liveGeneration !== nativeGeneration ||
+            currentGeneration !== publishedGeneration ||
+            lifecycle.pendingGeneration ||
+            lifecycle.nativeLabel !== nativeLabel ||
+            lifecycle.liveUrl !== liveUrl ||
+            lifecycle.liveNavigationToken !== liveNavigationToken ||
             lifecycle.replacementOperation || lifecycle.authorityTransition ||
-            lifecycle.quarantinedControlGeneration) {
+            lifecycle.quarantinedControlGeneration ||
+            canonical.generation < publishedGeneration) {
           return invoke("control_provider_remove", {
             projectRoot: pair.project.root,
             tabId: pair.tab.id,
@@ -11053,6 +11072,57 @@
       return false;
     }
   }
+  function recordBrowserHistoryUrl(tab, url, previousUrl) {
+    if (!tab || !url) return;
+    var history = Array.isArray(tab.history)
+      ? tab.history.filter(Boolean).map(function (entry) { return String(entry); })
+      : [];
+    var currentIndex = Number.isInteger(tab.historyIndex)
+      ? tab.historyIndex
+      : history.length - 1;
+    currentIndex = Math.max(-1, Math.min(currentIndex, history.length - 1));
+    var fallbackCurrentUrl = previousUrl ? String(previousUrl) : null;
+    if (fallbackCurrentUrl) {
+      var matchingIndex = -1;
+      var backwardStart = Math.min(currentIndex, history.length - 1);
+      for (var i = backwardStart; i >= 0; i--) {
+        if (browserUrlsMatch(history[i], fallbackCurrentUrl)) {
+          matchingIndex = i;
+          break;
+        }
+      }
+      if (matchingIndex === -1) {
+        for (var j = history.length - 1; j > backwardStart; j--) {
+          if (browserUrlsMatch(history[j], fallbackCurrentUrl)) {
+            matchingIndex = j;
+            break;
+          }
+        }
+      }
+      if (matchingIndex >= 0) currentIndex = matchingIndex;
+    }
+    history = history.slice(0, currentIndex + 1);
+    var currentUrl = currentIndex >= 0 ? history[currentIndex] : null;
+    if (fallbackCurrentUrl &&
+        (!currentUrl || !browserUrlsMatch(currentUrl, fallbackCurrentUrl))) {
+      history.push(fallbackCurrentUrl);
+      currentIndex = history.length - 1;
+      currentUrl = history[currentIndex];
+    }
+    if (currentUrl && browserUrlsMatch(currentUrl, url)) {
+      tab.history = history;
+      tab.historyIndex = currentIndex;
+      return;
+    }
+    history.push(String(url));
+    tab.history = history;
+    tab.historyIndex = history.length - 1;
+  }
+  function normaliseBrowserEventTitle(title) {
+    if (title == null) return "";
+    var trimmed = String(title).trim();
+    return trimmed ? trimmed.slice(0, 512) : "";
+  }
   function browserNativeUrl(value) {
     if (typeof value !== "string" || !value) return null;
     try {
@@ -11088,14 +11158,16 @@
     if (url) lifecycle.eventUrl = url;
     return pair;
   }
-  function browserNativeDocumentReplacementContext(nativeLabel, url) {
+  function browserNativeDocumentReplacementContext(nativeLabel, url, phase) {
     var nativeUrl = browserNativeUrl(url);
     if (!nativeUrl) return null;
     var pair = browserNativeEventContext(nativeLabel, null, null);
     if (!pair) return null;
     var lifecycle = browserTabLifecycle(pair.tab);
-    if (lifecycle.pendingGeneration || !lifecycle.liveUrl ||
-        browserUrlsShareOrigin(nativeUrl, lifecycle.liveUrl)) return null;
+    if (lifecycle.pendingGeneration || !lifecycle.liveUrl) return null;
+    if (phase === "started") return { pair: pair, url: nativeUrl };
+    if (browserUrlsMatch(nativeUrl, lifecycle.liveUrl) ||
+        (lifecycle.eventUrl && browserUrlsMatch(nativeUrl, lifecycle.eventUrl))) return null;
     return { pair: pair, url: nativeUrl };
   }
   async function rotateBrowserAuthorityForNativeReplacement(pair, reportedUrl) {
@@ -11104,8 +11176,7 @@
     if (lifecycle.replacementOperation) return lifecycle.replacementOperation.promise;
     var reportedNativeUrl = browserNativeUrl(reportedUrl);
     if (!reportedNativeUrl || !lifecycle.nativeLabel || !lifecycle.liveGeneration ||
-        lifecycle.pendingGeneration || !lifecycle.liveUrl ||
-        browserUrlsShareOrigin(reportedNativeUrl, lifecycle.liveUrl)) return false;
+        lifecycle.pendingGeneration || !lifecycle.liveUrl) return false;
     var previousGeneration =
       lifecycle.controlGeneration || lifecycle.liveGeneration;
     if (!previousGeneration) return false;
@@ -11220,7 +11291,8 @@
     var payload = event.payload || {};
     var replacement = browserNativeDocumentReplacementContext(
       payload.label,
-      payload.url
+      payload.url,
+      payload.phase
     );
     if (replacement) {
       return rotateBrowserAuthorityForNativeReplacement(
@@ -11302,8 +11374,9 @@
     }
     return true;
   }
-  function browserFocusEventContext(payload) {
+  function browserDocumentEventContext(payload, allowSameOriginRouteAdoption) {
     payload = payload || {};
+    allowSameOriginRouteAdoption = allowSameOriginRouteAdoption === true;
     var nativeLabel = payload.label;
     if (typeof nativeLabel !== "string" || !nativeLabel ||
         typeof payload.url !== "string" || !payload.url ||
@@ -11311,22 +11384,16 @@
         typeof payload.navigationToken !== "string" || !payload.navigationToken) return null;
     var nativeUrl = browserNativeUrl(payload.url);
     if (!nativeUrl) return null;
-    var pair = browserTabForNativeLabel(nativeLabel);
-    if (!pair || findProject(pair.project.id) !== pair.project) return null;
-    if (!pair.project.browsersByWorktree ||
-        pair.project.browsersByWorktree[pair.worktreePath] !== pair.browser ||
-        pair.browser.tabs.indexOf(pair.tab) === -1 ||
-        pair.browser.activeTabId !== pair.tab.id ||
-        !pair.tab.created ||
-        browserTabIsClosing(pair.tab)) return null;
-    if (state.activeProjectId !== pair.project.id ||
-        activeWorkspaceRoot(pair.project) !== pair.worktreePath) return null;
+    var pair = browserNativeEventContext(
+      nativeLabel,
+      null,
+      payload.navigationToken
+    );
+    if (!pair) return null;
     var pane = findBrowserPane(pair.project.id, pair.worktreePath);
     if (!pane || pane.projectId !== pair.project.id ||
         pane.worktreePath !== pair.worktreePath ||
-        findThread(pane.id) !== pane ||
-        browserPaneIsClosing(pane) ||
-        pane.hidden) return null;
+        findThread(pane.id) !== pane) return null;
     var lifecycle = browserTabLifecycle(pair.tab);
     if (!lifecycle.viewLive ||
         lifecycle.nativeLabel !== nativeLabel ||
@@ -11336,19 +11403,93 @@
         !lifecycle.liveNavigationToken ||
         payload.navigationToken !== lifecycle.liveNavigationToken) return null;
     var liveUrl = null;
+    var titleUrl = null;
     var replacementUrl = null;
     if (lifecycle.liveUrl &&
         !browserUrlsMatch(nativeUrl, lifecycle.liveUrl) &&
         (!lifecycle.eventUrl || !browserUrlsMatch(nativeUrl, lifecycle.eventUrl))) {
-      if (browserUrlsShareOrigin(nativeUrl, lifecycle.liveUrl)) liveUrl = nativeUrl;
-      else replacementUrl = nativeUrl;
+      if (allowSameOriginRouteAdoption &&
+          browserUrlsShareOrigin(nativeUrl, lifecycle.liveUrl)) {
+        liveUrl = nativeUrl;
+        titleUrl = nativeUrl;
+      } else {
+        replacementUrl = nativeUrl;
+      }
+    } else if (lifecycle.liveUrl &&
+               browserUrlsMatch(nativeUrl, lifecycle.liveUrl)) {
+      titleUrl = lifecycle.liveUrl;
+    } else if (lifecycle.eventUrl &&
+               browserUrlsMatch(nativeUrl, lifecycle.eventUrl)) {
+      titleUrl = lifecycle.eventUrl;
     }
+    var title = titleUrl ? normaliseBrowserEventTitle(payload.title) : "";
     return {
       pair: pair,
       pane: pane,
       liveUrl: liveUrl,
       replacementUrl: replacementUrl,
+      title: title || null,
     };
+  }
+  function browserFocusEventContext(payload) {
+    var context = browserDocumentEventContext(payload, false);
+    if (!context) return null;
+    if (state.activeProjectId !== context.pair.project.id ||
+        activeWorkspaceRoot(context.pair.project) !== context.pair.worktreePath ||
+        browserPaneIsClosing(context.pane) ||
+        context.pane.hidden) return null;
+    return context;
+  }
+  function adoptBrowserDocumentEvent(context) {
+    if (!context) return false;
+    var isActiveProjectWorktree =
+      context.pair.project.id === state.activeProjectId &&
+      activeWorkspaceRoot(context.pair.project) === context.pair.worktreePath;
+    if (context.liveUrl) {
+      var lifecycle = browserTabLifecycle(context.pair.tab);
+      var previousUrl = context.pair.tab.url;
+      lifecycle.controlGeneration = Math.max(
+        lifecycle.controlGeneration || 0,
+        lifecycle.liveGeneration || 0,
+        lifecycle.pendingGeneration || 0,
+        lifecycle.generation || 0
+      ) + 1;
+      lifecycle.confirmedAbsentControlGeneration = 0;
+      lifecycle.liveUrl = context.liveUrl;
+      lifecycle.eventUrl = context.liveUrl;
+      recordBrowserHistoryUrl(context.pair.tab, context.liveUrl, previousUrl);
+      context.pair.tab.url = context.liveUrl;
+      context.pair.tab.title = context.title || tabTitle(context.liveUrl);
+      if (isActiveProjectWorktree) {
+        renderBrowserTabs();
+        syncUrlInput();
+      }
+      saveWorkspaceSoon();
+      return true;
+    }
+    if (context.title && context.title !== context.pair.tab.title) {
+      context.pair.tab.title = context.title;
+      if (isActiveProjectWorktree) {
+        renderBrowserTabs();
+      }
+      saveWorkspaceSoon();
+    }
+    return true;
+  }
+  function handleBrowserRoute(event) {
+    var context = browserDocumentEventContext(event && event.payload || {}, true);
+    if (!context) return false;
+    if (context.replacementUrl) {
+      return rotateBrowserAuthorityForNativeReplacement(
+        context.pair,
+        context.replacementUrl
+      );
+    }
+    var adopted = adoptBrowserDocumentEvent(context);
+    if (typeof publishBrowserControlResource === "function") {
+      publishBrowserControlResource(context.pair).catch(function () {});
+    }
+    return adopted;
   }
   function handleBrowserFocus(event) {
     var context = browserFocusEventContext(event && event.payload || {});
@@ -11359,23 +11500,16 @@
         context.replacementUrl
       );
     }
-    if (context.liveUrl) {
-      var lifecycle = browserTabLifecycle(context.pair.tab);
-      lifecycle.liveUrl = context.liveUrl;
-      lifecycle.eventUrl = context.liveUrl;
-      context.pair.tab.url = context.liveUrl;
-      renderBrowserTabs();
-      syncUrlInput();
-      saveWorkspaceSoon();
-    }
+    var adopted = adoptBrowserDocumentEvent(context);
     markActiveSurface("browser");
     if (state.activeThreadId !== context.pane.id) focusThread(context.pane.id);
     if (typeof publishBrowserControlResource === "function") {
       publishBrowserControlResource(context.pair).catch(function () {});
     }
-    return true;
+    return adopted;
   }
   listen("browser:page-load", handleBrowserPageLoad).catch(function () {});
+  listen("browser:route", handleBrowserRoute).catch(function () {});
   listen("browser:title", handleBrowserTitle).catch(function () {});
   listen("browser:focus", handleBrowserFocus).catch(function () {});
   function ensureBrowserModel(project, workspaceRoot) {

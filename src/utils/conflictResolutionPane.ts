@@ -7,8 +7,6 @@
 import type { PsychePane } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
 import {
-  assertTmuxGenerationUnchanged,
-  captureTmuxGeneration,
   tearDownGenerationBoundPane,
 } from './TmuxGenerationGuard.js';
 import {
@@ -59,10 +57,9 @@ import {
 } from './paneTeardown.js';
 import {
   isPaneLifecycleReservationRetainedError,
-  PaneLifecycleReservationRetainedError,
-  retainPaneRecovery,
   type PaneRecoveryPersistenceResult,
 } from './paneLifecycleRecovery.js';
+import { createTransactionalPane } from './transactionalPaneCreation.js';
 
 export interface ConflictResolutionPaneOptions {
   sourceBranch: string;      // Branch being merged (the worktree branch)
@@ -73,6 +70,8 @@ export interface ConflictResolutionPaneOptions {
   existingPanes: PsychePane[];
   /** The shared pane registry root, not the conflict worktree itself. */
   sessionProjectRoot: string;
+  /** The target repository that owns the conflict worktree lifecycle. */
+  targetProjectRoot: string;
   /** Must durably add this exact record before merge/agent commands run. */
   persistConflictPane: (pane: PsychePane) => Promise<void>;
   refreshPanes?: () => Promise<void>;
@@ -87,7 +86,7 @@ export async function createConflictResolutionPane(
   const reservation = await WorktreeCleanupService.getInstance()
     .beginWorktreeReuseReservation(
       options.targetRepoPath,
-      options.sessionProjectRoot,
+      options.targetProjectRoot,
     );
   let settled = false;
   try {
@@ -121,7 +120,9 @@ async function createConflictResolutionPaneWithReservation(
   const settings = new SettingsManager(targetRepoPath).getSettings();
 
   // Generate slug for this conflict resolution session
-  const slug = `merge-${sourceBranch}-into-${targetBranch}`.substring(0, 50);
+  const slugBase = `merge-${sourceBranch}-into-${targetBranch}`
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .substring(0, 50);
 
   // Get current pane info
   const originalPaneId = tmuxService.getCurrentPaneIdSync();
@@ -143,91 +144,60 @@ async function createConflictResolutionPaneWithReservation(
     // Ignore if already set or fails
   }
 
-  // Create new pane. From this point onward, every fallible operation is
-  // guarded by exact persistence or verified teardown/recovery.
-  const allocationGeneration = captureTmuxGeneration(
-    tmuxService,
-    'conflict pane allocation',
-  );
-  const paneInfo = splitPane(
-    insertion ? { targetPane: insertion.targetTmuxPaneId, cwd: targetRepoPath } : {}
-  );
   const prompt = `There are conflicts merging ${targetBranch} into ${sourceBranch}. Both are valid changes, so please keep both feature sets and merge them intelligently. Check git status to see the conflicting files, then resolve each conflict to preserve both sets of changes. Once all conflicts are resolved, commit the merge.`;
-  const tmuxServerIdentity = allocationGeneration;
-  const newPane: PsychePane = {
-    id: createPsychePaneId(),
-    slug,
-    prompt,
-    paneId: paneInfo,
-    ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
-    projectRoot: targetRepoPath,
-    projectName,
-    colorTheme: resolveProjectColorTheme(targetRepoPath, []),
+  const paneRecordId = createPsychePaneId();
+  const newPane = await createTransactionalPane({
+    projectRoot: options.targetProjectRoot,
+    sessionProjectRoot: options.sessionProjectRoot,
+    operation: 'conflict-resolution-pane',
+    slugBase,
     worktreePath: targetRepoPath,
-    agent,
-  };
-
-  try {
-    assertTmuxGenerationUnchanged(
-      tmuxService,
-      allocationGeneration,
-      'conflict pane allocation',
-    );
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    if (!(await tmuxService.paneExists(paneInfo))) {
-      throw new Error(`newly split conflict pane ${paneInfo} is not present`);
-    }
-    await tmuxService.setPaneTitle(paneInfo, slug);
-    await enforceControlPaneSize(controlPaneId, SIDEBAR_WIDTH);
-    await insertPaneIntoStoredLayout({
-      panesFile,
-      panes: existingPanes,
-      pane: newPane,
-      controlPaneId,
-      insertion,
-      sidebarWidth: SIDEBAR_WIDTH,
-    });
-    await options.persistConflictPane(newPane);
-  } catch (error) {
-    const teardown = await tearDownGenerationBoundPane(
-      tmuxService,
-      paneInfo,
-      allocationGeneration,
-      { generationMismatch: 'unknown' },
-    );
-    const recovery = teardown.presence === 'absent'
-      ? undefined
-      : await retainPaneRecovery({
-        projectRoot: options.sessionProjectRoot,
-        sessionProjectRoot: options.sessionProjectRoot,
-        pane: newPane,
-        operation: 'conflict-resolution-pane',
-        reason: `post-split setup or persistence failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-        reservation,
-        persistConfigRecovery: tmuxServerIdentity
-          ? () => persistConflictPaneRecovery(
-            options.sessionProjectRoot,
-            newPane,
-          )
-          : async () => ({
-            durable: false,
-            message: 'refused to persist an unversioned conflict pane record',
-          }),
+    paneRecordId,
+    reservation,
+    allocate: () => splitPane(
+      insertion
+        ? { targetPane: insertion.targetTmuxPaneId, cwd: targetRepoPath }
+        : {},
+    ),
+    createPane: ({ paneId, tmuxServerIdentity, paneRecordId, slug }) => ({
+      id: paneRecordId,
+      slug,
+      prompt,
+      paneId,
+      tmuxServerIdentity,
+      projectRoot: options.targetProjectRoot,
+      projectName,
+      colorTheme: resolveProjectColorTheme(options.targetProjectRoot, []),
+      worktreePath: targetRepoPath,
+      agent,
+    }),
+    persist: async (pane) => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      if (!(await tmuxService.paneExists(pane.paneId))) {
+        throw new Error(`newly split conflict pane ${pane.paneId} is not present`);
+      }
+      await tmuxService.setPaneTitle(pane.paneId, pane.slug);
+      await enforceControlPaneSize(controlPaneId, SIDEBAR_WIDTH);
+      await insertPaneIntoStoredLayout({
+        panesFile,
+        panes: existingPanes,
+        pane,
+        controlPaneId,
+        insertion,
+        sidebarWidth: SIDEBAR_WIDTH,
       });
-    if (recovery?.retained) {
-      throw new PaneLifecycleReservationRetainedError(
-        `Failed to persist conflict resolution pane before commands: ${
-          error instanceof Error ? error.message : String(error)
-        }; ${recovery.message}`,
-      );
-    }
-    throw new Error(
-      `Failed to persist conflict resolution pane before commands: ${
-        error instanceof Error ? error.message : String(error)
-      }${recovery ? `; ${recovery.message}` : ''}`,
-    );
+      await options.persistConflictPane(pane);
+    },
+    persistRecovery: (pane) => persistConflictPaneRecovery(
+      options.sessionProjectRoot,
+      pane,
+    ),
+  });
+  const paneInfo = newPane.paneId;
+  const tmuxServerIdentity = newPane.tmuxServerIdentity;
+  const slug = newPane.slug;
+  if (!tmuxServerIdentity) {
+    throw new Error('conflict pane is missing its tmux server generation');
   }
 
   try {

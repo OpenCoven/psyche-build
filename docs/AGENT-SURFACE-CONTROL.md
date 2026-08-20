@@ -99,7 +99,7 @@ browser operations additionally require the current resource `generation`.
 | `psyche_browser_script` | `lease_id`, `lease_revision`, `tab_id`, `generation`, `source`; `task_id` optional when task-bound |
 | `psyche_control_action_status` | `action_id`; `task_id` optional for compatibility; replay results keep `resource.idDigest` instead of a live `resource.id` |
 | `psyche_list_panes` | `project_root` optional; `task_id` optional for compatibility |
-| `psyche_execute_task` | `prompt`, `lanes`, `lease_id`, `lease_revision`; `task_id` optional when task-bound |
+| `psyche_execute_task` | `prompt`, `lanes`, `lease_id`, `lease_revision`; `task_id` optional when task-bound; stable `operation_id` recommended for safe retry reconciliation |
 | `psyche_create_pane` | `prompt`, `agent`, `lease_id`, `lease_revision`; `task_id` optional when task-bound |
 | `psyche_kill_pane` | `pane_id`, `generation`, `lease_id`, `lease_revision`; `task_id` optional when task-bound |
 | `psyche_get_pane_output` | `pane_id`, `generation`, `lease_id`, `lease_revision`; `task_id` optional when task-bound |
@@ -107,6 +107,16 @@ browser operations additionally require the current resource `generation`.
 Compatibility aliases route through the same owner and task-resolution helper.
 Create, execute-task, kill, and pane-output operations require lease fields;
 missing authority returns `lease_missing` before an effect.
+
+Orchestration launch authority is separate from caller task, lane, and trace
+labels. Control execution derives a bounded operation identity from the
+canonical command idempotency key. Direct daemon clients should provide the
+top-level orchestration `operationId` for retry reconciliation across
+connections; `requestId` is response correlation only. Legacy requests without
+an operation ID are scoped to one connection, so a reused request ID after
+reconnect cannot inherit another launch. Each bridge pane launch hashes the
+authoritative operation identity with the lane ID, so the same operation/lane
+reconciles while another operation cannot inherit its persisted pane.
 
 If `psyche mcp` starts without a task binding, non-operator task-scoped MCP
 tools such as `psyche_control_list`, `psyche_control_lease status`,

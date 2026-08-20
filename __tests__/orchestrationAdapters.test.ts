@@ -34,6 +34,7 @@ describe('buildMultiAgentTaskRequest', () => {
   it('builds one isolated-worktree lane per agent, in order', () => {
     const request = buildMultiAgentTaskRequest({
       taskId: 'task-1',
+      operationId: 'operation-1',
       projectRoot: ROOT,
       prompt: 'Fix the failing tests',
       agents: ['coven-code', 'claude'],
@@ -48,6 +49,7 @@ describe('buildMultiAgentTaskRequest', () => {
   it('omits optional fields rather than passing undefined through', () => {
     const request = buildMultiAgentTaskRequest({
       taskId: 'task-1',
+      operationId: 'operation-1',
       projectRoot: ROOT,
       prompt: 'p',
       agents: ['codex'],
@@ -61,6 +63,7 @@ describe('buildMultiAgentTaskRequest', () => {
   it('carries concurrency and merge targets when given', () => {
     const request = buildMultiAgentTaskRequest({
       taskId: 'task-1',
+      operationId: 'operation-1',
       projectRoot: ROOT,
       prompt: 'p',
       agents: ['codex', 'claude'],
@@ -76,6 +79,7 @@ describe('buildMultiAgentTaskRequest', () => {
   it('produces a request the planner accepts', () => {
     const plan = planOrchestrationTask(buildMultiAgentTaskRequest({
       taskId: 'task-1',
+      operationId: 'operation-1',
       projectRoot: ROOT,
       prompt: 'Fix the failing tests',
       agents: ['coven-code', 'claude', 'coven-code'],
@@ -89,6 +93,7 @@ describe('buildSinglePaneTaskRequest', () => {
   it('builds one agent lane', () => {
     const request = buildSinglePaneTaskRequest({
       taskId: 'task-1',
+      operationId: 'operation-1',
       projectRoot: ROOT,
       prompt: 'p',
       agent: 'coven-code',
@@ -102,6 +107,7 @@ describe('buildSinglePaneTaskRequest', () => {
   it('builds a terminal lane when no agent is given', () => {
     const request = buildSinglePaneTaskRequest({
       taskId: 'task-1',
+      operationId: 'operation-1',
       projectRoot: ROOT,
       prompt: 'p',
     });
@@ -120,6 +126,7 @@ describe('buildSharedWorktreeTaskRequest', () => {
 
     const request = buildSharedWorktreeTaskRequest({
       taskId: 'task-1',
+      operationId: 'operation-1',
       projectRoot: ROOT,
       prompt: 'Review this',
       agents: ['claude', 'codex'],

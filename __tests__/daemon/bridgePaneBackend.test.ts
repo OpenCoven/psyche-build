@@ -11,6 +11,7 @@ function lane(overrides: Record<string, unknown> = {}) {
     agent: 'codex',
     taskId: 'task-1',
     traceId: 'trace-1',
+    operationId: 'operation-1',
     index: 0,
     projectRoot: ROOT,
     cwd: ROOT,
@@ -22,7 +23,13 @@ function lane(overrides: Record<string, unknown> = {}) {
 function spawnResult(id: string) {
   return {
     id: `%${id}`,
-    pane: {} as never,
+    pane: {
+      id: `%${id}`,
+      cwd: `/w/${id}`,
+      branch: `psyche/${id}`,
+      agent: 'codex',
+      title: `${id} lane`,
+    },
     createdPane: {
       id: `psyche-${id}`,
       slug: id,
@@ -31,6 +38,13 @@ function spawnResult(id: string) {
     },
     worktreePath: `/w/${id}`,
     branch: `psyche/${id}`,
+    persistedPane: {
+      id: `pane-${id}`,
+      slug: `persisted-${id}`,
+      paneId: `%${id}`,
+      worktreePath: `/persisted/${id}`,
+      branchName: `persisted/${id}`,
+    },
   };
 }
 
@@ -39,21 +53,134 @@ describe('createBridgePaneBackend', () => {
     const spawnPane = vi.fn(async () => spawnResult('codex'));
     const backend = createBridgePaneBackend({ sessionName: 'psyche-repo', spawnPane });
 
-    const output = await backend.execute(lane());
+    await backend.execute(lane());
 
     const [projectRoot, sessionName, request] = spawnPane.mock.calls[0] as any[];
     expect(projectRoot).toBe(ROOT);
     expect(sessionName).toBe('psyche-repo');
     expect(request).toMatchObject({
-      requestId: 'task-1:codex',
       cwd: ROOT,
       agent: 'codex',
       prompt: 'Fix the failing tests',
     });
-    expect(output).toMatchObject({
-      pane: { id: 'psyche-codex' },
+    expect(request.requestId).toMatch(/^orch-pane-v1-[0-9a-f]{64}$/);
+    expect([...backend.spawned().values()][0]).toMatchObject({ id: '%codex' });
+  });
+
+  it('uses the same launch identity when the same authoritative operation lane retries', async () => {
+    const launches = new Map<string, ReturnType<typeof spawnResult>>();
+    const spawnPane = vi.fn(async (_root: string, _session: string, request: { requestId: string }) => {
+      const retained = launches.get(request.requestId);
+      if (retained) return retained;
+      const created = spawnResult(`pane-${launches.size + 1}`);
+      launches.set(request.requestId, created);
+      return created;
     });
-    expect(backend.spawned().get('codex')).toMatchObject({ id: '%codex' });
+    const backend = createBridgePaneBackend({ sessionName: 's', spawnPane: spawnPane as never });
+
+    const first = await backend.execute(lane({ operationId: 'authoritative-operation' }));
+    const retry = await backend.execute(lane({ operationId: 'authoritative-operation' }));
+
+    expect((spawnPane.mock.calls[0] as any[])[2].requestId)
+      .toBe((spawnPane.mock.calls[1] as any[])[2].requestId);
+    expect(retry.pane).toEqual(first.pane);
+    expect(launches).toHaveLength(1);
+  });
+
+  it('uses a distinct launch identity for another operation with the same task and lane ids', async () => {
+    const spawnPane = vi.fn(async () => spawnResult('codex'));
+    const backend = createBridgePaneBackend({ sessionName: 's', spawnPane });
+
+    await backend.execute(lane({ operationId: 'operation-a' }));
+    await backend.execute(lane({ operationId: 'operation-b' }));
+
+    expect((spawnPane.mock.calls[0] as any[])[2].requestId)
+      .not.toBe((spawnPane.mock.calls[1] as any[])[2].requestId);
+    expect(backend.spawned().size).toBe(2);
+  });
+
+  it('forwards the lane permission mode to the bridge spawn request', async () => {
+    const spawnPane = vi.fn(async () => spawnResult('codex'));
+    const backend = createBridgePaneBackend({ sessionName: 's', spawnPane });
+
+    await backend.execute(lane({ permissionMode: 'plan' }));
+
+    expect((spawnPane.mock.calls[0] as any[])[2].permissionMode).toBe('plan');
+  });
+
+  it('forwards an explicit empty permission mode to preserve agent defaults', async () => {
+    const spawnPane = vi.fn(async () => spawnResult('codex'));
+    const backend = createBridgePaneBackend({ sessionName: 's', spawnPane });
+
+    await backend.execute(lane({ permissionMode: '' }));
+
+    expect((spawnPane.mock.calls[0] as any[])[2]).toHaveProperty('permissionMode', '');
+  });
+
+  it('returns the exact pane identity persisted by the spawn result', async () => {
+    const result = spawnResult('codex');
+    const backend = createBridgePaneBackend({
+      sessionName: 's',
+      spawnPane: vi.fn(async () => result),
+    });
+
+    const output = await backend.execute(lane());
+
+    expect({
+      id: output.pane?.id,
+      slug: output.pane?.slug,
+      paneId: output.pane?.paneId,
+      worktreePath: output.pane?.worktreePath,
+      branchName: output.pane?.branchName,
+    }).toEqual(result.persistedPane);
+  });
+
+  it('returns effect-unknown launches as a partial task with the persisted pane identity', async () => {
+    const result = {
+      ...spawnResult('codex'),
+      warnings: [{
+        code: 'effect_unknown' as const,
+        message: 'Pane persisted, but command dispatch outcome is unknown',
+      }],
+    };
+    const backend = createBridgePaneBackend({
+      sessionName: 's',
+      spawnPane: vi.fn(async () => result),
+    });
+    const orchestrator = new Orchestrator({ executeLane: backend.execute });
+
+    const execution = await orchestrator.execute({
+      taskId: 'task-effect-unknown',
+      operationId: 'operation-effect-unknown',
+      projectRoot: ROOT,
+      prompt: 'Run once',
+      lanes: [{ id: 'codex', mode: 'isolated-worktree', agent: 'codex' }],
+    });
+
+    expect(execution).toMatchObject({
+      status: 'partial',
+      lanes: [{
+        id: 'codex',
+        status: 'completed',
+        pane: result.persistedPane,
+        warnings: [{ code: 'effect_unknown' }],
+      }],
+    });
+  });
+
+  it('can execute without retaining completed spawn summaries', async () => {
+    const backend = createBridgePaneBackend({
+      sessionName: 's',
+      spawnPane: vi.fn(async () => spawnResult('codex')),
+      retainResults: false,
+    });
+
+    await Promise.all(
+      Array.from({ length: 25 }, (_, index) =>
+        backend.execute(lane({ id: `lane-${index}` }))),
+    );
+
+    expect(backend.spawned().size).toBe(0);
   });
 
   it('omits the agent for terminal lanes', async () => {
@@ -112,6 +239,7 @@ describe('createBridgePaneBackend', () => {
 
     const result = await orchestrator.execute({
       taskId: 'task-1',
+      operationId: 'operation-multi-lane',
       projectRoot: ROOT,
       prompt: 'Fix the failing tests',
       lanes: [
@@ -122,7 +250,8 @@ describe('createBridgePaneBackend', () => {
 
     expect(result.status).toBe('completed');
     expect(spawnPane).toHaveBeenCalledTimes(2);
-    expect([...backend.spawned().keys()]).toEqual(['coven-code', 'claude']);
+    expect([...backend.spawned().values()].map((value) => value.id))
+      .toEqual(['%coven-code', '%claude']);
   });
 
   it('reports a partial task when one lane fails, keeping the other', async () => {
@@ -135,6 +264,7 @@ describe('createBridgePaneBackend', () => {
 
     const result = await orchestrator.execute({
       taskId: 'task-1',
+      operationId: 'operation-partial',
       projectRoot: ROOT,
       prompt: 'p',
       lanes: [
@@ -144,7 +274,7 @@ describe('createBridgePaneBackend', () => {
     });
 
     expect(result.status).toBe('partial');
-    expect(backend.spawned().has('coven-code')).toBe(true);
-    expect(backend.spawned().has('claude')).toBe(false);
+    expect([...backend.spawned().values()].map((value) => value.id))
+      .toEqual(['%coven-code']);
   });
 });

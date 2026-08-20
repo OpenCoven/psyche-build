@@ -57,15 +57,15 @@ import { readDaemonWorkspaceSnapshot } from './workspace.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
 import type { BridgeSpawnRequest, BridgeSpawnResult } from './bridge.js';
 import { Orchestrator, type LaneBackend } from '../orchestration/orchestrator.js';
-import { createBridgePaneBackend } from '../orchestration/bridgePaneBackend.js';
-import {
-  composeLaneBackends,
-  createCovenSessionBackend,
-} from '../orchestration/covenSessionBackend.js';
+import { createDaemonOrchestrator } from './orchestrationBackend.js';
 import { PaneOutputFanout } from './paneOutputFanout.js';
 import { BrowserProviderBroker } from '../control/browserProviderBroker.js';
 import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
 import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
+import {
+  daemonOrchestrationControlIdempotencyKey,
+  daemonOrchestrationControlStepIdempotencyKey,
+} from '../orchestration/operationIdentity.js';
 
 export interface DaemonOptions {
   port: number;
@@ -73,9 +73,9 @@ export interface DaemonOptions {
   printToken: boolean;
   serverVersion: string;
   capabilityStrategies: readonly AgenticCapabilityStrategy[];
-  /** Optional lane backend for orchestration tasks. Defaults to a no-op. */
+  /** Optional lane backend override for orchestration tasks. */
   laneBackend?: LaneBackend;
-  /** Pre-constructed orchestrator. When omitted one is built from `laneBackend`. */
+  /** Pre-constructed orchestrator override. */
   orchestrator?: Orchestrator;
 }
 
@@ -216,17 +216,6 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   }
 
   const sessionName = tmuxSessionNameForRoot(projectRoot);
-  const bridgePaneBackend = createBridgePaneBackend({ sessionName });
-  const covenSessionBackend = createCovenSessionBackend();
-  const productionLaneBackend = composeLaneBackends({
-    terminal: bridgePaneBackend.execute,
-    'isolated-worktree': bridgePaneBackend.execute,
-    'shared-worktree': bridgePaneBackend.execute,
-    'coven-session': covenSessionBackend.execute,
-  });
-  const orchestrator = opts.orchestrator ?? new Orchestrator({
-    executeLane: opts.laneBackend ?? productionLaneBackend,
-  });
   const tmux = new TmuxControl(sessionName);
   if (tmuxSessionExists(sessionName)) {
     tmux.start();
@@ -240,6 +229,10 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   // project owner fence before accepting any connection; a failed acquire must
   // fail startup loudly rather than fall back to unfenced mutation.
   const canonicalProjectRoot = await canonicalizeProjectRoot(projectRoot);
+  const orchestrator = opts.orchestrator
+    ?? (opts.laneBackend
+      ? new Orchestrator({ executeLane: opts.laneBackend })
+      : createDaemonOrchestrator({ sessionName }));
   const paneObservations = new PaneObservationStore();
   const surfaces = new SurfaceRegistry();
   await refreshPaneSurfaces(canonicalProjectRoot, surfaces, paneObservations);
@@ -324,12 +317,12 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     projectRoot: canonicalProjectRoot,
     sessionName,
     capabilityRouter,
+    orchestrator,
     paneObservations,
     surfaces,
     refreshPaneSurfaces: () => paneRefresh.run(),
     browserProvider,
     browserSemanticSnapshots,
-    orchestrator,
   });
   const controlCredentials = await createControlCredentialStore({
     projectRoot: canonicalProjectRoot,
@@ -1194,6 +1187,21 @@ export class Connection {
       }
       case 'orchestration.execute': {
         try {
+          const executionIdempotencyKey = daemonOrchestrationControlIdempotencyKey({
+            operationId: msg.operationId,
+            connectionId: this.actorId,
+            requestId: msg.requestId,
+          });
+          const leaseRequestIdempotencyKey = daemonOrchestrationControlStepIdempotencyKey({
+            executionIdempotencyKey,
+            connectionId: this.actorId,
+            step: 'lease-request',
+          });
+          const leaseGrantIdempotencyKey = daemonOrchestrationControlStepIdempotencyKey({
+            executionIdempotencyKey,
+            connectionId: this.actorId,
+            step: 'lease-grant',
+          });
           const requestLease = await this.submitControl(this.buildCommand(
             'lease.request',
             {
@@ -1206,7 +1214,7 @@ export class Connection {
             },
             {
               actorKind: 'human',
-              idempotencyKey: `v0:orchestration:${this.actorId}:${msg.requestId}:lease-request`,
+              idempotencyKey: leaseRequestIdempotencyKey,
             },
           ));
           if (requestLease.status !== 'succeeded') {
@@ -1228,7 +1236,7 @@ export class Connection {
             { requestId: leaseRequestId },
             {
               actorKind: 'human',
-              idempotencyKey: `v0:orchestration:${this.actorId}:${msg.requestId}:lease-grant`,
+              idempotencyKey: leaseGrantIdempotencyKey,
             },
           ));
           if (grantLease.status !== 'succeeded') {
@@ -1257,7 +1265,7 @@ export class Connection {
             },
             {
               actorKind: 'human',
-              idempotencyKey: `v0:orchestration:${this.actorId}:${msg.requestId}:execute`,
+              idempotencyKey: executionIdempotencyKey,
             },
           ));
           if (outcome.status !== 'succeeded') {

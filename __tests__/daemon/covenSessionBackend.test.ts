@@ -19,6 +19,7 @@ function lane(overrides: Record<string, unknown> = {}) {
     harness: 'codex',
     taskId: 'task-1',
     traceId: 'trace-1',
+    operationId: 'operation-1',
     index: 0,
     projectRoot: ROOT,
     cwd: ROOT,
@@ -51,7 +52,35 @@ describe('createCovenSessionBackend', () => {
     expect(output.sessionId).toBe('session-9');
     // No pane: Coven owns the process, so there is no local pane to report.
     expect(output.pane).toBeUndefined();
-    expect(backend.sessions().get('coven')?.id).toBe('session-9');
+    expect([...backend.sessions().values()][0]?.id).toBe('session-9');
+  });
+
+  it('can execute without retaining completed session summaries', async () => {
+    const launchSession = vi.fn(async () => session('session-9'));
+    const backend = createCovenSessionBackend({
+      client: clientWith(launchSession),
+      retainResults: false,
+    });
+
+    await Promise.all(
+      Array.from({ length: 25 }, (_, index) =>
+        backend.execute(lane({ id: `lane-${index}` }))),
+    );
+
+    expect(backend.sessions().size).toBe(0);
+  });
+
+  it('retains same-named lanes from distinct operations without overwriting either session', async () => {
+    let sequence = 0;
+    const launchSession = vi.fn(async () => session(`session-${++sequence}`));
+    const backend = createCovenSessionBackend({ client: clientWith(launchSession) });
+
+    await backend.execute(lane({ operationId: 'operation-a' }));
+    await backend.execute(lane({ operationId: 'operation-b' }));
+
+    expect(backend.sessions().size).toBe(2);
+    expect([...backend.sessions().values()].map((value) => value.id))
+      .toEqual(['session-1', 'session-2']);
   });
 
   it('passes the lane harness, prompt, and cwd to Coven', async () => {
@@ -135,6 +164,7 @@ describe('composeLaneBackends', () => {
 
     const result = await orchestrator.execute({
       taskId: 'task-1',
+      operationId: 'operation-mixed',
       projectRoot: ROOT,
       prompt: 'Fix the failing tests',
       lanes: [
@@ -158,6 +188,7 @@ describe('composeLaneBackends', () => {
 
     const result = await orchestrator.execute({
       taskId: 'task-1',
+      operationId: 'operation-partial',
       projectRoot: ROOT,
       prompt: 'p',
       lanes: [

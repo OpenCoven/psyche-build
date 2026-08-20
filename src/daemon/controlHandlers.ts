@@ -19,6 +19,7 @@ import {
   spawnBridgePane,
   killBridgePane,
   createCovenClient,
+  dispatchOrchestrationRequest,
   getProjectCovenSession,
   launchProjectCovenSession,
   openProjectCovenSession,
@@ -26,7 +27,6 @@ import {
   resolveConfiguredPaneId,
   updatePaneMeta,
   defaultSpawnDeps,
-  dispatchOrchestrationRequest,
   type BridgeSpawnRequest,
   type BridgeSpawnResult,
   type BridgeSpawnDeps,
@@ -46,6 +46,8 @@ export interface DaemonControlHandlerDeps {
   ) => Promise<BridgeSpawnResult>;
   /** Router used to execute Coven session capabilities. */
   capabilityRouter: AgenticCapabilityRouter;
+  /** Production orchestration executor shared with the WebSocket bridge. */
+  orchestrator?: Pick<Orchestrator, 'execute'>;
   /** Coven client factory; defaults to the real bridge client. */
   createCovenClient?: () => CovenClient;
   /** Spawn deps used when opening a Coven session pane; defaults to the real bridge deps. */
@@ -57,7 +59,6 @@ export interface DaemonControlHandlerDeps {
   closePane?: (projectRoot: string, paneId: string) => Promise<void>;
   browserProvider?: Pick<BrowserProviderBroker, 'dispatch'>;
   browserSemanticSnapshots?: BrowserSemanticSnapshotRegistry;
-  orchestrator?: Orchestrator;
 }
 
 function notSupported(kind: string): () => Promise<never> {
@@ -126,18 +127,23 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
       await deps.tmux.killPane(await resolvePaneId(payload.paneId));
     },
 
-    async executeOrchestration(payload) {
+    async executeOrchestration(payload, authorizeEffect, operationId) {
       if (!deps.orchestrator) {
-        return notSupported('orchestration.execute')();
+        throw codedHandlerError('backend_unavailable', 'orchestration executor is unavailable');
       }
       const response = await dispatchOrchestrationRequest(
         deps.projectRoot,
         {
           type: 'orchestration.execute',
-          requestId: payload.taskId,
-          task: payload.request,
+          requestId: `control:${payload.taskId}`,
+          task: {
+            ...payload.request,
+            taskId: payload.taskId,
+            operationId,
+          },
         },
-        deps.orchestrator,
+        deps.orchestrator as Orchestrator,
+        { beforeLaneEffect: authorizeEffect, operationId },
       );
       return response.result;
     },
@@ -284,9 +290,12 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
 
     async openCovenSession(payload) {
       return openProjectCovenSession(
-        deps.projectRoot,
-        deps.sessionName,
-        payload.sessionId,
+        {
+          sessionProjectRoot: deps.projectRoot,
+          targetProjectRoot: deps.projectRoot,
+          sessionName: deps.sessionName,
+          sessionId: payload.sessionId,
+        },
         covenClientFactory(),
         covenSpawnDeps,
       );

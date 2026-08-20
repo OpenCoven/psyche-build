@@ -7,6 +7,7 @@ import { TmuxService } from "./services/TmuxService.js"
 import usePanes from "./hooks/usePanes.js"
 import useProjectSettings from "./hooks/useProjectSettings.js"
 import useTerminalWidth from "./hooks/useTerminalWidth.js"
+import useLayoutWidth from "./hooks/useLayoutWidth.js"
 import useNavigation from "./hooks/useNavigation.js"
 import useAutoUpdater from "./hooks/useAutoUpdater.js"
 import useAgentStatus from "./hooks/useAgentStatus.js"
@@ -147,6 +148,10 @@ import {
 } from "./utils/shellPaneDetection.js"
 import type { InlineRenameState } from "./utils/inlineRename.js"
 import { createTransactionalPane } from "./utils/transactionalPaneCreation.js"
+import {
+  summarizeDurableEffectWarnings,
+  type DurableEffectWarning,
+} from "./utils/durableEffectWarnings.js"
 
 const SidePanelRail: React.FC = () => (
   <Box flexDirection="column" width={4} alignItems="center">
@@ -243,8 +248,10 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
 
   // Track terminal dimensions for responsive layout
   const terminalWidth = useTerminalWidth()
+  // Measured against the tmux window, not this pane — see useLayoutWidth.
+  const layoutWidth = useLayoutWidth()
   const [sidePanelCollapsed, setSidePanelCollapsed] = useState(() =>
-    shouldUseCompactSidePanel(terminalWidth)
+    shouldUseCompactSidePanel(layoutWidth)
   )
   const [sidePanelManualOverride, setSidePanelManualOverride] = useState(false)
   const sidePanelWidth = getSidePanelWidth(sidePanelCollapsed)
@@ -265,13 +272,13 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     }
     
     // Auto-collapse on small terminals
-    if (shouldUseCompactSidePanel(terminalWidth)) {
+    if (shouldUseCompactSidePanel(layoutWidth)) {
       setSidePanelCollapsed(true)
     } else {
       // Expand when terminal is large enough
       setSidePanelCollapsed(false)
     }
-  }, [terminalWidth, sidePanelManualOverride])
+  }, [layoutWidth, sidePanelManualOverride])
 
   // Track unread error and warning counts for logs badge
   const [unreadErrorCount, setUnreadErrorCount] = useState(0)
@@ -1185,16 +1192,18 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       setStatusMessage("Creating ritual terminal pane...")
 
       const tmuxService = TmuxService.getInstance()
+      const nextId = getNextPsycheId(existingPanes)
       const shellPane = await createTransactionalPane({
         projectRoot: targetProjectRoot,
         sessionProjectRoot,
         operation: "ritual-terminal-pane",
+        slugBase: `shell-${nextId}`,
         tmuxService,
         allocate: () => tmuxService.splitPane({ cwd: targetProjectRoot }),
         createPane: async ({ paneId, tmuxServerIdentity }) => {
           const pane = await createShellPane(
             paneId,
-            getNextPsycheId(existingPanes),
+            nextId,
             undefined,
             { tmuxServerIdentity, setPaneTitle: false },
           )
@@ -1237,6 +1246,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
   ) => {
     let workingPanes = panes
     let createdCount = 0
+    const recoveryWarnings: DurableEffectWarning[] = []
 
     for (const ritualProject of ritual.projects) {
       const targetProjectRoot = resolveRitualProjectRoot(
@@ -1255,6 +1265,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
           if (pane) {
             workingPanes = [...workingPanes, pane]
             createdCount += 1
+            recoveryWarnings.push(...(pane.recoveryWarnings || []))
           }
           continue
         }
@@ -1297,10 +1308,18 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     }
 
     if (createdCount > 0) {
-      setStatusMessage(
-        `Opened ${ritual.name} (${createdCount} pane${createdCount === 1 ? "" : "s"})`
+      const recoveryNotice = summarizeDurableEffectWarnings(
+        recoveryWarnings,
+        `Opened ${createdCount} ritual pane${createdCount === 1 ? "" : "s"}`,
       )
-      setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
+      setStatusMessage(
+        recoveryNotice
+          || `Opened ${ritual.name} (${createdCount} pane${createdCount === 1 ? "" : "s"})`
+      )
+      setTimeout(
+        () => setStatusMessage(""),
+        recoveryNotice ? 5000 : STATUS_MESSAGE_DURATION_SHORT,
+      )
     } else {
       setStatusMessage(`Ritual did not create panes: ${ritual.name}`)
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)

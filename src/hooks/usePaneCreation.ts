@@ -2,14 +2,20 @@ import path from 'path';
 import * as os from 'os';
 import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import type { PsychePane, MergeTargetReference, SavePanes } from '../types.js';
 import { createPane, type CreatePaneOptions } from '../utils/paneCreation.js';
 import { LogService } from '../services/LogService.js';
+import {
+  summarizeDurableEffectWarnings,
+  type DurableEffectWarning,
+} from '../utils/durableEffectWarnings.js';
 import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
 import { type AgentName } from '../utils/agentLaunch.js';
 import { Orchestrator } from '../orchestration/orchestrator.js';
 import { createLocalPaneBackend } from '../orchestration/localPaneBackend.js';
 import { buildMultiAgentTaskRequest } from '../orchestration/adapters.js';
+import { summarizeOrchestrationWarnings } from '../orchestration/warnings.js';
 import { generateSlug } from '../utils/slug.js';
 import { SettingsManager } from '../utils/settingsManager.js';
 
@@ -175,7 +181,11 @@ export default function usePaneCreation({
     prompt: string,
     agent?: AgentName,
     options: CreateNewPaneOptions = {}
-  ): Promise<{ pane: PsychePane; persistedDuringLifecycle: boolean }> => {
+  ): Promise<{
+    pane: PsychePane;
+    persistedDuringLifecycle: boolean;
+    warnings?: readonly DurableEffectWarning[];
+  }> => {
     const panesForCreation = options.existingPanes ?? panes;
     const result = await createPane(
       {
@@ -205,7 +215,10 @@ export default function usePaneCreation({
     );
 
     if (result.needsAgentChoice) {
-      throw new Error('Agent choice is required');
+      const warning = summarizeDurableEffectWarnings(result.warnings);
+      throw new Error(
+        warning ? `Agent choice is required; ${warning}` : 'Agent choice is required',
+      );
     }
 
     return {
@@ -213,6 +226,7 @@ export default function usePaneCreation({
       persistedDuringLifecycle: Boolean(
         result.persistedDuringLifecycle || options.existingWorktree
       ),
+      ...(result.warnings ? { warnings: result.warnings } : {}),
     };
   };
 
@@ -227,7 +241,11 @@ export default function usePaneCreation({
       setIsCreatingPane(true)
       setStatusMessage("Creating pane...")
 
-      const { pane, persistedDuringLifecycle } = await createPaneInternal(prompt, agent, options);
+      const {
+        pane,
+        persistedDuringLifecycle,
+        warnings,
+      } = await createPaneInternal(prompt, agent, options);
 
       // Save the pane
       const updatedPanes = [...panesForCreation, pane];
@@ -241,8 +259,11 @@ export default function usePaneCreation({
       );
 
       await loadPanes();
-      setStatusMessage("Pane created")
-      setTimeout(() => setStatusMessage(""), 2000)
+      setStatusMessage(summarizeDurableEffectWarnings(warnings) || "Pane created")
+      setTimeout(
+        () => setStatusMessage(""),
+        warnings?.length ? 5000 : 2000,
+      )
       return pane;
     } catch (error) {
       const msg = 'Failed to create pane';
@@ -321,6 +342,7 @@ export default function usePaneCreation({
 
       const result = await orchestrator.execute(buildMultiAgentTaskRequest({
         taskId: `task-${Date.now()}`,
+        operationId: `tui-create-${randomUUID()}`,
         projectRoot: targetProjectRoot,
         prompt,
         agents: dedupedAgents,
@@ -333,6 +355,12 @@ export default function usePaneCreation({
         lane.status === 'completed' && lane.pane ? [lane.pane] : []
       );
       const failures = result.lanes.filter((lane) => lane.status === 'failed');
+      const warningMessage = summarizeOrchestrationWarnings(
+        result.lanes,
+        failures.length > 0
+          ? `${failures.length} lane${failures.length === 1 ? '' : 's'} failed`
+          : undefined,
+      );
 
       for (const failure of failures) {
         if (failure.status !== 'failed') continue;
@@ -356,7 +384,9 @@ export default function usePaneCreation({
         await loadPanes();
       }
 
-      if (failures.length > 0) {
+      if (warningMessage) {
+        setStatusMessage(warningMessage);
+      } else if (failures.length > 0) {
         setStatusMessage(
           `Created ${createdPanes.length}/${dedupedAgents.length} panes (${failures.length} failed)`
         );
