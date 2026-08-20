@@ -563,6 +563,33 @@ final class PsycheAppUITests: XCTestCase {
         )
     }
 
+    func testCompactCollapsedSecondaryChipPromotesThatPane() throws {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launchApp()
+        try requireCompactWidth(in: app)
+        openWebHomePane(in: app)
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        try waitForLandscape(app)
+        splitBeside("ios-cockpit", in: app)
+        XCTAssertTrue(element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10))
+
+        XCUIDevice.shared.orientation = .portrait
+        try waitForPortrait(app)
+
+        let cockpitChip = row("pane-chip-ios-cockpit", in: app)
+        XCTAssertTrue(cockpitChip.waitForExistence(timeout: 10))
+        cockpitChip.tap()
+
+        XCTAssertTrue(
+            element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10)
+        )
+        XCTAssertFalse(
+            app.otherElements["terminal-pane-web-home"].exists,
+            "Selecting the collapsed secondary should promote it into the single visible slot"
+        )
+    }
+
     // MARK: - Regular width (iPad)
 
     func testRegularUsesASidebarRatherThanTabs() throws {

@@ -12,7 +12,7 @@ struct PaneSwitcher: View {
     let primaryPaneID: String?
     let secondaryPaneID: String?
     let canSplit: Bool
-    let onSelect: (String) -> Void
+    let onSelect: (Selection) -> Void
     let onSplit: (String) -> Void
 
     struct PaneChoice: Identifiable, Equatable {
@@ -20,6 +20,11 @@ struct PaneSwitcher: View {
         let title: String
         let status: String
         let needsAttention: Bool
+    }
+
+    struct Selection: Equatable {
+        let paneID: String
+        let isVisibleSecondary: Bool
     }
 
     var body: some View {
@@ -72,7 +77,12 @@ struct PaneSwitcher: View {
         isShown: Bool
     ) -> some View {
         Button {
-            onSelect(pane.id)
+            onSelect(
+                Selection(
+                    paneID: pane.id,
+                    isVisibleSecondary: isSecondary
+                )
+            )
         } label: {
             HStack(spacing: 6) {
                 WorkspaceStatusDot(status: pane.status, needsAttention: pane.needsAttention)

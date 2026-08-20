@@ -132,13 +132,15 @@ struct PaneWorkspaceView: View {
 
     // MARK: - Selection
 
-    private func select(_ paneID: String) {
-        if store.secondaryPaneID == paneID {
-            registry.focus(paneID)
+    private func select(_ selection: PaneSwitcher.Selection) {
+        if selection.isVisibleSecondary {
+            registry.focus(selection.paneID)
             return
         }
-        store.primaryPaneID = paneID
-        if store.secondaryPaneID == paneID { store.secondaryPaneID = nil }
+        store.primaryPaneID = selection.paneID
+        if store.secondaryPaneID == selection.paneID {
+            store.secondaryPaneID = nil
+        }
     }
 
     private func splitBeside(_ paneID: String) {
