@@ -649,6 +649,72 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('requires product evidence after the final entity suffix across WebGPU, raw WebGL, and ANGLE', () => {
+    const cases = [
+      {
+        name: 'WebGPU entity-only evidence',
+        probe: {
+          webgpuAdapterAvailable: true,
+          webgpuAdapter: 'Acme Corporation',
+          unsupportedFields: [],
+        },
+      },
+      {
+        name: 'raw WebGL entity-only evidence',
+        probe: {
+          strictContext: 'webgl2' as const,
+          renderer: 'Acme Corporation',
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false,
+        },
+      },
+      {
+        name: 'ANGLE entity-only evidence',
+        probe: {
+          strictContext: 'webgl2' as const,
+          renderer: 'ANGLE (Google, Acme Corporation, OpenGL)',
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false,
+        },
+      },
+    ];
+
+    for (const { name, probe } of cases) {
+      expect(classifyGraphicsEvidence(probe), name).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+        unsupportedFields: [],
+      });
+    }
+
+    for (const adapter of [
+      'Acme Corporation TurboChip X1',
+      'Qualcomm Technologies Inc Adreno 740',
+      'Advanced Micro Devices Inc Radeon RX 7900 XTX',
+    ]) {
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: adapter,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'accelerated',
+        adapter,
+        supportingProbe: 'webgpu',
+      });
+    }
+
+    expect(classifyGraphicsEvidence({
+      webgpuAdapterAvailable: true,
+      webgpuAdapter: 'RadeonRX7900XTX',
+      unsupportedFields: [],
+    })).toMatchObject({
+      acceleration: 'accelerated',
+      adapter: 'RadeonRX7900XTX',
+      supportingProbe: 'webgpu',
+    });
+  });
+
   it('rejects concrete generic and compact identifier examples on raw WebGL, ANGLE, and WebGPU paths', () => {
     const ambiguousValues = [
       'NVIDIA Driver',

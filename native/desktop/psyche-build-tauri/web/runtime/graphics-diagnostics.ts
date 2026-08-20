@@ -247,6 +247,21 @@ const genericAdapterWords = new Set([
   'version',
   'windows',
 ]);
+const entitySuffixWords = new Set([
+  'co',
+  'company',
+  'corp',
+  'corporation',
+  'inc',
+  'incorporated',
+  'llc',
+  'llp',
+  'limited',
+  'ltd',
+  'semiconductor',
+  'technologies',
+  'technology',
+]);
 const knownAdapterWords = new Set([
   ...vendorOnlyAdapterNames,
   ...genericAdapterWords,
@@ -543,7 +558,14 @@ function hasMeaningfulProductToken(value: string): boolean {
   if (/0x[0-9a-f]+/i.test(value)) return false;
 
   const tokens = removeVendorEntityAliases(value).match(/[a-z0-9]+/gi) ?? [];
+  const finalEntitySuffixIndex = tokens.reduce(
+    (lastIndex, token, index) => (
+      entitySuffixWords.has(lowerCase(token)) ? index : lastIndex
+    ),
+    -1,
+  );
   return tokens
+    .slice(finalEntitySuffixIndex + 1)
     .filter((token) => !isKnownAdapterWord(token))
     .some((token) => {
       if (!/[a-z]/i.test(token)) return false;
