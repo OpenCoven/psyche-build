@@ -666,7 +666,7 @@ xcrun simctl list devices available | grep -F "Psyche iPad Pro 13-inch 26.5" || 
 
 Acceptance uses the same runtime generation as the iPhone gate to avoid
 OS-specific baseline drift in `NavigationSplitView` and accessibility behavior;
-the representative UI baseline failures reproduced on iOS 18.6 but passed
+the representative UI baseline failures reproduced on an older simulator runtime but passed
 unchanged on iOS 26.5.
 
 Run:
