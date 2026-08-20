@@ -9,6 +9,37 @@ import type {
   StressResource,
 } from '../native/desktop/psyche-build-tauri/web/runtime/stress-harness';
 
+const root = process.cwd();
+const main = readFileSync(
+  join(root, 'native/desktop/psyche-build-tauri/web/main.js'),
+  'utf8',
+);
+
+function functionSource(name: string) {
+  const asyncStart = main.indexOf(`async function ${name}(`);
+  const syncStart = main.indexOf(`function ${name}(`);
+  const start = asyncStart === -1 ? syncStart : asyncStart;
+  if (start === -1) throw new Error(`missing function ${name}`);
+  const bodyStart = main.indexOf('{', start);
+  let depth = 0;
+  for (let index = bodyStart; index < main.length; index += 1) {
+    if (main[index] === '{') depth += 1;
+    if (main[index] === '}') depth -= 1;
+    if (depth === 0) return main.slice(start, index + 1);
+  }
+  throw new Error(`unterminated function ${name}`);
+}
+
+function compileFunction<T extends (...args: never[]) => unknown>(
+  source: string,
+  dependencies: Record<string, unknown>,
+) {
+  return Function(
+    ...Object.keys(dependencies),
+    `"use strict"; return (${source});`,
+  )(...Object.values(dependencies)) as T;
+}
+
 function abortError(): Error {
   const error = new Error('stress run cancelled');
   error.name = 'AbortError';
@@ -56,6 +87,71 @@ function resource(id: string, disposed: string[]): StressResource {
     async dispose() {
       disposed.push(id);
     },
+  };
+}
+
+type FocusState = {
+  returnThreadId?: string | null;
+};
+
+type FilesPaneState = {
+  previousFocusedSessionId?: string | null;
+};
+
+async function createProductionRunScopeFixture(
+  fileFocus: FocusState,
+  filesPane: FilesPaneState,
+) {
+  const project = { id: 'project-1' };
+  const workspaceRoot = '/workspace';
+  const layoutKey = `${project.id}\0${workspaceRoot}`;
+  const paneLayouts = new Map([[layoutKey, { root: {} }]]);
+  const filesPanes = new Map([[layoutKey, filesPane]]);
+  const state = {
+    activeThreadId: 'terminal-before',
+    activeFileId: null as string | null,
+  };
+  const styleValues = new Map([['--sidebar-w', '320px']]);
+  const prepareRun = compileFunction<() => Promise<StressResource>>(
+    functionSource('prepareDiagnosticsStressRun'),
+    {
+      diagnosticsStressContext: null,
+      activeDiagnosticsBrowserFixture: null,
+      activeProject: () => project,
+      activeWorkspaceRoot: () => workspaceRoot,
+      showTerminalView: async () => true,
+      paneLayoutKey: () => layoutKey,
+      paneLayouts,
+      filesPaneKey: () => layoutKey,
+      filesPanes,
+      fileFocus,
+      state,
+      document: {
+        documentElement: {
+          style: {
+            getPropertyValue: (name: string) => styleValues.get(name) ?? '',
+            setProperty: (name: string, value: string) => styleValues.set(name, value),
+            removeProperty: (name: string) => styleValues.delete(name),
+          },
+        },
+      },
+      renderPaneWorkspace: () => undefined,
+      findOpenFile: () => null,
+      findThread: () => null,
+      activateFileTabNow: () => true,
+      restoreFileEditorFocus: () => undefined,
+      focusThread: async () => true,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      scheduleTerminalPaneFits: () => undefined,
+      scheduleBrowserBounds: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+    },
+  );
+  return {
+    prepareRun,
+    fileFocus,
+    filesPane,
   };
 }
 
@@ -202,6 +298,79 @@ describe('Tauri stress runtime adapter', () => {
     expect(state.frames.pending()).toBe(0);
   });
 
+  it('restores pre-existing production editor focus state after a successful run', async () => {
+    const production = await createProductionRunScopeFixture(
+      { returnThreadId: 'terminal-before' },
+      { previousFocusedSessionId: 'terminal-before' },
+    );
+    const state = createHost();
+    state.host.prepareRun = production.prepareRun;
+    state.host.createEditor = async () => {
+      production.fileFocus.returnThreadId = 'diagnostics-terminal';
+      production.filesPane.previousFocusedSessionId = 'diagnostics-terminal';
+      return resource('editor', state.disposed);
+    };
+
+    await createTauriStressHarness(state.host).run();
+
+    expect(production.fileFocus.returnThreadId).toBe('terminal-before');
+    expect(production.filesPane.previousFocusedSessionId).toBe('terminal-before');
+  });
+
+  it('restores absent production editor focus properties after a failed run', async () => {
+    const production = await createProductionRunScopeFixture({}, {});
+    const state = createHost({
+      resize() {
+        throw new Error('layout failed');
+      },
+    });
+    state.host.prepareRun = production.prepareRun;
+    state.host.createEditor = async () => {
+      production.fileFocus.returnThreadId = 'diagnostics-terminal';
+      production.filesPane.previousFocusedSessionId = 'diagnostics-terminal';
+      return resource('editor', state.disposed);
+    };
+
+    await expect(createTauriStressHarness(state.host).run())
+      .rejects.toThrow('layout failed');
+
+    expect(Object.hasOwn(production.fileFocus, 'returnThreadId')).toBe(false);
+    expect(Object.hasOwn(production.filesPane, 'previousFocusedSessionId')).toBe(false);
+  });
+
+  it('restores explicitly undefined production editor focus state after cancellation', async () => {
+    let warmupStarted!: () => void;
+    const warmup = new Promise<void>((resolve) => {
+      warmupStarted = resolve;
+    });
+    const production = await createProductionRunScopeFixture(
+      { returnThreadId: undefined },
+      { previousFocusedSessionId: undefined },
+    );
+    const state = createHost({
+      async sleep(_ms, signal) {
+        warmupStarted();
+        await abortableWait(signal);
+      },
+    });
+    state.host.prepareRun = production.prepareRun;
+    state.host.createEditor = async () => {
+      production.fileFocus.returnThreadId = 'diagnostics-terminal';
+      production.filesPane.previousFocusedSessionId = 'diagnostics-terminal';
+      return resource('editor', state.disposed);
+    };
+    const harness = createTauriStressHarness(state.host);
+    const run = harness.run();
+    await warmup;
+
+    expect(harness.cancel()).toBe(true);
+    await expect(run).rejects.toMatchObject({ name: 'AbortError' });
+    expect(Object.hasOwn(production.fileFocus, 'returnThreadId')).toBe(true);
+    expect(production.fileFocus.returnThreadId).toBeUndefined();
+    expect(Object.hasOwn(production.filesPane, 'previousFocusedSessionId')).toBe(true);
+    expect(production.filesPane.previousFocusedSessionId).toBeUndefined();
+  });
+
   it('rejects authorization before preparing or allocating runtime resources', async () => {
     let prepareCalls = 0;
     const state = createHost({
@@ -219,13 +388,8 @@ describe('Tauri stress runtime adapter', () => {
   });
 
   it('exports and installs the adapter with real desktop pane, native, editor, and browser paths', () => {
-    const root = process.cwd();
     const runtimeEntry = readFileSync(
       join(root, 'native/desktop/psyche-build-tauri/web/runtime/runtime-entry.ts'),
-      'utf8',
-    );
-    const main = readFileSync(
-      join(root, 'native/desktop/psyche-build-tauri/web/main.js'),
       'utf8',
     );
 

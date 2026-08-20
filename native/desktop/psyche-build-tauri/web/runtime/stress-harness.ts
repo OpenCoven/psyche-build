@@ -312,26 +312,47 @@ async function runActivePhase(
     let focusStep = 0;
     let nextFocusAt = phaseStartedAt + STRESS_FOCUS_INTERVAL_MS;
     while (true) {
-      const elapsedBeforeSleep = Math.max(0, dependencies.now() - phaseStartedAt);
+      const nowBeforeSleep = dependencies.now();
+      if (nowBeforeSleep > nextFocusAt) {
+        nextFocusAt += Math.ceil(
+          (nowBeforeSleep - nextFocusAt) / STRESS_FOCUS_INTERVAL_MS,
+        ) * STRESS_FOCUS_INTERVAL_MS;
+      }
+      const elapsedBeforeSleep = Math.max(0, nowBeforeSleep - phaseStartedAt);
       const remainingMs = durationMs - elapsedBeforeSleep;
       if (remainingMs <= 0) break;
       const delayMs = Math.min(
         remainingMs,
-        Math.max(0, nextFocusAt - dependencies.now()),
+        Math.max(0, nextFocusAt - nowBeforeSleep),
       );
       if (delayMs > 0) {
         await dependencies.sleep(delayMs, phaseController.signal);
       }
       throwIfAborted(phaseController.signal);
       if (frameError !== undefined) throw frameError;
-      const elapsedBeforeFocus = Math.max(0, dependencies.now() - phaseStartedAt);
+      const focusNow = dependencies.now();
+      const elapsedBeforeFocus = Math.max(0, focusNow - phaseStartedAt);
       if (elapsedBeforeFocus >= durationMs) break;
+      if (focusNow > nextFocusAt) {
+        nextFocusAt += Math.ceil(
+          (focusNow - nextFocusAt) / STRESS_FOCUS_INTERVAL_MS,
+        ) * STRESS_FOCUS_INTERVAL_MS;
+      }
+      if (focusNow < nextFocusAt) continue;
       await dependencies.focus(stressFocusId(focusOrder, focusStep));
       focusStep += 1;
-      nextFocusAt = dependencies.now() + STRESS_FOCUS_INTERVAL_MS;
+      nextFocusAt += STRESS_FOCUS_INTERVAL_MS;
+      const focusCompletedAt = dependencies.now();
+      if (focusCompletedAt >= nextFocusAt) {
+        nextFocusAt += (
+          Math.floor(
+            (focusCompletedAt - nextFocusAt) / STRESS_FOCUS_INTERVAL_MS,
+          ) + 1
+        ) * STRESS_FOCUS_INTERVAL_MS;
+      }
       const elapsedMs = Math.min(
         durationMs,
-        Math.max(0, dependencies.now() - phaseStartedAt),
+        Math.max(0, focusCompletedAt - phaseStartedAt),
       );
       emitProgress(
         dependencies,

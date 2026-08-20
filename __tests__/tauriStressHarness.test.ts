@@ -334,6 +334,54 @@ describe('Tauri diagnostics stress harness', () => {
       .toEqual([45_000, 45_000, 45_000, 45_000]);
   });
 
+  it('keeps focus operations on absolute 250 ms boundaries when focusing is slow', async () => {
+    const controller = new AbortController();
+    const focusTimes: number[] = [];
+    const frames = createFrameDriver();
+    let now = 0;
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, []);
+      },
+      async createEditor() {
+        return createResource('editor', []);
+      },
+      async createBrowser() {
+        return createResource('browser', []);
+      },
+      async focus() {
+        focusTimes.push(now);
+        now += 100;
+        if (focusTimes.length === 4) controller.abort(abortError());
+      },
+      resize() {},
+      async setVisible() {},
+      async cycleWindow() {},
+      async loseGraphicsContext() {
+        return false;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += ms;
+        frames.flush(now);
+      },
+      requestFrame: frames.request,
+      cancelFrame: frames.cancel,
+      now: () => now,
+      onProgress() {},
+    };
+
+    await expect(runStressPlan(dependencies, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(focusTimes).toEqual([250, 500, 750, 1_000]);
+    expect(frames.pending()).toBe(0);
+  });
+
   it('does not burst focus operations to catch up after a stalled clock', async () => {
     const controller = new AbortController();
     const focusTimes: number[] = [];
@@ -367,7 +415,7 @@ describe('Tauri diagnostics stress harness', () => {
       },
       async sleep(ms, signal) {
         if (signal.aborted) throw signal.reason ?? abortError();
-        now += firstSleep ? 1_000 : ms;
+        now += firstSleep ? 1_100 : ms;
         firstSleep = false;
         frames.flush(now);
       },
@@ -379,7 +427,7 @@ describe('Tauri diagnostics stress harness', () => {
 
     await expect(runStressPlan(dependencies, { signal: controller.signal }))
       .rejects.toMatchObject({ name: 'AbortError' });
-    expect(focusTimes).toEqual([1_000, 1_250, 1_500]);
+    expect(focusTimes).toEqual([1_250, 1_500, 1_750]);
     expect(frames.pending()).toBe(0);
   });
 

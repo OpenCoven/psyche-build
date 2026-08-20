@@ -14153,6 +14153,18 @@
     var originalThreadId = state.activeThreadId;
     var originalFileId = state.activeFileId;
     var originalSidebarWidth = document.documentElement.style.getPropertyValue("--sidebar-w");
+    var originalFileFocusHadReturnThreadId =
+      Object.prototype.hasOwnProperty.call(fileFocus, "returnThreadId");
+    var originalFileFocusReturnThreadId = fileFocus.returnThreadId;
+    var originalFilesPane = filesPanes.get(filesPaneKey(project.id, workspaceRoot)) || null;
+    var originalFilesPaneHadPreviousFocusedSessionId = !!originalFilesPane &&
+      Object.prototype.hasOwnProperty.call(
+        originalFilesPane,
+        "previousFocusedSessionId"
+      );
+    var originalFilesPanePreviousFocusedSessionId = originalFilesPane
+      ? originalFilesPane.previousFocusedSessionId
+      : undefined;
     diagnosticsStressContext = {
       projectId: project.id,
       workspaceRoot: workspaceRoot,
@@ -14164,32 +14176,48 @@
       async dispose() {
         if (disposed) return;
         disposed = true;
-        activeDiagnosticsBrowserFixture = null;
-        diagnosticsStressContext = null;
-        if (originalLayout) paneLayouts.set(layoutKey, originalLayout);
-        else paneLayouts.delete(layoutKey);
-        if (originalSidebarWidth) {
-          document.documentElement.style.setProperty("--sidebar-w", originalSidebarWidth);
-        } else {
-          document.documentElement.style.removeProperty("--sidebar-w");
+        try {
+          activeDiagnosticsBrowserFixture = null;
+          diagnosticsStressContext = null;
+          if (originalLayout) paneLayouts.set(layoutKey, originalLayout);
+          else paneLayouts.delete(layoutKey);
+          if (originalSidebarWidth) {
+            document.documentElement.style.setProperty("--sidebar-w", originalSidebarWidth);
+          } else {
+            document.documentElement.style.removeProperty("--sidebar-w");
+          }
+          state.activeFileId = null;
+          state.activeThreadId = null;
+          renderPaneWorkspace({ preserveTerminalFocus: false });
+          var originalFile = originalFileId && findOpenFile(originalFileId);
+          var originalThread = originalThreadId && findThread(originalThreadId);
+          if (originalFile) {
+            activateFileTabNow(originalFile.id);
+            restoreFileEditorFocus();
+          } else if (originalThread && !originalThread.hidden) {
+            await focusThread(originalThread.id);
+          } else {
+            refreshSidebar();
+            refreshTabs();
+          }
+          scheduleTerminalPaneFits();
+          scheduleBrowserBounds();
+          saveWorkspaceSoon();
+        } finally {
+          if (originalFileFocusHadReturnThreadId) {
+            fileFocus.returnThreadId = originalFileFocusReturnThreadId;
+          } else {
+            delete fileFocus.returnThreadId;
+          }
+          if (originalFilesPane) {
+            if (originalFilesPaneHadPreviousFocusedSessionId) {
+              originalFilesPane.previousFocusedSessionId =
+                originalFilesPanePreviousFocusedSessionId;
+            } else {
+              delete originalFilesPane.previousFocusedSessionId;
+            }
+          }
         }
-        state.activeFileId = null;
-        state.activeThreadId = null;
-        renderPaneWorkspace({ preserveTerminalFocus: false });
-        var originalFile = originalFileId && findOpenFile(originalFileId);
-        var originalThread = originalThreadId && findThread(originalThreadId);
-        if (originalFile) {
-          activateFileTabNow(originalFile.id);
-          restoreFileEditorFocus();
-        } else if (originalThread && !originalThread.hidden) {
-          await focusThread(originalThread.id);
-        } else {
-          refreshSidebar();
-          refreshTabs();
-        }
-        scheduleTerminalPaneFits();
-        scheduleBrowserBounds();
-        saveWorkspaceSoon();
       },
     };
   }
