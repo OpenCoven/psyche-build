@@ -8329,7 +8329,6 @@
   async function removeProject(id) {
     var project = findProject(id);
     if (!project) return false;
-    var wasActiveProject = state.activeProjectId === id;
     var projectOpenFiles = state.openFiles.filter(function (file) {
       return file.projectId === id;
     });
@@ -8353,8 +8352,8 @@
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
       .map(function (t) { return t.id; });
-    var preserveTerminalFocus = state.activeProjectId !== id;
     var closeResults = await Promise.all(threadIds.map(function (tid) {
+      var preserveTerminalFocus = state.activeProjectId !== id;
       return closeThread(tid, {
         focus: false,
         preserveTerminalFocus: preserveTerminalFocus,
@@ -8378,7 +8377,8 @@
     state.projects = state.projects.filter(function (p) { return p.id !== id; });
     startCovenPolling();
     var shouldRefreshSidebar = threadIds.length === 0;
-    if (wasActiveProject) {
+    var refreshedByActiveProjectHandoff = false;
+    if (state.activeProjectId === id) {
       var next = state.projects[0] || null;
       // Force setActiveProject to do its restore work even though the id
       // matches — clear first.
@@ -8386,15 +8386,17 @@
       else Object.assign(state, { activeProjectId: null });
       if (next) {
         shouldRefreshSidebar = false;
-        await setActiveProject(next.id);
+        refreshedByActiveProjectHandoff = await setActiveProject(next.id);
       } else {
         state.activeThreadId = null;
         renderPaneWorkspace({ preserveTerminalFocus: false });
         setStatus("no project — click + to open one", "");
       }
     }
-    if (shouldRefreshSidebar) refreshSidebar();
-    else refreshTabs();
+    if (!refreshedByActiveProjectHandoff) {
+      if (shouldRefreshSidebar) refreshSidebar();
+      else refreshTabs();
+    }
     if (restoredTerminalView) syncPaneMetricsVisibility();
     syncProjectBrowser();
     saveWorkspaceSoon();
