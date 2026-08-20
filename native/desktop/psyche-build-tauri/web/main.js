@@ -5462,6 +5462,12 @@
       run: function () {
         openProjectAppearancePopover(project, anchor);
       },
+    }, {
+      label: "Close project",
+      danger: true,
+      run: function () {
+        return removeProject(project.id);
+      },
     }];
   }
 

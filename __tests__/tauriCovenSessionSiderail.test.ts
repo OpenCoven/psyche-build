@@ -680,6 +680,7 @@ function createRenderer(options: {
   const openProjectAppearancePopover = vi.fn(
     options.openProjectAppearancePopover ?? (() => undefined),
   );
+  const removeProject = vi.fn().mockResolvedValue(true);
   const paneGlyphFor = (kind: string) =>
     kind === 'shell' ? '❯_' : kind === 'web' ? '◍' : '✳';
 
@@ -771,7 +772,7 @@ function createRenderer(options: {
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
     'saveWorkspaceSoon', 'activateProjectWorktree', 'showProjectFiles', 'setSessionTypeFilter',
-    'openSessionContextMenu', 'openProjectAppearancePopover',
+    'openSessionContextMenu', 'openProjectAppearancePopover', 'removeProject',
     'invoke', 'refreshCovenSessions', 'localStorage', 'seedStatusAlertEl', 'seedToastEl',
     `"use strict"; ${sources.join('\n')}; return {
       render: function () {
@@ -858,6 +859,7 @@ function createRenderer(options: {
     setSessionTypeFilter,
     openSessionContextMenu,
     openProjectAppearancePopover,
+    removeProject,
     invoke,
     refreshCovenSessions,
     localStorage,
@@ -922,6 +924,7 @@ function createRenderer(options: {
     toastTimeouts,
     canvasThreadIds,
     openProjectAppearancePopover,
+    removeProject,
   };
 }
 
@@ -939,10 +942,11 @@ function createSessionContextMenuHarness() {
   sessionListEl.appendChild(project);
 
   const openProjectAppearancePopover = vi.fn();
+  const removeProject = vi.fn().mockResolvedValue(true);
   const windowValue = { innerWidth: 1280, innerHeight: 720 };
   const projectValue = { id: 'psyche', name: 'PSYCHE-BUILD', root: '/repo/psyche-build' };
   const harness = Function(
-    'document', 'window', 'sessionListEl', 'findProject', 'openProjectAppearancePopover',
+    'document', 'window', 'sessionListEl', 'findProject', 'openProjectAppearancePopover', 'removeProject',
     `"use strict";
     var sessionTreeFocusKey = "";
     var projectAppearancePopover = null;
@@ -964,7 +968,8 @@ function createSessionContextMenuHarness() {
       closeSessionContextMenu: closeSessionContextMenu,
       handleTreeKeydown: handleSessionTreeKeydown,
       sessionContextMenu: function () { return sessionContextMenu; },
-      sessionTreeFocusKey: function () { return sessionTreeFocusKey; }
+      sessionTreeFocusKey: function () { return sessionTreeFocusKey; },
+      removeProject: removeProject
     };`,
   )(
     document,
@@ -972,11 +977,13 @@ function createSessionContextMenuHarness() {
     sessionListEl,
     (id: string) => (id === projectValue.id ? projectValue : null),
     openProjectAppearancePopover,
+    removeProject,
   ) as {
     closeSessionContextMenu: (options?: { restoreFocus?: boolean }) => void;
     handleTreeKeydown: (event: FakeEvent) => void;
     sessionContextMenu: () => FakeElement | null;
     sessionTreeFocusKey: () => string;
+    removeProject: typeof removeProject;
   };
 
   return {
@@ -985,6 +992,7 @@ function createSessionContextMenuHarness() {
     sessionListEl,
     project,
     openProjectAppearancePopover,
+    removeProject,
   };
 }
 
@@ -1316,7 +1324,7 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.document.activeElement).toBe(rerenderedProject);
   });
 
-  it('opens a project header context menu with customize appearance anchored to the treeitem', async () => {
+  it('opens a project header context menu with appearance and close actions anchored to the treeitem', async () => {
     const renderer = createRenderer({
       projects: [{
         id: 'psyche',
@@ -1361,8 +1369,9 @@ describe('Tauri Coven session project rail', () => {
     expect(projectTreeitem?.dataset.projectId).toBe('psyche');
     expect(renderer.openSessionContextMenu).toHaveBeenCalledTimes(1);
     const [, actions, anchor] = renderer.openSessionContextMenu.mock.calls[0];
-    expect(actions).toHaveLength(1);
+    expect(actions).toHaveLength(2);
     expect(actions[0]).toMatchObject({ label: 'Customize appearance' });
+    expect(actions[1]).toMatchObject({ label: 'Close project', danger: true });
     expect(anchor).toBe(projectTreeitem);
     expect(renderer.sessionTreeFocusKey()).toBe(projectTreeitem?.dataset.treeKey);
 
@@ -1371,6 +1380,9 @@ describe('Tauri Coven session project rail', () => {
       renderer.state.projects[0],
       projectTreeitem,
     );
+    await actions[1].run();
+    expect(renderer.removeProject).toHaveBeenCalledOnce();
+    expect(renderer.removeProject).toHaveBeenCalledWith('psyche');
   });
 
   it('renders daemon-backed Coven sessions inside Agents with Coven metadata', () => {
@@ -1604,8 +1616,13 @@ describe('Tauri Coven session project rail', () => {
     expect(contextMenu.propagationStopped).toBe(true);
     expect(renderer.openSessionContextMenu).toHaveBeenCalledTimes(1);
     expect(renderer.openSessionContextMenu.mock.calls[0][2]).toBe(project);
+    expect(renderer.openSessionContextMenu.mock.calls[0][1]).toHaveLength(2);
     expect(renderer.openSessionContextMenu.mock.calls[0][1][0]).toMatchObject({
       label: 'Customize appearance',
+    });
+    expect(renderer.openSessionContextMenu.mock.calls[0][1][1]).toMatchObject({
+      label: 'Close project',
+      danger: true,
     });
 
     renderer.openSessionContextMenu.mockClear();
@@ -1616,8 +1633,13 @@ describe('Tauri Coven session project rail', () => {
     expect(shiftF10.propagationStopped).toBe(true);
     expect(renderer.openSessionContextMenu).toHaveBeenCalledTimes(1);
     expect(renderer.openSessionContextMenu.mock.calls[0][2]).toBe(project);
+    expect(renderer.openSessionContextMenu.mock.calls[0][1]).toHaveLength(2);
     expect(renderer.openSessionContextMenu.mock.calls[0][1][0]).toMatchObject({
       label: 'Customize appearance',
+    });
+    expect(renderer.openSessionContextMenu.mock.calls[0][1][1]).toMatchObject({
+      label: 'Close project',
+      danger: true,
     });
   });
 
