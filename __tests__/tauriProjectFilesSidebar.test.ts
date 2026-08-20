@@ -706,6 +706,7 @@ function compileRenderSessionListFocusHarness(initial: {
         };
       },
     };
+    ${functionSource('isDormantThread')}
     ${functionSource('renderSessionList')}
     return {
       renderSessionList: renderSessionList,
