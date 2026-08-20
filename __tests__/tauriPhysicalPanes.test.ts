@@ -2777,6 +2777,63 @@ describe('Tauri physical terminal panes', () => {
     expect(state.activeThreadId).toBe('active-thread');
   });
 
+  it('refreshes the siderail after removing an inactive project with no local threads', async () => {
+    const activeProject = { id: 'active-project' };
+    const removedProject = { id: 'removed-project' };
+    const state = {
+      activeProjectId: activeProject.id,
+      activeThreadId: 'active-thread',
+      activeFileId: null as string | null,
+      projects: [activeProject, removedProject],
+      threads: [{
+        id: 'active-thread',
+        projectId: activeProject.id,
+      }],
+      openFiles: [] as Array<{ id: string; projectId: string }>,
+    };
+    const refreshSidebarProjects: Array<Array<string>> = [];
+    const refreshTabs = vi.fn();
+    const closeThread = vi.fn();
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: (projectId: string) => (
+        state.projects.find((project) => project.id === projectId) || null
+      ),
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: {
+        invalidateCovenRequests: (value: unknown) => value,
+      },
+      closeThread,
+      fileViewEl: null,
+      terminalHost: null,
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      setStatus: () => undefined,
+      refreshSidebar: () => {
+        refreshSidebarProjects.push(state.projects.map((project) => project.id));
+      },
+      refreshTabs,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+    });
+
+    await expect(removeProject(removedProject.id)).resolves.toBe(true);
+    expect(closeThread).not.toHaveBeenCalled();
+    expect(state.projects).toEqual([activeProject]);
+    expect(refreshSidebarProjects).toEqual([[activeProject.id]]);
+    expect(refreshTabs).not.toHaveBeenCalled();
+    expect(state.activeProjectId).toBe(activeProject.id);
+    expect(state.activeThreadId).toBe('active-thread');
+  });
+
   it('skips explicit target focus while the terminal canvas is hidden before RAF', async () => {
     const state = { activeProjectId: 'project', activeThreadId: null as string | null };
     const project = {
