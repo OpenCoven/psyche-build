@@ -1945,7 +1945,7 @@ describe('graphics evidence classification', () => {
   });
 
   it('does not promote WebGPU software markers over strict WebGL hardware evidence', async () => {
-    for (const webgpuDescription of [
+    for (const webgpuDevice of [
       'SwiftShader',
       'llvmpipe',
       'Microsoft Basic Render Driver',
@@ -1963,7 +1963,10 @@ describe('graphics evidence classification', () => {
         navigatorTarget: {
           gpu: {
             requestAdapter: async () => ({
-              info: { description: webgpuDescription },
+              info: {
+                description: 'NVIDIA GeForce RTX 4090',
+                device: webgpuDevice,
+              },
             }),
           },
         },
@@ -1972,7 +1975,7 @@ describe('graphics evidence classification', () => {
 
       expect(probe).toMatchObject({
         webgpuAdapterAvailable: true,
-        webgpuAdapter: webgpuDescription,
+        webgpuAdapter: webgpuDevice,
         webgpuAdapterInfoSource: 'adapter.info',
         strictContext: 'webgl2',
         renderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4090, Direct3D11)',
@@ -1982,6 +1985,71 @@ describe('graphics evidence classification', () => {
         acceleration: 'unknown',
         fallbackReason: 'conflicting_reliable_evidence',
         unsupportedFields: [],
+      });
+    }
+  });
+
+  it('preserves software device evidence when the WebGPU description is hardware', async () => {
+    for (const webgpuDevice of [
+      'SwiftShader',
+      'llvmpipe',
+      'Microsoft Basic Render Driver',
+    ]) {
+      const probe = await probeGraphicsEvidence({
+        navigatorTarget: {
+          gpu: {
+            requestAdapter: async () => ({
+              info: {
+                description: 'NVIDIA GeForce RTX 4090',
+                device: webgpuDevice,
+              },
+            }),
+          },
+        },
+        createCanvas: () => null,
+      });
+
+      expect(probe).toEqual({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: webgpuDevice,
+        webgpuAdapterInfoSource: 'adapter.info',
+        unsupportedFields: ['webgl.context'],
+      });
+      expect(classifyGraphicsEvidence(probe)).toEqual({
+        acceleration: 'software',
+        adapter: webgpuDevice,
+        supportingProbe: 'webgpu',
+        fallbackReason: 'software_renderer_detected',
+        unsupportedFields: ['webgl.context'],
+      });
+    }
+  });
+
+  it('preserves software markers from every WebGPU adapter-info text field', async () => {
+    for (const field of ['vendor', 'architecture', 'device', 'description'] as const) {
+      const info = {
+        description: 'NVIDIA GeForce RTX 4090',
+        device: 'NVIDIA GeForce RTX 4090',
+        vendor: 'NVIDIA',
+        architecture: 'Ada Lovelace',
+        [field]: 'SwiftShader',
+      };
+
+      const probe = await probeGraphicsEvidence({
+        navigatorTarget: {
+          gpu: {
+            requestAdapter: async () => ({ info }),
+          },
+        },
+        createCanvas: () => null,
+      });
+
+      expect(probe.webgpuAdapter).toBe('SwiftShader');
+      expect(classifyGraphicsEvidence(probe)).toMatchObject({
+        acceleration: 'software',
+        adapter: 'SwiftShader',
+        supportingProbe: 'webgpu',
+        fallbackReason: 'software_renderer_detected',
       });
     }
   });

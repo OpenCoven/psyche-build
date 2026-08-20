@@ -714,13 +714,16 @@ function hasExplicitOpenGlHardwareHint(text: string): boolean {
 
 function normalizeWebGpuAdapterInfo(info: GraphicsGpuAdapterInfo | undefined): string | undefined {
   const description = normalizeString(info?.description);
-  if (description && softwareMarkerFor(description)) return description;
+  const device = normalizeString(info?.device);
+  const vendor = normalizeString(info?.vendor);
+  const architecture = normalizeString(info?.architecture);
+
+  for (const field of [description, device, vendor, architecture]) {
+    if (field && softwareMarkerFor(field)) return field;
+  }
 
   const normalizedDescription = normalizeAdapterString(description ?? '');
   if (normalizedDescription) return normalizedDescription;
-
-  const device = normalizeString(info?.device);
-  if (device && softwareMarkerFor(device)) return device;
 
   return normalizeAdapterString(device ?? '');
 }
