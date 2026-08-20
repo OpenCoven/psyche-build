@@ -444,6 +444,57 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects concrete generic and compact identifier examples on raw WebGL, ANGLE, and WebGPU paths', () => {
+    const ambiguousValues = [
+      'NVIDIA Driver',
+      'NVIDIA Corporation',
+      'NVIDIA VendorID 10DE',
+      'NVIDIA VendorID10DE',
+      'NVIDIA DeviceID2484',
+      'NVIDIA VEN10DE',
+      'NVIDIA DEV2484',
+      'NVIDIA VEN10DE DEV2484',
+      'NVIDIA SUBSYS00000000',
+    ];
+
+    for (const value of ambiguousValues) {
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: value,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+        unsupportedFields: [],
+      });
+
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: `ANGLE (NVIDIA, ${value}, OpenGL)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+        unsupportedFields: [],
+      });
+
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: value,
+        unsupportedFields: [],
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgpu',
+        unsupportedFields: [],
+      });
+    }
+  });
+
   it('rejects vendor plus numeric identifiers on raw WebGL, ANGLE, and WebGPU paths', () => {
     for (const value of ['NVIDIA 0x10de', 'NVIDIA 123456']) {
       expect(classifyGraphicsEvidence({
@@ -530,6 +581,9 @@ describe('graphics evidence classification', () => {
     for (const adapter of [
       'Apple M3',
       'NVIDIA GeForce RTX 4090',
+      'NVIDIA Corporation GeForce RTX 4090',
+      'NVIDIA GeForce Graphics',
+      'NVIDIA GeForce Driver',
       'Intel Arc A770',
       'AMD Radeon Pro 560X',
       'Qualcomm Adreno 740',
@@ -784,6 +838,40 @@ describe('graphics probes', () => {
       'NVIDIA 10DE:2484',
       'NVIDIA VEN=10DE DEV=2484',
       'PCI\\VEN_10DE&DEV_2484&SUBSYS_00000000',
+    ]) {
+      const probe = await probeGraphicsEvidence({
+        navigatorTarget: {
+          gpu: {
+            requestAdapter: async () => ({ info: { description } }),
+          },
+        },
+        createCanvas: () => null,
+      });
+
+      expect(probe).toEqual({
+        webgpuAdapterAvailable: true,
+        unsupportedFields: ['webgpu.adapterInfo', 'webgl.context'],
+      });
+      expect(classifyGraphicsEvidence(probe)).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'webgpu_adapter_info_unavailable',
+        supportingProbe: 'webgpu',
+        unsupportedFields: ['webgpu.adapterInfo', 'webgl.context'],
+      });
+    }
+  });
+
+  it('filters concrete generic and compact identifier WebGPU descriptions', async () => {
+    for (const description of [
+      'NVIDIA Driver',
+      'NVIDIA Corporation',
+      'NVIDIA VendorID 10DE',
+      'NVIDIA VendorID10DE',
+      'NVIDIA DeviceID2484',
+      'NVIDIA VEN10DE',
+      'NVIDIA DEV2484',
+      'NVIDIA VEN10DE DEV2484',
+      'NVIDIA SUBSYS00000000',
     ]) {
       const probe = await probeGraphicsEvidence({
         navigatorTarget: {
