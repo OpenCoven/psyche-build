@@ -1372,7 +1372,7 @@ func testChangedFingerprintRequiresWarningBeforePairing() async {
 
 func testManualEntryRejectsMalformedPortAndFingerprint() async {
     let model = PairHostModel(dependencies: .fake())
-    model.showManualEntry = true
+    model.setManualEntrySelected(true)
     model.manualHost = "studio.local"
     model.manualPort = "70000"
     model.manualFingerprint = "nope"
@@ -1576,12 +1576,15 @@ final class PairHostModel: ObservableObject {
     @Published private(set) var phase: Phase = .browsing
     @Published private(set) var errorMessage: String?
     @Published private(set) var readyHost: PairedHost?
-    @Published var selectedServerID: String?
-    @Published var showManualEntry = false
+    @Published private(set) var selectedServerID: String?
+    @Published private(set) var showManualEntry = false
     @Published var manualHost = ""
     @Published var manualPort = ""
     @Published var manualFingerprint = ""
     @Published var pairingCode = ""
+
+    func select(serverID: String)
+    func setManualEntrySelected(_ isSelected: Bool)
 }
 ```
 
@@ -1902,6 +1905,10 @@ Start discovery with `.task { model.start() }`, stop with:
 
 Observe `model.readyHost`; call `onReady(host)` and dismiss only after phase
 `.ready`.
+
+Drive the manual toggle through `model.setManualEntrySelected(_:)` rather than
+binding writes directly to `showManualEntry`, so active connection state cannot
+be replaced mid-flight.
 
 - [ ] **Step 3: Wire Settings to a fresh model**
 

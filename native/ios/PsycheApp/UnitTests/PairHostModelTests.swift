@@ -80,6 +80,81 @@ final class PairHostModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .browsing)
     }
 
+    func testSelectingDifferentHostDuringActiveConnectKeepsOriginalSelectionPhaseAndReadyHost() async throws {
+        let probe = PairHostModelProbe()
+        let connectGate = AsyncGate()
+        let readinessGate = AsyncGate()
+        let readyHost = makePairedHost(serverID: "server-a", serverName: "Alpha")
+        await probe.setPairingStatus(.paired, for: "server-a")
+        await probe.setPairingStatus(.paired, for: "server-b")
+        await probe.setConnectPairedGate(connectGate)
+        await probe.setReadinessGate(readinessGate)
+        await probe.setConnectPairedResult(.success(readyHost))
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([
+            makeEntry(serverID: "server-a", serverName: "Alpha"),
+            makeEntry(serverID: "server-b", serverName: "Beta")
+        ])
+        await waitUntil { model.rows.count == 2 }
+        model.select(serverID: "server-a")
+
+        let submitTask = Task { await model.submit() }
+        await connectGate.waitUntilStarted()
+        await waitUntil { model.phase == .connecting }
+
+        model.select(serverID: "server-b")
+
+        XCTAssertEqual(model.selectedServerID, "server-a")
+        XCTAssertEqual(model.phase, .connecting)
+
+        await connectGate.succeed()
+        await readinessGate.waitUntilStarted()
+        await waitUntil { model.phase == .loadingWorkspace }
+        await readinessGate.succeed()
+        await submitTask.value
+
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.readyHost, readyHost)
+    }
+
+    func testSelectingManualEntryDuringActiveConnectKeepsOriginalSelectionPhaseAndReadyHost() async throws {
+        let probe = PairHostModelProbe()
+        let connectGate = AsyncGate()
+        let readinessGate = AsyncGate()
+        let readyHost = makePairedHost(serverID: "server-a", serverName: "Alpha")
+        await probe.setPairingStatus(.paired, for: "server-a")
+        await probe.setConnectPairedGate(connectGate)
+        await probe.setReadinessGate(readinessGate)
+        await probe.setConnectPairedResult(.success(readyHost))
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha")])
+        await waitUntil { model.rows.count == 1 }
+        model.select(serverID: "server-a")
+
+        let submitTask = Task { await model.submit() }
+        await connectGate.waitUntilStarted()
+        await waitUntil { model.phase == .connecting }
+
+        model.setManualEntrySelected(true)
+
+        XCTAssertFalse(model.showManualEntry)
+        XCTAssertEqual(model.selectedServerID, "server-a")
+        XCTAssertEqual(model.phase, .connecting)
+
+        await connectGate.succeed()
+        await readinessGate.waitUntilStarted()
+        await waitUntil { model.phase == .loadingWorkspace }
+        await readinessGate.succeed()
+        await submitTask.value
+
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.readyHost, readyHost)
+    }
+
     func testStartTwiceStartsDiscoveryAndObservationExactlyOnce() async throws {
         let probe = PairHostModelProbe()
         let model = PairHostModel(dependencies: await probe.dependencies())
@@ -245,7 +320,7 @@ final class PairHostModelTests: XCTestCase {
         let probe = PairHostModelProbe()
         let model = PairHostModel(dependencies: await probe.dependencies())
 
-        model.showManualEntry = true
+        model.setManualEntrySelected(true)
         model.manualHost = "manual.local"
         model.manualPort = "4242"
         model.manualFingerprint = otherFingerprint
@@ -401,7 +476,7 @@ final class PairHostModelTests: XCTestCase {
         await probe.setReadinessGate(readinessGate)
         let model = PairHostModel(dependencies: await probe.dependencies())
 
-        model.showManualEntry = true
+        model.setManualEntrySelected(true)
         model.manualHost = "bad host"
         model.manualPort = "70000"
         model.manualFingerprint = "not-a-fingerprint"
@@ -479,7 +554,7 @@ final class PairHostModelTests: XCTestCase {
         await probe.setReadinessGate(readinessGate)
         let model = PairHostModel(dependencies: await probe.dependencies())
 
-        model.showManualEntry = true
+        model.setManualEntrySelected(true)
         model.manualHost = " manual.local "
         model.manualPort = "4242"
         model.manualFingerprint = otherFingerprint

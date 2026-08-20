@@ -77,7 +77,7 @@ final class PairHostModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var readyHost: PairedHost?
     @Published private(set) var selectedServerID: String?
-    @Published var showManualEntry = false
+    @Published private(set) var showManualEntry = false
     @Published var manualHost = ""
     @Published var manualPort = ""
     @Published var manualFingerprint = ""
@@ -211,12 +211,26 @@ final class PairHostModel: ObservableObject {
     }
 
     func select(serverID: String) {
+        guard activeActionID == nil else { return }
         guard rows.contains(where: { $0.serverID == serverID }) else { return }
         selectedServerID = serverID
         showManualEntry = false
         clearNonReadyError()
         if phase != .ready {
             phase = .selected
+        }
+    }
+
+    func setManualEntrySelected(_ isSelected: Bool) {
+        guard activeActionID == nil else { return }
+        guard showManualEntry != isSelected || (isSelected && selectedServerID != nil) else { return }
+        showManualEntry = isSelected
+        if isSelected {
+            selectedServerID = nil
+        }
+        clearNonReadyError()
+        if phase != .ready {
+            phase = selectedServerID == nil ? .browsing : .selected
         }
     }
 
