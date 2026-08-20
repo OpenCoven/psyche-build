@@ -605,6 +605,81 @@ final class PairHostModelTests: XCTestCase {
         XCTAssertNil(model.readyHost)
     }
 
+    func testStopWhilePairedConnectIsActiveButStillBlockedDisconnectsExactlyOnce() async throws {
+        let probe = PairHostModelProbe()
+        let connectGate = AsyncGate()
+        let endpoint = HostEndpoint(
+            host: "alpha.local",
+            port: 4242,
+            certificateFingerprint: testFingerprint
+        )
+        await probe.setPairingStatus(.paired, for: "server-a")
+        await probe.setConnectPairedGate(connectGate)
+        await probe.setConnectPairedResult(.success(makePairedHost(
+            serverID: "server-a",
+            serverName: "Alpha",
+            endpoint: endpoint
+        )))
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha", host: "alpha.local")])
+        await waitUntil { model.rows.count == 1 }
+        model.select(serverID: "server-a")
+
+        let submitTask = Task { await model.submit() }
+        await connectGate.waitUntilStarted()
+        await waitUntil { model.phase == .connecting }
+
+        await model.stop()
+        await connectGate.waitUntilCancelled()
+        await submitTask.value
+
+        let stopCount = await probe.stopCount()
+        let disconnectCount = await probe.disconnectCount()
+        let connectPairedCalls = await probe.recordedConnectPairedCalls()
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(disconnectCount, 1)
+        XCTAssertEqual(connectPairedCalls, [.init(serverID: "server-a", endpoint: endpoint)])
+        XCTAssertNil(model.readyHost)
+    }
+
+    func testStopWhileConnectForPairingIsActiveButStillBlockedDisconnectsExactlyOnce() async throws {
+        let probe = PairHostModelProbe()
+        let connectGate = AsyncGate()
+        let endpoint = HostEndpoint(
+            host: "alpha.local",
+            port: 4242,
+            certificateFingerprint: testFingerprint
+        )
+        await probe.setConnectForPairingGate(connectGate)
+        let model = PairHostModel(dependencies: await probe.dependencies())
+
+        await model.start()
+        await probe.yield([makeEntry(serverID: "server-a", serverName: "Alpha", host: "alpha.local")])
+        await waitUntil { model.rows.count == 1 }
+        model.select(serverID: "server-a")
+        model.pairingCode = "123456"
+
+        let submitTask = Task { await model.submit() }
+        await connectGate.waitUntilStarted()
+        await waitUntil { model.phase == .connecting }
+
+        await model.stop()
+        await connectGate.waitUntilCancelled()
+        await submitTask.value
+
+        let stopCount = await probe.stopCount()
+        let disconnectCount = await probe.disconnectCount()
+        let connectForPairingCalls = await probe.recordedConnectForPairingCalls()
+        let pairCalls = await probe.recordedPairCalls()
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(disconnectCount, 1)
+        XCTAssertEqual(connectForPairingCalls, [.init(endpoint: endpoint)])
+        XCTAssertTrue(pairCalls.isEmpty)
+        XCTAssertNil(model.readyHost)
+    }
+
     func testReleasingModelAfterPairedConnectOwnsIncompleteConnectionDisconnectsExactlyOnceWithoutStop() async throws {
         let probe = PairHostModelProbe()
         let readinessGate = AsyncGate()
@@ -725,6 +800,13 @@ final class PairHostModelTests: XCTestCase {
         let connectWasCancelled = await connectGate.wasCancelled()
         XCTAssertTrue(connectWasCancelled)
         await waitUntil { weakModel == nil }
+        await waitUntilAsync { await probe.stopCount() == 1 }
+        await waitUntilAsync { await probe.disconnectCount() == 1 }
+
+        let stopCount = await probe.stopCount()
+        let disconnectCount = await probe.disconnectCount()
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(disconnectCount, 1)
         XCTAssertNil(weakModel)
     }
 

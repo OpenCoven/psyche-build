@@ -380,11 +380,16 @@ final class PairHostModel: ObservableObject {
                 }
             }
             do {
+                guard await self?.transitionAction(
+                    actionID: actionID,
+                    ownsIncompleteConnection: true
+                ) == true else {
+                    return
+                }
                 let host = try await dependencies.connectPaired(row.serverID, row.resolvedEndpoint)
                 guard await self?.transitionAction(
                     actionID: actionID,
-                    phase: .loadingWorkspace,
-                    ownsIncompleteConnection: true
+                    phase: .loadingWorkspace
                 ) == true else {
                     return
                 }
@@ -424,11 +429,16 @@ final class PairHostModel: ObservableObject {
                 }
             }
             do {
+                guard await self?.transitionAction(
+                    actionID: actionID,
+                    ownsIncompleteConnection: true
+                ) == true else {
+                    return
+                }
                 try await dependencies.connectForPairing(endpoint)
                 guard await self?.transitionAction(
                     actionID: actionID,
-                    phase: .pairing,
-                    ownsIncompleteConnection: true
+                    phase: .pairing
                 ) == true else {
                     return
                 }
@@ -479,14 +489,16 @@ final class PairHostModel: ObservableObject {
 
     private func transitionAction(
         actionID: UUID,
-        phase nextPhase: Phase,
+        phase nextPhase: Phase? = nil,
         ownsIncompleteConnection: Bool? = nil
     ) -> Bool {
         guard activeActionID == actionID else { return false }
         if let ownsIncompleteConnection {
             self.ownsIncompleteConnection = ownsIncompleteConnection
         }
-        phase = nextPhase
+        if let nextPhase {
+            phase = nextPhase
+        }
         return !Task.isCancelled
     }
 
