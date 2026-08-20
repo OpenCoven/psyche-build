@@ -309,7 +309,7 @@ describe('Tauri desktop tab shortcuts', () => {
       ...mainWindowPermissions,
       ...mainRuntimeDiagnosticsCapability.permissions,
     ];
-    expect(mainAppPermissions).toEqual(generatedPermissions);
+    expect([...mainAppPermissions].sort()).toEqual([...generatedPermissions].sort());
 
     expect(browserShortcutCapability).not.toBeNull();
     expect(browserShortcutCapability).toEqual({
