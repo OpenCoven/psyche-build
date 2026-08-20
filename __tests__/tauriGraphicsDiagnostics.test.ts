@@ -116,6 +116,57 @@ describe('graphics evidence classification', () => {
     });
   });
 
+  it('accepts unprefixed NVIDIA identifier pairs across WebGPU, raw WebGL, and ANGLE', () => {
+    for (const adapter of [
+      'NVIDIA 10DE 2684',
+      'NVIDIA Controller 10DE 2684',
+      'NVIDIA VGA Controller 10DE 2684',
+      'NVIDIA Controller 10DE-2684',
+    ]) {
+      const probes = [
+        {
+          webgpuAdapterAvailable: true as const,
+          webgpuAdapter: adapter,
+          unsupportedFields: [],
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: adapter,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: `ANGLE (NVIDIA, ${adapter}, OpenGL)`,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+      ];
+
+      for (const probe of probes) {
+        expect(classifyGraphicsEvidence(probe), adapter).toMatchObject({
+          acceleration: 'accelerated',
+          adapter,
+          supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+        });
+      }
+    }
+  });
+
+  it('preserves legitimate single-token GPU model identifiers', () => {
+    for (const adapter of ['Intel Arc A770', 'NVIDIA H100']) {
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: adapter,
+        unsupportedFields: [],
+      })).toMatchObject({
+        acceleration: 'accelerated',
+        adapter,
+        supportingProbe: 'webgpu',
+      });
+    }
+  });
+
   it('strips ancillary device identifiers from named ANGLE and WebGPU adapters', () => {
     expect(classifyGraphicsEvidence({
       strictContext: 'webgl2',
@@ -148,6 +199,53 @@ describe('graphics evidence classification', () => {
       acceleration: 'accelerated',
       backend: 'OpenGL',
       adapter: 'NVIDIA GeForce RTX 4090',
+      supportingProbe: 'webgl2',
+    });
+  });
+
+  it('strips complete device ID labels from named adapters across every adapter path', () => {
+    const adapter = 'NVIDIA GeForce RTX 4090';
+    const probes = [
+      {
+        webgpuAdapterAvailable: true as const,
+        webgpuAdapter: `${adapter} Device ID: 0x2684`,
+        unsupportedFields: [],
+      },
+      {
+        strictContext: 'webgl2' as const,
+        renderer: `${adapter} Device ID: 0x2684 OpenGL Engine`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false as const,
+      },
+      {
+        strictContext: 'webgl2' as const,
+        renderer: `ANGLE (NVIDIA, ${adapter} Device ID: 0x2684, OpenGL)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false as const,
+      },
+    ];
+
+    for (const probe of probes) {
+      const classification = classifyGraphicsEvidence(probe);
+      expect(classification).toMatchObject({
+        acceleration: 'accelerated',
+        adapter,
+        supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+      });
+      if (!probe.webgpuAdapterAvailable) expect(classification.backend).toBe('OpenGL');
+    }
+  });
+
+  it('removes generic trailing ANGLE version segments from adapter names', () => {
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)',
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toMatchObject({
+      acceleration: 'accelerated',
+      backend: 'Metal',
+      adapter: 'Apple M2',
       supportingProbe: 'webgl2',
     });
   });

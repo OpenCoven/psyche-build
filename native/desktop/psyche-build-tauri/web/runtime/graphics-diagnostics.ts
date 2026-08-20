@@ -312,8 +312,11 @@ const concatenatedDescriptorFragments = [
 const uuidPattern = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i;
 const identifierOnlyPattern = /^(?:(?:pci|ven|dev|vendor|device|id)|(?:0x)?[0-9a-f]+|[\s,:/\\\-&_;])+$/i;
 const hardwareIdentifierPattern = /(?:\b(?:0x)?[0-9a-f]{4,8}\s*:\s*(?:0x)?[0-9a-f]{4,8}\b|(?<![\p{L}\p{N}])(?:pci|ven|dev|subsys|vendor[^\p{L}\p{N}{}]*id|device[^\p{L}\p{N}{}]*id|vid|pid|did|luid|uuid)(?:[^\p{L}\p{N}{}]+(?:\{[0-9a-f-]+\}|(?:0x)?[0-9a-f]+)|(?:\{[0-9a-f-]+\}|(?:0x)?[0-9]+|(?:0x)?[0-9a-f]{4,}))(?![\p{L}\p{N}]))/iu;
+const unprefixedIdentifierPairPattern = /(?<![\p{L}\p{N}])[0-9a-f]{4,8}[\s-]+[0-9a-f]{4,8}(?![\p{L}\p{N}])/iu;
+const ancillaryIdentifierLabelPattern = /\s+(?:(?:pci|ven|dev|subsys|vid|pid|did|luid|uuid)\b(?:\s*(?:id|identifier)\b)?|(?:vendor|device)\b\s*(?:id|identifier)\b)\s*[:=#-]?\s*(?:0x)?[0-9a-f]{1,8}\b/gi;
 const ancillaryIdentifierPattern = /\s*\(\s*0x[0-9a-f]+\s*\)|\s+0x[0-9a-f]+\b/gi;
 const backendOnlyAdapterPattern = /^(?:angle\s+)?(?:metal|vulkan|opengl(?:\s+es)?|direct3d(?:\s*(?:11|12))?|d3d(?:11|12))(?:\s+(?:renderer|engine|[0-9]+(?:\.[0-9]+)*))?$/i;
+const genericTrailingAngleSegmentPattern = /^(?:angle|unspecified\s+version|(?:metal|vulkan|opengl(?:\s+es)?|direct3d(?:\s*(?:11|12))?|d3d(?:11|12)?)(?:\s+(?:renderer|engine|backend|version|[0-9]+(?:\.[0-9]+)*))*)$/i;
 const DIRECT3D_BACKEND_PATTERN = /\b(?:direct3d(?:11|12)?|d3d(?:11|12)?)\b/i;
 
 export const SOFTWARE_RENDERER_MARKERS = Object.freeze({
@@ -528,6 +531,7 @@ function normalizeAdapterString(value: string): string | undefined {
 function isReliableAdapterEvidence(value: string): boolean {
   const candidate = stripAncillaryIdentifierFragments(value);
   const normalized = lowerCase(candidate).replace(/\s+/g, ' ').trim();
+  const hasUnprefixedIdentifierPair = unprefixedIdentifierPairPattern.test(candidate);
   return !(
     genericAdapterPattern.test(candidate)
     || genericAdapterNames.has(normalized)
@@ -535,15 +539,19 @@ function isReliableAdapterEvidence(value: string): boolean {
     || hardwareIdentifierPattern.test(candidate)
     || identifierOnlyPattern.test(candidate)
     || uuidPattern.test(candidate)
-    || isConcatenatedDescriptorIdentifier(candidate)
+    || (isConcatenatedDescriptorIdentifier(candidate) && !hasUnprefixedIdentifierPair)
     || backendOnlyAdapterPattern.test(candidate)
     || isMaskedRenderer(candidate)
-    || !hasMeaningfulProductToken(candidate)
+    || (!hasMeaningfulProductToken(candidate) && !hasUnprefixedIdentifierPair)
   );
 }
 
 function stripAncillaryIdentifierFragments(value: string): string {
-  return value.replace(ancillaryIdentifierPattern, ' ').replace(/\s+/g, ' ').trim();
+  return value
+    .replace(ancillaryIdentifierLabelPattern, ' ')
+    .replace(ancillaryIdentifierPattern, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function isConcatenatedDescriptorIdentifier(value: string): boolean {
@@ -882,7 +890,13 @@ function parseWebGlRenderer(renderer: string, source: Exclude<RuntimeGraphicsPro
       .filter((segment) => segment.length > 0);
     const softwareMarker = softwareMarkerFor(renderer);
     const adapterSegments = segments.slice(1);
-    if (adapterSegments.at(-1) && backendOnlyAdapterPattern.test(adapterSegments.at(-1)!)) {
+    while (
+      adapterSegments.at(-1)
+      && (
+        backendOnlyAdapterPattern.test(adapterSegments.at(-1)!)
+        || genericTrailingAngleSegmentPattern.test(adapterSegments.at(-1)!)
+      )
+    ) {
       adapterSegments.pop();
     }
     const adapterToken = adapterSegments.join(', ');
