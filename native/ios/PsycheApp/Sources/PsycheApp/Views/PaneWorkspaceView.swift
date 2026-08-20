@@ -60,31 +60,40 @@ struct PaneWorkspaceView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .toolbar {
+                if let target = toolbarTarget(showsSplit: showsSplit) {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            inspectionTarget = InspectionTarget(
+                                paneID: target.paneID
+                            )
+                        } label: {
+                            Label("Browse files", systemImage: "folder")
+                        }
+                        .disabled(store.isStale)
+                        .accessibilityIdentifier("pane-files")
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        PaneControlsMenu(
+                            paneID: target.paneID,
+                            paneTitle: target.paneTitle,
+                            ritualContext: target.ritualContext
+                        )
+                    }
+                }
+            }
+            .task(id: workspaceKey(hasRoomForTwo: hasRoomForTwo, showsSplit: showsSplit)) {
+                if !didApplyRequestedPane {
+                    didApplyRequestedPane = true
+                    if let requestedPrimaryPaneID, store.primaryPaneID != requestedPrimaryPaneID {
+                        store.primaryPaneID = requestedPrimaryPaneID
+                    }
+                }
+                await syncRegistry(showsSplit: showsSplit)
+            }
         }
         .navigationTitle(primaryPane?.title ?? primaryPane?.id ?? "Pane")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            if let target = toolbarTarget {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        inspectionTarget = InspectionTarget(
-                            paneID: target.paneID
-                        )
-                    } label: {
-                        Label("Browse files", systemImage: "folder")
-                    }
-                    .disabled(store.isStale)
-                    .accessibilityIdentifier("pane-files")
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    PaneControlsMenu(
-                        paneID: target.paneID,
-                        paneTitle: target.paneTitle,
-                        ritualContext: target.ritualContext
-                    )
-                }
-            }
-        }
         .sheet(item: $inspectionTarget) { target in
             NavigationStack {
                 FileBrowserView(paneID: target.paneID)
@@ -97,15 +106,6 @@ struct PaneWorkspaceView: View {
         .accessibilityIdentifier(
             primaryPane.map { "pane-workspace-\($0.id)" } ?? "pane-workspace"
         )
-        .task(id: workspaceKey) {
-            if !didApplyRequestedPane {
-                didApplyRequestedPane = true
-                if let requestedPrimaryPaneID, store.primaryPaneID != requestedPrimaryPaneID {
-                    store.primaryPaneID = requestedPrimaryPaneID
-                }
-            }
-            await syncRegistry()
-        }
     }
 
     @ViewBuilder
@@ -150,17 +150,21 @@ struct PaneWorkspaceView: View {
 
     /// Re-runs whenever the shown panes change, so the registry attaches
     /// exactly what is on screen and nothing else.
-    private var workspaceKey: String {
+    private func workspaceKey(hasRoomForTwo: Bool, showsSplit: Bool) -> String {
         [
             requestedPrimaryPaneID ?? "",
             store.primaryPaneID ?? "",
             store.secondaryPaneID ?? "",
-            horizontalSizeClass == .regular ? "regular" : "compact",
+            hasRoomForTwo ? "room" : "tight",
+            showsSplit ? "split" : "single",
         ].joined(separator: "|")
     }
 
-    private func syncRegistry() async {
-        await registry.show(primary: store.primaryPaneID, secondary: store.secondaryPaneID)
+    private func syncRegistry(showsSplit: Bool) async {
+        await registry.show(
+            primary: store.primaryPaneID,
+            secondary: showsSplit ? secondaryPane?.id : nil
+        )
     }
 
     // MARK: - Data
@@ -194,18 +198,11 @@ struct PaneWorkspaceView: View {
         return secondary
     }
 
-    private var focusedVisiblePane: WorkspacePaneSnapshot? {
-        guard let focusedPaneID = registry.focusedPaneID else { return nil }
-        return [primaryPane, secondaryPane]
-            .compactMap { $0 }
-            .first { $0.id == focusedPaneID }
-    }
-
-    private var toolbarTarget: PaneWorkspaceToolbarTarget? {
+    private func toolbarTarget(showsSplit: Bool) -> PaneWorkspaceToolbarTarget? {
         PaneWorkspaceToolbarTarget.resolve(
             primaryPaneID: primaryPane?.id,
-            secondaryPaneID: secondaryPane?.id,
-            focusedPaneID: focusedVisiblePane?.id,
+            secondaryPaneID: showsSplit ? secondaryPane?.id : nil,
+            focusedPaneID: registry.focusedPaneID,
             in: store.workspace
         )
     }

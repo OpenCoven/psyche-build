@@ -33,6 +33,19 @@ final class PaneControlsTests: XCTestCase {
         XCTAssertEqual(target?.ritualContext?.projectID, "psyche")
     }
 
+    func testToolbarTargetIgnoresAFocusedSecondaryWhenTheSplitIsHidden() {
+        let target = PaneWorkspaceToolbarTarget.resolve(
+            primaryPaneID: "bridge-protocol",
+            secondaryPaneID: nil,
+            focusedPaneID: "web-home",
+            in: workspace
+        )
+
+        XCTAssertEqual(target?.paneID, "bridge-protocol")
+        XCTAssertEqual(target?.paneTitle, "bridge wire protocol")
+        XCTAssertEqual(target?.ritualContext?.projectID, "psyche")
+    }
+
     func testFocusedPaneUsesItsCanonicalProjectRituals() {
         let context = PaneRitualContext.resolve(
             paneID: "web-home",
