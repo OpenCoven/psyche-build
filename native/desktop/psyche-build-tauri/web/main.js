@@ -5483,6 +5483,7 @@
           throw error;
         });
       },
+    }];
   }
 
   var sessionContextMenu = null;
