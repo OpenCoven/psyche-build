@@ -141,6 +141,194 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(loaded?.token, "token-2")
     }
 
+    func testLastConnectedHostReturnsTheExactSelectedHost() async throws {
+        let secureStore = InMemorySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let hostA = makeHost(serverID: "server-a")
+        let hostZ = makeHost(serverID: "server-z")
+
+        try await store.save(hostA)
+        try await store.save(hostZ)
+        try await store.markLastConnected(serverID: "server-z")
+
+        let selected = try await store.lastConnectedHost()
+
+        XCTAssertEqual(selected, hostZ)
+    }
+
+    func testLastConnectedHostReturnsNilWhenNoSelectionExists() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+
+        let selected = try await store.lastConnectedHost()
+
+        XCTAssertNil(selected)
+    }
+
+    func testMarkLastConnectedRejectsUnknownHostsWithoutWritingSelection() async throws {
+        let secureStore = InMemorySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+
+        do {
+            try await store.markLastConnected(serverID: "server-missing")
+            XCTFail("Expected an unknown host to be rejected")
+        } catch {
+            XCTAssertEqual(error as? PairedHostStoreError, .unknownHost(serverID: "server-missing"))
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Choose a paired host before making it the reconnect target."
+            )
+        }
+
+        XCTAssertNil(try secureStore.data(forKey: PairedHostStore.lastConnectedKey))
+    }
+
+    func testRemovingTheSelectedHostClearsTheSelection() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        try await store.save(makeHost())
+        try await store.markLastConnected(serverID: "server-1")
+
+        try await store.remove(serverID: "server-1")
+
+        let selected = try await store.lastConnectedHost()
+        XCTAssertNil(selected)
+    }
+
+    func testRemovingAnotherOrUnknownHostPreservesSelection() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        try await store.save(makeHost(serverID: "server-a"))
+        try await store.save(makeHost(serverID: "server-z"))
+        try await store.markLastConnected(serverID: "server-z")
+
+        try await store.remove(serverID: "server-a")
+        try await store.remove(serverID: "server-missing")
+
+        let selected = try await store.lastConnectedHost()
+
+        XCTAssertEqual(selected?.serverID, "server-z")
+    }
+
+    func testRemoveAllClearsPairedHostsAndLastConnectedSelection() async throws {
+        let secureStore = InMemorySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        try await store.save(makeHost())
+        try await store.markLastConnected(serverID: "server-1")
+
+        try await store.removeAll()
+
+        let hosts = try await store.hosts()
+        XCTAssertEqual(hosts, [])
+        XCTAssertNil(try secureStore.data(forKey: PairedHostStore.defaultKey))
+        XCTAssertNil(try secureStore.data(forKey: PairedHostStore.lastConnectedKey))
+    }
+
+    func testStaleLastConnectedSelectionIsRemovedAndReturnsNil() async throws {
+        let secureStore = InMemorySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        try await store.save(makeHost(serverID: "server-a"))
+        try secureStore.set(try JSONEncoder().encode("server-z"), forKey: PairedHostStore.lastConnectedKey)
+
+        let selected = try await store.lastConnectedHost()
+
+        XCTAssertNil(selected)
+        XCTAssertNil(try secureStore.data(forKey: PairedHostStore.lastConnectedKey))
+    }
+
+    func testSuccessfulRecordSuccessfulConnectionUpdatesSelectionAndEndpointTogether() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        let generation = ConnectionGeneration(id: 1)
+        let host = makeHost()
+        let connectedHost = makeHost(
+            host: "10.0.0.9",
+            port: 5151,
+            token: "token-2"
+        )
+
+        try await store.save(host)
+
+        let committed = try await store.recordSuccessfulConnection(
+            connectedHost,
+            for: generation
+        )
+
+        let loaded = try await store.host(withServerID: "server-1")
+        let selected = try await store.lastConnectedHost()
+
+        XCTAssertTrue(committed)
+        XCTAssertEqual(loaded?.serverName, "Studio")
+        XCTAssertEqual(loaded?.endpoint.host, "10.0.0.9")
+        XCTAssertEqual(loaded?.endpoint.port, 5151)
+        XCTAssertEqual(loaded?.token, "token-2")
+        XCTAssertEqual(selected, loaded)
+    }
+
+    func testInvalidatedRecordSuccessfulConnectionLeavesHostAndSelectionUntouched() async throws {
+        let secureStore = SaveBoundarySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let generation = ConnectionGeneration(id: 1)
+        let originalHost = makeHost(serverID: "server-1")
+        let otherHost = makeHost(serverID: "server-z")
+        let updatedHost = makeHost(
+            host: "10.0.0.9",
+            port: 5151,
+            token: "token-2"
+        )
+
+        try await store.save(originalHost)
+        try await store.save(otherHost)
+        try await store.markLastConnected(serverID: "server-z")
+
+        secureStore.blockNextRead()
+        let commit = Task {
+            try await store.recordSuccessfulConnection(updatedHost, for: generation)
+        }
+        try await secureStore.waitUntilReadBegins()
+        generation.invalidate()
+        secureStore.releaseRead()
+
+        let committed = try await commit.value
+        let loaded = try await store.host(withServerID: "server-1")
+        let selected = try await store.lastConnectedHost()
+
+        XCTAssertFalse(committed)
+        XCTAssertEqual(loaded, originalHost)
+        XCTAssertEqual(selected, otherHost)
+    }
+
+    func testChangedFingerprintDuringSuccessfulConnectionFinalizationThrowsAndPreservesData() async throws {
+        let secureStore = InMemorySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let generation = ConnectionGeneration(id: 1)
+        let originalHost = makeHost(serverID: "server-1")
+        let otherHost = makeHost(serverID: "server-z")
+
+        try await store.save(originalHost)
+        try await store.save(otherHost)
+        try await store.markLastConnected(serverID: "server-z")
+
+        do {
+            _ = try await store.recordSuccessfulConnection(
+                makeHost(
+                    serverID: "server-1",
+                    fingerprint: otherFingerprint,
+                    host: "10.0.0.9",
+                    port: 5151,
+                    token: "token-2"
+                ),
+                for: generation
+            )
+            XCTFail("Expected a changed fingerprint to be rejected")
+        } catch {
+            XCTAssertEqual(error as? PairedHostStoreError, .identityChanged(serverID: "server-1"))
+            XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("re-pair"))
+        }
+
+        let loaded = try await store.host(withServerID: "server-1")
+        let selected = try await store.lastConnectedHost()
+
+        XCTAssertEqual(loaded, originalHost)
+        XCTAssertEqual(selected, otherHost)
+    }
+
     func testInvalidatedGenerationCannotCommitAtTheSecureWriteBoundary() async throws {
         let secureStore = SaveBoundarySecureStore()
         let store = PairedHostStore(secureStore: secureStore)
@@ -276,14 +464,16 @@ final class PairedHostStoreTests: XCTestCase {
     private func makeHost(
         serverID: String = "server-1",
         fingerprint: String? = nil,
+        host: String = "psyche.local",
+        port: Int = 4242,
         token: String? = "token-1"
     ) -> PairedHost {
         PairedHost(
             serverID: serverID,
             serverName: "Studio",
             endpoint: HostEndpoint(
-                host: "psyche.local",
-                port: 4242,
+                host: host,
+                port: port,
                 certificateFingerprint: fingerprint ?? self.fingerprint
             ),
             clientID: "client-1",
