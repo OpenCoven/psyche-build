@@ -1899,8 +1899,10 @@ describe('graphics evidence classification', () => {
       webgpuAdapterInfoSource: 'adapter.info',
       unsupportedFields: [],
     })).toEqual({
-      acceleration: 'unknown',
-      fallbackReason: 'conflicting_reliable_evidence',
+      acceleration: 'software',
+      adapter: 'Microsoft Basic Render Driver',
+      supportingProbe: 'webgl2',
+      fallbackReason: 'software_renderer_detected',
       unsupportedFields: [],
     });
 
@@ -2052,6 +2054,83 @@ describe('graphics evidence classification', () => {
         fallbackReason: 'software_renderer_detected',
       });
     }
+  });
+
+  it('classifies different reliable software adapters as software', () => {
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'ANGLE (Google, Vulkan 1.3 llvmpipe, Vulkan)',
+      webgpuAdapterAvailable: true,
+      webgpuAdapter: 'SwiftShader',
+      webgpuAdapterInfoSource: 'adapter.info',
+      unsupportedFields: [],
+    })).toEqual({
+      acceleration: 'software',
+      backend: 'Vulkan',
+      adapter: 'llvmpipe',
+      supportingProbe: 'webgl2',
+      fallbackReason: 'software_renderer_detected',
+      unsupportedFields: [],
+    });
+
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'ANGLE (Google, Vulkan 1.3 SwiftShader, Vulkan)',
+      webgpuAdapterAvailable: true,
+      webgpuAdapter: 'Microsoft Basic Render Driver',
+      webgpuAdapterInfoSource: 'adapter.info',
+      unsupportedFields: [],
+    })).toEqual({
+      acceleration: 'software',
+      backend: 'Vulkan',
+      adapter: 'SwiftShader',
+      supportingProbe: 'webgl2',
+      fallbackReason: 'software_renderer_detected',
+      unsupportedFields: [],
+    });
+  });
+
+  it('omits the backend when reliable software evidence disagrees', () => {
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'ANGLE (Google, Vulkan 1.3 SwiftShader, Vulkan)',
+      webgpuAdapterAvailable: true,
+      webgpuAdapter: 'Microsoft Basic Render Driver Direct3D11',
+      webgpuAdapterInfoSource: 'adapter.info',
+      unsupportedFields: [],
+    })).toEqual({
+      acceleration: 'software',
+      adapter: 'SwiftShader',
+      supportingProbe: 'webgl2',
+      fallbackReason: 'software_renderer_detected',
+      unsupportedFields: [],
+    });
+  });
+
+  it('uses the first software marker deterministically across WebGPU adapter fields', async () => {
+    const probe = await probeGraphicsEvidence({
+      navigatorTarget: {
+        gpu: {
+          requestAdapter: async () => ({
+            info: {
+              description: 'SwiftShader',
+              device: 'llvmpipe',
+              vendor: 'Microsoft Basic Render Driver',
+              architecture: 'software rasterizer',
+            },
+          }),
+        },
+      },
+      createCanvas: () => null,
+    });
+
+    expect(probe.webgpuAdapter).toBe('SwiftShader');
+    expect(classifyGraphicsEvidence(probe)).toMatchObject({
+      acceleration: 'software',
+      adapter: 'SwiftShader',
+      supportingProbe: 'webgpu',
+      fallbackReason: 'software_renderer_detected',
+    });
   });
 });
 

@@ -363,7 +363,7 @@ export function classifyGraphicsEvidence(probe: GraphicsProbeResult): GraphicsCl
   const webglEvidence = classifyWebGlEvidence(probe);
   const reliable = [webgpuEvidence, webglEvidence].filter(isReliableEvidence);
 
-  if (reliable.length > 1 && hasConflictingReliableEvidence(reliable[0], reliable[1])) {
+  if (hasConflictingReliableEvidence(reliable)) {
     return {
       acceleration: 'unknown',
       fallbackReason: 'conflicting_reliable_evidence',
@@ -372,7 +372,7 @@ export function classifyGraphicsEvidence(probe: GraphicsProbeResult): GraphicsCl
   }
 
   if (reliable.length > 0) {
-    return finalizeReliableEvidence(selectPreferredReliableEvidence(reliable), unsupportedFields);
+    return finalizeReliableEvidence(reliable, unsupportedFields);
   }
 
   const ambiguous = selectPreferredAmbiguousEvidence([webglEvidence, webgpuEvidence]);
@@ -1048,19 +1048,26 @@ function isReliableEvidence(evidence: ParsedEvidence | null): evidence is Parsed
   return evidence?.category === 'hardware' || evidence?.category === 'software';
 }
 
-function hasConflictingReliableEvidence(first: ParsedEvidence, second: ParsedEvidence): boolean {
-  if (first.category !== second.category) return true;
-  if (first.backend && second.backend && first.backend !== second.backend) return true;
+function hasConflictingReliableEvidence(evidence: ParsedEvidence[]): boolean {
+  for (let firstIndex = 0; firstIndex < evidence.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < evidence.length; secondIndex += 1) {
+      const first = evidence[firstIndex];
+      const second = evidence[secondIndex];
+      if (first.category !== second.category) return true;
+      if (first.category === 'software') continue;
+      if (first.backend && second.backend && first.backend !== second.backend) return true;
 
-  if (first.adapter && second.adapter) {
-    const firstAdapter = lowerCase(first.adapter);
-    const secondAdapter = lowerCase(second.adapter);
-    if (
-      firstAdapter !== secondAdapter
-      && !firstAdapter.includes(secondAdapter)
-      && !secondAdapter.includes(firstAdapter)
-    ) {
-      return true;
+      if (first.adapter && second.adapter) {
+        const firstAdapter = lowerCase(first.adapter);
+        const secondAdapter = lowerCase(second.adapter);
+        if (
+          firstAdapter !== secondAdapter
+          && !firstAdapter.includes(secondAdapter)
+          && !secondAdapter.includes(firstAdapter)
+        ) {
+          return true;
+        }
+      }
     }
   }
 
@@ -1082,15 +1089,22 @@ function reliabilityScore(evidence: ParsedEvidence): number {
 }
 
 function finalizeReliableEvidence(
-  evidence: ParsedEvidence,
+  evidence: ParsedEvidence[],
   unsupportedFields: string[],
 ): GraphicsClassification {
+  const preferred = selectPreferredReliableEvidence(evidence);
+  const backends = [...new Set(
+    evidence
+      .map((candidate) => candidate.backend)
+      .filter((backend): backend is RuntimeGraphicsBackend => Boolean(backend)),
+  )];
+
   return compactClassification({
-    acceleration: evidence.category === 'hardware' ? 'accelerated' : 'software',
-    backend: evidence.backend,
-    adapter: evidence.adapter,
-    supportingProbe: evidence.source,
-    fallbackReason: evidence.category === 'software' ? 'software_renderer_detected' : undefined,
+    acceleration: preferred.category === 'hardware' ? 'accelerated' : 'software',
+    backend: backends.length === 1 ? backends[0] : undefined,
+    adapter: preferred.adapter,
+    supportingProbe: preferred.source,
+    fallbackReason: preferred.category === 'software' ? 'software_renderer_detected' : undefined,
     unsupportedFields,
   });
 }
