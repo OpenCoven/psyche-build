@@ -308,6 +308,7 @@ const concatenatedDescriptorFragments = [
 const uuidPattern = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i;
 const identifierOnlyPattern = /^(?:(?:pci|ven|dev|vendor|device|id)|(?:0x)?[0-9a-f]+|[\s,:/\\\-&_;])+$/i;
 const hardwareIdentifierPattern = /(?:\b(?:0x)?[0-9a-f]{4,8}\s*:\s*(?:0x)?[0-9a-f]{4,8}\b|(?<![\p{L}\p{N}])(?:pci|ven|dev|subsys|vendor[^\p{L}\p{N}{}]*id|device[^\p{L}\p{N}{}]*id|vid|pid|did|luid|uuid)(?:[^\p{L}\p{N}{}]+(?:\{[0-9a-f-]+\}|(?:0x)?[0-9a-f]+)|(?:\{[0-9a-f-]+\}|(?:0x)?[0-9]+|(?:0x)?[0-9a-f]{4,}))(?![\p{L}\p{N}]))/iu;
+const ancillaryIdentifierPattern = /\s*\(\s*0x[0-9a-f]+\s*\)|\s+0x[0-9a-f]+\b/gi;
 const backendOnlyAdapterPattern = /^(?:angle\s+)?(?:metal|vulkan|opengl(?:\s+es)?|direct3d(?:\s*(?:11|12))?|d3d(?:11|12))(?:\s+(?:renderer|engine|[0-9]+(?:\.[0-9]+)*))?$/i;
 const DIRECT3D_BACKEND_PATTERN = /\b(?:direct3d(?:11|12)?|d3d(?:11|12)?)\b/i;
 
@@ -514,23 +515,31 @@ function isMaskedRenderer(text: string): boolean {
 
 function normalizeAdapterString(value: string): string | undefined {
   const normalized = normalizeString(value);
-  return normalized && isReliableAdapterEvidence(normalized) ? normalized : undefined;
+  if (!normalized) return undefined;
+
+  const candidate = stripAncillaryIdentifierFragments(normalized);
+  return candidate && isReliableAdapterEvidence(candidate) ? candidate : undefined;
 }
 
 function isReliableAdapterEvidence(value: string): boolean {
-  const normalized = lowerCase(value).replace(/\s+/g, ' ').trim();
+  const candidate = stripAncillaryIdentifierFragments(value);
+  const normalized = lowerCase(candidate).replace(/\s+/g, ' ').trim();
   return !(
-    genericAdapterPattern.test(value)
+    genericAdapterPattern.test(candidate)
     || genericAdapterNames.has(normalized)
     || vendorOnlyAdapterNames.has(normalized)
-    || hardwareIdentifierPattern.test(value)
-    || identifierOnlyPattern.test(value)
-    || uuidPattern.test(value)
-    || isConcatenatedDescriptorIdentifier(value)
-    || backendOnlyAdapterPattern.test(value)
-    || isMaskedRenderer(value)
-    || !hasMeaningfulProductToken(value)
+    || hardwareIdentifierPattern.test(candidate)
+    || identifierOnlyPattern.test(candidate)
+    || uuidPattern.test(candidate)
+    || isConcatenatedDescriptorIdentifier(candidate)
+    || backendOnlyAdapterPattern.test(candidate)
+    || isMaskedRenderer(candidate)
+    || !hasMeaningfulProductToken(candidate)
   );
+}
+
+function stripAncillaryIdentifierFragments(value: string): string {
+  return value.replace(ancillaryIdentifierPattern, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function isConcatenatedDescriptorIdentifier(value: string): boolean {

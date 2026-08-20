@@ -116,6 +116,42 @@ describe('graphics evidence classification', () => {
     });
   });
 
+  it('strips ancillary device identifiers from named ANGLE and WebGPU adapters', () => {
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4090 (0x00002684) Direct3D11 vs_5_0 ps_5_0, D3D11)',
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toMatchObject({
+      acceleration: 'accelerated',
+      backend: 'Direct3D',
+      adapter: 'NVIDIA GeForce RTX 4090',
+      supportingProbe: 'webgl2',
+    });
+
+    expect(classifyGraphicsEvidence({
+      webgpuAdapterAvailable: true,
+      webgpuAdapter: 'NVIDIA GeForce RTX 4090 (0x00002684)',
+      unsupportedFields: [],
+    })).toMatchObject({
+      acceleration: 'accelerated',
+      adapter: 'NVIDIA GeForce RTX 4090',
+      supportingProbe: 'webgpu',
+    });
+
+    expect(classifyGraphicsEvidence({
+      strictContext: 'webgl2',
+      renderer: 'NVIDIA GeForce RTX 4090 (0x00002684) OpenGL Engine',
+      unsupportedFields: [],
+      webgpuAdapterAvailable: false,
+    })).toMatchObject({
+      acceleration: 'accelerated',
+      backend: 'OpenGL',
+      adapter: 'NVIDIA GeForce RTX 4090',
+      supportingProbe: 'webgl2',
+    });
+  });
+
   it('never upgrades known software implementations to accelerated', () => {
     expect(classifyGraphicsEvidence({
       strictContext: 'webgl2',
