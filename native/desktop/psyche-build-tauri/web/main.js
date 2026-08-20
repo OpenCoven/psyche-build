@@ -7537,21 +7537,25 @@
 
     var projectModels = [];
     state.projects.forEach(function (project) {
-      var localRows = state.threads.filter(function (t) {
-        return t.projectId === project.id && !t.hidden && !isDormantThread(t);
+      var projectThreads = state.threads.filter(function (thread) {
+        return thread.projectId === project.id && !isDormantThread(thread);
       });
+      var visibleLocalRows = projectThreads.filter(function (thread) {
+        return !thread.hidden;
+      });
+      var remoteRows = covenSessionsForProject(project, covenAssignments);
+      if (projectThreads.length === 0 && remoteRows.length === 0) return;
       // This branch calls buildSidebarProjectModel instead of reaching for
       // buildProjectRailModel directly; the rail model still exists and
-      // sidebar-model.mjs builds on it. The sidebar model also carries the
-      // query/filter/selection that used to be applied afterwards here, which
-      // is why the surrounding code reads projectModel.visibleCount rather than
-      // filtering worktrees itself. main's covenAssignments argument survives the
-      // swap: it hoists the assignment map out of the per-project loop, which
-      // covenSessionsForProject would otherwise rebuild once per project.
-      var remoteRows = covenSessionsForProject(project, covenAssignments);
+      // sidebar-model.mjs builds on it. Eligibility is decided before the
+      // sidebar model sees any rows so query/filter presentation cannot turn a
+      // populated project into an "empty" one. main's covenAssignments
+      // argument survives the swap: it hoists the assignment map out of the
+      // per-project loop, which covenSessionsForProject would otherwise rebuild
+      // once per project.
       var projectModel = PsycheSessions.buildSidebarProjectModel({
         project: project,
-        localSessions: localRows,
+        localSessions: visibleLocalRows,
         covenSessions: remoteRows,
         query: currentSearchQuery,
         filter: sessionTypeFilter,
