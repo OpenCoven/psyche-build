@@ -84,7 +84,7 @@ Run Rust fmt/test/check, then commit as `Add native runtime diagnostics`.
 - Create: `__tests__/tauriGraphicsDiagnostics.test.ts`
 - Modify: `web/runtime/runtime-entry.ts`
 
-- [ ] **Step 1: Write failing classifier tests**
+- [x] **Step 1: Write failing classifier tests**
 
 Cover hardware ANGLE/D3D, Metal, Vulkan, OpenGL, SwiftShader, llvmpipe, Microsoft Basic Render Driver, masked renderer, failed strict context, conflicting evidence, and missing engine version.
 
@@ -97,19 +97,19 @@ expect(classifyGraphicsEvidence({ strictWebgl: true }))
   .toMatchObject({ acceleration: 'unknown' });
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `pnpm vitest --run __tests__/tauriGraphicsDiagnostics.test.ts`
 
 Expected: module-not-found failure.
 
-- [ ] **Step 3: Implement strict probing and classification**
+- [x] **Step 3: Implement strict probing and classification**
 
 Attempt WebGPU first when available and request adapter information only through supported APIs. Create WebGL2 then WebGL with `{ failIfMajorPerformanceCaveat: true, powerPreference: 'high-performance' }`. Request `WEBGL_debug_renderer_info`; if masked, omit adapter/backend and report the field in `unsupportedFields`.
 
 Use a versioned, case-insensitive software-marker list. `accelerated` requires a strict context or WebGPU adapter plus non-software renderer evidence. An ordinary context alone is `unknown`. If neither usable API exists, return `unavailable`. Never derive adapter/backend from OS or user agent.
 
-- [ ] **Step 4: Merge native and frontend reports**
+- [x] **Step 4: Merge native and frontend reports**
 
 Expose:
 
@@ -130,7 +130,7 @@ export interface RuntimeGraphicsReport {
 
 Log one structured `[psyche:graphics]` summary after startup probing. Keep unsupported fields absent from the primary field set.
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
 Run focused graphics tests, build the runtime bundle, run bundle freshness, and commit as `Report runtime graphics acceleration`.
 
