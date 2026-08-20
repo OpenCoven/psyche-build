@@ -149,6 +149,27 @@ describe('command builders', () => {
     );
   });
 
+  it('applies Coven session IDs only to coven-code commands', () => {
+    const context = { covenSessionId: '12345678-1234-4abc-8def-1234567890ab' };
+
+    expect(buildAgentCommand('coven-code', undefined, context)).toBe(
+      'coven code --session-id 12345678-1234-4abc-8def-1234567890ab'
+    );
+    expect(buildInitialPromptCommand('coven-code', '"fix it"', 'plan', context)).toBe(
+      'coven code --session-id 12345678-1234-4abc-8def-1234567890ab --permission-mode plan "fix it"'
+    );
+    expect(buildAgentCommand('codex', undefined, context)).toBe('codex');
+  });
+
+  it('rejects unsafe Coven session IDs', () => {
+    expect(() =>
+      buildAgentCommand('coven-code', undefined, { covenSessionId: '$(touch /tmp/unsafe)' })
+    ).toThrow('Coven session id contains unsupported characters');
+    expect(() =>
+      buildAgentCommand('coven-code', undefined, { covenSessionId: '' })
+    ).toThrow('Coven session id contains unsupported characters');
+  });
+
   it('builds option-style initial prompt command', () => {
     expect(buildInitialPromptCommand('copilot', '"fix it"', 'acceptEdits')).toBe(
       'copilot --allow-tool write -i "fix it"'
@@ -233,11 +254,11 @@ describe('getPromptTransport per agent', () => {
 describe('buildInitialPromptCommand per agent and permission mode', () => {
   it('builds positional prompt commands for coven-code', () => {
     expect(buildInitialPromptCommand('coven-code', '"fix it"', undefined))
-      .toBe('coven-code "fix it"');
+      .toBe('coven code "fix it"');
     expect(buildInitialPromptCommand('coven-code', '"fix it"', 'plan'))
-      .toBe('coven-code --permission-mode plan "fix it"');
+      .toBe('coven code --permission-mode plan "fix it"');
     expect(buildInitialPromptCommand('coven-code', '"fix it"', 'bypassPermissions'))
-      .toBe('coven-code --permission-mode bypass-permissions "fix it"');
+      .toBe('coven code --permission-mode bypass-permissions "fix it"');
   });
 
   it('builds positional prompt commands for claude', () => {
@@ -330,6 +351,17 @@ describe('isAgentName', () => {
 });
 
 describe('AGENT_REGISTRY contract', () => {
+  it('launches coven-code through coven with the approved contract', () => {
+    const entry = AGENT_REGISTRY['coven-code'];
+    expect(entry.installTestCommand).toBe(
+      'command -v coven 2>/dev/null || which coven 2>/dev/null'
+    );
+    expect(entry.commonPaths).toContain('/opt/homebrew/bin/coven');
+    expect(entry.commonPaths).not.toContain('/opt/homebrew/bin/coven-code');
+    expect(entry.promptCommand).toBe('coven code');
+    expect(entry.resumeCommandTemplate).toBe('coven code --resume{permissions}');
+  });
+
   it('every agent has a consistent promptCommand and promptTransport', () => {
     for (const agent of AGENT_IDS) {
       const entry = AGENT_REGISTRY[agent];
