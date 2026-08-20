@@ -186,6 +186,9 @@ public actor BonjourHostDiscovery {
     private var activeBatch: Batch?
     private var publishedEntries: [String: BonjourDiscoveryEntry] = [:]
     private var latestIdentities: [String: BonjourHostIdentity] = [:]
+    private var resolutionGeneration: UInt64 = 0
+    private var latestResolutionTokens: [String: UInt64] = [:]
+    private var retryTasks: [String: RetryTask] = [:]
 
     /// Four concurrent resolutions keep a stale peer from serially delaying
     /// usable hosts while keeping Bonjour work bounded on busy LANs.
@@ -194,6 +197,16 @@ public actor BonjourHostDiscovery {
     private struct Batch {
         let id: UInt64
         let serviceIDs: Set<String>
+    }
+
+    private struct ResolutionAttempt {
+        let identity: BonjourHostIdentity
+        let token: UInt64
+    }
+
+    private struct RetryTask {
+        let token: UInt64
+        let task: Task<BonjourDiscoveryEntry?, Never>
     }
 
     public init(
@@ -225,6 +238,7 @@ public actor BonjourHostDiscovery {
         activeBatch = nil
         publishedEntries = [:]
         latestIdentities = [:]
+        invalidateAllResolutionState()
 
         let records = browser.records()
         browser.start()
@@ -263,6 +277,7 @@ public actor BonjourHostDiscovery {
         activeBatch = nil
         publishedEntries = [:]
         latestIdentities = [:]
+        invalidateAllResolutionState()
         continuation?.finish()
         continuation = nil
         browser.stop()
@@ -271,12 +286,31 @@ public actor BonjourHostDiscovery {
     public func retry(serverID: String) async {
         guard let identity = latestIdentities[serverID] else { return }
         let currentObservationID = observationID
-        guard let entry = await Self.resolveHost(identity, using: resolver) else { return }
+        let token = nextResolutionToken(for: serverID)
+        cancelRetryTask(for: serverID)
+        let task = Task { [resolver] in
+            await Self.resolveHost(identity, using: resolver)
+        }
+        retryTasks[serverID] = RetryTask(token: token, task: task)
+
+        let entry = await withTaskCancellationHandler(operation: {
+            await task.value
+        }, onCancel: {
+            task.cancel()
+        })
+        clearRetryTaskIfCurrent(serverID: serverID, token: token)
+
+        guard let entry else { return }
         guard currentObservationID == self.observationID,
               latestIdentities[serverID] == identity else {
             return
         }
-        publishRetriedEntry(entry, observationID: currentObservationID, identity: identity)
+        publishRetriedEntry(
+            entry,
+            observationID: currentObservationID,
+            identity: identity,
+            resolutionToken: token
+        )
     }
 
     private func beginBatch(
@@ -293,6 +327,7 @@ public actor BonjourHostDiscovery {
         let serviceIDs = Set(identities.map(\.serverID))
         let removedIdentityIDs = Set(latestIdentities.keys).subtracting(serviceIDs)
         let removedPublishedIDs = Set(publishedEntries.keys).subtracting(serviceIDs)
+        invalidateResolutionState(for: removedIdentityIDs)
         for serviceID in removedIdentityIDs {
             latestIdentities.removeValue(forKey: serviceID)
         }
@@ -302,6 +337,13 @@ public actor BonjourHostDiscovery {
         for identity in identities {
             latestIdentities[identity.serverID] = identity
         }
+        let attempts = identities.map { identity in
+            ResolutionAttempt(
+                identity: identity,
+                token: nextResolutionToken(for: identity.serverID)
+            )
+        }
+        cancelRetryTasks(for: serviceIDs)
         activeBatch = Batch(id: currentBatchID, serviceIDs: serviceIDs)
         if !removedPublishedIDs.isEmpty {
             publishCurrentEntries()
@@ -309,12 +351,13 @@ public actor BonjourHostDiscovery {
 
         let discovery = self
         batchTask = Task { [resolver, discovery] in
-            let completed = await BonjourHostDiscovery.resolveHosts(from: identities, using: resolver) { entry in
+            let completed = await BonjourHostDiscovery.resolveHosts(from: attempts, using: resolver) { entry, token in
                 guard !Task.isCancelled else { return }
                 await discovery.publishResolvedEntry(
                     entry,
                     observationID: observationID,
-                    batchID: currentBatchID
+                    batchID: currentBatchID,
+                    resolutionToken: token
                 )
             }
             guard !Task.isCancelled else { return }
@@ -329,11 +372,13 @@ public actor BonjourHostDiscovery {
     private func publishResolvedEntry(
         _ entry: BonjourDiscoveryEntry,
         observationID: UInt64,
-        batchID: UInt64
+        batchID: UInt64,
+        resolutionToken: UInt64
     ) {
         guard observationID == self.observationID,
               activeBatch?.id == batchID,
-              latestIdentities[entry.serverID] == entry.identity else {
+              latestIdentities[entry.serverID] == entry.identity,
+              latestResolutionTokens[entry.serverID] == resolutionToken else {
             return
         }
         publishedEntries[entry.serverID] = entry
@@ -343,10 +388,12 @@ public actor BonjourHostDiscovery {
     private func publishRetriedEntry(
         _ entry: BonjourDiscoveryEntry,
         observationID: UInt64,
-        identity: BonjourHostIdentity
+        identity: BonjourHostIdentity,
+        resolutionToken: UInt64
     ) {
         guard observationID == self.observationID,
-              latestIdentities[entry.serverID] == identity else {
+              latestIdentities[entry.serverID] == identity,
+              latestResolutionTokens[entry.serverID] == resolutionToken else {
             return
         }
         publishedEntries[entry.serverID] = entry
@@ -380,6 +427,7 @@ public actor BonjourHostDiscovery {
         activeBatch = nil
         publishedEntries = [:]
         latestIdentities = [:]
+        invalidateAllResolutionState()
         continuation?.finish()
         continuation = nil
         browser.stop()
@@ -400,49 +448,91 @@ public actor BonjourHostDiscovery {
         activeBatch = nil
         publishedEntries = [:]
         latestIdentities = [:]
+        invalidateAllResolutionState()
         continuation = nil
         lifecycle.didTerminateObservation()
         browser.stop()
     }
 
     private static func resolveHosts(
-        from identities: [BonjourHostIdentity],
+        from attempts: [ResolutionAttempt],
         using resolver: any BonjourServiceResolving,
-        publish: @escaping @Sendable (BonjourDiscoveryEntry) async -> Void
+        publish: @escaping @Sendable (BonjourDiscoveryEntry, UInt64) async -> Void
     ) async -> Bool {
-        guard !identities.isEmpty else { return !Task.isCancelled }
+        guard !attempts.isEmpty else { return !Task.isCancelled }
 
-        await withTaskGroup(of: BonjourDiscoveryEntry?.self) { group in
-            var nextIdentityIndex = 0
+        await withTaskGroup(of: (BonjourDiscoveryEntry, UInt64)?.self) { group in
+            var nextAttemptIndex = 0
 
-            func resolveNextIdentity() {
-                let identity = identities[nextIdentityIndex]
-                nextIdentityIndex += 1
+            func resolveNextAttempt() {
+                let attempt = attempts[nextAttemptIndex]
+                nextAttemptIndex += 1
                 group.addTask {
-                    await resolveHost(identity, using: resolver)
+                    guard let entry = await resolveHost(attempt.identity, using: resolver) else {
+                        return nil
+                    }
+                    return (entry, attempt.token)
                 }
             }
 
-            for _ in 0..<min(maximumConcurrentResolutions, identities.count) {
-                resolveNextIdentity()
+            for _ in 0..<min(maximumConcurrentResolutions, attempts.count) {
+                resolveNextAttempt()
             }
 
-            while let host = await group.next() {
+            while let resolved = await group.next() {
                 guard !Task.isCancelled else {
                     group.cancelAll()
                     return
                 }
 
-                if let host {
-                    await publish(host)
+                if let resolved {
+                    await publish(resolved.0, resolved.1)
                 }
 
-                if nextIdentityIndex < identities.count {
-                    resolveNextIdentity()
+                if nextAttemptIndex < attempts.count {
+                    resolveNextAttempt()
                 }
             }
         }
         return !Task.isCancelled
+    }
+
+    private func nextResolutionToken(for serverID: String) -> UInt64 {
+        resolutionGeneration &+= 1
+        let token = resolutionGeneration
+        latestResolutionTokens[serverID] = token
+        return token
+    }
+
+    private func cancelRetryTask(for serverID: String) {
+        retryTasks.removeValue(forKey: serverID)?.task.cancel()
+    }
+
+    private func cancelRetryTasks<S: Sequence>(for serverIDs: S) where S.Element == String {
+        for serverID in serverIDs {
+            cancelRetryTask(for: serverID)
+        }
+    }
+
+    private func clearRetryTaskIfCurrent(serverID: String, token: UInt64) {
+        guard retryTasks[serverID]?.token == token else { return }
+        retryTasks.removeValue(forKey: serverID)
+    }
+
+    private func invalidateResolutionState<S: Sequence>(for serverIDs: S) where S.Element == String {
+        for serverID in serverIDs {
+            latestResolutionTokens.removeValue(forKey: serverID)
+            cancelRetryTask(for: serverID)
+        }
+    }
+
+    private func invalidateAllResolutionState() {
+        latestResolutionTokens = [:]
+        let tasks = retryTasks.values.map(\.task)
+        retryTasks = [:]
+        for task in tasks {
+            task.cancel()
+        }
     }
 
     private static func resolveHost(
