@@ -86,6 +86,13 @@ export interface PerformanceObserverLike {
   disconnect(): void;
 }
 
+export interface PerformanceVisibilityTarget {
+  readonly hidden?: boolean;
+  readonly visibilityState?: string;
+  addEventListener(name: 'visibilitychange', listener: () => void): void;
+  removeEventListener(name: 'visibilitychange', listener: () => void): void;
+}
+
 export type PerformanceObserverFactory = (
   callback: (list: PerformanceObserverEntries) => void,
 ) => PerformanceObserverLike;
@@ -98,6 +105,7 @@ export interface PerformanceMetricsCollectorOptions {
   clearInterval?: (handle: unknown) => void;
   now?: () => number;
   createPerformanceObserver?: PerformanceObserverFactory;
+  visibilityTarget?: PerformanceVisibilityTarget | null;
   schedulerSnapshot?: () => PerformanceSchedulerSnapshot;
   rendererSnapshots?: () => readonly PerformanceRendererSnapshot[];
   reportError?: (error: unknown, operation: string) => void;
@@ -152,6 +160,18 @@ function numberArrayFrom(
     if (single !== undefined) return [single];
   }
   return [];
+}
+
+function defaultVisibilityTarget(): PerformanceVisibilityTarget | undefined {
+  const candidate = (globalThis as unknown as { document?: unknown }).document;
+  if (!isRecord(candidate)) return undefined;
+  if (
+    typeof candidate.addEventListener !== 'function' ||
+    typeof candidate.removeEventListener !== 'function'
+  ) {
+    return undefined;
+  }
+  return candidate as unknown as PerformanceVisibilityTarget;
 }
 
 function nearestRank(samples: readonly number[]): number {
@@ -374,6 +394,8 @@ export function createPerformanceMetricsCollector(
   let collectionEpoch = 0;
   let lastPollStartedAt: number | undefined;
   let performanceObserver: PerformanceObserverLike | null = null;
+  const visibilityTarget = options.visibilityTarget ?? defaultVisibilityTarget();
+  let visibilityListenerRegistered = false;
   const reportError = options.reportError ?? ((error, operation) => {
     console.warn(`performance metrics ${operation} failed`, error);
   });
@@ -399,6 +421,36 @@ export function createPerformanceMetricsCollector(
   const clearIntervalFn = options.clearInterval ?? ((handle: unknown) =>
     clearInterval(handle as ReturnType<typeof setInterval>));
 
+  const handleVisibilityChange = (): void => {
+    previousFrameTimestamp = undefined;
+    try {
+      void visibilityTarget?.hidden;
+      void visibilityTarget?.visibilityState;
+    } catch (error) {
+      reportError(error, 'visibilitychange');
+    }
+  };
+
+  function registerVisibilityListener(): void {
+    if (!visibilityTarget || visibilityListenerRegistered) return;
+    try {
+      visibilityTarget.addEventListener('visibilitychange', handleVisibilityChange);
+      visibilityListenerRegistered = true;
+    } catch (error) {
+      reportError(error, 'visibilitychange.addEventListener');
+    }
+  }
+
+  function removeVisibilityListener(): void {
+    if (!visibilityTarget || !visibilityListenerRegistered) return;
+    visibilityListenerRegistered = false;
+    try {
+      visibilityTarget.removeEventListener('visibilitychange', handleVisibilityChange);
+    } catch (error) {
+      reportError(error, 'visibilitychange.removeEventListener');
+    }
+  }
+
   function scheduleFrame(loopGeneration: number): void {
     if (!running || generation !== loopGeneration || frameHandle !== null) return;
     try {
@@ -406,8 +458,6 @@ export function createPerformanceMetricsCollector(
         frameHandle = null;
         if (!running || generation !== loopGeneration) return;
         recordFrame(timestamp);
-        recordInteractionPaint('focus', timestamp);
-        recordInteractionPaint('resize', timestamp);
         scheduleFrame(loopGeneration);
       });
     } catch (error) {
@@ -478,6 +528,7 @@ export function createPerformanceMetricsCollector(
     running = true;
     generation += 1;
     const loopGeneration = generation;
+    registerVisibilityListener();
     scheduleFrame(loopGeneration);
     intervalHandle = setIntervalFn(() => pollNativeMetrics(loopGeneration), 1_000);
     if (options.createPerformanceObserver) {
@@ -517,6 +568,7 @@ export function createPerformanceMetricsCollector(
     generation += 1;
     previousFrameTimestamp = undefined;
     interactions.clear();
+    removeVisibilityListener();
     if (frameHandle !== null) {
       try {
         cancelFrame(frameHandle);

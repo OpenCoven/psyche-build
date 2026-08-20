@@ -951,6 +951,155 @@ describe('bounded performance metrics', () => {
   });
 
   describe('live performance collection', () => {
+    it('resets the live frame baseline across visibility loss and restoration without clearing history', () => {
+      const frameCallbacks: Array<(timestamp: number) => void> = [];
+      const visibilityListeners = new Set<() => void>();
+      const visibilityTarget = {
+        hidden: false,
+        visibilityState: 'visible',
+        addEventListener: vi.fn((_name: 'visibilitychange', listener: () => void) => {
+          visibilityListeners.add(listener);
+        }),
+        removeEventListener: vi.fn((_name: 'visibilitychange', listener: () => void) => {
+          visibilityListeners.delete(listener);
+        }),
+      };
+      const collector = createPerformanceMetricsCollector({
+        requestFrame: (callback) => {
+          frameCallbacks.push(callback);
+          return frameCallbacks.length;
+        },
+        cancelFrame: vi.fn(),
+        setInterval: () => 1,
+        clearInterval: vi.fn(),
+        visibilityTarget,
+      });
+
+      collector.start();
+      frameCallbacks.shift()?.(100);
+      frameCallbacks.shift()?.(116);
+      expect(collector.snapshot().frames).toMatchObject({
+        sampleCount: 1,
+        averageMs: 16,
+      });
+
+      visibilityTarget.hidden = true;
+      visibilityTarget.visibilityState = 'hidden';
+      visibilityListeners.forEach((listener) => listener());
+      frameCallbacks.shift()?.(10_000);
+
+      visibilityTarget.hidden = false;
+      visibilityTarget.visibilityState = 'visible';
+      visibilityListeners.forEach((listener) => listener());
+      frameCallbacks.shift()?.(20_000);
+      expect(collector.snapshot().frames).toMatchObject({
+        sampleCount: 1,
+        averageMs: 16,
+        maxMs: 16,
+      });
+
+      frameCallbacks.shift()?.(20_016);
+      expect(collector.snapshot().frames).toMatchObject({
+        sampleCount: 2,
+        averageMs: 16,
+        maxMs: 16,
+      });
+      collector.stop();
+    });
+
+    it('registers visibility listeners once per start and removes them once per stop', () => {
+      const visibilityTarget = {
+        hidden: false,
+        visibilityState: 'visible',
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      };
+      const collector = createPerformanceMetricsCollector({
+        requestFrame: () => 1,
+        cancelFrame: vi.fn(),
+        setInterval: () => 1,
+        clearInterval: vi.fn(),
+        visibilityTarget,
+      });
+
+      collector.start();
+      collector.start();
+      collector.stop();
+      collector.stop();
+      collector.start();
+      collector.stop();
+
+      expect(visibilityTarget.addEventListener).toHaveBeenCalledTimes(2);
+      expect(visibilityTarget.removeEventListener).toHaveBeenCalledTimes(2);
+    });
+
+    it('reports visibility listener failures without disabling frame collection', () => {
+      const reportError = vi.fn();
+      const frameCallbacks: Array<(timestamp: number) => void> = [];
+      const visibilityTarget = {
+        hidden: false,
+        visibilityState: 'visible',
+        addEventListener: vi.fn(() => {
+          throw new Error('visibility registration unavailable');
+        }),
+        removeEventListener: vi.fn(() => {
+          throw new Error('visibility removal unavailable');
+        }),
+      };
+      const collector = createPerformanceMetricsCollector({
+        requestFrame: (callback) => {
+          frameCallbacks.push(callback);
+          return frameCallbacks.length;
+        },
+        cancelFrame: vi.fn(),
+        setInterval: () => 1,
+        clearInterval: vi.fn(),
+        visibilityTarget,
+        reportError,
+      });
+
+      collector.start();
+      frameCallbacks.shift()?.(0);
+      frameCallbacks.shift()?.(16);
+      collector.stop();
+
+      expect(collector.snapshot().frames.sampleCount).toBe(1);
+      expect(reportError).toHaveBeenCalledWith(
+        expect.any(Error),
+        expect.stringContaining('visibility'),
+      );
+    });
+
+    it('waits for explicit interaction paints while collector frames continue during async work', () => {
+      const frameCallbacks: Array<(timestamp: number) => void> = [];
+      const collector = createPerformanceMetricsCollector({
+        requestFrame: (callback) => {
+          frameCallbacks.push(callback);
+          return frameCallbacks.length;
+        },
+        cancelFrame: vi.fn(),
+        setInterval: () => 1,
+        clearInterval: vi.fn(),
+      });
+
+      collector.start();
+      collector.recordInteractionStart('focus', 100);
+      collector.recordInteractionStart('resize', 100);
+      frameCallbacks.shift()?.(116);
+      frameCallbacks.shift()?.(132);
+      frameCallbacks.shift()?.(148);
+
+      expect(collector.snapshot().interactions).toEqual({});
+
+      collector.recordInteractionPaint('focus', 160);
+      collector.recordInteractionPaint('resize', 172);
+      expect(collector.snapshot().interactions).toEqual({
+        focusToNextPaintMs: 60,
+        resizeToNextPaintMs: 72,
+      });
+      collector.stop();
+    });
+
     it('polls native metrics at the interval cadence without invoking from rAF', async () => {
       let intervalCallback: (() => void) | undefined;
       const frameCallbacks: Array<(timestamp: number) => void> = [];
