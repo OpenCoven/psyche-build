@@ -1316,6 +1316,109 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects vendor and generic adapters with embedded UUIDs across WebGPU, raw WebGL, and ANGLE', () => {
+    for (const value of [
+      'NVIDIA {550e8400-e29b-41d4-a716-446655440000}',
+      'Generic GPU {550e8400-e29b-41d4-a716-446655440000}',
+    ]) {
+      const probes = [
+        {
+          webgpuAdapterAvailable: true as const,
+          webgpuAdapter: value,
+          unsupportedFields: [],
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: value,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: `ANGLE (Google, ${value}, OpenGL)`,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+      ];
+
+      for (const probe of probes) {
+        expect(classifyGraphicsEvidence(probe), value).toEqual({
+          acceleration: 'unknown',
+          fallbackReason: 'renderer_masked_or_ambiguous',
+          supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+          unsupportedFields: [],
+        });
+      }
+    }
+  });
+
+  it('strips embedded and labeled UUIDs from named products across WebGPU, raw WebGL, and ANGLE', () => {
+    const product = 'NVIDIA GeForce RTX 4090';
+    for (const value of [
+      `${product} {550e8400-e29b-41d4-a716-446655440000}`,
+      `${product} UUID: {550e8400-e29b-41d4-a716-446655440000}`,
+    ]) {
+      const probes = [
+        {
+          webgpuAdapterAvailable: true as const,
+          webgpuAdapter: value,
+          unsupportedFields: [],
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: value,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+        {
+          strictContext: 'webgl2' as const,
+          renderer: `ANGLE (NVIDIA, ${value}, OpenGL)`,
+          unsupportedFields: [],
+          webgpuAdapterAvailable: false as const,
+        },
+      ];
+
+      for (const probe of probes) {
+        expect(classifyGraphicsEvidence(probe), value).toMatchObject({
+          acceleration: 'accelerated',
+          adapter: product,
+          supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+        });
+      }
+    }
+  });
+
+  it('strips both IDs from AMD Radeon RX 7900 XTX identifier sequences across every path', () => {
+    const value = 'AMD Radeon RX 7900 XTX 1002 744C';
+    const probes = [
+      {
+        webgpuAdapterAvailable: true as const,
+        webgpuAdapter: value,
+        unsupportedFields: [],
+      },
+      {
+        strictContext: 'webgl2' as const,
+        renderer: value,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false as const,
+      },
+      {
+        strictContext: 'webgl2' as const,
+        renderer: `ANGLE (AMD, ${value}, Vulkan 1.3)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false as const,
+      },
+    ];
+
+    for (const probe of probes) {
+      expect(classifyGraphicsEvidence(probe), value).toMatchObject({
+        acceleration: 'accelerated',
+        adapter: 'AMD Radeon RX 7900 XTX',
+        supportingProbe: probe.webgpuAdapterAvailable ? 'webgpu' : 'webgl2',
+      });
+    }
+  });
+
   it('rejects organization-only and implementation-only names on raw WebGL, ANGLE, and WebGPU paths', () => {
     for (const value of ['Google LLC', 'NVIDIA Display Driver']) {
       expect(classifyGraphicsEvidence({

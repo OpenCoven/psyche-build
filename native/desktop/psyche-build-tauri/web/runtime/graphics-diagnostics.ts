@@ -293,6 +293,7 @@ const knownAdapterWords = new Set([
   'webgl2',
   'webgpu',
 ]);
+const productFamilyModelWords = new Set(['arc', 'gtx', 'rtx', 'rx']);
 const concatenatedDescriptorFragments = [
   ...knownAdapterWords,
   'advancedmicrodevices',
@@ -311,6 +312,7 @@ const concatenatedDescriptorFragments = [
 ].map((fragment) => fragment.replace(/[^a-z0-9]/gi, '').toLowerCase());
 const uuidPattern = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i;
 const embeddedUuidPattern = /\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?/gi;
+const embeddedUuidLabelPattern = /\buuid\b\s*[:=#-]?\s*(?=\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?)/gi;
 const identifierOnlyPattern = /^(?:(?:pci|ven|dev|vendor|device|id)|(?:0x)?[0-9a-f]+|[\s,:/\\\-&_;])+$/i;
 const hardwareIdentifierPattern = /(?:\b(?:0x)?[0-9a-f]{4,8}\s*:\s*(?:0x)?[0-9a-f]{4,8}\b|(?<![\p{L}\p{N}])(?:pci|ven|dev|subsys|vendor[^\p{L}\p{N}{}]*id|device[^\p{L}\p{N}{}]*id|vid|pid|did|luid|uuid)(?:[^\p{L}\p{N}{}]+(?:\{[0-9a-f-]+\}|(?:0x)?[0-9a-f]+)|(?:\{[0-9a-f-]+\}|(?:0x)?[0-9]+|(?:0x)?[0-9a-f]{4,}))(?![\p{L}\p{N}]))/iu;
 const identifierSequencePattern = /(?<![\p{L}\p{N}])(?:0x)?[0-9a-f]{4,8}(?:[\s-]+(?:0x)?[0-9a-f]{4,8})+(?![\p{L}\p{N}])/giu;
@@ -547,16 +549,13 @@ function isReliableAdapterEvidence(value: string): boolean {
 }
 
 function stripAncillaryIdentifierFragments(value: string): string {
-  const uuidFragments: string[] = [];
-  const protectedValue = value.replace(embeddedUuidPattern, (fragment) => {
-    uuidFragments.push(fragment);
-    return ` UUID_FRAGMENT_${uuidFragments.length} `;
-  });
-  const stripped = protectedValue
+  return value
+    .replace(embeddedUuidLabelPattern, ' ')
+    .replace(embeddedUuidPattern, ' ')
     .replace(identifierSequencePattern, (sequence, offset, source) => {
       const tokens = sequence.match(/(?:0x)?[0-9a-f]{4,8}/gi) ?? [];
       const prefix = source.slice(0, offset);
-      return hasNamedProductPrefix(prefix) && hasLikelyProductModelPrefix(prefix)
+      return shouldPreserveProductModelToken(prefix, tokens)
         ? ` ${tokens[0]} `
         : ' ';
     })
@@ -564,9 +563,22 @@ function stripAncillaryIdentifierFragments(value: string): string {
     .replace(ancillaryIdentifierPattern, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  return stripped.replace(/UUID_FRAGMENT_(\d+)/g, (_, index: string) => (
-    uuidFragments[Number(index) - 1] ?? ''
-  ));
+}
+
+function shouldPreserveProductModelToken(prefix: string, tokens: string[]): boolean {
+  const firstToken = tokens[0];
+  if (!firstToken || tokens.length < 2 || /^0x/i.test(firstToken)) return false;
+  const prefixTokens = prefix.match(/[a-z0-9]+/gi) ?? [];
+  const precedingToken = prefixTokens.at(-1);
+  return Boolean(
+    precedingToken
+      && productFamilyModelWords.has(lowerCase(precedingToken))
+      && hasNamedProductPrefix(prefix)
+      && (
+        /^\d+$/.test(firstToken)
+        || /^[a-z]\d{3,}$/i.test(firstToken)
+      ),
+  );
 }
 
 function hasNamedProductPrefix(value: string): boolean {
@@ -581,13 +593,6 @@ function hasNamedProductPrefix(value: string): boolean {
       && !entitySuffixWords.has(normalized)
       && /[a-z]/i.test(token);
   });
-}
-
-function hasLikelyProductModelPrefix(value: string): boolean {
-  const tokens = value.match(/[a-z0-9]+/gi) ?? [];
-  const finalToken = tokens.at(-1);
-  if (!finalToken) return false;
-  return !(/\d/.test(finalToken) && /[^0-9a-f]/i.test(finalToken));
 }
 
 function isConcatenatedDescriptorIdentifier(value: string): boolean {
