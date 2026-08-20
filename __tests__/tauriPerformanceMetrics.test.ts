@@ -424,6 +424,27 @@ describe('bounded performance metrics', () => {
     expect(collector.snapshot().transport.backpressureCount).toBe(16);
   });
 
+  it('baselines a reused PTY backpressure counter after retirement', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      sampledAt: 1_000,
+      ptySnapshots: [{ threadId: 'reused', metrics: { state: { pushWouldBlockCount: 10 } } }],
+    });
+    collector.mergeNativeSnapshot({ sampledAt: 2_000, ptySnapshots: [] });
+    collector.mergeNativeSnapshot({
+      sampledAt: 3_000,
+      ptySnapshots: [{ threadId: 'reused', metrics: { state: { pushWouldBlockCount: 1 } } }],
+    });
+    expect(collector.snapshot().transport.backpressureCount).toBe(10);
+
+    collector.mergeNativeSnapshot({
+      sampledAt: 4_000,
+      ptySnapshots: [{ threadId: 'reused', metrics: { state: { pushWouldBlockCount: 2 } } }],
+    });
+
+    expect(collector.snapshot().transport.backpressureCount).toBe(11);
+  });
+
   it('treats a PTY backpressure counter reset as a zero-delta interval', () => {
     const collector = createPerformanceMetricsCollector();
     collector.mergeNativeSnapshot({
