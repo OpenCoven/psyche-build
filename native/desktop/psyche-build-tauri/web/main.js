@@ -8377,7 +8377,7 @@
     state.projects = state.projects.filter(function (p) { return p.id !== id; });
     startCovenPolling();
     var shouldRefreshSidebar = threadIds.length === 0;
-    var refreshedByActiveProjectHandoff = false;
+    var sidebarRefreshedByActiveProjectHandoff = false;
     if (state.activeProjectId === id) {
       var next = state.projects[0] || null;
       // Force setActiveProject to do its restore work even though the id
@@ -8386,17 +8386,15 @@
       else Object.assign(state, { activeProjectId: null });
       if (next) {
         shouldRefreshSidebar = false;
-        refreshedByActiveProjectHandoff = await setActiveProject(next.id);
+        sidebarRefreshedByActiveProjectHandoff = await setActiveProject(next.id);
       } else {
         state.activeThreadId = null;
         renderPaneWorkspace({ preserveTerminalFocus: false });
         setStatus("no project — click + to open one", "");
       }
     }
-    if (!refreshedByActiveProjectHandoff) {
-      if (shouldRefreshSidebar) refreshSidebar();
-      else refreshTabs();
-    }
+    if (shouldRefreshSidebar && !sidebarRefreshedByActiveProjectHandoff) refreshSidebar();
+    else refreshTabs();
     if (restoredTerminalView) syncPaneMetricsVisibility();
     syncProjectBrowser();
     saveWorkspaceSoon();

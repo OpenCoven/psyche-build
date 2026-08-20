@@ -2853,13 +2853,17 @@ describe('Tauri physical terminal panes', () => {
       }],
     };
     const refreshSidebarProjects: Array<Array<string>> = [];
-    const refreshTabs = vi.fn();
+    const refreshCalls: string[] = [];
+    const refreshTabs = vi.fn(() => {
+      refreshCalls.push('tabs');
+    });
     const closeThread = vi.fn();
     const setActiveProjectCalls: string[] = [];
     const activeProjectBeforeHandoff: Array<string | null> = [];
-    const refreshSidebar = () => {
+    const refreshSidebar = vi.fn(() => {
+      refreshCalls.push('sidebar');
       refreshSidebarProjects.push(state.projects.map((project) => project.id));
-    };
+    });
     const removeProject = compileFunction<(
       id: string,
     ) => Promise<boolean>>(functionSource('removeProject'), {
@@ -2911,7 +2915,9 @@ describe('Tauri physical terminal panes', () => {
     expect(activeProjectBeforeHandoff).toEqual([null]);
     expect(setActiveProjectCalls).toEqual([activeProject.id]);
     expect(refreshSidebarProjects).toEqual([[activeProject.id]]);
-    expect(refreshTabs).not.toHaveBeenCalled();
+    expect(refreshSidebar).toHaveBeenCalledTimes(1);
+    expect(refreshTabs).toHaveBeenCalledTimes(1);
+    expect(refreshCalls).toEqual(['sidebar', 'tabs']);
   });
 
   it('skips explicit target focus while the terminal canvas is hidden before RAF', async () => {
