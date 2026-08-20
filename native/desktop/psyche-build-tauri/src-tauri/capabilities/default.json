@@ -62,8 +62,6 @@
     "allow-control-provider-complete",
     "allow-control-provider-shutdown",
     "allow-control-operator-submit",
-    "allow-control-state",
-    "allow-runtime-diagnostics",
-    "allow-runtime-process-metrics"
+    "allow-control-state"
   ]
 }
