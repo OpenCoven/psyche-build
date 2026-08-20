@@ -641,6 +641,59 @@ describe('graphics evidence classification', () => {
     }
   });
 
+  it('rejects NVIDIA backend/frontend descriptors and labeled identifiers on raw WebGL, ANGLE, and WebGPU paths', () => {
+    const ambiguousValues = [
+      'NVIDIA Backend',
+      'NVIDIA Frontend',
+      ...['VID', 'PID', 'DID', 'LUID', 'UUID'].flatMap((label) => [
+        `NVIDIA ${label}10DE`,
+        `NVIDIA ${label}_10DE`,
+        `NVIDIA ${label}=10DE`,
+        `NVIDIA ${label}:10DE`,
+        `NVIDIA ${label}-10DE`,
+        `NVIDIA ${label} 10DE`,
+      ]),
+      'NVIDIA VID_10DE PID_2484',
+    ];
+
+    for (const value of ambiguousValues) {
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: value,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+        unsupportedFields: [],
+      });
+
+      expect(classifyGraphicsEvidence({
+        strictContext: 'webgl2',
+        renderer: `ANGLE (NVIDIA, ${value}, OpenGL)`,
+        unsupportedFields: [],
+        webgpuAdapterAvailable: false,
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgl2',
+        unsupportedFields: [],
+      });
+
+      expect(classifyGraphicsEvidence({
+        webgpuAdapterAvailable: true,
+        webgpuAdapter: value,
+        unsupportedFields: [],
+      })).toEqual({
+        acceleration: 'unknown',
+        fallbackReason: 'renderer_masked_or_ambiguous',
+        supportingProbe: 'webgpu',
+        unsupportedFields: [],
+      });
+    }
+  });
+
   it('rejects organization-only and implementation-only names on raw WebGL, ANGLE, and WebGPU paths', () => {
     for (const value of ['Google LLC', 'NVIDIA Display Driver']) {
       expect(classifyGraphicsEvidence({
@@ -850,10 +903,12 @@ describe('graphics evidence classification', () => {
     for (const adapter of [
       'Apple M3',
       'NVIDIA GeForce RTX 4090',
+      'NVIDIA GeForce RTX 4090 Backend',
       'NVIDIA Corporation GeForce RTX 4090',
       'NVIDIA GeForce Graphics',
       'NVIDIA GeForce Driver',
       'Intel Arc A770',
+      'Intel Arc A770 Frontend',
       'Intel UHD Graphics 630',
       'AMD Radeon Pro 560X',
       'Qualcomm Adreno 740',
