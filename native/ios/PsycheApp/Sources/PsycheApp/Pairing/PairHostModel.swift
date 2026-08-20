@@ -31,6 +31,7 @@ final class PairHostModel: ObservableObject {
         private let beforeClaimActivation: (@Sendable () async -> Void)?
         private var nextSessionID: UInt64 = 0
         private var state: State = .idle
+        private var connectionOwnerSessionID: UInt64?
         private var endingWaiters: [CheckedContinuation<Void, Never>] = []
 
         init(beforeClaimActivation: (@Sendable () async -> Void)? = nil) {
@@ -68,6 +69,26 @@ final class PairHostModel: ObservableObject {
             let waiters = endingWaiters
             endingWaiters.removeAll()
             waiters.forEach { $0.resume() }
+        }
+
+        func claimConnectionIfCurrent(_ sessionID: UInt64) -> Bool {
+            guard case let .active(currentSessionID) = state, currentSessionID == sessionID else { return false }
+            connectionOwnerSessionID = sessionID
+            return true
+        }
+
+        func releaseConnectionIfOwned(_ sessionID: UInt64) {
+            guard connectionOwnerSessionID == sessionID else { return }
+            connectionOwnerSessionID = nil
+        }
+
+        func disconnectIfConnectionOwner(
+            _ sessionID: UInt64,
+            perform operation: @Sendable () async -> Void
+        ) async {
+            guard connectionOwnerSessionID == sessionID else { return }
+            connectionOwnerSessionID = nil
+            await operation()
         }
     }
 
@@ -206,11 +227,13 @@ final class PairHostModel: ObservableObject {
             Task.detached(
                 priority: .utility,
                 operation: { [authority, sessionID, shouldStopDiscovery, shouldDisconnect, stopDiscovery, disconnect] in
-                    await authority.endIfCurrent(sessionID) {
-                        if shouldStopDiscovery {
+                    if shouldStopDiscovery {
+                        await authority.endIfCurrent(sessionID) {
                             await stopDiscovery()
                         }
-                        if shouldDisconnect {
+                    }
+                    if shouldDisconnect {
+                        await authority.disconnectIfConnectionOwner(sessionID) {
                             await disconnect()
                         }
                     }
@@ -652,7 +675,9 @@ final class PairHostModel: ObservableObject {
             if let sessionID {
                 await authority.endIfCurrent(sessionID) {
                     await dependencies.stopDiscovery()
-                    if shouldDisconnect {
+                }
+                if shouldDisconnect {
+                    await authority.disconnectIfConnectionOwner(sessionID) {
                         await dependencies.disconnect()
                     }
                 }
@@ -839,10 +864,7 @@ final class PairHostModel: ObservableObject {
                 }
             }
             do {
-                guard await self?.transitionAction(
-                    actionID: actionID,
-                    ownsIncompleteConnection: true
-                ) == true else {
+                guard await self?.claimConnectionOwnershipIfCurrent(actionID: actionID) == true else {
                     return
                 }
                 let host = try await dependencies.connectPaired(row.serverID, row.resolvedEndpoint)
@@ -888,10 +910,7 @@ final class PairHostModel: ObservableObject {
                 }
             }
             do {
-                guard await self?.transitionAction(
-                    actionID: actionID,
-                    ownsIncompleteConnection: true
-                ) == true else {
+                guard await self?.claimConnectionOwnershipIfCurrent(actionID: actionID) == true else {
                     return
                 }
                 try await dependencies.connectForPairing(endpoint)
@@ -954,6 +973,21 @@ final class PairHostModel: ObservableObject {
         }
     }
 
+    private func claimConnectionOwnershipIfCurrent(actionID: UUID) async -> Bool {
+        guard activeActionID == actionID, let sessionID else { return false }
+        let authority = sessionAuthority
+        guard await authority.claimConnectionIfCurrent(sessionID) else {
+            cancelStaleActionIfCurrent(actionID: actionID)
+            return false
+        }
+        guard activeActionID == actionID, self.sessionID == sessionID else {
+            await authority.releaseConnectionIfOwned(sessionID)
+            return false
+        }
+        ownsIncompleteConnection = true
+        return true
+    }
+
     private func transitionAction(
         actionID: UUID,
         phase nextPhase: Phase? = nil,
@@ -973,9 +1007,14 @@ final class PairHostModel: ObservableObject {
         actionID: UUID,
         host: PairedHost,
         clearsPairingCode: Bool
-    ) {
+    ) async {
         guard activeActionID == actionID else { return }
+        let sessionID = self.sessionID
         ownsIncompleteConnection = false
+        if let sessionID {
+            await sessionAuthority.releaseConnectionIfOwned(sessionID)
+        }
+        guard activeActionID == actionID else { return }
         if clearsPairingCode {
             pairingCode = ""
         }
@@ -987,7 +1026,13 @@ final class PairHostModel: ObservableObject {
         actionID: UUID,
         error: Error,
         clearPairingCode: Bool
-    ) {
+    ) async {
+        guard activeActionID == actionID else { return }
+        let sessionID = self.sessionID
+        ownsIncompleteConnection = false
+        if let sessionID {
+            await sessionAuthority.releaseConnectionIfOwned(sessionID)
+        }
         guard activeActionID == actionID else { return }
         applyFailure(error, source: .action, clearPairingCode: clearPairingCode)
     }
@@ -1011,6 +1056,14 @@ final class PairHostModel: ObservableObject {
         errorMessage = sanitizedMessage(for: error)
         failureSource = source
         phase = .failed
+    }
+
+    private func cancelStaleActionIfCurrent(actionID: UUID) {
+        guard activeActionID == actionID else { return }
+        ownsIncompleteConnection = false
+        errorMessage = nil
+        failureSource = nil
+        phase = selectedServerID == nil ? .browsing : .selected
     }
 
     private func clearNonReadyError() {
