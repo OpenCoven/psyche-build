@@ -876,7 +876,8 @@ final class PairHostModel: ObservableObject {
         clearPairingCode: Bool
     ) {
         guard activeActionID == actionID else { return }
-        ownsIncompleteConnection = false
+        // Preserve ownership for incomplete connections until stop() explicitly
+        // disconnects; some failures can leave the transport active.
         applyFailure(error, source: .action, clearPairingCode: clearPairingCode)
     }
 

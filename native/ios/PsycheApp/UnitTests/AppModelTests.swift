@@ -302,6 +302,185 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(disconnectCount, 1)
     }
 
+    func testEndPairHostFlowAfterPairRejectionDisconnectsIncompleteManualConnectionExactlyOnce() async throws {
+        let (composition, _) = makeComposition()
+        let factory = AppModelPairHostFactory()
+        let model = AppModel(
+            composition: composition,
+            pairHostModelFactory: { factory.makeModel() }
+        )
+        let pairHostModel = await model.beginPairHostFlow()
+        let probe = try XCTUnwrap(factory.probes.first)
+        await probe.setPairResult(.failure(AppModelTestFailure("Pair rejected")))
+
+        await pairHostModel.start()
+        pairHostModel.setManualEntrySelected(true)
+        pairHostModel.manualHost = " manual.local "
+        pairHostModel.manualPort = " 4242 "
+        pairHostModel.manualFingerprint = testCertificateFingerprint
+        pairHostModel.pairingCode = "123456"
+
+        await pairHostModel.submit()
+
+        let connectForPairingCount = await probe.connectForPairingCount()
+        let pairCount = await probe.pairCount()
+        let disconnectCountBeforeEnd = await probe.disconnectCount()
+        XCTAssertEqual(pairHostModel.phase, .failed)
+        XCTAssertEqual(pairHostModel.errorMessage, "Pair rejected")
+        XCTAssertEqual(connectForPairingCount, 1)
+        XCTAssertEqual(pairCount, 1)
+        XCTAssertEqual(disconnectCountBeforeEnd, 0)
+
+        await model.endPairHostFlow(pairHostModel)
+
+        let stopCount = await probe.stopCount()
+        let disconnectCount = await probe.disconnectCount()
+        XCTAssertNil(model.activePairHostModel)
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(disconnectCount, 1)
+    }
+
+    func testEndPairHostFlowAfterValidationFailureBeforeConnectDoesNotDisconnect() async throws {
+        let (composition, _) = makeComposition()
+        let factory = AppModelPairHostFactory()
+        let model = AppModel(
+            composition: composition,
+            pairHostModelFactory: { factory.makeModel() }
+        )
+        let pairHostModel = await model.beginPairHostFlow()
+        let probe = try XCTUnwrap(factory.probes.first)
+
+        await pairHostModel.start()
+        pairHostModel.setManualEntrySelected(true)
+        pairHostModel.manualHost = "manual.local"
+        pairHostModel.manualPort = "4242"
+        pairHostModel.manualFingerprint = testCertificateFingerprint
+        pairHostModel.pairingCode = "12345"
+
+        await pairHostModel.submit()
+
+        let connectForPairingCount = await probe.connectForPairingCount()
+        let pairCount = await probe.pairCount()
+        XCTAssertEqual(pairHostModel.phase, .failed)
+        XCTAssertEqual(
+            pairHostModel.errorMessage,
+            "The pairing code must contain exactly six digits."
+        )
+        XCTAssertEqual(connectForPairingCount, 0)
+        XCTAssertEqual(pairCount, 0)
+
+        await model.endPairHostFlow(pairHostModel)
+
+        let stopCount = await probe.stopCount()
+        let disconnectCount = await probe.disconnectCount()
+        XCTAssertNil(model.activePairHostModel)
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(disconnectCount, 0)
+    }
+
+    func testEndPairHostFlowAfterReadinessFailureDisconnectsIncompleteManualConnection() async throws {
+        let (composition, _) = makeComposition()
+        let factory = AppModelPairHostFactory()
+        let model = AppModel(
+            composition: composition,
+            pairHostModelFactory: { factory.makeModel() }
+        )
+        let pairHostModel = await model.beginPairHostFlow()
+        let probe = try XCTUnwrap(factory.probes.first)
+        let readinessGate = AsyncGate()
+        let endpoint = HostEndpoint(
+            host: "manual.local",
+            port: 4242,
+            certificateFingerprint: testCertificateFingerprint
+        )
+        await probe.setPairResult(.success(makePairedHost(
+            serverID: "manual-server",
+            serverName: "Manual Host",
+            host: endpoint.host,
+            port: endpoint.port
+        )))
+        await probe.setReadinessGate(readinessGate)
+
+        await pairHostModel.start()
+        pairHostModel.setManualEntrySelected(true)
+        pairHostModel.manualHost = "manual.local"
+        pairHostModel.manualPort = "4242"
+        pairHostModel.manualFingerprint = testCertificateFingerprint
+        pairHostModel.pairingCode = "123456"
+
+        let submitTask = Task { @MainActor in
+            await pairHostModel.submit()
+        }
+        await readinessGate.waitUntilStarted()
+        await waitUntil { pairHostModel.phase == .loadingWorkspace }
+        await readinessGate.fail(AppModelTestFailure("Workspace never became ready"))
+        await submitTask.value
+
+        let connectForPairingCount = await probe.connectForPairingCount()
+        let pairCount = await probe.pairCount()
+        let disconnectCountBeforeEnd = await probe.disconnectCount()
+        XCTAssertEqual(pairHostModel.phase, .failed)
+        XCTAssertEqual(pairHostModel.errorMessage, "Workspace never became ready")
+        XCTAssertEqual(connectForPairingCount, 1)
+        XCTAssertEqual(pairCount, 1)
+        XCTAssertEqual(disconnectCountBeforeEnd, 0)
+
+        await model.endPairHostFlow(pairHostModel)
+
+        let stopCount = await probe.stopCount()
+        let disconnectCount = await probe.disconnectCount()
+        XCTAssertNil(model.activePairHostModel)
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(disconnectCount, 1)
+    }
+
+    func testEndPairHostFlowAfterReadyManualPairingDoesNotDisconnect() async throws {
+        let (composition, _) = makeComposition()
+        let factory = AppModelPairHostFactory()
+        let model = AppModel(
+            composition: composition,
+            pairHostModelFactory: { factory.makeModel() }
+        )
+        let pairHostModel = await model.beginPairHostFlow()
+        let probe = try XCTUnwrap(factory.probes.first)
+        let readinessGate = AsyncGate()
+        await probe.setPairResult(.success(makePairedHost(
+            serverID: "manual-server",
+            serverName: "Manual Host",
+            host: "manual.local"
+        )))
+        await probe.setReadinessGate(readinessGate)
+
+        await pairHostModel.start()
+        pairHostModel.setManualEntrySelected(true)
+        pairHostModel.manualHost = "manual.local"
+        pairHostModel.manualPort = "4242"
+        pairHostModel.manualFingerprint = testCertificateFingerprint
+        pairHostModel.pairingCode = "123456"
+
+        let submitTask = Task { @MainActor in
+            await pairHostModel.submit()
+        }
+        await readinessGate.waitUntilStarted()
+        await waitUntil { pairHostModel.phase == .loadingWorkspace }
+        await readinessGate.succeed()
+        await submitTask.value
+
+        let connectForPairingCount = await probe.connectForPairingCount()
+        let pairCount = await probe.pairCount()
+        XCTAssertEqual(pairHostModel.phase, .ready)
+        XCTAssertEqual(connectForPairingCount, 1)
+        XCTAssertEqual(pairCount, 1)
+
+        await model.endPairHostFlow(pairHostModel)
+
+        let stopCount = await probe.stopCount()
+        let disconnectCount = await probe.disconnectCount()
+        XCTAssertNil(model.activePairHostModel)
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(disconnectCount, 0)
+    }
+
     func testReadyEndStopsDiscoveryWithoutDisconnectAndAllowsNewDistinctFlow() async throws {
         let (composition, _) = makeComposition()
         let factory = AppModelPairHostFactory()
@@ -637,10 +816,8 @@ private final class AppModelPairHostProbe {
             retryDiscovery: { _ in },
             pairingStatus: { _, _ in .paired },
             connectPaired: { try await self.recorder.connectPaired(serverID: $0, endpoint: $1) },
-            connectForPairing: { _ in },
-            pair: { _ in
-                throw AppModelTestFailure("Unexpected pairing call")
-            },
+            connectForPairing: { try await self.recorder.connectForPairing(endpoint: $0) },
+            pair: { try await self.recorder.pair(code: $0) },
             waitForWorkspaceReady: { try await self.recorder.waitForWorkspaceReady() },
             disconnect: { await self.recorder.disconnect() }
         ))
@@ -652,6 +829,10 @@ private final class AppModelPairHostProbe {
 
     func setConnectPairedResult(_ result: Result<PairedHost, AppModelTestFailure>) async {
         await recorder.setConnectPairedResult(result)
+    }
+
+    func setPairResult(_ result: Result<PairedHost, AppModelTestFailure>) async {
+        await recorder.setPairResult(result)
     }
 
     func setReadinessGate(_ gate: AsyncGate?) async {
@@ -673,6 +854,14 @@ private final class AppModelPairHostProbe {
     func disconnectCount() async -> Int {
         await recorder.disconnectCount()
     }
+
+    func connectForPairingCount() async -> Int {
+        await recorder.connectForPairingCount()
+    }
+
+    func pairCount() async -> Int {
+        await recorder.pairCount()
+    }
 }
 
 private actor AppModelPairHostRecorder {
@@ -691,11 +880,15 @@ private actor AppModelPairHostRecorder {
             token: "test-token"
         )
     )
+    private var pairResult: Result<PairedHost, AppModelTestFailure> =
+        .failure(AppModelTestFailure("Unexpected pairing call"))
     private var readinessGate: AsyncGate?
     private var stopGate: AsyncGate?
     private var disconnectGate: AsyncGate?
     private var stopInvocationCount = 0
     private var disconnectInvocationCount = 0
+    private var connectForPairingInvocationCount = 0
+    private var pairInvocationCount = 0
 
     init() {
         let stream = AsyncStream<[BonjourDiscoveryEntry]>.makeStream()
@@ -713,6 +906,10 @@ private actor AppModelPairHostRecorder {
 
     func setConnectPairedResult(_ result: Result<PairedHost, AppModelTestFailure>) {
         connectPairedResult = result
+    }
+
+    func setPairResult(_ result: Result<PairedHost, AppModelTestFailure>) {
+        pairResult = result
     }
 
     func setReadinessGate(_ gate: AsyncGate?) {
@@ -745,6 +942,22 @@ private actor AppModelPairHostRecorder {
         }
     }
 
+    func connectForPairing(endpoint: HostEndpoint) async throws {
+        _ = endpoint
+        connectForPairingInvocationCount += 1
+    }
+
+    func pair(code: String) async throws -> PairedHost {
+        _ = code
+        pairInvocationCount += 1
+        switch pairResult {
+        case .success(let host):
+            return host
+        case .failure(let error):
+            throw error
+        }
+    }
+
     func waitForWorkspaceReady() async throws {
         try await readinessGate?.wait()
     }
@@ -765,6 +978,14 @@ private actor AppModelPairHostRecorder {
 
     func disconnectCount() -> Int {
         disconnectInvocationCount
+    }
+
+    func connectForPairingCount() -> Int {
+        connectForPairingInvocationCount
+    }
+
+    func pairCount() -> Int {
+        pairInvocationCount
     }
 }
 
@@ -806,6 +1027,11 @@ private actor AsyncGate {
 
     func succeed() {
         continuation?.resume()
+        continuation = nil
+    }
+
+    func fail(_ error: any Error) {
+        continuation?.resume(throwing: error)
         continuation = nil
     }
 

@@ -757,6 +757,14 @@ final class PairHostModelTests: XCTestCase {
         XCTAssertEqual(model.manualPort, "4242")
         XCTAssertEqual(model.manualFingerprint, otherFingerprint)
         XCTAssertNil(model.readyHost)
+
+        let disconnectCountBeforeStop = await probe.disconnectCount()
+        XCTAssertEqual(disconnectCountBeforeStop, 0)
+
+        await model.stop()
+
+        let disconnectCount = await probe.disconnectCount()
+        XCTAssertEqual(disconnectCount, 1)
     }
 
     func testDuplicateSubmitDoesNotLaunchDuplicateConnections() async throws {
