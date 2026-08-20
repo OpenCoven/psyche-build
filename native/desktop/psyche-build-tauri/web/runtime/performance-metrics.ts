@@ -252,6 +252,8 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
   let previousTransport:
     | { sampledAt: number; bytes?: number; batches?: number }
     | undefined;
+  let previousPtySampledAt: number | undefined;
+  const previousPtyCounters = new Map<string, { bytes?: number; batches?: number }>();
   let bytesPerSecond = 0;
   let batchesPerSecond = 0;
   let averageBatchBytesOverride: number | undefined;
@@ -278,8 +280,8 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     const value = finiteNonNegative(timestamp);
     if (value === undefined) return;
     if (previousFrameTimestamp !== undefined) {
-      const delta = value - previousFrameTimestamp;
-      if (delta >= 0) frames.push(delta);
+      if (value <= previousFrameTimestamp) return;
+      frames.push(value - previousFrameTimestamp);
     }
     previousFrameTimestamp = value;
   }
@@ -309,7 +311,10 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     interactions.delete(kind);
   }
 
-  function mergeOneNativeSnapshot(input: RecordLike): void {
+  function mergeOneNativeSnapshot(
+    input: RecordLike,
+    ptyDeltas?: { bytes?: number; batches?: number },
+  ): void {
     const sampledAt = numberFrom(input, ['sampledAt', 'timestamp', 'time']);
     if (sampledAt !== undefined) latestSampledAt = sampledAt;
 
@@ -329,7 +334,22 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
       averageBatchBytesOverride = emittedBytes / emittedBatches;
     }
 
-    if (sampledAt !== undefined && previousTransport !== undefined) {
+    if (ptyDeltas !== undefined) {
+      if (ptyDeltas.bytes !== undefined) bytesPerSecond = 0;
+      if (ptyDeltas.batches !== undefined) batchesPerSecond = 0;
+      if (sampledAt !== undefined && previousPtySampledAt !== undefined) {
+        const elapsedMs = sampledAt - previousPtySampledAt;
+        if (elapsedMs > 0) {
+          if (ptyDeltas.bytes !== undefined) {
+            bytesPerSecond = (ptyDeltas.bytes * 1_000) / elapsedMs;
+          }
+          if (ptyDeltas.batches !== undefined) {
+            batchesPerSecond = (ptyDeltas.batches * 1_000) / elapsedMs;
+          }
+        }
+      }
+      if (sampledAt !== undefined) previousPtySampledAt = sampledAt;
+    } else if (sampledAt !== undefined && previousTransport !== undefined) {
       const elapsedMs = sampledAt - previousTransport.sampledAt;
       if (elapsedMs > 0) {
         if (currentBytes !== undefined && previousTransport.bytes !== undefined) {
@@ -350,7 +370,11 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
         }
       }
     }
-    if (sampledAt !== undefined && (currentBytes !== undefined || currentBatches !== undefined)) {
+    if (
+      ptyDeltas === undefined &&
+      sampledAt !== undefined &&
+      (currentBytes !== undefined || currentBatches !== undefined)
+    ) {
       previousTransport = {
         sampledAt,
         bytes: currentBytes ?? previousTransport?.bytes,
@@ -409,37 +433,33 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
       : isRecord(paneSource)
         ? Object.values(paneSource).filter(isRecord)
         : [];
-    if (panes.length > 0) {
-      webglPanes = Math.max(
-        webglPanes,
-        panes.filter((pane) =>
-          paneFlag(pane, ['webgl', 'webgl2', 'isWebgl']) || paneState(pane) === 'webgl' || paneState(pane) === 'webgl2',
-        ).length,
-      );
-      recoveringPanes = Math.max(
-        recoveringPanes,
-        panes.filter((pane) =>
-          paneFlag(pane, ['recovering', 'isRecovering']) || paneState(pane) === 'recovering',
-        ).length,
-      );
-      fallbackPanes = Math.max(
-        fallbackPanes,
-        panes.filter((pane) =>
-          paneFlag(pane, ['fallback', 'isFallback']) || paneState(pane) === 'fallback',
-        ).length,
-      );
-      contextLosses = Math.max(
-        contextLosses,
-        panes.reduce((sum, pane) => sum + (numberFrom(pane, ['contextLosses', 'contextLoss']) ?? 0), 0),
-      );
+    if (paneSource !== undefined) {
+      webglPanes = panes.filter((pane) =>
+        paneFlag(pane, ['webgl', 'webgl2', 'isWebgl']) || paneState(pane) === 'webgl' || paneState(pane) === 'webgl2',
+      ).length;
+      recoveringPanes = panes.filter((pane) =>
+        paneFlag(pane, ['recovering', 'isRecovering']) || paneState(pane) === 'recovering',
+      ).length;
+      fallbackPanes = panes.filter((pane) =>
+        paneFlag(pane, ['fallback', 'isFallback']) || paneState(pane) === 'fallback',
+      ).length;
+      if (panes.length > 0) {
+        contextLosses = Math.max(
+          contextLosses,
+          panes.reduce(
+            (sum, pane) => sum + (numberFrom(pane, ['contextLosses', 'contextLoss']) ?? 0),
+            0,
+          ),
+        );
+      }
     }
     const directWebgl = numberFrom(renderer, ['webglPanes']);
     const directRecovering = numberFrom(renderer, ['recoveringPanes']);
     const directFallback = numberFrom(renderer, ['fallbackPanes']);
     const directLosses = numberFrom(renderer, ['contextLosses']);
-    if (directWebgl !== undefined) webglPanes = Math.max(webglPanes, directWebgl);
-    if (directRecovering !== undefined) recoveringPanes = Math.max(recoveringPanes, directRecovering);
-    if (directFallback !== undefined) fallbackPanes = Math.max(fallbackPanes, directFallback);
+    if (paneSource === undefined && directWebgl !== undefined) webglPanes = directWebgl;
+    if (paneSource === undefined && directRecovering !== undefined) recoveringPanes = directRecovering;
+    if (paneSource === undefined && directFallback !== undefined) fallbackPanes = directFallback;
     if (directLosses !== undefined) contextLosses = Math.max(contextLosses, directLosses);
 
     const process = isRecord(input.process) ? input.process : input;
@@ -472,6 +492,10 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     if (Array.isArray(nested)) {
       const entries = nested.filter(isRecord);
       const sampledAt = numberFrom(input, ['sampledAt', 'timestamp', 'time']);
+      const currentPtyIds = new Set(entries.map((entry, index) => ptyIdentity(entry, index)));
+      for (const id of previousPtyCounters.keys()) {
+        if (!currentPtyIds.has(id)) previousPtyCounters.delete(id);
+      }
       const sameSample =
         entries.length > 0 &&
         entries.every((entry) => {
@@ -479,19 +503,26 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
           return entrySampledAt === undefined || entrySampledAt === sampledAt;
         });
       if (sameSample) {
+        const { deltas } = updatePtyCounters(entries, previousPtyCounters);
         mergeOneNativeSnapshot({
           ...input,
           ...(sampledAt !== undefined ? { sampledAt } : {}),
           transport: aggregateTransportEntries(entries),
-        });
+        }, deltas);
       } else {
-        for (const entry of entries) {
-          mergeNativeSnapshot(
+        for (const [index, entry] of entries.entries()) {
+          const { deltas } = updatePtyCounters([entry], previousPtyCounters, index);
+          mergeOneNativeSnapshot(
             entry.sampledAt === undefined && sampledAt !== undefined
               ? { ...entry, sampledAt }
               : entry,
+            deltas,
           );
         }
+      }
+      if (entries.length === 0) {
+        previousPtySampledAt = undefined;
+        mergeOneNativeSnapshot(input);
       }
       return;
     }
@@ -553,6 +584,8 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     previousFrameTimestamp = undefined;
     latestSampledAt = 0;
     previousTransport = undefined;
+    previousPtySampledAt = undefined;
+    previousPtyCounters.clear();
     bytesPerSecond = 0;
     batchesPerSecond = 0;
     averageBatchBytesOverride = undefined;
@@ -584,6 +617,55 @@ export function createPerformanceMetricsCollector(): PerformanceMetricsCollector
     mergeNativeSnapshot,
     snapshot,
     reset,
+  };
+}
+
+function ptyIdentity(entry: RecordLike, index: number): string {
+  const source = transportSource(entry);
+  for (const key of ['threadId', 'thread_id', 'ptyId', 'pty_id', 'paneId', 'pane_id', 'id']) {
+    const value = entry[key] ?? source[key];
+    if (typeof value === 'string' || typeof value === 'number') return `${key}:${value}`;
+  }
+  return `index:${index}`;
+}
+
+function updatePtyCounters(
+  entries: readonly RecordLike[],
+  previousPtyCounters: Map<string, { bytes?: number; batches?: number }>,
+  indexOffset = 0,
+): { deltas: { bytes?: number; batches?: number } } {
+  let bytesDelta = 0;
+  let batchesDelta = 0;
+  let hasBytes = false;
+  let hasBatches = false;
+  for (const [index, entry] of entries.entries()) {
+    const id = ptyIdentity(entry, index + indexOffset);
+    const source = transportSource(entry);
+    const currentBytes = numberFrom(source, transportKeys.bytes);
+    const currentBatches = numberFrom(source, transportKeys.batches);
+    const previous = previousPtyCounters.get(id);
+    if (currentBytes !== undefined) {
+      hasBytes = true;
+      if (previous?.bytes !== undefined && currentBytes >= previous.bytes) {
+        bytesDelta += currentBytes - previous.bytes;
+      }
+    }
+    if (currentBatches !== undefined) {
+      hasBatches = true;
+      if (previous?.batches !== undefined && currentBatches >= previous.batches) {
+        batchesDelta += currentBatches - previous.batches;
+      }
+    }
+    previousPtyCounters.set(id, {
+      bytes: currentBytes ?? previous?.bytes,
+      batches: currentBatches ?? previous?.batches,
+    });
+  }
+  return {
+    deltas: {
+      ...(hasBytes ? { bytes: bytesDelta } : {}),
+      ...(hasBatches ? { batches: batchesDelta } : {}),
+    },
   };
 }
 

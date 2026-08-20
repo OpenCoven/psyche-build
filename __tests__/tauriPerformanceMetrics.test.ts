@@ -62,6 +62,23 @@ describe('bounded performance metrics', () => {
     expect(snapshot.frames.maxMs).toBe(1);
   });
 
+  it('ignores malformed or backward frame timestamps without replacing the baseline', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.recordFrame(100);
+    collector.recordFrame(116);
+    collector.recordFrame(116);
+    collector.recordFrame(90);
+    collector.recordFrame(Number.NaN);
+    collector.recordFrame(Number.POSITIVE_INFINITY);
+    collector.recordFrame(132);
+
+    expect(collector.snapshot().frames).toMatchObject({
+      sampleCount: 2,
+      averageMs: 16,
+      maxMs: 16,
+    });
+  });
+
   it('aggregates transport, renderer, process, and interaction metrics', () => {
     const collector = createPerformanceMetricsCollector();
     collector.mergeNativeSnapshot({
@@ -185,6 +202,74 @@ describe('bounded performance metrics', () => {
       bytesPerSecond: 4_096,
       batchesPerSecond: 4,
       queueBytesHighWater: 8_192,
+    });
+  });
+
+  it('calculates PTY counter deltas independently so one reset cannot mask another PTY growth', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      sampledAt: 1_000,
+      ptySnapshots: [
+        { threadId: 'resetting', metrics: { state: { bytesEmitted: 100 } } },
+        { threadId: 'growing', metrics: { state: { bytesEmitted: 100 } } },
+      ],
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 2_000,
+      ptySnapshots: [
+        { threadId: 'resetting', metrics: { state: { bytesEmitted: 10 } } },
+        { threadId: 'growing', metrics: { state: { bytesEmitted: 200 } } },
+      ],
+    });
+
+    expect(collector.snapshot().transport.bytesPerSecond).toBe(100);
+  });
+
+  it('forgets PTYs that disappear from an authoritative snapshot', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      sampledAt: 1_000,
+      ptySnapshots: [{ threadId: 'gone', metrics: { state: { bytesEmitted: 100 } } }],
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 2_000,
+      ptySnapshots: [{ threadId: 'gone', metrics: { state: { bytesEmitted: 200 } } }],
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 3_000,
+      ptySnapshots: [],
+    });
+    collector.mergeNativeSnapshot({
+      sampledAt: 4_000,
+      ptySnapshots: [{ threadId: 'gone', metrics: { state: { bytesEmitted: 200 } } }],
+    });
+
+    expect(collector.snapshot().transport.bytesPerSecond).toBe(0);
+  });
+
+  it('uses current renderer pane counts and clears them for an empty snapshot', () => {
+    const collector = createPerformanceMetricsCollector();
+    collector.mergeNativeSnapshot({
+      renderer: {
+        panes: [
+          { webgl: true },
+          { recovering: true },
+          { fallback: true },
+        ],
+      },
+    });
+    expect(collector.snapshot().renderer).toMatchObject({
+      webglPanes: 1,
+      recoveringPanes: 1,
+      fallbackPanes: 1,
+    });
+
+    collector.mergeNativeSnapshot({ renderer: { panes: [] } });
+
+    expect(collector.snapshot().renderer).toMatchObject({
+      webglPanes: 0,
+      recoveringPanes: 0,
+      fallbackPanes: 0,
     });
   });
 
