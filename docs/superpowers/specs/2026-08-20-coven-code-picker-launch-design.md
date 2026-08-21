@@ -5,92 +5,102 @@
 
 ## Goal
 
-Selecting **Coven Code** from the new-agent picker must launch Coven Code through
-the resolved Coven executable. It must never open Codex or fall through to the
-generic Codex agent launcher.
+Selecting **Coven Code** from the terminal/TUI new-pane picker must launch the
+current Coven CLI in code mode. It must not launch the retired `coven-code`
+binary or enter the Codex-specific launch path.
 
 ## Required Behavior
 
-The Coven Code picker entry launches the canonical descriptor:
+The stable agent registry ID remains `coven-code`, but a new TUI pane launches:
 
 ```text
-command: resolved Coven executable
-args: ["code", "--session-id", generated session ID]
-kind: "coven-code"
-launchKind: "coven-code"
-name: "Coven Code"
-metricsProvider: "coven"
-env.COVEN_SESSION_SOURCE: "psyche-build"
+coven code --session-id <generated UUID>
 ```
 
-The generated session ID, active project root, and selected worktree remain
-required. The Codex picker entry continues launching `codex` independently.
+Existing permission flags and prompt delivery follow that command. For example:
+
+```text
+coven code --session-id <generated UUID> --permission-mode plan
+coven code --session-id <generated UUID> "$PSYCHE_PROMPT_CONTENT"
+```
+
+The generated session ID is unique per new Coven Code pane. Codex remains a
+separate registry entry and continues launching `codex`.
 
 ## Architecture
 
-Keep `covenCodeLaunch`, `spawnCovenThread`, and `ensureProjectCoven` as the one
-canonical Coven Code creation path. The Coven Code picker selection bypasses
-the generic CLI-agent branch and delegates directly to that path.
+Update the `coven-code` registry entry so installation detection resolves the
+`coven` executable and its static command base is `coven code`. Keep the
+registry ID, display name, slug suffix, permission modes, prompt transport, and
+default-enabled status unchanged.
 
-The picker must identify Coven Code by its stable `coven-code` ID. Its launch
-must not consume the Codex registry entry, Codex command, or a stale generic
-agent selection. Other registered agents continue using the existing generic
-launcher.
+Extend the shared command builders with an optional launch context containing a
+validated Coven session ID. The builders append
+`--session-id <generated UUID>` only when the selected agent is `coven-code`.
+Callers that do not provide a launch context retain the static `coven code`
+command.
 
-No picker-specific duplicate of the Coven launch descriptor is added. This
-prevents the picker command from drifting away from `/new-thread`, Open Coven
-Terminal, retry, persistence, metrics, and native launch validation.
+`launchAgentInPane` generates one UUID for each new Coven Code pane and passes
+that same value through the no-prompt, prompt-file, and escaped-inline command
+paths. It does not generate a Coven session ID for any other agent.
+
+The existing Codex hook wrapper remains guarded by `agent === "codex"`.
+Changing the Coven executable must not make Coven Code consume Codex hooks,
+resume commands, or command metadata.
 
 ## Data Flow
 
 ```text
-select Coven Code in new-agent picker
-  -> resolve stable coven-code selection
-  -> validate project, worktree, and resolved Coven executable
-  -> ensureProjectCoven(project)
-  -> spawnCovenThread(project, worktree)
-  -> covenCodeLaunch(project, worktree)
-  -> execute coven code --session-id <generated-id>
+select Coven Code in terminal new-pane picker
+  -> stable agent ID coven-code
+  -> create pane/worktree
+  -> launchAgentInPane
+  -> generate one UUID
+  -> shared command builder receives Coven launch context
+  -> execute coven code --session-id <UUID> [permission flags] [prompt]
 ```
 
 Selecting Codex remains:
 
 ```text
-select Codex CLI
-  -> generic agent launcher
-  -> execute codex
+select Codex
+  -> stable agent ID codex
+  -> existing Codex hook setup
+  -> execute wrapped codex command
 ```
 
 ## Error Handling
 
-Existing explicit failures remain authoritative:
+Agent discovery must report Coven Code as installed only when the `coven`
+executable is available through the existing shell or common-path checks.
 
-- no open project;
-- no selected worktree;
-- missing Coven executable;
-- secure session ID generation failure; and
-- PTY creation or startup failure.
+UUID generation uses Node's `randomUUID`. If command construction receives an
+invalid or missing session ID, it must not emit a partial `--session-id` flag.
+The new-pane launch path always supplies a generated UUID.
 
-The Coven Code selection must not recover from any failure by launching Codex,
-another agent, or a bare shell. Existing status messages remain visible.
+Existing pane-creation and command-dispatch errors remain visible through the
+current status and logging paths. The Coven Code selection must not recover by
+launching `coven-code`, Codex, another agent, or a bare shell.
 
 ## Verification
 
 Focused automated coverage must prove:
 
-- the Coven Code picker entry delegates only to the canonical Coven launcher;
-- the resulting launch descriptor uses the resolved Coven executable;
-- its arguments are exactly `code --session-id <generated-id>`;
-- its pane identity is `coven-code` and its display name is `Coven Code`;
-- the Coven launch cannot consume the Codex command or generic Codex path;
-- missing Coven CLI reports the existing error without fallback; and
-- selecting the Codex entry still launches `codex`.
+- the `coven-code` registry entry detects `coven`, not `coven-code`;
+- its static base and resume commands use `coven code`;
+- command builders place one supplied session ID after `coven code`;
+- prompted and no-prompt TUI launches use the same generated session ID;
+- permission flags and prompt-file safety remain intact;
+- UUID generation occurs once per Coven pane and never for other agents;
+- Coven Code does not receive Codex hook environment wrapping; and
+- Codex launch behavior remains unchanged.
 
-Run the focused Tauri agent-picker and Coven-launch Vitest suites.
+Run the focused agent registry and pane-launch Vitest suites, followed by the
+repository test typecheck for the touched TypeScript signatures.
 
 ## Scope
 
-This patch does not change Coven daemon attachment, existing session rows,
-Codex behavior, other agent launchers, persistence formats, or native session
-protocols. It only hardens the new-agent picker boundary so the Coven Code
-selection always uses the canonical Coven Code launch path.
+This patch changes only terminal/TUI agent discovery and new-pane command
+construction. It does not change the native macOS desktop picker, Coven daemon
+attachment, pane persistence, worktree creation, other agent launchers, or the
+stable `coven-code` configuration ID.

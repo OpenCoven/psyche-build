@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { TmuxService } from '../services/TmuxService.js';
 import {
@@ -33,6 +34,10 @@ export const AGENT_IDS = [
 export type AgentName = typeof AGENT_IDS[number];
 export type PermissionMode = '' | 'plan' | 'acceptEdits' | 'bypassPermissions';
 export type PromptTransport = 'positional' | 'option' | 'stdin' | 'send-keys';
+
+export interface AgentCommandContext {
+  covenSessionId?: string;
+}
 
 export interface AgentLaunchOption {
   id: string;
@@ -326,15 +331,15 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
     shortLabel: 'cv',
     description: 'OpenCoven coding harness — Claurst-based TUI with familiar personas',
     slugSuffix: 'coven-code',
-    installTestCommand: 'command -v coven-code 2>/dev/null || which coven-code 2>/dev/null',
+    installTestCommand: 'command -v coven 2>/dev/null || which coven 2>/dev/null',
     commonPaths: [
-      ...homePath('.local/bin/coven-code'),
-      '/opt/homebrew/bin/coven-code',
-      '/usr/local/bin/coven-code',
-      ...homePath('bin/coven-code'),
-      ...homePath('.npm-global/bin/coven-code'),
+      ...homePath('.local/bin/coven'),
+      '/opt/homebrew/bin/coven',
+      '/usr/local/bin/coven',
+      ...homePath('bin/coven'),
+      ...homePath('.npm-global/bin/coven'),
     ],
-    promptCommand: 'coven-code',
+    promptCommand: 'coven code',
     promptTransport: 'positional',
     permissionFlags: {
       plan: '--permission-mode plan',
@@ -342,7 +347,7 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
       bypassPermissions: '--permission-mode bypass-permissions',
     },
     defaultEnabled: true,
-    resumeCommandTemplate: 'coven-code --resume{permissions}',
+    resumeCommandTemplate: 'coven code --resume{permissions}',
   },
 };
 
@@ -459,6 +464,27 @@ function appendFlags(base: string, flags: string): string {
   return flags ? `${base} ${flags}` : base;
 }
 
+function isValidCovenSessionId(value: string): boolean {
+  return /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+}
+
+function appendCovenSessionId(
+  agent: AgentName,
+  command: string,
+  context: AgentCommandContext | undefined
+): string {
+  const sessionId = context?.covenSessionId;
+  if (sessionId === undefined || agent !== 'coven-code') {
+    return command;
+  }
+
+  if (!isValidCovenSessionId(sessionId)) {
+    throw new Error('Coven session id contains unsupported characters');
+  }
+
+  return `${command} --session-id ${sessionId}`;
+}
+
 export function appendSlugSuffix(baseSlug: string, slugSuffix?: string): string {
   if (!slugSuffix) return baseSlug;
 
@@ -506,25 +532,30 @@ export function getPermissionFlags(
 
 export function buildAgentCommand(
   agent: AgentName,
-  permissionMode: PermissionMode | undefined
+  permissionMode: PermissionMode | undefined,
+  context?: AgentCommandContext
 ): string {
   const definition = AGENT_REGISTRY[agent];
   const baseCommand = definition.noPromptCommand || definition.promptCommand;
-  return appendFlags(baseCommand, getPermissionFlags(agent, permissionMode));
+  return appendFlags(
+    appendCovenSessionId(agent, baseCommand, context),
+    getPermissionFlags(agent, permissionMode)
+  );
 }
 
 export function buildInitialPromptCommand(
   agent: AgentName,
   promptToken: string,
-  permissionMode: PermissionMode | undefined
+  permissionMode: PermissionMode | undefined,
+  context?: AgentCommandContext
 ): string {
   const definition = AGENT_REGISTRY[agent];
   if (definition.promptTransport === 'send-keys') {
-    return buildAgentCommand(agent, permissionMode);
+    return buildAgentCommand(agent, permissionMode, context);
   }
 
   const baseCommand = appendFlags(
-    definition.promptCommand,
+    appendCovenSessionId(agent, definition.promptCommand, context),
     getPermissionFlags(agent, permissionMode)
   );
 
@@ -581,6 +612,7 @@ export interface LaunchAgentInPaneOptions {
   permissionMode?: PermissionMode;
   psychePaneId?: string;
   codexHookEventFile?: string;
+  generateCovenSessionId?: () => string;
   /** Injectable for tests. */
   tmuxService?: Pick<
     TmuxService,
@@ -612,6 +644,7 @@ export async function launchAgentInPane(
     permissionMode,
     psychePaneId,
     codexHookEventFile,
+    generateCovenSessionId = randomUUID,
     tmuxService = TmuxService.getInstance(),
   } = options;
 
@@ -624,6 +657,8 @@ export async function launchAgentInPane(
 
   const hasInitialPrompt = !!(prompt && prompt.trim());
   const promptTransport = getPromptTransport(agent);
+  const covenCommandContext =
+    agent === 'coven-code' ? { covenSessionId: generateCovenSessionId() } : undefined;
   // send-keys agents are launched bare, then typed into once their TUI is up.
   const shouldSendPromptViaTmux = hasInitialPrompt && promptTransport === 'send-keys';
 
@@ -651,7 +686,8 @@ export async function launchAgentInPane(
       launchCommand = `${promptBootstrap}; ${buildInitialPromptCommand(
         agent,
         '"$PSYCHE_PROMPT_CONTENT"',
-        permissionMode
+        permissionMode,
+        covenCommandContext
       )}`;
     } else {
       const escapedPrompt = prompt
@@ -662,11 +698,12 @@ export async function launchAgentInPane(
       launchCommand = buildInitialPromptCommand(
         agent,
         `"${escapedPrompt}"`,
-        permissionMode
+        permissionMode,
+        covenCommandContext
       );
     }
   } else {
-    launchCommand = buildAgentCommand(agent, permissionMode);
+    launchCommand = buildAgentCommand(agent, permissionMode, covenCommandContext);
   }
 
   if (agent === 'codex') {
