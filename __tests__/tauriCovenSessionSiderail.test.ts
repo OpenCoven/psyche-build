@@ -952,6 +952,7 @@ function createSessionContextMenuHarness(options: {
     `"use strict";
     var sessionTreeFocusKey = "";
     var projectAppearancePopover = null;
+    var state = { activeProjectId: "psyche" };
     function closeProjectAppearancePopover() {}
     var sessionContextMenu = null;
     var sessionContextMenuRestoreKey = "";
