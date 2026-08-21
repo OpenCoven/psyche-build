@@ -14153,6 +14153,9 @@
     var originalThreadId = state.activeThreadId;
     var originalFileId = state.activeFileId;
     var originalSidebarWidth = document.documentElement.style.getPropertyValue("--sidebar-w");
+    var originalProjectHadLastActiveThreadId =
+      Object.prototype.hasOwnProperty.call(project, "lastActiveThreadId");
+    var originalProjectLastActiveThreadId = project.lastActiveThreadId;
     var originalFileFocusHadReturnThreadId =
       Object.prototype.hasOwnProperty.call(fileFocus, "returnThreadId");
     var originalFileFocusReturnThreadId = fileFocus.returnThreadId;
@@ -14204,6 +14207,11 @@
           scheduleBrowserBounds();
           saveWorkspaceSoon();
         } finally {
+          if (originalProjectHadLastActiveThreadId) {
+            project.lastActiveThreadId = originalProjectLastActiveThreadId;
+          } else {
+            delete project.lastActiveThreadId;
+          }
           if (originalFileFocusHadReturnThreadId) {
             fileFocus.returnThreadId = originalFileFocusReturnThreadId;
           } else {

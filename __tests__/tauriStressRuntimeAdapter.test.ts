@@ -98,11 +98,16 @@ type FilesPaneState = {
   previousFocusedSessionId?: string | null;
 };
 
+type ProjectState = {
+  id: string;
+  lastActiveThreadId?: string | null;
+};
+
 async function createProductionRunScopeFixture(
   fileFocus: FocusState,
   filesPane: FilesPaneState,
+  project: ProjectState = { id: 'project-1' },
 ) {
-  const project = { id: 'project-1' };
   const workspaceRoot = '/workspace';
   const layoutKey = `${project.id}\0${workspaceRoot}`;
   const paneLayouts = new Map([[layoutKey, { root: {} }]]);
@@ -152,6 +157,7 @@ async function createProductionRunScopeFixture(
     prepareRun,
     fileFocus,
     filesPane,
+    project,
   };
 }
 
@@ -298,16 +304,18 @@ describe('Tauri stress runtime adapter', () => {
     expect(state.frames.pending()).toBe(0);
   });
 
-  it('restores pre-existing production editor focus state after a successful run', async () => {
+  it('restores pre-existing production focus state after a successful run', async () => {
     const production = await createProductionRunScopeFixture(
       { returnThreadId: 'terminal-before' },
       { previousFocusedSessionId: 'terminal-before' },
+      { id: 'project-1', lastActiveThreadId: 'terminal-before' },
     );
     const state = createHost();
     state.host.prepareRun = production.prepareRun;
     state.host.createEditor = async () => {
       production.fileFocus.returnThreadId = 'diagnostics-terminal';
       production.filesPane.previousFocusedSessionId = 'diagnostics-terminal';
+      production.project.lastActiveThreadId = 'diagnostics-terminal';
       return resource('editor', state.disposed);
     };
 
@@ -315,9 +323,10 @@ describe('Tauri stress runtime adapter', () => {
 
     expect(production.fileFocus.returnThreadId).toBe('terminal-before');
     expect(production.filesPane.previousFocusedSessionId).toBe('terminal-before');
+    expect(production.project.lastActiveThreadId).toBe('terminal-before');
   });
 
-  it('restores absent production editor focus properties after a failed run', async () => {
+  it('restores absent production focus properties after a failed run', async () => {
     const production = await createProductionRunScopeFixture({}, {});
     const state = createHost({
       resize() {
@@ -328,6 +337,7 @@ describe('Tauri stress runtime adapter', () => {
     state.host.createEditor = async () => {
       production.fileFocus.returnThreadId = 'diagnostics-terminal';
       production.filesPane.previousFocusedSessionId = 'diagnostics-terminal';
+      production.project.lastActiveThreadId = 'diagnostics-terminal';
       return resource('editor', state.disposed);
     };
 
@@ -336,9 +346,10 @@ describe('Tauri stress runtime adapter', () => {
 
     expect(Object.hasOwn(production.fileFocus, 'returnThreadId')).toBe(false);
     expect(Object.hasOwn(production.filesPane, 'previousFocusedSessionId')).toBe(false);
+    expect(Object.hasOwn(production.project, 'lastActiveThreadId')).toBe(false);
   });
 
-  it('restores explicitly undefined production editor focus state after cancellation', async () => {
+  it('restores explicitly undefined production focus state after cancellation', async () => {
     let warmupStarted!: () => void;
     const warmup = new Promise<void>((resolve) => {
       warmupStarted = resolve;
@@ -346,6 +357,7 @@ describe('Tauri stress runtime adapter', () => {
     const production = await createProductionRunScopeFixture(
       { returnThreadId: undefined },
       { previousFocusedSessionId: undefined },
+      { id: 'project-1', lastActiveThreadId: undefined },
     );
     const state = createHost({
       async sleep(_ms, signal) {
@@ -357,6 +369,7 @@ describe('Tauri stress runtime adapter', () => {
     state.host.createEditor = async () => {
       production.fileFocus.returnThreadId = 'diagnostics-terminal';
       production.filesPane.previousFocusedSessionId = 'diagnostics-terminal';
+      production.project.lastActiveThreadId = 'diagnostics-terminal';
       return resource('editor', state.disposed);
     };
     const harness = createTauriStressHarness(state.host);
@@ -369,6 +382,8 @@ describe('Tauri stress runtime adapter', () => {
     expect(production.fileFocus.returnThreadId).toBeUndefined();
     expect(Object.hasOwn(production.filesPane, 'previousFocusedSessionId')).toBe(true);
     expect(production.filesPane.previousFocusedSessionId).toBeUndefined();
+    expect(Object.hasOwn(production.project, 'lastActiveThreadId')).toBe(true);
+    expect(production.project.lastActiveThreadId).toBeUndefined();
   });
 
   it('rejects authorization before preparing or allocating runtime resources', async () => {
