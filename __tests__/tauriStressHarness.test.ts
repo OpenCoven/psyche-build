@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildStressFocusOrder,
   buildStressGeometry,
@@ -26,6 +28,22 @@ function abortableWait(signal: AbortSignal): Promise<void> {
       () => reject(signal.reason ?? abortError()),
       { once: true },
     );
+  });
+}
+
+function timerWait(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? abortError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', abort);
+      resolve();
+    }, ms);
+    const abort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
+      reject(signal.reason ?? abortError());
+    };
+    signal.addEventListener('abort', abort, { once: true });
   });
 }
 
@@ -131,12 +149,24 @@ describe('Tauri diagnostics stress harness', () => {
     });
   });
 
-  it('generates a large deterministic editor document and a local diagnostic browser page', () => {
+  it('generates a large deterministic editor document and an authorized local diagnostic page', () => {
     const document = createLargeEditorDocument(12);
     const page = createDiagnosticBrowserPage(12);
+    const pageUrl = new URL(page.url, 'tauri://localhost/index.html');
+    expect(pageUrl.href).toBe(
+      'tauri://localhost/diagnostics-fixture.html?paneCount=12',
+    );
+    const fixtureScript = readFileSync(
+      join(
+        process.cwd(),
+        'native/desktop/psyche-build-tauri/web/diagnostics-fixture.js',
+      ),
+      'utf8',
+    );
     const reports: Array<[string, { title: string }]> = [];
     let contextLost = false;
     const browserWindow: {
+      location: { search: string };
       __TAURI__: {
         core: {
           invoke(command: string, payload: { title: string }): Promise<void>;
@@ -144,6 +174,7 @@ describe('Tauri diagnostics stress harness', () => {
       };
       losePsycheDiagnosticsContext?: () => boolean;
     } = {
+      location: { search: pageUrl.search },
       __TAURI__: {
         core: {
           async invoke(command, payload) {
@@ -173,9 +204,7 @@ describe('Tauri diagnostics stress harness', () => {
         };
       },
     };
-    const script = page.html.match(/<script>([\s\S]+)<\/script>/)?.[1];
-    expect(script).toBeDefined();
-    Function('window', 'document', 'requestAnimationFrame', script as string)(
+    Function('window', 'document', 'requestAnimationFrame', fixtureScript)(
       browserWindow,
       browserDocument,
       () => 1,
@@ -186,12 +215,11 @@ describe('Tauri diagnostics stress harness', () => {
     expect(document.text.length).toBeGreaterThan(1_000_000);
     expect(document.text).toContain('pane=12 sequence=00000');
     expect(document.text).toContain('\u001b[36mrender-diagnostics\u001b[0m');
-    expect(page.url).toBe('about:blank');
     expect(page.title).toBe('Psyche render diagnostics · 12 panes');
-    expect(page.html).toContain('requestAnimationFrame');
-    expect(page.html).toContain('WEBGL_lose_context');
-    expect(page.html).toContain('context-unavailable');
-    expect(page.html).toContain('context-lost');
+    expect(fixtureScript).toContain('requestAnimationFrame');
+    expect(fixtureScript).toContain('WEBGL_lose_context');
+    expect(fixtureScript).toContain('context-unavailable');
+    expect(fixtureScript).toContain('context-lost');
     expect(browserWindow.losePsycheDiagnosticsContext?.()).toBe(true);
     expect(contextLost).toBe(true);
     expect(browserDocument.title).toBe(
@@ -332,6 +360,148 @@ describe('Tauri diagnostics stress harness', () => {
     expect(result.finishedAt - result.startedAt).toBe(4 * 45_000);
     expect(result.scenarios.map((scenario) => scenario.finishedAt - scenario.startedAt))
       .toEqual([45_000, 45_000, 45_000, 45_000]);
+  });
+
+  it('ends the phase at its deadline when a slow focus overlaps the budget', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const frames = createFrameDriver();
+      const disposed: string[] = [];
+      let activeFocuses = 0;
+      let abortedFocuses = 0;
+      let focusCalls = 0;
+      let measurementStartedAt = -1;
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          return createResource(`terminal-${index}`, disposed);
+        },
+        async createEditor() {
+          return createResource('editor', disposed);
+        },
+        async createBrowser() {
+          return createResource('browser', disposed);
+        },
+        async focus(_id, signal) {
+          focusCalls += 1;
+          activeFocuses += 1;
+          try {
+            await timerWait(2_000, signal ?? new AbortController().signal);
+          } catch (error) {
+            if (signal?.aborted) abortedFocuses += 1;
+            throw error;
+          } finally {
+            activeFocuses -= 1;
+          }
+        },
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        sleep: timerWait,
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => Date.now(),
+        onProgress(progress) {
+          if (progress.phase === 'measure' && progress.elapsedMs === 0) {
+            measurementStartedAt = Date.now();
+            throw new Error('stop after warmup');
+          }
+        },
+      };
+
+      const run = runStressPlan(dependencies);
+      const outcome = run.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(12_000);
+
+      await expect(outcome).resolves.toMatchObject({ message: 'stop after warmup' });
+      expect(measurementStartedAt).toBe(10_000);
+      expect(focusCalls).toBe(5);
+      expect(abortedFocuses).toBe(1);
+      expect(activeFocuses).toBe(0);
+      expect(frames.pending()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('aborts a hung focus at the phase deadline without leaking work', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const frames = createFrameDriver();
+      let activeFocuses = 0;
+      let abortedFocuses = 0;
+      let measurementStartedAt = -1;
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          return createResource(`terminal-${index}`, []);
+        },
+        async createEditor() {
+          return createResource('editor', []);
+        },
+        async createBrowser() {
+          return createResource('browser', []);
+        },
+        async focus(_id, signal) {
+          activeFocuses += 1;
+          try {
+            await new Promise<void>((_resolve, reject) => {
+              const safetyTimer = setTimeout(() => {
+                reject(new Error('hung focus leaked beyond phase deadline'));
+              }, 20_000);
+              signal?.addEventListener('abort', () => {
+                clearTimeout(safetyTimer);
+                abortedFocuses += 1;
+                reject(abortError());
+              }, { once: true });
+            });
+          } finally {
+            activeFocuses -= 1;
+          }
+        },
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        sleep: timerWait,
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => Date.now(),
+        onProgress(progress) {
+          if (progress.phase === 'measure' && progress.elapsedMs === 0) {
+            measurementStartedAt = Date.now();
+            throw new Error('stop after warmup');
+          }
+        },
+      };
+
+      const run = runStressPlan(dependencies);
+      const outcome = run.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(21_000);
+
+      await expect(outcome).resolves.toMatchObject({ message: 'stop after warmup' });
+      expect(measurementStartedAt).toBe(10_000);
+      expect(abortedFocuses).toBe(1);
+      expect(activeFocuses).toBe(0);
+      expect(frames.pending()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps focus operations on absolute 250 ms boundaries when focusing is slow', async () => {

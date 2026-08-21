@@ -37,9 +37,8 @@ export interface StressEditorDocument {
 
 export interface StressBrowserPage {
   paneCount: StressScenario['paneCount'];
-  url: 'about:blank';
+  url: string;
   title: string;
-  html: string;
 }
 
 export interface StressGeometry {
@@ -78,7 +77,7 @@ export interface StressHarnessDependencies {
   createTerminal(index: number, fixture: StressFixture): Promise<StressResource>;
   createEditor(document: StressEditorDocument): Promise<StressResource>;
   createBrowser(page: StressBrowserPage): Promise<StressResource>;
-  focus(id: string): Promise<void>;
+  focus(id: string, signal: AbortSignal): Promise<void>;
   resize(step: number, geometry: StressGeometry): void;
   setVisible(id: string, visible: boolean): Promise<void>;
   cycleWindow(): Promise<void>;
@@ -182,54 +181,10 @@ export function createDiagnosticBrowserPage(
   paneCount: StressScenario['paneCount'],
 ): StressBrowserPage {
   const title = `Psyche render diagnostics · ${paneCount} panes`;
-  const html = `<!doctype html>
-<html>
-<head><meta charset="utf-8"><title>${title}</title></head>
-<body>
-<canvas id="diagnostics-canvas" width="960" height="540"></canvas>
-<script>
-const canvas = document.getElementById('diagnostics-canvas');
-const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
-let frame = 0;
-function draw() {
-  frame += 1;
-  if (gl) {
-    gl.clearColor((frame % 255) / 255, ${paneCount} / 24, 0.5, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-  }
-  requestAnimationFrame(draw);
-}
-requestAnimationFrame(draw);
-function reportContextStatus(status) {
-  document.title = status;
-  try {
-    const core = window.__TAURI__ && window.__TAURI__.core;
-    const invoke = core && core.invoke;
-    if (typeof invoke === 'function') {
-      Promise.resolve(
-        invoke('browser_report_title', { title: status })
-      ).catch(function () {});
-    }
-  } catch (_) {}
-}
-window.losePsycheDiagnosticsContext = function () {
-  const extension = gl && gl.getExtension('WEBGL_lose_context');
-  if (!extension) {
-    reportContextStatus(${JSON.stringify(`${title} · context-unavailable`)});
-    return false;
-  }
-  reportContextStatus(${JSON.stringify(`${title} · context-lost`)});
-  extension.loseContext();
-  return true;
-};
-</script>
-</body>
-</html>`;
   return Object.freeze({
     paneCount,
-    url: 'about:blank',
+    url: `diagnostics-fixture.html?paneCount=${paneCount}`,
     title,
-    html,
   });
 }
 
@@ -262,6 +217,112 @@ function emitProgress(
     elapsedMs,
     phaseDurationMs,
   });
+}
+
+function phaseDeadlineError(): Error {
+  const error = new Error('stress phase deadline reached');
+  error.name = 'AbortError';
+  return error;
+}
+
+function isAbortError(error: unknown, signal: AbortSignal): boolean {
+  return signal.aborted && (
+    error === signal.reason
+    || (
+      typeof error === 'object'
+      && error !== null
+      && 'name' in error
+      && error.name === 'AbortError'
+    )
+  );
+}
+
+async function focusBeforeDeadline(
+  dependencies: StressHarnessDependencies,
+  id: string,
+  deadlineAt: number,
+  signal: AbortSignal,
+): Promise<boolean> {
+  throwIfAborted(signal);
+  const remainingMs = deadlineAt - dependencies.now();
+  if (remainingMs <= 0) return false;
+
+  const focusController = new AbortController();
+  const deadlineController = new AbortController();
+  const abortFocus = () => focusController.abort(abortReason(signal));
+  const abortDeadline = () => deadlineController.abort(abortReason(signal));
+  signal.addEventListener('abort', abortFocus, { once: true });
+  signal.addEventListener('abort', abortDeadline, { once: true });
+
+  let focusSettled = false;
+  let focusOperation: Promise<void>;
+  try {
+    focusOperation = Promise.resolve(dependencies.focus(id, focusController.signal));
+  } catch (error) {
+    focusOperation = Promise.reject(error);
+  }
+  const focusResult = focusOperation.then(
+    () => {
+      focusSettled = true;
+      return { kind: 'focus' as const };
+    },
+    (error: unknown) => {
+      focusSettled = true;
+      return { kind: 'focus-error' as const, error };
+    },
+  );
+  const deadlineResult = Promise.resolve().then(async () => {
+    if (focusSettled) return { kind: 'focus-already-settled' as const };
+    const delayMs = Math.max(0, deadlineAt - dependencies.now());
+    if (delayMs > 0) {
+      try {
+        await dependencies.sleep(delayMs, deadlineController.signal);
+      } catch (error) {
+        return { kind: 'deadline-error' as const, error };
+      }
+    }
+    return { kind: 'deadline' as const };
+  });
+
+  try {
+    let outcome = await Promise.race([focusResult, deadlineResult]);
+    if (outcome.kind === 'focus-already-settled') {
+      outcome = await focusResult;
+    }
+    if (outcome.kind === 'focus' || outcome.kind === 'focus-error') {
+      deadlineController.abort(phaseDeadlineError());
+      await deadlineResult;
+      if (outcome.kind === 'focus-error') throw outcome.error;
+      return true;
+    }
+    if (outcome.kind === 'deadline-error') {
+      focusController.abort(outcome.error);
+      const settledFocus = await focusResult;
+      if (
+        settledFocus.kind === 'focus-error'
+        && !isAbortError(settledFocus.error, focusController.signal)
+      ) {
+        throw settledFocus.error;
+      }
+      throw outcome.error;
+    }
+
+    const deadlineReason = phaseDeadlineError();
+    focusController.abort(deadlineReason);
+    const settledFocus = await focusResult;
+    if (
+      settledFocus.kind === 'focus-error'
+      && !isAbortError(settledFocus.error, focusController.signal)
+    ) {
+      throw settledFocus.error;
+    }
+    return false;
+  } finally {
+    signal.removeEventListener('abort', abortFocus);
+    signal.removeEventListener('abort', abortDeadline);
+    if (!focusController.signal.aborted) focusController.abort();
+    if (!deadlineController.signal.aborted) deadlineController.abort();
+  }
 }
 
 async function runActivePhase(
@@ -309,6 +370,7 @@ async function runActivePhase(
   try {
     requestGeometryFrame();
     const phaseStartedAt = dependencies.now();
+    const phaseDeadlineAt = phaseStartedAt + durationMs;
     let focusStep = 0;
     let nextFocusAt = phaseStartedAt + STRESS_FOCUS_INTERVAL_MS;
     while (true) {
@@ -329,7 +391,13 @@ async function runActivePhase(
       const elapsedBeforeFocus = Math.max(0, focusNow - phaseStartedAt);
       if (elapsedBeforeFocus >= durationMs) break;
       if (focusNow < nextFocusAt) continue;
-      await dependencies.focus(stressFocusId(focusOrder, focusStep));
+      const focused = await focusBeforeDeadline(
+        dependencies,
+        stressFocusId(focusOrder, focusStep),
+        phaseDeadlineAt,
+        phaseController.signal,
+      );
+      if (!focused) break;
       focusStep += 1;
       nextFocusAt += STRESS_FOCUS_INTERVAL_MS;
       const focusCompletedAt = dependencies.now();
@@ -530,6 +598,9 @@ async function runStressScenario(
     }
   }
 
+  if (primaryError === undefined && signal.aborted) {
+    primaryError = abortReason(signal);
+  }
   const combinedError = combineErrors(primaryError, cleanupErrors);
   if (combinedError !== undefined) throw combinedError;
   return result as StressScenarioResult;
@@ -556,13 +627,16 @@ export async function runStressPlan(
   try {
     throwIfAborted(runController.signal);
     for (let index = 0; index < STRESS_PLAN.length; index += 1) {
-      scenarios.push(await runStressScenario(
+      const scenarioResult = await runStressScenario(
         dependencies,
         runController.signal,
         index,
         STRESS_PLAN[index] as StressScenario,
-      ));
+      );
+      throwIfAborted(runController.signal);
+      scenarios.push(scenarioResult);
     }
+    throwIfAborted(runController.signal);
     return {
       startedAt,
       finishedAt: dependencies.now(),

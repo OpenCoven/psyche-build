@@ -14120,6 +14120,42 @@
   var activeDiagnosticsBrowserFixture = null;
   var diagnosticsFileCounter = 0;
 
+  function diagnosticsAbortReason(signal) {
+    if (signal && signal.reason !== undefined) return signal.reason;
+    var error = new Error("stress run cancelled");
+    error.name = "AbortError";
+    return error;
+  }
+
+  function awaitDiagnosticsOperation(operation, signal) {
+    if (!signal) return Promise.resolve(operation);
+    if (signal.aborted) {
+      Promise.resolve(operation).catch(function () {});
+      return Promise.reject(diagnosticsAbortReason(signal));
+    }
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      var abort = function () {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", abort);
+        reject(diagnosticsAbortReason(signal));
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      Promise.resolve(operation).then(function (value) {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      }, function (error) {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      });
+    });
+  }
+
   function diagnosticsCleanupFailure(primaryError, cleanupErrors, message) {
     if (!cleanupErrors.length) return primaryError;
     return new AggregateError(
@@ -14443,9 +14479,14 @@
     };
   }
 
+  function diagnosticsBrowserFixtureUrl(page) {
+    return new URL(page.url, window.location.href).href;
+  }
+
   async function createDiagnosticsBrowserFixture(page) {
     var project = diagnosticsStressProject();
     var context = diagnosticsStressContext;
+    var fixtureUrl = diagnosticsBrowserFixtureUrl(page);
     var existingPane = findBrowserPane(project.id, context.workspaceRoot);
     var existingPaneWasHidden = !!(existingPane && existingPane.hidden);
     if (existingPane && existingPane.hidden &&
@@ -14464,24 +14505,19 @@
       if (!pane) throw new Error("failed to allocate diagnostics browser pane");
       tab = createBrowserTab(
         project,
-        page.url,
+        fixtureUrl,
         true,
         context.workspaceRoot,
         { allowOverflow: true, diagnosticsFixture: true }
       );
       if (!tab) throw new Error("failed to allocate diagnostics browser tab");
-      var navigated = await navigateBrowserForContext(page.url, {
+      var navigated = await navigateBrowserForContext(fixtureUrl, {
         project: project,
         projectId: project.id,
         worktreePath: context.workspaceRoot,
         tabId: tab.id,
       });
       if (!navigated) throw new Error("failed to navigate diagnostics browser");
-      await invoke("browser_eval", {
-        label: browserLabelForTab(project, tab),
-        script: "document.open();document.write(" + JSON.stringify(page.html) +
-          ");document.close();",
-      });
       tab.title = page.title;
       renderBrowserTabs();
     } catch (error) {
@@ -14587,7 +14623,8 @@
     };
   }
 
-  async function focusDiagnosticsStressSurface(id) {
+  async function focusDiagnosticsStressSurface(id, signal) {
+    if (signal && signal.aborted) throw diagnosticsAbortReason(signal);
     var surface = canvasSurfaceById(id);
     if (!surface) throw new Error("diagnostics surface is unavailable: " + id);
     if (surface.kind === "files") {
@@ -14598,10 +14635,14 @@
       return;
     }
     if (surface.hidden) return;
-    if (!(await focusThread(surface.id, {
-      focusTerminal: surface.kind !== "web",
-      refreshStatus: false,
-    }))) {
+    var focused = await awaitDiagnosticsOperation(
+      focusThread(surface.id, {
+        focusTerminal: surface.kind !== "web",
+        refreshStatus: false,
+      }),
+      signal
+    );
+    if (!focused) {
       throw new Error("failed to focus diagnostics surface " + id);
     }
   }

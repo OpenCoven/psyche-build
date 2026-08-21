@@ -285,6 +285,46 @@ describe('Tauri stress runtime adapter', () => {
     expect(state.frames.pending()).toBe(0);
   });
 
+  it('rejects cancellation during final-scenario cleanup after disposing every resource', async () => {
+    let finalCleanupStarted!: () => void;
+    const finalCleanup = new Promise<void>((resolve) => {
+      finalCleanupStarted = resolve;
+    });
+    let releaseFinalCleanup!: () => void;
+    const finalCleanupRelease = new Promise<void>((resolve) => {
+      releaseFinalCleanup = resolve;
+    });
+    const state = createHost();
+    let browserCount = 0;
+    state.host.createBrowser = async () => {
+      const id = `browser-${browserCount}`;
+      browserCount += 1;
+      return {
+        id,
+        async dispose() {
+          if (id === 'browser-3') {
+            finalCleanupStarted();
+            await finalCleanupRelease;
+          }
+          state.disposed.push(id);
+        },
+      };
+    };
+    const harness = createTauriStressHarness(state.host);
+    const run = harness.run();
+    await finalCleanup;
+
+    expect(harness.cancel()).toBe(true);
+    releaseFinalCleanup();
+
+    await expect(run).rejects.toMatchObject({ name: 'AbortError' });
+    expect(state.disposed).toHaveLength(52);
+    expect(state.disposed.at(-1)).toBe('run-scope');
+    expect(state.clearedIntervals).toHaveLength(1);
+    expect(state.frames.pending()).toBe(0);
+    expect(harness.running()).toBe(false);
+  });
+
   it('cleans adapter and scenario resources after a production operation fails', async () => {
     const state = createHost({
       resize() {
@@ -433,5 +473,59 @@ describe('Tauri stress runtime adapter', () => {
     expect(main).not.toContain('!existingPane && browser.tabs.length === 0');
     expect(main).toContain('window.PsycheRenderStress = runtimeStressHarness;');
     expect(main).toContain('await installRuntimeStressHarness();');
+  });
+
+  it('uses the authorized local fixture origin and observes context loss through production code', async () => {
+    const diagnosticsBrowserFixtureUrl = compileFunction<
+      (page: { url: string }) => string
+    >(functionSource('diagnosticsBrowserFixtureUrl'), {
+      window: {
+        location: {
+          href: 'tauri://localhost/index.html',
+        },
+      },
+    });
+    const page = {
+      url: 'diagnostics-fixture.html?paneCount=12',
+      title: 'Psyche render diagnostics · 12 panes',
+    };
+    expect(diagnosticsBrowserFixtureUrl(page)).toBe(
+      'tauri://localhost/diagnostics-fixture.html?paneCount=12',
+    );
+
+    const tab = { title: page.title };
+    const fixture = {
+      project: { id: 'project-1' },
+      browser: { tabs: [tab] },
+      tab,
+      page,
+    };
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    const loseDiagnosticsBrowserContext = compileFunction<() => Promise<boolean>>(
+      functionSource('loseDiagnosticsBrowserContext'),
+      {
+        activeDiagnosticsBrowserFixture: fixture,
+        browserLabelForTab: () => 'browser-label',
+        invoke: async (command: string, args: Record<string, unknown>) => {
+          calls.push([command, args]);
+          tab.title = `${page.title} · context-lost`;
+        },
+        setTimeout,
+      },
+    );
+
+    await expect(loseDiagnosticsBrowserContext()).resolves.toBe(true);
+    expect(calls).toEqual([
+      [
+        'browser_eval',
+        {
+          label: 'browser-label',
+          script: 'window.losePsycheDiagnosticsContext && window.losePsycheDiagnosticsContext();',
+        },
+      ],
+    ]);
+    const createBrowserSource = functionSource('createDiagnosticsBrowserFixture');
+    expect(createBrowserSource).toContain('diagnosticsBrowserFixtureUrl(page)');
+    expect(createBrowserSource).not.toContain('document.write');
   });
 });

@@ -23,7 +23,7 @@ export interface TauriStressRuntimeHost {
   createTerminal(index: number, fixture: StressFixture): Promise<StressResource>;
   createEditor(document: StressEditorDocument): Promise<StressResource>;
   createBrowser(page: StressBrowserPage): Promise<StressResource>;
-  focus(id: string): Promise<void>;
+  focus(id: string, signal: AbortSignal): Promise<void>;
   resize(step: number, geometry: StressGeometry): void;
   setVisible(id: string, visible: boolean): Promise<void>;
   loseGraphicsContext(): Promise<boolean>;
@@ -168,6 +168,9 @@ export function createTauriStressHarness(
       if (activeController === controller) activeController = null;
     }
 
+    if (primaryError === undefined && controller.signal.aborted) {
+      primaryError = abortReason(controller.signal);
+    }
     const combinedError = combineErrors(primaryError, cleanupErrors);
     if (combinedError !== undefined) throw combinedError;
     return result as StressRunResult;

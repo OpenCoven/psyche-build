@@ -1972,7 +1972,9 @@ fn browser_documents_match_exact(left: &str, right: &str) -> bool {
     let Ok(right) = Url::parse(right) else {
         return false;
     };
-    matches!(left.scheme(), "http" | "https" | "about") && left == right
+    let supported_origin = matches!(left.scheme(), "http" | "https" | "about")
+        || (left.scheme() == "tauri" && left.host_str() == Some("localhost"));
+    supported_origin && left == right
 }
 
 fn retire_browser_authority_for_page_load(label: &str, current_url: &str) -> bool {
@@ -9627,6 +9629,16 @@ mod pty_runtime_tests {
                 "{left} should remain distinct from {right}"
             );
         }
+    }
+
+    #[test]
+    fn browser_document_matching_accepts_only_the_local_app_origin() {
+        let local_fixture = "tauri://localhost/diagnostics-fixture.html?paneCount=12";
+        assert!(browser_documents_match_exact(local_fixture, local_fixture));
+        assert!(!browser_documents_match_exact(
+            "tauri://untrusted.invalid/diagnostics-fixture.html?paneCount=12",
+            "tauri://untrusted.invalid/diagnostics-fixture.html?paneCount=12",
+        ));
     }
 
     #[test]
