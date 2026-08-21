@@ -45,6 +45,16 @@
           </button>
           <span class="titlebar-spacer" data-tauri-drag-region></span>
           <button
+            id="graphics-diagnostics-toggle"
+            class="chrome-btn graphics-diagnostics-toggle"
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="graphics-diagnostics-panel"
+            hidden
+            disabled
+          >Diagnostics</button>
+          <button
             id="agent-control-toggle"
             class="chrome-btn agent-control-toggle"
             type="button"
@@ -446,6 +456,81 @@
       </div>
 
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+      <div
+        class="graphics-diagnostics-shell"
+        id="graphics-diagnostics-shell"
+        hidden
+        inert
+      >
+        <section
+          id="graphics-diagnostics-panel"
+          class="graphics-diagnostics-panel"
+          role="dialog"
+          aria-modal="false"
+          aria-labelledby="graphics-diagnostics-title"
+          tabindex="-1"
+        >
+          <header class="graphics-diagnostics-head">
+            <div>
+              <h2 id="graphics-diagnostics-title">Graphics diagnostics</h2>
+              <p>Live development evidence from the production renderer and transport paths.</p>
+            </div>
+            <button
+              id="graphics-diagnostics-close"
+              type="button"
+              aria-label="Close graphics diagnostics"
+            >×</button>
+          </header>
+          <p
+            class="graphics-diagnostics-fallback"
+            id="graphics-diagnostics-fallback"
+            role="alert"
+            hidden
+          >Software rendering fallback is active.</p>
+          <p
+            class="graphics-diagnostics-status"
+            id="graphics-diagnostics-status"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >Collecting diagnostics…</p>
+          <div
+            class="graphics-diagnostics-content"
+            id="graphics-diagnostics-content"
+          ></div>
+          <section
+            class="graphics-diagnostics-scenario"
+            id="graphics-diagnostics-scenario"
+            aria-labelledby="graphics-diagnostics-scenario-title"
+            hidden
+            inert
+          >
+            <h3 id="graphics-diagnostics-scenario-title">Stress scenario</h3>
+            <progress
+              id="graphics-diagnostics-progress"
+              max="1"
+              value="0"
+              aria-label="Stress scenario phase progress"
+              aria-describedby="graphics-diagnostics-progress-text"
+            ></progress>
+            <p
+              id="graphics-diagnostics-progress-text"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >Authorized and ready.</p>
+            <div class="graphics-diagnostics-scenario-actions">
+              <button id="graphics-diagnostics-run" type="button">Run fixed scenario</button>
+              <button id="graphics-diagnostics-cancel" type="button" disabled>Cancel scenario</button>
+            </div>
+          </section>
+          <footer class="graphics-diagnostics-actions">
+            <button id="graphics-diagnostics-refresh" type="button">Refresh</button>
+            <button id="graphics-diagnostics-copy" type="button">Copy JSON</button>
+          </footer>
+        </section>
+      </div>
 
       <div class="agent-control-overlay" id="agent-control-overlay" hidden>
         <section

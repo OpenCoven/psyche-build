@@ -562,6 +562,20 @@ describe('Tauri stress runtime adapter', () => {
     expect(main).not.toContain('!existingPane && browser.tabs.length === 0');
     expect(main).toContain('window.PsycheRenderStress = runtimeStressHarness;');
     expect(main).toContain('await installRuntimeStressHarness();');
+    expect(main).toContain('async function runGraphicsDiagnosticsStressScenario()');
+    expect(main).toContain('runtimeStressHarness.run()');
+    expect(main).toContain('function cancelGraphicsDiagnosticsStressScenario()');
+    expect(main).toContain('runtimeStressHarness.cancel()');
+    expect(main).toContain(
+      'graphicsDiagnosticsScenarioEl.hidden = report.stressAuthorized !== true;',
+    );
+    expect(main).toContain(
+      'graphicsDiagnosticsScenarioEl.inert = report.stressAuthorized !== true;',
+    );
+    expect(main).toContain('updateGraphicsDiagnosticsStressProgress(progress);');
+    expect(main).toContain(
+      'window.dispatchEvent(new CustomEvent("psyche:render-stress-progress"',
+    );
   });
 
   it('accepts packaged fixture context loss through the browser title event path', async () => {

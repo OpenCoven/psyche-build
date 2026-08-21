@@ -1357,6 +1357,20 @@
   var newPaneMenuHeadEl = document.getElementById("new-pane-menu-head");
   var statusAlertEl = document.getElementById("status-alert");
   var toastEl = document.getElementById("toast");
+  var graphicsDiagnosticsToggleEl = document.getElementById("graphics-diagnostics-toggle");
+  var graphicsDiagnosticsShellEl = document.getElementById("graphics-diagnostics-shell");
+  var graphicsDiagnosticsPanelEl = document.getElementById("graphics-diagnostics-panel");
+  var graphicsDiagnosticsCloseEl = document.getElementById("graphics-diagnostics-close");
+  var graphicsDiagnosticsFallbackEl = document.getElementById("graphics-diagnostics-fallback");
+  var graphicsDiagnosticsStatusEl = document.getElementById("graphics-diagnostics-status");
+  var graphicsDiagnosticsContentEl = document.getElementById("graphics-diagnostics-content");
+  var graphicsDiagnosticsScenarioEl = document.getElementById("graphics-diagnostics-scenario");
+  var graphicsDiagnosticsProgressEl = document.getElementById("graphics-diagnostics-progress");
+  var graphicsDiagnosticsProgressTextEl = document.getElementById("graphics-diagnostics-progress-text");
+  var graphicsDiagnosticsRunEl = document.getElementById("graphics-diagnostics-run");
+  var graphicsDiagnosticsCancelEl = document.getElementById("graphics-diagnostics-cancel");
+  var graphicsDiagnosticsRefreshEl = document.getElementById("graphics-diagnostics-refresh");
+  var graphicsDiagnosticsCopyEl = document.getElementById("graphics-diagnostics-copy");
   var helpOverlayEl = document.getElementById("help-overlay");
   var agentPickerOverlayEl = document.getElementById("agent-picker-overlay");
   var agentPickerListEl = document.getElementById("agent-picker-list");
@@ -12729,14 +12743,15 @@
       (event.target && event.target.isContentEditable);
     // Esc cascade — one key, most-transient layer first, so it never skips
     // past something the user is looking at to undo something they aren't:
-    // picker → help → menus → set picking → armed confirm → file return →
-    // focus mode.
+    // picker → help → menus → diagnostics → set picking → armed confirm →
+    // file return → focus mode.
     if (event.key === "Escape") {
       if (agentPickerOpen()) { closeAgentPicker(); return; }
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
       var menuWasOpen = newPaneMenuEl && !newPaneMenuEl.hidden;
       closeNewPaneMenu(menuWasOpen);
       if (menuWasOpen) return;
+      if (handleGraphicsDiagnosticsKeydown(event)) return;
       if (cancelSetPicking()) return;
       if (armedSessionClose) { disarmSessionClose(); return; }
       // A call is the most transient thing on screen after a menu, and ending
@@ -14136,9 +14151,20 @@
   }
 
   var runtimeStressHarness = null;
+  var runtimeDiagnosticsReport = null;
   var diagnosticsStressContext = null;
   var activeDiagnosticsBrowserFixture = null;
   var diagnosticsFileCounter = 0;
+  var graphicsDiagnosticsCollector = null;
+  var graphicsDiagnosticsReport = null;
+  var graphicsDiagnosticsRenderTimer = 0;
+  var graphicsDiagnosticsCloseTimer = 0;
+  var graphicsDiagnosticsRefreshFlight = null;
+  var graphicsDiagnosticsOpen = false;
+  var graphicsDiagnosticsScenarioState = "idle";
+  var graphicsDiagnosticsScenarioProgress = null;
+  var graphicsDiagnosticsScenarioResult = null;
+  var graphicsDiagnosticsScenarioError = null;
 
   function diagnosticsAbortReason(signal) {
     if (signal && signal.reason !== undefined) return signal.reason;
@@ -14736,9 +14762,374 @@
     }).filter(Boolean);
   }
 
+  function graphicsDiagnosticsSnapshot() {
+    var snapshot = {};
+    if (graphicsDiagnosticsReport) snapshot.graphics = graphicsDiagnosticsReport;
+    if (graphicsDiagnosticsCollector) {
+      try {
+        snapshot.metrics = graphicsDiagnosticsCollector.snapshot();
+      } catch (error) {
+        console.warn("[graphics diagnostics] metrics snapshot failed", error);
+      }
+    }
+    if (runtimeDiagnosticsReport && runtimeDiagnosticsReport.stressAuthorized === true &&
+        runtimeStressHarness) {
+      snapshot.scenario = { state: graphicsDiagnosticsScenarioState };
+      if (graphicsDiagnosticsScenarioProgress) {
+        snapshot.scenario.progress = graphicsDiagnosticsScenarioProgress;
+      }
+      if (graphicsDiagnosticsScenarioResult) {
+        snapshot.scenario.result = graphicsDiagnosticsScenarioResult;
+      }
+      if (graphicsDiagnosticsScenarioError) {
+        snapshot.scenario.error = graphicsDiagnosticsScenarioError;
+      }
+    }
+    return snapshot;
+  }
+
+  function renderGraphicsDiagnosticsProgress() {
+    if (!graphicsDiagnosticsScenarioEl || graphicsDiagnosticsScenarioEl.hidden) return;
+    var progress = graphicsDiagnosticsScenarioProgress;
+    var running = graphicsDiagnosticsScenarioState === "running";
+    var cancelling = graphicsDiagnosticsScenarioState === "cancelling";
+    if (graphicsDiagnosticsRunEl) {
+      graphicsDiagnosticsRunEl.disabled = running || cancelling;
+    }
+    if (graphicsDiagnosticsCancelEl) {
+      graphicsDiagnosticsCancelEl.disabled = !running;
+    }
+    if (graphicsDiagnosticsProgressEl) {
+      if (progress && progress.phaseDurationMs > 0) {
+        graphicsDiagnosticsProgressEl.max = progress.phaseDurationMs;
+        graphicsDiagnosticsProgressEl.value = Math.min(
+          progress.phaseDurationMs,
+          Math.max(0, progress.elapsedMs)
+        );
+      } else if (graphicsDiagnosticsScenarioState === "completed") {
+        graphicsDiagnosticsProgressEl.max = 1;
+        graphicsDiagnosticsProgressEl.value = 1;
+      } else {
+        graphicsDiagnosticsProgressEl.max = 1;
+        graphicsDiagnosticsProgressEl.value = 0;
+      }
+    }
+    if (!graphicsDiagnosticsProgressTextEl) return;
+    if (progress && (running || cancelling)) {
+      graphicsDiagnosticsProgressTextEl.textContent =
+        ptyRuntime.formatDiagnosticsStressProgress(progress) +
+        (cancelling ? " · Cancellation requested" : "");
+      return;
+    }
+    if (graphicsDiagnosticsScenarioState === "running") {
+      graphicsDiagnosticsProgressTextEl.textContent = "Preparing the fixed stress scenario.";
+    } else if (graphicsDiagnosticsScenarioState === "cancelling") {
+      graphicsDiagnosticsProgressTextEl.textContent =
+        "Cancellation requested. Waiting for production cleanup.";
+    } else if (graphicsDiagnosticsScenarioState === "completed") {
+      var result = graphicsDiagnosticsScenarioResult;
+      var elapsed = result ? Math.max(0, result.finishedAt - result.startedAt) : 0;
+      graphicsDiagnosticsProgressTextEl.textContent =
+        "Completed all fixed scenarios in " + (elapsed / 1000).toFixed(1) + " seconds.";
+    } else if (graphicsDiagnosticsScenarioState === "cancelled") {
+      graphicsDiagnosticsProgressTextEl.textContent =
+        "Scenario cancelled. Production resources were cleaned up.";
+    } else if (graphicsDiagnosticsScenarioState === "failed") {
+      graphicsDiagnosticsProgressTextEl.textContent =
+        "Scenario failed. " + (graphicsDiagnosticsScenarioError || "");
+    } else {
+      graphicsDiagnosticsProgressTextEl.textContent = "Authorized and ready.";
+    }
+  }
+
+  function renderGraphicsDiagnosticsSurface() {
+    if (!graphicsDiagnosticsContentEl ||
+        typeof ptyRuntime.buildGraphicsDiagnosticsView !== "function") return;
+    var view = ptyRuntime.buildGraphicsDiagnosticsView(
+      graphicsDiagnosticsSnapshot()
+    );
+    graphicsDiagnosticsContentEl.replaceChildren();
+    view.sections.forEach(function (section) {
+      var sectionEl = document.createElement("section");
+      sectionEl.className = "graphics-diagnostics-section";
+      sectionEl.dataset.section = section.key;
+      var title = document.createElement("h3");
+      title.textContent = section.title;
+      var list = document.createElement("dl");
+      list.className = "graphics-diagnostics-list";
+      section.rows.forEach(function (entry) {
+        var rowEl = document.createElement("div");
+        rowEl.className = "graphics-diagnostics-row";
+        rowEl.dataset.field = entry.key;
+        if (entry.tone) rowEl.dataset.tone = entry.tone;
+        var term = document.createElement("dt");
+        term.textContent = entry.label;
+        var description = document.createElement("dd");
+        description.textContent = entry.value;
+        rowEl.append(term, description);
+        list.appendChild(rowEl);
+      });
+      sectionEl.append(title, list);
+      graphicsDiagnosticsContentEl.appendChild(sectionEl);
+    });
+    if (graphicsDiagnosticsFallbackEl) {
+      graphicsDiagnosticsFallbackEl.hidden = !view.softwareFallback;
+    }
+    if (graphicsDiagnosticsPanelEl) {
+      graphicsDiagnosticsPanelEl.dataset.softwareFallback =
+        view.softwareFallback ? "true" : "false";
+    }
+    if (graphicsDiagnosticsStatusEl) {
+      graphicsDiagnosticsStatusEl.textContent = view.sections.length
+        ? "Live diagnostics are updating."
+        : "Diagnostics evidence is unavailable.";
+    }
+    renderGraphicsDiagnosticsProgress();
+  }
+
+  function updateGraphicsDiagnosticsStressProgress(progress) {
+    graphicsDiagnosticsScenarioProgress = progress;
+    if (graphicsDiagnosticsScenarioState !== "cancelling") {
+      graphicsDiagnosticsScenarioState = "running";
+    }
+    renderGraphicsDiagnosticsSurface();
+  }
+
+  function setGraphicsDiagnosticsOpen(open) {
+    if (!graphicsDiagnosticsToggleEl || !graphicsDiagnosticsShellEl ||
+        !graphicsDiagnosticsPanelEl || graphicsDiagnosticsToggleEl.hidden) return false;
+    graphicsDiagnosticsOpen = !!open;
+    if (graphicsDiagnosticsCloseTimer) {
+      clearTimeout(graphicsDiagnosticsCloseTimer);
+      graphicsDiagnosticsCloseTimer = 0;
+    }
+    graphicsDiagnosticsToggleEl.setAttribute(
+      "aria-expanded",
+      graphicsDiagnosticsOpen ? "true" : "false"
+    );
+    if (graphicsDiagnosticsOpen) {
+      graphicsDiagnosticsShellEl.hidden = false;
+      graphicsDiagnosticsShellEl.inert = false;
+      renderGraphicsDiagnosticsSurface();
+      window.requestAnimationFrame(function () {
+        if (!graphicsDiagnosticsOpen) return;
+        beginCompositorTransition(graphicsDiagnosticsShellEl);
+        beginCompositorTransition(graphicsDiagnosticsPanelEl);
+        graphicsDiagnosticsShellEl.classList.add("is-open");
+        if (graphicsDiagnosticsCloseEl) graphicsDiagnosticsCloseEl.focus();
+      });
+      toast("Graphics diagnostics opened");
+      return true;
+    }
+    beginCompositorTransition(graphicsDiagnosticsShellEl);
+    beginCompositorTransition(graphicsDiagnosticsPanelEl);
+    graphicsDiagnosticsShellEl.classList.remove("is-open");
+    graphicsDiagnosticsShellEl.inert = true;
+    graphicsDiagnosticsCloseTimer = setTimeout(function () {
+      if (graphicsDiagnosticsOpen) return;
+      graphicsDiagnosticsShellEl.hidden = true;
+      graphicsDiagnosticsCloseTimer = 0;
+    }, 220);
+    graphicsDiagnosticsToggleEl.focus();
+    toast("Graphics diagnostics closed");
+    return true;
+  }
+
+  async function refreshGraphicsDiagnosticsSurface(options) {
+    if (graphicsDiagnosticsRefreshFlight) return graphicsDiagnosticsRefreshFlight;
+    options = options || {};
+    if (graphicsDiagnosticsRefreshEl) graphicsDiagnosticsRefreshEl.disabled = true;
+    if (graphicsDiagnosticsPanelEl) {
+      graphicsDiagnosticsPanelEl.setAttribute("aria-busy", "true");
+    }
+    graphicsDiagnosticsRefreshFlight = Promise.resolve().then(async function () {
+      var report = await ptyRuntime.collectRuntimeGraphicsReport({
+        invoke: invoke,
+        reportError: function (error, operation) {
+          console.warn("[graphics diagnostics] " + operation + " failed", error);
+        },
+      });
+      if (!report) throw new Error("graphics evidence is unavailable");
+      graphicsDiagnosticsReport = report;
+      renderGraphicsDiagnosticsSurface();
+      if (options.announce !== false) toast("Graphics diagnostics refreshed");
+      return report;
+    }).catch(function (error) {
+      showStatusError("Graphics diagnostics refresh failed: " + String(error));
+      return null;
+    }).finally(function () {
+      graphicsDiagnosticsRefreshFlight = null;
+      if (graphicsDiagnosticsRefreshEl) graphicsDiagnosticsRefreshEl.disabled = false;
+      if (graphicsDiagnosticsPanelEl) {
+        graphicsDiagnosticsPanelEl.removeAttribute("aria-busy");
+      }
+    });
+    return graphicsDiagnosticsRefreshFlight;
+  }
+
+  async function copyGraphicsDiagnosticsJson() {
+    try {
+      if (!clipboardManager || typeof clipboardManager.writeText !== "function") {
+        throw new Error("clipboard support is unavailable");
+      }
+      var json = ptyRuntime.serializeGraphicsDiagnosticsSnapshot(
+        graphicsDiagnosticsSnapshot()
+      );
+      await clipboardManager.writeText(json);
+      toast("Graphics diagnostics JSON copied");
+      return true;
+    } catch (error) {
+      showStatusError("Graphics diagnostics copy failed: " + String(error));
+      return false;
+    }
+  }
+
+  function graphicsDiagnosticsCancellation(error) {
+    if (!error || typeof error !== "object") return false;
+    if (error.name === "AbortError") return true;
+    return !!error.cause && graphicsDiagnosticsCancellation(error.cause);
+  }
+
+  async function runGraphicsDiagnosticsStressScenario() {
+    if (!runtimeStressHarness ||
+        !runtimeDiagnosticsReport ||
+        runtimeDiagnosticsReport.stressAuthorized !== true) {
+      showStatusError("Graphics stress diagnostics are not authorized");
+      return null;
+    }
+    if (runtimeStressHarness.running()) return null;
+    graphicsDiagnosticsScenarioState = "running";
+    graphicsDiagnosticsScenarioProgress = null;
+    graphicsDiagnosticsScenarioResult = null;
+    graphicsDiagnosticsScenarioError = null;
+    renderGraphicsDiagnosticsSurface();
+    toast("Graphics stress scenario started");
+    try {
+      var result = await runtimeStressHarness.run();
+      graphicsDiagnosticsScenarioResult = result;
+      graphicsDiagnosticsScenarioState = "completed";
+      toast("Graphics stress scenario completed");
+      return result;
+    } catch (error) {
+      if (graphicsDiagnosticsCancellation(error)) {
+        graphicsDiagnosticsScenarioState = "cancelled";
+        toast("Graphics stress scenario cancelled");
+      } else {
+        graphicsDiagnosticsScenarioState = "failed";
+        graphicsDiagnosticsScenarioError = String(error);
+        showStatusError("Graphics stress scenario failed: " + String(error));
+      }
+      return null;
+    } finally {
+      renderGraphicsDiagnosticsSurface();
+    }
+  }
+
+  function cancelGraphicsDiagnosticsStressScenario() {
+    if (!runtimeStressHarness || !runtimeStressHarness.running()) return false;
+    var cancelled = runtimeStressHarness.cancel();
+    if (!cancelled) return false;
+    graphicsDiagnosticsScenarioState = "cancelling";
+    renderGraphicsDiagnosticsSurface();
+    toast("Graphics stress scenario cancellation requested");
+    return true;
+  }
+
+  function handleGraphicsDiagnosticsKeydown(event) {
+    if (!graphicsDiagnosticsOpen || event.key !== "Escape") return false;
+    event.preventDefault();
+    event.stopPropagation();
+    if (graphicsDiagnosticsScenarioState === "running") {
+      cancelGraphicsDiagnosticsStressScenario();
+      return true;
+    }
+    setGraphicsDiagnosticsOpen(false);
+    return true;
+  }
+
+  async function installGraphicsDiagnosticsSurface() {
+    var report = runtimeDiagnosticsReport;
+    if (!report) {
+      try {
+        report = await invoke("runtime_diagnostics");
+      } catch (error) {
+        console.warn("[graphics diagnostics] availability check failed", error);
+      }
+    }
+    if (!report || report.debugBuild !== true) return null;
+    if (!graphicsDiagnosticsToggleEl || !graphicsDiagnosticsShellEl ||
+        !graphicsDiagnosticsPanelEl || !graphicsDiagnosticsCloseEl ||
+        !graphicsDiagnosticsContentEl || !graphicsDiagnosticsRefreshEl ||
+        !graphicsDiagnosticsCopyEl || !graphicsDiagnosticsScenarioEl ||
+        !graphicsDiagnosticsRunEl || !graphicsDiagnosticsCancelEl) {
+      console.warn("[graphics diagnostics] panel markup is incomplete");
+      return null;
+    }
+    runtimeDiagnosticsReport = report;
+    graphicsDiagnosticsToggleEl.hidden = false;
+    graphicsDiagnosticsToggleEl.disabled = false;
+    graphicsDiagnosticsScenarioEl.hidden = report.stressAuthorized !== true;
+    graphicsDiagnosticsScenarioEl.inert = report.stressAuthorized !== true;
+    if (report.stressAuthorized === true && !runtimeStressHarness) {
+      graphicsDiagnosticsScenarioEl.hidden = true;
+      graphicsDiagnosticsScenarioEl.inert = true;
+    }
+
+    graphicsDiagnosticsToggleEl.addEventListener("click", function () {
+      setGraphicsDiagnosticsOpen(!graphicsDiagnosticsOpen);
+    });
+    graphicsDiagnosticsCloseEl.addEventListener("click", function () {
+      setGraphicsDiagnosticsOpen(false);
+    });
+    graphicsDiagnosticsRefreshEl.addEventListener("click", function () {
+      void refreshGraphicsDiagnosticsSurface();
+    });
+    graphicsDiagnosticsCopyEl.addEventListener("click", function () {
+      void copyGraphicsDiagnosticsJson();
+    });
+    graphicsDiagnosticsRunEl.addEventListener("click", function () {
+      void runGraphicsDiagnosticsStressScenario();
+    });
+    graphicsDiagnosticsCancelEl.addEventListener("click", function () {
+      cancelGraphicsDiagnosticsStressScenario();
+    });
+
+    graphicsDiagnosticsCollector = ptyRuntime.createPerformanceMetricsCollector({
+      invoke: invoke,
+      requestFrame: window.requestAnimationFrame.bind(window),
+      cancelFrame: window.cancelAnimationFrame.bind(window),
+      now: performance.now.bind(performance),
+      visibilityTarget: document,
+      schedulerSnapshot: function () { return terminalFrameScheduler.snapshot(); },
+      rendererSnapshots: diagnosticsRendererSnapshots,
+      createPerformanceObserver: typeof PerformanceObserver === "function"
+        ? function (callback) { return new PerformanceObserver(callback); }
+        : undefined,
+      reportError: function (error, operation) {
+        console.warn("[graphics diagnostics] " + operation + " failed", error);
+      },
+    });
+    graphicsDiagnosticsCollector.start();
+    graphicsDiagnosticsReport =
+      await ptyRuntime.ensureRuntimeGraphicsStartupSummary();
+    if (!graphicsDiagnosticsReport) {
+      await refreshGraphicsDiagnosticsSurface({ announce: false });
+    } else {
+      renderGraphicsDiagnosticsSurface();
+    }
+    graphicsDiagnosticsRenderTimer = setInterval(function () {
+      if (graphicsDiagnosticsOpen) renderGraphicsDiagnosticsSurface();
+    }, 1000);
+    return {
+      collector: graphicsDiagnosticsCollector,
+      renderTimer: graphicsDiagnosticsRenderTimer,
+    };
+  }
+
   async function installRuntimeStressHarness() {
     try {
       var report = await invoke("runtime_diagnostics");
+      runtimeDiagnosticsReport = report;
       if (!report || report.debugBuild !== true || report.stressAuthorized !== true) return null;
       runtimeStressHarness = ptyRuntime.createTauriStressHarness({
         authorized: true,
@@ -14760,6 +15151,7 @@
           ? function (callback) { return new PerformanceObserver(callback); }
           : undefined,
         onProgress: function (progress) {
+          updateGraphicsDiagnosticsStressProgress(progress);
           window.dispatchEvent(new CustomEvent("psyche:render-stress-progress", {
             detail: progress,
           }));
@@ -14828,6 +15220,7 @@
     refreshVisiblePaneMetrics();
     if (typeof refreshStatusController === "function") refreshStatusController();
     await installRuntimeStressHarness();
+    await installGraphicsDiagnosticsSurface();
   }
 
   invoke("app_environment")

@@ -1,4 +1,17 @@
 import { snapshotFrameSchedulerResources } from './frame-scheduler';
+export {
+  buildGraphicsDiagnosticsView,
+  formatDiagnosticsStressProgress,
+  serializeGraphicsDiagnosticsSnapshot,
+} from './diagnostics-surface';
+export type {
+  GraphicsDiagnosticsRow,
+  GraphicsDiagnosticsScenarioSnapshot,
+  GraphicsDiagnosticsSection,
+  GraphicsDiagnosticsSnapshot,
+  GraphicsDiagnosticsTone,
+  GraphicsDiagnosticsView,
+} from './diagnostics-surface';
 import {
   classifyGraphicsEvidence,
   collectRuntimeGraphicsReport,

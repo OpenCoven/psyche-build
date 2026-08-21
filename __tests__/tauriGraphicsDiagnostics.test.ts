@@ -11,11 +11,14 @@ import {
   type GraphicsWebGlContext,
 } from '../native/desktop/psyche-build-tauri/web/runtime/graphics-diagnostics';
 import {
+  buildGraphicsDiagnosticsView as buildGraphicsDiagnosticsViewFromEntry,
   classifyGraphicsEvidence as classifyGraphicsEvidenceFromEntry,
   createPerformanceMetricsCollector as createPerformanceMetricsCollectorFromEntry,
   FRAME_SAMPLE_LIMIT as frameSampleLimitFromEntry,
+  formatDiagnosticsStressProgress as formatDiagnosticsStressProgressFromEntry,
   mergeRuntimeGraphicsReport as mergeRuntimeGraphicsReportFromEntry,
   probeGraphicsEvidence as probeGraphicsEvidenceFromEntry,
+  serializeGraphicsDiagnosticsSnapshot as serializeGraphicsDiagnosticsSnapshotFromEntry,
   summarizeFrames as summarizeFramesFromEntry,
 } from '../native/desktop/psyche-build-tauri/web/runtime/runtime-entry';
 import {
@@ -23,6 +26,10 @@ import {
   createPerformanceMetricsCollector,
   summarizeFrames,
 } from '../native/desktop/psyche-build-tauri/web/runtime/performance-metrics';
+import {
+  buildGraphicsDiagnosticsView,
+  serializeGraphicsDiagnosticsSnapshot,
+} from '../native/desktop/psyche-build-tauri/web/runtime/diagnostics-surface';
 
 const runtimeEntryPath = resolve(
   process.cwd(),
@@ -32,6 +39,49 @@ const runtimeBundlePath = resolve(
   process.cwd(),
   'native/desktop/psyche-build-tauri/web/runtime.bundle.js',
 );
+const webRoot = resolve(
+  process.cwd(),
+  'native/desktop/psyche-build-tauri/web',
+);
+
+function functionSource(source: string, name: string) {
+  const start = source.indexOf(`function ${name}(`);
+  const asyncStart = source.indexOf(`async function ${name}(`);
+  const functionStart = asyncStart === -1 ? start : asyncStart;
+  if (functionStart === -1) throw new Error(`missing function ${name}`);
+  const bodyStart = source.indexOf('{', functionStart);
+  let depth = 0;
+  let quote: string | null = null;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const character = source[index];
+    if (quote) {
+      if (character === '\\') index += 1;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === '`') {
+      quote = character;
+      continue;
+    }
+    if (character === '{') depth += 1;
+    if (character === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(functionStart, index + 1);
+    }
+  }
+  throw new Error(`unterminated function ${name}`);
+}
+
+function compileFunction<T extends (...args: never[]) => unknown>(
+  source: string,
+  name: string,
+  dependencies: Record<string, unknown>,
+) {
+  return Function(
+    ...Object.keys(dependencies),
+    `"use strict"; return (${functionSource(source, name)});`,
+  )(...Object.values(dependencies)) as T;
+}
 
 class FakeWebGlContext {
   constructor(
@@ -2498,6 +2548,10 @@ describe('runtime graphics startup wiring', () => {
     expect(createPerformanceMetricsCollectorFromEntry).toBe(createPerformanceMetricsCollector);
     expect(summarizeFramesFromEntry).toBe(summarizeFrames);
     expect(frameSampleLimitFromEntry).toBe(FRAME_SAMPLE_LIMIT);
+    expect(buildGraphicsDiagnosticsViewFromEntry).toBe(buildGraphicsDiagnosticsView);
+    expect(serializeGraphicsDiagnosticsSnapshotFromEntry)
+      .toBe(serializeGraphicsDiagnosticsSnapshot);
+    expect(formatDiagnosticsStressProgressFromEntry).toBeTypeOf('function');
   });
 
   it('logs one structured startup summary per startup state', async () => {
@@ -2600,6 +2654,9 @@ describe('runtime graphics startup wiring', () => {
     expect(runtimeEntry).toContain('createPerformanceMetricsCollector');
     expect(runtimeEntry).toContain('summarizeFrames');
     expect(runtimeEntry).toContain('FRAME_SAMPLE_LIMIT');
+    expect(runtimeEntry).toContain('buildGraphicsDiagnosticsView');
+    expect(runtimeEntry).toContain('serializeGraphicsDiagnosticsSnapshot');
+    expect(runtimeEntry).toContain('formatDiagnosticsStressProgress');
 
     expect(runtimeBundle).toContain('[psyche:graphics]');
     expect(runtimeBundle).toContain('runtime_diagnostics');
@@ -2607,5 +2664,355 @@ describe('runtime graphics startup wiring', () => {
     expect(runtimeBundle).toContain('createPerformanceMetricsCollector');
     expect(runtimeBundle).toContain('summarizeFrames');
     expect(runtimeBundle).toContain('FRAME_SAMPLE_LIMIT');
+    expect(runtimeBundle).toContain('buildGraphicsDiagnosticsView');
+    expect(runtimeBundle).toContain('serializeGraphicsDiagnosticsSnapshot');
+    expect(runtimeBundle).toContain('formatDiagnosticsStressProgress');
+  });
+});
+
+describe('in-app graphics diagnostics surface', () => {
+  const metrics = {
+    sampledAt: 12_345,
+    frames: {
+      sampleCount: 120,
+      averageMs: 16.2,
+      p95Ms: 22.4,
+      maxMs: 48.1,
+      over16_7: 18,
+      over33_4: 3,
+      over50: 0,
+      estimatedDroppedFrames: 4,
+    },
+    longTasks: {
+      count: 2,
+      totalMs: 84.5,
+      maxMs: 51.25,
+    },
+    transport: {
+      bytesPerSecond: 1_500_000,
+      batchesPerSecond: 240,
+      averageBatchBytes: 6_250,
+      p95BatchBytes: 8_192,
+      p95BatchIntervalMs: 5.5,
+      queueBytesHighWater: 65_536,
+      queueDepthHighWater: 8,
+      blockedProducersHighWater: 2,
+      backpressureCount: 3,
+      averageAckLatencyMs: 1.25,
+      maxAckLatencyMs: 4.75,
+    },
+    renderer: {
+      coalescedVisualUpdates: 9,
+      webglPanes: 5,
+      recoveringPanes: 1,
+      fallbackPanes: 2,
+      rendererTransitions: 4,
+      contextLosses: 1,
+    },
+    interactions: {
+      focusToNextPaintMs: 18.5,
+      resizeToNextPaintMs: 27.75,
+    },
+    process: {
+      cpuPercent: 42.5,
+      rssBytes: 536_870_912,
+    },
+  };
+
+  it('renders every present graphics and Task 3 metric field without unsupported placeholders', () => {
+    const view = buildGraphicsDiagnosticsView({
+      graphics: {
+        os: 'macos',
+        arch: 'aarch64',
+        engine: 'WKWebView',
+        engineVersion: '18.6',
+        acceleration: 'software',
+        backend: 'Vulkan',
+        adapter: 'SwiftShader',
+        supportingProbe: 'webgl2',
+        fallbackReason: 'software_renderer_detected',
+        unsupportedFields: ['webgpu.adapterInfo'],
+      },
+      metrics,
+    });
+
+    expect(view.softwareFallback).toBe(true);
+    expect(view.sections.map((section) => section.title)).toEqual([
+      'Graphics',
+      'Frame cadence',
+      'Throughput',
+      'IPC batching and distribution',
+      'Queue and backpressure',
+      'Renderer lifecycle',
+      'Long tasks',
+      'Interactions',
+      'Process',
+    ]);
+    const rows = view.sections.flatMap((section) => section.rows);
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Acceleration', value: 'Software fallback', tone: 'danger' }),
+      expect.objectContaining({ label: 'Engine', value: 'WKWebView' }),
+      expect.objectContaining({ label: 'Engine version', value: '18.6' }),
+      expect.objectContaining({ label: 'Backend', value: 'Vulkan' }),
+      expect.objectContaining({ label: 'Adapter', value: 'SwiftShader' }),
+      expect.objectContaining({ label: 'Fallback reason', value: 'software renderer detected', tone: 'danger' }),
+      expect.objectContaining({ label: 'Sample clock', value: '12345.00 ms' }),
+      expect.objectContaining({ label: 'Frame p95', value: '22.40 ms' }),
+      expect.objectContaining({ label: 'Bytes / second', value: '1.43 MiB/s' }),
+      expect.objectContaining({ label: 'Batch p95', value: '8.00 KiB' }),
+      expect.objectContaining({ label: 'Queue bytes high-water', value: '64.00 KiB' }),
+      expect.objectContaining({ label: 'Fallback panes', value: '2', tone: 'danger' }),
+      expect.objectContaining({ label: 'Long-task total', value: '84.50 ms' }),
+      expect.objectContaining({ label: 'Focus to next paint', value: '18.50 ms' }),
+      expect.objectContaining({ label: 'Process CPU', value: '42.50%' }),
+      expect.objectContaining({ label: 'Process RSS', value: '512.00 MiB' }),
+    ]));
+    expect(rows.map((row) => row.label)).not.toContain('Unsupported fields');
+    expect(rows.map((row) => row.value)).not.toContain('--');
+  });
+
+  it('omits optional graphics and metrics rows when their source fields are absent', () => {
+    const view = buildGraphicsDiagnosticsView({
+      graphics: {
+        os: 'linux',
+        arch: 'x86_64',
+        engine: 'WebKitGTK',
+        acceleration: 'accelerated',
+        unsupportedFields: [],
+      },
+      metrics: {
+        ...metrics,
+        longTasks: undefined,
+        transport: {
+          ...metrics.transport,
+          averageAckLatencyMs: undefined,
+          maxAckLatencyMs: undefined,
+        },
+        interactions: {},
+        process: undefined,
+      },
+    });
+
+    const labels = view.sections.flatMap((section) => section.rows.map((row) => row.label));
+    expect(view.softwareFallback).toBe(false);
+    expect(labels).toContain('Acceleration');
+    expect(labels).toContain('Engine');
+    expect(labels).not.toContain('Engine version');
+    expect(labels).not.toContain('Backend');
+    expect(labels).not.toContain('Adapter');
+    expect(labels).not.toContain('Fallback reason');
+    expect(labels).not.toContain('Average acknowledgement');
+    expect(labels).not.toContain('Maximum acknowledgement');
+    expect(view.sections.map((section) => section.title)).not.toContain('Long tasks');
+    expect(view.sections.map((section) => section.title)).not.toContain('Interactions');
+    expect(view.sections.map((section) => section.title)).not.toContain('Process');
+  });
+
+  it('copies stable JSON from the raw graphics, metrics, and stress interfaces', () => {
+    const progress = {
+      scenarioIndex: 2,
+      paneCount: 12 as const,
+      phase: 'measure' as const,
+      elapsedMs: 12_500,
+      phaseDurationMs: 30_000,
+    };
+    const first = {
+      graphics: {
+        os: 'macos',
+        arch: 'aarch64',
+        engine: 'WKWebView',
+        acceleration: 'accelerated' as const,
+        backend: 'Metal' as const,
+        adapter: 'Apple M3 Pro',
+        unsupportedFields: [],
+      },
+      metrics,
+      scenario: {
+        state: 'running' as const,
+        progress,
+      },
+    };
+    const reordered = {
+      scenario: {
+        progress: {
+          phaseDurationMs: 30_000,
+          elapsedMs: 12_500,
+          phase: 'measure' as const,
+          paneCount: 12 as const,
+          scenarioIndex: 2,
+        },
+        state: 'running' as const,
+      },
+      metrics: {
+        process: metrics.process,
+        interactions: metrics.interactions,
+        renderer: metrics.renderer,
+        transport: metrics.transport,
+        longTasks: metrics.longTasks,
+        frames: metrics.frames,
+        sampledAt: metrics.sampledAt,
+      },
+      graphics: {
+        unsupportedFields: [],
+        adapter: 'Apple M3 Pro',
+        backend: 'Metal' as const,
+        acceleration: 'accelerated' as const,
+        engine: 'WKWebView',
+        arch: 'aarch64',
+        os: 'macos',
+      },
+    };
+
+    const json = serializeGraphicsDiagnosticsSnapshot(first);
+    expect(json).toBe(serializeGraphicsDiagnosticsSnapshot(reordered));
+    expect(json.endsWith('\n')).toBe(true);
+    expect(JSON.parse(json)).toEqual(first);
+  });
+
+  it('ships a hidden development-only titlebar action and accessible inert right panel', () => {
+    const html = readFileSync(resolve(webRoot, 'index.html'), 'utf8');
+
+    expect(html).toMatch(
+      /id="graphics-diagnostics-toggle"[\s\S]*type="button"[\s\S]*aria-haspopup="dialog"[\s\S]*aria-expanded="false"[\s\S]*aria-controls="graphics-diagnostics-panel"[\s\S]*hidden[\s\S]*disabled/,
+    );
+    expect(html).toMatch(
+      /id="graphics-diagnostics-shell"[\s\S]*hidden[\s\S]*inert[\s\S]*id="graphics-diagnostics-panel"[\s\S]*role="dialog"[\s\S]*aria-modal="false"[\s\S]*aria-labelledby="graphics-diagnostics-title"/,
+    );
+    expect(html).toMatch(
+      /id="graphics-diagnostics-progress-text"[\s\S]*role="status"[\s\S]*aria-live="polite"[\s\S]*aria-atomic="true"/,
+    );
+    expect(html).toMatch(
+      /id="graphics-diagnostics-progress"[\s\S]*aria-label="Stress scenario phase progress"/,
+    );
+    expect(html).toMatch(
+      /id="graphics-diagnostics-scenario"[\s\S]*hidden[\s\S]*inert[\s\S]*id="graphics-diagnostics-progress"[\s\S]*id="graphics-diagnostics-run"[\s\S]*id="graphics-diagnostics-cancel"/,
+    );
+    expect(html).toContain('id="graphics-diagnostics-copy"');
+    expect(html).toContain('id="graphics-diagnostics-refresh"');
+    expect(html).toContain('id="graphics-diagnostics-close"');
+  });
+
+  it('wires debug availability, live production metrics, deterministic copy, and accessible actions', () => {
+    const main = readFileSync(resolve(webRoot, 'main.js'), 'utf8');
+    const styles = readFileSync(resolve(webRoot, 'styles.css'), 'utf8');
+
+    expect(main).toContain('async function installGraphicsDiagnosticsSurface()');
+    expect(main).toContain('if (!report || report.debugBuild !== true) return null;');
+    expect(main).toContain('ptyRuntime.ensureRuntimeGraphicsStartupSummary()');
+    expect(main).toContain('ptyRuntime.createPerformanceMetricsCollector({');
+    expect(main).toContain('ptyRuntime.buildGraphicsDiagnosticsView(');
+    expect(main).toContain('ptyRuntime.serializeGraphicsDiagnosticsSnapshot(');
+    expect(main).toContain('clipboardManager.writeText(json)');
+    expect(main).toContain('showStatusError("Graphics diagnostics copy failed: " + String(error))');
+    expect(main).toContain('graphicsDiagnosticsShellEl.inert = false;');
+    expect(main).toContain('graphicsDiagnosticsShellEl.inert = true;');
+    expect(main).toContain('beginCompositorTransition(graphicsDiagnosticsPanelEl)');
+    expect(main).toContain('await installGraphicsDiagnosticsSurface();');
+    expect(main).toContain('if (handleGraphicsDiagnosticsKeydown(event)) return;');
+    expect(main).not.toContain(
+      'document.addEventListener("keydown", handleGraphicsDiagnosticsKeydown, true);',
+    );
+
+    expect(styles).toMatch(
+      /\.graphics-diagnostics-shell\s*\{[^}]*transition:\s*opacity\s+var\(--transition-fast\);/s,
+    );
+    expect(styles).toMatch(
+      /\.graphics-diagnostics-panel\s*\{[^}]*transition-property:\s*transform,\s*opacity;[^}]*transition-duration:\s*var\(--transition-med\),\s*var\(--transition-fast\);/s,
+    );
+    expect(styles).not.toMatch(
+      /\.graphics-diagnostics-[^{]+\{[^}]*(?:transition|animation)[^}]*(?:width|right|left|grid-template|flex-basis)/s,
+    );
+  });
+
+  it('opens and closes with inert state, compositor hints, and focus restoration', () => {
+    const main = readFileSync(resolve(webRoot, 'main.js'), 'utf8');
+    const classes = new Set<string>();
+    const toggle = {
+      hidden: false,
+      attributes: new Map<string, string>(),
+      setAttribute(name: string, value: string) { this.attributes.set(name, value); },
+      focus: vi.fn(),
+    };
+    const shell = {
+      hidden: true,
+      inert: true,
+      classList: {
+        add: (name: string) => classes.add(name),
+        remove: (name: string) => classes.delete(name),
+      },
+    };
+    const panel = {};
+    const close = { focus: vi.fn() };
+    const transitions: unknown[] = [];
+    const announcements: string[] = [];
+    let closeTimer: () => void = () => undefined;
+    const setOpen = compileFunction<(open: boolean) => boolean>(
+      main,
+      'setGraphicsDiagnosticsOpen',
+      {
+        graphicsDiagnosticsToggleEl: toggle,
+        graphicsDiagnosticsShellEl: shell,
+        graphicsDiagnosticsPanelEl: panel,
+        graphicsDiagnosticsCloseEl: close,
+        graphicsDiagnosticsOpen: false,
+        graphicsDiagnosticsCloseTimer: 0,
+        clearTimeout: vi.fn(),
+        setTimeout: (callback: () => void) => {
+          closeTimer = callback;
+          return 1;
+        },
+        beginCompositorTransition: (element: unknown) => transitions.push(element),
+        renderGraphicsDiagnosticsSurface: vi.fn(),
+        window: { requestAnimationFrame: (callback: () => void) => callback() },
+        toast: (message: string) => announcements.push(message),
+      },
+    );
+
+    expect(setOpen(true)).toBe(true);
+    expect(shell.hidden).toBe(false);
+    expect(shell.inert).toBe(false);
+    expect(classes.has('is-open')).toBe(true);
+    expect(toggle.attributes.get('aria-expanded')).toBe('true');
+    expect(close.focus).toHaveBeenCalledTimes(1);
+
+    expect(setOpen(false)).toBe(true);
+    expect(shell.inert).toBe(true);
+    expect(classes.has('is-open')).toBe(false);
+    expect(toggle.attributes.get('aria-expanded')).toBe('false');
+    expect(toggle.focus).toHaveBeenCalledTimes(1);
+    closeTimer();
+    expect(shell.hidden).toBe(true);
+    expect(transitions).toEqual([shell, panel, shell, panel]);
+    expect(announcements).toEqual([
+      'Graphics diagnostics opened',
+      'Graphics diagnostics closed',
+    ]);
+  });
+
+  it('reports clipboard failures through the existing accessible error surface', async () => {
+    const main = readFileSync(resolve(webRoot, 'main.js'), 'utf8');
+    const reportError = vi.fn();
+    const copy = compileFunction<() => Promise<boolean>>(
+      main,
+      'copyGraphicsDiagnosticsJson',
+      {
+        clipboardManager: {
+          writeText: vi.fn(async () => {
+            throw new Error('permission denied');
+          }),
+        },
+        ptyRuntime: {
+          serializeGraphicsDiagnosticsSnapshot: () => '{"graphics":{}}\n',
+        },
+        graphicsDiagnosticsSnapshot: () => ({ graphics: {} }),
+        toast: vi.fn(),
+        showStatusError: reportError,
+      },
+    );
+
+    await expect(copy()).resolves.toBe(false);
+    expect(reportError).toHaveBeenCalledWith(
+      'Graphics diagnostics copy failed: Error: permission denied',
+    );
   });
 });

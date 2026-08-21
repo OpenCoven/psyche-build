@@ -13,6 +13,9 @@ import {
   type StressHarnessDependencies,
   type StressResource,
 } from '../native/desktop/psyche-build-tauri/web/runtime/stress-harness';
+import {
+  formatDiagnosticsStressProgress,
+} from '../native/desktop/psyche-build-tauri/web/runtime/diagnostics-surface';
 
 function abortError(): Error {
   const error = new Error('stress run cancelled');
@@ -87,6 +90,24 @@ function createResource(id: string, disposed: string[]): StressResource {
 }
 
 describe('Tauri diagnostics stress harness', () => {
+  it('formats actual stress progress for the accessible diagnostics status', () => {
+    expect(formatDiagnosticsStressProgress({
+      scenarioIndex: 1,
+      paneCount: 6,
+      phase: 'measure',
+      elapsedMs: 12_500,
+      phaseDurationMs: 30_000,
+    })).toBe('Scenario 2 of 4 · 6 panes · Measuring · 12.5 of 30.0 seconds');
+
+    expect(formatDiagnosticsStressProgress({
+      scenarioIndex: 3,
+      paneCount: 24,
+      phase: 'cleanup',
+      elapsedMs: 0,
+      phaseDurationMs: 0,
+    })).toBe('Scenario 4 of 4 · 24 panes · Cleaning up');
+  });
+
   it('builds the fixed scenario order, phase durations, and fixture assignments', () => {
     const plan = buildStressPlan();
 
