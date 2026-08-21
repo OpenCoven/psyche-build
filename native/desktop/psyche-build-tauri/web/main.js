@@ -11347,9 +11347,10 @@
   }
   function browserTitleEventContext(payload) {
     payload = payload || {};
-    var nativeUrl = browserNativeUrl(payload.url);
+    var reportedUrl = typeof payload.url === "string" ? payload.url : "";
+    var nativeUrl = browserNativeUrl(reportedUrl);
     var title = typeof payload.title === "string" ? payload.title.trim() : "";
-    if (!nativeUrl || !title || title.length > 4096 ||
+    if (!reportedUrl || !title || title.length > 4096 ||
         !Number.isSafeInteger(payload.generation) || payload.generation <= 0 ||
         typeof payload.navigationToken !== "string" || !payload.navigationToken) return null;
     var pair = browserNativeEventContext(
@@ -11358,6 +11359,25 @@
       payload.navigationToken
     );
     if (!pair) return null;
+    if (!nativeUrl &&
+        pair.tab.diagnosticsFixture === true &&
+        activeDiagnosticsBrowserFixture &&
+        activeDiagnosticsBrowserFixture.project === pair.project &&
+        activeDiagnosticsBrowserFixture.browser === pair.browser &&
+        activeDiagnosticsBrowserFixture.tab === pair.tab) {
+      try {
+        var diagnosticsUrl = new URL(reportedUrl);
+        if (diagnosticsUrl.protocol === "tauri:" &&
+            diagnosticsUrl.hostname === "localhost" &&
+            !diagnosticsUrl.port &&
+            !diagnosticsUrl.username &&
+            !diagnosticsUrl.password &&
+            diagnosticsUrl.pathname === "/diagnostics-fixture.html") {
+          nativeUrl = diagnosticsUrl.href;
+        }
+      } catch (_) {}
+    }
+    if (!nativeUrl) return null;
     var lifecycle = browserTabLifecycle(pair.tab);
     if (lifecycle.pendingGeneration) {
       if (payload.generation !== lifecycle.pendingGeneration ||

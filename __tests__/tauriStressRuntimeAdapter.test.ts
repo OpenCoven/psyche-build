@@ -40,6 +40,95 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   )(...Object.values(dependencies)) as T;
 }
 
+type BrowserTitleEvent = {
+  payload: {
+    label: string;
+    url: string;
+    title: string;
+    generation: number;
+    navigationToken: string;
+  };
+};
+
+function diagnosticsBrowserTitleHarness(
+  url: string,
+  diagnosticsFixture: boolean,
+  activeFixture = true,
+) {
+  const tab = {
+    id: 'tab-1',
+    url,
+    title: 'Original title',
+    created: true,
+    diagnosticsFixture,
+  };
+  const browser = { activeTabId: tab.id, tabs: [tab] };
+  const project = {
+    id: 'project-1',
+    browsersByWorktree: { '/workspace': browser },
+  };
+  const pane = {
+    id: 'browser-pane',
+    projectId: project.id,
+    worktreePath: '/workspace',
+  };
+  const lifecycle = {
+    generation: 1,
+    pendingGeneration: 0,
+    liveGeneration: 1,
+    liveUrl: url,
+    liveNavigationToken: 'fixture-token',
+    eventUrl: url,
+    nativeLabel: 'browser-label',
+    viewLive: true,
+    replacementOperation: null,
+  };
+  const browserUrlsMatch = compileFunction<
+    (left: string, right: string) => boolean
+  >(functionSource('browserUrlsMatch'), {});
+  const browserNativeUrl = compileFunction<
+    (value: string) => string | null
+  >(functionSource('browserNativeUrl'), {});
+  const browserNativeEventContext = compileFunction<
+    (label: string, eventUrl: string | null, navigationToken: string) => unknown
+  >(functionSource('browserNativeEventContext'), {
+    browserTabForNativeLabel: (label: string) => label === 'browser-label'
+      ? { project, worktreePath: '/workspace', browser, tab }
+      : null,
+    findProject: (projectId: string) => projectId === project.id ? project : null,
+    browserTabLifecycle: () => lifecycle,
+    browserTabIsClosing: () => false,
+    findBrowserPane: () => pane,
+    findThread: (threadId: string) => threadId === pane.id ? pane : null,
+    browserPaneIsClosing: () => false,
+    browserUrlsMatch,
+  });
+  const browserTitleEventContext = compileFunction<
+    (payload: BrowserTitleEvent['payload']) => unknown
+  >(functionSource('browserTitleEventContext'), {
+    activeDiagnosticsBrowserFixture: activeFixture ? { browser, project, tab } : null,
+    browserNativeUrl,
+    browserNativeEventContext,
+    browserTabLifecycle: () => lifecycle,
+    browserUrlsMatch,
+  });
+  const calls: string[] = [];
+  const handleBrowserTitle = compileFunction<
+    (event: BrowserTitleEvent) => boolean
+  >(functionSource('handleBrowserTitle'), {
+    browserTitleEventContext,
+    state: { activeProjectId: project.id },
+    activeWorkspaceRoot: () => '/workspace',
+    renderBrowserTabs: () => calls.push('render'),
+    saveWorkspaceSoon: () => calls.push('save'),
+    publishBrowserControlResource: async () => {
+      calls.push('publish');
+    },
+  });
+
+  return { browser, calls, handleBrowserTitle, project, tab };
+}
+
 function abortError(): Error {
   const error = new Error('stress run cancelled');
   error.name = 'AbortError';
@@ -475,7 +564,7 @@ describe('Tauri stress runtime adapter', () => {
     expect(main).toContain('await installRuntimeStressHarness();');
   });
 
-  it('uses the authorized local fixture origin and observes context loss through production code', async () => {
+  it('accepts packaged fixture context loss through the browser title event path', async () => {
     const diagnosticsBrowserFixtureUrl = compileFunction<
       (page: { url: string }) => string
     >(functionSource('diagnosticsBrowserFixtureUrl'), {
@@ -493,11 +582,13 @@ describe('Tauri stress runtime adapter', () => {
       'tauri://localhost/diagnostics-fixture.html?paneCount=12',
     );
 
-    const tab = { title: page.title };
+    const fixtureUrl = diagnosticsBrowserFixtureUrl(page);
+    const titleHarness = diagnosticsBrowserTitleHarness(fixtureUrl, true);
+    titleHarness.tab.title = page.title;
     const fixture = {
-      project: { id: 'project-1' },
-      browser: { tabs: [tab] },
-      tab,
+      project: titleHarness.project,
+      browser: titleHarness.browser,
+      tab: titleHarness.tab,
       page,
     };
     const calls: Array<[string, Record<string, unknown>]> = [];
@@ -508,7 +599,15 @@ describe('Tauri stress runtime adapter', () => {
         browserLabelForTab: () => 'browser-label',
         invoke: async (command: string, args: Record<string, unknown>) => {
           calls.push([command, args]);
-          tab.title = `${page.title} · context-lost`;
+          expect(titleHarness.handleBrowserTitle({
+            payload: {
+              label: 'browser-label',
+              url: fixtureUrl,
+              title: `  ${page.title} · context-lost  `,
+              generation: 1,
+              navigationToken: 'fixture-token',
+            },
+          })).toBe(true);
         },
         setTimeout,
       },
@@ -524,8 +623,32 @@ describe('Tauri stress runtime adapter', () => {
         },
       ],
     ]);
+    expect(titleHarness.tab.title).toBe(`${page.title} · context-lost`);
+    expect(titleHarness.calls).toEqual(['render', 'save', 'publish']);
     const createBrowserSource = functionSource('createDiagnosticsBrowserFixture');
     expect(createBrowserSource).toContain('diagnosticsBrowserFixtureUrl(page)');
     expect(createBrowserSource).not.toContain('document.write');
+  });
+
+  it.each([
+    ['an unmarked browser tab', 'tauri://localhost/diagnostics-fixture.html?paneCount=12', false, true],
+    ['an inactive diagnostics tab', 'tauri://localhost/diagnostics-fixture.html?paneCount=12', true, false],
+    ['an unrelated local path', 'tauri://localhost/index.html', true, true],
+    ['an unrelated local origin', 'tauri://localhost:1420/diagnostics-fixture.html?paneCount=12', true, true],
+    ['an unrelated Tauri host', 'tauri://untrusted.invalid/diagnostics-fixture.html?paneCount=12', true, true],
+  ])('rejects packaged title events from %s', (_case, url, diagnosticsFixture, activeFixture) => {
+    const harness = diagnosticsBrowserTitleHarness(url, diagnosticsFixture, activeFixture);
+
+    expect(harness.handleBrowserTitle({
+      payload: {
+        label: 'browser-label',
+        url,
+        title: 'Rejected title',
+        generation: 1,
+        navigationToken: 'fixture-token',
+      },
+    })).toBe(false);
+    expect(harness.tab.title).toBe('Original title');
+    expect(harness.calls).toEqual([]);
   });
 });
