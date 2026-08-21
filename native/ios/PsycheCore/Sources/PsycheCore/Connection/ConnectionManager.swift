@@ -144,6 +144,8 @@ public actor ConnectionManager {
     private var connectExecutionOwner: UUID?
     private var activeTeardown: UUID?
     private var teardownWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var interruptibleTeardownWaiters:
+        [UUID: CheckedContinuation<Void, Never>] = [:]
     private var lifecycleIntentEpoch: UInt64 = 0
     private var teardownFinalStateOverride: ConnectionState?
     private var activeMessageSession: UUID?
@@ -208,6 +210,9 @@ public actor ConnectionManager {
         for continuation in teardownWaiters.values {
             continuation.resume()
         }
+        for continuation in interruptibleTeardownWaiters.values {
+            continuation.resume()
+        }
     }
 
     public func connectToStoredHost() async {
@@ -239,8 +244,7 @@ public actor ConnectionManager {
         serverID: String,
         resolvedEndpoint: HostEndpoint? = nil
     ) async throws -> PairedHost {
-        lifecycleIntentEpoch &+= 1
-        let intentEpoch = lifecycleIntentEpoch
+        let intentEpoch = advanceLifecycleIntentEpoch()
         let (host, configuration) = try await exactStoredConnectionConfiguration(
             serverID: serverID,
             resolvedEndpoint: resolvedEndpoint
@@ -253,8 +257,7 @@ public actor ConnectionManager {
     }
 
     public func connectForPairing(to endpoint: HostEndpoint) async throws {
-        lifecycleIntentEpoch &+= 1
-        let intentEpoch = lifecycleIntentEpoch
+        let intentEpoch = advanceLifecycleIntentEpoch()
         _ = try await connectAndRequireConnected(
             using: ConnectionConfiguration(
                 endpoint: endpoint,
@@ -266,8 +269,7 @@ public actor ConnectionManager {
     }
 
     public func connect(to endpoint: HostEndpoint) async {
-        lifecycleIntentEpoch &+= 1
-        let intentEpoch = lifecycleIntentEpoch
+        let intentEpoch = advanceLifecycleIntentEpoch()
         await connect(
             using: ConnectionConfiguration(
                 endpoint: endpoint,
@@ -342,6 +344,14 @@ public actor ConnectionManager {
         guard lifecycleIntentEpoch == intentEpoch else {
             throw ConnectionManagerError.workspaceReadinessUnavailable
         }
+        if activeTeardown != nil {
+            _ = await waitForTeardownCompletionUnlessCancelled(
+                intentEpoch: intentEpoch
+            )
+        }
+        guard lifecycleIntentEpoch == intentEpoch else {
+            throw ConnectionManagerError.workspaceReadinessUnavailable
+        }
         guard let generation = activeGeneration,
               isActive(generation: generation),
               state == .connected else {
@@ -361,7 +371,9 @@ public actor ConnectionManager {
         using configuration: ConnectionConfiguration,
         intentEpoch: UInt64
     ) async {
-        guard await waitForTeardownCompletionUnlessCancelled() else { return }
+        guard await waitForTeardownCompletionUnlessCancelled(
+            intentEpoch: intentEpoch
+        ) else { return }
         guard lifecycleIntentEpoch == intentEpoch else { return }
         // Guard on execution, not on state. connect() keeps awaiting past the
         // .authenticating transition and the actor yields at every await.
@@ -499,7 +511,7 @@ public actor ConnectionManager {
     }
 
     public func disconnect() async {
-        lifecycleIntentEpoch &+= 1
+        _ = advanceLifecycleIntentEpoch()
         if activeTeardown != nil {
             transition(to: .disconnecting)
             teardownFinalStateOverride = .disconnected
@@ -1148,17 +1160,24 @@ public actor ConnectionManager {
         }
     }
 
-    private func waitForTeardownCompletionUnlessCancelled() async -> Bool {
+    private func waitForTeardownCompletionUnlessCancelled(
+        intentEpoch: UInt64? = nil
+    ) async -> Bool {
         while activeTeardown != nil {
+            if let intentEpoch, lifecycleIntentEpoch != intentEpoch {
+                return false
+            }
             guard !Task.isCancelled else { return false }
             let waiter = UUID()
             await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
-                    guard activeTeardown != nil, !Task.isCancelled else {
+                    guard activeTeardown != nil,
+                          !Task.isCancelled,
+                          intentEpoch == nil || lifecycleIntentEpoch == intentEpoch else {
                         continuation.resume()
                         return
                     }
-                    teardownWaiters[waiter] = continuation
+                    interruptibleTeardownWaiters[waiter] = continuation
                 }
             } onCancel: {
                 Task { [weak self] in
@@ -1166,11 +1185,14 @@ public actor ConnectionManager {
                 }
             }
         }
+        if let intentEpoch {
+            return lifecycleIntentEpoch == intentEpoch && !Task.isCancelled
+        }
         return !Task.isCancelled
     }
 
     private func cancelTeardownWaiter(_ waiter: UUID) {
-        teardownWaiters.removeValue(forKey: waiter)?.resume()
+        interruptibleTeardownWaiters.removeValue(forKey: waiter)?.resume()
     }
 
     private func completeTeardown(_ teardown: UUID) {
@@ -1179,6 +1201,18 @@ public actor ConnectionManager {
         let waiting = teardownWaiters.values
         teardownWaiters.removeAll()
         waiting.forEach { $0.resume() }
+        let interruptibleWaiting = interruptibleTeardownWaiters.values
+        interruptibleTeardownWaiters.removeAll()
+        interruptibleWaiting.forEach { $0.resume() }
+    }
+
+    @discardableResult
+    private func advanceLifecycleIntentEpoch() -> UInt64 {
+        lifecycleIntentEpoch &+= 1
+        let waiting = interruptibleTeardownWaiters.values
+        interruptibleTeardownWaiters.removeAll()
+        waiting.forEach { $0.resume() }
+        return lifecycleIntentEpoch
     }
 
     private func resetPerConnectionState(

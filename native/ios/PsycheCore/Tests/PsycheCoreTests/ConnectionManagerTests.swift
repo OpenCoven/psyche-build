@@ -1055,7 +1055,8 @@ final class ConnectionManagerTests: XCTestCase {
 
     func testSelectedHostMismatchDuringAuthoritativeWelcomeFailsBeforeSnapshotOrSelectionUpdate() async throws {
         let fake = FakeTransport()
-        let composition = makeComposition(transport: fake)
+        let transport = SuspendedDisconnectTransport(base: fake)
+        let composition = makeComposition(transport: transport)
         let stored = makePairedHost(
             serverID: "server-1",
             serverName: "Stored Host",
@@ -1073,11 +1074,23 @@ final class ConnectionManagerTests: XCTestCase {
                 resolvedEndpoint: refreshedEndpoint
             )
         }
+        let completionProbe = RequestCompletionProbe()
+        let completionMonitor = Task {
+            do {
+                _ = try await connectTask.value
+            } catch {}
+            await completionProbe.markComplete()
+        }
         try await waitForHello(on: fake)
         await fake.emit(.legacy(.welcome(makeWelcome(
             serverID: "server-2",
             serverName: "Different Host"
         ))))
+        await transport.waitUntilDisconnectSuspends()
+        for _ in 0..<100 { await Task.yield() }
+        let didCompleteMismatchBeforeTeardown = await completionProbe.isComplete
+        XCTAssertFalse(didCompleteMismatchBeforeTeardown)
+        await transport.releaseDisconnect()
 
         let mismatch = ConnectionManagerError.selectedHostMismatch(
             expectedServerID: stored.serverID,
@@ -1092,6 +1105,7 @@ final class ConnectionManagerTests: XCTestCase {
                 .connectionFailed(reason: mismatch.localizedDescription)
             )
         }
+        await completionMonitor.value
 
         let snapshotRequestCount = await fake.sentMessages
             .filter(\.isWorkspaceSnapshotRequest)
@@ -1104,6 +1118,99 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(persistedHosts, [stored])
         XCTAssertEqual(lastConnectedHost, stored)
         XCTAssertNil(composition.workspaceStore.workspace)
+    }
+
+    func testNegotiationMessageFailureReturnsExplicitFailureAfterTeardownCompletes() async throws {
+        let fake = FakeTransport()
+        let transport = SuspendedDisconnectTransport(base: fake)
+        let manager = makeComposition(transport: transport, token: "token").manager
+
+        let connectTask = Task {
+            try await manager.connectForPairing(to: testEndpoint())
+        }
+        let completionProbe = RequestCompletionProbe()
+        let completionMonitor = Task {
+            do {
+                try await connectTask.value
+            } catch {}
+            await completionProbe.markComplete()
+        }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.error(ProtocolError(
+            code: "unauthorized",
+            message: "token rejected"
+        ))))
+        await transport.waitUntilDisconnectSuspends()
+        for _ in 0..<100 { await Task.yield() }
+        let didCompleteFailureBeforeTeardown = await completionProbe.isComplete
+        XCTAssertFalse(didCompleteFailureBeforeTeardown)
+        await transport.releaseDisconnect()
+
+        do {
+            try await connectTask.value
+            XCTFail("Expected negotiation failure to throw")
+        } catch {
+            XCTAssertEqual(
+                error as? ConnectionManagerError,
+                .connectionFailed(reason: "token rejected")
+            )
+        }
+        await completionMonitor.value
+
+        let snapshotRequestCount = await fake.sentMessages
+            .filter(\.isWorkspaceSnapshotRequest)
+            .count
+        let failure = await waitForFailure(in: manager)
+        XCTAssertEqual(snapshotRequestCount, 0)
+        XCTAssertEqual(failure, "token rejected")
+    }
+
+    func testSupersededNegotiationFailureDoesNotWaitForUnrelatedTeardown() async throws {
+        let fake = FakeTransport()
+        let transport = SuspendedDisconnectTransport(base: fake)
+        let manager = makeComposition(transport: transport, token: "token").manager
+
+        let connectTask = Task {
+            try await manager.connectForPairing(to: testEndpoint())
+        }
+        let completionProbe = RequestCompletionProbe()
+        let completionMonitor = Task {
+            do {
+                try await connectTask.value
+            } catch {}
+            await completionProbe.markComplete()
+        }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.error(ProtocolError(
+            code: "unauthorized",
+            message: "token rejected"
+        ))))
+        await transport.waitUntilDisconnectSuspends()
+        for _ in 0..<100 { await Task.yield() }
+        let didCompleteBeforeSupersedingDisconnect = await completionProbe.isComplete
+        XCTAssertFalse(didCompleteBeforeSupersedingDisconnect)
+
+        await manager.disconnect()
+        for _ in 0..<100 { await Task.yield() }
+        let didCompleteAfterSupersedingDisconnect = await completionProbe.isComplete
+        XCTAssertTrue(didCompleteAfterSupersedingDisconnect)
+
+        do {
+            try await connectTask.value
+            XCTFail("Expected superseded negotiation failure to throw")
+        } catch {
+            XCTAssertEqual(
+                error as? ConnectionManagerError,
+                .workspaceReadinessUnavailable
+            )
+        }
+        await completionMonitor.value
+
+        let attempts = await fake.connectionAttempts
+        XCTAssertEqual(attempts.count, 1)
+
+        await transport.releaseDisconnect()
+        await manager.waitForState(.disconnected)
     }
 
     func testWorkspaceReadyPersistsRenamedSelectedHostFromAuthoritativeWelcome() async throws {
