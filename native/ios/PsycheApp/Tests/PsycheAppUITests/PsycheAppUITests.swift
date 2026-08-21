@@ -401,12 +401,32 @@ final class PsycheAppUITests: XCTestCase {
         let retry = element("pair-host-retry-offline-host", in: app)
         XCTAssertTrue(retry.waitForExistence(timeout: 10))
         XCTAssertTrue(retry.isHittable)
+        retry.tap()
+
+        let offlineRow = row("pair-host-row-offline-host", in: app)
+        let offlineStatus = app.staticTexts.matching(identifier: "pair-host-status-offline-host").firstMatch
+        let recovered = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                offlineRow.label.contains("offline-host.local:4245")
+                    && offlineStatus.label.contains("Pair")
+            },
+            object: app
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [recovered], timeout: 10), .completed)
+        XCTAssertTrue(retry.waitForNonExistence(timeout: 10) || !retry.exists)
 
         assertDiscoveredHostRow(
             "studio",
             name: "Studio",
             discriminator: "studio.local:4242",
             status: "Paired",
+            in: app
+        )
+        assertDiscoveredHostRow(
+            "offline-host",
+            name: "Offline Host",
+            discriminator: "offline-host.local:4245",
+            status: "Pair",
             in: app
         )
 
@@ -510,7 +530,9 @@ final class PsycheAppUITests: XCTestCase {
     }
 
     func testPairedHostDismissesOnlyAfterReadyAndUpdatesHostContext() throws {
-        let app = launchApp()
+        let app = launchApp(arguments: [
+            "-uiFixture", "multiproject", "-uiPairingReadinessDelay",
+        ])
         openConnections(in: app)
 
         selectDiscoveredHostRow("studio", in: app)
@@ -520,7 +542,19 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertEqual(submit.label, "Connect")
         submit.tap()
 
-        XCTAssertTrue(element("pair-host-sheet", in: app).waitForNonExistence(timeout: 10))
+        let sheet = element("pair-host-sheet", in: app)
+        let progress = element("pair-host-progress", in: app)
+        let loadingWorkspace = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                progress.exists && progress.label.contains("Loading workspace") && sheet.exists
+            },
+            object: app
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [loadingWorkspace], timeout: 10), .completed)
+        XCTAssertTrue(progress.exists)
+        XCTAssertTrue(sheet.exists)
+
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 10))
         let settings = element("settings-view", in: app)
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["settings-pair-host"].isHittable)
@@ -896,10 +930,10 @@ final class PsycheAppUITests: XCTestCase {
     private func revealInConnectionsSheet(_ target: XCUIElement, in app: XCUIApplication) {
         if target.exists { return }
 
-        let sheet = app.collectionViews["pair-host-sheet"]
-        XCTAssertTrue(sheet.waitForExistence(timeout: 10))
+        let scrollContainer = app.windows.firstMatch
+        XCTAssertTrue(scrollContainer.waitForExistence(timeout: 10))
         for _ in 0..<6 where !target.exists {
-            sheet.swipeUp()
+            scrollContainer.swipeUp()
         }
     }
 

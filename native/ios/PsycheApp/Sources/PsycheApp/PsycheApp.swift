@@ -11,7 +11,8 @@ struct PsycheApp: App {
         _model = StateObject(wrappedValue: AppModel(
             fixture: fixture,
             fixtureSendFails: AppModel.fixtureSendFails(in: arguments),
-            fixtureInspectionFails: AppModel.fixtureInspectionFails(in: arguments)
+            fixtureInspectionFails: AppModel.fixtureInspectionFails(in: arguments),
+            fixturePairingReadinessDelay: AppModel.fixturePairingReadinessDelay(in: arguments)
         ))
     }
 

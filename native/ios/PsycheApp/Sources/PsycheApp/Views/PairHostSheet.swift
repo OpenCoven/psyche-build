@@ -40,7 +40,6 @@ struct PairHostSheet: View {
                 nearbyHostsSection
                 selectedHostSection
                 manualConnectionSection
-                progressSection
                 errorSection
             }
             .disabled(isStopping)
@@ -147,6 +146,10 @@ struct PairHostSheet: View {
                         .foregroundStyle(PsycheTheme.amber)
                     }
 
+                    if let progressMessage {
+                        progressView(progressMessage)
+                    }
+
                     Button(model.primaryActionTitle) {
                         Task { await model.submit() }
                     }
@@ -195,6 +198,10 @@ struct PairHostSheet: View {
                     pairingCodeField
                 }
 
+                if let progressMessage {
+                    progressView(progressMessage)
+                }
+
                 Button(model.primaryActionTitle) {
                     Task { await model.submit() }
                 }
@@ -206,18 +213,6 @@ struct PairHostSheet: View {
             Text("Manual connection")
         } footer: {
             Text("Copy the port and certificate fingerprint from Psyche. This app will not trust an unknown certificate automatically.")
-        }
-    }
-
-    @ViewBuilder
-    private var progressSection: some View {
-        if let progressMessage {
-            Section {
-                ProgressView(progressMessage)
-                    .tint(PsycheTheme.mint)
-                    .accessibilityLabel(progressMessage)
-                    .accessibilityIdentifier("pair-host-progress")
-            }
         }
     }
 
@@ -237,6 +232,15 @@ struct PairHostSheet: View {
         TextField("Six-digit pairing code", text: $model.pairingCode)
             .keyboardType(.numberPad)
             .accessibilityIdentifier("pair-host-code")
+    }
+
+    private func progressView(_ progressMessage: String) -> some View {
+        HStack(spacing: 12) {
+            ProgressView()
+            Text(progressMessage)
+                .accessibilityIdentifier("pair-host-progress")
+        }
+        .tint(PsycheTheme.mint)
     }
 
     private var progressMessage: String? {

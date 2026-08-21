@@ -58,6 +58,62 @@ final class PairHostModelTests: XCTestCase {
         XCTAssertEqual(model.readyHost?.token, "fixture-token")
     }
 
+    func testFixtureRetryRecoversOfflineHostWithoutDisturbingOtherRowsOrSelection() async {
+        let model = PairHostModel.fixture()
+
+        await model.start()
+        await waitUntil { model.rows.count == 4 }
+
+        let initialRows = model.rows
+        model.select(serverID: "studio")
+        model.retry(serverID: "offline-host")
+
+        await waitUntil {
+            model.rows.first(where: { $0.serverID == "offline-host" })?.resolvedEndpoint?.host == "offline-host.local"
+        }
+
+        let offline = model.rows.first(where: { $0.serverID == "offline-host" })
+        XCTAssertEqual(model.rows.map(\.serverID), initialRows.map(\.serverID))
+        XCTAssertEqual(
+            model.rows.filter { $0.serverID != "offline-host" },
+            initialRows.filter { $0.serverID != "offline-host" }
+        )
+        XCTAssertEqual(model.selectedServerID, "studio")
+        XCTAssertEqual(model.retryingServerIDs, [])
+        XCTAssertEqual(offline?.pairingStatus, .unpaired)
+        XCTAssertNil(offline?.resolutionFailure)
+        XCTAssertEqual(
+            offline?.resolvedEndpoint,
+            HostEndpoint(
+                host: "offline-host.local",
+                port: 4245,
+                certificateFingerprint: String(repeating: "d", count: 64)
+            )
+        )
+    }
+
+    func testFixtureReadinessDelayPublishesLoadingWorkspaceBeforeReady() async {
+        let model = PairHostModel.fixture(readinessDelay: .milliseconds(200))
+
+        await model.start()
+        await waitUntil { model.rows.count == 4 }
+        model.select(serverID: "studio")
+
+        let submitTask = Task { @MainActor in
+            await model.submit()
+        }
+
+        await waitUntil { model.phase == .loadingWorkspace }
+
+        XCTAssertNil(model.readyHost)
+        XCTAssertEqual(model.selectedServerID, "studio")
+
+        await submitTask.value
+
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.readyHost?.serverID, "studio")
+    }
+
     func testComputedSelectedStateCoversPairedUnpairedRepairAndResolutionFailedRows() async throws {
         let probe = PairHostModelProbe()
         await probe.setPairingStatus(.paired, for: "paired")

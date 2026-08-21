@@ -54,7 +54,8 @@ final class AppModel: ObservableObject {
     private init(
         fixtureName: String,
         fixtureSendFails: Bool,
-        fixtureInspectionFails: Bool
+        fixtureInspectionFails: Bool,
+        fixturePairingReadinessDelay: Duration?
     ) {
         let workspaceStore = DemoStore.makeWorkspaceStore(
             fixture: fixtureName,
@@ -69,7 +70,9 @@ final class AppModel: ObservableObject {
         composition = nil
         self.workspaceStore = workspaceStore
         self.terminalRegistry = terminalRegistry
-        pairHostModelFactory = { PairHostModel.fixture() }
+        pairHostModelFactory = {
+            PairHostModel.fixture(readinessDelay: fixturePairingReadinessDelay ?? .zero)
+        }
         hostName = Self.fixtureHostName
         hostDiscriminator = nil
     }
@@ -77,13 +80,15 @@ final class AppModel: ObservableObject {
     convenience init(
         fixture: String? = nil,
         fixtureSendFails: Bool = false,
-        fixtureInspectionFails: Bool = false
+        fixtureInspectionFails: Bool = false,
+        fixturePairingReadinessDelay: Duration? = nil
     ) {
         if let fixture {
             self.init(
                 fixtureName: fixture,
                 fixtureSendFails: fixtureSendFails,
-                fixtureInspectionFails: fixtureInspectionFails
+                fixtureInspectionFails: fixtureInspectionFails,
+                fixturePairingReadinessDelay: fixturePairingReadinessDelay
             )
         } else {
             self.init(composition: MobileAppComposition.production())
@@ -159,6 +164,10 @@ final class AppModel: ObservableObject {
 
     static func fixtureInspectionFails(in arguments: [String]) -> Bool {
         arguments.contains("-uiInspectionFailure")
+    }
+
+    static func fixturePairingReadinessDelay(in arguments: [String]) -> Duration? {
+        arguments.contains("-uiPairingReadinessDelay") ? .seconds(2) : nil
     }
 
     func start() async {

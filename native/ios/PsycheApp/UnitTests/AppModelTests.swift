@@ -601,6 +601,16 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    func testFixturePairingReadinessDelayFlagIsReadFromLaunchArguments() {
+        XCTAssertEqual(
+            AppModel.fixturePairingReadinessDelay(in: ["Psyche", "-uiPairingReadinessDelay"]),
+            .seconds(2)
+        )
+        XCTAssertNil(
+            AppModel.fixturePairingReadinessDelay(in: ["Psyche", "-uiFixture", "multiproject"])
+        )
+    }
+
     func testFixtureCanDeterministicallyFailTerminalSends() async {
         let model = AppModel(
             fixture: WorkspaceFixtures.multiproject,

@@ -218,9 +218,8 @@ final class PairHostModel: ObservableObject {
         self.dependencies = dependencies
     }
 
-    static func fixture() -> PairHostModel {
-        let entries = fixtureEntries()
-        let entriesByServerID = Dictionary(uniqueKeysWithValues: entries.map { ($0.serverID, $0) })
+    static func fixture(readinessDelay: Duration = .zero) -> PairHostModel {
+        let discovery = FixtureDiscoverySource(snapshot: fixtureEntries())
         let statusByServerID: [String: PairingStatus] = [
             "studio": .paired,
             "new-host": .unpaired,
@@ -231,23 +230,23 @@ final class PairHostModel: ObservableObject {
 
         return PairHostModel(dependencies: Dependencies(
             startDiscovery: {
-                AsyncStream { continuation in
-                    continuation.yield(entries)
-                    continuation.finish()
-                }
+                await discovery.start()
             },
-            stopDiscovery: {},
-            retryDiscovery: { _ in },
+            stopDiscovery: {
+                await discovery.stop()
+            },
+            retryDiscovery: { serverID in
+                await discovery.retry(serverID: serverID)
+            },
             pairingStatus: { serverID, _ in
                 statusByServerID[serverID] ?? .unpaired
             },
             connectPaired: { serverID, endpoint in
-                if let entry = entriesByServerID[serverID],
-                   let resolvedEndpoint = fixtureResolvedEndpoint(for: entry) {
+                if let resolved = await discovery.resolvedFixture(serverID: serverID) {
                     return fixturePairedHost(
                         serverID: serverID,
-                        serverName: entry.serverName,
-                        endpoint: endpoint ?? resolvedEndpoint
+                        serverName: resolved.serverName,
+                        endpoint: endpoint ?? resolved.endpoint
                     )
                 }
                 return fixturePairedHost(
@@ -265,14 +264,18 @@ final class PairHostModel: ObservableObject {
                     port: 4243,
                     fingerprint: String(repeating: "b", count: 64)
                 )
-                let identity = fixtureIdentity(forEndpoint: endpoint, entries: entries)
+                let identity = await discovery.identity(for: endpoint)
                 return fixturePairedHost(
                     serverID: identity.serverID,
                     serverName: identity.serverName,
                     endpoint: endpoint
                 )
             },
-            waitForWorkspaceReady: {},
+            waitForWorkspaceReady: {
+                if readinessDelay != .zero {
+                    try await Task.sleep(for: readinessDelay)
+                }
+            },
             disconnect: {
                 await pendingPairing.clear()
             }
@@ -480,6 +483,69 @@ final class PairHostModel: ObservableObject {
 
         func clear() {
             endpoint = nil
+        }
+    }
+
+    private actor FixtureDiscoverySource {
+        private let stream: AsyncStream<[BonjourDiscoveryEntry]>
+        private let continuation: AsyncStream<[BonjourDiscoveryEntry]>.Continuation
+        private var snapshot: [BonjourDiscoveryEntry]
+        private var didStart = false
+        private var didStop = false
+
+        init(snapshot: [BonjourDiscoveryEntry]) {
+            let stream = AsyncStream<[BonjourDiscoveryEntry]>.makeStream()
+            self.stream = stream.stream
+            continuation = stream.continuation
+            self.snapshot = snapshot
+        }
+
+        func start() -> AsyncStream<[BonjourDiscoveryEntry]> {
+            guard !didStop else {
+                return AsyncStream { $0.finish() }
+            }
+            if !didStart {
+                didStart = true
+                continuation.yield(snapshot)
+            }
+            return stream
+        }
+
+        func stop() {
+            guard !didStop else { return }
+            didStop = true
+            continuation.finish()
+        }
+
+        func retry(serverID: String) {
+            guard !didStop,
+                  serverID == "offline-host",
+                  let index = snapshot.firstIndex(where: { $0.serverID == serverID }),
+                  case .resolutionFailed(.timedOut) = snapshot[index].availability else {
+                return
+            }
+
+            let entry = snapshot[index]
+            snapshot[index] = PairHostModel.fixtureResolvedEntry(
+                serverID: entry.serverID,
+                serverName: entry.serverName,
+                host: "offline-host.local",
+                port: 4245,
+                fingerprint: entry.identity.certificateFingerprint
+            )
+            continuation.yield(snapshot)
+        }
+
+        func resolvedFixture(serverID: String) -> (serverName: String, endpoint: HostEndpoint)? {
+            guard let entry = snapshot.first(where: { $0.serverID == serverID }),
+                  let endpoint = PairHostModel.fixtureResolvedEndpoint(for: entry) else {
+                return nil
+            }
+            return (entry.serverName, endpoint)
+        }
+
+        func identity(for endpoint: HostEndpoint) -> (serverID: String, serverName: String) {
+            PairHostModel.fixtureIdentity(forEndpoint: endpoint, entries: snapshot)
         }
     }
 
