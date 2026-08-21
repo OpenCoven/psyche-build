@@ -1238,7 +1238,17 @@ final class ConnectionManagerTests: XCTestCase {
             serverID: stored.serverID,
             serverName: "Renamed Host"
         ))))
-        _ = try await connectTask.value
+        let connectedHost = try await connectTask.value
+        XCTAssertEqual(
+            connectedHost,
+            PairedHost(
+                serverID: stored.serverID,
+                serverName: "Renamed Host",
+                endpoint: refreshedEndpoint,
+                clientID: stored.clientID,
+                token: stored.token
+            )
+        )
 
         let readiness = workspaceReadinessResult(on: composition.manager)
         let requestID = try await waitForSnapshotRequest(on: fake)

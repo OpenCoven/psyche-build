@@ -249,11 +249,20 @@ public actor ConnectionManager {
             serverID: serverID,
             resolvedEndpoint: resolvedEndpoint
         )
-        _ = try await connectAndRequireConnected(
+        let generation = try await connectAndRequireConnected(
             using: configuration,
             intentEpoch: intentEpoch
         )
-        return host
+        if let authenticatedHost = pendingReadyHost {
+            return authenticatedHost
+        }
+        guard workspaceReadyGeneration === generation,
+              let authenticatedHost = try await pairedHostStore.host(
+                  withServerID: host.serverID
+              ) else {
+            throw ConnectionManagerError.workspaceReadinessUnavailable
+        }
+        return authenticatedHost
     }
 
     public func connectForPairing(to endpoint: HostEndpoint) async throws {
