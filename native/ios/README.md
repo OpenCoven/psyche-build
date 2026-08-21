@@ -44,6 +44,20 @@ Run the UI test with:
 xcodebuild -project native/ios/Psyche.xcodeproj -scheme PsycheApp -destination 'platform=iOS Simulator,name=iPhone 16 Pro' -derivedDataPath native/ios/.build test
 ```
 
+### Bonjour connection acceptance
+
+Use this as the manual same-LAN acceptance checklist:
+
+1. Launch the exact host build under test and run `:pair`.
+2. Open Settings > Connections on the iOS device while both are on the same LAN.
+3. Select the advertised host, enter the six-digit code, and confirm the sheet closes only after the workspace is populated.
+4. Relaunch the iOS app and confirm it reconnects to the exact last-connected host.
+5. Pair a second host and confirm a deliberate switch changes the next launch target.
+6. Advertise a known server ID with a changed fingerprint and confirm a warning-gated re-pair flow appears instead of Connect.
+7. Force Bonjour service-resolution failure and confirm the failed row persists with Retry plus manual host/port/fingerprint fallback.
+
+Record the host commit, iOS commit, device model, OS version, server IDs, pass/fail result, and any environmental failures separately from the acceptance result. This document does not claim that live physical-device acceptance has been performed.
+
 `ExportOptions.plist` is intentionally restricted to internal TestFlight
 testing and automatic signing. No Apple development team ID is checked in;
 provide signing-team configuration only in the authorized release environment.

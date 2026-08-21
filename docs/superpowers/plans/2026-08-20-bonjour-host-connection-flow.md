@@ -36,10 +36,10 @@ changes in `.beads/interactions.jsonl`, `.gitignore`, and
 - `native/ios/PsycheApp/Sources/PsycheApp/Views/PairHostSheet.swift` renders the
   state-driven pairing and host-selection flow.
 - `native/ios/PsycheApp/Sources/PsycheApp/Views/SettingsView.swift` presents a
-  fresh pairing model and records the ready host.
+  coordinator-owned pairing model and records the ready host.
 - `native/ios/PsycheApp/Sources/PsycheApp/AppModel.swift` creates production or
-  network-free fixture pairing models and derives host context from exact
-  selection.
+  network-free fixture pairing models, serializes begin/end cleanup, and
+  derives host context from exact selection.
 - `native/ios/PsycheCore/Tests/PsycheCoreTests/BonjourHostDiscoveryTests.swift`,
   `PairedHostStoreTests.swift`, and `ConnectionManagerTests.swift` cover Core
   behavior.
@@ -1372,7 +1372,7 @@ func testChangedFingerprintRequiresWarningBeforePairing() async {
 
 func testManualEntryRejectsMalformedPortAndFingerprint() async {
     let model = PairHostModel(dependencies: .fake())
-    model.showManualEntry = true
+    model.setManualEntrySelected(true)
     model.manualHost = "studio.local"
     model.manualPort = "70000"
     model.manualFingerprint = "nope"
@@ -1576,12 +1576,15 @@ final class PairHostModel: ObservableObject {
     @Published private(set) var phase: Phase = .browsing
     @Published private(set) var errorMessage: String?
     @Published private(set) var readyHost: PairedHost?
-    @Published var selectedServerID: String?
-    @Published var showManualEntry = false
+    @Published private(set) var selectedServerID: String?
+    @Published private(set) var showManualEntry = false
     @Published var manualHost = ""
     @Published var manualPort = ""
     @Published var manualFingerprint = ""
     @Published var pairingCode = ""
+
+    func select(serverID: String)
+    func setManualEntrySelected(_ isSelected: Bool)
 }
 ```
 
@@ -1693,7 +1696,7 @@ git commit -m "feat(ios): add Bonjour pairing state model" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 ```
 
-## Task 6: Render and Wire the Host-Selection Sheet
+## Task 6: Render and Wire the AppModel-Coordinated Host-Selection Sheet
 
 **Files:**
 - Modify: `native/ios/PsycheApp/Sources/PsycheApp/Views/PairHostSheet.swift`
@@ -1701,20 +1704,27 @@ git commit -m "feat(ios): add Bonjour pairing state model" \
 - Modify: `native/ios/PsycheApp/Sources/PsycheApp/AppModel.swift`
 - Modify: `native/ios/PsycheApp/UnitTests/AppModelTests.swift`
 
-- [ ] **Step 1: Add a network-free fixture pairing model**
+- [ ] **Step 1: Add the persistent AppModel pairing-flow coordinator**
 
-In `AppModel`, add:
+In `AppModel`, replace the fresh-sheet model path with:
 
 ```swift
-func makePairHostModel() -> PairHostModel {
-    if let composition {
-        return PairHostModel(composition: composition)
-    }
-    return PairHostModel.fixture()
+@Published private(set) var activePairHostModel: PairHostModel?
+private var pairHostCleanupTask: Task<Void, Never>?
+
+func beginPairHostFlow() async -> PairHostModel
+func endPairHostFlow(_ model: PairHostModel) async
 }
 ```
 
-Implement `PairHostModel.fixture()` with a finished in-memory discovery stream
+`beginPairHostFlow()` must await any prior cleanup task before creating a new
+model, reuse the current active model when the flow is still presented, and
+build production or fixture models from the exact existing dependency graph.
+`endPairHostFlow(_:)` must be identity-checked, idempotent, retain the active
+model until `await model.stop()` finishes, and make any later begin wait for
+that shared cleanup before returning a distinct model.
+
+Keep `PairHostModel.fixture()` as the network-free in-memory discovery stream
 containing:
 
 - `studio` as resolved and paired;
@@ -1828,7 +1838,7 @@ Add an `AppModelTests` assertion:
 ```swift
 func testFixturePairingModelComposesNoLiveConnectionGraph() async {
     let appModel = AppModel(fixture: WorkspaceFixtures.multiproject)
-    let pairModel = appModel.makePairHostModel()
+    let pairModel = await appModel.beginPairHostFlow()
 
     pairModel.start()
     for _ in 0..<1_000 where pairModel.rows.count != 4 {
@@ -1842,19 +1852,23 @@ func testFixturePairingModelComposesNoLiveConnectionGraph() async {
 
 - [ ] **Step 2: Replace the non-networked sheet stub**
 
-Change the initializer to own a model for the sheet lifetime:
+Change the initializer to present the `AppModel`-owned model and delegate
+lifecycle decisions back through async callbacks:
 
 ```swift
 struct PairHostSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var model: PairHostModel
-    private let onReady: (PairedHost) -> Void
+    @ObservedObject private var model: PairHostModel
+    private let onCancel: () async -> Void
+    private let onReady: (PairedHost) async -> Void
 
     init(
         model: PairHostModel,
-        onReady: @escaping (PairedHost) -> Void
+        onCancel: @escaping () async -> Void,
+        onReady: @escaping (PairedHost) async -> Void
     ) {
-        _model = StateObject(wrappedValue: model)
+        self.model = model
+        self.onCancel = onCancel
         self.onReady = onReady
     }
 }
@@ -1892,25 +1906,31 @@ pair-host-error
 pair-host-progress
 ```
 
-Start discovery with `.task { model.start() }`, stop with:
+Start discovery with `.task { await model.start() }`. Explicit Cancel must
+`await onCancel()` before dismissing. Observing `model.readyHost` must call
+`await onReady(host)` and dismiss only after phase `.ready`. Presenter
+`.sheet(..., onDismiss:)` must also call `AppModel.endPairHostFlow(_:)` as an
+idempotent defensive path.
 
-```swift
-.onDisappear {
-    model.stop()
-}
-```
+Drive the manual toggle through `model.setManualEntrySelected(_:)` rather than
+binding writes directly to `showManualEntry`, so active connection state cannot
+be replaced mid-flight.
 
-Observe `model.readyHost`; call `onReady(host)` and dismiss only after phase
-`.ready`.
-
-- [ ] **Step 3: Wire Settings to a fresh model**
+- [ ] **Step 3: Wire Settings to the coordinator-owned model**
 
 Replace the current closure-only sheet:
 
 ```swift
-.sheet(isPresented: $isPairSheetPresented) {
-    PairHostSheet(model: model.makePairHostModel()) { host in
-        model.recordConnectedHost(host)
+.sheet(isPresented: $isPairSheetPresented, onDismiss: { ... }) {
+    if let pairHostModel = model.activePairHostModel {
+        PairHostSheet(
+            model: pairHostModel,
+            onCancel: { await model.endPairHostFlow(pairHostModel) },
+            onReady: { host in
+                model.recordConnectedHost(host)
+                await model.endPairHostFlow(pairHostModel)
+            }
+        )
     }
 }
 ```

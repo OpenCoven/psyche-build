@@ -370,6 +370,227 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
     }
 
+    // MARK: - Bonjour host connection flow
+
+    func testConnectionsSheetShowsDiscoveredStatusesAndResolutionRetry() throws {
+        let app = launchApp()
+        openConnections(in: app)
+
+        assertDiscoveredHostRow(
+            "changed-host",
+            name: "Changed Host",
+            discriminator: "changed-host.local:4244",
+            status: "Requires re-pairing",
+            in: app
+        )
+        assertDiscoveredHostRow(
+            "new-host",
+            name: "New Host",
+            discriminator: "new-host.local:4243",
+            status: "Pair",
+            in: app
+        )
+        assertDiscoveredHostRow(
+            "offline-host",
+            name: "Offline Host",
+            discriminator: "…e-host",
+            status: "Address unavailable",
+            in: app
+        )
+
+        let retry = element("pair-host-retry-offline-host", in: app)
+        XCTAssertTrue(retry.waitForExistence(timeout: 10))
+        XCTAssertTrue(retry.isHittable)
+        retry.tap()
+
+        let offlineRow = row("pair-host-row-offline-host", in: app)
+        let offlineStatus = app.staticTexts.matching(identifier: "pair-host-status-offline-host").firstMatch
+        let recovered = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                offlineRow.label.contains("offline-host.local:4245")
+                    && offlineStatus.label.contains("Pair")
+            },
+            object: app
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [recovered], timeout: 10), .completed)
+        XCTAssertTrue(retry.waitForNonExistence(timeout: 10) || !retry.exists)
+
+        assertDiscoveredHostRow(
+            "studio",
+            name: "Studio",
+            discriminator: "studio.local:4242",
+            status: "Paired",
+            in: app
+        )
+        assertDiscoveredHostRow(
+            "offline-host",
+            name: "Offline Host",
+            discriminator: "offline-host.local:4245",
+            status: "Pair",
+            in: app
+        )
+
+        cancelConnectionsSheet(in: app)
+    }
+
+    func testChangedFingerprintRequiresExplicitRePairConfirmation() throws {
+        let app = launchApp()
+        openConnections(in: app)
+
+        selectDiscoveredHostRow("changed-host", in: app)
+
+        let submit = app.buttons["pair-host-submit"]
+        revealInConnectionsSheet(submit, in: app)
+        XCTAssertTrue(submit.waitForExistence(timeout: 10))
+        XCTAssertEqual(submit.label, "Review re-pair warning")
+        submit.tap()
+
+        let confirm = element("pair-host-repair-confirm", in: app)
+        XCTAssertTrue(confirm.waitForExistence(timeout: 10))
+        XCTAssertFalse(element("pair-host-submit", in: app).exists)
+        XCTAssertTrue(
+            app.staticTexts.containing(
+                NSPredicate(format: "label CONTAINS[c] %@", "different certificate")
+            ).firstMatch.waitForExistence(timeout: 10)
+        )
+        XCTAssertTrue(confirm.label.localizedCaseInsensitiveContains("re-pair"), confirm.label)
+
+        let cancel = element("pair-host-repair-cancel", in: app)
+        XCTAssertTrue(cancel.exists)
+        cancel.tap()
+
+        let selected = element("pair-host-selected", in: app)
+        XCTAssertTrue(selected.waitForExistence(timeout: 10))
+        XCTAssertTrue(selected.label.contains("Changed Host"), selected.label)
+        XCTAssertTrue(app.buttons["pair-host-submit"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.buttons["pair-host-submit"].label, "Review re-pair warning")
+
+        cancelConnectionsSheet(in: app)
+    }
+
+    func testManualConnectionRejectsInvalidPortAndFingerprint() throws {
+        let app = launchApp()
+        openConnections(in: app)
+
+        let manualToggle = app.switches["pair-host-manual-toggle"]
+        revealInConnectionsSheet(manualToggle, in: app)
+        XCTAssertTrue(manualToggle.waitForExistence(timeout: 10))
+        turnOn(manualToggle)
+
+        let host = app.textFields["pair-host-manual-host"]
+        revealInConnectionsSheet(host, in: app)
+        XCTAssertTrue(host.waitForExistence(timeout: 10))
+        host.tap()
+        host.typeText("studio.local")
+
+        let port = app.textFields["pair-host-manual-port"]
+        revealInConnectionsSheet(port, in: app)
+        XCTAssertTrue(port.waitForExistence(timeout: 10))
+        port.tap()
+        port.typeText("70000")
+
+        let fingerprint = app.textFields["pair-host-manual-fingerprint"]
+        revealInConnectionsSheet(fingerprint, in: app)
+        XCTAssertTrue(fingerprint.waitForExistence(timeout: 10))
+        fingerprint.tap()
+        fingerprint.typeText("nope")
+
+        let code = app.textFields["pair-host-code"]
+        revealInConnectionsSheet(code, in: app)
+        XCTAssertTrue(code.waitForExistence(timeout: 10))
+        code.tap()
+        code.typeText("123456")
+        dismissKeyboardIfPresent(in: app)
+
+        let submit = app.buttons["pair-host-submit"]
+        revealInConnectionsSheet(submit, in: app)
+        XCTAssertTrue(submit.waitForExistence(timeout: 10))
+        submit.tap()
+
+        let error = element("pair-host-error", in: app)
+        XCTAssertTrue(error.waitForExistence(timeout: 10))
+        XCTAssertTrue(error.label.contains("port number between 1 and 65535"), error.label)
+        XCTAssertTrue(element("pair-host-sheet", in: app).exists)
+        XCTAssertFalse(element("settings-view", in: app).isHittable)
+
+        replaceText(in: port, with: "4242")
+        dismissKeyboardIfPresent(in: app)
+        revealInConnectionsSheet(submit, in: app)
+        submit.tap()
+
+        let fingerprintError = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                error.label.contains("fingerprint exactly as shown")
+            },
+            object: error
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [fingerprintError], timeout: 10), .completed)
+
+        cancelConnectionsSheet(in: app)
+    }
+
+    func testPairedHostDismissesOnlyAfterReadyAndUpdatesHostContext() throws {
+        let app = launchApp(arguments: [
+            "-uiFixture", "multiproject", "-uiPairingReadinessDelay",
+        ])
+        openConnections(in: app)
+
+        selectDiscoveredHostRow("studio", in: app)
+
+        let submit = app.buttons["pair-host-submit"]
+        XCTAssertTrue(submit.waitForExistence(timeout: 10))
+        XCTAssertEqual(submit.label, "Connect")
+        submit.tap()
+
+        let sheet = element("pair-host-sheet", in: app)
+        let progress = element("pair-host-progress", in: app)
+        let loadingWorkspace = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                progress.exists && progress.label.contains("Loading workspace") && sheet.exists
+            },
+            object: app
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [loadingWorkspace], timeout: 10), .completed)
+        XCTAssertTrue(progress.exists)
+        XCTAssertTrue(sheet.exists)
+
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 10))
+        let settings = element("settings-view", in: app)
+        XCTAssertTrue(settings.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["settings-pair-host"].isHittable)
+
+        let host = element("settings-host", in: app)
+        XCTAssertTrue(host.waitForExistence(timeout: 10))
+        XCTAssertTrue(host.label.localizedCaseInsensitiveContains("Studio"), host.label)
+        XCTAssertTrue(host.label.contains("studio.local:4242"), host.label)
+        XCTAssertFalse(element("pair-host-error", in: app).exists)
+        XCTAssertFalse(element("connection-error", in: app).exists)
+    }
+
+    func testConnectionsCanReopenAfterAwaitedCleanup() throws {
+        let app = launchApp()
+        openConnections(in: app)
+        cancelConnectionsSheet(in: app)
+
+        openConnections(in: app)
+        assertDiscoveredHostRow(
+            "studio",
+            name: "Studio",
+            discriminator: "studio.local:4242",
+            status: "Paired",
+            in: app
+        )
+        assertDiscoveredHostRow(
+            "offline-host",
+            name: "Offline Host",
+            discriminator: "…e-host",
+            status: "Address unavailable",
+            in: app
+        )
+
+        cancelConnectionsSheet(in: app)
+    }
+
     // MARK: - Pane commands
 
     /// The sheet opens on the context you are already in, so creating a pane
@@ -653,6 +874,116 @@ final class PsycheAppUITests: XCTestCase {
         let paneRow = row("now-pane-web-home", in: app)
         XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
         paneRow.tap()
+    }
+
+    private func openSettings(in app: XCUIApplication) {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+
+        if window.frame.width < 700 {
+            let settingsTab = app.tabBars.buttons["Settings"]
+            XCTAssertTrue(settingsTab.waitForExistence(timeout: 10))
+            settingsTab.tap()
+        } else {
+            let settingsRow = row("source-settings", in: app)
+            XCTAssertTrue(settingsRow.waitForExistence(timeout: 10))
+            settingsRow.tap()
+        }
+
+        XCTAssertTrue(element("settings-view", in: app).waitForExistence(timeout: 10))
+    }
+
+    private func openConnections(in app: XCUIApplication) {
+        openSettings(in: app)
+
+        let connections = element("settings-pair-host", in: app)
+        XCTAssertTrue(connections.waitForExistence(timeout: 10))
+        connections.tap()
+        XCTAssertTrue(element("pair-host-sheet", in: app).waitForExistence(timeout: 10))
+    }
+
+    private func cancelConnectionsSheet(in app: XCUIApplication) {
+        let cancel = app.navigationBars.buttons["Cancel"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 10))
+        cancel.tap()
+        XCTAssertTrue(element("pair-host-sheet", in: app).waitForNonExistence(timeout: 10))
+    }
+
+    private func assertDiscoveredHostRow(
+        _ serverID: String,
+        name: String,
+        discriminator: String,
+        status: String,
+        in app: XCUIApplication
+    ) {
+        let hostRow = row("pair-host-row-\(serverID)", in: app)
+        revealInConnectionsSheet(hostRow, in: app)
+        XCTAssertTrue(hostRow.waitForExistence(timeout: 10))
+        XCTAssertTrue(hostRow.label.contains(name), hostRow.label)
+        XCTAssertTrue(hostRow.label.contains(discriminator), hostRow.label)
+
+        let hostStatus = app.staticTexts.matching(identifier: "pair-host-status-\(serverID)").firstMatch
+        XCTAssertTrue(hostStatus.waitForExistence(timeout: 10))
+        XCTAssertTrue(hostStatus.label.contains(status), hostStatus.label)
+    }
+
+    private func revealInConnectionsSheet(_ target: XCUIElement, in app: XCUIApplication) {
+        if target.exists { return }
+
+        let scrollContainer = app.windows.firstMatch
+        XCTAssertTrue(scrollContainer.waitForExistence(timeout: 10))
+        for _ in 0..<6 where !target.exists {
+            scrollContainer.swipeUp()
+        }
+    }
+
+    private func selectDiscoveredHostRow(_ serverID: String, in app: XCUIApplication) {
+        let hostRow = row("pair-host-row-\(serverID)", in: app)
+        revealInConnectionsSheet(hostRow, in: app)
+        XCTAssertTrue(hostRow.waitForExistence(timeout: 10))
+
+        let button = app.buttons[hostRow.label]
+        if button.exists {
+            button.tap()
+        } else {
+            hostRow.tap()
+        }
+    }
+
+    private func dismissKeyboardIfPresent(in app: XCUIApplication) {
+        guard app.keyboards.element.exists else { return }
+
+        let done = app.toolbars.buttons["Done"]
+        if done.exists {
+            done.tap()
+        } else {
+            let window = app.windows.firstMatch
+            XCTAssertTrue(window.waitForExistence(timeout: 10))
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)).tap()
+        }
+
+        XCTAssertTrue(app.keyboards.element.waitForNonExistence(timeout: 10))
+    }
+
+    private func replaceText(in field: XCUIElement, with text: String) {
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        if let current = field.value as? String, !current.isEmpty {
+            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count))
+        }
+        field.typeText(text)
+    }
+
+    private func turnOn(_ toggle: XCUIElement) {
+        guard (toggle.value as? String) != "1" else { return }
+
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+
+        let manualMode = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == '1'"),
+            object: toggle
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [manualMode], timeout: 10), .completed)
     }
 
     /// Always launches the fixture root.

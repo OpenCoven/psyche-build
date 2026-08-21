@@ -3,7 +3,9 @@ import Foundation
 public enum PairedHostStoreError: Error, Sendable, Equatable, LocalizedError {
     case invalidFingerprint
     case identityChanged(serverID: String)
+    case unknownHost(serverID: String)
     case corruptedRecord
+    case rollbackFailed
 
     public var errorDescription: String? {
         switch self {
@@ -14,8 +16,12 @@ public enum PairedHostStoreError: Error, Sendable, Equatable, LocalizedError {
             This host is presenting a different certificate than the one you \
             paired with. Re-pair this device with the host to trust it again.
             """
+        case .unknownHost:
+            "Choose a paired host before making it the reconnect target."
         case .corruptedRecord:
             "The stored pairing could not be read. Re-pair this device with the host."
+        case .rollbackFailed:
+            "The paired host store could not restore its previous state after a failed write. Re-pair this device with the host."
         }
     }
 }
@@ -26,13 +32,22 @@ public enum PairedHostStoreError: Error, Sendable, Equatable, LocalizedError {
 /// can rewrite a pinned fingerprint.
 public actor PairedHostStore {
     public static let defaultKey = "paired-hosts.v1"
+    public static let lastConnectedKey = "paired-host-last-connected.v1"
+    static let customSelectionKeyPrefix = "paired-host-selection.v1."
 
     private let secureStore: any SecureStore
     private let key: String
+    private let selectionKey: String
 
     public init(secureStore: any SecureStore, key: String = defaultKey) {
         self.secureStore = secureStore
         self.key = key
+        self.selectionKey = Self.selectionKey(forStoreKey: key)
+    }
+
+    static func selectionKey(forStoreKey key: String) -> String {
+        guard key != Self.defaultKey else { return Self.lastConnectedKey }
+        return "\(customSelectionKeyPrefix)\(Data(key.utf8).base64EncodedString())"
     }
 
     /// Sorted by server ID so a list rendered from this never reorders itself
@@ -43,6 +58,15 @@ public actor PairedHostStore {
 
     public func host(withServerID serverID: String) throws -> PairedHost? {
         try records()[serverID]
+    }
+
+    public func lastConnectedHost() throws -> PairedHost? {
+        guard let serverID = try selectedServerID() else { return nil }
+        guard let host = try records()[serverID] else {
+            try clearLastConnectedHost()
+            return nil
+        }
+        return host
     }
 
     /// Persists a pairing, refusing to overwrite a known server ID whose
@@ -135,17 +159,80 @@ public actor PairedHostStore {
     }
 
     public func remove(serverID: String) throws {
-        var records = try records()
+        let priorRecordsData = try secureStore.data(forKey: key)
+        var records = try records(from: priorRecordsData)
         guard records.removeValue(forKey: serverID) != nil else { return }
-        try write(records)
+        let priorSelectionData = try secureStore.data(forKey: selectionKey)
+        let shouldClearSelection = decodedSelectedServerID(from: priorSelectionData) == serverID
+
+        try performRollbackSafeMutation(
+            recordsData: priorRecordsData,
+            selectionData: priorSelectionData
+        ) {
+            try write(records)
+            if shouldClearSelection {
+                try clearLastConnectedHost()
+            }
+        }
     }
 
     public func removeAll() throws {
-        try secureStore.removeValue(forKey: key)
+        let priorRecordsData = try secureStore.data(forKey: key)
+        let priorSelectionData = try secureStore.data(forKey: selectionKey)
+
+        try performRollbackSafeMutation(
+            recordsData: priorRecordsData,
+            selectionData: priorSelectionData
+        ) {
+            try secureStore.removeValue(forKey: key)
+            try secureStore.removeValue(forKey: selectionKey)
+        }
+    }
+
+    public func markLastConnected(serverID: String) throws {
+        guard try records()[serverID] != nil else {
+            throw PairedHostStoreError.unknownHost(serverID: serverID)
+        }
+        try writeLastConnected(serverID: serverID)
+    }
+
+    public func clearLastConnectedHost() throws {
+        try secureStore.removeValue(forKey: selectionKey)
+    }
+
+    func recordSuccessfulConnection(
+        _ host: PairedHost,
+        for generation: ConnectionGeneration
+    ) throws -> Bool {
+        let priorRecordsData = try secureStore.data(forKey: key)
+        let priorSelectionData = try secureStore.data(forKey: selectionKey)
+        let normalized = try normalize(host)
+        var records = try records(from: priorRecordsData)
+
+        if let existing = records[normalized.serverID],
+           existing.certificateFingerprint != normalized.certificateFingerprint {
+            throw PairedHostStoreError.identityChanged(serverID: normalized.serverID)
+        }
+
+        records[normalized.serverID] = normalized
+        return try generation.withValidity {
+            try performRollbackSafeMutation(
+                recordsData: priorRecordsData,
+                selectionData: priorSelectionData
+            ) {
+                try write(records)
+                try writeLastConnected(serverID: normalized.serverID)
+                return true
+            }
+        } ?? false
     }
 
     private func records() throws -> [String: PairedHost] {
-        guard let data = try secureStore.data(forKey: key) else { return [:] }
+        try records(from: secureStore.data(forKey: key))
+    }
+
+    private func records(from data: Data?) throws -> [String: PairedHost] {
+        guard let data else { return [:] }
         do {
             return try JSONDecoder().decode([String: PairedHost].self, from: data)
         } catch {
@@ -155,6 +242,74 @@ public actor PairedHostStore {
 
     private func write(_ records: [String: PairedHost]) throws {
         try secureStore.set(try JSONEncoder().encode(records), forKey: key)
+    }
+
+    private func writeLastConnected(serverID: String) throws {
+        try secureStore.set(try JSONEncoder().encode(serverID), forKey: selectionKey)
+    }
+
+    private func selectedServerID() throws -> String? {
+        guard let data = try secureStore.data(forKey: selectionKey) else {
+            return nil
+        }
+        do {
+            return try JSONDecoder().decode(String.self, from: data)
+        } catch {
+            try secureStore.removeValue(forKey: selectionKey)
+            return nil
+        }
+    }
+
+    private func decodedSelectedServerID(from data: Data?) -> String? {
+        guard let data else { return nil }
+        return try? JSONDecoder().decode(String.self, from: data)
+    }
+
+    private func performRollbackSafeMutation<T>(
+        recordsData: Data?,
+        selectionData: Data?,
+        perform mutation: () throws -> T
+    ) throws -> T {
+        do {
+            return try mutation()
+        } catch {
+            try restorePriorState(
+                recordsData: recordsData,
+                selectionData: selectionData
+            )
+            throw error
+        }
+    }
+
+    private func restorePriorState(
+        recordsData: Data?,
+        selectionData: Data?
+    ) throws {
+        var rollbackFailed = false
+
+        do {
+            try restore(recordsData, forKey: key)
+        } catch {
+            rollbackFailed = true
+        }
+
+        do {
+            try restore(selectionData, forKey: selectionKey)
+        } catch {
+            rollbackFailed = true
+        }
+
+        if rollbackFailed {
+            throw PairedHostStoreError.rollbackFailed
+        }
+    }
+
+    private func restore(_ data: Data?, forKey key: String) throws {
+        guard let data else {
+            try secureStore.removeValue(forKey: key)
+            return
+        }
+        try secureStore.set(data, forKey: key)
     }
 
     /// Store fingerprints in one canonical form so a record saved from a

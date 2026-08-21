@@ -7,6 +7,7 @@ struct SettingsView: View {
     @EnvironmentObject private var store: WorkspaceStore
     @EnvironmentObject private var model: AppModel
     @State private var isPairSheetPresented = false
+    @State private var isBeginningPairHostFlow = false
 
     var body: some View {
         List {
@@ -20,11 +21,18 @@ struct SettingsView: View {
                 .accessibilityIdentifier("settings-status")
 
                 LabeledContent("Host") {
-                    Text(model.hostName ?? "Not paired")
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(model.hostName ?? "Not paired")
+                        if let hostDiscriminator = model.hostDiscriminator {
+                            Text(hostDiscriminator)
+                                .font(.footnote)
+                        }
+                    }
+                    .multilineTextAlignment(.trailing)
+                    .foregroundStyle(.secondary)
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Host, \(model.hostName ?? "not paired")")
+                .accessibilityLabel(hostAccessibilityLabel)
                 .accessibilityIdentifier("settings-host")
 
                 if let lastConfirmedAt = store.lastConfirmedAt {
@@ -44,11 +52,14 @@ struct SettingsView: View {
             }
 
             Section {
-                Button("Pair a host") { isPairSheetPresented = true }
+                Button("Connections") {
+                    beginPairHostFlow()
+                }
                     .frame(minHeight: PsycheTheme.minimumTapTarget)
                     .accessibilityIdentifier("settings-pair-host")
+                    .disabled(isBeginningPairHostFlow || model.activePairHostModel != nil)
             } footer: {
-                Text("Pairing exchanges a token with a host on your local network.")
+                Text("Discover, pair, or switch to a Psyche host on your local network.")
             }
 
             Section("Diagnostics") {
@@ -69,9 +80,22 @@ struct SettingsView: View {
         .listStyle(.insetGrouped)
         .navigationTitle("Settings")
         .accessibilityIdentifier("settings-view")
-        .sheet(isPresented: $isPairSheetPresented) {
-            PairHostSheet { host, _ in
-                model.recordPairedHostName(host)
+        .sheet(isPresented: $isPairSheetPresented, onDismiss: {
+            Task {
+                await endPresentedPairHostFlowIfNeeded()
+            }
+        }) {
+            if let pairHostModel = model.activePairHostModel {
+                PairHostSheet(
+                    model: pairHostModel,
+                    onCancel: {
+                        await model.endPairHostFlow(pairHostModel)
+                    },
+                    onReady: { host in
+                        model.recordConnectedHost(host)
+                        await model.endPairHostFlow(pairHostModel)
+                    }
+                )
             }
         }
     }
@@ -81,6 +105,42 @@ struct SettingsView: View {
             store.workspace == nil ? "Not connected" : "Showing last known state"
         } else {
             "Live"
+        }
+    }
+
+    private var hostAccessibilityLabel: String {
+        let hostName = model.hostName ?? "not paired"
+        guard let hostDiscriminator = model.hostDiscriminator else {
+            return "Host, \(hostName)"
+        }
+        return "Host, \(hostName), \(hostDiscriminator)"
+    }
+
+    @MainActor
+    private func beginPairHostFlow() {
+        guard !isPairSheetPresented,
+              !isBeginningPairHostFlow,
+              model.activePairHostModel == nil else {
+            return
+        }
+        isBeginningPairHostFlow = true
+        Task {
+            let pairHostModel = await model.beginPairHostFlow()
+            await MainActor.run {
+                isBeginningPairHostFlow = false
+                if model.activePairHostModel === pairHostModel {
+                    isPairSheetPresented = true
+                }
+            }
+        }
+    }
+
+    private func endPresentedPairHostFlowIfNeeded() async {
+        if let pairHostModel = await MainActor.run(body: { model.activePairHostModel }) {
+            await model.endPairHostFlow(pairHostModel)
+        }
+        await MainActor.run {
+            isBeginningPairHostFlow = false
         }
     }
 }

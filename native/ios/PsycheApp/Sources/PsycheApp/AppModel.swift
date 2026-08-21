@@ -15,6 +15,8 @@ final class AppModel: ObservableObject {
     /// Which host the state on screen came from. Rows read it for VoiceOver,
     /// where the host is not otherwise recoverable from the visible text.
     @Published private(set) var hostName: String?
+    @Published private(set) var hostDiscriminator: String?
+    @Published private(set) var activePairHostModel: PairHostModel?
 
     let workspaceStore: WorkspaceStore
     /// `nil` under a fixture launch — that absence is what makes the fixture
@@ -26,43 +28,123 @@ final class AppModel: ObservableObject {
     let paneComposerSendAttempts = PaneComposerSendAttempts()
 
     private var hasStarted = false
+    private let pairHostModelFactory: @MainActor () -> PairHostModel
+    private var pairHostCleanupTask: Task<Void, Never>?
 
     var isFixture: Bool { fixtureName != nil }
 
+    convenience init(composition: MobileAppComposition) {
+        self.init(
+            composition: composition,
+            pairHostModelFactory: { PairHostModel(composition: composition) }
+        )
+    }
+
     init(
-        fixture: String? = nil,
-        fixtureSendFails: Bool = false,
-        fixtureInspectionFails: Bool = false
+        composition: MobileAppComposition,
+        pairHostModelFactory: @escaping @MainActor () -> PairHostModel
     ) {
-        fixtureName = fixture
+        self.composition = composition
+        fixtureName = nil
+        workspaceStore = composition.workspaceStore
+        terminalRegistry = composition.terminalRegistry
+        self.pairHostModelFactory = pairHostModelFactory
+    }
 
-        guard let fixture else {
-            let composition = MobileAppComposition.production()
-            self.composition = composition
-            workspaceStore = composition.workspaceStore
-            terminalRegistry = composition.terminalRegistry
-            return
-        }
-
-        composition = nil
-        workspaceStore = DemoStore.makeWorkspaceStore(
-            fixture: fixture,
+    private init(
+        fixtureName: String,
+        fixtureSendFails: Bool,
+        fixtureInspectionFails: Bool,
+        fixturePairingReadinessDelay: Duration?
+    ) {
+        let workspaceStore = DemoStore.makeWorkspaceStore(
+            fixture: fixtureName,
             inspectionFails: fixtureInspectionFails
         )
-        // A fixture terminal client, so the fixture shell renders real output
-        // through the real registry without opening a socket.
-        terminalRegistry = TerminalSessionRegistry(
+        let terminalRegistry = TerminalSessionRegistry(
             client: FixtureTerminalClient(sendFails: fixtureSendFails)
         )
         terminalRegistry.start()
+
+        self.fixtureName = fixtureName
+        composition = nil
+        self.workspaceStore = workspaceStore
+        self.terminalRegistry = terminalRegistry
+        pairHostModelFactory = {
+            PairHostModel.fixture(readinessDelay: fixturePairingReadinessDelay ?? .zero)
+        }
         hostName = Self.fixtureHostName
+        hostDiscriminator = nil
+    }
+
+    convenience init(
+        fixture: String? = nil,
+        fixtureSendFails: Bool = false,
+        fixtureInspectionFails: Bool = false,
+        fixturePairingReadinessDelay: Duration? = nil
+    ) {
+        if let fixture {
+            self.init(
+                fixtureName: fixture,
+                fixtureSendFails: fixtureSendFails,
+                fixtureInspectionFails: fixtureInspectionFails,
+                fixturePairingReadinessDelay: fixturePairingReadinessDelay
+            )
+        } else {
+            self.init(composition: MobileAppComposition.production())
+        }
     }
 
     /// Fixed so UI tests can assert host context without a paired record.
     static let fixtureHostName = "psyche-demo.local"
 
-    func recordPairedHostName(_ name: String) {
-        hostName = name
+    func recordConnectedHost(_ host: PairedHost) {
+        hostName = host.serverName
+        hostDiscriminator = PairHostDiscriminatorFormatter.format(host: host)
+        connectionError = nil
+    }
+
+    func beginPairHostFlow() async -> PairHostModel {
+        if let pairHostCleanupTask {
+            await pairHostCleanupTask.value
+        }
+        if let activePairHostModel {
+            return activePairHostModel
+        }
+
+        let model = pairHostModelFactory()
+        activePairHostModel = model
+        return model
+    }
+
+    func endPairHostFlow(_ model: PairHostModel) async {
+        guard activePairHostModel === model else { return }
+        if let pairHostCleanupTask {
+            await pairHostCleanupTask.value
+            return
+        }
+
+        let cleanupTask = Task { [weak self] in
+            await model.stop()
+            await MainActor.run {
+                guard let self else { return }
+                if self.activePairHostModel === model {
+                    self.activePairHostModel = nil
+                }
+                self.pairHostCleanupTask = nil
+            }
+        }
+        pairHostCleanupTask = cleanupTask
+        await cleanupTask.value
+    }
+
+    func loadLastConnectedHostContext() async {
+        guard let composition,
+              let host = try? await composition.pairedHostStore.lastConnectedHost() else {
+            return
+        }
+        hostName = host.serverName
+        hostDiscriminator = PairHostDiscriminatorFormatter.format(host: host)
     }
 
     /// Reads the launch arguments once so the decision cannot drift between
@@ -84,19 +166,17 @@ final class AppModel: ObservableObject {
         arguments.contains("-uiInspectionFailure")
     }
 
+    static func fixturePairingReadinessDelay(in arguments: [String]) -> Duration? {
+        arguments.contains("-uiPairingReadinessDelay") ? .seconds(2) : nil
+    }
+
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
         guard let composition else { return }
 
         await composition.start()
-
-        // Read the stored identity rather than waiting on a welcome: it is
-        // what auto-connect just used, and it lets Settings and VoiceOver name
-        // the host even when the connection has not come up.
-        if let paired = try? await composition.pairedHostStore.hosts().first {
-            hostName = paired.serverName
-        }
+        await loadLastConnectedHostContext()
 
         let state = await composition.connectionManager.state
         if case let .failed(reason) = state {

@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		014E37F0AD313A3C17B84736 /* PairHostModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E159B6573C97C916A78610D6 /* PairHostModelTests.swift */; };
 		0471C40617596B588B68F316 /* PaneWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36C2542B4B731C8B314F83FA /* PaneWorkspaceView.swift */; };
 		04E83890A129FB1782F79F98 /* BridgeMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0899D0A654BB447D7D88380A /* BridgeMessages.swift */; };
 		054F31B1D48F28B5BFCDC16C /* DiffView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC95135143B5BA7FEFB904A9 /* DiffView.swift */; };
@@ -14,6 +15,7 @@
 		07CD5CF1A0EC6D104609AC2E /* BonjourServiceResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E457435611B4FE24E9F7CCA /* BonjourServiceResolver.swift */; };
 		081E43EFCA60F4E5ADED0047 /* WorkspaceFixturesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C43E6A1E83A7A2553415A2E /* WorkspaceFixturesTests.swift */; };
 		0F01384040440B16FD0E79F4 /* ProjectsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FC6CD0D46E3ABC60ECA196E /* ProjectsView.swift */; };
+		17634AED17B8DFDC604DD5F6 /* PairHostModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 594A1A98DE5961370BD5B182 /* PairHostModel.swift */; };
 		21CB84B0171DC6BF9A0F9F79 /* ActionSheetPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EAEE90A9952DD0C2700B685 /* ActionSheetPresentationTests.swift */; };
 		2330B5B27CE5005482E42520 /* PsycheApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56D912A6A487EC289774C800 /* PsycheApp.swift */; };
 		240852AD94156EFDD5CCE5C5 /* CodingKeyRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7313D981B100847A9B66306 /* CodingKeyRow.swift */; };
@@ -180,6 +182,7 @@
 		570996D2BB27B824377A07A7 /* PaneControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneControls.swift; sourceTree = "<group>"; };
 		57532C369ADD3A8953FA08FF /* ControlRequestClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlRequestClient.swift; sourceTree = "<group>"; };
 		587923E031AA726CC0A26E11 /* PaneSwitcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneSwitcher.swift; sourceTree = "<group>"; };
+		594A1A98DE5961370BD5B182 /* PairHostModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairHostModel.swift; sourceTree = "<group>"; };
 		5A050B0898E8E4F6815CEB76 /* PairHostSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairHostSheet.swift; sourceTree = "<group>"; };
 		61F1FA349C4783166939B55D /* RemoteActionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteActionStoreTests.swift; sourceTree = "<group>"; };
 		62AEDC0262461A3E2670DA01 /* NowItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowItem.swift; sourceTree = "<group>"; };
@@ -216,6 +219,7 @@
 		D2DEBE06B83FD927FAD0C546 /* PsycheAppUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PsycheAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D9D412D06D4B9BE4902586CC /* ControlMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMessages.swift; sourceTree = "<group>"; };
 		DAFF9B97F032BB54D8E8104B /* ActionSheetPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionSheetPresentation.swift; sourceTree = "<group>"; };
+		E159B6573C97C916A78610D6 /* PairHostModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairHostModelTests.swift; sourceTree = "<group>"; };
 		E199D1958A85D0E5AA22B1D5 /* CreatePaneForm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreatePaneForm.swift; sourceTree = "<group>"; };
 		E6A1D2D3833898A9E46B0861 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		E8E8406429DED9F64BBF20B3 /* PsycheTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheTransportTests.swift; sourceTree = "<group>"; };
@@ -289,6 +293,14 @@
 			path = Fixtures;
 			sourceTree = "<group>";
 		};
+		1B49DCE0E7FC8F530F68AA70 /* Pairing */ = {
+			isa = PBXGroup;
+			children = (
+				594A1A98DE5961370BD5B182 /* PairHostModel.swift */,
+			);
+			path = Pairing;
+			sourceTree = "<group>";
+		};
 		25FACD0C6B436E1A2F0AC1A3 /* UnitTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -296,6 +308,7 @@
 				2B01F85780ECB7DA2A3933F1 /* AppModelTests.swift */,
 				7C422F47C586CD7CE3F0CCC6 /* CreatePaneFormTests.swift */,
 				698F6E9A9AC0CA498A4F9B64 /* MobileInspectionPresentationTests.swift */,
+				E159B6573C97C916A78610D6 /* PairHostModelTests.swift */,
 				32B37ACB2BDE762E4091F2CC /* PaneAccessibilityTests.swift */,
 				8B84BDEB14FE60F2EF185773 /* PaneComposerTests.swift */,
 				145FE2009F0E817AF44D610E /* PaneIndicatorTests.swift */,
@@ -392,6 +405,7 @@
 				171B1ED652B1AA9F5C98FAF0 /* DemoStore.swift */,
 				56D912A6A487EC289774C800 /* PsycheApp.swift */,
 				3A8E16E9F9D734F6300018E5 /* Design */,
+				1B49DCE0E7FC8F530F68AA70 /* Pairing */,
 				D7C7DF5BC480E7FBEE672FD8 /* Views */,
 			);
 			path = PsycheApp;
@@ -712,6 +726,7 @@
 				054F31B1D48F28B5BFCDC16C /* DiffView.swift in Sources */,
 				6BDEF69B00F7C6E870A940EA /* FileBrowserView.swift in Sources */,
 				ADE2364200253F66FF3F60A5 /* NowView.swift in Sources */,
+				17634AED17B8DFDC604DD5F6 /* PairHostModel.swift in Sources */,
 				37AC8C53A77A8747916251FF /* PairHostSheet.swift in Sources */,
 				C41A0357612B4800ACCEDBBC /* PaneAccessibility.swift in Sources */,
 				57C00E3E569EB487C94E4297 /* PaneComposer.swift in Sources */,
@@ -735,6 +750,7 @@
 				B28AA7E56F8C0B0EADACA6C6 /* AppModelTests.swift in Sources */,
 				C5172D7B0FA837EEAC936A98 /* CreatePaneFormTests.swift in Sources */,
 				9CA90B93A245DAC373286CFB /* MobileInspectionPresentationTests.swift in Sources */,
+				014E37F0AD313A3C17B84736 /* PairHostModelTests.swift in Sources */,
 				2F55F53C111C6532AB9A6FD3 /* PaneAccessibilityTests.swift in Sources */,
 				063961D94B8EF85F48AFBF1D /* PaneComposerTests.swift in Sources */,
 				36C478336226BA4B15A8766E /* PaneIndicatorTests.swift in Sources */,

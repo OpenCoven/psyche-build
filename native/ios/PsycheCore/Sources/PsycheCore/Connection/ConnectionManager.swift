@@ -52,6 +52,10 @@ final class PairingPersistenceAuthorization: @unchecked Sendable {
 
 public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
     case missingWelcomeIdentity
+    case selectedHostUnavailable(serverID: String)
+    case selectedHostMismatch(expectedServerID: String, actualServerID: String)
+    case connectionFailed(reason: String)
+    case workspaceReadinessUnavailable
     case unsupportedProtocolVersion(Int)
     case messageProcessorEndedBeforeReady
     case connectionCancelled
@@ -61,6 +65,14 @@ public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
         switch self {
         case .missingWelcomeIdentity:
             "The host accepted pairing before identifying itself."
+        case .selectedHostUnavailable(let serverID):
+            "The paired host \(serverID) is no longer available on this device. Choose another paired host or pair it again."
+        case .selectedHostMismatch(let expectedServerID, let actualServerID):
+            "Expected paired host \(expectedServerID), but the authenticated host identified itself as \(actualServerID)."
+        case .connectionFailed(let reason):
+            "The connection failed: \(reason)"
+        case .workspaceReadinessUnavailable:
+            "This connection no longer has a workspace snapshot. Reconnect to the host and wait for it to finish loading."
         case .unsupportedProtocolVersion(let version):
             "The host selected unsupported mobile protocol version \(version)."
         case .messageProcessorEndedBeforeReady:
@@ -114,6 +126,12 @@ public actor ConnectionManager {
     private let snapshotRequestFailureStart: @Sendable () async -> Void
     private let manualCredentials: ConnectionCredentials
     private var activeConnection: ConnectionConfiguration?
+    private var pendingReadyHost: PairedHost?
+    private var workspaceReadyGeneration: ConnectionGeneration?
+    private var workspaceReadinessWaiters: [UUID: (
+        generation: ConnectionGeneration,
+        continuation: CheckedContinuation<Void, any Error>
+    )] = [:]
     private let clientName: String
     private var welcomeIdentity: WelcomeIdentity?
     private var pairingWaiter: PairingWaiter?
@@ -126,6 +144,8 @@ public actor ConnectionManager {
     private var connectExecutionOwner: UUID?
     private var activeTeardown: UUID?
     private var teardownWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var interruptibleTeardownWaiters:
+        [UUID: CheckedContinuation<Void, Never>] = [:]
     private var lifecycleIntentEpoch: UInt64 = 0
     private var teardownFinalStateOverride: ConnectionState?
     private var activeMessageSession: UUID?
@@ -181,52 +201,188 @@ public actor ConnectionManager {
                 throwing: ConnectionManagerError.messageProcessorEndedBeforeReady
             )
         }
+        for waiter in workspaceReadinessWaiters.values {
+            waiter.continuation.resume(
+                throwing: ConnectionManagerError.workspaceReadinessUnavailable
+            )
+        }
         pairingWaiter?.continuation.resume(throwing: PairingError.connectionChanged)
         for continuation in teardownWaiters.values {
+            continuation.resume()
+        }
+        for continuation in interruptibleTeardownWaiters.values {
             continuation.resume()
         }
     }
 
     public func connectToStoredHost() async {
+        await connectToLastConnectedHost()
+    }
+
+    public func connectToLastConnectedHost() async {
         let intentEpoch = lifecycleIntentEpoch
         guard canStartStoredReconnect(intentEpoch: intentEpoch) else { return }
 
         do {
-            guard let host = try await pairedHostStore.hosts().first else { return }
+            guard let host = try await pairedHostStore.lastConnectedHost() else { return }
             guard canStartStoredReconnect(intentEpoch: intentEpoch) else { return }
-            await connect(
-                using: ConnectionConfiguration(
-                    endpoint: host.endpoint,
-                    credentials: ConnectionCredentials(
-                        clientID: host.clientID,
-                        token: host.token
-                    )
-                ),
+            let (_, configuration) = try await storedConnectionConfiguration(for: host)
+            let generation = try await connectAndRequireConnected(
+                using: configuration,
                 intentEpoch: intentEpoch
             )
+            guard lifecycleIntentEpoch == intentEpoch else { return }
+            try await waitForWorkspaceReady(for: generation)
         } catch {
-            guard canStartStoredReconnect(intentEpoch: intentEpoch) else { return }
+            guard lifecycleIntentEpoch == intentEpoch else { return }
             transition(to: .failed(error.localizedDescription))
         }
     }
 
-    public func connect(to endpoint: HostEndpoint) async {
-        lifecycleIntentEpoch &+= 1
-        let intentEpoch = lifecycleIntentEpoch
-        await connect(
+    @discardableResult
+    public func connectToPairedHost(
+        serverID: String,
+        resolvedEndpoint: HostEndpoint? = nil
+    ) async throws -> PairedHost {
+        let intentEpoch = advanceLifecycleIntentEpoch()
+        let (host, configuration) = try await exactStoredConnectionConfiguration(
+            serverID: serverID,
+            resolvedEndpoint: resolvedEndpoint
+        )
+        let generation = try await connectAndRequireConnected(
+            using: configuration,
+            intentEpoch: intentEpoch
+        )
+        if let authenticatedHost = pendingReadyHost {
+            return authenticatedHost
+        }
+        guard workspaceReadyGeneration === generation,
+              let authenticatedHost = try await pairedHostStore.host(
+                  withServerID: host.serverID
+              ) else {
+            throw ConnectionManagerError.workspaceReadinessUnavailable
+        }
+        return authenticatedHost
+    }
+
+    public func connectForPairing(to endpoint: HostEndpoint) async throws {
+        let intentEpoch = advanceLifecycleIntentEpoch()
+        _ = try await connectAndRequireConnected(
             using: ConnectionConfiguration(
                 endpoint: endpoint,
-                credentials: manualCredentials
+                credentials: manualCredentials,
+                readyHost: nil
             ),
             intentEpoch: intentEpoch
         )
+    }
+
+    public func connect(to endpoint: HostEndpoint) async {
+        let intentEpoch = advanceLifecycleIntentEpoch()
+        await connect(
+            using: ConnectionConfiguration(
+                endpoint: endpoint,
+                credentials: manualCredentials,
+                readyHost: nil
+            ),
+            intentEpoch: intentEpoch
+        )
+    }
+
+    public func waitForWorkspaceReady() async throws {
+        guard let generation = activeGeneration else {
+            throw ConnectionManagerError.workspaceReadinessUnavailable
+        }
+        try await waitForWorkspaceReady(for: generation)
+    }
+
+    private func exactStoredConnectionConfiguration(
+        serverID: String,
+        resolvedEndpoint: HostEndpoint?
+    ) async throws -> (host: PairedHost, configuration: ConnectionConfiguration) {
+        guard let host = try await pairedHostStore.host(withServerID: serverID) else {
+            throw ConnectionManagerError.selectedHostUnavailable(serverID: serverID)
+        }
+        return try await storedConnectionConfiguration(
+            for: host,
+            resolvedEndpoint: resolvedEndpoint
+        )
+    }
+
+    private func storedConnectionConfiguration(
+        for host: PairedHost,
+        resolvedEndpoint: HostEndpoint? = nil
+    ) async throws -> (host: PairedHost, configuration: ConnectionConfiguration) {
+        let exactHost: PairedHost
+        if let resolvedEndpoint {
+            switch try await pairedHostStore.pairingStatus(
+                forServerID: host.serverID,
+                certificateFingerprint: resolvedEndpoint.certificateFingerprint
+            ) {
+            case .paired:
+                exactHost = host.withEndpoint(resolvedEndpoint)
+            case .requiresRePairing:
+                throw PairedHostStoreError.identityChanged(serverID: host.serverID)
+            case .unpaired:
+                throw ConnectionManagerError.selectedHostUnavailable(
+                    serverID: host.serverID
+                )
+            }
+        } else {
+            exactHost = host
+        }
+
+        return (
+            exactHost,
+            ConnectionConfiguration(
+                endpoint: exactHost.endpoint,
+                credentials: ConnectionCredentials(
+                    clientID: exactHost.clientID,
+                    token: exactHost.token
+                ),
+                readyHost: exactHost
+            )
+        )
+    }
+
+    private func connectAndRequireConnected(
+        using configuration: ConnectionConfiguration,
+        intentEpoch: UInt64
+    ) async throws -> ConnectionGeneration {
+        await connect(using: configuration, intentEpoch: intentEpoch)
+        guard lifecycleIntentEpoch == intentEpoch else {
+            throw ConnectionManagerError.workspaceReadinessUnavailable
+        }
+        if activeTeardown != nil {
+            _ = await waitForTeardownCompletionUnlessCancelled(
+                intentEpoch: intentEpoch
+            )
+        }
+        guard lifecycleIntentEpoch == intentEpoch else {
+            throw ConnectionManagerError.workspaceReadinessUnavailable
+        }
+        guard let generation = activeGeneration,
+              isActive(generation: generation),
+              state == .connected else {
+            throw connectionOutcomeError()
+        }
+        return generation
+    }
+
+    private func connectionOutcomeError() -> ConnectionManagerError {
+        if case let .failed(reason) = state {
+            return .connectionFailed(reason: reason)
+        }
+        return .workspaceReadinessUnavailable
     }
 
     private func connect(
         using configuration: ConnectionConfiguration,
         intentEpoch: UInt64
     ) async {
-        guard await waitForTeardownCompletionUnlessCancelled() else { return }
+        guard await waitForTeardownCompletionUnlessCancelled(
+            intentEpoch: intentEpoch
+        ) else { return }
         guard lifecycleIntentEpoch == intentEpoch else { return }
         // Guard on execution, not on state. connect() keeps awaiting past the
         // .authenticating transition and the actor yields at every await.
@@ -252,6 +408,8 @@ public actor ConnectionManager {
         pairingRequiresReconnect = false
         activeConnectAttempt = attempt
         activeConnection = configuration
+        pendingReadyHost = configuration.readyHost
+        workspaceReadyGeneration = nil
         transition(to: .connecting)
 
         do {
@@ -347,6 +505,7 @@ public actor ConnectionManager {
             await tearDownActiveConnection(
                 generation: generation,
                 readinessError: error,
+                workspaceReadinessError: error,
                 finalState: .failed(error.localizedDescription)
             )
         } catch {
@@ -354,13 +513,14 @@ public actor ConnectionManager {
             await tearDownActiveConnection(
                 generation: generation,
                 readinessError: error,
+                workspaceReadinessError: error,
                 finalState: .failed(error.localizedDescription)
             )
         }
     }
 
     public func disconnect() async {
-        lifecycleIntentEpoch &+= 1
+        _ = advanceLifecycleIntentEpoch()
         if activeTeardown != nil {
             transition(to: .disconnecting)
             teardownFinalStateOverride = .disconnected
@@ -464,6 +624,37 @@ public actor ConnectionManager {
         let waiterID = UUID()
         await withCheckedContinuation { continuation in
             stateWaiters[waiterID] = (expectedState, continuation)
+        }
+    }
+
+    private func waitForWorkspaceReady(
+        for generation: ConnectionGeneration
+    ) async throws {
+        guard activeGeneration === generation else {
+            throw ConnectionManagerError.workspaceReadinessUnavailable
+        }
+        guard workspaceReadyGeneration !== generation else { return }
+
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, any Error>) in
+                guard activeGeneration === generation else {
+                    continuation.resume(
+                        throwing: ConnectionManagerError.workspaceReadinessUnavailable
+                    )
+                    return
+                }
+                guard workspaceReadyGeneration !== generation else {
+                    continuation.resume()
+                    return
+                }
+                workspaceReadinessWaiters[waiterID] = (generation, continuation)
+            }
+        } onCancel: {
+            Task { [weak self] in
+                await self?.cancelWorkspaceReadinessWaiter(waiterID)
+            }
         }
     }
 
@@ -582,10 +773,26 @@ public actor ConnectionManager {
                         .localizedDescription
                 )
             }
-            welcomeIdentity = WelcomeIdentity(
+            let welcomeIdentity = WelcomeIdentity(
                 serverID: payload.serverID,
                 serverName: payload.serverName
             )
+            if let readyHost = pendingReadyHost {
+                guard welcomeIdentity.serverID == readyHost.serverID else {
+                    return .failed(
+                        ConnectionManagerError.selectedHostMismatch(
+                            expectedServerID: readyHost.serverID,
+                            actualServerID: welcomeIdentity.serverID
+                        )
+                        .localizedDescription
+                    )
+                }
+                pendingReadyHost = rebuiltReadyHost(
+                    from: readyHost,
+                    welcomeIdentity: welcomeIdentity
+                )
+            }
+            self.welcomeIdentity = welcomeIdentity
             await requestClient.beginGeneration(generation)
             guard isActive(session: session, generation: generation) else {
                 return .ignored
@@ -669,6 +876,7 @@ public actor ConnectionManager {
                 clientID: pairingWaiter.request.clientID,
                 token: payload.token
             )
+            pendingReadyHost = host
             completePairing(
                 id: pairingWaiter.id,
                 generation: generation,
@@ -713,11 +921,24 @@ public actor ConnectionManager {
             isSnapshotRecoveryInFlight = false
             activeSnapshotRequest = nil
             snapshotRequestTask = nil
-            await workspaceStore.applySnapshot(
-                workspace: result.workspace,
-                sequence: result.sequence,
-                for: generation
-            )
+            do {
+                let finalized = try await finalizeWorkspaceReadiness(
+                    with: result,
+                    session: session,
+                    generation: generation
+                )
+                return finalized ? .processed : .ignored
+            } catch {
+                let failure = ConnectionManagerError.connectionFailed(
+                    reason: error.localizedDescription
+                )
+                await tearDownActiveConnection(
+                    generation: generation,
+                    workspaceReadinessError: failure,
+                    finalState: .failed(failure.localizedDescription)
+                )
+                return .ignored
+            }
         case .error(let error):
             if !claimSnapshotFailure(for: response, wasHandled: wasHandled),
                !wasHandled {
@@ -815,9 +1036,56 @@ public actor ConnectionManager {
         isSnapshotRecoveryInFlight = false
         activeSnapshotRequest = nil
         snapshotRequestTask = nil
+        let failure = ConnectionManagerError.connectionFailed(
+            reason: error.localizedDescription
+        )
         await tearDownActiveConnection(
             generation: generation,
+            workspaceReadinessError: failure,
             finalState: .failed(error.localizedDescription)
+        )
+    }
+
+    private func finalizeWorkspaceReadiness(
+        with result: MobileWorkspaceSnapshotResult,
+        session: UUID,
+        generation: ConnectionGeneration
+    ) async throws -> Bool {
+        await workspaceStore.applySnapshot(
+            workspace: result.workspace,
+            sequence: result.sequence,
+            for: generation
+        )
+        guard isActive(session: session, generation: generation) else { return false }
+
+        if let readyHost = pendingReadyHost {
+            let committed = try await pairedHostStore.recordSuccessfulConnection(
+                readyHost,
+                for: generation
+            )
+            guard committed else { return false }
+            guard isActive(session: session, generation: generation) else {
+                return false
+            }
+            pendingReadyHost = nil
+        }
+
+        workspaceReadyGeneration = generation
+        completeWorkspaceReadiness(for: generation, with: .success(()))
+        return true
+    }
+
+    private func rebuiltReadyHost(
+        from readyHost: PairedHost,
+        welcomeIdentity: WelcomeIdentity
+    ) -> PairedHost {
+        guard let activeConnection else { return readyHost }
+        return PairedHost(
+            serverID: welcomeIdentity.serverID,
+            serverName: welcomeIdentity.serverName,
+            endpoint: activeConnection.endpoint,
+            clientID: activeConnection.credentials.clientID,
+            token: activeConnection.credentials.token
         )
     }
 
@@ -835,6 +1103,7 @@ public actor ConnectionManager {
     private func tearDownActiveConnection(
         generation expectedGeneration: ConnectionGeneration? = nil,
         readinessError: any Error = ConnectionManagerError.messageProcessorEndedBeforeReady,
+        workspaceReadinessError: any Error = ConnectionManagerError.workspaceReadinessUnavailable,
         finalState: ConnectionState? = nil
     ) async {
         if activeTeardown != nil {
@@ -864,6 +1133,10 @@ public actor ConnectionManager {
         activeMessageSession = nil
         completeMessageProcessorReadiness(for: session, with: .failure(readinessError))
         completeNegotiation(for: session, with: .failure(readinessError))
+        completeWorkspaceReadiness(
+            for: generation,
+            with: .failure(workspaceReadinessError)
+        )
         messageTask?.cancel()
         messageTask = nil
         let shouldDisconnectTransport = transportCleanupGeneration === generation
@@ -896,17 +1169,24 @@ public actor ConnectionManager {
         }
     }
 
-    private func waitForTeardownCompletionUnlessCancelled() async -> Bool {
+    private func waitForTeardownCompletionUnlessCancelled(
+        intentEpoch: UInt64? = nil
+    ) async -> Bool {
         while activeTeardown != nil {
+            if let intentEpoch, lifecycleIntentEpoch != intentEpoch {
+                return false
+            }
             guard !Task.isCancelled else { return false }
             let waiter = UUID()
             await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
-                    guard activeTeardown != nil, !Task.isCancelled else {
+                    guard activeTeardown != nil,
+                          !Task.isCancelled,
+                          intentEpoch == nil || lifecycleIntentEpoch == intentEpoch else {
                         continuation.resume()
                         return
                     }
-                    teardownWaiters[waiter] = continuation
+                    interruptibleTeardownWaiters[waiter] = continuation
                 }
             } onCancel: {
                 Task { [weak self] in
@@ -914,11 +1194,14 @@ public actor ConnectionManager {
                 }
             }
         }
+        if let intentEpoch {
+            return lifecycleIntentEpoch == intentEpoch && !Task.isCancelled
+        }
         return !Task.isCancelled
     }
 
     private func cancelTeardownWaiter(_ waiter: UUID) {
-        teardownWaiters.removeValue(forKey: waiter)?.resume()
+        interruptibleTeardownWaiters.removeValue(forKey: waiter)?.resume()
     }
 
     private func completeTeardown(_ teardown: UUID) {
@@ -927,6 +1210,18 @@ public actor ConnectionManager {
         let waiting = teardownWaiters.values
         teardownWaiters.removeAll()
         waiting.forEach { $0.resume() }
+        let interruptibleWaiting = interruptibleTeardownWaiters.values
+        interruptibleTeardownWaiters.removeAll()
+        interruptibleWaiting.forEach { $0.resume() }
+    }
+
+    @discardableResult
+    private func advanceLifecycleIntentEpoch() -> UInt64 {
+        lifecycleIntentEpoch &+= 1
+        let waiting = interruptibleTeardownWaiters.values
+        interruptibleTeardownWaiters.removeAll()
+        waiting.forEach { $0.resume() }
+        return lifecycleIntentEpoch
     }
 
     private func resetPerConnectionState(
@@ -937,6 +1232,8 @@ public actor ConnectionManager {
         activeSnapshotRequest = nil
         requestedInitialSnapshot = false
         isSnapshotRecoveryInFlight = false
+        pendingReadyHost = nil
+        workspaceReadyGeneration = nil
         activeConnection = nil
         welcomeIdentity = nil
         isMessageProcessorReady = false
@@ -959,6 +1256,7 @@ public actor ConnectionManager {
         await tearDownActiveConnection(
             generation: generation,
             readinessError: error,
+            workspaceReadinessError: error,
             finalState: .failed(error.localizedDescription)
         )
     }
@@ -1051,6 +1349,30 @@ public actor ConnectionManager {
         }
     }
 
+    private func cancelWorkspaceReadinessWaiter(_ waiterID: UUID) {
+        workspaceReadinessWaiters.removeValue(forKey: waiterID)?
+            .continuation
+            .resume(throwing: CancellationError())
+    }
+
+    private func completeWorkspaceReadiness(
+        for generation: ConnectionGeneration?,
+        with result: Result<Void, any Error>
+    ) {
+        let waiterIDs = workspaceReadinessWaiters.compactMap { entry -> UUID? in
+            let (waiterID, waiter) = entry
+            if let generation, waiter.generation !== generation {
+                return nil
+            }
+            return waiterID
+        }
+        for waiterID in waiterIDs {
+            workspaceReadinessWaiters.removeValue(forKey: waiterID)?
+                .continuation
+                .resume(with: result)
+        }
+    }
+
     private func messageProcessingEnded(
         for session: UUID,
         generation: ConnectionGeneration,
@@ -1059,8 +1381,10 @@ public actor ConnectionManager {
         guard isActive(session: session, generation: generation) else { return }
 
         transition(to: .disconnecting)
+        let failure = ConnectionManagerError.connectionFailed(reason: reason)
         await tearDownActiveConnection(
             generation: generation,
+            workspaceReadinessError: failure,
             finalState: .failed(reason)
         )
     }
@@ -1127,6 +1451,7 @@ public actor ConnectionManager {
     private struct ConnectionConfiguration {
         let endpoint: HostEndpoint
         let credentials: ConnectionCredentials
+        let readyHost: PairedHost?
 
         func withPairingCredentials(
             clientID: String,
@@ -1137,7 +1462,8 @@ public actor ConnectionManager {
                 credentials: ConnectionCredentials(
                     clientID: clientID,
                     token: token
-                )
+                ),
+                readyHost: readyHost
             )
         }
     }
