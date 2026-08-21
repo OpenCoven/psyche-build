@@ -40,6 +40,7 @@ export interface TauriStressRuntimeHost {
   createPerformanceObserver?: PerformanceObserverFactory;
   onProgress?(progress: StressProgress): void;
   reportError?(error: unknown, operation: string): void;
+  reportSuccess?(operation: string): void;
 }
 
 export interface TauriStressHarness {
@@ -190,6 +191,7 @@ export function createTauriStressHarness(
         schedulerSnapshot: host.schedulerSnapshot,
         rendererSnapshots: host.rendererSnapshots,
         reportError: host.reportError,
+        reportSuccess: host.reportSuccess,
       });
       collector.start();
       result = await runStressPlan({
@@ -231,7 +233,14 @@ export function createTauriStressHarness(
         },
         snapshotMetrics: () => {
           cancelInteractions();
-          return collector?.snapshot();
+          try {
+            const snapshot = collector?.snapshot();
+            host.reportSuccess?.('stress metrics snapshot');
+            return snapshot;
+          } catch (error) {
+            host.reportError?.(error, 'stress metrics snapshot');
+            throw error;
+          }
         },
         sleep: host.sleep ?? sleepWithAbort,
         requestFrame: host.requestFrame,

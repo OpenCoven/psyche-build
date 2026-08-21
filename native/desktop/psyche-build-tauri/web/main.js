@@ -14151,6 +14151,7 @@
   }
 
   var runtimeStressHarness = null;
+  var graphicsDiagnosticsStressController = null;
   var runtimeDiagnosticsReport = null;
   var diagnosticsStressContext = null;
   var activeDiagnosticsBrowserFixture = null;
@@ -14161,11 +14162,9 @@
   var graphicsDiagnosticsCloseTimer = 0;
   var graphicsDiagnosticsRefreshFlight = null;
   var graphicsDiagnosticsOpen = false;
-  var graphicsDiagnosticsScenarioState = "idle";
-  var graphicsDiagnosticsScenarioProgress = null;
-  var graphicsDiagnosticsScenarioResult = null;
-  var graphicsDiagnosticsScenarioError = null;
   var graphicsDiagnosticsFailures = new Map();
+  var graphicsDiagnosticsCollectorFailures = new Map();
+  var graphicsDiagnosticsStressCollectionFailures = new Map();
   var graphicsDiagnosticsHasEvidence = false;
   var graphicsDiagnosticsInteractions = {
     sequence: 0,
@@ -14203,6 +14202,34 @@
 
   function clearGraphicsDiagnosticsFailure(key) {
     if (!graphicsDiagnosticsFailures.delete(key)) return;
+    updateGraphicsDiagnosticsStatus();
+  }
+
+  function reportGraphicsDiagnosticsTrackedFailure(
+    failures,
+    key,
+    prefix,
+    error,
+    operation
+  ) {
+    var message = prefix + operation + ": " + String(error);
+    failures.delete(operation);
+    failures.set(operation, message);
+    reportGraphicsDiagnosticsFailure(key, message, error);
+  }
+
+  function clearGraphicsDiagnosticsTrackedFailure(failures, key, operation) {
+    if (!failures.delete(operation)) return;
+    var remaining = null;
+    failures.forEach(function (message) {
+      remaining = message;
+    });
+    if (!remaining) {
+      clearGraphicsDiagnosticsFailure(key);
+      return;
+    }
+    graphicsDiagnosticsFailures.delete(key);
+    graphicsDiagnosticsFailures.set(key, remaining);
     updateGraphicsDiagnosticsStatus();
   }
 
@@ -14966,26 +14993,20 @@
       }
     }
     if (runtimeDiagnosticsReport && runtimeDiagnosticsReport.stressAuthorized === true &&
-        runtimeStressHarness) {
-      snapshot.scenario = { state: graphicsDiagnosticsScenarioState };
-      if (graphicsDiagnosticsScenarioProgress) {
-        snapshot.scenario.progress = graphicsDiagnosticsScenarioProgress;
-      }
-      if (graphicsDiagnosticsScenarioResult) {
-        snapshot.scenario.result = graphicsDiagnosticsScenarioResult;
-      }
-      if (graphicsDiagnosticsScenarioError) {
-        snapshot.scenario.error = graphicsDiagnosticsScenarioError;
-      }
+        graphicsDiagnosticsStressController) {
+      snapshot.scenario = graphicsDiagnosticsStressController.snapshot();
     }
     return snapshot;
   }
 
   function renderGraphicsDiagnosticsProgress() {
     if (!graphicsDiagnosticsScenarioEl || graphicsDiagnosticsScenarioEl.hidden) return;
-    var progress = graphicsDiagnosticsScenarioProgress;
-    var running = graphicsDiagnosticsScenarioState === "running";
-    var cancelling = graphicsDiagnosticsScenarioState === "cancelling";
+    var scenario = graphicsDiagnosticsStressController
+      ? graphicsDiagnosticsStressController.snapshot()
+      : { state: "idle" };
+    var progress = scenario.progress;
+    var running = scenario.state === "running";
+    var cancelling = scenario.state === "cancelling";
     if (graphicsDiagnosticsRunEl) {
       graphicsDiagnosticsRunEl.disabled = running || cancelling;
     }
@@ -14999,7 +15020,7 @@
           progress.phaseDurationMs,
           Math.max(0, progress.elapsedMs)
         );
-      } else if (graphicsDiagnosticsScenarioState === "completed") {
+      } else if (scenario.state === "completed") {
         graphicsDiagnosticsProgressEl.max = 1;
         graphicsDiagnosticsProgressEl.value = 1;
       } else {
@@ -15014,22 +15035,22 @@
         (cancelling ? " · Cancellation requested" : "");
       return;
     }
-    if (graphicsDiagnosticsScenarioState === "running") {
+    if (scenario.state === "running") {
       graphicsDiagnosticsProgressTextEl.textContent = "Preparing the fixed stress scenario.";
-    } else if (graphicsDiagnosticsScenarioState === "cancelling") {
+    } else if (scenario.state === "cancelling") {
       graphicsDiagnosticsProgressTextEl.textContent =
         "Cancellation requested. Waiting for production cleanup.";
-    } else if (graphicsDiagnosticsScenarioState === "completed") {
-      var result = graphicsDiagnosticsScenarioResult;
+    } else if (scenario.state === "completed") {
+      var result = scenario.result;
       var elapsed = result ? Math.max(0, result.finishedAt - result.startedAt) : 0;
       graphicsDiagnosticsProgressTextEl.textContent =
         "Completed all fixed scenarios in " + (elapsed / 1000).toFixed(1) + " seconds.";
-    } else if (graphicsDiagnosticsScenarioState === "cancelled") {
+    } else if (scenario.state === "cancelled") {
       graphicsDiagnosticsProgressTextEl.textContent =
         "Scenario cancelled. Production resources were cleaned up.";
-    } else if (graphicsDiagnosticsScenarioState === "failed") {
+    } else if (scenario.state === "failed") {
       graphicsDiagnosticsProgressTextEl.textContent =
-        "Scenario failed. " + (graphicsDiagnosticsScenarioError || "");
+        "Scenario failed. " + (scenario.error || "");
     } else {
       graphicsDiagnosticsProgressTextEl.textContent = "Authorized and ready.";
     }
@@ -15078,9 +15099,42 @@
   }
 
   function updateGraphicsDiagnosticsStressProgress(progress) {
-    graphicsDiagnosticsScenarioProgress = progress;
-    if (graphicsDiagnosticsScenarioState !== "cancelling") {
-      graphicsDiagnosticsScenarioState = "running";
+    if (!graphicsDiagnosticsStressController) return;
+    graphicsDiagnosticsStressController.updateProgress(progress);
+  }
+
+  function handleGraphicsDiagnosticsStressState(snapshot, error, previous) {
+    if (error !== undefined &&
+        snapshot.state !== "failed" &&
+        snapshot.state !== "cancelled") {
+      reportGraphicsDiagnosticsFailure(
+        "stress-action",
+        "Graphics stress scenario start failed: " + String(error),
+        error
+      );
+      renderGraphicsDiagnosticsSurface();
+      return;
+    }
+    if (!previous || snapshot.state !== previous.state) {
+      if (snapshot.state === "running") {
+        clearGraphicsDiagnosticsFailure("stress-action");
+        toast("Graphics stress scenario started");
+      } else if (snapshot.state === "cancelling") {
+        clearGraphicsDiagnosticsFailure("stress-action");
+        toast("Graphics stress scenario cancellation requested");
+      } else if (snapshot.state === "completed") {
+        clearGraphicsDiagnosticsFailure("stress-action");
+        toast("Graphics stress scenario completed");
+      } else if (snapshot.state === "cancelled") {
+        clearGraphicsDiagnosticsFailure("stress-action");
+        toast("Graphics stress scenario cancelled");
+      } else if (snapshot.state === "failed") {
+        reportGraphicsDiagnosticsFailure(
+          "stress-action",
+          "Graphics stress scenario failed: " + String(error),
+          error
+        );
+      }
     }
     renderGraphicsDiagnosticsSurface();
   }
@@ -15199,59 +15253,30 @@
     return !!error.cause && graphicsDiagnosticsCancellation(error.cause);
   }
 
-  async function runGraphicsDiagnosticsStressScenario() {
-    if (!runtimeStressHarness ||
+  function runGraphicsDiagnosticsStressScenario() {
+    if (!graphicsDiagnosticsStressController ||
         !runtimeDiagnosticsReport ||
         runtimeDiagnosticsReport.stressAuthorized !== true) {
+      var error = new Error("graphics stress diagnostics are not authorized");
       reportGraphicsDiagnosticsFailure(
         "stress-action",
         "Graphics stress diagnostics are not authorized."
       );
-      return null;
+      return Promise.reject(error);
     }
-    if (runtimeStressHarness.running()) return null;
-    clearGraphicsDiagnosticsFailure("stress-action");
-    graphicsDiagnosticsScenarioState = "running";
-    graphicsDiagnosticsScenarioProgress = null;
-    graphicsDiagnosticsScenarioResult = null;
-    graphicsDiagnosticsScenarioError = null;
-    renderGraphicsDiagnosticsSurface();
-    toast("Graphics stress scenario started");
-    try {
-      var result = await runtimeStressHarness.run();
-      graphicsDiagnosticsScenarioResult = result;
-      graphicsDiagnosticsScenarioState = "completed";
-      clearGraphicsDiagnosticsFailure("stress-action");
-      toast("Graphics stress scenario completed");
-      return result;
-    } catch (error) {
-      if (graphicsDiagnosticsCancellation(error)) {
-        graphicsDiagnosticsScenarioState = "cancelled";
-        toast("Graphics stress scenario cancelled");
-      } else {
-        graphicsDiagnosticsScenarioState = "failed";
-        graphicsDiagnosticsScenarioError = String(error);
-        reportGraphicsDiagnosticsFailure(
-          "stress-action",
-          "Graphics stress scenario failed: " + String(error),
-          error
-        );
-      }
-      return null;
-    } finally {
-      renderGraphicsDiagnosticsSurface();
-    }
+    return graphicsDiagnosticsStressController.run();
   }
 
   function cancelGraphicsDiagnosticsStressScenario() {
-    if (!runtimeStressHarness || !runtimeStressHarness.running()) {
+    if (!graphicsDiagnosticsStressController ||
+        !graphicsDiagnosticsStressController.running()) {
       reportGraphicsDiagnosticsFailure(
         "stress-action",
         "Graphics stress scenario is not running."
       );
       return false;
     }
-    var cancelled = runtimeStressHarness.cancel();
+    var cancelled = graphicsDiagnosticsStressController.cancel();
     if (!cancelled) {
       reportGraphicsDiagnosticsFailure(
         "stress-action",
@@ -15259,10 +15284,6 @@
       );
       return false;
     }
-    clearGraphicsDiagnosticsFailure("stress-action");
-    graphicsDiagnosticsScenarioState = "cancelling";
-    renderGraphicsDiagnosticsSurface();
-    toast("Graphics stress scenario cancellation requested");
     return true;
   }
 
@@ -15270,7 +15291,10 @@
     if (!graphicsDiagnosticsOpen || event.key !== "Escape") return false;
     event.preventDefault();
     event.stopPropagation();
-    if (graphicsDiagnosticsScenarioState === "running") {
+    var scenario = graphicsDiagnosticsStressController
+      ? graphicsDiagnosticsStressController.snapshot()
+      : { state: "idle" };
+    if (scenario.state === "running") {
       cancelGraphicsDiagnosticsStressScenario();
       return true;
     }
@@ -15312,7 +15336,7 @@
     graphicsDiagnosticsToggleEl.disabled = false;
     graphicsDiagnosticsScenarioEl.hidden = report.stressAuthorized !== true;
     graphicsDiagnosticsScenarioEl.inert = report.stressAuthorized !== true;
-    if (report.stressAuthorized === true && !runtimeStressHarness) {
+    if (report.stressAuthorized === true && !graphicsDiagnosticsStressController) {
       graphicsDiagnosticsScenarioEl.hidden = true;
       graphicsDiagnosticsScenarioEl.inert = true;
     }
@@ -15330,7 +15354,7 @@
       void copyGraphicsDiagnosticsJson();
     });
     graphicsDiagnosticsRunEl.addEventListener("click", function () {
-      void runGraphicsDiagnosticsStressScenario();
+      void runGraphicsDiagnosticsStressScenario().catch(function () {});
     });
     graphicsDiagnosticsCancelEl.addEventListener("click", function () {
       cancelGraphicsDiagnosticsStressScenario();
@@ -15348,11 +15372,19 @@
         ? function (callback) { return new PerformanceObserver(callback); }
         : undefined,
       reportError: function (error, operation) {
-        reportGraphicsDiagnosticsFailure(
+        reportGraphicsDiagnosticsTrackedFailure(
+          graphicsDiagnosticsCollectorFailures,
           "collector",
-          "Graphics diagnostics collector failed during " + operation +
-            ": " + String(error),
-          error
+          "Graphics diagnostics collector failed during ",
+          error,
+          operation
+        );
+      },
+      reportSuccess: function (operation) {
+        clearGraphicsDiagnosticsTrackedFailure(
+          graphicsDiagnosticsCollectorFailures,
+          "collector",
+          operation
         );
       },
     });
@@ -15413,18 +15445,33 @@
           }));
         },
         reportError: function (error, operation) {
-          reportGraphicsDiagnosticsFailure(
+          reportGraphicsDiagnosticsTrackedFailure(
+            graphicsDiagnosticsStressCollectionFailures,
             "stress-collection",
-            "Graphics stress diagnostics collection failed during " + operation +
-              ": " + String(error),
-            error
+            "Graphics stress diagnostics collection failed during ",
+            error,
+            operation
+          );
+        },
+        reportSuccess: function (operation) {
+          clearGraphicsDiagnosticsTrackedFailure(
+            graphicsDiagnosticsStressCollectionFailures,
+            "stress-collection",
+            operation
           );
         },
       });
+      graphicsDiagnosticsStressController = ptyRuntime.createGraphicsDiagnosticsStressController({
+        harness: runtimeStressHarness,
+        isCancellation: graphicsDiagnosticsCancellation,
+        onStateChange: handleGraphicsDiagnosticsStressState,
+      });
       clearGraphicsDiagnosticsFailure("stress-availability");
-      window.PsycheRenderStress = runtimeStressHarness;
-      return runtimeStressHarness;
+      window.PsycheRenderStress = graphicsDiagnosticsStressController;
+      return graphicsDiagnosticsStressController;
     } catch (error) {
+      runtimeStressHarness = null;
+      graphicsDiagnosticsStressController = null;
       reportGraphicsDiagnosticsFailure(
         "stress-availability",
         "Graphics stress diagnostics are unavailable: " + String(error),

@@ -14,6 +14,7 @@ import {
   buildGraphicsDiagnosticsView as buildGraphicsDiagnosticsViewFromEntry,
   classifyGraphicsEvidence as classifyGraphicsEvidenceFromEntry,
   createPerformanceMetricsCollector as createPerformanceMetricsCollectorFromEntry,
+  createGraphicsDiagnosticsStressController as createGraphicsDiagnosticsStressControllerFromEntry,
   FRAME_SAMPLE_LIMIT as frameSampleLimitFromEntry,
   formatDiagnosticsStressProgress as formatDiagnosticsStressProgressFromEntry,
   mergeRuntimeGraphicsReport as mergeRuntimeGraphicsReportFromEntry,
@@ -28,6 +29,7 @@ import {
 } from '../native/desktop/psyche-build-tauri/web/runtime/performance-metrics';
 import {
   buildGraphicsDiagnosticsView,
+  createGraphicsDiagnosticsStressController,
   serializeGraphicsDiagnosticsSnapshot,
 } from '../native/desktop/psyche-build-tauri/web/runtime/diagnostics-surface';
 
@@ -2671,6 +2673,12 @@ describe('runtime graphics startup wiring', () => {
 });
 
 describe('in-app graphics diagnostics surface', () => {
+  const stressResult = {
+    startedAt: 1_000,
+    finishedAt: 2_000,
+    scenarios: [],
+  };
+
   const metrics = {
     sampledAt: 12_345,
     frames: {
@@ -2869,6 +2877,136 @@ describe('in-app graphics diagnostics surface', () => {
     expect(JSON.parse(json)).toEqual(first);
   });
 
+  it('tracks an exported stress start through completion and captures its result', async () => {
+    let resolveRun!: (result: typeof stressResult) => void;
+    const harness = {
+      run: vi.fn(() => new Promise<typeof stressResult>((resolve) => {
+        resolveRun = resolve;
+      })),
+      cancel: vi.fn(() => true),
+    };
+    const states: string[] = [];
+    const exported = createGraphicsDiagnosticsStressController({
+      harness,
+      onStateChange(snapshot) {
+        states.push(snapshot.state);
+      },
+    });
+
+    const run = exported.run();
+    expect(exported.running()).toBe(true);
+    expect(exported.snapshot()).toEqual({ state: 'running' });
+
+    resolveRun(stressResult);
+    await expect(run).resolves.toBe(stressResult);
+
+    expect(exported.running()).toBe(false);
+    expect(exported.snapshot()).toEqual({
+      state: 'completed',
+      result: stressResult,
+    });
+    expect(states).toEqual(['running', 'completed']);
+  });
+
+  it('records an exported stress failure while preserving promise rejection', async () => {
+    const failure = new Error('layout failed');
+    const observedErrors: unknown[] = [];
+    const exported = createGraphicsDiagnosticsStressController({
+      harness: {
+        run: vi.fn(async () => {
+          throw failure;
+        }),
+        cancel: vi.fn(() => false),
+      },
+      onStateChange(_snapshot, error) {
+        if (error !== undefined) observedErrors.push(error);
+      },
+    });
+
+    await expect(exported.run()).rejects.toThrow('layout failed');
+    expect(exported.running()).toBe(false);
+    expect(exported.snapshot()).toEqual({
+      state: 'failed',
+      error: 'Error: layout failed',
+    });
+    expect(observedErrors).toEqual([failure]);
+  });
+
+  it('shares one active stress run across panel and exported cancellation paths', async () => {
+    let rejectRun: ((error: unknown) => void) | null = null;
+    const cancellation = new DOMException('cancelled', 'AbortError');
+    const harness = {
+      run: vi.fn(() => new Promise<typeof stressResult>((_resolve, reject) => {
+        rejectRun = reject;
+      })),
+      cancel: vi.fn(() => {
+        rejectRun?.(cancellation);
+        return true;
+      }),
+    };
+    const controller = createGraphicsDiagnosticsStressController({
+      harness,
+      isCancellation: (error) => error === cancellation,
+    });
+    const exported = controller;
+    const panelStart = () => controller.run();
+    const panelCancel = () => controller.cancel();
+
+    const externalRun = exported.run();
+    expect(panelCancel()).toBe(true);
+    expect(controller.snapshot().state).toBe('cancelling');
+    await expect(externalRun).rejects.toBe(cancellation);
+    expect(controller.snapshot()).toEqual({ state: 'cancelled' });
+
+    const panelRun = panelStart();
+    expect(exported.cancel()).toBe(true);
+    await expect(panelRun).rejects.toBe(cancellation);
+    expect(harness.run).toHaveBeenCalledTimes(2);
+    expect(harness.cancel).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a concurrent exported stress start without duplicating the run', async () => {
+    let resolveRun!: (result: typeof stressResult) => void;
+    const harness = {
+      run: vi.fn(() => new Promise<typeof stressResult>((resolve) => {
+        resolveRun = resolve;
+      })),
+      cancel: vi.fn(() => true),
+    };
+    const exported = createGraphicsDiagnosticsStressController({ harness });
+
+    const first = exported.run();
+    await expect(exported.run()).rejects.toThrow('render diagnostics are already running');
+    expect(harness.run).toHaveBeenCalledOnce();
+
+    resolveRun(stressResult);
+    await expect(first).resolves.toBe(stressResult);
+  });
+
+  it('includes externally-started stress results in copied deterministic diagnostics', async () => {
+    const exported = createGraphicsDiagnosticsStressController({
+      harness: {
+        run: vi.fn(async () => stressResult),
+        cancel: vi.fn(() => false),
+      },
+    });
+
+    await exported.run();
+    const json = serializeGraphicsDiagnosticsSnapshot({
+      scenario: exported.snapshot(),
+    });
+
+    expect(JSON.parse(json)).toEqual({
+      scenario: {
+        state: 'completed',
+        result: stressResult,
+      },
+    });
+    expect(json).toBe(serializeGraphicsDiagnosticsSnapshot({
+      scenario: exported.snapshot(),
+    }));
+  });
+
   it('ships a hidden development-only titlebar action and accessible inert right panel', () => {
     const html = readFileSync(resolve(webRoot, 'index.html'), 'utf8');
 
@@ -2902,6 +3040,17 @@ describe('in-app graphics diagnostics surface', () => {
     expect(main).toContain('ptyRuntime.createPerformanceMetricsCollector({');
     expect(main).toContain('ptyRuntime.buildGraphicsDiagnosticsView(');
     expect(main).toContain('ptyRuntime.serializeGraphicsDiagnosticsSnapshot(');
+    expect(createGraphicsDiagnosticsStressControllerFromEntry)
+      .toBe(createGraphicsDiagnosticsStressController);
+    expect(main).toContain(
+      'graphicsDiagnosticsStressController = ' +
+        'ptyRuntime.createGraphicsDiagnosticsStressController({',
+    );
+    expect(main).toContain(
+      'window.PsycheRenderStress = graphicsDiagnosticsStressController;',
+    );
+    expect(main).toContain('graphicsDiagnosticsStressController.run()');
+    expect(main).toContain('graphicsDiagnosticsStressController.cancel()');
     expect(main).toContain('clipboardManager.writeText(json)');
     expect(main).toContain('reportGraphicsDiagnosticsFailure(');
     expect(main).toContain('clearGraphicsDiagnosticsFailure(');
@@ -3420,5 +3569,109 @@ describe('in-app graphics diagnostics surface', () => {
     shouldFail = false;
     await expect(copy()).resolves.toBe(true);
     expect(clearFailure).toHaveBeenCalledWith('copy');
+  });
+
+  it('keeps collector failures visible until the failed operation accepts recovery evidence', () => {
+    const main = readFileSync(resolve(webRoot, 'main.js'), 'utf8');
+    const tracked = new Map<string, string>();
+    const visible = new Map<string, string>();
+    const updates: string[] = [];
+    const reportFailure = (key: string, message: string) => {
+      visible.delete(key);
+      visible.set(key, message);
+      updates.push(message);
+    };
+    const clearFailure = (key: string) => {
+      visible.delete(key);
+      updates.push('cleared');
+    };
+    const report = compileFunction<
+      (
+        failures: Map<string, string>,
+        key: string,
+        prefix: string,
+        error: unknown,
+        operation: string,
+      ) => void
+    >(
+      main,
+      'reportGraphicsDiagnosticsTrackedFailure',
+      { reportGraphicsDiagnosticsFailure: reportFailure },
+    );
+    const clear = compileFunction<
+      (failures: Map<string, string>, key: string, operation: string) => void
+    >(
+      main,
+      'clearGraphicsDiagnosticsTrackedFailure',
+      {
+        graphicsDiagnosticsFailures: visible,
+        clearGraphicsDiagnosticsFailure: clearFailure,
+        updateGraphicsDiagnosticsStatus: () => {
+          updates.push(visible.get('collector') || visible.get('stress-collection') || '');
+        },
+      },
+    );
+
+    report(tracked, 'collector', 'Collector failed during ', new Error('offline'), 'pty');
+    clear(tracked, 'collector', 'process');
+    expect(visible.get('collector')).toContain('offline');
+
+    report(tracked, 'collector', 'Collector failed during ', new Error('still offline'), 'pty');
+    clear(tracked, 'collector', 'process');
+    expect(visible.get('collector')).toContain('still offline');
+    expect(updates).not.toContain('cleared');
+
+    clear(tracked, 'collector', 'pty');
+    expect(visible.has('collector')).toBe(false);
+    expect(updates.at(-1)).toBe('cleared');
+  });
+
+  it('clears stress collection failures only when the same failed boundary recovers', () => {
+    const main = readFileSync(resolve(webRoot, 'main.js'), 'utf8');
+    const tracked = new Map<string, string>();
+    const visible = new Map<string, string>();
+    const report = compileFunction<
+      (
+        failures: Map<string, string>,
+        key: string,
+        prefix: string,
+        error: unknown,
+        operation: string,
+      ) => void
+    >(
+      main,
+      'reportGraphicsDiagnosticsTrackedFailure',
+      {
+        reportGraphicsDiagnosticsFailure(key: string, message: string) {
+          visible.set(key, message);
+        },
+      },
+    );
+    const clear = compileFunction<
+      (failures: Map<string, string>, key: string, operation: string) => void
+    >(
+      main,
+      'clearGraphicsDiagnosticsTrackedFailure',
+      {
+        graphicsDiagnosticsFailures: visible,
+        clearGraphicsDiagnosticsFailure: (key: string) => {
+          visible.delete(key);
+        },
+        updateGraphicsDiagnosticsStatus: vi.fn(),
+      },
+    );
+
+    report(
+      tracked,
+      'stress-collection',
+      'Stress collection failed during ',
+      new Error('renderer unavailable'),
+      'renderer snapshot',
+    );
+    clear(tracked, 'stress-collection', 'stress metrics snapshot');
+    expect(visible.get('stress-collection')).toContain('renderer unavailable');
+
+    clear(tracked, 'stress-collection', 'renderer snapshot');
+    expect(visible.has('stress-collection')).toBe(false);
   });
 });

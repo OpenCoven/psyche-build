@@ -109,6 +109,7 @@ export interface PerformanceMetricsCollectorOptions {
   schedulerSnapshot?: () => PerformanceSchedulerSnapshot;
   rendererSnapshots?: () => readonly PerformanceRendererSnapshot[];
   reportError?: (error: unknown, operation: string) => void;
+  reportSuccess?: (operation: string) => void;
 }
 
 export interface PerformanceMetricsCollector {
@@ -400,6 +401,7 @@ export function createPerformanceMetricsCollector(
   const reportError = options.reportError ?? ((error, operation) => {
     console.warn(`performance metrics ${operation} failed`, error);
   });
+  const reportSuccess = options.reportSuccess ?? (() => undefined);
   const now = options.now ?? (() =>
     typeof globalThis.performance !== 'undefined' && typeof globalThis.performance.now === 'function'
       ? globalThis.performance.now()
@@ -427,6 +429,7 @@ export function createPerformanceMetricsCollector(
     try {
       void visibilityTarget?.hidden;
       void visibilityTarget?.visibilityState;
+      reportSuccess('visibilitychange');
     } catch (error) {
       reportError(error, 'visibilitychange');
     }
@@ -437,6 +440,7 @@ export function createPerformanceMetricsCollector(
     try {
       visibilityTarget.addEventListener('visibilitychange', handleVisibilityChange);
       visibilityListenerRegistered = true;
+      reportSuccess('visibilitychange.addEventListener');
     } catch (error) {
       reportError(error, 'visibilitychange.addEventListener');
     }
@@ -447,6 +451,7 @@ export function createPerformanceMetricsCollector(
     visibilityListenerRegistered = false;
     try {
       visibilityTarget.removeEventListener('visibilitychange', handleVisibilityChange);
+      reportSuccess('visibilitychange.removeEventListener');
     } catch (error) {
       reportError(error, 'visibilitychange.removeEventListener');
     }
@@ -461,6 +466,7 @@ export function createPerformanceMetricsCollector(
         recordFrame(timestamp);
         scheduleFrame(loopGeneration);
       });
+      reportSuccess('requestAnimationFrame');
     } catch (error) {
       reportError(error, 'requestAnimationFrame');
     }
@@ -510,6 +516,9 @@ export function createPerformanceMetricsCollector(
             Object.prototype.hasOwnProperty.call(input, 'process')) {
           try {
             mergeNativeSnapshot(input);
+            if (pty.status === 'fulfilled') reportSuccess('pty_transport_metrics');
+            if (process.status === 'fulfilled') reportSuccess('runtime_process_metrics');
+            reportSuccess('native metrics merge');
           } catch (error) {
             reportError(error, 'native metrics merge');
           }
@@ -545,12 +554,14 @@ export function createPerformanceMetricsCollector(
                 if (entry.duration !== undefined) recordLongTask(entry.duration);
               }
             }
+            reportSuccess('PerformanceObserver callback');
           } catch (error) {
             reportError(error, 'PerformanceObserver callback');
           }
         });
         observer.observe({ entryTypes: ['longtask'] });
         performanceObserver = observer;
+        reportSuccess('PerformanceObserver');
       } catch (error) {
         try {
           observer?.disconnect();
@@ -573,6 +584,7 @@ export function createPerformanceMetricsCollector(
     if (frameHandle !== null) {
       try {
         cancelFrame(frameHandle);
+        reportSuccess('cancelAnimationFrame');
       } catch (error) {
         reportError(error, 'cancelAnimationFrame');
       }
@@ -581,6 +593,7 @@ export function createPerformanceMetricsCollector(
     if (intervalHandle !== null) {
       try {
         clearIntervalFn(intervalHandle);
+        reportSuccess('clearInterval');
       } catch (error) {
         reportError(error, 'clearInterval');
       }
@@ -591,6 +604,7 @@ export function createPerformanceMetricsCollector(
     if (performanceObserver) {
       try {
         performanceObserver.disconnect();
+        reportSuccess('PerformanceObserver.disconnect');
       } catch (error) {
         reportError(error, 'PerformanceObserver.disconnect');
       }
@@ -1050,6 +1064,7 @@ export function createPerformanceMetricsCollector(
         if (coalesced !== undefined) {
           coalescedVisualUpdates = Math.max(coalescedVisualUpdates, coalesced);
         }
+        reportSuccess('scheduler snapshot');
       } catch (error) {
         reportError(error, 'scheduler snapshot');
       }
@@ -1084,6 +1099,7 @@ export function createPerformanceMetricsCollector(
           nextRendererTransitions,
           nextContextLosses,
         );
+        reportSuccess('renderer snapshot');
       } catch (error) {
         reportError(error, 'renderer snapshot');
       }

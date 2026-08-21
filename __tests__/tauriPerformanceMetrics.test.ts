@@ -1336,6 +1336,68 @@ describe('bounded performance metrics', () => {
       collector.stop();
     });
 
+    it('reports native poll recovery only after each successful result is accepted', async () => {
+      let intervalCallback: (() => void) | undefined;
+      let clock = 1_000;
+      let poll = 0;
+      const reportError = vi.fn();
+      const reportSuccess = vi.fn();
+      const invoke = vi.fn((command: string) => {
+        if (command === 'pty_transport_metrics') {
+          return poll === 0
+            ? Promise.reject(new Error('transport unavailable'))
+            : Promise.resolve([]);
+        }
+        const result = poll === 0
+          ? Promise.resolve({ cpuPercent: 12 })
+          : poll === 1
+            ? Promise.reject(new Error('process unavailable'))
+            : Promise.resolve({ cpuPercent: 18 });
+        poll += 1;
+        return result;
+      });
+      const collector = createPerformanceMetricsCollector({
+        invoke,
+        requestFrame: () => 1,
+        cancelFrame: vi.fn(),
+        setInterval: (callback) => {
+          intervalCallback = callback;
+          return 1;
+        },
+        clearInterval: vi.fn(),
+        now: () => clock,
+        reportError,
+        reportSuccess,
+      });
+
+      collector.start();
+      intervalCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(reportError).toHaveBeenCalledWith(expect.any(Error), 'pty_transport_metrics');
+      expect(reportSuccess).toHaveBeenCalledWith('runtime_process_metrics');
+      expect(reportSuccess).not.toHaveBeenCalledWith('pty_transport_metrics');
+
+      reportError.mockClear();
+      reportSuccess.mockClear();
+      clock = 2_000;
+      intervalCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(reportError).toHaveBeenCalledWith(expect.any(Error), 'runtime_process_metrics');
+      expect(reportSuccess).toHaveBeenCalledWith('pty_transport_metrics');
+      expect(reportSuccess).not.toHaveBeenCalledWith('runtime_process_metrics');
+
+      reportError.mockClear();
+      reportSuccess.mockClear();
+      clock = 3_000;
+      intervalCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(reportError).not.toHaveBeenCalled();
+      expect(reportSuccess).toHaveBeenCalledWith('pty_transport_metrics');
+      expect(reportSuccess).toHaveBeenCalledWith('runtime_process_metrics');
+      expect(reportSuccess).toHaveBeenCalledWith('native metrics merge');
+      collector.stop();
+    });
+
     it('keeps transport state unchanged when transport fails and clears process on a successful null result', async () => {
       let intervalCallback: (() => void) | undefined;
       let clock = 1_000;

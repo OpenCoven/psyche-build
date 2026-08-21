@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createTauriStressHarness,
   type TauriStressRuntimeHost,
@@ -350,6 +350,15 @@ describe('Tauri stress runtime adapter', () => {
     expect(harness.running()).toBe(false);
   });
 
+  it('reports accepted stress metric snapshots as collection recovery boundaries', async () => {
+    const reportSuccess = vi.fn();
+    const state = createHost({ reportSuccess });
+
+    await createTauriStressHarness(state.host).run();
+
+    expect(reportSuccess).toHaveBeenCalledWith('stress metrics snapshot');
+  });
+
   it('records completed production focus and resize input-to-next-paint samples', async () => {
     const state = createHost();
 
@@ -582,12 +591,14 @@ describe('Tauri stress runtime adapter', () => {
       /var pane = null;\s*var tab = null;\s*try \{\s*pane = await createBrowserPane/,
     );
     expect(main).not.toContain('!existingPane && browser.tabs.length === 0');
-    expect(main).toContain('window.PsycheRenderStress = runtimeStressHarness;');
+    expect(main).toContain(
+      'window.PsycheRenderStress = graphicsDiagnosticsStressController;',
+    );
     expect(main).toContain('await installRuntimeStressHarness();');
-    expect(main).toContain('async function runGraphicsDiagnosticsStressScenario()');
-    expect(main).toContain('runtimeStressHarness.run()');
+    expect(main).toContain('function runGraphicsDiagnosticsStressScenario()');
+    expect(main).toContain('graphicsDiagnosticsStressController.run()');
     expect(main).toContain('function cancelGraphicsDiagnosticsStressScenario()');
-    expect(main).toContain('runtimeStressHarness.cancel()');
+    expect(main).toContain('graphicsDiagnosticsStressController.cancel()');
     expect(main).toContain(
       'graphicsDiagnosticsScenarioEl.hidden = report.stressAuthorized !== true;',
     );

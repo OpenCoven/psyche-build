@@ -2,6 +2,7 @@ import type { RuntimeGraphicsReport } from './graphics-diagnostics';
 import type { RuntimePerformanceSnapshot } from './performance-metrics';
 import type {
   StressProgress,
+  StressRunOptions,
   StressRunResult,
 } from './stress-harness';
 
@@ -36,6 +37,136 @@ export interface GraphicsDiagnosticsSnapshot {
 export interface GraphicsDiagnosticsView {
   softwareFallback: boolean;
   sections: GraphicsDiagnosticsSection[];
+}
+
+export interface GraphicsDiagnosticsStressHarness {
+  run(options?: StressRunOptions): Promise<StressRunResult>;
+  cancel(reason?: unknown): boolean;
+}
+
+export interface GraphicsDiagnosticsStressController {
+  run(options?: StressRunOptions): Promise<StressRunResult>;
+  cancel(reason?: unknown): boolean;
+  running(): boolean;
+  snapshot(): GraphicsDiagnosticsScenarioSnapshot;
+  updateProgress(progress: StressProgress): void;
+}
+
+export interface GraphicsDiagnosticsStressControllerOptions {
+  harness: GraphicsDiagnosticsStressHarness;
+  isCancellation?: (error: unknown) => boolean;
+  onStateChange?: (
+    snapshot: GraphicsDiagnosticsScenarioSnapshot,
+    error?: unknown,
+    previous?: GraphicsDiagnosticsScenarioSnapshot,
+  ) => void;
+}
+
+function defaultStressCancellation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  if ('name' in error && error.name === 'AbortError') return true;
+  return 'cause' in error && defaultStressCancellation(error.cause);
+}
+
+function copyScenarioSnapshot(
+  snapshot: GraphicsDiagnosticsScenarioSnapshot,
+): GraphicsDiagnosticsScenarioSnapshot {
+  return {
+    state: snapshot.state,
+    ...(snapshot.progress ? { progress: { ...snapshot.progress } } : {}),
+    ...(snapshot.result ? { result: snapshot.result } : {}),
+    ...(snapshot.error ? { error: snapshot.error } : {}),
+  };
+}
+
+export function createGraphicsDiagnosticsStressController(
+  options: GraphicsDiagnosticsStressControllerOptions,
+): GraphicsDiagnosticsStressController {
+  let state: GraphicsDiagnosticsScenarioSnapshot = { state: 'idle' };
+  let activeRun: Promise<StressRunResult> | null = null;
+  let active = false;
+  const isCancellation = options.isCancellation ?? defaultStressCancellation;
+
+  const snapshot = (): GraphicsDiagnosticsScenarioSnapshot => copyScenarioSnapshot(state);
+  const publish = (
+    next: GraphicsDiagnosticsScenarioSnapshot,
+    error?: unknown,
+  ): void => {
+    const previous = snapshot();
+    state = next;
+    options.onStateChange?.(snapshot(), error, previous);
+  };
+
+  const run = (runOptions: StressRunOptions = {}): Promise<StressRunResult> => {
+    if (active) {
+      const error = new Error('render diagnostics are already running');
+      options.onStateChange?.(snapshot(), error, snapshot());
+      return Promise.reject(error);
+    }
+    active = true;
+    publish({ state: 'running' });
+    let harnessRun: Promise<StressRunResult>;
+    try {
+      harnessRun = options.harness.run(runOptions);
+    } catch (error) {
+      harnessRun = Promise.reject(error);
+    }
+    const operation = Promise.resolve(harnessRun)
+      .then((result) => {
+        publish({
+          state: 'completed',
+          ...(state.progress ? { progress: state.progress } : {}),
+          result,
+        });
+        return result;
+      })
+      .catch((error: unknown) => {
+        if (isCancellation(error)) {
+          publish({
+            state: 'cancelled',
+            ...(state.progress ? { progress: state.progress } : {}),
+          }, error);
+        } else {
+          publish({
+            state: 'failed',
+            ...(state.progress ? { progress: state.progress } : {}),
+            error: String(error),
+          }, error);
+        }
+        throw error;
+      });
+    activeRun = operation.finally(() => {
+      active = false;
+      activeRun = null;
+    });
+    return activeRun;
+  };
+
+  return Object.freeze({
+    run,
+    cancel(reason?: unknown) {
+      if (!active) return false;
+      const cancelled = options.harness.cancel(reason);
+      if (cancelled) {
+        publish({
+          state: 'cancelling',
+          ...(state.progress ? { progress: state.progress } : {}),
+        });
+      }
+      return cancelled;
+    },
+    running() {
+      return active;
+    },
+    snapshot,
+    updateProgress(progress: StressProgress) {
+      if (!active) return;
+      publish({
+        state: state.state === 'cancelling' ? 'cancelling' : 'running',
+        progress: { ...progress },
+      });
+    },
+  });
 }
 
 function row(

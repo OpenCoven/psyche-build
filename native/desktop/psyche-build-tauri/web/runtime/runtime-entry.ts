@@ -1,6 +1,7 @@
 import { snapshotFrameSchedulerResources } from './frame-scheduler';
 export {
   buildGraphicsDiagnosticsView,
+  createGraphicsDiagnosticsStressController,
   formatDiagnosticsStressProgress,
   serializeGraphicsDiagnosticsSnapshot,
 } from './diagnostics-surface';
@@ -9,6 +10,9 @@ export type {
   GraphicsDiagnosticsScenarioSnapshot,
   GraphicsDiagnosticsSection,
   GraphicsDiagnosticsSnapshot,
+  GraphicsDiagnosticsStressController,
+  GraphicsDiagnosticsStressControllerOptions,
+  GraphicsDiagnosticsStressHarness,
   GraphicsDiagnosticsTone,
   GraphicsDiagnosticsView,
 } from './diagnostics-surface';
