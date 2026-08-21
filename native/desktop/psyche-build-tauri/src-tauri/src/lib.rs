@@ -1965,16 +1965,32 @@ impl Drop for BrowserNavigationWaiterGuard {
 static BROWSER_NAVIGATION_WAITERS: Lazy<Mutex<HashMap<String, BrowserNavigationWaiter>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+fn is_packaged_diagnostics_document(raw: &str, url: &Url) -> bool {
+    raw == url.as_str()
+        && url.scheme() == "tauri"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str() == Some("localhost")
+        && url.port().is_none()
+        && url.path() == "/diagnostics-fixture.html"
+        && matches!(
+            url.query(),
+            Some("paneCount=1" | "paneCount=6" | "paneCount=12" | "paneCount=24")
+        )
+        && url.fragment().is_none()
+}
+
 fn browser_documents_match_exact(left: &str, right: &str) -> bool {
-    let Ok(left) = Url::parse(left) else {
+    let Ok(left_url) = Url::parse(left) else {
         return false;
     };
-    let Ok(right) = Url::parse(right) else {
+    let Ok(right_url) = Url::parse(right) else {
         return false;
     };
-    let supported_origin = matches!(left.scheme(), "http" | "https" | "about")
-        || (left.scheme() == "tauri" && left.host_str() == Some("localhost"));
-    supported_origin && left == right
+    let supported_document = matches!(left_url.scheme(), "http" | "https" | "about")
+        || (is_packaged_diagnostics_document(left, &left_url)
+            && is_packaged_diagnostics_document(right, &right_url));
+    supported_document && left_url == right_url
 }
 
 fn retire_browser_authority_for_page_load(label: &str, current_url: &str) -> bool {
@@ -9632,13 +9648,78 @@ mod pty_runtime_tests {
     }
 
     #[test]
-    fn browser_document_matching_accepts_only_the_local_app_origin() {
-        let local_fixture = "tauri://localhost/diagnostics-fixture.html?paneCount=12";
-        assert!(browser_documents_match_exact(local_fixture, local_fixture));
-        assert!(!browser_documents_match_exact(
+    fn browser_document_matching_accepts_exact_packaged_diagnostics_fixtures() {
+        for pane_count in [1, 6, 12, 24] {
+            let local_fixture =
+                format!("tauri://localhost/diagnostics-fixture.html?paneCount={pane_count}");
+            assert!(
+                browser_documents_match_exact(&local_fixture, &local_fixture),
+                "{local_fixture} should be authorized"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_document_matching_rejects_ambiguous_local_tauri_urls() {
+        for url in [
+            "tauri://localhost/index.html",
+            "tauri://localhost/diagnostics-fixture.html",
+            "tauri://localhost/diagnostics-fixture.html?paneCount=2",
+            "tauri://localhost/diagnostics-fixture.html?paneCount=12&other=value",
+            "tauri://localhost/diagnostics-fixture.html?other=value&paneCount=12",
+            "tauri://localhost/diagnostics-fixture.html?paneCount=12&paneCount=12",
+            "tauri://localhost/diagnostics-fixture.html?paneCount=%31%32",
+            "tauri://localhost/diagnostics-fixture.html?paneCount=12#fragment",
+            "tauri://localhost/%64iagnostics-fixture.html?paneCount=12",
+            "tauri://localhost/nested/../diagnostics-fixture.html?paneCount=12",
+            "tauri://localhost/nested/%2e%2e/diagnostics-fixture.html?paneCount=12",
+            "TAURI://localhost/diagnostics-fixture.html?paneCount=12",
+            "tauri://LOCALHOST/diagnostics-fixture.html?paneCount=12",
+            "tauri://localhost/Diagnostics-fixture.html?paneCount=12",
+            "tauri://localhost:1420/diagnostics-fixture.html?paneCount=12",
+            "tauri://user@localhost/diagnostics-fixture.html?paneCount=12",
+            "tauri://user:password@localhost/diagnostics-fixture.html?paneCount=12",
             "tauri://untrusted.invalid/diagnostics-fixture.html?paneCount=12",
-            "tauri://untrusted.invalid/diagnostics-fixture.html?paneCount=12",
-        ));
+            "tauri://localhost//diagnostics-fixture.html?paneCount=12",
+            "tauri://localhost/diagnostics-fixture.html/?paneCount=12",
+        ] {
+            assert!(
+                !browser_documents_match_exact(url, url),
+                "{url} should not be authorized"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_document_matching_rejects_noncanonical_local_tauri_observations() {
+        let expected = "tauri://localhost/diagnostics-fixture.html?paneCount=12";
+        for observed in [
+            "TAURI://localhost/diagnostics-fixture.html?paneCount=12",
+            "tauri://LOCALHOST/diagnostics-fixture.html?paneCount=12",
+            "tauri://localhost/nested/../diagnostics-fixture.html?paneCount=12",
+        ] {
+            assert!(
+                !browser_documents_match_exact(expected, observed),
+                "{observed} should not match {expected}"
+            );
+            assert!(
+                !browser_documents_match_exact(observed, expected),
+                "{observed} should not authorize {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_document_matching_preserves_http_and_https_behavior() {
+        for url in [
+            "http://example.test/path?query=value#fragment",
+            "https://example.test/path?query=value#fragment",
+        ] {
+            assert!(
+                browser_documents_match_exact(url, url),
+                "{url} should remain authorized"
+            );
+        }
     }
 
     #[test]
