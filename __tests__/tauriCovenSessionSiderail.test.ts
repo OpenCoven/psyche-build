@@ -956,6 +956,7 @@ function createSessionContextMenuHarness(options: {
     function closeProjectAppearancePopover() {}
     var sessionContextMenu = null;
     var sessionContextMenuRestoreKey = "";
+    var state = { activeProjectId: null };
     ${extractFunctionSource(mainJs, 'visibleSessionTreeItems')}
     ${extractFunctionSource(mainJs, 'focusSessionTreeItem')}
     ${extractFunctionSource(mainJs, 'parentSessionTreeItem')}
